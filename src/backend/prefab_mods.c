@@ -274,10 +274,19 @@ static void pm_put_str(pm_buf *b, const char *s)
     pm_put(b, "\"", 1);
 }
 
-static int pm_installed(const char *hash)
+/* The asset rule (modserve.h sh_modserve_row_served): SH_MODPUB_ROW_*. */
+static int pm_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
     const sh_prefab_mods_ops *o = pm_ops();
-    return o->bundle_state && o->bundle_state(hash) == 1;
+    if (cause && cap) cause[0] = 0;
+    return o->row_state ? o->row_state(row, cause, cap) : SH_MODPUB_ROW_MISSING;
+}
+
+static int pm_installed(const sh_modmanifest_row *row) { return pm_row_state(row, NULL, 0) == SH_MODPUB_ROW_SERVED; }
+
+static const char *pm_state_word(int state)
+{
+    return state == SH_MODPUB_ROW_SERVED ? "served" : state == SH_MODPUB_ROW_INCOMPLETE ? "incomplete" : "missing";
 }
 
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing_out)
@@ -286,7 +295,7 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
     size_t i, missing = 0;
     char num[48];
     if (missing_out) *missing_out = 0;
-    for (i = 0; rows && i < rows->count; i++) if (!pm_installed(rows->rows[i].bundle)) missing++;
+    for (i = 0; rows && i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
     _snprintf_s(num, sizeof num, _TRUNCATE, "{\"count\":%u,\"missing\":%u,\"mods\":[",
                 (unsigned)(rows ? rows->count : 0), (unsigned)missing);
     pm_puts(&b, num);
@@ -298,7 +307,14 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
         pm_puts(&b, ",\"bundle\":"); pm_put_str(&b, r->bundle);
         _snprintf_s(num, sizeof num, _TRUNCATE, ",\"size\":%llu", r->size);
         pm_puts(&b, num);
-        pm_puts(&b, pm_installed(r->bundle) ? ",\"installed\":true}" : ",\"installed\":false}");
+        {
+            char cause[400];
+            int st = pm_row_state(r, cause, sizeof cause);
+            pm_puts(&b, st == SH_MODPUB_ROW_SERVED ? ",\"installed\":true" : ",\"installed\":false");
+            pm_puts(&b, ",\"state\":"); pm_put_str(&b, pm_state_word(st));
+            pm_puts(&b, ",\"cause\":"); pm_put_str(&b, cause);
+            pm_puts(&b, "}");
+        }
     }
     pm_puts(&b, "]}");
     if (b.bad) { free(b.p); return NULL; }
@@ -635,20 +651,15 @@ static int pm_known(void *ctx, const char *name)
 static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
 {
     const sh_prefab_mods_ops *o = pm_ops();
-    const char **hashes;
     size_t i;
     if (!rows || !rows->count) return;
-    hashes = (const char **)calloc(rows->count, sizeof *hashes);
-    if (hashes) {
-        for (i = 0; i < rows->count; i++) hashes[i] = rows->rows[i].bundle;
-        if (o->activate) (void)o->activate(hashes, (int)rows->count);
-        free((void *)hashes);
-    }
+    /* Each row through the build that serves it now (the asset rule). */
+    if (o->activate) (void)o->activate(rows);
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
         char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4], note[256] = "", line[PM_LINE_CAP];
         int a;
-        if (o->listed && o->listed(r->bundle) > 0) continue;
+        if (o->listed && o->listed(r) > 0) continue;
         if (!o->attach) continue;
         sh_prefab_mods_label(r, label, sizeof label);
         a = o->attach(r, note, sizeof note);
@@ -712,7 +723,9 @@ static void pm_refuse_unasked(const char *name, const sh_modmanifest_list *rows,
         return;
     }
     for (i = 0; i < rows->count; i++) {
-        if (pm_installed(rows->rows[i].bundle)) continue;
+        char cause[400];
+        if (pm_row_state(&rows->rows[i], cause, sizeof cause) == SH_MODPUB_ROW_SERVED) continue;
+        if (cause[0]) pm_print(cause);
         sh_prefab_mods_label(&rows->rows[i], store[n], sizeof store[n]);
         labels[n] = store[n];
         n++;
@@ -762,16 +775,18 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         }
         free(engine);
     }
-    for (i = 0; i < rows->count; i++) if (!pm_installed(rows->rows[i].bundle)) missing++;
+    /* The asset rule: the store is asked only for rows no installed folder
+     * serves (missing or incomplete). */
+    for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
     if (missing && o->restore) {
         /* A mod in the recycle bin comes back, as a map load would bring it. */
         const char **hashes = (const char **)calloc(missing, sizeof *hashes);
         int n = 0;
         if (hashes) {
-            for (i = 0; i < rows->count; i++) if (!pm_installed(rows->rows[i].bundle)) hashes[n++] = rows->rows[i].bundle;
+            for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) hashes[n++] = rows->rows[i].bundle;
             if (o->restore(hashes, n) > 0) {
                 missing = 0;
-                for (i = 0; i < rows->count; i++) if (!pm_installed(rows->rows[i].bundle)) missing++;
+                for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
             }
             free((void *)hashes);
         }
@@ -1008,7 +1023,7 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
     if (sh_prefab_mods_rows_of(text, len, NULL, &rows) > 0) {
         for (i = 0; i < rows.count; i++) {
             char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
-            if (pm_installed(rows.rows[i].bundle)) continue;
+            if (pm_installed(&rows.rows[i])) continue;
             sh_prefab_mods_label(&rows.rows[i], label, sizeof label);
             strncat_s(extra, sizeof extra, absent ? ", " : " It also needs ", _TRUNCATE);
             strncat_s(extra, sizeof extra, label, _TRUNCATE);
@@ -1246,8 +1261,10 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
         for (i = 0; i < rows.count; i++) {
             char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
             sh_prefab_mods_label(&rows.rows[i], label, sizeof label);
+            char cause[400];
+            int st = pm_row_state(&rows.rows[i], cause, sizeof cause);
             pm_linef("  %s (bundle %.16s): %s", label, rows.rows[i].bundle,
-                     pm_installed(rows.rows[i].bundle) ? "installed" : "not installed");
+                     st == SH_MODPUB_ROW_SERVED ? "installed" : cause[0] ? cause : "not installed");
         }
         sh_modmanifest_list_free(&rows);
         return;
@@ -1301,7 +1318,10 @@ static int pm_default_root(char *out, size_t cap) { (void)out; (void)cap; return
 #include "apply_engine.h"
 #include "ui_bridge.h"
 
-static int eng_bundle_state(const char *hash) { return sh_modserve_bundle_state(hash, NULL, 0); }
+static int eng_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
+{
+    return sh_modserve_row_served_for(row, "prefab", cause, cap);
+}
 static int eng_restore(const char *const *hashes, int n)
 {
     return sh_modserve_restore(hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD);
@@ -1309,15 +1329,19 @@ static int eng_restore(const char *const *hashes, int n)
 
 /* Does the open map list this bundle (its manifest rows, or the map scope's
  * listing, which adds the placed entities)? */
-static int eng_listed(const char *hash)
+static int eng_listed(const sh_modmanifest_row *row)
 {
     sh_modserve_scope_info info;
     sh_modserve_bundle_ref want, have;
     sh_modmanifest_list cur;
+    const char *hash = row->bundle;
     size_t i;
     int listed = 0;
-    if (sh_modserve_scope_enabled() && sh_modserve_bundle_scope(hash, &info) && info.listed) return 1;
-    if (!sh_modserve_bundle_serving(hash, NULL, &want)) memset(&want, 0, sizeof want);
+    /* The build that serves the row (the asset rule: its id when its hash is
+     * not installed). */
+    if (!sh_modserve_bundle_serving(row->bundle, row->id, &want)) memset(&want, 0, sizeof want);
+    if (sh_modserve_scope_enabled() && sh_modserve_bundle_scope(want.hash[0] ? want.hash : hash, &info) && info.listed)
+        return 1;
     (void)sh_modmanifest_current(&cur);
     for (i = 0; i < cur.count && !listed; i++) {
         if (!strcmp(cur.rows[i].bundle, hash)) listed = 1;
@@ -1335,12 +1359,12 @@ static int eng_attach(const sh_modmanifest_row *row, char *note, size_t cap)
     const char *key = row->id;
     if (sh_modserve_bundle_serving(row->bundle, row->id, &ref) && ref.id[0]) key = ref.id;
     (void)sh_modui_run(SH_MODS_ACT_MAP_ADD, key);
-    if (eng_listed(row->bundle)) return 1;
+    if (eng_listed(row)) return 1;
     if (note && cap) strncpy_s(note, cap, "the Mods tab can add it with Use in this map", _TRUNCATE);
     return -1;
 }
 
-static int eng_activate(const char *const *hashes, int n) { return modserve_activate_bundles(hashes, n); }
+static int eng_activate(const sh_modmanifest_list *rows) { return sh_modmanifest_activate(rows); }
 static int eng_module_known(const char *name) { return sh_grid_native_module_known(name); }
 static void eng_print(const char *line) { sh_printf("%s\n", line); }
 static void eng_toast(const char *text)
@@ -1369,7 +1393,7 @@ static void pm_bind_defaults(void)
 {
     sh_prefab_mods_ops o;
     memset(&o, 0, sizeof o);
-    o.bundle_state = eng_bundle_state;
+    o.row_state = eng_row_state;
     o.restore = eng_restore;
     o.listed = eng_listed;
     o.attach = eng_attach;

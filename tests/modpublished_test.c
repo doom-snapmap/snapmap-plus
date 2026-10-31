@@ -4,8 +4,9 @@
  * text), No, a failed fetch, a bundle that will not install, a second load
  * abandoning the hold, the joiner's host re-check, the warm-cache joiner branch
  * and My Maps play; and the rawmap gate: the rows a rawmap names counted
- * against the installed bundles and the recycle bin, the store check, the
- * refusal that names each mod and the download that reopens the rawmap.
+ * under the asset rule (an installed folder of the row's id serving its
+ * names, whatever its hash), the store check, the refusal that names each
+ * mod and the download that reopens the rawmap.
  *
  * The real map manifest (modmanifest.c) reads the rows; the engine and the
  * modsync worker are doubles behind sh_modpub_ops. The worker double runs the
@@ -37,6 +38,12 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int count)
 {
     (void)bundle_hashes;
     return count;
+}
+int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
+{
+    (void)bundle_hash; (void)id;
+    if (out) memset(out, 0, sizeof *out);
+    return 0;
 }
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context)
@@ -95,7 +102,7 @@ typedef struct fake {
     HANDLE worker;
     int store_a, store_b;            /* store_has: 1 held, 0 absent, -1 unreachable */
     int store_calls;
-    int restores, restore_brings_a;  /* the recycle bin holds alex.pink-imp */
+    int other_a;                     /* another build of alex.pink-imp: 1 serves its names, 2 lacks one */
     int prints;
     char last_print[1024];
 } fake;
@@ -104,25 +111,41 @@ static fake F;
 static int g_metadata_cookie;
 
 static int f_on_main(void *c) { (void)c; return 1; }
-static int f_bundle_state(void *c, const char *hash, char *cause, size_t cap)
+/* The asset rule as modserve.c answers it, over the fixture's two mods. */
+static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
+    const char *what = subject ? subject : "map";
     (void)c;
     if (cause && cap) cause[0] = 0;
-    if (!strcmp(hash, HASH_A)) {
-        if (!F.installed_a && F.refuse_install && cause) strcpy_s(cause, cap, "a file size differs");
-        return F.installed_a ? 1 : (F.refuse_install && F.fetch_calls ? -1 : 0);
+    if (!strcmp(row->bundle, HASH_A) || !strcmp(row->id, "alex.pink-imp")) {
+        if (F.installed_a || F.other_a == 1) return SH_MODPUB_ROW_SERVED;
+        if (F.other_a == 2) {
+            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "Pink Imp (alex.pink-imp) is installed but does not provide "
+                                   "mods/alex.pink-imp/imp, which this %s uses.", what);
+            return SH_MODPUB_ROW_INCOMPLETE;
+        }
+        if (cause) {
+            if (F.refuse_install && F.fetch_calls)
+                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses alex.pink-imp, which is installed but cannot be used: "
+                            "a file size differs.", what);
+            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses alex.pink-imp, which is not installed.", what);
+        }
+        return SH_MODPUB_ROW_MISSING;
     }
-    if (!strcmp(hash, HASH_B)) return F.installed_b ? 1 : 0;
-    return 0;
+    if (!strcmp(row->bundle, HASH_B)) {
+        if (F.installed_b) return SH_MODPUB_ROW_SERVED;
+        if (cause) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses bob.room, which is not installed.", what);
+    }
+    return SH_MODPUB_ROW_MISSING;
 }
 static int f_rescan(void *c) { (void)c; F.rescans++; return 1; }
-static int f_activate(void *c, const char *const *hashes, int n)
+static int f_activate(void *c, const sh_modmanifest_list *rows)
 {
     (void)c;
     F.activations++;
-    F.activated_count = n;
-    for (int i = 0; i < n && i < 4; i++) strcpy_s(F.activated[i], sizeof F.activated[i], hashes[i]);
-    return n;
+    F.activated_count = (int)rows->count;
+    for (size_t i = 0; i < rows->count && i < 4; i++) strcpy_s(F.activated[i], sizeof F.activated[i], rows->rows[i].bundle);
+    return (int)rows->count;
 }
 static int f_can_ask(void *c) { (void)c; return F.ticks >= F.can_ask_after; }
 static int f_ask(void *c, unsigned gdm, unsigned set, const char *text)
@@ -236,15 +259,6 @@ static int f_store_has(void *c, const char *hash, volatile int *cancel)
     if (!strcmp(hash, HASH_B)) return F.store_b;
     return 0;
 }
-static int f_restore(void *c, const char *const *hashes, int n)
-{
-    int back = 0;
-    (void)c;
-    F.restores++;
-    for (int i = 0; i < n; i++)
-        if (F.restore_brings_a && !strcmp(hashes[i], HASH_A) && !F.installed_a) { F.installed_a = 1; back++; }
-    return back;
-}
 static void f_print(void *c, const char *line)
 {
     (void)c;
@@ -253,10 +267,10 @@ static void f_print(void *c, const char *line)
 }
 
 static const sh_modpub_ops OPS = {
-    NULL, f_on_main, f_bundle_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
+    NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
-    f_store_has, f_restore, f_print
+    f_store_has, NULL, f_print
 };
 
 static void reset(void)
@@ -341,6 +355,31 @@ static void vanilla_and_installed_pass_through(void)
     CHECK(!sh_modpublished_holding() && !F.hold_ui && !F.metadata_copies);
     tick(5);
     CHECK(F.asks == 0 && F.activations == 0 && F.resumes == 0);
+
+    /* The asset rule: another build of the row's id that provides its names
+     * plays, whatever its hash; nothing is asked. */
+    reset();
+    F.other_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && !F.hold_ui);
+    tick(5);
+    CHECK(F.asks == 0);
+
+    /* A folder of the id that lacks a listed name goes to the store offer. */
+    reset();
+    F.other_a = 2;
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding());
+    CHECK(strstr(F.last_print, "is installed but does not provide mods/alex.pink-imp/imp, which this map uses.") != NULL);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "Download and install now?") != NULL);
+    F.answer = 2;   /* No: the launch is dropped with the asset rule's sentence */
+    tick(3);
+    CHECK(!sh_modpublished_holding());
+    CHECK(!strcmp(F.last_ask, "Pink Imp (alex.pink-imp) is installed but does not provide mods/alex.pink-imp/imp, which "
+                              "this map uses. The map was not loaded."));
 
     /* A completion whose map is not the last parse's object is not gated. */
     reset();
@@ -434,7 +473,8 @@ static void fetch_failure_drops(void)
     tick_until_idle();
     CHECK(F.rescans == 1 && F.resumes == 0 && F.activations == 0);
     tick(2);
-    CHECK(strstr(F.last_ask, "could not be installed: a file size differs") != NULL);
+    CHECK(strstr(F.last_ask, "could not be installed. This map uses alex.pink-imp, which is installed but cannot be used: "
+                             "a file size differs.") != NULL);
 }
 
 static void second_load_abandons(void)
@@ -597,22 +637,22 @@ static void tick_until_probed(void)
 static void rawmap_missing_counts_rows(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a rawmap's rows are counted against the installed bundles and the recycle bin\n");
+    printf("-- a rawmap's rows are counted under the asset rule\n");
     reset();
     CHECK(sh_modpub_rawmap_missing(VANILLA, strlen(VANILLA), &rows) == 0 && rows.count == 0);
     sh_modmanifest_list_free(&rows);
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2 && rows.count == 2);
-    CHECK(F.restores == 1);              /* the bin was asked before anything is called missing */
     sh_modmanifest_list_free(&rows);
     F.installed_b = 1;
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
     sh_modmanifest_list_free(&rows);
-    F.restore_brings_a = 1;              /* uninstalled, but still in removed-mods */
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0 && F.installed_a);
+    F.other_a = 2;                       /* a folder of the id that lacks a listed name: still missing */
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
     sh_modmanifest_list_free(&rows);
-    F.restores = 0;
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0 && F.restores == 0);
+    F.other_a = 1;                       /* another build of the id that serves the names: nothing to ask */
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0);
     sh_modmanifest_list_free(&rows);
+    F.other_a = 0;
     /* Not a published-map parse: the rawmap check never touches the parse record. */
     CHECK(sh_modpublished_last_parse(NULL) == -1);
     /* Without bound gates nothing is missing: the rawmap loads as it always did. */
@@ -635,7 +675,8 @@ static void rawmap_store_lacks_refuses(void)
     CHECK(sh_modpub_rawmap_hold(&rows, "shared.json") == 1);
     sh_modmanifest_list_free(&rows);
     CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 4 && F.asks == 0);
-    CHECK(F.prints == 1 && strstr(F.last_print, "Rawmap shared.json needs 2 mods you do not have") != NULL);
+    /* One line per row the asset rule names, then the store check. */
+    CHECK(F.prints == 3 && strstr(F.last_print, "Rawmap shared.json needs 2 mods you do not have") != NULL);
     tick_until_probed();
     CHECK(F.store_calls == 2);           /* both asked, so the refusal can name every one */
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0 && F.activations == 0);
@@ -644,8 +685,9 @@ static void rawmap_store_lacks_refuses(void)
                                 "carries the mods."));
     tick(2);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
-    CHECK(!strcmp(F.last_ask, "This map was not loaded. It needs mods you do not have and the mod store does not "
-                              "hold: bob.room 1. Ask the map's author for its .zip export."));
+    /* One row: the notice is the asset rule's sentence. */
+    CHECK(!strcmp(F.last_ask, "This map uses bob.room, which is not installed. The map was not loaded. Ask its author "
+                              "for the .zip export."));
 
     printf("-- a store that cannot be reached is said so, and nothing is downloaded\n");
     reset();
@@ -656,7 +698,8 @@ static void rawmap_store_lacks_refuses(void)
     tick_until_probed();
     tick(2);
     CHECK(F.fetch_calls == 0 && F.resumes == 0 && !sh_modpublished_holding());
-    CHECK(strstr(F.last_ask, "alex.pink-imp 1. The mod store could not be reached. Try again") != NULL);
+    CHECK(!strcmp(F.last_ask, "This map uses alex.pink-imp, which is not installed. The map was not loaded. The mod "
+                              "store could not be reached; try again, or ask its author for the .zip export."));
     CHECK(strstr(F.last_print, "the mod store could not be reached") != NULL);
 }
 
@@ -690,7 +733,8 @@ static void rawmap_store_has_downloads_and_reopens(void)
     tick(1);
     F.answer = 2;
     tick(3);
-    CHECK(F.fetch_calls == 0 && F.resumes == 0 && strstr(F.last_ask, "alex.pink-imp") != NULL);
+    CHECK(F.fetch_calls == 0 && F.resumes == 0);
+    CHECK(!strcmp(F.last_ask, "This map uses alex.pink-imp, which is not installed. The map was not loaded."));
 
     printf("-- nothing missing after all: no hold\n");
     reset();

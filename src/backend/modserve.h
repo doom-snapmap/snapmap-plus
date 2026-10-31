@@ -543,6 +543,27 @@ int  sh_modserve_scope_source(int when);
  * first cause is copied to `cause` when non-NULL). */
 int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap);
 
+/* The asset rule. A map, rawmap or prefab needs the paths its manifest rows
+ * list; a mod folder provides them. A row is SERVED when an admitted bundle
+ * declares the row's id and every name the row lists resolves through the
+ * serving index to an admitted bundle (any provider, unscoped); MISSING when
+ * no admitted bundle declares the id (a folder of the id that was skipped is
+ * named in the cause); INCOMPLETE when one declares it but a listed name does
+ * not resolve. The row's bundle hash is not consulted: it is the key a
+ * download asks the store for. `cause` (when non-NULL) gets the sentence a
+ * refusal shows, for a MISSING row "This map uses Hell Guards
+ * (local.hell-guard), which is not installed." and for an INCOMPLETE one
+ * "Hell Guards (local.hell-guard) is installed but does not provide <the
+ * first three names>[ and N more], which this map uses."; `subject` replaces
+ * "map" ("rawmap", "prefab"). The title is the installed folder's name when
+ * one declares the id, else the id alone. Lock-free; any thread. */
+#define SH_MODSERVE_ROW_MISSING    0
+#define SH_MODSERVE_ROW_SERVED     1
+#define SH_MODSERVE_ROW_INCOMPLETE 2
+struct sh_modmanifest_row;
+int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, size_t cap);
+int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
+
 /* The admitted build that serves a mod: the bundle `bundle_hash` names
  * (aliases resolve), else the newest admitted bundle of `id`; when a newer
  * admitted build of the same id is installed it is that one, as the save-time

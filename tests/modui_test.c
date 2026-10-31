@@ -596,16 +596,45 @@ int main(int argc, char **argv)
     free(doc);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, key1);
     CHECK(mt_exists(path));
-    /* A row naming a bundle that is not installed, while a build of the mod is. */
+    /* The asset rule: a row naming another build of an installed id whose
+     * names that folder provides is active, played with the installed copy. */
     load_map_naming("alex.r2-imp", "00000000000000000000000000000000000000000000000000000000000000aa");
     doc = list_doc();
-    CHECK(has(doc, "\"state\":\"missing\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
+    CHECK(has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
     CHECK(has(doc, "\"inManifest\":false"));
     free(doc);
+    /* No folder declares the id: missing, with the refusal's sentence. */
     load_map_naming("alex.other", "00000000000000000000000000000000000000000000000000000000000000bb");
     doc = list_doc();
-    CHECK(has(doc, "\"state\":\"missing\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"\""));
+    CHECK(has(doc, "\"state\":\"missing\",\"cause\":\"This map uses alex.other, which is not installed.\",\"key\":\"\","
+                   "\"otherKey\":\"\""));
     free(doc);
+    /* A folder declares the id but lacks a name the row lists: incomplete. */
+    {
+        sh_modmanifest_list rows;
+        sh_modmanifest_row row;
+        char err[256], *text, *loaded;
+        size_t tl = 0, ll = 0;
+        memset(&rows, 0, sizeof rows);
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.id, sizeof row.id, "alex.r2-imp");
+        strcpy_s(row.version, sizeof row.version, "1.0.0");
+        strcpy_s(row.bundle, sizeof row.bundle, hash1);
+        CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.r2-imp/imp_copy"));
+        CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.r2-imp/imp_gone"));
+        CHECK(sh_modmanifest_list_add(&rows, &row));
+        sh_modmanifest_row_free(&row);
+        text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
+        loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        sh_modmanifest_list_free(&rows);
+        doc = list_doc();
+        CHECK(has(doc, "\"state\":\"incomplete\",\"cause\":\"R2 Imp copy (alex.r2-imp) is installed but does not provide "
+                       "mods/alex.r2-imp/imp_gone, which this map uses.\""));
+        free(doc);
+        sh_modmanifest_reset();
+    }
 
     printf("-- a second version beside the first: two rows of one id; the first is removable\n");
     mt_append(src, "assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy_b.md6.decl", "\r\n// changed\r\n");

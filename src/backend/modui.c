@@ -1376,6 +1376,9 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             /* A row naming an alias of a bundle the closure reached is that mod. */
             for (k = 0; k < mp->mod_count && mod < 0; k++)
                 if (mu_same_bundle(m, mp->mods[k].hash, row->bundle)) mod = (int)k;
+            /* The asset rule: a row is its mod by id, whatever build serves it. */
+            for (k = 0; k < mp->mod_count && mod < 0; k++)
+                if (mp->mods[k].in_closure && !_stricmp(mp->mods[k].id, row->id)) mod = (int)k;
             if (mod < 0) mod = mu_mapmod_add(mp, row->bundle, row->id, row->version, row->size);
             if (mod >= 0) { mp->mods[mod].in_rows = 1; if (row->attached) mp->mods[mod].attached = 1; }
         }
@@ -1422,13 +1425,38 @@ static int mu_mapmod_entry(const mu_model *m, const mu_mapmod *x)
     return mu_find_hash(m, x->hash);
 }
 
-/* The state a map entry shows: installed, superseded, unindexed, skipped, missing. */
-static const char *mu_mapmod_state(const mu_model *m, const mu_mapmod *x)
+/* A manifest row's state under the asset rule (modserve.h
+ * sh_modserve_row_served): active, superseded, incomplete, skipped (a folder
+ * of its id that the index did not admit), missing. */
+static const char *mu_row_state(const mu_model *m, const sh_modmanifest_row *r, char *cause, size_t cap, int *at_out)
 {
-    int st = sh_modserve_bundle_state(x->hash, NULL, 0), at = mu_mapmod_entry(m, x);
-    if (st > 0) return at >= 0 && m->entries[at].superseded_paths ? "superseded" : "installed";
-    if (st < 0) return "skipped";
-    return at >= 0 ? "unindexed" : "missing";
+    int st = sh_modserve_row_served(r, cause, cap), at = mu_find_hash(m, r->bundle);
+    sh_modserve_bundle_ref ref;
+    if (at < 0 && sh_modserve_bundle_serving(r->bundle, r->id, &ref)) at = mu_find_hash(m, ref.hash);
+    if (at < 0) at = mu_find_id(m, r->id, -1);
+    if (at_out) *at_out = at;
+    if (st == SH_MODSERVE_ROW_SERVED) {
+        if (cause && cap) cause[0] = 0;
+        return at >= 0 && m->entries[at].superseded_paths ? "superseded" : "active";
+    }
+    if (st == SH_MODSERVE_ROW_INCOMPLETE) return "incomplete";
+    return at >= 0 ? "skipped" : "missing";
+}
+
+/* The state a map entry shows: installed, superseded, incomplete, skipped,
+ * missing. A mod the placed names reach is installed; one only a row names
+ * is judged by that row. */
+static const char *mu_mapmod_state(const mu_model *m, const mu_map *mp, const mu_mapmod *x)
+{
+    size_t i;
+    int at = mu_mapmod_entry(m, x);
+    if (x->in_closure) return at >= 0 && m->entries[at].superseded_paths ? "superseded" : "installed";
+    for (i = 0; i < mp->rows.count; i++)
+        if (!strcmp(mp->rows.rows[i].bundle, x->hash) || !_stricmp(mp->rows.rows[i].id, x->id)) {
+            const char *s = mu_row_state(m, &mp->rows.rows[i], NULL, 0, NULL);
+            return !strcmp(s, "active") ? "installed" : s;
+        }
+    return at >= 0 ? "installed" : "missing";
 }
 
 /* "<name> #<uniqueId>": the entity's own label, else its editor row's name,
@@ -1499,11 +1527,13 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
     mu_putn(b, "[", 1);
     for (i = 0; i < mp->rows.count; i++) {
         const sh_modmanifest_row *r = &mp->rows.rows[i];
-        char cause[SH_MB_CAUSE_MAX];
-        int st = sh_modserve_bundle_state(r->bundle, cause, sizeof cause);
-        int at = mu_find_hash(m, r->bundle), other = at < 0 ? mu_find_id(m, r->id, -1) : -1;
-        const char *state = st > 0 ? "active" : st < 0 ? "skipped" : at >= 0 ? "unindexed" : "missing";
-        if (st > 0 && at >= 0 && m->entries[at].superseded_paths) state = "superseded";
+        char cause[400];
+        int at = -1, other;
+        const char *state = mu_row_state(m, r, cause, sizeof cause, &at);
+        /* key: the folder of the row's own build; otherKey: the folder that
+         * serves its id instead (the asset rule plays that one). */
+        other = mu_find_hash(m, r->bundle) < 0 ? at : -1;
+        if (other >= 0) at = -1;
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "id", r->id, 1);
@@ -1511,7 +1541,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_kstr(b, "bundle", r->bundle, 0);
         mu_knum(b, "size", r->size, 0);
         mu_kstr(b, "state", state, 0);
-        mu_kstr(b, "cause", st < 0 ? cause : at >= 0 && st == 0 ? m->entries[at].cause : "", 0);
+        mu_kstr(b, "cause", cause, 0);
         mu_kstr(b, "key", at >= 0 ? m->list.items[at].name : "", 0);
         mu_kstr(b, "otherKey", other >= 0 ? m->list.items[other].name : "", 0);
         mu_knum(b, "nameCount", (unsigned long long)r->name_count, 0);
@@ -1576,7 +1606,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_kstr(b, "key", at >= 0 ? m->list.items[at].name : "", 1);
             mu_kstr(b, "id", x->id, 0);
             mu_kstr(b, "version", mu_version(x->version), 0);
-            mu_kstr(b, "state", mu_mapmod_state(m, x), 0);
+            mu_kstr(b, "state", mu_mapmod_state(m, mp, x), 0);
             mu_key(b, "placedEntities", 0);
             mu_put_entity_names(b, m, mp, x);
             mu_knum(b, "placedCount", (unsigned long long)x->uid_count, 0);
@@ -3684,7 +3714,7 @@ static void mu_say_map(const mu_out *o)
                             si.shadows_live ? "active" : "not active");
             mu_line(o, "map: mod %s%s%s (%s, %s): %s%zu placed entit%s%s, %zu wire or timeline reference(s)%s%s%s", x->id,
                     x->version[0] && mu_version(x->version)[0] ? "@" : "", mu_version(x->version),
-                    at >= 0 ? m.list.items[at].name : "not installed", mu_mapmod_state(&m, x),
+                    at >= 0 ? m.list.items[at].name : "not installed", mu_mapmod_state(&m, &mp, x),
                     x->attached ? "map-level (attached to the whole map), " : "", x->uid_count,
                     x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
                     x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "",

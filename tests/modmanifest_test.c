@@ -56,6 +56,27 @@ static const installed *g_installed;
 static size_t g_installed_count;
 static int g_lookup_calls;
 
+/* The build that serves a row: its hash when installed, else the installed
+ * build of its id (the asset rule's activation). */
+int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
+{
+    size_t b;
+    if (out) memset(out, 0, sizeof *out);
+    for (b = 0; b < g_installed_count; b++)
+        if (bundle_hash && !strcmp(g_installed[b].hash, bundle_hash)) break;
+    if (b == g_installed_count)
+        for (b = 0; b < g_installed_count; b++)
+            if (id && !strcmp(g_installed[b].id, id)) break;
+    if (b == g_installed_count) return 0;
+    if (out) {
+        strcpy_s(out->id, sizeof out->id, g_installed[b].id);
+        strcpy_s(out->version, sizeof out->version, g_installed[b].version);
+        strcpy_s(out->hash, sizeof out->hash, g_installed[b].hash);
+        out->size = g_installed[b].size;
+    }
+    return 1;
+}
+
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context)
 {
@@ -472,6 +493,32 @@ static void mod_json(void)
     }
 }
 
+/* The asset rule at activation: a row whose pinned hash no folder carries is
+ * activated through the installed build of its id; a row of an id nothing
+ * installed declares keeps its own hash (the activation reports it unknown). */
+static void activate_by_id(void)
+{
+    sh_modmanifest_list rows;
+    sh_modmanifest_row row;
+    printf("-- activation: a row pinning another build of an installed id activates the installed one\n");
+    memset(&rows, 0, sizeof rows);
+    memset(&row, 0, sizeof row);
+    g_installed = INSTALLED;
+    g_installed_count = 2;
+    strcpy_s(row.id, sizeof row.id, INSTALLED[1].id);
+    strcpy_s(row.version, sizeof row.version, "0.9");
+    strcpy_s(row.bundle, sizeof row.bundle, "9999999999999999999999999999999999999999999999999999999999999999");
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    strcpy_s(row.id, sizeof row.id, "nobody.has-this");
+    strcpy_s(row.bundle, sizeof row.bundle, "8888888888888888888888888888888888888888888888888888888888888888");
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    g_activate_calls = 0;
+    CHECK(sh_modmanifest_activate(&rows) == 2 && g_activate_calls == 1 && g_activate_count == 2);
+    CHECK(!strcmp(g_activated[0], INSTALLED[1].hash));
+    CHECK(!strcmp(g_activated[1], "8888888888888888888888888888888888888888888888888888888888888888"));
+    sh_modmanifest_list_free(&rows);
+}
+
 /* The save step's restore hook: asked with the placed names while armed,
  * before the rows are built, so a reinstated bundle gets its row. */
 static int g_armed, g_restore_calls, g_restore_when;
@@ -674,6 +721,7 @@ int main(void)
     placed_names();
     save_closure();
     save_restore();
+    activate_by_id();
     load_step();
     mod_json();
     map_level();

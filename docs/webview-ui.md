@@ -205,9 +205,12 @@ and a `.meta.json` is never listed as a prefab.
 The list shows a pill per prefab that records mods: "Mods: <id>" when every
 one is installed, "Needs mods: <id>" (warning colours) naming the missing ones
 otherwise, "+N" when there are more, and every mod with its state in the
-tooltip; the filter matches "mods" and "needs mods". Prefab Details shows a
-Mods section under the module warning: one row per mod with Installed or Not
-installed, and a line saying that Load / Place offers to download missing mods
+tooltip; the filter matches "mods" and "needs mods". A mod counts as installed
+under the asset rule (an installed folder of its id provides every name the
+prefab's row lists, whatever its hash; `MODS_STATUS` rows carry `state`
+`served`, `missing` or `incomplete` and the refusal sentence as `cause`).
+Prefab Details shows a Mods section under the module warning: one row per mod
+with Installed or Not installed, and a line saying that Load / Place offers to download missing mods
 when the mod store has them and otherwise to ask for the prefab's ZIP export.
 P29's module warning stays above it; a module one of the rows provides is a
 mod, not a missing room.
@@ -225,8 +228,9 @@ Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
 *.json)": a ZIP, or the `.json` inside an extracted export folder, whose
 `mods/` folder holds the mod folders (`rawmap_picker.h`, `for_prefab_dialog`).
 Import is the ordinary install of each mod folder, as the Mods tab's install
-button does it. The backend reads and writes them on the UI thread, with no
-network. The
+button does it; a carried folder whose id an installed folder declares and
+whose names that folder provides is skipped. The backend reads and writes them
+on the UI thread, with no network. The
 pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mockup.html` and are tested by `tests/prefab_mods_test.js`.
 
@@ -327,7 +331,7 @@ and `size` is the carried bytes.
 | `published` | object | `{state: "published", at}` when the record's `links` section holds an item published from this map (written by a publish with mods from this installation, dropped at its unpublish); `at` is the link's time. Absent otherwise: the product cannot tell an unpublished map from one published without mods or elsewhere, so it never sends `unpublished`. |
 | `uploaded` | object | `{claimed, at}`, sent with `published`: whether the record's `claims` section holds that item's claim, and its time. |
 | `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
-| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
+| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `incomplete` (a folder of its id is installed but lacks a name the map's row lists), `skipped` or `missing`, judged by the asset rule ([architecture](architecture.md#mods)), so a row pinning another build of an installed id is `installed`; `rows[].state` is `active`, `superseded`, `"incomplete"`, `skipped` or `missing` the same way, with the refusal sentence in `cause`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
 
 The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).

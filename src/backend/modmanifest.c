@@ -927,13 +927,39 @@ static void mm_describe(const sh_modmanifest_list *list, char *out, size_t cap)
     }
 }
 
+int sh_modmanifest_activate(const sh_modmanifest_list *rows)
+{
+    const char **hashes;
+    char (*served)[SH_MODMANIFEST_HASH_CAP];
+    size_t i;
+    int active;
+    if (!rows || !rows->count) return modserve_activate_bundles(NULL, 0);
+    hashes = (const char **)calloc(rows->count, sizeof *hashes);
+    served = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(rows->count, sizeof *served);
+    if (!hashes || !served) { free((void *)hashes); free(served); return -1; }
+    /* The asset rule: a row is activated through the build that serves its
+     * id now (its own hash or an alias of it, else the installed build of
+     * the id), whatever hash the row pins. */
+    for (i = 0; i < rows->count; i++) {
+        sh_modserve_bundle_ref ref;
+        if (sh_modserve_bundle_serving(rows->rows[i].bundle, rows->rows[i].id, &ref) &&
+            strlen(ref.hash) == SH_MOD_HASH_CHARS)
+            strcpy_s(served[i], sizeof served[i], ref.hash);
+        else strcpy_s(served[i], sizeof served[i], rows->rows[i].bundle);
+        hashes[i] = served[i];
+    }
+    active = modserve_activate_bundles(hashes, (int)rows->count);
+    free((void *)hashes);
+    free(served);
+    return active;
+}
+
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length)
 {
     sh_modmanifest_list list = {0};
-    const char **hashes = NULL;
     unsigned rejected = 0, removed = 0;
     int doc_failed = 0, active;
-    size_t i, stripped_len = 0;
+    size_t stripped_len = 0;
     char *stripped = NULL;
     char line[512], names[320];
 
@@ -948,15 +974,11 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
     sh_modmanifest_read(json, length, &list, &rejected);
     stripped = sh_modmanifest_strip(json, length, &stripped_len, &removed, &doc_failed);
 
-    if (list.count) {
-        hashes = (const char **)calloc(list.count, sizeof *hashes);
-        if (hashes) for (i = 0; i < list.count; i++) hashes[i] = list.rows[i].bundle;
-    }
     mm_describe(&list, names, sizeof names);
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register. */
     mm_scope_load(json, length, &list);
-    active = modserve_activate_bundles(hashes, hashes ? (int)list.count : 0);
+    active = sh_modmanifest_activate(&list);
     /* `active` counts the registration steps the activation found ready (new
      * names; a bundle of shadows and requirements has none), not bundles. */
     {
@@ -977,7 +999,6 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
     if (doc_failed)
         backend_log("MODS: the manifest rows could not be removed (the map's JSON did not read "
                     "cleanly); they stay as inert string variables");
-    free((void *)hashes);
     mm_set_current(&list);
     sh_modmanifest_list_free(&list);
     if (stripped && out_length) *out_length = stripped_len;

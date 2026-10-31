@@ -66,7 +66,7 @@ typedef struct sh_modpublished_parse_info {
     int parsed;               /* the parser's result */
     void *map;                /* the object it filled */
     size_t rows;              /* manifest rows the text carried */
-    size_t missing;           /* of them, bundles not installed and admitted */
+    size_t missing;           /* of them, rows no installed folder serves (the asset rule) */
     unsigned long sequence;   /* increments on every parse */
 } sh_modpublished_parse_info;
 
@@ -119,15 +119,25 @@ typedef struct sh_modpub_resume {
     const char *id, *revision;/* published item (empty for local play) */
 } sh_modpub_resume;
 
+/* A row's state under the asset rule; the values of modserve.h's
+ * SH_MODSERVE_ROW_*. */
+#define SH_MODPUB_ROW_MISSING    0
+#define SH_MODPUB_ROW_SERVED     1
+#define SH_MODPUB_ROW_INCOMPLETE 2
+
 /* Everything the state machine asks of the engine and of the lanes it depends
  * on. Production binds these at install; tests supply fakes. */
 typedef struct sh_modpub_ops {
     void *context;
     int  (*on_main)(void *c);
-    /* sh_modserve_bundle_state: 1 installed and admitted, 0 absent, -1 skipped. */
-    int  (*bundle_state)(void *c, const char *hash, char *cause, size_t cap);
+    /* The asset rule (modserve.h sh_modserve_row_served_for): SH_MODPUB_ROW_*,
+     * with the refusal sentence in `cause` when it is not served. `subject`
+     * is "map" or "prefab" (NULL: "map"). */
+    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
     int  (*rescan)(void *c);
-    int  (*activate)(void *c, const char *const *hashes, int n);
+    /* Activate the rows' mods through the builds that serve them
+     * (sh_modmanifest_activate). */
+    int  (*activate)(void *c, const sh_modmanifest_list *rows);
     int  (*can_ask)(void *c);
     int  (*ask)(void *c, unsigned gdm_id, unsigned button_set, const char *text);
     int  (*poll)(void *c, int ticket);          /* an sh_engine_dialog_result */
@@ -169,8 +179,9 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
  * A rawmap (rawmap.c) carries the same manifest rows, and its mods have to be
  * installed before the engine parses it: a placed entity whose mod is absent
  * makes SnapMap's own validator refuse the map as corrupt. The rawmap layer
- * asks which rows are missing before any parse (the recycle bin is tried
- * first) and, when some are, never hands the map to the engine. The hold
+ * asks which rows are missing before any parse (the asset rule:
+ * modserve.h sh_modserve_row_served) and, when some are, never hands the map
+ * to the engine. The hold
  * then asks the mod store on the worker whether it has every missing bundle.
  * When it has, the player gets the question a My Maps launch asks and Yes
  * fetches, installs and opens the rawmap again (the resume, hook
@@ -182,7 +193,8 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
 
 /* Read every row of `text` into *rows (cleared first; free with
  * sh_modmanifest_list_free) and return how many name a bundle that is not
- * installed and admitted, after one restore from the recycle bin. */
+ * served under the asset rule (no installed folder of the row's id, or one
+ * that lacks a name the row lists), after one restore from the recycle bin. */
 size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
 
 /* Hold a rawmap load whose rows name missing bundles. `source` is the file

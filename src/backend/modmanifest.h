@@ -121,9 +121,15 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 
 /* ------------------------------------------------------------ hooks ------ */
 
+/* Activate the rows' mods: each row through the build that serves it now
+ * (sh_modserve_bundle_serving: its hash or an alias of it, else the installed
+ * build of its id), so a map plays with the installed copy whatever hash it
+ * pins. Returns modserve_activate_bundles' result. Main thread. */
+int sh_modmanifest_activate(const sh_modmanifest_list *rows);
+
 /* The DeserializeFromJson step: read and keep the rows as the current
- * manifest, strip them, then call modserve_activate_bundles with their hashes
- * (count 0 for a map without rows). Returns the stripped buffer (HeapFree), or
+ * manifest, strip them, then activate them (sh_modmanifest_activate; count 0
+ * for a map without rows). Returns the stripped buffer (HeapFree), or
  * NULL to parse `json` unchanged. Never throws for malformed input. */
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length);
 
@@ -147,7 +153,7 @@ void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int ha
 /* The map scope's hook (modui.c, modserve.h map scope): at every load, with
  * the rows just read and, when `armed` answers above 0, the map's placed
  * names (`when` SH_MODSERVE_RESTORE_LOAD), before the bundles are activated;
- * at every save with the rows written (names NULL, `when` ..._SAVE). NULL
+ * at every save with the rows written (names NULL, `when` SH_MODSERVE_RESTORE_SAVE). NULL
  * unbinds. */
 typedef void (*sh_modmanifest_scope_fn)(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
                                         int when);

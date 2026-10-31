@@ -805,10 +805,14 @@ static struct {
 } R;
 
 static int r_on_main(void *c) { (void)c; return 1; }
-static int r_bundle_state(void *c, const char *hash, char *cause, size_t cap)
-{ (void)c; if (cause && cap) cause[0] = 0; return !strcmp(hash, HASH_A) && R.installed; }
+static int r_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+{
+    (void)c; (void)subject;
+    if (cause && cap) cause[0] = 0;
+    return !strcmp(row->bundle, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
+}
 static int r_rescan(void *c) { (void)c; return 1; }
-static int r_activate(void *c, const char *const *h, int n) { (void)c; (void)h; return n; }
+static int r_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
 static int r_can_ask(void *c) { (void)c; return 1; }
 static int r_ask(void *c, unsigned gdm, unsigned set, const char *text)
 { (void)c; (void)gdm; (void)set; R.asks++; R.answered = 0; strcpy_s(R.ask, sizeof R.ask, text); return 10 + R.asks; }
@@ -828,13 +832,12 @@ static int r_resume(void *c, const sh_modpub_resume *r)
 }
 static int r_store_has(void *c, const char *hash, volatile int *cancel)
 { (void)c; (void)cancel; return strcmp(hash, HASH_A) ? 0 : R.store; }
-static int r_restore(void *c, const char *const *h, int n) { (void)c; (void)h; (void)n; return 0; }
 static void r_print(void *c, const char *line) { (void)c; R.prints++; strcpy_s(R.print, sizeof R.print, line); }
 
 static const sh_modpub_ops RAWMAP_OPS = {
-    NULL, r_on_main, r_bundle_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
+    NULL, r_on_main, r_row_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
     r_worker_run, r_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, r_resume, NULL,
-    r_store_has, r_restore, r_print
+    r_store_has, NULL, r_print
 };
 
 static void notify_toast(const char *title, const char *text)

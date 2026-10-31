@@ -29,7 +29,9 @@
  * as a view and a view composes into a block.
  *
  * Load and Place resolve the rows before the engine sees the prefab:
- *   every row installed   the mods are activated for the open map, a mod the
+ *   every row served      (the asset rule, modserve.h sh_modserve_row_served:
+ *                         a folder of the row's id provides its names) the
+ *                         mods are activated for the open map, a mod the
  *                         open map does not list is attached to it (a
  *                         map-level row, as the Mods tab's Use in this map)
  *                         with one console line, and the placement goes on;
@@ -108,8 +110,10 @@ int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *n
 /* "id version" for a row (the refusal's label). */
 void  sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap);
 
-/* {"count":N,"missing":M,"mods":[{"id","version","bundle","size","installed"}...]}
- * with each row's state from the bound bundle_state. malloc'd. */
+/* {"count":N,"missing":M,"mods":[{"id","version","bundle","size","installed",
+ * "state","cause"}...]} with each row's state under the asset rule
+ * (row_state): "served", "missing" or "incomplete", and the refusal sentence
+ * for the last two. malloc'd. */
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing);
 
 /* ------------------------------------------------------------ the block */
@@ -219,11 +223,13 @@ int   sh_prefab_mods_valid_name(const char *name);
 /* What the steps above ask of the game. The product binds its defaults on
  * first use (none in a SH_PREFAB_MODS_PURE build); tests bind fakes. */
 typedef struct sh_prefab_mods_ops {
-    int  (*bundle_state)(const char *hash);                        /* 1 installed and admitted */
+    /* The asset rule (modserve.h sh_modserve_row_served_for, subject
+     * "prefab"): SH_MODPUB_ROW_*, the refusal sentence in `cause`. */
+    int  (*row_state)(const sh_modmanifest_row *row, char *cause, size_t cap);
     int  (*restore)(const char *const *hashes, int n);             /* the recycle bin; how many came back */
-    int  (*listed)(const char *hash);                              /* 1 the open map lists the bundle */
+    int  (*listed)(const sh_modmanifest_row *row);                 /* 1 the open map lists the build serving it */
     int  (*attach)(const sh_modmanifest_row *row, char *note, size_t cap);   /* 1 attached, 0 already, -1 failed */
-    int  (*activate)(const char *const *hashes, int n);            /* register the bundles' decls for the open map */
+    int  (*activate)(const sh_modmanifest_list *rows);             /* register the rows' decls for the open map */
     int  (*module_known)(const char *module_name);                 /* the module guard: 1, 0, -1 */
     void (*print)(const char *line);                               /* one console line */
     void (*toast)(const char *text);                               /* one editor toast */
