@@ -132,7 +132,9 @@ Client-side only; no map data changes.
 A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding `mod.json` and an `assets\` tree of
 already-cooked idTech 6 files at the paths the game asks for. Converting assets from other games is
 Doomforge's job, not this product's. New names live under `mods/<id>/`; a stock file the mod replaces
-is listed in `shadows`.
+is listed in `shadows`. A shadow may keep a name the stock text already carries and the game ships
+without (the stock hands model names six animations no archive holds): the builder reports it and
+does not refuse, since the engine already tolerates those names.
 
 - `mod.json` is yours except for one member, `"snapmap-plus"`, which the product writes when it
   builds the folder (the files, their hashes, the bundle hash and whether it verified). Everything
@@ -152,7 +154,8 @@ is listed in `shadows`.
   editor. New names of a mod no map has used yet register when a map that uses it loads, a changed
   movie applies at the next map load, and changed sound banks, animations and other raw files
   besides models and images, or a stock decl no mod serves that inherits a changed one, need a
-  restart. The rescan's result and the backend
+  restart. A shadow a newly installed mod adds for a decl, model or image the game already holds is
+  treated like a changed one and takes effect the same way. The rescan's result and the backend
   log's `MODS: refresh:` lines say which applied.
   `sh_mods build "<folder>"` does it at once; `sh_mods install "<folder>"` copies a folder from
   elsewhere into `mods\<id>\`, verifies it and makes it available at once. `sh_mods list`,

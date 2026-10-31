@@ -2994,6 +2994,14 @@ names:
                 mb_warn(b, "%s needs %s %s, which %s (legacy bundle: reported, not refused)", f->path,
                         f->needs[k].type, f->needs[k].name,
                         got < 0 ? "cannot be checked against the game" : "resolves to nothing");
+            /* A shadow replaces a stock file whose own text may name content
+             * the game ships without (the stock hands model names six
+             * animations no archive holds); the engine already tolerates
+             * those names, so a replacement that keeps them is reported, not
+             * refused. */
+            else if (f->shadowed && got == 0)
+                mb_warn(b, "%s needs %s %s, which resolves to nothing (a replaced stock file: reported, not refused)",
+                        f->path, f->needs[k].type, f->needs[k].name);
             else if (got < 0)
                 mb_error(b, "%s needs %s %s, which is not in the bundle and cannot be checked against the game (resource reader unavailable)",
                          f->path, f->needs[k].type, f->needs[k].name);

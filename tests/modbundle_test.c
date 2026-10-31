@@ -228,6 +228,7 @@ static const char *const STOCK[] = {
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/meleeforward02.bmd6anim",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim",
     "generated/decls/entitydef/monster/imp.decl",
+    "generated/decls/md6def/monster/imp.md6.decl",
     NULL
 };
 static unsigned g_stock_misses;
@@ -662,6 +663,13 @@ static void m_shadow_ok(const char *f)
     mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
+/* A shadow whose text keeps a stock animation name the game ships without. */
+static void m_shadow_dangling(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/md6def/monster/imp.md6.decl\"]"));
+    mt_write(f, "assets\\generated\\decls\\md6def\\monster\\imp.md6.decl",
+             "{\r\n\tevents {\r\n\t\tanim \"md6/monster/imp/nothing_here.md6anim\" {\r\n\t\t}\r\n\t}\r\n}");
+}
 static void m_shadow_not_stock(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/not_stock.decl\"]"));
@@ -732,6 +740,14 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_shadow_ok, &b);
     CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed);
     CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
+    sh_mb_free(&b);
+    /* A shadow keeping a stock name the game lacks is reported, not refused;
+     * the same dangling name in a mod's own decl still refuses (m_missing_need). */
+    accepted(fixture, tmp, m_shadow_dangling, &b);
+    if (b.errors || b.warnings != 1) fprintf(stderr, "  dangling shadow: %s / %s\n", b.first_cause, b.first_warning);
+    CHECK(b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1 &&
+          strstr(b.first_warning, "resolves to nothing (a replaced stock file") != NULL &&
+          find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->shadowed);
     sh_mb_free(&b);
     /* Supported gates normalise to "0"; unknown keys travel under extra. */
     accepted(fixture, tmp, m_requirements, &b);
