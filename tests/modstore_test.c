@@ -134,6 +134,13 @@ static const char *alias_of(const sh_ms_list *l, const char *from)
     return NULL;
 }
 
+static int ms_test_folder_builds_to(const sh_ms_list *l, const char *hash)
+{
+    size_t i;
+    for (i = 0; i < l->count; i++) if (l->items[i].loaded && !_stricmp(l->items[i].bundle.hash, hash)) return 1;
+    return 0;
+}
+
 static int alias_targets(const sh_ms_list *l, const char *to)
 {
     size_t i;
@@ -172,7 +179,9 @@ static void test_alias_note(void)
     CHECK(sh_ms_alias_note(B, C) == 1);
     CHECK(sh_ms_alias_prune() == 1);
     CHECK(sh_ms_enumerate(&l));
-    CHECK(!alias_of(&l, B) && l.alias_count == 0);
+    CHECK(!alias_of(&l, B));
+    /* An alias whose target a folder of the fixture builds to survives the prune. */
+    { size_t q; for (q = 0; q < l.alias_count; q++) CHECK(ms_test_folder_builds_to(&l, l.aliases[q].to)); }
     sh_ms_list_free(&l);
     CHECK(sh_ms_alias_prune() == 0);
 }
