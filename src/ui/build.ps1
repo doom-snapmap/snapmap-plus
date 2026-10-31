@@ -93,7 +93,7 @@ $incArgs = @(
     # prefab_grab.c so Create can check a saved frame when the backend has no guard.
     "/I`"$backend`""
 ) -join " "
-$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c ..\backend\prefab_grab.c"
+$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c ..\backend\prefab_grab.c ..\backend\prefab_block.c"
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",

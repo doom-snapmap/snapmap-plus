@@ -45,6 +45,14 @@ int main()
     CHECK(wcsstr(modded.types[0].label, L"with its mods") != nullptr);
     CHECK(wcsstr(modded.types[1].label, L"without its mods") != nullptr);
 
+    /* A prefab's export is always a ZIP; import also takes the .json of an extracted one. */
+    choice pexport = for_prefab_dialog(true);
+    CHECK(!wcscmp(pexport.types[0].pattern, L"*.zip") && !wcscmp(pexport.types[0].label, L"Prefab export (*.zip)"));
+    CHECK(!wcscmp(pexport.extension, L"zip") && pexport.file_name == nullptr);   /* the caller proposes "<name>.zip" */
+    choice pimport = for_prefab_dialog(false);
+    CHECK(!wcscmp(pimport.types[0].pattern, L"*.zip;*.json") && !wcscmp(pimport.types[0].label, L"Prefab exports (*.zip, *.json)"));
+    CHECK(offers(pimport, L"*.*") && pimport.file_name == nullptr);
+
     CHECK(map_mods_from_status("{\"load\":\"a\",\"mapMods\":2}") == 2);
     CHECK(map_mods_from_status("{\"load\":\"a\",\"mapMods\":0}") == 0);
     CHECK(map_mods_from_status("{\"load\":\"a\"}") == 0);     /* an older backend */
