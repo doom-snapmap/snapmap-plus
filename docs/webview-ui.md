@@ -90,6 +90,9 @@ crash submission use a short-lived HTTPS worker in the host and the
 | page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data}`; asked when the Prefabs tab opens and on each prefab selection. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
+| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's sidecar records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, version, bundle, size, installed}]}`); see [Prefabs and their mods](#prefabs-and-their-mods). |
+| host to page | `loadPrefabResult {result: 3 \| -7, message}` | 3: the placement is held while the mod store is asked for its missing mods; -7: refused because of its mods (the message says why, or is empty when the game's own notice did). |
+| page to host | `exportPrefab {name, folder}` / `importPrefab` | Open the Windows Save or Open dialog for a prefab ZIP; the host answers `prefabFileResult {op, ok, message, name?, cancelled?}` and refreshes the list after an import. |
 
 ## Prefabs 3D preview
 
@@ -147,6 +150,36 @@ over the KB limit sum), MEMORY = max(render models, lights, world areas,
 decals), DEMONS = AI / 64 and DECALS = decals / limit; a result is red when
 NETWORK, OBJECTS or MEMORY would reach 1.0 or DEMONS would pass it. The limits
 and usage are always read live, never hard-coded.
+
+## Prefabs and their mods
+
+A prefab's sidecar records the mods its entities and modules need
+(`backend/prefab_mods.c`, see [architecture](architecture.md#prefabs-that-name-mods)).
+Create from Selection asks the backend to record them right after the file is
+written (`MODS_RECORD`); a module prefab's save writes them itself. Every
+sidecar write from the page goes through `META_WRITE`, so editing the
+description or tags, or clearing both, never drops the recorded rows.
+
+The list shows a pill per prefab that records mods: "Mods: <id>" when every
+one is installed, "Needs mods: <id>" (warning colours) naming the missing ones
+otherwise, "+N" when there are more, and every mod with its state in the
+tooltip; the filter matches "mods" and "needs mods". Prefab Details shows a
+Mods section under the module warning: one row per mod with Installed or Not
+installed, and a line saying that Load / Place offers to download missing mods
+when the mod store has them and otherwise to ask for the prefab's ZIP export.
+P29's module warning stays above it; a module one of the rows provides is a
+mod, not a missing room.
+
+Load / Place asks the backend first (`MODS_RESOLVE`) for either kind of prefab
+whose sidecar exists. It answers place now, held (the host follows it with
+`MODS_POLL` on each think-loop turn and places the prefab again, through the
+same Load / Place, once the mods are installed), a module the player cannot
+get, or refused. The page shows the backend's text as a toast. Export (Prefab
+Details head) and Import (the list head) use the rawmap pickers' dialog with a
+"Prefab with its mods (*.zip)" type (`rawmap_picker.h`, `for_prefab_dialog`);
+the backend reads and writes the ZIP on the UI thread. The pure helpers sit
+between `// --- prefab mods (pure) ---` markers in `mockup.html` and are tested
+by `tests/prefab_mods_test.js`.
 
 ## Mods tab
 
