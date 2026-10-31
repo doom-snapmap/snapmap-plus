@@ -1688,6 +1688,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
     case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
+    case SH_MODS_ACT_WATCH_RESCAN: return "watchRescan";
     default: return "unknown";
     }
 }
@@ -3221,12 +3222,29 @@ int sh_modui_run(int action, const char *arg)
         return mu_install(arg);
     case SH_MODS_ACT_VERIFY:
         return mu_verify(arg);
+    case SH_MODS_ACT_WATCH_RESCAN:
     case SH_MODS_ACT_RESCAN: {
         int n;
         char msg[520];
         sh_modserve_refresh rf;
         mu_buf b;
         note[0] = 0;
+        if (action == SH_MODS_ACT_WATCH_RESCAN) {
+            /* The folder watcher's request: Play, a load and a store write in
+             * progress defer it; the host asks again once they end. */
+            char cause[200];
+            const char *why = NULL;
+            if (mu_busy(cause, sizeof cause)) why = cause;
+            else if (modstore_lock_busy(NULL)) why = "a store write is in progress";
+            if (why) {
+                memset(&b, 0, sizeof b);
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Deferred: %s.", why);
+                mu_result_head(&b, action, 0, msg);
+                mu_kbool(&b, "deferred", 1, 0);
+                return mu_result_tail(&b);
+            }
+            mu_log("rescan: the mods folder changed on disk");
+        }
         n = mu_rescan_refresh(note, sizeof note, &rf);
         mu_log("rescan: %s", note);
         if (n >= 0 && rf.state > 0)
@@ -3299,6 +3317,12 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
     case SH_MODS_WAIT:
         call->needed = 0;
         return sh_modui_wait(call->out_cap > 0 ? (unsigned)call->out_cap : 0);
+    case SH_MODS_STORE: {
+        unsigned gen = 0;
+        call->needed = modstore_lock_busy(&gen) ? 1 : 0;
+        call->generation = gen;
+        return 1;
+    }
     case SH_MODS_ROOT: {
         char root[MAX_PATH * 4];
         size_t len;

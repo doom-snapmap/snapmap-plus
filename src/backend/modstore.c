@@ -21,6 +21,8 @@
 static INIT_ONCE        g_ms_lock_once = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION g_ms_lock;
 static volatile LONG    g_ms_lock_waits;
+static volatile LONG    g_ms_lock_depth;   /* nested holds of the owner; read from any thread */
+static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
 
 static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
 {
@@ -32,16 +34,25 @@ static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
 void modstore_lock(void)
 {
     InitOnceExecuteOnce(&g_ms_lock_once, ms_lock_init, NULL, NULL);
-    if (TryEnterCriticalSection(&g_ms_lock)) return;
-    /* Held by another thread: wait for it rather than fail. */
-    InterlockedIncrement(&g_ms_lock_waits);
-    backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
-    EnterCriticalSection(&g_ms_lock);
+    if (!TryEnterCriticalSection(&g_ms_lock)) {
+        /* Held by another thread: wait for it rather than fail. */
+        InterlockedIncrement(&g_ms_lock_waits);
+        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
+        EnterCriticalSection(&g_ms_lock);
+    }
+    InterlockedIncrement(&g_ms_lock_depth);
 }
 
 void modstore_unlock(void)
 {
+    if (InterlockedDecrement(&g_ms_lock_depth) == 0) InterlockedIncrement(&g_ms_lock_gen);
     LeaveCriticalSection(&g_ms_lock);
+}
+
+int modstore_lock_busy(unsigned *generation)
+{
+    if (generation) *generation = (unsigned)InterlockedCompareExchange(&g_ms_lock_gen, 0, 0);
+    return InterlockedCompareExchange(&g_ms_lock_depth, 0, 0) > 0;
 }
 
 unsigned modstore_lock_waits(void)

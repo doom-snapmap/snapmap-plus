@@ -230,7 +230,13 @@ Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
 Import is the ordinary install of each mod folder, as the Mods tab's install
 button does it; a carried folder whose id an installed folder declares and
 whose names that folder provides is skipped. The backend reads and writes them
-on the UI thread, with no network. The
+on the UI thread, with no network.
+
+The list follows the prefabs folder: the host's folder watcher (`folder_watch.h`)
+sends a fresh `prefabs` list 300 ms after the last change of a burst under
+`%LOCALAPPDATA%\snapmap-plus\prefabs\`, the product's own writes included. The
+page renders it as any list and keeps its selection while that prefab exists;
+otherwise Prefab Details is cleared. The
 pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mockup.html` and are tested by `tests/prefab_mods_test.js`.
 
@@ -239,7 +245,11 @@ pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
 Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
 answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and nothing
-polls. The page renders only from the last document and the last dry run, never from its own
+polls. The host's folder watcher also asks for the rescan by itself 1500 ms after the mods folder
+goes quiet (`SH_MODS_ACT_WATCH_RESCAN`, deferred by the backend while Play runs, a map loads or a
+store write holds the lock, and asked again two seconds later); it posts only the fresh `mods`
+document, never a `modsActionResult`, and changes seen while the product's own store lock is held,
+or within a second after, are ignored (`SH_MODS_STORE`). The page renders only from the last document and the last dry run, never from its own
 bookkeeping, so counts, manifest rows and the published state are always what the backend just
 read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods doctor [verify]`.
 
@@ -420,6 +430,10 @@ Off-main callers submit a copied batch through `clone_bss_apply`; missing thread
 identity or transport refuses the operation. A timed-out operation already running
 returns an in-progress status, so the page must not report completion or retry it
 automatically. See [architecture](architecture.md#threads-and-edit-results).
+
+The folder watchers run on their own thread (`ReadDirectoryChangesW`) and only note changes; the
+think loop decides when the Prefabs list or the Mods tab refreshes (`folder_watch.h`, tested by
+`tests/folder_watch_test.c`) and logs one `watch:` line per refresh or rescan.
 
 Camera polling runs at the loop cadence and posts only changed coordinates.
 The prefab list never reads a prefab scene: previews, and the Limits section,

@@ -459,6 +459,9 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *          unresolved.
  *   WAIT   any thread. Waits up to out_cap milliseconds (out unused) for a
  *          migration MIGRATE started to finish: 1 idle, 0 still running.
+ *   STORE  any thread. 1 with needed = 1 while a store write holds the store
+ *          lock (else 0) and generation = the store lock's released holds
+ *          (not the document generation). An older backend answers 0.
  * generation is set by every op; it changes after each action that can change
  * the store or the serving index. */
 #define SH_MODS_LIST  1
@@ -466,6 +469,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_FETCH 3
 #define SH_MODS_ROOT  4
 #define SH_MODS_WAIT  5
+#define SH_MODS_STORE 6
 #define SH_MODS_ACT_INSTALL     1
 #define SH_MODS_ACT_VERIFY      2
 #define SH_MODS_ACT_RESCAN      3
@@ -482,6 +486,8 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_REMOVED_EMPTY      14    /* retired with the recycle bin: answers a refusal */
 #define SH_MODS_ACT_REMOVED_RESTORE    15    /* retired with the recycle bin: answers a refusal */
 #define SH_MODS_ACT_MAP_ADD            16    /* arg: key (or an installed id): attach the mod to the open map (a map-level row) */
+#define SH_MODS_ACT_WATCH_RESCAN       17    /* the folder watcher's rescan: as RESCAN, or "deferred":true while Play runs,
+                                                a map loads or a store write holds the lock */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

@@ -47,6 +47,10 @@ void modstore_lock(void);
 void modstore_unlock(void);
 /* How many lock calls had to wait so far (tests, diagnostics). */
 unsigned modstore_lock_waits(void);
+/* Any thread: 1 while some thread holds the lock (a store write may be in
+ * progress), else 0. *generation (when non-NULL) counts the outermost holds
+ * released so far, so a change tells that a hold ended since the last look. */
+int      modstore_lock_busy(unsigned *generation);
 
 /* id@version+build; version may hold up to 4 UTF-8 bytes per code point. */
 #define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)

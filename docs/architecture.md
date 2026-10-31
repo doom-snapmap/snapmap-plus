@@ -573,6 +573,25 @@ removed-mods: 3 folder(s) deleted; the bin is retired"); a later start finds
 nothing and logs nothing. An entry that cannot be deleted stays for the next
 start.
 
+The folder watchers. The lists follow the disk. The window's host
+(`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
+`%LOCALAPPDATA%\snapmap-plus\prefabs\` and `mods\` with
+`ReadDirectoryChangesW` (subtree; file and folder names, last write, size). A
+change in the prefabs folder refreshes the Prefabs list 300 ms after the last
+change of a burst (the page keeps its selection while that prefab exists and
+clears Prefab Details otherwise). A change in `mods\` asks for the ordinary
+rescan (the Refresh button's, as `SH_MODS_ACT_WATCH_RESCAN`) after 1500 ms of
+quiet, on the main thread through `run_on_main`; the backend defers it while
+Play runs, a map loads or a store write holds the lock, and the host asks again
+two seconds later. The Mods tab re-renders from the document that follows. The
+product's own writes fire the watcher too: a change seen while the store lock
+is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
+hold ended, is dropped, so an install or export in progress never triggers a
+rescan mid-write, and the watcher re-arms with the next change. A rescan of
+unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
+UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
+opened again every five seconds.
+
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the
 cache for its bundle; that runs on a rescan (the Mods tab, `sh_mods rescan`,

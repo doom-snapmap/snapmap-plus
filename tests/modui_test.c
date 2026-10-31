@@ -1510,6 +1510,34 @@ int main(int argc, char **argv)
         call.out = path;
         call.out_cap = (int)sizeof path;
         CHECK(sh_modui_slot(NULL, &call) == 1 && !strcmp(path, g_root));
+        /* The folder watcher's rescan: deferred while the game is busy or a store write runs. */
+        g_busy = "Play is running";
+        doc = run_doc(SH_MODS_ACT_WATCH_RESCAN, "");
+        CHECK(has(doc, "\"action\":\"watchRescan\",\"ok\":false,\"message\":\"Deferred: Play is running.\",\"deferred\":true"));
+        free(doc);
+        g_busy = NULL;
+        modstore_lock();
+        doc = run_doc(SH_MODS_ACT_WATCH_RESCAN, "");
+        CHECK(has(doc, "\"deferred\":true") && has(doc, "a store write is in progress"));
+        free(doc);
+        modstore_unlock();
+        doc = run_doc(SH_MODS_ACT_WATCH_RESCAN, "");
+        CHECK(has(doc, "\"action\":\"watchRescan\",\"ok\":true,\"message\":\"Mods folder reread: ") && !has(doc, "\"deferred\":true"));
+        free(doc);
+        /* The store's state, for the watcher (any thread). */
+        {
+            unsigned gen0;
+            call.op = SH_MODS_STORE;
+            CHECK(sh_modui_slot(NULL, &call) == 1 && call.needed == 0);
+            gen0 = call.generation;
+            modstore_lock();
+            CHECK(sh_modui_slot(NULL, &call) == 1 && call.needed == 1 && call.generation == gen0);
+            modstore_lock();                              /* recursive */
+            modstore_unlock();
+            CHECK(sh_modui_slot(NULL, &call) == 1 && call.needed == 1 && call.generation == gen0);
+            modstore_unlock();
+            CHECK(sh_modui_slot(NULL, &call) == 1 && call.needed == 0 && call.generation == gen0 + 1);
+        }
         call.op = 99;
         CHECK(sh_modui_slot(NULL, &call) == 0);
         CHECK(sh_modui_slot(NULL, NULL) == 0);

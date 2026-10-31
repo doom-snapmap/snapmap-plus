@@ -91,6 +91,7 @@ $tests = @(
     @{ name = "iface_config_test";  src = 'iface_config_test.c ..\src\common\snapmap_plus_iface.c';   arg = "" }
     @{ name = "editor_delete_test"; src = 'editor_delete_test.c ..\src\backend\editor_delete.c'; defs = '/DSH_EDITOR_DELETE_TESTING'; arg = "" }
     @{ name = "editor_undo_test"; src = 'editor_undo_test.c ..\src\backend\editor_undo.c'; defs = '/DSH_EDITOR_UNDO_TESTING'; arg = "" }
+    @{ name = "folder_watch_test"; src = 'folder_watch_test.c'; arg = "" }
     @{ name = "config_test";        src = 'config_test.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "startup_dirs_test"; src = 'startup_dirs_test.c ..\src\backend\user_dirs.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = (Join-Path $here '..') }
     @{ name = "strids_test"; src = 'strids_test.c ..\src\backend\strids.c ..\src\backend\config_json.c'; defs = '/DSH_STRIDS_TESTING'; arg = "" }
