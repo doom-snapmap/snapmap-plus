@@ -1077,25 +1077,25 @@ static void poc_poll_module_place()
  * this backend cannot say). Posts on a change, or always when forced. */
 static void poc_post_editor_mode(bool force)
 {
-    int entity = 0, blueprint = 0;
+    int entity = 0, blueprint = 0, map_open = 0;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->is_entity_mode) {
         __try { entity = g_iface->vtbl->is_entity_mode(g_iface) ? 1 : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { entity = 0; }
     }
     sh_module_prefab_call call;
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_STATE;
-    if (poc_module_prefab_call(&call) == 1) blueprint = call.blueprint ? 1 : 0;
+    if (poc_module_prefab_call(&call) == 1) { blueprint = call.blueprint ? 1 : 0; map_open = call.map_open ? 1 : 0; }
     /* The modules selected in Blueprint gate Create there; the entity count rides selCount. */
     sh_prefab_watch watch;
     poc_prefab_watch(&watch);
     int modules = blueprint ? watch.modules_selected : 0;
-    int now = entity | (blueprint << 1);
+    int now = entity | (blueprint << 1) | (map_open << 2);
     if (!force && now == g_editor_mode_last && modules == g_editor_modules_last) return;
     g_editor_mode_last = now;
     g_editor_modules_last = modules;
     wchar_t m[128];
-    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d}",
-                 entity, blueprint, modules);
+    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d,\"mapOpen\":%d}",
+                 entity, blueprint, modules, map_open);
     poc_post_json(m);
 }
 static void poc_strip_trailing_sep(char *s)

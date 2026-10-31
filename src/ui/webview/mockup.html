@@ -3178,13 +3178,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var pfr = pfFileResultToast(d);
       if (pfr) toast(pfr.text, pfr.level);
     } else if (d.kind === 'editorMode') {
-      var prevMode = edMode.known ? (edMode.entityMode + ':' + edMode.blueprint) : null;
+      var prevMapOpen = edMode.known ? edMode.mapOpen : null;
       edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0,
-                modules: typeof d.modules === 'number' ? d.modules : -1};
+                modules: typeof d.modules === 'number' ? d.modules : -1,
+                mapOpen: typeof d.mapOpen === 'number' ? d.mapOpen : -1};
       pfRefreshModeUi(); updateCreateBtn();
-      // The Mods tab's "In this map" pills follow the map: a mode change (a map opened, the editor
-      // left for the hub) refreshes the tab's document while the tab is showing.
-      if (prevMode !== null && prevMode !== (edMode.entityMode + ':' + edMode.blueprint)) {
+      // The Mods tab's "In this map" pills follow the map: when the editor takes a map or lets it go
+      // (mapOpen from the backend; -1 from an older one), the tab's document is read again while showing.
+      if (prevMapOpen !== null && prevMapOpen !== edMode.mapOpen) {
         var modsPanel = document.getElementById('panel-mods');
         if (modsPanel && modsPanel.style.display !== 'none' && typeof modsUi !== 'undefined') modsUi.show();
       }
@@ -3358,7 +3359,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var selectedPrefabKind = '';   // kind of the prefab whose details are shown
   var metaExtra = null;          // the loaded view minus desc/tags (a module prefab's summary, its mods); the backend keeps them
   // The editor's mode, posted by the host: module prefabs place only in Blueprint, object prefabs in Object mode.
-  var edMode = {known: false, entityMode: 0, blueprint: 0, modules: -1};
+  var edMode = {known: false, entityMode: 0, blueprint: 0, modules: -1, mapOpen: -1};
   function pfKindOf(folder, name) { return prefabKinds[(folder ? folder + '/' : '') + name] || 'objects'; }
   // --- prefab kind ---
   // The host classifies a prefab by its file's top-level ~type (idSnapMap: modules, with or without
@@ -7223,8 +7224,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       for (var j = 0; j < items.length; j++) { var k = r.folder + '/' + items[j]; if (seen[k]) continue; seen[k] = true; names.push(items[j]); folders.push(r.folder); }
     }
     if (!names.length) return;
-    if (names.length === 1) { showConfirm('Delete "' + names[0] + '"? This removes the file from disk.', function(){ post({cmd:'deletePrefab', name: names[0], folder: folders[0]}); }); return; }
-    showConfirm('Delete ' + names.length + ' prefabs? This removes their files from disk.', function(){ post({cmd:'deletePrefabs', names: names, folders: folders}); });
+    if (names.length === 1) { showConfirm('Delete "' + names[0] + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: names[0], folder: folders[0]}); }); return; }
+    showConfirm('Delete ' + names.length + ' prefabs? Their files go to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefabs', names: names, folders: folders}); });
   }
   var newFolderBtn = document.getElementById('newFolderBtn');
   if (newFolderBtn) newFolderBtn.addEventListener('click', function(){
@@ -7329,7 +7330,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');
   if (prefabDeleteBtn) prefabDeleteBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;
-    showConfirm('Delete "' + name + '"? This removes the file from disk.', function(){ post({cmd:'deletePrefab', name: name, folder: selectedPrefabFolder}); });
+    showConfirm('Delete "' + name + '"? Its file goes to the Windows Recycle Bin.', function(){ post({cmd:'deletePrefab', name: name, folder: selectedPrefabFolder}); });
   });
   // Description and tags live in the prefab file's own snapmapPlus block, which every reader strips
   // before the engine sees the file. Save changed metadata on blur; clearing both fields clears them.

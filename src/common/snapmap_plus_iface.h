@@ -396,6 +396,7 @@ typedef struct sh_module_prefab_call {
     const char *name;        /* MODS_RESOLVE, EXPORT: the prefab's name */
     const char *zip_path;    /* EXPORT, IMPORT: the ZIP (IMPORT: or a .json in an extracted export) */
     int         tail;        /* META_READ in: text is the end of a larger file */
+    int         map_open;    /* STATE out: the editor holds a map object (0 at the hub or after the editor left it) */
 } sh_module_prefab_call;
 typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
 /* Timeline tile: the product palette row on snapmaps/unknown whose prototype

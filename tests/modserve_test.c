@@ -1408,8 +1408,8 @@ static void test_refresh(void)
      * them); new names of the mod are not. Settle them. */
     sh_modserve_last_diff(&d);
     CHECK(d.changed == 0 && d.added == 14 && d.changed_decls == 3 && d.pending > 0);
-    /* Both editor rows count as added, the mod's own and the shadow of a stock one. */
-    CHECK(d.added_rows == 2);
+    /* The mod's own editor row is added; the shadow of a stock row counts as a changed row. */
+    CHECK(d.added_rows == 1 && d.changed_rows == 1);
     memset(&s, 0, sizeof s);
     CHECK(sh_modserve_each_refresh(rf_visit, &s) == d.pending);
     CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && strstr(s.order, "1:entityDef:monster/zombie:now;") &&

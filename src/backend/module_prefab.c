@@ -879,10 +879,14 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_STATE: {
         unsigned char *ed = mp_editor();
         int state = 0;
-        call->blueprint = call->entity_mode = 0;
+        void *map = NULL;
+        call->blueprint = call->entity_mode = call->map_open = 0;
         if (!ed || !rd_i32(ed + ED_STATE_OFF, &state)) return 0;
         call->blueprint = state == 1;
         call->entity_mode = state == 2;
+        /* The editor's map object: NULL at the hub and once the editor has left the map. */
+        if (!rd_ptr(ed + ED_MAP_OFF, &map)) map = NULL;
+        call->map_open = map != NULL;
         return 1;
     }
     case SH_MODULE_PREFAB_SAVE:
