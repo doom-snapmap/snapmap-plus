@@ -112,9 +112,9 @@ installer\snapmap-plus.exe install --local dist
 ```
 
 It auto-detects your DOOM via Steam (or pass `--doom <path>` to your DOOM 2016 folder, the one holding
-`DOOMx64vk.exe` and `DOOMx64.exe`), backs up
-anything it replaces, and records the install so **`installer\snapmap-plus.exe uninstall`** restores vanilla
-exactly. (You can also drop `dist\*` into the DOOM root by hand — `dist/` mirrors the overlay tree.)
+`DOOMx64vk.exe` and `DOOMx64.exe`), installs only the two files for your DOOM build, removes any file of
+an earlier release, and records the install in `%LOCALAPPDATA%\snapmap-plus\install.json` so
+**`installer\snapmap-plus.exe uninstall`** restores vanilla exactly. (You can also drop `dist\*` into the DOOM root by hand — `dist/` mirrors the overlay tree.)
 
 Launch DOOM and enter the SnapMap editor; the **Snapmap+** window opens (run `sh` in the in-game
 console if it doesn't). Either renderer will do — the backend attaches to whichever process image it was

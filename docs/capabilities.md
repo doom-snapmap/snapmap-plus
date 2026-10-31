@@ -312,6 +312,13 @@ does not refuse, since the engine already tolerates those names.
   names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
   Everything it deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
   at the next rescan, as before.
+- The installer leaves the DOOM folder holding exactly the two Snapmap+ files for the installed
+  build, removing the other build's files, files of earlier releases and the backups earlier
+  installers kept of their own DLLs, and naming any file that is not Snapmap+'s as left in place.
+  It leaves `%LOCALAPPDATA%\snapmap-plus` holding `snapmap-plus.exe`, `snapmap-plus-store.exe`,
+  `install.json` (its only record) and your data; the records of earlier installers are folded into
+  `install.json`, and empty `override-backups\`, `package-cache\` and `package-staging\` folders are
+  removed. See [installer/README.md](../installer/README.md#layout-contract).
 - It converts a mods folder of earlier releases in place:
   `bundle.json`, `.state.json`, the shared `blobs\` folder and `legacy\` go, each mod keeps its files
   in its own folder with a `mod.json` (a file shared by hard link gets its own copy, and the original
@@ -461,11 +468,11 @@ goes to the `~` console with a summary toast.
 The Snapmap+ window — HTML/CSS/JS rendered in a WebView2 control, opened inside the SnapMap
 editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview-ui.md`](webview-ui.md).
 The backend loads it from `<DOOM>\snapmap-plus\snapmap-plus-ui-13954591.dll`, a path that names the
-supported build; a `snapmap-plus\snapmap-plus-ui.dll` beside it is the 2018 release's frontend, which
-release bundles also carry (see [packaging](packaging.md#the-bundle)), and is never loaded.
+supported build; a `snapmap-plus\snapmap-plus-ui.dll` is the 2018 release's frontend, which this build
+never loads and the installer removes (see [packaging](packaging.md#the-installed-file-contract)).
 Its WebView2 profile is regenerable cache in `%LOCALAPPDATA%\snapmap-plus\cache\webview2\`; the first
 start of this release renames an older `snapmap-plus\webview2\` folder into it, and the installer never
-backs up or copies `cache\`.
+backs up or copies `cache\` (it keeps its own `cache\installer\` there).
 
 | Surface | What it does |
 |---|---|
