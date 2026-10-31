@@ -61,8 +61,10 @@ func installLegacyRelease(f flags, doom string) error {
 	if f.token != "" {
 		args = append(args, "--token", f.token)
 	}
-	fmt.Printf("Running the %s installer for the 2018 build ...\n", legacyReleaseTag)
+	ui.Section("Installing files")
+	ui.Note("Running the %s installer for the 2018 build...", legacyReleaseTag)
 	runErr := runLegacyExe(exe, args)
+	ui.External()
 	dropLegacyCopy(digest)
 	if runErr != nil {
 		var exit *exec.ExitError

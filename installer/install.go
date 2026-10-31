@@ -84,8 +84,11 @@ func cmdInstall(f flags) error {
 	if err != nil {
 		return err
 	}
+	ui.Section("Detecting DOOM")
+	ui.PathField("Folder", doom)
+	ui.Field("Build", build.label)
 	for _, line := range describeDoomGames(doom) {
-		fmt.Println("Game: " + line)
+		ui.Field("Game", line)
 	}
 	if f, err = routeRelease(f, build); err != nil {
 		return err
@@ -140,24 +143,25 @@ func cmdInstall(f flags) error {
 	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 		rec.Version, build.label, doom)
 	if len(legacy) > 0 {
-		fmt.Println("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its")
-		fmt.Printf("files (%d) will be removed. Your maps and prefabs under\n", len(legacy))
-		fmt.Printf("%%USERPROFILE%%\\snaphak are yours and are kept (they carry over).\n")
+		ui.Warn("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its\n"+
+			"files (%d) will be removed. Your maps and prefabs under\n"+
+			"%%USERPROFILE%%\\snaphak are yours and are kept (they carry over).", len(legacy))
 		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 			rec.Version, build.label, doom)
 	}
 	// FINAL gate -- runs only after every check passed (DOOM found, DOOM closed, bundle downloaded + verified).
 	if !f.yes && isInteractive() {
 		if !confirm(confirmMsg) {
-			fmt.Println("Cancelled -- nothing was changed.")
+			ui.Skip("Cancelled -- nothing was changed.")
 			return nil
 		}
 	}
+	ui.LazySection("Migrating player data")
 	// Bring player content forward from earlier install locations. The package system is being
 	// rebuilt, so no package folder is created, converted or removed.
 	migrateUserData()
 	if len(legacy) > 0 {
-		fmt.Println("Removing the original SnapHak:")
+		ui.Section("Removing the original SnapHak")
 		rec.Backups = dropLegacyBackups(doom, rec.Backups)
 		rec.LegacyRemoved = append(rec.LegacyRemoved, removeLegacy(doom, legacy)...)
 	}
@@ -165,7 +169,10 @@ func cmdInstall(f flags) error {
 	for _, bk := range rec.Backups {
 		backedUp[bk.Rel] = true
 	}
-	fmt.Printf("Installing Snapmap+ into %s (%s DOOM build)\n", doom, build.label)
+	ui.Section("Installing files")
+	ui.Field("Version", rec.Version)
+	ui.PathField("Folder", doom)
+	placed := ui.List("Installed files")
 	for _, e := range files {
 		target := filepath.Join(doom, e.rel)
 		// Back up pre-existing files unless the prior record owns them or their bytes
@@ -189,14 +196,15 @@ func cmdInstall(f flags) error {
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("couldn't create a folder in your DOOM install (%v) -- check you have permission (try running as administrator)", err)
+			return fmt.Errorf("couldn't create a folder in your DOOM folder (%v) -- check you have permission (try running as administrator)", err)
 		}
 		if err := copyFile(filepath.Join(b.root, e.rel), target); err != nil {
 			return fmt.Errorf("couldn't write %s into your DOOM folder (%v) -- check you have permission (try running as administrator)", e.rel, err)
 		}
 		rec.Files = append(rec.Files, e.rel)
-		fmt.Printf("  + %s\n", e.rel)
+		placed.Add(e.rel)
 	}
+	placed.Close()
 	if err := saveRecord(rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- uninstall may not fully clean up", err)
 	}
@@ -211,7 +219,7 @@ func cmdInstall(f flags) error {
 		}
 		if !placed {
 			if os.Remove(filepath.Join(doom, rel)) == nil {
-				fmt.Printf("  - removed superseded %s\n", rel)
+				ui.OK("removed superseded %s", rel)
 			}
 			removeIfEmpty(filepath.Dir(filepath.Join(doom, rel)))
 		}
@@ -224,13 +232,14 @@ func cmdInstall(f flags) error {
 			continue // recorded files were handled above
 		}
 		if got, err := fileSHA256(target); err == nil && got == e.sha256 && os.Remove(target) == nil {
-			fmt.Printf("  - removed the 2018 release's %s\n", e.rel)
+			ui.OK("removed the 2018 release's %s", e.rel)
 		}
 	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
-	fmt.Printf("Done. Snapmap+ %s installed.\n", rec.Version)
+	ui.OK("Snapmap+ %s installed.", rec.Version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
-	fmt.Println("Launch DOOM and open the SnapMap editor.")
+	ui.Blank()
+	ui.Note("Launch DOOM and open the SnapMap editor.")
 	return nil
 }
 
@@ -269,26 +278,29 @@ func foldLogsForward(old, newDir string) {
 	if rest, err := os.ReadDir(old); err == nil && len(rest) == 0 {
 		os.Remove(old)
 		if moved {
-			fmt.Println("  ~ moved runtime logs into snapmap-plus\\logs\\")
+			ui.OK("moved runtime logs into snapmap-plus\\logs\\")
 		}
 	}
 }
 
 func cmdUpdate(f flags) error {
 	rec, err := loadRecord()
+	ui.Section("Updating")
 	if err != nil {
-		fmt.Println("No existing install found -- doing a fresh install.")
+		ui.Note("No existing install found -- doing a fresh install.")
 		return cmdInstall(f)
 	}
 	if f.doom == "" {
 		f.doom = rec.DoomPath
 	}
-	fmt.Printf("Updating Snapmap+ in %s (current: %s)\n", rec.DoomPath, rec.Version)
+	ui.Field("Current version", rec.Version)
+	ui.PathField("Folder", rec.DoomPath)
 	if err := cmdInstall(f); err != nil {
 		return err
 	}
 	// The overlay is updated; now refresh snapmap-plus.exe itself (best-effort -- never fails the overlay update).
 	if !f.noSelf {
+		ui.LazySection("Updating snapmap-plus.exe")
 		selfUpdate(f, resolveToken(f))
 	}
 	return nil
@@ -306,31 +318,35 @@ func cmdUninstall(f flags) error {
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (its files are in use)")
 	}
+	ui.Section("Uninstalling")
+	ui.Field("Version", rec.Version)
+	ui.PathField("Folder", doom)
 	if !f.yes && isInteractive() {
 		if !confirm(fmt.Sprintf("About to remove Snapmap+ from\n  %s\nand restore vanilla. Continue?", doom)) {
-			fmt.Println("Cancelled -- nothing was changed.")
+			ui.Skip("Cancelled -- nothing was changed.")
 			return nil
 		}
 	}
-	fmt.Printf("Removing Snapmap+ from %s\n", doom)
+	removed := ui.List("Removed files")
 
 	// 1) delete exactly the files this install placed (never whole directories)
 	for _, rel := range rec.Files {
 		target := filepath.Join(doom, rel)
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "  ! couldn't remove %s (%v) -- is DOOM still running?\n", rel, err)
+			ui.Warn("couldn't remove %s (%v) -- is DOOM still running?", rel, err)
 			continue
 		}
-		fmt.Printf("  - %s\n", rel)
+		removed.Add(rel)
 	}
+	removed.Close()
 	// 2) restore any files we backed up
 	for _, bk := range rec.Backups {
 		target := filepath.Join(doom, bk.Rel)
 		if err := os.Rename(bk.Backup, target); err != nil {
-			fmt.Fprintf(os.Stderr, "  ! couldn't restore %s (%v)\n", bk.Rel, err)
+			ui.Warn("couldn't restore %s (%v)", bk.Rel, err)
 			continue
 		}
-		fmt.Printf("  ~ restored %s\n", bk.Rel)
+		ui.OK("restored %s", bk.Rel)
 	}
 	// Remove runtime log trees. Remove overlay and plugin directories only if empty.
 	os.RemoveAll(filepath.Join(doom, "snapmap-plus", "logs"))
@@ -342,27 +358,28 @@ func cmdUninstall(f flags) error {
 	// Remove installer metadata and unused executable copies; preserve runtime
 	// configuration and nonempty player-content directories.
 	cleanupAppData()
-	fmt.Println("Done. DOOM restored to vanilla. (Your Snapmap+ modding data was left untouched.)")
+	ui.OK("DOOM restored to vanilla. (Your Snapmap+ modding data was left untouched.)")
 	return nil
 }
 
 func cmdStatus(f flags) error {
 	rec, err := loadRecord()
+	ui.Section("Status")
 	if err != nil {
-		fmt.Println("Snapmap+ is not installed (no install record).")
+		ui.Skip("Snapmap+ is not installed (no install record).")
 		return nil
 	}
-	fmt.Printf("Snapmap+ %s\n", rec.Version)
-	fmt.Printf("  DOOM:      %s\n", rec.DoomPath)
-	fmt.Printf("  Installed: %s\n", rec.InstalledAt)
-	fmt.Printf("  Files:     %d\n", len(rec.Files))
-	fmt.Printf("  Backups:   %d\n", len(rec.Backups))
+	ui.Field("Version", rec.Version)
+	ui.PathField("Folder", rec.DoomPath)
+	ui.Field("Installed", rec.InstalledAt)
+	ui.Field("Installed files", fmt.Sprint(len(rec.Files)))
+	ui.Field("Backups", fmt.Sprint(len(rec.Backups)))
 	games := describeDoomGames(rec.DoomPath)
 	if len(games) == 0 {
-		fmt.Println("  Game:      no DOOM 2016 executable found")
+		ui.Field("Game", "no DOOM 2016 executable found")
 	}
 	for _, line := range games {
-		fmt.Printf("  Game:      %s\n", line)
+		ui.Field("Game", line)
 	}
 	missing := 0
 	for _, rel := range rec.Files {
@@ -371,18 +388,19 @@ func cmdStatus(f flags) error {
 		}
 	}
 	if missing > 0 {
-		fmt.Printf("  WARNING:   %d installed file(s) missing from the DOOM folder\n", missing)
+		ui.Warn("%d installed file(s) missing from the DOOM folder", missing)
 	}
 	return nil
 }
 
 // cmdVersion prints the installer's own version and, if a mod is installed, the installed mod version.
 func cmdVersion() {
-	fmt.Println("snapmap-plus", version)
+	ui.Raw("snapmap-plus " + version + "\n")
 	if rec, err := loadRecord(); err == nil {
-		fmt.Printf("installed mod: %s  (in %s)\n", rec.Version, rec.DoomPath)
+		ui.Field("Installed mod", rec.Version)
+		ui.PathField("Folder", rec.DoomPath)
 		for _, line := range describeDoomGames(rec.DoomPath) {
-			fmt.Println("game: " + line)
+			ui.Field("Game", line)
 		}
 	}
 }

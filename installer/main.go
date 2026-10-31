@@ -4,7 +4,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"os"
 )
 
@@ -12,7 +11,7 @@ import (
 var version = "dev"
 
 func usage() {
-	fmt.Print(`snapmap-plus -- the Snapmap+ installer (` + version + `)
+	ui.Help(`snapmap-plus -- the Snapmap+ installer (`+version+`)
 
 Usage:
   snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
@@ -24,7 +23,7 @@ Usage:
   snapmap-plus help
 
 Options:
-  --doom <path>       Your DOOM 2016 install dir (the folder with DOOMx64vk.exe and DOOMx64.exe).
+  --doom <path>       Your DOOM 2016 folder (the one with DOOMx64vk.exe and DOOMx64.exe).
                       Auto-detected from your Steam libraries if omitted.
   --local <dist-dir>  Install from a local dist/ tree (built by package.ps1) instead of
                       downloading a release.
@@ -33,6 +32,8 @@ Options:
   --no-self           With "update": don't also update snapmap-plus.exe itself (overlay only).
   --force             Let this snapmap-plus.exe replace a newer copy kept in %LOCALAPPDATA%\snapmap-plus.
   --yes, -y           Skip the "are you sure?" confirmation (for scripts / automation).
+  --plain             Print without colour. Colour is also off when NO_COLOR is set or the
+                      output is not a console.
 
 With "changelog", a bare version shows just that release (the leading v is optional):
   snapmap-plus changelog v0.2.1-beta.4    that release's notes
@@ -48,27 +49,34 @@ Snapmap+ converts them itself the first time DOOM starts with it.
 
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.
-`)
+`, "Usage:", "Options:")
 }
 
 func main() {
+	args, plain := stripPlain(os.Args[1:])
+	setupOutput(plain)
 	cleanupSelfUpdateLeftovers() // remove any <exe>.old a prior self-update left behind
-	if len(os.Args) < 2 {
+	if len(args) < 1 {
 		// No arguments opens the interactive prompt used when double-clicking the executable.
 		interactiveMain()
+		restoreConsole()
 		return
 	}
-	cmd := os.Args[1]
-	err := runCommand(cmd, os.Args[2:])
+	cmd := args[0]
+	err := runCommand(cmd, args[1:])
 	if errors.Is(err, errUnknownCommand) {
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
+		ui.Fail("unknown command %q", cmd)
+		ui.Blank()
 		usage()
+		restoreConsole()
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		ui.Fail("%v", err)
+		restoreConsole()
 		os.Exit(1)
 	}
+	restoreConsole()
 }
 
 // errUnknownCommand distinguishes "no such command" from a command that ran and failed.
@@ -77,6 +85,8 @@ var errUnknownCommand = errors.New("unknown command")
 // runCommand dispatches one command; shared by the CLI entry point and the interactive prompt so both
 // surfaces stay identical.
 func runCommand(cmd string, args []string) error {
+	args, plain := stripPlain(args)
+	ui.setPlain(plain)
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			usage()

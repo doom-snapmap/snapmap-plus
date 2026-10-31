@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -70,16 +69,18 @@ func detectLegacy(doom string) []string {
 // It prunes empty Qt plugin directories but retains the snaphak directory.
 func removeLegacy(doom string, files []string) []string {
 	var removed []string
+	list := ui.List("Removed files")
 	for _, rel := range files {
 		if err := os.Remove(filepath.Join(doom, rel)); err != nil {
 			if !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "  ! couldn't remove the original SnapHak's %s (%v) -- is DOOM still running?\n", rel, err)
+				ui.Warn("couldn't remove the original SnapHak's %s (%v) -- is DOOM still running?", rel, err)
 			}
 			continue
 		}
 		removed = append(removed, rel)
-		fmt.Printf("  - %s (original SnapHak)\n", rel)
+		list.Add(rel)
 	}
+	list.Close()
 	removeIfEmpty(filepath.Join(doom, "plugins", "platforms"))
 	removeIfEmpty(filepath.Join(doom, "plugins"))
 	removeIfEmpty(filepath.Join(doom, "platforms"))
@@ -90,17 +91,19 @@ func removeLegacy(doom string, files []string) []string {
 // restore the runtime being replaced.
 func dropLegacyBackups(doom string, baks []backup) []backup {
 	kept := baks[:0]
+	list := ui.List("Removed copies saved aside by an earlier install")
+	defer list.Close()
 	for _, bk := range baks {
 		if !legacySharedBakRels[filepath.FromSlash(bk.Rel)] {
 			kept = append(kept, bk)
 			continue
 		}
 		if err := os.Remove(bk.Backup); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "  ! couldn't remove the original SnapHak's saved-aside %s (%v)\n", bk.Rel, err)
+			ui.Warn("couldn't remove the original SnapHak's saved-aside %s (%v)", bk.Rel, err)
 			kept = append(kept, bk) // couldn't delete it -> keep the record entry so nothing dangles
 			continue
 		}
-		fmt.Printf("  - %s (original SnapHak, saved aside by an earlier install)\n", bk.Rel)
+		list.Add(bk.Rel)
 	}
 	return kept
 }
