@@ -399,7 +399,9 @@ and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
 see [Published maps and missing mods](#published-maps-and-missing-mods)); an
 exported rawmap is a ZIP that carries the bundles itself (`modexport.c`), so
-sharing a rawmap stays offline. Plain saves never upload. The retired
+sharing a rawmap stays offline, and every rawmap save of a map that names mods
+writes that ZIP beside the JSON (see
+[Rawmaps that name mods](#rawmaps-that-name-mods)). Plain saves never upload. The retired
 `%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the migration
 below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
@@ -454,6 +456,8 @@ These backend files share the work:
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
+  It also holds a rawmap load whose mods are missing, as in
+  [Rawmaps that name mods](#rawmaps-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, as in
@@ -1272,6 +1276,51 @@ changed drops the hold: nothing is launched, the progress widget is hidden, and
 a one-button notice names the mod. Another map load, or a newer held launch,
 abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled.
+
+### Rawmaps that name mods
+
+A rawmap carries the same `smpmod1.` rows as any saved map, and its JSON alone
+loads only where those mods are installed: a placed entity whose mod is absent
+makes SnapMap's own validator throw the player out with "map corruption". So a
+rawmap is never handed to the engine while a mod it names is missing.
+
+Loading. `sh_modpub_rawmap_missing` reads the rows and counts those whose bundle
+(aliases resolve) is not installed and admitted, after one restore from the
+recycle bin (`sh_modserve_restore` at the load point). The editor reload, which
+both **File > Load Rawmap...** and `sh_rawmaps load` use, checks on its own
+frame before `LoadMap` (`sh_rawmap_prepare_reload` in `ef_service_reload`); the
+text it read, with a `.zip` already imported, is what the parse then uses. Any
+other substitution (a staged file and the next map the player opens, or rawmaps
+on for every load) is checked in the `DeserializeFromJson` detour: a map that
+misses mods is not substituted, the map being opened loads as itself, and the
+hold starts after that parse. Inside a reload window a failed check parses
+nothing rather than the borrowed saved map.
+
+The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) begins one
+state earlier than a published map's: a worker job asks the mod store for each
+missing bundle (`GET /mods/bundle/<hash>`; 404 and 451 mean absent). When the
+store has them all, the player gets the question a My Maps launch asks, and Yes
+fetches and installs them; the resume does not activate anything (the rawmap's
+own parse does) but opens the rawmap again, through a reload when the editor can
+take one and otherwise staged for the next map open, with a notice saying so.
+When the store lacks any, or cannot be reached, the load is refused with a
+one-button notice and one console line naming each such mod (id and version) and
+saying the map needs its author's `.zip` export. No and a failed download behave
+as for a published map. The gate is bound with the published-map gates; on a
+build where they did not install, nothing is counted missing and rawmaps load as
+before.
+
+Saving. After every rawmap write of a map with at least one row (the File menu's
+Save Rawmap and Save Rawmap As, `sh_rawmaps save`, and the mirror when rawmaps
+are on), the export is written beside the JSON at the same path with `.zip`
+(`rawmap.json` becomes `rawmap.zip`), through `modexport_write_text_report`. The
+next main tick (`sh_rawmap_poll_main`) shows one toast and one console line:
+"This map uses N mod(s); share <name>.zip, the .json alone will not load for
+others." A save whose own path ends in `.zip` is the export already; a map with no
+rows writes only the JSON. `sh_rawmaps status` and the File menu's status
+(`lastJson`, `lastZip`, `lastZipBytes`, `lastMods`, `lastZipError`, and `mapMods`
+for the open map) report what the last save wrote. A ZIP left beside a JSON by
+an earlier save is not deleted when the map later stops using mods.
 
 ### Publishing a map with mods
 

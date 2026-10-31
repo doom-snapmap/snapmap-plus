@@ -21,6 +21,12 @@
  * steps leave it, with nothing launched. Another map load, or a newer hold,
  * abandons the hold silently (its fetch is cancelled and its job retired when
  * the worker returns).
+ *
+ * A rawmap load (sh_modpub_rawmap_hold) has no completion to skip: the rawmap
+ * layer never handed the map to the engine. Its hold starts one step earlier,
+ * PROBING: a worker job asks the store for every missing bundle, and only
+ * when the store has them all does it go on to RAISE. Its resume opens the
+ * rawmap again.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -52,7 +58,7 @@
 #define PUB_TEXT_CAP        256     /* the native dialog body */
 
 enum { PUB_DIALOG_PENDING = 0, PUB_DIALOG_ACCEPTED = 1 };
-enum { HOLD_IDLE = 0, HOLD_RAISE, HOLD_ASKING, HOLD_FETCHING };
+enum { HOLD_IDLE = 0, HOLD_RAISE, HOLD_ASKING, HOLD_FETCHING, HOLD_PROBING };
 
 static sh_modpub_ops g_ops;
 static int g_ops_set;
@@ -193,6 +199,8 @@ typedef struct pub_job {
     volatile LONG64 progress_done, progress_total;
     int failed_index;                    /* -1 when every fetch returned 0 */
     int failed_code;
+    int probe;                           /* ask the store (store_has) instead of fetching */
+    int *found;                          /* probe: store_has per bundle */
 } pub_job;
 
 static pub_job *volatile g_running_job;  /* the job the worker is in (progress target) */
@@ -203,6 +211,7 @@ static void pub_job_free(pub_job *job)
     if (!job) return;
     free(job->hashes);
     free(job->ids);
+    free(job->found);
     free(job);
 }
 
@@ -220,6 +229,17 @@ static void pub_job_main(void *context)
 {
     pub_job *job = context;
     job->failed_index = -1;
+    if (job->probe) {
+        /* Every bundle is asked about, so the refusal can name all of them. */
+        for (size_t i = 0; i < job->count; i++) {
+            if (job->cancel) { job->failed_index = (int)i; job->failed_code = -2; break; }
+            InterlockedExchange(&job->current, (LONG)i);
+            job->found[i] = g_ops.store_has ? g_ops.store_has(g_ops.context, job->hashes[i], &job->cancel) : -1;
+        }
+        MemoryBarrier();
+        InterlockedExchange(&job->done, 1);
+        return;
+    }
     g_running_job = job;
     for (size_t i = 0; i < job->count; i++) {
         int rc;
@@ -290,6 +310,7 @@ static const char *pub_hook_name(int hook)
     case SH_MODPUB_CACHE_READY: return "lobby join";
     case SH_MODPUB_CACHE_LOBBY: return "lobby join (cached map)";
     case SH_MODPUB_LOCAL_OFFLINE: return "My Maps play";
+    case SH_MODPUB_RAWMAP_LOAD: return "rawmap load";
     default: return "?";
     }
 }
@@ -486,7 +507,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     char item[PUB_ID_CAP] = "", rev[PUB_ID_CAP] = "";
     pub_record *record = &g_record;
     int begun;
-    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS) return 1;
+    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || hook == SH_MODPUB_RAWMAP_LOAD) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
 
@@ -637,7 +658,9 @@ static void pub_finish(void)
         pub_drop(line, "a fetched bundle is not admitted");
         return;
     }
-    if (g_ops.owner_current && !g_ops.owner_current(g_ops.context, h->hook, h->owner, h->extra, h->token)) {
+    /* A rawmap hold has no screen of its own; the reopen asks the editor itself. */
+    if (h->hook != SH_MODPUB_RAWMAP_LOAD && g_ops.owner_current &&
+        !g_ops.owner_current(g_ops.context, h->hook, h->owner, h->extra, h->token)) {
         pub_abandon("the screen that asked for it is gone");
         return;
     }
@@ -647,11 +670,15 @@ static void pub_finish(void)
                  "the lobby host's item differs from the held map");
         return;
     }
-    hashes = calloc(h->rows.count ? h->rows.count : 1, sizeof(*hashes));
-    if (!hashes) { pub_drop("The mods were installed, but the map could not be resumed.", "no memory"); return; }
-    for (size_t i = 0; i < h->rows.count; i++) hashes[i] = h->rows.rows[i].bundle;
-    if (g_ops.activate) (void)g_ops.activate(g_ops.context, hashes, (int)h->rows.count);
-    free((void *)hashes);
+    /* A rawmap is activated by its own parse when it opens again; activating
+     * now would change what the map that is open serves. */
+    if (h->hook != SH_MODPUB_RAWMAP_LOAD) {
+        hashes = calloc(h->rows.count ? h->rows.count : 1, sizeof(*hashes));
+        if (!hashes) { pub_drop("The mods were installed, but the map could not be resumed.", "no memory"); return; }
+        for (size_t i = 0; i < h->rows.count; i++) hashes[i] = h->rows.rows[i].bundle;
+        if (g_ops.activate) (void)g_ops.activate(g_ops.context, hashes, (int)h->rows.count);
+        free((void *)hashes);
+    }
 
     memset(&r, 0, sizeof r);
     r.hook = h->hook; r.owner = h->owner; r.extra = h->extra; r.metadata = h->metadata;
@@ -669,6 +696,195 @@ static void pub_finish(void)
     pub_hold_free();
 }
 
+/* ------------------------------------------------------------ rawmap loads */
+
+static void pub_print(const char *line)
+{
+    if (g_ops.print) g_ops.print(g_ops.context, line);
+}
+
+/* "id version" for a row, the way the refusal names a mod. */
+static void pub_row_label(char *out, size_t cap, const sh_modmanifest_row *row)
+{
+    if (row->id[0] && row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", row->id, row->version);
+    else if (row->id[0]) _snprintf_s(out, cap, _TRUNCATE, "%s", row->id);
+    else _snprintf_s(out, cap, _TRUNCATE, "bundle %.16s", row->bundle);
+}
+
+void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable)
+{
+    static const char head[] = "This map was not loaded. It needs mods you do not have";
+    static const char lacks[] = " and the mod store does not hold: ";
+    static const char gone[] = ": ";
+    static const char tail_lacks[] = ". Ask the map's author for its .zip export.";
+    static const char tail_gone[] = ". The mod store could not be reached. Try again, or ask the map's author for its .zip export.";
+    const char *mid = unreachable ? gone : lacks, *tail = unreachable ? tail_gone : tail_lacks;
+    char list[PUB_TEXT_CAP];
+    size_t room, fixed = sizeof head - 1 + strlen(mid) + strlen(tail);
+    if (!out || !cap) return;
+    if (cap > PUB_TEXT_CAP) cap = PUB_TEXT_CAP;
+    room = cap - 1 > fixed + 1 ? cap - 1 - fixed : 1;
+    if (room > sizeof list) room = sizeof list;
+    pub_names_line(list, room, mods, count);
+    _snprintf_s(out, cap, _TRUNCATE, "%s%s%s%s", head, mid, list, tail);
+}
+
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows)
+{
+    unsigned rejected = 0;
+    size_t missing;
+    if (!rows) return 0;
+    memset(rows, 0, sizeof(*rows));
+    if (!g_ops_set || !text || !length) return 0;
+    sh_modmanifest_read(text, length, rows, &rejected);
+    if (!rows->count) return 0;
+    missing = pub_count_missing(rows);
+    /* An uninstalled mod still in the recycle bin comes back first, exactly as
+     * the load's own activation would bring it back. */
+    if (missing && g_ops.restore && pub_on_main()) {
+        const char **hashes = calloc(missing, sizeof(*hashes));
+        int n = 0;
+        if (hashes) {
+            for (size_t i = 0; i < rows->count && (size_t)n < missing; i++)
+                if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) hashes[n++] = rows->rows[i].bundle;
+            if (g_ops.restore(g_ops.context, hashes, n) > 0) missing = pub_count_missing(rows);
+            free((void *)hashes);
+        }
+    }
+    return missing;
+}
+
+#define PUB_LABEL_CAP (SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
+
+/* The refusal: the notice, and one console line naming every mod. */
+static void pub_rawmap_refuse(const char *source, const sh_modmanifest_row *const *rows, size_t count,
+                              int unreachable, const char *why)
+{
+    char notice[PUB_TEXT_CAP], line[1024], piece[PUB_LABEL_CAP + 4];
+    const char **labels = calloc(count ? count : 1, sizeof(*labels));
+    char (*storage)[PUB_LABEL_CAP] = calloc(count ? count : 1, sizeof(*storage));
+    if (!labels || !storage) {
+        free((void *)labels); free(storage);
+        if (g_hold.state != HOLD_IDLE) pub_drop("This map was not loaded. It needs mods you do not have.", why);
+        else pub_notice("This map was not loaded. It needs mods you do not have.");
+        return;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE, "Rawmap %s was not loaded: it needs ", source && source[0] ? source : "map");
+    for (size_t i = 0; i < count; i++) {
+        pub_row_label(storage[i], sizeof storage[i], rows[i]);
+        labels[i] = storage[i];
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s", i ? ", " : "", storage[i]);
+        strncat_s(line, sizeof line, piece, _TRUNCATE);
+    }
+    strncat_s(line, sizeof line, unreachable
+        ? ", which you do not have, and the mod store could not be reached. Try again, or ask the map's author "
+          "for its .zip export, which carries the mods."
+        : ", which you do not have and the mod store does not hold. Ask the map's author for its .zip export, "
+          "which carries the mods.", _TRUNCATE);
+    sh_modpublished_compose_refusal(notice, sizeof notice, labels, count, unreachable);
+    free((void *)labels); free(storage);
+    pub_print(line);
+    pub_logf("MODS: %s", line);
+    if (g_hold.state != HOLD_IDLE) pub_drop(notice, why);
+    else pub_notice(notice);
+}
+
+int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
+{
+    char name[PUB_ID_CAP] = "";
+    int begun;
+    if (!rows || !rows->count) return 0;
+    if (source) strncpy_s(name, sizeof name, source, _TRUNCATE);
+    if (!g_ops_set || !pub_on_main()) {
+        const sh_modmanifest_row **missing = calloc(rows->count, sizeof(*missing));
+        size_t n = 0;
+        if (missing) {
+            for (size_t i = 0; i < rows->count; i++)
+                if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) missing[n++] = &rows->rows[i];
+            if (n) pub_rawmap_refuse(name, missing, n, 0, "the rawmap gate is unavailable here");
+            free((void *)missing);
+        }
+        return -1;
+    }
+    begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", rows, NULL);
+    if (begun == 0) return 0;
+    if (begun < 0) {
+        pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
+        return -1;
+    }
+    g_hold.state = HOLD_PROBING;
+    pub_logf("MODS: rawmap '%s' needs %u missing mod(s) (%llu bytes); asking the mod store for them", name,
+             (unsigned)g_hold.missing_count, g_hold.missing_bytes);
+    {
+        char line[PUB_TEXT_CAP + PUB_ID_CAP];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "Rawmap %s needs %u mod%s you do not have; checking the mod store.",
+                    name[0] ? name : "map", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
+        pub_print(line);
+    }
+    return 1;
+}
+
+static void pub_start_probe(void)
+{
+    pub_hold *h = &g_hold;
+    pub_job *job = calloc(1, sizeof(*job));
+    if (job) {
+        job->count = h->missing_count;
+        job->probe = 1;
+        job->hashes = calloc(job->count, sizeof(*job->hashes));
+        job->ids = calloc(job->count, sizeof(*job->ids));
+        job->found = calloc(job->count, sizeof(*job->found));
+    }
+    if (!job || !job->hashes || !job->ids || !job->found) {
+        pub_job_free(job);
+        pub_drop("This map needs mods that could not be prepared. The map was not loaded.", "no memory for the store check");
+        return;
+    }
+    for (size_t i = 0; i < job->count; i++) {
+        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
+        strcpy_s(job->hashes[i], sizeof job->hashes[i], row->bundle);
+        strcpy_s(job->ids[i], sizeof job->ids[i], row->id[0] ? row->id : row->bundle);
+    }
+    if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
+        pub_job_free(job);
+        /* Another network job (an upload, a download) is running: try again
+         * on later ticks, for as long as a question may wait for the surface. */
+        if (++h->waited > PUB_RAISE_TICKS)
+            pub_drop("The mod store is busy, so this map's mods could not be checked. The map was not loaded. "
+                     "Try again in a moment.", "the worker stayed busy");
+        return;
+    }
+    h->job = job;
+    h->waited = 0;
+}
+
+static void pub_probe_finish(void)
+{
+    pub_hold *h = &g_hold;
+    pub_job *job = h->job;
+    const sh_modmanifest_row **absent = calloc(h->missing_count ? h->missing_count : 1, sizeof(*absent));
+    size_t lacking = 0, unknown = 0;
+    if (!absent) { pub_drop("This map needs mods that could not be prepared. The map was not loaded.", "no memory"); return; }
+    for (size_t i = 0; i < h->missing_count; i++) {
+        int found = (job->failed_index >= 0 && (size_t)job->failed_index <= i) ? -1 : job->found[i];
+        if (found == 0) absent[lacking++] = &h->rows.rows[h->missing[i]];
+        else if (found < 0) unknown++;
+    }
+    if (lacking) {
+        pub_rawmap_refuse(h->id, absent, lacking, 0, "the mod store does not hold every missing mod");
+    } else if (unknown) {
+        for (size_t i = 0; i < h->missing_count; i++) absent[i] = &h->rows.rows[h->missing[i]];
+        pub_rawmap_refuse(h->id, absent, h->missing_count, 1, "the mod store could not be asked");
+    } else {
+        pub_logf("MODS: the mod store holds all %u missing mod(s) of rawmap '%s'", (unsigned)h->missing_count, h->id);
+        pub_job_free(job);
+        h->job = NULL;
+        h->waited = 0;
+        h->state = HOLD_RAISE;
+    }
+    free((void *)absent);
+}
+
 void sh_modpublished_poll(void)
 {
     pub_hold *h = &g_hold;
@@ -678,6 +894,11 @@ void sh_modpublished_poll(void)
     pub_orphans_retire();
 
     switch (h->state) {
+    case HOLD_PROBING:
+        if (!h->job) { pub_start_probe(); break; }
+        if (!InterlockedCompareExchange(&h->job->done, 0, 0)) break;
+        pub_probe_finish();
+        break;
     case HOLD_RAISE: {
         char text[PUB_TEXT_CAP];
         const char **names;
@@ -777,6 +998,8 @@ const char *sh_modpub_test_notice(void) { return g_notice; }
 #include "engine_dialog.h"
 #include "modserve.h"
 #include "process_heap_scope.h"
+#include "rawmap.h"     /* sh_rawmap_reopen_after_mods: a rawmap hold's resume */
+#include "commands.h"   /* sh_printf: the rawmap refusal's console line */
 
 #define ENG_METADATA_SIZE  0x588   /* idPublishedMapModel; the selection record allocates 0x590 with its prefix */
 #define ENG_MAP_SIZE       0x800   /* idSnapMap: 0x770 on every native caller's stack */
@@ -1127,6 +1350,14 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
     uint8_t *map = NULL;
     int constructed = 0, ran = 0;
     (void)c;
+    if (r && r->hook == SH_MODPUB_RAWMAP_LOAD) {
+        /* Nothing was launched, so there is nothing to call: the rawmap opens
+         * again, now or at the next map open. */
+        char note[PUB_TEXT_CAP] = "";
+        ran = sh_rawmap_reopen_after_mods(note, sizeof note);
+        if (note[0]) pub_notice(note);
+        return ran;
+    }
     if (!r || !sh_process_heap_enter(&g_eng.heap, &scope)) return 0;
     __try {
         if (r->hook == SH_MODPUB_CACHE_LOBBY) {
@@ -1157,10 +1388,41 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
     return ran;
 }
 
+/* GET /mods/bundle/<hash>: the manifest is small (at most 1 MB) and is what a
+ * fetch reads first, so a 404 here is the fetch's own first refusal. 451 (on
+ * the takedown list) is as absent as 404 for the player. */
+static int eng_store_has(void *c, const char *hash, volatile int *cancel)
+{
+    modnet_io io;
+    modnet_result r;
+    char *text = NULL;
+    size_t len = 0;
+    int code;
+    (void)c;
+    memset(&io, 0, sizeof io);
+    memset(&r, 0, sizeof r);
+    io.cancel = (volatile long *)cancel;
+    code = modnet_get_bundle(hash, &text, &len, &io, &r);
+    free(text);
+    if (code == MODNET_OK) return 1;
+    pub_logf("MODS: store check of %.16s: %s", hash, modnet_code_text(code));
+    if (code == MODNET_E_NOT_FOUND || code == MODNET_E_BLOCKED) return 0;
+    return -1;
+}
+
+static int eng_restore(void *c, const char *const *hashes, int n)
+{
+    (void)c;
+    return sh_modserve_restore(hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD);
+}
+
+static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf("%s\n", line); }
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_bundle_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
-    eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log
+    eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
+    eng_store_has, eng_restore, eng_print
 };
 
 /* ------------------------------------------------------------ detours */

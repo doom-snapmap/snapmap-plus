@@ -377,6 +377,155 @@ static char *prepare_map_buffer(const char *json)
  * detour's entry by the engine caller's return address. */
 static __declspec(thread) int g_parse_kind;
 
+/* ------------------------------------------------------------ the mods a rawmap names
+ * A rawmap whose rows name a mod this machine does not have must never reach
+ * the engine: SnapMap's validator rejects the placed entities as corruption
+ * and the player is thrown out. So before any substitution the rows are
+ * compared with the installed bundles (sh_modpub_rawmap_missing, which also
+ * tries the recycle bin), and a map that misses any goes to the rawmap hold
+ * (modpublished.c), which offers the download when the mod store has them
+ * and refuses with a notice when it does not.
+ *
+ * The editor reload checks on its own frame, before LoadMap
+ * (sh_rawmap_prepare_reload), and keeps the text it read so the parse uses
+ * exactly the bytes that were checked and a .zip is imported once. Any other
+ * substitution (a staged file and the next map open, or rawmaps on for every
+ * load) is checked in the detour: a map that misses mods is not substituted,
+ * the engine's own map loads, and the hold starts after that parse. */
+static char *g_prepared;               /* process heap; the text the reload checked */
+static size_t g_prepared_len;
+static char g_prepared_path[MAX_PATH];
+static volatile LONG g_in_reload;      /* 1 between sh_rawmap_prepare_reload and _done */
+
+static void rawmap_base_name(const char *path, char *out, size_t cap)
+{
+    const char *b = path, *p;
+    if (!out || !cap) return;
+    out[0] = '\0';
+    if (!path) return;
+    for (p = path; *p; ++p) if (*p == '\\' || *p == '/') b = p + 1;
+    strncpy_s(out, cap, b, _TRUNCATE);
+}
+
+static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows)
+{
+    memset(rows, 0, sizeof *rows);
+    __try {
+        return sh_modpub_rawmap_missing(text, len, rows);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the rawmap's mod check FAULTED; the map loads as it is");
+        memset(rows, 0, sizeof *rows);   /* leaked on purpose: its state is unknown */
+        return 0;
+    }
+}
+
+static int rawmap_hold_guarded(const sh_modmanifest_list *rows, const char *name)
+{
+    __try {
+        return sh_modpub_rawmap_hold(rows, name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the rawmap hold FAULTED; the map was not loaded");
+        return -1;
+    }
+}
+
+static void prepared_drop(void)
+{
+    char *p = (char *)InterlockedExchangePointer((PVOID volatile *)&g_prepared, NULL);
+    if (p) HeapFree(GetProcessHeap(), 0, p);
+    g_prepared_len = 0;
+    g_prepared_path[0] = '\0';
+}
+
+/* The text the reload checked, when it was read from the source in force. */
+static char *prepared_take(size_t *out_len)
+{
+    char path[MAX_PATH];
+    char *p;
+    resolve_source_path(path, sizeof path);
+    if (!g_prepared || _stricmp(path, g_prepared_path) != 0) return NULL;
+    *out_len = g_prepared_len;
+    p = (char *)InterlockedExchangePointer((PVOID volatile *)&g_prepared, NULL);
+    g_prepared_path[0] = '\0';
+    return p;
+}
+
+int sh_rawmap_prepare_reload(char *why, int cap)
+{
+    char path[MAX_PATH], name[MAX_PATH];
+    sh_modmanifest_list rows;
+    size_t len = 0, missing;
+    char *text;
+    int held;
+
+    if (why && cap > 0) why[0] = '\0';
+    prepared_drop();
+    resolve_source_path(path, sizeof path);
+    rawmap_base_name(path, name, sizeof name);
+    /* A .zip is imported here: its mods install before the rows are counted. */
+    text = read_source_file(&len);
+    if (text == NULL) {
+        char line[MAX_PATH + 96];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap reload REFUSED -- %s could not be read", path);
+        backend_log(line);
+        if (why && cap > 0)
+            _snprintf_s(why, (size_t)cap, _TRUNCATE, "%s could not be read (the backend log says why)", name);
+        return 0;
+    }
+    missing = rawmap_missing_guarded(text, len, &rows);
+    if (missing) {
+        char line[MAX_PATH + 128];
+        HeapFree(GetProcessHeap(), 0, text);
+        /* The one-shot belongs to this load; the hold re-arms it if it reopens. */
+        InterlockedExchange(&g_swap_oneshot, 0);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B1: rawmap reload HELD -- %s names %u mod(s) that are not installed; the engine never sees it",
+                    path, (unsigned)missing);
+        backend_log(line);
+        held = rawmap_hold_guarded(&rows, name);
+        sh_modmanifest_list_free(&rows);
+        if (why && cap > 0)
+            _snprintf_s(why, (size_t)cap, _TRUNCATE, held > 0
+                        ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
+                        : "%s needs %u mod(s) you do not have, so it was not opened", name, (unsigned)missing);
+        return 0;
+    }
+    sh_modmanifest_list_free(&rows);
+    g_prepared_len = len;
+    strncpy_s(g_prepared_path, sizeof g_prepared_path, path, _TRUNCATE);
+    InterlockedExchangePointer((PVOID volatile *)&g_prepared, text);
+    InterlockedExchange(&g_in_reload, 1);
+    return 1;
+}
+
+void sh_rawmap_reload_done(void)
+{
+    InterlockedExchange(&g_in_reload, 0);
+    prepared_drop();
+}
+
+int sh_rawmap_reopen_after_mods(char *note, size_t cap)
+{
+    char path[MAX_PATH], name[MAX_PATH], msg[192] = "", line[MAX_PATH + 256];
+    if (note && cap) note[0] = '\0';
+    resolve_source_path(path, sizeof path);
+    rawmap_base_name(path, name, sizeof name);
+    /* Staged as well, so a reload the editor cannot take now still opens it
+     * at the next map open (the reload itself spends it on substitution). */
+    sh_rawmap_load_arm_once();
+    if (sh_editor_frame_request_reload(msg, (int)sizeof msg)) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap %s opens again now that its mods are installed", path);
+        backend_log(line);
+        return 1;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: rawmap %s staged after its mods were installed (no reload now: %s)", path, msg);
+    backend_log(line);
+    if (note && cap)
+        _snprintf_s(note, cap, _TRUNCATE, "The mods are installed. Open any map and it opens as %s.", name);
+    return 1;
+}
+
 /* Parse the chosen bytes after preparation and record the map's render settings. */
 static int deser_prepared(const char *json, void *out_map)
 {
@@ -421,7 +570,43 @@ static int sh_deser_detour(const char *json, void *out_map)
             return 0;
         }
         size_t len = 0;
-        char *ours = read_source_file(&len);
+        /* The reload checked these bytes on this frame; anything else is checked here. */
+        char *ours = prepared_take(&len);
+        int checked = (ours != NULL);
+        if (ours == NULL) ours = read_source_file(&len);
+        if (ours != NULL && !checked) {
+            sh_modmanifest_list rows;
+            size_t missing = rawmap_missing_guarded(ours, len, &rows);
+            if (missing) {
+                char src[MAX_PATH], name[MAX_PATH], line[MAX_PATH + 160];
+                int rc;
+                resolve_source_path(src, sizeof src);
+                rawmap_base_name(src, name, sizeof name);
+                HeapFree(GetProcessHeap(), 0, ours);
+                if (oneshot) InterlockedExchange(&g_swap_oneshot, 0);
+                if (InterlockedCompareExchange(&g_in_reload, 0, 0)) {
+                    /* The reload borrowed another saved map's id: its own text must
+                     * not open in its place either. */
+                    _snprintf_s(line, sizeof line, _TRUNCATE,
+                                "B1: rawmap swap REFUSED -- %s names %u mod(s) that are not installed; the reload parses nothing",
+                                src, (unsigned)missing);
+                    backend_log(line);
+                    sh_modmanifest_list_free(&rows);
+                    return 0;
+                }
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "B1: rawmap swap REFUSED -- %s names %u mod(s) that are not installed; the map being "
+                            "opened loads as itself", src, (unsigned)missing);
+                backend_log(line);
+                InterlockedExchange(&g_open_is_rawmap, 0);
+                rc = deser_prepared(json, out_map);
+                /* After the parse: the parse record abandons any hold begun before it. */
+                (void)rawmap_hold_guarded(&rows, name);
+                sh_modmanifest_list_free(&rows);
+                return rc;
+            }
+            sh_modmanifest_list_free(&rows);
+        }
         if (ours != NULL) {
             char line[160];
             unsigned long n;
@@ -627,6 +812,142 @@ int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_ids
 
 static volatile LONG     g_shadow_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
+
+/* What the last rawmap save wrote: the JSON, and the export beside it when the
+ * map names mods. Read by the File menu's status and `sh_rawmaps`. */
+static SRWLOCK g_report_lock = SRWLOCK_INIT;
+static sh_rawmap_save_report g_report;
+
+/* Rows in the text the last engine save produced, and the map it belonged to:
+ * how the File menu knows to offer .zip first. */
+static volatile LONG g_saved_rows = -1;
+static volatile LONG g_saved_rows_generation = 0;
+
+static void (*volatile g_notify_toast)(const char *title, const char *text);
+static void (*volatile g_notify_print)(const char *line);
+
+void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), void (*print)(const char *line))
+{
+    g_notify_toast = toast;
+    g_notify_print = print;
+}
+
+/* The sentence waits for the main tick (sh_rawmap_poll_main): a save is
+ * reported from inside the engine's serializer, which is no place to raise a
+ * toast. One slot; a newer save's sentence replaces an unshown one. */
+static SRWLOCK g_tell_lock = SRWLOCK_INIT;
+static char g_tell[600];
+static volatile LONG g_tell_pending;
+
+static void rawmap_tell(const char *text)
+{
+    char line[640];
+    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap: %s", text);
+    backend_log(line);
+    AcquireSRWLockExclusive(&g_tell_lock);
+    strncpy_s(g_tell, sizeof g_tell, text, _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_tell_lock);
+    InterlockedExchange(&g_tell_pending, 1);
+}
+
+void sh_rawmap_poll_main(void)
+{
+    char text[600];
+    void (*toast)(const char *, const char *) = g_notify_toast;
+    void (*print)(const char *) = g_notify_print;
+    if (!InterlockedExchange(&g_tell_pending, 0)) return;
+    AcquireSRWLockShared(&g_tell_lock);
+    strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
+    ReleaseSRWLockShared(&g_tell_lock);
+    if (print) print(text);
+    if (toast) toast("Rawmap", text);
+}
+
+void sh_rawmap_last_save(sh_rawmap_save_report *out)
+{
+    if (!out) return;
+    AcquireSRWLockShared(&g_report_lock);
+    *out = g_report;
+    ReleaseSRWLockShared(&g_report_lock);
+}
+
+int sh_rawmap_open_map_mods(void)
+{
+    sh_modmanifest_list rows;
+    size_t current = sh_modmanifest_current(&rows);
+    LONG saved = InterlockedCompareExchange(&g_saved_rows, 0, 0);
+    sh_modmanifest_list_free(&rows);
+    /* A save of this map since it opened knows what it places now. */
+    if (saved >= 0 && (unsigned long)InterlockedCompareExchange(&g_saved_rows_generation, 0, 0) ==
+                      sh_rawmap_load_generation())
+        return (int)saved;
+    return (int)current;
+}
+
+int sh_rawmap_companion_zip_path(const char *json_path, char *out, size_t cap)
+{
+    size_t n;
+    if (!out || !cap) return 0;
+    out[0] = '\0';
+    if (!json_path || !json_path[0] || modexport_is_zip_path(json_path)) return 0;
+    n = strlen(json_path);
+    if (n > 5 && _stricmp(json_path + n - 5, ".json") == 0) n -= 5;
+    if (n + 5 > cap) return 0;
+    memcpy(out, json_path, n);
+    memcpy(out + n, ".zip", 5);
+    return 1;
+}
+
+/* After a rawmap write to `path` succeeded: record it, and for a map that names
+ * mods write the export beside a JSON and say which file to share. A map with
+ * no mods writes only the JSON, as it always has. `data` may be engine memory;
+ * the caller guards the read. */
+static void rawmap_after_write(const char *data, size_t len, const char *path, unsigned long long wrote)
+{
+    sh_rawmap_save_report r;
+    sh_modmanifest_list rows;
+    unsigned rejected = 0;
+    char name[MAX_PATH], text[600];
+
+    memset(&r, 0, sizeof r);
+    memset(&rows, 0, sizeof rows);
+    sh_modmanifest_read(data, len, &rows, &rejected);
+    r.mods = (unsigned)rows.count;
+    sh_modmanifest_list_free(&rows);
+
+    if (modexport_is_zip_path(path)) {
+        strncpy_s(r.zip, sizeof r.zip, path, _TRUNCATE);
+        r.zip_bytes = wrote;
+        rawmap_base_name(path, name, sizeof name);
+        if (r.mods) {
+            _snprintf_s(text, sizeof text, _TRUNCATE, "This map uses %u mod%s; %s carries %s, so share that one file.",
+                        r.mods, r.mods == 1 ? "" : "s", name, r.mods == 1 ? "it" : "them");
+            rawmap_tell(text);
+        }
+    } else {
+        strncpy_s(r.json, sizeof r.json, path, _TRUNCATE);
+        r.json_bytes = wrote;
+        if (r.mods && sh_rawmap_companion_zip_path(path, r.zip, sizeof r.zip)) {
+            rawmap_base_name(r.zip, name, sizeof name);
+            r.zip_bytes = modexport_write_text_report(data, len, r.zip, NULL, r.zip_error, sizeof r.zip_error);
+            if (r.zip_bytes) {
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "This map uses %u mod%s; share %s, the .json alone will not load for others.",
+                            r.mods, r.mods == 1 ? "" : "s", name);
+            } else {
+                if (!r.zip_error[0]) strcpy_s(r.zip_error, sizeof r.zip_error, "the export could not be written");
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "This map uses %u mod%s, but %s could not be written (%s). The .json alone will not "
+                            "load for others.", r.mods, r.mods == 1 ? "" : "s", name, r.zip_error);
+            }
+            rawmap_tell(text);
+        }
+    }
+    AcquireSRWLockExclusive(&g_report_lock);
+    r.sequence = g_report.sequence + 1;
+    g_report = r;
+    ReleaseSRWLockExclusive(&g_report_lock);
+}
 
 /* WHERE SAVES GO.
  *
@@ -994,6 +1315,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
                 laid_out = (shaped != NULL);
                 wrote = laid_out ? write_shadow_to(shaped, shaped_len, destination)
                                  : write_shadow_to(data, (size_t)len, destination);
+                if (wrote) rawmap_after_write(data, (size_t)len, destination, wrote);
                 if (shaped != NULL) HeapFree(GetProcessHeap(), 0, shaped);
             }
         }
@@ -1146,7 +1468,12 @@ static unsigned long long write_shadow(const char *data, size_t len)
  * of what actually reaches disk. Compiled out of shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len)
 {
-    return write_shadow(data, len);
+    char path[MAX_PATH];
+    unsigned long long wrote;
+    resolve_dest_path(path, sizeof path);
+    wrote = write_shadow_to(data, len, path);
+    if (wrote) rawmap_after_write(data, len, path, wrote);   /* as the save mirror does */
+    return wrote;
 }
 
 #endif
@@ -1319,10 +1646,20 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     /* The map manifest goes last so its rows are the final string variables. */
     manifest_on_save(out_idstr);
-    if (g_save_observer) {
+    {
         const char *saved = NULL;
         int saved_len = 0;
-        if (read_out_idstr(out_idstr, &saved, &saved_len)) g_save_observer(saved, (size_t)saved_len);
+        if (read_out_idstr(out_idstr, &saved, &saved_len)) {
+            sh_modmanifest_list rows;
+            unsigned rejected = 0;
+            memset(&rows, 0, sizeof rows);
+            __try { sh_modmanifest_read(saved, (size_t)saved_len, &rows, &rejected); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { memset(&rows, 0, sizeof rows); }
+            InterlockedExchange(&g_saved_rows, (LONG)rows.count);
+            InterlockedExchange(&g_saved_rows_generation, (LONG)sh_rawmap_load_generation());
+            sh_modmanifest_list_free(&rows);
+            if (g_save_observer) g_save_observer(saved, (size_t)saved_len);
+        }
     }
 
     /* Refresh navigation regions from the final serialized map. */
@@ -1363,8 +1700,11 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     int laid_out = (shaped != NULL);
 
     unsigned long long wrote = 0;
+    char mirror_path[MAX_PATH];
+    resolve_dest_path(mirror_path, sizeof mirror_path);
     __try {
-        wrote = write_shadow(body, body_len);   /* may read `data` (engine heap/SSO) -> guard the read */
+        wrote = write_shadow_to(body, body_len, mirror_path);   /* may read `data` (engine heap/SSO) -> guard the read */
+        if (wrote) rawmap_after_write(data, (size_t)len, mirror_path, wrote);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         wrote = 0;
     }
@@ -1668,8 +2008,10 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
     char load_path[MAX_PATH], save_path[MAX_PATH];
     char load_esc[MAX_PATH * 2], save_esc[MAX_PATH * 2], target_esc[MAX_PATH * 2];
+    char json_esc[MAX_PATH * 2], zip_esc[MAX_PATH * 2], err_esc[512];
     char target[MAX_PATH] = "";
-    int written;
+    sh_rawmap_save_report last;
+    int written, tail;
 
     (void)self;
     if (out_json == NULL || out_capacity <= 0) return 0;
@@ -1681,6 +2023,10 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     if (!json_escape_into(load_esc, sizeof load_esc, load_path)) load_esc[0] = '\0';
     if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
     if (!json_escape_into(target_esc, sizeof target_esc, target)) target_esc[0] = '\0';
+    sh_rawmap_last_save(&last);
+    if (!json_escape_into(json_esc, sizeof json_esc, last.json)) json_esc[0] = '\0';
+    if (!json_escape_into(zip_esc, sizeof zip_esc, last.zip)) zip_esc[0] = '\0';
+    if (!json_escape_into(err_esc, sizeof err_esc, last.zip_error)) err_esc[0] = '\0';
 
     /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
      * checkbox must not show ON for a flag-file arm that unticking it cannot clear. `willFire` is
@@ -1705,6 +2051,16 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
         sh_rawmap_load_oneshot_pending(),
         target_esc,
         sh_rawmap_swap_will_fire());
+    if (written <= 0 || written >= out_capacity - 1) return (written > 0) ? written : 0;
+
+    /* What the last save wrote, and how many mods the open map uses (the File
+     * menu offers .zip first when it uses any). Appended inside the object. */
+    tail = _snprintf_s(out_json + written - 1, (size_t)(out_capacity - written + 1), _TRUNCATE,
+        ",\"lastJson\":\"%s\",\"lastJsonBytes\":%llu,\"lastZip\":\"%s\",\"lastZipBytes\":%llu,"
+        "\"lastMods\":%u,\"lastZipError\":\"%s\",\"mapMods\":%d}",
+        json_esc, last.json_bytes, zip_esc, last.zip_bytes, last.mods, err_esc, sh_rawmap_open_map_mods());
+    if (tail > 0) written += tail - 1;
+    else { out_json[written - 1] = '}'; out_json[written] = '\0'; }
 
     return (written > 0) ? written : 0;
 }

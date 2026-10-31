@@ -58,6 +58,25 @@ unsigned long long modexport_write_text(const char *data, size_t len, const char
     return 0;
 }
 
+/* The rawmap layer's companion export: g_mod_stub_export_result is what the
+ * write returns (0 refuses with a fixed cause); the calls and the last path
+ * are recorded. */
+unsigned long long g_mod_stub_export_result;
+int g_mod_stub_export_calls;
+char g_mod_stub_export_path[520];
+
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+                                               unsigned *bundles, char *cause, size_t cause_cap)
+{
+    (void)data; (void)len;
+    g_mod_stub_export_calls++;
+    strncpy_s(g_mod_stub_export_path, sizeof g_mod_stub_export_path, path_acp ? path_acp : "", _TRUNCATE);
+    if (bundles) *bundles = 0;
+    if (g_mod_stub_export_result) return g_mod_stub_export_result;
+    if (cause && cause_cap) strncpy_s(cause, cause_cap, "the rawmap export is not linked into this test", _TRUNCATE);
+    return 0;
+}
+
 char *modexport_read_text(const char *path_acp, size_t *out_len)
 {
     (void)path_acp;

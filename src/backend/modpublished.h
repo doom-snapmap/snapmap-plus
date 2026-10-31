@@ -33,6 +33,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "modmanifest.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -99,6 +101,7 @@ enum sh_modpub_hook {
     SH_MODPUB_CACHE_READY,
     SH_MODPUB_CACHE_LOBBY,      /* the warm-cache branch only */
     SH_MODPUB_LOCAL_OFFLINE,
+    SH_MODPUB_RAWMAP_LOAD,      /* not an engine hook: a rawmap load (sh_modpub_rawmap_hold) */
     SH_MODPUB_HOOKS
 };
 
@@ -142,6 +145,15 @@ typedef struct sh_modpub_ops {
     void (*drop_ui)(void *c, int hook, void *owner);   /* after a refusal */
     int  (*resume)(void *c, const sh_modpub_resume *r);   /* 1 when the original ran */
     void (*log)(void *c, const char *line);
+    /* Rawmap loads only. Does the mod store hold this bundle? 1 yes, 0 no
+     * (never published, or released and gone), negative when the store
+     * could not be asked. Worker thread; stops early when *cancel is set. */
+    int  (*store_has)(void *c, const char *hash, volatile int *cancel);
+    /* Put recycled mods the rows name back (sh_modserve_restore at the load
+     * point). Returns how many came back. Main thread. */
+    int  (*restore)(void *c, const char *const *hashes, int n);
+    /* One line on the game console. */
+    void (*print)(void *c, const char *line);
 } sh_modpub_ops;
 
 /* The decision a hook detour asks for before calling its original. Returns 1
@@ -151,6 +163,39 @@ typedef struct sh_modpub_ops {
  * used by SH_MODPUB_CACHE_LOBBY; completions read them from `metadata`. */
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision);
+
+/* ------------------------------------------------------------ rawmap loads
+ * A rawmap (rawmap.c) carries the same manifest rows, and its mods have to be
+ * installed before the engine parses it: a placed entity whose mod is absent
+ * makes SnapMap's own validator refuse the map as corrupt. The rawmap layer
+ * asks which rows are missing before any parse (the recycle bin is tried
+ * first) and, when some are, never hands the map to the engine. The hold
+ * then asks the mod store on the worker whether it has every missing bundle.
+ * When it has, the player gets the question a My Maps launch asks and Yes
+ * fetches, installs and opens the rawmap again (the resume, hook
+ * SH_MODPUB_RAWMAP_LOAD). When it lacks any, the load is refused with a
+ * one-button notice and one console line naming each mod it lacks and
+ * saying the map needs its author's .zip export. Rows are only counted when
+ * the gates are bound (sh_modpub_test_set_ops, or the install); otherwise
+ * nothing is missing and the rawmap loads as before. */
+
+/* Read every row of `text` into *rows (cleared first; free with
+ * sh_modmanifest_list_free) and return how many name a bundle that is not
+ * installed and admitted, after one restore from the recycle bin. */
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
+
+/* Hold a rawmap load whose rows name missing bundles. `source` is the file
+ * name the messages use. Returns 1 held (the store is being asked), 0 when
+ * nothing is missing after all, -1 when it could not be held (off the main
+ * thread, no gates, no memory); the -1 case raises the refusal notice
+ * itself. Main thread. */
+int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
+
+/* The refusal as the one-button notice shows it (shorter than 256 bytes,
+ * names that do not fit summarized as "and K more"): `mods` are "id version"
+ * labels; `unreachable` selects the wording for a store that could not be
+ * asked. */
+void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable);
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISHED_PURE
@@ -167,7 +212,7 @@ void sh_modpub_test_set_ops(const sh_modpub_ops *ops);
 /* Bind the classification sites directly. */
 void sh_modpub_test_set_read_sites(const void *offline_return, const void *online_return);
 void sh_modpub_test_reset(void);
-/* 0 idle, 1 raise, 2 asking, 3 fetching */
+/* 0 idle, 1 raise, 2 asking, 3 fetching, 4 asking the store (rawmap) */
 int  sh_modpub_test_state(void);
 /* Pending notice text, or "" */
 const char *sh_modpub_test_notice(void);

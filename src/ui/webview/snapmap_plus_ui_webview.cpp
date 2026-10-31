@@ -27,6 +27,7 @@
 #include "growing_text_buffer.h"
 #include "serialization_buffer.h"
 #include "theme_bootstrap.h"
+#include "rawmap_picker.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "crash_pending.h"
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
@@ -132,6 +133,7 @@ static std::string   g_new_entity_json, g_new_entity_label;
 static volatile LONG g_pick_busy = 0;
 static volatile LONG g_pick_done = 0;
 static int           g_pick_kind = 0;        /* 0 = Load Rawmap, 1 = Save Rawmap As */
+static volatile LONG g_pick_mods = 0;        /* the open map's mods when the picker opened */
 static bool          g_pick_ok   = false;    /* false = cancelled */
 static std::wstring  g_pick_path;
 /* Keep the latest sound request until the drain; an empty name stops playback.
@@ -1534,7 +1536,7 @@ static void poc_send_material_result(const char *name)
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
  * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
  * Call from the picker thread, never from the message handler. */
-static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &out_path)
+static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path)
 {
     out_path.clear();
 
@@ -1548,15 +1550,18 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
     HRESULT hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
     if (SUCCEEDED(hr) && dlg) {
-        COMDLG_FILTERSPEC filters[] = {
-            { L"Rawmap JSON (*.json)", L"*.json" },
-            { L"All files (*.*)",      L"*.*"    },
-        };
-        dlg->SetFileTypes(ARRAYSIZE(filters), filters);
+        /* .json and .zip both: a .zip is the map with its mods (rawmap_picker.h). */
+        const sh_rawmap_picker::choice pick = sh_rawmap_picker::for_dialog(save, map_mods);
+        COMDLG_FILTERSPEC filters[4];
+        for (unsigned i = 0; i < pick.count; ++i) {
+            filters[i].pszName = pick.types[i].label;
+            filters[i].pszSpec = pick.types[i].pattern;
+        }
+        dlg->SetFileTypes(pick.count, filters);
         dlg->SetFileTypeIndex(1);
-        dlg->SetDefaultExtension(L"json");
+        dlg->SetDefaultExtension(pick.extension);
         if (title) dlg->SetTitle(title);
-        if (save) dlg->SetFileName(L"rawmap.json");
+        if (save && pick.file_name) dlg->SetFileName(pick.file_name);
 
         /* Keep the dialog's own work down. FORCEFILESYSTEM refuses items with no path (nothing we
          * could open anyway); NOCHANGEDIR keeps it from moving the process's working directory out
@@ -1734,7 +1739,8 @@ static DWORD WINAPI poc_pick_thread(LPVOID param)
     bool ok;
 
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    ok = poc_pick_rawmap_file(kind == 1, kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
+    ok = poc_pick_rawmap_file(kind == 1, (int)InterlockedCompareExchange(&g_pick_mods, 0, 0),
+                              kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
     if (SUCCEEDED(init)) CoUninitialize();
 
     g_pick_kind = kind;
@@ -1754,6 +1760,15 @@ static void poc_begin_pick(int kind)
     if (InterlockedExchange(&g_pick_busy, 1) != 0) {
         poc_send_rawmap_status(L"A file dialog is already open.");
         return;
+    }
+    /* Asked here, on the UI thread: the picker thread touches no backend slot. */
+    {
+        char status[2048] = "";
+        int mods = 0;
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status &&
+            g_iface->vtbl->rawmap_status(g_iface, status, (int)sizeof status) > 0)
+            mods = sh_rawmap_picker::map_mods_from_status(status);
+        InterlockedExchange(&g_pick_mods, mods);
     }
     h = CreateThread(nullptr, 0, poc_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
     if (h == nullptr) {
