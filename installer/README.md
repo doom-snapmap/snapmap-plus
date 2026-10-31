@@ -13,6 +13,7 @@ and preserves player data. The runtime uses only Go's standard library.
 | `main.go`, `interactive.go` | CLI dispatch and the double-click interactive prompt. |
 | `doom.go`, `bundle.go`, `install.go` | Game discovery, bundle validation and installation records. |
 | `legacy.go`, `userdata.go` | Earlier-install cleanup and player data. |
+| `storemigrate.go` | Placing and running the store migration tool, `snapmap-plus-store.exe`. |
 | `selfinstall*.go`, `selfupdate.go`, `webview2.go` | Installer ownership, updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
@@ -116,8 +117,9 @@ files and failed copies remain in the legacy location for you to reconcile.
 Migration compares file contents before retiring a source and removes only empty
 directories; read errors and links prevent retirement. Unknown files in the old
 metadata directory also remain there. The installer scaffolds `strings\` and
-`prefabs\` only; retired package folders (`overrides`, `package-cache`,
-`package-staging`, `override-backups`) are never copied, created or removed.
+`prefabs\` only; this migration never copies, creates or removes the retired
+package folders (`overrides`, `package-cache`, `package-staging`,
+`override-backups`). The store tool below handles `overrides\`.
 
 Stable installer copies are tracked by name and SHA-256 in `installer-files.json`,
 and by release in `installer-versions.json`. An installer older than the stable copy
@@ -141,13 +143,35 @@ when needed. See [packaging](../docs/packaging.md) for the installed file contra
 
 ## Mods and retired package folders
 
-The installer never creates, changes, converts or removes `mods\`, and treats the
-retired package folders (`overrides\`, `override-backups\`, `package-cache\`,
-`package-staging\`) the same way across install, update, uninstall and reinstall.
-The backend owns both at DOOM start: its first start converts a `mods\` folder
-from earlier releases to the current layout and moves the packages in
-`overrides\` into `mods\` (see [Mods](../docs/capabilities.md#mods)). The
-installer has no `migrate-overrides` command; `sh_mods migrate` repeats the move.
+DOOM converts nothing at startup. On install and update, after the DLLs are
+placed and before it reports success, the installer runs the bundle's store
+migration tool, `snapmap-plus-store.exe` (`storemigrate.go`, source in
+`src/store/`):
+
+1. It checks the tool against the bundle's `TOOLS.sha256` and keeps it beside
+   `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`, recorded in
+   `installer-files.json` like the installer's own copies, so uninstall's rules
+   for those copies apply to it. A copy you changed is kept, and the bundle's
+   verified copy runs instead.
+2. It runs `snapmap-plus-store check "%LOCALAPPDATA%\snapmap-plus"`, which lists
+   what it finds from earlier releases and changes nothing.
+3. When check finds work (exit 1), it runs `snapmap-plus-store migrate
+   "%LOCALAPPDATA%\snapmap-plus" --doom "<the DOOM folder it installed into>"`.
+
+Every line the tool prints is shown, indented. The tool converts `mods\` folders
+of the retired layout to one folder per mod with a `mod.json` (`bundle.json`,
+`.state.json`, `blobs\` and `legacy\` go, hard-linked files get their own
+copies, the old record files are folded into `mods\snapmap-plus.json`), sends
+the retired recycle bin `removed-mods\` to the Windows Recycle Bin, and moves
+the packages in `overrides\` into `mods\` once, leaving `overrides\` unchanged
+and removing only an empty `override-backups\`. Everything it deletes goes to
+the Recycle Bin. A missing tool, an altered one, or a check or migrate that
+does not finish is a warning, never a failed install; the warning gives the
+command to run by hand with DOOM closed,
+`"%LOCALAPPDATA%\snapmap-plus\snapmap-plus-store.exe" migrate "%LOCALAPPDATA%\snapmap-plus" --doom "<DOOM folder>"`.
+The installer itself never creates, changes or removes `mods\` or the retired
+package folders (see [Mods](../docs/capabilities.md#mods)). In the game,
+`sh_mods migrate` repeats the move of `overrides\`.
 
 ## Private release repositories
 

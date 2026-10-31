@@ -107,8 +107,10 @@ activates them. A map that names a mod you do not have asks first; it downloads
 only what you approve in the dialog, verified by hash. A map saved or published with packages by an
 earlier release has a complete package converted into a local mod on load; any
 other package is removed. Nothing is loaded from
-`%LOCALAPPDATA%\snapmap-plus\overrides\`, and folders that earlier releases
-left are not touched; you can keep or delete them. See
+`%LOCALAPPDATA%\snapmap-plus\overrides\`: on install and update the installer
+runs `snapmap-plus-store.exe`, which converts a mods folder of earlier releases
+and moves the packages in `overrides\` into `mods\`, leaving `overrides\` as it
+was for you to keep or delete; whatever it deletes goes to the Recycle Bin. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits
