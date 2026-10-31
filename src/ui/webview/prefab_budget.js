@@ -173,12 +173,23 @@ var prefabBudget = (function () {
   function reachedBy(r) { return r.network >= 1 || r.objects >= 1 || r.memory >= 1 || r.demons > 1; }
   function meterReached(name, value) { return name === 'demons' ? value > 1 : value >= 1; }
 
+  /* The colour a meter's resulting value takes in Prefab Details: 'ok' below WARN_AT (75%), 'warn'
+     from WARN_AT up to the limit, 'over' at or past it (100%). Every meter the editor would report as
+     reached is therefore 'over'; DEMONS at exactly 100% is 'over' too, because no demon fits after it,
+     although the editor's "limits reached" flag waits for the 65th. */
+  var WARN_AT = 0.75, OVER_AT = 1;
+  function meterLevel(r) {
+    if (!(r < OVER_AT)) return isNaN(r) ? 'ok' : 'over';
+    return r >= WARN_AT ? 'warn' : 'ok';
+  }
+
   function meters(addBlock, usage, limits) {
     var l = block(limits), u = block(usage), after = add(block(usage), addBlock);
     var rAdd = meterRatios(addBlock, l), rBefore = meterRatios(u, l), rAfter = meterRatios(after, l), out = {};
     for (var i = 0; i < METERS.length; i++) {
       var k = METERS[i];
-      out[k] = {add: rAdd[k], before: rBefore[k], after: rAfter[k], reached: meterReached(k, rAfter[k])};
+      out[k] = {add: rAdd[k], before: rBefore[k], after: rAfter[k], reached: meterReached(k, rAfter[k]),
+                level: meterLevel(rAfter[k])};
     }
     return {meters: out, reached: reachedBy(rAfter), after: after};
   }
@@ -233,7 +244,8 @@ var prefabBudget = (function () {
     };
   }
 
-  return {FIELDS: FIELDS, METERS: METERS, LABELS: LABELS, BUCKET_BASE_KB: BUCKET_BASE_KB,
+  return {FIELDS: FIELDS, METERS: METERS, LABELS: LABELS, BUCKET_BASE_KB: BUCKET_BASE_KB, WARN_AT: WARN_AT, OVER_AT: OVER_AT,
+          meterLevel: meterLevel,
           compute: compute, sum: sum, meters: meters, meterRatios: meterRatios, reachedBy: reachedBy,
           entityBlock: entityBlock, moduleBlock: moduleBlock, moduleScene: moduleScene, findModule: findModule, leaf: leaf,
           formatPercent: formatPercent, rawText: rawText, createCache: createCache};

@@ -150,6 +150,32 @@ const demons = budget.compute([ent('snapmaps/placeablesnapaiencounter/imp')], []
                               {limits: LIMITS, usage: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64]});
 check(demons.reached && demons.meters.demons.reached, 'the 65th demon reaches the limit');
 
+/* The "Map after" colour: below 75% ok (blue), 75% up to the limit warn (yellow), 100% and over red. */
+check(budget.WARN_AT === 0.75 && budget.OVER_AT === 1, 'colour thresholds are 75% and 100%');
+check(budget.meterLevel(0) === 'ok' && budget.meterLevel(0.749) === 'ok' && budget.meterLevel(0.7499999) === 'ok',
+      'below 75% is ok');
+check(budget.meterLevel(0.75) === 'warn' && budget.meterLevel(0.9) === 'warn' && budget.meterLevel(0.9999) === 'warn',
+      '75% up to the limit is warn');
+check(budget.meterLevel(1) === 'over' && budget.meterLevel(1.5) === 'over' && budget.meterLevel(Infinity) === 'over',
+      'the limit and past it is over');
+check(budget.meterLevel(NaN) === 'ok', 'a meter with no reading is not coloured as a warning');
+check(full.meters.network.level === 'over' && demons.meters.demons.level === 'over',
+      'every reached meter is red');
+['network', 'objects', 'memory', 'decals'].forEach(function (k) {
+  [0.5, 0.75, 0.99, 1, 1.2].forEach(function (r) {
+    var m = {network: 0, objects: 0, memory: 0, demons: 0, decals: 0}; m[k] = r;
+    check(budget.reachedBy(m) === (k !== 'decals' && budget.meterLevel(r) === 'over'),
+          k + ' at ' + r + ': red exactly when the editor reports the limit reached');
+  });
+});
+const sixtyFour = budget.compute([], [], table, {limits: LIMITS, usage: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64]});
+check(sixtyFour.meters.demons.level === 'over' && !sixtyFour.meters.demons.reached && !sixtyFour.reached,
+      '64 of 64 demons is red (no demon fits after it) without the editor reporting the limit reached');
+const nearly = budget.compute([ent('snapmaps/props/new/crate01')], [], table,
+                              {limits: LIMITS, usage: [0, 0, 0, 0, 503, 0, 0, 0, 0, 0, 0, 0]});
+check(nearly.meters.network.after === 504 / 672 && nearly.meters.network.level === 'warn' &&
+      nearly.meters.objects.level === 'ok', 'a meter crossing 75% turns yellow');
+
 /* Formatting and the bounded memo. */
 check(budget.formatPercent(30 / 672) === '4.5%' && budget.formatPercent(0) === '0.0%' &&
       budget.formatPercent(1 / 8192) === '<0.1%' && budget.formatPercent(Infinity) === 'over', 'percent format');
@@ -163,6 +189,29 @@ check(html.includes('id="pcLimits"') && html.indexOf('id="pcPreview"') < html.in
       html.indexOf('id="pcLimits"') < html.indexOf('for="pcName"'), 'Limits sits under the preview, above Name');
 check(html.includes('>Limits</div>') && html.includes('id="pcLimitsDetails"') && html.includes('<summary>Details</summary>'),
       'Limits heading and collapsible Details');
+{
+  const sect = html.slice(html.indexOf('id="pcLimits"'), html.indexOf('id="pcLimitsDetails"'));
+  check(sect.indexOf('id="pcLimitsHead" role="columnheader">Limits<') !== -1 &&
+        sect.indexOf('id="pcLimitsHead"') < sect.indexOf('>This prefab<') && sect.indexOf('>This prefab<') < sect.indexOf('>Map after<') &&
+        sect.indexOf('>Map after<') < sect.indexOf('id="pcLimitsRows"'),
+        'the Limits head is the first column head, on the line of This prefab and Map after');
+  const render = html.slice(html.indexOf('function pfLimitsCell('), html.indexOf('function pfShowMods('));
+  check(render.includes("'pcl-num pcl-after pcl-' + v.level") && render.includes("'pcl-bar pcl-' + v.level"),
+        'Map after and its bar take the meter level class');
+  check(render.includes('prefabBudget.rawText(name, s.block)') && render.includes("'Now ' + prefabBudget.formatPercent(v.before)"),
+        'the raw-count and current-use tooltips stay');
+  check(render.includes("' not in the editor palette (each counted as 1 entity, 1 model, 1 network): '") &&
+        render.includes("' on a layer the editor does not count.'"), 'the unknown-type and uncounted-layer notes stay');
+  const css = fs.readFileSync(path.join(root, 'src', 'ui', 'webview', 'studio.css'), 'utf8');
+  check(/\.pcl-after\.pcl-ok\s*\{\s*color:\s*var\(--infoText\);/.test(css) &&
+        /\.pcl-after\.pcl-warn\s*\{\s*color:\s*var\(--warnText\);/.test(css) &&
+        /\.pcl-after\.pcl-over\s*\{\s*color:\s*var\(--dangerText\);/.test(css),
+        'Map after uses the info, warning and danger text tokens');
+  check((css.match(/--infoText:#[0-9a-f]{6}; --dangerText:#[0-9a-f]{6};/g) || []).length === 2,
+        'the info and danger text tokens exist in the light and the dark theme');
+  check(/\.pc-limits-raw\s*\{[^}]*repeat\(auto-fit,[^}]*color:\s*var\(--muted\)/.test(css),
+        'Details lays the raw fields out in columns, in the muted colour');
+}
 check(html.indexOf('src="prefab_budget.js"') > html.indexOf('src="prefab_transform.js"'), 'the module is loaded');
 const detail = html.slice(html.indexOf('function renderPrefabDetail(d)'), html.indexOf('function pfShowFootprint(meta)'));
 check((detail.match(/parseScene\(/g) || []).length === 1, 'the selected scene is parsed once');
