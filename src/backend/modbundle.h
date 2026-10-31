@@ -399,6 +399,24 @@ int  sh_mb_stock_restore(const char *request, const char *source);
  * success; 0 when the request is not a module decl. */
 int  sh_mb_module_info_request(const char *request, char *out, size_t cap);
 
+/* Editor-time content: a request the editor itself reads and the game never
+ * does at play (the snapEditor* and snapPropertyInspector* decl types, the
+ * palette decls, the editor's own movies). A shadow of one changes what an
+ * author can set, never what a player sees, so it is no dependency of a map
+ * (modserve.c's save closure skips it) and a bundle made only of such files
+ * is not installed when a map a player opens names it (modsync.c). */
+int  sh_mb_editor_time(const char *request);
+
+/* 1 when every file of a loaded bundle is editor-time content and it asks no
+ * requirements: nothing in it changes play. 0 for an empty bundle. */
+int  sh_mb_editor_only(const sh_mb_bundle *bundle);
+
+/* A model reference as an entity's edit state or a decl writes it
+ * (models/.../x.lwo, .ase, .ma, .obj, .fbx or a .bmodel path) as the cooked
+ * request the provider is asked for (cooked/model/models/.../x.bmodel,
+ * lower-cased). 1 on success; 0 when `name` is not a model reference. */
+int  sh_mb_model_key(const char *name, char *out, size_t cap);
+
 /* The canonical text of a mod.json "requirements" value (JSON text of the
  * member's value), as the builder writes it into the manifest:
  *   {"commands":{"activate":[...],"deactivate":[...]},"cvars":{"<name>":"<value>",...}}

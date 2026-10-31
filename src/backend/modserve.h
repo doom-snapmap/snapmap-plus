@@ -555,6 +555,13 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
 #define SH_MODSERVE_ROW_INCOMPLETE 2
 struct sh_modmanifest_row;
 int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, size_t cap);
+
+/* 1 when the store record (mods\snapmap-plus.json, section "editorOnly")
+ * names `bundle_hash` as a bundle a map listed that changes only the editor:
+ * the fetch classified it (modsync.c) and installed nothing. Such a row is
+ * served (the map plays without it) and is never asked for again. Read at
+ * the index build. */
+int sh_modserve_editor_only_recorded(const char *bundle_hash);
 int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
 
 /* The admitted build that serves a mod: the bundle `bundle_hash` names

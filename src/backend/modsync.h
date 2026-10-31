@@ -54,6 +54,7 @@ typedef struct modsync_stats {
     int reclaimed;                  /* upload: the stored secret replaced the ref's bundle set */
     int queued;                     /* upload: the failure was queued for retry */
     int already_installed;          /* download: nothing was fetched */
+    int editor_only;                /* download: the bundle changes only the editor; recorded, not installed */
     char key[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* download: the installed folder (relative) */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
     char cause[256];

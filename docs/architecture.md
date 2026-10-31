@@ -557,9 +557,34 @@ it, whatever its hash. Activation follows the same rule
 serves its id now (`sh_modserve_bundle_serving`). The per-map listing of a
 bundle that shadows stock paths or sets requirements stays keyed by id (the
 scope listing, [Map scope](#map-scope)).
+What a placed entity depends on. The save closure and the map listing resolve
+each placed name (`sh_modmanifest_placed_names`: the `inherit` and
+`moduleName` values and every string in an entity's `edit` state) through
+`ms_name_file`: an entityDef provider, else any served decl or snapModule of
+that name, else, for a model reference (`renderModelInfo.model` and the like:
+a `.lwo`, `.ase`, `.ma`, `.obj`, `.fbx` or `.bmodel` path), the file that
+provides it under its cooked request (`sh_mb_model_key`:
+`cooked/model/<stem>.bmodel`), carried or a stock pointer. So a mod whose only
+content unlocks a blacklisted stock model an author placed by path is named by
+the map and uploaded with it. A name whose provider is a shadow of editor-time
+content (`sh_mb_editor_time`: the snapEditor*, snapPropertyInspector* and
+snapPalette decl types, the editor's own movies) names no bundle: such a
+shadow changes what the author can set, never what plays, so an author's
+editor overrides never become a dependency of a map, vanilla or not. A
+gameplay shadow (an entityDef, a material, a model) still does.
+
+The player side of the same rule: a fetch whose bundle manifest holds only
+editor-time content and no requirements (`sh_mb_editor_only`) installs
+nothing, logs `MODS: pull <hash>: <name> (<id>) changes only the editor (...);
+not installed, the map plays without it`, and records the hash in the
+`editorOnly` section; `sh_modserve_row_served_for` serves a row whose bundle
+that section names, so maps published before this rule neither ask for nor
+download an author's editor overrides again.
+
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
-and `aliases`, each section written whole under one lock.
+`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
+`aliases` and `editorOnly` (bundle hash to id, name and when: bundles a map
+named that change only the editor), each section written whole under one lock.
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
 covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct
@@ -1054,8 +1079,10 @@ A now in the palette; palette rebuilt in N ms (B -> C rows)`. It is refused,
 with the reason on the same line, while the editor holds an entity or a wire;
 before the first palette build it does nothing, because that build registers
 every row. A map without manifest rows never reaches it. On
-save it appends one row per bundle that provides a placed name (and each bundle
-their needs reach) and one per map-level row of the current manifest, after any
+save it appends one row per bundle that provides a placed name (a placed
+entity's def, module or a model its edit state names; never a shadow of
+editor-time content, see the asset rule) and each bundle their needs reach,
+and one per map-level row of the current manifest, after any
 navigation shards; with an empty table, no rows in the map and no map-level row
 it returns at once and the save is the engine's own bytes. A map-level row is
 written for the build that serves its mod (the bundle resolver modui.c binds,

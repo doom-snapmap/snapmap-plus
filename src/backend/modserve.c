@@ -117,6 +117,7 @@ typedef struct ms_index {
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
     int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
     struct { const char *from, *to; } *aliases; int naliases;         /* dropped copy's hash -> kept bundle's hash */
+    const char **editor_only; int neditor_only;                        /* record "editorOnly": bundles a map named that change only the editor */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
     struct ms_index *prev;                /* the table this one replaced (retired, never freed) */
@@ -211,7 +212,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
-    free(x->aliases); free(x->gone); free(x->alts);
+    free(x->aliases); free(x->editor_only); free(x->gone); free(x->alts);
     free(x);
 }
 
@@ -751,14 +752,15 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
  * says otherwise. */
 static int ms_editor_time(const char *request)
 {
-    static const char *const prefixes[] = {
-        "generated/decls/snapeditor", "generated/decls/snappropertyinspector", "generated/decls/snappalette",
-        "generated/swf/snapmaps/snap_editor", "generated/swf/snapmaps/entity_menu", "generated/swf/snapmaps/list_view",
-        NULL
-    };
-    int i;
-    for (i = 0; prefixes[i]; ++i) if (!strncmp(request, prefixes[i], strlen(prefixes[i]))) return 1;
-    return 0;
+    return sh_mb_editor_time(request);
+}
+
+/* A shadow of editor-time content: it changes what the author can set, not
+ * what plays, so a placed name it resolves names no bundle (the save closure
+ * and the map listing skip it). */
+static int ms_editor_shadow(const ms_file *f)
+{
+    return f->is_shadow && ms_editor_time(f->request);
 }
 
 /* A growable text for the "extra" object. */
@@ -1049,6 +1051,47 @@ static void ms_load_aliases(ms_index *x, const char *mods_root)
         if (x->aliases[x->naliases].from) x->naliases++;
     }
     free(text);
+}
+
+/* The record's "editorOnly" section: bundles a map named whose fetch found
+ * only editor-time content (modsync.c). Their rows are served without a
+ * folder: the map plays without them. Keyed by bundle hash; the values (id,
+ * name, when) are for the player reading the record. */
+static void ms_load_editor_only(ms_index *x, const char *mods_root)
+{
+    char *text = NULL, key[80];
+    ms_json o;
+    const char *v, *ve;
+    int cap = 0;
+    if (sh_mb_record_get(mods_root, "editorOnly", &text) != 1 || !text) { free(text); return; }
+    o.p = text;
+    o.e = text + strlen(text);
+    if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
+        const char *hash;
+        if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
+        ms_lower(key);
+        if (strlen(key) != 64 || !ms_valid_hash(key)) continue;
+        if (!ms_grow((void **)&x->editor_only, &cap, x->neditor_only + 1, sizeof *x->editor_only)) break;
+        hash = ms_strdup(x, key);
+        if (hash) x->editor_only[x->neditor_only++] = hash;
+    }
+    free(text);
+}
+
+static int ms_editor_only_recorded(const ms_index *x, const char *bundle_hash)
+{
+    char lower[SH_MODSERVE_HASH_HEX + 1];
+    int i;
+    if (!x || !bundle_hash || strlen(bundle_hash) != SH_MODSERVE_HASH_HEX) return 0;
+    strcpy_s(lower, sizeof lower, bundle_hash);
+    ms_lower(lower);
+    for (i = 0; i < x->neditor_only; ++i) if (!strcmp(x->editor_only[i], lower)) return 1;
+    return 0;
+}
+
+int sh_modserve_editor_only_recorded(const char *bundle_hash)
+{
+    return ms_editor_only_recorded(g_index, bundle_hash);
 }
 
 /* ------------------------------------------------------------------ conflicts and table */
@@ -2273,6 +2316,7 @@ int sh_modserve_index_build(const char *mods_root)
     strncpy_s(g_last_root, sizeof g_last_root, mods_root, _TRUNCATE);
     ms_scan_folder(x, mods_root);
     ms_load_aliases(x, mods_root);
+    ms_load_editor_only(x, mods_root);
     if (!ms_resolve(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
@@ -4038,9 +4082,19 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
 static int ms_name_file(const ms_index *x, const char *lower)
 {
     int f = ms_provider(x, "entitydef", lower), k;
+    char key[MS_NAME_MAX];
     for (k = 0; f < 0 && k < x->nfiles; ++k)
         if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower) &&
             (x->files[k].is_decl || (x->files[k].ptype && !strcmp(x->files[k].ptype, "snapModule")))) f = k;
+    /* A model an entity's edit state names (renderModelInfo.model, a .lwo or
+     * .bmodel path) is provided under its cooked request: a bundle that
+     * carries or unlocks that model is one the map depends on. */
+    if (f < 0 && sh_mb_model_key(lower, key, sizeof key)) {
+        ms_lower(key);
+        f = ms_provider(x, "model", key);
+        for (k = 0; f < 0 && k < x->nfiles; ++k)
+            if (x->files[k].served && !strcmp(x->files[k].request, key)) f = k;
+    }
     return f;
 }
 
@@ -4069,6 +4123,9 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
     size_t k, w = 0;
     if (cause && cap) cause[0] = 0;
     if (!row || !row->id[0] || strlen(row->id) > SH_MB_ID_MAX) return SH_MODSERVE_ROW_MISSING;
+    /* A bundle the record knows changes only the editor: the map plays
+     * without it, whatever folders are installed. */
+    if (ms_editor_only_recorded(x, row->bundle)) return SH_MODSERVE_ROW_SERVED;
     strcpy_s(id, sizeof id, row->id);
     ms_lower(id);
     for (i = 0; x && i < x->nbundles; ++i) {
@@ -4138,6 +4195,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
         f = ms_name_file(x, lower);
+        if (f >= 0 && ms_editor_shadow(&x->files[f])) continue;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     while (qh < nq) {
@@ -4177,7 +4235,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
         f = ms_name_file(x, lower);
-        if (f < 0) continue;
+        if (f < 0 || ms_editor_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, names[i]);
         if (!seen_bundle[x->files[f].bundle]) { seen_bundle[x->files[f].bundle] = 1; found++; }

@@ -1204,6 +1204,41 @@ static int mb_own_name(const char *name, char *out, size_t cap)
     return 1;
 }
 
+int sh_mb_model_key(const char *name, char *out, size_t cap)
+{
+    size_t n;
+    if (!name || !out || !cap) return 0;
+    n = strlen(name);
+    if (!n || strchr(name, '"') || strchr(name, ' ')) return 0;
+    if (mb_iends(name, n, ".bmodel")) return mb_own_name(name, out, cap);
+    if (!mb_iends(name, n, ".lwo") && !mb_iends(name, n, ".ase") && !mb_iends(name, n, ".ma") &&
+        !mb_iends(name, n, ".obj") && !mb_iends(name, n, ".fbx"))
+        return 0;
+    return mb_binary_name("cooked", "model", name, "bmodel", out, cap);
+}
+
+int sh_mb_editor_time(const char *request)
+{
+    static const char *const prefixes[] = {
+        "generated/decls/snapeditor", "generated/decls/snappropertyinspector", "generated/decls/snappalette",
+        "generated/swf/snapmaps/snap_editor", "generated/swf/snapmaps/entity_menu", "generated/swf/snapmaps/list_view",
+        NULL
+    };
+    int i;
+    if (!request) return 0;
+    for (i = 0; prefixes[i]; ++i) if (!_strnicmp(request, prefixes[i], strlen(prefixes[i]))) return 1;
+    return 0;
+}
+
+int sh_mb_editor_only(const sh_mb_bundle *bundle)
+{
+    size_t i;
+    if (!bundle || !bundle->file_count || bundle->requirements) return 0;
+    for (i = 0; i < bundle->file_count; i++)
+        if (!sh_mb_editor_time(bundle->files[i].request)) return 0;
+    return 1;
+}
+
 int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max)
 {
     size_t tl, nl;

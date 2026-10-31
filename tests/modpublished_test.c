@@ -101,6 +101,8 @@ typedef struct fake {
     unsigned long long token;
     HANDLE worker;
     int store_a, store_b;            /* store_has: 1 held, 0 absent, -1 unreachable */
+    int editor_only_a;               /* the fetch finds alex.pink-imp editor-only: recorded, not installed */
+    int recorded_a;                  /* the record's editorOnly section names alex.pink-imp's bundle */
     int store_calls;
     int other_a;                     /* another build of alex.pink-imp: 1 serves its names, 2 lacks one */
     int prints;
@@ -118,7 +120,7 @@ static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subje
     (void)c;
     if (cause && cap) cause[0] = 0;
     if (!strcmp(row->bundle, HASH_A) || !strcmp(row->id, "alex.pink-imp")) {
-        if (F.installed_a || F.other_a == 1) return SH_MODPUB_ROW_SERVED;
+        if (F.installed_a || F.other_a == 1 || F.recorded_a) return SH_MODPUB_ROW_SERVED;
         if (F.other_a == 2) {
             if (cause) _snprintf_s(cause, cap, _TRUNCATE, "Pink Imp (alex.pink-imp) is installed but does not provide "
                                    "mods/alex.pink-imp/imp, which this %s uses.", what);
@@ -194,6 +196,7 @@ static int f_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, vo
             if (*cancel) { F.fetch_cancelled++; return -2; }
     }
     if (F.fetch_fails && F.fetch_calls == 1) return F.fetch_fails;
+    if (F.editor_only_a && !strcmp(hash, HASH_A)) { F.recorded_a = 1; return 0; }   /* modsync: recorded, nothing installed */
     if (F.install_on_fetch && !F.refuse_install) {
         if (!strcmp(hash, HASH_A)) F.installed_a = 1;
         if (!strcmp(hash, HASH_B)) F.installed_b = 1;
@@ -430,6 +433,30 @@ static void yes_resumes_with_a_fresh_map(void)
     /* The next completion of the same map passes: nothing is missing now. */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+}
+
+static void editor_only_row_plays_without_a_folder(void)
+{
+    printf("-- a row whose bundle changes only the editor: fetched, recorded, not installed; the map resumes\n");
+    reset();
+    F.editor_only_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding());
+    tick(3);
+    CHECK(F.asks == 1);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.installed_a == 0 && F.recorded_a == 1);
+    CHECK(F.rescans == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_BROWSER_PLAY);
+    CHECK(!sh_modpublished_holding() && !sh_modpub_test_notice()[0]);
+
+    /* Every later launch of a map naming it passes: the record serves the row. */
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding());
+    tick(3);
+    CHECK(F.asks == 1 && F.fetch_calls == 1);
 }
 
 static void no_drops(void)
@@ -765,6 +792,7 @@ int main(void)
     classification();
     vanilla_and_installed_pass_through();
     yes_resumes_with_a_fresh_map();
+    editor_only_row_plays_without_a_folder();
     no_drops();
     fetch_failure_drops();
     second_load_abandons();

@@ -140,6 +140,52 @@ static void ln(const char *req, const char *type, const char *name)
 }
 
 /* Every row of the Contract 1 table. */
+/* Editor-time content, the model key a placed entity's edit state resolves
+ * through, and the editor-only bundle classification. */
+static void test_editor_time(void)
+{
+    char key[SH_MB_REQUEST_MAX + 1];
+    sh_mb_bundle b;
+    sh_mb_file files[3];
+    CHECK(sh_mb_editor_time("generated/decls/snapeditorentitydef/func/lift.decl"));
+    CHECK(sh_mb_editor_time("generated/decls/snappropertyinspector_text/mods/x/y.decl"));
+    CHECK(sh_mb_editor_time("generated/decls/snapeditorsettings/default.decl"));
+    CHECK(sh_mb_editor_time("generated/decls/snappalette/x.decl"));
+    CHECK(sh_mb_editor_time("generated/swf/snapmaps/snap_editor.bswf"));
+    CHECK(sh_mb_editor_time("Generated/Decls/SnapEditorEntityDef/func/lift.decl"));
+    CHECK(!sh_mb_editor_time("generated/decls/entitydef/monster/imp.decl"));
+    CHECK(!sh_mb_editor_time("generated/decls/snapmoduleinfo/x.decl"));
+    CHECK(!sh_mb_editor_time("cooked/model/models/modular/airlock/air_lock_shell.bmodel"));
+    CHECK(!sh_mb_editor_time(NULL));
+
+    CHECK(sh_mb_model_key("models/modular/airlock/air_lock_shell.lwo", key, sizeof key) &&
+          !strcmp(key, "cooked/model/models/modular/airlock/air_lock_shell.bmodel"));
+    CHECK(sh_mb_model_key("Models/Foo/Bar.LWO", key, sizeof key) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
+    CHECK(sh_mb_model_key("models/foo/bar.ase", key, sizeof key) && !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
+    CHECK(sh_mb_model_key("cooked/model/models/foo/bar.bmodel", key, sizeof key) &&
+          !strcmp(key, "cooked/model/models/foo/bar.bmodel"));
+    CHECK(!sh_mb_model_key("md6/monsters/imp/imp.md6", key, sizeof key));
+    CHECK(!sh_mb_model_key("snapmaps/props/thing", key, sizeof key));
+    CHECK(!sh_mb_model_key("", key, sizeof key));
+    CHECK(!sh_mb_model_key("models/foo/bar.lwo", key, 8));
+
+    memset(&b, 0, sizeof b);
+    memset(files, 0, sizeof files);
+    files[0].request = "generated/decls/snapeditorentitydef/func/lift.decl";
+    files[1].request = "generated/decls/snappropertyinspector_text/x.decl";
+    files[2].request = "generated/decls/entitydef/monster/imp.decl";
+    b.files = files;
+    CHECK(!sh_mb_editor_only(&b));            /* nothing in it */
+    b.file_count = 2;
+    CHECK(sh_mb_editor_only(&b));
+    b.requirements = "{\"cvars\":{\"g_x\":\"1\"}}";
+    CHECK(!sh_mb_editor_only(&b));            /* a cvar requirement changes play */
+    b.requirements = NULL;
+    b.file_count = 3;
+    CHECK(!sh_mb_editor_only(&b));            /* one gameplay decl */
+    CHECK(!sh_mb_editor_only(NULL));
+}
+
 static void test_logical_names(void)
 {
     char t[64], n[512];
@@ -1104,6 +1150,7 @@ int main(int argc, char **argv)
     if (!mt_temp_dir("modbundle", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
     test_sha();
     test_names();
+    test_editor_time();
     test_logical_names();
     test_need_requests();
     test_scan();

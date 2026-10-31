@@ -2451,6 +2451,83 @@ static void test_row_served(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
+/* The names a map's placed entities give the save closure: a model an edit
+ * state names reaches the bundle that carries or unlocks it; a shadow of
+ * editor-time content names no bundle; a gameplay shadow still does. And the
+ * record's editorOnly section serves a row without a folder. */
+typedef struct dep_seen { char names[512]; int bundles; } dep_seen;
+static void dep_visit(void *context, const char *id, const char *version, const char *hash,
+                      unsigned long long size, const char *name)
+{
+    dep_seen *s = (dep_seen *)context;
+    (void)version; (void)hash; (void)size;
+    if (name) { strcat_s(s->names, sizeof s->names, name); strcat_s(s->names, sizeof s->names, ";"); }
+    else s->bundles++;
+    (void)id;
+}
+
+static void test_dependency_names(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], out[4][SH_MODSERVE_HASH_HEX + 1], ha[65], hc[65], hd[65], he[65], record[200];
+    char cause[400];
+    char *slash;
+    sh_modmanifest_row row;
+    dep_seen seen;
+    static const fx_file ivy[] = {
+        { "cooked/model/models/modular/airlock/air_lock_shell.bmodel", "AIRLOCKBYTES", -1, "model",
+          "cooked/model/models/modular/airlock/air_lock_shell.bmodel", NULL, 'a' },
+    };
+    static const fx_file jo[] = { { LIFT, "JOLIFT", -1, "snapEditorEntityDef", "func/lift", NULL, 'b' } };
+    static const fx_file kay[] = { { SHADOW, "entityDef kay {}", -1, "entityDef", "monster/imp", NULL, 'c' } };
+    printf("-- dependency names: models in edit state, editor-time shadows, the editorOnly record\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\deps\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = NULL;
+    make_bundle(root, "ivy.airlock@1.0.0", "ivy.airlock", "1.0.0", 'a',
+                "\"cooked/model/models/modular/airlock/air_lock_shell.bmodel\"", ivy, 1, NULL);
+    make_bundle(root, "jo.editor@1.0.0", "jo.editor", "1.0.0", 'b', "\"" LIFT "\"", jo, 1, NULL);
+    make_bundle(root, "kay.game@1.0.0", "kay.game", "1.0.0", 'c', "\"" SHADOW "\"", kay, 1, NULL);
+    hash64('a', ha); hash64('c', hc); hash64('d', hd); hash64('e', he);
+    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zed.editor\", \"name\": \"Zed\", \"at\": 1}}", hd);
+    CHECK(sh_mb_record_put(root, "editorOnly", record));
+    CHECK(sh_modserve_index_build(root) == 3);
+
+    {
+        const char *lwo[] = { "models/modular/airlock/air_lock_shell.lwo" };
+        const char *upper[] = { "MODELS/Modular/Airlock/Air_Lock_Shell.LWO" };
+        const char *cooked[] = { "cooked/model/models/modular/airlock/air_lock_shell.bmodel" };
+        const char *other[] = { "models/modular/other/thing.lwo" };
+        const char *lift[] = { "func/lift" };
+        const char *imp[] = { "monster/imp" };
+        const char *all[] = { "func/lift", "models/modular/airlock/air_lock_shell.lwo", "monster/imp", "snapmaps/props/stock" };
+        CHECK(modserve_bundles_for_names(lwo, 1, out, 4) == 1 && !strcmp(out[0], ha));
+        CHECK(modserve_bundles_for_names(upper, 1, out, 4) == 1 && !strcmp(out[0], ha));
+        CHECK(modserve_bundles_for_names(cooked, 1, out, 4) == 1 && !strcmp(out[0], ha));
+        CHECK(modserve_bundles_for_names(other, 1, out, 4) == 0);
+        CHECK(modserve_bundles_for_names(lift, 1, out, 4) == 0);   /* an editor-time shadow is no dependency */
+        CHECK(modserve_bundles_for_names(imp, 1, out, 4) == 1 && !strcmp(out[0], hc));
+        memset(&seen, 0, sizeof seen);
+        CHECK(modserve_bundles_for_names_visit(all, 4, dep_visit, &seen) == 2);
+        CHECK(strstr(seen.names, "models/modular/airlock/air_lock_shell.lwo;") && strstr(seen.names, "monster/imp;"));
+        CHECK(!strstr(seen.names, "func/lift") && !strstr(seen.names, "stock") && seen.bundles == 0);
+    }
+    /* The record: a row whose bundle the editorOnly section names is served
+     * with no folder at all; any other hash is judged as before. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "zed.editor");
+    strcpy_s(row.bundle, sizeof row.bundle, hd);
+    CHECK(sh_modserve_editor_only_recorded(hd) && !sh_modserve_editor_only_recorded(he));
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+    strcpy_s(row.bundle, sizeof row.bundle, he);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(strstr(cause, "zed.editor, which is not installed") != NULL);
+
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -2481,6 +2558,7 @@ int main(void)
     test_scope();
     test_scope_providers();
     test_row_served();
+    test_dependency_names();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

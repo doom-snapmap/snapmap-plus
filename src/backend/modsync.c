@@ -332,6 +332,24 @@ static int msy_doc_save(const char *section, const mpj *doc)
     return ok;
 }
 
+/* Record a bundle whose fetch found only editor-time content: section
+ * "editorOnly", keyed by bundle hash. 1 written. */
+static int msy_editor_only_record(const char *hash, const char *id, const char *name)
+{
+    mpj *doc = msy_doc_load("editorOnly", "editorOnly"), *section, *entry;
+    int ok = 0;
+    if (!doc) return 0;
+    section = mpj_get(doc, "editorOnly");
+    entry = mpj_new(MPJ_OBJ);
+    if (section && entry && mpj_set(entry, "id", mpj_new_str(id ? id : "")) &&
+        mpj_set(entry, "name", mpj_new_str(name ? name : "")) &&
+        mpj_set(entry, "at", mpj_new_int((long long)_time64(NULL))) && mpj_set(section, hash, entry))
+        ok = msy_doc_save("editorOnly", doc);
+    else mpj_free(entry);
+    mpj_free(doc);
+    return ok;
+}
+
 static mpj *msy_hash_array(const char *const *hashes, int n)
 {
     mpj *arr = mpj_new(MPJ_ARR);
@@ -1134,6 +1152,25 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
             size_t i;
             st->blobs_total = (unsigned)(b.file_count - b.stock_count);
             for (i = 0; i < b.file_count; i++) prog.total += b.files[i].size;   /* a pointer's size is 0 */
+            /* A bundle of editor-time content only (an author's editor
+             * overrides a map named): nothing in it plays, so nothing is
+             * installed. The record remembers it, and the row is served
+             * from now on (sh_modserve_row_served_for). */
+            if (sh_mb_editor_only(&b)) {
+                int recorded = msy_editor_only_record(hash, b.id, b.name);
+                msy_log("MODS: pull %.16s: %s (%s) changes only the editor (%u file(s), no requirements); not installed, "
+                        "the map plays without it%s", hash, b.name && b.name[0] ? b.name : b.id, b.id,
+                        (unsigned)b.file_count, recorded ? "" : " (the record could not be written; it will be asked again)");
+                sh_mb_free(&b);
+                free(with);
+                free(text);
+                st->editor_only = 1;
+                if (sh_modserve_index_rescan() < 0)
+                    msy_log("MODS: pull %.16s: the serving index could not be rebuilt after the record was written", hash);
+                st->ms = msy_now_ms() - t0;
+                st->code = MODNET_OK;
+                return 1;
+            }
         }
         sh_mb_free(&b);
         free(with);

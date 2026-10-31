@@ -18,6 +18,7 @@
 #include "../src/backend/modsync.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
+#include "../src/backend/modmanifest.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -108,12 +109,18 @@ static const char *const D_BYTES[] = { "delta bytes", NULL };
 static const char *const D2_BYTES[] = { "delta bytes, edited", NULL };
 static const char *const X_FILES[] = { "assets/generated/image/mods/test.extra/x.bimage", NULL };
 static const char *const X_BYTES[] = { "extra bytes", NULL };
+static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
+static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
+
+/* The builder's stock resolver: every shadow names a stock resource. */
+static int stock_yes(void *context, const char *request) { (void)context; (void)request; return 1; }
 
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], storeB[MAX_PATH * 2], storeC[MAX_PATH * 2], dir[MAX_PATH * 2];
     char url[64], keyA[SH_MS_KEY_MAX + 1], keyB[SH_MS_KEY_MAX + 1], keyG[SH_MS_KEY_MAX + 1], keyX[SH_MS_KEY_MAX + 1];
-    char hA[65], hB[65], hG[65], hX[65], claim1[33], secret1[65], claim_again[33], path[MAX_PATH * 2];
+    char keyE[SH_MS_KEY_MAX + 1];
+    char hA[65], hB[65], hG[65], hX[65], hE[65], claim1[33], secret1[65], claim_again[33], path[MAX_PATH * 2];
     modsync_stats st;
     int puts_before;
     g_echo = argc > 1 && !strcmp(argv[1], "-v");
@@ -140,6 +147,24 @@ int main(int argc, char **argv)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\extra", src);
     make_mod(dir, "test.extra", ",\"strings\":{\"english\":{\"#str_x\":\"X\"}}", X_FILES, X_BYTES);
     CHECK(install(dir, keyX, hX));
+    {
+        /* An author's editor overrides: one shadow of an editor-time decl,
+         * nothing that plays. */
+        sh_mb_resolver res;
+        sh_ms_install_stats ist;
+        sh_mb_bundle eb;
+        char cause[SH_MB_CAUSE_MAX];
+        memset(&res, 0, sizeof res);
+        res.stock = stock_yes;
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\editor", src);
+        make_mod(dir, "test.editor", ",\"shadows\":[\"generated/decls/snapeditorentitydef/func/rotate.decl\"]", E_FILES, E_BYTES);
+        if (!sh_ms_install_from_folder(dir, &res, keyE, sizeof keyE, &ist, &eb, cause, sizeof cause)) {
+            fprintf(stderr, "install %s: %s\n", dir, cause);
+            CHECK(0);
+        }
+        strcpy_s(hE, sizeof hE, eb.hash);
+        sh_mb_free(&eb);
+    }
 
     /* ---- upload: negotiation, blobs, the canonical manifest, a new claim ---- */
     {
@@ -268,6 +293,12 @@ int main(int argc, char **argv)
         CHECK(!modsync_claim_lookup("map-4", NULL, NULL));
     }
 
+    {
+        /* The editor overrides go up like any bundle an author's map names. */
+        const char *one[] = { hE };
+        CHECK(modsync_upload_bundles(one, 1, "map-e", NULL, &st) && stub_has_bundle(hE));
+    }
+
     /* ---- download into an empty store ---- */
     CHECK(sh_ms_set_root(storeB));
     CHECK(sh_modserve_index_build(storeB) == 0);
@@ -302,6 +333,32 @@ int main(int argc, char **argv)
         CHECK(modsync_fetch_bundle(hA, NULL, &st));
         g_stub.serve_bundle_member = 0;
         CHECK(st.blobs_transferred == 1 && sh_modserve_bundle_state(hA, NULL, 0) == 1);
+    }
+    {
+        /* A bundle of editor-time content only: its manifest is read, no blob
+         * is fetched, nothing is installed, and the record's editorOnly
+         * section serves its row from now on. */
+        int blob_gets = g_stub.blob_gets;
+        sh_modmanifest_row row;
+        char cause[400];
+        unsigned files_before;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s", storeB);
+        files_before = count_files(path);
+        CHECK(modsync_fetch_bundle(hE, NULL, &st));
+        CHECK(st.editor_only && st.code == MODNET_OK && !st.bundles_created && !st.already_installed);
+        CHECK(g_stub.blob_gets == blob_gets);
+        CHECK(sh_modserve_bundle_state(hE, NULL, 0) == 0);
+        CHECK(count_files(path) == files_before);   /* only snapmap-plus.json changed */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeB);
+        CHECK(file_contains(path, "\"editorOnly\"") && file_contains(path, hE) && file_contains(path, "\"test.editor\""));
+        CHECK(sh_modserve_editor_only_recorded(hE));
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.id, sizeof row.id, "test.editor");
+        strcpy_s(row.bundle, sizeof row.bundle, hE);
+        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+        CHECK(strstr(g_log, "changes only the editor (1 file(s), no requirements); not installed") != NULL);
+        /* Asked again: the same answer, still nothing fetched. */
+        CHECK(modsync_fetch_bundle(hE, NULL, &st) && st.editor_only && g_stub.blob_gets == blob_gets);
     }
 
     /* ---- refusals on download ---- */

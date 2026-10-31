@@ -1344,7 +1344,11 @@ static int eng_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, 
     memset(&st, 0, sizeof st);
     io.cancel = (volatile long *)cancel;
     io.progress = (modnet_progress_fn)progress;
-    if (modsync_fetch_bundle(hash, &io, &st)) return 0;
+    if (modsync_fetch_bundle(hash, &io, &st)) {
+        if (st.editor_only)
+            pub_logf("MODS: %.16s changes only the editor; the map plays without it, so it was not installed", hash);
+        return 0;
+    }
     pub_logf("fetch %.16s failed: %s", hash, st.cause[0] ? st.cause : modnet_code_text(st.code));
     return st.code ? st.code : -1;
 }
