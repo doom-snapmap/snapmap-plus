@@ -64,6 +64,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   <symbol id="icon-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol>
   <symbol id="icon-folder-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path></symbol>
   <symbol id="icon-folder-input" viewBox="0 0 24 24"><path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-1.73"></path><path d="M2 13h10"></path><path d="m9 16 3-3-3-3"></path></symbol>
+  <symbol id="icon-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"></path><path d="m21 2-9.6 9.6"></path><circle cx="7.5" cy="15.5" r="5.5"></circle></symbol>
   <symbol id="icon-map" viewBox="0 0 24 24"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"></path><path d="M15 5.764v15"></path><path d="M9 3.236v15"></path></symbol>
   <symbol id="icon-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path><path d="M12 15V3"></path></symbol>
   <symbol id="icon-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M8 16H3v5"></path></symbol>
@@ -254,20 +255,24 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="pc-preview" id="pcPreview">
           <canvas id="pcCanvas" aria-label="Interactive 3D prefab preview"></canvas>
           <canvas id="pcFootprint" aria-label="Top-down footprint of the module prefab" style="display:none;"></canvas>
-          <div class="pc-kind-pill" id="pcKindPill" style="display:none;">Blueprint prefab</div>
-          <div class="pc-preview-status" id="pcPreviewStatus">Preparing preview...</div>
-          <div class="pc-preview-count" id="pcEntityCount"></div>
-          <div class="pc-preview-legend" aria-hidden="true">
-            <span><i class="pc-legend-dot"></i>Solid</span>
-            <span><i class="pc-legend-dot blocker"></i>Blocking</span>
-            <span><i class="pc-legend-dot navigation"></i>AI Navigation</span>
-            <span><i class="pc-legend-dot interactable"></i>Interactable</span>
-            <span><i class="pc-legend-dot demon"></i>Demons</span>
-            <span><i class="pc-legend-dot player"></i>Player</span>
-            <span><i class="pc-legend-dot logic"></i>Logic / I/O</span>
-            <span><i class="pc-legend-dot helper"></i>Triggers</span>
+          <div class="pc-preview-tag">
+            <div class="pc-kind-pill" id="pcKindPill" style="display:none;">Blueprint prefab</div>
+            <div class="pc-preview-status" id="pcPreviewStatus">Preparing preview...</div>
           </div>
-          <div class="pc-preview-help">Drag to orbit &middot; Wheel to zoom &middot; Double-click to frame</div>
+          <div class="pc-preview-count" id="pcEntityCount"></div>
+          <div class="pc-legend" id="pcLegend">
+            <div class="pc-preview-legend" id="pcLegendPanel" role="group" aria-label="Legend" hidden>
+              <span><i class="pc-legend-dot"></i>Solid</span>
+              <span><i class="pc-legend-dot blocker"></i>Blocking</span>
+              <span><i class="pc-legend-dot navigation"></i>AI Navigation</span>
+              <span><i class="pc-legend-dot interactable"></i>Interactable</span>
+              <span><i class="pc-legend-dot demon"></i>Demons</span>
+              <span><i class="pc-legend-dot player"></i>Player</span>
+              <span><i class="pc-legend-dot logic"></i>Logic / I/O</span>
+              <span><i class="pc-legend-dot helper"></i>Triggers</span>
+            </div>
+            <button type="button" class="pc-legend-btn icon-button" id="pcLegendBtn" aria-expanded="false" aria-controls="pcLegendPanel" aria-label="Legend" title="Show the legend"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-key"></use></svg></button>
+          </div>
         </div>
         <div class="pc-needs" id="pcNeeds" role="status" style="display:none;"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-triangle-alert"></use></svg><span id="pcNeedsText"></span></div>
         <section class="pc-mods" id="pcMods" aria-labelledby="pcModsHead" style="display:none;">
@@ -276,8 +281,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="pc-mods-note" id="pcModsNote"></div>
         </section>
         <section class="pc-limits" id="pcLimits" aria-labelledby="pcLimitsHead">
-          <div class="pc-limits-head" id="pcLimitsHead">Limits</div>
-          <div class="pc-limits-rows" id="pcLimitsRows" role="table" aria-label="What this prefab adds to the map's limits"></div>
+          <div class="pc-limits-table" role="table" aria-label="What this prefab adds to the map's limits">
+            <div class="pcl-row" role="row">
+              <div class="pc-limits-head" id="pcLimitsHead" role="columnheader">Limits</div>
+              <span class="pcl-col pcl-col-bar" aria-hidden="true"></span>
+              <span class="pcl-col" role="columnheader">This prefab</span>
+              <span class="pcl-col" role="columnheader">Map after</span>
+            </div>
+            <div class="pcl-rule" aria-hidden="true"></div>
+            <div class="pc-limits-rows" id="pcLimitsRows" role="rowgroup"></div>
+          </div>
           <div class="pc-limits-note" id="pcLimitsNote"></div>
           <details class="pc-limits-details" id="pcLimitsDetails"><summary>Details</summary><div class="pc-limits-raw" id="pcLimitsRaw"></div></details>
         </section>
@@ -3716,17 +3729,30 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                    kind: selectedPrefabKind, parsed: !!doc || (selectedPrefabKind === 'modules' && modules.length > 0)};
     pfRenderLimits();
   }
-  function pfLimitsCell(text, cls, title) {
+  function pfLimitsCell(text, cls, title, role) {
     var s = document.createElement('span');
-    s.textContent = text; s.className = cls || ''; s.setAttribute('role', 'cell');
+    s.textContent = text; s.className = cls || ''; s.setAttribute('role', role || 'cell');
     if (title) s.title = title;
     return s;
   }
+  // A meter's thin bar in the result's colour: the map's current use faint, then what the prefab adds.
+  function pfLimitsBarPct(r) { return isFinite(r) ? Math.max(0, Math.min(100, r * 100)) : (r > 0 ? 100 : 0); }
+  function pfLimitsBar(v) {
+    var bar = document.createElement('span'), now = document.createElement('i'), add = document.createElement('i');
+    var b = pfLimitsBarPct(v.before), a = pfLimitsBarPct(v.after);
+    bar.className = 'pcl-bar pcl-' + v.level; bar.setAttribute('aria-hidden', 'true');
+    now.className = 'pcl-bar-now'; now.style.width = b + '%';
+    add.className = 'pcl-bar-add'; add.style.left = b + '%'; add.style.width = Math.max(0, a - b) + '%';
+    if (v.add > 0 && b < 100) add.style.minWidth = '2px';
+    bar.appendChild(now); bar.appendChild(add);
+    return bar;
+  }
   function pfRenderLimits() {
     var rows = document.getElementById('pcLimitsRows'), note = document.getElementById('pcLimitsNote');
-    var raw = document.getElementById('pcLimitsRaw');
+    var raw = document.getElementById('pcLimitsRaw'), section = document.getElementById('pcLimits');
     if (!rows || !note || !raw) return;
     rows.textContent = ''; raw.textContent = ''; note.textContent = '';
+    if (section) section.classList.add('pc-limits-empty');
     if (!pfBudgetSel) return;
     if (!pfBudgetTable || pfBudgetTable.error) {
       note.textContent = pfBudgetTable && pfBudgetTable.error ? 'Limits unavailable: ' + pfBudgetTable.error
@@ -3742,14 +3768,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     var live = pfBudgetLive && pfBudgetLive.usage && pfBudgetLive.limits ? pfBudgetLive : pfBudgetTable;
     var m = prefabBudget.meters(s.block, live.usage, live.limits);
-    ['', 'This prefab', 'Map after'].forEach(function(h){ rows.appendChild(pfLimitsCell(h, 'pcl-col', '')); });
+    if (section) section.classList.remove('pc-limits-empty');
+    // One row per HUD meter; "Map after" takes the colour of prefabBudget.meterLevel (blue, yellow, red).
     prefabBudget.METERS.forEach(function(name){
-      var v = m.meters[name];
-      rows.appendChild(pfLimitsCell(prefabBudget.LABELS[name], 'pcl-label', ''));
+      var v = m.meters[name], row = document.createElement('div');
+      row.className = 'pcl-row'; row.setAttribute('role', 'row');
+      row.appendChild(pfLimitsCell(prefabBudget.LABELS[name], 'pcl-label', '', 'rowheader'));
+      row.appendChild(pfLimitsBar(v));
       var addText = prefabBudget.formatPercent(v.add);
-      rows.appendChild(pfLimitsCell(addText.charAt(0) === '<' ? addText : '+' + addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
-      rows.appendChild(pfLimitsCell(prefabBudget.formatPercent(v.after), 'pcl-num' + (v.reached ? ' pcl-over' : ''),
-        'Now ' + prefabBudget.formatPercent(v.before) + (v.reached ? '; placing it would reach this limit' : '')));
+      row.appendChild(pfLimitsCell(addText.charAt(0) === '<' ? addText : '+' + addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
+      row.appendChild(pfLimitsCell(prefabBudget.formatPercent(v.after), 'pcl-num pcl-after pcl-' + v.level,
+        'Now ' + prefabBudget.formatPercent(v.before) + (v.level === 'over' ? '; placing it would reach this limit'
+                                                         : v.level === 'warn' ? '; placing it comes close to this limit' : '')));
+      rows.appendChild(row);
     });
     var notes = [];
     if (s.misses.length) notes.push(s.misses.length + (s.misses.length === 1 ? ' entity type is' : ' entity types are') +
@@ -3762,7 +3793,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (m.reached) notes.unshift('Placing this prefab would reach the map\'s limits.');
     note.textContent = notes.join(' ');
     prefabBudget.FIELDS.forEach(function(f, i){
-      raw.appendChild(pfLimitsCell(f, '', '')); raw.appendChild(pfLimitsCell(String(s.block[i]), '', ''));
+      var item = document.createElement('div'), k = document.createElement('span'), n = document.createElement('span');
+      item.className = 'pcl-raw-item'; n.className = 'pcl-raw-num';
+      k.textContent = f; n.textContent = String(s.block[i]);
+      item.appendChild(k); item.appendChild(n); raw.appendChild(item);
     });
   }
   // The backend's module check for the selected module prefab (module_prefab_map.h): a line, with the
@@ -3803,11 +3837,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // marked, counts and environments in the corners. The 3D viewport and its legend step aside.
   function pfShowFootprint(meta) {
     var canvas3d = document.getElementById('pcCanvas'), fp = document.getElementById('pcFootprint');
-    var pill = document.getElementById('pcKindPill'), help = document.querySelector('#pcPreview .pc-preview-help');
-    var legend = document.querySelector('#pcPreview .pc-preview-legend'), status = document.getElementById('pcPreviewStatus');
+    var pill = document.getElementById('pcKindPill'), status = document.getElementById('pcPreviewStatus');
     if (canvas3d) canvas3d.style.display = 'none';
-    if (legend) legend.style.display = 'none';
-    if (help) help.style.display = 'none';
+    pfLegendShow(false);
     if (pill) pill.style.display = 'block';
     if (fp) fp.style.display = 'block';
     var mc = meta.moduleCount || (meta.modules ? meta.modules.length : 0), ec = meta.entityCount || 0, dc = meta.doorCount || 0;
@@ -3823,14 +3855,59 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   function pfHideFootprint() {
     var canvas3d = document.getElementById('pcCanvas'), fp = document.getElementById('pcFootprint');
-    var pill = document.getElementById('pcKindPill'), help = document.querySelector('#pcPreview .pc-preview-help');
-    var legend = document.querySelector('#pcPreview .pc-preview-legend');
+    var pill = document.getElementById('pcKindPill');
     if (canvas3d) canvas3d.style.display = '';
-    if (legend) legend.style.display = '';
-    if (help) help.style.display = '';
+    pfLegendShow(true);
     if (pill) pill.style.display = 'none';
     if (fp) fp.style.display = 'none';
   }
+  // --- preview legend ---
+  // The 3D preview's legend: a key button at the bottom left that opens the colour list upwards.
+  // Collapsed by default; it stays open across object-prefab selections until the button, Escape or
+  // a press elsewhere in the preview closes it. A module prefab's footprint has no legend at all.
+  function pfLegendSetOpen(btn, panel, open) {
+    open = !!open;
+    panel.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.title = open ? 'Hide the legend' : 'Show the legend';
+    return open;
+  }
+  function pfLegendIsOpen(btn) { return btn.getAttribute('aria-expanded') === 'true'; }
+  // What an event does to the legend: 'toggle', 'close' or '' (nothing). box is the legend control
+  // (button and list), preview the whole preview. Escape counts only with the focus in the preview
+  // (the key button), so it never also clears the prefab selection, which Escape does elsewhere.
+  function pfLegendAction(e, open, box, btn, preview) {
+    var t = e.target;
+    if (e.type === 'click') return t && btn.contains(t) ? 'toggle' : '';
+    if (!open) return '';
+    if (e.type === 'keydown') return e.key === 'Escape' && t && preview.contains(t) ? 'close' : '';
+    if (e.type === 'pointerdown') return t && preview.contains(t) && !box.contains(t) ? 'close' : '';
+    return '';
+  }
+  // --- preview legend end ---
+  function pfLegendShow(show) {
+    var box = document.getElementById('pcLegend'), btn = document.getElementById('pcLegendBtn'), panel = document.getElementById('pcLegendPanel');
+    if (!box || !btn || !panel) return;
+    box.style.display = show ? '' : 'none';
+    if (!show) pfLegendSetOpen(btn, panel, false);
+  }
+  (function(){
+    var box = document.getElementById('pcLegend'), btn = document.getElementById('pcLegendBtn');
+    var panel = document.getElementById('pcLegendPanel'), preview = document.getElementById('pcPreview');
+    if (!box || !btn || !panel || !preview) return;
+    function on(e) {
+      var act = pfLegendAction(e, pfLegendIsOpen(btn), box, btn, preview);
+      if (act === 'toggle') pfLegendSetOpen(btn, panel, !pfLegendIsOpen(btn));
+      else if (act === 'close') {
+        var refocus = box.contains(document.activeElement);
+        pfLegendSetOpen(btn, panel, false);
+        if (refocus) btn.focus();
+      }
+    }
+    btn.addEventListener('click', on);
+    preview.addEventListener('pointerdown', on);
+    document.addEventListener('keydown', on);
+  })();
   var pfFootprintModules = null;
   function pfDrawFootprint(modules) {
     pfFootprintModules = modules;

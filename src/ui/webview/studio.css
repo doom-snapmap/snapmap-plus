@@ -6,6 +6,8 @@
     --text:#1b1d21; --muted:#6b7280; --accent:#2f7ad6; --accentText:#ffffff; --sel:#e7f0fb; --selText:#123a63;
     --link:#2a68b8; --field:#ffffff; --danger:#a3352f;
     --ok:#3f8a35; --warnBg:#f6ecd0; --warnText:#7d5d10;
+    /* --accent and --danger as small text on --panel, at least 4.5:1 in both themes. */
+    --infoText:#2a6dc0; --dangerText:#a3352f;
     --tkKey:#0550ae; --tkStr:#9a3b22; --tkNum:#116329; --tkBool:#8250df; --sqErr:#d1372c; --sqWarn:#b58a1f;
     color-scheme: light;
   }
@@ -14,6 +16,7 @@
     --text:#e7e8ea; --muted:#9aa0a8; --accent:#4a9eff; --accentText:#0c1116; --sel:#2d4257; --selText:#cfe4fb;
     --link:#6fb2ff; --field:#1f2024; --danger:#c9483d;
     --ok:#6aa84f; --warnBg:#3d3420; --warnText:#e0b552;
+    --infoText:#4a9eff; --dangerText:#f07a6e;
     --tkKey:#7cb5ff; --tkStr:#ce9178; --tkNum:#9fd394; --tkBool:#c39ce8; --sqErr:#f14c4c; --sqWarn:#d7a944;
     color-scheme: dark;
   }
@@ -430,15 +433,24 @@
   .pc-preview canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .pc-preview canvas.dragging { cursor: grabbing; }
   .pc-preview canvas#pcFootprint { cursor: default; }
-  .pc-kind-pill { position: absolute; z-index: 1; left: 8px; top: 7px; padding: 1px 8px; border-radius: 9px; font-size: 10px; color: var(--accentText); background: var(--accent); pointer-events: none; }
-  .pc-kind-pill + .pc-preview-status { left: 110px; max-width: 50%; }
-  .pc-preview-status, .pc-preview-count, .pc-preview-help, .pc-preview-legend { position: absolute; z-index: 1; pointer-events: none;
-    color: var(--muted); font-size: 10px; line-height: 1.35; text-shadow: 0 1px 2px var(--panel); }
-  .pc-preview-status { top: 7px; left: 8px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pc-preview-count { right: 8px; bottom: 7px; }
-  .pc-preview-help { top: 7px; right: 8px; max-width: 54%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
-  .pc-preview-legend { left: 8px; bottom: 7px; display: flex; flex-wrap: wrap; gap: 3px 8px; max-width: 54%; }
-  .pc-preview-legend span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+  /* Top left: the kind pill (module prefabs only) then the status; a hidden pill takes no room. */
+  .pc-preview-tag { position: absolute; z-index: 1; left: 8px; top: 7px; right: 8px; display: flex; align-items: center; gap: 6px; pointer-events: none; }
+  .pc-kind-pill { flex: none; padding: 1px 8px; border-radius: 9px; font-size: 10px; color: var(--accentText); background: var(--accent); }
+  .pc-preview-status, .pc-preview-count { color: var(--muted); font-size: 10px; line-height: 1.35; text-shadow: 0 1px 2px var(--panel); }
+  .pc-preview-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pc-preview-count { position: absolute; z-index: 1; pointer-events: none; right: 8px; bottom: 7px; }
+  /* Bottom left: the legend key button; its list opens upwards above it. */
+  .pc-legend { position: absolute; z-index: 2; left: 6px; bottom: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: calc(100% - 12px); }
+  .pc-legend-btn { width: 24px; height: 24px; border: 1px solid var(--border2); border-radius: 5px; background: var(--panel2); color: var(--muted); cursor: pointer; }
+  .pc-legend-btn .ui-icon { width: 13px; height: 13px; }
+  .pc-legend-btn:hover { border-color: var(--accent); color: var(--text); }
+  .pc-legend-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+  .pc-legend-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .pc-preview-legend { display: grid; grid-auto-flow: column; grid-template-rows: repeat(4, auto); gap: 3px 14px; padding: 6px 9px;
+    background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    color: var(--text); font-size: 10px; line-height: 1.35; }
+  .pc-preview-legend[hidden] { display: none; }
+  .pc-preview-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
   .pc-legend-dot { width: 6px; height: 6px; border-radius: 50%; background: #a3abb5; box-shadow: 0 0 0 1px rgba(0,0,0,.18); }
   .pc-legend-dot.blocker { background: #5794c7; }
   .pc-legend-dot.navigation { background: #5cb86b; }
@@ -464,18 +476,41 @@
   .pc-mods-note { color: var(--muted); font-size: 10px; }
   .pc-mods.pc-mods-missing .pc-mods-note { color: var(--warnText); }
   /* Limits: what the selected prefab adds to the editor's five HUD meters. */
-  .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
-  .pc-limits-head { color: var(--muted); }
-  .pc-limits-rows { display: grid; grid-template-columns: minmax(76px, auto) minmax(72px, auto) auto; justify-content: start; gap: 1px 28px; font-size: 11px; }
-  .pc-limits-rows .pcl-col { color: var(--muted); font-size: 10px; }
-  .pc-limits-rows .pcl-label { letter-spacing: .04em; }
-  .pc-limits-rows .pcl-num { font-variant-numeric: tabular-nums; }
-  .pc-limits-rows .pcl-over { color: var(--danger); font-weight: 600; }
-  .pc-limits-note { color: var(--muted); font-size: 10px; min-height: 0; }
+  /* Limits: one compact table. The section head is the first column head, so "Limits", the meter
+     names and the column heads share one left edge and one header line. */
+  .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .pc-limits-table { display: grid; grid-template-columns: 76px minmax(48px, 150px) 74px 74px; column-gap: 12px; align-items: center; font-size: 11px; }
+  .pc-limits-table .pcl-row, .pc-limits-rows { display: contents; }
+  .pc-limits-head { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .pc-limits-table .pcl-col { color: var(--muted); font-size: 10px; font-weight: 600; text-align: right; }
+  .pc-limits-table > .pcl-row > * { padding-bottom: 3px; }
+  .pc-limits-table .pcl-rule { grid-column: 1 / -1; height: 1px; margin-bottom: 2px; background: var(--border); }
+  .pc-limits-empty .pcl-col { visibility: hidden; }
+  .pc-limits-empty .pc-limits-details { display: none; }
+  .pc-limits-rows .pcl-label { padding: 2px 0; color: var(--text); font-size: 10px; letter-spacing: .04em; }
+  .pc-limits-rows .pcl-num { padding: 2px 0; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pc-limits-rows .pcl-num:not(.pcl-after) { color: var(--muted); }
+  /* "Map after" by prefabBudget.meterLevel: below 75% blue, 75% up to the limit yellow, 100% and over red. */
+  .pc-limits-rows .pcl-after { font-weight: 600; }
+  .pc-limits-rows .pcl-after.pcl-ok { color: var(--infoText); }
+  .pc-limits-rows .pcl-after.pcl-warn { color: var(--warnText); }
+  .pc-limits-rows .pcl-after.pcl-over { color: var(--dangerText); }
+  /* The meter bar in the result's colour: the map's use now faint, then this prefab's share solid. */
+  .pcl-bar { --pclFill: var(--accent); position: relative; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .pcl-bar.pcl-warn { --pclFill: var(--warnText); }
+  .pcl-bar.pcl-over { --pclFill: var(--danger); }
+  .pcl-bar i { position: absolute; top: 0; bottom: 0; left: 0; background: var(--pclFill); }
+  .pcl-bar .pcl-bar-now { opacity: .4; }
+  .pc-limits-note { color: var(--muted); font-size: 10px; line-height: 1.4; min-height: 0; margin-top: 2px; }
   .pc-limits-note:empty { display: none; }
   .pc-limits-details summary { color: var(--muted); font-size: 10px; cursor: pointer; }
-  .pc-limits-raw { display: grid; grid-template-columns: auto 1fr; gap: 0 10px; font-size: 10px; padding: 2px 0 0 12px; }
-  .pc-limits-raw span:nth-child(2n) { font-variant-numeric: tabular-nums; }
+  .pc-limits .pc-limits-details { margin-top: 6px; }
+  .pc-limits .pc-limits-details summary:hover { color: var(--text); }
+  /* The twelve raw fields, faint, in as many columns as the pane allows. */
+  .pc-limits-raw { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 156px)); gap: 2px 20px;
+    padding: 6px 0 2px 12px; color: var(--muted); font-size: 10px; }
+  .pcl-raw-item { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+  .pcl-raw-num { font-variant-numeric: tabular-nums; }
   @media (max-height: 520px) { .pc-preview { flex-basis: 130px; } }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }

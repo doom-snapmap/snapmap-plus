@@ -16,7 +16,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
 | `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the grouped installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
-| `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule and a bounded memo. No DOM. |
+| `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
 | `src/ui/webview/webview_json.{h,cpp}` | Text encoding, JSON escaping and field access for WebView messages. |
@@ -132,6 +132,16 @@ model is drawn as a box because its model resolved to nothing or could not be
 decoded or delivered; Blocking Boxes, triggers, glyphs and decals never count.
 Models skipped by the triangle budget are reported separately.
 
+The preview carries no orbit hints; dragging orbits, the wheel zooms and a
+double-click frames the prefab. Its top-left row holds the "Blueprint prefab"
+pill (module prefabs only) and the status in one flex row, so an object
+prefab's status starts at the corner. A key button at the bottom left opens the
+legend of entity colours upwards (`pfLegendSetOpen` and `pfLegendAction` in the
+page, marked for test extraction). It is collapsed by default and stays open
+across object-prefab selections until the button, Escape with the focus on it,
+or a press elsewhere in the preview closes it. A module prefab's footprint
+hides the control.
+
 ## Prefabs Limits section
 
 The prefab card shows, under the preview, what placing the selected prefab adds
@@ -151,6 +161,19 @@ over the KB limit sum), MEMORY = max(render models, lights, world areas,
 decals), DEMONS = AI / 64 and DECALS = decals / limit; a result is red when
 NETWORK, OBJECTS or MEMORY would reach 1.0 or DEMONS would pass it. The limits
 and usage are always read live, never hard-coded.
+
+The section is one table: the "Limits" head is the first column head, beside
+"This prefab" and "Map after", then a row per meter with a thin bar (the map's
+use now faint, this prefab's share solid). `prefabBudget.meterLevel` colours
+"Map after" and the bar: below 75% (`WARN_AT`) the info colour, from 75% up to
+the limit the warning colour, at 100% (`OVER_AT`) and over the danger colour.
+Every meter the editor would report as reached is therefore red; DEMONS at
+exactly 64 of 64 is red as well, although the editor's flag waits for the 65th.
+The text uses `--infoText`, `--warnText` and `--dangerText`, the accent and
+danger colours tuned to at least 4.5:1 on `--panel` in both themes; the bars use
+`--accent`, `--warnText` and `--danger`. Tooltips give the raw counts and the
+current use. Details lists the twelve summed block fields, muted, in as many
+columns as the pane allows.
 
 ## Prefabs and their mods
 

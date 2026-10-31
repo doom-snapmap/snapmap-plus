@@ -25,11 +25,66 @@ check(html.indexOf('id="pcEntityCount"') > html.indexOf('id="pcCanvas"') &&
 check(html.includes("d.count + (d.count === 1 ? ' entity' : ' entities')"),'aggregate count uses singular/plural text');
 check(/\.pc-preview-count\s*\{[^}]*right:\s*8px;[^}]*bottom:\s*7px;/s.test(css),
       'aggregate count is bottom-right preview metadata');
-check(/\.pc-preview-help\s*\{[^}]*top:\s*7px;[^}]*right:\s*8px;/s.test(css),
-      'orbit controls replace the count at top-right');
+check(!html.includes('pc-preview-help') && !html.includes('Drag to orbit') && !css.includes('.pc-preview-help'),
+      'the preview shows no orbit hints');
+check(js.includes("canvas.addEventListener('dblclick'") && js.includes("canvas.addEventListener('pointerdown'"),
+      'orbit, zoom and frame-on-double-click still work without the hints');
+check(!css.includes('.pc-kind-pill + .pc-preview-status') &&
+      /\.pc-preview-tag\s*\{[^}]*display:\s*flex;/.test(css) &&
+      html.indexOf('<div class="pc-preview-tag">') < html.indexOf('id="pcKindPill"') &&
+      html.indexOf('id="pcKindPill"') < html.indexOf('id="pcPreviewStatus"'),
+      'the kind pill and the status share a flex row, so a hidden pill reserves no space');
 check(/\.pc-preview[^}]*background:\s*var\(--field\)/s.test(css),'viewport uses the Decl Text field background');
 check(html.includes('class="pc-preview-legend"') && html.includes('Logic / I/O') && html.includes('Triggers'),
       'viewport explains semantic scene roles');
+check(html.includes('id="pcLegendPanel" role="group" aria-label="Legend" hidden>') &&
+      html.includes('id="pcLegendBtn" aria-expanded="false" aria-controls="pcLegendPanel"') &&
+      html.includes('<use href="#icon-key"></use>') && html.includes('<symbol id="icon-key"') &&
+      html.indexOf('id="pcLegendPanel"') < html.indexOf('id="pcLegendBtn"'),
+      'the legend is a collapsed list above a key button that names it');
+check(/\.pc-legend\s*\{[^}]*left:\s*6px;[^}]*bottom:\s*6px;[^}]*flex-direction:\s*column;/.test(css) &&
+      /\.pc-preview-legend\[hidden\]\s*\{\s*display:\s*none;/.test(css),
+      'the legend opens upwards from the bottom-left corner');
+/* The legend control, lifted from the page and run against stand-in elements. */
+{
+  const b = html.indexOf('  // --- preview legend ---'), e = html.indexOf('  // --- preview legend end ---');
+  check(b > 0 && e > b, 'the legend control is marked for extraction');
+  const api = {};
+  new Function('api', html.slice(b, e).replace(/\r\n/g, '\n') +
+    '\napi.setOpen = pfLegendSetOpen; api.isOpen = pfLegendIsOpen; api.action = pfLegendAction;')(api);
+  function node(parent) {
+    const n = {parent, attrs: {}, hidden: false, title: '',
+      setAttribute(k, v) { this.attrs[k] = String(v); }, getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+      contains(o) { for (let x = o; x; x = x.parent) if (x === this) return true; return false; }};
+    return n;
+  }
+  const preview = node(null), canvas = node(preview), box = node(preview), btn = node(box), panel = node(box);
+  const icon = node(btn), item = node(panel), outside = node(null);
+  btn.setAttribute('aria-expanded', 'false'); panel.hidden = true;
+  check(!api.isOpen(btn), 'collapsed by default');
+  check(api.action({type: 'click', target: icon}, false, box, btn, preview) === 'toggle', 'a click on the key opens it');
+  api.setOpen(btn, panel, true);
+  check(api.isOpen(btn) && panel.hidden === false && btn.getAttribute('aria-expanded') === 'true' &&
+        btn.title === 'Hide the legend', 'open: the list shows and aria-expanded follows');
+  check(api.action({type: 'click', target: btn}, true, box, btn, preview) === 'toggle', 'a second click closes it');
+  check(api.action({type: 'keydown', key: 'Escape', target: btn}, true, box, btn, preview) === 'close',
+        'Escape with the focus on the key closes it');
+  check(api.action({type: 'keydown', key: 'Escape', target: outside}, true, box, btn, preview) === '',
+        'Escape elsewhere is left to the page (it clears the prefab selection)');
+  check(api.action({type: 'keydown', key: 'Enter', target: btn}, true, box, btn, preview) === '', 'other keys do nothing');
+  check(api.action({type: 'pointerdown', target: canvas}, true, box, btn, preview) === 'close',
+        'a press elsewhere in the preview closes it');
+  check(api.action({type: 'pointerdown', target: item}, true, box, btn, preview) === '' &&
+        api.action({type: 'pointerdown', target: btn}, true, box, btn, preview) === '',
+        'a press on the list or the key does not close it before its click');
+  check(api.action({type: 'pointerdown', target: canvas}, false, box, btn, preview) === '' &&
+        api.action({type: 'keydown', key: 'Escape', target: btn}, false, box, btn, preview) === '',
+        'nothing to close when it is collapsed');
+  api.setOpen(btn, panel, false);
+  check(!api.isOpen(btn) && panel.hidden === true && btn.title === 'Show the legend', 'closed again');
+}
+check(html.includes('pfLegendShow(false);') && html.includes('pfLegendShow(true);'),
+      'a module prefab footprint hides the legend control; an object prefab shows it again');
 check(/\.pc-name\s*\{\s*width:\s*100%;\s*\}/.test(css),'Name has no typography override over shared field rules');
 check(js.includes('new ResizeObserver('),'element resize is observed directly');
 check(js.includes('requestAnimationFrame('),'resize/render work is coalesced to animation frames');
