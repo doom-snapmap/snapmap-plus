@@ -560,7 +560,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var ENTITY_SELECTION_MODE_KEY = 'entities.selection_mode';
   var PREFAB_OPEN_FOLDERS_KEY = 'prefabs.open_folders';
   var TIMELINE_OPEN_FOLDERS_KEY = 'timelines.open_folders';
-  var MODS_COLLAPSED_KEY = 'mods.collapsed_groups';
   var entitySettingsPending = { showHidden:null, selectionMode:null };
   var entitySettingsHydrated = false;
   var inheritsRequested = false;
@@ -2998,8 +2997,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         receivePrefabOpenFolders(d);
       } else if (d.key === TIMELINE_OPEN_FOLDERS_KEY) {
         receiveTimelineOpenFolders(d);
-      } else if (d.key === MODS_COLLAPSED_KEY) {
-        if (d.result === 1) { try { modsUi.loadCollapsed(JSON.parse(d.valueJson)); } catch (e) {} }
       } else {
         receiveEntitySetting(d);
       }
@@ -4455,7 +4452,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       configGet(ENTITY_SELECTION_MODE_KEY);
       configGet(PREFAB_OPEN_FOLDERS_KEY);
       configGet(TIMELINE_OPEN_FOLDERS_KEY);
-      configGet(MODS_COLLAPSED_KEY);
     }
   })();
 
@@ -4634,10 +4630,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var modsUi = modsTab.create({
     document: document,
     byId: function(id){ return document.getElementById(id); },
-    post: post, toast: toast,
-    // Which origin groups are collapsed: a setting, like the Prefabs tab's open folders (session
-    // only in browser preview).
-    saveCollapsed: function(list){ if (!PREVIEW) configSet(MODS_COLLAPSED_KEY, list); }
+    // One flat list: the retired mods.collapsed_groups setting is neither read nor written.
+    post: post, toast: toast
   });
   modsUi.bind();
 

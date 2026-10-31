@@ -1,5 +1,6 @@
 /* The Mods tab (mods_tab.js): the payload model (v3, and v2 from a backend that predates it), the
-   three row states, the origin groups and their persisted collapse, the attention filter, the details
+   three row states, the flat list's order and its "In this map" pill, the retired collapsed-groups
+   setting left alone, the origin line, the attention filter, the details
    sections, the empty states, the map modal (the decl focus modal's mechanism), the dry-run-driven
    confirmations of Remove from map and Uninstall, the vanilla state, the stand-in host the browser
    preview uses, and the page and host contract around it. tests/fixtures/mods_tab_payload.json is the
@@ -81,7 +82,7 @@ function harness(opts) {
   nodes.modsMapModal.style.display = 'none';
   nodes.modsMapModal.appendChild(nodes.modsMapHost);
   const sent = [], toasts = [];
-  const saved = [];
+  const saved = [];   /* what a page that still wrote mods.collapsed_groups would have saved */
   const doc = {createElement: tag => new FakeNode(tag), createElementNS: (ns, tag) => Object.assign(new FakeNode(tag), {ns})};
   let ui = null;
   ui = modsTab.create({
@@ -94,8 +95,8 @@ function harness(opts) {
 }
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
-function groups(h) { return h.nodes.modsList.all('mods-group'); }
-function groupHead(h, id) { return h.nodes.modsList.all('mods-group-head').find(n => n.getAttribute('data-group') === id); }
+function keys(h) { return rows(h).map(n => n.getAttribute('data-key')); }
+function pills(h) { return rows(h).filter(n => n.all('mods-pill').length).map(n => n.getAttribute('data-key')); }
 function iconOf(n) { return n.all('mods-status-icon')[0].getAttribute('data-status'); }
 function section(h, name, box) { return (box || h.nodes.modsDetail).all('mods-section').find(n => n.getAttribute('data-section') === name); }
 function modalText(h) { return h.nodes.modsMapHost.textContent; }
@@ -199,20 +200,30 @@ test('three states: every backend state and cause maps onto check, triangle or i
   assert.equal(modsTab.mapModStatus({state: 'active'}).tone, 'ok');
   assert.equal(modsTab.mapModStatus({state: 'superseded'}).tone, 'info');
 });
-test('groups and origins', () => {
-  assert.equal(modsTab.groupOf({origin: ''}), 'yours');
-  assert.equal(modsTab.groupOf({origin: 'migration'}), 'yours', 'migrated overrides were the owner\'s');
-  assert.equal(modsTab.groupOf({origin: 'install'}), 'installed');
-  assert.equal(modsTab.groupOf({origin: 'download'}), 'maps');
-  assert.equal(modsTab.groupOf({origin: 'delivery'}), 'maps');
-  assert.equal(modsTab.originText({origin: ''}), 'You added this folder');
-  assert.equal(modsTab.originText({origin: 'install'}), 'Installed from a folder');
-  assert.equal(modsTab.originText({origin: 'migration', migratedFrom: 'overrides\\hell-guards'}), 'Moved from overrides\\hell-guards');
-  assert.equal(modsTab.originText({origin: 'migration', migratedFrom: ''}), 'Moved from the overrides folder');
-  assert.equal(modsTab.originText({origin: 'download'}), 'Downloaded for a map');
-  assert.equal(modsTab.originText({origin: 'delivery'}), 'Delivered by a map');
-  const g = modsTab.groupMods(modsTab.normalize(v3).mods);
-  assert.deepEqual(g.map(x => [x.label, x.mods.length]), [['Your mods', 30], ['Installed', 4], ['From maps you played', 2]]);
+test('origins: one plain line per origin', () => {
+  assert.equal(modsTab.originText({origin: ''}), 'Added by hand');
+  assert.equal(modsTab.originText({origin: 'install'}), 'Imported from an export');
+  assert.equal(modsTab.originText({origin: 'migration', migratedFrom: 'overrides\\hell-guards'}),
+    'Moved from the old overrides folder (overrides\\hell-guards)');
+  assert.equal(modsTab.originText({origin: 'migration', migratedFrom: ''}), 'Moved from the old overrides folder');
+  assert.equal(modsTab.originText({origin: 'download'}), 'Downloaded for a map you played');
+  assert.equal(modsTab.originText({origin: 'delivery'}), 'Downloaded for a map you played');
+  assert.equal(modsTab.originText({origin: 'mars'}), 'Added by hand');
+  assert.equal(modsTab.GROUPS, undefined, 'the origin groups are gone');
+  assert.equal(modsTab.groupOf, undefined);
+});
+test('the list order: display name without case, then id, then folder', () => {
+  const m = modsTab.normalize({mods: [
+    {key: 'b2', id: 'z.same', name: 'Same'}, {key: 'b1', id: 'a.same', name: 'same'}, {key: 'c', id: 'c.zeta', name: 'zeta'},
+    {key: 'a', id: 'a.alpha', name: 'Alpha'}, {key: 'n', id: 'beta.noname', name: ''}, {key: 'd2', id: 'd.dup', name: 'Dup'},
+    {key: 'd1', id: 'd.dup', name: 'Dup'}]});
+  assert.deepEqual(m.mods.map(b => b.key), ['a', 'n', 'd1', 'd2', 'b1', 'b2', 'c'],
+    'Alpha, beta.noname (its id is its name), Dup by folder, same before Same by id, zeta');
+  /* the v3 fixture: every one of the 36 folders in one sorted run */
+  const v = modsTab.normalize(v3).mods;
+  const names = v.map(b => (b.name || b.id || b.key).toLowerCase());
+  assert.deepEqual(names, names.slice().sort((x, y) => x < y ? -1 : x > y ? 1 : 0));
+  assert.equal(v.length, 36);
 });
 test('formatting: sizes, dates, the row line, the count lines', () => {
   assert.equal(modsTab.formatSize(0), '0 B');
@@ -251,19 +262,29 @@ test('show rescans once; the list waits for the answer', () => {
   assert.equal(h.sent.length, 2, 'showing the tab again rereads the folder');
   assert.equal(h.ui.onMessage({kind: 'other'}), false);
 });
-test('the list: origin groups with counts, one status icon per row, two lines per row', () => {
+test('the list: one flat list, one status icon per row, two lines per row, the In this map pill', () => {
   const h = harness();
   shown(h);
   assert.equal(h.nodes.modsBadge.textContent, '36');
-  assert.deepEqual(groups(h).map(g => g.getAttribute('aria-label')), ['Your mods', 'Installed', 'From maps you played']);
-  assert.deepEqual(h.nodes.modsList.all('pf-fcount').map(n => n.textContent), ['30', '4', '2']);
-  assert.equal(rows(h).length, 36, 'every row of an open group is mounted');
+  assert.equal(h.nodes.modsList.all('mods-group').length + h.nodes.modsList.all('mods-group-head').length +
+               h.nodes.modsList.all('pf-caret').length, 0, 'no group headers, no carets');
+  assert.ok(h.nodes.modsList.children.every(n => /mods-row/.test(n.className)), 'rows sit directly in the list');
+  assert.deepEqual(keys(h), modsTab.normalize(v3).mods.map(b => b.key), 'the model order');
+  assert.equal(rows(h).length, 36, 'every row is mounted');
   assert.ok(rows(h).every(n => n.style.top === undefined), 'rows are in flow');
   const hg = rowOf(h, 'local.hell-guard');
   assert.equal(hg.all('mods-row-name')[0].textContent, 'Hell Guards');
   assert.equal(hg.all('mods-row-sub')[0].textContent, 'local.hell-guard \u00b7 0.0.0 \u00b7 1.2 MB');
   assert.ok(!/files|installed game/.test(hg.textContent), 'the file counts left the row');
-  assert.equal(hg.all('mods-pill').length, 0, 'no pills');
+  /* the open map's mods (the document's map.mods) carry the pill, and only those */
+  const used = v3.map.mods.map(r => r.key).filter(k => v3.mods.some(b => b.key === k));
+  assert.ok(used.length >= 2 && used.indexOf('local.hell-guard') >= 0);
+  assert.deepEqual(pills(h).slice().sort(), used.slice().sort());
+  const pill = hg.all('mods-pill')[0];
+  assert.equal(pill.textContent, 'In this map');
+  assert.equal(pill.title, 'The open map uses this mod');
+  assert.equal(hg.children[hg.children.length - 1], pill, 'the pill closes the row');
+  assert.equal(rowOf(h, 'airlock').all('mods-pill').length, 0);
   assert.equal(iconOf(hg), 'ok');
   assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install');
   const icon = hg.all('mods-status-icon')[0];
@@ -274,9 +295,6 @@ test('the list: origin groups with counts, one status icon per row, two lines pe
     assert.equal(rowOf(h, key).title, 'another installed mod declares this id; change one id in its mod.json');
   }
   assert.equal(rowOf(h, 'local.cyberdemon@0.0.0').all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-triangle-alert');
-  const maps = groups(h)[2];
-  assert.deepEqual(maps.all('mods-row').map(n => n.getAttribute('data-key')), ['acceptance.mixed-rows', 'female.models']);
-  assert.ok(groups(h)[1].all('mods-row').some(n => n.getAttribute('data-key') === 'test.shader-tint'));
   /* the grey info state */
   const sup = clone(v3);
   sup.mods.find(b => b.key === 'local.cyberdemon@0.0.0').duplicateId = false;
@@ -286,42 +304,57 @@ test('the list: origin groups with counts, one status icon per row, two lines pe
   assert.equal(iconOf(grey), 'info');
   assert.equal(grey.all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-circle-info');
   assert.match(grey.title, /another build of this mod \(local\.cyberdemon@0\.0\.0-05238b2e\) serves its files/);
+  /* the pill follows the document: no map open, no pill; a map that drops a mod drops its pill */
+  const closed = clone(v3);
+  closed.map = {entities: -1, names: 0, rows: [], placed: []};
+  h.ui.onMessage({kind: 'mods', data: closed});
+  assert.deepEqual(pills(h), []);
+  const fewer = clone(v3);
+  fewer.map.mods = fewer.map.mods.filter(r => r.key === 'local.hell-guard');
+  h.ui.onMessage({kind: 'mods', data: fewer});
+  assert.deepEqual(pills(h), ['local.hell-guard']);
+  rowOf(h, 'local.hell-guard').click();
+  assert.equal(rowOf(h, 'local.hell-guard').all('mods-pill').length, 1, 'selecting keeps the pill');
 });
-test('group collapse is a saved setting and is applied when it arrives', () => {
-  assert.equal(modsTab.COLLAPSE_KEY, 'mods.collapsed_groups');
+test('the retired collapsed-groups setting is neither read nor written', () => {
   const h = harness();
   shown(h);
-  groupHead(h, 'yours').click();
-  assert.equal(groupHead(h, 'yours').getAttribute('aria-expanded'), 'false');
-  assert.equal(rows(h).length, 6, 'a collapsed group mounts no rows');
-  assert.deepEqual(h.saved.pop(), ['yours']);
-  /* keyboard: Enter and Space on the header toggle it */
-  const e = groupHead(h, 'installed').dispatch('keydown', {key: 'Enter'});
-  assert.equal(e.defaultPrevented, true);
-  assert.deepEqual(h.saved.pop(), ['installed', 'yours']);
-  groupHead(h, 'installed').dispatch('keydown', {key: ' '});
-  assert.deepEqual(h.saved.pop(), ['yours']);
-  /* a new page applies the stored value when the configuration answers; arrows skip the group */
-  const again = harness();
-  shown(again);
-  again.ui.loadCollapsed(['yours', 42, '']);
-  assert.deepEqual(again.ui.state().collapsed, ['yours']);
-  assert.equal(rows(again).length, 6);
-  again.nodes.modsList.dispatch('keydown', {key: 'Home'});
-  assert.equal(again.ui.state().selectedKey, 'p6probe');
-  /* a filter shows matches in every group without touching the saved set */
-  again.nodes.modsFilter.value = 'hell';
-  again.nodes.modsFilter.dispatch('input');
-  assert.deepEqual(rows(again).map(n => n.getAttribute('data-key')), ['local.hell-guard']);
-  groupHead(again, 'yours').click();
-  assert.equal(rows(again).length, 0, 'a header still folds while filtering');
-  assert.equal(again.saved.length, 0, 'and that fold is not saved');
-  again.nodes.modsFilter.value = 'zzz';
-  again.nodes.modsFilter.dispatch('input');
-  assert.match(again.nodes.modsList.textContent, /No installed mod matches/);
-  /* a bad stored value starts open */
-  again.ui.loadCollapsed('nope');
-  assert.deepEqual(again.ui.state().collapsed, []);
+  assert.equal(modsTab.COLLAPSE_KEY, undefined);
+  assert.equal(h.ui.loadCollapsed, undefined, 'nothing applies a stored value');
+  assert.ok(!('collapsed' in h.ui.state()));
+  /* a stored value arriving anyway is not the tab's message */
+  assert.equal(h.ui.onMessage({kind: 'configValue', key: 'mods.collapsed_groups', result: 1, valueJson: '["yours"]'}), false);
+  assert.equal(rows(h).length, 36, 'every row stays shown');
+  h.nodes.modsFilter.value = 'hell';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['local.hell-guard']);
+  h.nodes.modsFilter.value = '';
+  h.nodes.modsFilter.dispatch('input');
+  rowOf(h, 'airlock').click();
+  h.nodes.modsList.dispatch('keydown', {key: 'End'});
+  assert.equal(h.saved.length, 0, 'nothing is saved');
+  assert.ok(!h.sent.some(m => m.cmd === 'configSet' || m.cmd === 'configGet'), 'and nothing is asked of the configuration');
+});
+test('the filter matches name, id and folder over the flat list', () => {
+  const h = harness();
+  shown(h);
+  h.nodes.modsFilter.value = 'HELL GUARDS';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['local.hell-guard'], 'by name, without case');
+  h.nodes.modsFilter.value = 'mapobjects.';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['mapobjects.prop'], 'by id (its name is Props)');
+  h.nodes.modsFilter.value = '05238b2e';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['local.cyberdemon@0.0.0-05238b2e'], 'by folder');
+  h.nodes.modsFilter.value = 'cyber';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e'], 'matches keep the list order');
+  h.nodes.modsList.dispatch('keydown', {key: 'Home'});
+  assert.equal(h.ui.state().selectedKey, 'local.cyberdemon@0.0.0', 'the keys move over the rows shown');
+  h.nodes.modsFilter.value = 'zzz';
+  h.nodes.modsFilter.dispatch('input');
+  assert.match(h.nodes.modsList.textContent, /No installed mod matches/);
 });
 test('the attention badge filters to the rows that need attention', () => {
   const h = harness();
@@ -337,7 +370,6 @@ test('the attention badge filters to the rows that need attention', () => {
   assert.equal(b.getAttribute('aria-pressed'), 'true');
   assert.match(b.className, / on$/, 'the pressed state shows');
   assert.deepEqual(rows(h).map(n => n.getAttribute('data-key')), ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']);
-  assert.deepEqual(groups(h).map(g => g.getAttribute('data-group')), ['yours']);
   b.click();
   assert.equal(rows(h).length, 36);
   /* no attention: the badge hides and the filter lets go */
@@ -351,7 +383,7 @@ test('the attention badge filters to the rows that need attention', () => {
   assert.equal(h.ui.state().attentionOnly, false);
   assert.equal(rows(h).length, 35);
 });
-test('keyboard selection over the grouped list', () => {
+test('keyboard selection over the flat list', () => {
   const h = harness();
   shown(h);
   rowOf(h, 'alex.r2-imp').click();
@@ -359,14 +391,14 @@ test('keyboard selection over the grouped list', () => {
   assert.equal(rowOf(h, 'alex.r2-imp').getAttribute('aria-selected'), 'true');
   let e = h.nodes.modsList.dispatch('keydown', {key: 'ArrowDown'});
   assert.equal(e.defaultPrevented, true);
-  assert.equal(h.ui.state().selectedKey, 'spencer', 'next row in display order: R2 Imp copy, then Robots');
-  assert.ok(rowOf(h, 'spencer').scrolledIntoView > 0);
+  assert.equal(h.ui.state().selectedKey, 'rctest', 'next row in display order: R2 Imp copy, then rctest');
+  assert.ok(rowOf(h, 'rctest').scrolledIntoView > 0);
   h.nodes.modsList.dispatch('keydown', {key: 'End'});
-  assert.equal(h.ui.state().selectedKey, 'female.models');
+  assert.equal(h.ui.state().selectedKey, 'waterfalls');
   h.nodes.modsList.dispatch('keydown', {key: 'ArrowDown'});
-  assert.equal(h.ui.state().selectedKey, 'female.models');
+  assert.equal(h.ui.state().selectedKey, 'waterfalls');
   h.nodes.modsList.dispatch('keydown', {key: 'Home'});
-  assert.equal(h.ui.state().selectedKey, 'airlock');
+  assert.equal(h.ui.state().selectedKey, 'acceptance.mixed-rows');
   e = h.nodes.modsList.dispatch('keydown', {key: 'PageDown'});
   assert.equal(e.defaultPrevented, false, 'Page Down scrolls natively');
 });
@@ -401,8 +433,18 @@ test('details: every section for a v3 mod', () => {
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'files', 'requirements', 'sharing']);
   const about = section(h, 'about').textContent;
   for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Build 2', 'Description The three Hell Guard brothers',
-                   'Folder local.hell-guard', 'Origin Moved from overrides\\hell-guards'])
+                   'Folder local.hell-guard', 'Moved from the old overrides folder (overrides\\hell-guards)'])
     assert.ok(about.indexOf(s) >= 0, s + ' in ' + about);
+  assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Moved from the old overrides folder (overrides\\hell-guards)',
+    'one plain line, not a labelled field');
+  assert.ok(!/Origin/.test(about));
+  rowOf(h, 'p6probe').click();
+  assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Imported from an export');
+  rowOf(h, 'female.models').click();
+  assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Downloaded for a map you played');
+  rowOf(h, 'alex.r2-imp').click();
+  assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Added by hand');
+  rowOf(h, 'local.hell-guard').click();
   assert.ok(!/Author/.test(about), 'an empty author is left out');
   const adds = section(h, 'adds').textContent;
   assert.match(adds, /3 Toybox rows Hell Guard \(hammer\) Hell Guard \(shield\) Hell Guard \(fist\)/);
@@ -470,7 +512,7 @@ test('details: a v2 document renders with the v3 parts left out', () => {
   rowOf(h, 'alex.r2-imp@1.0.0+2').click();
   const d = h.nodes.modsDetail;
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'files', 'requirements']);
-  assert.match(section(h, 'about').textContent, /Origin You added this folder/);
+  assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Added by hand');
   assert.match(section(h, 'adds').textContent, /^What it adds 2 Toybox rows$/);
   assert.equal(section(h, 'files').tags('details').length, 0, 'no carried list without carriedPaths');
   assert.match(section(h, 'files').textContent, /Carried 13 files, 1\.8 MB/);
@@ -480,8 +522,8 @@ test('details: a v2 document renders with the v3 parts left out', () => {
   assert.match(section(h, 'about').textContent, /Id \(not built yet\)/);
   assert.match(section(h, 'adds').textContent, /Adds no Toybox rows/);
   assert.equal(rowOf(h, 'unbuilt-folder').all('mods-row-sub')[0].textContent, 'unbuilt-folder');
-  /* v2 has no origins: everything is Your mods */
-  assert.deepEqual(groups(h).map(g => g.getAttribute('data-group')), ['yours']);
+  /* v2 has no origins and no map mods: every row is a plain row without a pill */
+  assert.deepEqual(pills(h), []);
   assert.equal(h.nodes.modsAttnBtn.textContent, '4');
 });
 test('empty states: How mods work, with and without mods', () => {
@@ -817,11 +859,11 @@ test('page contract', () => {
   assert.deepEqual(JSON.parse(m[1]), v3, 'PREVIEW_MODS is the v3 fixture');
   assert.match(html, /var previewMods = modsTab\.standIn\(PREVIEW_MODS\);/);
   assert.match(html, /if \(o\.cmd === 'modsAction'\) \{[\s\S]*?previewMods\(o\)\.forEach\(onMessage\);/);
-  /* the collapsed groups are a configuration setting, never browser storage */
-  assert.match(html, /var MODS_COLLAPSED_KEY = 'mods\.collapsed_groups';/);
-  assert.match(html, /configGet\(MODS_COLLAPSED_KEY\);/);
-  assert.match(html, /saveCollapsed: function\(list\)\{ if \(!PREVIEW\) configSet\(MODS_COLLAPSED_KEY, list\); \}/);
-  assert.match(html, /\} else if \(d\.key === MODS_COLLAPSED_KEY\) \{\n        if \(d\.result === 1\) \{ try \{ modsUi\.loadCollapsed\(JSON\.parse\(d\.valueJson\)\); \} catch \(e\) \{\} \}/);
+  /* the retired collapsed-groups setting: the page neither asks for it nor saves it */
+  assert.ok(!/MODS_COLLAPSED_KEY|saveCollapsed|loadCollapsed/.test(html));
+  assert.ok(!/mods\.collapsed_groups'/.test(html), 'no request names the key');
+  assert.ok(!/\.mods-group/.test(css), 'the group styles are gone');
+  assert.match(css, /\.mods-pill \{/);
   assert.equal(html.split('localStorage').length - 1, 2, 'browser storage stays the preview theme only');
   assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
   assert.ok(!/innerHTML/.test(source), 'all text goes through textContent');
@@ -832,7 +874,7 @@ test('page contract', () => {
   assert.match(css, /\.mods-toolbar\.panel-toolbar \{ flex-direction: row; align-items: center; \}/);
   assert.match(css, /\.mods-toolbar input\[type=text\] \{ flex: 1 1 auto; width: auto; min-width: 0; \}/);
   assert.match(css, /\.btn\.danger-solid \{ background: var\(--danger\);/);
-  assert.ok(!/mods-sizer|mods-shadow|mods-pill/.test(css), 'the windowed list, the shadow list and the pills are gone');
+  assert.ok(!/mods-sizer|mods-shadow/.test(css), 'the windowed list and the shadow list are gone');
   /* the payload spec */
   for (const k of ['"description"', '"origin"', '"migratedFrom"', '"servedBy"', '"builtAt"', '"bundle"', '"counts"', '"requirements"',
                    '"editorRowNames"', '"carriedPaths"', '"publishedMaps"', '"placedEntities"', '"references"', '"vanilla"',

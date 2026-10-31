@@ -15,7 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
-| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the grouped installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
+| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the flat installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
 | `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
@@ -306,14 +306,15 @@ read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods
 **List pane.** The panel head carries the mod count and, when any mod needs attention, a yellow
 badge button with that number; pressing it (`aria-pressed`) shows only those rows. One toolbar row
 holds the filter, refresh, Open mods folder, Migrate (only while `migrate.pending > 0`) and install.
-Rows are grouped under collapsible headers (the prefab tree's folder head and caret) by origin:
-Your mods (no origin, or `migration`: those were the owner's overrides), Installed (`install`) and
-From maps you played (`download`, `delivery`). The collapsed groups are the setting
-`mods.collapsed_groups`, a list of group ids (`yours`, `installed`, `maps`) saved through the
-configuration service like `prefabs.open_folders` (`config.c`: `SH_JSON_ARRAY`, `"[]"`, UI read and
-write). Browser preview never saves it. A filter or the attention badge shows matches in every group;
-a header folded while filtering is not saved. Each
-row is a status icon, the name, and `id · version · size`. The three icons cover every backend
+The rows are one flat list sorted by display name (the name, else the id, else the folder) without
+case, then by id, then by folder; there are no groups, headers or carets. The filter matches name,
+id and folder, and it and the attention badge keep that order. The collapsed-groups setting of
+earlier builds, `mods.collapsed_groups`, is neither read nor written by the page: a value already in
+`config.json` stays there unused (`config.c` still knows the key). Each
+row is a status icon, the name, and `id · version · size`, and, when the open map uses the mod, an
+"In this map" pill (hover: "The open map uses this mod") at its right end: the row's `key` is the
+`key` of an entry of the document's `map.mods`, read only while a map is open, so the pill costs no
+read of its own and follows each fresh document. The three icons cover every backend
 state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`; the hover
 title is the cause) and a grey info dot (`installed` with `servedBy` set). The list is a plain list
 scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
@@ -322,7 +323,11 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+) and Sharing. About carries an Applies line when the
+the note that every player needs Snapmap+) and Sharing. About carries, after Folder, one plain line
+about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
+overrides folder" (`migration`, followed by `migratedFrom` in parentheses when the document names
+it), "Imported from an export" (`install`) and "Downloaded for a map you played" (`download`,
+`delivery`). About carries an Applies line when the
 backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
 requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
 nothing for a mod that only adds new names. The head actions are Use in this map, Verify, Rebuild
