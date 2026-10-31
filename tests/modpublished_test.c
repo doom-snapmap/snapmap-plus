@@ -533,6 +533,25 @@ static void second_load_abandons(void)
     CHECK(F.fetch_cancelled == 1 && F.resumes == 0 && F.activations == 0);
     tick(2);   /* the retired job is freed once the worker returned */
     CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
+
+    printf("-- the same map launched again mid-fetch is held with the first; the download goes on\n");
+    reset();
+    F.fetch_gate = CreateEventA(NULL, TRUE, FALSE, NULL);
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    tick(1);
+    CHECK(sh_modpub_test_state() == 3);
+    for (int i = 0; i < 200 && !F.fetch_calls; i++) Sleep(1);
+    parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, (void *)0x7200);   /* Play pressed again */
+    CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 3);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, (void *)0x7200, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding() && F.asks == 1 && F.hold_ui == 1);
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    CHECK(F.fetch_cancelled == 0 && F.fetch_calls == 1 && F.resumes == 1 && F.installed_a);
+    CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
 }
 
 static void joiner_host_mismatch_drops(void)

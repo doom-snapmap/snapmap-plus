@@ -117,6 +117,7 @@ typedef struct pub_record {
     char *text;               /* only when missing > 0 */
     size_t length;
     unsigned long sequence;
+    int repeat;               /* the held map parsed again: this launch is held with the running hold */
 } pub_record;
 
 static pub_record g_record;
@@ -462,6 +463,22 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return;
     if (!pub_on_main()) { g_record.valid = 0; return; }
     pub_record_clear(&g_record);
+    /* The same map launched again while its hold asks or downloads (the
+     * player pressed Play once more, or the browser re-issued the request):
+     * the hold goes on, and this launch is held with it rather than starting
+     * the download over. Another map abandons the hold. */
+    if (g_hold.state != HOLD_IDLE && text && g_hold.text && !pub_is_local(g_hold.hook) &&
+        g_hold.length == strlen(text) && !memcmp(g_hold.text, text, g_hold.length)) {
+        g_record.repeat = 1;
+        g_record.kind = kind;
+        g_record.parsed = parsed;
+        g_record.map = out_map;
+        g_record.sequence = sequence;
+        g_record.valid = 1;
+        pub_logf("MODS: '%s' was launched again while its mods %s; that launch is held with the first",
+                 g_hold.id[0] ? g_hold.id : "the held map", g_hold.state == HOLD_FETCHING ? "download" : "are offered");
+        return;
+    }
     if (g_hold.state != HOLD_IDLE) pub_abandon("another map load started");
     memset(&rows, 0, sizeof rows);
     g_record.kind = kind;
@@ -587,6 +604,12 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
             pub_logf("MODS: %s received map %p, not the last parsed %p; not gated", pub_hook_name(hook),
                      map, record->map);
         return 1;
+    }
+    if (record->repeat) {
+        /* Held with the running hold of the same map (parse_seen above). */
+        int held = g_hold.state != HOLD_IDLE;
+        pub_record_clear(record);
+        return held ? 0 : 1;
     }
     if (pub_is_completion(hook) && g_ops.metadata_ids)
         (void)g_ops.metadata_ids(g_ops.context, metadata, item, sizeof item, rev, sizeof rev);
