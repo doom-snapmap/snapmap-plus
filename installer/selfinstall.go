@@ -63,18 +63,32 @@ func selfInstall(force bool) error {
 	return nil
 }
 
-// cleanupAppData removes metadata and unchanged, recorded executable copies.
-// Unrecorded files, the running image and player content remain untouched.
+// cleanupAppData removes the installer's bookkeeping and the unchanged executables it placed, except
+// the running image, which stays recorded in an install.json that holds nothing else. Unrecorded files
+// and the player's content remain untouched.
 func cleanupAppData() {
 	dir := appDataDir()
 	if dir == "" {
 		return
 	}
-	os.Remove(filepath.Join(dir, "install.json"))
 	os.Remove(filepath.Join(dir, "token"))
 	exe, _ := executablePath()
 	cleanupOwnedExecutables(dir, exe)
-	pruneCopyVersions(dir)
+	if rec, err := loadStateAt(dir); err == nil {
+		rest := &installRecord{Executables: rec.Executables}
+		if rec.SelfUpdate != nil && len(rec.SelfUpdate.SetAside) > 0 {
+			rest.SelfUpdate = &selfUpdateState{SetAside: rec.SelfUpdate.SetAside}
+		}
+		if len(rest.Executables) == 0 && rest.SelfUpdate == nil {
+			os.Remove(statePath(dir))
+		} else {
+			saveStateAt(dir, rest)
+		}
+	}
+	for _, name := range []string{retiredExecutableRecord, retiredVersionsRecord} {
+		os.Remove(filepath.Join(dir, name))
+	}
+	tidyInstallerCache()
 	// Remove only empty content folders, then the parent if empty.
 	for _, sub := range userContentSubdirs {
 		removeIfEmpty(filepath.Join(dir, sub))

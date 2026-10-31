@@ -47,6 +47,7 @@ func selfUpdate(f flags, token string) {
 		ui.Warn("couldn't check for a snapmap-plus.exe update: %v", err)
 		return
 	}
+	noteReleaseChecked(rel.TagName)
 	if !shouldSelfUpdate(version, rel.TagName) {
 		return // already current, or a dev build
 	}
@@ -98,6 +99,9 @@ func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 		ui.Warn("couldn't replace snapmap-plus.exe (%v) -- you can grab the new snapmap-plus.exe from the release if needed", err)
 		return exe, false
 	}
+	if sum, err := fileSHA256(exe); err == nil {
+		notePlacedInstaller(rel.TagName, sum)
+	}
 	// Keep the stable %LOCALAPPDATA% copy current too, if we're running from somewhere else.
 	if dir := appDataDir(); dir != "" {
 		if filepath.Clean(filepath.Dir(exe)) == filepath.Clean(dir) {
@@ -117,14 +121,19 @@ func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 type replaceExeOps struct {
 	copyFile func(string, string) error
 	rename   func(string, string) error
+	remove   func(string) error
 }
 
-// Stage complete bytes before renaming the current image. A failed rollback
-// reports the old image's recovery path and never removes that image.
+// Stage complete bytes before moving the current image aside. A failed rollback reports the old
+// image's recovery path and never removes that image.
 func replaceExe(path, newExe string) error {
-	return replaceExeWithOps(path, newExe, replaceExeOps{copyFile, os.Rename})
+	return replaceExeWithOps(path, newExe, replaceExeOps{copyFile, os.Rename, os.Remove})
 }
 
+// replaceExeWithOps moves the current image into the data folder's cache\installer (beside it when
+// that is not possible), puts the new bytes in its place, and removes the replaced image at once. A
+// replaced image that is still running cannot be removed: it is recorded in install.json and removed
+// at the next start.
 func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 	staged, err := os.CreateTemp(filepath.Dir(path), ".snapmap-plus-update-*")
 	if err != nil {
@@ -141,20 +150,15 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 	if !identicalFiles(newExe, stagedPath) {
 		return fmt.Errorf("staged executable does not match the download")
 	}
-	removeOldLeftovers(path)
-	for i := 0; i < 10; i++ {
-		old := path + ".old"
-		if i > 0 {
-			old = fmt.Sprintf("%s.old%d", path, i+1)
-		}
+	sum, _ := fileSHA256(path)
+	defer tidyInstallerCache()
+	err = fmt.Errorf("no free name")
+	for _, old := range asideCandidates(path) {
 		if _, statErr := os.Lstat(old); !os.IsNotExist(statErr) {
 			continue // Existing recovery copies are never overwritten.
 		}
-		if err := forgetUpdateBackup(path, old); err != nil {
-			return fmt.Errorf("prepare executable recovery record: %w", err)
-		}
 		if err = ops.rename(path, old); err != nil {
-			continue // this aside name is held by a still-running image -- try the next one
+			continue // another volume, or a name held by a still-running image -- try the next one
 		}
 		if installErr := ops.rename(stagedPath, path); installErr != nil {
 			if rollbackErr := ops.rename(old, path); rollbackErr != nil {
@@ -162,17 +166,12 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 			}
 			return fmt.Errorf("install new executable (original restored): %w", installErr)
 		}
-		if err := recordUpdateBackup(path, old); err != nil {
-			ui.Warn("kept the prior installer at %s; could not record cleanup ownership: %v", old, err)
+		if ops.remove(old) != nil {
+			if recErr := recordSetAside(old, sum, path); recErr != nil {
+				ui.Warn("kept the prior installer at %s; could not record it for removal: %v", old, recErr)
+			}
 		}
 		return nil
 	}
 	return fmt.Errorf("could not reserve an executable backup path: %v", err)
-}
-
-// Clean recorded backups after a successful update. Locked images remain.
-func cleanupSelfUpdateLeftovers() {
-	if exe, err := executablePath(); err == nil {
-		removeOldLeftovers(exe)
-	}
 }

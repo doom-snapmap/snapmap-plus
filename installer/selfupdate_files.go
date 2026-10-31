@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,69 +8,13 @@ import (
 	"strings"
 )
 
-type updateRecord struct {
-	Current string            `json:"current_sha256"`
-	Backups map[string]string `json:"backups"`
-}
-
-func loadUpdateRecord(exe string) (*updateRecord, error) {
-	rec := &updateRecord{Backups: map[string]string{}}
-	data, err := os.ReadFile(exe + ".updates.json")
-	if os.IsNotExist(err) {
-		return rec, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, rec); err != nil {
-		return nil, err
-	}
-	if decoded, err := hex.DecodeString(rec.Current); err != nil || len(decoded) != 32 {
-		return nil, fmt.Errorf("unrecognized executable update record")
-	}
-	if rec.Backups == nil {
-		rec.Backups = map[string]string{}
-	}
-	return rec, nil
-}
-
-// Clear a stale claim before reusing its name, including when publication fails.
-func forgetUpdateBackup(exe, backup string) error {
-	rec, err := loadUpdateRecord(exe)
-	if err != nil {
-		return err
-	}
-	name := filepath.Base(backup)
-	if _, exists := rec.Backups[name]; !exists {
-		return nil
-	}
-	delete(rec.Backups, name)
-	return saveJSONFile(exe+".updates.json", rec)
-}
-
-// Only a completed replacement makes a backup eligible for later cleanup.
-func recordUpdateBackup(exe, backup string) error {
-	rec, err := loadUpdateRecord(exe)
-	if err != nil {
-		return err
-	}
-	rec.Current, err = fileSHA256(exe)
-	if err != nil {
-		return err
-	}
-	digest, err := fileSHA256(backup)
-	if err != nil {
-		return err
-	}
-	rec.Backups[filepath.Base(backup)] = digest
-	return saveJSONFile(exe+".updates.json", rec)
-}
-
+// updateBackupName reports whether name is one of the <exe>.old, <exe>.old2 ... <exe>.old10 names a
+// replaced image is moved to.
 func updateBackupName(exe, name string) bool {
 	if filepath.Base(name) != name {
 		return false
 	}
-	suffix, matches := strings.CutPrefix(name, filepath.Base(exe)+".old")
+	suffix, matches := strings.CutPrefix(strings.ToLower(name), strings.ToLower(filepath.Base(exe))+".old")
 	if !matches {
 		return false
 	}
@@ -80,23 +22,25 @@ func updateBackupName(exe, name string) bool {
 	return suffix == "" || (err == nil && n >= 2 && n <= 10 && strconv.Itoa(n) == suffix)
 }
 
-func removeOldLeftovers(exe string) {
-	rec, err := loadUpdateRecord(exe)
-	if err != nil || !ownsExecutable(exe, rec.Current) {
-		return // A missing or changed current image may still need its recovery copies.
-	}
-	for name, digest := range rec.Backups {
-		path := filepath.Join(filepath.Dir(exe), name)
-		if !updateBackupName(exe, name) || !ownsExecutable(path, digest) {
-			continue
+// asideCandidates lists, in order, where a replaced image of exe may be moved: the data folder's
+// cache\installer when there is one (a rename, so only on exe's volume), then beside exe.
+func asideCandidates(exe string) []string {
+	var out []string
+	names := func(dir string) {
+		for i := 1; i <= 10; i++ {
+			n := filepath.Base(exe) + ".old"
+			if i > 1 {
+				n = fmt.Sprintf("%s%d", n, i)
+			}
+			out = append(out, filepath.Join(dir, n))
 		}
-		if os.Remove(path) == nil {
-			delete(rec.Backups, name)
+	}
+	if dir := appDataDir(); dir != "" {
+		cache := installerCacheDir(dir)
+		if os.MkdirAll(cache, 0o755) == nil {
+			names(cache)
 		}
 	}
-	if len(rec.Backups) == 0 {
-		os.Remove(exe + ".updates.json")
-	} else {
-		saveJSONFile(exe+".updates.json", rec)
-	}
+	names(filepath.Dir(exe))
+	return out
 }

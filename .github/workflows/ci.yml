@@ -114,10 +114,14 @@ jobs:
           # Require both DLLs and reject accidental Qt dependencies.
           $ErrorActionPreference = 'Stop'
           $dist = "dist"
-          # CI packages without the 2018 release's files, so its frontend path is the 2024 one.
+          # The bundle carries the April 2024 pair only; the 2018 release's pair is never packaged.
           $must = @("XINPUT1_4.dll", "snapmap-plus\snapmap-plus-ui-13954591.dll", "MANIFEST.sha256", "snapmap-plus-store.exe", "TOOLS.sha256")
           foreach ($f in $must) {
             if (-not (Test-Path (Join-Path $dist $f))) { throw "bundle guard: missing $f in dist\" }
+          }
+          $mustNot = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")
+          foreach ($f in $mustNot) {
+            if (Test-Path (Join-Path $dist $f)) { throw "bundle guard: dist\$f is the 2018 release's file and must not be packaged" }
           }
           if (Test-Path (Join-Path $dist "platforms")) {
             throw "bundle guard: dist\platforms\ must not exist -- the bundle ships no Qt platform plugin"

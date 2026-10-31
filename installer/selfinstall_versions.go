@@ -1,33 +1,14 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-// installer-versions.json records which release each stable installer copy in app data is, keyed by
-// its file name and tied to its SHA-256, so an older downloaded installer does not replace a newer
-// stable copy. installer-files.json keeps its earlier format, which older installers also read.
-const executableVersionsName = "installer-versions.json"
-
-type copyVersion struct {
-	SHA256  string `json:"sha256"`
-	Version string `json:"version"`
-}
-
-func loadCopyVersions(dir string) map[string]copyVersion {
-	m := map[string]copyVersion{}
-	if data, err := os.ReadFile(filepath.Join(dir, executableVersionsName)); err == nil {
-		if json.Unmarshal(data, &m) != nil || m == nil {
-			m = map[string]copyVersion{}
-		}
-	}
-	return m
-}
+// install.json records which release each stable installer copy in the data folder is, tied to its
+// SHA-256, so an older downloaded installer does not replace a newer stable copy.
 
 // noteCopyVersion records that the executable at path is release ver.
 func noteCopyVersion(path, ver string) {
@@ -35,35 +16,30 @@ func noteCopyVersion(path, ver string) {
 	if err != nil || ver == "" {
 		return
 	}
-	dir := filepath.Dir(path)
-	m := loadCopyVersions(dir)
-	m[filepath.Base(path)] = copyVersion{SHA256: sum, Version: ver}
-	saveJSONFile(filepath.Join(dir, executableVersionsName), m)
+	name := filepath.Base(path)
+	updateStateAt(filepath.Dir(path), func(r *installRecord) {
+		if r.Executables == nil {
+			r.Executables = map[string]exeEntry{}
+		}
+		r.Executables[name] = exeEntry{SHA256: sum, Version: ver}
+	})
 }
 
 // copyVersionOf returns the recorded release of the executable at path, or "" when it is unrecorded
 // or its bytes changed since.
 func copyVersionOf(path string) string {
-	e, ok := loadCopyVersions(filepath.Dir(path))[filepath.Base(path)]
+	rec, err := loadStateAt(filepath.Dir(path))
+	if err != nil {
+		return ""
+	}
+	e, ok := rec.Executables[filepath.Base(path)]
 	if !ok || !ownsExecutable(path, e.SHA256) {
+		if v, ok := readRetiredVersions(filepath.Dir(path))[filepath.Base(path)]; ok && ownsExecutable(path, v.SHA256) {
+			return v.Version
+		}
 		return ""
 	}
 	return e.Version
-}
-
-// pruneCopyVersions drops entries whose executable is gone or changed, and the file when empty.
-func pruneCopyVersions(dir string) {
-	m := loadCopyVersions(dir)
-	for name, e := range m {
-		if !executableName(name) || !ownsExecutable(filepath.Join(dir, name), e.SHA256) {
-			delete(m, name)
-		}
-	}
-	if len(m) == 0 {
-		os.Remove(filepath.Join(dir, executableVersionsName))
-		return
-	}
-	saveJSONFile(filepath.Join(dir, executableVersionsName), m)
 }
 
 var releaseVersionRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$`)

@@ -1,8 +1,8 @@
 # Packaging — the deployable bundle
 
 `package.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by `build.ps1`),
-laid out exactly as they drop into a DOOM install, and for a release the final 2018 release's two files,
-with the store migration tool `snapmap-plus-store.exe` beside them.
+laid out exactly as they drop into a DOOM install, with the store migration tool `snapmap-plus-store.exe`
+beside them.
 This is the artifact an end user installs; `dist/` is gitignored (binaries are never committed).
 
 ## The bundle
@@ -11,25 +11,18 @@ This is the artifact an end user installs; `dist/` is gitignored (binaries are n
 |---|---|---|
 | `XINPUT1_4.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield + the SnapStack subsystem (all merged in) |
 | `snapmap-plus\snapmap-plus-ui-13954591.dll` | `build/webview/snapmap-plus-ui.dll` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL. The path names the supported build; it is `SH_UI_DLL_PATH` in `src/backend/ui_bridge.h` |
-| `XINPUT1_3.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's backend, byte for byte |
-| `snapmap-plus\snapmap-plus-ui.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's frontend, byte for byte |
 | `snapmap-plus-store.exe` | `build/` | the store migration tool (`src/store/`): not installed into DOOM; the installer keeps it beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus` and runs it (see [Mods](#mods)) |
 
-**Why a release carries the 2018 files.** Installers up to and including v0.2.1-beta.19 have no build
-detection: their `update` installs every file the newest bundle's `MANIFEST.sha256` lists, overwrites
-files in place, removes only files their previous install recorded and the new manifest drops, and then
-updates the installer itself. With the 2018 files in every bundle, such an update on the 2018 build
-leaves `XINPUT1_3.dll` and its frontend byte-identical and adds two inert files; on the April 2024
-build it installs a working Snapmap+ beside two inert ones. Either way the installer updates itself to
-one that detects the build, and its next `update` leaves a clean install: on the 2018 build it runs
-v0.2.1-beta.19's own installer, which removes the recorded 2024 files; on the April 2024 build it
-installs only the first two files and removes the 2018 ones (recorded ones, and unrecorded ones whose
-bytes are this bundle's). The other build's files are inert because each build's executables import
-only their own XInput name (2018: `XINPUT1_3.dll`, April 2024: `XINPUT1_4.dll`), the game's only
-dynamic XInput load first takes whichever XInput module is already loaded, and each backend loads only
-its own frontend path. `release.yml` downloads v0.2.1-beta.19's `snapmap-plus-bundle.zip` by tag, and
-`package.ps1 -LegacyBundle` checks it against the digest GitHub publishes and its own manifest before
-adding the two files. CI packages without them.
+**The bundle carries the April 2024 pair only.** The bundles of earlier releases from v0.2.1-beta.20 on also carried
+v0.2.1-beta.19's `XINPUT1_3.dll` and `snapmap-plus\snapmap-plus-ui.dll`, so that an update by an installer
+without build detection would leave a 2018 install's files in place; that left the other build's files in
+every April 2024 folder. `package.ps1` no longer packages them, and `ci.yml` and `release.yml` refuse a
+`dist/` that holds either. The installer installs only the pair for the detected build from any bundle,
+the bundle of an earlier release included, so an old bundle cannot put them back, and it removes the
+other build's pair wherever it finds it (see [The installed file contract](#the-installed-file-contract)).
+An installer of v0.2.1-beta.19 or earlier that updates a 2018 install from a current bundle removes its
+own two files, as they are no longer listed, and then updates itself; the next `update` runs
+v0.2.1-beta.19's own installer, which restores them.
 
 Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify) and `TOOLS.sha256`. The
 manifest lists only what goes into DOOM, because every installer, the earliest included, installs each
@@ -52,11 +45,24 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
     └── snapmap-plus-ui-13954591.dll
 ```
 
-`dist/` mirrors this tree (a release's `dist/` also holds the two 2018 files, which the installer
-does not install on the April 2024 build, and every `dist/` holds `snapmap-plus-store.exe` and
-`TOOLS.sha256`, which never go into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
+`dist/` mirrors this tree (it also holds `snapmap-plus-store.exe` and `TOOLS.sha256`, which never go
+into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
 root. The Snapmap+ window opens in the SnapMap editor (run `sh` in the console if it doesn't
 auto-open).
+
+## The installed file contract
+
+After any install, update or migration the DOOM folder holds exactly the pair for its build and nothing
+else of Snapmap+'s: `XINPUT1_4.dll` and `snapmap-plus\snapmap-plus-ui-13954591.dll` on the April 2024
+build, `XINPUT1_3.dll` and `snapmap-plus\snapmap-plus-ui.dll` on the 2018 build. The installer removes the
+other build's pair, files earlier releases placed, and the `.snapmap-plus-bak` copies earlier installers
+kept of our own DLLs; it leaves files that are not ours and lists them. It never backs up a file of ours:
+neither XInput name exists in vanilla DOOM, so uninstall restores vanilla by deleting the pair. A file that
+is not ours and is replaced is kept in `%LOCALAPPDATA%\snapmap-plus\cache\installer\backup\`, never in
+DOOM, and uninstall puts it back. The data folder holds `snapmap-plus.exe`, `snapmap-plus-store.exe`,
+`install.json` (the installer's only record) and the player's data. [installer/README.md](../installer/README.md#layout-contract)
+gives the rule for what is ours, the `install.json` schema and each migration path, and its simulation
+harness (`installer/sim/run.ps1`) checks the contract on every path.
 
 ## The runtime dependency: WebView2
 
@@ -81,22 +87,24 @@ The bundle ships no player content. At startup the backend creates `%LOCALAPPDAT
 with its `strings\` and `prefabs\` folders, and nothing else. Snapmap+'s small built-in default
 declarations are served from memory by the backend DLL. The companion window keeps its WebView2
 profile in `cache\webview2\`, regenerable data the installer never backs up or copies (an older
-top-level `webview2\` folder is renamed into `cache\` at the window's first start).
+top-level `webview2\` folder is renamed into `cache\` at the window's first start). The installer keeps
+its own `cache\installer\` beside it, for replaced installer images and backups of files that were not
+ours.
 
 ### Mods
 
 The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. DOOM converts
 nothing at startup. On install and update, after the DLLs are in place, the installer checks the bundle's
 `snapmap-plus-store.exe` against `TOOLS.sha256`, keeps it beside `snapmap-plus.exe` (recorded in
-`installer-files.json` like the installer's own copies, so uninstall removes it by the same rule) and runs
+`install.json` like the installer's own copy, so uninstall removes it by the same rule) and runs
 `snapmap-plus-store check` on `%LOCALAPPDATA%\snapmap-plus`; when that finds work it runs
 `snapmap-plus-store migrate <folder> --doom <the DOOM folder it installed into>`. The tool converts a
 `mods\` folder of earlier releases in place to one folder per mod with a `mod.json`, sends the retired
 `removed-mods\` to the Windows Recycle Bin, and moves the packages in the retired `overrides\` folder
 into `mods\` once, changing nothing in `overrides\` and removing only an empty `override-backups\`;
 everything it deletes goes to the Recycle Bin. No `package-cache` or `package-staging` folder is
-created, and the installer itself never creates, changes or removes `mods\` or the retired package
-folders. A missing or failing tool is a warning, never a failed install. See
+created, and apart from removing an empty `override-backups\`, `package-cache\` or `package-staging\`
+the installer itself never creates, changes or removes `mods\` or the retired package folders. A missing or failing tool is a warning, never a failed install. See
 [Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the

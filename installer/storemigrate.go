@@ -21,8 +21,9 @@ const (
 	storeToolManifest = "TOOLS.sha256"
 )
 
-// storeToolOut receives the tool's lines, indented (tests replace it).
-var storeToolOut io.Writer = os.Stdout
+// storeToolOut receives the tool's lines, indented; nil prints them through the output layer, under
+// the current section (tests replace it).
+var storeToolOut io.Writer
 
 // migrateStore places the bundle's store tool in the app-data folder and runs it on that folder:
 // check, then, when check finds work, migrate with the DOOM folder this install went into. It never
@@ -32,9 +33,10 @@ func migrateStore(bundleRoot, doom string) {
 	if dir == "" {
 		return
 	}
+	ui.LazySection("Converting mods")
 	tool, note := placeStoreTool(bundleRoot, dir)
 	if note != "" {
-		fmt.Println("Warning: " + note)
+		ui.Warn("%s", note)
 	}
 	if tool == "" {
 		return
@@ -43,24 +45,24 @@ func migrateStore(bundleRoot, doom string) {
 	code, err := runStoreTool(tool, "check", dir)
 	switch {
 	case err != nil:
-		fmt.Printf("Warning: %s could not be run (%v), so your mods folder was not checked for files of earlier releases. "+
-			"To do it by hand, close DOOM and run:\n  %s\n", storeToolName, err, rerun)
+		ui.Warn("%s could not be run (%v), so your mods folder was not checked for files of earlier releases. "+
+			"To do it by hand, close DOOM and run:\n  %s", storeToolName, err, rerun)
 		return
 	case code == 0:
 		return
 	case code != 1:
-		fmt.Printf("Warning: %s could not check your mods folder (exit code %d). To try again, close DOOM and run:\n  %s\n",
+		ui.Warn("%s could not check your mods folder (exit code %d). To try again, close DOOM and run:\n  %s",
 			storeToolName, code, rerun)
 		return
 	}
 	code, err = runStoreTool(tool, "migrate", dir, "--doom", doom)
 	switch {
 	case err != nil:
-		fmt.Printf("Warning: %s could not be run (%v), so your mods folder was not migrated. To do it by hand, close DOOM "+
-			"and run:\n  %s\n", storeToolName, err, rerun)
+		ui.Warn("%s could not be run (%v), so your mods folder was not migrated. To do it by hand, close DOOM "+
+			"and run:\n  %s", storeToolName, err, rerun)
 	case code != 0:
-		fmt.Printf("Warning: %s did not finish migrating your mods folder (exit code %d); Snapmap+ itself is installed. "+
-			"To finish, close DOOM and run:\n  %s\n", storeToolName, code, rerun)
+		ui.Warn("%s did not finish migrating your mods folder (exit code %d); Snapmap+ itself is installed. "+
+			"To finish, close DOOM and run:\n  %s", storeToolName, code, rerun)
 	}
 }
 
@@ -122,7 +124,12 @@ func runStoreTool(tool string, args ...string) (int, error) {
 		sc := bufio.NewScanner(pr)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
-			fmt.Fprintln(storeToolOut, "  "+strings.TrimRight(sc.Text(), "\r"))
+			line := "  " + strings.TrimRight(sc.Text(), "\r")
+			if storeToolOut != nil {
+				fmt.Fprintln(storeToolOut, line)
+			} else {
+				ui.Line(line)
+			}
 		}
 		io.Copy(io.Discard, pr)
 		close(done)

@@ -1,66 +1,61 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const executableRecordName = "installer-files.json"
+// The executables this installer places in the data folder (snapmap-plus.exe, snapmap-plus-store.exe)
+// are recorded in install.json by name with their SHA-256, so uninstall never deletes, and an update
+// never overwrites, a file the player put at the same name.
 
-// The digest prevents uninstall from deleting a user's replacement at the same name.
+// executableRecord maps an executable's file name to the SHA-256 of the bytes this installer placed.
 type executableRecord map[string]string
 
 func executableName(name string) bool {
 	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, `:/\`) && strings.EqualFold(filepath.Ext(name), ".exe")
 }
 
+// loadExecutableRecord reads dir's recorded executables, including any still listed in the retired
+// installer-files.json.
 func loadExecutableRecord(dir string) (executableRecord, error) {
-	data, err := os.ReadFile(filepath.Join(dir, executableRecordName))
-	if os.IsNotExist(err) {
-		return executableRecord{}, nil
-	}
+	rec, err := loadStateAt(dir)
 	if err != nil {
 		return nil, err
 	}
-	var rec executableRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
+	out := executableRecord{}
+	for name, sum := range readRetiredExecutables(dir) {
+		out[name] = sum
 	}
-	if rec == nil {
-		rec = executableRecord{}
+	for name, e := range rec.Executables {
+		out[name] = e.SHA256
 	}
-	return rec, nil
+	return out, nil
 }
 
-func saveExecutableRecord(dir string, rec executableRecord) error {
-	return saveJSONFile(filepath.Join(dir, executableRecordName), rec)
-}
-
-func saveJSONFile(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".installer-files-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	_, err = tmp.Write(data)
+// saveExecutableRecord replaces dir's recorded executables with m, keeping each recorded version
+// whose bytes are unchanged.
+func saveExecutableRecord(dir string, m executableRecord) error {
+	err := updateStateAt(dir, func(r *installRecord) {
+		next := map[string]exeEntry{}
+		for name, sum := range m {
+			e := exeEntry{SHA256: sum}
+			if old, ok := r.Executables[name]; ok && strings.EqualFold(old.SHA256, sum) {
+				e.Version = old.Version
+			}
+			next[name] = e
+		}
+		if len(next) == 0 {
+			next = nil
+		}
+		r.Executables = next
+	})
 	if err == nil {
-		err = tmp.Sync()
+		os.Remove(filepath.Join(dir, retiredExecutableRecord)) // its entries are in install.json now
 	}
-	closeErr := tmp.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return os.Rename(tmp.Name(), path)
+	return err
 }
 
 func ownsExecutable(path, digest string) bool {
@@ -72,7 +67,7 @@ func ownsExecutable(path, digest string) bool {
 		return false
 	}
 	actual, err := fileSHA256(path)
-	return err == nil && actual == digest
+	return err == nil && strings.EqualFold(actual, digest)
 }
 
 // Only overwrite a recorded, unchanged copy or adopt identical existing bytes.
@@ -108,6 +103,8 @@ func installSelfCopy(src, dst string) error {
 	return saveExecutableRecord(dir, rec)
 }
 
+// cleanupOwnedExecutables removes every recorded executable in dir whose bytes are unchanged, except the
+// running image, and forgets the ones that changed or are gone. The running image stays recorded.
 func cleanupOwnedExecutables(dir, running string) {
 	rec, err := loadExecutableRecord(dir)
 	if err != nil {
@@ -126,14 +123,10 @@ func cleanupOwnedExecutables(dir, running string) {
 			delete(rec, name)
 			continue
 		}
-		removeOldLeftovers(path)
+		retireUpdateLeftovers(dir, path)
 		if os.Remove(path) == nil {
 			delete(rec, name)
 		}
 	}
-	if len(rec) == 0 {
-		os.Remove(filepath.Join(dir, executableRecordName))
-	} else {
-		saveExecutableRecord(dir, rec)
-	}
+	saveExecutableRecord(dir, rec)
 }
