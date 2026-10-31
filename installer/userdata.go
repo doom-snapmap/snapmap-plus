@@ -102,10 +102,10 @@ func migrateUserData() {
 			_, copyErr := copyTreeMissing(old, dir)
 			if copyErr == nil && fullyMirrored(old, dir) {
 				if removeMirroredTree(old, dir) == nil {
-					fmt.Printf("  ~ moved your saved content (prefabs / strings / rawmaps) to %s\n", dir)
+					ui.OK("moved your saved content (prefabs / strings / rawmaps) to %s", dir)
 				}
 			} else {
-				fmt.Printf("  ~ copied your content to %s -- kept %s (some files could not be verified)\n", dir, old)
+				ui.Warn("copied your content to %s -- kept %s (some files could not be verified)", dir, old)
 			}
 		}
 	}
@@ -121,7 +121,7 @@ func migrateUserData() {
 				if err := copyMissingFile(s, t); err == nil && identicalFiles(s, t) {
 					os.Remove(s)
 				} else {
-					fmt.Printf("  ! kept legacy metadata %s -- the destination could not be verified\n", s)
+					ui.Warn("kept legacy metadata %s -- the destination could not be verified", s)
 				}
 			}
 			os.Remove(oldAD) // Only an empty directory can be retired.

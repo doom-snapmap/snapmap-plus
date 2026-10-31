@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -16,21 +15,21 @@ var stdin = bufio.NewReader(os.Stdin)
 // interactiveMain opens the no-argument prompt. Enter installs when absent or
 // updates when a newer release is known; named commands remain available.
 func interactiveMain() {
-	fmt.Println("Snapmap+", version)
-	fmt.Println()
+	ui.Section("Snapmap+ " + version)
 
 	rec, err := loadRecord()
 	installed := err == nil
 	installedVersion := ""
 	if installed {
 		installedVersion = rec.Version
-		fmt.Printf("Installed: Snapmap+ %s at %s\n", rec.Version, rec.DoomPath)
+		ui.Field("Version", rec.Version)
+		ui.PathField("Folder", rec.DoomPath)
 	} else {
-		fmt.Println("Snapmap+ is not installed yet.")
+		ui.Note("Snapmap+ is not installed yet.")
 		if doom, derr := resolveDoom(""); derr == nil {
-			fmt.Printf("Found DOOM: %s\n", doom)
+			ui.PathField("Found DOOM", doom)
 		} else {
-			fmt.Println("(couldn't find DOOM automatically -- you can type:  install --doom \"C:\\path\\to\\DOOM\")")
+			ui.Warn("couldn't find DOOM automatically -- you can type:  install --doom \"C:\\path\\to\\DOOM\"")
 		}
 	}
 
@@ -47,23 +46,27 @@ func interactiveMain() {
 	}
 	switch {
 	case legacyFix:
-		fmt.Printf("\nYour DOOM is the %s, whose release is Snapmap+ %s; the install record says %s.\n",
+		ui.Blank()
+		ui.Note("Your DOOM is the %s, whose release is Snapmap+ %s; the install record says %s.",
 			label2018, legacyReleaseTag, installedVersion)
-		fmt.Println("Press Enter to update now (this restores that release's files only), or type a command.")
+		ui.Note("Press Enter to update now (this restores that release's files only), or type a command.")
 		commandLoop(enter)
 		return
 	}
 	switch enter {
 	case "install":
-		fmt.Println("\nPress Enter to install now, or type a command (help lists them).")
+		ui.Blank()
+		ui.Note("Press Enter to install now, or type a command (help lists them).")
 	case "update":
-		fmt.Printf("\nA new version of Snapmap+ is available: %s (you have %s).\n", latest, installedVersion)
-		fmt.Println("Press Enter to update now, or type a command (help lists them).")
+		ui.Blank()
+		ui.Note("A new version of Snapmap+ is available: %s (you have %s).", latest, installedVersion)
+		ui.Note("Press Enter to update now, or type a command (help lists them).")
 	default:
 		if installed && latest != "" {
-			fmt.Println("You're up to date.")
+			ui.OK("You're up to date.")
 		}
-		fmt.Println("\nType a command (help lists them), or quit to close.")
+		ui.Blank()
+		ui.Note("Type a command (help lists them), or quit to close.")
 	}
 	commandLoop(enter)
 }
@@ -89,8 +92,9 @@ func legacyNeedsUpdate(b doomBuild, installedVersion string) bool {
 // (the pre-selected obvious action); after firing once, a bare Enter just re-prompts.
 func commandLoop(enterCmd string) {
 	for {
-		fmt.Print("\nsnapmap-plus> ")
+		ui.CommandPrompt("snapmap-plus>")
 		line, ok := readLineEOF()
+		ui.Answered(!ok)
 		if !ok {
 			return // stdin closed (piped input ran out) -- never spin on EOF
 		}
@@ -108,10 +112,10 @@ func commandLoop(enterCmd string) {
 		}
 		if err := runCommand(cmd, fields[1:]); err != nil {
 			if errors.Is(err, errUnknownCommand) {
-				fmt.Printf("Unknown command %q -- type help for the list, or quit to close.\n", cmd)
+				ui.Warn("Unknown command %q -- type help for the list, or quit to close.", cmd)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, "error:", err)
+			ui.Fail("%v", err)
 		}
 	}
 }
@@ -202,8 +206,9 @@ func isYes(s string) bool {
 }
 
 func pause() {
-	fmt.Print("\nPress Enter to exit...")
+	ui.Ask("Press Enter to close.", "")
 	readLine()
+	ui.Answered(false)
 }
 
 // isInteractive reports whether stdin is a real terminal -- so we only prompt when a human can answer.
@@ -217,10 +222,10 @@ var isInteractive = func() bool {
 // confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes"). Input that ends
 // before an answer counts as no.
 func confirm(prompt string) bool {
-	fmt.Print(prompt + " [Y/n] ")
+	ui.Ask(prompt, "[Y/n]")
 	answer, open := readLineEOF()
+	ui.Answered(!open)
 	if !open {
-		fmt.Println()
 		return false
 	}
 	return isYes(answer)

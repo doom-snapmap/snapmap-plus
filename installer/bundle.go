@@ -39,7 +39,7 @@ func apiBase() string {
 			return v
 		}
 	}
-	fmt.Fprintf(os.Stderr, "(ignoring %s=%q: only a loopback URL is accepted)\n", apiBaseEnv, v)
+	ui.Warn("ignoring %s=%q: only a loopback URL is accepted", apiBaseEnv, v)
 	return githubAPI
 }
 
@@ -230,7 +230,7 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 			if pick, isBeta := pickDefaultRelease(list); pick != nil {
 				if isBeta && !betaFallbackNoted {
 					betaFallbackNoted = true
-					fmt.Printf("No stable release has been published yet -- using the newest beta (%s).\n", pick.TagName)
+					ui.Note("No stable release has been published yet -- using the newest beta (%s).", pick.TagName)
 				}
 				return pick, nil
 			}
@@ -391,7 +391,7 @@ func cmdSetToken(args []string) error {
 		return fmt.Errorf("usage: snapmap-plus set-token <github-token>")
 	}
 	if err := selfInstall(false); err != nil { // a tester's first command -> keep a stable copy of snapmap-plus.exe
-		fmt.Printf("(%v)\n", err)
+		ui.Warn("%v", err)
 	}
 	p, err := tokenPath()
 	if err != nil {
@@ -403,7 +403,7 @@ func cmdSetToken(args []string) error {
 	if err := os.WriteFile(p, []byte(strings.TrimSpace(args[0])), 0o600); err != nil {
 		return fmt.Errorf("couldn't save your token (%v)", err)
 	}
-	fmt.Println("Token saved. You can now run:  snapmap-plus update --beta")
+	ui.OK("Token saved. You can now run:  snapmap-plus update --beta")
 	return nil
 }
 
@@ -425,7 +425,7 @@ func cmdChangelog(f flags, args []string) error {
 	}
 	list = published
 	if len(list) == 0 {
-		fmt.Println("No releases have been published yet.")
+		ui.Skip("No releases have been published yet.")
 		return nil
 	}
 
@@ -433,7 +433,7 @@ func cmdChangelog(f flags, args []string) error {
 	if rec, err := loadRecord(); err == nil {
 		installed = rec.Version
 	}
-	fmt.Print(formatChangelog(list, installed, changelogArg(f, args), terminalWidth()))
+	ui.Raw(formatChangelog(list, installed, changelogArg(f, args), terminalWidth()))
 	return nil
 }
 

@@ -55,29 +55,30 @@ func webview2Version() string {
 // Non-interactive use and --yes accept the bootstrapper prompt automatically.
 func ensureWebView2Runtime(f flags) {
 	if v := webview2Version(); v != "" {
-		fmt.Printf("WebView2 runtime: present (%s).\n", v)
+		ui.OK("WebView2 runtime: present (%s).", v)
 		return
 	}
-	fmt.Println("The Snapmap+ UI renders in Microsoft's Edge WebView2 runtime, which isn't installed on this machine.")
+	ui.Section("WebView2 runtime")
+	ui.Note("The Snapmap+ UI renders in Microsoft's Edge WebView2 runtime, which isn't installed on this machine.")
 	if !f.yes && isInteractive() {
 		if !confirm("Install the WebView2 runtime now (a ~2 MB download from Microsoft)?") {
-			fmt.Println("Skipped -- Snapmap+ is installed, but its window won't appear until the runtime is present.")
-			fmt.Println("Get it later from https://developer.microsoft.com/microsoft-edge/webview2/ (the \"Evergreen\" runtime).")
+			ui.Skip("Snapmap+ is installed, but its window won't appear until the runtime is present.\n" +
+				"Get it later from https://developer.microsoft.com/microsoft-edge/webview2/ (the \"Evergreen\" runtime).")
 			return
 		}
 	} else {
-		fmt.Println("Installing it now (a ~2 MB download from Microsoft)...")
+		ui.Note("Installing it now (a ~2 MB download from Microsoft)...")
 	}
 	if err := installWebView2Runtime(); err != nil {
-		fmt.Fprintf(os.Stderr, "  ! couldn't install the WebView2 runtime automatically (%v).\n", err)
-		fmt.Println("    Snapmap+ is installed. Get the runtime from https://developer.microsoft.com/microsoft-edge/webview2/")
-		fmt.Println("    (the \"Evergreen Standalone Installer\") and the UI will work on the next launch.")
+		ui.Warn("couldn't install the WebView2 runtime automatically (%v).\n"+
+			"Snapmap+ is installed. Get the runtime from https://developer.microsoft.com/microsoft-edge/webview2/\n"+
+			"(the \"Evergreen Standalone Installer\") and the UI will work on the next launch.", err)
 		return
 	}
 	if v := webview2Version(); v != "" {
-		fmt.Printf("WebView2 runtime installed (%s).\n", v)
+		ui.OK("WebView2 runtime installed (%s).", v)
 	} else {
-		fmt.Println("WebView2 runtime installer finished.")
+		ui.OK("WebView2 runtime installer finished.")
 	}
 }
 

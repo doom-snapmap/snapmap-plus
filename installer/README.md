@@ -51,6 +51,8 @@ snapmap-plus version
 snapmap-plus help
 ```
 
+Any command also takes `--plain` (see [Output](#output)).
+
 With no arguments, the executable opens an interactive prompt. Installation,
 update and uninstall ask for confirmation after checks; `--yes` or `-y` skips
 that prompt, and input that ends before an answer counts as no. Both DOOM executables
@@ -98,6 +100,17 @@ The changelog command reads GitHub release bodies derived from reviewed
 release index by default; a version, `latest`, or `all` selects another view.
 Terminal output removes inline bold and code markers before wrapping the text,
 while preserving command names such as `sh_pretty_on`.
+
+## Output
+
+Everything the installer prints goes through `out.go`. Each phase (detecting DOOM,
+migrating player data, installing files, updating, uninstalling, status) opens with a
+title and a rule, details are aligned `Label:  value` lines, and each step ends in one
+result line marked `ok` (done), `--` (skipped or unchanged), `!!` (warning, written to
+stderr) or `xx` (error, written to stderr). Colour is used only when the stream is a
+console that accepts virtual-terminal processing; redirected output never carries escape
+codes. `--plain`, accepted with any command or on its own for the interactive prompt, and a
+non-empty `NO_COLOR` turn colour off. The changelog renderer stays colourless.
 
 ## Installation and player data
 

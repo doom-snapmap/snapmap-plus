@@ -181,8 +181,8 @@ func routeRelease(f flags, b doomBuild) (flags, error) {
 		return f, fmt.Errorf("your DOOM is the %s, which only Snapmap+ %s supports; %s targets the %s. Nothing was changed",
 			label2018, legacyReleaseTag, f.release, label2024)
 	}
-	fmt.Printf("Your DOOM is the %s. Installing Snapmap+ %s, the final release for it\n"+
-		"(newer Snapmap+ releases target the %s).\n", label2018, legacyReleaseTag, label2024)
+	ui.Note("Your DOOM is the %s. Installing Snapmap+ %s, the final release for it\n"+
+		"(newer Snapmap+ releases target the %s).", label2018, legacyReleaseTag, label2024)
 	f.release = legacyReleaseTag
 	f.beta = false
 	return f, nil

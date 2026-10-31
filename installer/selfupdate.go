@@ -44,7 +44,7 @@ func assetMatchesFile(a *ghAsset, path string) bool {
 func selfUpdate(f flags, token string) {
 	rel, err := fetchRelease(f, token)
 	if err != nil {
-		fmt.Printf("(couldn't check for a snapmap-plus.exe update: %v)\n", err)
+		ui.Warn("couldn't check for a snapmap-plus.exe update: %v", err)
 		return
 	}
 	if !shouldSelfUpdate(version, rel.TagName) {
@@ -63,7 +63,7 @@ func selfUpdate(f flags, token string) {
 
 	exe, err := executablePath()
 	if err != nil {
-		fmt.Printf("(couldn't locate the running snapmap-plus.exe to update it: %v)\n", err)
+		ui.Warn("couldn't locate the running snapmap-plus.exe to update it: %v", err)
 		return
 	}
 	if assetMatchesFile(asset, exe) {
@@ -76,7 +76,7 @@ func selfUpdate(f flags, token string) {
 	defer os.RemoveAll(tmp)
 	newExe := filepath.Join(tmp, selfExeAsset)
 	if err := downloadAsset(asset, token, newExe); err != nil {
-		fmt.Printf("(couldn't download the new snapmap-plus.exe: %v)\n", err)
+		ui.Warn("couldn't download the new snapmap-plus.exe: %v", err)
 		return
 	}
 	if onDisk, err := fileSHA256(exe); err == nil {
@@ -85,7 +85,7 @@ func selfUpdate(f flags, token string) {
 		}
 	}
 	if err := replaceExe(exe, newExe); err != nil {
-		fmt.Printf("(couldn't replace snapmap-plus.exe (%v) -- the overlay updated fine; you can grab the new snapmap-plus.exe from the release if needed)\n", err)
+		ui.Warn("couldn't replace snapmap-plus.exe (%v) -- the overlay updated fine; you can grab the new snapmap-plus.exe from the release if needed", err)
 		return
 	}
 	// Keep the stable %LOCALAPPDATA% copy current too, if we're running from somewhere else.
@@ -101,7 +101,7 @@ func selfUpdate(f flags, token string) {
 			}
 		}
 	}
-	fmt.Printf("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).\n", rel.TagName)
+	ui.OK("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).", rel.TagName)
 }
 
 type replaceExeOps struct {
@@ -153,7 +153,7 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 			return fmt.Errorf("install new executable (original restored): %w", installErr)
 		}
 		if err := recordUpdateBackup(path, old); err != nil {
-			fmt.Printf("(kept the prior installer at %s; could not record cleanup ownership: %v)\n", old, err)
+			ui.Warn("kept the prior installer at %s; could not record cleanup ownership: %v", old, err)
 		}
 		return nil
 	}
