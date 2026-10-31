@@ -33,4 +33,11 @@ void sh_module_prefab_tick(void *editor);
 /* 1 while a placement is installing or its grab is live. */
 int sh_module_prefab_active(void);
 
+/* The Prefabs tab's watch (sh_prefab_watch_fn): the modules selected in
+ * Blueprint (0 outside Blueprint, -1 unreadable), and 1 while a placement is
+ * held, from the moment its modules are installed (the editor budget counts
+ * them from then on) until Space or Esc ends the grab. Any thread. */
+int sh_module_prefab_selected_count(void);
+int sh_module_prefab_held(void);
+
 #endif

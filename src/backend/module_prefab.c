@@ -537,6 +537,25 @@ void sh_module_prefab_tick(void *editor)
     }
 }
 
+int sh_module_prefab_held(void)
+{
+    LONG phase = InterlockedCompareExchange(&g_phase, 0, 0);
+    return phase == MP_SELECT_WAIT || phase == MP_GRAB_WAIT || phase == MP_GRABBED;
+}
+
+/* The count Save reads: the length of Blueprint's module selection list. */
+int sh_module_prefab_selected_count(void)
+{
+    unsigned char *ed = mp_editor();
+    void *sel = NULL;
+    int state = 0, n = 0;
+    if (!ed || !rd_i32(ed + ED_STATE_OFF, &state)) return -1;
+    if (state != 1) return 0;
+    if (!rd_ptr(ed + ED_SEL_OFF, &sel) || !sel) return 0;
+    if (!rd_i32((unsigned char *)sel + SEL_COUNT_OFF, &n) || n < 0) return -1;
+    return n > MODULE_CAP ? MODULE_CAP : n;
+}
+
 /* ------------------------------------------------------------ capture (game thread) */
 
 /* The module guard's palette query (module_prefab_map.h): grid_room_native.c

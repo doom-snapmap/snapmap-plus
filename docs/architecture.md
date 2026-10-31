@@ -230,7 +230,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x378`; the current table occupies `0x380`
+retained, with extensions through `+0x380`; the current table occupies `0x388`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -239,8 +239,11 @@ Blueprint module-prefab state, save, place, status and module-check operations),
 `timeline_tile` (`+0x368`, the Timeline palette tile's status) and `budget`
 (`+0x370`, the editor budget table and usage for the Prefabs tab's Limits
 section, built on the game thread after each palette build by
-`budget_table.c`) and `mods` (`+0x378`, the Mods tab's document and actions,
-`modui.c`, run on the game thread through `run_on_main`). The retired
+`budget_table.c`), `mods` (`+0x378`, the Mods tab's document and actions,
+`modui.c`, run on the game thread through `run_on_main`) and `prefab_watch`
+(`+0x380`, the Prefabs tab's guarded reads: the Blueprint module selection that
+gates Create, the Load / Place held in the 3D view, and the game thread's last
+paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -1761,6 +1764,13 @@ runs the same check (`SH_MODULE_PREFAB_CHECK`) when a module prefab is selected
 and shows the missing rooms above Limits; the check names nothing when no editor
 palette is open, and with the prefab's block (or older sidecar) it leaves out the modules its
 mod rows provide, which the Prefabs tab lists as mods instead.
+
+From the install until Space or Esc ends its grab, a placement is held
+(`sh_module_prefab_held`, read through `prefab_watch`); the editor budget
+already counts the installed modules then, so the Prefabs tab's Limits show the
+live usage as "Map after" for the held prefab instead of adding it again.
+`sh_module_prefab_selected_count` reads the length of Blueprint's module
+selection, the count Save uses, for the tab's Create gate.
 
 ## Map behaviour carried by String Set nodes
 

@@ -839,6 +839,7 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
 static SRWLOCK g_tell_lock = SRWLOCK_INIT;
 static char g_tell[600];
 static volatile LONG g_tell_pending;
+static volatile LONG g_tell_console_only;   /* the page shows its own toast for this one */
 
 static void rawmap_tell(const char *text)
 {
@@ -848,6 +849,22 @@ static void rawmap_tell(const char *text)
     AcquireSRWLockExclusive(&g_tell_lock);
     strncpy_s(g_tell, sizeof g_tell, text, _TRUNCATE);
     ReleaseSRWLockExclusive(&g_tell_lock);
+    InterlockedExchange(&g_tell_console_only, 0);
+    InterlockedExchange(&g_tell_pending, 1);
+}
+
+/* File > Load Rawmap refused a file: the backend log now, the console line on
+ * the next main tick (the page already shows the toast). Mirrors the prefab
+ * Import's "The prefab was not imported: ..." line. */
+static void rawmap_tell_load_refused(const char *path, const char *reason)
+{
+    char line[900];
+    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap: load of %s refused: %s", path ? path : "", reason ? reason : "");
+    backend_log(line);
+    AcquireSRWLockExclusive(&g_tell_lock);
+    _snprintf_s(g_tell, sizeof g_tell, _TRUNCATE, "The rawmap was not loaded: %s.", reason && reason[0] ? reason : "it cannot be read");
+    ReleaseSRWLockExclusive(&g_tell_lock);
+    InterlockedExchange(&g_tell_console_only, 1);
     InterlockedExchange(&g_tell_pending, 1);
 }
 
@@ -861,7 +878,7 @@ void sh_rawmap_poll_main(void)
     strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
     ReleaseSRWLockShared(&g_tell_lock);
     if (print) print(text);
-    if (toast) toast("Rawmap", text);
+    if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast("Rawmap", text);
 }
 
 void sh_rawmap_last_save(sh_rawmap_save_report *out)
@@ -2097,6 +2114,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
              * does it, at the moment a map actually opens. */
         } else {
             if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
+            rawmap_tell_load_refused(load_path, reason);
             return 0;
         }
     }

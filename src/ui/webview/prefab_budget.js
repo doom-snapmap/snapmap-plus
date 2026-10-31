@@ -183,15 +183,20 @@ var prefabBudget = (function () {
     return r >= WARN_AT ? 'warn' : 'ok';
   }
 
-  function meters(addBlock, usage, limits) {
-    var l = block(limits), u = block(usage), after = add(block(usage), addBlock);
+  /* meters(addBlock, usage, limits[, held]). held: this prefab is the one the player is holding in
+     the 3D view (a Load / Place before Space or Esc). The editor's usage already counts what is held
+     (identical held and after Space, for object and module prefabs), so "Map after" is the live
+     usage itself and the bar's current part is all of it: the prefab is never added twice. add
+     stays the prefab's own share. */
+  function meters(addBlock, usage, limits, held) {
+    var l = block(limits), u = block(usage), after = held ? block(usage) : add(block(usage), addBlock);
     var rAdd = meterRatios(addBlock, l), rBefore = meterRatios(u, l), rAfter = meterRatios(after, l), out = {};
     for (var i = 0; i < METERS.length; i++) {
       var k = METERS[i];
       out[k] = {add: rAdd[k], before: rBefore[k], after: rAfter[k], reached: meterReached(k, rAfter[k]),
-                level: meterLevel(rAfter[k])};
+                level: meterLevel(rAfter[k]), held: !!held};
     }
-    return {meters: out, reached: reachedBy(rAfter), after: after};
+    return {meters: out, reached: reachedBy(rAfter), after: after, held: !!held};
   }
 
   /* compute(entities, modules, table[, live[, opts]]) -> {block, meters, reached, misses, unknownModules}.

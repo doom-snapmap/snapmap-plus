@@ -440,7 +440,7 @@
   .pc-preview-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pc-preview-count { position: absolute; z-index: 1; pointer-events: none; right: 8px; bottom: 7px; }
   /* Bottom left: the legend key button; its list opens upwards above it. */
-  .pc-legend { position: absolute; z-index: 2; left: 6px; bottom: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: calc(100% - 12px); }
+  .pc-legend { position: absolute; z-index: 2; left: 6px; bottom: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: calc(100% - 12px); max-height: calc(100% - 12px); }
   .pc-legend-btn { width: 24px; height: 24px; border: 1px solid var(--border2); border-radius: 5px; background: var(--panel2); color: var(--muted); cursor: pointer; }
   .pc-legend-btn .ui-icon { width: 13px; height: 13px; }
   .pc-legend-btn:hover { border-color: var(--accent); color: var(--text); }
@@ -448,7 +448,7 @@
   .pc-legend-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .pc-preview-legend { display: grid; grid-auto-flow: column; grid-template-rows: repeat(4, auto); gap: 3px 14px; padding: 6px 9px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.18);
-    color: var(--text); font-size: 10px; line-height: 1.35; }
+    color: var(--text); font-size: 10px; line-height: 1.35; min-height: 0; overflow: auto; }
   .pc-preview-legend[hidden] { display: none; }
   .pc-preview-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
   .pc-legend-dot { width: 6px; height: 6px; border-radius: 50%; background: #a3abb5; box-shadow: 0 0 0 1px rgba(0,0,0,.18); }
@@ -479,7 +479,10 @@
   /* Limits: one compact table. The section head is the first column head, so "Limits", the meter
      names and the column heads share one left edge and one header line. */
   .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
-  .pc-limits-table { display: grid; grid-template-columns: 76px minmax(48px, 150px) 74px 74px; column-gap: 12px; align-items: center; font-size: 11px; }
+  /* The columns give way down to their minimums (228px with the gaps), so the table fits the
+     narrowest Prefab Details pane without a horizontal scrollbar. */
+  .pc-limits-table { display: grid; grid-template-columns: minmax(54px, 76px) minmax(24px, 150px) minmax(58px, 74px) minmax(58px, 74px);
+    column-gap: 12px; align-items: center; font-size: 11px; min-width: 0; }
   .pc-limits-table .pcl-row, .pc-limits-rows { display: contents; }
   .pc-limits-head { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
   .pc-limits-table .pcl-col { color: var(--muted); font-size: 10px; font-weight: 600; text-align: right; }
@@ -511,7 +514,11 @@
     padding: 6px 0 2px 12px; color: var(--muted); font-size: 10px; }
   .pcl-raw-item { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
   .pcl-raw-num { font-variant-numeric: tabular-nums; }
-  @media (max-height: 520px) { .pc-preview { flex-basis: 130px; } }
+  @media (max-height: 520px) {
+    .pc-preview { flex-basis: 130px; }
+    /* At this height the open legend reaches the top row: the status steps aside while it is open. */
+    .pc-preview.pc-legend-open .pc-preview-tag { visibility: hidden; }
+  }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }
   .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; width: 340px; display: flex; flex-direction: column; gap: 5px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }

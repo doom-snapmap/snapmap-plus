@@ -1001,6 +1001,23 @@ static int slot_prefab_grab_status(sh_iface *self, sh_prefab_grab_info *out)
     return status;
 }
 
+/* +0x380 ext 35: the Prefabs tab's watch. An object paste and a module
+ * placement cannot both be held: the first needs Object mode, the second
+ * Blueprint. */
+static int slot_prefab_watch(sh_iface *self, sh_prefab_watch *out)
+{
+    (void)self;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (sh_apply_engine_place_watch(&out->place_seq, &out->place_result, out->place_reason,
+                                    sizeof out->place_reason))
+        out->held = SH_PREFAB_HELD_OBJECTS;
+    else if (sh_module_prefab_held())
+        out->held = SH_PREFAB_HELD_MODULES;
+    out->modules_selected = sh_module_prefab_selected_count();
+    return editor_session() != NULL;
+}
+
 static int slot_delete_entities(sh_iface *self, const int *ids, int count, sh_delete_result *out)
 {
     (void)self;
@@ -1492,6 +1509,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
     slots.timeline_tile          = sh_timeline_tile_slot;     /* +0x368 ext 32 */
     slots.budget                 = sh_budget_table_slot;      /* +0x370 ext 33 */
+    slots.prefab_watch           = slot_prefab_watch;         /* +0x380 ext 35 */
     {
         /* The Mods tab: the store, the serving index and the open map's names. */
         sh_modui_engine mods;

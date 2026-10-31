@@ -499,6 +499,36 @@ typedef struct sh_mods_call {
 } sh_mods_call;
 typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 (ext 34) */
 
+/* The Prefabs tab's watch on the editor (backend/iface_engine.c), read by the
+ * host about three times a second on its own thread; every field is a guarded
+ * read of the last editor frame, nothing waits for the game.
+ *   modules_selected  the modules selected in Blueprint (0 outside it), -1
+ *                     unreadable: the Create gate in Blueprint.
+ *   held              SH_PREFAB_HELD_*: a Load / Place the player is holding
+ *                     in the 3D view (an object paste in its grab, or a module
+ *                     placement from its install to Space or Esc). The editor
+ *                     budget already counts what is held.
+ *   place_seq         counts the object pastes Load / Place asked for; it
+ *                     changes once the game thread has decided each one.
+ *   place_result      that decision: SH_PREFAB_PLACE_*.
+ *   place_reason      for STAGED, why the paste was not queued, as a phrase
+ *                     the page can show ("the cursor is over an entity").
+ * Returns 1, or 0 when no editor is open (the fields are then zero). */
+#define SH_PREFAB_HELD_NONE     0
+#define SH_PREFAB_HELD_OBJECTS  1
+#define SH_PREFAB_HELD_MODULES  2
+#define SH_PREFAB_PLACE_FAILED  0
+#define SH_PREFAB_PLACE_STAGED  1   /* staged only: Ctrl+V in the 3D view places it */
+#define SH_PREFAB_PLACE_QUEUED  2   /* the native paste was requested: it arrives in hand */
+typedef struct sh_prefab_watch {
+    int  modules_selected;
+    int  held;
+    int  place_seq;
+    int  place_result;
+    char place_reason[96];
+} sh_prefab_watch;
+typedef int (*sh_prefab_watch_fn)(struct sh_iface *self, sh_prefab_watch *out); /* +0x380 (ext 35) */
+
 /* +0x320 (ext 23): the preview model and renderModelInfo.scale for an entityDef inherit, as
  * SH_PREFAB_DEFAULT_* bits. When the def chain names no .lwo/.bmodel/.md6, the model is the one the
  * editor draws for the inherit's palette row (SH_PREFAB_DEFAULT_EDITOR). With out_scale_count >= 6,
@@ -717,6 +747,7 @@ typedef struct sh_iface_vtbl {
     sh_timeline_tile_fn        timeline_tile;        /* +0x368 (ext 32) Timeline palette tile */
     sh_budget_fn               budget;               /* +0x370 (ext 33) editor budget table */
     sh_mods_fn                 mods;                 /* +0x378 (ext 34) Mods tab */
+    sh_prefab_watch_fn         prefab_watch;         /* +0x380 (ext 35) Prefabs tab editor watch */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -745,7 +776,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x380);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x388);
+SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -914,6 +947,7 @@ typedef struct sh_iface_engine_slots {
     sh_timeline_tile_fn        timeline_tile;               /* +0x368 (ext 32) */
     sh_budget_fn               budget;                      /* +0x370 (ext 33) */
     sh_mods_fn                 mods;                        /* +0x378 (ext 34) */
+    sh_prefab_watch_fn         prefab_watch;                /* +0x380 (ext 35) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

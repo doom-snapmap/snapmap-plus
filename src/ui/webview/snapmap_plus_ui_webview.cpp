@@ -28,6 +28,8 @@
 #include "serialization_buffer.h"
 #include "theme_bootstrap.h"
 #include "rawmap_picker.h"
+#include "prefab_host.h"    /* Create's precheck, a prefab's kind by its ~type, the live usage gate */
+#include <knownfolders.h>
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "crash_pending.h"
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
@@ -167,8 +169,21 @@ static bool          g_load_prefab_modules = false;  /* the last Load/Place read
 static int           g_module_place_seq = 0;      /* placement being followed, 0 = none */
 static std::string   g_load_message;              /* the backend's text for a refused module placement */
 static ULONGLONG     g_module_place_deadline = 0;
-static std::string   g_module_place_name;
+static std::string   g_module_place_name, g_module_place_folder;
 static int           g_editor_mode_last = -1;     /* entityMode | blueprint << 1; -1 posts on the next check */
+static int           g_editor_modules_last = -2;  /* modules selected in Blueprint when editorMode was last posted */
+/* An object Load / Place waits for the game thread's decision (prefab_watch's place_seq) before the
+ * page is told whether the prefab is in hand or only staged. */
+static bool          g_place_wait = false;
+static int           g_place_wait_seq = 0;
+static ULONGLONG     g_place_wait_deadline = 0;
+static std::string   g_place_wait_name, g_place_wait_folder;
+/* The prefab the player may be holding in the 3D view, by kind; prefab_watch says whether one is. */
+static std::string   g_held_obj_name, g_held_obj_folder;
+static int           g_held_obj_seq = -1;         /* the paste decision it came from: a later kind-2 paste is not it */
+static bool          g_usage_wanted = false;      /* the page has asked for the map's usage */
+/* The folder the picker opens in, chosen on the UI thread before the dialog's thread starts. */
+static std::wstring  g_pick_folder;
 
 /* Folders: one real level of subdirectories under %LOCALAPPDATA%\snapmap-plus\prefabs\ (no nested-within-nested).
  * folder="" always means the root prefabs\ dir. The folder/file IS the truth -- no separate manifest. */
@@ -825,6 +840,21 @@ static int poc_serialize_selection_raw(char *buf, int cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
 }
+static int poc_hovered_id_seh()
+{
+    __try { return g_iface->vtbl->hovered_id(g_iface); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+/* The Prefabs tab's watch (+0x380): the Blueprint module selection, what is held and the last
+ * paste decision. An older backend reads as unknown (modules_selected -1, nothing held). */
+static int poc_prefab_watch(sh_prefab_watch *w)
+{
+    memset(w, 0, sizeof *w);
+    w->modules_selected = -1;
+    if (!SH_IFACE_HAS_SLOT(g_iface, prefab_watch)) return -1;
+    __try { return g_iface->vtbl->prefab_watch(g_iface, w); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { memset(w, 0, sizeof *w); w->modules_selected = -1; return -1; }
+}
 /* The backend's grab-frame guard verdict on the serialize just made, or
  * UNCHECKED when this backend has no guard. */
 static int poc_prefab_grab_status(sh_prefab_grab_info *info)
@@ -841,8 +871,9 @@ static int poc_prefab_grab_status(sh_prefab_grab_info *info)
  * that line misses the hovered entity the backend rebuilds the frame from it
  * (reported as corrected). Without that guard, a file whose frame missed is
  * refused rather than written with collapsed positions.
- * Results: 1 = saved, 0 = empty, 2 = hover refused, 3 = no usable grab frame,
- * -1 = resolve/serialize/write failure. */
+ * Results: 1 = saved, 0 = empty, 2 = nothing hovered, 3 = no usable grab frame,
+ * 4 = the hovered entity is not selected, 5 = the copy check refused a selection
+ * it was otherwise given, -1 = resolve/serialize/write failure. */
 static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
 static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
 static void poc_apply_create_prefab()
@@ -854,10 +885,24 @@ static void poc_apply_create_prefab()
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
         return;
     }
-    if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) < 0) {
-        poc_log("create-prefab: ABORT (not hovering an entity in the selection)");
-        g_create_result = 2;
-        return;
+    {
+        /* DOOM's copy check refuses an empty selection and a hovered entity that is not
+         * selected alike; tell the page which (prefab_host.h). */
+        static int sel[POC_MAX_ENTS];
+        int count = poc_get_selection(sel, POC_MAX_ENTS);
+        bool have_hover = g_iface->vtbl->hovered_id != nullptr;
+        int hovered = have_hover ? poc_hovered_id_seh() : -1;
+        int pre = sh_prefab_host::create_precheck(sel, count, hovered, have_hover);
+        if (pre != sh_prefab_host::CREATE_GO) {
+            char l[200];
+            _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
+                        pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
+                        : pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
+                        : "hovering an entity that is not selected", count, hovered);
+            poc_log(l);
+            g_create_result = pre;
+            return;
+        }
     }
     if (!poc_valid_name(g_create_prefab_name)) {
         poc_log("create-prefab: ABORT (name rejected -- '..' or path separator)");
@@ -879,7 +924,12 @@ static void poc_apply_create_prefab()
         if (grab_status == SH_PREFAB_GRAB_REFUSED) {
             poc_log("create-prefab: ABORT (no finite grab frame could be built from the hovered entity)");
             g_create_result = 3;
-        } else g_create_result = 0;
+        } else {
+            /* A selection and a selected hover: the copy check refused for its other causes
+             * (a wired or referenced entity left out, or one the editor does not copy). */
+            poc_log("create-prefab: ABORT (the editor's copy check refused the selection)");
+            g_create_result = 5;
+        }
         return;
     }
     if (grab_status == SH_PREFAB_GRAB_CORRECTED) {
@@ -1023,7 +1073,8 @@ static void poc_poll_module_place()
     g_module_place_seq = 0;
 }
 /* Tell the page which editor mode is up: Object Mode gates object prefabs, Blueprint
- * gates module prefabs. Posts on a change, or always when forced. */
+ * gates module prefabs, and in Blueprint the modules selected gate Create (-1 when
+ * this backend cannot say). Posts on a change, or always when forced. */
 static void poc_post_editor_mode(bool force)
 {
     int entity = 0, blueprint = 0;
@@ -1034,11 +1085,17 @@ static void poc_post_editor_mode(bool force)
     memset(&call, 0, sizeof call);
     call.op = SH_MODULE_PREFAB_STATE;
     if (poc_module_prefab_call(&call) == 1) blueprint = call.blueprint ? 1 : 0;
+    /* The modules selected in Blueprint gate Create there; the entity count rides selCount. */
+    sh_prefab_watch watch;
+    poc_prefab_watch(&watch);
+    int modules = blueprint ? watch.modules_selected : 0;
     int now = entity | (blueprint << 1);
-    if (!force && now == g_editor_mode_last) return;
+    if (!force && now == g_editor_mode_last && modules == g_editor_modules_last) return;
     g_editor_mode_last = now;
-    wchar_t m[96];
-    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d}", entity, blueprint);
+    g_editor_modules_last = modules;
+    wchar_t m[128];
+    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"editorMode\",\"entityMode\":%d,\"blueprint\":%d,\"modules\":%d}",
+                 entity, blueprint, modules);
     poc_post_json(m);
 }
 static void poc_strip_trailing_sep(char *s)
@@ -1226,6 +1283,7 @@ static void poc_apply_place_module_prefab(const std::string &body)
         g_module_place_seq = call.seq;
         g_module_place_deadline = GetTickCount64() + 10000;
         g_module_place_name = g_load_prefab_name;
+        g_module_place_folder = g_load_prefab_folder;
         g_load_result = 2;          /* pending: posted when the backend finishes */
         return;
     }
@@ -1301,6 +1359,7 @@ static void poc_apply_load_prefab()
 {
     g_load_result = -1;
     g_load_message.clear();
+    g_place_wait = false;   /* a newer Load / Place answers for itself */
     if (g_load_prefab_name.empty()) return;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { poc_log("load-prefab: ABORT (iface/slot missing)"); return; }
     char path[1024];
@@ -1345,9 +1404,51 @@ static void poc_apply_load_prefab()
      * in heap 0. Keep placement on the native action path rather than directly
      * invoking PasteInstantiate or synthesizing operating-system keystrokes. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
+    sh_prefab_watch watch;
+    bool watched = poc_prefab_watch(&watch) >= 0;
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
     char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
+    poc_log(l);
+    /* The game thread decides on its next frame whether the paste was queued (the prefab arrives
+     * in hand) or only staged; the page is told once it has (poc_poll_place_outcome). */
+    if (g_load_result == 1 && watched) {
+        g_place_wait = true;
+        g_place_wait_seq = watch.place_seq;
+        g_place_wait_deadline = GetTickCount64() + 2500;
+        g_place_wait_name = g_load_prefab_name;
+        g_place_wait_folder = g_load_prefab_folder;
+    }
+}
+/* Post an object Load / Place's outcome once the game thread has decided it: "queued" (in hand,
+ * Space places it), "staged" (Ctrl+V places it; reason says why it was not queued) or "unknown"
+ * when no decision came in time. A queued paste becomes the held prefab the Limits rule names. */
+static void poc_poll_place_outcome()
+{
+    if (!g_place_wait) return;
+    sh_prefab_watch watch;
+    poc_prefab_watch(&watch);
+    bool decided = watch.place_seq != g_place_wait_seq;
+    if (!decided && GetTickCount64() < g_place_wait_deadline) return;
+    g_place_wait = false;
+    const char *placed = !decided ? "unknown"
+                       : watch.place_result == SH_PREFAB_PLACE_QUEUED ? "queued"
+                       : watch.place_result == SH_PREFAB_PLACE_STAGED ? "staged" : "failed";
+    if (decided && watch.place_result == SH_PREFAB_PLACE_QUEUED) {
+        g_held_obj_name = g_place_wait_name;
+        g_held_obj_folder = g_place_wait_folder;
+        g_held_obj_seq = watch.place_seq;
+    }
+    std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":";
+    m += decided && watch.place_result == SH_PREFAB_PLACE_FAILED ? L"-1" : L"1";
+    m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_place_wait_name.c_str());
+    m += L"\",\"placed\":\""; m += sh_webview_json::escape_wide(placed);
+    m += L"\",\"reason\":\""; m += sh_webview_json::escape_wide(decided ? watch.place_reason : "");
+    m += L"\"}";
+    poc_post_json(m.c_str());
+    char l[300];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: '%s' %s%s%s", g_place_wait_name.c_str(), placed,
+                decided && watch.place_reason[0] ? ": " : "", decided ? watch.place_reason : "");
     poc_log(l);
 }
 /* Commit the page's refreshed, patched entity JSON with kind=0. Prefer the
@@ -1710,18 +1811,14 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
          *
          * SetDefaultFolder is kept too, for the first-ever open and for a path that does not exist
          * yet; SetFolder wins when both are set. Overriding a remembered location is the intent:
-         * this is the app's own data folder and it is where rawmaps live. */
-        {
-            wchar_t dir[MAX_PATH];
-            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
-                wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
-                CreateDirectoryW(dir, nullptr);        /* harmless if it already exists */
-                IShellItem *folder = nullptr;
-                if (SUCCEEDED(SHCreateItemFromParsingName(dir, nullptr, IID_PPV_ARGS(&folder))) && folder) {
-                    dlg->SetDefaultFolder(folder);
-                    dlg->SetFolder(folder);
-                    folder->Release();
-                }
+         * the folder is the one this dialog kind last used, else its default (rawmap_picker.h),
+         * chosen by poc_pick_start_folder on the UI thread. */
+        if (!g_pick_folder.empty()) {
+            IShellItem *folder = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(g_pick_folder.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
+                dlg->SetDefaultFolder(folder);
+                dlg->SetFolder(folder);
+                folder->Release();
             }
         }
 
@@ -1872,6 +1969,51 @@ static DWORD WINAPI poc_pick_thread(LPVOID param)
     return 0;
 }
 
+static int poc_config_get_json(const std::string &key, std::string &value, unsigned int *out_flags);   /* fwd */
+static bool poc_is_dir(const std::wstring &path)
+{
+    DWORD a = path.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+/* The folder a dialog of `kind` opens in: the one kept for it in config.json when it still exists,
+ * else Downloads for the prefab dialogs and the rawmaps folder for the rawmap ones. UI thread. */
+static std::wstring poc_pick_start_folder(int kind)
+{
+    const char *key = sh_rawmap_picker::folder_config_key(kind);
+    std::string json;
+    std::wstring kept;
+    if (key && poc_config_get_json(key, json, nullptr) > 0 &&
+        sh_rawmap_picker::folder_from_config(json.c_str(), kept) && poc_is_dir(kept))
+        return kept;
+    if (sh_rawmap_picker::default_folder(kind) == sh_rawmap_picker::FOLDER_DOWNLOADS) {
+        PWSTR p = nullptr;
+        std::wstring dl;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p)) && p) dl = p;
+        if (p) CoTaskMemFree(p);
+        if (poc_is_dir(dl)) return dl;
+    }
+    wchar_t dir[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
+        wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
+        CreateDirectoryW(dir, nullptr);        /* harmless if it already exists */
+        return dir;
+    }
+    return std::wstring();
+}
+/* Keep the folder of a file the player picked, for that dialog kind's next open. UI thread. */
+static void poc_pick_keep_folder(int kind, const std::wstring &picked)
+{
+    const char *key = sh_rawmap_picker::folder_config_key(kind);
+    std::wstring folder = sh_rawmap_picker::folder_of(picked);
+    if (!key || folder.empty() || !g_iface || !g_iface->vtbl || !g_iface->vtbl->config_set_json) return;
+    std::string value = sh_rawmap_picker::folder_to_config(folder);
+    int r = g_iface->vtbl->config_set_json(g_iface, key, value.c_str());
+    if (r == SH_CONFIG_SET_REJECTED) {
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "dialogs: could not keep the folder for %s", key);
+        poc_log(l);
+    }
+}
 /* Open a picker, unless one is already open. Returns with the dialog still to come -- the caller has
  * nothing to report yet, which is the point: the message handler returns immediately and the think
  * loop keeps turning. */
@@ -1895,6 +2037,7 @@ static void poc_begin_pick(int kind)
             mods = sh_rawmap_picker::map_mods_from_status(status);
         InterlockedExchange(&g_pick_mods, mods);
     }
+    g_pick_folder = poc_pick_start_folder(kind);   /* read by the dialog's thread, which starts below */
     h = CreateThread(nullptr, 0, poc_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
     if (h == nullptr) {
         InterlockedExchange(&g_pick_busy, 0);
@@ -1990,6 +2133,7 @@ static void poc_finish_pick()
     if (picked) {
         size_t cut = g_pick_path.find_last_of(L"\\/");
         base = (cut == std::wstring::npos) ? g_pick_path : g_pick_path.substr(cut + 1);
+        poc_pick_keep_folder(kind, g_pick_path);   /* this dialog opens there next time */
     }
 
     g_pick_path.clear();
@@ -2026,6 +2170,11 @@ static void poc_finish_pick()
                                                      msg, (int)sizeof msg);
         }
         if (!staged) {
+            /* The backend logs the refusal and prints it to the console (rawmap.c); this is the UI
+             * log's line, as the prefab Import's refusal has one. */
+            char l[1400];
+            _snprintf_s(l, sizeof l, _TRUNCATE, "rawmap load: refused '%s': %s", p8.c_str(), msg);
+            poc_log(l);
             poc_send_rawmap_status((L"Refused: " + sh_webview_json::escape_wide(msg)).c_str());
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
@@ -2378,15 +2527,14 @@ static int poc_meta_int(const std::string &body, const char *key)
     if (c == std::string::npos) return -1;
     return atoi(body.c_str() + c + 1);
 }
-/* Is this prefab file an idSnapMap? Reads only its last 4 KB: the engine writes
- * the top-level "~type" second to last, so the final "~type" is that one. A
- * file with a block answers from its view's "kind" instead. */
-static bool poc_file_tail_is_module(const char *path)
+/* The top-level "~type" of a prefab file from its last 256 KB, the block left out
+ * (prefab_host.h); "" when that tail names none. */
+static std::string poc_file_top_type(const char *path)
 {
     FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    if (!path || fopen_s(&fp, path, "rb") != 0 || !fp) return std::string();
     fseek(fp, 0, SEEK_END); long sz = ftell(fp);
-    long take = sz < 4096 ? sz : 4096;
+    long take = sz < 256 * 1024 ? sz : 256 * 1024;
     std::string tail;
     if (take > 0) {
         tail.resize((size_t)take);
@@ -2394,10 +2542,7 @@ static bool poc_file_tail_is_module(const char *path)
         tail.resize(fread(&tail[0], 1, (size_t)take, fp));
     }
     fclose(fp);
-    size_t t = tail.rfind("\"~type\"");
-    if (t == std::string::npos) return false;
-    size_t q1 = tail.find('"', tail.find(':', t + 7) + 1);
-    return q1 != std::string::npos && tail.compare(q1, 11, "\"idSnapMap\"") == 0;
+    return sh_prefab_host::top_type_of_tail(tail.data(), tail.size());
 }
 /* The prefab file's size and write time, the content signature the page's
  * Limits cache keys on. */
@@ -2525,20 +2670,23 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
             sceneBody = fileBody;
             sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));
         }
-        modules = poc_meta_kind_of(metaBody) == "modules" ||
-                  (whole ? sh_webview_json::top_level_type(sceneBody) == "idSnapMap" : poc_file_tail_is_module(path));
+        /* The file's ~type decides the kind, with or without a block (prefab_host.h). */
+        std::string kind = sh_prefab_host::kind_of_type(whole ? sh_webview_json::top_level_type(sceneBody)
+                                                              : poc_file_top_type(path));
+        modules = kind.empty() ? poc_meta_kind_of(metaBody) == "modules" : kind == "modules";
         sig = poc_prefab_signature(path);
         ok = whole || modules;
         entityCount = modules ? poc_meta_int(metaBody, "entityCount") : poc_count_prefab_entities(sceneBody);
+        if (entityCount < 0 && modules) entityCount = poc_count_prefab_entities(sceneBody);   /* no summary */
         if (entityCount < 0) entityCount = 0;
     }
     std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += sh_webview_json::escape_wide(name.c_str());
     json += L"\",\"folder\":\""; json += sh_webview_json::escape_wide(folder.c_str());
     json += L"\",\"sig\":\""; json += sig;
     json += L"\",\"ok\":"; json += ok ? L"true" : L"false";
-    /* A module prefab shows its footprint from its view; its scene still ships, once,
-     * for the Limits section's entity count. */
-    if (modules) json += L",\"prefabKind\":\"modules\"";
+    /* The kind the file's ~type gives (prefab_host.h). A module prefab shows its footprint from
+     * its view; its scene still ships, once, for the Limits section's entity count. */
+    json += modules ? L",\"prefabKind\":\"modules\"" : L",\"prefabKind\":\"objects\"";
     json += L",\"meta\":\""; json += sh_webview_json::escape_wide(metaBody.c_str());
     json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(sceneBody.c_str());
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
@@ -2555,7 +2703,8 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
 /* The Prefabs tab's Limits section. The backend builds its budget table on the
  * game thread after each palette build; the page asks for it once (budgetTable)
  * and is sent it again whenever its generation changes, and asks for the map's
- * current usage (budgetUsage) when the tab opens and on each selection. */
+ * current usage (budgetUsage) when the tab opens and on each selection; from then
+ * on the think loop sends it again whenever it or the held prefab changes. */
 static bool     g_budget_wanted = false;   /* the page has asked for the table */
 static unsigned g_budget_sent_gen = 0;     /* table generation last posted */
 
@@ -2568,7 +2717,7 @@ static int poc_budget_call(sh_budget_call *call)
 
 /* Post {"kind":kind,"data":<backend JSON>} or {"kind":kind,"data":null}. The
  * backend writes the JSON itself (escaped names, integers), so it is spliced. */
-static void poc_post_budget(const wchar_t *kind, const std::string &body)
+static void poc_post_budget(const wchar_t *kind, const std::string &body, const std::wstring &extra = std::wstring())
 {
     std::wstring m = L"{\"kind\":\""; m += kind; m += L"\",\"data\":";
     if (body.empty()) m += L"null";
@@ -2581,6 +2730,7 @@ static void poc_post_budget(const wchar_t *kind, const std::string &body)
             m += wb;
         }
     }
+    m += extra;
     m += L"}";
     poc_post_json(m.c_str());
 }
@@ -2612,11 +2762,51 @@ static void poc_send_budget_table()
     poc_post_budget(L"budgetTable", body);
 }
 
+/* The prefab held in the 3D view as the page's ",\"held\":{...}" member, or ",\"held\":null".
+ * The editor budget already counts what is held (snaphak-re R-006: usage held and after Space
+ * are identical for object and module prefabs), so the page must not add it a second time. */
+static std::wstring poc_held_json()
+{
+    sh_prefab_watch watch;
+    poc_prefab_watch(&watch);
+    const std::string *name = nullptr, *folder = nullptr;
+    const wchar_t *kind = L"";
+    /* A held paste is this prefab only while it is the last one decided: Create New Timeline and
+     * the asset browser paste through the same kind 2. */
+    if (watch.held == SH_PREFAB_HELD_OBJECTS && !g_held_obj_name.empty() && watch.place_seq == g_held_obj_seq) {
+        name = &g_held_obj_name; folder = &g_held_obj_folder; kind = L"objects";
+    } else if (watch.held == SH_PREFAB_HELD_MODULES && !g_module_place_name.empty()) {
+        name = &g_module_place_name; folder = &g_module_place_folder; kind = L"modules";
+    }
+    if (!name) return L",\"held\":null";
+    std::wstring h = L",\"held\":{\"name\":\""; h += sh_webview_json::escape_wide(name->c_str());
+    h += L"\",\"folder\":\""; h += sh_webview_json::escape_wide(folder->c_str());
+    h += L"\",\"kind\":\""; h += kind; h += L"\"}";
+    return h;
+}
+
+static sh_prefab_host::usage_gate g_usage_gate;
+
 static void poc_send_budget_usage()
 {
     std::string body;
     poc_budget_read(SH_BUDGET_USAGE, body);
-    poc_post_budget(L"budgetUsage", body);
+    std::wstring held = poc_held_json();
+    g_usage_wanted = true;
+    g_usage_gate.changed(body, sh_webview_json::to_utf8(held));   /* what the page now has */
+    poc_post_budget(L"budgetUsage", body, held);
+}
+
+/* UI cadence, once the page has asked: post the map's usage again whenever it or the held prefab
+ * changed (an edit, a paste picked up, Space or Esc), never an unchanged value on a timer. */
+static void poc_budget_usage_poll()
+{
+    if (!g_usage_wanted) return;
+    std::string body;
+    poc_budget_read(SH_BUDGET_USAGE, body);
+    std::wstring held = poc_held_json();
+    if (!g_usage_gate.changed(body, sh_webview_json::to_utf8(held))) return;
+    poc_post_budget(L"budgetUsage", body, held);
 }
 
 /* UI cadence: re-send the table after a palette rebuild, only once asked. */
@@ -3277,14 +3467,25 @@ static void poc_send_prefabs()
         }
         json += L"]";
     }
-    /* kinds: only module prefabs, keyed like meta, read from each view's "kind". */
+    /* kinds: only module prefabs, keyed like meta. The file's ~type decides, with or without a
+     * block; a tail that names no type falls back to the view's "kind". */
     json += L"},\"kinds\":{";
     bool firstKind = true;
-    for (size_t v = 0; v < views.size(); v++) {
-        if (poc_meta_kind_of(views[v].second) != "modules") continue;
+    auto kindOf = [&](const std::string &folder, const std::string &name) {
+        char path[1024];
+        if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return;
+        std::string key = folder.empty() ? name : (folder + "/" + name);
+        std::string kind = sh_prefab_host::kind_of_type(poc_file_top_type(path));
+        if (kind.empty())
+            for (size_t v = 0; v < views.size(); v++)
+                if (views[v].first == key && poc_meta_kind_of(views[v].second) == "modules") kind = "modules";
+        if (kind != "modules") return;
         if (!firstKind) json += L","; firstKind = false;
-        json += L"\""; json += sh_webview_json::escape_wide(views[v].first.c_str()); json += L"\":\"modules\"";
-    }
+        json += L"\""; json += sh_webview_json::escape_wide(key.c_str()); json += L"\":\"modules\"";
+    };
+    for (size_t i = 0; i < rootNames.size(); i++) kindOf("", rootNames[i]);
+    for (size_t i = 0; i < folders.size(); i++)
+        for (size_t j = 0; j < folders[i].second.size(); j++) kindOf(folders[i].first, folders[i].second[j]);
     /* mods: the mods each view records, keyed like meta, as escaped status JSON the page parses. */
     json += L"},\"mods\":{";
     bool firstMods = true;
@@ -4333,8 +4534,9 @@ static void poc_think_loop()
             poc_post_json(m.c_str());
             if (g_create_module_result == 1) poc_send_prefabs();
         }
-        /* a module placement posts when the backend has its outcome (poc_poll_module_place) */
-        if (did_load_prefab && !(g_load_prefab_modules && g_load_result == 2)) {
+        /* a module placement posts when the backend has its outcome (poc_poll_module_place), an
+         * object paste once the game thread has queued or staged it (poc_poll_place_outcome) */
+        if (did_load_prefab && !(g_load_prefab_modules && g_load_result == 2) && !g_place_wait) {
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_load_prefab_name.c_str()); m += L"\"";
             if (g_load_prefab_modules) m += L",\"prefabKind\":\"modules\"";
@@ -4345,6 +4547,7 @@ static void poc_think_loop()
             poc_post_json(m.c_str());
         }
         poc_poll_module_place();
+        poc_poll_place_outcome();
         poc_poll_prefab_mods();
         if (did_sound_preview) {
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
@@ -4516,8 +4719,9 @@ static void poc_think_loop()
                 }
                 /* Object Mode / Blueprint, for the Prefabs tab's Load and Create gates */
                 poc_post_editor_mode(false);
-                /* The Limits section's table, after a palette rebuild. */
+                /* The Limits section's table, after a palette rebuild, and its live usage. */
                 poc_budget_poll();
+                poc_budget_usage_poll();
                 if (g_sync_on) {
                     /* mirror the WHOLE editor selection (any N) into the list, only when it changes. */
                     std::sort(selids, selids + sn);
