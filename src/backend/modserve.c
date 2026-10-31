@@ -149,6 +149,23 @@ static void ms_log(const char *fmt, ...)
     backend_log(line);
 }
 
+/* The lines a player should see (sh_modserve_set_console). */
+static sh_modserve_console_fn volatile g_console;
+void sh_modserve_set_console(sh_modserve_console_fn fn) { g_console = fn; }
+
+static void ms_console(const char *fmt, ...)
+{
+    char line[600];
+    va_list ap;
+    sh_modserve_console_fn fn = g_console;
+    if (!fn) return;
+    memcpy(line, "Snapmap+ mods: ", 15);
+    va_start(ap, fmt);
+    _vsnprintf_s(line + 15, sizeof line - 15, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    fn(line);
+}
+
 static double ms_now_ms(void)
 {
     LARGE_INTEGER f, c;
@@ -2878,14 +2895,22 @@ static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
     return ms_file_raw(f, len);
 }
 
-/* 1 with the first model an animWeb's modelInfos block names that no served
- * bundle file provides as an md6Def, the engine has no md6Def source for and
- * the game archives do not hold (the registry does not know a stock decl
- * whose source is not registered yet: the player hands' md6Def at map
- * activation); 0 when every model resolves (or the text cannot be read, or
- * the engine cannot tell). */
+/* 1 with the first model an animWeb's models or modelInfos block names that
+ * no served bundle file provides as an md6Def and the engine cannot find; 0
+ * when every model resolves (or the text cannot be read, or the engine cannot
+ * tell). The engine's parse looks each model up with DeclFind and no
+ * makeDefault, and a miss throws an idLexerException that the parse catches
+ * itself: the web keeps what it had parsed so far (nothing past the props
+ * block), is not marked failed, and the load reports success (13954591, both
+ * renderers). `strict` is a load now: the engine's own lookup (decl_found)
+ * decides, since the game archives also hold campaign md6Defs SnapMap cannot
+ * load (issue 132: designsystems/med_station naming the campaign
+ * wallhealthstation.md6). Otherwise (a stock shadow the engine parses later,
+ * on demand) a model the registry or the game archives know counts as
+ * resolved, since the registry does not know a stock decl whose source is not
+ * registered yet (the player hands' md6Def at map activation). */
 static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_modserve_engine_ops *ops,
-                                 char *model, size_t cap)
+                                 int strict, char *model, size_t cap)
 {
     size_t len = 0;
     unsigned char *text = ms_file_bytes(f, &len);
@@ -2898,17 +2923,24 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
     l.len = len;
     l.pos = 0;
     while (!found && (t = mc_next(&l)).kind != MC_END) {
-        if (t.kind != MC_WORD || t.n != 10 || _strnicmp(t.p, "modelInfos", 10)) continue;
+        /* modelInfos { "<md6>" "<alias>" ... } and models { "<md6>" ... } */
+        int pairs;
+        if (t.kind != MC_WORD) continue;
+        if (t.n == 10 && !_strnicmp(t.p, "modelInfos", 10)) pairs = 1;
+        else if (t.n == 6 && !_strnicmp(t.p, "models", 6)) pairs = 0;
+        else continue;
         if (mc_next(&l).kind != MC_LB) continue;
         for (;;) {
             mc_tok m = mc_next(&l), v;
             char name[MS_NAME_MAX], key[MS_NAME_MAX + 8];
-            int p;
+            int p, engine;
             if (m.kind == MC_RB || m.kind == MC_END || m.kind == MC_BAD) break;
             if (m.kind != MC_STR) continue;
-            v = mc_peek(&l);
-            if (v.kind != MC_STR) continue;
-            mc_next(&l);
+            if (pairs) {
+                v = mc_peek(&l);
+                if (v.kind != MC_STR) continue;
+                mc_next(&l);
+            }
             if (m.n < 3 || m.n - 2 >= sizeof name) continue;
             memcpy(name, m.p + 1, m.n - 2);
             name[m.n - 2] = 0;
@@ -2916,11 +2948,15 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
             _snprintf_s(key, sizeof key, _TRUNCATE, "md6def\x01%s", name);
             p = ms_find(x->pslots, x->pmask, key);
             if (p >= 0 && x->files[p].served && !x->files[p].withdrawn) continue;
-            if (ops->source_registered(ops->context, "md6Def", name) != 0) continue;
-            if (ops->stock_exists) {
-                char request[MS_NAME_MAX + 32];
-                _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/md6def/%s.decl", name);
-                if (ops->stock_exists(ops->context, request) != 0) continue;
+            engine = ops->decl_found ? ops->decl_found(ops->context, "md6Def", name) : -1;
+            if (engine == 1) continue;
+            if (engine != 0 || !strict) {
+                if (ops->source_registered(ops->context, "md6Def", name) != 0) continue;
+                if (ops->stock_exists) {
+                    char request[MS_NAME_MAX + 32];
+                    _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/md6def/%s.decl", name);
+                    if (ops->stock_exists(ops->context, request) != 0) continue;
+                }
             }
             strncpy_s(model, cap, name, _TRUNCATE);
             found = 1;
@@ -2929,6 +2965,43 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
     }
     HeapFree(GetProcessHeap(), 0, text);
     return found;
+}
+
+int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char *model, size_t cap)
+{
+    const ms_index *x = NULL;
+    const ms_file *f;
+    if (!model || !cap) return -1;
+    model[0] = 0;
+    if (!ops || !ops->source_registered) return -1;
+    f = ms_lookup_file(&x, request);
+    if (!f || !f->is_decl || !f->ptype || _stricmp(f->ptype, "animWeb")) return -1;
+    return ms_animweb_unresolved(x, f, ops, 1, model, cap);
+}
+
+int sh_modserve_withdraw(const char *request, const char *type, const char *name, const char *why)
+{
+    const ms_index *x = NULL;
+    ms_file *f = (ms_file *)ms_lookup_file(&x, request);
+    const char *bundle;
+    if (!f) return 0;
+    bundle = x->bundles[f->bundle].id;
+    InterlockedExchange(&f->withdrawn, 1);
+    ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
+    ms_console("%s: %s '%s' not loaded: %s", bundle, type ? type : "decl", name ? name : request, why ? why : "");
+    return 1;
+}
+
+int sh_modserve_error_names_decl(const char *text, const char *type, const char *name)
+{
+    char hay[1024], needle[MS_NAME_MAX + 48];
+    size_t i;
+    if (!text || !type || !name || !text[0]) return 0;
+    if (_snprintf_s(needle, sizeof needle, _TRUNCATE, "decls/%s/%s.decl", type, name) < 0) return 0;
+    for (i = 0; needle[i]; ++i) needle[i] = needle[i] == '\\' ? '/' : (char)ms_fold(needle[i]);
+    for (i = 0; i + 1 < sizeof hay && text[i]; ++i) hay[i] = text[i] == '\\' ? '/' : (char)ms_fold(text[i]);
+    hay[i] = 0;
+    return strstr(hay, needle) != NULL;
 }
 
 /* ------------------------------------------------------------------ resource watermark */
@@ -3074,6 +3147,18 @@ void sh_modserve_watermark_free(sh_modserve_watermark *w)
     memset(w, 0, sizeof *w);
 }
 
+unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was)
+{
+    unsigned char *r = (unsigned char *)resource;
+    unsigned before, after;
+    before = *(unsigned *)(r + MS_RES_LEVEL);
+    if (was) *was = before;
+    load(resource);
+    after = *(unsigned *)(r + MS_RES_LEVEL);
+    if (after != before) *(unsigned *)(r + MS_RES_LEVEL) = before;
+    return after;
+}
+
 int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -3137,6 +3222,15 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             continue;
         }
         if (f->reg_state == 1) continue;
+        if (InterlockedCompareExchange(&f->withdrawn, 0, 0)) {
+            /* Withdrawn by an earlier pass (a model SnapMap cannot load, or a
+             * parse the engine refused): its bytes are not parsed again. */
+            failed[i] = 1;
+            InterlockedExchange(&f->reg_state, -1);
+            ms_log("%s: %s '%s' (%s) NOT READY: withdrawn earlier in this session", phase, s->type, s->name,
+                   s->bundle_id);
+            continue;
+        }
         {
             int known = ops->source_registered(ops->context, s->type, s->name) == 1;
             char model[MS_NAME_MAX];
@@ -3144,19 +3238,23 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
              * refused by the engine's parse (a C++ throw per load). Its file
              * is withdrawn from serving: a stock decl it shadowed serves
              * again, and a new name is never registered. */
-            if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, model, sizeof model)) {
+            if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, !known, model, sizeof model)) {
                 InterlockedExchange(&f->withdrawn, 1);
                 if (known && s->shadow) {
                     InterlockedExchange(&f->reg_state, 1);
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
+                    ms_console("%s: animWeb '%s' not applied: it names model '%s', which SnapMap cannot load; the "
+                               "game's own animWeb is used", s->bundle_id, s->name, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
+                    ms_console("%s: animWeb '%s' not loaded: it names model '%s', which SnapMap cannot load "
+                               "(campaign-only or missing)", s->bundle_id, s->name, model);
                 }
                 continue;
             }
@@ -3180,7 +3278,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
         sh_modserve_step *s = &plan->steps[i];
         ms_file *f = &x->files[s->file];
         unsigned state = 0, lifetime = 0;
-        int dep_failed = -1;
+        int dep_failed = -1, loaded;
         if (failed[i]) { s->ready = -1; continue; }
         if (f->reg_state == 1) { s->ready = 1; ready++; continue; }
         if (stock[i] == 2) { s->ready = 1; ready++; continue; }   /* withdrawn: the stock decl serves */
@@ -3207,7 +3305,22 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                    s->bundle_id, plan->steps[dep_failed].type, plan->steps[dep_failed].name);
             continue;
         }
-        if (ops->load(ops->context, s->type, s->name, s->persist, &state, &lifetime)) {
+        loaded = ops->load(ops->context, s->type, s->name, s->persist, &state, &lifetime);
+        if (loaded == SH_MODSERVE_LOAD_REFUSED) {
+            /* The parse failed although the load reports success: withdrawn,
+             * so no later pass or demand load parses these bytes again. */
+            char why[300];
+            why[0] = 0;
+            if (ops->refusal) ops->refusal(ops->context, why, sizeof why);
+            failed[i] = 1;
+            s->ready = -1;
+            InterlockedExchange(&f->reg_state, -1);
+            InterlockedExchange(&f->withdrawn, 1);
+            ms_log("%s: %s '%s' (%s) NOT READY: the engine refused its parse%s%s; withdrawn, not loaded again", phase,
+                   s->type, s->name, s->bundle_id, why[0] ? ": " : "", why);
+            ms_console("%s: %s '%s' not loaded: the game refused it%s%s", s->bundle_id, s->type, s->name,
+                       why[0] ? ": " : "", why);
+        } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);
             s->ready = 1;
             ready++;

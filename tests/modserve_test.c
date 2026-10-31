@@ -1816,6 +1816,180 @@ static void test_watermark(void)
     lm.next = NULL;
 }
 
+/* ------------------------------------------------------------------ refusals (issue 132) */
+
+/* The engine side of the issue-132 pass: the archives hold the campaign md6Defs
+ * (stock_exists 1), but the engine's own lookup (decl_found) finds only what
+ * SnapMap loaded; one parse the engine refuses although the load reports
+ * success. */
+static char g_console_seen[4096];
+static void rf_console(const char *line)
+{
+    size_t at = strlen(g_console_seen);
+    _snprintf_s(g_console_seen + at, sizeof g_console_seen - at, _TRUNCATE, "%s\n", line);
+}
+static int rf_source(void *c, const char *type, const char *name)
+{
+    (void)c;
+    return !_stricmp(type, "animWeb") && !_stricmp(name, "player/fp_hands_mp");
+}
+static int rf_stock(void *c, const char *request)
+{
+    (void)c;
+    return !strncmp(request, "generated/decls/md6def/zion/", 28);
+}
+static int rf_found(void *c, const char *type, const char *name)
+{
+    (void)c;
+    return !_stricmp(type, "md6Def") && !strcmp(name, "zion/snap/known.md6");
+}
+static int g_rf_loads;
+static int rf_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    (void)c; (void)type;
+    g_rf_loads++;
+    call_log(persist ? "P" : "L", type, name);
+    *lifetime = 1;
+    *state = 0;
+    return !strcmp(name, "designsystems/throws") ? SH_MODSERVE_LOAD_REFUSED : 1;
+}
+static void rf_refusal(void *c, char *out, size_t cap)
+{
+    (void)c;
+    strncpy_s(out, cap, "S:\\DOOM\\base\\generated\\decls\\animWeb\\designsystems\\throws.decl(9): error : "
+              "Could not find animweb decl: 'gone'", _TRUNCATE);
+}
+static const sh_modserve_engine_ops g_rf = { NULL, rf_source, fake_register, rf_load, rf_stock, NULL, rf_found, rf_refusal };
+/* The same engine without the lookup: the archives decide, as before. */
+static const sh_modserve_engine_ops g_rf_old = { NULL, rf_source, fake_register, rf_load, rf_stock };
+
+static void rf_reconstruct(void *res) { ((fake_res *)res)->level = 1; }
+static void rf_plain(void *res) { ((fake_res *)res)->state = 0; }
+
+static void test_refusals(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], hash[65], model[200];
+    char *slash;
+    sh_modserve_plan p;
+    const char *hashes[1];
+    int unknown = 0, ready;
+    static fake_res res;
+    unsigned was = 0;
+    static const fx_file files[] = {
+        { "generated/decls/animweb/designsystems/med_station.decl",
+          "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/objects/props_set/kiosks/wallhealthstation.md6\" \"\"\t// modelIndex 0\n\t\t}\n\t}\n}\n",
+          -1, "animWeb", "designsystems/med_station", NULL, '1' },
+        { "generated/decls/animweb/designsystems/turret.decl",
+          "{\n\tprops {\n\t\tmodels {\n\t\t\t\"zion/snap/known.md6\"\n\t\t\t\"zion/objects/weapons/turret_campaign.md6\"\n\t\t}\n\t}\n}\n",
+          -1, "animWeb", "designsystems/turret", NULL, '2' },
+        { "generated/decls/animweb/designsystems/fine.decl",
+          "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/snap/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
+          -1, "animWeb", "designsystems/fine", NULL, '3' },
+        { "generated/decls/animweb/designsystems/throws.decl",
+          "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/snap/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
+          -1, "animWeb", "designsystems/throws", NULL, '4' },
+        { "generated/decls/animweb/player/fp_hands_mp.decl",
+          "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/mp.md6\" \"\"\n\t\t}\n\t}\n}\n",
+          -1, "animWeb", "player/fp_hands_mp", NULL, '5' },
+    };
+
+    /* The error text names the decl's own file, either slash, any case. */
+    CHECK(sh_modserve_error_names_decl("S:\\Steam\\steamapps\\common\\DOOM\\base\\generated\\decls\\animWeb\\designsystems\\"
+                                       "med_station.decl(21): error : Could not find model 'x.md6' in 'models' block.",
+                                       "animWeb", "designsystems/med_station"));
+    CHECK(sh_modserve_error_names_decl("generated/decls/md6def/zion/a/b.md6.decl(3): error : x", "md6Def", "zion/a/b.md6"));
+    CHECK(!sh_modserve_error_names_decl("generated\\decls\\animWeb\\designsystems\\med_station_heal.decl(23): error : x",
+                                        "animWeb", "designsystems/med_station"));
+    CHECK(!sh_modserve_error_names_decl("", "animWeb", "a") && !sh_modserve_error_names_decl(NULL, "animWeb", "a"));
+
+    /* A failed in-place load reconstructs the object, whose constructor writes
+     * level 1: the level is put back; a load that keeps it is left alone. */
+    res.level = 4;
+    CHECK(sh_modserve_load_keep_lifetime(&res, rf_reconstruct, &was) == 1 && was == 4 && res.level == 4);
+    res.level = 2;
+    CHECK(sh_modserve_load_keep_lifetime(&res, rf_plain, &was) == 2 && was == 2 && res.level == 2);
+
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refusals\\mods", top);
+    mkdirs(root);
+    /* A converted first-generation package (the issue-132 "SP doors"): every
+     * name it carries is listed as a shadow, new names included. */
+    g_bundle_extra = "\"legacy\": {},\n  ";
+    make_bundle(root, "dz.pack@0.0.0+1", "dz.pack", "0.0.0", '9',
+                "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/turret.decl\", "
+                "\"generated/decls/animweb/designsystems/fine.decl\", \"generated/decls/animweb/designsystems/throws.decl\", "
+                "\"generated/decls/animweb/player/fp_hands_mp.decl\"",
+                files, 5, NULL);
+    g_bundle_extra = NULL;
+    hash64('9', hash);
+    hashes[0] = hash;
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    /* The check alone: the engine lookup decides a load now. */
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/med_station.decl", &g_rf, model, sizeof model) == 1 &&
+          !strcmp(model, "zion/objects/props_set/kiosks/wallhealthstation.md6"));
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/turret.decl", &g_rf, model, sizeof model) == 1 &&
+          !strcmp(model, "zion/objects/weapons/turret_campaign.md6"));
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/fine.decl", &g_rf, model, sizeof model) == 0);
+    CHECK(sh_modserve_animweb_check("generated/decls/md6def/zion/none.md6.decl", &g_rf, model, sizeof model) == -1);
+    /* Without the lookup the archives answer, which is what let issue 132's
+     * campaign models through. */
+    CHECK(sh_modserve_animweb_check("generated/decls/animweb/designsystems/med_station.decl", &g_rf_old, model, sizeof model) == 0);
+
+    g_console_seen[0] = 0;
+    sh_modserve_set_console(rf_console);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5 && unknown == 0);
+    log_clear();
+    g_calls[0] = 0;
+    g_rf_loads = 0;
+    ready = sh_modserve_plan_run(&p, &g_rf, "map");
+    CHECK(ready == 2);
+    CHECK(log_has("map: animWeb 'designsystems/med_station' (dz.pack) NOT READY: it names model "
+                  "'zion/objects/props_set/kiosks/wallhealthstation.md6', which neither a bundle nor the game provides"));
+    CHECK(log_has("map: animWeb 'designsystems/turret' (dz.pack) NOT READY: it names model 'zion/objects/weapons/turret_campaign.md6'"));
+    CHECK(log_has("map: animWeb 'designsystems/fine' (dz.pack) READY"));
+    CHECK(log_has("map: animWeb 'designsystems/throws' (dz.pack) NOT READY: the engine refused its parse: "
+                  "S:\\DOOM\\base\\generated\\decls\\animWeb\\designsystems\\throws.decl(9): error : Could not find animweb decl: 'gone'; "
+                  "withdrawn, not loaded again"));
+    /* The known stock shadow parses later, on demand: the archives keep it served. */
+    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (dz.pack) shadows a stock decl; served by the provider"));
+    /* Never loaded: the two whose models SnapMap cannot load. */
+    CHECK(!strstr(g_calls, "designsystems/med_station") && !strstr(g_calls, "designsystems/turret"));
+    CHECK(g_rf_loads == 2);
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/med_station' not loaded: it names model "
+                                 "'zion/objects/props_set/kiosks/wallhealthstation.md6', which SnapMap cannot load (campaign-only or missing)\n") != NULL);
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/throws' not loaded: the game refused it: ") != NULL);
+    CHECK(!strstr(g_console_seen, "designsystems/fine"));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/throws.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/fine.decl", NULL));
+    sh_modserve_plan_free(&p);
+
+    /* The next map load with the same bundle parses none of them again. */
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5);
+    log_clear();
+    g_calls[0] = 0;
+    g_rf_loads = 0;
+    g_console_seen[0] = 0;
+    ready = sh_modserve_plan_run(&p, &g_rf, "map");
+    CHECK(ready == 2 && g_rf_loads == 0);
+    CHECK(log_has("map: animWeb 'designsystems/throws' (dz.pack) NOT READY: withdrawn earlier in this session"));
+    CHECK(log_has("map: animWeb 'designsystems/med_station' (dz.pack) NOT READY: withdrawn earlier in this session"));
+    CHECK(g_console_seen[0] == 0);
+    sh_modserve_plan_free(&p);
+
+    /* A withdrawal by request (the early re-parse's refusal) names the file once. */
+    CHECK(sh_modserve_withdraw("generated/decls/animweb/designsystems/fine.decl", "animWeb", "designsystems/fine",
+                               "the game refused its bytes; the game's own decl is restored") == 1);
+    CHECK(log_has("MODS: withdrawn: animWeb 'designsystems/fine' (dz.pack): the game refused its bytes"));
+    CHECK(strstr(g_console_seen, "Snapmap+ mods: dz.pack: animWeb 'designsystems/fine' not loaded: the game refused its bytes") != NULL);
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/fine.decl", NULL));
+    CHECK(sh_modserve_withdraw("generated/decls/animweb/designsystems/fine.decl", "animWeb", "designsystems/fine", "again") == 0);
+    sh_modserve_set_console(NULL);
+}
+
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
@@ -2197,6 +2371,7 @@ int main(void)
     test_conflicts();
     test_editor_refs();
     test_watermark();
+    test_refusals();
     test_bundle_extra();
     test_scope();
     test_scope_providers();

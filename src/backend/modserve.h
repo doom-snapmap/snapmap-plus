@@ -177,7 +177,12 @@ void sh_modserve_plan_free(sh_modserve_plan *plan);
 /* The engine operations a plan runs through. Production binds them to the
  * decl registry (modserve_engine.c); tests supply fakes. Each returns 1 for
  * success. `state` and `lifetime` receive the resource bytes at +0x2c/+0x28
- * after the load, for the log. */
+ * after the load, for the log. `load` may also answer
+ * SH_MODSERVE_LOAD_REFUSED: the engine raised a parse error naming the decl's
+ * file during the load. An animWeb's parse catches its own error and leaves a
+ * truncated web that looks loaded (state bit 0 clear), so the state byte alone
+ * cannot tell; the plan withdraws such a file and never loads it again. */
+#define SH_MODSERVE_LOAD_REFUSED 2
 typedef struct sh_modserve_engine_ops {
     void *context;
     int (*source_registered)(void *context, const char *type, const char *name);
@@ -194,7 +199,46 @@ typedef struct sh_modserve_engine_ops {
      * (sh_modserve_each_unopened_shadow) after the new identities they name
      * have sources and before a new decl that inherits one is parsed. */
     void (*sources_published)(void *context);
+    /* Optional: 1 when the engine's own lookup finds the decl now (DeclFind
+     * without makeDefault, the lookup an animWeb's parse makes for each model
+     * it names), 0 when it does not, -1 when it cannot tell. When present it
+     * decides the model check for a decl the pass loads now: the game
+     * archives also hold campaign content SnapMap cannot load. */
+    int (*decl_found)(void *context, const char *type, const char *name);
+    /* Optional: the engine's error text after `load` answered
+     * SH_MODSERVE_LOAD_REFUSED, for the log and the console line. */
+    void (*refusal)(void *context, char *out, size_t cap);
 } sh_modserve_engine_ops;
+
+/* The console sink for the lines a player should see when a pass skips or
+ * refuses a decl (production: the DOOM console). NULL turns it off. */
+typedef void (*sh_modserve_console_fn)(const char *line);
+void sh_modserve_set_console(sh_modserve_console_fn fn);
+
+/* The model check for the served animWeb at `request`, as a load now would
+ * meet it: 1 with the first model its models or modelInfos block names that
+ * no bundle serves and the engine cannot find (written to `model`), 0 when
+ * every model resolves or the check cannot tell, -1 when `request` is not a
+ * served animWeb. */
+int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char *model, size_t cap);
+
+/* Withdraw the file serving `request` (lookups and the probe miss it, a
+ * rescan keeps it withdrawn while its bytes are unchanged), logging `why` and
+ * printing one console line. 1 when a served file was withdrawn. */
+int sh_modserve_withdraw(const char *request, const char *type, const char *name, const char *why);
+
+/* 1 when the engine error text `text` names the decl file of `type`/`name`
+ * ("...\generated\decls\animWeb\designsystems\med_station.decl(21): error : ..."),
+ * matched without case and with either slash. */
+int sh_modserve_error_names_decl(const char *text, const char *type, const char *name);
+
+/* Run `load(resource)` and put the resource's lifetime (+0x28) back as it was.
+ * ResourceGenericLoad's failure path reconstructs the object in place, and
+ * the constructor writes level 1 or 2, so a permanent decl that failed an
+ * in-place re-parse would be destroyed by the next map unload while every
+ * permanent consumer still points at it. Returns the level the load left
+ * (before the restore); `*was` receives the level before. */
+unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was);
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is
  * not registered yet (registration only publishes the source, so a decl that
