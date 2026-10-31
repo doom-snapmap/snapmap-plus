@@ -234,6 +234,10 @@ static int fake_scope_apply(const char *phase)
     return 1;
 }
 
+/* modui.h map_left while the editor screen is down: 1 left (hub), 0 a menu over the map, -1 unknown. */
+static int g_map_left = 1;
+static int fake_map_left(void) { return g_map_left; }
+
 static const char *g_busy;
 static int fake_busy(char *cause, size_t cap)
 {
@@ -287,6 +291,7 @@ static void bind_fakes(void)
     e.migrate_start = fake_mig_start;
     e.migrate_busy = fake_mig_busy;
     e.scope_apply = fake_scope_apply;
+    e.map_left = fake_map_left;
     sh_modui_bind(&e);
 }
 
@@ -1379,7 +1384,18 @@ int main(int argc, char **argv)
             CHECK(sh_modserve_scope_map_open());
             CHECK(sh_modui_poll_main(NULL) == 1);
             applies = g_scope_applies;
+            /* Settings from the Start menu (P27): the editor screen goes down but its state keeps
+             * running over the open map, so the listing stays and nothing is applied, on the way
+             * there or back. */
             g_map_on = 0;
+            g_map_left = 0;
+            CHECK(sh_modui_poll_main(NULL) == 0 && sh_modui_poll_main(NULL) == 0);
+            CHECK(sh_modserve_scope_map_open() && g_scope_applies == applies);
+            g_map_on = 1;
+            CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open() && g_scope_applies == applies);
+            /* The hub: the editor no longer runs a state. */
+            g_map_on = 0;
+            g_map_left = 1;
             CHECK(sh_modui_poll_main(NULL) == 0);
             CHECK(!sh_modserve_scope_map_open() && g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "map exit"));
             {

@@ -892,7 +892,12 @@ in (below) or, in a map, when the bundle adds Toybox rows; a pass after the
 listing changes therefore runs the stopped bundles' deactivate lines and
 restores their cvars as it does after an uninstall. `sh_mods status` and
 `sh_mods doctor` print `sh_modserve_requirements_report`, one line per
-requirement and whether it is live. Packages converted from the
+requirement with that bundle's own state for the open map: live, not active
+for this map (with the reason, and the mod that holds the same value when one
+does, so another bundle's value never reads as live for this one), refused
+(lost a conflict), NOT live with the engine's cause, restored (its
+requirements ran and stopped; `modserve.c` keeps the stopped ids until they
+start again), or not applied yet. Packages converted from the
 retired formats keep only the two blacklist gates (below): their requirements
 were never accepted by a player installing them.
 
@@ -1041,13 +1046,22 @@ read lock-free: `shadows_off` (a map-scoped bundle the listing lacks) and
 rows the palette registers whatever map is open). A withdrawn shadow misses
 `sh_modserve_lookup`, `sh_modserve_open` and the decl probe, so the provider
 falls through to the engine; the early-decl and gated-reload visits skip it;
-reports read the index through `sh_modserve_lookup_indexed`. A conflict path
-whose winner is withdrawn falls through as well, even when another provider is
-listed.
+reports read the index through `sh_modserve_lookup_indexed`. Admission is per
+path, not per winner: `ms_resolve` records a shadow path's other providers on
+its winner (`alt_first`, in the conflict rules' order for different bytes,
+index order for identical bytes), and when the winner's bundle is withdrawn
+`ms_scope_compute` picks the first provider the listing admits
+(`scope_alt`), whose own file then serves the path (`ms_scoped`). So a path
+two installs carry with the same bytes (a renamed or forked copy) is served in
+a map that lists either one, and a conflict whose winner is unlisted is served
+by the listed provider the winner rules rank next, uncomposed; only a path none
+of whose providers is listed falls through. `sh_mods doctor` adds, per shadow
+or conflict path, which provider serves it for the open map.
 
-When the listing changes, every served shadow decl, model and image of each
-bundle whose shadows turned on or off is marked pending at generation 0 and the
-inheritance closure is marked again, and `sh_modserve_each_refresh` offers them
+When the listing changes, every shadow decl, model and image whose serving
+bytes changed (withdrawn, admitted, or moved to a provider with other bytes;
+moving between identical copies marks nothing) is marked pending at generation
+0 and the inheritance closure is marked again, and `sh_modserve_each_refresh` offers them
 with `gone` set while withdrawn (no gate needed for the game's bytes). The
 engine side is the refresh of a rescan: `sh_modserve_scope_apply` runs the
 requirements pass first, then `me_refresh_apply` (re-parse in process heap 0,
@@ -1064,8 +1078,13 @@ at:
   placed names, then applies before the requirements check and the level load;
 - the map exit: the main-thread tick (`sh_modui_poll_main`, polled while scope
   can matter) clears the listing once the editor that showed the map loaded
-  last has no map open and neither Play nor a load runs (the hub), and sets it
-  again from the open map when an editor map is open without one;
+  last has its screen down, neither Play nor a load runs, and the engine's
+  `map_left` (`iface_engine.c`) says the editor has left the map: no map
+  object, or the editor state at `+0x23618` is 0 (no state runs: the hub or
+  the browser) or 8 (exiting). The Settings screen opened from the Start menu
+  also takes the editor screen down but leaves the state running, so the
+  listing stays. The tick sets the listing again from the open map when an
+  editor map is open without one;
 - the Mods tab's and the console's map add and Remove from map, at once.
 
 With no map (at boot, and at the hub after the editor) no map-scoped shadow
@@ -1082,7 +1101,9 @@ once per build: a `generated/decls/snapeditor*`, `snappropertyinspector*` or
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
 `sh_modserve_scope_report`, one line per bundle with its scope and whether it
-is active for the open map.
+is active for the open map. The map load's `MODS: map manifest names ...` line
+ends with the registration steps the activation found ready, or "no new decls
+to register" for bundles of shadows and requirements only.
 
 ### Migration of the retired overrides folder
 

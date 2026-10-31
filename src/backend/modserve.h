@@ -384,10 +384,12 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
 int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
                                const sh_modserve_gate_ops *gates, const char *phase, sh_modserve_gates *out);
 
-/* One line per requirement of each admitted bundle and whether it is live
- * ("requirements: <id>@<version>: cvar <name>=<value>: live", "NOT live
- * (<cause>; ...)", "not applied yet (...)"; "... activate command \"<line>\":
- * ran"; "... deactivate command ...: runs when the mod stops"), then each
+/* One line per requirement of each admitted bundle and its state for the
+ * open map ("requirements: <id>@<version>: cvar <name>=<value>: live", "not
+ * active for this map (...)", "refused (<cause>)", "NOT live (<cause>; ...)",
+ * "restored (...)", "not applied yet (...)"; "... activate command
+ * \"<line>\": ran"; "... deactivate command ...: runs when the mod stops" or
+ * "ran when it stopped"), then each
  * cvar waiting to be restored and each stopped bundle whose lines wait, or
  * one "requirements: none" line. For sh_mods status and sh_mods doctor. Any
  * thread. Returns the number of lines. */
@@ -403,10 +405,14 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * names (mods/<id>/...) are not scoped: they activate per map through the
  * plan, and a lookup of one is answered whatever map is open.
  *
- * A shadow of a bundle the current map does not list is treated as withdrawn:
- * sh_modserve_lookup, sh_modserve_open and the decl probe miss it, so the
- * engine's own bytes answer, and the early-decl and gated-reload visits skip
- * it. Its requirements are not accepted (sh_modserve_requirements_apply runs
+ * A shadow path is admitted when any bundle that provides it is listed (or
+ * always-scoped): its winner serves when the winner's bundle is listed, else
+ * the first listed provider in winner order (the same bytes when another
+ * install carries them, a renamed or forked copy; for different bytes the
+ * conflict rules' next choice, uncomposed). A path none of whose providers is
+ * listed is withdrawn: sh_modserve_lookup, sh_modserve_open and the decl
+ * probe miss it, so the engine's own bytes answer, and the early-decl and
+ * gated-reload visits skip it. An unlisted bundle's requirements are not accepted (sh_modserve_requirements_apply runs
  * its deactivate lines and restores its cvars), except that in a map a bundle
  * that adds Toybox rows keeps its requirements live, because the palette
  * registers its rows in every map. With no map (the hub, and at boot) no
@@ -424,7 +430,8 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * sh_modserve_index_boot); with it off every shadow serves as it always did.
  *
  * When the listing changes (sh_modserve_scope_set), every shadow decl, model
- * and image of each bundle whose shadows turned on or off is marked pending
+ * and image whose serving bytes changed (withdrawn, admitted, or served by
+ * another provider with other bytes) is marked pending
  * exactly as a changed or gone shadow is at a rescan (sh_modserve_each_refresh,
  * with `gone` set while withdrawn), and the inheritance closure is marked
  * again (sh_modserve_refresh_expand), so the refresh primitives re-parse or
