@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int mt_temp_dir(const char *tag, char *out, size_t cap)
@@ -101,5 +102,51 @@ static void mt_delete(const char *folder, const char *rel)
 }
 
 static int mt_exists(const char *path) { return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES; }
+
+/* Extract a ZIP of stored entries (the exports write method 0) into dir, as a
+ * player's file manager would. Returns the entry count, -1 on a damaged file. */
+static int mt_unzip_stored(const char *zip, const char *dir)
+{
+    FILE *f = NULL;
+    unsigned char *z;
+    long size;
+    size_t i, at = (size_t)-1, cd, n, k;
+    int count = 0;
+    if (fopen_s(&f, zip, "rb") || !f) return -1;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    z = (unsigned char *)malloc((size_t)size + 1);
+    if (!z || fread(z, 1, (size_t)size, f) != (size_t)size) { fclose(f); free(z); return -1; }
+    fclose(f);
+    for (i = (size_t)size >= 22 ? (size_t)size - 22 + 1 : 0; i-- > 0;)
+        if (z[i] == 'P' && z[i + 1] == 'K' && z[i + 2] == 5 && z[i + 3] == 6) { at = i; break; }
+    if (at == (size_t)-1) { free(z); return -1; }
+    n = (size_t)(z[at + 10] | (z[at + 11] << 8));
+    cd = (size_t)z[at + 16] | ((size_t)z[at + 17] << 8) | ((size_t)z[at + 18] << 16) | ((size_t)z[at + 19] << 24);
+    for (k = 0; k < n; k++) {
+        size_t nl = (size_t)(z[cd + 28] | (z[cd + 29] << 8)), xl = (size_t)(z[cd + 30] | (z[cd + 31] << 8));
+        size_t cl = (size_t)(z[cd + 32] | (z[cd + 33] << 8));
+        size_t usize = (size_t)z[cd + 24] | ((size_t)z[cd + 25] << 8) | ((size_t)z[cd + 26] << 16) | ((size_t)z[cd + 27] << 24);
+        size_t lho = (size_t)z[cd + 42] | ((size_t)z[cd + 43] << 8) | ((size_t)z[cd + 44] << 16) | ((size_t)z[cd + 45] << 24);
+        size_t data = lho + 30 + (size_t)(z[lho + 26] | (z[lho + 27] << 8)) + (size_t)(z[lho + 28] | (z[lho + 29] << 8));
+        char name[MAX_PATH], path[MAX_PATH * 2];
+        FILE *o = NULL;
+        size_t c;
+        if (nl >= sizeof name || z[cd + 10] != 0) { free(z); return -1; }
+        memcpy(name, z + cd + 46, nl);
+        name[nl] = 0;
+        for (c = 0; c < nl; c++) if (name[c] == '/') name[c] = '\\';
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        mt_mkdirs_for(path);
+        if (fopen_s(&o, path, "wb") || !o) { free(z); return -1; }
+        fwrite(z + data, 1, usize, o);
+        fclose(o);
+        count++;
+        cd += 46 + nl + xl + cl;
+    }
+    free(z);
+    return count;
+}
 
 #endif

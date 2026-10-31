@@ -121,7 +121,9 @@ int sh_mp_missing_status(const sh_mp_module_check *c, char *out, size_t cap);
  * malloc-owned text or NULL. */
 char *sh_mp_check_json(const sh_mp_module_check *c);
 
-/* The sidecar body: {"desc":"","tags":[],"kind":"modules",...}. bounds, when
+/* The summary view the save composes into the prefab's snapmapPlus block
+ * (prefab_mods.h): {"desc":"","tags":[],"kind":"modules",...}; every member
+ * but desc and tags becomes the block's "summary". bounds, when
  * not NULL, holds one world-axis box per module (min xyz, max xyz) relative to
  * the anchor; labels (may be NULL) the display names. desc/tags are written
  * empty. Returns malloc-owned text or NULL. */

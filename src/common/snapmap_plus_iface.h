@@ -308,9 +308,9 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *          Object Mode (state 2). Returns 1, or 0 when no editor is open.
  *   SAVE   any thread except the game thread (it marshals its capture there and
  *          waits). Cuts the selected modules out of the open map and writes path
- *          (the prefab) and meta_path (the sidecar); out receives the sidecar
- *          body. Returns 1 saved, -1 failed, -2 not in Blueprint, -3 no module
- *          selected.
+ *          (the prefab, its snapmapPlus block holding the summary and mod
+ *          rows); out receives the view (below). Returns 1 saved, -1 failed,
+ *          -2 not in Blueprint, -3 no module selected.
  *   PLACE  any thread. Validates and merges text (a module prefab file) into the
  *          open map, then stages the install for the game's next frames.
  *          Returns 2 accepted (poll STATUS with the returned seq), -1 unreadable,
@@ -327,14 +327,21 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *          same module check for text without placing: out receives
  *          {"checked":true,"count":N,"missing":[...],"status":"..."} or
  *          {"checked":false}. Returns the missing count, -1 when it could not
- *          check (no editor, not a module prefab). With meta_path, a module a
- *          row of that sidecar provides is not missing (it is a mod, below).
- * The mods a prefab needs (backend/prefab_mods.c), for both kinds of prefab:
- *   MODS_RECORD   any thread. text: the prefab file just written; meta_path:
- *          its sidecar. Writes the mod rows (the map manifest's save-time
- *          closure over the prefab) into the sidecar; out receives the
- *          sidecar body. Returns the row count, -1 failed.
- *   MODS_STATUS   any thread. text: a sidecar body. out receives
+ *          check (no editor, not a module prefab). text is the prefab file
+ *          (its snapmapPlus block is ignored); a module a row of its block
+ *          (else of the sidecar at meta_path) provides is not missing (it is a
+ *          mod, below).
+ * A prefab's details and the mods it needs (backend/prefab_mods.c), for both
+ * kinds of prefab. They live in the prefab file's "snapmapPlus" block
+ * (backend/prefab_block.h); a prefab without one falls back, read-only, to a
+ * <name>.meta.json sidecar at meta_path. Details cross as a "view", the flat
+ * {"desc","tags",...summary...,"mods"} object the page reads:
+ *   MODS_RECORD   any thread. text: the prefab the engine just serialized;
+ *          path: its file. Writes a fresh block with the mod rows (the map
+ *          manifest's save-time closure over the prefab) into the file; out
+ *          receives the view. Returns the row count, -1 failed (the file is
+ *          left as the engine wrote it).
+ *   MODS_STATUS   any thread. text: a view. out receives
  *          {"count":N,"missing":M,"mods":[{"id","version","bundle","size",
  *          "installed"}...]}. Returns M, -1 unreadable.
  *   MODS_RESOLVE  not the game thread (it runs there and waits). text: the
@@ -342,17 +349,24 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *          place now (every mod installed and in the open map), 2 held while
  *          the mod store is asked (poll MODS_POLL with seq), -6 a module the
  *          player cannot get (DLC), -7 refused, 0 the game did not answer;
- *          out receives the message for -6, -7 and 2.
+ *          out receives the message for -6, -7 and 2. The caller strips the
+ *          block before the engine sees the text.
  *   MODS_POLL     any thread. seq from MODS_RESOLVE: 2 waiting, 1 ready (place
  *          it now), 0 refused or dropped (the game showed why).
- *   META_WRITE    any thread. text: a sidecar body from the page ("" deletes);
- *          meta_path. Keeps the recorded mod rows when the body has none.
- *          1 written, -1 failed.
+ *   META_WRITE    any thread. text: a view from the page ("" clears); only its
+ *          desc and tags are taken. path: the prefab file, whose block is
+ *          rewritten in place (from the sidecar at meta_path when it has none
+ *          yet; the sidecar is not changed). 1 written, -1 failed.
+ *   META_READ     any thread. text: the prefab file, or its end when tail is 1;
+ *          meta_path: its sidecar. out receives the view (empty when there
+ *          are no details). Returns where it came from: 1 the block, 2 the
+ *          sidecar, 0 neither.
  *   EXPORT        not the game thread. path: the prefab file; meta_path: its
- *          sidecar; name; zip_path. Writes the prefab with its mods (the
- *          rawmap export's layout). out: the message. 1 written, -1 refused.
- *   IMPORT        not the game thread. zip_path; path: the prefabs folder.
- *          Installs the mods, adds the prefab. out: {"ok","name","message"}.
+ *          sidecar; name (UTF-8); zip_path. Writes the prefab with its mods
+ *          as one ZIP (modexport.h). out: the message. 1 written, -1 refused.
+ *   IMPORT        not the game thread. zip_path: a .zip, or a .json inside an
+ *          extracted export folder; path: the prefabs folder. Installs the
+ *          mods, adds the prefab. out: {"ok","added","name","message"}.
  *          1 added, 0 already in the library (nothing written), -1 refused. */
 #define SH_MODULE_PREFAB_STATE  1
 #define SH_MODULE_PREFAB_SAVE   2
@@ -366,19 +380,22 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
 #define SH_MODULE_PREFAB_META_WRITE   10
 #define SH_MODULE_PREFAB_EXPORT       11
 #define SH_MODULE_PREFAB_IMPORT       12
+#define SH_MODULE_PREFAB_META_READ    13
 typedef struct sh_module_prefab_call {
     int         op;
-    const char *path;        /* SAVE: prefab file; EXPORT: prefab file; IMPORT: prefabs folder */
-    const char *meta_path;   /* SAVE, CHECK, MODS_*, META_WRITE, EXPORT: sidecar file */
-    const char *text;        /* PLACE, CHECK, MODS_*: prefab file text; MODS_STATUS, META_WRITE: sidecar body */
+    const char *path;        /* SAVE, MODS_RECORD, META_WRITE, EXPORT: prefab file; IMPORT: prefabs folder */
+    const char *meta_path;   /* CHECK, MODS_RESOLVE, META_*, EXPORT: the read-only sidecar fallback */
+    const char *text;        /* PLACE, CHECK, MODS_RECORD, MODS_RESOLVE, META_READ: prefab file text;
+                                MODS_STATUS, META_WRITE: a view */
     size_t      text_len;
-    char       *out;         /* SAVE: sidecar body; STATUS/PLACE: message */
+    char       *out;         /* SAVE, MODS_RECORD, META_READ: the view; STATUS/PLACE: message */
     int         out_cap;
     int         seq;         /* PLACE out; STATUS in; MODS_RESOLVE out; MODS_POLL in */
     int         blueprint;   /* STATE out */
     int         entity_mode; /* STATE out */
     const char *name;        /* MODS_RESOLVE, EXPORT: the prefab's name */
-    const char *zip_path;    /* EXPORT, IMPORT: the ZIP */
+    const char *zip_path;    /* EXPORT, IMPORT: the ZIP (IMPORT: or a .json in an extracted export) */
+    int         tail;        /* META_READ in: text is the end of a larger file */
 } sh_module_prefab_call;
 typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
 /* Timeline tile: the product palette row on snapmaps/unknown whose prototype
