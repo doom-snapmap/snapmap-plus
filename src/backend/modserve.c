@@ -1819,6 +1819,17 @@ static void ms_diff(ms_index *x, const ms_index *old)
                 d->added_decls++;
                 if (f->is_sedef) d->added_rows++;
                 else if (ms_id_registered(old, x->bundles[f->bundle].id)) { f->refresh_new = 1; d->added_active++; }
+            } else if (f->is_shadow) {
+                /* A shadow the previous table did not serve replaces a stock
+                 * file the engine may already hold parsed from its own bytes
+                 * (a mod installed after boot, or reinstalled after an
+                 * uninstall): pending like a changed file, so the refresh
+                 * re-parses or reloads it now instead of at the next restart. */
+                kind = ms_kind(f);
+                if (kind && f->ptype && f->pname) f->refresh = 1;
+                if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
+                else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
+                else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
             }
             continue;
         }

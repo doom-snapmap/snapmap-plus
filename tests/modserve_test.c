@@ -1245,12 +1245,15 @@ static void test_refresh(void)
     CHECK(sh_modserve_index_build(root) == 1);
     /* The first table of this root replaces another root's: every file is
      * new. Shadows the earlier tables served and no table serves since are
-     * still pending as gone (the engine holds their bundles' text); settle them. */
+     * still pending as gone (the engine holds their bundles' text), and the
+     * new shadows are pending too (the engine may hold the game's text for
+     * them); new names of the mod are not. Settle them. */
     sh_modserve_last_diff(&d);
-    CHECK(d.changed == 0 && d.added == 13 && d.pending > 0);
+    CHECK(d.changed == 0 && d.added == 13 && d.changed_decls == 2 && d.pending > 0);
     memset(&s, 0, sizeof s);
     CHECK(sh_modserve_each_refresh(rf_visit, &s) == d.pending);
-    CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && !strstr(s.order, "now;") && !strstr(s.order, "rf.mod"));
+    CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && strstr(s.order, "1:entityDef:monster/zombie:now;") &&
+          strstr(s.order, "1:entityDef:monster/gonezombie:now;") && !strstr(s.order, "rf.mod"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
     /* The engine read some of v1 through the provider. */
