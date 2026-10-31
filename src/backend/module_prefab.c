@@ -23,6 +23,8 @@
 #include "module_prefab_map.h"
 #include "rawmap.h"
 #include "apply_engine.h"
+#include "grid_room_native.h"
+#include "commands.h"
 #include "ui_bridge.h"
 #include "backend_log.h"
 #include "process_heap_scope.h"
@@ -536,9 +538,20 @@ void sh_module_prefab_tick(void *editor)
 
 /* ------------------------------------------------------------ capture (game thread) */
 
+/* The module guard's palette query (module_prefab_map.h): grid_room_native.c
+ * answers it on the engine thread. */
+static int mp_module_known(void *ctx, const char *name)
+{
+    (void)ctx;
+    return sh_grid_native_module_known(name);
+}
+
 typedef struct mp_capture {
     int    op;
     int    result;            /* 1 ok or a refusal code */
+    const sh_mp_summary *modules;   /* PLACE / CHECK: the prefab's modules, checked on the engine thread */
+    sh_mp_module_check check;
+    int    checked;           /* sh_mp_check_modules' result: missing count, -1 not checked */
     char  *json;              /* HeapAlloc */
     size_t len;
     int    sel[MODULE_CAP];
@@ -552,6 +565,21 @@ typedef struct mp_capture {
     int    records;
 } mp_capture;
 
+/* Check the prefab's modules on the engine thread. A refusal names them on the
+ * console (one line). 1 when placement may go on. */
+static int mp_capture_check(mp_capture *c)
+{
+    c->checked = sh_mp_check_modules(c->modules, mp_module_known, NULL, &c->check);
+    if (c->checked > 0) {
+        char line[1200];
+        sh_mp_missing_console_line(&c->check, line, sizeof line);
+        sh_printf("%s\n", line);
+        mp_logf("MODPREFAB: placement refused: %.280s", line);
+        return 0;
+    }
+    return 1;
+}
+
 static int mp_capture_main(void *ctx)
 {
     mp_capture *c = (mp_capture *)ctx;
@@ -560,6 +588,11 @@ static int mp_capture_main(void *ctx)
     int state = 0, i, n = 0;
     c->result = -1;
     if (!ed) return 0;
+    if (c->op == SH_MODULE_PREFAB_CHECK) {
+        c->checked = sh_mp_check_modules(c->modules, mp_module_known, NULL, &c->check);
+        c->result = 1;
+        return 1;
+    }
     if (!mp_blueprint_idle(ed, &state)) {
         int sub = 0;
         unsigned char pending = 1;
@@ -596,6 +629,9 @@ static int mp_capture_main(void *ctx)
                     else g_world_bounds(rec, c->bounds[i], (const float *)(module + MODULE_LOCAL_BOUNDS));
                 }
             }
+        } else if (c->modules && !mp_capture_check(c)) {
+            c->result = -6;
+            return 0;
         } else if (g_cursor && g_floor) {
             int xy[2] = { 0, 0 };
             float out[3] = { 0, 0, 0 };
@@ -621,7 +657,8 @@ static int mp_capture_run(mp_capture *c)
 {
     int r = 0;
     if (!g_run_on_main) return 0;
-    if (g_run_on_main(NULL, mp_capture_main, c, 3000, &r) != 1) return 0;
+    /* The Prefabs tab's check waits less: it runs on every selection. */
+    if (g_run_on_main(NULL, mp_capture_main, c, c->op == SH_MODULE_PREFAB_CHECK ? 1000 : 3000, &r) != 1) return 0;
     return 1;
 }
 
@@ -697,12 +734,23 @@ static int mp_place(sh_module_prefab_call *call)
     if (!call->text || !sh_mp_is_module_file(call->text, call->text_len)) { mp_out(call, "not a module prefab"); return -1; }
     if (!sh_mp_inspect(call->text, call->text_len, &sum, err, (int)sizeof err)) { mp_out(call, err); return -1; }
     boxes = sum.has_nav_boxes;
-    sh_mp_summary_free(&sum);
-    if (InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE) { mp_out(call, "a placement is still in progress"); return 0; }
+    if (InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE) { sh_mp_summary_free(&sum); mp_out(call, "a placement is still in progress"); return 0; }
     c = (mp_capture *)calloc(1, sizeof *c);
-    if (!c) return 0;
+    if (!c) { sh_mp_summary_free(&sum); return 0; }
     c->op = SH_MODULE_PREFAB_PLACE;
-    if (!mp_capture_run(c)) { mp_out(call, "the game did not answer"); free(c); return 0; }
+    c->modules = &sum;
+    if (!mp_capture_run(c)) { sh_mp_summary_free(&sum); mp_out(call, "the game did not answer"); free(c); return 0; }
+    sh_mp_summary_free(&sum);
+    c->modules = NULL;
+    if (c->result == -6) {
+        char toast[600];
+        sh_mp_missing_toast(&c->check, toast, sizeof toast);
+        mp_toast(toast);
+        mp_out(call, toast);
+        if (c->json) HeapFree(GetProcessHeap(), 0, c->json);
+        free(c);
+        return -6;
+    }
     if (c->result != 1) {
         int r = c->result == -4 ? -4 : 0;
         mp_out(call, r == -4 ? "switch to Blueprint mode" : "finish the Blueprint action first");
@@ -744,6 +792,29 @@ static int mp_place(sh_module_prefab_call *call)
     return 2;
 }
 
+/* The Prefabs tab's pre-Load check: the same module check, nothing placed. */
+static int mp_check(sh_module_prefab_call *call)
+{
+    mp_capture *c;
+    sh_mp_summary sum;
+    char err[256] = "", *json;
+    int r = -1;
+    mp_out(call, "{\"checked\":false}");
+    if (!g_run_on_main || !call->text || !sh_mp_is_module_file(call->text, call->text_len)) return -1;
+    if (!sh_mp_inspect(call->text, call->text_len, &sum, err, (int)sizeof err)) return -1;
+    c = (mp_capture *)calloc(1, sizeof *c);
+    if (!c) { sh_mp_summary_free(&sum); return -1; }
+    c->op = SH_MODULE_PREFAB_CHECK;
+    c->modules = &sum;
+    c->checked = -1;
+    if (mp_capture_run(c) && c->result == 1) r = c->checked;
+    sh_mp_summary_free(&sum);
+    json = sh_mp_check_json(r >= 0 ? &c->check : NULL);
+    if (json) { mp_out(call, json); free(json); }
+    free(c);
+    return r;
+}
+
 int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
 {
     (void)self;
@@ -767,6 +838,8 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_PLACE:
         if (!mp_ready_place()) { mp_out(call, "module prefab placement is unavailable on this build"); return 0; }
         return mp_place(call);
+    case SH_MODULE_PREFAB_CHECK:
+        return mp_check(call);
     case SH_MODULE_PREFAB_STATUS: {
         int r;
         AcquireSRWLockShared(&g_lock);

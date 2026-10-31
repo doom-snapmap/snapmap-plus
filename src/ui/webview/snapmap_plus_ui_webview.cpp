@@ -155,6 +155,7 @@ static int           g_create_module_result = 0;  /* 1 ok; 0 name exists; -1 fai
 static std::string   g_create_module_summary;     /* the sidecar body the backend wrote */
 static bool          g_load_prefab_modules = false;  /* the last Load/Place read a module prefab */
 static int           g_module_place_seq = 0;      /* placement being followed, 0 = none */
+static std::string   g_load_message;              /* the backend's text for a refused module placement */
 static ULONGLONG     g_module_place_deadline = 0;
 static std::string   g_module_place_name;
 static int           g_editor_mode_last = -1;     /* entityMode | blueprint << 1; -1 posts on the next check */
@@ -1181,6 +1182,11 @@ static void poc_apply_place_module_prefab(const std::string &body)
     _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: module prefab '%s' place=%d seq=%d (%s)",
                 g_load_prefab_name.c_str(), r, call.seq, msg);
     poc_log(l);
+    if (r == -6) {                  /* needs a module the editor cannot build; nothing was placed */
+        g_load_result = -6;
+        g_load_message = msg;
+        return;
+    }
     if (r == 2 && call.seq > 0) {
         g_module_place_seq = call.seq;
         g_module_place_deadline = GetTickCount64() + 10000;
@@ -1193,6 +1199,7 @@ static void poc_apply_place_module_prefab(const std::string &body)
 static void poc_apply_load_prefab()
 {
     g_load_result = -1;
+    g_load_message.clear();
     if (g_load_prefab_name.empty()) return;
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { poc_log("load-prefab: ABORT (iface/slot missing)"); return; }
     char path[1024];
@@ -2218,6 +2225,24 @@ static bool poc_read_prefab_scene(const char *path, std::string &body)
     if (!ok) body.clear();
     return ok;
 }
+/* The backend's module check for a module prefab's text (SH_MODULE_PREFAB_CHECK):
+ * its JSON, or empty when this backend or editor cannot answer. */
+static std::string poc_module_prefab_check(const std::string &scene)
+{
+    static char out[16 * 1024];
+    sh_module_prefab_call call;
+    if (scene.empty()) return std::string();
+    out[0] = '\0';
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODULE_PREFAB_CHECK;
+    call.text = scene.c_str();
+    call.text_len = scene.size();
+    call.out = out;
+    call.out_cap = (int)sizeof out;
+    int r = poc_module_prefab_call(&call);
+    if (r < 0 || !out[0]) return std::string();
+    return std::string(out);
+}
 static void poc_send_prefab_detail(const std::string &name, const std::string &folder)
 {
     if (!g_webview) return;
@@ -2239,7 +2264,9 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
                 json += L"\",\"ok\":true,\"prefabKind\":\"modules\",\"meta\":\""; json += sh_webview_json::escape_wide(meta.c_str());
                 json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(scene.c_str());
                 json += L"\",\"count\":"; json += std::to_wstring(count < 0 ? 0 : count);
-                json += L"}";
+                /* an escaped string, parsed by the page under try/catch like the sidecar */
+                json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(poc_module_prefab_check(scene).c_str());
+                json += L"\"}";
                 g_webview->PostWebMessageAsJson(json.c_str());
                 return;
             }
@@ -3837,6 +3864,9 @@ static void poc_think_loop()
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_load_prefab_name.c_str()); m += L"\"";
             if (g_load_prefab_modules) m += L",\"prefabKind\":\"modules\"";
+            if (!g_load_message.empty()) {
+                m += L",\"message\":\""; m += sh_webview_json::escape_wide(g_load_message.c_str()); m += L"\"";
+            }
             m += L"}";
             poc_post_json(m.c_str());
         }

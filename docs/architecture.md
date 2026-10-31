@@ -235,7 +235,7 @@ bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
 (`+0x350`), `prefab_grab_status` (`+0x358`), `module_prefab` (`+0x360`, the
-Blueprint module-prefab state, save, place and status operations),
+Blueprint module-prefab state, save, place, status and module-check operations),
 `timeline_tile` (`+0x368`, the Timeline palette tile's status) and `budget`
 (`+0x370`, the editor budget table and usage for the Prefabs tab's Limits
 section, built on the game thread after each palette build by
@@ -1350,6 +1350,29 @@ section. At startup the backend settles provisional refs
 left by a closed game (their claims are released and their queued uploads
 dropped, since their publish never completed), then retries the rest of the
 queue once on the worker and logs the counts.
+
+## Module prefabs
+
+`module_prefab.c` saves the selected Blueprint modules as an `idSnapMap` file and
+places one by merging it into a fresh serialization of the open map
+(`module_prefab_map.c`) and installing the result through the engine's Redo step
+(see `module_prefab.h`). Before the merge, Place checks every `moduleName` the
+file names, on the game thread: `sh_mp_check_modules` asks
+`sh_grid_native_module_known`, which accepts a record of the editor's module
+palette (found by exact name over every record, because the Blueprint Add tool
+re-sorts that list), a Grid Room size the adapter builds, a module an installed
+mod serves (`sh_modserve_module_served`) or one already loaded into a private
+palette. Any other name refuses the placement before the engine sees it: slot
+result -6, one console line `Module prefab: needs module <name>; this room is
+not in your palette (DLC or a mod you do not have)` and a toast naming the rooms.
+The engine has no safe outcome for such a name. The map validator (VK
+0x1412488e0 / GL 0x141247f10) drops the instance through HasModule ("Couldn't
+load module") and keeps its entities, and the record builder SnapMapEditCtor runs
+(VK FUN_141204380 / GL FUN_141203780) raises FatalError "Couldn't find module in
+modulePalette" when FindModule returns the palette's end record. The Prefabs tab
+runs the same check (`SH_MODULE_PREFAB_CHECK`) when a module prefab is selected
+and shows the missing rooms above Limits; the check names nothing when no editor
+palette is open.
 
 ## Map behaviour carried by String Set nodes
 

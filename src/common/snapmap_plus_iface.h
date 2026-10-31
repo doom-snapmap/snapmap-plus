@@ -314,14 +314,25 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *   PLACE  any thread. Validates and merges text (a module prefab file) into the
  *          open map, then stages the install for the game's next frames.
  *          Returns 2 accepted (poll STATUS with the returned seq), -1 unreadable,
- *          -4 not in Blueprint, 0 refused (busy or the map could not be read).
+ *          -4 not in Blueprint, -6 needs a module (below), 0 refused (busy or
+ *          the map could not be read).
+ *          PLACE first checks every module the prefab names against the open
+ *          editor (its module palette, Grid Room sizes, served mod modules);
+ *          -6 refuses one that names a module the editor cannot build, with
+ *          nothing sent to the engine and the toast text in out.
  *   STATUS any thread. For the placement seq: 2 pending, 1 placed and grabbed,
  *          0 the engine refused, -5 over the editor's budget, -1 unreadable.
- *          out receives a short message. */
+ *          out receives a short message.
+ *   CHECK  any thread except the game thread (it asks there and waits). The
+ *          same module check for text without placing: out receives
+ *          {"checked":true,"count":N,"missing":[...],"status":"..."} or
+ *          {"checked":false}. Returns the missing count, -1 when it could not
+ *          check (no editor, not a module prefab). */
 #define SH_MODULE_PREFAB_STATE  1
 #define SH_MODULE_PREFAB_SAVE   2
 #define SH_MODULE_PREFAB_PLACE  3
 #define SH_MODULE_PREFAB_STATUS 4
+#define SH_MODULE_PREFAB_CHECK  5
 typedef struct sh_module_prefab_call {
     int         op;
     const char *path;        /* SAVE: prefab file */

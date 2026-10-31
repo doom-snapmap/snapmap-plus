@@ -445,6 +445,10 @@
   /* Typography deliberately comes from the same global input/textarea rule as Entity State. */
   .pc-name { width: 100%; }
   .pc-desc { min-height: 60px; resize: vertical; }
+  /* A module prefab that names modules this editor cannot build (the backend's module check). */
+  .pc-needs { flex: 0 0 auto; display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; padding: 4px 6px;
+              background: var(--warnBg); color: var(--warnText); font-size: 11px; }
+  .pc-needs .ui-icon { width: 12px; height: 12px; margin-top: 1px; }
   /* Limits: what the selected prefab adds to the editor's five HUD meters. */
   .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
   .pc-limits-head { color: var(--muted); }

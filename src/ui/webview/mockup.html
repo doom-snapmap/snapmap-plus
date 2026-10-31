@@ -267,6 +267,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           </div>
           <div class="pc-preview-help">Drag to orbit &middot; Wheel to zoom &middot; Double-click to frame</div>
         </div>
+        <div class="pc-needs" id="pcNeeds" role="status" style="display:none;"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-triangle-alert"></use></svg><span id="pcNeedsText"></span></div>
         <section class="pc-limits" id="pcLimits" aria-labelledby="pcLimitsHead">
           <div class="pc-limits-head" id="pcLimitsHead">Limits</div>
           <div class="pc-limits-rows" id="pcLimitsRows" role="table" aria-label="What this prefab adds to the map's limits"></div>
@@ -3226,6 +3227,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
         else if (d.result === -4) toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn');
         else if (d.result === -5) toast('"' + d.name + '" does not fit: the map would exceed its module budget', 'warn');
+        else if (d.result === -6) toast(d.message || ('"' + d.name + '" needs modules that are not in your palette'), 'warn');
         else toast('The editor refused to place "' + d.name + '" (see log)', 'err');
       }
       else if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
@@ -3585,6 +3587,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // The selected scene is parsed exactly once and shared by the preview and the Limits section.
     var doc = null;
     if (d.scene) { try { doc = prefabTransform.parseScene(d.scene); } catch (e) { doc = null; } }
+    pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.moduleCheck : null);
     if (selectedPrefabKind === 'modules') {
       prefabViewport.clear();
       pfShowFootprint(meta);
@@ -3666,6 +3669,23 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     prefabBudget.FIELDS.forEach(function(f, i){
       raw.appendChild(pfLimitsCell(f, '', '')); raw.appendChild(pfLimitsCell(String(s.block[i]), '', ''));
     });
+  }
+  // The backend's module check for the selected module prefab (module_prefab_map.h): a line, with the
+  // alert icon, naming the modules this editor cannot build, so the player sees it before Load. The
+  // backend refuses such a placement anyway; the line only explains it ahead of time. No check (no
+  // editor open, an older backend) shows nothing.
+  function pfShowModuleCheck(text) {
+    var box = document.getElementById('pcNeeds'), span = document.getElementById('pcNeedsText');
+    var load = document.getElementById('prefabLoadBtn'), check = null;
+    if (text) { try { check = JSON.parse(text); } catch (e) { check = null; } }
+    var missing = check && check.checked && check.count > 0;
+    if (box) box.style.display = missing ? 'flex' : 'none';
+    if (span) span.textContent = missing ? (check.status || 'Needs modules that are not in your palette') : '';
+    if (box) box.title = missing && Array.isArray(check.missing) ? check.missing.join('\n') : '';
+    if (load && !load.disabled) {
+      if (missing) load.setAttribute('title', 'This prefab needs modules that are not in your palette (DLC or a mod you do not have)');
+      else load.removeAttribute('title');
+    }
   }
   // A module prefab's preview is its top-down footprint: one box per module, the placement anchor
   // marked, counts and environments in the corners. The 3D viewport and its legend step aside.
