@@ -305,15 +305,25 @@ does not refuse, since the engine already tolerates those names.
   says it cannot be served. Removing the mod releases the family, unless the editor or a map has
   been opened since it was registered, in which case it stays until DOOM exits. The format a tool
   must write is in [vt-baker.md](vt-baker.md).
-- The first start of this release converts a mods folder of earlier releases in place:
+- DOOM no longer converts anything at startup: the installer does, on install and update, by
+  running `snapmap-plus-store.exe` (kept beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`).
+  It first runs `check`, which lists what it finds from earlier releases, and runs `migrate` only
+  when there is something to do; its lines are printed as it goes, and a failure is a warning that
+  names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
+  Everything it deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
+  at the next rescan, as before.
+- It converts a mods folder of earlier releases in place:
   `bundle.json`, `.state.json`, the shared `blobs\` folder and `legacy\` go, each mod keeps its files
-  in its own folder with a `mod.json`, and `claims.json`, `publish-links.json` and `.migrated.json`
-  are folded into `snapmap-plus.json`; one `MODS: store:` log line per folder says what happened.
+  in its own folder with a `mod.json` (a file shared by hard link gets its own copy, and the original
+  is kept until the copy checks out), and `claims.json`, `publish-links.json` and `.migrated.json`
+  are folded into `snapmap-plus.json`; one line per folder says what happened.
   Then, once, a package a map delivered is removed when an installed mod has its id or provides
   every file it provides (maps naming it load the installed mod), a mod folder left alone with its
-  id is renamed to the id, and no folder is named after a generated version.
-- The first start of this release moves the packages in the retired
-  `%LOCALAPPDATA%\snapmap-plus\overrides\` folder into `mods\`, once. Each folder there with a
+  id is renamed to the id, and no folder is named after a generated version. The recycle bin of
+  earlier builds, `removed-mods\`, goes to the Windows Recycle Bin.
+- It moves the packages in the retired
+  `%LOCALAPPDATA%\snapmap-plus\overrides\` folder into `mods\`, once, reading the DOOM folder the
+  installer installed into to recognise files that are game content. Each folder there with a
   `package.json` or `mod.json` becomes `mods\<that folder>\` with `mod.json` (its requirements,
   strings and hud kept; a pack without an id is named after its folder); each package a map
   delivered (`overrides\map-<16 hex>\<package>`) becomes `mods\<id>\`, which a later load of that
@@ -323,10 +333,10 @@ does not refuse, since the engine already tolerates those names.
   kept, each in its own folder. A folder over 512 MiB or 8192 files is skipped, and one
   larger than a mod can be (4096 files, 256 MiB) is refused. Nothing in `overrides\` is changed or
   deleted, and you can keep or delete it afterwards; an empty `override-backups\` folder is removed.
-  Small folders are done during startup and the rest in the background. The outcome is in the log's
-  `MODS: migration:` lines; once the move completes, `mods\snapmap-plus.json` keeps only when it
-  ran, from where, and the folders it skipped or refused. An `overrides\` entry added or changed
-  afterwards shows the **Migrate** button again; `sh_mods migrate --again` repeats the move.
+  The outcome is in the tool's `migration:` lines; once the move completes, `mods\snapmap-plus.json`
+  keeps only when it ran, from where, and the folders it skipped or refused. An `overrides\` entry
+  added or changed afterwards shows the **Migrate** button again; `sh_mods migrate --again` repeats
+  the move in the game.
 
 ## Map behaviour: String Set commands
 

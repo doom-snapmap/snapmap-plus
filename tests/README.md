@@ -144,11 +144,21 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   unchanged, that a second pass does nothing and `--again` rebuilds the same
   bundles, that a map carrying the same delivery or the same authored tree is
   answered by the migrated bundle without a conversion, a non-empty
-  `override-backups` left alone, the boot split (a small folder before the
-  index, a large one on the worker, then one rescan), the rerun of an
+  `override-backups` left alone, the in-game pass on the worker (`sh_mods
+  migrate`: the record completes, then one rescan), the rerun of an
   unfinished record, and the store lock (a pass waits for a holder, and
   installs during a worker pass wait their turn and succeed).
   `MODMIGRATE_ECHO=1` prints the log lines.
+- `store_tool_test.c` runs `snapmap-plus-store` (`src/store/`) on a copy of
+  `fixtures\store-retired\data`, a store of an earlier release (a folder of the
+  retired layout with `bundle.json`, an old record file, a `removed-mods\`
+  entry and an `overrides\` package), with `blobs\` and a hard link added at
+  run time and a synthetic DOOM install: `check`'s list and exit codes,
+  `migrate` without and with the game folder, a second `migrate` that changes
+  nothing, every delete through the discard (a stand-in Recycle Bin folder),
+  the hard-link conversion through a failed copy, a failed retire and an
+  interrupted run, and the errors that exit 2 and change nothing.
+  `STORE_TOOL_ECHO=1` prints the tool's output.
 - `modstock_test.c` covers stock pointers end to end over two synthetic
   installs (`mod_stock_fixture.h` writes `gameresources` and
   `snap_gameresources` indexes with `.resources` and `.patch` slices, stored

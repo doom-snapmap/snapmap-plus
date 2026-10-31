@@ -83,7 +83,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 This compiles both DLLs into **`build/`**: the backend `XINPUT1_4.dll` and the frontend
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
-sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.)
+sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It also builds
+`build/snapmap-plus-store.exe`, the store migration tool the installer runs, from the backend's store sources
+(`src/store/build.ps1`).
 
 `build.ps1` is the one top-level build script (used above and by CI). Pass `-BackendOnly` to skip the
 frontend when iterating on backend code alone; any extra args (e.g. `-Diag`) forward through to
@@ -471,13 +473,14 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
+| `src/store/` | `snapmap-plus-store.exe`, the console tool that migrates a mods folder of earlier releases (the installer runs it) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
 | `docs/` | contributor guides and cross-component contracts, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
-| `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs) |
+| `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs, and the store tool beside them) |
 | `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) |
 | `LICENSE` | MIT |
 

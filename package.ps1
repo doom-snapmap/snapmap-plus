@@ -1,4 +1,4 @@
-# Package the built DLLs and their hash manifest into dist/.
+# Package the built DLLs and their hash manifest into dist/, with the store migration tool beside them.
 # The frontend uses the system WebView2 runtime. Run build.ps1 first.
 # -LegacyBundle adds the final 2018 release's files (see docs/packaging.md): release.yml passes
 # v0.2.1-beta.19's snapmap-plus-bundle.zip and the SHA-256 GitHub publishes for it.
@@ -19,10 +19,11 @@ $uiRel = "snapmap-plus\snapmap-plus-ui-13954591.dll"
 # The 2018 release's files, carried byte for byte for installers without build detection.
 $legacyRels = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")
 
-# Require both DLL outputs before changing dist/.
+# Require both DLL outputs and the store tool before changing dist/.
 $backendDll = Join-Path $build "XINPUT1_4.dll"
 $uiDll      = Join-Path $build "webview\snapmap-plus-ui.dll"
-foreach ($d in @($backendDll, $uiDll)) {
+$storeTool  = Join-Path $build "snapmap-plus-store.exe"
+foreach ($d in @($backendDll, $uiDll, $storeTool)) {
     if (-not (Test-Path $d)) { throw "missing $d -- run build.ps1 first (repo root; builds backend + frontend together)." }
 }
 
@@ -75,6 +76,14 @@ try {
         "{0}  {1}" -f $h, $f
     }
     [System.IO.File]::WriteAllLines((Join-Path $dist "MANIFEST.sha256"), $lines, (New-Object System.Text.UTF8Encoding $false))
+
+    # The store migration tool ships beside the overlay, not in it: MANIFEST.sha256 lists what goes
+    # into DOOM (every earlier installer installs each listed file), so the tool has its own list,
+    # TOOLS.sha256, which the installer checks before placing it in %LOCALAPPDATA%\snapmap-plus.
+    Copy-Item $storeTool (Join-Path $dist "snapmap-plus-store.exe")
+    $toolHash = (Get-FileHash (Join-Path $dist "snapmap-plus-store.exe") -Algorithm SHA256).Hash
+    [System.IO.File]::WriteAllLines((Join-Path $dist "TOOLS.sha256"), @("{0}  {1}" -f $toolHash, "snapmap-plus-store.exe"),
+        (New-Object System.Text.UTF8Encoding $false))
 } finally {
     if ($legacyDir) { Remove-Item -LiteralPath $legacyDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -84,3 +93,5 @@ foreach ($f in $files) {
     Write-Host ("  {0,-44} {1,10}" -f $f, (Get-Item (Join-Path $dist $f)).Length)
 }
 Write-Host "MANIFEST.sha256 written (the install/verify map)."
+Write-Host ("  {0,-44} {1,10}" -f "snapmap-plus-store.exe", (Get-Item (Join-Path $dist "snapmap-plus-store.exe")).Length)
+Write-Host "TOOLS.sha256 written (the store tool, placed in %LOCALAPPDATA%\snapmap-plus, not in DOOM)."

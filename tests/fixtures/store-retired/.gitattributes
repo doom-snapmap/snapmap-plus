@@ -1,0 +1,3 @@
+# A store of an earlier release, hashed byte for byte (bundle.json names each
+# file's SHA-256): never convert line endings.
+* -text

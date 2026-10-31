@@ -1,7 +1,8 @@
 # Packaging — the deployable bundle
 
 `package.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by `build.ps1`),
-laid out exactly as they drop into a DOOM install, and for a release the final 2018 release's two files.
+laid out exactly as they drop into a DOOM install, and for a release the final 2018 release's two files,
+with the store migration tool `snapmap-plus-store.exe` beside them.
 This is the artifact an end user installs; `dist/` is gitignored (binaries are never committed).
 
 ## The bundle
@@ -12,6 +13,7 @@ This is the artifact an end user installs; `dist/` is gitignored (binaries are n
 | `snapmap-plus\snapmap-plus-ui-13954591.dll` | `build/webview/snapmap-plus-ui.dll` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL. The path names the supported build; it is `SH_UI_DLL_PATH` in `src/backend/ui_bridge.h` |
 | `XINPUT1_3.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's backend, byte for byte |
 | `snapmap-plus\snapmap-plus-ui.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's frontend, byte for byte |
+| `snapmap-plus-store.exe` | `build/` | the store migration tool (`src/store/`): not installed into DOOM; the installer keeps it beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus` and runs it (see [Mods](#mods)) |
 
 **Why a release carries the 2018 files.** Installers up to and including v0.2.1-beta.19 have no build
 detection: their `update` installs every file the newest bundle's `MANIFEST.sha256` lists, overwrites
@@ -29,7 +31,10 @@ its own frontend path. `release.yml` downloads v0.2.1-beta.19's `snapmap-plus-bu
 `package.ps1 -LegacyBundle` checks it against the digest GitHub publishes and its own manifest before
 adding the two files. CI packages without them.
 
-Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify). **Nothing else ships** — the
+Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify) and `TOOLS.sha256`. The
+manifest lists only what goes into DOOM, because every installer, the earliest included, installs each
+file it lists; the store tool is listed in `TOOLS.sha256` instead, which the installer checks before it
+places and runs the tool, so earlier installers never see it. **Nothing else ships** — the
 frontend renders in the **system-installed WebView2 runtime** (preinstalled on Windows 11; the evergreen
 runtime on most Windows 10), so there is no UI-toolkit runtime to bundle. The two DLLs' exact sizes shift per build
 (MSVC embeds a build timestamp), so equivalence is judged on the export/ordinal surface, not byte size.
@@ -48,7 +53,8 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
 ```
 
 `dist/` mirrors this tree (a release's `dist/` also holds the two 2018 files, which the installer
-does not install on the April 2024 build). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
+does not install on the April 2024 build, and every `dist/` holds `snapmap-plus-store.exe` and
+`TOOLS.sha256`, which never go into DOOM). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
 root. The Snapmap+ window opens in the SnapMap editor (run `sh` in the console if it doesn't
 auto-open).
 
@@ -79,13 +85,18 @@ top-level `webview2\` folder is renamed into `cache\` at the window's first star
 
 ### Mods
 
-The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. The installer
-never creates, changes or removes `mods\` or the retired package folders (`overrides\`,
-`override-backups\`, `package-cache\`, `package-staging\`) on install, update, uninstall or reinstall.
-The backend owns both, at the first start of DOOM with this release: it converts a `mods\` folder of
-earlier releases in place to one folder per mod with a `mod.json`, and moves the packages in the retired
-`overrides\` folder into `mods\` once, changing nothing in `overrides\` and removing only an empty
-`override-backups\`. No `package-cache` or `package-staging` folder is created. See
+The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. DOOM converts
+nothing at startup. On install and update, after the DLLs are in place, the installer checks the bundle's
+`snapmap-plus-store.exe` against `TOOLS.sha256`, keeps it beside `snapmap-plus.exe` (recorded in
+`installer-files.json` like the installer's own copies, so uninstall removes it by the same rule) and runs
+`snapmap-plus-store check` on `%LOCALAPPDATA%\snapmap-plus`; when that finds work it runs
+`snapmap-plus-store migrate <folder> --doom <the DOOM folder it installed into>`. The tool converts a
+`mods\` folder of earlier releases in place to one folder per mod with a `mod.json`, sends the retired
+`removed-mods\` to the Windows Recycle Bin, and moves the packages in the retired `overrides\` folder
+into `mods\` once, changing nothing in `overrides\` and removing only an empty `override-backups\`;
+everything it deletes goes to the Recycle Bin. No `package-cache` or `package-staging` folder is
+created, and the installer itself never creates, changes or removes `mods\` or the retired package
+folders. A missing or failing tool is a warning, never a failed install. See
 [Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the

@@ -115,7 +115,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dist = "dist"
           # CI packages without the 2018 release's files, so its frontend path is the 2024 one.
-          $must = @("XINPUT1_4.dll", "snapmap-plus\snapmap-plus-ui-13954591.dll", "MANIFEST.sha256")
+          $must = @("XINPUT1_4.dll", "snapmap-plus\snapmap-plus-ui-13954591.dll", "MANIFEST.sha256", "snapmap-plus-store.exe", "TOOLS.sha256")
           foreach ($f in $must) {
             if (-not (Test-Path (Join-Path $dist $f))) { throw "bundle guard: missing $f in dist\" }
           }

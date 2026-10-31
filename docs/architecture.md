@@ -17,6 +17,7 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
+| Store tool | Migrates a mods folder of earlier releases; the installer runs it. | `src/store/store_tool.h` |
 | Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
@@ -408,8 +409,8 @@ install of those folders, so sharing stays offline; every rawmap save of a map
 that names mods writes that ZIP beside the JSON (see
 [Rawmaps that name mods](#rawmaps-that-name-mods) and
 [Prefabs that name mods](#prefabs-that-name-mods)). Plain saves never upload. The retired
-`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the migration
-below, and never served or written; no `package-cache` or `package-staging`
+`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the store tool's
+migration below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
 
 These backend files share the work:
@@ -424,8 +425,9 @@ These backend files share the work:
   record (a converted first-generation package), whose unresolved needs also
   only warn.
 - `modstore.c` owns the store: the mod folders, install, verification, the
-  rebuild rule and the one-time upgrade of the retired layout, below. Files are
-  hashed at install and on `sh_mods doctor verify`, never at boot.
+  rebuild rule and the one-time upgrade of the retired layout, below, which the
+  store tool runs. Files are hashed at install and on `sh_mods doctor verify`,
+  never at boot.
 - `modstock.c` is the read-only installed-resource bridge behind stock
   pointers, below.
 - `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
@@ -477,7 +479,8 @@ These backend files share the work:
   plain JSON), reads an older prefab's sidecar read-only, resolves
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
-- `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
+- `modmigrate.c` moves the retired `overrides\` tree into the store once (the
+  store tool runs it, and `sh_mods migrate` by hand), as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, as in
   [Mod sounds](#mod-sounds).
@@ -585,13 +588,36 @@ used the mod.
 
 The retired recycle bin. Earlier builds moved removed folders to
 `removed-mods\` beside `mods\` and recorded them in the record's `removed`
-section. At every start, after the store upgrade and before the serving index
-is built, `sh_ms_bin_sweep` deletes every entry of `removed-mods\` (links not
-followed), the folder itself and the `removed` section, logging one line per
-entry ("MODS: removed-mods: deleted <name>") and one summary ("MODS:
-removed-mods: 3 folder(s) deleted; the bin is retired"); a later start finds
-nothing and logs nothing. An entry that cannot be deleted stays for the next
-start.
+section. The store tool's `migrate`, after the store upgrade, runs
+`sh_ms_bin_sweep`: every entry of `removed-mods\` goes to the Windows Recycle
+Bin (links removed, never followed), then the empty folder and the `removed`
+section go, with one line per entry ("removed-mods: <name> moved to the Recycle
+Bin") and one summary ("removed-mods: 3 folder(s) moved to the Recycle Bin; the
+bin is retired"); a later run finds nothing. An entry that cannot be moved
+stays for the next run.
+
+The store migration tool. The game runs no store migration at boot.
+`snapmap-plus-store.exe` (`src/store/`) links the store sources (`modstore.c`,
+`modmigrate.c`, `modlegacy.c`, `modbundle.c`, `modstock.c` and what they use)
+with a stand-in for the serving layer (`store_seam.c`), and no engine, DLL or
+WebView code. `check <store>` lists the work it finds, one line per kind
+(folders of the retired layout, `blobs\`, `legacy\`, the old record files, the
+second upgrade step, `removed-mods\` or its record section, an `overrides\`
+folder the record does not mark as migrated) and exits 0 when there is none, 1
+when there is, 2 on an error; it changes nothing (`sh_ms_upgrade_scan`).
+`migrate <store> [--doom <folder>]` refuses while DOOM runs, then runs the
+layout upgrade, the bin sweep and the overrides migration, each only when
+`check` finds its work, with every delete through `sh_ms_set_discard` to the
+Recycle Bin (`store_recycle.c`: `SHFileOperationW` with `FOF_ALLOWUNDO`, on a
+fixed local disk only, links removed first). The overrides migration needs the
+game's archives for its stock pointers: the `--doom` folder, else the one Steam
+names; without either it is reported and left. It prints the store's own log
+lines as its action lines and a summary, and exits 0 when nothing is left to do,
+1 when a later run could still do something, 2 on an error; a second run finds
+nothing and changes nothing. The installer runs it on install and update (see
+[installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
+The rebuild rule is unchanged: a folder without a product block is built at the
+next rescan.
 
 The folder watchers. The lists follow the disk. The window's host
 (`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
@@ -616,16 +642,20 @@ The rebuild rule: a folder is built again when its tree hash (the author's bytes
 and the path, size and time of every file under `assets\`) is not a key of the
 cache for its bundle; that runs on a rescan (the Mods tab, `sh_mods rescan`,
 an install), never at boot, because a build needs the game's resource reader.
-At the first start of this build `sh_ms_upgrade` converts the retired layout
-once (before the overrides migration and the serving index): every
+The store tool's `sh_ms_upgrade` converts the retired layout once (before the
+overrides migration): every
 `<id>@<version>+<build>\` folder gets `mod.json` from its `bundle.json` and
 `.state.json` (read back with the same hash before the old files go), hard
-links become copies, a missing file is restored from `blobs\`, product folders
+links become copies (the linked file is renamed aside, copied back to its name
+and checked against its hash, and only then is the renamed original retired;
+on any failure the original is put back, and one an interrupted run left aside
+is put back at the next run), a missing file is restored from `blobs\`, product folders
 are renamed to `<id>` (or `<id>@<version>` when one id has several), `legacy\`
 folders move into `mods\` or are dropped as aliases, `blobs\` is removed, and
 `claims.json`, `publish-links.json`, `pending-uploads.json` and
-`.migrated.json` are folded into the record. It logs one `MODS: store:` line
-per folder and a summary, and every step can be repeated. A second step runs
+`.migrated.json` are folded into the record. Everything it retires goes to the
+Recycle Bin. It logs one `MODS: store:` line per folder and a summary (the
+tool prints them), and every step can be repeated. A second step runs
 once per store, also on one that went through the first already (the record's
 `layout` section becomes 2): it removes every delivered package an installed
 mod answers by the rule above and aliases its hash, renames a product folder
@@ -1208,10 +1238,11 @@ to register" for bundles of shadows and requirements only.
 
 ### Migration of the retired overrides folder
 
-Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,
-after the store upgrade and before the serving table is built, `modmigrate.c`
-runs once when `overrides\` exists and the record's `migration` section does
-not (or records an unfinished pass):
+Releases up to v0.2.1-beta.19 kept packages in `overrides\`. The store tool's
+`migrate`, after the store upgrade and the bin sweep, runs `modmigrate.c`'s
+pass once when `overrides\` exists and the record's `migration` section does
+not (or records an unfinished pass), with the `--doom` folder as the stock
+bridge's install (`sh_modstock_set_install`):
 
 - each direct child folder with `package.json` or `mod.json` is converted the
   way a carrier is (layout moved under `assets/`, files a bundle cannot carry
@@ -1247,14 +1278,14 @@ not (or records an unfinished pass):
 - nothing under `overrides\` is created, changed or deleted; an empty
   `override-backups\` folder is removed and a non-empty one is left alone.
 
-Folders of at most 32 files and 16 MiB are migrated before the serving table,
-within about a second of boot time; the rest go to a worker thread that runs
-while the game boots, writes the record and rebuilds the serving table when it
-is done (editor rows it adds after the first palette build need
+The tool runs the pass on its own thread, folder by folder. In the game,
+`sh_mods migrate [--again]` (and the Mods tab's **Migrate**) runs it on a worker
+thread that writes the record and rebuilds the serving table when it is done
+(editor rows it adds after the first palette build need
 `sh_mods palette rebuild`). The record lists every folder with its kind,
 outcome, reason, id, version, store folder, bundle hash and tree, and a `trees`
-map from tree to store folder; it says `"complete": false` until the worker
-ends, and an unfinished record makes the next start run the pass again (every
+map from tree to store folder; it says `"complete": false` until the pass
+ends, and an unfinished record makes the next run do the pass again (every
 step is idempotent). Each folder logs one `MODS: migration:` line and the pass
 one summary line; a line that leaves files out names how many and how many of
 them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
@@ -1262,10 +1293,9 @@ by `modswf.c`; a pack migrated before that was left out can be migrated again
 with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
 shares one with a delivered or converted package (the beta.19 `doors` packs),
 the most recently installed bundle serves every path they share, whichever
-map is open. `sh_mods migrate [--again]` runs the same pass on the worker.
-Stock names are not checked during the migration because the game's resource
-reader is not up at boot, so unresolved needs only warn, as for a converted
-carrier.
+map is open. Stock names are not checked during the migration because the
+pass runs without the game's resource reader, so unresolved needs only warn, as
+for a converted carrier.
 
 Every writer of the store serialises on one recursive lock, `modstore_lock`
 (`modstore.c`; `modsync_store_lock` is the same lock under its older name).

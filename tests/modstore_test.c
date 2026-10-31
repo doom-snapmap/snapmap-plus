@@ -557,8 +557,8 @@ static void test_bin_sweep(const char *tmp)
     g_sweep[0] = 0;
     g_sweep_lines = 0;
     CHECK(sh_ms_bin_sweep(sweep_line, NULL) == 3);
-    CHECK(strstr(g_sweep, "MODS: removed-mods: deleted alex.one\n") && strstr(g_sweep, "MODS: removed-mods: deleted alex.two-2\n") &&
-          strstr(g_sweep, "MODS: removed-mods: deleted stray\n"));
+    CHECK(strstr(g_sweep, "MODS: removed-mods: alex.one deleted\n") && strstr(g_sweep, "MODS: removed-mods: alex.two-2 deleted\n") &&
+          strstr(g_sweep, "MODS: removed-mods: stray deleted\n"));
     CHECK(strstr(g_sweep, "MODS: removed-mods: 3 folder(s) deleted; the bin is retired\n") && g_sweep_lines == 4);
     CHECK(!mt_exists(bin));
     _snprintf_s(link, sizeof link, _TRUNCATE, "%s\\precious.txt", outside);
