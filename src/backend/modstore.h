@@ -19,7 +19,9 @@
  * under assets\) is not the key of the record's cache entry for its bundle.
  * Building needs the game's resource reader, so it runs on a rescan (the Mods
  * tab, sh_mods rescan, install, build), never at boot; boot reads the product
- * blocks and checks sizes only.
+ * blocks and checks sizes only. The game runs no store migration at boot: the
+ * upgrade of the retired layout and the bin sweep below are run by the store
+ * tool (src/store, snapmap-plus-store.exe), which the installer runs.
  *
  * Installing a folder from elsewhere builds it in memory (the source folder
  * is not written), copies its mod.json author text and its carried files into
@@ -231,7 +233,12 @@ typedef struct sh_ms_upgrade_stats {
  * Contract 5, logging one "MODS: store:" line per folder and a summary.
  * Idempotent and safe to interrupt: each folder's mod.json is written (and
  * read back with the same bundle hash) before the old files go, and a record
- * file is folded before it is deleted.
+ * file is folded before it is retired. A hard-linked file is renamed aside,
+ * copied back to its name and verified against the bundle before the renamed
+ * original is retired; on any failure the original is put back (and an
+ * original an interrupted run left aside is put back at the next run).
+ * Everything retired goes through sh_ms_set_discard's function when one is
+ * set.
  *
  * Then, once per store (until the record's "layout" section is 2), the
  * second step: every package a map delivered that copies an installed mod
@@ -247,6 +254,41 @@ typedef struct sh_ms_upgrade_stats {
  * Returns 1 when either step ran, 0 when there was nothing to do, -1 when the
  * store could not be read. */
 int  sh_ms_upgrade(sh_ms_upgrade_stats *stats);
+
+/* What sh_ms_upgrade and sh_ms_bin_sweep would do (sh_ms_upgrade_scan, read only). */
+typedef struct sh_ms_upgrade_check {
+    unsigned layout_folders;    /* folders with bundle.json, bundle.canonical.json or .state.json */
+    int blobs_present;          /* blobs\ */
+    unsigned blob_files;
+    unsigned long long blob_bytes;
+    int legacy_present;         /* legacy\ */
+    unsigned legacy_folders;
+    unsigned record_files;      /* claims.json, publish-links.json, pending-uploads.json, .migrated.json */
+    char record_names[96];      /* their names, ", " between */
+    unsigned tidy_drops;        /* the second step: delivered copies of an installed mod */
+    unsigned tidy_renames;      /* the second step: product folders to rename */
+    int tidy_migration;         /* the second step: a completed migration record to collapse */
+    int bin_present;            /* removed-mods\ beside mods\ */
+    unsigned bin_entries;
+    int bin_section;            /* the record's "removed" section */
+} sh_ms_upgrade_check;
+
+/* Fill *out. Returns the number of kinds of work found (0: nothing to do),
+ * -1 when the store folder cannot be resolved. */
+int  sh_ms_upgrade_scan(sh_ms_upgrade_check *out);
+
+/* How the upgrade and the bin sweep retire files and folders. NULL (the
+ * default) deletes outright, links removed and never followed. `fn` receives
+ * an absolute long-form path that exists and returns 1 when it is gone; `verb`
+ * ("moved to the Recycle Bin") replaces "deleted" in the sweep's lines. Not
+ * thread-safe: set it before the first call. */
+typedef int (*sh_ms_discard_fn)(void *context, const wchar_t *path);
+void sh_ms_set_discard(sh_ms_discard_fn fn, void *context, const char *verb);
+
+#ifdef SH_MODSTORE_TESTING
+/* > 0: that many hard-link copies of the upgrade fail after the copy (tests). */
+extern int sh_ms_test_fail_unlink_copy;
+#endif
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };
 
@@ -283,14 +325,15 @@ int  sh_ms_remove_folder(const char *folder);
  * follows at the next sync. */
 int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
 
-/* The retired recycle bin. Deletes every entry of removed-mods\ (the store
- * root's sibling), the folder itself, and the record's "removed" section,
- * under the store lock. One "MODS: removed-mods: deleted <name>" line per
- * entry and, when anything was there, the summary "MODS: removed-mods: N
- * folder(s) deleted; the bin is retired", each to the backend log and to
- * `line` when given. Idempotent: a later start finds nothing. Runs at backend
- * start before the serving index is built. Returns the entries deleted, or
- * -1 when one could not be deleted (it is tried again at the next start). */
+/* The retired recycle bin. Retires every entry of removed-mods\ (the store
+ * root's sibling) through the discard (sh_ms_set_discard), then removes the
+ * empty folder and the record's "removed" section, under the store lock. One
+ * "MODS: removed-mods: <name> deleted" line per entry ("moved to the Recycle
+ * Bin" with the store tool's discard) and, when anything was there, the
+ * summary "MODS: removed-mods: N folder(s) deleted; the bin is retired", each
+ * to the backend log and to `line` when given. Idempotent: a later run finds
+ * nothing. The store tool runs it. Returns the entries removed, or -1 when one
+ * could not be removed (it is tried again at the next run). */
 typedef void (*sh_ms_sweep_line_fn)(void *context, const char *line);
 int  sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context);
 

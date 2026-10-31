@@ -309,6 +309,38 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
 
 /* ---------------------------------------------------- the retired bin --- */
 
+/* How the store upgrade and the bin sweep remove what they retire: through
+ * the caller's discard (the store tool's Recycle Bin) when one is set, else
+ * outright. */
+static sh_ms_discard_fn g_ms_discard;
+static void *g_ms_discard_ctx;
+static const char *g_ms_discard_verb = "deleted";
+
+void sh_ms_set_discard(sh_ms_discard_fn fn, void *context, const char *verb)
+{
+    g_ms_discard = fn;
+    g_ms_discard_ctx = context;
+    g_ms_discard_verb = fn && verb && verb[0] ? verb : "deleted";
+}
+
+/* Retire `path`, which must lie strictly inside `within`. Without a discard a
+ * folder is removed recursively and a link is removed as a link, never
+ * followed. 1 when it is gone (or was never there). */
+static int ms_discard(const wchar_t *path, const wchar_t *within)
+{
+    DWORD a;
+    if (!path || !within || !ms_inside(path, within)) return 0;
+    a = GetFileAttributesW(path);
+    if (a == INVALID_FILE_ATTRIBUTES) {
+        DWORD err = GetLastError();
+        return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
+    }
+    if (g_ms_discard) return g_ms_discard(g_ms_discard_ctx, path) != 0;
+    if ((a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT)) return ms_rmtree(path, within);
+    if (a & FILE_ATTRIBUTE_DIRECTORY) return RemoveDirectoryW(path) != 0;
+    return ms_delete_file(path);
+}
+
 int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
 {
     wchar_t *root = ms_wroot(), *bin = NULL, *pattern = NULL, *slash;
@@ -336,18 +368,15 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
             if (!child) { failed++; continue; }
             if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, leaf, (int)sizeof leaf, NULL, NULL)) strcpy_s(leaf, sizeof leaf, "?");
             /* A link is removed as a link; a folder's tree never follows one. */
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                ok = ms_rmtree(child, bin);
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = RemoveDirectoryW(child) != 0;
-            else ok = ms_delete_file(child);
+            ok = ms_discard(child, bin);
             free(child);
             if (ok) {
                 deleted++;
-                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: deleted %s", leaf);
+                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s %s", leaf, g_ms_discard_verb);
             } else {
                 failed++;
-                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be deleted completely (error %lu)",
-                            leaf, GetLastError());
+                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be removed (error %lu); it stays "
+                            "for the next run", leaf, GetLastError());
             }
             backend_log(text);
             if (line) line(context, text);
@@ -364,9 +393,10 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
     free(record);
     if (deleted || failed || had_record) {
         if (failed)
-            _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) deleted, %d could not be deleted; "
-                        "the bin is retired", deleted, failed);
-        else _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) deleted; the bin is retired", deleted);
+            _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) %s, %d could not be removed; "
+                        "the bin is retired", deleted, g_ms_discard_verb, failed);
+        else _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) %s; the bin is retired", deleted,
+                         g_ms_discard_verb);
         backend_log(text);
         if (line) line(context, text);
     }
@@ -1419,6 +1449,72 @@ static int ms_up_needed(const wchar_t *root)
     return found;
 }
 
+#ifdef SH_MODSTORE_TESTING
+int sh_ms_test_fail_unlink_copy;
+#endif
+
+/* Give the hard-linked file `p` (a carried file `f` inside `dir`) its own
+ * bytes without ever being without them: the original is renamed aside, copied
+ * back to its name, the copy is verified against the bundle, and only then is
+ * the renamed original retired. On any failure the original is put back. A
+ * renamed original left by an interrupted run is put back first
+ * (ms_up_unlink_recover). */
+#define MS_UP_ASIDE L".snapmap-plus-unlink"
+static int ms_up_unlink(const wchar_t *p, const wchar_t *dir, const sh_mb_file *f, char *cause, size_t cap)
+{
+    size_t n = wcslen(p) + 32;
+    wchar_t *aside = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    char got[SH_MB_HASH_HEX + 1];
+    unsigned long long size = 0;
+    DWORD err = 0;
+    int copied;
+    if (!aside) return ms_cause(cause, cap, "out of memory");
+    _snwprintf_s(aside, n, _TRUNCATE, L"%s%s", p, MS_UP_ASIDE);
+    if (!MoveFileExW(p, aside, 0)) {
+        err = GetLastError();
+        free(aside);
+        return ms_cause(cause, cap, "%s is a hard link that could not be set aside for copying (error %lu); it is unchanged",
+                        f->path, err);
+    }
+    copied = CopyFileW(aside, p, TRUE);
+#ifdef SH_MODSTORE_TESTING
+    if (copied && sh_ms_test_fail_unlink_copy > 0) { sh_ms_test_fail_unlink_copy--; copied = 0; SetLastError(ERROR_DISK_FULL); }
+#endif
+    if (!copied) err = GetLastError();
+    else {
+        SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
+        if (!ms_hash_wfile(p, &size, got) || size != f->size || strcmp(got, f->blob) != 0) { copied = 0; err = ERROR_CRC; }
+    }
+    if (copied && !ms_discard(aside, dir)) { copied = 0; err = GetLastError(); }
+    if (!copied) {
+        /* The copy goes (a duplicate of the original, or partial) and the original returns. */
+        ms_delete_file(p);
+        if (!MoveFileExW(aside, p, 0))
+            ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu); the original is kept "
+                     "beside it as %s.snapmap-plus-unlink", f->path, err, f->path);
+        else ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu); the original was put "
+                      "back", f->path, err);
+        free(aside);
+        return 0;
+    }
+    free(aside);
+    return 1;
+}
+
+/* An interrupted ms_up_unlink: the renamed original is the file. */
+static void ms_up_unlink_recover(const wchar_t *p)
+{
+    size_t n = wcslen(p) + 32;
+    wchar_t *aside = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    if (!aside) return;
+    _snwprintf_s(aside, n, _TRUNCATE, L"%s%s", p, MS_UP_ASIDE);
+    if (ms_exists(aside)) {
+        if (ms_exists(p)) ms_delete_file(p);   /* the run's own copy, complete or partial */
+        if (MoveFileExW(aside, p, 0)) ms_log("MODS: store: a file set aside by an interrupted run was put back");
+    }
+    free(aside);
+}
+
 /* Put every carried file of `b` in place as a real file: restored from
  * blobs\ when missing or of the wrong size, copied over a hard link. */
 static int ms_up_files(ms_up_ctx *c, const wchar_t *dir, const sh_mb_bundle *b, unsigned *unlinked, unsigned *restored,
@@ -1433,6 +1529,7 @@ static int ms_up_files(ms_up_ctx *c, const wchar_t *dir, const sh_mb_bundle *b, 
         if (f->stock) continue;
         p = ms_wjoin_utf8(dir, f->path);
         if (!p) return ms_cause(cause, cap, "out of memory");
+        ms_up_unlink_recover(p);
         if (!ms_file_size(p, &size) || size != f->size) {
             unsigned long long bsize = 0;
             blob = c->blobs ? ms_wjoin_utf8(c->blobs, f->blob) : NULL;
@@ -1442,20 +1539,8 @@ static int ms_up_files(ms_up_ctx *c, const wchar_t *dir, const sh_mb_bundle *b, 
             (*restored)++;
         } else if (ms_link_count(p) > 1) {
             /* Editing a linked file would edit every copy: the folder gets its own. */
-            size_t n = wcslen(p) + 16;
-            wchar_t *tmp = (wchar_t *)malloc(sizeof(wchar_t) * n);
-            ok = 0;
-            if (tmp) {
-                _snwprintf_s(tmp, n, _TRUNCATE, L"%s.unlink", p);
-                ms_delete_file(tmp);
-                if (CopyFileW(p, tmp, FALSE)) {
-                    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
-                    ok = ms_delete_file(p) && MoveFileExW(tmp, p, 0);
-                    if (!ok) ms_delete_file(tmp);
-                }
-                free(tmp);
-            }
-            if (!ok) { free(p); return ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu)", f->path, GetLastError()); }
+            ok = ms_up_unlink(p, dir, f, cause, cap);
+            if (!ok) { free(p); return 0; }
             (*unlinked)++;
         } else {
             DWORD a = GetFileAttributesW(p);
@@ -1488,10 +1573,10 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         if (!r) { sh_mb_free(&it->b); memset(&it->b, 0, sizeof it->b); }
         else {
             wchar_t *p = ms_wjoin(it->dir, L"bundle.canonical.json");
-            if (p && ms_exists(p)) ms_delete_file(p);
+            if (p && ms_exists(p)) ms_discard(p, it->dir);
             free(p);
             p = ms_wjoin(it->dir, L".state.json");
-            if (p && ms_exists(p)) ms_delete_file(p);
+            if (p && ms_exists(p)) ms_discard(p, it->dir);
             free(p);
         }
         goto out;
@@ -1543,7 +1628,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         int i;
         for (i = 0; gone[i]; i++) {
             wchar_t *p = ms_wjoin(it->dir, gone[i]);
-            if (p && ms_exists(p)) ms_delete_file(p);
+            if (p && ms_exists(p)) ms_discard(p, it->dir);
             free(p);
         }
     }
@@ -1707,7 +1792,7 @@ static int ms_up_fold(ms_up_ctx *c, const wchar_t *leaf, const char *member, con
     }
     if (value && sh_mb_record_put(c->rootu, section, value)) {
         ok = 1;
-        ms_delete_file(p);
+        ms_discard(p, c->root);
         c->st->records++;
         ms_log("MODS: store: %ls folded into snapmap-plus.json (%s) and removed", leaf, section);
     } else {
@@ -1875,6 +1960,7 @@ static int ms_tidy_move(const char *folder, const char *rootu, const char *to)
 static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
 {
     char *text = NULL;
+    wchar_t *wroot;
     sh_ms_list l;
     ms_pair *pairs = NULL;
     size_t np = 0, i;
@@ -1886,9 +1972,10 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
     modstore_lock();
     st->tidied = 1;
     trees_add = mpj_new(MPJ_OBJ);
-    if (!sh_ms_enumerate(&l)) { modstore_unlock(); mpj_free(trees_add); return -1; }
+    wroot = ms_wroot();
+    if (!wroot || !sh_ms_enumerate(&l)) { free(wroot); modstore_unlock(); mpj_free(trees_add); return -1; }
     pairs = (ms_pair *)calloc(l.count * 2 + 1, sizeof *pairs);
-    if (!pairs) { sh_ms_list_free(&l); modstore_unlock(); mpj_free(trees_add); return -1; }
+    if (!pairs) { sh_ms_list_free(&l); free(wroot); modstore_unlock(); mpj_free(trees_add); return -1; }
 
     /* 1. A package a map delivered that copies an installed mod goes; its
      * hash answers as the installed mod's. */
@@ -1899,10 +1986,16 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
         if (!sh_ms_entry_delivered(d)) continue;
         m = sh_ms_delivered_counterpart(&l, &d->bundle, &rule);
         if (!m) continue;
-        if (!sh_ms_remove_folder(d->folder)) {
-            st->tidy_failed++;
-            ms_log("MODS: store: %s: a copy of %s that a map delivered, but it could not be removed; it stays", d->name, m->name);
-            continue;
+        {
+            wchar_t *w = sh_mb_wpath(d->folder);
+            int gone = w && ms_discard(w, wroot);
+            free(w);
+            if (!gone) {
+                st->tidy_failed++;
+                ms_log("MODS: store: %s: a copy of %s that a map delivered, but it could not be removed; it stays", d->name,
+                       m->name);
+                continue;
+            }
         }
         if (_stricmp(d->bundle.hash, m->bundle.hash)) sh_ms_alias_note(d->bundle.hash, m->bundle.hash);
         strcpy_s(pairs[np].from, sizeof pairs[np].from, d->name);
@@ -1968,6 +2061,7 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
            st->tidy_failed ? "; some folders were left as they were, so this runs again at the next start" : "");
     modstore_unlock();
     free(pairs);
+    free(wroot);
     mpj_free(trees_add);
     return 1;
 }
@@ -2019,7 +2113,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
             const ms_up_item *o = &c.items[k];
             if (k == i || o->dropped || (o->legacy && k > i)) continue;
             if (!strcmp(o->b.hash, it->b.hash) || (!strcmp(o->b.id, it->b.id) && !strcmp(o->content, it->content))) {
-                char value[SH_MB_HASH_HEX + 3], *dir = sh_mb_utf8(it->dir);
+                char value[SH_MB_HASH_HEX + 3];
                 it->dropped = 1;
                 it->kept = k;
                 if (strcmp(o->b.hash, it->b.hash)) {
@@ -2029,7 +2123,12 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
                 ms_log("MODS: store: %s: dropped, %s serves the same content%s%.16s%s%.16s%s", it->from, o->from,
                        strcmp(o->b.hash, it->b.hash) ? " (alias " : " (same bundle ", it->b.hash,
                        strcmp(o->b.hash, it->b.hash) ? " -> " : "", strcmp(o->b.hash, it->b.hash) ? o->b.hash : "", ")");
-                if (dir) { sh_ms_remove_folder(dir); free(dir); }
+                if (!ms_discard(it->dir, c.root)) {
+                    /* Served by the kept one; the next run drops it again. */
+                    ms_log("MODS: store: %s could not be removed (error %lu); it stays for the next run", it->from,
+                           GetLastError());
+                    stats->failed++;
+                }
                 stats->dropped++;
             }
         }
@@ -2065,7 +2164,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
     if (c.blobs) {
         if (!stats->failed) {
             stats->blob_bytes = ms_tree_bytes(c.blobs);
-            stats->blobs_removed = ms_rmtree(c.blobs, c.root);
+            stats->blobs_removed = ms_discard(c.blobs, c.root);
             ms_log("MODS: store: blobs\\ %s (%llu MiB)", stats->blobs_removed ? "removed" : "could not be removed completely",
                    stats->blob_bytes >> 20);
         } else {
@@ -2106,4 +2205,134 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
     free(c.root);
     sh_json_object_free(&aliases);
     return 1;
+}
+
+/* ------------------------------------------------------ the dry run ---- */
+
+static unsigned ms_count_children(const wchar_t *dir, int folders_only, unsigned long long *bytes)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(dir, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    unsigned n = 0;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (folders_only && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        n++;
+        if (bytes && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            *bytes += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* What the second step would change: drops, renames, a migration record to collapse. */
+static void ms_check_tidy(const char *rootu, sh_ms_upgrade_check *out)
+{
+    char *text = NULL;
+    sh_ms_list l;
+    size_t i, k;
+    unsigned char *dropped;
+    if (sh_mb_record_get(rootu, "layout", &text) == 1 && text && atoi(text) >= 2) { free(text); return; }
+    free(text);
+    text = NULL;
+    if (!sh_ms_enumerate(&l)) return;
+    dropped = (unsigned char *)calloc(l.count + 1, 1);
+    for (i = 0; dropped && i < l.count; i++) {
+        int rule = 0;
+        if (sh_ms_entry_delivered(&l.items[i]) && sh_ms_delivered_counterpart(&l, &l.items[i].bundle, &rule)) {
+            dropped[i] = 1;
+            out->tidy_drops++;
+        }
+    }
+    for (i = 0; dropped && i < l.count; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        char prefix[SH_MB_ID_MAX + 2];
+        size_t same = 0;
+        if (dropped[i] || !e->loaded || !e->bundle.origin[0] || !e->bundle.id[0] || !_stricmp(e->name, e->bundle.id)) continue;
+        for (k = 0; k < l.count; k++) if (!dropped[k] && l.items[k].loaded && !strcmp(l.items[k].bundle.id, e->bundle.id)) same++;
+        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->bundle.id);
+        if ((same == 1 && !_strnicmp(e->name, prefix, strlen(prefix))) || strstr(e->name, "@legacy-")) out->tidy_renames++;
+    }
+    free(dropped);
+    sh_ms_list_free(&l);
+    if (sh_mb_record_get(rootu, "migration", &text) == 1 && text) {
+        mpj *m = mpj_parse(text, strlen(text));
+        const mpj *c = m ? mpj_get(m, "complete") : NULL, *rows = m ? mpj_get(m, "folders") : NULL;
+        int n;
+        if (c && c->type == MPJ_BOOL && c->b) {
+            for (n = 0; n < m->n; n++) {
+                const char *key = m->keys[n];
+                if (strcmp(key, "complete") && strcmp(key, "migratedAt") && strcmp(key, "source") && strcmp(key, "folders") &&
+                    strcmp(key, "trees")) out->tidy_migration = 1;
+            }
+            for (n = 0; rows && rows->type == MPJ_ARR && n < rows->n; n++)
+                if (ms_outcome_done(rows->items[n])) out->tidy_migration = 1;
+        }
+        mpj_free(m);
+    }
+    free(text);
+}
+
+int sh_ms_upgrade_scan(sh_ms_upgrade_check *out)
+{
+    static const struct { const wchar_t *w; const char *u; } records[] = {
+        { L"claims.json", "claims.json" }, { L"publish-links.json", "publish-links.json" },
+        { L"pending-uploads.json", "pending-uploads.json" }, { L".migrated.json", ".migrated.json" }, { NULL, NULL } };
+    wchar_t *root, *p, *pattern, *slash;
+    char rootu[MAX_PATH * 4], *section = NULL;
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int i;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    root = ms_wroot();
+    if (!root || !sh_ms_root(rootu, sizeof rootu)) { free(root); return -1; }
+    /* removed-mods\ is the store root's sibling. */
+    slash = wcsrchr(root, L'\\');
+    if (slash && slash > root) {
+        size_t n = (size_t)(slash - root);
+        wchar_t *bin = (wchar_t *)malloc((n + 16) * sizeof(wchar_t));
+        if (bin) {
+            memcpy(bin, root, n * sizeof(wchar_t));
+            wcscpy_s(bin + n, 16, L"\\removed-mods");
+            if (ms_is_dir(bin)) { out->bin_present = 1; out->bin_entries = ms_count_children(bin, 0, NULL); }
+            free(bin);
+        }
+    }
+    if (!ms_is_dir(root)) { free(root); return out->bin_present; }
+    if (sh_mb_record_get(rootu, "removed", &section) == 1 && section) out->bin_section = 1;
+    free(section);
+    p = ms_wjoin(root, L"blobs");
+    if (p && ms_is_dir(p)) { out->blobs_present = 1; out->blob_files = ms_count_children(p, 0, &out->blob_bytes); }
+    free(p);
+    p = ms_wjoin(root, L"legacy");
+    if (p && ms_is_dir(p)) { out->legacy_present = 1; out->legacy_folders = ms_count_children(p, 1, NULL); }
+    free(p);
+    for (i = 0; records[i].w; i++) {
+        if (!ms_has_file(root, records[i].w)) continue;
+        out->record_files++;
+        if (out->record_names[0]) strncat_s(out->record_names, sizeof out->record_names, ", ", _TRUNCATE);
+        strncat_s(out->record_names, sizeof out->record_names, records[i].u, _TRUNCATE);
+    }
+    pattern = ms_wjoin(root, L"*");
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            wchar_t *child;
+            if (!ms_candidate(&fd)) continue;
+            child = ms_wjoin(root, fd.cFileName);
+            if (child && (ms_has_file(child, L"bundle.json") || ms_has_file(child, L".state.json") ||
+                          ms_has_file(child, L"bundle.canonical.json"))) out->layout_folders++;
+            free(child);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    ms_check_tidy(rootu, out);
+    free(root);
+    return (out->layout_folders > 0) + out->blobs_present + out->legacy_present + (out->record_files > 0) +
+           (out->tidy_drops + out->tidy_renames > 0) + out->tidy_migration + out->bin_present + out->bin_section;
 }
