@@ -222,6 +222,28 @@ static int op_register_file(void *context, const char *type, const char *name, c
     return ok;
 }
 
+/* The engine error text a load left, when it names the decl's own file: the
+ * parse failed. An animWeb's parse catches its own idLexerException (VK
+ * FUN_1416e2c10 / GL FUN_1416e3590), so DeclRead returns success and the
+ * state byte shows nothing; the reporter copies the text into last_error_msg
+ * before the throw on both renderers. */
+static char g_refusal[ERROR_TEXT_MAX];
+
+static int me_refused(const char *before, const char *type, const char *name)
+{
+    char after[ERROR_TEXT_MAX];
+    me_error_text(after, sizeof after);
+    if (!after[0] || !strcmp(after, before) || !sh_modserve_error_names_decl(after, type, name)) return 0;
+    strcpy_s(g_refusal, sizeof g_refusal, after);
+    return 1;
+}
+
+static void op_refusal(void *context, char *out, size_t cap)
+{
+    (void)context;
+    if (out && cap) strncpy_s(out, cap, g_refusal, _TRUNCATE);
+}
+
 static int op_load(void *context, const char *type, const char *name, int persist,
                    unsigned *out_state, unsigned *out_lifetime)
 {
@@ -229,6 +251,7 @@ static int op_load(void *context, const char *type, const char *name, int persis
     int ok = 0;
     (void)context;
     *out_state = *out_lifetime = 0;
+    g_refusal[0] = 0;
     me_error_text(before, sizeof before);
     __try {
         void *m = me_manager(type), *decl = NULL;
@@ -240,27 +263,46 @@ static int op_load(void *context, const char *type, const char *name, int persis
             unsigned char *d = (unsigned char *)decl;
             unsigned char state = d[RES_STATE_OFF];
             unsigned lifetime = *(unsigned *)(d + RES_LIFETIME_OFF);
-            if (!(state & 1)) {
+            /* DeclFind loads a name the probe admits on demand: a parse it
+             * already refused is not run a second time. */
+            int refused = me_refused(before, type, name);
+            if (!refused && !(state & 1)) {
                 /* A new identity with no consumers takes the native source load
                  * once, at the persistent level, as timeline_tile.c does. */
                 *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
                 d[RES_STATE_OFF] = (unsigned char)(state & ~2);
                 g_generic_load(decl);
                 state = d[RES_STATE_OFF];
+                refused = me_refused(before, type, name);
             }
             /* Editor rows stay through map purges; everything else returns to
              * the engine's own level (1), which the next map unload purges. */
             *(unsigned *)(d + RES_LIFETIME_OFF) = persist ? 4u : lifetime;
             *out_state = state;
             *out_lifetime = *(unsigned *)(d + RES_LIFETIME_OFF);
-            ok = (state & 3) == 0;
-            if (ok && !_stricmp(type, "snapEditorEntityDef") && !*(void **)(d + SEDEF_ENTITYDEF_OFF)) {
+            ok = refused ? SH_MODSERVE_LOAD_REFUSED : (state & 3) == 0;
+            if (ok == 1 && !_stricmp(type, "snapEditorEntityDef") && !*(void **)(d + SEDEF_ENTITYDEF_OFF)) {
                 me_log("sedef '%s' resolved no entityDef (sedef+0x1c8 is NULL); palette admission would reject it", name);
                 ok = 0;
             }
         }
     } __except (me_fault_filter(GetExceptionCode())) { me_log_fault("load", type, name, before); ok = 0; }
     return ok;
+}
+
+/* The lookup an animWeb's parse makes for each model it names: DeclFind
+ * without makeDefault, which answers from the resource lists, then the
+ * visibility probe (a name the probe admits is created and loaded, as the
+ * parse would have done). Inside the pass's process heap scope. */
+static int op_decl_found(void *context, const char *type, const char *name)
+{
+    int found = -1;
+    (void)context;
+    __try {
+        void *m = me_manager(type);
+        if (m) found = g_decl(m, name, 0) != NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { found = -1; }
+    return found;
 }
 
 /* The player's game archives, read through the engine provider (the same
@@ -284,7 +326,7 @@ static int op_stock_exists(void *context, const char *request)
 static void op_sources_published(void *context);
 static const char *g_reparse_phase = "plan";   /* the running pass, for the early-decl lines */
 static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists,
-                                              op_sources_published };
+                                              op_sources_published, op_decl_found, op_refusal };
 
 /* ------------------------------------------------------------------ gates */
 
@@ -468,9 +510,12 @@ static void me_index_changed(void)
     if (run) (void)run(NULL, me_strings_main, NULL, 1500, &result);
 }
 
+static void me_console_line(const char *line) { sh_printf("%s\n", line); }
+
 int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     size_t i;
+    sh_modserve_set_console(me_console_line);
     /* The boot index was built before this point, and the string injector
      * (installed after it) read that table in its first pass. */
     sh_modserve_set_index_listener(me_index_changed);
@@ -524,7 +569,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
 typedef struct me_reparse_type { const char *type; int count; char names[160]; } me_reparse_type;
 typedef struct me_reparse {
     me_reparse_type types[ME_REPARSE_TYPES];
-    int ntypes, reparsed, through_provider, failed, faulted, pending;
+    int ntypes, reparsed, through_provider, failed, faulted, pending, skipped, restored;
 } me_reparse;
 
 static me_reparse_type *me_reparse_slot(me_reparse *r, const char *type)
@@ -536,34 +581,68 @@ static me_reparse_type *me_reparse_slot(me_reparse *r, const char *type)
     return &r->types[r->ntypes++];
 }
 
+/* Every in-place load keeps the resource's lifetime: ResourceGenericLoad's
+ * failure path reconstructs the object (ResourceReconstruct, VK 0x1416c67f0),
+ * and idResource's constructor (VK 0x1416c5580) writes level 1 or 2, so a
+ * permanent decl that failed a re-parse would be destroyed by the next map
+ * unload while everything permanent that points at it (the menu's
+ * collectibles, an editor row) keeps the pointer. */
+static void me_load_in_place(unsigned char *d, const char *what, const char *type, const char *name)
+{
+    unsigned was = 0, left;
+    d[RES_STATE_OFF] = (unsigned char)(d[RES_STATE_OFF] & ~3);
+    left = sh_modserve_load_keep_lifetime(d, g_generic_load, &was);
+    if (left != was)
+        me_log("%s: %s '%s' kept at lifetime %u (the load left %u)", what, type, name, was, left);
+}
+
 static int me_reparse_one(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
 {
     me_reparse *r = (me_reparse *)context;
     char before[ERROR_TEXT_MAX];
     int result = 0;
-    (void)bundle_id;
     me_error_text(before, sizeof before);
     __try {
         void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
         unsigned char *d = (unsigned char *)decl, state;
+        char model[200], why[ERROR_TEXT_MAX + 80];
         if (!d) return 0;
         state = d[RES_STATE_OFF];
         if (state & 2) { r->pending++; return 0; }   /* not parsed yet: the provider will serve it */
+        /* An animWeb naming a model the engine cannot find would come out of
+         * its parse empty (its nodes freed first, nothing rebuilt): the
+         * game's own web stays. */
+        if (!_stricmp(type, "animWeb") && sh_modserve_animweb_check(request, &g_ops, model, sizeof model) == 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "it names model '%s', which SnapMap cannot load; the game's own "
+                        "animWeb is kept", model);
+            (void)sh_modserve_withdraw(request, type, name, why);
+            r->skipped++;
+            return 1;
+        }
         {
             me_reparse_type *t = me_reparse_slot(r, type);
             size_t at = strlen(t->names);
-            d[RES_STATE_OFF] = (unsigned char)(state & ~3);
-            g_generic_load(decl);
+            int refused;
+            me_load_in_place(d, "reparse", type, name);
             state = d[RES_STATE_OFF];
+            refused = me_refused(before, type, name);
             r->reparsed++;
             t->count++;
             if (at < sizeof t->names - 4)
                 _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
             if (sh_modserve_open_count(request) > 0) r->through_provider++;
-            if (state & 1) {
+            if ((state & 1) || refused) {
                 r->failed++;
-                me_log("reparse: %s '%s' (%s) failed to parse the bundle's bytes (state 0x%02x)", type, name,
-                       bundle_id, state);
+                me_log("reparse: %s '%s' (%s) failed to parse the bundle's bytes (state 0x%02x)%s%s", type, name,
+                       bundle_id, state, refused ? ": " : "", refused ? g_refusal : "");
+                /* The bundle's bytes stop being served and the engine parses
+                 * its own again, so the decl is whole. */
+                _snprintf_s(why, sizeof why, _TRUNCATE, "the game refused its bytes%s%s; the game's own decl is restored",
+                            refused ? ": " : "", refused ? g_refusal : "");
+                if (sh_modserve_withdraw(request, type, name, why)) {
+                    me_load_in_place(d, "restore", type, name);
+                    r->restored++;
+                }
             }
         }
         result = 1;
@@ -592,13 +671,13 @@ static void me_reparse_early(const char *phase, int in_heap)
     __finally {
         if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: early-decl re-parse heap scope did not balance", phase);
     }
-    if (!r.reparsed && !r.faulted) return;
+    if (!r.reparsed && !r.faulted && !r.skipped) return;
     for (i = 0; i < r.ntypes; ++i)
         me_log("reparsed %d %s decl(s) the engine parsed before the serving index (%s%s)", r.types[i].count,
                r.types[i].type, r.types[i].names, strlen(r.types[i].names) >= sizeof r.types[i].names - 5 ? ", ..." : "");
-    me_log("%s: early decls: %d re-parsed in %.1f ms (%d read through the provider, %d failed, %d faulted); "
-           "%d of %d unserved shadow(s) not parsed yet", phase, r.reparsed, me_now_ms() - t0, r.through_provider,
-           r.failed, r.faulted, r.pending, offered);
+    me_log("%s: early decls: %d re-parsed in %.1f ms (%d read through the provider, %d failed, %d restored, %d faulted, "
+           "%d withdrawn unparsed); %d of %d unserved shadow(s) not parsed yet", phase, r.reparsed, me_now_ms() - t0,
+           r.through_provider, r.failed, r.restored, r.faulted, r.skipped, r.pending, offered);
 }
 
 /* Models and images a gated bundle serves that the engine loaded before the
@@ -648,8 +727,7 @@ static void me_raw_one(void *context, const char *list_class, void *resource, co
         d = (unsigned char *)resource;
         __try {
             if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates */
-            d[RES_STATE_OFF] = (unsigned char)(d[RES_STATE_OFF] & ~3);
-            g_generic_load(resource);
+            me_load_in_place(d, "reload", list_class, name);
             if (d[RES_STATE_OFF] & 1) r->failed++;
             r->reloaded++;
             if (image) r->images++; else r->models++;

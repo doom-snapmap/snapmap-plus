@@ -850,9 +850,25 @@ the winner's text is served with the other providers' entries appended, so
 several boss packs work together. One `MODS: conflict:` line names the
 providers, the winner and the reason; `sh_mods doctor` prints the same. A
 registration pass (editor rows, map activation) also withdraws an animWeb
-whose models block names a model that no bundle provides and the engine has
-no md6Def for, since the engine's parse throws on it: a stock animWeb it
-shadowed is served by the game again, and a new name is not registered. Before
+whose `modelInfos` or `models` block names a model that no bundle provides and
+the engine cannot find. The engine's parse looks each model up with DeclFind
+(no makeDefault) and a miss throws an `idLexerException` that the animWeb
+parse catches itself (13954591, both renderers): the web keeps what it had
+parsed (nothing past `props`, its nodes freed first), is not marked failed,
+and the load reports success. So for a decl the pass loads now, the engine's
+own lookup decides, not the game archives, which also hold campaign md6Defs
+SnapMap cannot load (issue 132: a converted doors package carrying
+`designsystems/med_station`, which names the campaign
+`wallhealthstation.md6`); a stock shadow the engine parses later keeps the
+archive answer. A stock animWeb it shadowed is served by the game again, and a
+new name is not registered. A load the engine refuses although it reports
+success is caught by its error text naming the decl's file (the reporter
+copies it to `last_error_msg` before the throw); the decl is not loaded a
+second time and is withdrawn. A withdrawn file is not parsed again in the
+session, and each skip or refusal prints one console line,
+`Snapmap+ mods: <bundle>: animWeb '<name>' not loaded: it names model
+'<md6>', which SnapMap cannot load (campaign-only or missing)` or `... not
+loaded: the game refused it: <engine error>`. Before
 the Play level load the SnapBuild detour re-checks the bundles' requirements
 (`MODS: play: requirements live: ...`); the engine itself does not reset the
 blacklist gates between the editor and the level load. The editor pass
@@ -979,6 +995,20 @@ the bytes are unchanged, also when the open landed in the table it replaced.
 The pass logs `MODS: reparsed <n> <type> decl(s) the engine parsed before the
 serving index (...)` per type and one summary line.
 
+Every in-place load the product runs (this re-parse, the refresh below, the
+gated reload of models and images) keeps the resource's lifetime at `+0x28`.
+`ResourceGenericLoad`'s failure path reconstructs the object in place and
+idResource's constructor writes level 1 or 2 (VK 0x1416c5580), so a permanent
+decl that failed a re-parse would be destroyed by the next map unload while
+everything permanent that points at it keeps the pointer; the main menu's
+collectibles hold stock md6Defs (`unlockModel` decls name the boss and demon
+md6Defs that Doomforge packs shadow) and read them on every shell-map load. A
+re-parse that fails (state bit 0, or an engine error naming the file) is
+withdrawn and the decl is parsed once more from the game's bytes, and an
+animWeb shadow whose models the engine cannot find is withdrawn before its
+re-parse, since the re-parse would free the stock web's nodes and rebuild
+nothing.
+
 The same race decides what a bundle's requirements mean for a resource: its
 cvars (the cut-content blacklist gates, for one) are applied only at the first
 registration pass, and anything the engine loaded before that resolved its
@@ -1082,7 +1112,10 @@ at:
   placed names, then applies before the requirements check and the level load;
 - the map exit: the main-thread tick (`sh_modui_poll_main`, polled while scope
   can matter) clears the listing once the editor that showed the map loaded
-  last has its screen down, neither Play nor a load runs, and the engine's
+  last has its screen down, neither Play nor a load runs (`load_state` reads
+  3 for any loaded map, so the loading-screen thread's running byte,
+  `load_screen` `+0x4b2`, marks a load in progress, the hub's shell map
+  included), and the engine's
   `map_left` (`iface_engine.c`) says the editor has left the map: no map
   object, or the editor state at `+0x23618` is 0 (no state runs: the hub or
   the browser) or 8 (exiting). The Settings screen opened from the Start menu
