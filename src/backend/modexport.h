@@ -1,24 +1,35 @@
-/* modexport.h -- a rawmap export that carries its mods: one ZIP file.
+/* modexport.h -- an export that carries its mods: one ZIP file, a map's or a
+ * prefab's, with the same layout for both.
  *
- *   map.rawmap.json                         the map text, manifest rows included
- *   export.json                             {"format":1,"map":"map.rawmap.json",
- *                                            "bundles":[{"bundle","id","version","build","folder"}]}
- *   mods/<id>@<version>+<build>/bundle.json            each bundle the rows name, in the
- *   mods/<id>@<version>+<build>/bundle.canonical.json  Contract 1 bundle.json form (derived
- *   mods/<id>@<version>+<build>/assets/...             from mod.json; the ZIP format is unchanged)
- *   mods/legacy/<id>@<version>+<build>/...  a converted first-generation bundle
+ *   <name>.json                the map text (manifest rows included) or the
+ *                              prefab file (its "snapmapPlus" block, prefab_block.h)
+ *   mods/<folder>/mod.json     each mod the rows name, exactly as it is installed:
+ *   mods/<folder>/assets/...   the store folder's own name (<id>, or <id>@<version>
+ *                              when the store holds two folders for one id) and
+ *                              its mod.json and carried files byte for byte
  *
- * Each distinct blob is stored once in the ZIP: a file whose bytes an
- * earlier entry already holds (in the same bundle or another) is left out,
- * and the importer takes it from that entry by the hash bundle.json names.
- * Entries are stored (method 0); the reader also accepts deflate (8), so a
- * file repacked by another tool still imports. No ZIP64: an export is
- * limited to 65535 entries and 4 GiB.
+ * There is no index, no bundle.json and no canonical manifest: the .json's
+ * rows name the bundles, and each carried mod.json records its own bundle
+ * hash in its product block. A stock pointer is an entry of mod.json; the
+ * export never carries installed game content, so a pointer whose bytes the
+ * author's folder holds under assets/ is left out and the importer reads
+ * those bytes from its own game. Entries are stored (method 0); the reader
+ * also accepts deflate (8), so a file repacked by another tool still imports.
+ * No ZIP64: an export is limited to 65535 entries and 4 GiB.
  *
- * Import verifies every manifest against its hash and every blob against
- * the manifest, installs the bundles as mod folders exactly as a download
- * does (modsync_install_manifest: mods\<id>\ with mod.json and assets\),
- * rebuilds the serving index, and returns the map text.
+ * Import is the ordinary install of each carried folder whose bundle a row
+ * names: a folder the store already serves (the bundle hash, or an alias of
+ * it) is skipped and counted as already installed; otherwise the folder is
+ * copied out of the export to a temporary folder and installed from there
+ * (sh_ms_install_as, building and verifying it as any folder from elsewhere),
+ * under its own name when no folder of its id is installed and that name is
+ * free, else beside the installed id under the store's own name
+ * (<id>@<version>). An installed folder of the same id and version with other
+ * content refuses the import, because nothing installed is ever rewritten.
+ * The built bundle hash must equal the row's; on any refusal the folders this
+ * import installed are removed again. The serving index is rebuilt after an
+ * install. A ZIP in the retired bundle form of earlier releases (any
+ * bundle.canonical.json, or an export.json index) is refused.
  *
  * File work only, no network. Paths are UTF-8 unless marked ACP.
  */
@@ -28,21 +39,26 @@
 #include <stddef.h>
 
 #include "modmanifest.h"
+#include "modbundle.h"
 
-#define MODEXPORT_FORMAT    1
-#define MODEXPORT_MAP_ENTRY "map.rawmap.json"
-#define MODEXPORT_INDEX     "export.json"
-#define MODEXPORT_MAP_MAX   (64u * 1024u * 1024u)
+/* A map's entry is named after the ZIP ("my map.zip" carries "my map.json"),
+ * this when the ZIP's name cannot name one. */
+#define MODEXPORT_MAP_FALLBACK "map.json"
+/* The retired index name: an export.json without ~type is that index. */
+#define MODEXPORT_INDEX        "export.json"
+#define MODEXPORT_MAP_MAX      (64u * 1024u * 1024u)
+/* The refusals of the retired bundle form. */
+#define MODEXPORT_RETIRED_PREFAB "this export was made by an earlier release; export it again"
+#define MODEXPORT_RETIRED_MAP    "this export was made by an earlier release; save the rawmap again"
 
 typedef struct modexport_stats {
-    unsigned bundles;              /* bundles the map's rows name */
+    unsigned bundles;              /* export: mods the rows name; import: carried folders the rows name */
     unsigned bundles_installed;    /* import: newly installed */
     unsigned bundles_present;      /* import: already installed */
     unsigned bundles_absent;       /* import: rows naming a bundle the export does not carry and
                                       this machine does not have (the map cannot load as it is) */
     unsigned entries;              /* ZIP entries written or read */
-    unsigned blobs_written;        /* distinct blobs stored in the ZIP / installed from it */
-    unsigned blobs_deduped;        /* files left out because an earlier entry holds their bytes */
+    unsigned files;                /* export: carried files written; import: files copied out */
     unsigned long long map_bytes;
     unsigned long long zip_bytes;
     double ms;
@@ -57,32 +73,26 @@ int   modexport_is_zip_path(const char *path);
 int   modexport_write(const char *map_json, size_t len, const char *zip_path, modexport_stats *st,
                       char *cause, size_t cause_cap);
 
-/* Check an export's structure without installing anything: readable ZIP,
- * export.json of this format, a map entry that is a JSON object. */
+/* Check a map's export without installing anything: a readable ZIP, not
+ * in the retired form, holding one top-level .json that is a map. */
 int   modexport_probe(const char *zip_path, char *cause, size_t cause_cap);
 
-/* Import: install every bundle the export carries (verifying hashes), then
- * return the map text (malloc'd, NUL-terminated), or NULL with the cause. */
+/* Import a map's export: install the carried folders the map's rows name, as
+ * above, then return the map text (malloc'd, NUL-terminated), or NULL with
+ * the cause (nothing stays installed). */
 char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st, char *cause, size_t cause_cap);
 
 /* ---------------------------------------------- prefab exports ------ */
-/* A prefab's export is one ZIP, written for every prefab, with or without mods:
+/* A prefab's export is written for every prefab, with or without mods, in
+ * the layout above: <name>.json is the prefab file, whose block's "mods" rows
+ * name the bundles the ZIP carries. An export that has been extracted (a
+ * folder holding <name>.json and mods/) imports as the ZIP does: the importer
+ * is given the .json, and its folder is the export.
  *
- *   <name>.json                       the prefab file: the engine's JSON with its
- *                                     "snapmapPlus" block (prefab_block.h), whose
- *                                     "mods" rows name the builds the ZIP carries
- *   mods/<id>@<version>+<build>/...   each bundle those rows name, as for a map
- *   mods/legacy/<id>@<version>+<build>/...
- *
- * There is no export.json: the prefab's own block is the index. The importer
- * takes the one top-level .json (an idSnapEntityPrefab, or an idSnapMap that
- * carries a block) and installs the carried bundles its rows name, each found
- * by its bundle.canonical.json, whose SHA-256 is the bundle hash. An export
- * that has been extracted (a folder holding <name>.json and mods/) imports as
- * the ZIP does: the importer is given the .json, and its folder is the export.
- *
- * A map's importer refuses a prefab's export and the other way round; an
- * export.json index without "map" (an earlier prefab layout) is refused. */
+ * The importers tell the kinds apart by the carried .json: an
+ * idSnapEntityPrefab, or an idSnapMap with a block, is a prefab; an idSnapMap
+ * (or an object without ~type) without a block is a map. Each refuses the
+ * other's export. */
 #define MODEXPORT_PREFAB_MAX (16u * 1024u * 1024u)
 
 /* The prefab text to carry, given the rows the export carries (`moved` is 1
@@ -102,15 +112,19 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
 typedef int (*modexport_rows_fn)(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows);
 
 /* Import a prefab's export: path (UTF-8) is the ZIP, or a .json whose folder
- * is an extracted export. Verify it, install the bundles rows_of names that
- * the export carries and the store does not hold (every carried bundle when
- * rows_of is NULL; nothing already installed is written again), then return
+ * is an extracted export. Install the carried folders whose bundle rows_of
+ * names (every carried folder when rows_of is NULL), as above, then return
  * the prefab text (malloc'd) and its name (the .json's file name without the
- * extension, UTF-8). 1 on success, else 0 with the cause; a damaged export
- * installs nothing. st->bundles_absent counts rows naming a bundle the export
- * does not carry and the store lacks. */
+ * extension, UTF-8). 1 on success, else 0 with the cause; a refused import
+ * leaves nothing installed. st->bundles_absent counts rows naming a bundle the
+ * export does not carry and the store lacks. */
 int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
                           char *name, size_t name_cap, modexport_stats *st, char *cause, size_t cause_cap);
+
+/* The stock existence check the import's builds use for needs (the game's
+ * installed archives; thread-safe). NULL leaves a need on a stock name
+ * uncheckable, as in the tests. The backend registers one at start. */
+void modexport_set_stock(sh_mb_exists_fn stock, void *ctx);
 
 /* ---------------------------------------------- rawmap file hooks ---- */
 /* The rawmap layer (rawmap.c) calls these for a path ending in .zip. Paths

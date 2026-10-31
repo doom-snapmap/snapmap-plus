@@ -532,6 +532,9 @@ int sh_prefab_mods_record(const char *text, size_t len, const char *path, char *
     if (!path || !path[0] || !text || !len) return -1;
     engine = sh_prefab_mods_strip_copy(text, len, &elen);
     if (!engine) return -1;
+    /* The file Create writes is plain JSON (the host removes the serializer's
+     * comments before it writes; a text that still has them loses them here). */
+    elen = sh_prefab_block_strip_comments(engine, elen);
     n = sh_prefab_mods_closure(engine, elen, &rows);
     if (n < 0) {
         pm_logf("PREFABS: %s: the prefab's mods could not be read; the file is left as the engine wrote it", path);
@@ -911,8 +914,8 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
             pm_msg(msg, cap, "Exported prefab %s with %u mod%s to %s (%llu KB).", nm, st.bundles, st.bundles == 1 ? "" : "s",
                    zip_utf8, (st.zip_bytes + 1023) / 1024);
         else pm_msg(msg, cap, "Exported prefab %s to %s; it uses no mods.", nm, zip_utf8);
-        pm_logf("PREFABS: export %s: %u bundle(s), %u blob(s) stored, %u deduplicated, %u entries, %llu byte(s)%s in %.0f ms",
-                zip_utf8, st.bundles, st.blobs_written, st.blobs_deduped, st.entries, st.zip_bytes,
+        pm_logf("PREFABS: export %s: %u bundle(s), %u file(s) carried, %u entries, %llu byte(s)%s in %.0f ms",
+                zip_utf8, st.bundles, st.files, st.entries, st.zip_bytes,
                 x.rewrite ? " (its block written for the export)" : "", st.ms);
     } else {
         pm_msg(msg, cap, "Prefab %s was not exported: %s.", nm, cause);
@@ -1021,9 +1024,9 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
         pm_msg(msg, cap, "Prefab %s is already in your library; %u mod%s installed.%s", name, st.bundles_installed,
                st.bundles_installed == 1 ? " was" : "s were", extra);
     else pm_msg(msg, cap, "Prefab %s and its mods are already here; nothing was changed.%s", name, extra);
-    pm_logf("PREFABS: import %s -> %s: %u bundle(s) (%u installed, %u present), %u blob(s), %llu byte(s) in %.0f ms",
+    pm_logf("PREFABS: import %s -> %s: %u bundle(s) (%u installed, %u present), %u file(s) copied out, %llu byte(s) in %.0f ms",
             src_utf8, result == 1 ? path : "(unchanged)", st.bundles, st.bundles_installed, st.bundles_present,
-            st.blobs_written, st.zip_bytes, st.ms);
+            st.files, st.zip_bytes, st.ms);
     if (st.bundles_installed && o->refresh) (void)o->refresh();
     free(text);
     return result;

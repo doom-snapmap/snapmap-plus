@@ -397,11 +397,14 @@ holding `mod.json` and an `assets/` tree at the engine's own request paths
 bundles are uploaded to the Community API's mod store when the map is published,
 and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
-see [Published maps and missing mods](#published-maps-and-missing-mods)); an
-exported rawmap is a ZIP that carries the bundles itself (`modexport.c`), so
-sharing a rawmap stays offline, and every rawmap save of a map that names mods
-writes that ZIP beside the JSON (see
-[Rawmaps that name mods](#rawmaps-that-name-mods)). Plain saves never upload. The retired
+see [Published maps and missing mods](#published-maps-and-missing-mods)); that
+transport is for publications only. An exported rawmap or prefab is a ZIP that
+carries each mod exactly as it sits in the mods folder, its folder with
+`mod.json` and `assets/` (`modexport.c`), and importing one is the ordinary
+install of those folders, so sharing stays offline; every rawmap save of a map
+that names mods writes that ZIP beside the JSON (see
+[Rawmaps that name mods](#rawmaps-that-name-mods) and
+[Prefabs that name mods](#prefabs-that-name-mods)). Plain saves never upload. The retired
 `%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the migration
 below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
@@ -459,9 +462,14 @@ These backend files share the work:
   It also holds a rawmap load whose mods are missing, as in
   [Rawmaps that name mods](#rawmaps-that-name-mods), and a prefab placement
   whose mods are missing, as in [Prefabs that name mods](#prefabs-that-name-mods).
+- `modexport.c` writes and reads the ZIP exports of maps and prefabs: the
+  `.json` and each mod's installed folder, byte for byte; import installs
+  each carried folder as a folder from elsewhere (`sh_ms_install_as`), as in
+  [Rawmaps that name mods](#rawmaps-that-name-mods). It has no network code.
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
-  inserts and strips it), reads an older prefab's sidecar read-only, resolves
+  inserts and strips it, and removes the serializer's comments so the file is
+  plain JSON), reads an older prefab's sidecar read-only, resolves
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
@@ -493,7 +501,9 @@ text is the Contract 1 text, so an unchanged mod keeps its hash. There is no
 blob store and there are no hard links: a mod's files live in its own
 `assets\` only. A folder the author drops in keeps its name; one the product
 makes (an install, a download, a migration, a delivered package) is `<id>`,
-else `<id>@<version>`. A package a map delivered without a version gets one
+else `<id>@<version>`; an export's import keeps the carried folder's name when
+no folder of its id is installed and the name is free. A package a map
+delivered without a version gets one
 generated from its digest (`legacy-<digest16>`); it is part of the manifest
 and its hash, so it stays in `mod.json`, but it never names a folder (`<id>`,
 else `<id>-<hash 8>`) and the Mods tab and the doctor do not show it.
@@ -1383,6 +1393,56 @@ rows writes only the JSON. `sh_rawmaps status` and the File menu's status
 for the open map) report what the last save wrote. A ZIP left beside a JSON by
 an earlier save is not deleted when the map later stops using mods.
 
+The ZIP (`modexport.h`) carries the map and each mod its rows name, as the
+mod is installed:
+
+```
+<name>.json                the map text, its smpmod1 rows included, named after the ZIP
+mods/<folder>/mod.json     the store folder's own name (<id>, or <id>@<version> when
+mods/<folder>/assets/...   the store holds two folders for one id), byte for byte
+```
+
+There is no `export.json`, no `bundle.json` and no `bundle.canonical.json`, no
+`legacy/` level and no `+<build>` suffix: the rows name the bundles, and each
+carried `mod.json` records its bundle hash in its product block (with its
+`legacy` record, if any). A stock pointer is an entry of `mod.json`, so the
+folder carries it; installed game content is never written into the ZIP, so a
+pointer whose bytes an author's folder holds under `assets\` travels without
+them. A row pinning an earlier build carries the folder serving it now, and the
+exported map's rows name that build.
+
+Importing it is the ordinary install of each carried folder whose bundle a row
+names (`modexport_read`, on whichever thread loads the map; a carried folder no
+row names is left out):
+
+- a bundle the store already serves (by its hash, or an alias of it) is
+  skipped and counted as already installed; nothing in that folder is written;
+- otherwise every folder is decided before anything is written: an installed
+  folder of the same id and version with other content refuses the import
+  with "the installed <id> <version> differs from the one the export
+  carries", because nothing installed is rewritten (the store's install would
+  replace it);
+- each remaining folder is copied out of the ZIP into a temporary folder (with
+  the bytes of a pointer the folder held filled from this player's own game)
+  and installed from there as any folder from elsewhere is
+  (`sh_ms_install_as`: built, copied into the store, verified): under its own
+  name when no folder of its id is installed and that name is free, else
+  under the name the store gives a second folder of an id (`<id>@<version>`),
+  beside the installed one. A mod that needs another carried mod is built
+  after it;
+- the built bundle hash must equal the row's; otherwise, and on any other
+  refusal, exactly the folders this import installed are removed and the load
+  is refused ("<id> <version> in the export does not build to the bundle the
+  map names");
+- after an install the serving index is rebuilt, as before.
+
+A ZIP in the bundle form of earlier releases (any `bundle.canonical.json`, or
+an `export.json` index) is refused: "this export was made by an earlier
+release; save the rawmap again". The map importer tells a map from a prefab by
+the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
+`snapmapPlus` block is a map; a prefab's export is refused with "this is a
+prefab's export, not a map's". The published-map download path is not used.
+
 ### Prefabs that name mods
 
 A prefab is never handed to the engine while a mod it uses is missing, for the
@@ -1413,6 +1473,17 @@ backend, the closure ignores it, and the Prefabs tab sends the page the scene
 without it (the page's scene parser also drops the key). The product writes a
 prefab file at Create and then only rewrites its block; the engine never
 re-saves one, so the block persists.
+
+Plain JSON. The engine's serializer writes a block comment before almost
+every member (`{/*camera yaw*/`; one stairs prefab held 209). Create
+removes every block and line comment outside a string
+(`sh_prefab_block_strip_comments` in `prefab_block.c`, the one function every
+writer of an object prefab file uses: the host before it writes the file, and
+`MODS_RECORD` again before it writes the block) and then appends the block, so
+a prefab file is plain JSON. Strings keep every byte, comment openers and
+escapes included. Readers still skip comments, because files created by
+earlier builds have them; the engine's deserializer reads comment-free text
+(module prefab files and prefabs from the 2018 build have none).
 
 Recording. Saving a prefab finds its mods exactly as a map's save does: the
 placed names of the prefab text (`sh_modmanifest_placed_names`: every
@@ -1474,15 +1545,17 @@ thread):
 One hold runs at a time: a second placement while one waits is refused.
 
 Export. `sh_prefab export "<name>" "<path.zip>"` and the tab's Export always
-write one ZIP, also for a prefab that uses no mods (`modexport.h`):
+write one ZIP, also for a prefab that uses no mods, in a map's layout
+(`modexport.h`):
 
 ```
-<name>.json                        the prefab file, its block naming the builds carried
-mods/<id>@<version>+<build>/...    each bundle the block's rows name, as for a map
-mods/legacy/<id>@<version>+<build>/...
+<name>.json                the prefab file, its block naming the builds carried
+mods/<folder>/mod.json     each mod the block's rows name, as it is installed:
+mods/<folder>/assets/...   the store folder's name and its files, byte for byte
 ```
 
-There is no `export.json` and no sidecar: the prefab's own block is the index.
+There is no `export.json`, no sidecar and no bundle manifest: the prefab's own
+block is the index, and each `mod.json` carries its bundle hash.
 `<name>.json` is the file's bytes as they are on disk. A prefab with no block
 (saved before it, with or without a sidecar), one saved before rows were
 recorded (its rows are then the closure of its text) and one whose rows pin an
@@ -1493,20 +1566,26 @@ carries; the file in the library is not changed. The Export dialog proposes
 Import. `sh_prefab import "<path.zip or path.json>"` and the tab's Import (the
 Open dialog's "Prefab exports (*.zip, *.json)") take the ZIP, or a `.json`
 inside an extracted export folder: that folder is the export, the picked file is
-the prefab and a `mods/` folder beside it holds the bundles. The importer takes
-the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
-carries a block), finds each carried bundle by its `bundle.canonical.json`
-(whose SHA-256 is the bundle hash) and installs the ones the block's rows name
-that the store lacks, hashes verified and nothing installed rewritten; a carried
-bundle no row names is left out. It then rescans and adds the prefab under the
-`.json`'s file name. A prefab of that name with the same bytes is left alone (an
+the prefab and a `mods/` folder beside it holds the mod folders. The importer
+takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
+carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
+names a bundle the block's rows name, exactly as a map's import does (see
+[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when the store
+serves it already, installed under its own name or beside an installed id,
+refused when the same id and version is installed with other content, and
+removed again when it does not build to the row's hash; a carried folder no row
+names is left out. It then rescans and adds the prefab under the `.json`'s file
+name. A prefab of that name with the same bytes is left alone (an
 import that finds everything already there writes nothing); one with other bytes
 is kept and the import takes "<name> (2)" and so on. A row the export does not
 carry is named in the result ("It also needs <id> <version>, which the export
 does not carry."), and Load / Place asks for it as above. Each importer refuses
-the other's ZIP: a rawmap export has `export.json` with `"map"`, and the prefab
-importer also refuses a map's JSON, two prefabs in one ZIP and an `export.json`
-index without `"map"` (the earlier prefab layout, which shipped in no release).
+the other's ZIP, told apart by the carried `.json` ("this is a map's export, not
+a prefab's"), and the prefab importer also refuses a map's JSON and two prefabs
+in one ZIP. An export in the bundle form of earlier releases (any
+`bundle.canonical.json`, in a ZIP or an extracted folder, or an `export.json`
+index) is refused with "this export was made by an earlier release; export it
+again".
 `sh_prefab mods "<name>"` lists the block's rows (else the sidecar's) and
 whether each is installed.
 

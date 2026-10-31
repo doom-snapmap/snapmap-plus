@@ -290,8 +290,9 @@ static int rawmap_current_load_dir(char *out, size_t cap)
     return rawmap_dir_of(probe, out, cap);
 }
 
-/* One folder's *.zip exports: a map and its mods in one file. Only a ZIP whose export.json and
- * map entry read is listed; nothing is installed by looking. Returns how many it printed. */
+/* One folder's *.zip exports: a map and its mods in one file. Only a ZIP holding one map .json
+ * (not a prefab's export, not the retired form) is listed; nothing is installed by looking.
+ * Returns how many it printed. */
 static int rawmap_list_one_zip_dir(const char *dir, const char *prefix)
 {
     char glob[MAX_PATH], why[160];

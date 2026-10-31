@@ -55,6 +55,16 @@ size_t sh_prefab_block_strip(char *text, size_t len);
  * complete top-level object or out of memory. */
 char  *sh_prefab_block_put(const char *text, size_t len, const char *block, size_t block_len, size_t *out_len);
 
+/* Remove every block comment and line comment outside a string, in place:
+ * the engine's serializer writes a comment before almost every member
+ * (a "camera yaw" comment before "cameraYaw"), and a prefab file the product writes is plain
+ * JSON. Strings are kept byte for byte, comment openers inside them included,
+ * and an escaped quote does not end one. Comments do not nest: a block
+ * comment ends at the first star and slash after it, and one that never ends
+ * runs to the end of the text; a line comment ends before its newline, which
+ * is kept. Returns the new length and NUL-terminates when there is room. */
+size_t sh_prefab_block_strip_comments(char *text, size_t len);
+
 /* The top-level "~type" string's escaped body, copied into out (truncated).
  * Returns 1 when found, 0 when the object has none, -1 not an object. */
 int    sh_prefab_block_top_type(const char *text, size_t len, char *out, size_t cap);

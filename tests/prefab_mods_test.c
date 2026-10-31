@@ -7,6 +7,10 @@
  *     engine's exact bytes (formatting, comments, an empty object, a first
  *     member), found in a tail, a text that is not an object refused; a view
  *     composed into a block and read back;
+ *   comments: the serializer's comments removed outside strings (strings
+ *     holding comment openers, escaped quotes and backslashes, comments that
+ *     look nested, line comments, an unterminated one), and Create's file
+ *     written as plain JSON with its block;
  *   recording: Create writes an object prefab's closure (one row naming the
  *     bundle that provides its inherit, stock names nothing) into the file's
  *     block and no sidecar; description and tag edits rewrite the block and
@@ -22,11 +26,13 @@
  *     a DLC module no row provides, with and without a block; a second
  *     placement while one waits; the slot's rows from the block or a sidecar,
  *     META_READ from the file, a tail or a sidecar;
- *   the ZIP: <name>.json as on disk and the bundle, no index, also for a
+ *   the ZIP: <name>.json as on disk and the mod's installed folder
+ *     (mods/<id>/mod.json and assets/ byte for byte), no index, also for a
  *     prefab without mods; refused by the map importer and refusing a map's
- *     ZIP; imported into an empty store and library, imported again without a
- *     write, a differing prefab of the same name kept beside it; an extracted
- *     export folder imported; a lone .json naming a mod it does not carry; a
+ *     ZIP and the retired bundle form; imported into an empty store and
+ *     library, imported again without a write, a differing prefab of the same
+ *     name kept beside it; an extracted export folder imported; a lone .json
+ *     naming a mod it does not carry; a
  *     prefab whose row names an uninstalled bundle refused; a prefab saved
  *     before the block exported with a block written for the ZIP only; the
  *     console verbs and the slot's outputs; prefab names.
@@ -364,6 +370,72 @@ static void block(void)
         CHECK(v && !strcmp(v, "{\"desc\":\"\",\"tags\":[]}"));
         free(b); free(v);
         CHECK(sh_prefab_mods_block_view("[]", 2, NULL) == NULL);
+    }
+}
+
+static void comments(const char *lib)
+{
+    size_t n;
+    printf("-- comments: the serializer's comments go, strings keep every byte\n");
+    {
+        char t[] = "{/*camera yaw*/\n   \"cameraYaw\" : 280.5,/*entities*/\n   \"entities\" : [\n      {/*custom icon*/\n"
+                   "         \"x\" : 1\n      }\n   ]\n}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\n   \"cameraYaw\" : 280.5,\n   \"entities\" : [\n      {\n         \"x\" : 1\n      }\n   ]\n}") &&
+              n == strlen(t));
+    }
+    {
+        /* Comment openers inside strings, an escaped quote, and an escaped
+         * backslash right before a string's closing quote. */
+        char t[] = "{\"a\":\"x /* not */ y // nor\",\"b\":\"q\\\"/*s*/\",\"c\":\"\\\\\"/*gone*/,\"d\":\"http://h/*p*/\"}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\"a\":\"x /* not */ y // nor\",\"b\":\"q\\\"/*s*/\",\"c\":\"\\\\\",\"d\":\"http://h/*p*/\"}") &&
+              n == strlen(t));
+    }
+    {
+        /* Comments do not nest: one ends at the first star-slash after it. */
+        char t[] = "{/* a /* b */\"k\":1/* c // d */,/* e */ /* f */\"m\":[/**/]}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\"k\":1, \"m\":[]}") && n == strlen(t));
+    }
+    {
+        char t[] = "{/* a /* b */ */\"k\":1}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{ */\"k\":1}"));
+    }
+    {
+        /* A line comment ends before its newline; a block opener inside it is not one. */
+        char t[] = "{// line /* not a block\r\n\"k\":1,// x\n\"m\":2/2}// end";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\n\"k\":1,\n\"m\":2/2}") && n == strlen(t));
+    }
+    {
+        char t[] = "{\"k\":1}/* never closed";
+        char u[] = "{\"k\":\"open string /* kept";
+        char v[] = "{\"k\":1}";
+        CHECK(sh_prefab_block_strip_comments(t, sizeof t - 1) == 7 && !strcmp(t, "{\"k\":1}"));
+        CHECK(sh_prefab_block_strip_comments(u, sizeof u - 1) == sizeof u - 1 && !strcmp(u, "{\"k\":\"open string /* kept"));
+        CHECK(sh_prefab_block_strip_comments(v, sizeof v - 1) == sizeof v - 1 && !strcmp(v, "{\"k\":1}"));
+        CHECK(sh_prefab_block_strip_comments(NULL, 4) == 0 && sh_prefab_block_strip_comments(v, 0) == 0);
+    }
+
+    printf("-- Create's file is plain JSON: a commented serializer text is written without its comments\n");
+    {
+        static const char COMMENTED[] =
+            "{/*camera yaw*/\"cameraYaw\":0,/*entities*/\"entities\":["
+            "{/*in editor display name*/\"displayName\":\"Door\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/test.door/door\",\"name\":\"\"}},"
+            "{\"displayName\":\"Crate\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/props/new/crate01\",\"name\":\"\"}}],"
+            "/*grab distance*/\"grabDistance\":256,\"~type\":\"idSnapEntityPrefab\"}";
+        char p[MAX_PATH * 2], *text;
+        size_t len = 0;
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\Commented.json", lib);
+        CHECK(put_file(p, COMMENTED));
+        CHECK(sh_prefab_mods_record(COMMENTED, sizeof COMMENTED - 1, p, NULL) == 1);
+        text = slurp(p, &len);
+        CHECK(text && !strstr(text, "/*") && strstr(block_of(text, len), "\"mods\":[{\"id\":\"test.door\""));
+        CHECK(engine_bytes_are(p, OBJECT_PREFAB));
+        free(text);
+        DeleteFileA(p);
     }
 }
 
@@ -795,7 +867,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     const char *e;
     FILETIME before_p, after_p, before_m, after_m;
 
-    printf("-- export: always one ZIP, <name>.json as it is on disk and the mod's bundle, nothing else\n");
+    printf("-- export: always one ZIP, <name>.json as it is on disk and the mod's installed folder, nothing else\n");
     reset_fakes();
     _snprintf_s(zipA, sizeof zipA, _TRUNCATE, "%s\\Door export.zip", tmp);
     _snprintf_s(libB, sizeof libB, _TRUNCATE, "%s\\libB", tmp);
@@ -807,11 +879,20 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     z = slurp(zipA, &zl);
     disk = slurp(prefab, &len);
     {
-        char entry[200];
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/%s@%s+1/bundle.canonical.json", door->id, door->version);
-        CHECK(z && zl > 0 && memmem_find(z, zl, entry));
+        char mj[MAX_PATH * 2], *disk_mj;
+        size_t ml = 0;
         e = zip_entry(z, zl, "Door.json", &el);
         CHECK(e && disk && el == len && !memcmp(e, disk, len));
+        /* The mod as it is installed: mods/test.door/mod.json and its asset, byte for byte. */
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\test.door\\mod.json", storeA);
+        disk_mj = slurp(mj, &ml);
+        e = zip_entry(z, zl, "mods/test.door/mod.json", &el);
+        CHECK(e && disk_mj && el == ml && !memcmp(e, disk_mj, ml));
+        free(disk_mj);
+        e = zip_entry(z, zl, "mods/test.door/assets/generated/decls/entitydef/mods/test.door/door.decl", &el);
+        CHECK(e && el == sizeof DOOR_DECL - 1 && !memcmp(e, DOOR_DECL, el));
+        CHECK(!memmem_find(z, zl, "bundle.canonical.json") && !memmem_find(z, zl, "bundle.json") && !memmem_find(z, zl, "mods/legacy/") &&
+              !memmem_find(z, zl, "test.door@"));
         CHECK(!memmem_find(z, zl, "export.json") && !memmem_find(z, zl, "prefab.meta.json") && !memmem_find(z, zl, "prefab.json"));
     }
     free(z);
@@ -846,6 +927,19 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
               !strcmp(msg, "The prefab was not imported: this is a map's export, not a prefab's."));
     }
 
+    printf("-- the prefab importer refuses the retired bundle form of earlier releases\n");
+    {
+        static const char *const OLD_N[] = { "Door.json", "mods/test.door@1.0.0+1/bundle.canonical.json" };
+        const char *old_d[2];
+        char zo[MAX_PATH * 2];
+        old_d[0] = STOCK_PREFAB;
+        old_d[1] = "{\"id\":\"test.door\"}";
+        _snprintf_s(zo, sizeof zo, _TRUNCATE, "%s\\old form.zip", tmp);
+        CHECK(mt_zip_stored(zo, 2, OLD_N, old_d));
+        CHECK(sh_prefab_mods_import(zo, libB, name, sizeof name, msg, sizeof msg) == -1 &&
+              !strcmp(msg, "The prefab was not imported: this export was made by an earlier release; export it again."));
+    }
+
     printf("-- import into an empty store and library: the mod installed, the prefab added, no sidecar\n");
     CHECK(sh_ms_set_root(storeB));
     CHECK(sh_modserve_index_build(storeB) == 0);
@@ -861,6 +955,9 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     free(text); free(disk);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.meta.json", libB);
     CHECK(!mt_exists(path));
+
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.door\\mod.json", storeB);
+    CHECK(mt_exists(path));   /* installed under its own name, as a folder from elsewhere is */
 
     printf("-- importing it again writes nothing\n");
     {
@@ -1044,6 +1141,7 @@ int main(int argc, char **argv)
 
     names();
     block();
+    comments(libA);
     recording(libA, &door);
     status(&door);
     resolving(&door);

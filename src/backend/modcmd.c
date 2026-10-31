@@ -463,12 +463,12 @@ static int mc_job_run(void *ctx, const modnet_io *io)
         why[0] = 0;
         if (!text) { mc_async_line("MODS: import %s: FAILED: %s", j->path, cause); break; }
         free(text);
-        mc_async_line("MODS: import %s: %u bundle(s) (%u installed, %u already present), %u blob(s), map %llu byte(s), "
+        mc_async_line("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
                       "%llu byte(s) read in %.0f ms", j->path, es.bundles, es.bundles_installed, es.bundles_present,
-                      es.blobs_written, es.map_bytes, es.zip_bytes, es.ms);
+                      es.files, es.map_bytes, es.zip_bytes, es.ms);
         /* Stage it as 'sh_rawmaps load <path>' does: the next map open reads it. */
         if (!sh_rawmap_validate_source(j->path, why, (int)sizeof why) || !sh_rawmap_swap_set_source(j->path)) {
-            mc_async_line("MODS: import %s: the bundles are installed, but the map could not be staged: %s", j->path,
+            mc_async_line("MODS: import %s: the mods are installed, but the map could not be staged: %s", j->path,
                           why[0] ? why : "the path is not usable");
             break;
         }
@@ -739,9 +739,20 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
     return ok;
 }
 
+/* An export's import builds each carried mod on the thread that imports it
+ * (the WebView host's, a rawmap load's, the job worker's), so its stock check
+ * is the installed-archive bridge, which is thread-safe, not the engine
+ * provider. */
+static int mc_import_stock(void *ctx, const char *request)
+{
+    (void)ctx;
+    return sh_modstock_exists(request);
+}
+
 int sh_modcmd_register(void)
 {
     char root[MAX_PATH * 4];
+    modexport_set_stock(mc_import_stock, NULL);
     if (sh_ms_root(root, sizeof root)) mc_line("MODS: sh_mods ready; store %s", root);
     else mc_line("MODS: sh_mods ready; the store folder cannot be resolved");
     return 1;

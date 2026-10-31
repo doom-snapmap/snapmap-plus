@@ -229,3 +229,36 @@ int sh_prefab_block_top_type(const char *text, size_t len, char *out, size_t cap
     }
     return 1;
 }
+
+size_t sh_prefab_block_strip_comments(char *s, size_t len)
+{
+    size_t i = 0, w = 0;
+    if (!s) return 0;
+    while (i < len) {
+        char c = s[i];
+        if (c == '"') {
+            /* A string, escapes included, copied as it is (an unterminated one to the end). */
+            s[w++] = s[i++];
+            while (i < len) {
+                c = s[i];
+                s[w++] = s[i++];
+                if (c == '\\' && i < len) { s[w++] = s[i++]; continue; }
+                if (c == '"') break;
+            }
+            continue;
+        }
+        if (c == '/' && i + 1 < len && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            i = i + 1 < len ? i + 2 : len;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && s[i + 1] == '/') {
+            while (i < len && s[i] != '\n') i++;
+            continue;
+        }
+        s[w++] = s[i++];
+    }
+    if (w < len) s[w] = 0;
+    return w;
+}

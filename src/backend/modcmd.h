@@ -30,7 +30,7 @@
  *   sh_mods release "<ref>"        release the claim stored for ref
  *   sh_mods retry                  retry uploads queued after a failure
  *   sh_mods export "<path.zip>"    write the open map and the bundles it names to one ZIP
- *   sh_mods import "<path.zip>"    install an export's bundles and stage its map
+ *   sh_mods import "<path.zip>"    install an export's mod folders and stage its map
  *   sh_mods cancel                 stop the running push, pull, release, retry or import
  *
  * push, pull, release, retry and import run on a worker thread (modnet.c),

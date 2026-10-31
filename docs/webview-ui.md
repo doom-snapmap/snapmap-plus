@@ -177,12 +177,14 @@ columns as the pane allows.
 
 ## Prefabs and their mods
 
-A prefab is one file. Its description, tags, a module prefab's summary and the
+A prefab is one file of plain JSON. Its description, tags, a module prefab's summary and the
 mods its entities and modules need live in the file's own top-level
 `snapmapPlus` block, after the engine's members (`backend/prefab_block.h`,
 `backend/prefab_mods.c`, see [architecture](architecture.md#prefabs-that-name-mods)).
-Create from Selection writes the file the engine serialized and then asks the
-backend to write the block into it (`MODS_RECORD`); a module prefab's save
+Create from Selection removes the comments the engine's serializer writes
+before each member (`sh_prefab_block_strip_comments`, the backend's function,
+which `MODS_RECORD` applies again), writes the file and then asks the backend
+to write the block into it (`MODS_RECORD`); a module prefab's save
 writes the file with its block. Description and tag edits go through
 `META_WRITE`, which rewrites the block in place and keeps its summary and mod
 rows; clearing both fields clears them. No sidecar is written. The host never
@@ -216,12 +218,15 @@ answers place now, held (the host follows it with `MODS_POLL` on each
 think-loop turn and places the prefab again, through the same Load / Place,
 once the mods are installed), a module the player cannot get, or refused. The
 page shows the backend's text as a toast. Export (Prefab Details head) always
-writes one ZIP, `<name>.json` and `mods/<id>@<version>+<build>/...`, through the
-rawmap pickers' Save dialog with a "Prefab export (*.zip)" type, proposing
-`<name>.zip`. Import (the list head) uses the Open dialog with "Prefab exports
-(*.zip, *.json)": a ZIP, or the `.json` inside an extracted export folder,
-whose `mods/` folder holds the bundles (`rawmap_picker.h`,
-`for_prefab_dialog`). The backend reads and writes them on the UI thread. The
+writes one ZIP, `<name>.json` and each mod as it is installed,
+`mods/<id>/mod.json` and `mods/<id>/assets/...`, through the rawmap pickers'
+Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`.
+Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
+*.json)": a ZIP, or the `.json` inside an extracted export folder, whose
+`mods/` folder holds the mod folders (`rawmap_picker.h`, `for_prefab_dialog`).
+Import is the ordinary install of each mod folder, as the Mods tab's install
+button does it. The backend reads and writes them on the UI thread, with no
+network. The
 pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mockup.html` and are tested by `tests/prefab_mods_test.js`.
 
