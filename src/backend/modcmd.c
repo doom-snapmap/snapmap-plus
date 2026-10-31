@@ -756,6 +756,7 @@ int sh_modcmd_register(void)
 {
     char root[MAX_PATH * 4];
     modexport_set_stock(mc_import_stock, NULL);
+    sh_modserve_set_build_cause(sh_ms_build_cause);
     if (sh_ms_root(root, sizeof root)) mc_line("MODS: sh_mods ready; store %s", root);
     else mc_line("MODS: sh_mods ready; the store folder cannot be resolved");
     return 1;

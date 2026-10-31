@@ -138,6 +138,11 @@ int  sh_ms_alias_note(const char *old_hash, const char *new_hash);
  * number dropped. */
 int  sh_ms_alias_forget(const char *id, const char *hash);
 
+/* Drop every alias whose target hash no folder of the store builds to any
+ * more (a folder deleted by hand, or replaced by one with other bytes).
+ * Returns the number dropped. sh_ms_sync runs it after each pass. */
+int  sh_ms_alias_prune(void);
+
 /* A folder of the store was built and its mod.json written: the build cache
  * notes it (sh_ms_cache_note) and, when the product block named another
  * bundle before (b->prev_hash), that hash becomes an alias of the new one.

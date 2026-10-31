@@ -153,6 +153,8 @@ static void ms_log(const char *fmt, ...)
 /* The lines a player should see (sh_modserve_set_console). */
 static sh_modserve_console_fn volatile g_console;
 void sh_modserve_set_console(sh_modserve_console_fn fn) { g_console = fn; }
+static sh_modserve_build_cause_fn volatile g_build_cause;
+void sh_modserve_set_build_cause(sh_modserve_build_cause_fn fn) { g_build_cause = fn; }
 
 static void ms_console(const char *fmt, ...)
 {
@@ -921,7 +923,13 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     b->version = ms_trim(version);
     b->name = ms_trim(name);
     b->installed_at = built;
-    if (!block_v) ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; a rescan of the Mods tab builds it)");
+    if (!block_v) {
+        char last[SH_MB_CAUSE_MAX] = "";
+        sh_modserve_build_cause_fn cause_fn = g_build_cause;
+        if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
+        if (last[0]) ms_fail(b, "its last build was refused: %s", last);
+        else ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; a rescan of the Mods tab builds it)");
+    }
     else if (format != 1) ms_fail(b, "mod.json product block format %g is not supported (this build reads format 1)", format);
     if (!b->id || !ms_valid_id(b->id)) ms_fail(b, "bundle id '%s' is not valid", b->id ? b->id : "");
     if (!b->version) b->version = "";

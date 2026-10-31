@@ -814,6 +814,24 @@ int sh_ms_alias_forget(const char *id, const char *hash)
     return n;
 }
 
+int sh_ms_alias_prune(void)
+{
+    sh_ms_list l;
+    size_t i, k;
+    int dropped = 0;
+    if (!sh_ms_enumerate(&l)) return 0;
+    for (i = 0; i < l.alias_count; i++) {
+        int kept = 0, n = 0;
+        for (k = 0; k < l.count && !kept; k++)
+            if (l.items[k].loaded && !_stricmp(l.items[k].bundle.hash, l.aliases[i].to)) kept = 1;
+        if (kept) continue;
+        if (ms_alias_rewrite(NULL, NULL, l.aliases[i].to, &n)) dropped += n;
+    }
+    sh_ms_list_free(&l);
+    if (dropped) ms_log("MODS: store: %d stale alias(es) dropped: no folder builds to their bundle any more", dropped);
+    return dropped;
+}
+
 int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 {
     int ok;
@@ -1343,6 +1361,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     sh_json_object_free(&next);
     free(root);
     st->ms = GetTickCount64() - t0;
+    sh_ms_alias_prune();
     return 1;
 }
 

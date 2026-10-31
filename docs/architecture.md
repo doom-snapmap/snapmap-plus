@@ -524,7 +524,9 @@ content (the rebuild rule, `sh_mods build`, an install replacing the folder of
 the same id and version) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
 current one. The aliases stay flat: an alias naming the old hash is re-pointed
-at the new one, so one hop always resolves. Aliases are a lookup aid for
+at the new one, so one hop always resolves. After each pass of the rebuild rule
+the store drops every alias whose target no folder builds to any more (a
+folder deleted or replaced by hand), with one `MODS: store:` line. Aliases are a lookup aid for
 store downloads and exports only: upload sends and claims the current build,
 and export carries it and rewrites the exported map's rows to name it, both
 through `sh_ms_resolve`. Nothing refuses or brings anything back because of an

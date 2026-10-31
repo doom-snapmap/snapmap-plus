@@ -202,6 +202,12 @@ typedef struct sh_modserve_engine_ops {
 typedef void (*sh_modserve_console_fn)(const char *line);
 void sh_modserve_set_console(sh_modserve_console_fn fn);
 
+/* The store's memory of the last refused build of a folder (absolute path),
+ * so a folder without a product block reports why its build was refused
+ * rather than "not built yet". NULL turns it off. */
+typedef void (*sh_modserve_build_cause_fn)(const char *folder, char *out, size_t cap);
+void sh_modserve_set_build_cause(sh_modserve_build_cause_fn fn);
+
 /* The model check for the served animWeb at `request`, as a load now would
  * meet it: 1 with the first model its models or modelInfos block names that
  * no bundle serves and the engine cannot find (written to `model`), 0 when

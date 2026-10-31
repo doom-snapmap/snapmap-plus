@@ -167,6 +167,14 @@ static void test_alias_note(void)
     CHECK(sh_ms_enumerate(&l));
     CHECK(!alias_of(&l, B) && !alias_of(&l, C));
     sh_ms_list_free(&l);
+    /* An alias whose target no folder builds to (a folder deleted or replaced by
+     * hand) is stale; the prune after each pass drops it. */
+    CHECK(sh_ms_alias_note(B, C) == 1);
+    CHECK(sh_ms_alias_prune() == 1);
+    CHECK(sh_ms_enumerate(&l));
+    CHECK(!alias_of(&l, B) && l.alias_count == 0);
+    sh_ms_list_free(&l);
+    CHECK(sh_ms_alias_prune() == 0);
 }
 
 
