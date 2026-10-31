@@ -1,4 +1,4 @@
-/* The Mods tab: the installed mods, grouped by where they came from, and the selected mod's details,
+/* The Mods tab: the installed mods in one list sorted by name, and the selected mod's details,
    with the few actions a player uses (install a folder, open the mods folder, remove, rebuild or
    verify a mod, migrate the old overrides folder). Browser global + CommonJS test export. Pure ASCII.
 
@@ -9,8 +9,9 @@
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
    editorRowNames, carriedPaths, publishedMaps and scope (docs/webview-ui.md). Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
-   after every action; showing the tab asks for a rescan. Nothing polls. The list is a plain list the
-   page scrolls natively. All text goes through textContent. */
+   after every action; showing the tab asks for a rescan. Nothing polls. The list is one flat list the
+   page scrolls natively; a row the open map uses carries an "In this map" pill (from the document's
+   map.mods, no read of its own). All text goes through textContent. */
 var modsTab = (function () {
   var STATES = {
     installed: {label: 'Installed', tone: 'ok'},
@@ -23,18 +24,16 @@ var modsTab = (function () {
     warn: {icon: 'triangle-alert', label: 'Needs attention'},
     info: {icon: 'circle-info', label: 'Installed; another build serves its files'}
   };
+  /* The details pane's line about where the folder came from (the product block's origin). */
   var ORIGINS = {
-    '':        'You added this folder',
-    install:   'Installed from a folder',
-    migration: 'Moved from the overrides folder',
-    download:  'Downloaded for a map',
-    delivery:  'Delivered by a map'
+    '':        'Added by hand',
+    install:   'Imported from an export',
+    migration: 'Moved from the old overrides folder',
+    download:  'Downloaded for a map you played',
+    delivery:  'Downloaded for a map you played'
   };
-  var GROUPS = [
-    {id: 'yours', label: 'Your mods'},
-    {id: 'installed', label: 'Installed'},
-    {id: 'maps', label: 'From maps you played'}
-  ];
+  var IN_MAP_TEXT = 'In this map';
+  var IN_MAP_TITLE = 'The open map uses this mod';
   var COUNT_LINES = [
     ['shadows', 'Replaces %s'], ['sounds', '%s'], ['movies', '%s'], ['modules', '%s'], ['vt', '%s']
   ];
@@ -43,7 +42,8 @@ var modsTab = (function () {
   /* remove is the v2 name of uninstall; the page sends uninstall. The two *Preview actions are dry
      runs that answer with the consequence list the confirmation shows. mapAddMod attaches the
      selected mod to the open map without placing anything (a map-level row); it removes nothing,
-     so it has no dry run. Uninstall is permanent: there is no bin to empty or restore from. */
+     so it has no dry run. Uninstall moves the folder to the Windows Recycle Bin; the page has no bin
+     of its own to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
@@ -54,13 +54,16 @@ var modsTab = (function () {
   var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
                     unindexed: 'not scanned yet; reopen the Mods tab', skipped: 'installed but not in use',
                     attention: 'needs attention'};
-  /* Under the Uninstall confirmation's scope line: it cannot be undone. */
-  var UNINSTALL_PERMANENT = 'This cannot be undone. Uninstalling:';
+  /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
+  var UNINSTALL_HEAD = {
+    undo: 'Undo history is cleared. The folder can be restored from the Recycle Bin by hand. Uninstalling:',
+    plain: 'The folder can be restored from the Recycle Bin by hand. Uninstalling:'
+  };
+  function uninstallHead(pv) { return pv && pv.install && pv.install.undoCleared ? UNINSTALL_HEAD.undo : UNINSTALL_HEAD.plain; }
   /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
   function savedMapsText(n) {
     return n + ' of your saved maps use it; they will not open until a mod folder provides its assets again.';
   }
-  var UNDO_CLEARED = 'Undo history is cleared.';
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
     mapRemoveMod: 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.',
@@ -68,7 +71,6 @@ var modsTab = (function () {
     uninstallUnused: 'Removes the mod from this computer. The open map does not use it.'
   };
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
-  var COLLAPSE_KEY = 'mods.collapsed_groups';
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
   /* Where a mod's replacements and requirements apply (payload scope; docs/webview-ui.md). */
@@ -129,6 +131,11 @@ var modsTab = (function () {
     return '';
   }
   function title(b) { return b.name || b.id || b.key; }
+  function cmp(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
+  /* The list's one order: the display name without case, then the id, then the folder. */
+  function compareMods(a, b) {
+    return cmp(title(a).toLowerCase(), title(b).toLowerCase()) || cmp(a.id, b.id) || cmp(a.key, b.key);
+  }
 
   /* The host's payload as the tab uses it. error is set for an unusable payload. The open map
      (payload.map) is not this tab's any more and is not read. */
@@ -138,10 +145,7 @@ var modsTab = (function () {
               migrate: {entries: 0, pending: 0, running: false}};
     var mg = payload.migrate && typeof payload.migrate === 'object' ? payload.migrate : {};
     var mods = arr(payload.mods).map(normMod);
-    mods.sort(function (a, b) {
-      var x = title(a).toLowerCase(), y = title(b).toLowerCase();
-      return x === y ? (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) : (x < y ? -1 : 1);
-    });
+    mods.sort(compareMods);
     return {ok: true, error: payload.storeReadable === false ? 'The mods folder cannot be read.' : '',
             root: str(payload.root), gen: num(payload.gen), v: num(payload.v), mods: mods,
             migrate: {entries: num(mg.entries), pending: num(mg.pending), running: bool(mg.running)},
@@ -180,8 +184,9 @@ var modsTab = (function () {
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
                        references: normRefs(mp.references), manifestRow: bool(mp.manifestRow), attached: bool(mp.attached),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
-            /* Uninstall deletes the folder; savedMaps is -1 when the saves could not be read. */
-            install: ins ? {folder: str(ins.folder), disposition: 'delete',
+            /* Uninstall moves the folder to the Recycle Bin (older backends said move or delete);
+               savedMaps is -1 when the saves could not be read. */
+            install: ins ? {folder: str(ins.folder), disposition: 'recycle',
                             savedMaps: ins.savedMaps === undefined || ins.savedMaps === null ? -1 : num(ins.savedMaps),
                             undoCleared: bool(ins.undoCleared)} : null,
             /* uninstallPreview only: the Toybox rows uninstalling takes out of the editor */
@@ -211,9 +216,8 @@ var modsTab = (function () {
     if (pv.action === 'uninstall' && pv.editorRows.length)
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
-      out.push({text: 'Deletes the folder mods\\' + pv.install.folder + ' and its files.'});
+      out.push({text: 'Moves the folder mods\\' + pv.install.folder + ' to the Windows Recycle Bin.'});
       if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
-      if (pv.install.undoCleared) out.push({text: UNDO_CLEARED});
     }
     return out;
   }
@@ -269,14 +273,8 @@ var modsTab = (function () {
   }
   function needsAttention(b) { return statusInfo(b).tone === 'warn'; }
 
-  /* Your mods: folders the author made, and the migrated overrides (the owner's own). */
-  function groupOf(b) {
-    if (b.origin === 'install') return 'installed';
-    if (b.origin === 'download' || b.origin === 'delivery') return 'maps';
-    return 'yours';
-  }
   function originText(b) {
-    if (b.origin === 'migration') return b.migratedFrom ? 'Moved from ' + b.migratedFrom : ORIGINS.migration;
+    if (b.origin === 'migration' && b.migratedFrom) return ORIGINS.migration + ' (' + b.migratedFrom + ')';
     return ORIGINS[b.origin] || ORIGINS[''];
   }
 
@@ -284,12 +282,6 @@ var modsTab = (function () {
     var q = str(query).trim().toLowerCase();
     if (!q) return mods.slice();
     return mods.filter(function (b) { return (b.name + '\n' + b.id + '\n' + b.key).toLowerCase().indexOf(q) !== -1; });
-  }
-  /* The groups in display order, empty ones left out. */
-  function groupMods(mods) {
-    return GROUPS.map(function (g) {
-      return {id: g.id, label: g.label, mods: mods.filter(function (b) { return groupOf(b) === g.id; })};
-    }).filter(function (g) { return g.mods.length > 0; });
   }
   /* "Replaces 500 stock files", "9 sounds", ...; zero counts are left out. */
   function countLines(c) {
@@ -311,27 +303,15 @@ var modsTab = (function () {
 
   /* ------------------------------------------------------------------------------------------ DOM */
 
-  /* env: {document, byId(id), post(message), toast(text, kind), saveCollapsed?(list of group ids)} */
+  /* env: {document, byId(id), post(message), toast(text, kind)}. The retired collapsed-groups
+     setting (mods.collapsed_groups) is neither read nor written. */
   function create(env) {
     var doc = env.document, byId = env.byId;
     var model = normalize(null), loaded = false, waiting = false, busy = '', quiet = false, selectedKey = '';
     var view = [], filter = '', attnOnly = false, lastError = '', rowNodes = {};
-    var collapsed = {}, filterCollapsed = {};
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
     var modal = {open: false, page: 'list', preview: null, from: 'map', opener: null}, modalButtons = [];
-
-    /* The collapsed groups are a setting (COLLAPSE_KEY) kept by the host's configuration service,
-       like the Prefabs tab's open folders: the page saves the list on each toggle and applies the
-       stored one when it arrives (loadCollapsed). A bad value starts with every group open. */
-    function collapsedFrom(list) {
-      var out = {};
-      arr(list).forEach(function (id) { if (typeof id === 'string' && id) out[id] = true; });
-      return out;
-    }
-    function writeCollapsed() {
-      if (env.saveCollapsed) env.saveCollapsed(Object.keys(collapsed).sort());
-    }
 
     function el(tag, cls, text) {
       var n = doc.createElement(tag);
@@ -378,8 +358,6 @@ var modsTab = (function () {
       return null;
     }
     function attentionCount() { return model.mods.filter(needsAttention).length; }
-    function filtering() { return attnOnly || !!str(filter).trim(); }
-    function groupOpen(id) { return filtering() ? !filterCollapsed[id] : !collapsed[id]; }
 
     function renderButtons() {
       var sel = !!selectedMod();
@@ -424,68 +402,32 @@ var modsTab = (function () {
       if (busy && !(busy === 'rescan' && quiet)) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
     }
 
-    /* ---- the list: groups of plain rows; every row of an open group is mounted */
+    /* ---- the list: one flat list of plain rows in the model's order; every row shown is mounted */
     function computeView() {
       var shown = filterMods(model.mods, filter);
       if (attnOnly) shown = shown.filter(needsAttention);
-      var groups = groupMods(shown);
-      view = [];
-      groups.forEach(function (g) { if (groupOpen(g.id)) view = view.concat(g.mods); });
-      return groups;
+      view = shown;
+      return shown;
     }
+    /* The open map uses the mod: the document's map.mods names its folder. */
+    function inMap(b) { return !!(model.map && model.map.open && mapUses(b)); }
     function renderList() {
       var box = byId('modsList');
       if (!box) return;
       clear(box);
       rowNodes = {};
-      var groups = computeView();
+      var shown = computeView();
       if (!loaded) { box.appendChild(el('div', 'list-empty', waiting ? 'Reading installed mods...' : 'Open this tab to list installed mods.')); return; }
       if (lastError) { box.appendChild(el('div', 'list-empty mods-error', lastError)); return; }
       if (!model.mods.length) {
         box.appendChild(el('div', 'list-empty', 'No mods installed. Drop a mod folder into mods\\ or use the download button to install one.'));
         return;
       }
-      if (!groups.length) {
+      if (!shown.length) {
         box.appendChild(el('div', 'list-empty', attnOnly ? 'No mod that needs attention matches the filter.' : 'No installed mod matches the filter.'));
         return;
       }
-      groups.forEach(function (g) { box.appendChild(groupNode(g)); });
-    }
-    function groupNode(g) {
-      var open = groupOpen(g.id);
-      var wrap = el('div', 'pf-folder mods-group' + (open ? ' pf-open' : ''));
-      wrap.setAttribute('role', 'group');
-      wrap.setAttribute('aria-label', g.label);
-      wrap.setAttribute('data-group', g.id);
-      var head = el('div', 'pf-folder-head mods-group-head');
-      head.setAttribute('role', 'button');
-      head.setAttribute('tabindex', '0');
-      head.setAttribute('aria-expanded', open ? 'true' : 'false');
-      head.setAttribute('data-group', g.id);
-      var caret = el('span', 'pf-caret');
-      caret.appendChild(icon('chevron-down'));
-      head.appendChild(caret);
-      head.appendChild(el('span', 'pf-fname', g.label));
-      head.appendChild(el('span', 'pf-fcount', String(g.mods.length)));
-      head.addEventListener('click', function () { toggleGroup(g.id); });
-      head.addEventListener('keydown', function (e) {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        if (e.preventDefault) e.preventDefault();
-        if (e.stopPropagation) e.stopPropagation();
-        toggleGroup(g.id);
-      });
-      wrap.appendChild(head);
-      if (open) {
-        var body = el('div', 'mods-group-body');
-        g.mods.forEach(function (b) { body.appendChild(modRow(b)); });
-        wrap.appendChild(body);
-      }
-      return wrap;
-    }
-    function toggleGroup(id) {
-      if (filtering()) { if (filterCollapsed[id]) delete filterCollapsed[id]; else filterCollapsed[id] = true; }
-      else { if (collapsed[id]) delete collapsed[id]; else collapsed[id] = true; writeCollapsed(); }
-      renderList();
+      shown.forEach(function (b) { box.appendChild(modRow(b)); });
     }
     function modRow(b) {
       var info = statusInfo(b), on = b.key === selectedKey;
@@ -499,6 +441,11 @@ var modsTab = (function () {
       text.appendChild(el('div', 'mods-row-name', title(b)));
       text.appendChild(el('div', 'mods-row-sub', subText(b)));
       row.appendChild(text);
+      if (inMap(b)) {
+        var pill = el('span', 'mods-pill', IN_MAP_TEXT);
+        pill.title = IN_MAP_TITLE;
+        row.appendChild(pill);
+      }
       row.addEventListener('click', function () { select(b.key); });
       rowNodes[b.key] = row;
       return row;
@@ -516,8 +463,8 @@ var modsTab = (function () {
       renderDetail();
       renderButtons();
     }
-    /* Arrow keys, Home and End move the selection over the rows shown (collapsed groups are
-       skipped); Page Up and Page Down scroll natively. */
+    /* Arrow keys, Home and End move the selection over the rows shown; Page Up and Page Down
+       scroll natively. */
     function onListKey(e) {
       var keys = {ArrowDown: 1, ArrowUp: -1, Home: -Infinity, End: Infinity};
       if (!view.length || !has(keys, e.key)) return;
@@ -582,7 +529,7 @@ var modsTab = (function () {
       link.title = 'Open this folder in Explorer';
       link.addEventListener('click', function () { act('openFolder', b.folder || b.key); });
       field(about, 'Folder', link);
-      field(about, 'Origin', originText(b));
+      about.appendChild(el('div', 'mods-line mods-origin', originText(b)));
       var applies = scopeText(b);
       if (applies) field(about, 'Applies', applies);
 
@@ -773,7 +720,7 @@ var modsTab = (function () {
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
       body.appendChild(el('div', 'mods-note', uninstall
-        ? UNINSTALL_PERMANENT
+        ? uninstallHead(pv)
         : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
@@ -824,7 +771,7 @@ var modsTab = (function () {
       var badge = byId('modsBadge');
       if (badge) badge.textContent = String(model.mods.length);
       var n = attentionCount(), at = byId('modsAttnBtn');
-      if (n === 0 && attnOnly) { attnOnly = false; filterCollapsed = {}; }
+      if (n === 0 && attnOnly) attnOnly = false;
       if (at) {
         clear(at);
         at.appendChild(icon('triangle-alert'));
@@ -849,7 +796,6 @@ var modsTab = (function () {
     }
     function setAttnOnly(on) {
       attnOnly = !!on && attentionCount() > 0;
-      filterCollapsed = {};
       renderHead();
       renderList();
     }
@@ -955,7 +901,7 @@ var modsTab = (function () {
       on('modsVerifyBtn', 'click', function () { var b = selectedMod(); if (b) act('verify', b.key); });
       on('modsRefreshBtn', 'click', function () { refresh(); });
       on('modsAttnBtn', 'click', function () { setAttnOnly(!attnOnly); });
-      on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); filterCollapsed = {}; renderList(); });
+      on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); renderList(); });
       on('modsList', 'keydown', onListKey);
       renderHead();
       renderButtons();
@@ -970,8 +916,6 @@ var modsTab = (function () {
       select: select,
       setAttentionOnly: setAttnOnly,
       openMap: function () { openMap(); },
-      /* The stored COLLAPSE_KEY value: a list of group ids. */
-      loadCollapsed: function (list) { collapsed = collapsedFrom(list); renderList(); },
       closeMap: closeMap,
       onMessage: function (d) {
         if (!d || typeof d !== 'object') return false;
@@ -981,7 +925,7 @@ var modsTab = (function () {
       },
       state: function () {
         return {model: model, loaded: loaded, waiting: waiting, busy: busy, selectedKey: selectedKey, view: view, error: lastError,
-                attentionOnly: attnOnly, collapsed: Object.keys(collapsed).sort(),
+                attentionOnly: attnOnly,
                 modal: {open: modal.open, page: modal.page, from: modal.from, preview: modal.preview}};
       }
     };
@@ -1021,9 +965,9 @@ var modsTab = (function () {
               tagRemoved: left === 0 && docu.map.tagged !== false,
               vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
     }
-    /* Uninstall deletes the folder; the saved maps are not the preview's to count. */
+    /* Uninstall moves the folder to the Recycle Bin; the saved maps are not the preview's to count. */
     function installPart(b, open) {
-      return {folder: b.folder || b.key, disposition: 'delete', savedMaps: num(b.savedMaps), undoCleared: !!open};
+      return {folder: b.folder || b.key, disposition: 'recycle', savedMaps: num(b.savedMaps), undoCleared: !!open};
     }
     function removeFromMap(r) {
       docu.map.mods = mapMods().filter(function (x) { return x !== r; });
@@ -1062,7 +1006,7 @@ var modsTab = (function () {
         if (!b) { ok = false; msg = key + ' is not installed.'; }
         else {
           var open = !!(docu.map && docu.map.entities !== -1);
-          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was deleted' +
+          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was moved to the Recycle Bin' +
                 (open ? ' and the undo history was cleared.' : '.');
           if (r) removeFromMap(r);
           docu.mods = mods().filter(function (x) { return x !== b; });
@@ -1075,12 +1019,12 @@ var modsTab = (function () {
     };
   }
 
-  return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, GROUPS: GROUPS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
-          COLLAPSE_KEY: COLLAPSE_KEY, FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE,
-          normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
-          groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
+  return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
+          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, compareMods: compareMods,
+          normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
+          originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
-          mapModStatus: mapModStatus, UNINSTALL_PERMANENT: UNINSTALL_PERMANENT, UNDO_CLEARED: UNDO_CLEARED, savedMapsText: savedMapsText,
+          mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create};
 })();
 

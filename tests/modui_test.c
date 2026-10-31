@@ -4,8 +4,9 @@
  * folder (two folders declaring one id both listed as duplicates, a package a
  * map delivered listed like any other), "installed" and "attention" with their
  * causes, the Migrate state and action with the slot's WAIT, Remove (a folder
- * the product made and the author's own folder both deleted, a mod the open
- * map uses refused), the open map's manifest rows and placed
+ * the product made and the author's own folder both moved to the Recycle Bin,
+ * the outright delete when the bin refuses one and the result saying so, a
+ * mod the open map uses refused), the open map's manifest rows and placed
  * closure, the conservative removal of covered builds, `sh_mods doctor` (every
  * bundle with its state, conflicts with their winners, shadows, duplicate ids,
  * migration, verification), the main-thread refusal, the slot's size query,
@@ -16,7 +17,7 @@
  * a load refused, one batch, the row and the search tag dropped, the next
  * save writing no row), the permanent Uninstall (the saved maps that use the
  * mod counted from their map.decl, the undo history cleared after the
- * delete's own commit, the folder deleted, nothing brought back by a load, a
+ * delete's own commit, the folder moved to the Recycle Bin, nothing brought back by a load, a
  * save or a tick), the asset rule's row states, Rebuild, the console verbs
  * with their --yes gate, and that every key the page's v3 fixture uses is a
  * key the backend writes.
@@ -781,9 +782,9 @@ int main(int argc, char **argv)
         CHECK(has(dr, "MODS: doctor: duplicate id alex.twin: mods\\twin-a (your folder), mods\\twin-b (your folder); "
                       "another installed mod declares this id; change one id in its mod.json\n"));
         CHECK(has(dr, "MODS: doctor: bundle mods\\twin-a (alex.twin@1.0.0+1): superseded, twin-b serves 1 of its path(s)\n"));
-        /* Remove one: the author's own folder is deleted too; there is no bin. */
+        /* Remove one: the author's own folder goes to the Recycle Bin too; the product keeps no bin. */
         doc = run_doc(SH_MODS_ACT_REMOVE, "twin-b");
-        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "Removed Twin. Its folder was deleted.") &&
+        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "Removed Twin. Its folder was moved to the Recycle Bin.") &&
               has(doc, "\"inUse\":false,\"removed\":[\"twin-b\"]"));
         free(doc);
         _snprintf_s(moved, sizeof moved, _TRUNCATE, "%s\\store\\removed-mods", tmp);
@@ -846,8 +847,12 @@ int main(int argc, char **argv)
             CHECK(has(doc, "\"ok\":true"));
             free(doc);
         }
+        /* The shell refuses: the folder is deleted outright and the result says so. */
+        sh_ms_recycle_refuse_for_test(1);
         doc = run_doc(SH_MODS_ACT_REMOVE, "old.pack");
-        CHECK(has(doc, "\"ok\":true") && has(doc, "Its folder was deleted."));
+        sh_ms_recycle_refuse_for_test(0);
+        CHECK(has(doc, "\"ok\":true") && has(doc, "Its folder was deleted because the Recycle Bin could not take it "
+                                                  "(the shell refused it (test)).\""));
         free(doc);
         CHECK(!mt_exists(leg));
     }
@@ -996,13 +1001,13 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("-- remove a folder the product made: deleted\n");
+    printf("-- remove a folder the product made: to the Recycle Bin\n");
     {
         unsigned rescans = (unsigned)g_rescans;
         sh_modmanifest_reset();
         g_placed_count = 0;
         doc = run_doc(SH_MODS_ACT_REMOVE, "alex.shade-a");
-        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "\"message\":\"Removed Shade. Its folder was deleted.\"") &&
+        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "\"message\":\"Removed Shade. Its folder was moved to the Recycle Bin.\"") &&
               has(doc, "\"removed\":[\"alex.shade-a\"]") && has(doc, "\"blobs\":0"));
         CHECK((unsigned)g_rescans == rescans + 1);
         free(doc);
@@ -1208,13 +1213,13 @@ int main(int argc, char **argv)
         }
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "alex.req");
         CHECK(has(doc, "\"preview\":{\"action\":\"uninstall\",\"key\":\"alex.req\",\"name\":\"Gates\",\"map\":null,"
-                       "\"install\":{\"folder\":\"alex.req\",\"disposition\":\"delete\",\"savedMaps\":0,\"undoCleared\":true},"
+                       "\"install\":{\"folder\":\"alex.req\",\"disposition\":\"recycle\",\"savedMaps\":0,\"undoCleared\":true},"
                        "\"editorRows\":[]}"));
         free(doc);
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, key2);
         CHECK(has(doc, "\"action\":\"uninstall\",\"key\":\"alex.r2-imp@1.0.1\""));
         CHECK(has(doc, "\"entityCount\":2,") && has(doc, "\"tagRemoved\":true,\"vanillaAfter\":true"));
-        CHECK(has(doc, "\"install\":{\"folder\":\"alex.r2-imp@1.0.1\",\"disposition\":\"delete\",\"savedMaps\":1,"
+        CHECK(has(doc, "\"install\":{\"folder\":\"alex.r2-imp@1.0.1\",\"disposition\":\"recycle\",\"savedMaps\":1,"
                        "\"undoCleared\":true},"
                        "\"editorRows\":[\"mods/alex.r2-imp/imp_copy\",\"mods/alex.r2-imp/imp_copy_b\"]}"));
         free(doc);
@@ -1269,7 +1274,8 @@ int main(int argc, char **argv)
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
             CHECK(has(g_doctor, "MODS: uninstall: removes 2 Toybox row(s) from the editor\n"));
-            CHECK(has(g_doctor, "MODS: uninstall: deletes the folder mods\\alex.r2-imp@1.0.1; this cannot be undone\n"));
+            CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp@1.0.1 to the Windows Recycle Bin; restore it "
+                                "from there by hand\n"));
             CHECK(has(g_doctor, "MODS: uninstall: 1 of your saved maps use it; they will not open until a mod folder provides "
                                 "its assets again\n"));
             CHECK(has(g_doctor, "MODS: uninstall: Undo history is cleared.\n"));
@@ -1291,7 +1297,7 @@ int main(int argc, char **argv)
                 unsigned rescans = (unsigned)g_rescans;
                 CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
                 CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: Uninstalled R2 Imp copy and removed it from the open map. "
-                                    "Its folder was deleted and the undo history was cleared.\n"));
+                                    "Its folder was moved to the Recycle Bin and the undo history was cleared.\n"));
                 CHECK((unsigned)g_rescans == rescans + 1);
             }
             CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
@@ -1344,8 +1350,7 @@ int main(int argc, char **argv)
             const char *ls[] = { "removed" };
             CHECK(sh_modui_command(1, ls, doctor_line, NULL) == 0);   /* not a verb of the tab any more */
             doc = run_doc(SH_MODS_ACT_REMOVED_EMPTY, "");
-            CHECK(has(doc, "\"action\":\"unknown\",\"ok\":false,\"message\":\"Uninstalled mods are deleted; there is no bin "
-                           "to empty or restore from.\""));
+            CHECK(has(doc, "\"action\":\"unknown\",\"ok\":false,\"message\":\"Uninstalled mods go to the Windows Recycle Bin.\""));
             free(doc);
             doc = run_doc(SH_MODS_ACT_REMOVED_RESTORE, "alex.r2-imp");
             CHECK(has(doc, "\"ok\":false"));
@@ -1472,11 +1477,11 @@ int main(int argc, char **argv)
             CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: a map is loading.\"") && mt_exists(path));
             free(doc);
             g_busy = NULL;
-            /* The open map does not use it: the history is cleared at once, the folder deleted. */
+            /* The open map does not use it: the history is cleared at once, the folder recycled. */
             {
                 int clears = g_undo_clears;
                 doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.req");
-                CHECK(has(doc, "\"action\":\"uninstall\",\"ok\":true,\"message\":\"Uninstalled Gates. Its folder was deleted and "
+                CHECK(has(doc, "\"action\":\"uninstall\",\"ok\":true,\"message\":\"Uninstalled Gates. Its folder was moved to the Recycle Bin and "
                                "the undo history was cleared.\"") && !mt_exists(path));
                 free(doc);
                 CHECK(g_undo_clears == clears + 1);

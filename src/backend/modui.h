@@ -147,14 +147,16 @@ int  sh_modui_list(void);
  * INSTALL (absolute), the key for VERIFY ("" verifies every installed build),
  * newline-separated keys for PRUNE_APPLY and a row's key for REMOVE, which
  * removes every build of that row unless the open map uses one. REMOVE,
- * PRUNE_APPLY and UNINSTALL delete the folders outright (sh_ms_delete_mod_folder)
- * and drop their aliases; nothing can bring them back. UNINSTALL, in order:
+ * PRUNE_APPLY and UNINSTALL move the folders to the Windows Recycle Bin
+ * (sh_ms_delete_mod_folder; deleted outright, and the result says so, when the
+ * bin cannot take one) and drop their aliases; the product never brings them
+ * back, the player can restore one from the bin by hand. UNINSTALL, in order:
  * the open map's entities of the mod through the native delete (refused, with
  * nothing deleted, while Play runs, a map loads or the editor is busy), the
  * open map's undo and redo history cleared to the current state (after the
- * delete's own commit, on the tick), the folder deleted, the rescan.
- * REMOVED_EMPTY and REMOVED_RESTORE are retired with the recycle bin and
- * answer a refusal. MIGRATE starts the migration on its worker (sh_modui_wait
+ * delete's own commit, on the tick), the folder moved to the Recycle Bin,
+ * the rescan. REMOVED_EMPTY and REMOVED_RESTORE are retired with the
+ * product's own bin and answer a refusal. MIGRATE starts the migration on its worker (sh_modui_wait
  * follows it). Returns the result length, or -1 when refused before the
  * action ran.
  *

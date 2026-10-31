@@ -630,9 +630,9 @@
   .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
   .menu-note > div + div { margin-top: 1px; }
   .menu-note b { font-weight: 600; opacity: .8; }
-  /* Mods tab (mods_tab.js). A plain list: every row of an open group is mounted and #modsList (a
-     .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel, the
-     scrollbar and the keyboard. Group headers reuse the prefab tree's folder head and caret. */
+  /* Mods tab (mods_tab.js). One flat list sorted by name: every row shown is mounted and #modsList
+     (a .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel,
+     the scrollbar and the keyboard. A row the open map uses carries the "In this map" pill. */
   .mods-toolbar.panel-toolbar { flex-direction: row; align-items: center; }
   .mods-toolbar input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
   .mods-toolbar .btn { flex: none; }
@@ -643,9 +643,6 @@
   .mods-attn.on { background: var(--sqWarn); color: var(--panel); }
   .mods-attn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .mods-list:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .mods-group + .mods-group { margin-top: 4px; }
-  .mods-group-head { border-radius: 4px; font-weight: 600; }
-  .mods-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .mods-row { display: flex; align-items: flex-start; gap: 7px; padding: 4px 7px; border-radius: 4px; cursor: default; }
   .mods-row:hover { background: var(--panel2); }
   .mods-row.selected { background: var(--sel); }
@@ -653,6 +650,9 @@
   .mods-row-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-row.selected .mods-row-name { color: var(--selText); }
   .mods-row-sub { margin-top: 1px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mods-pill { flex: none; align-self: center; padding: 0 6px; border-radius: 9px; font-size: 10px; line-height: 15px; white-space: nowrap;
+               color: var(--muted); background: var(--panel2); border: 1px solid var(--border2); }
+  .mods-row.selected .mods-pill { color: var(--selText); border-color: transparent; background: rgba(255,255,255,0.14); }
   .mods-status-icon { flex: 0 0 14px; width: 14px; display: inline-grid; place-items: center; margin-top: 1px; }
   .mods-status-icon .ui-icon { width: 14px; height: 14px; }
   .mods-status-icon.ok { color: var(--ok); }

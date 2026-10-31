@@ -1991,17 +1991,20 @@ typedef struct mu_removal {
     size_t removed, failed, blobs;
     unsigned long long freed;
     char first_fail[SH_MS_KEY_MAX + 300];
-    char deleted[SH_MS_NAME_MAX + 1];   /* the last folder deleted (its name in mods\) */
+    char deleted[SH_MS_NAME_MAX + 1];   /* the last folder removed (its name in mods\) */
+    size_t outright;             /* removed folders the Recycle Bin could not take, so deleted */
+    char outright_why[200];      /* why the bin could not take the first of them */
     char note[160];              /* the rescan's note */
 } mu_removal;
 
 static const char *mu_entry_title(const sh_ms_entry *s);
 
-/* Delete the marked entries' folders outright, under the store lock
- * (sh_ms_delete_mod_folder: a direct child of the store root, links removed
- * and never followed). An entry whose folder cannot be deleted is unmarked
- * and counted as failed. Its aliases go once no folder of its id remains;
- * the build cache follows at the rescan. */
+/* Move the marked entries' folders to the Windows Recycle Bin, under the
+ * store lock (sh_ms_delete_mod_folder: a direct child of the store root;
+ * deleted outright, links removed and never followed, when the bin cannot
+ * take it, counted in `outright`). An entry whose folder cannot be removed is
+ * unmarked and counted as failed. Its aliases go once no folder of its id
+ * remains; the build cache follows at the rescan. */
 static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_removal *out)
 {
     size_t n = m->list.count, i;
@@ -2010,8 +2013,9 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
     for (i = 0; i < n; i++) {
         const sh_ms_entry *e = &m->list.items[i];
         char cause[SH_MS_KEY_MAX + 200];
+        int how;
         if (!removing[i]) continue;
-        if (!sh_ms_delete_mod_folder(e->folder, cause, sizeof cause)) {
+        if ((how = sh_ms_delete_mod_folder(e->folder, cause, sizeof cause)) == 0) {
             out->failed++;
             if (!out->first_fail[0]) strncpy_s(out->first_fail, sizeof out->first_fail, cause, _TRUNCATE);
             removing[i] = 0;
@@ -2021,7 +2025,13 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
         out->removed++;
         out->freed += e->bundle.total_size;
         strncpy_s(out->deleted, sizeof out->deleted, mu_leaf(e->folder), _TRUNCATE);
-        mu_log("remove %s: mods\\%s deleted", e->name, mu_leaf(e->folder));
+        if (how == SH_MS_DELETED) {
+            if (!out->outright++) strncpy_s(out->outright_why, sizeof out->outright_why, cause, _TRUNCATE);
+            mu_log("remove %s: mods\\%s deleted outright; the Recycle Bin could not take it (%s)", e->name, mu_leaf(e->folder),
+                   cause);
+        } else {
+            mu_log("remove %s: mods\\%s moved to the Recycle Bin", e->name, mu_leaf(e->folder));
+        }
     }
     for (i = 0; i < n; i++)
         if (removing[i] && m->list.items[i].loaded)
@@ -2082,7 +2092,11 @@ static int mu_prune(int apply, const char *keys)
         }
         mu_remove_marked(&m, removing, &rm);
         if (!rm.removed && !rm.failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing removed: none of the chosen builds can be removed now.");
-        else if (!rm.failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s).", rm.removed);
+        else if (!rm.failed && !rm.outright)
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s); their folders were moved to the Recycle Bin.", rm.removed);
+        else if (!rm.failed)
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s); %zu folder(s) were deleted because the Recycle Bin "
+                        "could not take them (%s).", rm.removed, rm.outright, rm.outright_why);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s); %zu could not be removed (%s).", rm.removed, rm.failed, rm.first_fail);
         mu_log("remove: %zu build(s) removed, %zu failed", rm.removed, rm.failed);
         mu_result_head(&b, SH_MODS_ACT_PRUNE_APPLY, rm.failed == 0 && rm.removed > 0, msg);
@@ -2138,7 +2152,9 @@ static int mu_remove(const char *key)
         mu_remove_marked(&m, removing, &rm);
         mu_log("remove %s: %zu folder(s) removed, %zu failed", key, rm.removed, rm.failed);
         ok = rm.removed > 0 && rm.failed == 0;
-        if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was deleted.", shown);
+        if (ok && !rm.outright) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was moved to the Recycle Bin.", shown);
+        else if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was deleted because the Recycle Bin could not "
+                                 "take it (%s).", shown, rm.outright_why);
         else if (rm.removed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu of %zu builds of %s; %s.", rm.removed,
                                          rm.removed + rm.failed, shown, rm.first_fail);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be removed: %s. Close any program using its folder and try again.",
@@ -2747,11 +2763,11 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
         mu_key(&b, "install", 0);
         if (!uninstall) mu_puts(&b, "null");
         else {
-            /* Permanent: the folder is deleted, and the open map's undo
+            /* The folder goes to the Recycle Bin, and the open map's undo
              * history is cleared. */
             mu_putn(&b, "{", 1);
             mu_kstr(&b, "folder", mu_leaf(s->folder), 1);
-            mu_kstr(&b, "disposition", "delete", 0);
+            mu_kstr(&b, "disposition", "recycle", 0);
             mu_kint(&b, "savedMaps", saved, 0);
             mu_kbool(&b, "undoCleared", mp.entities >= 0, 0);
             mu_putn(&b, "}", 1);
@@ -2770,7 +2786,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
                 if (m.entries[entry].row_count)
                     mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, m.entries[entry].row_count);
                 for (i = 0; i < (size_t)m.entries[entry].row_count; i++) mu_line(o, "%s:   %s", verb, m.entries[entry].row_names[i]);
-                mu_line(o, "%s: deletes the folder mods\\%s; this cannot be undone", verb, mu_leaf(s->folder));
+                mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
+                        mu_leaf(s->folder));
                 if (saved > 0)
                     mu_line(o, "%s: %d of your saved maps use it; they will not open until a mod folder provides its assets "
                             "again", verb, saved);
@@ -2818,10 +2835,15 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
                 mu_remove_marked(&m, removing, &rm);
                 ok = rm.removed > 0 && rm.failed == 0;
             }
-            mu_log("uninstall %s: %s%s", key, ok ? "the folder was deleted" : "the folder could not be deleted",
-                   removed_from_map ? " after the open map was cleaned of it" : "");
-            if (ok)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was deleted%s", title,
+            mu_log("uninstall %s: %s%s", key, !ok ? "the folder could not be removed" : rm.outright ? "the folder was deleted outright"
+                   : "the folder was moved to the Recycle Bin", removed_from_map ? " after the open map was cleaned of it" : "");
+            if (ok && rm.outright)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was deleted because the Recycle Bin could not "
+                            "take it (%s)%s", title, removed_from_map ? " and removed it from the open map" : "", rm.outright_why,
+                            mp.entities < 0 ? "." : undo > 0 ? ", and the undo history was cleared."
+                                                             : "; the undo history could not be cleared.");
+            else if (ok)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was moved to the Recycle Bin%s", title,
                             removed_from_map ? " and removed it from the open map" : "",
                             mp.entities < 0 ? "." : undo > 0 ? " and the undo history was cleared."
                                                              : "; the undo history could not be cleared.");
@@ -3284,8 +3306,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_map_action(action, arg, NULL);
     case SH_MODS_ACT_REMOVED_EMPTY:
     case SH_MODS_ACT_REMOVED_RESTORE:
-        /* The recycle bin is retired: Uninstall deletes. */
-        return mu_simple_result(action, 0, "Uninstalled mods are deleted; there is no bin to empty or restore from.");
+        /* The product's own bin is retired: Uninstall moves the folder to the Windows Recycle Bin. */
+        return mu_simple_result(action, 0, "Uninstalled mods go to the Windows Recycle Bin.");
     case SH_MODS_ACT_MAP_ADD:
         return mu_map_add(arg, NULL);
     default:

@@ -15,7 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
-| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the grouped installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
+| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the flat installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
 | `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
@@ -306,14 +306,15 @@ read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods
 **List pane.** The panel head carries the mod count and, when any mod needs attention, a yellow
 badge button with that number; pressing it (`aria-pressed`) shows only those rows. One toolbar row
 holds the filter, refresh, Open mods folder, Migrate (only while `migrate.pending > 0`) and install.
-Rows are grouped under collapsible headers (the prefab tree's folder head and caret) by origin:
-Your mods (no origin, or `migration`: those were the owner's overrides), Installed (`install`) and
-From maps you played (`download`, `delivery`). The collapsed groups are the setting
-`mods.collapsed_groups`, a list of group ids (`yours`, `installed`, `maps`) saved through the
-configuration service like `prefabs.open_folders` (`config.c`: `SH_JSON_ARRAY`, `"[]"`, UI read and
-write). Browser preview never saves it. A filter or the attention badge shows matches in every group;
-a header folded while filtering is not saved. Each
-row is a status icon, the name, and `id · version · size`. The three icons cover every backend
+The rows are one flat list sorted by display name (the name, else the id, else the folder) without
+case, then by id, then by folder; there are no groups, headers or carets. The filter matches name,
+id and folder, and it and the attention badge keep that order. The collapsed-groups setting of
+earlier builds, `mods.collapsed_groups`, is neither read nor written by the page: a value already in
+`config.json` stays there unused (`config.c` still knows the key). Each
+row is a status icon, the name, and `id · version · size`, and, when the open map uses the mod, an
+"In this map" pill (hover: "The open map uses this mod") at its right end: the row's `key` is the
+`key` of an entry of the document's `map.mods`, read only while a map is open, so the pill costs no
+read of its own and follows each fresh document. The three icons cover every backend
 state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`; the hover
 title is the cause) and a grey info dot (`installed` with `servedBy` set). The list is a plain list
 scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
@@ -322,7 +323,11 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+) and Sharing. About carries an Applies line when the
+the note that every player needs Snapmap+) and Sharing. About carries, after Folder, one plain line
+about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
+overrides folder" (`migration`, followed by `migratedFrom` in parentheses when the document names
+it), "Imported from an export" (`install`) and "Downloaded for a map you played" (`download`,
+`delivery`). About carries an Applies line when the
 backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
 requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
 nothing for a mod that only adds new names. The head actions are Use in this map, Verify, Rebuild
@@ -340,12 +345,15 @@ consequence list the confirmation shows, with exactly two buttons (Cancel, and D
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
 
-**Uninstall is permanent.** Its confirmation reads "This cannot be undone. Uninstalling:" and lists,
-after the map part and the Toybox rows, "Deletes the folder mods\<folder> and its files.", "N of
-your saved maps use it; they will not open until a mod folder provides its assets again" (when
-`install.savedMaps` is above 0) and "Undo history is cleared." (when `install.undoCleared`). There
-is no recycle bin: the footer has no removed-mods line and the page sends no `removedEmpty`; a
-document's `removed` object, sent by an older backend, is not read.
+**Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
+folder can be restored from the Recycle Bin by hand. Uninstalling:" (when `install.undoCleared`;
+without it, "The folder can be restored from the Recycle Bin by hand. Uninstalling:") and lists,
+after the map part and the Toybox rows, "Moves the folder mods\<folder> to the Windows Recycle Bin."
+and "N of your saved maps use it; they will not open until a mod folder provides its assets again"
+(when `install.savedMaps` is above 0). The result reads "Its folder was moved to the Recycle Bin",
+or, when the bin could not take it, "Its folder was deleted because the Recycle Bin could not take it
+(<why>)". The product keeps no bin of its own: the footer has no removed-mods line and the page sends
+no `removedEmpty`; a document's `removed` object, sent by an older backend, is not read.
 
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
@@ -416,17 +424,17 @@ again.
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
-| `uninstall` | Permanent. `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder deleted, whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
-| `removedEmpty` | Retired with the recycle bin; the page no longer sends it and the backend answers a refusal. |
+| `uninstall` | `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder moved to the Windows Recycle Bin (deleted outright, and the message says so, when the bin cannot take it), whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
+| `removedEmpty` | Retired with the product's own bin; the page no longer sends it and the backend answers "Uninstalled mods go to the Windows Recycle Bin." as a refusal. |
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
 manifestRow, tagRemoved, vanillaAfter, published, attached?}` (`attached` true for a map-level row); `install` is null for `mapRemoveMod`, else
-`{folder, disposition, "savedMaps", "undoCleared"}`: `disposition` is `delete`; `savedMaps` counts the
+`{folder, disposition, "savedMaps", "undoCleared"}`: `disposition` is `recycle`; `savedMaps` counts the
 local saves in My Maps whose `map.decl` carries a row of the mod (-1 when the saves could not be read);
 `undoCleared` is true when a map is open, whose undo history the uninstall clears. An older backend
-sent `move` with `movedTo`; the page reads either as `delete`. A refused dry run is `ok: false` with the
+sent `move` with `movedTo`, and then `delete`; the page reads any of them as `recycle`. A refused dry run is `ok: false` with the
 reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
 a map is loading, the mod is placed as Blueprint modules (removed in Blueprint mode), or only another
 mod the map uses needs it. The real actions refuse the same way, and also when the editor refuses
@@ -439,7 +447,7 @@ entities), the mod's row dropped from the map's manifest record (the
 next save rebuilds the rows from the placed entities, so it writes none for the mod), and with the
 last mod the search tag removed from the editor's copy of the map's tags. `uninstall` runs that on
 the open map first, then clears the undo history (`editor_undo.c`, see
-[architecture](architecture.md#the-mods-tabs-map-scope)), deletes the folder (as `remove`) and rescans; the rescan's refresh rebuilds
+[architecture](architecture.md#the-mods-tabs-map-scope)), moves the folder to the Recycle Bin (as `remove`) and rescans; the rescan's refresh rebuilds
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
