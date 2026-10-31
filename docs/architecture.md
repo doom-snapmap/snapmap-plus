@@ -1431,6 +1431,21 @@ The fault shield handles selected, understood engine faults. It does not make
 arbitrary native calls safe. Expected recoveries, nonterminal notices and fatal
 records have different meanings; a captured record alone does not prove survival.
 
+The Class-B redirect turns a fault into the engine's `Error(6)`. Only
+`idCommonLocal::Frame`'s idException catch receives it, and that catch is a full
+teardown run inside the catch funclet, outside Frame's try: it syncs the renderer
+and calls CancelMapChange, which unloads the game and loads `game/shell_map`.
+`redirect_policy.h` therefore declines the redirect, and leaves the fault to the
+fatal handlers and their crash report, when the fault is off the engine main
+thread; when the loading-screen thread is running (the `load_screen` global,
+thread byte +0x4b2), because only `idLoadScreen::LevelLoadCompleted` stops that
+thread and the throw skips it, so the thread keeps rendering the menu while the
+main thread recovers; when an earlier redirect is still being recovered in the
+same Frame call, where a second throw reaches the game-loop catch that ends the
+process; and when the faulting stack does not unwind to Frame. An input the
+shield cannot read keeps the earlier behaviour. The decision is logged as a
+`declined` shield line with its stack.
+
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves
 the engine's list reduction and removed-entity reset. Startup requires a unique

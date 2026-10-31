@@ -49,6 +49,15 @@
    "vk_rva": "0x583bd70",
    "gl_rva": "0x41413f0"
   },
+  "load_screen": {
+   "anchor": "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8B CF E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ??",
+   "disp_slot": 3,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x360e3d0",
+   "gl_rva": "0x3656080",
+   "note": "idLoadScreen; its first field is the loading-screen thread, whose byte +0x4b2 is 1 while it runs"
+  },
   "load_state": {
    "anchor": "89 0D ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC 48 83 EC 28",
    "disp_slot": 2,

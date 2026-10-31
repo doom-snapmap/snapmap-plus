@@ -51,6 +51,22 @@ static void write_suppressor_b(void)
 #define RECOVER_BUDGET_FRAMES 600   /* ~10s @ 60fps backstop */
 
 static volatile LONG g_armed = 0;
+/* Odd while a hooked Frame call runs: incremented on entry and on return. */
+static volatile LONG g_frame_seq = 0;
+static volatile LONG g_redirect_seq = -1;
+
+void recovery_note_redirect(void)
+{
+    LONG seq = InterlockedCompareExchange(&g_frame_seq, 0, 0);
+    InterlockedExchange(&g_redirect_seq, (seq & 1) ? seq : -1);
+}
+
+int recovery_redirected_this_frame(void)
+{
+    LONG seq = InterlockedCompareExchange(&g_frame_seq, 0, 0);
+    if (seq == 0) return -1;
+    return ((seq & 1) && seq == InterlockedCompareExchange(&g_redirect_seq, 0, 0)) ? 1 : 0;
+}
 static int g_state  = 0;            /* 1 = recover, 2 = wait-exit */
 static int g_frames = 0;
 
@@ -333,7 +349,9 @@ static int64_t frame_detour(void *self)
     save_guard_tick();           /* B: resident save-deletion guard (dismiss the corrupt-save dialogs) */
     recovery_tick();             /* advance a pending editor-exit recovery */
     notice_tick();               /* show a pending editor-native notice */
+    InterlockedIncrement(&g_frame_seq);
     result = orig_frame(self);
+    InterlockedIncrement(&g_frame_seq);
     if (!InterlockedCompareExchange(&g_armed, 0, 0)) sh_apply_prefab_poll_play();
     return result;
 }
