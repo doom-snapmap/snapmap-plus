@@ -1421,5 +1421,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
       "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"
       , 0x11C4160u, 0x11C3530u },
+    /* smp: commands (modaction.c; snaphak-re mod-system-reinstatement lanes
+     * P22 and P26). Unique on both build 13954591 executables. */
+    { "StringSetDoAction", /* idSnapMapAction_StringVar_Set::DoAction(this, activator), reached only through its vtable slot (VK 0x24BDA20 / GL 0x24D7770); the value parameter at +0xCA8, the logic manager read at gameMgr+0x298128 -> +0x48. Steal 20. */
+      "48 8B C4 57 41 56 41 57 48 83 EC 60 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 58 48 8B E9 4C 8B 05 ?? ?? ?? ?? 49 8B 80 28 81 29 00 4C 8B 78 48 4D 85 FF 0F 84 ?? ?? ?? ?? 33 "
+      "F6 8B 81 F8 03 00 00"
+      , 0x9E26C0u, 0x9E19B0u },
     { NULL, NULL, 0 }   /* terminator */
 };

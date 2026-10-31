@@ -46,6 +46,7 @@ $tests = @(
     @{ name = "fly_to_test"; src = 'fly_to_test.c'; arg = "" }
     @{ name = "module_prefab_test"; src = 'module_prefab_test.c ..\src\backend\module_prefab_map.c ..\src\backend\mp_json.c'; arg = "" }
     @{ name = "timeline_tile_test"; src = 'timeline_tile_test.c ..\src\backend\timeline_tile.c'; defs = '/DSH_TIMELINE_TILE_PURE'; arg = "" }
+    @{ name = "modaction_test"; src = 'modaction_test.c ..\src\backend\modaction.c'; defs = '/DSH_MODACTION_PURE'; arg = "" }
     @{ name = "budget_table_test"; src = 'budget_table_test.c ..\src\backend\budget_table.c'; defs = '/DSH_BUDGET_TABLE_PURE'; arg = "" }
     @{ name = "settings_tab_test"; src = 'settings_tab_test.c ..\src\backend\settings_tab.c'; defs = '/DSH_SETTINGS_TAB_PURE'; arg = "" }
     @{ name = "map_render_native_test"; src = 'map_render_native_test.c ..\src\backend\map_render.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
@@ -220,7 +221,7 @@ if ($Only.Count) { exit 0 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "prefab_budget_test.js", "mods_tab_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js")
 foreach ($jsTest in $jsTests) {
     & $node.Source (Join-Path $here $jsTest)
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }

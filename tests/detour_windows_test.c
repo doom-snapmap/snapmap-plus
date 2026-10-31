@@ -98,6 +98,7 @@ static const site SITES[] = {
     { "modpublish.c",         "PublishStart",               SITE_SIG, 0, 15, REPLAYS, 0 },
     { "modpublish.c",         "WriteLocalSavedMapText",     SITE_SIG, 0, 20, REPLAYS, 0 },
     { "modpublish.c",         "MapInfoCopyToMyMaps",        SITE_SIG, 0, 19, REPLAYS, 0 },
+    { "modaction.c",          "StringSetDoAction",          SITE_SIG, 0, 20, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -314,7 +315,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
     { "backend\\timeline_tile.c", 1 }, { "backend\\modserve_engine.c", 1 },
-    { "backend\\modpublished.c", 5 }, { "backend\\modpublish.c", 1 },
+    { "backend\\modpublished.c", 5 }, { "backend\\modpublish.c", 1 }, { "backend\\modaction.c", 1 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };

@@ -52,6 +52,7 @@
 #include "commands.h"
 #include "cvars.h"
 #include "entity.h"
+#include "modaction.h"
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "vt_harness.h"
@@ -489,6 +490,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Bind reflection functions and the signed decl-manager accessor call site. */
         sh_typeinfo_install(results, db, g_doom_base);
+
+        /* smp: commands carried by String Variable Set nodes (needs the game
+         * manager from sh_entity_install and the decl manager above). */
+        (void)sh_modaction_install(results, db, g_doom_base);
 
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */

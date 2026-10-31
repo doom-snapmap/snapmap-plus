@@ -1278,6 +1278,57 @@ left by a closed game (their claims are released and their queued uploads
 dropped, since their publish never completed), then retries the rest of the
 queue once on the worker and logs the counts.
 
+## Map behaviour carried by String Set nodes
+
+`modaction.c` lets a map carry a behaviour in stock data, so a new engine event
+needs no product release: a Set (String) node whose literal value starts with
+`smp:` is a command. The detour sits on the action's `DoAction(this, activator)`
+(signature `StringSetDoAction`, Vulkan 0x9E26C0 / OpenGL 0x9E19B0, reached
+only through its vtable slot), the one hop where the activator is known; the
+variable-changed notification that follows carries only the variable index.
+The 20-byte prologue is checked before the detour is placed; the engine calls
+the hook uses (`ProcessEventArgs`, the argument clear and entity conversion,
+the two player casts) are raw RVA pairs that apply only on the recognised build
+13954591 executables.
+
+The hook reads the node's value parameter at `this+0xCA8`: a literal when its
+index equals the engine's "no variable" constant (-1), held in an `idStr` at
+`+0xCB0` (length `+0x08`, data `+0x10`). It acts only when all of these hold:
+the master switch (`sh_smp on|off`) is on, the game manager reports the host
+(`IsServer`, gameMgr `+0x2BB3A4`), the SnapMap logic manager exists (the same
+check every stock action makes), and the optional map gate
+(`sh_modaction_set_map_gate`, unset by default because the `smp:` prefix is the
+map's own opt-in) admits the open map. Logic only runs on the host, so a client
+never reaches the hook. The activator becomes a player by an `idPlayer` cast,
+else through the owner slot (vtable `+0x558`) the stock Give Item action uses.
+The command runs on the game thread inside `DoAction`, then the stock write
+proceeds unchanged; a fault inside the command is caught and logged and never
+stops the write.
+
+`smp:event` looks the event up through the decl manager's event interface
+(`+0x90`, FindByName `+0x10`), types the arguments from the record's compact
+format (`+0x08`), and dispatches at once with `ProcessEventArgs(obj, ret, def, n,
+arg...)`, up to eight 0x18-byte `idEventArg`s. A bool travels as `'i'` because
+the engine's argument copy drops a `'b'` value; an entity argument is resolved
+by name and converted to its handle with the engine's own constructor; a string
+points into the parsed command for the duration of the call. `smp:doomhands`
+writes the player's Doom-hands byte (`+0x45EB5`, otherwise written only by
+`idPlayer::Spawn` from the local-player check, the SnapMap game type, the map's
+`useSPModels` and a player count below two) and marks the hands and body stale
+(`+0xB512`, `+0xB513`) so the next think reselects them. The parser and the
+argument typing are pure C (`SH_MODACTION_PURE`, `tests/modaction_test.c`).
+
+`sh_event list` reads the same registry (Count `+0x28`, GetEventCommand
+`+0x08`); on this build it holds the 1611 events of the Timeline tab's
+generated catalogue with the same argument types, so the tab's picker already
+offers every registry event. Timelines resolve their target entities when the
+map spawns (`idComponentTimeLine` reports "references bad entity" for a name
+that does not exist yet, such as `player1`), while entity arguments resolve
+when the event runs. The engine's own writer annotates the call's members as
+`"\neventHandle_t eventDef"` and `"\nnum"` (a leading newline), and the Play
+build warns about them
+("Expected 'eventHandle_t eventDef' ...") but still reads the call.
+
 ## Failure reporting
 
 The fault shield handles selected, understood engine faults. It does not make
