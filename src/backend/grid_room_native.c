@@ -360,6 +360,21 @@ static void *create(void *palette,const sh_grid_size *size)
     return load_private(palette,size,NULL,stock_wrapper,palette_name,variant,1);
 }
 void sh_grid_native_set_module_source(sh_grid_module_served_fn served){g_module_served=served;}
+int sh_grid_native_module_known(const char *name)
+{
+    sh_grid_size size;unsigned i;void *palette,*record;int n=0;
+    if(!name||!*name)return 0;
+    if(!g_editor)return -1;
+    if(sh_grid_parse_name(name,&size))return 1;
+    if(g_module_served&&g_module_served(name,1)==1)return 1;
+    for(i=0;i<g_count;++i)if(!g_entries[i].size.kind&&g_entries[i].state==2&&!_stricmp(g_entries[i].module,name))return 1;
+    palette=g_editor+0x206c0;
+    __try {n=*(int*)((unsigned char*)palette+0x18);if(!*(void**)((unsigned char*)palette+0x10))n=0;}
+    __except(EXCEPTION_EXECUTE_HANDLER){return -1;}
+    if(n<=0||n>100000)return -1;
+    record=palette_find(palette,name);
+    return record&&record!=end_record(palette)?1:0;
+}
 int sh_grid_module_logical(const char *name,char *out,size_t cap)
 {
     size_t n=name?strlen(name):0;

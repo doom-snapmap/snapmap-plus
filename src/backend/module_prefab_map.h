@@ -78,6 +78,49 @@ int sh_mp_inspect(const char *frag, size_t flen, sh_mp_summary *sum, char *err, 
  * is anything else, including "idSnapEntityPrefab". Scans only the top level. */
 int sh_mp_is_module_file(const char *text, size_t len);
 
+/* The module guard. A prefab is placed only when every module it names is one
+ * the receiving editor can build: a record in its module palette (stock rooms
+ * and owned DLC), a Grid Room size the grid-room adapter makes, or a module an
+ * installed mod serves. The engine has no safe answer for any other name: the
+ * map validator drops the instance and keeps its entities, and the module
+ * record builder raises "Couldn't find module in modulePalette". */
+
+/* known(ctx, name): 1 the receiver can build the module, 0 it cannot, -1 it
+ * cannot tell (no editor palette yet). */
+typedef int (*sh_mp_module_known_fn)(void *ctx, const char *name);
+
+#define SH_MP_CHECK_NAMES 8
+typedef struct sh_mp_module_check {
+    int checked;            /* distinct names the callback answered (0 or 1) */
+    int unknown;            /* distinct names it could not tell (-1) */
+    int missing_count;      /* distinct names it cannot build, all of them */
+    int listed;             /* names kept in missing[], at most SH_MP_CHECK_NAMES */
+    char missing[SH_MP_CHECK_NAMES][SH_MP_NAME_CAP];
+} sh_mp_module_check;
+
+/* Ask known() once for each distinct moduleName in s (ASCII case-insensitive).
+ * An empty name is missing. Returns missing_count, or -1 when no name could be
+ * answered (nothing is known about the palette: the caller must not refuse). */
+int sh_mp_check_modules(const sh_mp_summary *s, sh_mp_module_known_fn known, void *ctx,
+                        sh_mp_module_check *out);
+
+/* "maps/modules/ind_dlc/ind_room.decl" -> "ind_dlc/ind_room": the name a toast shows. */
+void sh_mp_module_short_name(const char *name, char *out, size_t cap);
+
+/* The refusal texts for a check with missing_count > 0. Each returns the length
+ * written (truncated to cap). The console line names every listed module in full:
+ *   needs module <name>; this room is not in your palette (DLC or a mod you do not have)
+ * The toast names them shortly and says nothing was placed. The status is the
+ * Prefabs tab line shown before Load. */
+int sh_mp_missing_console_line(const sh_mp_module_check *c, char *out, size_t cap);
+int sh_mp_missing_toast(const sh_mp_module_check *c, char *out, size_t cap);
+int sh_mp_missing_status(const sh_mp_module_check *c, char *out, size_t cap);
+
+/* The Prefabs tab's check result: {"checked":true,"missing":["<name>",...],"more":N},
+ * or {"checked":false} when check is NULL or nothing could be answered. Returns
+ * malloc-owned text or NULL. */
+char *sh_mp_check_json(const sh_mp_module_check *c);
+
 /* The sidecar body: {"desc":"","tags":[],"kind":"modules",...}. bounds, when
  * not NULL, holds one world-axis box per module (min xyz, max xyz) relative to
  * the anchor; labels (may be NULL) the display names. desc/tags are written

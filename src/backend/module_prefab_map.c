@@ -744,6 +744,117 @@ int sh_mp_inspect(const char *text, size_t flen, sh_mp_summary *sum, char *err, 
     return 1;
 }
 
+static int mp_name_eq(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+        if (!x) return 1;
+    }
+}
+
+int sh_mp_check_modules(const sh_mp_summary *s, sh_mp_module_known_fn known, void *ctx,
+                        sh_mp_module_check *out)
+{
+    int i, j;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!s || !known || (s->module_count > 0 && !s->modules)) return -1;
+    for (i = 0; i < s->module_count; i++) {
+        const char *name = s->modules[i].name;
+        int seen = 0, k;
+        for (j = 0; j < i && !seen; j++) seen = mp_name_eq(s->modules[j].name, name);
+        if (seen) continue;
+        k = name[0] ? known(ctx, name) : 0;
+        if (k < 0) { out->unknown++; continue; }
+        out->checked++;
+        if (k > 0) continue;
+        if (out->listed < SH_MP_CHECK_NAMES) mp_copy(out->missing[out->listed++], name);
+        out->missing_count++;
+    }
+    return out->checked ? out->missing_count : -1;
+}
+
+void sh_mp_module_short_name(const char *name, char *out, size_t cap)
+{
+    size_t n;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!name) return;
+    if (!name[0]) { snprintf(out, cap, "(no module name)"); return; }
+    if (!_strnicmp(name, "maps/modules/", 13)) name += 13;
+    n = strlen(name);
+    if (n > 5 && !_stricmp(name + n - 5, ".decl")) n -= 5;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, name, n);
+    out[n] = 0;
+}
+
+/* names[0..listed) joined by ", ", short or in full, then ", ..." when more were missing. */
+static void mp_join_missing(const sh_mp_module_check *c, int shorten, char *out, size_t cap)
+{
+    size_t used = 0;
+    int i;
+    out[0] = 0;
+    for (i = 0; i < c->listed && used + 1 < cap; i++) {
+        char shortname[SH_MP_NAME_CAP];
+        const char *name = c->missing[i];
+        if (shorten || !name[0]) { sh_mp_module_short_name(name, shortname, sizeof shortname); name = shortname; }
+        used += (size_t)snprintf(out + used, cap - used, "%s%s", i ? ", " : "", name);
+        if (used >= cap) used = cap - 1;
+    }
+    if (c->missing_count > c->listed && used + 1 < cap) snprintf(out + used, cap - used, ", ...");
+}
+
+int sh_mp_missing_console_line(const sh_mp_module_check *c, char *out, size_t cap)
+{
+    char names[1024];
+    int n;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!c || c->missing_count <= 0) return 0;
+    mp_join_missing(c, 0, names, sizeof names);
+    if (c->missing_count == 1)
+        n = snprintf(out, cap, "Module prefab: needs module %s; this room is not in your palette "
+                               "(DLC or a mod you do not have)", names);
+    else
+        n = snprintf(out, cap, "Module prefab: needs modules %s; these rooms are not in your palette "
+                               "(DLC or a mod you do not have)", names);
+    return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
+}
+
+int sh_mp_missing_toast(const sh_mp_module_check *c, char *out, size_t cap)
+{
+    char names[512];
+    int n;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!c || c->missing_count <= 0) return 0;
+    mp_join_missing(c, 1, names, sizeof names);
+    if (c->missing_count == 1)
+        n = snprintf(out, cap, "Not placed: this prefab needs module %s, which is not in your palette "
+                               "(DLC or a mod you do not have)", names);
+    else
+        n = snprintf(out, cap, "Not placed: this prefab needs %d modules that are not in your palette "
+                               "(DLC or a mod you do not have): %s", c->missing_count, names);
+    return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
+}
+
+int sh_mp_missing_status(const sh_mp_module_check *c, char *out, size_t cap)
+{
+    char names[512];
+    int n;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!c || c->missing_count <= 0) return 0;
+    mp_join_missing(c, 1, names, sizeof names);
+    n = snprintf(out, cap, "Cannot be placed here: needs %s %s (not in your palette: DLC or a mod you do not have)",
+                 c->missing_count == 1 ? "module" : "modules", names);
+    return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
+}
+
 int sh_mp_is_module_file(const char *text, size_t len)
 {
     /* Walk the top-level object only, skipping nested values, for "~type". */
@@ -866,6 +977,25 @@ char *sh_mp_sidecar_json(const sh_mp_summary *s, const float (*bounds)[6], const
         buf_put(&b, "}}");
     }
     buf_put(&b, "]}");
+    if (b.bad) { free(b.p); return NULL; }
+    return b.p;
+}
+
+char *sh_mp_check_json(const sh_mp_module_check *c)
+{
+    mp_buf b = {0};
+    int i;
+    if (!c || !c->checked) {
+        buf_put(&b, "{\"checked\":false}");
+    } else {
+        char status[768];
+        sh_mp_missing_status(c, status, sizeof status);
+        buf_put(&b, "{\"checked\":true,\"count\":%d,\"missing\":[", c->missing_count);
+        for (i = 0; i < c->listed; i++) { if (i) buf_put(&b, ","); buf_str(&b, c->missing[i]); }
+        buf_put(&b, "],\"status\":");
+        buf_str(&b, status);
+        buf_put(&b, "}");
+    }
     if (b.bad) { free(b.p); return NULL; }
     return b.p;
 }

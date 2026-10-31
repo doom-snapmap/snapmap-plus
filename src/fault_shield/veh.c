@@ -1,7 +1,7 @@
 /* Classify engine faults and attempt bounded recovery. Visibility-leaf faults
  * return false for the bad node. Repaired CSR/render-node faults can unwind to
  * editor Think (Class A); remaining eligible faults redirect to Error(6) and request
- * editor exit (Class B). Known off-main threads are never given that redirect.
+ * editor exit (Class B). redirect_policy.h decides when that redirect is declined.
  * Engine C++ throws continue to their handlers after recovery-gate adjustments.
  * Fault logging is independent of recovery and may also record non-engine faults. */
 #include <windows.h>
@@ -15,6 +15,7 @@
 #include "crash_report.h"
 #include "recovery.h"
 #include "shield_sigs.h"
+#include "redirect_policy.h"
 #include "veh.h"
 #pragma comment(lib, "user32.lib")   /* ClipCursor/ShowCursor -- free the captured mouse on a Class-B fault */
 
@@ -52,6 +53,8 @@ static uintptr_t g_suppr_a_at    = 0;   /* throw-gate suppressor A */
 static uintptr_t g_main_tid_at   = 0;   /* the engine's own main-thread id */
 static uintptr_t g_editor_at     = 0;   /* the inline idSnapEditorLocal object (RN-FAULT diagnostic only) */
 static uintptr_t g_ti_fatal_rva  = 0;   /* idFatalException ThrowInfo, as an RVA */
+static uintptr_t g_load_screen_at = 0;  /* idLoadScreen; its first field is the loading-screen thread */
+static uintptr_t g_frame_rva     = 0;   /* idCommonLocal::Frame's function start, as an RVA */
 static int       g_ti_fatal_ok   = 0;   /* ...and whether it resolved (0 is a legal RVA, so flag it) */
 
 /* The visibility redirect requires the resolved leaf and its measured false tail. */
@@ -82,6 +85,8 @@ static void veh_resolve_globals(void)
     g_suppr_a_at    = glb_resolve(base, "throw_suppressor_a", NULL);
     g_main_tid_at   = glb_resolve(base, "main_thread_id", NULL);
     g_editor_at     = glb_resolve(base, "editor_singleton", NULL);
+    g_load_screen_at = glb_resolve(base, "load_screen", NULL);
+    if (g_eng.frame && g_eng.frame > (uintptr_t)base) g_frame_rva = g_eng.frame - (uintptr_t)base;
 
     v = glb_resolve(base, "throwinfo_fatal", NULL);
     if (v) { g_ti_fatal_rva = v - (uintptr_t)base; g_ti_fatal_ok = 1; }
@@ -444,6 +449,71 @@ static int shield_on_main_thread(void)
     return (mt == GetCurrentThreadId()) ? 1 : 0;
 }
 
+/* The loading-screen thread's running byte (idLoadScreenThread +0x4b2, set by its
+ * Run loop, cleared when idLoadScreen::LevelLoadCompleted stops it): 1 running,
+ * 0 stopped or never created, -1 unresolved or unreadable. */
+#define LOAD_SCREEN_RUNNING_OFF 0x4b2
+static int shield_load_screen_running(void)
+{
+    uint8_t *thread;
+    if (!g_load_screen_at) return -1;
+    __try {
+        thread = *(uint8_t *volatile *)g_load_screen_at;
+        if (!thread) return 0;
+        return *(volatile uint8_t *)(thread + LOAD_SCREEN_RUNNING_OFF) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+/* The function start of the frame at rip, following chained unwind entries to
+ * the primary one, so a return address in a separated cold block still names
+ * its function. 0 when rip has no unwind entry. */
+static uintptr_t primary_function_rva(DWORD64 rip, DWORD64 *image_base)
+{
+    PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(rip, image_base, NULL);
+    int hops;
+    for (hops = 0; fn && hops < 8; hops++) {
+        const uint8_t *ui = (const uint8_t *)(*image_base + (fn->UnwindData & ~1u));
+        uint8_t count = ui[2];
+        if (!((ui[0] >> 3) & UNW_FLAG_CHAININFO)) return fn->BeginAddress;
+        fn = (PRUNTIME_FUNCTION)(ui + 4 + ((count + 1) & ~1) * 2);
+    }
+    return 0;
+}
+
+/* Does the faulting stack unwind to idCommonLocal::Frame? The C++ dispatch of
+ * Error(6)'s throw walks the same unwind data, so a stack this walk cannot
+ * take to Frame is one the throw cannot either. 1 found, 0 the walk ended
+ * without it, -1 Frame unresolved, the walk faulted or ran out of frames. */
+#define FRAME_WALK_MAX 96
+static int shield_frame_on_stack(const CONTEXT *fault)
+{
+    CONTEXT c;
+    int i;
+    if (!g_frame_rva || !g_doom_base) return -1;
+    __try {
+        c = *fault;
+        for (i = 0; i < FRAME_WALK_MAX; i++) {
+            DWORD64 image = 0;
+            uintptr_t begin = primary_function_rva((DWORD64)c.Rip, &image);
+            PRUNTIME_FUNCTION fn;
+            if (begin && image == (DWORD64)(uintptr_t)g_doom_base && begin == g_frame_rva) return 1;
+            fn = RtlLookupFunctionEntry((DWORD64)c.Rip, &image, NULL);
+            if (fn == NULL) {
+                uintptr_t sp = (uintptr_t)c.Rsp;
+                if (sp == 0 || is_wild((void *)sp)) return 0;
+                c.Rip = *(uintptr_t *)sp;
+                c.Rsp = sp + 8;
+            } else {
+                PVOID data = NULL;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, (DWORD64)c.Rip, fn, &c, &data, &establisher, NULL);
+            }
+            if (c.Rip == 0) return 0;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return -1;
+}
+
 /* Count of off-main-thread faults the shield has declined to force through Error(6) (log rate-limit). */
 #define SHIELD_MAX_OFFTHREAD 8
 static volatile LONG g_offthread_seen = 0;
@@ -661,6 +731,33 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    /* Decline the redirect where Frame's catch cannot recover it (redirect_policy.h).
+     * The fault then continues to the fatal handlers, which write the crash report
+     * and minidump; nothing here changes the fault or the engine state. */
+    {
+        shield_redirect_verdict v = shield_redirect_policy(1, shield_load_screen_running(),
+                                                           recovery_redirected_this_frame(),
+                                                           shield_frame_on_stack(ep->ContextRecord));
+        if (v != SHIELD_REDIRECT_OK) {
+            static volatile LONG s_declined = 0;
+            if (InterlockedIncrement(&s_declined) <= SHIELD_MAX_OFFTHREAD) {
+                __try {
+                    _snprintf_s(g_offthread, sizeof g_offthread, _TRUNCATE,
+                        "shield: fault 0x%lx at rip+0x%llx NOT redirected to Error(6): %s -> left to the crash report",
+                        (unsigned long)code, (unsigned long long)rva, shield_redirect_decline_reason(v));
+                    shield_fault df = { "declined", (int)code, g_offthread, rva, (uintptr_t)fault_addr };
+                    shield_emit(&df);
+                    capture_fault_stack(ep->ContextRecord, g_crashstk, sizeof g_crashstk, 14);
+                    if (g_crashstk[0]) {
+                        shield_fault sk = { "stack", (int)code, g_crashstk, rva, (uintptr_t)fault_addr };
+                        shield_emit(&sk);
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+    }
+
     /* ---- Class B (Layer 1): a wild AV the editor-unwind did NOT claim, OR a non-AV hardware fault in DOOM
      * (illegal/priv instruction, int/float divide, in-page, ...). Redirect into the engine's own recoverable
      * Error(6) + the proven editor-exit -> My-Maps browser. Runaway-guarded; CAN surface DOOM's recoverable-
@@ -706,6 +803,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 
     /* Request normal editor teardown so an incomplete render world is not reused. */
     recovery_arm();
+    /* A later fault in this same Frame call is inside the catch's recovery. */
+    recovery_note_redirect();
 
     /* Error(6) will populate engine error text after this redirect. Request a toast
      * using that text if recovery later has an editor screen to show it on. */

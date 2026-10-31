@@ -15,6 +15,13 @@ int sh_grid_native_install(const sig_result *results,size_t count,const uint8_t 
  * is (log line "MODS: module <name> loaded into a private palette"). */
 typedef int (*sh_grid_module_served_fn)(const char *request,int module);
 void sh_grid_native_set_module_source(sh_grid_module_served_fn served);
+/* Can the open editor build the module `name` names? 1 when it is a record of
+ * the editor module palette (found by exact name over every record, as
+ * palette_find does), a Grid Room size this adapter makes, a module a mod
+ * serves, or one already loaded into a private palette; 0 when none applies;
+ * -1 when there is no editor palette to ask. Engine thread (the Blueprint Add
+ * tool re-sorts the palette records in place). */
+int sh_grid_native_module_known(const char *name);
 /* "maps/modules/<path>.decl" -> "<path>" (the snapModuleInfo name). 1 ok. */
 int sh_grid_module_logical(const char *name,char *out,size_t cap);
 int sh_grid_native_read(void *edit_data,int instance,sh_grid_size *size);

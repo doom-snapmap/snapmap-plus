@@ -369,12 +369,146 @@ static void test_refusals(void)
     free(src); free(tgt);
 }
 
+/* The module guard: a stubbed palette that knows a.decl and b.decl (in any
+ * case), cannot tell for "maps/modules/unknown_tell.decl", and knows nothing else. */
+#define STARTS(s, lit) (strncmp((s), (lit), sizeof(lit) - 1) == 0)
+static int g_known_calls;
+static int stub_known(void *ctx, const char *name)
+{
+    (void)ctx;
+    g_known_calls++;
+    if (!_stricmp(name, "maps/modules/a.decl") || !_stricmp(name, "maps/modules/b.decl")) return 1;
+    if (!strcmp(name, "maps/modules/unknown_tell.decl")) return -1;
+    return 0;
+}
+static int stub_never(void *ctx, const char *name) { (void)ctx; (void)name; return -1; }
+
+static void summary_of(sh_mp_summary *s, sh_mp_module *mods, const char *const *names, int n)
+{
+    int i;
+    memset(s, 0, sizeof *s);
+    memset(mods, 0, sizeof *mods * (size_t)n);
+    for (i = 0; i < n; i++) strcpy_s(mods[i].name, sizeof mods[i].name, names[i]);
+    s->modules = mods;
+    s->module_count = n;
+}
+
+static void test_module_guard(void)
+{
+    sh_mp_summary s;
+    sh_mp_module mods[12];
+    sh_mp_module_check c;
+    char line[1200], toast[600], status[600], *json;
+    static const char *const all_known[] = { "maps/modules/a.decl", "MAPS/MODULES/B.DECL", "maps/modules/a.decl" };
+    static const char *const one_missing[] = {
+        "maps/modules/a.decl", "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl",
+        "maps/modules/ind_dlc/IND_TOTALLY_BLANK_ROOM_4X.decl" };
+    static const char *const many[] = {
+        "maps/modules/m1.decl", "maps/modules/m2.decl", "maps/modules/m3.decl", "maps/modules/m4.decl",
+        "maps/modules/m5.decl", "maps/modules/m6.decl", "maps/modules/m7.decl", "maps/modules/m8.decl",
+        "maps/modules/m9.decl", "maps/modules/m10.decl", "", "maps/modules/a.decl" };
+    static const char *const cannot_tell[] = { "maps/modules/unknown_tell.decl" };
+
+    /* every module known: nothing missing, each distinct name asked once */
+    summary_of(&s, mods, all_known, 3);
+    g_known_calls = 0;
+    CHECK(sh_mp_check_modules(&s, stub_known, NULL, &c) == 0);
+    CHECK(g_known_calls == 2 && c.checked == 2 && c.missing_count == 0 && c.listed == 0);
+    CHECK(sh_mp_missing_console_line(&c, line, sizeof line) == 0 && line[0] == 0);
+    CHECK(sh_mp_missing_toast(&c, toast, sizeof toast) == 0 && toast[0] == 0);
+    json = sh_mp_check_json(&c);
+    CHECK(json && !strcmp(json, "{\"checked\":true,\"count\":0,\"missing\":[],\"status\":\"\"}"));
+    free(json);
+
+    /* the issue-132 sidecar's module, named twice in different case: one refusal line */
+    summary_of(&s, mods, one_missing, 3);
+    CHECK(sh_mp_check_modules(&s, stub_known, NULL, &c) == 1);
+    CHECK(c.listed == 1 && !strcmp(c.missing[0], "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl"));
+    sh_mp_missing_console_line(&c, line, sizeof line);
+    CHECK(!strcmp(line, "Module prefab: needs module maps/modules/ind_dlc/ind_totally_blank_room_4x.decl; "
+                        "this room is not in your palette (DLC or a mod you do not have)"));
+    sh_mp_missing_toast(&c, toast, sizeof toast);
+    CHECK(!strcmp(toast, "Not placed: this prefab needs module ind_dlc/ind_totally_blank_room_4x, "
+                         "which is not in your palette (DLC or a mod you do not have)"));
+    sh_mp_missing_status(&c, status, sizeof status);
+    CHECK(!strcmp(status, "Cannot be placed here: needs module ind_dlc/ind_totally_blank_room_4x "
+                          "(not in your palette: DLC or a mod you do not have)"));
+    json = sh_mp_check_json(&c);
+    CHECK(json && strstr(json, "\"count\":1") &&
+          strstr(json, "\"missing\":[\"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl\"]") &&
+          strstr(json, "\"status\":\"Cannot be placed here: needs module ind_dlc/ind_totally_blank_room_4x"));
+    {
+        mpj *v = json ? mpj_parse(json, strlen(json)) : NULL;
+        CHECK(v != NULL);
+        mpj_free(v);
+    }
+    free(json);
+
+    /* eleven missing (one has no name): all counted, eight listed, the texts end in ", ..." */
+    summary_of(&s, mods, many, 12);
+    CHECK(sh_mp_check_modules(&s, stub_known, NULL, &c) == 11);
+    CHECK(c.listed == SH_MP_CHECK_NAMES && c.checked == 12);
+    sh_mp_missing_console_line(&c, line, sizeof line);
+    CHECK(STARTS(line, "Module prefab: needs modules maps/modules/m1.decl, maps/modules/m2.decl"));
+    CHECK(strstr(line, "maps/modules/m8.decl, ...; these rooms are not in your palette (DLC or a mod you do not have)") != NULL);
+    sh_mp_missing_toast(&c, toast, sizeof toast);
+    CHECK(STARTS(toast, "Not placed: this prefab needs 11 modules that are not in your palette "
+                        "(DLC or a mod you do not have): m1, m2, m3"));
+    CHECK(strstr(toast, "m8, ...") != NULL);
+
+    /* the empty name is listed as such */
+    {
+        static const char *const empty[] = { "" };
+        summary_of(&s, mods, empty, 1);
+        CHECK(sh_mp_check_modules(&s, stub_known, NULL, &c) == 1);
+        sh_mp_missing_toast(&c, toast, sizeof toast);
+        CHECK(strstr(toast, "needs module (no module name),") != NULL);
+    }
+
+    /* nothing answerable: -1, so the caller must not refuse; JSON says unchecked */
+    summary_of(&s, mods, cannot_tell, 1);
+    CHECK(sh_mp_check_modules(&s, stub_known, NULL, &c) == -1 && c.unknown == 1 && c.checked == 0);
+    summary_of(&s, mods, all_known, 3);
+    CHECK(sh_mp_check_modules(&s, stub_never, NULL, &c) == -1);
+    json = sh_mp_check_json(&c);
+    CHECK(json && !strcmp(json, "{\"checked\":false}"));
+    free(json);
+    json = sh_mp_check_json(NULL);
+    CHECK(json && !strcmp(json, "{\"checked\":false}"));
+    free(json);
+    CHECK(sh_mp_check_modules(NULL, stub_known, NULL, &c) == -1);
+    CHECK(sh_mp_check_modules(&s, NULL, NULL, &c) == -1);
+
+    /* short names */
+    sh_mp_module_short_name("maps/modules/ind_dlc/ind_room.decl", toast, sizeof toast);
+    CHECK(!strcmp(toast, "ind_dlc/ind_room"));
+    sh_mp_module_short_name("custom/name", toast, sizeof toast);
+    CHECK(!strcmp(toast, "custom/name"));
+    sh_mp_module_short_name("maps/modules/ind_dlc/ind_room.decl", toast, 5);
+    CHECK(!strcmp(toast, "ind_"));
+
+    /* a prefab cut from the synthetic map: its modules come from sh_mp_inspect */
+    {
+        char *src = source_map(), *frag = NULL, err[256] = "";
+        size_t flen = 0;
+        int sel[3] = { 0, 1, 2 };
+        sh_mp_summary cut, back;
+        CHECK(sh_mp_cut(src, strlen(src), sel, 3, &frag, &flen, &cut, err, sizeof err) == 1);
+        CHECK(frag && sh_mp_inspect(frag, flen, &back, err, sizeof err) == 1);
+        CHECK(sh_mp_check_modules(&back, stub_known, NULL, &c) == 1);
+        CHECK(c.listed == 1 && !strcmp(c.missing[0], "maps/modules/c.decl"));
+        sh_mp_summary_free(&cut); sh_mp_summary_free(&back);
+        free(frag); free(src);
+    }
+}
+
 int main(void)
 {
     test_json_roundtrip();
     test_is_module_file();
     test_cut_and_merge();
     test_refusals();
+    test_module_guard();
     if (g_fail) { printf("module_prefab_test: FAILED\n"); return 1; }
     printf("module_prefab_test: all passed\n");
     return 0;

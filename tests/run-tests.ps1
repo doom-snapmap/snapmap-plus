@@ -75,6 +75,7 @@ $tests = @(
     @{ name = "recovery_dialog_test"; src = 'recovery_dialog_test.c'; defs = '/Gy'; arg = "" }
     @{ name = "nav_play_test"; src = 'nav_play_test.c ..\src\backend\patch.c ..\src\backend\hook.c map_bounds_link_stub.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c ..\src\common\log_rotate.c'; arg = "" }
+    @{ name = "redirect_policy_test"; src = 'redirect_policy_test.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c ..\src\backend\patch.c'; defs = '/DSH_PATCH_TESTING';                       arg = "" }
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }

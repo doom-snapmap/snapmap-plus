@@ -9,7 +9,8 @@ global's Vulkan/OpenGL RVA. Never hand-edit the generated header.
 The update file is {"globals": {"<name>": {...}}}. Each value may carry a new
 "anchor" with "disp_slot", "disp_tail" and "delta" (all four together), the
 "vk_rva" and "gl_rva" the global resolves to on the two build 13954591
-executables, and a one-line "note". Every row must end with both RVAs; a row that
+executables, and a one-line "note". A name the header does not have adds a row,
+which must carry an anchor and a note. Every row must end with both RVAs; a row that
 cannot be resolved on this build is an error, not a silent omission.
 """
 import argparse
@@ -69,7 +70,13 @@ def apply_update(rows, path):
     by_name = {r['name']: r for r in rows}
     for name, v in data.get('globals', {}).items():
         if name not in by_name:
-            raise SystemExit('%s: update for unknown global %r' % (path, name))
+            # A new row needs its whole definition: an anchor and a note.
+            if 'anchor' not in v or not v.get('note'):
+                raise SystemExit('%s: update for unknown global %r (a new row needs "anchor" and "note")'
+                                 % (path, name))
+            r = dict(name=name, note='', pattern='', slot=0, tail=0, delta=0, vk=None, gl=None)
+            rows.append(r)
+            by_name[name] = r
         r = by_name[name]
         if 'anchor' in v:
             missing = [k for k in ('disp_slot', 'disp_tail', 'delta') if k not in v]
