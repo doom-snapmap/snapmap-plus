@@ -1288,7 +1288,7 @@ static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
 #define IE_EDIT_LOCAL_ID 0x7F8
 #define IE_EDIT_CLOUD_ID 0x9B0
 #define ED_ACTIVE_BYTE_OFF   0x09       /* editor_set_active's byte: clear during SnapMap Play */
-#define ED_DEACT_REASON_OFF  0x2366c    /* 3: deactivated for Play */
+#define ED_DEACT_REASON_OFF  0x2366c    /* int: why the editor deactivated; 1 shutdown, 3 Play, 4 Settings */
 #define IE_LOAD_STATE_RUNNING 3
 static const uint8_t *g_mods_load_state_at;
 /* idLoadScreen (glb "load_screen"): its thread's running byte at +0x4b2 is set
@@ -1411,7 +1411,6 @@ static int ie_mods_busy(char *cause, size_t cap)
  * tells the two apart: 4 while Settings is up, 1 for a shutdown. The
  * loaded-map pointer persists in the hub, so it decides nothing alone. */
 #define IE_EDITOR_STATE_EXITING 8
-#define ED_DEACT_REASON_OFF 0x2366C   /* int: why the editor deactivated; 4 = Settings, 1 = shutdown */
 #define IE_DEACT_REASON_SETTINGS 4
 static int ie_mods_map_left(void)
 {
