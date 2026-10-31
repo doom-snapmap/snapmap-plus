@@ -28,6 +28,7 @@
 #include "ui_bridge.h"
 #include "backend_log.h"
 #include "process_heap_scope.h"
+#include "prefab_mods.h"
 
 
 /* editor */
@@ -539,10 +540,13 @@ void sh_module_prefab_tick(void *editor)
 /* ------------------------------------------------------------ capture (game thread) */
 
 /* The module guard's palette query (module_prefab_map.h): grid_room_native.c
- * answers it on the engine thread. */
+ * answers it on the engine thread. ctx, when set, is the prefab's mod rows
+ * (prefab_mods.h): a module one of them provides is a mod the Prefabs tab
+ * lists and Place resolves, not a missing room. */
 static int mp_module_known(void *ctx, const char *name)
 {
-    (void)ctx;
+    const sh_modmanifest_list *rows = (const sh_modmanifest_list *)ctx;
+    if (rows && sh_prefab_mods_row_provides(rows, name)) return 1;
     return sh_grid_native_module_known(name);
 }
 
@@ -550,6 +554,7 @@ typedef struct mp_capture {
     int    op;
     int    result;            /* 1 ok or a refusal code */
     const sh_mp_summary *modules;   /* PLACE / CHECK: the prefab's modules, checked on the engine thread */
+    const sh_modmanifest_list *rows; /* CHECK: the prefab's mod rows, or NULL */
     sh_mp_module_check check;
     int    checked;           /* sh_mp_check_modules' result: missing count, -1 not checked */
     char  *json;              /* HeapAlloc */
@@ -589,7 +594,7 @@ static int mp_capture_main(void *ctx)
     c->result = -1;
     if (!ed) return 0;
     if (c->op == SH_MODULE_PREFAB_CHECK) {
-        c->checked = sh_mp_check_modules(c->modules, mp_module_known, NULL, &c->check);
+        c->checked = sh_mp_check_modules(c->modules, mp_module_known, (void *)c->rows, &c->check);
         c->result = 1;
         return 1;
     }
@@ -705,6 +710,13 @@ static int mp_save(sh_module_prefab_call *call)
         if (rel) for (i = 0; i < c->nsel; i++) for (k = 0; k < 6; k++) rel[i][k] = c->bounds[i][k] - c->anchor[k % 3];
     }
     side = sh_mp_sidecar_json(&sum, rel ? (const float (*)[6])rel : NULL, NULL);
+    if (side) {
+        /* The mods its modules and entities need, as a map's save records them. */
+        int mods = 0;
+        char *with = sh_prefab_mods_with_closure(side, frag, flen, &mods);
+        if (with) { free(side); side = with; }
+        if (mods) mp_logf("MODPREFAB: the prefab needs %d mod(s); its sidecar records them", mods);
+    }
     if (!side || !mp_write_file(call->path, frag, flen) || !mp_write_file(call->meta_path, side, strlen(side))) {
         mp_out(call, "the prefab file could not be written");
         goto done;
@@ -797,8 +809,10 @@ static int mp_check(sh_module_prefab_call *call)
 {
     mp_capture *c;
     sh_mp_summary sum;
+    sh_modmanifest_list rows;
     char err[256] = "", *json;
     int r = -1;
+    memset(&rows, 0, sizeof rows);
     mp_out(call, "{\"checked\":false}");
     if (!g_run_on_main || !call->text || !sh_mp_is_module_file(call->text, call->text_len)) return -1;
     if (!sh_mp_inspect(call->text, call->text_len, &sum, err, (int)sizeof err)) return -1;
@@ -807,7 +821,14 @@ static int mp_check(sh_module_prefab_call *call)
     c->op = SH_MODULE_PREFAB_CHECK;
     c->modules = &sum;
     c->checked = -1;
+    if (call->meta_path && call->meta_path[0]) {
+        size_t slen = 0;
+        char *side = sh_prefab_mods_read_file(call->meta_path, &slen);
+        if (sh_prefab_mods_sidecar_rows(side, slen, &rows) > 0) c->rows = &rows;
+        free(side);
+    }
     if (mp_capture_run(c) && c->result == 1) r = c->checked;
+    sh_modmanifest_list_free(&rows);
     sh_mp_summary_free(&sum);
     json = sh_mp_check_json(r >= 0 ? &c->check : NULL);
     if (json) { mp_out(call, json); free(json); }
@@ -840,6 +861,15 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
         return mp_place(call);
     case SH_MODULE_PREFAB_CHECK:
         return mp_check(call);
+    case SH_MODULE_PREFAB_MODS_RECORD:
+    case SH_MODULE_PREFAB_MODS_STATUS:
+    case SH_MODULE_PREFAB_MODS_RESOLVE:
+    case SH_MODULE_PREFAB_MODS_POLL:
+    case SH_MODULE_PREFAB_META_WRITE:
+    case SH_MODULE_PREFAB_EXPORT:
+    case SH_MODULE_PREFAB_IMPORT:
+        /* The mods a prefab needs, for either kind (prefab_mods.c). */
+        return sh_prefab_mods_slot(call);
     case SH_MODULE_PREFAB_STATUS: {
         int r;
         AcquireSRWLockShared(&g_lock);

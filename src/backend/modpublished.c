@@ -27,6 +27,12 @@
  * PROBING: a worker job asks the store for every missing bundle, and only
  * when the store has them all does it go on to RAISE. Its resume opens the
  * rawmap again.
+ *
+ * A prefab placement (sh_modpub_prefab_hold) is held the same way: PROBING,
+ * then the question, the fetch and the install; its resume is the ready
+ * callback (prefab_mods.c), which brings the mods into the open map and lets
+ * the placement go on. Its texts say "prefab" and "placed" where a map's say
+ * "map" and "loaded".
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -288,6 +294,15 @@ typedef struct pub_hold {
 } pub_hold;
 
 static pub_hold g_hold;
+static sh_modpub_prefab_ready_fn g_prefab_ready;
+
+static int pub_is_prefab(int hook) { return hook == SH_MODPUB_PREFAB_PLACE; }
+/* "map" or "prefab", for the messages a hold shows. */
+static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" : "map"; }
+/* The sentence that says nothing happened. */
+static const char *pub_not_done(int hook) { return pub_is_prefab(hook) ? "The prefab was not placed." : "The map was not loaded."; }
+/* A hold the rawmap layer or a prefab started: no engine completion behind it. */
+static int pub_is_local(int hook) { return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE; }
 
 /* One pending notice, raised with a single Accept button when the surface is
  * idle and no question is up. A later notice replaces an unraised one. */
@@ -311,6 +326,7 @@ static const char *pub_hook_name(int hook)
     case SH_MODPUB_CACHE_LOBBY: return "lobby join (cached map)";
     case SH_MODPUB_LOCAL_OFFLINE: return "My Maps play";
     case SH_MODPUB_RAWMAP_LOAD: return "rawmap load";
+    case SH_MODPUB_PREFAB_PLACE: return "prefab placement";
     default: return "?";
     }
 }
@@ -344,21 +360,33 @@ static void pub_size_text(char *out, size_t cap, unsigned long long bytes)
     else _snprintf_s(out, cap, _TRUNCATE, "%.1f MB", mb);
 }
 
-void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
-                                      unsigned long long bytes)
+static void pub_compose_question(char *out, size_t cap, const char *thing, const char *const *names, size_t count,
+                                 unsigned long long bytes)
 {
     static const char tail[] = "). Download and install now?";
     char head[64], size[32], list[PUB_TEXT_CAP];
     size_t room;
     if (!out || !cap) return;
     if (cap > PUB_TEXT_CAP) cap = PUB_TEXT_CAP;
-    _snprintf_s(head, sizeof head, _TRUNCATE, "This map needs %u mod%s: ", (unsigned)count, count == 1 ? "" : "s");
+    _snprintf_s(head, sizeof head, _TRUNCATE, "This %s needs %u mod%s: ", thing, (unsigned)count, count == 1 ? "" : "s");
     pub_size_text(size, sizeof size, bytes);
     room = cap - 1;
     room = room > strlen(head) + strlen(size) + strlen(tail) + 2 ? room - strlen(head) - strlen(size) - strlen(tail) - 2 : 1;
     if (room > sizeof list) room = sizeof list;
     pub_names_line(list, room, names, count);
     _snprintf_s(out, cap, _TRUNCATE, "%s%s (%s%s", head, list, size, tail);
+}
+
+void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
+                                      unsigned long long bytes)
+{
+    pub_compose_question(out, cap, "map", names, count, bytes);
+}
+
+void sh_modpublished_compose_prefab_question(char *out, size_t cap, const char *const *names, size_t count,
+                                             unsigned long long bytes)
+{
+    pub_compose_question(out, cap, "prefab", names, count, bytes);
 }
 
 /* The missing bundles' display names (ids), malloc'd array of borrowed
@@ -507,7 +535,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     char item[PUB_ID_CAP] = "", rev[PUB_ID_CAP] = "";
     pub_record *record = &g_record;
     int begun;
-    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || hook == SH_MODPUB_RAWMAP_LOAD) return 1;
+    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
 
@@ -610,9 +638,11 @@ static void pub_start_fetch(void)
         job->ids = calloc(job->count, sizeof(*job->ids));
     }
     if (!job || !job->hashes || !job->ids) {
+        char line[PUB_TEXT_CAP];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded (out of memory). %s",
+                    pub_thing(h->hook), pub_not_done(h->hook));
         pub_job_free(job);
-        pub_drop("This map's mods could not be downloaded (out of memory). The map was not loaded.",
-                 "no memory for the fetch job");
+        pub_drop(line, "no memory for the fetch job");
         return;
     }
     for (size_t i = 0; i < job->count; i++) {
@@ -624,9 +654,11 @@ static void pub_start_fetch(void)
     h->state = HOLD_FETCHING;
     h->progress_at = GetTickCount64();
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
+        char line[PUB_TEXT_CAP];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod download could not start. %s", pub_not_done(h->hook));
         h->job = NULL;
         pub_job_free(job);
-        pub_drop("The mod download could not start. The map was not loaded.", "the worker refused the job");
+        pub_drop(line, "the worker refused the job");
         return;
     }
     pub_logf("MODS: downloading %u mod(s) for '%s'", (unsigned)job->count, h->id[0] ? h->id : "local map");
@@ -642,8 +674,8 @@ static void pub_finish(void)
     int ok;
 
     if (job->failed_index >= 0) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Could not download the mod %s. The map was not loaded.",
-                    job->ids[job->failed_index]);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "Could not download the mod %s. %s",
+                    job->ids[job->failed_index], pub_not_done(h->hook));
         _snprintf_s(cause, sizeof cause, _TRUNCATE, "the fetch of %s returned %d", job->hashes[job->failed_index],
                     job->failed_code);
         pub_drop(line, cause);
@@ -653,9 +685,24 @@ static void pub_finish(void)
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         if (pub_bundle_installed(row->bundle, cause, sizeof cause)) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed%s%s. "
-                    "The map was not loaded.", row->id[0] ? row->id : row->bundle, cause[0] ? ": " : "", cause);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed%s%s. %s",
+                    row->id[0] ? row->id : row->bundle, cause[0] ? ": " : "", cause, pub_not_done(h->hook));
         pub_drop(line, "a fetched bundle is not admitted");
+        return;
+    }
+    if (pub_is_prefab(h->hook)) {
+        /* The placement goes on: the ready callback brings the mods into the
+         * open map (activation, the map-level rows) and the Prefabs tab places
+         * the prefab again. */
+        if (!g_prefab_ready) {
+            pub_drop("The mods were installed, but the prefab could not be placed. Place it again.",
+                     "no prefab callback is bound");
+            return;
+        }
+        g_prefab_ready(h->id, &h->rows);
+        pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook), h->id,
+                 (unsigned)h->missing_count);
+        pub_hold_free();
         return;
     }
     /* A rawmap hold has no screen of its own; the reopen asks the editor itself. */
@@ -711,22 +758,55 @@ static void pub_row_label(char *out, size_t cap, const sh_modmanifest_row *row)
     else _snprintf_s(out, cap, _TRUNCATE, "bundle %.16s", row->bundle);
 }
 
-void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable)
+/* mode 0: the store lacks them; 1: the store could not be reached; 2 (a
+ * prefab with no gates bound): the store was not asked. */
+static void pub_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode, int prefab)
 {
-    static const char head[] = "This map was not loaded. It needs mods you do not have";
-    static const char lacks[] = " and the mod store does not hold: ";
     static const char gone[] = ": ";
-    static const char tail_lacks[] = ". Ask the map's author for its .zip export.";
-    static const char tail_gone[] = ". The mod store could not be reached. Try again, or ask the map's author for its .zip export.";
-    const char *mid = unreachable ? gone : lacks, *tail = unreachable ? tail_gone : tail_lacks;
+    static const char lacks[] = " and the mod store does not hold: ";
+    const char *head = prefab ? "This prefab was not placed. It needs mods you do not have"
+                              : "This map was not loaded. It needs mods you do not have";
+    const char *mid = mode == 0 ? lacks : gone;
+    const char *tail = mode == 1
+        ? (prefab ? ". The mod store could not be reached. Try again, or ask the prefab's author for its .zip export."
+                  : ". The mod store could not be reached. Try again, or ask the map's author for its .zip export.")
+        : (prefab ? ". Ask the prefab's author for its .zip export." : ". Ask the map's author for its .zip export.");
     char list[PUB_TEXT_CAP];
-    size_t room, fixed = sizeof head - 1 + strlen(mid) + strlen(tail);
+    size_t room, fixed = strlen(head) + strlen(mid) + strlen(tail);
     if (!out || !cap) return;
     if (cap > PUB_TEXT_CAP) cap = PUB_TEXT_CAP;
     room = cap - 1 > fixed + 1 ? cap - 1 - fixed : 1;
     if (room > sizeof list) room = sizeof list;
     pub_names_line(list, room, mods, count);
     _snprintf_s(out, cap, _TRUNCATE, "%s%s%s%s", head, mid, list, tail);
+}
+
+void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable)
+{
+    pub_compose_refusal(out, cap, mods, count, unreachable ? 1 : 0, 0);
+}
+
+void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode)
+{
+    pub_compose_refusal(out, cap, mods, count, mode < 0 || mode > 2 ? 0 : mode, 1);
+}
+
+void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name, const char *const *mods, size_t count,
+                                         int mode)
+{
+    size_t i;
+    if (!out || !cap) return;
+    _snprintf_s(out, cap, _TRUNCATE, "Prefab %s was not placed: it needs ", name && name[0] ? name : "prefab");
+    for (i = 0; i < count; i++) {
+        if (i) strncat_s(out, cap, ", ", _TRUNCATE);
+        strncat_s(out, cap, mods[i], _TRUNCATE);
+    }
+    strncat_s(out, cap, mode == 1
+        ? ", which you do not have, and the mod store could not be reached. Try again, or ask the prefab's author "
+          "for its .zip export, which carries the mods."
+        : mode == 2 ? ", which you do not have. Ask the prefab's author for its .zip export, which carries the mods."
+        : ", which you do not have and the mod store does not hold. Ask the prefab's author for its .zip export, "
+          "which carries the mods.", _TRUNCATE);
 }
 
 size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows)
@@ -757,16 +837,32 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
 #define PUB_LABEL_CAP (SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
 
 /* The refusal: the notice, and one console line naming every mod. */
-static void pub_rawmap_refuse(const char *source, const sh_modmanifest_row *const *rows, size_t count,
+static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest_row *const *rows, size_t count,
                               int unreachable, const char *why)
 {
     char notice[PUB_TEXT_CAP], line[1024], piece[PUB_LABEL_CAP + 4];
     const char **labels = calloc(count ? count : 1, sizeof(*labels));
     char (*storage)[PUB_LABEL_CAP] = calloc(count ? count : 1, sizeof(*storage));
+    const char *bare = pub_is_prefab(hook) ? "This prefab was not placed. It needs mods you do not have."
+                                           : "This map was not loaded. It needs mods you do not have.";
     if (!labels || !storage) {
         free((void *)labels); free(storage);
-        if (g_hold.state != HOLD_IDLE) pub_drop("This map was not loaded. It needs mods you do not have.", why);
-        else pub_notice("This map was not loaded. It needs mods you do not have.");
+        if (g_hold.state != HOLD_IDLE) pub_drop(bare, why);
+        else pub_notice(bare);
+        return;
+    }
+    if (pub_is_prefab(hook)) {
+        for (size_t i = 0; i < count; i++) {
+            pub_row_label(storage[i], sizeof storage[i], rows[i]);
+            labels[i] = storage[i];
+        }
+        sh_modpublished_prefab_refusal_line(line, sizeof line, source, labels, count, unreachable ? 1 : 0);
+        sh_modpublished_compose_prefab_refusal(notice, sizeof notice, labels, count, unreachable ? 1 : 0);
+        free((void *)labels); free(storage);
+        pub_print(line);
+        pub_logf("MODS: %s", line);
+        if (g_hold.state != HOLD_IDLE) pub_drop(notice, why);
+        else pub_notice(notice);
         return;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE, "Rawmap %s was not loaded: it needs ", source && source[0] ? source : "map");
@@ -801,7 +897,7 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
         if (missing) {
             for (size_t i = 0; i < rows->count; i++)
                 if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) missing[n++] = &rows->rows[i];
-            if (n) pub_rawmap_refuse(name, missing, n, 0, "the rawmap gate is unavailable here");
+            if (n) pub_rawmap_refuse(SH_MODPUB_RAWMAP_LOAD, name, missing, n, 0, "the rawmap gate is unavailable here");
             free((void *)missing);
         }
         return -1;
@@ -824,6 +920,34 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
     return 1;
 }
 
+/* ------------------------------------------------------------ prefab placements */
+
+void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn) { g_prefab_ready = fn; }
+
+int sh_modpub_prefab_holding(void)
+{
+    return g_hold.state != HOLD_IDLE && pub_is_prefab(g_hold.hook);
+}
+
+int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
+{
+    char nm[PUB_ID_CAP] = "", line[PUB_TEXT_CAP + PUB_ID_CAP];
+    int begun;
+    if (!rows || !rows->count) return 0;
+    if (!g_ops_set) return -2;
+    if (!pub_on_main()) return -1;
+    if (name) strncpy_s(nm, sizeof nm, name, _TRUNCATE);
+    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", rows, NULL);
+    if (begun <= 0) return begun;
+    g_hold.state = HOLD_PROBING;
+    pub_logf("MODS: prefab '%s' needs %u missing mod(s) (%llu bytes); asking the mod store for them", nm,
+             (unsigned)g_hold.missing_count, g_hold.missing_bytes);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "Prefab %s needs %u mod%s you do not have; checking the mod store.",
+                nm[0] ? nm : "prefab", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
+    pub_print(line);
+    return 1;
+}
+
 static void pub_start_probe(void)
 {
     pub_hold *h = &g_hold;
@@ -836,8 +960,11 @@ static void pub_start_probe(void)
         job->found = calloc(job->count, sizeof(*job->found));
     }
     if (!job || !job->hashes || !job->ids || !job->found) {
+        char line[PUB_TEXT_CAP];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s needs mods that could not be prepared. %s", pub_thing(h->hook),
+                    pub_not_done(h->hook));
         pub_job_free(job);
-        pub_drop("This map needs mods that could not be prepared. The map was not loaded.", "no memory for the store check");
+        pub_drop(line, "no memory for the store check");
         return;
     }
     for (size_t i = 0; i < job->count; i++) {
@@ -849,9 +976,12 @@ static void pub_start_probe(void)
         pub_job_free(job);
         /* Another network job (an upload, a download) is running: try again
          * on later ticks, for as long as a question may wait for the surface. */
-        if (++h->waited > PUB_RAISE_TICKS)
-            pub_drop("The mod store is busy, so this map's mods could not be checked. The map was not loaded. "
-                     "Try again in a moment.", "the worker stayed busy");
+        if (++h->waited > PUB_RAISE_TICKS) {
+            char line[PUB_TEXT_CAP];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "The mod store is busy, so this %s's mods could not be checked. %s "
+                        "Try again in a moment.", pub_thing(h->hook), pub_not_done(h->hook));
+            pub_drop(line, "the worker stayed busy");
+        }
         return;
     }
     h->job = job;
@@ -864,19 +994,26 @@ static void pub_probe_finish(void)
     pub_job *job = h->job;
     const sh_modmanifest_row **absent = calloc(h->missing_count ? h->missing_count : 1, sizeof(*absent));
     size_t lacking = 0, unknown = 0;
-    if (!absent) { pub_drop("This map needs mods that could not be prepared. The map was not loaded.", "no memory"); return; }
+    if (!absent) {
+        char line[PUB_TEXT_CAP];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "This %s needs mods that could not be prepared. %s", pub_thing(h->hook),
+                    pub_not_done(h->hook));
+        pub_drop(line, "no memory");
+        return;
+    }
     for (size_t i = 0; i < h->missing_count; i++) {
         int found = (job->failed_index >= 0 && (size_t)job->failed_index <= i) ? -1 : job->found[i];
         if (found == 0) absent[lacking++] = &h->rows.rows[h->missing[i]];
         else if (found < 0) unknown++;
     }
     if (lacking) {
-        pub_rawmap_refuse(h->id, absent, lacking, 0, "the mod store does not hold every missing mod");
+        pub_rawmap_refuse(h->hook, h->id, absent, lacking, 0, "the mod store does not hold every missing mod");
     } else if (unknown) {
         for (size_t i = 0; i < h->missing_count; i++) absent[i] = &h->rows.rows[h->missing[i]];
-        pub_rawmap_refuse(h->id, absent, h->missing_count, 1, "the mod store could not be asked");
+        pub_rawmap_refuse(h->hook, h->id, absent, h->missing_count, 1, "the mod store could not be asked");
     } else {
-        pub_logf("MODS: the mod store holds all %u missing mod(s) of rawmap '%s'", (unsigned)h->missing_count, h->id);
+        pub_logf("MODS: the mod store holds all %u missing mod(s) of %s '%s'", (unsigned)h->missing_count,
+                 pub_is_prefab(h->hook) ? "prefab" : "rawmap", h->id);
         pub_job_free(job);
         h->job = NULL;
         h->waited = 0;
@@ -909,7 +1046,7 @@ void sh_modpublished_poll(void)
             break;
         }
         if (!(names = pub_missing_names(h))) { pub_drop(NULL, "no memory for the question"); break; }
-        sh_modpublished_compose_question(text, sizeof text, names, h->missing_count, h->missing_bytes);
+        pub_compose_question(text, sizeof text, pub_thing(h->hook), names, h->missing_count, h->missing_bytes);
         free((void *)names);
         h->ticket = g_ops.ask ? g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_YES_NO, text) : 0;
         if (!h->ticket) { pub_drop(NULL, "the dialog would not raise; nothing is downloaded without an answer"); break; }
@@ -928,7 +1065,8 @@ void sh_modpublished_poll(void)
             pub_names_line(list, sizeof list, names, h->missing_count);
             free((void *)names);
         }
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The map was not loaded: it needs %s.", list);
+        _snprintf_s(line, sizeof line, _TRUNCATE, pub_is_prefab(h->hook) ? "The prefab was not placed: it needs %s."
+                                                                        : "The map was not loaded: it needs %s.", list);
         pub_drop(line, "the player declined");
         break;
     }
@@ -977,6 +1115,7 @@ void sh_modpub_test_reset(void)
         pub_job_free(job);
     }
     pub_record_clear(&g_record);
+    g_prefab_ready = NULL;
     for (size_t i = 0; i < PUB_SEEN_MAX; i++) sh_modmanifest_list_free(&g_seen[i].rows);
     memset(g_seen, 0, sizeof g_seen);
     g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;

@@ -102,6 +102,7 @@ enum sh_modpub_hook {
     SH_MODPUB_CACHE_LOBBY,      /* the warm-cache branch only */
     SH_MODPUB_LOCAL_OFFLINE,
     SH_MODPUB_RAWMAP_LOAD,      /* not an engine hook: a rawmap load (sh_modpub_rawmap_hold) */
+    SH_MODPUB_PREFAB_PLACE,     /* not an engine hook: a prefab placement (sh_modpub_prefab_hold) */
     SH_MODPUB_HOOKS
 };
 
@@ -196,6 +197,44 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
  * labels; `unreachable` selects the wording for a store that could not be
  * asked. */
 void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable);
+
+/* ------------------------------------------------------------ prefab placements
+ * A prefab records the mods it needs (prefab_mods.h) and is never handed to
+ * the engine while one is missing. Its placement is held like a rawmap load:
+ * the store is asked on the worker; when it has every missing bundle the
+ * player is asked "This prefab needs N mod(s): ..."; Yes fetches and installs
+ * them and calls the ready callback (main thread, from the tick), which brings
+ * them into the open map, and the placement goes on. When the store lacks any
+ * or cannot be reached, the placement is refused with the one-button notice
+ * and one console line naming each mod (id and version) and saying to ask for
+ * the prefab's .zip export. No, a failed download and a bundle that will not
+ * install behave as for a map, with "The prefab was not placed." */
+
+/* Hold a placement whose rows name missing bundles; `name` is the prefab's
+ * name the messages use. Returns 1 held (the store is being asked), 0 when
+ * nothing is missing, -1 when it could not be held (off the main thread, no
+ * memory), -2 when the gates are not bound (nothing raised: the caller
+ * refuses). Main thread. */
+int  sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name);
+
+/* 1 while the hold in progress is a prefab placement's. */
+int  sh_modpub_prefab_holding(void);
+
+/* Called once a held placement's mods are installed and admitted, with the
+ * prefab's name and every row it names. Main thread (the tick). */
+typedef void (*sh_modpub_prefab_ready_fn)(const char *name, const sh_modmanifest_list *rows);
+void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn);
+
+/* The prefab's question, as a map's says it: "This prefab needs N mod(s):
+ * <names> (<size>). Download and install now?". */
+void sh_modpublished_compose_prefab_question(char *out, size_t cap, const char *const *names, size_t count,
+                                             unsigned long long bytes);
+/* The prefab's refusal notice (shorter than 256 bytes) and its console line:
+ * mode 0 the store does not hold them, 1 the store could not be reached, 2
+ * the store was not asked (no gates). `mods` are "id version" labels. */
+void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode);
+void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name, const char *const *mods, size_t count,
+                                         int mode);
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISHED_PURE

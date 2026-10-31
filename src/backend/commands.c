@@ -32,6 +32,7 @@
 #include "grid_room_native.h"
 #include "modcmd.h"
 #include "vt_harness.h"
+#include "prefab_mods.h"
 
 /* Engine call contracts. */
 
@@ -1979,6 +1980,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
     { SH_MODCMD_NAME,        (void *)h_sh_mods,     SH_MODCMD_HELP },
     { SH_VT_CMD_NAME,        (void *)h_sh_vt,       SH_VT_CMD_HELP },
+    { SH_PREFAB_CMD_NAME,    (void *)h_sh_prefab,   SH_PREFAB_CMD_HELP },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },

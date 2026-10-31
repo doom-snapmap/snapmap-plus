@@ -521,9 +521,67 @@ static void me_hset_free(me_hset *s) { free(s->v); free(s->slot); memset(s, 0, s
 
 /* ------------------------------------------------------------ write ----- */
 
+static int mm_list_has(const sh_modmanifest_list *list, const char *bundle)
+{
+    size_t i;
+    for (i = 0; i < list->count; i++) if (!strcmp(list->rows[i].bundle, bundle)) return 1;
+    return 0;
+}
+
+/* What one export carries besides its bundles: a map (whose rows are read from
+ * its text and rewritten when a row pins an earlier build) or a prefab (whose
+ * rows are given, and whose sidecar is written from the rows the export
+ * carries). */
+typedef struct me_payload {
+    const char *entry;                 /* MODEXPORT_MAP_ENTRY or MODEXPORT_PREFAB_ENTRY */
+    const char *text;
+    size_t len;
+    const sh_modmanifest_list *rows;   /* prefab: the rows; map: NULL (read from text) */
+    const char *name;                  /* prefab: its name in export.json */
+    modexport_meta_fn meta;            /* prefab: the sidecar for the carried rows */
+    void *meta_ctx;
+} me_payload;
+
+static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char *cause, size_t cap);
+
 int modexport_write(const char *map_json, size_t len, const char *zip_path, modexport_stats *stp,
                     char *cause, size_t cap)
 {
+    me_payload pl;
+    memset(&pl, 0, sizeof pl);
+    pl.entry = MODEXPORT_MAP_ENTRY;
+    pl.text = map_json;
+    pl.len = len;
+    return me_write(&pl, zip_path, stp, cause, cap);
+}
+
+int modexport_write_prefab(const char *name, const char *prefab, size_t len, const sh_modmanifest_list *rows,
+                           modexport_meta_fn meta, void *meta_ctx, const char *zip_path, modexport_stats *stp,
+                           char *cause, size_t cap)
+{
+    me_payload pl;
+    sh_modmanifest_list none;
+    memset(&pl, 0, sizeof pl);
+    memset(&none, 0, sizeof none);
+    if (!name || !name[0]) return me_cause(cause, cap, "the prefab has no name");
+    if (len > MODEXPORT_PREFAB_MAX) return me_cause(cause, cap, "the prefab is larger than %u bytes", MODEXPORT_PREFAB_MAX);
+    pl.entry = MODEXPORT_PREFAB_ENTRY;
+    pl.text = prefab;
+    pl.len = len;
+    pl.rows = rows ? rows : &none;
+    pl.name = name;
+    pl.meta = meta;
+    pl.meta_ctx = meta_ctx;
+    return me_write(&pl, zip_path, stp, cause, cap);
+}
+
+static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char *cause, size_t cap)
+{
+    const char *map_json = pl->text;
+    size_t len = pl->len;
+    const int prefab = pl->rows != NULL;
+    char *meta_text = NULL;
+    size_t meta_len = 0;
     modexport_stats local;
     modexport_stats *st = stp ? stp : &local;
     sh_modmanifest_list rows;
@@ -547,8 +605,14 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
     w.h = INVALID_HANDLE_VALUE;
     if (cause && cap) cause[0] = 0;
     if (!map_json || !len || len > MODEXPORT_MAP_MAX || !zip_path || !zip_path[0])
-        return me_cause(cause, cap, "no map text or no destination");
-    sh_modmanifest_read(map_json, len, &rows, &rejected);
+        return me_cause(cause, cap, prefab ? "no prefab text or no destination" : "no map text or no destination");
+    if (prefab) {
+        for (i = 0; i < pl->rows->count; i++)
+            if (!mm_list_has(&rows, pl->rows->rows[i].bundle) && !sh_modmanifest_list_add(&rows, &pl->rows->rows[i])) {
+                sh_modmanifest_list_free(&rows);
+                return me_cause(cause, cap, "out of memory");
+            }
+    } else sh_modmanifest_read(map_json, len, &rows, &rejected);
     st->bundles = (unsigned)rows.count;
     st->map_bytes = len;
 
@@ -562,8 +626,8 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
         picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
         if (picked[i] && !sh_ms_entry_usable(picked[i])) picked[i] = NULL;
         if (!picked[i]) {
-            me_cause(cause, cap, "the map needs %s@%s (bundle %.16s), which is not installed or failed verification",
-                     rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
+            me_cause(cause, cap, "the %s needs %s@%s (bundle %.16s), which is not installed or failed verification",
+                     prefab ? "prefab" : "map", rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
             goto done;
         }
     }
@@ -598,6 +662,15 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
                 strncpy_s(r->version, sizeof r->version, b->version, _TRUNCATE);
                 r->size = b->total_size;
             }
+            if (prefab) {
+                /* A prefab's rows live in its sidecar, written below from the rows carried. */
+                me_log("MODS: export: %zu row(s) pinned an earlier build; the export carries and names the current one(s)", moved);
+                sh_modmanifest_list_free(&rows);
+                rows = fixed;
+                for (i = 0; i < rows.count; i++) picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
+                st->bundles = (unsigned)rows.count;
+                goto rows_done;
+            }
             moved_map = sh_modmanifest_write(map_json, len, &fixed, &map_len, err, sizeof err);
             if (!moved_map) {
                 sh_modmanifest_list_free(&fixed);
@@ -613,6 +686,11 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
             st->bundles = (unsigned)rows.count;
             st->map_bytes = len;
         }
+    }
+rows_done:
+    if (prefab && pl->meta) {
+        meta_text = pl->meta(pl->meta_ctx, &rows, &meta_len);
+        if (!meta_text) { me_cause(cause, cap, "the prefab's details could not be written"); goto done; }
     }
     for (i = 0; i < rows.count; i++) total_files += picked[i]->bundle.file_count;
     if (!me_hset_init(&written, total_files + 1)) { me_cause(cause, cap, "out of memory"); goto done; }
@@ -632,7 +710,11 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
         me_puts(&index, ",\"version\":"); me_put_str(&index, b->version);
         me_puts(&index, "}");
     }
-    me_puts(&index, "],\"format\":1,\"map\":\"" MODEXPORT_MAP_ENTRY "\"}");
+    if (prefab) {
+        me_puts(&index, "],\"format\":1,\"kind\":\"prefab\",\"name\":");
+        me_put_str(&index, pl->name);
+        me_puts(&index, ",\"prefab\":\"" MODEXPORT_PREFAB_ENTRY "\"}");
+    } else me_puts(&index, "],\"format\":1,\"map\":\"" MODEXPORT_MAP_ENTRY "\"}");
     if (index.bad) { me_cause(cause, cap, "out of memory"); goto done; }
 
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.smp-%lu.tmp", zip_path, GetCurrentProcessId());
@@ -642,7 +724,8 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
     w.h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (w.h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot create %s (error %lu)", zip_path, GetLastError()); goto done; }
 
-    me_add(&w, MODEXPORT_MAP_ENTRY, map_json, len);
+    me_add(&w, pl->entry, map_json, len);
+    if (meta_text) me_add(&w, MODEXPORT_PREFAB_META, meta_text, meta_len);
     me_add(&w, MODEXPORT_INDEX, index.p, index.n);
     for (i = 0; i < rows.count && !w.failed; i++) {
         const sh_ms_entry *e = picked[i];
@@ -704,6 +787,7 @@ done:
     free(index.p);
     free(picked);
     free(moved_map);
+    free(meta_text);
     free(wfinal);
     free(wtmp);
     if (listed) sh_ms_list_free(&l);
@@ -755,8 +839,17 @@ static char *me_with_bundle(const char *canonical, size_t len, const char *hash)
     return out;
 }
 
-/* Open an export and read its index and manifests (nothing installed). */
+/* Open an export and read its index and manifests (nothing installed). `main`
+ * is the entry the export must carry (the map, or a prefab); a prefab's name
+ * from export.json goes to `name` when it is not NULL. */
+static int me_import_open_as(me_import *im, const char *zip_path, int manifests, const char *main, char *name,
+                             size_t name_cap, char *cause, size_t cap);
 static int me_import_open(me_import *im, const char *zip_path, int manifests, char *cause, size_t cap)
+{
+    return me_import_open_as(im, zip_path, manifests, MODEXPORT_MAP_ENTRY, NULL, 0, cause, cap);
+}
+static int me_import_open_as(me_import *im, const char *zip_path, int manifests, const char *main, char *name,
+                             size_t name_cap, char *cause, size_t cap)
 {
     unsigned char *text;
     size_t len = 0, i, k, files = 0;
@@ -765,7 +858,13 @@ static int me_import_open(me_import *im, const char *zip_path, int manifests, ch
     long idx;
     memset(im, 0, sizeof *im);
     if (!me_reader_open(&im->zr, zip_path, cause, cap)) return 0;
-    if (me_find(&im->zr, MODEXPORT_MAP_ENTRY) < 0) { me_import_free(im); return me_cause(cause, cap, "the export has no %s", MODEXPORT_MAP_ENTRY); }
+    if (me_find(&im->zr, main) < 0) {
+        int other = me_find(&im->zr, strcmp(main, MODEXPORT_MAP_ENTRY) ? MODEXPORT_MAP_ENTRY : MODEXPORT_PREFAB_ENTRY) >= 0;
+        me_import_free(im);
+        if (other) return me_cause(cause, cap, strcmp(main, MODEXPORT_MAP_ENTRY) ? "this is a map's export, not a prefab's"
+                                                                                 : "this is a prefab's export, not a map's");
+        return me_cause(cause, cap, "the export has no %s", main);
+    }
     idx = me_find(&im->zr, MODEXPORT_INDEX);
     if (idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export has no %s", MODEXPORT_INDEX); }
     text = me_read_entry(&im->zr, idx, ME_INDEX_MAX, &len, cause, cap);
@@ -778,6 +877,20 @@ static int me_import_open(me_import *im, const char *zip_path, int manifests, ch
         mpj_free(root);
         me_import_free(im);
         return me_cause(cause, cap, "%s is not an export index of format %d", MODEXPORT_INDEX, MODEXPORT_FORMAT);
+    }
+    if (name && name_cap) {
+        const mpj *nm = mpj_get(root, "name");
+        name[0] = 0;
+        if (nm && nm->type == MPJ_STR && nm->text) {
+            /* The escaped body, decoded: \" and \\ only (a \u escape leaves the name empty). */
+            size_t o = 0;
+            const char *q;
+            for (q = nm->text; *q && o + 1 < name_cap; q++) {
+                if (*q == '\\' && q[1]) { q++; if (*q == 'u') { o = 0; break; } }
+                name[o++] = *q;
+            }
+            name[o] = 0;
+        }
     }
     im->bundles = (me_ibundle *)calloc((size_t)(arr->n ? arr->n : 1), sizeof *im->bundles);
     if (!im->bundles) { mpj_free(root); me_import_free(im); return me_cause(cause, cap, "out of memory"); }
@@ -900,12 +1013,42 @@ int modexport_probe(const char *zip_path, char *cause, size_t cap)
     return 1;
 }
 
+/* Install every bundle the export carries that the store does not hold
+ * (verifying hashes), then rebuild the serving index when one was installed.
+ * Nothing already installed is written again. */
+static int me_install_all(me_import *im, modexport_stats *st, char *cause, size_t cap)
+{
+    me_src src;
+    size_t i;
+    st->bundles = (unsigned)im->nb;
+    st->entries = (unsigned)im->zr.n;
+    st->zip_bytes = im->zr.size;
+    src.im = im;
+    src.fetched = 0;
+    /* One listing decides what is installed already, so a reload of an
+     * imported export (the map load reads it again) costs one scan. */
+    me_installed_mark(im);
+    for (i = 0; i < im->nb; i++) {
+        modsync_install_info info;
+        char one[320];
+        if (im->bundles[i].present) { st->bundles_present++; continue; }
+        if (!modsync_install_manifest(im->bundles[i].canonical, im->bundles[i].len, im->bundles[i].hash, me_zip_source, &src,
+                                      &info, one, sizeof one))
+            return me_cause(cause, cap, "%s: %s", im->bundles[i].folder, one);
+        if (info.already_installed) st->bundles_present++;
+        else st->bundles_installed++;
+    }
+    st->blobs_written = src.fetched;
+    if (st->bundles_installed && sh_modserve_index_rescan() < 0)
+        me_log("MODS: import: bundles installed, but the serving index could not be rebuilt");
+    return 1;
+}
+
 char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char *cause, size_t cap)
 {
     modexport_stats local;
     modexport_stats *st = stp ? stp : &local;
     me_import im;
-    me_src src;
     unsigned char *text = NULL;
     size_t len = 0, i;
     double t0 = me_now_ms();
@@ -913,31 +1056,11 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     memset(st, 0, sizeof *st);
     if (cause && cap) cause[0] = 0;
     if (!me_import_open(&im, zip_path, 1, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
-    st->bundles = (unsigned)im.nb;
-    st->entries = (unsigned)im.zr.n;
-    st->zip_bytes = im.zr.size;
-    src.im = &im;
-    src.fetched = 0;
-    /* One listing decides what is installed already, so a reload of an
-     * imported export (the map load reads it again) costs one scan. */
-    me_installed_mark(&im);
-    for (i = 0; i < im.nb; i++) {
-        modsync_install_info info;
-        char one[320];
-        if (im.bundles[i].present) { st->bundles_present++; continue; }
-        if (!modsync_install_manifest(im.bundles[i].canonical, im.bundles[i].len, im.bundles[i].hash, me_zip_source, &src,
-                                      &info, one, sizeof one)) {
-            me_cause(cause, cap, "%s: %s", im.bundles[i].folder, one);
-            me_import_free(&im);
-            st->ms = me_now_ms() - t0;
-            return NULL;
-        }
-        if (info.already_installed) st->bundles_present++;
-        else st->bundles_installed++;
+    if (!me_install_all(&im, st, cause, cap)) {
+        me_import_free(&im);
+        st->ms = me_now_ms() - t0;
+        return NULL;
     }
-    st->blobs_written = src.fetched;
-    if (st->bundles_installed && sh_modserve_index_rescan() < 0)
-        me_log("MODS: import: bundles installed, but the serving index could not be rebuilt");
     text = me_read_entry(&im.zr, me_find(&im.zr, MODEXPORT_MAP_ENTRY), MODEXPORT_MAP_MAX, &len, cause, cap);
     if (text) {
         /* Rows that name a bundle the export did not carry and the store lacks. */
@@ -958,6 +1081,58 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     st->ms = me_now_ms() - t0;
     if (out_len) *out_len = len;
     return (char *)text;
+}
+
+int modexport_read_prefab(const char *zip_path, char **prefab, size_t *prefab_len, char **meta, size_t *meta_len,
+                          char *name, size_t name_cap, modexport_stats *stp, char *cause, size_t cap)
+{
+    modexport_stats local;
+    modexport_stats *st = stp ? stp : &local;
+    me_import im;
+    unsigned char *text = NULL, *side = NULL;
+    size_t len = 0, slen = 0, i = 0;
+    long at;
+    double t0 = me_now_ms();
+    if (prefab) *prefab = NULL;
+    if (prefab_len) *prefab_len = 0;
+    if (meta) *meta = NULL;
+    if (meta_len) *meta_len = 0;
+    if (name && name_cap) name[0] = 0;
+    memset(st, 0, sizeof *st);
+    if (cause && cap) cause[0] = 0;
+    if (!prefab) return me_cause(cause, cap, "nothing to read into");
+    if (!me_import_open_as(&im, zip_path, 1, MODEXPORT_PREFAB_ENTRY, name, name_cap, cause, cap)) {
+        st->ms = me_now_ms() - t0;
+        return 0;
+    }
+    /* The prefab is read before anything is installed: a damaged export
+     * installs nothing. */
+    text = me_read_entry(&im.zr, me_find(&im.zr, MODEXPORT_PREFAB_ENTRY), MODEXPORT_PREFAB_MAX, &len, cause, cap);
+    if (text) {
+        if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) i = 3;
+        while (i < len && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n')) i++;
+        if (i >= len || text[i] != '{') { free(text); text = NULL; me_cause(cause, cap, "the export's prefab is not prefab JSON"); }
+    }
+    at = me_find(&im.zr, MODEXPORT_PREFAB_META);
+    if (text && at >= 0) {
+        side = me_read_entry(&im.zr, at, ME_INDEX_MAX, &slen, cause, cap);
+        if (!side) { free(text); text = NULL; }
+    }
+    if (!text || !me_install_all(&im, st, cause, cap)) {
+        free(text);
+        free(side);
+        me_import_free(&im);
+        st->ms = me_now_ms() - t0;
+        return 0;
+    }
+    st->map_bytes = len;
+    me_import_free(&im);
+    *prefab = (char *)text;
+    if (prefab_len) *prefab_len = len;
+    if (meta) *meta = (char *)side; else free(side);
+    if (meta_len) *meta_len = side ? slen : 0;
+    st->ms = me_now_ms() - t0;
+    return 1;
 }
 
 /* ------------------------------------------------------------ rawmap ---- */
