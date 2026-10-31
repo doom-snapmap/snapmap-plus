@@ -532,6 +532,9 @@ int sh_prefab_mods_record(const char *text, size_t len, const char *path, char *
     if (!path || !path[0] || !text || !len) return -1;
     engine = sh_prefab_mods_strip_copy(text, len, &elen);
     if (!engine) return -1;
+    /* The file Create writes is plain JSON (the host removes the serializer's
+     * comments before it writes; a text that still has them loses them here). */
+    elen = sh_prefab_block_strip_comments(engine, elen);
     n = sh_prefab_mods_closure(engine, elen, &rows);
     if (n < 0) {
         pm_logf("PREFABS: %s: the prefab's mods could not be read; the file is left as the engine wrote it", path);

@@ -149,10 +149,12 @@ char *sh_prefab_mods_read_file(const char *path_acp, size_t *len);
 /* Write a file through a temporary beside it. 1 written. */
 int   sh_prefab_mods_write_file(const char *path_acp, const char *data, size_t len);
 
-/* Create: `text` is the prefab the engine just serialized to `path`. The
- * closure over it goes into a fresh block, written into the file. *view_out
- * (optional, malloc'd) receives the view written. Returns the row count, -1
- * when nothing could be recorded (the file is left as the engine wrote it). */
+/* Create: `text` is the prefab the engine just serialized to `path` (the host
+ * has removed its comments, sh_prefab_block_strip_comments; any left are
+ * removed here). The closure over it goes into a fresh block, written into
+ * the file with the plain JSON. *view_out (optional, malloc'd) receives the
+ * view written. Returns the row count, -1 when nothing could be recorded
+ * (the file is left as the host wrote it). */
 int   sh_prefab_mods_record(const char *text, size_t len, const char *path, char **view_out);
 
 /* A module prefab's save: the cut file `prefab` with a block composed from its

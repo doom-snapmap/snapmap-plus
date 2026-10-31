@@ -7,6 +7,10 @@
  *     engine's exact bytes (formatting, comments, an empty object, a first
  *     member), found in a tail, a text that is not an object refused; a view
  *     composed into a block and read back;
+ *   comments: the serializer's comments removed outside strings (strings
+ *     holding comment openers, escaped quotes and backslashes, comments that
+ *     look nested, line comments, an unterminated one), and Create's file
+ *     written as plain JSON with its block;
  *   recording: Create writes an object prefab's closure (one row naming the
  *     bundle that provides its inherit, stock names nothing) into the file's
  *     block and no sidecar; description and tag edits rewrite the block and
@@ -364,6 +368,72 @@ static void block(void)
         CHECK(v && !strcmp(v, "{\"desc\":\"\",\"tags\":[]}"));
         free(b); free(v);
         CHECK(sh_prefab_mods_block_view("[]", 2, NULL) == NULL);
+    }
+}
+
+static void comments(const char *lib)
+{
+    size_t n;
+    printf("-- comments: the serializer's comments go, strings keep every byte\n");
+    {
+        char t[] = "{/*camera yaw*/\n   \"cameraYaw\" : 280.5,/*entities*/\n   \"entities\" : [\n      {/*custom icon*/\n"
+                   "         \"x\" : 1\n      }\n   ]\n}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\n   \"cameraYaw\" : 280.5,\n   \"entities\" : [\n      {\n         \"x\" : 1\n      }\n   ]\n}") &&
+              n == strlen(t));
+    }
+    {
+        /* Comment openers inside strings, an escaped quote, and an escaped
+         * backslash right before a string's closing quote. */
+        char t[] = "{\"a\":\"x /* not */ y // nor\",\"b\":\"q\\\"/*s*/\",\"c\":\"\\\\\"/*gone*/,\"d\":\"http://h/*p*/\"}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\"a\":\"x /* not */ y // nor\",\"b\":\"q\\\"/*s*/\",\"c\":\"\\\\\",\"d\":\"http://h/*p*/\"}") &&
+              n == strlen(t));
+    }
+    {
+        /* Comments do not nest: one ends at the first star-slash after it. */
+        char t[] = "{/* a /* b */\"k\":1/* c // d */,/* e */ /* f */\"m\":[/**/]}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\"k\":1, \"m\":[]}") && n == strlen(t));
+    }
+    {
+        char t[] = "{/* a /* b */ */\"k\":1}";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{ */\"k\":1}"));
+    }
+    {
+        /* A line comment ends before its newline; a block opener inside it is not one. */
+        char t[] = "{// line /* not a block\r\n\"k\":1,// x\n\"m\":2/2}// end";
+        n = sh_prefab_block_strip_comments(t, sizeof t - 1);
+        CHECK(!strcmp(t, "{\n\"k\":1,\n\"m\":2/2}") && n == strlen(t));
+    }
+    {
+        char t[] = "{\"k\":1}/* never closed";
+        char u[] = "{\"k\":\"open string /* kept";
+        char v[] = "{\"k\":1}";
+        CHECK(sh_prefab_block_strip_comments(t, sizeof t - 1) == 7 && !strcmp(t, "{\"k\":1}"));
+        CHECK(sh_prefab_block_strip_comments(u, sizeof u - 1) == sizeof u - 1 && !strcmp(u, "{\"k\":\"open string /* kept"));
+        CHECK(sh_prefab_block_strip_comments(v, sizeof v - 1) == sizeof v - 1 && !strcmp(v, "{\"k\":1}"));
+        CHECK(sh_prefab_block_strip_comments(NULL, 4) == 0 && sh_prefab_block_strip_comments(v, 0) == 0);
+    }
+
+    printf("-- Create's file is plain JSON: a commented serializer text is written without its comments\n");
+    {
+        static const char COMMENTED[] =
+            "{/*camera yaw*/\"cameraYaw\":0,/*entities*/\"entities\":["
+            "{/*in editor display name*/\"displayName\":\"Door\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/test.door/door\",\"name\":\"\"}},"
+            "{\"displayName\":\"Crate\",\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"snapmaps/props/new/crate01\",\"name\":\"\"}}],"
+            "/*grab distance*/\"grabDistance\":256,\"~type\":\"idSnapEntityPrefab\"}";
+        char p[MAX_PATH * 2], *text;
+        size_t len = 0;
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\Commented.json", lib);
+        CHECK(put_file(p, COMMENTED));
+        CHECK(sh_prefab_mods_record(COMMENTED, sizeof COMMENTED - 1, p, NULL) == 1);
+        text = slurp(p, &len);
+        CHECK(text && !strstr(text, "/*") && strstr(block_of(text, len), "\"mods\":[{\"id\":\"test.door\""));
+        CHECK(engine_bytes_are(p, OBJECT_PREFAB));
+        free(text);
+        DeleteFileA(p);
     }
 }
 

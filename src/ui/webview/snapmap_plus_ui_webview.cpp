@@ -901,6 +901,16 @@ static void poc_apply_create_prefab()
             return;
         }
     }
+    /* A prefab file is plain JSON: the serializer's comments before each member go
+     * (backend/prefab_block.h); readers still skip them in files earlier builds wrote. */
+    {
+        size_t before = (size_t)n;
+        n = (int)sh_prefab_block_strip_comments(buf, before);
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: comments removed, %lu byte(s) -> %lu",
+                    (unsigned long)before, (unsigned long)n);
+        poc_log(l);
+    }
     FILE *fp = nullptr;
     if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
     fwrite(buf, 1, (size_t)n, fp);
