@@ -2112,8 +2112,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     return s;
   }
-  function tlArgLabel(argSchema) {
-    if (!argSchema) return '(unknown arg)';
+  // The catalogue arrives after the first render of a timeline (it is requested
+  // then), so the 'events' handler renders the open timeline again with it.
+  function tlSetEventCatalog(items) {
+    var byName = {};
+    for (var i = 0; i < (items || []).length; i++) byName[items[i].name] = items[i];
+    return byName;
+  }
+  function tlArgLabel(argSchema, argVal) {
+    if (!argSchema) {
+      // No catalogue entry (yet): the stored value's key is its type.
+      var keys = (argVal && typeof argVal === 'object') ? Object.keys(argVal) : [];
+      return keys.length === 1 ? keys[0] + '  (not in the event catalogue)' : '(unknown arg)';
+    }
     var nm = (argSchema.name && argSchema.name.length) ? argSchema.name : argSchema.type;
     return nm + '  (' + argSchema.type + ')';
   }
@@ -2121,7 +2132,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Use delegated listeners because event rows are replaced on each rebuild.
   function tlRenderArgRow(argSchema, argIdx, argVal, tabEntitySlug) {
     var kind = argSchema ? tlClassifyArg(argSchema.type) : 'unknown';
-    var label = esc(tlArgLabel(argSchema));
+    var label = esc(tlArgLabel(argSchema, argVal));
     // Per-entity asset choices take precedence over the normal widget; empty choices fall through.
     var asset = tlAssetCategoryFor(argSchema, tabEntitySlug);
     if (asset) {
@@ -3086,10 +3097,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       onPreviewRequested(d);
     } else if (d.kind === 'events') {
       eventItems = d.items || [];
-      eventCatalogByName = {};
-      for (var evi = 0; evi < eventItems.length; evi++) eventCatalogByName[eventItems[evi].name] = eventItems[evi];
+      eventCatalogByName = tlSetEventCatalog(eventItems);
+      // A timeline opened before the catalogue came rendered its arguments without names.
+      if (tlModel) renderTlBody();
     } else if (d.kind === 'eventDocs') {
-      // New description data is used the next time the box opens or renders.
+      // New description data is used the next time the box opens or renders (the open timeline now).
       var docItems = d.items || [];
       eventDocsByName = {};
       for (var edi = 0; edi < docItems.length; edi++) {
@@ -3099,6 +3111,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         for (var eda = 0; eda < itArgs.length; eda++) argMap[itArgs[eda].name] = itArgs[eda].desc;
         eventDocsByName[it.name] = { summary: it.summary, confidence: it.confidence, source: it.source, args: argMap };
       }
+      if (tlModel) renderTlBody();
     } else if (d.kind === 'argResclass') {
       argResclassCache[d.resClass] = d.items || [];
       // New choices are used the next time this dropdown opens.

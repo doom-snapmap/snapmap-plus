@@ -53,7 +53,8 @@ new Function('api', 'catalog',
   ' function post(){} function esc(s){ return String(s); } function iconSvg(){ return ""; } function isFilterUtilityEntity(){ return false; }' +
   src.slice(begin, end) +
   '\napi.setModel = function(m){ tlModel = m; }; api.setEntities = function(e){ allEntities = e; };' +
-  ' api.patch = tlBuildPatchedEntityJson; api.parse = parseTimeline; api.defaultArg = tlDefaultArgValue;')(api,
+  ' api.patch = tlBuildPatchedEntityJson; api.parse = parseTimeline; api.defaultArg = tlDefaultArgValue;' +
+  ' api.setCatalog = tlSetEventCatalog; api.label = tlArgLabel;')(api,
   { forcePraetorHandsAndBody: fphb, spawnSingleAI: spawn });
 
 /* A timeline as the Timeline tile places it: snapmaps/unknown, class idTarget_Timeline, no component. */
@@ -95,6 +96,35 @@ const reopened = api.parse(95, JSON.stringify(patched));
 check(reopened.ok && reopened.tabs.length === 1 && reopened.tabs[0].entity === 'player1', 'reopen keeps the target');
 check(reopened.tabs[0].events[0].eventDef === 'forcePraetorHandsAndBody' && reopened.tabs[0].events[0].time === 0 &&
       JSON.stringify(reopened.tabs[0].events[0].args) === '[{"bool":true}]', 'reopen keeps the event and its argument');
+
+/* Argument labels: every event whose catalogue entry names a bool argument is labelled with that name once
+ * the catalogue is loaded (forcePraetorHandsAndBody's 'force' read "(unknown arg)" when the timeline was
+ * rendered before the catalogue arrived), and the page renders the open timeline again when it arrives. */
+{
+  const names = [];
+  const rowRe = /^ {4}\{ "([^"\n]+)", \d+, (?:SH_EVT_A_\d+|0) \},\r?$/mg;
+  let m;
+  while ((m = rowRe.exec(catalog)) !== null) names.push(m[1]);
+  const byName = api.setCatalog(names.map(catalogEntry));
+  let bools = 0, wrong = [];
+  for (const n of names) {
+    const def = byName[n];
+    def.args.forEach((a, i) => {
+      if (a.type !== 'bool' || !a.name) return;
+      bools++;
+      const label = api.label(def.args[i], { bool: true });
+      if (label !== a.name + '  (bool)') wrong.push(n + ': ' + label);
+    });
+  }
+  check(bools > 100 && wrong.length === 0, bools + ' named bool arguments labelled by name; wrong: ' + wrong.slice(0, 5).join('; '));
+  check(api.label(byName.forcePraetorHandsAndBody.args[0], { bool: true }) === 'force  (bool)', 'forcePraetorHandsAndBody labels its argument force');
+  check(api.label(undefined, { bool: true }) === 'bool  (not in the event catalogue)' && api.label(undefined, undefined) === '(unknown arg)',
+        'without a catalogue entry the stored type names the argument');
+  const handler = src.slice(src.indexOf("} else if (d.kind === 'events') {"), src.indexOf("} else if (d.kind === 'argResclass') {"));
+  check(/eventCatalogByName = tlSetEventCatalog\(eventItems\);\s*\/\/[^\n]*\n\s*if \(tlModel\) renderTlBody\(\);/.test(handler),
+        'the events handler renders the open timeline again');
+  check((handler.match(/if \(tlModel\) renderTlBody\(\);/g) || []).length === 2, 'so does the event-docs handler');
+}
 
 /* --emit <entity.json>: print the patch the tab's Save sends for the forcePraetorHandsAndBody model. */
 /* The Runs on note: player targets are flagged, map entities and empty values are not. */

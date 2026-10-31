@@ -1167,7 +1167,7 @@ static void test_requirements_general(void)
     CHECK(strstr(g_report, "requirements: d.same@1.0.0: cvar g_label=two words: live\n") != NULL);
     CHECK(strstr(g_report, "requirements: a.first@1.0.0: activate command \"echo first on\": ran\n") != NULL);
     CHECK(strstr(g_report, "requirements: a.first@1.0.0: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
-    CHECK(strstr(g_report, "requirements: b.second@1.0.0: cvar com_maxFps=60: NOT live (com_maxFps=60 lost to a.first@1.0.0") != NULL);
+    CHECK(strstr(g_report, "requirements: b.second@1.0.0: cvar com_maxFps=60: refused (com_maxFps=60 lost to a.first@1.0.0") != NULL);
     CHECK(strstr(g_report, "requirements: b.second@1.0.0: activate command \"echo second on\": not run") != NULL);
     CHECK(strstr(g_report, "requirements: c.locked@1.0.0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
     CHECK(strstr(g_report, "requirements: e.lines@1.0.0: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
@@ -2060,6 +2060,118 @@ static void test_scope(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* Lane P31: a shadow path is served when any provider the open map lists
+ * provides it, also when the winner's bundle is not listed (two installs of
+ * the same bytes, a renamed or forked copy), and requirement lines say each
+ * bundle's own state for the open map. */
+static void test_scope_providers(void)
+{
+    static const fx_file bare[] = { { SC_COOP, "entityDef coop { bare }", -1, "entityDef", "player/coop", NULL, '9' } };
+    static const fx_file one[] = { { SC_DECL, "entityDef rev { one }", -1, "entityDef", "monster/revenant", NULL, 'a' } };
+    static const fx_file two[] = { { SC_DECL, "entityDef rev { two! }", -1, "entityDef", "monster/revenant", NULL, 'b' } };
+    char top[MAX_PATH], root[MAX_PATH], h_req[65];
+    const char *list[2];
+    char *slash;
+    sh_modserve_hit hit;
+    sh_modserve_gates r;
+    sh_modserve_scope_info si;
+    scope_seen seen;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\scope2\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"r_fancy\": true}},\n  ";
+    make_bundle(root, "a.bare", "a.bare", "1.0.0", 'c', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "b.req", "b.req", "1.0.0", 'd', "\"" SC_COOP "\"", bare, 1, "{\"installedAt\": 200}");
+    hash64('d', h_req);
+    g_bundle_extra = NULL;
+    make_bundle(root, "x.one", "x.one", "1.0.0", 'e', "\"" SC_DECL "\"", one, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "y.two", "y.two", "1.0.0", 'f', "\"" SC_DECL "\"", two, 1, "{\"installedAt\": 200}");
+
+    printf("-- map scope: a shadow path is served by any provider the open map lists\n");
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 4);
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_lookup(SC_DECL, NULL));
+    CHECK(sh_modserve_lookup_indexed(SC_COOP, &hit) && !strcmp(hit.bundle_id, "a.bare"));   /* the winner */
+
+    /* Only b.req is listed (P27: alex.bare-hands-req attached, alex.bare-hands not): its copy serves, re-parsed now. */
+    list[0] = h_req;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 1);
+    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "b.req") && strstr(hit.disk_path, "b.req") != NULL);
+    CHECK(sh_modserve_open(SC_COOP, &bytes, &len) == 1 && len == strlen("entityDef coop { bare }") &&
+          !memcmp(bytes, "entityDef coop { bare }", len));
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    CHECK(sh_modserve_probe_claims(SC_COOP) == 1);
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "b.req:player/coop:gone=0") != NULL);
+    CHECK(sh_modserve_bundle_scope(h_req, &si) && si.shadows == 1 && si.shadows_live);
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(strstr(g_report, "scope: b.req@1.0.0: map (1 shadow, requirements): active in the open map\n") != NULL);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[1], "1"));
+    g_report[0] = 0;
+    sh_modserve_requirements_report(report_line, NULL);
+    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: live\n") != NULL);
+    /* a.bare asks the same value but the map does not use it: not live for it. */
+    CHECK(strstr(g_report, "requirements: a.bare@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
+                           "the cvar has this value because b.req@1.0.0 asks it)\n") != NULL);
+    CHECK(!strstr(g_report, "a.bare@1.0.0: cvar r_fancy=1: live"));
+    /* Its gate is live now: the re-parse that waited for it runs. */
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "b.req:player/coop:gone=0:gates=1;") != NULL);
+
+    /* Moving the listing to the other copy of the same bytes changes nothing the engine holds. */
+    list[0] = "a.bare";
+    CHECK(sh_modserve_scope_set(NULL, 0, list, 1, 1) == 2);
+    CHECK(sh_modserve_lookup(SC_COOP, &hit) && !strcmp(hit.bundle_id, "a.bare"));
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(!strstr(seen.order, "player/coop"));
+
+    /* Different bytes: the listed provider's own file serves; the winner when both are listed. */
+    list[0] = "x.one";
+    CHECK(sh_modserve_scope_set(NULL, 0, list, 1, 1) >= 1);
+    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "x.one"));
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "x.one:monster/revenant:gone=0") && strstr(seen.order, "a.bare:player/coop:gone=1"));
+    list[0] = "x.one"; list[1] = "y.two";
+    CHECK(sh_modserve_scope_set(NULL, 0, list, 2, 1) >= 1);
+    CHECK(sh_modserve_lookup(SC_DECL, &hit) && !strcmp(hit.bundle_id, "y.two"));   /* installed most recently */
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "y.two:monster/revenant:gone=0") != NULL);   /* other bytes: read again */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 1 && !sh_modserve_lookup(SC_DECL, NULL));
+
+    /* The requirement lines after the map stops using the mods, then after it closes. */
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 0 && !strcmp(g_text_val[1], "0"));
+    g_report[0] = 0;
+    sh_modserve_requirements_report(report_line, NULL);
+    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
+                           "restored: the cvar is back at the value it displaced)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: a.bare@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it)\n") != NULL);
+    CHECK(!strstr(g_report, "not applied yet") && !strstr(g_report, ": live"));
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    g_report[0] = 0;
+    sh_modserve_requirements_report(report_line, NULL);
+    CHECK(strstr(g_report, "requirements: b.req@1.0.0: cvar r_fancy=1: not active for this map (no map is open; restored") != NULL);
+
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -2087,6 +2199,7 @@ int main(void)
     test_watermark();
     test_bundle_extra();
     test_scope();
+    test_scope_providers();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

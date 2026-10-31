@@ -185,9 +185,13 @@ does not refuse, since the engine already tolerates those names.
   can opt out with `"scope": "always"` in its `mod.json` (`"map"` is the default; any other value is
   refused when it is built), and a mod without the key that replaces something the editor itself uses
   (an editor settings, palette or property-inspector decl, or the editor's own movies) is treated as
-  `always`, with one log line. A mod without the key keeps the bundle hash it had. `sh_mods status`,
-  `sh_mods doctor` and `sh_mods map` print each mod's scope and whether it is active in the open map.
-  A published map played from the hub keeps its mods applied until the next map opens.
+  `always`, with one log line. A mod without the key keeps the bundle hash it had. When two installed
+  mods replace the same file (a renamed or forked copy, for example), a map that uses either one gets
+  the replacement, from the mod it uses. Opening the Settings screen from the editor's Start menu keeps
+  the map's mods applied. `sh_mods status`, `sh_mods doctor` and `sh_mods map` print each mod's scope
+  and whether it is active in the open map, and `sh_mods doctor` prints which mod serves each replaced
+  file for the open map. A published map played from the hub keeps its mods applied until the next map
+  opens.
 - A saved map records each mod a placed entity needs as one `smpmod1.` string variable, and the
   next load activates exactly those mods. A mod can also be used by the whole map without placing
   anything (the Mods tab's **Use in this map**, `sh_mods map add "<id>"`), for a mod that only replaces
@@ -238,7 +242,8 @@ does not refuse, since the engine already tolerates those names.
   `activate` lines run once when the mod's requirements start, the `deactivate` lines when they stop.
   A cvar the game refuses (read-only, or settable only on the command line) or does not have is
   logged, the mod's content stays unloaded, and `sh_mods status` and `sh_mods doctor` show each
-  requirement and whether it is live. When two mods ask different values for one cvar the later
+  requirement's state for that mod: live, not active for this map (also when another mod holds the
+  same value), refused with the reason, or restored after it stopped. When two mods ask different values for one cvar the later
   install loses, both are named in the log, and none of its requirements apply. The Mods tab lists
   them under Requirements.
 - A mod's `hud` setting chooses how the ammo panel shows a weapon: `"ammo_display": "weapon"` for a

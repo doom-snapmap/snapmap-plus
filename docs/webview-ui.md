@@ -305,8 +305,12 @@ build 13954591 lists the same 1611 events and argument types as the live registr
 the engine's `"\neventHandle_t eventDef"` key and each argument keyed by its type in
 signature order. `tlRuntimeTargetNote` shows a note under **Runs on** when the target is
 `player1` to `player8`, because a timeline resolves its targets when the map starts, before
-any player exists. `tests/timeline_eventcall_test.js` lifts these functions from the page
-and checks the saved shape, the reopen and the note.
+any player exists. The page asks for the catalogue (and the event docs) when the first
+timeline opens and renders that timeline before they arrive, so the `events` and
+`eventDocs` handlers render the open timeline again; until then an argument is labelled by
+its stored type ("bool  (not in the event catalogue)"). `tests/timeline_eventcall_test.js`
+lifts these functions from the page and checks the saved shape, the reopen, the note and
+that every named bool argument is labelled by its catalogue name.
 
 ## Driving the page from a test
 

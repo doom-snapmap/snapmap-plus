@@ -1385,6 +1385,24 @@ static int ie_mods_busy(char *cause, size_t cap)
     return 0;
 }
 
+/* The map scope's exit test (modui.h map_left), asked while the editor
+ * screen is down. Leaving the map for the hub or the browser stops the
+ * editor's state machine (editor+0x23618 reads 0, the test editor_frame.c's
+ * reload makes), and an exit passes through state 8; a menu screen opened
+ * from the Start menu (Settings) leaves the state running. The loaded-map
+ * pointer persists in the hub, so it decides nothing alone. */
+#define IE_EDITOR_STATE_EXITING 8
+static int ie_mods_map_left(void)
+{
+    void *map = NULL;
+    int state = 0;
+    if (!g_editor) return -1;
+    if (!ie_read_ptr(g_editor + ED_MAP_OBJ_OFF, &map)) return -1;
+    if (!map) return 1;
+    if (!ie_read_s32(g_editor + ED_ENTITY_MODE_OFF, &state)) return -1;
+    return state == 0 || state == IE_EDITOR_STATE_EXITING ? 1 : 0;
+}
+
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
@@ -1466,6 +1484,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         mods.entity_valid    = ie_mods_entity_valid;
         mods.toast           = ie_mods_toast;
         mods.print           = ie_mods_print;
+        mods.map_left        = ie_mods_map_left;
         sh_modui_bind(&mods);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */

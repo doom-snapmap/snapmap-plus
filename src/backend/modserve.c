@@ -54,6 +54,12 @@ typedef struct ms_file {
     volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
     volatile LONG refresh_new;            /* a new gameplay decl of a mod this session registered: register it now */
+    /* Map scope: the other providers of a shadow path, in winner order
+     * (x->alts), so a path whose winner the open map does not list is served
+     * by a provider it does list. */
+    int alt_first, alt_count;             /* a winner's alternates */
+    int alt_of;                           /* an alternate's winner, or -1 */
+    volatile LONG scope_alt;              /* a withdrawn winner's serving alternate for the listing, or -1 */
 } ms_file;
 
 /* One path several bundles provide with different bytes, and what serves it. */
@@ -108,6 +114,7 @@ typedef struct ms_index {
     ms_slot *slots; uint32_t mask; int nkeys;
     ms_slot *pslots; uint32_t pmask;
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
+    int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
     struct { const char *from, *to; } *aliases; int naliases;         /* dropped copy's hash -> kept bundle's hash */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
@@ -184,7 +191,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
-    free(x->aliases); free(x->gone);
+    free(x->aliases); free(x->gone); free(x->alts);
     free(x);
 }
 
@@ -1537,6 +1544,29 @@ static int ms_conflict_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, ((const ms_conflict *)b)->request);
 }
 
+/* Map scope: the other providers of a shadow path, recorded on its winner in
+ * the order the winner rules rank them (`ordered`, different bytes) or in
+ * index order (identical bytes), so that a provider the open map lists can
+ * serve the path while the winner's bundle is withdrawn (ms_scope_compute).
+ * Without memory the path keeps only its winner. */
+static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, int winner, int ordered)
+{
+    ms_key rest[64];
+    int k, m = 0;
+    for (k = i; k < j && m < 64; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
+    if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) return;
+    x->files[winner].alt_first = x->nalts;
+    x->files[winner].alt_count = m;
+    while (m > 0) {
+        const char *why = NULL;
+        int b = ordered && av && m > 1 ? ms_pick(x, av, rest, 0, m, &why) : 0;
+        x->alts[x->nalts++] = rest[b].file;
+        x->files[rest[b].file].alt_of = winner;
+        memmove(&rest[b], &rest[b + 1], sizeof *rest * (size_t)(m - b - 1));
+        m--;
+    }
+}
+
 /* Decide which files serve their request path. Returns 0 on allocation failure. */
 static int ms_resolve(ms_index *x)
 {
@@ -1544,7 +1574,7 @@ static int ms_resolve(ms_index *x)
     int i, n = 0, logged = 0, avail_built = 0;
     int *superseded_by;
     ms_avail avail = { NULL, 0 };
-    x->conflicts = x->composed = x->nconflict_list = 0;
+    x->conflicts = x->composed = x->nconflict_list = x->nalts = 0;
     keys = (ms_key *)malloc(sizeof(ms_key) * (size_t)(x->nfiles ? x->nfiles : 1));
     superseded_by = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
     if (!keys || !superseded_by) { free(keys); free(superseded_by); return 0; }
@@ -1553,6 +1583,9 @@ static int ms_resolve(ms_index *x)
         x->files[i].served = 0;
         x->files[i].body = NULL;
         x->files[i].body_len = 0;
+        x->files[i].alt_first = x->files[i].alt_count = 0;
+        x->files[i].alt_of = -1;
+        x->files[i].scope_alt = -1;
         if (x->bundles[x->files[i].bundle].admitted) { keys[n].key = x->files[i].request; keys[n].file = i; keys[n].alias = 0; n++; }
     }
     qsort(keys, (size_t)n, sizeof *keys, ms_key_cmp);
@@ -1581,6 +1614,7 @@ static int ms_resolve(ms_index *x)
         }
         if (j - i == 1 || same_blob) {
             x->files[winner].served = 1;
+            if (j - i > 1 && any_shadow) ms_record_alts(x, NULL, keys, i, j, winner, 0);
         } else if (same_id) {
             /* Two installed versions of one mod: the most recently installed serves. */
             for (k = i + 1; k < j; ++k)
@@ -1647,6 +1681,7 @@ static int ms_resolve(ms_index *x)
                 for (q = 0; q < nt; ++q) if (owned[q]) HeapFree(GetProcessHeap(), 0, owned[q]);
             }
             x->files[winner].served = 1;
+            if (any_shadow) ms_record_alts(x, &avail, keys, i, j, winner, 1);
             if (composed) {
                 x->composed++;
                 _snprintf_s(how, sizeof how, _TRUNCATE, "composed: %d list entr%s of the other providers added to %s@%s's text",
@@ -1819,6 +1854,19 @@ static void ms_resolve_needs(ms_index *x)
 
 /* ------------------------------------------------------------------ build and publish */
 
+/* Map scope: the file that serves winner `f`'s path for the current listing.
+ * A shadow of a bundle the open map does not list is served by the first of
+ * its other providers the map lists (scope_alt), else by nobody (-1: the
+ * game's bytes answer). Read lock-free. */
+static int ms_scoped(const ms_index *x, int f)
+{
+    const ms_file *w = &x->files[f];
+    if (!w->is_shadow || w->is_restore ||
+        !InterlockedCompareExchange((volatile LONG *)&x->bundles[w->bundle].shadows_off, 0, 0))
+        return f;
+    return (int)InterlockedCompareExchange((volatile LONG *)&w->scope_alt, 0, 0);
+}
+
 /* Two files of successive tables that serve the same bytes. */
 static int ms_same_bytes(const ms_file *a, const ms_file *b)
 {
@@ -1889,7 +1937,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
                 d->added_decls++;
                 if (f->is_sedef) d->added_rows++;
                 else if (ms_id_registered(old, x->bundles[f->bundle].id)) { f->refresh_new = 1; d->added_active++; }
-            } else if (f->is_shadow && !x->bundles[f->bundle].shadows_off) {
+            } else if (f->is_shadow && ms_scoped(x, i) >= 0) {
                 /* A shadow the previous table did not serve replaces a stock
                  * file the engine may already hold parsed from its own bytes
                  * (a mod installed after boot, or reinstalled after an
@@ -1914,7 +1962,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (f->is_sedef) d->changed_rows++;
         kind = ms_kind(f);
         /* A withdrawn shadow's new bytes are read when a map that uses it opens. */
-        if (kind && f->ptype && f->pname && !(f->is_shadow && x->bundles[f->bundle].shadows_off)) f->refresh = 1;
+        if (kind && f->ptype && f->pname && !(f->is_shadow && ms_scoped(x, i) < 0)) f->refresh = 1;
         if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
         else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
         else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
@@ -1929,7 +1977,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (n >= 0 && x->files[n].served) continue;
         d->gone++;
         /* A shadow the map scope had withdrawn: the engine holds the game's bytes already. */
-        if (of->is_shadow && !of->is_restore && old->bundles[of->bundle].shadows_off) continue;
+        if (of->is_shadow && !of->is_restore && ms_scoped(old, i) < 0) continue;
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
@@ -1983,7 +2031,9 @@ static int ms_scope_compute(ms_index *x, int mark)
 {
     int i, k, changed = 0, marked = 0, on = InterlockedCompareExchange(&g_scope_on, 0, 0) != 0;
     int open = InterlockedCompareExchange(&g_scope_open, 0, 0) != 0;
+    LONG *was_off;
     if (!x) return 0;
+    was_off = (LONG *)calloc((size_t)x->nbundles + 1, sizeof *was_off);
     for (i = 0; i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
         LONG soff, roff, was_s, was_r;
@@ -1994,16 +2044,34 @@ static int ms_scope_compute(ms_index *x, int mark)
         roff = soff && !(open && b->has_rows);
         was_s = InterlockedExchange(&b->shadows_off, soff);
         was_r = InterlockedExchange(&b->req_off, roff);
+        if (was_off) was_off[i] = was_s;
         if (was_s != soff || was_r != roff) changed++;
-        if (!mark || was_s == soff) continue;
-        for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
-            ms_file *f = &x->files[k];
-            if (!f->is_shadow || f->is_restore || !f->served || !ms_kind(f) || !f->ptype || !f->pname) continue;
-            InterlockedExchange(&f->refresh_gen, 0);
-            InterlockedExchange(&f->refresh, 1);
-            marked++;
-        }
     }
+    /* Each shadow path: which provider serves it now, and whether the bytes
+     * the engine should hold changed (pending, generation 0, with the
+     * inheritance closure computed again). A withdrawn winner's path is
+     * served by the first alternate the listing admits. */
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        LONG alt = -1, was_alt;
+        int before, after;
+        if (!f->served || !f->is_shadow || f->is_restore || !x->bundles[f->bundle].admitted) continue;
+        if (InterlockedCompareExchange(&x->bundles[f->bundle].shadows_off, 0, 0))
+            for (k = 0; k < f->alt_count && alt < 0; ++k) {
+                int a = x->alts[f->alt_first + k];
+                if (!InterlockedCompareExchange(&x->bundles[x->files[a].bundle].shadows_off, 0, 0)) alt = a;
+            }
+        was_alt = InterlockedExchange(&f->scope_alt, alt);
+        if (!mark || !was_off) continue;
+        before = was_off[f->bundle] ? (int)was_alt : i;
+        after = ms_scoped(x, i);
+        if (before == after || (before >= 0 && after >= 0 && ms_same_bytes(&x->files[before], &x->files[after]))) continue;
+        if (!ms_kind(f) || !f->ptype || !f->pname) continue;
+        InterlockedExchange(&f->refresh_gen, 0);
+        InterlockedExchange(&f->refresh, 1);
+        marked++;
+    }
+    free(was_off);
     if (marked) InterlockedExchange(&x->expanded, 0);
     return changed;
 }
@@ -2103,7 +2171,8 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     ReleaseSRWLockShared(&g_scope_lock);
     out->map_open = sh_modserve_scope_map_open();
     for (k = b->first_file; k < b->first_file + b->file_count; ++k)
-        if (x->files[k].is_shadow && !x->files[k].is_restore && x->files[k].served) out->shadows++;
+        if (x->files[k].is_shadow && !x->files[k].is_restore && (x->files[k].served || x->files[k].alt_of >= 0))
+            out->shadows++;
     out->shadows_live = !InterlockedCompareExchange((volatile LONG *)&b->shadows_off, 0, 0);
     out->requirements = b->req_text && (b->req_ncvars || b->req_nact || b->req_ndeact);
     out->requirements_live = out->requirements && !b->req_lost &&
@@ -2297,10 +2366,9 @@ static const ms_file *ms_lookup_file_ex(const ms_index **out_index, const char *
     __try { f = ms_find(x->slots, x->mask, request); }
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
     if (f < 0 || x->files[f].withdrawn) return NULL;
-    /* Map scope: a shadow of a bundle the current map does not list is withdrawn. */
-    if (scoped && x->files[f].is_shadow && !x->files[f].is_restore &&
-        InterlockedCompareExchange((volatile LONG *)&x->bundles[x->files[f].bundle].shadows_off, 0, 0))
-        return NULL;
+    /* Map scope: a shadow path whose providers the current map does not list
+     * is withdrawn; one it lists serves when the winner's bundle is not. */
+    if (scoped && (f = ms_scoped(x, f)) < 0) return NULL;
     if (out_index) *out_index = x;
     return &x->files[f];
 }
@@ -3191,6 +3259,29 @@ static ms_held *g_held;
 static int g_nheld, g_cheld;
 static ms_active *g_active;
 static int g_nactive, g_cactive;
+/* Ids whose requirements ran and then stopped (the map scope withdrew them,
+ * or they were removed), until they start again: the report says "restored"
+ * instead of "not applied yet". */
+static char (*g_stopped)[100];
+static int g_nstopped, g_cstopped;
+
+static int ms_stopped_find(const char *id)
+{
+    int i;
+    for (i = 0; i < g_nstopped; ++i) if (!strcmp(g_stopped[i], id)) return i;
+    return -1;
+}
+
+static void ms_stopped_set(const char *id, int stopped)
+{
+    int i = ms_stopped_find(id);
+    if (!stopped) {
+        if (i >= 0) { memmove(&g_stopped[i], &g_stopped[i + 1], sizeof *g_stopped * (size_t)(g_nstopped - i - 1)); g_nstopped--; }
+        return;
+    }
+    if (i >= 0 || !ms_grow((void **)&g_stopped, &g_cstopped, g_nstopped + 1, sizeof *g_stopped)) return;
+    strncpy_s(g_stopped[g_nstopped++], sizeof *g_stopped, id, _TRUNCATE);
+}
 
 /* Accepted: admitted, not lost to an earlier install, and in scope for the
  * current map (modserve.h, map scope). */
@@ -3451,6 +3542,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
                g_active[i].ndeact ? "; running its deactivate commands" : "");
         for (k = 0; k < g_active[i].ndeact; ++k)
             r.commands += ms_req_line(ops, phase, g_active[i].id, g_active[i].deact[k]);
+        ms_stopped_set(g_active[i].id, 1);
         ms_active_drop(i);
     }
     if (!ops || !ops->read || !ops->set) {
@@ -3595,6 +3687,7 @@ finish:
             a = &g_active[g_nactive++];
             memset(a, 0, sizeof *a);
             strncpy_s(a->id, sizeof a->id, b->id, _TRUNCATE);
+            ms_stopped_set(b->id, 0);
             if (b->req_nact) ms_log("%s: requirements of %s@%s start; running its activate commands", phase, b->id, b->version);
             for (k = 0; k < b->req_nact; ++k) ran += ms_req_line(ops, phase, b->id, b->req_act[k]);
             r.commands += ran;
@@ -3683,17 +3776,36 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
     for (i = 0; x && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         const ms_active *a;
+        int off, stopped;
+        const char *scope_why;
         if (!b->admitted || !b->req_text || (!b->req_ncvars && !b->req_nact && !b->req_ndeact)) continue;
         any = 1;
         a = ms_active_find(b->id);
+        /* Each line is this bundle's own state for the open map: another
+         * mod holding the same value does not make an inactive one live. */
+        off = !b->req_lost && InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
+        stopped = !a && ms_stopped_find(b->id) >= 0;
+        scope_why = sh_modserve_scope_map_open() ? "the open map does not use it" : "no map is open";
         for (k = 0; k < b->req_ncvars; ++k) {
             const ms_held *h = ms_held_find(b->req_cvars[k].name);
             const char *state;
-            char why[200];
-            if (b->req_lost) state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", b->req_lost);
-            else if (!h || !h->needed || !ms_req_same(h->want, b->req_cvars[k].value)) state = "not applied yet", strcpy_s(why, sizeof why, " (no registration pass since it was installed)");
+            char why[300];
+            if (b->req_lost) state = "refused", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", b->req_lost);
+            else if (off) {
+                state = "not active for this map";
+                if (h && h->needed && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value))
+                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; the cvar has this value because %s asks it)", scope_why,
+                                h->owner);
+                else if (h && h->owned && !h->needed)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; restored to \"%.120s\" at the next editor pass or map load)",
+                                scope_why, h->original);
+                else if (stopped)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; restored: the cvar is back at the value it displaced)",
+                                scope_why);
+                else _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", scope_why);
+            } else if (!h || !h->needed || !ms_req_same(h->want, b->req_cvars[k].value) || h->state == 0)
+                state = "not applied yet", strcpy_s(why, sizeof why, " (the next editor pass or map load applies it)");
             else if (h->state == 1) state = "live", why[0] = 0;
-            else if (h->state == 0) state = "not applied yet", strcpy_s(why, sizeof why, " (the next editor pass or map load applies it)");
             else state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; its steps are blocked)", h->why);
             _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: cvar %s=%s: %s%s", b->id, b->version,
                         b->req_cvars[k].name, b->req_cvars[k].value, state, why);
@@ -3701,15 +3813,18 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
             lines++;
         }
         for (k = 0; k < b->req_nact; ++k) {
+            const char *state = b->req_lost ? "not run (a cvar lost a conflict)"
+                              : a ? (k < a->act_ran ? "ran" : "NOT run")
+                              : off ? (stopped ? "ran, then stopped (not active for this map)" : "not run (not active for this map)")
+                              : "runs at the next editor pass or map load";
             _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: activate command \"%s\": %s", b->id, b->version,
-                        b->req_act[k], b->req_lost ? "not run (a cvar lost a conflict)" : a ? (k < a->act_ran ? "ran" : "NOT run")
-                        : "runs at the next editor pass or map load");
+                        b->req_act[k], state);
             fn(context, line);
             lines++;
         }
         for (k = 0; k < b->req_ndeact; ++k) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: deactivate command \"%s\": runs when the mod "
-                        "stops", b->id, b->version, b->req_deact[k]);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: deactivate command \"%s\": %s", b->id, b->version,
+                        b->req_deact[k], stopped ? "ran when it stopped" : "runs when the mod stops");
             fn(context, line);
             lines++;
         }
@@ -3744,6 +3859,7 @@ void sh_modserve_test_reset_gates(void)
     AcquireSRWLockExclusive(&g_req_lock);
     for (i = g_nactive - 1; i >= 0; --i) ms_active_drop(i);
     g_nheld = 0;
+    g_nstopped = 0;
     ReleaseSRWLockExclusive(&g_req_lock);
 }
 unsigned sh_modserve_test_gates_owned(void)
@@ -4056,15 +4172,16 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
     if (!x || !fn) return 0;
     for (rank = 0; rank <= 3; ++rank)
         for (i = 0; i < x->nfiles; ++i) {
-            ms_file *f = (ms_file *)&x->files[i];
+            ms_file *f = (ms_file *)&x->files[i], *ef;
+            int eff;
             if (f->rank != rank || !f->is_decl || !f->is_shadow || f->is_restore || !f->served || f->withdrawn ||
-                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname ||
-                InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].shadows_off, 0, 0))
+                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname || (eff = ms_scoped(x, i)) < 0)
                 continue;
-            if (InterlockedCompareExchange(&f->reparse_tried, 0, 0) || !ms_stale(x, f)) continue;
+            ef = (ms_file *)&x->files[eff];   /* the provider that serves the path for the open map */
+            if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_stale(x, ef)) continue;
             visited++;
-            if (fn(context, f->ptype, f->pname, f->request, x->bundles[f->bundle].id) == 1)
-                InterlockedExchange(&f->reparse_tried, 1);
+            if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)
+                InterlockedExchange(&ef->reparse_tried, 1);
         }
     return visited;
 }
@@ -4077,17 +4194,18 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
     int i, visited = 0;
     if (!x || !fn) return 0;
     for (i = 0; i < x->nfiles; ++i) {
-        ms_file *f = (ms_file *)&x->files[i];
+        ms_file *f = (ms_file *)&x->files[i], *ef;
+        int eff;
         if (f->is_decl || !f->served || f->withdrawn || !x->bundles[f->bundle].admitted || !f->ptype || !f->pname ||
-            (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")) ||
-            (f->is_shadow && !f->is_restore && InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].shadows_off, 0, 0)))
+            (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")) || (eff = ms_scoped(x, i)) < 0)
             continue;
-        if (InterlockedCompareExchange(&f->reparse_tried, 0, 0) || !InterlockedCompareExchange(&f->opened_ungated, 0, 0) ||
-            !ms_gates_live_for(x, f))
+        ef = (ms_file *)&x->files[eff];
+        if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
+            !ms_gates_live_for(x, ef))
             continue;
         visited++;
-        if (fn(context, f->ptype, f->pname, f->request, x->bundles[f->bundle].id) == 1)
-            InterlockedExchange(&f->reparse_tried, 1);
+        if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)
+            InterlockedExchange(&ef->reparse_tried, 1);
     }
     return visited;
 }
@@ -4205,15 +4323,20 @@ static int ms_gates_ok(const ms_index *x, const ms_file *f)
 static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_refresh_fn fn, void *context)
 {
     sh_modserve_refresh_item it;
-    it.type = f->ptype; it.name = f->pname; it.request = f->request; it.bundle_id = x->bundles[f->bundle].id;
+    int eff = ms_scoped(x, (int)(f - x->files));
+    const ms_file *ef = eff >= 0 ? &x->files[eff] : f;   /* the provider serving the path for the open map */
+    it.type = f->ptype; it.name = f->pname; it.request = f->request; it.bundle_id = x->bundles[ef->bundle].id;
     /* A shadow the map scope withdrew goes back to the game's bytes, which need no gate. */
     it.kind = kind; it.shadow = f->is_shadow;
-    it.gone = f->is_shadow && !f->is_restore && InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].shadows_off, 0, 0);
-    it.gates_live = it.gone ? 1 : ms_gates_ok(x, f);
+    it.gone = eff < 0;
+    it.gates_live = it.gone ? 1 : ms_gates_ok(x, ef);
     if (fn(context, &it) == 1) {
         InterlockedExchange(&f->refresh, 0);
         /* What the engine holds is settled: not an early decl. */
-        if (kind == SH_MODSERVE_RF_DECL) InterlockedExchange(&f->reparse_tried, 1);
+        if (kind == SH_MODSERVE_RF_DECL) {
+            InterlockedExchange(&f->reparse_tried, 1);
+            if (eff >= 0) InterlockedExchange((volatile LONG *)&x->files[eff].reparse_tried, 1);
+        }
     }
     return 1;
 }

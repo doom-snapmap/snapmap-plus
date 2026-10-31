@@ -109,6 +109,12 @@ typedef struct sh_modui_engine {
      * sh_modserve_scope_apply; none in a SH_MODUI_PURE build): 1 applied,
      * 0 nothing pending, -1 refused. Main thread. */
     int (*scope_apply)(const char *phase);
+    /* Whether the editor has left the map it had open, asked when the editor
+     * screen is down (map_info 0): 1 left (no editor state runs: the hub or
+     * the map browser, or the editor is exiting or shutting down), 0 a menu
+     * screen over the open map (the Start menu's Settings), -1 unknown. The
+     * map scope's exit waits for 1 (or -1, or no op bound). Main thread. */
+    int (*map_left)(void);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {

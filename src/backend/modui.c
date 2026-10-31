@@ -131,6 +131,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->toast) g_engine.toast = engine->toast;
         if (engine->print) g_engine.print = engine->print;
         if (engine->scope_apply) g_engine.scope_apply = engine->scope_apply;
+        if (engine->map_left) g_engine.map_left = engine->map_left;
     }
     g_engine_bound = 1;
     /* The points where a map's needs become known reach the recycle bin. */
@@ -922,8 +923,8 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             size_t j = i + 1, q, at = 0;
             int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, served;
             int any_delivered = m->entries[paths[i].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[i].entry]);
-            char who[700];
-            sh_modserve_hit hit;
+            char who[700], here[200];
+            sh_modserve_hit hit, open_hit;
             while (j < n && !strcmp(paths[j].request, paths[i].request)) {
                 conflict |= paths[j].conflict;
                 any_legacy |= m->entries[paths[j].entry].legacy;
@@ -944,6 +945,17 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                 at += (size_t)w;
             }
             served = sh_modserve_lookup_indexed(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
+            /* With map scope on: which provider serves the path for the open
+             * map (any provider the map lists, not only the winner). */
+            here[0] = 0;
+            if (sh_modserve_scope_enabled()) {
+                int open = sh_modserve_lookup(paths[i].request, &open_hit) ? mu_find_hash(m, open_hit.bundle_hash) : -1;
+                if (open >= 0)
+                    _snprintf_s(here, sizeof here, _TRUNCATE, "; for the open map: %s", m->list.items[open].name);
+                else
+                    _snprintf_s(here, sizeof here, _TRUNCATE, "; for the open map: the game's copy (%s)",
+                                sh_modserve_scope_map_open() ? "the map lists none of its providers" : "no map is open");
+            }
             if (conflict) {
                 sh_modserve_conflict ci;
                 int known = sh_modserve_conflict_info(paths[i].request, &ci);
@@ -952,16 +964,16 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                 else if (ci.withdrawn)
                     mu_say(o, "conflict %s: withdrawn, the game copy serves (%s); from %s", paths[i].request, ci.reason, who);
                 else if (ci.composed)
-                    mu_say(o, "conflict %s: composed, every provider's list entries are served (%s); from %s",
-                           paths[i].request, ci.reason, who);
+                    mu_say(o, "conflict %s: composed, every provider's list entries are served (%s); from %s%s",
+                           paths[i].request, ci.reason, who, here);
                 else
-                    mu_say(o, "conflict %s: %s serves it (%s); from %s", paths[i].request, m->list.items[served].name,
-                           ci.reason, who);
+                    mu_say(o, "conflict %s: %s serves it (%s); from %s%s", paths[i].request, m->list.items[served].name,
+                           ci.reason, who, here);
             } else
-                mu_say(o, "%s %s: by %s%s; served by %s%s", any_legacy ? "grandfathered shadow" : "shadow", paths[i].request,
+                mu_say(o, "%s %s: by %s%s; served by %s%s%s", any_legacy ? "grandfathered shadow" : "shadow", paths[i].request,
                        who, !any_legacy ? "" : any_delivered ? " (delivered by a map)" : " (migrated)",
                        served >= 0 ? m->list.items[served].name : "nothing",
-                       served >= 0 && hit.is_stock ? " (the installed game's own copy)" : "");
+                       served >= 0 && hit.is_stock ? " (the installed game's own copy)" : "", here);
             printed++;
             i = j;
         }
@@ -2870,13 +2882,17 @@ static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifes
 }
 
 /* The tick's part: in the editor, a save's change is applied, and an editor
- * map open without a listing gets one; out of it, the listing of the map the
- * editor had open goes. */
+ * map open without a listing gets one; once the editor has left the map (the
+ * hub or the browser), its listing goes. A menu screen over the open map
+ * (the Start menu's Settings) also takes the editor screen down, so the exit
+ * waits for map_left to say the editor no longer runs a state. */
 static void mu_scope_tick(int editor_map)
 {
+    const sh_modui_engine *e = mu_engine();
     if (!sh_modserve_scope_enabled()) return;
     if (!editor_map) {
-        if (InterlockedCompareExchange(&g_scope_editor, 0, 0) && sh_modserve_scope_map_open()) {
+        if (InterlockedCompareExchange(&g_scope_editor, 0, 0) && sh_modserve_scope_map_open() &&
+            !(e->map_left && e->map_left() == 0)) {
             InterlockedExchange(&g_scope_editor, 0);
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' shadows and requirements are withdrawn");

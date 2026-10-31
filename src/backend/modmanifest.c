@@ -957,9 +957,17 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
      * before their gameplay decls register. */
     mm_scope_load(json, length, &list);
     active = modserve_activate_bundles(hashes, hashes ? (int)list.count : 0);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "MODS: map manifest names %zu bundle(s)%s%s; %u row(s) removed before parse; %d active",
-        list.count, list.count ? ": " : "", names, removed, active);
+    /* `active` counts the registration steps the activation found ready (new
+     * names; a bundle of shadows and requirements has none), not bundles. */
+    {
+        char what[64];
+        if (active < 0) strcpy_s(what, sizeof what, "activation refused (see above)");
+        else if (!active) strcpy_s(what, sizeof what, "no new decls to register");
+        else _snprintf_s(what, sizeof what, _TRUNCATE, "%d registration step(s) ready", active);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "MODS: map manifest names %zu bundle(s)%s%s; %u row(s) removed before parse; %s",
+            list.count, list.count ? ": " : "", names, removed, what);
+    }
     backend_log(line);
     if (rejected) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
