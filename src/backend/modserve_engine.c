@@ -19,19 +19,27 @@
  * registration with a native idStr, a true probe answer, bytes through the
  * provider, DeclFind, then the generic load once for a new identity.
  *
- * Bundle requirements (the cut-content gates) are applied before every pass,
- * by me_run, through idCVar::Set(cvar, "0", force 1) (CvarSetString, VK
- * 0x140295780 / GL 0x1402959a0), the setter map_bounds.c already uses. That
- * route is immediate, so it needs no drain: Set parses the text into the int
- * at idCVar+0x30 before returning, and both blacklist matchers read exactly
- * that int on 13954591 (VK: resource matcher 0x140395150 reads the
- * g_useResourceBlackList object 0x145b13bd0 +0x30, the image matcher at
- * 0x140394fc0 reads g_useImageBlackList 0x145b13a90 +0x30; Ghidra jobs in
- * snaphak-re logs/shared-ghidra/mod-system-reinstatement/laneRQ). The retired
- * route buffered "<cvar> 0" console text, which stays queued until the
- * command buffer runs, and so needed CmdExecuteBuffer between the disarm and
- * the registration; modserve.c keeps that two-phase shape for any queued set,
- * and verifies every gate by reading +0x30 back before registering.
+ * Bundle requirements are applied before every pass, by me_run. A cvar is
+ * set through idCVar::Set(cvar, text, force 1) (CvarSetString, VK
+ * 0x140295780 / GL 0x1402959a0), the setter map_bounds.c already uses. Force
+ * skips the engine's developer check (the product's cvar unlock lifts it for
+ * the console too) and its read-only and command-line-only checks, so those
+ * two are made here from the cvar's flags (idCVar+0x68: 0x8000 read-only,
+ * 0x4000 command line only), and such a cvar is reported refused. That route
+ * is immediate, so it needs no drain: Set assigns the value string (its data
+ * pointer at idCVar+0x10) and parses it into the int at +0x30 before
+ * returning. The blacklist matchers read exactly that int on 13954591 (VK:
+ * resource matcher 0x140395150 reads the g_useResourceBlackList object
+ * 0x145b13bd0 +0x30, the image matcher at 0x140394fc0 reads
+ * g_useImageBlackList 0x145b13a90 +0x30; Ghidra jobs in snaphak-re
+ * logs/shared-ghidra/mod-system-reinstatement/laneRQ; both register with
+ * flags 1, a plain bool), so a read-back reports the int whenever the string
+ * is an integer it disagrees with. The retired route buffered console text,
+ * which stays queued until the command buffer runs; modserve.c keeps that
+ * two-phase shape for any queued set, and verifies every cvar by reading it
+ * back before registering. A requirement's console lines are appended with
+ * BufferCommandText (the engine runs them at its next command-buffer pass),
+ * on the main thread like every pass.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -40,6 +48,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "modserve.h"
+#include "modbundle.h"
 #include "overrides.h"
 #include "modstock.h"
 #include "signatures.h"
@@ -76,6 +85,7 @@ typedef void *(*source_fn)(void *, const char *);
 typedef void *(*find_decl_fn)(void *, const char *, unsigned char);
 typedef void (*generic_load_fn)(void *);
 typedef unsigned char (*cvar_set_fn)(void *, const char *, unsigned char);
+typedef void (*buffer_cmd_fn)(void *, const char *);
 typedef unsigned char (*probe_fn)(void *, const char *, void *, void *, void *, void *, uint64_t);
 typedef union ms_string { void *align; unsigned char bytes[48]; } ms_string;
 
@@ -99,6 +109,8 @@ static volatile LONG g_editor_pass_done;
 static DWORD g_fault_code;
 static cvar_set_fn g_cvar_set;
 static const void *g_cvar_slot;
+static buffer_cmd_fn g_buffer_cmd;
+static void *g_cmdsys;
 static const unsigned char *g_editor;  /* editor_singleton: idSnapEditorLocal, constructed in place */
 
 extern volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* modserve.c */
@@ -281,25 +293,77 @@ static void *me_gate_cvar(const char *name)
     return sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
 }
 
-static int gate_read(void *context, const char *cvar, int *value)
+#define ME_CVAR_VALUE_STR  0x10u      /* idCVar value-string data pointer */
+#define ME_CVAR_READ_ONLY  0x8000u    /* flags bit 15 */
+#define ME_CVAR_INIT_ONLY  0x4000u    /* flags bit 14: command line only */
+
+static int me_plain_int(const char *s)
 {
-    (void)context;
-    return sh_engine_cvar_read_int(me_gate_cvar(cvar), value);
+    if (*s == '-') ++s;
+    if (!*s) return 0;
+    for (; *s; ++s) if (*s < '0' || *s > '9') return 0;
+    return 1;
 }
 
-/* Immediate: the value is in idCVar+0x30 when Set returns. */
+/* The cvar's value text; the int the engine parsed from it when the text is
+ * an integer they disagree on (the int is what bool and int readers use). */
+static int gate_read(void *context, const char *cvar, char *value, size_t cap)
+{
+    const unsigned char *c = (const unsigned char *)me_gate_cvar(cvar);
+    int n = 0, ok = 0;
+    (void)context;
+    if (!c || !value || cap < 16) return 0;
+    __try {
+        const char *s = *(const char *const *)(c + ME_CVAR_VALUE_STR);
+        size_t i = 0;
+        if (s) {
+            for (; i + 1 < cap && s[i]; ++i) value[i] = s[i];
+            value[i] = 0;
+            ok = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (!sh_engine_cvar_read_int(c, &n)) return 0;
+    if (!ok || (me_plain_int(value) && atoi(value) != n)) _snprintf_s(value, cap, _TRUNCATE, "%d", n);
+    return 1;
+}
+
+/* Immediate: the value is in the cvar when Set returns. */
 static int gate_set(void *context, const char *cvar, const char *value)
 {
-    void *c = me_gate_cvar(cvar);
+    unsigned char *c = (unsigned char *)me_gate_cvar(cvar);
+    unsigned flags = 0;
     unsigned char ok = 0;
     (void)context;
     if (!c || !g_cvar_set) return 0;
+    __try { flags = *(const unsigned *)(c + SH_IDCVAR_FLAGS); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (flags & ME_CVAR_READ_ONLY) return SH_MODSERVE_GATE_READ_ONLY;
+    if (flags & ME_CVAR_INIT_ONLY) return SH_MODSERVE_GATE_INIT_ONLY;
     __try { ok = g_cvar_set(c, value, 1); }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     return ok ? SH_MODSERVE_GATE_SET : 0;
 }
 
-static const sh_modserve_gate_ops g_gate_ops = { NULL, gate_read, gate_set, NULL };
+/* One console line, for the engine's next command-buffer pass. */
+static int gate_command(void *context, const char *line)
+{
+    char text[SH_MB_REQ_LINE_MAX + 2];
+    (void)context;
+    if (!g_buffer_cmd || !g_cmdsys || !line) return 0;
+    _snprintf_s(text, sizeof text, _TRUNCATE, "%s\n", line);
+    __try { g_buffer_cmd(g_cmdsys, text); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 1;
+}
+
+static const sh_modserve_gate_ops g_gate_ops = { NULL, gate_read, gate_set, NULL, gate_command };
+/* The cvar system unresolved: no cvar is set, the lines still run. */
+static const sh_modserve_gate_ops g_lines_ops = { NULL, NULL, NULL, NULL, gate_command };
+
+static const sh_modserve_gate_ops *me_gate_ops(void)
+{
+    return g_cvar_set && g_cvar_slot ? &g_gate_ops : &g_lines_ops;
+}
 
 /* Run a plan inside process heap 0: decl objects outlive every map. The
  * bundles' requirements are applied and read back first, outside the scope
@@ -311,7 +375,7 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
     int ready = -1;
     if (!g_bound) { me_log("%s: decl registry unavailable on this build", phase); return -1; }
     if (plan->count) {
-        sh_modserve_requirements_apply(g_cvar_set && g_cvar_slot ? &g_gate_ops : NULL, phase, &gates);
+        sh_modserve_requirements_apply(me_gate_ops(), phase, &gates);
         sh_modserve_plan_block_unmet(plan, &gates);
     }
     if (!sh_process_heap_enter(&g_heap, &heap)) { me_log("%s: process heap scope unavailable; nothing registered", phase); return -1; }
@@ -330,12 +394,12 @@ void sh_modserve_play_begin(void)
     /* An uninstalled mod the map being played still places comes back first;
      * the game-side refresh waits for the return to the editor. */
     if (on_main == 1) (void)sh_modserve_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_PLAY);
-    if (!sh_modserve_requirements()) return;
+    if (!sh_modserve_requirements_held()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
         return;
     }
-    sh_modserve_requirements_check(g_cvar_set && g_cvar_slot ? &g_gate_ops : NULL, "play", NULL);
+    sh_modserve_requirements_check(me_gate_ops(), "play", NULL);
 }
 
 /* ------------------------------------------------------------------ probe */
@@ -415,9 +479,11 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_source = (source_fn)me_clean(results, count, "DeclSourceFind");
     g_decl = (find_decl_fn)me_clean(results, count, "DeclFind");
     g_generic_load = (generic_load_fn)me_clean(results, count, "ResourceGenericLoad");
-    /* The requirement gates: optional, so a build without them still
-     * registers every bundle that needs none. */
+    /* Requirements: optional, so a build without them still registers every
+     * bundle that needs none. */
     g_cvar_set = (cvar_set_fn)me_clean(results, count, "CvarSetString");
+    g_buffer_cmd = (buffer_cmd_fn)me_clean(results, count, "BufferCommandText");
+    g_cmdsys = sh_resolve_cmdsys(results, count, module_base);
     g_cvar_slot = (const void *)glb_resolve(module_base, "cvar_system_slot", NULL);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
@@ -433,8 +499,11 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     if (!g_bound) me_log("decl registration unavailable on this build (registry, heap scope or main thread unresolved)");
     if (!g_probe_sig_ok) me_log("existence probe unavailable (DeclResourceProbe is not a clean match)");
     if (!g_cvar_set || !g_cvar_slot)
-        me_log("bundle requirements unavailable (%s unresolved); bundles that need a blacklist gate are blocked",
+        me_log("bundle cvar requirements unavailable (%s unresolved); bundles that set a cvar are blocked",
                !g_cvar_set ? "CvarSetString" : "the cvar system");
+    if (!g_buffer_cmd || !g_cmdsys)
+        me_log("bundle requirement commands unavailable (%s unresolved); their lines are not run",
+               !g_buffer_cmd ? "BufferCommandText" : "the command system");
     if (g_bound) me_ensure_probe();
     return g_bound;
 }
@@ -847,6 +916,13 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     const char *why = NULL;
     memset(&r, 0, sizeof r);
     if (main == 1) (void)sh_modserve_refresh_expand();
+    /* Requirements follow the new table at once: a mod uninstalled or dropped
+     * has its cvars restored and its deactivate lines run, a new one is set.
+     * During Play, or off the main thread, the next pass does it. */
+    if (main == 1 && me_in_play() != 1 && sh_modserve_requirements_held()) {
+        sh_modserve_gates g;
+        (void)sh_modserve_requirements_apply(me_gate_ops(), "rescan", &g);
+    }
     sh_modserve_last_diff(&d);
     rows = d.added_rows + d.changed_rows + d.gone_rows;
     later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
@@ -1200,6 +1276,8 @@ static void me_print_bundle(void *context, const char *id, const char *version, 
               admitted ? "active" : "SKIPPED", admitted ? "" : ": ", admitted ? "" : cause, files);
 }
 
+static void me_print_line(void *context, const char *line) { (void)context; sh_printf("  %s\n", line); }
+
 static int me_rebuild_main(void *context) { (void)context; return modserve_palette_rebuild_requested(); }
 
 int sh_modserve_command(void *args, const char *verb)
@@ -1217,6 +1295,7 @@ int sh_modserve_command(void *args, const char *verb)
                   st.opens_served, st.cache_hits, st.open_failures, st.probe_claims, st.editor_rows_registered,
                   st.editor_rows_failed, g_bound ? "bound" : "unavailable", g_probe_orig ? "hooked" : "not hooked");
         sh_modserve_each_bundle(me_print_bundle, NULL);
+        (void)sh_modserve_requirements_report(me_print_line, NULL);
         {
             sh_modserve_diff d;
             sh_modserve_last_diff(&d);

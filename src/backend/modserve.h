@@ -282,77 +282,111 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
 
 /* ------------------------------------------------------------------ requirements */
 
-/* A mod.json may carry {"requirements": {"cvars": {...}}} naming the two
- * cut-content blacklist gates with the value "0" (or 0): nothing else. The
- * index collects them per bundle; a bundle naming any other key, cvar or value
- * is skipped with that first cause. Each admitted bundle's requirements are
- * logged once, the first time an index carries it:
+/* A mod.json may carry
+ *   {"requirements": {"cvars": {"<cvar>": <value>, ...},
+ *                     "commands": {"activate": ["<line>", ...], "deactivate": [...]}}}
+ * read through the builder's canonical form (modbundle.h,
+ * sh_mb_requirements_canonical): any cvar at any value, any single console
+ * line, within the builder's bounds; this layer names none of them. A bundle
+ * whose requirements the builder refuses is skipped with that first cause.
+ * Bundles are taken in install order (built time, then folder name); one that
+ * asks a cvar an earlier accepted bundle asks at another value loses, both
+ * named once in the log, and none of its requirements is applied (its steps
+ * are blocked):
+ *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, the later install, loses ...
+ * Each accepted bundle's requirements are logged once, the first time an
+ * index carries it with that text:
  *   MODS: requirements: g_useResourceBlackList=0 for <id>@<version>
- * Disarming a gate is global (S1 consequence 16): with g_useImageBlackList 0
- * the five stock font-atlas directories load as well. */
-#define SH_MODSERVE_REQ_IMAGE    1u   /* g_useImageBlackList 0 */
-#define SH_MODSERVE_REQ_RESOURCE 2u   /* g_useResourceBlackList 0 */
-#define SH_MODSERVE_REQ_COUNT    2
+ *   MODS: requirements: 1 activate and 1 deactivate command(s) for <id>@<version>
+ * A cvar a requirement sets is global (with g_useImageBlackList 0 the five
+ * stock font-atlas directories load as well, S1 consequence 16). */
 
-/* The cvar name of requirement bit `index` (0 or 1), else NULL. */
-const char *sh_modserve_requirement_cvar(int index);
+/* The number of distinct cvars the accepted bundles' requirements set. */
+int sh_modserve_requirements(void);
 
-/* The union of the admitted bundles' requirement bits. */
-unsigned sh_modserve_requirements(void);
+/* 1 when a pass has work: an accepted bundle has requirements, or a cvar
+ * this layer set, or a bundle whose activate lines ran, waits for release. */
+int sh_modserve_requirements_held(void);
 
-/* How the gates are read and set. `read` returns 1 with the integer value.
- * `set` returns SH_MODSERVE_GATE_SET when the value is in the cvar on return
- * (idCVar::Set), SH_MODSERVE_GATE_QUEUED when it was only buffered as console
- * text, or 0 when refused. `drain` executes the command buffer and returns 1;
- * it may be NULL for a route whose sets are never queued. */
-#define SH_MODSERVE_GATE_SET    1
-#define SH_MODSERVE_GATE_QUEUED 2
+/* How cvars are read and set and console lines are run. `read` copies the
+ * cvar's value text (NUL-terminated, truncated to cap) and returns 1, or 0
+ * when the engine has no such cvar. `set` returns SH_MODSERVE_GATE_SET when
+ * the value is in the cvar on return (idCVar::Set), SH_MODSERVE_GATE_QUEUED
+ * when it was only buffered as console text, 0 when the engine refused it,
+ * or a negative SH_MODSERVE_GATE_* refusal. `drain` executes the command
+ * buffer and returns 1; it may be NULL for a route whose sets are never
+ * queued. `command` appends one console line to the engine's command buffer
+ * and returns 1; with NULL no line runs (they wait for a pass that has it). */
+#define SH_MODSERVE_GATE_SET        1
+#define SH_MODSERVE_GATE_QUEUED     2
+#define SH_MODSERVE_GATE_READ_ONLY  (-1)   /* the cvar is flagged read-only */
+#define SH_MODSERVE_GATE_INIT_ONLY  (-2)   /* the cvar is settable only on the command line */
 typedef struct sh_modserve_gate_ops {
     void *context;
-    int (*read)(void *context, const char *cvar, int *value);
+    int (*read)(void *context, const char *cvar, char *value, size_t cap);
     int (*set)(void *context, const char *cvar, const char *value);
     int (*drain)(void *context);
+    int (*command)(void *context, const char *line);
 } sh_modserve_gate_ops;
 
 typedef struct sh_modserve_gates {
-    unsigned needed;     /* union of admitted bundles' requirements */
-    unsigned changed;    /* gates set by this call (needed or restored) */
-    unsigned queued;     /* of them, sets that were only buffered */
-    int drained;         /* 1 when the command buffer was drained between the phases */
-    unsigned live;       /* needed gates read back as 0 */
-    unsigned not_live;   /* needed & ~live */
-    unsigned restored;   /* gates no bundle needs any more, returned to their displaced value */
+    int needed;      /* distinct cvars the accepted bundles ask */
+    int changed;     /* cvars set by this call (asked or restored) */
+    int queued;      /* of them, sets that were only buffered */
+    int drained;     /* 1 when the command buffer was drained between the phases */
+    int live;        /* asked cvars read back at the asked value */
+    int not_live;    /* needed - live */
+    int restored;    /* cvars no bundle asks any more, returned to the value they displaced */
+    int commands;    /* console lines appended by this call */
 } sh_modserve_gates;
 
-/* Make the union live before a registration pass, in two phases. Phase 1
- * (disarm) reads each needed gate and sets it to 0 when it is not; when any
- * set was queued, the command buffer is drained before phase 2. Phase 2
- * (verify) reads every gate back; only a read-back 0 counts as live. A gate
- * this layer changed and no admitted bundle needs any more is restored to the
- * value it displaced, unless someone else changed it meanwhile. Returns 0
- * when no gate is needed (and when none is held either, ops is never
- * called), 1 when every needed gate is live, -1 otherwise. Main thread only. */
+/* Make the accepted bundles' requirements live before a registration pass,
+ * in two phases. First the deactivate lines of every bundle whose
+ * requirements stopped (uninstalled, removed, dropped by a rescan, lost a
+ * conflict) are appended. Phase 1 reads each asked cvar and sets it when it
+ * differs; when any set was queued, the command buffer is drained before
+ * phase 2. Phase 2 reads every cvar back; only the asked value read back
+ * (the same text, or the same number) counts as live. A cvar the engine has
+ * not, refuses or does not keep is not live, with the cause in the log and
+ * in sh_modserve_requirements_report, and the steps of the bundles asking it
+ * are blocked. A cvar this layer changed and no accepted bundle asks any
+ * more is restored to the value it displaced, unless someone else changed it
+ * meanwhile. Then the activate lines of bundles whose requirements start now
+ * are appended, each logged as
+ *   MODS: requirements: <id>: command "<line>"
+ * Returns 0 when no cvar is asked (and when nothing is held either, ops is
+ * never called), 1 when every asked cvar is live, -1 otherwise. Main thread. */
 int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
 /* sh_modserve_requirements_apply for a point where nothing is registered
- * (the Play level load): the same disarm and verify, plus one line when every
- * needed gate was already live, so the log shows the gates held:
+ * (the Play level load): the same pass, plus one line when every asked cvar
+ * was already live, so the log shows them held:
  *   MODS: play: requirements live: g_useImageBlackList=0, g_useResourceBlackList=0 (unchanged since the last pass)
  * Returns what sh_modserve_requirements_apply returns. */
 int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
-/* Block the steps of bundles whose requirements `gates` reports not live
- * (first cause "requirement <cvar>=0 is not live"), except steps already
- * registered. Returns how many were blocked. */
+/* Block the steps of bundles whose cvar requirements are not live (first
+ * cause "requirement <cvar>=<value> is not live", or the conflict it lost),
+ * except steps already registered. Returns how many were blocked. */
 int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates);
 
 /* sh_modserve_requirements_apply, then sh_modserve_plan_run: no
- * DeclRegisterFile is issued before the gates are verified. Steps of a bundle
+ * DeclRegisterFile is issued before the cvars are verified. Steps of a bundle
  * whose requirement is not live are blocked with that first cause (unless
  * already registered), and steps needing them fail with it. An empty plan
  * touches nothing. Returns what sh_modserve_plan_run returns. */
 int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
                                const sh_modserve_gate_ops *gates, const char *phase, sh_modserve_gates *out);
+
+/* One line per requirement of each admitted bundle and whether it is live
+ * ("requirements: <id>@<version>: cvar <name>=<value>: live", "NOT live
+ * (<cause>; ...)", "not applied yet (...)"; "... activate command \"<line>\":
+ * ran"; "... deactivate command ...: runs when the mod stops"), then each
+ * cvar waiting to be restored and each stopped bundle whose lines wait, or
+ * one "requirements: none" line. For sh_mods status and sh_mods doctor. Any
+ * thread. Returns the number of lines. */
+typedef void (*sh_modserve_line_fn)(void *context, const char *line);
+int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
 
 /* ------------------------------------------------------------------ queries */
 
@@ -451,14 +485,14 @@ typedef int (*sh_modserve_unopened_fn)(void *context, const char *type, const ch
                                        const char *bundle_id);
 int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
 
-/* A bundle's requirement gates (the cut-content blacklists) are applied at
- * the first registration pass, after DOOM loaded its boot resources: a model
- * or image served before then was resolved against the blacklists (the Spider
- * Mastermind mesh held no materials and drew nothing). Visit every served
- * baseModel and image first opened while one of its bundle's gates was not
- * live, once those gates are live; `fn` returns 1 when it reloaded the
- * resource (not offered again). The early-decl visit above also offers decls
- * first opened before their gates were live. Returns the number visited. */
+/* A bundle's cvar requirements (for example the cut-content blacklists) are
+ * applied at the first registration pass, after DOOM loaded its boot
+ * resources: a model or image served before then was resolved with the old
+ * values (the Spider Mastermind mesh held no materials and drew nothing).
+ * Visit every served baseModel and image first opened while its bundle's
+ * cvar requirements were not live, once they are live; `fn` returns 1 when it
+ * reloaded the resource (not offered again). The early-decl visit above also
+ * offers decls first opened before then. Returns the number visited. */
 int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
 
 /* Refresh. A rescan replaces the table while the engine keeps every decl it
@@ -512,7 +546,7 @@ typedef struct sh_modserve_refresh_item {
     int kind;          /* SH_MODSERVE_RF_* */
     int gone;          /* 1: no bundle serves the request now; the engine's own bytes answer it */
     int shadow;        /* a stock path */
-    int gates_live;    /* the bundle's requirement gates are live (1 when it has none) */
+    int gates_live;    /* the bundle's cvar requirements are live (1 when it has none) */
 } sh_modserve_refresh_item;
 
 /* Visit every pending item: changed decls in plan rank order, then gone
@@ -604,13 +638,14 @@ int modserve_palette_rebuild_requested(void);
 int modserve_activate_bundles(const char *const *bundle_hashes, int n);
 
 /* Called before the Play level load (the SnapBuild detour in nav_play.c),
- * on the main thread: re-checks the admitted bundles' requirements with
+ * on the main thread: re-checks the accepted bundles' requirements with
  * sh_modserve_requirements_check (phase "play"). The engine does not reset
- * either gate between the editor and the level load on 13954591 (lane MG2:
- * each gate's int has one reader, its matcher, and no engine writer; both are
- * plain bool cvars that no shipped config names), so this normally logs
- * "requirements live"; a gate someone set back to 1 is disarmed again before
- * the level's decls load. No-op when no bundle has requirements. */
+ * the blacklist gates between the editor and the level load on 13954591
+ * (lane MG2: each gate's int has one reader, its matcher, and no engine
+ * writer; both are plain bool cvars that no shipped config names), so this
+ * normally logs "requirements live"; a cvar someone changed back is set
+ * again before the level's decls load. No-op when nothing is asked or held
+ * (sh_modserve_requirements_held). */
 void sh_modserve_play_begin(void);
 
 /* After a rescan published a table: apply its pending changes now (main

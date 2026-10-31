@@ -88,6 +88,12 @@ var modsTab = (function () {
     if (!c) return null;
     return Object.keys(c).sort().map(function (k) { return {name: k, value: str(c[k])}; });
   }
+  /* requirements.commands: console lines run when the mod starts and stops; null when not sent. */
+  function normCommands(v) {
+    var r = obj(v), c = r && obj(r.commands);
+    if (!r || !obj(r.cvars)) return null;
+    return {activate: c ? normNames(c.activate) : [], deactivate: c ? normNames(c.deactivate) : []};
+  }
   function normMod(b) {
     b = b && typeof b === 'object' ? b : {};
     var state = has(STATES, b.state) ? b.state : 'attention';
@@ -98,7 +104,7 @@ var modsTab = (function () {
             /* v3 */
             description: str(b.description), origin: typeof b.origin === 'string' && has(ORIGINS, b.origin) ? b.origin : '',
             migratedFrom: str(b.migratedFrom), servedBy: str(b.servedBy), builtAt: num(b.builtAt), bundle: str(b.bundle),
-            counts: normCounts(b.counts), cvars: normCvars(b.requirements),
+            counts: normCounts(b.counts), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps)};
@@ -590,6 +596,13 @@ var modsTab = (function () {
       } else if (b.cvars) {
         field(req, 'Console settings', 'None');
       }
+      [['activate', 'Commands when active'], ['deactivate', 'Commands when removed']].forEach(function (k) {
+        var lines = b.commands ? b.commands[k[0]] : [];
+        if (!lines.length) return;
+        var ll = el('div', 'mods-rows-list mono');
+        lines.forEach(function (line) { ll.appendChild(el('div', '', line)); });
+        field(req, k[1], ll);
+      });
       req.appendChild(el('div', 'mods-note', NEEDS_NOTE));
 
       var lines = [];

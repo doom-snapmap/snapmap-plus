@@ -1581,52 +1581,184 @@ static char *mb_trimmed_dup(const mbj *v)
 
 /* ----------------------------------------------------------- descriptor ---- */
 
-static const char *const MB_GATES[] = { "g_useImageBlackList", "g_useResourceBlackList", NULL };
+/* requirements: {"cvars": {<name>: <value>}, "commands": {"activate": [...],
+ * "deactivate": [...]}} -> canonical text. No cvar or command is named here:
+ * a cvar is any engine identifier, a command any single console line, and the
+ * player accepted them by installing the mod. The canonical text is
+ *   {"commands":{"activate":[...],"deactivate":[...]},"cvars":{...}}
+ * with "cvars" always present (sorted names, string values) and "commands",
+ * and each of its lists, only when not empty (lines in the author's order), so
+ * a bundle that carries only cvars keeps the text and hash it had when cvars
+ * were the only key. */
+static int mb_req_cvar_name(const char *s, size_t n)
+{
+    size_t i;
+    if (n < 1 || n > SH_MB_REQ_NAME_MAX) return 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
+    for (i = 1; i < n; i++)
+        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
+            return 0;
+    return 1;
+}
 
-/* requirements: {"cvars": {<supported gate>: "0" | 0}} -> canonical text. */
+static int mb_req_printable(const char *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if ((unsigned char)s[i] < 0x20 || (unsigned char)s[i] > 0x7e) return 0;
+    return 1;
+}
+
+/* A cvar value as its canonical string: a string as written, an integer as
+ * its digits, a boolean as "1" or "0". NULL with a cause otherwise. */
+static const char *mb_req_value(const mbj *v, const char *name, char *num, size_t num_cap, size_t *len,
+                                char *cause, size_t cap)
+{
+    if (v->t == MBJ_STR) {
+        if (v->n > SH_MB_REQ_VALUE_MAX || strlen(v->s) != v->n || !mb_req_printable(v->s, v->n)) {
+            mb_cause(cause, cap, "requirements.cvars.%.64s must be printable ASCII of at most %u characters", name,
+                     SH_MB_REQ_VALUE_MAX);
+            return NULL;
+        }
+        *len = v->n;
+        return v->s;
+    }
+    if (v->t == MBJ_BOOL) { *len = 1; return v->b ? "1" : "0"; }
+    if (v->t == MBJ_NUM && mb_plain_integer(v->s, v->n)) {
+        strcpy_s(num, num_cap, strcmp(v->s, "-0") == 0 ? "0" : v->s);
+        *len = strlen(num);
+        return num;
+    }
+    mb_cause(cause, cap, "requirements.cvars.%.64s must be a string, an integer or a boolean (write a decimal as a string)",
+             name);
+    return NULL;
+}
+
+/* One commands list: an array of single console lines, trimmed of spaces. */
+static int mb_req_lines(const mbj *arr, const char *which, mb_buf *out, char *cause, size_t cap)
+{
+    size_t i;
+    if (arr->t != MBJ_ARR) { mb_cause(cause, cap, "requirements.commands.%s must be an array of console lines", which); return 0; }
+    if (arr->count > SH_MB_REQ_COMMANDS_MAX) {
+        mb_cause(cause, cap, "requirements.commands.%s has more than %u lines", which, SH_MB_REQ_COMMANDS_MAX);
+        return 0;
+    }
+    for (i = 0; i < arr->count; i++) {
+        const mbj *v = arr->items[i];
+        size_t a = 0, z;
+        if (v->t != MBJ_STR || strlen(v->s) != v->n) {
+            mb_cause(cause, cap, "requirements.commands.%s[%zu] must be a string", which, i);
+            return 0;
+        }
+        z = v->n;
+        while (a < z && v->s[a] == ' ') a++;
+        while (z > a && v->s[z - 1] == ' ') z--;
+        if (a == z || z - a > SH_MB_REQ_LINE_MAX || !mb_req_printable(v->s + a, z - a) || memchr(v->s + a, ';', z - a)) {
+            mb_cause(cause, cap, "requirements.commands.%s[%zu] must be one console command: printable ASCII without ';', "
+                     "1 to %u characters", which, i, SH_MB_REQ_LINE_MAX);
+            return 0;
+        }
+        if (out->n) mb_put(out, ",", 1);
+        mb_put_jstr(out, v->s + a, z - a);
+    }
+    return 1;
+}
+
 static char *mb_requirements(const mbj *req, char *cause, size_t cap)
 {
-    const mbj *cvars;
-    mb_buf out = {0};
-    size_t i, *order;
+    const mbj *cvars, *commands;
+    mb_buf out = {0}, act = {0}, deact = {0};
+    size_t i, *order = NULL;
     if (req->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements must be an object"); return NULL; }
     for (i = 0; i < req->count; i++)
-        if (!(req->klen[i] == 5 && memcmp(req->keys[i], "cvars", 5) == 0)) {
-            mb_cause(cause, cap, "requirements key %.64s is not supported (only cvars)", req->keys[i]);
+        if (!(req->klen[i] == 5 && memcmp(req->keys[i], "cvars", 5) == 0) &&
+            !(req->klen[i] == 8 && memcmp(req->keys[i], "commands", 8) == 0)) {
+            mb_cause(cause, cap, "requirements key %.64s is not supported (cvars, commands)", req->keys[i]);
             return NULL;
         }
     cvars = mbj_get(req, "cvars");
-    if (!cvars) { mb_cause(cause, cap, "requirements has no cvars"); return NULL; }
-    if (cvars->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements.cvars must be an object"); return NULL; }
-    for (i = 0; i < cvars->count; i++) {
-        const mbj *v = cvars->items[i];
-        int gate = 0, k;
-        for (k = 0; MB_GATES[k]; k++)
-            if (strlen(MB_GATES[k]) == cvars->klen[i] && memcmp(MB_GATES[k], cvars->keys[i], cvars->klen[i]) == 0) gate = 1;
-        if (!gate) {
-            mb_cause(cause, cap, "requirements.cvars.%.64s is not a supported gate (g_useImageBlackList, g_useResourceBlackList)",
-                     cvars->keys[i]);
-            return NULL;
-        }
-        if (!((v->t == MBJ_STR && strcmp(v->s, "0") == 0) || (v->t == MBJ_NUM && strcmp(v->s, "0") == 0))) {
-            mb_cause(cause, cap, "requirements.cvars.%.64s must be \"0\"", cvars->keys[i]);
-            return NULL;
-        }
+    commands = mbj_get(req, "commands");
+    if (cvars && cvars->t != MBJ_OBJ) { mb_cause(cause, cap, "requirements.cvars must be an object"); return NULL; }
+    if (commands && commands->t != MBJ_OBJ) {
+        mb_cause(cause, cap, "requirements.commands must be an object of activate and deactivate lists");
+        return NULL;
     }
-    order = (size_t *)malloc(sizeof(size_t) * (cvars->count ? cvars->count : 1));
-    if (!order) return NULL;
-    for (i = 0; i < cvars->count; i++) order[i] = i;
-    qsort_s(order, cvars->count, sizeof(size_t), mb_key_cmp, (void *)cvars);
-    mb_puts(&out, "{\"cvars\":{");
-    for (i = 0; i < cvars->count; i++) {
-        if (i) mb_put(&out, ",", 1);
-        mb_put_jstr(&out, cvars->keys[order[i]], cvars->klen[order[i]]);
-        mb_puts(&out, ":\"0\"");
+    if (cvars && cvars->count > SH_MB_REQ_CVARS_MAX) {
+        mb_cause(cause, cap, "requirements.cvars names more than %u cvars", SH_MB_REQ_CVARS_MAX);
+        return NULL;
+    }
+    for (i = 0; commands && i < commands->count; i++) {
+        const char *k = commands->keys[i];
+        size_t n = commands->klen[i];
+        int is_act = n == 8 && memcmp(k, "activate", 8) == 0, is_deact = n == 10 && memcmp(k, "deactivate", 10) == 0;
+        if (!is_act && !is_deact) {
+            mb_cause(cause, cap, "requirements.commands key %.64s is not supported (activate, deactivate)", k);
+            goto fail;
+        }
+        if (!mb_req_lines(commands->items[i], is_act ? "activate" : "deactivate", is_act ? &act : &deact, cause, cap))
+            goto fail;
+    }
+    mb_puts(&out, "{");
+    if (act.n || deact.n) {
+        mb_puts(&out, "\"commands\":{");
+        if (act.n) { mb_puts(&out, "\"activate\":["); mb_put(&out, act.p, act.n); mb_puts(&out, "]"); }
+        if (act.n && deact.n) mb_put(&out, ",", 1);
+        if (deact.n) { mb_puts(&out, "\"deactivate\":["); mb_put(&out, deact.p, deact.n); mb_puts(&out, "]"); }
+        mb_puts(&out, "},");
+    }
+    mb_puts(&out, "\"cvars\":{");
+    if (cvars && cvars->count) {
+        order = (size_t *)malloc(sizeof(size_t) * cvars->count);
+        if (!order) goto fail;
+        for (i = 0; i < cvars->count; i++) order[i] = i;
+        qsort_s(order, cvars->count, sizeof(size_t), mb_key_cmp, (void *)cvars);
+        for (i = 0; i < cvars->count; i++) {
+            const char *name = cvars->keys[order[i]];
+            size_t n = cvars->klen[order[i]], len = 0, k;
+            char num[32];
+            const char *value;
+            if (!mb_req_cvar_name(name, n) || strlen(name) != n) {
+                mb_cause(cause, cap, "requirements.cvars key %.64s is not a cvar name (a letter or '_', then letters, "
+                         "digits or '_', at most %u)", name, SH_MB_REQ_NAME_MAX);
+                goto fail;
+            }
+            for (k = 0; k < i; k++)
+                if (_stricmp(name, cvars->keys[order[k]]) == 0) {
+                    mb_cause(cause, cap, "requirements.cvars names %.64s twice", name);
+                    goto fail;
+                }
+            value = mb_req_value(cvars->items[order[i]], name, num, sizeof num, &len, cause, cap);
+            if (!value) goto fail;
+            if (i) mb_put(&out, ",", 1);
+            mb_put_jstr(&out, name, n);
+            mb_put(&out, ":", 1);
+            mb_put_jstr(&out, value, len);
+        }
     }
     mb_puts(&out, "}}");
+    if (out.oom || act.oom || deact.oom) { mb_cause(cause, cap, "out of memory"); goto fail; }
     free(order);
-    if (out.oom) { free(out.p); return NULL; }
+    free(act.p);
+    free(deact.p);
     return out.p;
+fail:
+    free(order);
+    free(act.p);
+    free(deact.p);
+    free(out.p);
+    return NULL;
+}
+
+char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, size_t cause_cap)
+{
+    mbj *root;
+    char *out;
+    if (cause && cause_cap) cause[0] = 0;
+    if (!text) return NULL;
+    root = mbj_parse(text, len, cause, cause_cap);
+    if (!root) return NULL;
+    out = mb_requirements(root, cause, cause_cap);
+    mbj_free(root);
+    return out;
 }
 
 static int mb_set_shadows(sh_mb_bundle *b, const mbj *arr, int from_manifest)

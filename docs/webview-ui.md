@@ -175,7 +175,8 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 **Details pane.** The selected mod's name, icon and one sentence ("Installed and serving 24
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
-Requirements (console settings and the note that every player needs Snapmap+) and Sharing. The head
+Requirements (console settings, the commands run when the mod is active and when it is removed, and
+the note that every player needs Snapmap+) and Sharing. The head
 actions are Verify, Rebuild and Uninstall. With nothing selected the pane explains how mods work.
 
 **Map modal.** The map button in the list pane's head opens the decl editor's focus modal
@@ -215,7 +216,7 @@ Per entry of `mods`:
 | `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
 | `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
 | `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files, sound banks, movies, snapModule decls, virtual textures. |
-| `"requirements"` | object | `{cvars: {name: "value"}}` from mod.json's requirements; `{cvars: {}}` when none. |
+| `"requirements"` | object | The builder's canonical requirements, `{commands?: {activate?: [line], deactivate?: [line]}, cvars: {name: "value"}}`; `{cvars: {}}` when none. Whether each is live is in `sh_mods status` and `sh_mods doctor`, not the payload. |
 | `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
 | `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |

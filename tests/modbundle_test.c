@@ -24,6 +24,13 @@ void backend_log(const char *message) { (void)message; }
  * or of the fixture, and the store's validator must agree with it. */
 #define GOLDEN_HASH "194e95cd9d4f4c18f5e3f01d8447ea4ef7d07299c3d8a539246a7229f832be17"
 
+/* The fixture with only the two blacklist gates as requirements, as the
+ * builder hashed it while those gates were the only requirements it accepted
+ * (main at 1ac4c6e). The general requirements keep that text and hash, so no
+ * installed mod of that shape is rebuilt or re-hashed. */
+#define GATES_GOLDEN_HASH "372311a1d3f6dbeff4e6258bff02534dff5c362140961cbe1ac7aa6a37d6575b"
+#define GATES_CANONICAL   "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"
+
 static int has_need(const sh_mb_file *f, const char *type, const char *name)
 {
     size_t i;
@@ -642,7 +649,28 @@ static void m_bad_json(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.
 static void m_bad_version(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.r2-imp\",\"version\":\"1/2\",\"name\":\"x\"}"); }
 static void m_reserved(const char *f) { mt_write(f, "mod.json", DESC(",\"files\":[]")); }
 static void m_float(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":1.5}")); }
-static void m_bad_gate(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g_god\":\"1\"}}")); }
+static void m_bad_cvar(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g-god\":\"1\"}}")); }
+static void m_bad_cvar_value(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"r_fov\":90.5}}")); }
+static void m_bad_cvar_twice(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"r_fov\":1,\"R_FOV\":2}}")); }
+static void m_bad_req_key(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"dlls\":{}}")); }
+static void m_bad_line(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"activate\":[\"echo a; quit\"]}}")); }
+static void m_bad_line_ctrl(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"deactivate\":[\"echo a\\nquit\"]}}")); }
+static void m_bad_line_key(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"start\":[\"echo\"]}}")); }
+static void m_bad_line_count(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"activate\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\","
+                                 "\"g\",\"h\",\"i\",\"j\",\"k\",\"l\",\"m\",\"n\",\"o\",\"p\",\"q\"]}}"));
+}
+static void m_gates_only(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+}
+static void m_req_general(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"deactivate\":[\"echo bye\"],"
+                                 "\"activate\":[\"  echo hi \",\"bind x \\\"say hi\\\"\"]},"
+                                 "\"cvars\":{\"r_label\":\"two words\",\"g_god\":true,\"com_maxFps\":120,\"g_off\":false}}"));
+}
 static void m_bad_home(const char *f) { mt_write(f, "mod.json", DESC(",\"homepage\":\"ftp://x\"")); }
 static void m_both(const char *f) { mt_write(f, "package.json", DESC("")); }
 static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
@@ -708,7 +736,14 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_version, &RESOLVER, "version must be");
     refused(fixture, tmp, m_reserved, &RESOLVER, "may not contain files or bundle");
     refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer");
-    refused(fixture, tmp, m_bad_gate, &RESOLVER, "not a supported gate");
+    refused(fixture, tmp, m_bad_cvar, &RESOLVER, "requirements.cvars key g-god is not a cvar name");
+    refused(fixture, tmp, m_bad_cvar_value, &RESOLVER, "requirements.cvars.r_fov must be a string, an integer or a boolean");
+    refused(fixture, tmp, m_bad_cvar_twice, &RESOLVER, "names r_fov twice");
+    refused(fixture, tmp, m_bad_req_key, &RESOLVER, "requirements key dlls is not supported (cvars, commands)");
+    refused(fixture, tmp, m_bad_line, &RESOLVER, "requirements.commands.activate[0] must be one console command");
+    refused(fixture, tmp, m_bad_line_ctrl, &RESOLVER, "requirements.commands.deactivate[0] must be one console command");
+    refused(fixture, tmp, m_bad_line_key, &RESOLVER, "requirements.commands key start is not supported");
+    refused(fixture, tmp, m_bad_line_count, &RESOLVER, "requirements.commands.activate has more than 16 lines");
     refused(fixture, tmp, m_bad_home, &RESOLVER, "homepage");
     refused(fixture, tmp, m_both, &RESOLVER, "both mod.json and package.json");
     refused(fixture, tmp, m_no_desc, &RESOLVER, "no mod.json or package.json");
@@ -749,11 +784,46 @@ static void test_refusals(const char *fixture, const char *tmp)
           strstr(b.first_warning, "resolves to nothing (a replaced stock file") != NULL &&
           find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->shadowed);
     sh_mb_free(&b);
-    /* Supported gates normalise to "0"; unknown keys travel under extra. */
+    /* Values normalise to strings; unknown keys travel under extra. */
     accepted(fixture, tmp, m_requirements, &b);
-    CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+    CHECK(b.requirements && !strcmp(b.requirements, GATES_CANONICAL));
     CHECK(b.extra && strstr(b.extra, "\"composes\":{\"hands\":true}") && b.homepage);
     sh_mb_free(&b);
+    /* A bundle carrying only the two gates keeps the canonical text and the
+     * hash the gates-only builder gave it. */
+    accepted(fixture, tmp, m_gates_only, &b);
+    CHECK(b.requirements && !strcmp(b.requirements, GATES_CANONICAL));
+    CHECK(strstr(b.canonical, ",\"requirements\":" GATES_CANONICAL ",") != NULL);
+    CHECK(!strcmp(b.hash, GATES_GOLDEN_HASH));
+    if (strcmp(b.hash, GATES_GOLDEN_HASH)) fprintf(stderr, "  gates-only hash %s\n", b.hash);
+    sh_mb_free(&b);
+    /* Any cvar and any console line: sorted names, string values (true "1",
+     * false "0", integers as digits), lines trimmed and in the author's order,
+     * "commands" before "cvars". */
+    accepted(fixture, tmp, m_req_general, &b);
+    CHECK(b.requirements && !strcmp(b.requirements,
+          "{\"commands\":{\"activate\":[\"echo hi\",\"bind x \\\"say hi\\\"\"],\"deactivate\":[\"echo bye\"]},"
+          "\"cvars\":{\"com_maxFps\":\"120\",\"g_god\":\"1\",\"g_off\":\"0\",\"r_label\":\"two words\"}}"));
+    if (b.requirements) printf("modbundle_test: general requirements canonical %s\n", b.requirements);
+    CHECK(strcmp(b.hash, GATES_GOLDEN_HASH) != 0);
+    sh_mb_free(&b);
+    /* The canonicaliser on its own: empty lists vanish, "cvars" stays. */
+    {
+        static const char *const empty_lists = "{\"commands\":{\"activate\":[],\"deactivate\":[]},\"cvars\":{\"b\":false,\"a\":\"x\"}}";
+        static const char *const accented = "{\"cvars\":{\"a\":\"\\u00e9\"}}";
+        char cause[SH_MB_CAUSE_MAX];
+        char *c = sh_mb_requirements_canonical(empty_lists, strlen(empty_lists), cause, sizeof cause);
+        CHECK(c && !strcmp(c, "{\"cvars\":{\"a\":\"x\",\"b\":\"0\"}}"));
+        free(c);
+        c = sh_mb_requirements_canonical("{}", 2, cause, sizeof cause);
+        CHECK(c && !strcmp(c, "{\"cvars\":{}}"));
+        free(c);
+        c = sh_mb_requirements_canonical(accented, strlen(accented), cause, sizeof cause);
+        CHECK(!c && strstr(cause, "printable ASCII"));
+        free(c);
+        c = sh_mb_requirements_canonical("[]", 2, cause, sizeof cause);
+        CHECK(!c && strstr(cause, "must be an object"));
+    }
 
     /* A symbolic link inside assets/ (needs symlink rights; skipped without them). */
     {

@@ -208,6 +208,19 @@ does not refuse, since the engine already tolerates those names.
   `generated/swf/mods/<id>/`. They load whenever the game asks for the movie, in the editor and in
   Play; a replaced movie the game already holds changes at the next map load, and one held since
   startup after a restart.
+- A mod's `requirements` set console variables and run console commands while it is installed:
+  `"requirements": {"cvars": {"<cvar>": <value>}, "commands": {"activate": ["<line>"], "deactivate":
+  ["<line>"]}}`. Any cvar works at any value (a string, an integer, or `true`/`false` for 1/0; write a
+  decimal as a string), up to 32 per mod; each command is one console line without `;`, up to 16 per
+  list. Snapmap+ keeps no list of allowed settings or commands: installing the mod accepts them. The
+  cvars are set when the editor is first opened or a map loads, checked again before Play, and put
+  back to the value they replaced when the mod is uninstalled or a rescan no longer finds it; the
+  `activate` lines run once when the mod's requirements start, the `deactivate` lines when they stop.
+  A cvar the game refuses (read-only, or settable only on the command line) or does not have is
+  logged, the mod's content stays unloaded, and `sh_mods status` and `sh_mods doctor` show each
+  requirement and whether it is live. When two mods ask different values for one cvar the later
+  install loses, both are named in the log, and none of its requirements apply. The Mods tab lists
+  them under Requirements.
 - A mod's `hud` setting chooses how the ammo panel shows a weapon: `"ammo_display": "weapon"` for a
   weapon decl lets the panel show the weapon's own capacity (the campaign pistol's infinity symbol
   and full bar) instead of SnapMap's forced number. It changes only the display, applies to every

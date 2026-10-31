@@ -101,6 +101,13 @@
 #define SH_MB_MANIFEST_MAX    (1024u * 1024u)   /* the store's bundle JSON cap */
 #define SH_MB_CAUSE_MAX       512u
 #define SH_MB_HASH_HEX        64u
+/* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
+ * console line, within these bounds. The Worker's manifest check mirrors them. */
+#define SH_MB_REQ_CVARS_MAX    32u     /* cvars one bundle may set */
+#define SH_MB_REQ_NAME_MAX     64u     /* bytes of a cvar name */
+#define SH_MB_REQ_VALUE_MAX    64u     /* bytes of a cvar value */
+#define SH_MB_REQ_COMMANDS_MAX 16u     /* lines in each of activate and deactivate */
+#define SH_MB_REQ_LINE_MAX     256u    /* bytes of one console line */
 #define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's product block */
 /* Product block "origin": the product created the folder (a copy it may
  * delete on Remove). A folder without one is the author's (Remove keeps its
@@ -389,6 +396,18 @@ int  sh_mb_stock_restore(const char *request, const char *source);
  * request it needs (generated/decls/snapmoduleinfo/<path>.decl). 1 on
  * success; 0 when the request is not a module decl. */
 int  sh_mb_module_info_request(const char *request, char *out, size_t cap);
+
+/* The canonical text of a mod.json "requirements" value (JSON text of the
+ * member's value), as the builder writes it into the manifest:
+ *   {"commands":{"activate":[...],"deactivate":[...]},"cvars":{"<name>":"<value>",...}}
+ * cvars: names are a letter or '_' then letters, digits or '_'; values are
+ * printable ASCII strings, integers or booleans, canonicalised to strings
+ * (true "1", false "0"); sorted by name, one name once (case-insensitive).
+ * commands: each line one console command (printable ASCII, no ';', spaces
+ * trimmed), in the author's order. "cvars" is always present; "commands" and
+ * each list only when not empty. Returns a malloc'd string, or NULL with the
+ * first cause. */
+char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, size_t cause_cap);
 
 /* A private virtual-texture family member:
  * virtualtextures/mods/<id>/[<folders>/]<family>_sq<N>.mega2, N 1 to 16 with

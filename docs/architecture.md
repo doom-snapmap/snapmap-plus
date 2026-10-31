@@ -848,9 +848,9 @@ registration pass (editor rows, map activation) also withdraws an animWeb
 whose models block names a model that no bundle provides and the engine has
 no md6Def for, since the engine's parse throws on it: a stock animWeb it
 shadowed is served by the game again, and a new name is not registered. Before
-the Play level load the SnapBuild detour re-checks the bundles' blacklist
-requirements (`MODS: play: requirements live: ...`); the engine itself does not
-reset those two gates between the editor and the level load. The editor pass
+the Play level load the SnapBuild detour re-checks the bundles' requirements
+(`MODS: play: requirements live: ...`); the engine itself does not reset the
+blacklist gates between the editor and the level load. The editor pass
 also raises to the session lifetime (4) the decls an editor row points at
 directly (its editor animWeb, its md6 render model, its preview material): the
 row is kept for the session, but those objects were created after the boot
@@ -861,6 +861,35 @@ raised the same way: the pass takes a watermark of the engine's resource
 lists before it runs and keeps every resource created since then that is
 still at level 1, and every step of the editor plan is registered at the
 session lifetime.
+
+Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
+{"activate": [...], "deactivate": [...]}}`) are read only through the builder's
+canonical form (`sh_mb_requirements_canonical`): sorted cvar names with string
+values, `true`/`false` as `1`/`0`, console lines trimmed and in the author's
+order, `"cvars"` always present and `"commands"` only when not empty, so a
+bundle carrying only the two blacklist gates keeps the text and hash it had
+when they were the only accepted requirement. The product names no cvar or
+command; the bounds (`SH_MB_REQ_*` in `modbundle.h`) are syntax only, and the
+Community API's manifest check mirrors them. `modserve.c` takes the admitted
+bundles in install order and drops the requirements of one that asks a cvar an
+earlier one asks at another value (one `MODS: requirements: conflict:` line
+names both). Before every registration pass, at the Play re-check and after a
+rescan on the main thread outside Play, it applies them: the deactivate lines of
+bundles whose requirements stopped, then each asked cvar set and read back
+(`idCVar::Set` with force, after `modserve_engine.c` refuses a read-only or
+command-line-only cvar from its flags; a set queued as console text is drained
+first), each cvar no bundle asks any more restored to the value it displaced
+unless someone else changed it, then the activate lines of bundles that start
+now, appended with `BufferCommandText` and logged as `MODS: requirements: <id>:
+command "<line>"`. A bundle whose cvars are not all live has its steps blocked
+with the cause, and its files first served before then are treated as below.
+The state lives across tables (a rescan replaces the index, not what was set);
+Nothing is restored at DOOM's exit; a cvar the engine archives to its own
+configuration may therefore keep a mod's value into the next session.
+`sh_mods status` and `sh_mods doctor` print `sh_modserve_requirements_report`,
+one line per requirement and whether it is live. Packages converted from the
+retired formats keep only the two blacklist gates (below): their requirements
+were never accepted by a player installing them.
 
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into an
@@ -931,15 +960,15 @@ the bytes are unchanged, also when the open landed in the table it replaced.
 The pass logs `MODS: reparsed <n> <type> decl(s) the engine parsed before the
 serving index (...)` per type and one summary line.
 
-The same race decides what a bundle's requirements mean for a resource: the
-cut-content blacklist gates are applied only at the first registration pass,
-and anything the engine loaded before that resolved its names with the
-blacklists on. A model loaded then keeps no materials and draws nothing: this
+The same race decides what a bundle's requirements mean for a resource: its
+cvars (the cut-content blacklist gates, for one) are applied only at the first
+registration pass, and anything the engine loaded before that resolved its
+names with the blacklists on. A model loaded then keeps no materials and draws nothing: this
 is why the Spider Mastermind body (stock-named mesh, loaded at boot, its
 materials and images on the blacklists) was invisible on 13954591 while its AI
 ran, and why the same bytes under a new mesh name drew. The provider therefore
-records whether a file was first served while one of its bundle's gates was not
-live; a decl first served then is re-parsed by the pass above, and each
+records whether a file was first served while its bundle's cvar requirements
+were not live; a decl first served then is re-parsed by the pass above, and each
 `baseModel` and `image` first served then is loaded again in place, found by
 name in the engine's `idMD6Model` and `idImage` resource lists, once the gates
 are live: `MODS: editor: reloaded <n> model(s) and <m> image(s) loaded before

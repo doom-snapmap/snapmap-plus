@@ -138,13 +138,13 @@ static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_loa
 static int g_gate[2] = { 1, 1 };         /* g_useImageBlackList, g_useResourceBlackList */
 static int g_gate_reads, g_gate_sets, g_registered_at_first_set = -1;
 static int gate_slot(const char *cvar) { return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1; }
-static int gate_read(void *c, const char *cvar, int *value)
+static int gate_read(void *c, const char *cvar, char *value, size_t cap)
 {
     int g = gate_slot(cvar);
     (void)c;
     g_gate_reads++;
     if (g < 0) return 0;
-    *value = g_gate[g];
+    _snprintf_s(value, cap, _TRUNCATE, "%d", g_gate[g]);
     return 1;
 }
 static int gate_set(void *c, const char *cvar, const char *value)
@@ -546,7 +546,7 @@ static void carrier_conversion(const char *root)
         CHECK(out != NULL && verdicts == maps[i].carriers && converted == maps[i].carriers && indexed == converted);
         /* The manifest step of the same parse activates what was converted. */
         if (out) {
-            unsigned req = sh_modserve_requirements();
+            int req = sh_modserve_requirements();
             g_activations = 0;
             g_rebuilds = 0;
             g_gate[0] = g_gate[1] = 1;
@@ -556,10 +556,9 @@ static void carrier_conversion(const char *root)
             loaded = sh_modmanifest_prepare_load(out, on, &ln);
             /* A converted package's cvar rows become bundle requirements; the
              * activation sets them before its first registration. */
-            if (req) CHECK(g_gate_sets > 0 && g_registered_at_first_set == 0 && !(req & 1u && g_gate[0]) &&
-                           !(req & 2u && g_gate[1]));
+            if (req) CHECK(g_gate_sets > 0 && g_registered_at_first_set == 0 && (g_gate[0] == 0) + (g_gate[1] == 0) == req);
             printf("  %s: requirements %s%s%s\n", maps[i].file, req ? "" : "none",
-                   (req & 1u) ? "g_useImageBlackList=0 " : "", (req & 2u) ? "g_useResourceBlackList=0" : "");
+                   !g_gate[0] ? "g_useImageBlackList=0 " : "", !g_gate[1] ? "g_useResourceBlackList=0" : "");
             CHECK(loaded != NULL && g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
             CHECK(g_rebuilds == (g_last_sync.missing ? 1 : 0) && g_last_sync.registered == g_last_sync.missing &&
                   g_last_sync.admitted == g_last_sync.missing);
@@ -744,7 +743,7 @@ static void cut_content(const char *root)
     CHECK(sh_modserve_index_build(mods) == 1);
     CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for local.cut@legacy-00000000000000aa") &&
           strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for local.cut@legacy-00000000000000aa"));
-    CHECK(sh_modserve_requirements() == 3);
+    CHECK(sh_modserve_requirements() == 2);
     g_gate[0] = g_gate[1] = 1;
     g_gate_sets = 0;
     g_registered_at_first_set = -1;
