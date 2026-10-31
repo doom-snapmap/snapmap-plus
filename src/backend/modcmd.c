@@ -637,10 +637,13 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
-    if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall") || !_stricmp(verb, "removed")) {
-        /* The Mods tab's map details, Remove from map, Uninstall and the
-         * removed mods (modui.c): the same dry runs and actions; --yes
-         * performs one. */
+    if (!_stricmp(verb, "removed")) {
+        mc_line("MODS: removed: the recycle bin is retired; Uninstall deletes a mod's folder for good");
+        return;
+    }
+    if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall")) {
+        /* The Mods tab's map details, Remove from map and Uninstall
+         * (modui.c): the same dry runs and actions; --yes performs one. */
         const char *argv[8];
         int argc = 0, i, n = cmd_argc(a);
         for (i = 1; i < n && argc < 8; i++) if (cmd_argv(a, i)) argv[argc++] = cmd_argv(a, i);

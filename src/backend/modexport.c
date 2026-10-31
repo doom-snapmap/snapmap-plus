@@ -1267,16 +1267,57 @@ static void me_rollback(me_import *im, const char *root)
     }
 }
 
-/* The ordinary install of each carried folder whose bundle the store does not
- * already serve. Every folder is decided before anything is written: one
- * whose id and version are installed with other content is refused. Then each
- * one is copied out of the export and installed as a folder from elsewhere is
- * (sh_ms_install_as: built, copied in, verified), under its own name when no
- * folder of its id is installed and that name is free, else under the name
- * the store gives a second folder of an id. The built bundle must be the one
- * the rows name. A refusal removes what the import installed; nothing that
- * was installed before is ever written. */
-static int me_install(me_import *im, modexport_stats *st, char *cause, size_t cap)
+/* The asset rule for a carried folder (modserve.h sh_modserve_row_served):
+ * an installed folder declares its id and the serving index resolves every
+ * name the rows that name its bundle list (a prefab's block rows, a map's
+ * rows). */
+static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_row row;
+    char **names = NULL;
+    size_t i, k, n = 0, total = 0;
+    int st;
+    memset(&row, 0, sizeof row);
+    if (strlen(c->b.id) >= sizeof row.id) return 0;
+    strcpy_s(row.id, sizeof row.id, c->b.id);
+    for (i = 0; rows && i < rows->count; i++)
+        if (!_stricmp(rows->rows[i].bundle, c->b.hash)) total += rows->rows[i].name_count;
+    if (total && !(names = (char **)calloc(total, sizeof *names))) return 0;
+    for (i = 0; rows && i < rows->count; i++)
+        if (!_stricmp(rows->rows[i].bundle, c->b.hash))
+            for (k = 0; k < rows->rows[i].name_count; k++) names[n++] = rows->rows[i].names[k];
+    row.names = names;
+    row.name_count = n;
+    st = sh_modserve_row_served(&row, NULL, 0);
+    free(names);
+    return st == SH_MODSERVE_ROW_SERVED;
+}
+
+/* A folder name beside the installed folders of an id: "<id>@<version>",
+ * else "<id>@<version>-2", "-3", ... */
+static int me_beside_name(const char *root, const char *id, const char *version, char *out, size_t cap)
+{
+    int k;
+    for (k = 1; k < 100; k++) {
+        if (k == 1) _snprintf_s(out, cap, _TRUNCATE, "%s@%s", id, version && version[0] ? version : "0.0.0");
+        else _snprintf_s(out, cap, _TRUNCATE, "%s@%s-%d", id, version && version[0] ? version : "0.0.0", k);
+        if (me_name_safe(out) && !me_folder_taken(root, out)) return 1;
+    }
+    return 0;
+}
+
+/* The ordinary install of each carried folder the store does not already
+ * serve. A carried folder whose bundle the store holds (by hash or alias), or
+ * whose id an installed folder declares and whose listed names that folder
+ * provides (the asset rule, whatever the bytes), is skipped and counted as
+ * already installed. Every other one is copied out of the export and
+ * installed as a folder from elsewhere is (sh_ms_install_as: built, copied
+ * in, verified), under its own name when no folder of its id is installed and
+ * that name is free, else beside the installed folders of its id under
+ * "<id>@<version>" (a free variant when that is taken). The built bundle must
+ * be the one its own mod.json names. A refusal removes what the import
+ * installed; nothing that was installed before is ever written. */
+static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_stats *st, char *cause, size_t cap)
 {
     sh_ms_list l;
     sh_mb_resolver r;
@@ -1296,18 +1337,16 @@ static int me_install(me_import *im, modexport_stats *st, char *cause, size_t ca
     for (i = 0; i < im->nc; i++) {
         me_carry *c = &im->c[i];
         const sh_ms_entry *e = sh_ms_resolve(&l, c->b.hash);
-        if (e && sh_ms_entry_usable(e)) { c->present = 1; st->bundles_present++; continue; }
+        if ((e && sh_ms_entry_usable(e)) || me_carry_served(c, rows)) {
+            c->present = 1;
+            st->bundles_present++;
+            me_log("MODS: import: mods/%s skipped: an installed folder of %s provides what the %s uses", c->name, c->b.id, what);
+            continue;
+        }
         if (e) {
             me_cause(cause, cap, "the installed %s %s needs attention (%s); run sh_mods doctor verify", c->b.id, c->b.version,
                      e->cause[0] ? e->cause : "it does not verify");
             goto done;
-        }
-        for (k = 0; k < l.count; k++) {
-            const sh_ms_entry *o = &l.items[k];
-            if (o->loaded && !strcmp(o->bundle.id, c->b.id) && !strcmp(o->bundle.version, c->b.version)) {
-                me_cause(cause, cap, "the installed %s %s differs from the one the export carries", c->b.id, c->b.version);
-                goto done;
-            }
         }
         left++;
     }
@@ -1332,6 +1371,7 @@ static int me_install(me_import *im, modexport_stats *st, char *cause, size_t ca
             sh_ms_install_stats is;
             sh_mb_bundle built;
             const char *as = NULL;
+            char beside[SH_MS_NAME_MAX + 1];
             int same_id = 0;
             if (c->present || c->installed) continue;
             if (sh_ms_enumerate(&l)) {
@@ -1339,6 +1379,15 @@ static int me_install(me_import *im, modexport_stats *st, char *cause, size_t ca
                 sh_ms_list_free(&l);
             }
             if (!same_id && me_name_safe(c->name) && !me_folder_taken(root, c->name)) as = c->name;
+            /* Beside an installed folder of the id, never over it (the store's
+             * own name for the same id and version would replace it). */
+            else if (same_id) {
+                if (!me_beside_name(root, c->b.id, c->b.version, beside, sizeof beside)) {
+                    me_cause(cause, cap, "no free folder name beside the installed %s", c->b.id);
+                    goto rollback;
+                }
+                as = beside;
+            }
             if (!sh_ms_install_as(c->stage, as, &r, c->stored, sizeof c->stored, &is, &built, c->why, sizeof c->why)) {
                 sh_mb_free(&built);
                 continue;
@@ -1399,6 +1448,7 @@ static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows
         if (me_carried(im, rows->rows[i].bundle)) continue;
         e = listed ? sh_ms_resolve(&l, rows->rows[i].bundle) : NULL;
         if (e && sh_ms_entry_usable(e)) continue;
+        if (sh_modserve_row_served(&rows->rows[i], NULL, 0) == SH_MODSERVE_ROW_SERVED) continue;
         st->bundles_absent++;
         me_log("MODS: import: the %s names %s@%s (bundle %.16s), which the export does not carry",
                me_kind_word(im->kind), rows->rows[i].id, rows->rows[i].version, rows->rows[i].bundle);
@@ -1437,7 +1487,7 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     if (cause && cap) cause[0] = 0;
     if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
     sh_modmanifest_read(text, len, &rows, &rejected);
-    if (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, st, cause, cap)) {
+    if (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, &rows, st, cause, cap)) {
         free(text);
         text = NULL;
         len = 0;
@@ -1482,7 +1532,7 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
         me_cause(cause, cap, "the prefab's mods cannot be read");
         goto done;
     }
-    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, st, cause, cap)) goto done;
+    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, &rows, st, cause, cap)) goto done;
     me_count_absent(&im, &rows, st);
     st->map_bytes = len;
     ok = 1;

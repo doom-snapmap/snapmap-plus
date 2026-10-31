@@ -41,24 +41,26 @@ var modsTab = (function () {
   var COUNT_NOUNS = {shadows: ['stock file', 'stock files'], sounds: ['sound', 'sounds'], movies: ['movie', 'movies'],
                      modules: ['module', 'modules'], vt: ['virtual texture', 'virtual textures']};
   /* remove is the v2 name of uninstall; the page sends uninstall. The two *Preview actions are dry
-     runs that answer with the consequence list the confirmation shows. removedEmpty deletes the
-     folders of removed-mods the confirmation listed (newline-separated). mapAddMod attaches the
+     runs that answer with the consequence list the confirmation shows. mapAddMod attaches the
      selected mod to the open map without placing anything (a map-level row); it removes nothing,
-     so it has no dry run. */
+     so it has no dry run. Uninstall is permanent: there is no bin to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'removedEmpty'];
+                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'info'};
-  var MAP_CAUSES = {missing: 'not installed on this machine', unindexed: 'not scanned yet; reopen the Mods tab',
-                    skipped: 'installed but not in use', attention: 'needs attention'};
-  var OTHER_MAPS_NOTE = 'Other saved maps that use this mod bring it back from removed-mods when they are opened.';
-  /* Under the Uninstall confirmation's scope line: what undoes it. */
-  var UNINSTALL_UNDO = 'Ctrl+Z in the editor, or opening a map that uses it, puts it back. Uninstalling:';
-  var UNINSTALL_REOPEN = 'Opening a map that uses it puts it back. Uninstalling:';
-  /* The removed mods (payload.removed): the footer line and the Empty confirmation. */
-  var EMPTY_NOTE = 'Deletes these folders from removed-mods for good. A saved map that still uses one of them can no longer bring it back.';
+  /* A map needs the paths its rows list; a mod folder provides them (the asset rule). */
+  var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
+                    unindexed: 'not scanned yet; reopen the Mods tab', skipped: 'installed but not in use',
+                    attention: 'needs attention'};
+  /* Under the Uninstall confirmation's scope line: it cannot be undone. */
+  var UNINSTALL_PERMANENT = 'This cannot be undone. Uninstalling:';
+  /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
+  function savedMapsText(n) {
+    return n + ' of your saved maps use it; they will not open until a mod folder provides its assets again.';
+  }
+  var UNDO_CLEARED = 'Undo history is cleared.';
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
     mapRemoveMod: 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.',
@@ -133,7 +135,7 @@ var modsTab = (function () {
   function normalize(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload))
       return {ok: false, error: 'The mods list is unavailable.', mods: [], root: '', gen: 0, v: 0,
-              migrate: {entries: 0, pending: 0, running: false}, removed: null};
+              migrate: {entries: 0, pending: 0, running: false}};
     var mg = payload.migrate && typeof payload.migrate === 'object' ? payload.migrate : {};
     var mods = arr(payload.mods).map(normMod);
     mods.sort(function (a, b) {
@@ -143,22 +145,8 @@ var modsTab = (function () {
     return {ok: true, error: payload.storeReadable === false ? 'The mods folder cannot be read.' : '',
             root: str(payload.root), gen: num(payload.gen), v: num(payload.v), mods: mods,
             migrate: {entries: num(mg.entries), pending: num(mg.pending), running: bool(mg.running)},
-            removed: normRemoved(payload.removed), map: normMap(payload.map)};
+            map: normMap(payload.map)};
   }
-  /* removed-mods (payload.removed): null when the backend did not report it. */
-  function normRemoved(v) {
-    v = obj(v);
-    if (!v) return null;
-    var items = arr(v.items).map(function (it) {
-      it = obj(it) || {};
-      return {folder: str(it.folder), id: str(it.id), version: str(it.version), name: str(it.name), bytes: num(it.bytes),
-              at: num(it.at), restorable: bool(it.restorable)};
-    }).filter(function (it) { return it.folder.length > 0; });
-    var bytes = num(v.bytes);
-    if (!bytes) bytes = items.reduce(function (a, it) { return a + it.bytes; }, 0);
-    return {folder: str(v.folder), count: Math.max(num(v.count), items.length), bytes: bytes, items: items};
-  }
-  function removedText(r) { return 'Removed mods: ' + r.count + ', ' + formatSize(r.bytes); }
 
   /* The open map (payload v3 map object). null: no map object at all; open false: no map is open
      (v2's entities -1). Absent v3 fields stay null and are left out of the modal. */
@@ -192,8 +180,10 @@ var modsTab = (function () {
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
                        references: normRefs(mp.references), manifestRow: bool(mp.manifestRow), attached: bool(mp.attached),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
-            install: ins ? {folder: str(ins.folder), disposition: ins.disposition === 'move' ? 'move' : 'delete',
-                            movedTo: str(ins.movedTo)} : null,
+            /* Uninstall deletes the folder; savedMaps is -1 when the saves could not be read. */
+            install: ins ? {folder: str(ins.folder), disposition: 'delete',
+                            savedMaps: ins.savedMaps === undefined || ins.savedMaps === null ? -1 : num(ins.savedMaps),
+                            undoCleared: bool(ins.undoCleared)} : null,
             /* uninstallPreview only: the Toybox rows uninstalling takes out of the editor */
             editorRows: normNames(v.editorRows)};
   }
@@ -221,14 +211,9 @@ var modsTab = (function () {
     if (pv.action === 'uninstall' && pv.editorRows.length)
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
-      var f = 'mods\\' + pv.install.folder, as = pv.install.movedTo.replace(/^removed-mods\\/, '');
-      out.push({text: pv.install.disposition === 'move'
-        ? 'Moves the folder ' + f + ' to removed-mods\\' + (as && as !== pv.install.folder ? ' as ' + as : '') +
-          ', where it stays until you empty the removed mods.'
-        : 'Deletes the folder ' + f + ' and its files.'});
-    }
-    if (pv.action === 'uninstall') {
-      out.push({text: OTHER_MAPS_NOTE});
+      out.push({text: 'Deletes the folder mods\\' + pv.install.folder + ' and its files.'});
+      if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
+      if (pv.install.undoCleared) out.push({text: UNDO_CLEARED});
     }
     return out;
   }
@@ -386,7 +371,6 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...',
-                     removedEmpty: 'Deleting the removed mods...',
                      migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
     function selectedMod() {
@@ -399,7 +383,7 @@ var modsTab = (function () {
 
     function renderButtons() {
       var sel = !!selectedMod();
-      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsEmptyBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn'].forEach(function (id) {
         var b = byId(id);
         if (b) b.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn' || id === 'modsVerifyBtn'));
       });
@@ -725,7 +709,6 @@ var modsTab = (function () {
       clear(host);
       modalButtons = [];
       if (modal.page === 'confirm' && modal.preview) { renderConfirm(host, modal.preview); return; }
-      if (modal.page === 'empty') { renderEmpty(host); return; }
       var m = model.map;
       modalHead(host, m && m.open && m.name ? m.name : 'This map');
       var body = el('div', 'mods-map-body');
@@ -790,7 +773,7 @@ var modsTab = (function () {
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
       body.appendChild(el('div', 'mods-note', uninstall
-        ? (pv.map ? UNINSTALL_UNDO : UNINSTALL_REOPEN)
+        ? UNINSTALL_PERMANENT
         : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
@@ -823,46 +806,6 @@ var modsTab = (function () {
       }));
       host.appendChild(acts);
     }
-    /* The Empty confirmation: the folders the last document listed, Cancel and Empty. */
-    function openEmpty() {
-      var r = model.removed;
-      if (busy || !r || !r.count) return;
-      modal.from = 'empty';
-      modal.page = 'empty';
-      modal.preview = null;
-      openMap(byId('modsEmptyBtn'), true);
-    }
-    function renderEmpty(host) {
-      var r = model.removed || {count: 0, bytes: 0, items: []};
-      modalHead(host, 'Empty the removed mods?');
-      var body = el('div', 'mods-map-body');
-      host.appendChild(body);
-      body.appendChild(el('div', 'mods-note mods-scope', EMPTY_NOTE));
-      body.appendChild(el('div', 'mods-note', removedText(r) + ':'));
-      var ul = el('ul', 'mods-consequences');
-      r.items.forEach(function (it) {
-        var who = it.name || it.id;
-        ul.appendChild(el('li', '', 'removed-mods\\' + it.folder + (who && who !== it.folder ? ' (' + who + ')' : '') + ', ' + formatSize(it.bytes)));
-      });
-      body.appendChild(ul);
-      var acts = el('div', 'modal-actions mods-map-foot');
-      acts.appendChild(modalButton('Cancel', '', closeMap));
-      acts.appendChild(modalButton('Empty', 'danger-solid', function () {
-        act('removedEmpty', r.items.map(function (it) { return it.folder; }).join('\n'));
-      }));
-      host.appendChild(acts);
-    }
-    /* The footer line under the store path: hidden while removed-mods is empty or not reported. */
-    function renderRemoved() {
-      var box = byId('modsRemoved'), text = byId('modsRemovedText'), r = model.removed;
-      var on = loaded && !!r && r.count > 0;
-      if (box) box.style.display = on ? '' : 'none';
-      if (text) {
-        text.textContent = on ? removedText(r) : '';
-        text.title = on ? r.folder : '';
-      }
-    }
-
     /* Escape closes; Tab stays inside the dialog. */
     function onModalKey(e) {
       if (!modal.open) return;
@@ -894,7 +837,6 @@ var modsTab = (function () {
       }
       var rootLine = byId('modsRoot');
       if (rootLine) { rootLine.textContent = model.root; rootLine.title = model.root; }
-      renderRemoved();
     }
 
     function renderAll() {
@@ -975,7 +917,6 @@ var modsTab = (function () {
       }
       setStatus(message, ok ? 'ok' : 'err');
       if (message) env.toast(message, ok ? 'ok' : 'err');
-      if (action === 'removedEmpty') { if (modal.from === 'empty') closeMap(); return; }
       if (action === 'install' && ok && data.key) selectedKey = str(data.key);
       if ((action === 'uninstall' || action === 'remove') && ok) selectedKey = '';
       /* After the real action the modal shows the next document: the list, or nothing after an
@@ -1008,7 +949,6 @@ var modsTab = (function () {
           act('mapRemoveModPreview', b.key);
         } else act('mapAddMod', b.key);
       });
-      on('modsEmptyBtn', 'click', openEmpty);
       on('modsMapModal', 'keydown', onModalKey);
       on('modsMapModal', 'mousedown', function (e) { if (e.target === byId('modsMapModal')) closeMap(); });
       on('modsRebuildBtn', 'click', function () { var b = selectedMod(); if (b) act('rebuild', b.key); });
@@ -1030,7 +970,6 @@ var modsTab = (function () {
       select: select,
       setAttentionOnly: setAttnOnly,
       openMap: function () { openMap(); },
-      openEmpty: openEmpty,
       /* The stored COLLAPSE_KEY value: a list of group ids. */
       loadCollapsed: function (list) { collapsed = collapsedFrom(list); renderList(); },
       closeMap: closeMap,
@@ -1082,25 +1021,9 @@ var modsTab = (function () {
               tagRemoved: left === 0 && docu.map.tagged !== false,
               vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
     }
-    function binOf() {
-      if (!docu.removed || typeof docu.removed !== 'object') docu.removed = {folder: 'removed-mods', count: 0, bytes: 0, items: []};
-      if (!Array.isArray(docu.removed.items)) docu.removed.items = [];
-      return docu.removed;
-    }
-    function binName(folder) {
-      var taken = {}, n = 2, name = folder;
-      binOf().items.forEach(function (it) { taken[it.folder] = true; });
-      while (taken[name]) name = folder + '-' + n++;
-      return name;
-    }
-    function binCount() {
-      var r = binOf();
-      r.count = r.items.length;
-      r.bytes = r.items.reduce(function (a, it) { return a + num(it.bytes); }, 0);
-    }
-    /* Every origin moves to removed-mods; a clash there gets a suffix. */
-    function installPart(b) {
-      return {folder: b.folder || b.key, disposition: 'move', movedTo: 'removed-mods\\' + binName(b.folder || b.key)};
+    /* Uninstall deletes the folder; the saved maps are not the preview's to count. */
+    function installPart(b, open) {
+      return {folder: b.folder || b.key, disposition: 'delete', savedMaps: num(b.savedMaps), undoCleared: !!open};
     }
     function removeFromMap(r) {
       docu.map.mods = mapMods().filter(function (x) { return x !== r; });
@@ -1129,7 +1052,8 @@ var modsTab = (function () {
         else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.id), map: mapPart(r), install: null};
       } else if (a === 'uninstallPreview') {
         if (!b) { ok = false; msg = key + ' is not installed.'; }
-        else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null, install: installPart(b),
+        else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null,
+                             install: installPart(b, !!(docu.map && docu.map.entities !== -1)),
                              editorRows: arr(b.editorRowNames).slice()};
       } else if (a === 'mapRemoveMod') {
         if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
@@ -1137,21 +1061,12 @@ var modsTab = (function () {
       } else if (a === 'uninstall') {
         if (!b) { ok = false; msg = key + ' is not installed.'; }
         else {
-          var moved = binName(b.folder || b.key), title = nameOf(key);
-          msg = 'Uninstalled ' + nameOf(key) + '. Its folder was moved to removed-mods\\' + moved + '.';
+          var open = !!(docu.map && docu.map.entities !== -1);
+          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was deleted' +
+                (open ? ' and the undo history was cleared.' : '.');
           if (r) removeFromMap(r);
           docu.mods = mods().filter(function (x) { return x !== b; });
-          binOf().items.push({folder: moved, id: b.id || b.key, version: str(b.version), name: title, bytes: num(b.size),
-                              at: 0, restorable: !!b.bundle});
-          binCount();
         }
-      } else if (a === 'removedEmpty') {
-        var listed = key ? key.split('\n') : null, bin = binOf(), before = bin.items.length;
-        bin.items = bin.items.filter(function (it) { return listed && listed.indexOf(it.folder) < 0; });
-        var gone = before - bin.items.length;
-        binCount();
-        if (!gone) { ok = false; msg = 'Nothing to empty: removed-mods holds no folder.'; }
-        else msg = 'Deleted ' + gone + ' removed mod folder(s).';
       } else { ok = false; msg = 'Browser preview: the mods store is not available here.'; }
       recount();
       data.ok = ok;
@@ -1165,7 +1080,7 @@ var modsTab = (function () {
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
-          mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, UNINSTALL_UNDO: UNINSTALL_UNDO, UNINSTALL_REOPEN: UNINSTALL_REOPEN, EMPTY_NOTE: EMPTY_NOTE,
+          mapModStatus: mapModStatus, UNINSTALL_PERMANENT: UNINSTALL_PERMANENT, UNDO_CLEARED: UNDO_CLEARED, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create};
 })();
 

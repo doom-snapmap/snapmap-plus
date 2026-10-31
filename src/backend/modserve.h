@@ -69,24 +69,11 @@ int sh_modserve_index_rescan(void);
 /* Nonzero when the published table serves at least one path. */
 int sh_modserve_active(void);
 
-/* Reinstating an uninstalled mod the open map still needs (modui.c owns the
- * recycle bin, removed-mods\, and binds the hook). The points where the
- * backend learns what a map needs call sh_modserve_restore: the map rows at a
- * load (`hashes`, the manifest's bundle hashes), the save observer (`names`,
- * the placed names), a Play entry and the undo watch (neither: the hook reads
- * the open map's placed names). A bundle that resolves to nothing installed
- * but matches a recycled folder is moved back into mods\ and the serving
- * index rebuilt before the call returns; what the running game still needs
- * (registration, the palette, the toast) follows on a later main-thread tick.
- * Returns the number of mods reinstated, 0 when none (or no hook). */
-#define SH_MODSERVE_RESTORE_LOAD 1
-#define SH_MODSERVE_RESTORE_SAVE 2
-#define SH_MODSERVE_RESTORE_PLAY 3
-#define SH_MODSERVE_RESTORE_UNDO 4
-typedef int (*sh_modserve_restore_fn)(const char *const *hashes, int hash_count, const char *const *names,
-                                      size_t name_count, int when);
-void sh_modserve_set_restore(sh_modserve_restore_fn fn);
-int  sh_modserve_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when);
+/* Where the backend learns what a map lists (the map scope's hook and
+ * source, modmanifest.h and modui.c): a load, a save, the Play entry. */
+#define SH_MODSERVE_AT_LOAD 1
+#define SH_MODSERVE_AT_SAVE 2
+#define SH_MODSERVE_AT_PLAY 3
 
 /* ------------------------------------------------------------------ serve */
 
@@ -531,7 +518,7 @@ int  sh_modserve_scope_report(sh_modserve_line_fn fn, void *context);
 /* The points that must read the open map itself (the Play entry: Play does
  * not serialize the map) ask the bound source (modui.c) to recompute the
  * listing from the current manifest and the placed names and call
- * sh_modserve_scope_set. `when` is a SH_MODSERVE_RESTORE_* point. Returns
+ * sh_modserve_scope_set. `when` is a SH_MODSERVE_AT_* point. Returns
  * what the source returns (the bundles that changed), 0 without one. */
 typedef int (*sh_modserve_scope_source_fn)(int when);
 void sh_modserve_set_scope_source(sh_modserve_scope_source_fn fn);
@@ -542,6 +529,27 @@ int  sh_modserve_scope_source(int when);
 /* 1 installed and admitted, 0 not installed, -1 installed but skipped (the
  * first cause is copied to `cause` when non-NULL). */
 int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap);
+
+/* The asset rule. A map, rawmap or prefab needs the paths its manifest rows
+ * list; a mod folder provides them. A row is SERVED when an admitted bundle
+ * declares the row's id and every name the row lists resolves through the
+ * serving index to an admitted bundle (any provider, unscoped); MISSING when
+ * no admitted bundle declares the id (a folder of the id that was skipped is
+ * named in the cause); INCOMPLETE when one declares it but a listed name does
+ * not resolve. The row's bundle hash is not consulted: it is the key a
+ * download asks the store for. `cause` (when non-NULL) gets the sentence a
+ * refusal shows, for a MISSING row "This map uses Hell Guards
+ * (local.hell-guard), which is not installed." and for an INCOMPLETE one
+ * "Hell Guards (local.hell-guard) is installed but does not provide <the
+ * first three names>[ and N more], which this map uses."; `subject` replaces
+ * "map" ("rawmap", "prefab"). The title is the installed folder's name when
+ * one declares the id, else the id alone. Lock-free; any thread. */
+#define SH_MODSERVE_ROW_MISSING    0
+#define SH_MODSERVE_ROW_SERVED     1
+#define SH_MODSERVE_ROW_INCOMPLETE 2
+struct sh_modmanifest_row;
+int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, size_t cap);
+int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
 
 /* The admitted build that serves a mod: the bundle `bundle_hash` names
  * (aliases resolve), else the newest admitted bundle of `id`; when a newer

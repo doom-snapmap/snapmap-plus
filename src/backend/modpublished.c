@@ -12,7 +12,7 @@
  *   ASKING         poll the answer
  *   FETCHING       Yes: one worker job fetches every missing bundle in turn
  *   (resume)       the job is done, on a main tick: rescan the index, check
- *                  every bundle is admitted, re-check the owner and (joiner)
+ *                  every row is served (the asset rule), re-check the owner and (joiner)
  *                  the lobby host's item, activate, parse the retained text into
  *                  a fresh map and call the original completion with it
  *
@@ -62,6 +62,7 @@
 #define PUB_SEEN_MAX        16
 #define PUB_ID_CAP          96
 #define PUB_TEXT_CAP        256     /* the native dialog body */
+#define PUB_CAUSE_CAP       400     /* the asset rule's sentence for one row */
 
 enum { PUB_DIALOG_PENDING = 0, PUB_DIALOG_ACCEPTED = 1 };
 enum { HOLD_IDLE = 0, HOLD_RAISE, HOLD_ASKING, HOLD_FETCHING, HOLD_PROBING };
@@ -85,6 +86,8 @@ static void pub_logf(const char *fmt, ...)
     va_end(ap);
     pub_log(line);
 }
+
+static void pub_print(const char *line);
 
 static int pub_on_main(void)
 {
@@ -120,17 +123,26 @@ static pub_record g_record;
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
-static int pub_bundle_installed(const char *hash, char *cause, size_t cap)
+/* The asset rule (modserve.h sh_modserve_row_served): a row is served when an
+ * installed folder declares its id and provides every name it lists,
+ * whatever its bundle hash. `subject` is the word the cause uses ("map",
+ * "prefab"). */
+static int pub_row_state(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     if (cause && cap) cause[0] = 0;
-    return g_ops.bundle_state && g_ops.bundle_state(g_ops.context, hash, cause, cap) == 1;
+    return g_ops.row_state ? g_ops.row_state(g_ops.context, row, subject, cause, cap) : SH_MODPUB_ROW_MISSING;
+}
+
+static int pub_row_served(const sh_modmanifest_row *row)
+{
+    return pub_row_state(row, NULL, NULL, 0) == SH_MODPUB_ROW_SERVED;
 }
 
 static size_t pub_count_missing(const sh_modmanifest_list *rows)
 {
     size_t missing = 0;
     for (size_t i = 0; i < rows->count; i++)
-        if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) missing++;
+        if (!pub_row_served(&rows->rows[i])) missing++;
     return missing;
 }
 
@@ -501,7 +513,7 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
     for (size_t i = 0; i < h->rows.count; i++) {
-        if (pub_bundle_installed(h->rows.rows[i].bundle, NULL, 0)) continue;
+        if (pub_row_served(&h->rows.rows[i])) continue;
         h->missing[h->missing_count++] = i;
         h->missing_bytes += h->rows.rows[i].size;
     }
@@ -523,6 +535,12 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
         }
     }
     h->state = HOLD_RAISE;
+    /* Each row the hold asks for, as the asset rule names it. */
+    for (size_t i = 0; i < h->missing_count; i++) {
+        char cause[PUB_CAUSE_CAP];
+        (void)pub_row_state(&h->rows.rows[h->missing[i]], pub_thing(hook), cause, sizeof cause);
+        if (cause[0]) { pub_print(cause); pub_logf("MODS: %s", cause); }
+    }
     return 1;
 nomem:
     pub_hold_free();
@@ -668,8 +686,7 @@ static void pub_finish(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = h->job;
-    char line[PUB_TEXT_CAP], cause[160];
-    const char **hashes;
+    char line[PUB_TEXT_CAP], cause[PUB_CAUSE_CAP];
     sh_modpub_resume r;
     int ok;
 
@@ -684,10 +701,10 @@ static void pub_finish(void)
     if (g_ops.rescan) (void)g_ops.rescan(g_ops.context);
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        if (pub_bundle_installed(row->bundle, cause, sizeof cause)) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed%s%s. %s",
-                    row->id[0] ? row->id : row->bundle, cause[0] ? ": " : "", cause, pub_not_done(h->hook));
-        pub_drop(line, "a fetched bundle is not admitted");
+        if (pub_row_state(row, pub_thing(h->hook), cause, sizeof cause) == SH_MODPUB_ROW_SERVED) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed.%s%s %s",
+                    row->id[0] ? row->id : row->bundle, cause[0] ? " " : "", cause, pub_not_done(h->hook));
+        pub_drop(line, "a fetched row is not served");
         return;
     }
     if (pub_is_prefab(h->hook)) {
@@ -720,11 +737,8 @@ static void pub_finish(void)
     /* A rawmap is activated by its own parse when it opens again; activating
      * now would change what the map that is open serves. */
     if (h->hook != SH_MODPUB_RAWMAP_LOAD) {
-        hashes = calloc(h->rows.count ? h->rows.count : 1, sizeof(*hashes));
-        if (!hashes) { pub_drop("The mods were installed, but the map could not be resumed.", "no memory"); return; }
-        for (size_t i = 0; i < h->rows.count; i++) hashes[i] = h->rows.rows[i].bundle;
-        if (g_ops.activate) (void)g_ops.activate(g_ops.context, hashes, (int)h->rows.count);
-        free((void *)hashes);
+        /* Each row through the build that serves it now (the asset rule). */
+        if (g_ops.activate) (void)g_ops.activate(g_ops.context, &h->rows);
     }
 
     memset(&r, 0, sizeof r);
@@ -819,22 +833,21 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     sh_modmanifest_read(text, length, rows, &rejected);
     if (!rows->count) return 0;
     missing = pub_count_missing(rows);
-    /* An uninstalled mod still in the recycle bin comes back first, exactly as
-     * the load's own activation would bring it back. */
-    if (missing && g_ops.restore && pub_on_main()) {
-        const char **hashes = calloc(missing, sizeof(*hashes));
-        int n = 0;
-        if (hashes) {
-            for (size_t i = 0; i < rows->count && (size_t)n < missing; i++)
-                if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) hashes[n++] = rows->rows[i].bundle;
-            if (g_ops.restore(g_ops.context, hashes, n) > 0) missing = pub_count_missing(rows);
-            free((void *)hashes);
-        }
-    }
     return missing;
 }
 
 #define PUB_LABEL_CAP (SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
+
+/* One row's refusal notice: the asset rule's sentence, what did not happen,
+ * and where the mod can come from. Kept only when it fits the dialog body. */
+static void pub_single_notice(char *notice, size_t cap, const char *cause, int hook, int unreachable)
+{
+    char text[PUB_TEXT_CAP * 2];
+    _snprintf_s(text, sizeof text, _TRUNCATE, "%s %s %s", cause, pub_not_done(hook),
+                unreachable ? "The mod store could not be reached; try again, or ask its author for the .zip export."
+                            : "Ask its author for the .zip export.");
+    if (strlen(text) < cap && strlen(text) < PUB_TEXT_CAP) strcpy_s(notice, cap, text);
+}
 
 /* The refusal: the notice, and one console line naming every mod. */
 static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest_row *const *rows, size_t count,
@@ -845,6 +858,16 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
     char (*storage)[PUB_LABEL_CAP] = calloc(count ? count : 1, sizeof(*storage));
     const char *bare = pub_is_prefab(hook) ? "This prefab was not placed. It needs mods you do not have."
                                            : "This map was not loaded. It needs mods you do not have.";
+    char single[PUB_CAUSE_CAP] = "";
+    /* The asset rule's sentence for each row first; one row's sentence is
+     * also the notice. */
+    for (size_t i = 0; i < count; i++) {
+        char cause[PUB_CAUSE_CAP];
+        (void)pub_row_state(rows[i], pub_thing(hook), cause, sizeof cause);
+        if (!cause[0]) continue;
+        pub_print(cause);
+        if (count == 1) strcpy_s(single, sizeof single, cause);
+    }
     if (!labels || !storage) {
         free((void *)labels); free(storage);
         if (g_hold.state != HOLD_IDLE) pub_drop(bare, why);
@@ -858,6 +881,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
         }
         sh_modpublished_prefab_refusal_line(line, sizeof line, source, labels, count, unreachable ? 1 : 0);
         sh_modpublished_compose_prefab_refusal(notice, sizeof notice, labels, count, unreachable ? 1 : 0);
+        if (single[0]) pub_single_notice(notice, sizeof notice, single, hook, unreachable);
         free((void *)labels); free(storage);
         pub_print(line);
         pub_logf("MODS: %s", line);
@@ -878,6 +902,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
         : ", which you do not have and the mod store does not hold. Ask the map's author for its .zip export, "
           "which carries the mods.", _TRUNCATE);
     sh_modpublished_compose_refusal(notice, sizeof notice, labels, count, unreachable);
+    if (single[0]) pub_single_notice(notice, sizeof notice, single, hook, unreachable);
     free((void *)labels); free(storage);
     pub_print(line);
     pub_logf("MODS: %s", line);
@@ -896,7 +921,7 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
         size_t n = 0;
         if (missing) {
             for (size_t i = 0; i < rows->count; i++)
-                if (!pub_bundle_installed(rows->rows[i].bundle, NULL, 0)) missing[n++] = &rows->rows[i];
+                if (!pub_row_served(&rows->rows[i])) missing[n++] = &rows->rows[i];
             if (n) pub_rawmap_refuse(SH_MODPUB_RAWMAP_LOAD, name, missing, n, 0, "the rawmap gate is unavailable here");
             free((void *)missing);
         }
@@ -1067,6 +1092,12 @@ void sh_modpublished_poll(void)
         }
         _snprintf_s(line, sizeof line, _TRUNCATE, pub_is_prefab(h->hook) ? "The prefab was not placed: it needs %s."
                                                                         : "The map was not loaded: it needs %s.", list);
+        if (h->missing_count == 1) {
+            char cause[PUB_CAUSE_CAP], text[PUB_TEXT_CAP * 2];
+            (void)pub_row_state(&h->rows.rows[h->missing[0]], pub_thing(h->hook), cause, sizeof cause);
+            _snprintf_s(text, sizeof text, _TRUNCATE, "%s %s", cause, pub_not_done(h->hook));
+            if (cause[0] && strlen(text) < sizeof line) strcpy_s(line, sizeof line, text);
+        }
         pub_drop(line, "the player declined");
         break;
     }
@@ -1280,10 +1311,10 @@ static int eng_on_main(void *c)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-static int eng_bundle_state(void *c, const char *hash, char *cause, size_t cap)
-{ (void)c; return sh_modserve_bundle_state(hash, cause, cap); }
+static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+{ (void)c; return sh_modserve_row_served_for(row, subject, cause, cap); }
 static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
-static int eng_activate(void *c, const char *const *hashes, int n) { (void)c; return modserve_activate_bundles(hashes, n); }
+static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
 static int eng_ask(void *c, unsigned gdm, unsigned set, const char *text) { (void)c; return sh_engine_dialog_ask(gdm, set, text); }
 static int eng_poll(void *c, int ticket) { (void)c; return sh_engine_dialog_poll(ticket); }
@@ -1549,19 +1580,13 @@ static int eng_store_has(void *c, const char *hash, volatile int *cancel)
     return -1;
 }
 
-static int eng_restore(void *c, const char *const *hashes, int n)
-{
-    (void)c;
-    return sh_modserve_restore(hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD);
-}
-
 static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf("%s\n", line); }
 
 static const sh_modpub_ops ENG_OPS = {
-    NULL, eng_on_main, eng_bundle_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
+    NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
-    eng_store_has, eng_restore, eng_print
+    eng_store_has, eng_print
 };
 
 /* ------------------------------------------------------------ detours */

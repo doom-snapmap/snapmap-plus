@@ -97,15 +97,22 @@ typedef struct fake {
 } fake;
 static fake F;
 
-static int f_bundle_state_plain(const char *hash)
+/* The asset rule: the real serving index answers every row but the ghost's,
+ * which only a download installs. */
+static int f_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
-    if (!strcmp(hash, GHOST)) return F.ghost_installed ? 1 : 0;
-    return sh_modserve_bundle_state(hash, NULL, 0);
+    if (cause && cap) cause[0] = 0;
+    if (!strcmp(row->bundle, GHOST)) {
+        if (F.ghost_installed) return SH_MODPUB_ROW_SERVED;
+        if (cause) _snprintf_s(cause, cap, _TRUNCATE, "This prefab uses %s, which is not installed.", row->id);
+        return SH_MODPUB_ROW_MISSING;
+    }
+    return sh_modserve_row_served_for(row, "prefab", cause, cap);
 }
-static int f_listed(const char *hash)
+static int f_listed(const sh_modmanifest_row *row)
 {
     int i;
-    for (i = 0; i < F.listed_n; i++) if (!strcmp(F.listed[i], hash)) return 1;
+    for (i = 0; i < F.listed_n; i++) if (!strcmp(F.listed[i], row->bundle)) return 1;
     return 0;
 }
 static int f_attach(const sh_modmanifest_row *row, char *note, size_t cap)
@@ -116,7 +123,7 @@ static int f_attach(const sh_modmanifest_row *row, char *note, size_t cap)
     if (F.listed_n < 4) strcpy_s(F.listed[F.listed_n++], sizeof F.listed[0], row->bundle);
     return 1;
 }
-static int f_activate(const char *const *hashes, int n) { (void)hashes; if (n > 0) F.activations++; return n; }
+static int f_activate(const sh_modmanifest_list *rows) { if (rows->count) F.activations++; return (int)rows->count; }
 static int f_module_known(const char *name)
 {
     if (!_stricmp(name, "maps/modules/ind/stock_room.decl")) return 1;
@@ -134,19 +141,18 @@ static int f_refresh(void) { F.refreshes++; return 1; }
 static int f_call_main(int (*fn)(void *), void *ctx) { F.main_calls++; return fn(ctx) ? 1 : 1; }
 
 static const sh_prefab_mods_ops PM_OPS = {
-    f_bundle_state_plain, NULL, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main
+    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main
 };
 
 /* modpublished's doubles: the hold runs as in the game, its jobs inline. */
 static int p_on_main(void *c) { (void)c; return 1; }
-static int p_bundle_state(void *c, const char *hash, char *cause, size_t cap)
+static int p_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
-    (void)c;
-    if (cause && cap) cause[0] = 0;
-    return f_bundle_state_plain(hash) == 1 ? 1 : 0;
+    (void)c; (void)subject;
+    return f_row_state(row, cause, cap);
 }
 static int p_rescan(void *c) { (void)c; return 1; }
-static int p_activate(void *c, const char *const *h, int n) { (void)c; (void)h; return n; }
+static int p_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
 static int p_can_ask(void *c) { (void)c; return 1; }
 static int p_ask(void *c, unsigned gdm, unsigned set, const char *text)
 {
@@ -181,9 +187,9 @@ static int p_store_has(void *c, const char *hash, volatile int *cancel)
 static void p_print(void *c, const char *line) { (void)c; f_print(line); }
 
 static const sh_modpub_ops PUB_OPS = {
-    NULL, p_on_main, p_bundle_state, p_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
+    NULL, p_on_main, p_row_state, p_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
     p_worker_run, p_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, p_log,
-    p_store_has, NULL, p_print
+    p_store_has, p_print
 };
 
 static void reset_fakes(void)
@@ -686,8 +692,8 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod 2.0, which you do not have and the mod "
                                 "store does not hold. Ask the prefab's author for its .zip export, which carries the mods."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 &&
-          !strcmp(F.last_ask, "This prefab was not placed. It needs mods you do not have and the mod store does not hold: "
-                              "ghost.mod 2.0. Ask the prefab's author for its .zip export."));
+          !strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed. Ask its "
+                              "author for the .zip export."));
     sh_modmanifest_list_free(&rows);
 
     printf("-- the store cannot be reached: said so, nothing downloaded\n");
@@ -700,7 +706,8 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod 2.0, which you do not have, and the mod "
                                 "store could not be reached. Try again, or ask the prefab's author for its .zip export, "
                                 "which carries the mods."));
-    CHECK(strstr(F.last_ask, "This prefab was not placed.") && strstr(F.last_ask, "could not be reached"));
+    CHECK(!strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed. The mod store "
+                              "could not be reached; try again, or ask its author for the .zip export."));
     sh_modmanifest_list_free(&rows);
 
     printf("-- No: nothing downloaded, the prefab is not placed\n");
@@ -711,7 +718,7 @@ static void resolving(const sh_modmanifest_row *door)
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     tick(4);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(F.asks == 2 && !strcmp(F.last_ask, "The prefab was not placed: it needs ghost.mod."));
+    CHECK(F.asks == 2 && !strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed."));
     sh_modmanifest_list_free(&rows);
 
     printf("-- no gates bound: refused with the console line and the toast, the store not asked\n");

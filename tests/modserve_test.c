@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "modserve.h"
+#include "modmanifest.h"
 #include "overrides.h"
 
 void sh_modserve_test_cache(int enabled);
@@ -144,6 +145,8 @@ static const char *hash64(char c, char *out)
 
 /* Raw author-block members (with a trailing comma) the next make_bundle writes. */
 static const char *g_bundle_extra;
+/* The author's "name" the next make_bundle writes (NULL: the id). */
+static const char *g_bundle_name;
 
 /* Write <root>\<folder>\mod.json (an author block and its product block) and
  * its files. A folder written under <root>\legacy stands for a package a map
@@ -180,7 +183,7 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                       "{\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
                       "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\"",
-                      id, version, id, author, hash64(hash_digit, h));
+                      id, version, g_bundle_name ? g_bundle_name : id, author, hash64(hash_digit, h));
     if (state) {
         const char *v = strstr(state, "\"validated\": false"), *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (v) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"validated\": false");
@@ -2346,6 +2349,100 @@ static void test_scope_providers(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* The asset rule (sh_modserve_row_served): a row is served by any admitted
+ * folder of its id that provides every name it lists, whatever its bytes;
+ * missing with no folder of the id; incomplete, naming the first missing
+ * names, when the folder lacks one. */
+static void test_row_served(void)
+{
+    char tmp[MAX_PATH], root[MAX_PATH], top[MAX_PATH], cause[400], *slash;
+    sh_modmanifest_row row;
+    char *names[5];
+    static const fx_file HG[] = {
+        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_combo_enc.decl", "{ inherit = \"x\"; }", -1,
+          "entityDef", "mods/local.hell-guard/hell_guard_combo_enc", NULL, '1' },
+        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_shield.decl", "{ inherit = \"y\"; }", -1,
+          "entityDef", "mods/local.hell-guard/hell_guard_shield", NULL, '2' },
+    };
+    static const fx_file HG_NEW[] = {   /* recreated: the same paths, new bytes */
+        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_combo_enc.decl", "{ inherit = \"x2\"; }", -1,
+          "entityDef", "mods/local.hell-guard/hell_guard_combo_enc", NULL, '3' },
+        { "generated/decls/entitydef/mods/local.hell-guard/hell_guard_shield.decl", "{ inherit = \"y2\"; }", -1,
+          "entityDef", "mods/local.hell-guard/hell_guard_shield", NULL, '4' },
+    };
+    GetTempPathA(sizeof tmp, tmp);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%smodserve_rows_%lu\\mods", tmp, GetCurrentProcessId());
+    strcpy_s(top, sizeof top, root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    remove_tree(top);
+    mkdirs(root);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "local.hell-guard");
+    strcpy_s(row.version, sizeof row.version, "1.0.0");
+    hash64('9', row.bundle);                 /* a hash no folder carries */
+    names[0] = "mods/local.hell-guard/hell_guard_combo_enc";
+    names[1] = "MODS/local.hell-guard/hell_guard_shield";   /* names fold case */
+    row.names = names;
+    row.name_count = 2;
+
+    /* No folder of the id: missing. */
+    CHECK(sh_modserve_index_build(root) >= 0);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(!strcmp(cause, "This map uses local.hell-guard, which is not installed."));
+    CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+          !strcmp(cause, "This prefab uses local.hell-guard, which is not installed."));
+
+    /* The folder: served, though its hash is not the row's. */
+    g_bundle_name = "Hell Guards";
+    make_bundle(root, "local.hell-guard", "local.hell-guard", "1.0.0", 'd', NULL, HG, 2, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+
+    /* Recreated with the same id and paths but new bytes (a new hash): still served. */
+    remove_tree(top);
+    mkdirs(root);
+    make_bundle(root, "hand-made", "local.hell-guard", "2.0.0", 'e', NULL, HG_NEW, 2, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+
+    /* A folder of the id that lacks one listed path: incomplete, naming it. */
+    remove_tree(top);
+    mkdirs(root);
+    make_bundle(root, "local.hell-guard", "local.hell-guard", "1.0.0", 'd', NULL, HG + 1, 1, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
+    CHECK(!strcmp(cause, "Hell Guards (local.hell-guard) is installed but does not provide "
+                         "mods/local.hell-guard/hell_guard_combo_enc, which this map uses."));
+    /* More than three missing: the first three and the count. */
+    names[2] = "mods/local.hell-guard/a";
+    names[3] = "mods/local.hell-guard/b";
+    names[4] = "mods/local.hell-guard/c";
+    row.name_count = 5;
+    CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
+    CHECK(!strcmp(cause, "Hell Guards (local.hell-guard) is installed but does not provide "
+                         "mods/local.hell-guard/hell_guard_combo_enc, mods/local.hell-guard/a, mods/local.hell-guard/b and 1 more, "
+                         "which this prefab uses."));
+    /* A row that lists no names (a map-level row) is served by the id alone. */
+    row.name_count = 0;
+    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    /* Another id's folder providing the names does not serve the row. */
+    remove_tree(top);
+    mkdirs(root);
+    g_bundle_name = NULL;
+    row.name_count = 2;
+    {
+        static const fx_file OTHER[] = {
+            { "generated/decls/entitydef/mods/local.other/x.decl", "{ }", -1, "entityDef", "mods/local.other/x", NULL, '5' },
+        };
+        make_bundle(root, "local.other", "local.other", "1.0.0", 'c', NULL, OTHER, 1, NULL);
+    }
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_row_served(&row, NULL, 0) == SH_MODSERVE_ROW_MISSING);
+    remove_tree(top);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -2375,6 +2472,7 @@ int main(void)
     test_bundle_extra();
     test_scope();
     test_scope_providers();
+    test_row_served();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

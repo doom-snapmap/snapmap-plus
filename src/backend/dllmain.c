@@ -68,6 +68,7 @@
 #include "ui_bridge.h"
 #include "config.h"
 #include "iface_engine.h"
+#include "editor_undo.h"
 #include "apply_engine.h"
 #include "cvar_unlock.h"
 #include "backend_log.h"
@@ -340,6 +341,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * registering it loads nothing until a pointer is built, verified or served. */
         sh_modstock_register();
         (void)sh_ms_upgrade(NULL);    /* the retired store layout, once (modstore.h): mod.json folders */
+        (void)sh_ms_bin_sweep(NULL, NULL);   /* the retired recycle bin, removed-mods\, deleted (modstore.h) */
         (void)sh_modmigrate_boot();   /* the retired overrides folder, once (modmigrate.h) */
         (void)sh_modserve_index_boot();
 
@@ -473,6 +475,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Bind engine slots after the interface and apply dependencies exist.
          * The editor singleton resolves through the engine-globals anchor. */
         sh_iface_engine_install(results, db, g_doom_base);
+        /* Uninstall's undo-history clear: the push EditorCommitEdit calls (editor_undo.h). */
+        (void)sh_editor_undo_install(results, db, g_doom_base);
 
         /* Install the native dialog binding used by sh_dialogtest. Failed binding
          * leaves the OS message-box fallback available. */

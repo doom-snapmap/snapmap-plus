@@ -20,6 +20,7 @@
 #include <shlobj.h>
 #include <ctype.h>
 #include "modserve.h"
+#include "modmanifest.h"
 #include "modbundle.h"
 #include "config_json.h"
 #include "backend_log.h"
@@ -2357,16 +2358,6 @@ int sh_modserve_index_rescan(void)
     return sh_modserve_index_build(root);
 }
 
-static sh_modserve_restore_fn volatile g_restore_fn;
-
-void sh_modserve_set_restore(sh_modserve_restore_fn fn) { g_restore_fn = fn; }
-
-int sh_modserve_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when)
-{
-    sh_modserve_restore_fn fn = g_restore_fn;
-    return fn ? fn(hashes, hash_count, names, name_count, when) : 0;
-}
-
 int sh_modserve_active(void)
 {
     const ms_index *x = g_index;
@@ -4027,6 +4018,95 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
     return 1;
 }
 
+/* The served file a placed name (lowercase) resolves to: an entityDef of
+ * that name, else any served decl of that name, else a module instance's
+ * moduleName (a snapModule decl is served as a raw file named by its own
+ * path). -1 when no admitted bundle provides it. */
+static int ms_name_file(const ms_index *x, const char *lower)
+{
+    int f = ms_provider(x, "entitydef", lower), k;
+    for (k = 0; f < 0 && k < x->nfiles; ++k)
+        if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower) &&
+            (x->files[k].is_decl || (x->files[k].ptype && !strcmp(x->files[k].ptype, "snapModule")))) f = k;
+    return f;
+}
+
+/* A name a manifest row lists resolves when the placed-name rule finds it
+ * (ms_name_file), or any served file provides it under any type, or it is a
+ * served request path itself. Rows written by a save hold placed names; rows
+ * read from a mod.json hold every provided name. */
+static int ms_row_name_resolves(const ms_index *x, const char *lower)
+{
+    int k;
+    if (ms_name_file(x, lower) >= 0) return 1;
+    for (k = 0; k < x->nfiles; ++k)
+        if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower)) return 1;
+    return x->slots && ms_find(x->slots, x->mask, lower) >= 0;
+}
+
+/* The asset rule (modserve.h): a row is served when an admitted bundle
+ * declares its id and every name it lists resolves to an admitted bundle,
+ * whichever one provides it. The bundle hash is not consulted. */
+int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+{
+    const ms_index *x = g_index;
+    char id[SH_MB_ID_MAX + 1], title[300], missing[600];
+    const char *what = subject && subject[0] ? subject : "map";
+    int i, declared = -1, skipped = -1, absent = 0;
+    size_t k, w = 0;
+    if (cause && cap) cause[0] = 0;
+    if (!row || !row->id[0] || strlen(row->id) > SH_MB_ID_MAX) return SH_MODSERVE_ROW_MISSING;
+    strcpy_s(id, sizeof id, row->id);
+    ms_lower(id);
+    for (i = 0; x && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->id || strcmp(b->id, id)) continue;
+        if (b->admitted) { if (declared < 0 || ms_newer(x, i, declared)) declared = i; }
+        else if (skipped < 0) skipped = i;
+    }
+    {
+        const ms_bundle *b = declared >= 0 ? &x->bundles[declared] : skipped >= 0 ? &x->bundles[skipped] : NULL;
+        if (b && b->name && b->name[0] && _stricmp(b->name, row->id))
+            _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", b->name, row->id);
+        else strncpy_s(title, sizeof title, row->id, _TRUNCATE);
+    }
+    if (declared < 0) {
+        if (cause && cap) {
+            if (skipped >= 0)
+                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
+                            title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
+            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
+        }
+        return SH_MODSERVE_ROW_MISSING;
+    }
+    missing[0] = 0;
+    for (k = 0; k < row->name_count; ++k) {
+        char lower[MS_NAME_MAX];
+        if (!row->names || !row->names[k] || !row->names[k][0] || strlen(row->names[k]) >= sizeof lower) continue;
+        strcpy_s(lower, sizeof lower, row->names[k]);
+        ms_lower(lower);
+        if (ms_row_name_resolves(x, lower)) continue;
+        if (absent < 3) {
+            int n = _snprintf_s(missing + w, sizeof missing - w, _TRUNCATE, "%s%s", absent ? ", " : "", row->names[k]);
+            if (n > 0) w += (size_t)n;
+        }
+        absent++;
+    }
+    if (!absent) return SH_MODSERVE_ROW_SERVED;
+    if (cause && cap) {
+        char more[48] = "";
+        if (absent > 3) _snprintf_s(more, sizeof more, _TRUNCATE, " and %d more", absent - 3);
+        _snprintf_s(cause, cap, _TRUNCATE, "%s is installed but does not provide %s%s, which this %s uses.", title, missing,
+                    more, what);
+    }
+    return SH_MODSERVE_ROW_INCOMPLETE;
+}
+
+int sh_modserve_row_served(const sh_modmanifest_row *row, char *cause, size_t cap)
+{
+    return sh_modserve_row_served_for(row, "map", cause, cap);
+}
+
 int modserve_bundles_for_names(const char *const *names, int n_names,
                                char (*out_hashes)[SH_MODSERVE_HASH_HEX + 1], int cap)
 {
@@ -4044,13 +4124,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
-        f = ms_provider(x, "entitydef", lower);
-        /* A placed decl name, or a module instance's moduleName (a snapModule
-         * decl is served as a raw file named by its own path). */
-        if (f < 0)
-            for (k = 0; k < x->nfiles && f < 0; ++k)
-                if (x->files[k].served && !strcmp(x->files[k].pname, lower) &&
-                    (x->files[k].is_decl || !strcmp(x->files[k].ptype, "snapModule"))) f = k;
+        f = ms_name_file(x, lower);
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     while (qh < nq) {
@@ -4089,13 +4163,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
-        f = ms_provider(x, "entitydef", lower);
-        /* A placed decl name, or a module instance's moduleName (a snapModule
-         * decl is served as a raw file named by its own path). */
-        if (f < 0)
-            for (k = 0; k < x->nfiles && f < 0; ++k)
-                if (x->files[k].served && !strcmp(x->files[k].pname, lower) &&
-                    (x->files[k].is_decl || !strcmp(x->files[k].ptype, "snapModule"))) f = k;
+        f = ms_name_file(x, lower);
         if (f < 0) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, names[i]);

@@ -381,8 +381,9 @@ static __declspec(thread) int g_parse_kind;
  * A rawmap whose rows name a mod this machine does not have must never reach
  * the engine: SnapMap's validator rejects the placed entities as corruption
  * and the player is thrown out. So before any substitution the rows are
- * compared with the installed bundles (sh_modpub_rawmap_missing, which also
- * tries the recycle bin), and a map that misses any goes to the rawmap hold
+ * compared with the installed mods under the asset rule
+ * (sh_modpub_rawmap_missing: a folder of each row's id provides its names),
+ * and a map that misses any goes to the rawmap hold
  * (modpublished.c), which offers the download when the mod store has them
  * and refuses with a notice when it does not.
  *

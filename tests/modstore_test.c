@@ -496,6 +496,73 @@ static void test_upgrade(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
 }
 
+/* The retired recycle bin: the sweep deletes every entry of removed-mods\\
+ * (links removed, never followed), the folder and the record's section, with
+ * one line per entry and a summary; a second start finds nothing. */
+static char g_sweep[4096];
+static int g_sweep_lines;
+static void sweep_line(void *context, const char *line)
+{
+    (void)context;
+    g_sweep_lines++;
+    strncat_s(g_sweep, sizeof g_sweep, line, _TRUNCATE);
+    strncat_s(g_sweep, sizeof g_sweep, "\n", _TRUNCATE);
+}
+
+static void test_bin_sweep(const char *tmp)
+{
+    char root[MAX_PATH], bin[MAX_PATH], keep[MAX_PATH], outside[MAX_PATH], link[MAX_PATH], *rec = NULL;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\sweep\\mods", tmp);
+    _snprintf_s(bin, sizeof bin, _TRUNCATE, "%s\\sweep\\removed-mods", tmp);
+    _snprintf_s(outside, sizeof outside, _TRUNCATE, "%s\\sweep\\outside", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\alex.kept", root);
+    make_small_mod(keep, "alex.kept");
+    {
+        char a[MAX_PATH], b[MAX_PATH], c[MAX_PATH];
+        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\alex.one", bin);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\alex.two-2", bin);
+        _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\stray", bin);
+        mt_write(a, "mod.json", "{\"id\":\"alex.one\"}");
+        mt_write(a, "assets\\generated\\decls\\entitydef\\mods\\alex.one\\x.decl", "{\r\n}");
+        mt_write(b, "mod.json", "{\"id\":\"alex.two\"}");
+        mt_write(c, "notes.txt", "moved here by hand");
+        /* A junction inside a binned folder points outside: removed as a link, its target kept. */
+        mt_write(outside, "precious.txt", "not the bin's");
+        _snprintf_s(link, sizeof link, _TRUNCATE, "cmd /c mklink /J \"%s\\link\" \"%s\" >nul 2>&1", a, outside);
+        (void)system(link);
+    }
+    CHECK(sh_mb_record_put(root, "removed", "{\"alex.one\":{\"id\":\"alex.one\",\"hashes\":[]}}"));
+    g_sweep[0] = 0;
+    g_sweep_lines = 0;
+    CHECK(sh_ms_bin_sweep(sweep_line, NULL) == 3);
+    CHECK(strstr(g_sweep, "MODS: removed-mods: deleted alex.one\n") && strstr(g_sweep, "MODS: removed-mods: deleted alex.two-2\n") &&
+          strstr(g_sweep, "MODS: removed-mods: deleted stray\n"));
+    CHECK(strstr(g_sweep, "MODS: removed-mods: 3 folder(s) deleted; the bin is retired\n") && g_sweep_lines == 4);
+    CHECK(!mt_exists(bin));
+    _snprintf_s(link, sizeof link, _TRUNCATE, "%s\\precious.txt", outside);
+    CHECK(mt_exists(link));                                    /* the link was not followed */
+    CHECK(sh_mb_record_get(root, "removed", &rec) != 1 || !rec);
+    free(rec);
+    _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\alex.kept\\mod.json", root);
+    CHECK(mt_exists(keep));                                    /* the store is not touched */
+    /* The next start: nothing there, nothing said. */
+    g_sweep[0] = 0;
+    g_sweep_lines = 0;
+    CHECK(sh_ms_bin_sweep(sweep_line, NULL) == 0 && g_sweep_lines == 0);
+
+    /* Uninstall's delete: a direct child of the store only. */
+    {
+        char cause[300], kept_dir[MAX_PATH];
+        _snprintf_s(kept_dir, sizeof kept_dir, _TRUNCATE, "%s\\alex.kept", root);
+        CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a folder of the store"));
+        CHECK(!sh_ms_delete_mod_folder(root, cause, sizeof cause));
+        CHECK(sh_ms_delete_mod_folder(kept_dir, cause, sizeof cause) && !mt_exists(kept_dir));
+        CHECK(!sh_ms_delete_mod_folder(kept_dir, cause, sizeof cause) && strstr(cause, "is no longer in the store"));
+        CHECK(mt_exists(link));
+    }
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], root[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], key[160], cause[512] = "", fixture[MAX_PATH];
@@ -793,6 +860,7 @@ int main(int argc, char **argv)
     }
     test_alias_note();
     test_tidy(tmp);
+    test_bin_sweep(tmp);
 
     test_upgrade(fixture, tmp);
 

@@ -653,9 +653,6 @@
   .mods-status-icon.info { color: var(--muted); }
   .mods-foot { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 5px var(--pane-inline, 10px) 6px; border-top: 1px solid var(--border); }
   .mods-status { color: var(--muted); overflow-wrap: anywhere; }
-  .mods-removed { display: flex; align-items: center; gap: 6px; color: var(--muted); }
-  .mods-removed-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mods-removed .btn { flex: none; padding: 1px 8px; }
   .mods-status:empty { display: none; }
   .mods-status.ok { color: var(--ok); }
   .mods-status.err { color: var(--danger); }

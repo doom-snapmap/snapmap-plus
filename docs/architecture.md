@@ -457,14 +457,16 @@ These backend files share the work:
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
-  bundle that is not installed, asks the player, and fetches and resumes it or
-  drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
+  mod no installed folder serves (the asset rule, below), asks the player, and
+  fetches and resumes it or drops it, as in
+  [Published maps and missing mods](#published-maps-and-missing-mods).
   It also holds a rawmap load whose mods are missing, as in
   [Rawmaps that name mods](#rawmaps-that-name-mods), and a prefab placement
   whose mods are missing, as in [Prefabs that name mods](#prefabs-that-name-mods).
 - `modexport.c` writes and reads the ZIP exports of maps and prefabs: the
   `.json` and each mod's installed folder, byte for byte; import installs
-  each carried folder as a folder from elsewhere (`sh_ms_install_as`), as in
+  each carried folder the asset rule does not find served already as a folder
+  from elsewhere (`sh_ms_install_as`), as in
   [Rawmaps that name mods](#rawmaps-that-name-mods). It has no network code.
 - `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
   needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
@@ -519,50 +521,76 @@ content (the rebuild rule, `sh_mods build`, an install replacing the folder of
 the same id and version) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
 current one. The aliases stay flat: an alias naming the old hash is re-pointed
-at the new one, so one hop always resolves. Every lookup of a map's pinned
-hash goes through `sh_ms_resolve` (or the serving index's alias-aware lookup):
-activation, the Mods tab's This map pane, upload (which sends and claims the
-current build) and export (which carries the current build and rewrites the
-exported map's rows to name it). Saving a map writes rows from the serving
-index, so they name the build that serves. Removing a folder keeps its
-aliases while a folder of that id remains and drops them once none does.
-`mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
-`aliases` and `removed`, each section written whole under one lock.
+at the new one, so one hop always resolves. Aliases are a lookup aid for
+store downloads and exports only: upload sends and claims the current build,
+and export carries it and rewrites the exported map's rows to name it, both
+through `sh_ms_resolve`. Nothing refuses or brings anything back because of an
+alias. Saving a map writes rows from the serving index, so they name the
+build that serves. Removing a folder keeps its aliases while a folder of that
+id remains and drops them once none does.
 
-The recycle bin. No folder is deleted by Uninstall, Remove or the removal of
-covered builds: every one, the product's or the author's own, moves to
-`removed-mods\` beside `mods\` (a name already taken there gets `-2`, `-3`, ...),
-and the record's `removed` section keeps, under its name there, the bundle
-hash and every alias that answered as it, the id, version and title, its name
-in `mods\`, the time (`removedAt`, Unix seconds) and an order number (`seq`).
-The aliases themselves are dropped as above. A recorded folder comes back when
-a map still needs it (`modui.c`, `mu_restore`, behind `sh_modserve_restore`
-and the save step's hook): a map load whose manifest names a bundle that
-resolves to nothing installed (the hash, or one of its aliases, is recorded;
-`modserve_activate_bundles` asks before it plans and plans again), a save or a
-Play entry whose placed names live under `mods/<id>/` (or the id's `_`
-spelling) of an id no installed folder declares (the newest recorded folder
-of that id), or Ctrl+Z bringing back an entity Uninstall deleted from the open
-map: the main-thread tick after each native frame (`sh_modui_poll_main`, run
-on the process heap like the other main-thread calls, every 250 ms while
-anything is watched or owed) checks those uniqueIds and, when one is back,
-reinstates the bundle they were deleted with, by its hash, whatever its names
-look like. The folder moves back under its old name,
-else its id, else a free name; its aliases are recorded again; the rebuild
-rule and the serving index run at once, so the load or save in progress sees
-the mod (the dropped `cache` entry makes the rebuild rule build it again,
-with the same hash when nothing changed). The game-side refresh (decls,
-palette rows, strings) runs at once after an undo and otherwise on the next
-editor tick, and that tick shows one editor toast and one console line, "Hell
-Guards was reinstalled because the map still uses it."; during Play or a load
-the tick waits, as the deferred refresh does. Emptying the bin (the Mods tab's
-footer, `sh_mods removed empty --yes`) deletes the folders, links not
-followed, and their entries; a folder in `removed-mods\` the record does not
-know (one moved there by hand or by an earlier build) is listed and emptied
-but never brought back. `sh_mods removed restore "<id>"` moves one back by
-hand. Not covered: a published map's launch asks to download a missing bundle
-before activation, so it does not use the bin.
+The asset rule. A map, rawmap or prefab needs the paths its manifest rows
+list (the placed names, `mods/<id>/...`); a mod folder provides them; the
+bundle hash is a download key. `sh_modserve_row_served(row, cause, cap)`
+(`modserve.c`, `sh_modserve_row_served_for` with the word "prefab") is the one
+predicate every hold uses: a row is served when an admitted bundle declares
+its id and every name it lists resolves through the serving index to an
+admitted bundle, whichever provides it (a placed name, any provided name, or a
+served request path); missing when no admitted bundle declares the id;
+incomplete when one does but a listed name does not resolve. Its cause is the
+refusal: "This map uses Hell Guards (local.hell-guard), which is not
+installed." or "Hell Guards (local.hell-guard) is installed but does not
+provide mods/local.hell-guard/hell_guard_combo_enc, which this map uses." (the
+first three missing names, then "and N more"; the folder's own name when one
+declares the id, else the id alone; "prefab" for a prefab). A folder rebuilt
+with new bytes at the same paths therefore still serves every map that used
+it, whatever its hash. Activation follows the same rule
+(`sh_modmanifest_activate`): each row is activated through the build that
+serves its id now (`sh_modserve_bundle_serving`). The per-map listing of a
+bundle that shadows stock paths or sets requirements stays keyed by id (the
+scope listing, [Map scope](#map-scope)).
+`mods\snapmap-plus.json` is the product's one record:
+`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
+and `aliases`, each section written whole under one lock.
+
+Removal is permanent. Uninstall, Remove and the removal of covered builds
+delete the folder outright (`sh_ms_delete_mod_folder`: a direct child of the
+store root, deleted under the store lock, links removed and never followed),
+drop its aliases once no folder of its id remains (`sh_ms_alias_forget`), and
+rescan; the build cache follows at that rescan. Nothing brings a folder back: a
+map that still needs it refuses to open with the asset rule's sentence, and the
+download offer of a published map, a rawmap or a prefab is the only way the
+mod returns (as a new install). Uninstall also clears the open map's undo
+history (see [The Mods tab's map scope](#the-mods-tabs-map-scope)).
+
+The retired recycle bin. Earlier builds moved removed folders to
+`removed-mods\` beside `mods\` and recorded them in the record's `removed`
+section. At every start, after the store upgrade and before the serving index
+is built, `sh_ms_bin_sweep` deletes every entry of `removed-mods\` (links not
+followed), the folder itself and the `removed` section, logging one line per
+entry ("MODS: removed-mods: deleted <name>") and one summary ("MODS:
+removed-mods: 3 folder(s) deleted; the bin is retired"); a later start finds
+nothing and logs nothing. An entry that cannot be deleted stays for the next
+start.
+
+The folder watchers. The lists follow the disk. The window's host
+(`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
+`%LOCALAPPDATA%\snapmap-plus\prefabs\` and `mods\` with
+`ReadDirectoryChangesW` (subtree; file and folder names, last write, size). A
+change in the prefabs folder refreshes the Prefabs list 300 ms after the last
+change of a burst (the page keeps its selection while that prefab exists and
+clears Prefab Details otherwise). A change in `mods\` asks for the ordinary
+rescan (the Refresh button's, as `SH_MODS_ACT_WATCH_RESCAN`) after 1500 ms of
+quiet, on the main thread through `run_on_main`; the backend defers it while
+Play runs, a map loads or a store write holds the lock, and the host asks again
+two seconds later. The Mods tab re-renders from the document that follows. The
+product's own writes fire the watcher too: a change seen while the store lock
+is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
+hold ended, is dropped, so an install or export in progress never triggers a
+rescan mid-write, and the watcher re-arms with the next change. A rescan of
+unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
+UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
+opened again every five seconds.
 
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the
@@ -980,8 +1008,7 @@ navigation shards; with an empty table, no rows in the map and no map-level row
 it returns at once and the save is the engine's own bytes. A map-level row is
 written for the build that serves its mod (the bundle resolver modui.c binds,
 `sh_modserve_bundle_serving`), and the current manifest follows the rename; a
-row of a mod that is not installed is kept as it is, and an uninstalled one is
-reinstated from the recycle bin by its hash first.
+row of a mod that is not installed is kept as it is.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
@@ -1274,13 +1301,40 @@ last mod, the search tag `mods` is removed from the editor's tag list
 heap because the console command's own heap does not survive Play); the published
 copy is unchanged until the map is published again. A mod placed as
 Blueprint modules, or reached only through another mod's needs, is refused
-with the cause. Uninstall runs that on the open map first, then moves the
-folder to `removed-mods\` as Remove does (every origin, recorded; see the
-recycle bin above), then rescans; the refresh rebuilds the palette without the
-mod's editor rows and, when the editor refuses the rebuild because the delete
-is still committing, retries it once the editor is free. Closed maps are not
-edited. Both flows, and Rebuild, are refused while Play runs or a map loads
-(the editor's deactivation reason, the engine's load state).
+with the cause.
+
+Uninstall is permanent. In order: the dry run and confirmation (as Remove
+from map's, plus the Toybox rows, "Deletes the folder mods\<folder> and its
+files.", how many local saves in My Maps carry a row of the mod, "N of your
+saved maps use it; they will not open until a mod folder provides its assets
+again", and, with a map open, "Undo history is cleared."); the native delete
+of the mod's entities from the open map, as Remove from map (a refusal, Play
+running, a load or a busy editor, deletes nothing and is reported); the open
+map's undo and redo history cleared so no snapshot older than the delete
+remains; the folder deleted and its record entries dropped; the rescan. The
+saved maps are counted from each `savegame.user\<profile>\SNAPMAPS<id>\map.decl`
+(a 4-byte checksum, then zlib of the map text; `sh_inflate_raw_upto`). The
+history is cleared by the engine's own undo push (`editor_undo.c`): the undo
+list is the idList at `*(editor+0x10)` (data +0, count +8, capacity +0xc,
+cursor +0x18, each entry a 0xDD0-byte snapshot), and the push EditorCommitEdit
+calls (Vulkan RVA 0x12039F0, OpenGL RVA 0x1202CE0, decoded at run time from
+EditorCommitEdit's rel32 CALL at +0x20 to a `mov rcx,[rcx]; jmp` wrapper)
+advances the cursor, destroys every entry from it to the end with the snapshot
+destructor and the engine's sized free, compacts the list and appends a copy of
+the live edit map. With the cursor set one slot before the first entry it
+destroys every snapshot and leaves exactly one, the current state, with the
+cursor on it; the engine frees what it allocated and no other address is
+needed. It runs on the game thread inside a verified process-heap scope. After
+an entity delete the native "Delete Selection" commit lands on later editor
+frames, so the Mods tab's tick (`sh_modui_poll_main`, every native frame while
+a clear is owed) clears once `sh_editor_delete_native_pending` is 0 (at most
+ten seconds); without a delete it clears at once. A build where the push does
+not decode refuses Uninstall while a map is open. The rescan's refresh rebuilds
+the palette without the mod's editor rows and, when the editor refuses the
+rebuild because the delete is still committing, retries it once the editor is
+free. Closed maps are not edited. Remove from map, Uninstall and Rebuild are
+refused while Play runs or a map loads (the editor's deactivation reason, the
+engine's load state).
 
 Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
@@ -1295,9 +1349,11 @@ like a placed mod's.
 ### Published maps and missing mods
 
 A published map is native by default: the product touches its launch only when
-its text carries `smpmod1.` rows naming a bundle that is not installed and
-admitted. Everything else, vanilla maps and maps whose mods are all installed,
-reaches the engine unchanged.
+its text carries an `smpmod1.` row the asset rule does not find served (no
+installed folder of the row's id, or one that lacks a name the row lists).
+Everything else reaches the engine unchanged: vanilla maps, and maps whose
+rows an installed folder serves, whatever its hash, which play with the
+installed copy.
 
 Identification. The `DeserializeFromJson` detour classifies each parse by the
 engine caller's return address: `PublishedMapRead`+0x12A is the offline read of
@@ -1333,7 +1389,8 @@ progress widget; browser play clears its pending state; the joiner hides the
 progress widget), and returns without the original. On a later main-thread tick
 (`sh_modpublished_poll`, after every native frame, menus included) it raises the
 engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
-"This map needs N mod(s): <names> (<size>). Download and install now?".
+"This map needs N mod(s): <names> (<size>). Download and install now?". Each
+row it asks for prints the asset rule's sentence on the console first.
 
 Yes starts one job on the modsync worker that fetches every missing bundle by
 hash and logs a progress line every two seconds. When the job is done, on a main
@@ -1346,7 +1403,14 @@ with it. No, a failed fetch, a bundle that will not install or a lobby that
 changed drops the hold: nothing is launched, the progress widget is hidden, and
 a one-button notice names the mod. Another map load, or a newer held launch,
 abandons the hold silently and cancels its fetch. The engine thread never waits:
-the network runs on the worker and the dialog is polled.
+the network runs on the worker and the dialog is polled. After No, a hold that
+asked for one row shows that row's sentence and "The map was not loaded."
+(for example "This map uses Hell Guards (local.hell-guard), which is not
+installed. The map was not loaded."). The download lands by the store's rule:
+it replaces a folder of that id the product made (origin download, install or
+delivery) and sits beside an author's own folder under `<id>@<version>`, both
+serving by the conflict rule; the resume checks every row against the asset
+rule again.
 
 ### Rawmaps that name mods
 
@@ -1355,9 +1419,8 @@ loads only where those mods are installed: a placed entity whose mod is absent
 makes SnapMap's own validator throw the player out with "map corruption". So a
 rawmap is never handed to the engine while a mod it names is missing.
 
-Loading. `sh_modpub_rawmap_missing` reads the rows and counts those whose bundle
-(aliases resolve) is not installed and admitted, after one restore from the
-recycle bin (`sh_modserve_restore` at the load point). The editor reload, which
+Loading. `sh_modpub_rawmap_missing` reads the rows and counts those the asset
+rule does not find served (missing or incomplete). The editor reload, which
 both **File > Load Rawmap...** and `sh_rawmaps load` use, checks on its own
 frame before `LoadMap` (`sh_rawmap_prepare_reload` in `ef_service_reload`); the
 text it read, with a `.zip` already imported, is what the parse then uses. Any
@@ -1376,7 +1439,10 @@ own parse does) but opens the rawmap again, through a reload when the editor can
 take one and otherwise staged for the next map open, with a notice saying so.
 When the store lacks any, or cannot be reached, the load is refused with a
 one-button notice and one console line naming each such mod (id and version) and
-saying the map needs its author's `.zip` export. No and a failed download behave
+saying the map needs its author's `.zip` export; the asset rule's sentence for
+each row comes first on the console, and with one row it is the notice ("...
+which is not installed. The map was not loaded. Ask its author for the .zip
+export."). No and a failed download behave
 as for a published map. The gate is bound with the published-map gates; on a
 build where they did not install, nothing is counted missing and rawmaps load as
 before.
@@ -1415,25 +1481,23 @@ Importing it is the ordinary install of each carried folder whose bundle a row
 names (`modexport_read`, on whichever thread loads the map; a carried folder no
 row names is left out):
 
-- a bundle the store already serves (by its hash, or an alias of it) is
-  skipped and counted as already installed; nothing in that folder is written;
-- otherwise every folder is decided before anything is written: an installed
-  folder of the same id and version with other content refuses the import
-  with "the installed <id> <version> differs from the one the export
-  carries", because nothing installed is rewritten (the store's install would
-  replace it);
+- a carried folder the store already holds (by its hash, or an alias of it),
+  or one whose id an installed folder declares and whose listed names (the
+  rows that name its bundle) that folder serves (the asset rule, whatever its
+  bytes or version), is skipped and counted as already installed; nothing in
+  that folder is written;
 - each remaining folder is copied out of the ZIP into a temporary folder (with
   the bytes of a pointer the folder held filled from this player's own game)
   and installed from there as any folder from elsewhere is
   (`sh_ms_install_as`: built, copied into the store, verified): under its own
   name when no folder of its id is installed and that name is free, else
-  under the name the store gives a second folder of an id (`<id>@<version>`),
-  beside the installed one. A mod that needs another carried mod is built
-  after it;
-- the built bundle hash must equal the row's; otherwise, and on any other
-  refusal, exactly the folders this import installed are removed and the load
-  is refused ("<id> <version> in the export does not build to the bundle the
-  map names");
+  beside the installed folders of its id under `<id>@<version>` (a free
+  `<id>@<version>-2`, ... when that is taken), never over one. A mod that needs
+  another carried mod is built after it;
+- the built bundle hash must equal the one the carried `mod.json` names;
+  otherwise, and on any other refusal, exactly the folders this import
+  installed are removed and the load is refused ("<id> <version> in the export
+  does not build to the bundle the map names");
 - after an install the serving index is rebuilt, as before.
 
 A ZIP in the bundle form of earlier releases (any `bundle.canonical.json`, or
@@ -1520,8 +1584,8 @@ thread):
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
   console line, below; nothing is fetched, because nothing can install it;
-- missing rows first try the recycle bin (`sh_modserve_restore`);
-- with every row installed, the rows' bundles are activated for the open map
+- with every row served (the asset rule), the rows are activated for the open map
+  through the builds that serve them
   (`modserve_activate_bundles`) and each one the open map does not list (its
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`), with one
@@ -1532,7 +1596,8 @@ thread):
   with its own hook (`SH_MODPUB_PREFAB_PLACE`): the store is asked on the worker;
   when it has every missing bundle the engine's Yes/No asks "This prefab needs
   N mod(s): <names> (<size>). Download and install now?", Yes fetches and
-  installs them, and the ready callback runs the step above; the Prefabs tab,
+  installs them, and the ready callback runs the step above; only rows the
+  asset rule reports missing or incomplete are asked for; the Prefabs tab,
   polling `MODS_POLL`, then places the prefab through its ordinary Load /
   Place. When the store lacks any or cannot be reached, the notice says "This
   prefab was not placed. It needs mods you do not have ..." and one console line
@@ -1570,11 +1635,11 @@ the prefab and a `mods/` folder beside it holds the mod folders. The importer
 takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
 carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
 names a bundle the block's rows name, exactly as a map's import does (see
-[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when the store
-serves it already, installed under its own name or beside an installed id,
-refused when the same id and version is installed with other content, and
-removed again when it does not build to the row's hash; a carried folder no row
-names is left out. It then rescans and adds the prefab under the `.json`'s file
+[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when an installed
+folder of its id serves the names the block's rows list (the asset rule),
+installed under its own name or beside the installed folders of its id
+otherwise, and removed again when it does not build to the hash its own
+`mod.json` names; a carried folder no row names is left out. It then rescans and adds the prefab under the `.json`'s file
 name. A prefab of that name with the same bytes is left alone (an
 import that finds everything already there writes nothing); one with other bytes
 is kept and the import takes "<name> (2)" and so on. A row the export does not
@@ -1587,7 +1652,7 @@ in one ZIP. An export in the bundle form of earlier releases (any
 index) is refused with "this export was made by an earlier release; export it
 again".
 `sh_prefab mods "<name>"` lists the block's rows (else the sidecar's) and
-whether each is installed.
+whether each is installed, with the asset rule's sentence for one that is not.
 
 ### Publishing a map with mods
 

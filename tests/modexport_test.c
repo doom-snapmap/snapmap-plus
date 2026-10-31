@@ -254,6 +254,8 @@ static const char *const A_FILES[] = { "assets/generated/image/mods/test.alpha/a
 static const char *const A_BYTES[] = { "alpha only bytes", "bytes both bundles carry", NULL };
 static const char *const A2_BYTES[] = { "alpha two bytes", "bytes both bundles carry", NULL };
 static const char *const A3_BYTES[] = { "alpha other bytes", "bytes both bundles carry", NULL };
+/* A test.alpha that no longer provides a.bimage (a path the rows list). */
+static const char *const A4_FILES[] = { "assets/generated/image/mods/test.alpha/z.bimage", "assets/generated/image/mods/test.alpha/shared.bimage", NULL };
 static const char *const B_FILES[] = { "assets/generated/image/mods/test.beta/shared.bimage", "assets/generated/image/mods/test.beta/b.bimage", NULL };
 static const char *const B_BYTES[] = { "bytes both bundles carry", "beta only bytes", NULL };
 static const char *const C_FILES[] = { "assets/generated/image/mods/test.gamma/c.bimage", NULL };
@@ -310,6 +312,8 @@ int main(int argc, char **argv)
     CHECK(install(dir, keyC, &rc));
     memset(&rows, 0, sizeof rows);
     CHECK(sh_modmanifest_list_add(&rows, &ra) && sh_modmanifest_list_add(&rows, &rb));
+    /* The path the map uses from test.alpha (the asset rule reads it at import). */
+    CHECK(sh_modmanifest_row_add_name(&rows.rows[0], "generated/image/mods/test.alpha/a.bimage"));
     map = sh_modmanifest_write(BASE_MAP, sizeof BASE_MAP - 1, &rows, &map_len, err, sizeof err);
     CHECK(map != NULL && strstr(map, "smpmod1.0.2") && strstr(map, "smpmod1.1.2"));
     sh_modmanifest_list_free(&rows);
@@ -505,7 +509,8 @@ int main(int argc, char **argv)
         CHECK(folder_count(storeC) == 0);
     }
 
-    /* ---- a second version beside the installed one, and the same version with other content ---- */
+    /* ---- the asset rule: an installed folder of the id that provides the listed paths is used,
+     * whatever its bytes or version; one that lacks a path gets the carried folder beside it ---- */
     {
         char storeH[MAX_PATH * 2], storeI[MAX_PATH * 2], storeJ[MAX_PATH * 2], before[MAX_PATH * 2], zipH[MAX_PATH * 2];
         char key2[SH_MS_KEY_MAX + 1], *text;
@@ -516,9 +521,9 @@ int main(int argc, char **argv)
         _snprintf_s(storeI, sizeof storeI, _TRUNCATE, "%s\\storeI", tmp);
         _snprintf_s(storeJ, sizeof storeJ, _TRUNCATE, "%s\\storeJ", tmp);
         _snprintf_s(zipH, sizeof zipH, _TRUNCATE, "%s\\two versions.zip", tmp);
-        /* storeH holds test.alpha 2.0.0 as test.alpha. */
+        /* storeH holds test.alpha 2.0.0 as test.alpha, without a.bimage: incomplete for the rows. */
         CHECK(fresh_store(storeH));
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha2", src); make_mod_v(dir, "test.alpha", "2.0.0", A_FILES, A2_BYTES);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha2", src); make_mod_v(dir, "test.alpha", "2.0.0", A4_FILES, A2_BYTES);
         CHECK(install(dir, key2, &ra2) && !strcmp(key2, "test.alpha"));
         _snprintf_s(before, sizeof before, _TRUNCATE, "%s\\test.alpha\\mod.json", storeH);
         b1 = slurp(before, &l1);
@@ -552,18 +557,44 @@ int main(int argc, char **argv)
             CHECK(text && st.bundles_installed == 1 && has_folder(storeJ, "test.alpha@1.0.0") && folder_count(storeJ) == 1);
             free(text);
         }
-        /* storeI holds test.alpha 1.0.0 with other content: the import is refused, nothing installed. */
+        /* storeI holds test.alpha 1.0.0 with other bytes at the same paths: it
+         * provides what the map uses, so the carried folder is skipped and
+         * counted as already installed; only test.beta installs. */
         CHECK(fresh_store(storeI));
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha3", src); make_mod(dir, "test.alpha", A_FILES, A3_BYTES);
         CHECK(install(dir, key2, &ra3) && strcmp(ra3.bundle, ra.bundle));
         _snprintf_s(before, sizeof before, _TRUNCATE, "%s\\test.alpha\\mod.json", storeI);
         b1 = slurp(before, &l1);
+        CHECK(sh_modserve_index_build(storeI) == 1);
         text = modexport_read(zip, &len, &st, cause, sizeof cause);
-        CHECK(text == NULL && !strcmp(cause, "the installed test.alpha 1.0.0 differs from the one the export carries"));
-        CHECK(folder_count(storeI) == 1 && !has_folder(storeI, "test.beta"));
+        if (!text) fprintf(stderr, "served import: %s\n", cause);
+        CHECK(text && st.bundles_installed == 1 && st.bundles_present == 1);
+        free(text);
+        CHECK(folder_count(storeI) == 2 && has_folder(storeI, "test.beta") && !has_folder(storeI, "test.alpha@1.0.0"));
         b2 = slurp(before, &l2);
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
         free(b1); free(b2);
+        /* The same version without a.bimage: the carried 1.0.0 lands beside it,
+         * never over it (the store's own name for that id and version would
+         * replace the installed folder). */
+        {
+            char storeL[MAX_PATH * 2];
+            _snprintf_s(storeL, sizeof storeL, _TRUNCATE, "%s\\storeL", tmp);
+            CHECK(fresh_store(storeL));
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha4", src); make_mod(dir, "test.alpha", A4_FILES, A3_BYTES);
+            CHECK(install(dir, key2, &ra3) && !strcmp(key2, "test.alpha"));
+            _snprintf_s(before, sizeof before, _TRUNCATE, "%s\\test.alpha\\mod.json", storeL);
+            b1 = slurp(before, &l1);
+            CHECK(sh_modserve_index_build(storeL) == 1);
+            text = modexport_read(zip, &len, &st, cause, sizeof cause);
+            if (!text) fprintf(stderr, "beside same version: %s\n", cause);
+            CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
+            free(text);
+            CHECK(has_folder(storeL, "test.alpha") && has_folder(storeL, "test.alpha@1.0.0") && folder_count(storeL) == 3);
+            b2 = slurp(before, &l2);
+            CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
+            free(b1); free(b2);
+        }
     }
 
     /* ---- a mod that needs another carried one installs after it (test.adep

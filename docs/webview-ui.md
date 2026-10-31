@@ -205,9 +205,12 @@ and a `.meta.json` is never listed as a prefab.
 The list shows a pill per prefab that records mods: "Mods: <id>" when every
 one is installed, "Needs mods: <id>" (warning colours) naming the missing ones
 otherwise, "+N" when there are more, and every mod with its state in the
-tooltip; the filter matches "mods" and "needs mods". Prefab Details shows a
-Mods section under the module warning: one row per mod with Installed or Not
-installed, and a line saying that Load / Place offers to download missing mods
+tooltip; the filter matches "mods" and "needs mods". A mod counts as installed
+under the asset rule (an installed folder of its id provides every name the
+prefab's row lists, whatever its hash; `MODS_STATUS` rows carry `state`
+`served`, `missing` or `incomplete` and the refusal sentence as `cause`).
+Prefab Details shows a Mods section under the module warning: one row per mod
+with Installed or Not installed, and a line saying that Load / Place offers to download missing mods
 when the mod store has them and otherwise to ask for the prefab's ZIP export.
 P29's module warning stays above it; a module one of the rows provides is a
 mod, not a missing room.
@@ -225,8 +228,15 @@ Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
 *.json)": a ZIP, or the `.json` inside an extracted export folder, whose
 `mods/` folder holds the mod folders (`rawmap_picker.h`, `for_prefab_dialog`).
 Import is the ordinary install of each mod folder, as the Mods tab's install
-button does it. The backend reads and writes them on the UI thread, with no
-network. The
+button does it; a carried folder whose id an installed folder declares and
+whose names that folder provides is skipped. The backend reads and writes them
+on the UI thread, with no network.
+
+The list follows the prefabs folder: the host's folder watcher (`folder_watch.h`)
+sends a fresh `prefabs` list 300 ms after the last change of a burst under
+`%LOCALAPPDATA%\snapmap-plus\prefabs\`, the product's own writes included. The
+page renders it as any list and keeps its selection while that prefab exists;
+otherwise Prefab Details is cleared. The
 pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mockup.html` and are tested by `tests/prefab_mods_test.js`.
 
@@ -235,7 +245,11 @@ pure helpers sit between `// --- prefab mods (pure) ---` markers in
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
 Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
 answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and nothing
-polls. The page renders only from the last document and the last dry run, never from its own
+polls. The host's folder watcher also asks for the rescan by itself 1500 ms after the mods folder
+goes quiet (`SH_MODS_ACT_WATCH_RESCAN`, deferred by the backend while Play runs, a map loads or a
+store write holds the lock, and asked again two seconds later); it posts only the fresh `mods`
+document, never a `modsActionResult`, and changes seen while the product's own store lock is held,
+or within a second after, are ignored (`SH_MODS_STORE`). The page renders only from the last document and the last dry run, never from its own
 bookkeeping, so counts, manifest rows and the published state are always what the backend just
 read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods doctor [verify]`.
 
@@ -276,10 +290,12 @@ consequence list the confirmation shows, with exactly two buttons (Cancel, and D
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
 
-**Removed mods.** The list pane's footer, under the store path, reads "Removed mods: N, 12.3 MB"
-(`removed.count`, `removed.bytes`; the hover title is the folder) with an Empty button while
-`removed-mods\` holds a folder, and is hidden otherwise. Empty opens the same modal with the folders
-listed and two buttons, Cancel and Empty; Empty sends `removedEmpty` with the listed folder names.
+**Uninstall is permanent.** Its confirmation reads "This cannot be undone. Uninstalling:" and lists,
+after the map part and the Toybox rows, "Deletes the folder mods\<folder> and its files.", "N of
+your saved maps use it; they will not open until a mod folder provides its assets again" (when
+`install.savedMaps` is above 0) and "Undo history is cleared." (when `install.undoCleared`). There
+is no recycle bin: the footer has no removed-mods line and the page sends no `removedEmpty`; a
+document's `removed` object, sent by an older backend, is not read.
 
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
@@ -327,16 +343,13 @@ and `size` is the carried bytes.
 | `published` | object | `{state: "published", at}` when the record's `links` section holds an item published from this map (written by a publish with mods from this installation, dropped at its unpublish); `at` is the link's time. Absent otherwise: the product cannot tell an unpublished map from one published without mods or elsewhere, so it never sends `unpublished`. |
 | `uploaded` | object | `{claimed, at}`, sent with `published`: whether the record's `claims` section holds that item's claim, and its time. |
 | `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
-| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
+| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `incomplete` (a folder of its id is installed but lacks a name the map's row lists), `skipped` or `missing`, judged by the asset rule ([architecture](architecture.md#mods)), so a row pinning another build of an installed id is `installed`; `rows[].state` is `active`, `superseded`, `"incomplete"`, `skipped` or `missing` the same way, with the refusal sentence in `cause`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
 
 The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
 
-`"removed"` describes `removed-mods\`, the folder beside `mods\` that Uninstall moves folders to:
-`{folder, count, bytes, items: [{folder, id, version, name, bytes, at, "restorable"}]}`. `folder`
-is its absolute path; each item is a folder in it with what the record's `removed` section says of
-it (`id` is the folder name for a folder the record does not know, `at` Unix seconds, 0 unknown);
-`restorable` says a map that still uses it brings it back. Absent from an older backend.
+The document carries no `removed` object: the recycle bin is retired (an older backend sent one; the
+page ignores it).
 
 ### Actions
 
@@ -353,15 +366,17 @@ again.
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
-| `uninstall` | `mapRemoveMod` on the open map when it uses the mod, then v2's `remove`: the folder, whatever its origin, moves to `removed-mods\` and is recorded. Closed maps are not edited; one that still uses the mod brings it back when opened, and so does Ctrl+Z on the open map. Replaces `remove`. |
-| `removedEmpty` | Delete the folders of `removed-mods\` that `arg` names (newline-separated; "" all) and their records. `data` adds `deleted`, `failed` and `freed` (bytes). |
+| `uninstall` | Permanent. `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder deleted, whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
+| `removedEmpty` | Retired with the recycle bin; the page no longer sends it and the backend answers a refusal. |
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
 manifestRow, tagRemoved, vanillaAfter, published, attached?}` (`attached` true for a map-level row); `install` is null for `mapRemoveMod`, else
-`{folder, disposition, movedTo}`: `disposition` is `move` and `movedTo` is `removed-mods\<name>` (a
-suffix when the name is taken there); an older backend sent `delete` for a folder the product made. A refused dry run is `ok: false` with the
+`{folder, disposition, "savedMaps", "undoCleared"}`: `disposition` is `delete`; `savedMaps` counts the
+local saves in My Maps whose `map.decl` carries a row of the mod (-1 when the saves could not be read);
+`undoCleared` is true when a map is open, whose undo history the uninstall clears. An older backend
+sent `move` with `movedTo`; the page reads either as `delete`. A refused dry run is `ok: false` with the
 reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
 a map is loading, the mod is placed as Blueprint modules (removed in Blueprint mode), or only another
 mod the map uses needs it. The real actions refuse the same way, and also when the editor refuses
@@ -373,7 +388,8 @@ Delete Selection, one undo step "Delete Selection"; the editor drops the wires t
 entities), the mod's row dropped from the map's manifest record (the
 next save rebuilds the rows from the placed entities, so it writes none for the mod), and with the
 last mod the search tag removed from the editor's copy of the map's tags. `uninstall` runs that on
-the open map first, then moves the folder to `removed-mods\` (as `remove`) and rescans; the rescan's refresh rebuilds
+the open map first, then clears the undo history (`editor_undo.c`, see
+[architecture](architecture.md#the-mods-tabs-map-scope)), deletes the folder (as `remove`) and rescans; the rescan's refresh rebuilds
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
@@ -414,6 +430,10 @@ Off-main callers submit a copied batch through `clone_bss_apply`; missing thread
 identity or transport refuses the operation. A timed-out operation already running
 returns an in-progress status, so the page must not report completion or retry it
 automatically. See [architecture](architecture.md#threads-and-edit-results).
+
+The folder watchers run on their own thread (`ReadDirectoryChangesW`) and only note changes; the
+think loop decides when the Prefabs list or the Mods tab refreshes (`folder_watch.h`, tested by
+`tests/folder_watch_test.c`) and logs one `watch:` line per refresh or rescan.
 
 Camera polling runs at the loop cadence and posts only changed coordinates.
 The prefab list never reads a prefab scene: previews, and the Limits section,

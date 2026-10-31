@@ -18,11 +18,8 @@
  *   sh_mods map add "<id>"         use that mod in the whole open map without placing anything
  *                                  (a map-level manifest row; the next save writes it)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
- *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, then the folder moved to
- *                                       removed-mods); --yes does it
- *   sh_mods removed                     the removed mods: each folder in removed-mods, its id and size
- *   sh_mods removed empty [--yes]       what emptying deletes; --yes deletes the folders and their records
- *   sh_mods removed restore "<id>"      moves one back into mods and rescans
+ *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, its undo history cleared,
+ *                                       then the folder deleted; permanent); --yes does it
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
  *   sh_mods push "<id@version+build>" "<ref>"   upload a bundle to the mod store and claim it under ref
@@ -63,9 +60,8 @@
                            "'sh_mods map add \"<id>\"' uses a mod in the whole map without placing anything, 'sh_mods map remove " \
                            "\"<id>\"' prints what removing that mod from the map deletes and 'sh_mods map remove \"<id>\" --yes' " \
                            "does it (one undo step), 'sh_mods uninstall \"<id>\"' prints what uninstalling does (the open map " \
-                           "cleaned of it, its Toybox rows, its folder moved to removed-mods) and '--yes' does it, " \
-                           "'sh_mods removed' lists the removed mods, 'sh_mods removed empty --yes' deletes them, " \
-                           "'sh_mods removed restore \"<id>\"' puts one back, 'sh_mods rebuild \"<folder>\"' " \
+                           "cleaned of it, its undo history cleared, its Toybox rows, its folder deleted for good) and '--yes' " \
+                           "does it, 'sh_mods rebuild \"<folder>\"' " \
                            "builds a mod folder again and rescans."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
