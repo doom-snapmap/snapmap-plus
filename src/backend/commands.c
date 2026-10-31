@@ -1670,6 +1670,7 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
 void h_sh_dumpdef(idCmdArgs *a);
 void h_sh_spawninfo(idCmdArgs *a);
 void h_sh_spawn(idCmdArgs *a);
+void h_sh_playerevent(idCmdArgs *a);
 void h_sh_dumpmap(idCmdArgs *a);
 /* Local-player runtime cheat toggles. */
 void h_noclip(idCmdArgs *a);
@@ -1907,6 +1908,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_reenable_devmode", (void *)h_reenable_devmode, "re-enable devmode" },
     { "sh_dumpmap",          (void *)h_sh_dumpmap,  "sh_dumpmap <name> dumps the current mapfile, even the generated snapmap mapfile, to <game dir>\\base\\mapdumps\\<name>.map (never overwrites: repeats get _2, _3, ...)" },
     { "sh_spawn",            (void *)h_sh_spawn,    "sh_spawn <entitydef> <entity name after spawning>" },
+    { "sh_playerevent",      (void *)h_sh_playerevent, "sh_playerevent hands | info <event> | <event> [int] [process|post] fires a player event on the local player (diagnostic)" },
     { "sh_dumpdef",          (void *)h_sh_dumpdef,  "sh_dumpdef <entity name>, dumps the entitydef of an existing ingame entity" },
     { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"Internal type-field diagnostic -- you dont need this" },
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
