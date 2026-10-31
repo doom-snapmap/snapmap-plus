@@ -837,7 +837,7 @@ static void r_print(void *c, const char *line) { (void)c; R.prints++; strcpy_s(R
 static const sh_modpub_ops RAWMAP_OPS = {
     NULL, r_on_main, r_row_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
     r_worker_run, r_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, r_resume, NULL,
-    r_store_has, NULL, r_print
+    r_store_has, r_print
 };
 
 static void notify_toast(const char *title, const char *text)

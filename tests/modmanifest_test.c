@@ -519,39 +519,6 @@ static void activate_by_id(void)
     sh_modmanifest_list_free(&rows);
 }
 
-/* The save step's restore hook: asked with the placed names while armed,
- * before the rows are built, so a reinstated bundle gets its row. */
-static int g_armed, g_restore_calls, g_restore_when;
-static size_t g_restore_names;
-static int fake_armed(void) { return g_armed; }
-static int fake_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when)
-{
-    (void)hashes; (void)hash_count; (void)names;
-    g_restore_calls++;
-    g_restore_names = name_count;
-    g_restore_when = when;
-    g_installed_count = 2;   /* the bundle serves again */
-    return 1;
-}
-
-static void save_restore(void)
-{
-    char *out;
-    size_t n = 0;
-    printf("-- save: an uninstalled mod the map still places is reinstated before the rows are built\n");
-    sh_modmanifest_set_restore(fake_restore, fake_armed);
-    g_installed = INSTALLED;
-    g_installed_count = 0;
-    g_armed = 0;
-    CHECK(sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n) == NULL && g_restore_calls == 0);   /* not armed */
-    g_armed = 1;
-    out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
-    CHECK(g_restore_calls == 1 && g_restore_names > 0 && g_restore_when == SH_MODSERVE_RESTORE_SAVE);
-    CHECK(out && strstr(out, "\"smpmod1.0.1\""));
-    if (out) HeapFree(GetProcessHeap(), 0, out);
-    sh_modmanifest_set_restore(NULL, NULL);
-}
-
 /* ---- map-level rows -------------------------------------------------------------------------- */
 
 #define HASH_C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -633,7 +600,7 @@ static void map_level(void)
     engine = sh_modmanifest_prepare_load(written, wlen, &elen);
     CHECK(engine != NULL && !strstr(engine, "smpmod1."));
     /* The load hook sees both rows and the placed names, before activation. */
-    CHECK(g_scope_calls == 1 && g_scope_when == SH_MODSERVE_RESTORE_LOAD && g_scope_rows == 2 && g_scope_attached == 1 &&
+    CHECK(g_scope_calls == 1 && g_scope_when == SH_MODSERVE_AT_LOAD && g_scope_rows == 2 && g_scope_attached == 1 &&
           g_scope_names > 0);
     CHECK(g_activate_count == 2);
     CHECK(sh_modmanifest_current(&current) == 2 && sh_modmanifest_current_attached(&rows) == 1 &&
@@ -653,7 +620,7 @@ static void map_level(void)
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
     CHECK(saved && strstr(saved, "alex.pink-imp") && strstr(saved, HASH_D) && !strstr(saved, HASH_C));
     CHECK(saved && strstr(saved, "\\\"attached\\\":true"));
-    CHECK(g_scope_when == SH_MODSERVE_RESTORE_SAVE && g_scope_rows == 2 && g_scope_attached == 1);
+    CHECK(g_scope_when == SH_MODSERVE_AT_SAVE && g_scope_rows == 2 && g_scope_attached == 1);
     CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].bundle, HASH_D) &&
           !strcmp(rows.rows[0].version, "1.1.0"));
     sh_modmanifest_list_free(&rows);
@@ -720,7 +687,6 @@ int main(void)
     playtest_bound();
     placed_names();
     save_closure();
-    save_restore();
     activate_by_id();
     load_step();
     mod_json();

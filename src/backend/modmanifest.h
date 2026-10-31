@@ -143,17 +143,10 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
  * unchanged. */
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length);
 
-/* The save step's restore hook (modui.c's recycle bin, the modserve.h
- * sh_modserve_restore_fn contract with `names`): when `armed` says a recycled
- * mod could be needed, the placed names go to `restore` before the rows are
- * built, so a mod the map still places is reinstated and gets its row. */
-void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int hash_count, const char *const *names,
-                                               size_t name_count, int when), int (*armed)(void));
-
 /* The map scope's hook (modui.c, modserve.h map scope): at every load, with
  * the rows just read and, when `armed` answers above 0, the map's placed
- * names (`when` SH_MODSERVE_RESTORE_LOAD), before the bundles are activated;
- * at every save with the rows written (names NULL, `when` SH_MODSERVE_RESTORE_SAVE). NULL
+ * names (`when` SH_MODSERVE_AT_LOAD), before the bundles are activated;
+ * at every save with the rows written (names NULL, `when` SH_MODSERVE_AT_SAVE). NULL
  * unbinds. */
 typedef void (*sh_modmanifest_scope_fn)(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
                                         int when);

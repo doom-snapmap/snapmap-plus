@@ -267,4 +267,22 @@ int  sh_ms_copy_file(const wchar_t *from, const wchar_t *to);
  * followed). Refuses anything outside the root and the root itself. */
 int  sh_ms_remove_folder(const char *folder);
 
+/* Uninstall's delete: `folder` (absolute) must be a direct child of the store
+ * root that exists; it is deleted recursively under the store lock, links
+ * removed and never followed. 1 deleted, else 0 with the first cause. The
+ * record's aliases are the caller's (sh_ms_alias_forget) and the build cache
+ * follows at the next sync. */
+int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
+
+/* The retired recycle bin. Deletes every entry of removed-mods\ (the store
+ * root's sibling), the folder itself, and the record's "removed" section,
+ * under the store lock. One "MODS: removed-mods: deleted <name>" line per
+ * entry and, when anything was there, the summary "MODS: removed-mods: N
+ * folder(s) deleted; the bin is retired", each to the backend log and to
+ * `line` when given. Idempotent: a later start finds nothing. Runs at backend
+ * start before the serving index is built. Returns the entries deleted, or
+ * -1 when one could not be deleted (it is tried again at the next start). */
+typedef void (*sh_ms_sweep_line_fn)(void *context, const char *line);
+int  sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context);
+
 #endif /* SNAPMAP_PLUS_MODSTORE_H */

@@ -778,19 +778,6 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
     /* The asset rule: the store is asked only for rows no installed folder
      * serves (missing or incomplete). */
     for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
-    if (missing && o->restore) {
-        /* A mod in the recycle bin comes back, as a map load would bring it. */
-        const char **hashes = (const char **)calloc(missing, sizeof *hashes);
-        int n = 0;
-        if (hashes) {
-            for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) hashes[n++] = rows->rows[i].bundle;
-            if (o->restore(hashes, n) > 0) {
-                missing = 0;
-                for (i = 0; i < rows->count; i++) if (!pm_installed(&rows->rows[i])) missing++;
-            }
-            free((void *)hashes);
-        }
-    }
     if (!missing) {
         pm_prepare(rows, name);
         return SH_PREFAB_MODS_PLACE;
@@ -1322,10 +1309,6 @@ static int eng_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
     return sh_modserve_row_served_for(row, "prefab", cause, cap);
 }
-static int eng_restore(const char *const *hashes, int n)
-{
-    return sh_modserve_restore(hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD);
-}
 
 /* Does the open map list this bundle (its manifest rows, or the map scope's
  * listing, which adds the placed entities)? */
@@ -1394,7 +1377,6 @@ static void pm_bind_defaults(void)
     sh_prefab_mods_ops o;
     memset(&o, 0, sizeof o);
     o.row_state = eng_row_state;
-    o.restore = eng_restore;
     o.listed = eng_listed;
     o.attach = eng_attach;
     o.activate = eng_activate;

@@ -141,7 +141,7 @@ static int f_refresh(void) { F.refreshes++; return 1; }
 static int f_call_main(int (*fn)(void *), void *ctx) { F.main_calls++; return fn(ctx) ? 1 : 1; }
 
 static const sh_prefab_mods_ops PM_OPS = {
-    f_row_state, NULL, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main
+    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main
 };
 
 /* modpublished's doubles: the hold runs as in the game, its jobs inline. */
@@ -189,7 +189,7 @@ static void p_print(void *c, const char *line) { (void)c; f_print(line); }
 static const sh_modpub_ops PUB_OPS = {
     NULL, p_on_main, p_row_state, p_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
     p_worker_run, p_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, p_log,
-    p_store_has, NULL, p_print
+    p_store_has, p_print
 };
 
 static void reset_fakes(void)

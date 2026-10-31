@@ -226,7 +226,6 @@ typedef struct sh_prefab_mods_ops {
     /* The asset rule (modserve.h sh_modserve_row_served_for, subject
      * "prefab"): SH_MODPUB_ROW_*, the refusal sentence in `cause`. */
     int  (*row_state)(const sh_modmanifest_row *row, char *cause, size_t cap);
-    int  (*restore)(const char *const *hashes, int n);             /* the recycle bin; how many came back */
     int  (*listed)(const sh_modmanifest_row *row);                 /* 1 the open map lists the build serving it */
     int  (*attach)(const sh_modmanifest_row *row, char *note, size_t cap);   /* 1 attached, 0 already, -1 failed */
     int  (*activate)(const sh_modmanifest_list *rows);             /* register the rows' decls for the open map */

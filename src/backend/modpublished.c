@@ -833,18 +833,6 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     sh_modmanifest_read(text, length, rows, &rejected);
     if (!rows->count) return 0;
     missing = pub_count_missing(rows);
-    /* An uninstalled mod still in the recycle bin comes back first, exactly as
-     * the load's own activation would bring it back. */
-    if (missing && g_ops.restore && pub_on_main()) {
-        const char **hashes = calloc(missing, sizeof(*hashes));
-        int n = 0;
-        if (hashes) {
-            for (size_t i = 0; i < rows->count && (size_t)n < missing; i++)
-                if (!pub_row_served(&rows->rows[i])) hashes[n++] = rows->rows[i].bundle;
-            if (g_ops.restore(g_ops.context, hashes, n) > 0) missing = pub_count_missing(rows);
-            free((void *)hashes);
-        }
-    }
     return missing;
 }
 
@@ -1592,19 +1580,13 @@ static int eng_store_has(void *c, const char *hash, volatile int *cancel)
     return -1;
 }
 
-static int eng_restore(void *c, const char *const *hashes, int n)
-{
-    (void)c;
-    return sh_modserve_restore(hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD);
-}
-
 static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf("%s\n", line); }
 
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
-    eng_store_has, eng_restore, eng_print
+    eng_store_has, eng_print
 };
 
 /* ------------------------------------------------------------ detours */

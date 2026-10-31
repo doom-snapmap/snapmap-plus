@@ -909,7 +909,7 @@ static void mm_scope_load(const char *json, size_t length, const sh_modmanifest_
         count = sh_modmanifest_placed_names(json, length, &names, &failed);
         if (failed) { names = NULL; count = 0; }
     }
-    scope(rows ? rows : &none, (const char *const *)names, count, SH_MODSERVE_RESTORE_LOAD);
+    scope(rows ? rows : &none, (const char *const *)names, count, SH_MODSERVE_AT_LOAD);
     sh_modmanifest_names_free(names, count);
 }
 
@@ -1007,16 +1007,6 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;
 
-static int (*volatile g_restore)(const char *const *, int, const char *const *, size_t, int);
-static int (*volatile g_restore_armed)(void);
-
-void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int hash_count, const char *const *names,
-                                               size_t name_count, int when), int (*armed)(void))
-{
-    g_restore = restore;
-    g_restore_armed = armed;
-}
-
 static void mm_save_visit(void *context, const char *bundle_id, const char *version,
                           const char *bundle_hash, unsigned long long size, const char *name)
 {
@@ -1090,7 +1080,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 {
     char **names = NULL;
     size_t count, i, written = 0;
-    int failed = 0, stale, restore;
+    int failed = 0, stale;
     mm_save_ctx ctx;
     sh_modmanifest_list attached;
     sh_modmanifest_scope_fn scope = g_scope;
@@ -1104,10 +1094,9 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     /* No installed bundle serves anything, the map carries no rows and no
      * map-level mod: the save is the engine's own bytes, without walking the
      * map. */
-    restore = g_restore && g_restore_armed && g_restore_armed() > 0;
     (void)sh_modmanifest_current_attached(&attached);
-    if (!stale && !restore && !attached.count && !sh_modserve_active()) {
-        if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_RESTORE_SAVE);
+    if (!stale && !attached.count && !sh_modserve_active()) {
+        if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
         return NULL;
     }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
@@ -1116,16 +1105,6 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
                     "the save carries no manifest rows");
         sh_modmanifest_list_free(&attached);
         return NULL;
-    }
-    /* An uninstalled mod the map still places, or a map-level mod that was
-     * uninstalled, is reinstated first (its folder back in mods\, the index
-     * rebuilt), so the save writes its row from the build that serves. */
-    if (restore && (count || attached.count)) {
-        const char **hashes = attached.count ? (const char **)calloc(attached.count, sizeof *hashes) : NULL;
-        for (i = 0; hashes && i < attached.count; i++) hashes[i] = attached.rows[i].bundle;
-        (void)g_restore(hashes, hashes ? (int)attached.count : 0, count ? (const char *const *)names : NULL, count,
-                        SH_MODSERVE_RESTORE_SAVE);
-        free((void *)hashes);
     }
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
     sh_modmanifest_names_free(names, count);
@@ -1137,7 +1116,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         return NULL;
     }
     /* What the map now lists: placed entities may have been added since the load. */
-    if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_RESTORE_SAVE);
+    if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_AT_SAVE);
     if (ctx.list.count == 0 && !stale) return NULL;
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);

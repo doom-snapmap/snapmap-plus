@@ -280,10 +280,12 @@ consequence list the confirmation shows, with exactly two buttons (Cancel, and D
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
 
-**Removed mods.** The list pane's footer, under the store path, reads "Removed mods: N, 12.3 MB"
-(`removed.count`, `removed.bytes`; the hover title is the folder) with an Empty button while
-`removed-mods\` holds a folder, and is hidden otherwise. Empty opens the same modal with the folders
-listed and two buttons, Cancel and Empty; Empty sends `removedEmpty` with the listed folder names.
+**Uninstall is permanent.** Its confirmation reads "This cannot be undone. Uninstalling:" and lists,
+after the map part and the Toybox rows, "Deletes the folder mods\<folder> and its files.", "N of
+your saved maps use it; they will not open until a mod folder provides its assets again" (when
+`install.savedMaps` is above 0) and "Undo history is cleared." (when `install.undoCleared`). There
+is no recycle bin: the footer has no removed-mods line and the page sends no `removedEmpty`; a
+document's `removed` object, sent by an older backend, is not read.
 
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
@@ -336,11 +338,8 @@ and `size` is the carried bytes.
 
 The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
 
-`"removed"` describes `removed-mods\`, the folder beside `mods\` that Uninstall moves folders to:
-`{folder, count, bytes, items: [{folder, id, version, name, bytes, at, "restorable"}]}`. `folder`
-is its absolute path; each item is a folder in it with what the record's `removed` section says of
-it (`id` is the folder name for a folder the record does not know, `at` Unix seconds, 0 unknown);
-`restorable` says a map that still uses it brings it back. Absent from an older backend.
+The document carries no `removed` object: the recycle bin is retired (an older backend sent one; the
+page ignores it).
 
 ### Actions
 
@@ -357,15 +356,17 @@ again.
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
-| `uninstall` | `mapRemoveMod` on the open map when it uses the mod, then v2's `remove`: the folder, whatever its origin, moves to `removed-mods\` and is recorded. Closed maps are not edited; one that still uses the mod brings it back when opened, and so does Ctrl+Z on the open map. Replaces `remove`. |
-| `removedEmpty` | Delete the folders of `removed-mods\` that `arg` names (newline-separated; "" all) and their records. `data` adds `deleted`, `failed` and `freed` (bytes). |
+| `uninstall` | Permanent. `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder deleted, whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
+| `removedEmpty` | Retired with the recycle bin; the page no longer sends it and the backend answers a refusal. |
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
 manifestRow, tagRemoved, vanillaAfter, published, attached?}` (`attached` true for a map-level row); `install` is null for `mapRemoveMod`, else
-`{folder, disposition, movedTo}`: `disposition` is `move` and `movedTo` is `removed-mods\<name>` (a
-suffix when the name is taken there); an older backend sent `delete` for a folder the product made. A refused dry run is `ok: false` with the
+`{folder, disposition, "savedMaps", "undoCleared"}`: `disposition` is `delete`; `savedMaps` counts the
+local saves in My Maps whose `map.decl` carries a row of the mod (-1 when the saves could not be read);
+`undoCleared` is true when a map is open, whose undo history the uninstall clears. An older backend
+sent `move` with `movedTo`; the page reads either as `delete`. A refused dry run is `ok: false` with the
 reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
 a map is loading, the mod is placed as Blueprint modules (removed in Blueprint mode), or only another
 mod the map uses needs it. The real actions refuse the same way, and also when the editor refuses
@@ -377,7 +378,8 @@ Delete Selection, one undo step "Delete Selection"; the editor drops the wires t
 entities), the mod's row dropped from the map's manifest record (the
 next save rebuilds the rows from the placed entities, so it writes none for the mod), and with the
 last mod the search tag removed from the editor's copy of the map's tags. `uninstall` runs that on
-the open map first, then moves the folder to `removed-mods\` (as `remove`) and rescans; the rescan's refresh rebuilds
+the open map first, then clears the undo history (`editor_undo.c`, see
+[architecture](architecture.md#the-mods-tabs-map-scope)), deletes the folder (as `remove`) and rescans; the rescan's refresh rebuilds
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;

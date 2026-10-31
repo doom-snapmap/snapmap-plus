@@ -160,9 +160,6 @@ typedef struct sh_modpub_ops {
      * (never published, or released and gone), negative when the store
      * could not be asked. Worker thread; stops early when *cancel is set. */
     int  (*store_has)(void *c, const char *hash, volatile int *cancel);
-    /* Put recycled mods the rows name back (sh_modserve_restore at the load
-     * point). Returns how many came back. Main thread. */
-    int  (*restore)(void *c, const char *const *hashes, int n);
     /* One line on the game console. */
     void (*print)(void *c, const char *line);
 } sh_modpub_ops;
@@ -194,7 +191,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
 /* Read every row of `text` into *rows (cleared first; free with
  * sh_modmanifest_list_free) and return how many name a bundle that is not
  * served under the asset rule (no installed folder of the row's id, or one
- * that lacks a name the row lists), after one restore from the recycle bin. */
+ * that lacks a name the row lists). */
 size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
 
 /* Hold a rawmap load whose rows name missing bundles. `source` is the file

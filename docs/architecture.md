@@ -550,42 +550,28 @@ serves its id now (`sh_modserve_bundle_serving`). The per-map listing of a
 bundle that shadows stock paths or sets requirements stays keyed by id (the
 scope listing, [Map scope](#map-scope)).
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
-`aliases` and `removed`, each section written whole under one lock.
+`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
+and `aliases`, each section written whole under one lock.
 
-The recycle bin. No folder is deleted by Uninstall, Remove or the removal of
-covered builds: every one, the product's or the author's own, moves to
-`removed-mods\` beside `mods\` (a name already taken there gets `-2`, `-3`, ...),
-and the record's `removed` section keeps, under its name there, the bundle
-hash and every alias that answered as it, the id, version and title, its name
-in `mods\`, the time (`removedAt`, Unix seconds) and an order number (`seq`).
-The aliases themselves are dropped as above. A recorded folder comes back when
-a map still needs it (`modui.c`, `mu_restore`, behind `sh_modserve_restore`
-and the save step's hook): a map load whose manifest names a bundle that
-resolves to nothing installed (the hash, or one of its aliases, is recorded;
-`modserve_activate_bundles` asks before it plans and plans again), a save or a
-Play entry whose placed names live under `mods/<id>/` (or the id's `_`
-spelling) of an id no installed folder declares (the newest recorded folder
-of that id), or Ctrl+Z bringing back an entity Uninstall deleted from the open
-map: the main-thread tick after each native frame (`sh_modui_poll_main`, run
-on the process heap like the other main-thread calls, every 250 ms while
-anything is watched or owed) checks those uniqueIds and, when one is back,
-reinstates the bundle they were deleted with, by its hash, whatever its names
-look like. The folder moves back under its old name,
-else its id, else a free name; its aliases are recorded again; the rebuild
-rule and the serving index run at once, so the load or save in progress sees
-the mod (the dropped `cache` entry makes the rebuild rule build it again,
-with the same hash when nothing changed). The game-side refresh (decls,
-palette rows, strings) runs at once after an undo and otherwise on the next
-editor tick, and that tick shows one editor toast and one console line, "Hell
-Guards was reinstalled because the map still uses it."; during Play or a load
-the tick waits, as the deferred refresh does. Emptying the bin (the Mods tab's
-footer, `sh_mods removed empty --yes`) deletes the folders, links not
-followed, and their entries; a folder in `removed-mods\` the record does not
-know (one moved there by hand or by an earlier build) is listed and emptied
-but never brought back. `sh_mods removed restore "<id>"` moves one back by
-hand. Not covered: a published map's launch asks to download a missing bundle
-before activation, so it does not use the bin.
+Removal is permanent. Uninstall, Remove and the removal of covered builds
+delete the folder outright (`sh_ms_delete_mod_folder`: a direct child of the
+store root, deleted under the store lock, links removed and never followed),
+drop its aliases once no folder of its id remains (`sh_ms_alias_forget`), and
+rescan; the build cache follows at that rescan. Nothing brings a folder back: a
+map that still needs it refuses to open with the asset rule's sentence, and the
+download offer of a published map, a rawmap or a prefab is the only way the
+mod returns (as a new install). Uninstall also clears the open map's undo
+history (see [The Mods tab's map scope](#the-mods-tabs-map-scope)).
+
+The retired recycle bin. Earlier builds moved removed folders to
+`removed-mods\` beside `mods\` and recorded them in the record's `removed`
+section. At every start, after the store upgrade and before the serving index
+is built, `sh_ms_bin_sweep` deletes every entry of `removed-mods\` (links not
+followed), the folder itself and the `removed` section, logging one line per
+entry ("MODS: removed-mods: deleted <name>") and one summary ("MODS:
+removed-mods: 3 folder(s) deleted; the bin is retired"); a later start finds
+nothing and logs nothing. An entry that cannot be deleted stays for the next
+start.
 
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the
@@ -1003,8 +989,7 @@ navigation shards; with an empty table, no rows in the map and no map-level row
 it returns at once and the save is the engine's own bytes. A map-level row is
 written for the build that serves its mod (the bundle resolver modui.c binds,
 `sh_modserve_bundle_serving`), and the current manifest follows the rename; a
-row of a mod that is not installed is kept as it is, and an uninstalled one is
-reinstated from the recycle bin by its hash first.
+row of a mod that is not installed is kept as it is.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
@@ -1297,13 +1282,40 @@ last mod, the search tag `mods` is removed from the editor's tag list
 heap because the console command's own heap does not survive Play); the published
 copy is unchanged until the map is published again. A mod placed as
 Blueprint modules, or reached only through another mod's needs, is refused
-with the cause. Uninstall runs that on the open map first, then moves the
-folder to `removed-mods\` as Remove does (every origin, recorded; see the
-recycle bin above), then rescans; the refresh rebuilds the palette without the
-mod's editor rows and, when the editor refuses the rebuild because the delete
-is still committing, retries it once the editor is free. Closed maps are not
-edited. Both flows, and Rebuild, are refused while Play runs or a map loads
-(the editor's deactivation reason, the engine's load state).
+with the cause.
+
+Uninstall is permanent. In order: the dry run and confirmation (as Remove
+from map's, plus the Toybox rows, "Deletes the folder mods\<folder> and its
+files.", how many local saves in My Maps carry a row of the mod, "N of your
+saved maps use it; they will not open until a mod folder provides its assets
+again", and, with a map open, "Undo history is cleared."); the native delete
+of the mod's entities from the open map, as Remove from map (a refusal, Play
+running, a load or a busy editor, deletes nothing and is reported); the open
+map's undo and redo history cleared so no snapshot older than the delete
+remains; the folder deleted and its record entries dropped; the rescan. The
+saved maps are counted from each `savegame.user\<profile>\SNAPMAPS<id>\map.decl`
+(a 4-byte checksum, then zlib of the map text; `sh_inflate_raw_upto`). The
+history is cleared by the engine's own undo push (`editor_undo.c`): the undo
+list is the idList at `*(editor+0x10)` (data +0, count +8, capacity +0xc,
+cursor +0x18, each entry a 0xDD0-byte snapshot), and the push EditorCommitEdit
+calls (Vulkan RVA 0x12039F0, OpenGL RVA 0x1202CE0, decoded at run time from
+EditorCommitEdit's rel32 CALL at +0x20 to a `mov rcx,[rcx]; jmp` wrapper)
+advances the cursor, destroys every entry from it to the end with the snapshot
+destructor and the engine's sized free, compacts the list and appends a copy of
+the live edit map. With the cursor set one slot before the first entry it
+destroys every snapshot and leaves exactly one, the current state, with the
+cursor on it; the engine frees what it allocated and no other address is
+needed. It runs on the game thread inside a verified process-heap scope. After
+an entity delete the native "Delete Selection" commit lands on later editor
+frames, so the Mods tab's tick (`sh_modui_poll_main`, every native frame while
+a clear is owed) clears once `sh_editor_delete_native_pending` is 0 (at most
+ten seconds); without a delete it clears at once. A build where the push does
+not decode refuses Uninstall while a map is open. The rescan's refresh rebuilds
+the palette without the mod's editor rows and, when the editor refuses the
+rebuild because the delete is still committing, retries it once the editor is
+free. Closed maps are not edited. Remove from map, Uninstall and Rebuild are
+refused while Play runs or a map loads (the editor's deactivation reason, the
+engine's load state).
 
 Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
@@ -1388,9 +1400,8 @@ loads only where those mods are installed: a placed entity whose mod is absent
 makes SnapMap's own validator throw the player out with "map corruption". So a
 rawmap is never handed to the engine while a mod it names is missing.
 
-Loading. `sh_modpub_rawmap_missing` reads the rows and counts those whose bundle
-(aliases resolve) is not installed and admitted, after one restore from the
-recycle bin (`sh_modserve_restore` at the load point). The editor reload, which
+Loading. `sh_modpub_rawmap_missing` reads the rows and counts those the asset
+rule does not find served (missing or incomplete). The editor reload, which
 both **File > Load Rawmap...** and `sh_rawmaps load` use, checks on its own
 frame before `LoadMap` (`sh_rawmap_prepare_reload` in `ef_service_reload`); the
 text it read, with a `.zip` already imported, is what the parse then uses. Any
@@ -1554,8 +1565,8 @@ thread):
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
   console line, below; nothing is fetched, because nothing can install it;
-- missing rows first try the recycle bin (`sh_modserve_restore`);
-- with every row installed, the rows' bundles are activated for the open map
+- with every row served (the asset rule), the rows are activated for the open map
+  through the builds that serve them
   (`modserve_activate_bundles`) and each one the open map does not list (its
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`), with one

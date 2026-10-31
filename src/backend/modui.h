@@ -13,8 +13,9 @@
  *   migrate   whether the retired overrides\ folder holds entries the
  *             migration record does not cover (sh_modmigrate_pending)
  *   map       the manifest rows the last map load carried (modmanifest's
- *             current record), each with whether its bundle is installed and
- *             active, and the bundles the placed entities resolve to now (the
+ *             current record), each with its state under the asset rule
+ *             (modserve.h sh_modserve_row_served: active, superseded,
+ *             incomplete, skipped, missing) and the refusal sentence, and the bundles the placed entities resolve to now (the
  *             save-time closure, modserve_bundles_for_names_visit); with the
  *             map's JSON bound (payload v3) also its name, saved-map id, last
  *             save, published and uploaded state (the record's links and
@@ -99,7 +100,8 @@ typedef struct sh_modui_engine {
      * running, a map is loading), else 0. */
     int (*busy)(char *cause, size_t cap);
     /* 1 when the open editor map holds the entity with this uniqueId. Main
-     * thread. The undo watch (sh_modui_poll_main) reads it. */
+     * thread. Bound by iface_engine.c; nothing reads it since the undo watch
+     * was retired with the recycle bin. */
     int (*entity_valid)(int uid);
     /* The editor toast with a title and literal text; nothing outside the editor. */
     void (*toast)(const char *title, const char *text);
@@ -115,6 +117,15 @@ typedef struct sh_modui_engine {
      * screen over the open map (the Start menu's Settings), -1 unknown. The
      * map scope's exit waits for 1 (or -1, or no op bound). Main thread. */
     int (*map_left)(void);
+    /* Empty the open map's undo and redo history to the current state
+     * (editor_undo.h sh_editor_undo_clear; none in a SH_MODUI_PURE build).
+     * probe 1: 1 possible, 0 no editor map, -1 unavailable; probe 0: 1
+     * cleared, 0 no editor map, -1 failed. Main thread. */
+    int (*clear_undo)(int probe);
+    /* 1 while a native editor action has not committed yet
+     * (sh_editor_delete_native_pending): the Uninstall's undo clear waits for
+     * the delete's own commit. */
+    int (*undo_pending)(void);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {
@@ -135,14 +146,15 @@ int  sh_modui_list(void);
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
  * INSTALL (absolute), the key for VERIFY ("" verifies every installed build),
  * newline-separated keys for PRUNE_APPLY and a row's key for REMOVE, which
- * removes every build of that row unless the open map uses one. Nothing is
- * deleted by REMOVE, PRUNE_APPLY or UNINSTALL: every folder moves out of the
- * store to snapmap-plus\removed-mods\ (the recycle bin) and the record's
- * "removed" section keeps its bundle hashes, aliases, id, version, old name
- * and time. REMOVED_EMPTY deletes the bin's folders (arg: the
- * newline-separated folder names the confirmation listed, "" all) and their
- * records; REMOVED_RESTORE puts one back (arg: its folder in the bin, or an
- * id) and rescans. MIGRATE starts the migration on its worker (sh_modui_wait
+ * removes every build of that row unless the open map uses one. REMOVE,
+ * PRUNE_APPLY and UNINSTALL delete the folders outright (sh_ms_delete_mod_folder)
+ * and drop their aliases; nothing can bring them back. UNINSTALL, in order:
+ * the open map's entities of the mod through the native delete (refused, with
+ * nothing deleted, while Play runs, a map loads or the editor is busy), the
+ * open map's undo and redo history cleared to the current state (after the
+ * delete's own commit, on the tick), the folder deleted, the rescan.
+ * REMOVED_EMPTY and REMOVED_RESTORE are retired with the recycle bin and
+ * answer a refusal. MIGRATE starts the migration on its worker (sh_modui_wait
  * follows it). Returns the result length, or -1 when refused before the
  * action ran.
  *
@@ -160,15 +172,10 @@ int  sh_modui_list(void);
  * listing when the editor that had the map open is gone (the hub), and sets
  * it again when an editor map is open without one.
  *
- * Reinstatement: binding registers the restore hook with modserve.h and
- * modmanifest.h. When a map load names a bundle that resolves to nothing
- * installed, a save or a Play entry finds placed names under mods/<id>/ of an
- * id no installed folder declares, or an entity Uninstall deleted from the
- * open map is back (Ctrl+Z), the matching recorded folder moves back into
- * mods\ (its old name, else its id, else a free name), the rebuild rule and
- * the serving index run, and on the next editor tick the game-side refresh
- * runs and one toast and one console line say "<title> was reinstalled
- * because the map still uses it." */
+ * The uninstall's dry run reports, with the consequences, how many local
+ * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a
+ * row of the mod ("savedMaps") and whether the undo history is cleared
+ * ("undoCleared": a map is open). */
 int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:
@@ -179,19 +186,18 @@ int  sh_modui_run(int action, const char *arg);
  *   map add "<key|id>"          attach the mod to the open map (a map-level row)
  *   map remove "<key|id>" [--yes]   the dry run; with --yes it is performed
  *   uninstall "<key>" [--yes]       the dry run; with --yes it is performed
- *   removed                     the recycle bin: each folder in removed-mods
- *   removed empty [--yes]       what emptying deletes; with --yes it is done
- *   removed restore "<id>"      puts one folder back into mods\ and rescans
  * argv[0] is the verb. Lines start "MODS: ". Returns 1 when the verb was
  * handled (whatever its outcome), 0 for a verb that is not one of these, -1
  * off the main thread. */
 int  sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, void *context);
 
 /* The main-thread tick after each native frame: sh_modui_poll_due is cheap
- * (nothing watched or owed, or under 250 ms since the last tick: 0); when it
- * returns 1 the caller runs sh_modui_poll_main inside the process heap scope
- * its main-thread calls use. The tick waits out Play and loads, then runs an
- * owed refresh, checks the undo watch and shows the reinstatement toast. */
+ * (nothing owed, or under 250 ms since the last map-scope tick: 0; every
+ * frame while an Uninstall's undo clear is owed); when it returns 1 the
+ * caller runs sh_modui_poll_main inside the process heap scope its
+ * main-thread calls use. The tick waits out Play and loads, then clears an
+ * owed undo history once the editor's delete has committed, and runs the map
+ * scope's part. */
 int  sh_modui_poll_due(void);
 int  sh_modui_poll_main(void *context);
 

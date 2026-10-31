@@ -109,9 +109,10 @@
 #define SH_MB_REQ_COMMANDS_MAX 16u     /* lines in each of activate and deactivate */
 #define SH_MB_REQ_LINE_MAX     256u    /* bytes of one console line */
 #define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's product block */
-/* Product block "origin": the product created the folder (a copy it may
- * delete on Remove). A folder without one is the author's (Remove keeps its
- * files, moved to removed-mods). */
+/* Product block "origin": the product created the folder (a download that
+ * lands later may replace it). A folder without one is the author's (a
+ * download of its id sits beside it under <id>@<version>). Uninstall and
+ * Remove delete either kind. */
 #define SH_MB_ORIGIN_INSTALL   "install"        /* copied in by Install folder or sh_mods install */
 #define SH_MB_ORIGIN_DOWNLOAD  "download"       /* fetched from the mod store */
 #define SH_MB_ORIGIN_MIGRATION "migration"      /* converted from the retired overrides folder */

@@ -272,6 +272,99 @@ int sh_ms_remove_folder(const char *folder)
     return ok;
 }
 
+static int ms_is_dir(const wchar_t *path);
+
+int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
+{
+    wchar_t *root, *w;
+    int ok = 0;
+    if (cause && cap) cause[0] = 0;
+    if (!folder || !folder[0]) { ms_cause(cause, cap, "no folder named"); return 0; }
+    modstore_lock();
+    root = ms_wroot();
+    w = sh_mb_wpath(folder);
+    if (!root || !w) ms_cause(cause, cap, "the store folder cannot be resolved");
+    else if (!ms_child_of(w, root)) ms_cause(cause, cap, "%s is not a folder of the store", ms_leaf(folder));
+    else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_leaf(folder));
+    else if (!ms_rmtree(w, root)) ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_leaf(folder),
+                                           GetLastError());
+    else ok = 1;
+    if (ok) ms_log("MODS: store: deleted mods\\%s", ms_leaf(folder));
+    free(root);
+    free(w);
+    modstore_unlock();
+    return ok;
+}
+
+/* ---------------------------------------------------- the retired bin --- */
+
+int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
+{
+    wchar_t *root = ms_wroot(), *bin = NULL, *pattern = NULL, *slash;
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    char root8[MAX_PATH * 4], text[MAX_PATH * 4 + 160], *record = NULL;
+    int deleted = 0, failed = 0, had_record = 0;
+    if (!root) return -1;
+    modstore_lock();
+    /* removed-mods\ is the store root's sibling: <data>\removed-mods. */
+    slash = wcsrchr(root, L'\\');
+    if (slash && slash > root) {
+        size_t n = (size_t)(slash - root);
+        bin = (wchar_t *)malloc((n + 16) * sizeof(wchar_t));
+        if (bin) { memcpy(bin, root, n * sizeof(wchar_t)); wcscpy_s(bin + n, 16, L"\\removed-mods"); }
+    }
+    if (bin && ms_is_dir(bin) && (pattern = ms_wjoin(bin, L"*")) != NULL &&
+        (h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)) != INVALID_HANDLE_VALUE) {
+        do {
+            wchar_t *child;
+            char leaf[SH_MS_NAME_MAX * 4 + 1];
+            int ok;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            child = ms_wjoin(bin, fd.cFileName);
+            if (!child) { failed++; continue; }
+            if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, leaf, (int)sizeof leaf, NULL, NULL)) strcpy_s(leaf, sizeof leaf, "?");
+            /* A link is removed as a link; a folder's tree never follows one. */
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                ok = ms_rmtree(child, bin);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = RemoveDirectoryW(child) != 0;
+            else ok = ms_delete_file(child);
+            free(child);
+            if (ok) {
+                deleted++;
+                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: deleted %s", leaf);
+            } else {
+                failed++;
+                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be deleted completely (error %lu)",
+                            leaf, GetLastError());
+            }
+            backend_log(text);
+            if (line) line(context, text);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    free(pattern);
+    if (bin && ms_is_dir(bin) && !failed) (void)RemoveDirectoryW(bin);
+    /* The record's "removed" section goes with the bin. */
+    if (sh_ms_root(root8, sizeof root8) && sh_mb_record_get(root8, "removed", &record) == 1 && record) {
+        had_record = 1;
+        (void)sh_mb_record_put(root8, "removed", NULL);
+    }
+    free(record);
+    if (deleted || failed || had_record) {
+        if (failed)
+            _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) deleted, %d could not be deleted; "
+                        "the bin is retired", deleted, failed);
+        else _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) deleted; the bin is retired", deleted);
+        backend_log(text);
+        if (line) line(context, text);
+    }
+    free(bin);
+    free(root);
+    modstore_unlock();
+    return failed ? -1 : deleted;
+}
+
 /* -------------------------------------------------------- file utils ---- */
 
 static int ms_file_size(const wchar_t *path, unsigned long long *size)
