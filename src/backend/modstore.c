@@ -331,7 +331,7 @@ static int ms_recycle(const wchar_t *path, char *why, size_t cap)
 /* Remove a tree under the store root: the Recycle Bin first, the outright
  * delete (ms_rmtree: links removed, never followed) when the bin cannot take
  * it. SH_MS_RECYCLED, SH_MS_DELETED, or 0 when it could not be removed. */
-static int ms_discard(const wchar_t *path, const wchar_t *root, char *why, size_t cap)
+static int ms_retire(const wchar_t *path, const wchar_t *root, char *why, size_t cap)
 {
     if (why && cap) why[0] = 0;
     if (!ms_inside(path, root)) return 0;
@@ -355,7 +355,7 @@ int sh_ms_remove_folder(const char *folder)
     modstore_lock();
     root = ms_wroot();
     w = folder ? sh_mb_wpath(folder) : NULL;
-    if (root && w) r = ms_discard(w, root, why, sizeof why);
+    if (root && w) r = ms_retire(w, root, why, sizeof why);
     ms_log_discard(folder, r, why);
     free(root);
     free(w);
@@ -376,7 +376,7 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
     if (!root || !w) ms_cause(cause, cap, "the store folder cannot be resolved");
     else if (!ms_child_of(w, root)) ms_cause(cause, cap, "%s is not a folder of the store", ms_leaf(folder));
     else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_leaf(folder));
-    else if ((r = ms_discard(w, root, why, sizeof why)) == 0)
+    else if ((r = ms_retire(w, root, why, sizeof why)) == 0)
         ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_leaf(folder), GetLastError());
     else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
     ms_log_discard(folder, r, why);
