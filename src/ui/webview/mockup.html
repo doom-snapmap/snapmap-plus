@@ -3178,9 +3178,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var pfr = pfFileResultToast(d);
       if (pfr) toast(pfr.text, pfr.level);
     } else if (d.kind === 'editorMode') {
+      var prevMode = edMode.known ? (edMode.entityMode + ':' + edMode.blueprint) : null;
       edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0,
                 modules: typeof d.modules === 'number' ? d.modules : -1};
       pfRefreshModeUi(); updateCreateBtn();
+      // The Mods tab's "In this map" pills follow the map: a mode change (a map opened, the editor
+      // left for the hub) refreshes the tab's document while the tab is showing.
+      if (prevMode !== null && prevMode !== (edMode.entityMode + ':' + edMode.blueprint)) {
+        var modsPanel = document.getElementById('panel-mods');
+        if (modsPanel && modsPanel.style.display !== 'none' && typeof modsUi !== 'undefined') modsUi.show();
+      }
     } else if (d.kind === 'createModulePrefabResult') {
       var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
       if (d.result === 1) {

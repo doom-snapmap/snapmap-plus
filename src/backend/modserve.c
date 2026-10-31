@@ -1959,6 +1959,10 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (o >= 0 && !old->files[o].served) o = -1;
         if (o < 0) {
             d->added++;
+            /* A new editor row that shadows a stock one is a palette change too:
+             * the refresh below re-parses it, and the palette must be built
+             * again to show the mod's row (the removal side counts it as well). */
+            if (f->is_sedef && f->is_shadow && f->ptype && f->pname) d->added_rows++;
             if (f->is_decl && !f->is_shadow) {
                 d->added_decls++;
                 if (f->is_sedef) d->added_rows++;
