@@ -146,6 +146,9 @@ static void *gm_find_entity(void *gm, const char *name)
     }
 }
 
+void *sh_entity_gamemgr(void) { return get_gamemgr(); }
+void *sh_entity_find(const char *name) { void *gm = get_gamemgr(); return gm ? gm_find_entity(gm, name) : NULL; }
+
 /* Return 1 after GetOrigin succeeds, or 0 for a missing slot or memory fault. */
 static int ent_get_origin(void *ent, float out[3])
 {

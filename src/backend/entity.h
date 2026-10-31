@@ -17,4 +17,9 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
  * first pass, including partial binding, or 0 if already installed or base is NULL. */
 int sh_entity_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys);
 
+/* The live game manager object and FindEntity(name) through it, both NULL
+ * before sh_entity_install or when the game has no map. SEH-guarded. */
+void *sh_entity_gamemgr(void);
+void *sh_entity_find(const char *name);
+
 #endif /* BACKEND_B2_ENTITY_H */

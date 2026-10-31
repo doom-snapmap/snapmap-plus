@@ -297,6 +297,17 @@ still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
 `sh_mods map add "<id>"` runs `mapAddMod`.
 
+## Timeline events
+
+The event picker is fed by `enumEvents` from the generated `sh_event_catalog.h`, which on
+build 13954591 lists the same 1611 events and argument types as the live registry
+(`sh_event list`). Save builds each call with `tlBuildPatchedEntityJson`: the event under
+the engine's `"\neventHandle_t eventDef"` key and each argument keyed by its type in
+signature order. `tlRuntimeTargetNote` shows a note under **Runs on** when the target is
+`player1` to `player8`, because a timeline resolves its targets when the map starts, before
+any player exists. `tests/timeline_eventcall_test.js` lifts these functions from the page
+and checks the saved shape, the reopen and the note.
+
 ## Driving the page from a test
 
 A file `%LOCALAPPDATA%\snapmap-plus\devtools-port` containing one port number (1024 to
