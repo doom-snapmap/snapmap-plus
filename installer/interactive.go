@@ -15,7 +15,7 @@ var stdin = bufio.NewReader(os.Stdin)
 // interactiveMain opens the no-argument prompt. Enter installs when absent or
 // updates when a newer release is known; named commands remain available.
 func interactiveMain() {
-	ui.Section("Snapmap+ " + version)
+	ui.Section("snapmap-plus " + version + " (installer)")
 
 	rec, err := loadRecord()
 	installed := err == nil

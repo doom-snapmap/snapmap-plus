@@ -65,8 +65,14 @@ process check; they can run while your real game is open.
 `--doom` overrides Steam discovery. `--local` reads the repository's packaged
 `dist/` directory. Downloads use the latest stable release by default, with a
 reported fallback to the newest beta while no stable release exists. `--beta`
-selects the newest beta; `--release` selects a specific tag. Updates also refresh
-the installer unless `--no-self` is supplied.
+selects the newest beta; `--release` selects a specific tag. A stale installer
+refreshes itself before it touches the game: at start, every run except
+`version`, `help`, `set-token`, `uninstall`, an offline `--local` run and
+`--no-self` resolves the release, replaces `snapmap-plus.exe` when the release
+ships a newer one, and starts the new image with the same arguments, so the mod
+work is always done by the current installer. `update` still refreshes the
+installer at its end for a run that started current and found a newer release
+meanwhile.
 
 The installer identifies the DOOM build from the executables' SHA-256 before it
 downloads anything. On the 2018 build (Steam build 2642713) install, update and

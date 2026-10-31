@@ -57,6 +57,11 @@ func main() {
 	args, plain := stripPlain(os.Args[1:])
 	setupOutput(plain)
 	cleanupSelfUpdateLeftovers() // remove any <exe>.old a prior self-update left behind
+	// A stale installer updates itself before it touches the game, and the new image does the work.
+	if relaunched, code := selfUpdateFirst(os.Args[1:]); relaunched {
+		restoreConsole()
+		os.Exit(code)
+	}
 	if len(args) < 1 {
 		// No arguments opens the interactive prompt used when double-clicking the executable.
 		interactiveMain()

@@ -50,6 +50,16 @@ func selfUpdate(f flags, token string) {
 	if !shouldSelfUpdate(version, rel.TagName) {
 		return // already current, or a dev build
 	}
+	if _, updated := selfUpdateTo(rel, token); updated {
+		ui.OK("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).", rel.TagName)
+	}
+}
+
+// selfUpdateTo replaces the running image with the release's snapmap-plus.exe when the release ships one
+// and the bytes on disk differ. It returns the executable's path and whether it was replaced; every
+// failure is a warning. Shared by the start-of-run update (which then relaunches) and the update
+// command's final step (which only reports).
+func selfUpdateTo(rel *ghRelease, token string) (string, bool) {
 	var asset *ghAsset
 	for i := range rel.Assets {
 		if rel.Assets[i].Name == selfExeAsset {
@@ -58,35 +68,35 @@ func selfUpdate(f flags, token string) {
 		}
 	}
 	if asset == nil {
-		return // this release doesn't ship a standalone exe
+		return "", false // this release doesn't ship a standalone exe
 	}
 
 	exe, err := executablePath()
 	if err != nil {
 		ui.Warn("couldn't locate the running snapmap-plus.exe to update it: %v", err)
-		return
+		return "", false
 	}
 	if assetMatchesFile(asset, exe) {
-		return // the on-disk exe is already this release (an earlier run updated it) -- nothing to do
+		return exe, false // the on-disk exe is already this release (an earlier run updated it) -- nothing to do
 	}
 	tmp, err := os.MkdirTemp("", "snapmap-plus-exe-")
 	if err != nil {
-		return
+		return exe, false
 	}
 	defer os.RemoveAll(tmp)
 	newExe := filepath.Join(tmp, selfExeAsset)
 	if err := downloadAsset(asset, token, newExe); err != nil {
 		ui.Warn("couldn't download the new snapmap-plus.exe: %v", err)
-		return
+		return exe, false
 	}
 	if onDisk, err := fileSHA256(exe); err == nil {
 		if fresh, err := fileSHA256(newExe); err == nil && fresh == onDisk {
-			return // same bytes already in place (release had no digest to catch this earlier)
+			return exe, false // same bytes already in place (release had no digest to catch this earlier)
 		}
 	}
 	if err := replaceExe(exe, newExe); err != nil {
-		ui.Warn("couldn't replace snapmap-plus.exe (%v) -- the overlay updated fine; you can grab the new snapmap-plus.exe from the release if needed", err)
-		return
+		ui.Warn("couldn't replace snapmap-plus.exe (%v) -- you can grab the new snapmap-plus.exe from the release if needed", err)
+		return exe, false
 	}
 	// Keep the stable %LOCALAPPDATA% copy current too, if we're running from somewhere else.
 	if dir := appDataDir(); dir != "" {
@@ -101,7 +111,7 @@ func selfUpdate(f flags, token string) {
 			}
 		}
 	}
-	ui.OK("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).", rel.TagName)
+	return exe, true
 }
 
 type replaceExeOps struct {
