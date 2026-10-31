@@ -97,11 +97,17 @@ static void mu_defaults(sh_modui_engine *e)
     e->migrate_pending = sh_modmigrate_pending;
     e->migrate_start = sh_modmigrate_start;
     e->migrate_busy = sh_modmigrate_busy;
+    e->scope_apply = sh_modserve_scope_apply;
 #endif
 }
 
 static int mu_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when);
 static int mu_bin_armed(void);
+static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when);
+static int mu_scope_armed(void);
+static int mu_scope_source(int when);
+static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
+static int mu_scope_now(const char *phase);
 
 void sh_modui_bind(const sh_modui_engine *engine)
 {
@@ -124,11 +130,16 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->entity_valid) g_engine.entity_valid = engine->entity_valid;
         if (engine->toast) g_engine.toast = engine->toast;
         if (engine->print) g_engine.print = engine->print;
+        if (engine->scope_apply) g_engine.scope_apply = engine->scope_apply;
     }
     g_engine_bound = 1;
     /* The points where a map's needs become known reach the recycle bin. */
     sh_modserve_set_restore(mu_restore);
     sh_modmanifest_set_restore(mu_restore, mu_bin_armed);
+    /* And the map scope: what the open map lists, and the build a map-level row names. */
+    sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
+    sh_modmanifest_set_resolver(mu_resolve_row);
+    sh_modserve_set_scope_source(mu_scope_source);
 }
 
 static const sh_modui_engine *mu_engine(void)
@@ -598,7 +609,7 @@ static int mu_model_build(mu_model *m)
         for (k = 0; k < e->bundle.file_count; k++) {
             sh_modserve_hit hit;
             int other;
-            if (!sh_modserve_lookup(e->bundle.files[k].request, &hit)) continue;
+            if (!sh_modserve_lookup_indexed(e->bundle.files[k].request, &hit)) continue;
             if (!hit.bundle_hash || !strcmp(hit.bundle_hash, e->bundle.hash)) continue;
             if (!hit.bundle_id || strcmp(hit.bundle_id, e->bundle.id)) continue;
             other = mu_find_hash(m, hit.bundle_hash);
@@ -792,6 +803,15 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
     mu_putn(b, "]", 1);
     free((void *)carried);
     if (rec->claims_read) mu_knum(b, "publishedMaps", mu_published_maps(m, rec, (int)(u - m->entries)), 0);
+    {
+        /* Where its shadows and requirements apply (modserve.h, map scope). */
+        sh_modserve_scope_info si;
+        if (e->loaded && sh_modserve_bundle_scope(bd->hash, &si)) {
+            mu_kstr(b, "scope", si.scope == SH_MODSERVE_SCOPE_ALWAYS ? "always" : "map", 0);
+            mu_kbool(b, "scopeAuto", si.automatic, 0);
+            mu_kbool(b, "scoped", si.scope == SH_MODSERVE_SCOPE_MAP && (si.shadows > 0 || si.requirements), 0);
+        }
+    }
 }
 
 /* One row of the tab. "attention" carries the shown build's first cause; a
@@ -880,7 +900,7 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             const sh_mb_file *f = &u->e->bundle.files[k];
             /* Several mods provide the path with different bytes (one of
              * them serves it, possibly composed), or nothing serves it. */
-            int conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup(f->request, NULL);
+            int conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL);
             if (!f->shadowed && !conflict) continue;
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;
@@ -923,7 +943,7 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                 if (w < 0) break;
                 at += (size_t)w;
             }
-            served = sh_modserve_lookup(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
+            served = sh_modserve_lookup_indexed(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
             if (conflict) {
                 sh_modserve_conflict ci;
                 int known = sh_modserve_conflict_info(paths[i].request, &ci);
@@ -1092,6 +1112,7 @@ typedef struct mu_mapmod {
     char version[SH_MB_VERSION_MAX + 1];
     unsigned long long size;
     int in_rows;              /* the current manifest has a row for it */
+    int attached;             /* that row is map-level: the map uses the mod without placing it */
     int in_closure;           /* the placed names resolve to it now */
     int named;                /* reached by a placed name (not only through another mod's needs) */
     int *uids;                /* the entities that use it */
@@ -1344,7 +1365,7 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             for (k = 0; k < mp->mod_count && mod < 0; k++)
                 if (mu_same_bundle(m, mp->mods[k].hash, row->bundle)) mod = (int)k;
             if (mod < 0) mod = mu_mapmod_add(mp, row->bundle, row->id, row->version, row->size);
-            if (mod >= 0) mp->mods[mod].in_rows = 1;
+            if (mod >= 0) { mp->mods[mod].in_rows = 1; if (row->attached) mp->mods[mod].attached = 1; }
         }
         if (mp->have_mm) mu_map_attribute(mp);
         if (e->map_info && e->map_info(&mp->info) == 1) {
@@ -1488,7 +1509,9 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             if (k) mu_putn(b, ",", 1);
             mu_str(b, r->names[k]);
         }
-        mu_puts(b, "]}");
+        mu_putn(b, "]", 1);
+        mu_kbool(b, "attached", r->attached, 0);
+        mu_putn(b, "}", 1);
     }
     mu_puts(b, "],\"placed\":[");
     for (i = 0; i < mp->closure.count; i++) {
@@ -1551,6 +1574,14 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_knum(b, "size", x->size, 0);
             mu_kbool(b, "inManifest", x->in_rows, 0);
             mu_kbool(b, "viaNeeds", x->in_closure && !x->named, 0);
+            mu_kbool(b, "attached", x->attached, 0);
+            {
+                sh_modserve_scope_info si;
+                if (sh_modserve_bundle_scope(x->hash, &si)) {
+                    mu_kstr(b, "scope", si.scope == SH_MODSERVE_SCOPE_ALWAYS ? "always" : "map", 0);
+                    mu_kbool(b, "active", si.shadows_live, 0);
+                }
+            }
             mu_putn(b, "}", 1);
         }
         mu_putn(b, "]", 1);
@@ -1619,6 +1650,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
     case SH_MODS_ACT_REMOVED_EMPTY: return "removedEmpty";
     case SH_MODS_ACT_REMOVED_RESTORE: return "removedRestore";
+    case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
     default: return "unknown";
     }
 }
@@ -2711,10 +2743,161 @@ static int mu_restore(const char *const *hashes, int hash_count, const char *con
     return restored;
 }
 
+/* ---- map scope (modserve.h): what the open map lists */
+
+/* A save changed the listing (applied on the next editor tick), and whether
+ * the editor has shown the map loaded last (the tick clears the listing once
+ * that editor is gone; a published map played from the hub keeps its listing
+ * until the next load). */
+static volatile LONG g_scope_owed;
+static volatile LONG g_scope_editor;
+
+typedef struct mu_listing {
+    const char **hashes, **ids;
+    size_t nh, ch, ni, ci;
+} mu_listing;
+
+static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const char *s)
+{
+    if (!s || !s[0]) return;
+    if (*n == *cap) {
+        size_t nc = *cap ? *cap * 2 : 16;
+        const char **na = (const char **)realloc((void *)*arr, nc * sizeof *na);
+        if (!na) return;
+        *arr = na;
+        *cap = nc;
+    }
+    (*arr)[(*n)++] = s;
+}
+
+/* The closure's bundle hashes are the serving index's own strings. */
+static void mu_listing_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
+                             unsigned long long size, const char *name)
+{
+    mu_listing *l = (mu_listing *)context;
+    (void)bundle_id; (void)version; (void)size; (void)name;
+    mu_listing_push(&l->hashes, &l->nh, &l->ch, bundle_hash);
+}
+
+/* The listing from manifest rows and placed names, set on the serving layer.
+ * Returns the bundles that changed. */
+static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int map_open)
+{
+    mu_listing l;
+    size_t i;
+    int changed;
+    memset(&l, 0, sizeof l);
+    for (i = 0; rows && i < rows->count; i++) {
+        mu_listing_push(&l.hashes, &l.nh, &l.ch, rows->rows[i].bundle);
+        mu_listing_push(&l.ids, &l.ni, &l.ci, rows->rows[i].id);
+    }
+    if (names && name_count && sh_modserve_active())
+        (void)modserve_bundles_for_names_visit(names, name_count, mu_listing_visit, &l);
+    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, l.ids, (int)l.ni, map_open);
+    free((void *)l.hashes);
+    free((void *)l.ids);
+    return changed;
+}
+
+/* The listing of the map open in the editor now: its current manifest and
+ * its live placed names. Returns the bundles that changed. */
+static int mu_listing_live(void)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_modmanifest_list rows;
+    mu_names placed;
+    int changed;
+    memset(&placed, 0, sizeof placed);
+    (void)sh_modmanifest_current(&rows);
+    if (e->placed_names && e->placed_names(mu_names_add, &placed) < 0) mu_names_free(&placed);
+    changed = mu_listing_set(&rows, (const char *const *)placed.items, placed.count, 1);
+    mu_names_free(&placed);
+    sh_modmanifest_list_free(&rows);
+    return changed;
+}
+
+static int mu_scope_apply(const char *phase)
+{
+    const sh_modui_engine *e = mu_engine();
+    InterlockedExchange(&g_scope_owed, 0);
+    return e->scope_apply ? e->scope_apply(phase) : 0;
+}
+
+/* After a Mods tab or console change to the open map: applied at once. */
+static int mu_scope_now(const char *phase)
+{
+    int changed;
+    if (!sh_modserve_scope_enabled()) return 0;
+    changed = mu_listing_live();
+    if (changed) (void)mu_scope_apply(phase);
+    return changed;
+}
+
+static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
+
+/* The manifest's hook: a load applies at once (before activation), a save on
+ * the next editor tick. */
+static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
+{
+    int changed;
+    if (!sh_modserve_scope_enabled()) return;
+    if (when == SH_MODSERVE_RESTORE_LOAD) InterlockedExchange(&g_scope_editor, 0);
+    changed = mu_listing_set(rows, names, name_count, 1);
+    if (!changed) return;
+    if (when == SH_MODSERVE_RESTORE_LOAD && mu_on_main()) (void)mu_scope_apply("map load");
+    else InterlockedExchange(&g_scope_owed, 1);
+}
+
+/* The serving layer's source at the Play entry: Play does not serialize the map. */
+static int mu_scope_source(int when)
+{
+    (void)when;
+    if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
+    return mu_listing_live();
+}
+
+/* The build that serves a map-level row at save. */
+static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    sh_modserve_bundle_ref ref;
+    if (!out || !sh_modserve_bundle_serving(bundle_hash, id, &ref)) return 0;
+    if (strlen(ref.id) >= sizeof out->id || strlen(ref.version) >= sizeof out->version) return 0;
+    strcpy_s(out->id, sizeof out->id, ref.id);
+    strcpy_s(out->version, sizeof out->version, ref.version);
+    strcpy_s(out->bundle, sizeof out->bundle, ref.hash);
+    out->size = ref.size;
+    return 1;
+}
+
+/* The tick's part: in the editor, a save's change is applied, and an editor
+ * map open without a listing gets one; out of it, the listing of the map the
+ * editor had open goes. */
+static void mu_scope_tick(int editor_map)
+{
+    if (!sh_modserve_scope_enabled()) return;
+    if (!editor_map) {
+        if (InterlockedCompareExchange(&g_scope_editor, 0, 0) && sh_modserve_scope_map_open()) {
+            InterlockedExchange(&g_scope_editor, 0);
+            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+                mu_log("scope: the editor left the map; its mods' shadows and requirements are withdrawn");
+                (void)mu_scope_apply("map exit");
+            }
+        }
+        return;
+    }
+    InterlockedExchange(&g_scope_editor, 1);
+    if (!sh_modserve_scope_map_open() && sh_modserve_scope_relevant()) {
+        if (mu_listing_live()) (void)mu_scope_apply("editor");
+    } else if (InterlockedCompareExchange(&g_scope_owed, 0, 0)) (void)mu_scope_apply("save");
+}
+
 int sh_modui_poll_due(void)
 {
     ULONGLONG now;
-    if (!InterlockedCompareExchange(&g_owed_refresh, 0, 0) && !g_watch_n && !g_announce[0]) return 0;
+    if (!InterlockedCompareExchange(&g_owed_refresh, 0, 0) && !g_watch_n && !g_announce[0] &&
+        !(sh_modserve_scope_enabled() && (InterlockedCompareExchange(&g_scope_owed, 0, 0) || sh_modserve_scope_map_open() ||
+                                          sh_modserve_scope_relevant())))
+        return 0;
     now = GetTickCount64();
     if (now < g_poll_next) return 0;
     g_poll_next = now + 250;
@@ -2729,7 +2912,11 @@ int sh_modui_poll_main(void *context)
     int i, back = 0;
     (void)context;
     if (!mu_on_main() || mu_busy(cause, sizeof cause)) return 0;   /* Play or a load: later */
-    if (!e->map_info || e->map_info(&info) != 1) return 0;          /* the editor, with a map */
+    if (!e->map_info || e->map_info(&info) != 1) {                  /* the editor, with a map */
+        mu_scope_tick(0);
+        return 0;
+    }
+    mu_scope_tick(1);
     if (InterlockedExchange(&g_owed_refresh, 0) && e->refresh) {
         sh_modserve_refresh rf;
         memset(&rf, 0, sizeof rf);
@@ -2977,6 +3164,7 @@ typedef struct mu_plan {
     sh_mm_ref *refs;
     size_t ref_count;
     int manifest_row, tag_removed, vanilla_after, published;
+    int attached;             /* its row is map-level */
 } mu_plan;
 
 /* A map entry that only another mod's needs reach: it goes with that mod. */
@@ -3009,6 +3197,7 @@ static void mu_plan_build(const mu_model *m, const mu_map *mp, const char *key, 
     }
     for (i = 0; i < mp->mod_count; i++) if ((int)i != p->mod && !mu_mapmod_follows(&mp->mods[i])) others++;
     p->manifest_row = x->in_rows;
+    p->attached = x->attached;
     p->vanilla_after = others == 0;
     p->tag_removed = p->vanilla_after && mp->have_info && mp->info.tagged == 1;
     p->published = mp->link != NULL;
@@ -3067,6 +3256,8 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
         if (drop) rows += sh_modmanifest_current_remove(mp->rows.rows[i].bundle);
     }
     if (p->tag_removed && e->remove_tag) tag = e->remove_tag(MU_TAG);
+    /* The mod's shadows and requirements leave with it. */
+    (void)mu_scope_now("map remove");
     InterlockedIncrement(&g_gen);
     mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s", key, x->uid_count,
            x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows,
@@ -3106,6 +3297,7 @@ static void mu_put_plan(mu_buf *b, const mu_model *m, const mu_map *mp, const mu
     mu_kbool(b, "tagRemoved", p->tag_removed, 0);
     mu_kbool(b, "vanillaAfter", p->vanilla_after, 0);
     mu_kbool(b, "published", p->published, 0);
+    if (p->attached) mu_kbool(b, "attached", 1, 0);
     mu_putn(b, "}", 1);
 }
 
@@ -3128,7 +3320,8 @@ static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, co
         mu_ref_name(m, mp, &p->refs[i], name, sizeof name);
         mu_line(o, "%s:   %s: %s", verb, p->refs[i].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", name);
     }
-    if (p->manifest_row) mu_line(o, "%s: removes the mod's row from the map's list of mods", verb);
+    if (p->manifest_row) mu_line(o, "%s: removes the mod's row from the map's list of mods%s", verb,
+                                 p->attached ? " (it is attached to the whole map)" : "");
     if (p->tag_removed) mu_line(o, "%s: removes the search tag mods (the last mod the map uses)", verb);
     if (p->vanilla_after) mu_line(o, "%s: the map then needs no mods and plays without Snapmap+", verb);
     if (p->published) mu_line(o, "%s: the published copy on the server is unaffected until you publish the map again", verb);
@@ -3287,6 +3480,90 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
+/* ---- map add: a map-level row */
+
+/* Attach `key` (a folder, else an installed id) to the open map: the current
+ * manifest gets a map-level row naming the build that serves, and the map
+ * scope follows at once. The next save writes the row. */
+static int mu_map_add(const char *key, const mu_out *o)
+{
+    const int action = SH_MODS_ACT_MAP_ADD;
+    mu_model m;
+    mu_map mp;
+    mu_record rec;
+    mu_buf b;
+    sh_modserve_bundle_ref ref;
+    char msg[900], cause[SH_MB_CAUSE_MAX], title[300];
+    const char *where;
+    int entry = -1, ok = 0, r, st;
+    size_t i;
+    memset(&b, 0, sizeof b);
+    if (!key || !key[0]) {
+        mu_line(o, "map add: no mod named");
+        return mu_simple_result(action, 0, "Select a mod first.");
+    }
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        mu_line(o, "map add %s: refused: %s", key, cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    mu_record_load(&m, &rec);
+    mu_map_build(&mp, &m, &rec);
+    for (i = 0; i < m.list.count && entry < 0; i++)
+        if (!strcmp(m.list.items[i].name, key) && m.list.items[i].loaded) entry = (int)i;
+    if (entry < 0 && sh_modserve_bundle_serving(NULL, key, &ref)) entry = mu_find_hash(&m, ref.hash);
+    strncpy_s(title, sizeof title, entry >= 0 ? mu_entry_title(&m.list.items[entry]) : key, _TRUNCATE);
+    where = mp.name[0] ? mp.name : "the open map";
+    st = entry >= 0 ? sh_modserve_bundle_state(m.list.items[entry].bundle.hash, cause, sizeof cause) : 0;
+    if (mp.entities < 0)
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, mp.entities == -1 ? "No map is open in the editor."
+                                                                   : "The open map cannot be read on this build.");
+    else if (entry < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
+    else if (st <= 0 || !sh_modserve_bundle_serving(m.list.items[entry].bundle.hash, NULL, &ref))
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not in use, so a map cannot use it: %s.", title,
+                    st < 0 && cause[0] ? cause : "the serving index has not read it; refresh the Mods tab");
+    else {
+        sh_modmanifest_row row;
+        const mu_mapmod *x = NULL;
+        memset(&row, 0, sizeof row);
+        /* A row the map already has for this mod (an earlier build, an alias) is the one marked. */
+        for (i = 0; i < mp.rows.count && !row.bundle[0]; i++)
+            if (mu_same_bundle(&m, mp.rows.rows[i].bundle, ref.hash)) row = mp.rows.rows[i];
+        if (!row.bundle[0]) {
+            strncpy_s(row.id, sizeof row.id, ref.id, _TRUNCATE);
+            strncpy_s(row.version, sizeof row.version, ref.version, _TRUNCATE);
+            strcpy_s(row.bundle, sizeof row.bundle, ref.hash);
+            row.size = ref.size;
+        }
+        row.names = NULL;
+        row.name_count = 0;
+        for (i = 0; i < mp.mod_count && !x; i++) if (mu_same_bundle(&m, mp.mods[i].hash, ref.hash)) x = &mp.mods[i];
+        r = sh_modmanifest_current_attach(&row);
+        if (r < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be added to %s (its id or bundle is not valid).", title, where);
+        else if (r == 0) {
+            ok = 1;
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already used by the whole of %s.", title, where);
+        } else {
+            ok = 1;
+            (void)mu_scope_now("map add");
+            InterlockedIncrement(&g_gen);
+            mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.id, row.version, row.bundle,
+                   where, x && x->uid_count ? " (it also has placed entities)" : "");
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply in this map, and "
+                        "the map lists it with its mods when you save: players are offered it when they open the map. "
+                        "Remove from map takes it out again.", title, where,
+                        x && x->uid_count ? " as well as by its placed entities" : "");
+        }
+    }
+    mu_line(o, "map add %s: %s", key, msg);
+    mu_result_head(&b, action, ok, msg);
+    mu_map_free(&mp);
+    mu_record_free(&rec);
+    mu_model_free(&m);
+    return mu_result_tail(&b);
+}
+
 /* ---- rebuild */
 
 /* Build one folder again from its files (as 'sh_mods build'), write its
@@ -3352,6 +3629,8 @@ static int mu_rebuild(const char *key)
 
 /* ---- the console verbs */
 
+static void mu_say_scope(void *context, const char *line) { mu_line((const mu_out *)context, "map: %s", line); }
+
 static void mu_say_map(const mu_out *o)
 {
     mu_model m;
@@ -3381,11 +3660,19 @@ static void mu_say_map(const mu_out *o)
             sh_mm_ref *refs = NULL;
             size_t n = mp.have_mm && x->uid_count ? sh_mm_references(&mp.mm, x->uids, x->uid_count, &refs) : 0;
             if (n == (size_t)-1) n = 0;
-            mu_line(o, "map: mod %s%s%s (%s, %s): %zu placed entit%s%s, %zu wire or timeline reference(s)%s%s", x->id,
+            sh_modserve_scope_info si;
+            char scope[120] = "";
+            /* Only a mod with something to scope (shadows, requirements) says where it applies. */
+            if (sh_modserve_bundle_scope(x->hash, &si) && (si.shadows || si.requirements))
+                _snprintf_s(scope, sizeof scope, _TRUNCATE, "; scope %s, %s", si.scope == SH_MODSERVE_SCOPE_ALWAYS ? "always" : "map",
+                            si.shadows_live ? "active" : "not active");
+            mu_line(o, "map: mod %s%s%s (%s, %s): %s%zu placed entit%s%s, %zu wire or timeline reference(s)%s%s%s", x->id,
                     x->version[0] && mu_version(x->version)[0] ? "@" : "", mu_version(x->version),
-                    at >= 0 ? m.list.items[at].name : "not installed", mu_mapmod_state(&m, x), x->uid_count,
+                    at >= 0 ? m.list.items[at].name : "not installed", mu_mapmod_state(&m, x),
+                    x->attached ? "map-level (attached to the whole map), " : "", x->uid_count,
                     x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
-                    x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "");
+                    x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "",
+                    scope);
             for (k = 0; k < x->uid_count && k < MU_MAX_MAP_ENTITIES; k++) {
                 char name[300];
                 mu_entity_label(&m, sh_mm_find(&mp.mm, x->uids[k]), x->uids[k], name, sizeof name);
@@ -3399,6 +3686,7 @@ static void mu_say_map(const mu_out *o)
             free(refs);
         }
     }
+    (void)sh_modserve_scope_report(mu_say_scope, (void *)o);
     mu_map_free(&mp);
     mu_record_free(&rec);
     mu_model_free(&m);
@@ -3428,8 +3716,13 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
     first = !_stricmp(verb, "map") ? 2 : 1;
+    if (!_stricmp(verb, "map") && !_stricmp(argv[1], "add")) {
+        if (argc != 3 || !argv[2][0]) { mu_line(&o, "map: usage: sh_mods map add \"<id>\""); return 1; }
+        (void)mu_map_add(argv[2], &o);
+        return 1;
+    }
     if (!_stricmp(verb, "map") && _stricmp(argv[1], "remove")) {
-        mu_line(&o, "map: usage: sh_mods map, or sh_mods map remove \"<id>\" [--yes]");
+        mu_line(&o, "map: usage: sh_mods map, sh_mods map add \"<id>\", or sh_mods map remove \"<id>\" [--yes]");
         return 1;
     }
     for (i = first; i < argc; i++) {
@@ -3521,6 +3814,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
     mu_say(&o, "serving index: %d of %d bundle(s) active, %d file(s), %d shadow(s), %d conflict(s) (%d composed), %d editor row(s) registered",
            st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
     for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);
+    (void)sh_modserve_scope_report(mu_say_requirement, &o);
     (void)sh_modserve_requirements_report(mu_say_requirement, &o);
     for (i = 0; i < m.row_count; i++) {
         const char *id = m.list.items[m.rows[i].serving].bundle.id;
@@ -3625,6 +3919,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_bin_empty(1, arg, NULL);
     case SH_MODS_ACT_REMOVED_RESTORE:
         return mu_bin_restore_key(arg, NULL);
+    case SH_MODS_ACT_MAP_ADD:
+        return mu_map_add(arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
@@ -3683,6 +3979,8 @@ void sh_modui_test_reset(void)
     g_watch_n = 0;
     g_poll_next = 0;
     InterlockedExchange(&g_owed_refresh, 0);
+    InterlockedExchange(&g_scope_owed, 0);
+    InterlockedExchange(&g_scope_editor, 0);
     InterlockedExchange(&g_bin_records, -1);
     g_announce[0] = 0;
 }

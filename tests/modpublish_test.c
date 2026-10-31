@@ -182,6 +182,10 @@ static int install(const char *folder, char hash[65])
 
 static const char EMPTY_MAP[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
 
+/* With it set, the second row is map-level ("attached"): a mod the map uses
+ * without placing anything uploads and claims like any other. */
+static int g_attach_second;
+
 /* A saved map naming these bundles in its manifest rows (HeapFree). */
 static char *map_with(const char *const *hashes, const char *const *ids, int n, size_t *len)
 {
@@ -196,6 +200,7 @@ static char *map_with(const char *const *hashes, const char *const *ids, int n, 
         strcpy_s(row.version, sizeof row.version, "1.0.0");
         strcpy_s(row.bundle, sizeof row.bundle, hashes[i]);
         row.size = 1000 + (unsigned long long)i;
+        row.attached = g_attach_second && i == 1;
         sh_modmanifest_list_add(&rows, &row);
     }
     text = sh_modmanifest_write(EMPTY_MAP, strlen(EMPTY_MAP), &rows, len, err, sizeof err);
@@ -338,7 +343,10 @@ int main(int argc, char **argv)
         if (rows_text) HeapFree(GetProcessHeap(), 0, rows_text);
     }
 
+    g_attach_second = 1;
     text = map_with(both_h, both_id, 2, &len);
+    g_attach_second = 0;
+    CHECK(text && strstr(text, "\\\"attached\\\":true"));
     CHECK(text != NULL);
 
     printf("-- first time: No cancels and leaves the setting\n");

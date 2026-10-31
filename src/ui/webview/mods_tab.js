@@ -7,7 +7,7 @@
    rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
    (which this tab no longer shows). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
-   editorRowNames, carriedPaths and publishedMaps (docs/webview-ui.md). Every v3 field is optional:
+   editorRowNames, carriedPaths, publishedMaps and scope (docs/webview-ui.md). Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
    after every action; showing the tab asks for a rescan. Nothing polls. The list is a plain list the
    page scrolls natively. All text goes through textContent. */
@@ -42,8 +42,10 @@ var modsTab = (function () {
                      modules: ['module', 'modules'], vt: ['virtual texture', 'virtual textures']};
   /* remove is the v2 name of uninstall; the page sends uninstall. The two *Preview actions are dry
      runs that answer with the consequence list the confirmation shows. removedEmpty deletes the
-     folders of removed-mods the confirmation listed (newline-separated). */
-  var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify',
+     folders of removed-mods the confirmation listed (newline-separated). mapAddMod attaches the
+     selected mod to the open map without placing anything (a map-level row); it removes nothing,
+     so it has no dry run. */
+  var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'removedEmpty'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
@@ -63,10 +65,18 @@ var modsTab = (function () {
     uninstallUsed: 'Removes the mod from this computer. The open map is cleaned of it first.',
     uninstallUnused: 'Removes the mod from this computer. The open map does not use it.'
   };
-  function scopeText(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
+  function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var COLLAPSE_KEY = 'mods.collapsed_groups';
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
+  /* Where a mod's replacements and requirements apply (payload scope; docs/webview-ui.md). */
+  var SCOPE_TEXT = {
+    map: 'Only in maps that use it',
+    always: 'In every map',
+    auto: 'In every map: it changes the editor itself'
+  };
+  var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
+  var MAP_LEVEL_TEXT = 'Used by the whole map';
 
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
   function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
@@ -107,7 +117,14 @@ var modsTab = (function () {
             counts: normCounts(b.counts), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
-            publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps)};
+            publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
+            scope: b.scope === 'map' || b.scope === 'always' ? b.scope : '', scopeAuto: bool(b.scopeAuto), scoped: bool(b.scoped)};
+  }
+  /* The About line for where the mod applies; '' when the backend did not say or nothing is scoped. */
+  function scopeText(b) {
+    if (b.scope === 'always') return b.scopeAuto ? SCOPE_TEXT.auto : SCOPE_TEXT.always;
+    if (b.scope === 'map' && b.scoped) return SCOPE_TEXT.map;
+    return '';
   }
   function title(b) { return b.name || b.id || b.key; }
 
@@ -152,7 +169,7 @@ var modsTab = (function () {
     var names = normNames(m.placedEntities);
     return {key: str(m.key), id: str(m.id), version: str(m.version), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
-            references: normRefs(m.references), size: num(m.size)};
+            references: normRefs(m.references), size: num(m.size), attached: bool(m.attached)};
   }
   function normMap(m) {
     m = obj(m);
@@ -173,7 +190,7 @@ var modsTab = (function () {
     var mp = obj(v.map), ins = obj(v.install), names = mp ? normNames(mp.entities) : [];
     return {action: str(v.action), key: str(v.key), name: str(v.name),
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
-                       references: normRefs(mp.references), manifestRow: bool(mp.manifestRow),
+                       references: normRefs(mp.references), manifestRow: bool(mp.manifestRow), attached: bool(mp.attached),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
             install: ins ? {folder: str(ins.folder), disposition: ins.disposition === 'move' ? 'move' : 'delete',
                             movedTo: str(ins.movedTo)} : null,
@@ -195,7 +212,8 @@ var modsTab = (function () {
       if (m.entityCount > 0) out.push({text: 'Deletes ' + plural(m.entityCount, 'placed entity', 'placed entities') + where + '.', list: m.entities});
       if (m.references.length) out.push({text: 'Severs ' + plural(m.references.length, 'wire or timeline reference') + ' to those entities.',
                                          list: m.references.map(refText)});
-      if (m.manifestRow) out.push({text: "Removes the mod's row from the map's list of mods."});
+      if (m.manifestRow) out.push({text: m.attached ? "Removes the mod from the map's list of mods; the whole map used it."
+                                                    : "Removes the mod's row from the map's list of mods."});
       if (m.tagRemoved) out.push({text: 'Removes the search tag mods: this is the last mod the map uses.'});
       if (m.vanillaAfter) out.push({text: 'The map then needs no mods and plays without Snapmap+.'});
       if (m.published) out.push({text: 'The published copy on the server is unaffected until you publish the map again.'});
@@ -367,6 +385,7 @@ var modsTab = (function () {
                      rebuild: 'Building the mod again...', verify: 'Checking every file of the mod...',
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
+                     mapAddMod: 'Adding the mod to the map...',
                      removedEmpty: 'Deleting the removed mods...',
                      migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
@@ -386,6 +405,7 @@ var modsTab = (function () {
       });
       var mb = byId('modsMapBtn');
       if (mb) mb.disabled = !loaded;
+      renderUse();
       modalButtons.forEach(function (n) { n.disabled = !!busy; });
       var mg = byId('modsMigrateBtn');
       if (mg) {
@@ -394,6 +414,25 @@ var modsTab = (function () {
         mg.title = 'Migrate: move ' + plural(model.migrate.pending, 'entry', 'entries') +
                    ' of the old overrides folder into the mods folder';
       }
+    }
+    /* The details head's map action: Use in this map, or Remove from map once the open map uses the
+       selected mod. Shown only while a map is open in the editor. */
+    function mapUses(b) {
+      var m = model.map;
+      if (!b || !m || !m.mods) return null;
+      for (var i = 0; i < m.mods.length; i++) if (m.mods[i].key && m.mods[i].key === b.key) return m.mods[i];
+      return null;
+    }
+    function renderUse() {
+      var u = byId('modsUseBtn');
+      if (!u) return;
+      var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
+      u.style.display = open ? '' : 'none';
+      var used = mapUses(b);
+      u.textContent = used ? 'Remove from map' : 'Use in this map';
+      u.className = 'btn' + (used ? ' danger' : '');
+      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : USE_TITLE;
+      u.disabled = !!busy || !b || !open || (!used && (needsAttention(b) || !b.id));
     }
     function setBusy(action) {
       busy = action || '';
@@ -560,6 +599,8 @@ var modsTab = (function () {
       link.addEventListener('click', function () { act('openFolder', b.folder || b.key); });
       field(about, 'Folder', link);
       field(about, 'Origin', originText(b));
+      var applies = scopeText(b);
+      if (applies) field(about, 'Applies', applies);
 
       var adds = section(box, 'adds', 'What it adds');
       var names = b.editorRowNames || [];
@@ -727,8 +768,11 @@ var modsTab = (function () {
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', modName(r.key, r.id)));
       text.appendChild(el('div', 'mods-row-sub', (r.version ? r.id + ' \u00b7 ' + r.version : r.id) + ' \u00b7 ' + formatSize(r.size)));
-      text.appendChild(el('div', 'mods-map-uses', plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it') +
-        (info.tone === 'warn' ? '; ' + info.cause : '')));
+      var uses = r.attached
+        ? MAP_LEVEL_TEXT + (r.placedCount ? ', and ' + plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it') : '')
+        : plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it');
+      text.appendChild(el('div', 'mods-map-uses' + (r.attached ? ' mods-map-level' : ''), uses + (info.tone === 'warn' ? '; ' + info.cause : '')));
+      if (r.attached) row.setAttribute('data-attached', 'true');
       if (r.references.length) text.appendChild(el('div', 'mods-map-uses', 'Also used by ' + r.references.map(refText).join(', ')));
       row.appendChild(text);
       var name = modName(r.key, r.id);
@@ -744,7 +788,7 @@ var modsTab = (function () {
       modalHead(host, uninstall ? 'Uninstall ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
-      body.appendChild(el('div', 'mods-note mods-scope', scopeText(pv)));
+      body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
       body.appendChild(el('div', 'mods-note', uninstall
         ? (pv.map ? UNINSTALL_UNDO : UNINSTALL_REOPEN)
         : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
@@ -771,7 +815,7 @@ var modsTab = (function () {
       /* The footer stays at the dialog's bottom edge; the consequence list scrolls above it. */
       var acts = el('div', 'modal-actions mods-map-foot');
       acts.appendChild(modalButton('Cancel', '', function () {
-        if (modal.from === 'uninstall') closeMap();
+        if (modal.from === 'uninstall' || modal.from === 'details') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
       }));
       acts.appendChild(modalButton(uninstall ? 'Uninstall' : 'Delete from map', 'danger-solid', function () {
@@ -937,7 +981,7 @@ var modsTab = (function () {
       /* After the real action the modal shows the next document: the list, or nothing after an
          uninstall started from the details pane. A refusal goes back the same way. */
       if (action === 'mapRemoveMod' || action === 'uninstall') {
-        if (modal.from === 'uninstall') closeMap();
+        if (modal.from === 'uninstall' || modal.from === 'details') closeMap();
         else if (modal.open) { modal.page = 'list'; modal.preview = null; renderModal(); }
       }
     }
@@ -955,6 +999,15 @@ var modsTab = (function () {
         act('uninstallPreview', b.key);
       });
       on('modsMapBtn', 'click', function () { openMap(byId('modsMapBtn')); });
+      on('modsUseBtn', 'click', function () {
+        var b = selectedMod();
+        if (!b || busy) return;
+        if (mapUses(b)) {
+          modal.from = 'details';
+          modal.opener = byId('modsUseBtn');
+          act('mapRemoveModPreview', b.key);
+        } else act('mapAddMod', b.key);
+      });
       on('modsEmptyBtn', 'click', openEmpty);
       on('modsMapModal', 'keydown', onModalKey);
       on('modsMapModal', 'mousedown', function (e) { if (e.target === byId('modsMapModal')) closeMap(); });
@@ -1025,7 +1078,8 @@ var modsTab = (function () {
     function mapPart(r) {
       var left = mapMods().length - 1;
       return {name: str(docu.map && docu.map.name), entities: arr(r.placedEntities).slice(), entityCount: num(r.placedCount),
-              references: arr(r.references).slice(), manifestRow: true, tagRemoved: left === 0 && docu.map.tagged !== false,
+              references: arr(r.references).slice(), manifestRow: true, attached: !!r.attached,
+              tagRemoved: left === 0 && docu.map.tagged !== false,
               vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
     }
     function binOf() {
@@ -1059,7 +1113,18 @@ var modsTab = (function () {
       if (a === 'rescan') msg = '';
       else if (a === 'rebuild') msg = 'Browser preview: ' + key + ' was built again; nothing changed.';
       else if (a === 'verify') msg = 'Browser preview: every file of ' + key + ' matches its recorded hash.';
-      else if (a === 'mapRemoveModPreview') {
+      else if (a === 'mapAddMod') {
+        if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
+        else if (!b) { ok = false; msg = key + ' is not installed.'; }
+        else if (r && r.attached) msg = nameOf(key) + ' is already used by the whole of ' + docu.map.name + '.';
+        else {
+          if (r) r.attached = true;
+          else docu.map.mods.push({key: key, id: str(b.id), version: str(b.version), state: 'installed', placedEntities: [],
+                                   placedCount: 0, placedModules: 0, references: [], size: num(b.size), inManifest: true,
+                                   viaNeeds: false, attached: true});
+          msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '.';
+        }
+      } else if (a === 'mapRemoveModPreview') {
         if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
         else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.id), map: mapPart(r), install: null};
       } else if (a === 'uninstallPreview') {
@@ -1101,7 +1166,7 @@ var modsTab = (function () {
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, UNINSTALL_UNDO: UNINSTALL_UNDO, UNINSTALL_REOPEN: UNINSTALL_REOPEN, EMPTY_NOTE: EMPTY_NOTE,
-          SCOPE: SCOPE, standIn: standIn, create: create};
+          SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = modsTab;

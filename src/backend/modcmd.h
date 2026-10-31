@@ -13,7 +13,10 @@
  *   sh_mods verify "<folder|id|id@version>"  rehash installed mods and record the result
  *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
  *   sh_mods map                    the open map and each mod it uses: placed entities, and the
- *                                  wires and Timelines pointing at them (modui.c)
+ *                                  wires and Timelines pointing at them, map-level or not, and
+ *                                  where each mod applies (modui.c, modserve.h map scope)
+ *   sh_mods map add "<id>"         use that mod in the whole open map without placing anything
+ *                                  (a map-level manifest row; the next save writes it)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
  *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, then the folder moved to
  *                                       removed-mods); --yes does it
@@ -55,8 +58,9 @@
                        "'sh_mods copystock \"<engine path>\" \"<file>\"' writes an installed game file's bytes to a file. " \
                        "'sh_mods help' lists the Mods tab and mod store verbs."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP: the Mods tab's actions, sharing its dry runs. */
-#define SH_MODCMD_HELP_TAB "Mods tab: 'sh_mods map' prints the open map (name, id, published state, search tag) and each mod it " \
-                           "uses with its placed entities and the wires and Timelines pointing at them, 'sh_mods map remove " \
+#define SH_MODCMD_HELP_TAB "Mods tab: 'sh_mods map' prints the open map (name, id, published state, search tag), each mod it " \
+                           "uses with its placed entities, wires and Timelines, and where each mod's replacements apply, " \
+                           "'sh_mods map add \"<id>\"' uses a mod in the whole map without placing anything, 'sh_mods map remove " \
                            "\"<id>\"' prints what removing that mod from the map deletes and 'sh_mods map remove \"<id>\" --yes' " \
                            "does it (one undo step), 'sh_mods uninstall \"<id>\"' prints what uninstalling does (the open map " \
                            "cleaned of it, its Toybox rows, its folder moved to removed-mods) and '--yes' does it, " \

@@ -1881,6 +1881,185 @@ static void remove_tree(const char *dir)
     RemoveDirectoryA(dir);
 }
 
+/* ------------------------------------------------------------------ map scope (lane P25) */
+
+#define SC_COOP   "generated/decls/entitydef/player/coop.decl"
+#define SC_IMAGE  "generated/image/models/hands/arms.bimage"
+#define SC_SET    "generated/decls/snapeditorsettings/default.decl"
+#define SC_ROWDEF "generated/decls/entitydef/monster/hellknight.decl"
+#define SC_ROW    "generated/decls/snapeditorentitydef/mods/r.rows/knight.decl"
+#define SC_NEW    "generated/decls/entitydef/mods/n.names/thing.decl"
+#define SC_DECL   "generated/decls/entitydef/monster/revenant.decl"
+#define SC_MAPED  "generated/decls/snapeditorsettings/other.decl"
+
+typedef struct scope_seen { char order[2048]; } scope_seen;
+static int scope_refresh(void *context, const sh_modserve_refresh_item *it)
+{
+    scope_seen *s = (scope_seen *)context;
+    size_t at = strlen(s->order);
+    _snprintf_s(s->order + at, sizeof s->order - at, _TRUNCATE, "%s:%s:gone=%d:gates=%d;", it->bundle_id, it->name, it->gone,
+                it->gates_live);
+    return it->gates_live ? 1 : 0;   /* as the engine: a gated change waits */
+}
+
+static void test_scope(void)
+{
+    static const fx_file hands[] = {
+        { SC_COOP, "entityDef coop { hands }", -1, "entityDef", "player/coop", NULL, '1' },
+        { SC_IMAGE, "ARMS", -1, "image", "models/hands/arms", NULL, '2' },
+    };
+    static const fx_file editor[] = { { SC_SET, "settings {}", -1, "snapEditorSettings", "default", NULL, '3' } };
+    static const fx_file declared[] = { { SC_DECL, "entityDef rev {}", -1, "entityDef", "monster/revenant", NULL, '4' } };
+    static const fx_file maped[] = { { SC_MAPED, "settings {}", -1, "snapEditorSettings", "other", NULL, '5' } };
+    static const fx_file rows[] = {
+        { SC_ROWDEF, "entityDef hk {}", -1, "entityDef", "monster/hellknight", NULL, '6' },
+        { SC_ROW, "{ entityDef \"monster/hellknight\" }", -1, "snapEditorEntityDef", "mods/r.rows/knight", NULL, '7' },
+    };
+    static const fx_file names[] = { { SC_NEW, "entityDef t {}", -1, "entityDef", "mods/n.names/thing", NULL, '8' } };
+    char top[MAX_PATH], root[MAX_PATH], h_hands[65], h_rows[65], h_maped[65];
+    const char *list[2];
+    char *slash;
+    sh_modserve_gates r;
+    sh_modserve_scope_info si;
+    scope_seen seen;
+    sh_modserve_diff d;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\scope\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"r_fancy\": true}, \"commands\": {\"activate\": [\"echo hands on\"], "
+                     "\"deactivate\": [\"echo hands off\"]}},\n  ";
+    make_bundle(root, "a.hands", "a.hands", "1.0.0", '1', "\"" SC_COOP "\", \"" SC_IMAGE "\"", hands, 2, "{\"installedAt\": 100}");
+    hash64('1', h_hands);
+    g_bundle_extra = NULL;
+    make_bundle(root, "e.editor", "e.editor", "1.0.0", '2', "\"" SC_SET "\"", editor, 1, "{\"installedAt\": 110}");
+    g_bundle_extra = "\"scope\": \"always\",\n  ";
+    make_bundle(root, "d.declared", "d.declared", "1.0.0", '3', "\"" SC_DECL "\"", declared, 1, "{\"installedAt\": 120}");
+    g_bundle_extra = "\"scope\": \"map\",\n  ";
+    make_bundle(root, "m.editor", "m.editor", "1.0.0", '4', "\"" SC_MAPED "\"", maped, 1, "{\"installedAt\": 130}");
+    hash64('4', h_maped);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_label\": \"knights\"}},\n  ";
+    make_bundle(root, "r.rows", "r.rows", "1.0.0", '5', "\"" SC_ROWDEF "\"", rows, 2, "{\"installedAt\": 140}");
+    hash64('5', h_rows);
+    g_bundle_extra = NULL;
+    make_bundle(root, "n.names", "n.names", "1.0.0", '6', NULL, names, 1, "{\"installedAt\": 150}");
+
+    printf("-- map scope: shadows and requirements apply only in maps that list their bundle\n");
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_scope_enable(0);
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 6);
+    /* The new shadows this table brings are pending as at any rescan: settle them first. */
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    /* Off (as every earlier test): every shadow serves. */
+    CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL) && sh_modserve_lookup(SC_MAPED, NULL));
+    CHECK(log_has("MODS: scope: e.editor@1.0.0 shadows editor-time content (" SC_SET "); treated as \"scope\": \"always\""));
+    CHECK(log_count("MODS: scope:") == 1);   /* m.editor says "map" itself: no line */
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(strstr(g_report, "scope: map scope is off; every shadow serves in every map\n") != NULL);
+    CHECK(!sh_modserve_scope_relevant());
+
+    /* On, no map open: map-scoped shadows are withdrawn, new names and "always" serve. */
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_scope_enabled() && !sh_modserve_scope_map_open() && sh_modserve_scope_relevant());
+    CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_lookup(SC_IMAGE, NULL) && !sh_modserve_lookup(SC_ROWDEF, NULL));
+    CHECK(sh_modserve_lookup_indexed(SC_COOP, NULL) == 1);
+    {
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        CHECK(sh_modserve_open(SC_COOP, &bytes, &len) == 0 && !bytes);
+        CHECK(sh_modserve_probe_claims(SC_COOP) == 0);
+    }
+    CHECK(sh_modserve_lookup(SC_SET, NULL) && sh_modserve_lookup(SC_DECL, NULL) && sh_modserve_lookup(SC_NEW, NULL) &&
+          sh_modserve_lookup(SC_ROW, NULL));
+    CHECK(!sh_modserve_lookup(SC_MAPED, NULL));   /* "scope": "map" overrides the editor rule */
+    /* The engine is told to read the game's bytes again: gone, no gate. */
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "a.hands:player/coop:gone=1:gates=1;") && strstr(seen.order, "a.hands:models/hands/arms:gone=1:gates=1;"));
+    CHECK(strstr(seen.order, "r.rows:monster/hellknight:gone=1") && strstr(seen.order, "m.editor:other:gone=1"));
+    CHECK(!strstr(seen.order, "e.editor") && !strstr(seen.order, "d.declared") && !strstr(seen.order, "n.names"));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    /* No early-decl offer for a withdrawn shadow. */
+    {
+        unopened_seen u;
+        memset(&u, 0, sizeof u);
+        sh_modserve_each_unopened_shadow(unopened_visit, &u);
+        CHECK(!strstr(u.order, "player/coop"));
+    }
+    /* No map: no requirement is live, nothing set, no line run. */
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) == 0 && r.commands == 0 && !strcmp(g_text_val[1], "0"));
+    CHECK(sh_modserve_bundle_scope(h_hands, &si) && si.scope == SH_MODSERVE_SCOPE_MAP && !si.listed && !si.shadows_live &&
+          si.shadows == 2 && si.requirements && !si.requirements_live);
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(strstr(g_report, "scope: a.hands@1.0.0: map (2 shadows, requirements): not active (no map is open)\n") != NULL);
+    CHECK(strstr(g_report, "scope: e.editor@1.0.0: always (shadows editor-time content: " SC_SET ") (1 shadow)\n") != NULL);
+    CHECK(strstr(g_report, "scope: d.declared@1.0.0: always (mod.json) (1 shadow)\n") != NULL);
+    CHECK(strstr(g_report, "scope: n.names@1.0.0: map: new names only, nothing to scope\n") != NULL);
+
+    /* A map that does not list a.hands: r.rows keeps its requirements (its row is in the palette), not its shadow. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) == 1);
+    CHECK(sh_modserve_scope_map_open() && !sh_modserve_lookup(SC_ROWDEF, NULL));
+    g_events[0] = 0;
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[3], "knights") && !strcmp(g_text_val[1], "0"));
+    CHECK(ev_first("C:echo hands on") < 0);
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(strstr(g_report, "scope: r.rows@1.0.0: map (1 shadow, requirements): not active (the open map does not use it); "
+                           "its requirements stay live because it adds Toybox rows\n") != NULL);
+    CHECK(strstr(g_report, "scope: a.hands@1.0.0: map (2 shadows, requirements): not active (the open map does not use it)\n") != NULL);
+
+    /* The map lists a.hands (by its row's hash): its shadows serve again, marked to be re-parsed and reloaded. */
+    list[0] = h_hands;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 1);
+    CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL));
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "a.hands:player/coop:gone=0:gates=0;") != NULL);   /* waits for its gate */
+    g_events[0] = 0;
+    log_clear();
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && !strcmp(g_text_val[1], "1"));
+    CHECK(ev_first("S:r_fancy=1") >= 0 && ev_first("C:echo hands on") > ev_first("S:r_fancy=1"));
+    CHECK(log_has("MODS: requirements: a.hands: command \"echo hands on\""));
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(strstr(seen.order, "a.hands:player/coop:gone=0:gates=1;") && strstr(seen.order, "a.hands:models/hands/arms:gone=0:gates=1;"));
+    CHECK(sh_modserve_bundle_scope(h_hands, &si) && si.listed && si.shadows_live && si.requirements_live);
+    /* The same listing again changes nothing. */
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 0);
+    /* A rescan keeps the listing: the new table serves it at once, nothing pending. */
+    CHECK(sh_modserve_index_rescan() == 6 && sh_modserve_lookup(SC_COOP, NULL));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    /* By id (a row whose build is not indexed names its mod), and case-insensitive. */
+    list[0] = "A.Hands";
+    CHECK(sh_modserve_scope_set(NULL, 0, list, 1, 1) == 0 && sh_modserve_lookup(SC_COOP, NULL));
+    /* The serving build a map-level row is rewritten to. */
+    {
+        sh_modserve_bundle_ref ref;
+        CHECK(sh_modserve_bundle_serving(NULL, "a.hands", &ref) && !strcmp(ref.hash, h_hands) && !strcmp(ref.version, "1.0.0"));
+        CHECK(sh_modserve_bundle_serving(h_rows, NULL, &ref) && !strcmp(ref.id, "r.rows"));
+        CHECK(!sh_modserve_bundle_serving(NULL, "nobody.here", &ref));
+    }
+
+    /* The map closes (the hub): the hands' deactivate line runs and r_fancy and g_label are restored. */
+    g_events[0] = 0;
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) == 2);
+    CHECK(!sh_modserve_lookup(SC_COOP, NULL) && !sh_modserve_scope_map_open());
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map exit", &r) == 0);
+    CHECK(ev_first("C:echo hands off") >= 0 && !strcmp(g_text_val[1], "0") && !strcmp(g_text_val[3], ""));
+    CHECK(sh_modserve_requirements_held() == 0);
+    (void)h_maped;
+
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -1907,6 +2086,7 @@ int main(void)
     test_editor_refs();
     test_watermark();
     test_bundle_extra();
+    test_scope();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

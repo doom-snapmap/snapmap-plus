@@ -2118,6 +2118,17 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 return 0;
             }
+            /* "scope" (modserve.h, map scope): where the bundle's shadows and
+             * requirements apply. Kept in "extra" like any author key, so a
+             * mod without it keeps its canonical text and hash. */
+            if (root->klen[i] == 5 && memcmp(root->keys[i], "scope", 5) == 0 &&
+                (root->items[i]->t != MBJ_STR ||
+                 !((root->items[i]->n == 3 && memcmp(root->items[i]->s, "map", 3) == 0) ||
+                   (root->items[i]->n == 6 && memcmp(root->items[i]->s, "always", 6) == 0)))) {
+                mb_error(b, "%s scope must be \"map\" or \"always\"", b->descriptor);
+                free(tmp.items); free(tmp.keys); free(tmp.klen);
+                return 0;
+            }
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 mb_error(b, "out of memory");
