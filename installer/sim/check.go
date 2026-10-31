@@ -36,7 +36,7 @@ var playerData = map[string]string{
 	"pinned.json": "player data",
 	// The store tool moves the packages of the retired overrides\ folder into mods\ once and leaves
 	// overrides\ as it was: the player's to delete.
-	"overrides": "player data (retired; the store tool leaves it unchanged)",
+	"overrides": "player data (retired package folder; the store tool leaves it unchanged)",
 }
 
 var installerFiles = map[string]bool{"snapmap-plus.exe": true, "snapmap-plus-store.exe": true, "install.json": true}

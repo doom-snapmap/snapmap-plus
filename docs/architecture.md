@@ -712,8 +712,10 @@ The builder's and the Mods tab's stock-name checks ask the bridge when the
 engine provider does not have a name.
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
-placement grid, map navigation, the generated Grid Room variants, the built-in
-defaults, installed mods, then the engine. Opens with mode 2 or higher are
+placement grid, map navigation, the generated Grid Room variants, installed
+mods, the built-in defaults, then the engine (a mod's version of a built-in
+name, such as a player's expanded Lift tile, wins over the baked default, as the
+retired overrides layer did). Opens with mode 2 or higher are
 never served. A shadow applies while a map that lists its bundle is open or
 played (see [Map scope](#map-scope)); a new name applies once it is registered: editor rows at the first palette build (or
 `sh_mods palette rebuild`, or the load of a map that names their bundle, below),

@@ -231,7 +231,7 @@ func describeEarlier(doom, build string, prior *installRecord, legacy []string, 
 	}
 	plan := upperFirst(joinAnd(gone)) + " are removed, then this build's pair is installed."
 	if other && !present {
-		plan += "\nThe store tool converts the overrides\\ packages of that release."
+		plan += "\nThe store tool converts the overrides\\ packages of that release." // a retired package folder
 	}
 	return earlierInstall{"Snapmap+ " + ver + " with " + joinAnd(found), plan}
 }
@@ -258,7 +258,7 @@ func tidyRetiredFolders() {
 	if dir == "" {
 		return
 	}
-	for _, name := range []string{"override-backups", "package-cache", "package-staging"} {
+	for _, name := range []string{"override-backups", "package-cache", "package-staging"} { // each a retired package folder
 		p := filepath.Join(dir, name)
 		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
 			continue

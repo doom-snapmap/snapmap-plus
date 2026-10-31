@@ -760,6 +760,20 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
         }
     }
 
+    /* Installed mods: below navigation and the Grid Room, above the built-in
+     * defaults and the engine, so a mod's version of a built-in name (the Lift
+     * tile a player expanded under the old overrides layer, which also sat
+     * above the built-ins) is the one the editor reads. A file that cannot be
+     * read falls through. */
+    if (mode < 2 && name != NULL && sh_modserve_active()) {
+        unsigned char *bytes = NULL;
+        size_t length = 0;
+        if (sh_modserve_open(name, &bytes, &length) > 0) {
+            ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
+            if (s) return s;
+            HeapFree(GetProcessHeap(), 0, bytes);
+        }
+    }
     if (mode < 2 && name != NULL) {
         ov_stream *s = NULL;
         const char *src = NULL;
@@ -784,17 +798,6 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
 
     }
 
-    /* Installed mods: below navigation, the Grid Room and built-ins, above the
-     * engine. A file that cannot be read falls through to the engine. */
-    if (mode < 2 && name != NULL && sh_modserve_active()) {
-        unsigned char *bytes = NULL;
-        size_t length = 0;
-        if (sh_modserve_open(name, &bytes, &length) > 0) {
-            ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
-            if (s) return s;
-            HeapFree(GetProcessHeap(), 0, bytes);
-        }
-    }
     /* No shadow, or mode guard: chain with the original byte arguments. */
     {
         void *chained;

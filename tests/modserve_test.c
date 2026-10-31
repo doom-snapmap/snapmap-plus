@@ -570,8 +570,9 @@ static void test_precedence(void)
     CHECK(provider_text("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl", 1, text, sizeof text));
     /* Mode 2 is never served. */
     CHECK(!provider_text(A_SEDEF, 2, text, sizeof text));
-    /* Built-in defaults win over a bundle shadow of the same name. */
-    CHECK(provider_text(LIFT, 0, text, sizeof text) && text[0] == '{' && strcmp(text, "MODLIFT"));
+    /* A bundle shadow of a built-in name wins over the built-in default (the
+     * player's expanded Lift tile from the retired overrides layer). */
+    CHECK(provider_text(LIFT, 0, text, sizeof text) && !strcmp(text, "MODLIFT"));
     /* Map navigation wins. */
     CHECK(provider_text(NAV_NAME, 0, text, sizeof text) && !strcmp(text, "NAV"));
     /* A Grid Room name is claimed by the Grid Room even when it cannot be

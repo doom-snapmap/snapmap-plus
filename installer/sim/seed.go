@@ -150,7 +150,7 @@ func cmdSeed(args []string) error {
 		add(data, "config.json", []byte(`{"schema_version":1,"settings":{"theme":"light"}}`))
 		add(data, `prefabs\corridor.snapmap.json`, []byte(`{"prefab":"corridor"}`))
 		add(data, `mods\imp\mod.json`, []byte(`{"id":"imp","version":"1.0.0"}`))
-		if err := os.MkdirAll(filepath.Join(data, "override-backups"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(data, "override-backups"), 0o755); err != nil { // a retired package folder the beta.20 layout left behind
 			return err
 		}
 	default:
