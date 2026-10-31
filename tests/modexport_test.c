@@ -7,8 +7,11 @@
  * nothing; a damaged entry, a mislabelled manifest and a map naming an
  * uninstalled bundle are refused; a map pinning an earlier build of a folder
  * exports the current build and names it in the exported map; the rawmap
- * hooks take ANSI paths and return process-heap text. Pure file work: no
- * network.
+ * hooks take ANSI paths and return process-heap text; an export whose map
+ * names a bundle it does not carry imports what it carries and counts the
+ * rest as absent, which is what the rawmap gate then refuses or offers to
+ * download; importing an export whose bundles are installed rewrites
+ * nothing. Pure file work: no network.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -312,7 +315,60 @@ int main(int argc, char **argv)
         size_t len = 0;
         char *text = modexport_read(zip, &len, &st, cause, sizeof cause);
         CHECK(text && st.bundles_installed == 0 && st.bundles_present == 2 && st.blobs_written == 0);
+        CHECK(st.bundles_absent == 0);
         free(text);
+    }
+    {
+        /* Importing an export whose bundles are installed rewrites nothing: the
+         * folders' files keep their bytes and their write times. */
+        char mj[MAX_PATH * 2], asset[MAX_PATH * 2];
+        WIN32_FILE_ATTRIBUTE_DATA before_mj, before_asset, after_mj, after_asset;
+        size_t l1 = 0, l2 = 0, len = 0;
+        unsigned char *b1, *b2;
+        char *text;
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\%s\\mod.json", storeB, keyA);
+        _snprintf_s(asset, sizeof asset, _TRUNCATE, "%s\\%s\\assets\\generated\\image\\mods\\test.alpha\\a.bimage", storeB, keyA);
+        CHECK(GetFileAttributesExA(mj, GetFileExInfoStandard, &before_mj));
+        CHECK(GetFileAttributesExA(asset, GetFileExInfoStandard, &before_asset));
+        b1 = slurp(mj, &l1);
+        Sleep(20);
+        text = modexport_read(zip, &len, &st, cause, sizeof cause);
+        CHECK(text && st.bundles_installed == 0 && st.bundles_present == 2);
+        free(text);
+        b2 = slurp(mj, &l2);
+        CHECK(b1 && b2 && l1 == l2 && memcmp(b1, b2, l1) == 0);
+        CHECK(GetFileAttributesExA(mj, GetFileExInfoStandard, &after_mj));
+        CHECK(GetFileAttributesExA(asset, GetFileExInfoStandard, &after_asset));
+        CHECK(CompareFileTime(&before_mj.ftLastWriteTime, &after_mj.ftLastWriteTime) == 0);
+        CHECK(CompareFileTime(&before_asset.ftLastWriteTime, &after_asset.ftLastWriteTime) == 0);
+        free(b1); free(b2);
+    }
+    {
+        /* An export whose map names a bundle it does not carry (here: beta's
+         * row renamed to a build nobody has). Everything it carries installs and
+         * the map text comes back; the absent bundle is counted, and the rawmap
+         * gate refuses or offers it before the engine sees the map. */
+        static const char GHOST[] = "3333333333333333333333333333333333333333333333333333333333333333";
+        char part[MAX_PATH * 2], storeE[MAX_PATH * 2];
+        size_t zl = 0, len = 0;
+        unsigned char *z = slurp(zip, &zl);
+        char *text;
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s\\partial.zip", tmp);
+        _snprintf_s(storeE, sizeof storeE, _TRUNCATE, "%s\\storeE", tmp);
+        CHECK(z && patch_entry(z, zl, "map.rawmap.json", rb.bundle, GHOST));
+        CHECK(z && spit(part, z, zl));
+        free(z);
+        CHECK(modexport_probe(part, cause, sizeof cause));
+        CHECK(sh_ms_set_root(storeE));
+        CHECK(sh_modserve_index_build(storeE) == 0);
+        text = modexport_read(part, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "partial import: %s\n", cause);
+        CHECK(text && strstr(text, GHOST) != NULL);
+        CHECK(st.bundles == 2 && st.bundles_installed == 2 && st.bundles_absent == 1);
+        CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(GHOST, NULL, 0) == 0);
+        free(text);
+        CHECK(sh_ms_set_root(storeB));
+        CHECK(sh_modserve_index_build(storeB) >= 0);   /* back to the store the next steps use */
     }
 
     /* ---- refusals on import ---- */
@@ -335,6 +391,23 @@ int main(int argc, char **argv)
     /* ---- the rawmap hooks: ANSI paths, process-heap text ---- */
     CHECK(sh_ms_set_root(storeA));
     CHECK(modexport_write_text(map, map_len, zip2) > 0);
+    {
+        /* The reporting writer names the bundles and, on refusal, the cause. */
+        sh_modmanifest_row ghost = ra;
+        unsigned bundles = 0;
+        char *gm, why[320];
+        size_t gl = 0;
+        CHECK(modexport_write_text_report(map, map_len, zip2, &bundles, why, sizeof why) > 0 && bundles == 2 && !why[0]);
+        memset(&rows, 0, sizeof rows);
+        strcpy_s(ghost.bundle, sizeof ghost.bundle, "4444444444444444444444444444444444444444444444444444444444444444");
+        CHECK(sh_modmanifest_list_add(&rows, &ghost));
+        gm = sh_modmanifest_write(BASE_MAP, sizeof BASE_MAP - 1, &rows, &gl, err, sizeof err);
+        sh_modmanifest_list_free(&rows);
+        CHECK(gm && modexport_write_text_report(gm, gl, zip2, &bundles, why, sizeof why) == 0 && bundles == 1 &&
+              strstr(why, "not installed") != NULL);
+        if (gm) HeapFree(GetProcessHeap(), 0, gm);
+        CHECK(modexport_validate_source(zip2, cause, (int)sizeof cause));   /* the earlier export is untouched */
+    }
     {
         char msg[192];
         size_t len = 0;

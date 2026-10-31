@@ -3,7 +3,9 @@
  * Yes (fetch on a worker, activation, resume with a fresh parse of the retained
  * text), No, a failed fetch, a bundle that will not install, a second load
  * abandoning the hold, the joiner's host re-check, the warm-cache joiner branch
- * and My Maps play.
+ * and My Maps play; and the rawmap gate: the rows a rawmap names counted
+ * against the installed bundles and the recycle bin, the store check, the
+ * refusal that names each mod and the download that reopens the rawmap.
  *
  * The real map manifest (modmanifest.c) reads the rows; the engine and the
  * modsync worker are doubles behind sh_modpub_ops. The worker double runs the
@@ -91,6 +93,11 @@ typedef struct fake {
     int owner_ok;
     unsigned long long token;
     HANDLE worker;
+    int store_a, store_b;            /* store_has: 1 held, 0 absent, -1 unreachable */
+    int store_calls;
+    int restores, restore_brings_a;  /* the recycle bin holds alex.pink-imp */
+    int prints;
+    char last_print[1024];
 } fake;
 
 static fake F;
@@ -221,11 +228,35 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     return 1;
 }
 static void f_log(void *c, const char *line) { (void)c; if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line); }
+static int f_store_has(void *c, const char *hash, volatile int *cancel)
+{
+    (void)c; (void)cancel;
+    F.store_calls++;
+    if (!strcmp(hash, HASH_A)) return F.store_a;
+    if (!strcmp(hash, HASH_B)) return F.store_b;
+    return 0;
+}
+static int f_restore(void *c, const char *const *hashes, int n)
+{
+    int back = 0;
+    (void)c;
+    F.restores++;
+    for (int i = 0; i < n; i++)
+        if (F.restore_brings_a && !strcmp(hashes[i], HASH_A) && !F.installed_a) { F.installed_a = 1; back++; }
+    return back;
+}
+static void f_print(void *c, const char *line)
+{
+    (void)c;
+    F.prints++;
+    strcpy_s(F.last_print, sizeof F.last_print, line);
+}
 
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_bundle_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
-    f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log
+    f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
+    f_store_has, f_restore, f_print
 };
 
 static void reset(void)
@@ -236,6 +267,7 @@ static void reset(void)
     F.install_on_fetch = 1;
     F.host_ok = 1;
     F.owner_ok = 1;
+    F.store_a = F.store_b = 1;
     sh_modpub_test_set_ops(&OPS);
     sh_modmanifest_reset();
 }
@@ -556,6 +588,134 @@ static void the_question(void)
     CHECK(strlen(text) < 64);
 }
 
+/* Tick until the store check has finished and the hold moved on. */
+static void tick_until_probed(void)
+{
+    for (int i = 0; i < 2000 && sh_modpub_test_state() == 4; i++) { tick(1); Sleep(1); }
+}
+
+static void rawmap_missing_counts_rows(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a rawmap's rows are counted against the installed bundles and the recycle bin\n");
+    reset();
+    CHECK(sh_modpub_rawmap_missing(VANILLA, strlen(VANILLA), &rows) == 0 && rows.count == 0);
+    sh_modmanifest_list_free(&rows);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2 && rows.count == 2);
+    CHECK(F.restores == 1);              /* the bin was asked before anything is called missing */
+    sh_modmanifest_list_free(&rows);
+    F.installed_b = 1;
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
+    sh_modmanifest_list_free(&rows);
+    F.restore_brings_a = 1;              /* uninstalled, but still in removed-mods */
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0 && F.installed_a);
+    sh_modmanifest_list_free(&rows);
+    F.restores = 0;
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0 && F.restores == 0);
+    sh_modmanifest_list_free(&rows);
+    /* Not a published-map parse: the rawmap check never touches the parse record. */
+    CHECK(sh_modpublished_last_parse(NULL) == -1);
+    /* Without bound gates nothing is missing: the rawmap loads as it always did. */
+    sh_modpub_test_set_ops(NULL);
+    F.installed_a = F.installed_b = 0;
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0);
+    sh_modmanifest_list_free(&rows);
+    sh_modpub_test_set_ops(&OPS);
+    /* Never a hook a detour can ask about. */
+    CHECK(sh_modpub_decide(SH_MODPUB_RAWMAP_LOAD, MANAGER, NULL, MAP, NULL, NULL, NULL) == 1);
+}
+
+static void rawmap_store_lacks_refuses(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a rawmap whose mods the store lacks is refused, naming each mod and the .zip\n");
+    reset();
+    F.store_b = 0;                       /* bob.room was never published */
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2);
+    CHECK(sh_modpub_rawmap_hold(&rows, "shared.json") == 1);
+    sh_modmanifest_list_free(&rows);
+    CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 4 && F.asks == 0);
+    CHECK(F.prints == 1 && strstr(F.last_print, "Rawmap shared.json needs 2 mods you do not have") != NULL);
+    tick_until_probed();
+    CHECK(F.store_calls == 2);           /* both asked, so the refusal can name every one */
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0 && F.activations == 0);
+    CHECK(!strcmp(F.last_print, "Rawmap shared.json was not loaded: it needs bob.room 1, which you do not have and "
+                                "the mod store does not hold. Ask the map's author for its .zip export, which "
+                                "carries the mods."));
+    tick(2);
+    CHECK(F.asks == 1 && F.ask_buttons == 0);
+    CHECK(!strcmp(F.last_ask, "This map was not loaded. It needs mods you do not have and the mod store does not "
+                              "hold: bob.room 1. Ask the map's author for its .zip export."));
+
+    printf("-- a store that cannot be reached is said so, and nothing is downloaded\n");
+    reset();
+    F.store_a = -1;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "one.zip") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick_until_probed();
+    tick(2);
+    CHECK(F.fetch_calls == 0 && F.resumes == 0 && !sh_modpublished_holding());
+    CHECK(strstr(F.last_ask, "alex.pink-imp 1. The mod store could not be reached. Try again") != NULL);
+    CHECK(strstr(F.last_print, "the mod store could not be reached") != NULL);
+}
+
+static void rawmap_store_has_downloads_and_reopens(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a rawmap whose mods the store has asks as My Maps does, then downloads and reopens\n");
+    reset();
+    F.installed_b = 1;
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick_until_probed();
+    CHECK(F.store_calls == 1 && sh_modpub_test_state() == 1);
+    tick(1);
+    CHECK(F.asks == 1 && F.ask_buttons == 6);
+    CHECK(!strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.rescans == 1);
+    CHECK(F.activations == 0);           /* the reopened rawmap's own parse activates */
+    CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_RAWMAP_LOAD && !strcmp(F.resume_id, "rawmap.json"));
+    CHECK(!F.resume_text[0] && F.metadata_copies == 0 && F.hold_ui == 0);
+
+    printf("-- No leaves the rawmap closed and names the mod\n");
+    reset();
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick_until_probed();
+    tick(1);
+    F.answer = 2;
+    tick(3);
+    CHECK(F.fetch_calls == 0 && F.resumes == 0 && strstr(F.last_ask, "alex.pink-imp") != NULL);
+
+    printf("-- nothing missing after all: no hold\n");
+    reset();
+    F.installed_a = 1;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 0 && !sh_modpublished_holding());
+    sh_modmanifest_list_free(&rows);
+}
+
+static void the_refusal(void)
+{
+    char text[256];
+    const char *names[40];
+    char storage[40][48];
+    printf("-- the refusal fits the native body\n");
+    for (int i = 0; i < 40; i++) {
+        _snprintf_s(storage[i], sizeof storage[i], _TRUNCATE, "author%02d.a-rather-long-mod-name 1.0.%d", i, i);
+        names[i] = storage[i];
+    }
+    sh_modpublished_compose_refusal(text, sizeof text, names, 40, 0);
+    CHECK(strlen(text) < 256 && strstr(text, " more. Ask the map's author for its .zip export.") != NULL);
+    sh_modpublished_compose_refusal(text, sizeof text, names, 40, 1);
+    CHECK(strlen(text) < 256 && strstr(text, "could not be reached") != NULL);
+}
+
 int main(void)
 {
     classification();
@@ -569,6 +729,10 @@ int main(void)
     my_maps_play();
     a_newer_launch_replaces();
     the_question();
+    rawmap_missing_counts_rows();
+    rawmap_store_lacks_refuses();
+    rawmap_store_has_downloads_and_reopens();
+    the_refusal();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

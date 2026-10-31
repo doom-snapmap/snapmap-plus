@@ -35,6 +35,7 @@
 #include "editor_frame.h"
 #include "cvars.h"
 #include "hook.h"
+#include "modpublished.h"
 
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL, NULL, 0u } };
 
@@ -777,6 +778,248 @@ static void retired_header_grammar(void)
         CHECK(sh_map_legacy_payload_header(refused[i], strlen(refused[i])) == 0);
 }
 
+/* ---- the mods a rawmap names ------------------------------------------------------------------
+ * The engine never parses a rawmap whose mods are missing: the swap falls back to the engine's own
+ * map and the rawmap hold (modpublished.c, linked for real) asks the store, then refuses or offers
+ * the download. A map with mods also writes the export beside its JSON. The store, the dialog and
+ * the worker are doubles behind sh_modpub_ops; the worker runs its job on the calling thread. */
+#define HASH_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define MVAR(name, value) \
+    "{\"info\":{\"name\":\"" name "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"" value "\"," \
+    "\"~type\":\"snapVarString_t\"}"
+#define MROW(id, version, hash, size) \
+    "{\\\"id\\\":\\\"" id "\\\",\\\"version\\\":\\\"" version "\\\",\\\"bundle\\\":\\\"" hash "\\\"," \
+    "\\\"size\\\":" size ",\\\"names\\\":[]}"
+static const char MOD_MAP[] =
+    "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
+    MVAR("door_label", "RAWMAP_MARK") "," MVAR("smpmod1.0.1", MROW("test.alpha", "1.0", HASH_A, "1048576")) "]}}";
+static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
+
+extern unsigned long long g_mod_stub_export_result;
+extern int g_mod_stub_export_calls;
+extern char g_mod_stub_export_path[520];
+
+static struct {
+    int installed, store, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
+    char ask[256], print[1024], toast[600], resume_note[256];
+} R;
+
+static int r_on_main(void *c) { (void)c; return 1; }
+static int r_bundle_state(void *c, const char *hash, char *cause, size_t cap)
+{ (void)c; if (cause && cap) cause[0] = 0; return !strcmp(hash, HASH_A) && R.installed; }
+static int r_rescan(void *c) { (void)c; return 1; }
+static int r_activate(void *c, const char *const *h, int n) { (void)c; (void)h; return n; }
+static int r_can_ask(void *c) { (void)c; return 1; }
+static int r_ask(void *c, unsigned gdm, unsigned set, const char *text)
+{ (void)c; (void)gdm; (void)set; R.asks++; R.answered = 0; strcpy_s(R.ask, sizeof R.ask, text); return 10 + R.asks; }
+static int r_poll(void *c, int ticket)
+{ (void)c; (void)ticket; if (R.answered || !R.answer) return 0; R.answered = 1; return R.answer; }
+static void r_release(void *c, int ticket) { (void)c; (void)ticket; }
+static int r_worker_run(void *c, void (*job)(void *), void *ctx) { (void)c; job(ctx); return 1; }
+static int r_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, volatile int *cancel)
+{ (void)c; (void)progress; (void)cancel; R.fetches++; if (!strcmp(hash, HASH_A)) R.installed = 1; return 0; }
+static int r_resume(void *c, const sh_modpub_resume *r)
+{
+    (void)c;
+    R.resumes++;
+    R.resume_hook = r->hook;
+    /* What the engine's resume does for a rawmap hold. */
+    return sh_rawmap_reopen_after_mods(R.resume_note, sizeof R.resume_note);
+}
+static int r_store_has(void *c, const char *hash, volatile int *cancel)
+{ (void)c; (void)cancel; return strcmp(hash, HASH_A) ? 0 : R.store; }
+static int r_restore(void *c, const char *const *h, int n) { (void)c; (void)h; (void)n; return 0; }
+static void r_print(void *c, const char *line) { (void)c; R.prints++; strcpy_s(R.print, sizeof R.print, line); }
+
+static const sh_modpub_ops RAWMAP_OPS = {
+    NULL, r_on_main, r_bundle_state, r_rescan, r_activate, r_can_ask, r_ask, r_poll, r_release,
+    r_worker_run, r_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, r_resume, NULL,
+    r_store_has, r_restore, r_print
+};
+
+static void notify_toast(const char *title, const char *text)
+{ (void)title; R.toasts++; strcpy_s(R.toast, sizeof R.toast, text); }
+static void notify_print(const char *line) { R.prints++; strcpy_s(R.print, sizeof R.print, line); }
+
+static void mods_begin(void)
+{
+    sh_modpub_test_reset();
+    memset(&R, 0, sizeof R);
+    sh_modpub_test_set_ops(&RAWMAP_OPS);
+    sh_modmanifest_reset();
+    sh_rawmap_set_notify(notify_toast, notify_print);
+    sh_rawmap_set_branch_tag(0);                /* no IsBranchMap answer in this test */
+    g_deser_orig = fixture_deser;
+}
+
+static void mods_end(void)
+{
+    g_deser_orig = NULL;
+    sh_rawmap_set_branch_tag(1);
+    sh_rawmap_set_notify(NULL, NULL);
+    sh_modpub_test_reset();
+    sh_modpub_test_set_ops(NULL);
+    InterlockedExchange(&g_swap_oneshot, 0);
+    sh_rawmap_swap_arm(0);
+    clean_state();
+}
+
+static void ticks(int n) { for (int i = 0; i < n; i++) sh_modpublished_poll(); }
+
+static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
+{
+    char staged[MAX_PATH];
+    unsigned long swaps;
+    printf("\n-- a rawmap whose mods are missing and not in the store is refused before the engine parses it\n");
+    mods_begin();
+    R.store = 0;
+    CHECK(write_file("rawmap_mods_missing.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    sh_rawmap_load_arm_once();
+    swaps = sh_rawmap_swap_count();
+    g_parses = 0;
+    CHECK(sh_deser_detour(ENGINE_MAP, (void *)1) == 1);
+    CHECK(g_parses == 1 && strcmp(g_parsed, ENGINE_MAP) == 0);   /* the map being opened, as itself */
+    CHECK(strstr(g_parsed, "RAWMAP_MARK") == NULL && sh_rawmap_swap_count() == swaps);
+    CHECK(!sh_rawmap_load_oneshot_pending());   /* this load's arm is spent: no surprise later */
+    CHECK(sh_modpub_test_state() == 4 && R.prints == 1);
+    CHECK(strstr(R.print, "Rawmap rawmap_mods_missing.json needs 1 mod you do not have") != NULL);
+    ticks(4);
+    CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
+    CHECK(!strcmp(R.print, "Rawmap rawmap_mods_missing.json was not loaded: it needs test.alpha 1.0, which you do "
+                           "not have and the mod store does not hold. Ask the map's author for its .zip export, "
+                           "which carries the mods."));
+    CHECK(R.asks == 1 && !strcmp(R.ask, "This map was not loaded. It needs mods you do not have and the mod store "
+                                        "does not hold: test.alpha 1.0. Ask the map's author for its .zip export."));
+
+    printf("-- the editor reload refuses on its own frame, before LoadMap\n");
+    {
+        char why[256];
+        R.prints = 0;
+        CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+        CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
+        CHECK(g_prepared == NULL && !g_in_reload);
+        ticks(4);
+        CHECK(strstr(R.print, "test.alpha 1.0") && strstr(R.print, ".zip export"));
+    }
+    DeleteFileA(staged);
+    mods_end();
+}
+
+static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
+{
+    char staged[MAX_PATH], why[256];
+    printf("\n-- a rawmap whose mods the store has: the My Maps question, the download, then it opens\n");
+    mods_begin();
+    R.store = 1;
+    CHECK(write_file("rawmap_mods_offer.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(strstr(why, "checking whether it can download them") != NULL);
+    ticks(3);
+    CHECK(R.asks == 1 && !strcmp(R.ask, "This map needs 1 mod: test.alpha (1.0 MB). Download and install now?"));
+    R.answer = 1;
+    ticks(3);
+    CHECK(R.fetches == 1 && R.installed && R.resumes == 1 && R.resume_hook == SH_MODPUB_RAWMAP_LOAD);
+    /* No editor in this test, so the reopen stages it for the next map open and says so. */
+    CHECK(sh_rawmap_load_oneshot_pending());
+    CHECK(!strcmp(R.resume_note, "The mods are installed. Open any map and it opens as rawmap_mods_offer.json."));
+
+    printf("-- with the mods installed the reload keeps the bytes it checked for the parse\n");
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && g_in_reload);
+    {
+        char again[MAX_PATH];
+        unsigned long swaps = sh_rawmap_swap_count();
+        /* The file changes between the check and the parse: the checked bytes are parsed. */
+        CHECK(write_file("rawmap_mods_offer.json", ENGINE_MAP, again, sizeof again));
+        sh_rawmap_swap_arm(1);                  /* the reload's own arm window */
+        g_parses = 0;
+        CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"name\":\"BORROWED\"}", (void *)1) == 1);
+        CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL && strstr(g_parsed, "smpmod1.") == NULL);
+        CHECK(sh_rawmap_swap_count() == swaps + 1 && g_prepared == NULL);
+        sh_rawmap_swap_arm(0);
+        sh_rawmap_reload_done();
+        CHECK(!g_in_reload);
+    }
+    DeleteFileA(staged);
+    mods_end();
+}
+
+static void a_rawmap_whose_mods_are_installed_loads(void)
+{
+    char staged[MAX_PATH];
+    printf("\n-- a rawmap whose mods are installed is substituted as before\n");
+    mods_begin();
+    R.installed = 1;
+    CHECK(write_file("rawmap_mods_ok.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    sh_rawmap_load_arm_once();
+    g_parses = 0;
+    CHECK(sh_deser_detour(ENGINE_MAP, (void *)1) == 1);
+    CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
+    CHECK(!sh_modpublished_holding() && R.prints == 0 && R.asks == 0);
+    DeleteFileA(staged);
+    mods_end();
+}
+
+static void a_save_with_mods_writes_the_zip_beside_the_json(void)
+{
+    char target[MAX_PATH], zip[MAX_PATH], status[4096];
+    sh_rawmap_save_report last;
+    sh_rawmap_status_fn status_fn = NULL;
+    printf("\n-- a save of a map that uses mods writes <name>.zip beside the .json and says to share it\n");
+    mods_begin();
+
+    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\rawmap.json", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\rawmap.zip"));
+    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\Arena.JSON", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\Arena.zip"));
+    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\notes.txt", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\notes.txt.zip"));
+    CHECK(!sh_rawmap_companion_zip_path("C:\\maps\\shared.zip", zip, sizeof zip) && !zip[0]);
+    CHECK(!sh_rawmap_companion_zip_path("", zip, sizeof zip));
+
+    CHECK(temp_path("rawmap_share.json", target, sizeof target));
+    CHECK(sh_rawmap_set_save_target(target));
+    g_mod_stub_export_calls = 0;
+    g_mod_stub_export_result = 4321;
+    CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
+    CHECK(g_mod_stub_export_calls == 1 && sh_rawmap_companion_zip_path(target, zip, sizeof zip) &&
+          !_stricmp(g_mod_stub_export_path, zip));
+    sh_rawmap_last_save(&last);
+    CHECK(!_stricmp(last.json, target) && !_stricmp(last.zip, zip) && last.zip_bytes == 4321 && last.mods == 1);
+    CHECK(R.toasts == 0);                       /* never from inside the save itself */
+    sh_rawmap_poll_main();
+    CHECK(R.toasts == 1 && R.prints == 1 &&
+          !strcmp(R.toast, "This map uses 1 mod; share rawmap_share.zip, the .json alone will not load for others.") &&
+          !strcmp(R.print, R.toast));
+    sh_rawmap_poll_main();
+    CHECK(R.toasts == 1);                       /* once */
+
+    sh_rawmap_get_slots(&status_fn, NULL, NULL);
+    CHECK(status_fn && status_fn(NULL, status, (int)sizeof status) > 0);
+    CHECK(strstr(status, "\"lastZip\":\"") && strstr(status, "rawmap_share.zip\"") &&
+          strstr(status, "\"lastZipBytes\":4321") && strstr(status, "\"lastMods\":1") &&
+          strstr(status, "\"mapMods\":") && status[strlen(status) - 1] == '}');
+
+    printf("-- an export that cannot be written says so, and the .json is still written\n");
+    g_mod_stub_export_result = 0;
+    CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
+    sh_rawmap_poll_main();
+    CHECK(!strcmp(R.toast, "This map uses 1 mod, but rawmap_share.zip could not be written (the rawmap export is not "
+                           "linked into this test). The .json alone will not load for others."));
+    sh_rawmap_last_save(&last);
+    CHECK(last.zip[0] && last.zip_bytes == 0 && strstr(last.zip_error, "not linked") != NULL);
+
+    printf("-- a map without mods writes only the .json, and says nothing\n");
+    g_mod_stub_export_calls = 0;
+    R.toasts = 0;
+    CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == sizeof BODY - 1);
+    sh_rawmap_poll_main();
+    sh_rawmap_last_save(&last);
+    CHECK(g_mod_stub_export_calls == 0 && R.toasts == 0 && !last.zip[0] && last.mods == 0 && last.json[0]);
+
+    DeleteFileA(target);
+    mods_end();
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -809,6 +1052,10 @@ int main(void)
     a_staged_rawmap_with_a_retired_payload_loads_plain();
     a_reload_into_the_same_map_object_is_a_new_map();
     saves_carry_no_package_payload();
+    a_rawmap_without_its_mods_never_reaches_the_engine();
+    a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
+    a_rawmap_whose_mods_are_installed_loads();
+    a_save_with_mods_writes_the_zip_beside_the_json();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

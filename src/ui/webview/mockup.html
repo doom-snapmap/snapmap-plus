@@ -4137,6 +4137,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         ? 'You picked this file. Opening another map goes back to the default one.'
         : 'The default file. Use Save Rawmap As... to pick another.';
       note.appendChild(chosen);
+      // A map that uses mods travels as the .zip the save wrote beside the .json (or instead of
+      // it): name the one file to send, because the .json alone does not load for others.
+      if (st.lastZip) {
+        var mods = st.lastMods || 0;
+        var share = document.createElement('div');
+        share.textContent = st.lastZipBytes
+          ? ('To share this map, send ' + rawmapBaseName(st.lastZip) + ': it carries the map and its ' +
+             mods + ' mod' + (mods === 1 ? '' : 's') + '. The .json alone will not load for others.')
+          : ('This map uses ' + mods + ' mod' + (mods === 1 ? '' : 's') + ', but ' +
+             rawmapBaseName(st.lastZip) + ' was not written' +
+             (st.lastZipError ? ': ' + st.lastZipError : '') + '.');
+        share.title = st.lastZip;
+        note.appendChild(share);
+      }
       // No status line here on purpose. It used to report a running count of rawmap substitutions,
       // which was engine vocabulary describing something already finished -- it never answered the
       // only question the menu is asked, which is what happens when you click. The paths above say

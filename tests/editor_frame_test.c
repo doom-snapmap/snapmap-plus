@@ -26,6 +26,8 @@ int sh_rawmap_load_is_safe(void) { return 1; }
 int sh_rawmap_source_ok(char *msg, int cap) { (void)msg; (void)cap; return 1; }
 int sh_rawmap_swap_is_armed(void) { return 0; }
 int sh_rawmap_swap_arm(int on) { return on; }
+int sh_rawmap_prepare_reload(char *why, int cap) { if (why && cap > 0) why[0] = 0; return 1; }
+void sh_rawmap_reload_done(void) {}
 void sh_rawmap_get_paths(char *load, int load_cap, char *save, int save_cap)
 { (void)load; (void)load_cap; if (save) strcpy_s(save, save_cap, current); }
 int sh_rawmap_dest_writable_now(const char *path, char *msg, int cap)

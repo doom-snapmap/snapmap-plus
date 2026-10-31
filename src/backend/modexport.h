@@ -36,6 +36,8 @@ typedef struct modexport_stats {
     unsigned bundles;              /* bundles the map's rows name */
     unsigned bundles_installed;    /* import: newly installed */
     unsigned bundles_present;      /* import: already installed */
+    unsigned bundles_absent;       /* import: rows naming a bundle the export does not carry and
+                                      this machine does not have (the map cannot load as it is) */
     unsigned entries;              /* ZIP entries written or read */
     unsigned blobs_written;        /* distinct blobs stored in the ZIP / installed from it */
     unsigned blobs_deduped;        /* files left out because an earlier entry holds their bytes */
@@ -68,6 +70,12 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st,
 
 /* The writer: returns the ZIP's byte count, 0 on failure. */
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp);
+/* The same writer for a caller that reports the outcome itself: *bundles
+ * (optional) receives the bundles the map's rows name, and on failure `cause`
+ * says why (a mod the map names is not installed, the folder is not
+ * writable). */
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+                                               unsigned *bundles, char *cause, size_t cause_cap);
 /* The reader: a NUL-terminated process-heap buffer (HeapFree), or NULL. */
 char *modexport_read_text(const char *path_acp, size_t *out_len);
 /* The source check: 1 when the export can be loaded, else 0 with a reason. */

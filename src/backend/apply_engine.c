@@ -3444,6 +3444,7 @@ void sh_apply_prefab_poll_play(void)
      * and the resume. Runs in menus too, where the editor frame does not. */
     sh_modpublished_poll();
     sh_modpublish_poll();   /* held publishes, their uploads and claims */
+    sh_rawmap_poll_main();  /* a rawmap save's "share the .zip" toast and console line */
     /* Mods: an uninstalled mod the open map needs again (Ctrl+Z, a load, a
      * save): the owed refresh and its toast, and the undo watch. */
     if (sh_modui_poll_due()) (void)ae_main_call_invoke(sh_modui_poll_main, NULL);

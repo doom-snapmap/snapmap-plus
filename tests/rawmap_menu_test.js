@@ -28,4 +28,41 @@ assert.equal(sent.pop().cmd, 'rawmapLoadNow');
 click('menuRawmapSave');
 assert.equal(sent[0].cmd, 'rawmapSaveNow');
 assert.equal(sent[0].path, undefined, 'Save resolves its path in the backend, not a stale page snapshot');
+
+// The File menu's path readout names the one file to share when the last save wrote the export.
+function element() {
+  return {
+    children: [], textContent: '', title: '', disabled: false, attributes: {},
+    set innerHTML(value) { this.children = []; },
+    appendChild(child) { this.children.push(child); return child; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    querySelector() { return element(); },
+  };
+}
+const ids = {};
+const statusContext = vm.createContext({
+  document: {
+    getElementById: id => (ids[id] = ids[id] || element()),
+    createElement: () => element(),
+    createTextNode: text => ({textContent: text}),
+  },
+});
+const start = page.indexOf('  var RAWMAP_ARMED = false;');
+const end = page.indexOf("  document.getElementById('menuRawmapLoad')");
+assert.ok(start > 0 && end > start);
+vm.runInContext(page.slice(start, end), statusContext);
+function readout(status) {
+  delete ids.menuRawmapPaths;
+  vm.runInContext('renderRawmapStatus(' + JSON.stringify(status) + ')', statusContext);
+  return ids.menuRawmapPaths.children.map(row => row.textContent).join('\n');
+}
+const base = {load: 'C:\\maps\\rawmap.json', save: 'C:\\maps\\rawmap.json', armed: 0, saveTarget: ''};
+assert.doesNotMatch(readout(base), /share/i, 'a map without a saved export says nothing about sharing');
+assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', lastZipBytes: 900, lastMods: 2})),
+             /To share this map, send rawmap\.zip: it carries the map and its 2 mods\. The \.json alone will not load for others\./);
+assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', lastZipBytes: 900, lastMods: 1})),
+             /its 1 mod\./);
+assert.match(readout(Object.assign({}, base, {lastZip: 'C:\\maps\\rawmap.zip', lastZipBytes: 0, lastMods: 1,
+                                              lastZipError: 'a mod is not installed'})),
+             /This map uses 1 mod, but rawmap\.zip was not written: a mod is not installed\./);
 console.log('rawmap_menu_test: OK');

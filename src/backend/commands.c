@@ -18,6 +18,7 @@
 #include "engine_globals.h"
 #include "host_image.h"
 #include "rawmap.h"
+#include "modexport.h"   /* sh_rawmaps list: .zip exports */
 #include "editor_frame.h"
 #include "ui_bridge.h"
 #include "hook.h"
@@ -288,18 +289,44 @@ static int rawmap_current_load_dir(char *out, size_t cap)
     return rawmap_dir_of(probe, out, cap);
 }
 
-/* One folder's *.json files. `prefix` is printed before each name, so a subfolder pass can show
- * "doom\mymap.json" without a second column. Returns how many it printed. */
+/* One folder's *.zip exports: a map and its mods in one file. Only a ZIP whose export.json and
+ * map entry read is listed; nothing is installed by looking. Returns how many it printed. */
+static int rawmap_list_one_zip_dir(const char *dir, const char *prefix)
+{
+    char glob[MAX_PATH], why[160];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int n = 0;
+
+    _snprintf_s(glob, sizeof glob, _TRUNCATE, "%s\\*.zip", dir);
+    h = FindFirstFileA(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        char full[MAX_PATH];
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        if (!modexport_validate_source(full, why, (int)sizeof why)) continue;
+        sh_printf("  %s%-38s %llu bytes  (the map and its mods)\n", prefix ? prefix : "", fd.cFileName,
+                  ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+        n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* One folder's rawmaps: the *.zip exports, then the *.json files that are maps. `prefix` is
+ * printed before each name, so a subfolder pass can show "doom\mymap.json" without a second
+ * column. Returns how many it printed. */
 static int rawmap_list_one_dir(const char *dir, const char *prefix)
 {
     char glob[MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE h;
-    int n = 0;
+    int n = rawmap_list_one_zip_dir(dir, prefix);
 
     _snprintf_s(glob, sizeof glob, _TRUNCATE, "%s\\*.json", dir);
     h = FindFirstFileA(glob, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (h == INVALID_HANDLE_VALUE) return n;
     do {
         char full[MAX_PATH];
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
@@ -424,18 +451,38 @@ static void rawmap_print_state(void)
     }
     if (sh_rawmap_load_oneshot_pending())
         sh_printf("  a rawmap is staged for the NEXT map you open.\n");
+    {
+        /* What the last save wrote, and which file to share. */
+        sh_rawmap_save_report last;
+        sh_rawmap_last_save(&last);
+        if (last.sequence) {
+            if (last.json[0])
+                sh_printf("  last save: %s (%llu bytes)\n", last.json, last.json_bytes);
+            if (last.zip[0] && last.zip_bytes)
+                sh_printf("  %s %s (%llu bytes) carries the map and its %u mod%s: share that file\n",
+                          last.json[0] ? "beside it:" : "last save:", last.zip, last.zip_bytes, last.mods,
+                          last.mods == 1 ? "" : "s");
+            else if (last.zip[0])
+                sh_printf("  the map uses %u mod%s, but %s was not written: %s\n", last.mods,
+                          last.mods == 1 ? "" : "s", last.zip, last.zip_error[0] ? last.zip_error : "unknown cause");
+            else if (last.json[0])
+                sh_printf("  the map uses no mods, so the .json is all anyone needs\n");
+        }
+    }
     sh_printf("  'sh_rawmaps help' lists what else it can do.\n");
 }
 
 static void rawmap_print_usage(void)
 {
     sh_printf("sh_rawmaps -- raw JSON map files.\n");
-    sh_printf("  sh_rawmaps                 show the state and both paths\n");
+    sh_printf("  sh_rawmaps | status        show the state, both paths and what the last\n");
+    sh_printf("                             save wrote\n");
     sh_printf("  sh_rawmaps help | ?        this list\n");
     sh_printf("  sh_rawmaps list [folder]   rawmap files: the default folder, the folder your\n");
     sh_printf("                             load path points at, or one you name\n");
     sh_printf("  sh_rawmaps on | off        optional: apply rawmaps to EVERY map load and save\n");
-    sh_printf("  sh_rawmaps load <path>     point the load path at a file and stage it\n");
+    sh_printf("  sh_rawmaps load <path>     point the load path at a file (.json or .zip)\n");
+    sh_printf("                             and stage it\n");
     sh_printf("  sh_rawmaps load            open the load path as a new map -- or stage it,\n");
     sh_printf("                             if the editor is not up yet, so the next map\n");
     sh_printf("                             you open becomes it\n");
@@ -450,6 +497,13 @@ static void rawmap_print_usage(void)
     sh_printf("                             off by default: saving a rawmap you opened makes a\n");
     sh_printf("                             new map. On lets the save land on the map it\n");
     sh_printf("                             opened over, replacing it, until you close DOOM\n");
+    sh_printf("Maps that use mods:\n");
+    sh_printf("  Every save of such a map also writes <name>.zip beside the .json: the map\n");
+    sh_printf("  and its mods in one file. Share the .zip; the .json alone will not load\n");
+    sh_printf("  for anyone who does not have the mods. Opening a .zip installs its mods.\n");
+    sh_printf("  A rawmap whose mods you do not have is never opened as it is: when the mod\n");
+    sh_printf("  store has them the game offers to download them, and otherwise it names\n");
+    sh_printf("  them and says to ask the map's author for the .zip.\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)
@@ -457,7 +511,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
     const char *verb = cmd_argv(a, 1);
     const char *arg  = cmd_argv(a, 2);
 
-    if (verb == NULL || verb[0] == '\0') { rawmap_print_state(); return; }
+    if (verb == NULL || verb[0] == '\0' || _stricmp(verb, "status") == 0) { rawmap_print_state(); return; }
 
     /* An unknown verb already falls through to the usage text at the end. Naming
      * these two makes it something a person can ask for rather than stumble on. */

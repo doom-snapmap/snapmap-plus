@@ -946,9 +946,11 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
         memset(&rows, 0, sizeof rows);
         sh_modmanifest_read((const char *)text, len, &rows, &rejected);
         for (i = 0; i < rows.count; i++)
-            if (!me_carried(&im, rows.rows[i].bundle) && !modsync_find_installed(rows.rows[i].bundle, NULL, 0))
+            if (!me_carried(&im, rows.rows[i].bundle) && !modsync_find_installed(rows.rows[i].bundle, NULL, 0)) {
+                st->bundles_absent++;
                 me_log("MODS: import: the map names %s@%s (bundle %.16s), which the export does not carry",
                        rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
+            }
         sh_modmanifest_list_free(&rows);
         st->map_bytes = len;
     }
@@ -969,13 +971,29 @@ static int me_acp_to_utf8(const char *acp, char *out, size_t cap)
 
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp)
 {
+    char cause[320];
+    return modexport_write_text_report(data, len, path_acp, NULL, cause, sizeof cause);
+}
+
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+                                               unsigned *bundles, char *cause_out, size_t cause_cap)
+{
     modexport_stats st;
     char path[MAX_PATH * 4], cause[320];
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) { me_log("MODS: export: the destination path is not usable"); return 0; }
-    if (!modexport_write(data, len, path, &st, cause, sizeof cause)) {
-        me_log("MODS: export %s: refused: %s", path, cause);
+    if (bundles) *bundles = 0;
+    if (cause_out && cause_cap) cause_out[0] = 0;
+    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
+        me_log("MODS: export: the destination path is not usable");
+        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, "the destination path is not usable", _TRUNCATE);
         return 0;
     }
+    if (!modexport_write(data, len, path, &st, cause, sizeof cause)) {
+        me_log("MODS: export %s: refused: %s", path, cause);
+        if (bundles) *bundles = st.bundles;
+        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, cause, _TRUNCATE);
+        return 0;
+    }
+    if (bundles) *bundles = st.bundles;
     me_log("MODS: export %s: map %llu byte(s), %u bundle(s), %u blob(s) stored, %u deduplicated, %u entr%s, %llu byte(s) in %.0f ms",
            path, st.map_bytes, st.bundles, st.blobs_written, st.blobs_deduped, st.entries, st.entries == 1 ? "y" : "ies",
            st.zip_bytes, st.ms);
@@ -993,8 +1011,9 @@ char *modexport_read_text(const char *path_acp, size_t *out_len)
     text = modexport_read(path, &len, &st, cause, sizeof cause);
     if (!text) { me_log("MODS: import %s: refused: %s", path, cause); return NULL; }
     me_log("MODS: import %s: %u bundle(s) (%u installed, %u already present), %u blob(s) installed, map %llu byte(s), "
-           "%llu byte(s) read in %.0f ms", path, st.bundles, st.bundles_installed, st.bundles_present, st.blobs_written,
-           st.map_bytes, st.zip_bytes, st.ms);
+           "%llu byte(s) read in %.0f ms%s", path, st.bundles, st.bundles_installed, st.bundles_present, st.blobs_written,
+           st.map_bytes, st.zip_bytes, st.ms,
+           st.bundles_absent ? "; the map also names mods the export does not carry" : "");
     if (!len || len > (size_t)INT_MAX) { free(text); return NULL; }
     heap = (char *)HeapAlloc(GetProcessHeap(), 0, len + 1);
     if (heap) { memcpy(heap, text, len); heap[len] = 0; if (out_len) *out_len = len; }

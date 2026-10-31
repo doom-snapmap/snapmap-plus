@@ -81,7 +81,7 @@ $tests = @(
     @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
     @{ name = "json_pretty_test";   src = 'json_pretty_test.c';                                      arg = "" }
     @{ name = "editor_frame_test"; src = 'editor_frame_test.c'; libs = 'shell32.lib ole32.lib'; arg = "" }
-    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\map_legacy_payload.c ..\src\backend\modlegacy.c ..\src\backend\modbundle.c ..\src\backend\decl_text.c ..\src\backend\modmanifest.c ..\src\backend\raw_deflate.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\hook.c ..\src\backend\patch.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c map_bounds_link_stub.c mod_seam_stub.c ..\src\backend\modpublished.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING /DSH_PATCH_TESTING /DSH_MODPUBLISHED_PURE'; libs = 'shell32.lib ole32.lib'; arg = "" }
+    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\map_legacy_payload.c ..\src\backend\modlegacy.c ..\src\backend\modbundle.c ..\src\backend\decl_text.c ..\src\backend\modmanifest.c ..\src\backend\raw_deflate.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\hook.c ..\src\backend\patch.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c map_bounds_link_stub.c mod_seam_stub.c ..\src\backend\modpublished.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING /DSH_PATCH_TESTING /DSH_MODPUBLISHED_PURE /DSH_MODPUBLISHED_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "modmanifest_test"; src = 'modmanifest_test.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "modmap_test"; src = 'modmap_test.c ..\src\backend\modmap.c ..\src\backend\mp_json.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "modpublished_test"; src = 'modpublished_test.c ..\src\backend\modpublished.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\config_json.c'; defs = '/DSH_MODPUBLISHED_PURE /DSH_MODPUBLISHED_TESTING'; arg = "" }
@@ -117,6 +117,7 @@ $tests = @(
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "entity_settings_contract_test"; src = 'entity_settings_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "growing_text_buffer_test"; src = 'growing_text_buffer_test.cpp'; cxx = $true; arg = "" }
+    @{ name = "rawmap_picker_test"; src = 'rawmap_picker_test.cpp'; cxx = $true; arg = "" }
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }

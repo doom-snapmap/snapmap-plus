@@ -335,7 +335,7 @@ static void ef_service_reload(void *editor)
 {
     ef_idstr s;
     const char *why = "";
-    char reason[128];
+    char reason[256];
     int rc = 0;
     int prev_armed;
     char line[256];
@@ -351,6 +351,19 @@ static void ef_service_reload(void *editor)
         ef_set_msg(reason);
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "EF: reload ABANDONED -- the staged rawmap is no longer usable (%s)", reason);
+        backend_log(line);
+        return;
+    }
+
+    /* The mods the rawmap names, checked on this frame and before the engine
+     * sees a byte: a map whose mods are missing goes to the rawmap hold (the
+     * download question, or a refusal naming them) instead of LoadMap, where
+     * SnapMap's validator would throw the player out over "corruption". */
+    if (!sh_rawmap_prepare_reload(reason, (int)sizeof reason)) {
+        InterlockedExchange(&g_pending, 0);
+        InterlockedExchange(&g_state, SH_RELOAD_FAILED);
+        ef_set_msg(reason);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "EF: reload not started -- %s", reason);
         backend_log(line);
         return;
     }
@@ -378,6 +391,7 @@ static void ef_service_reload(void *editor)
         rc = g_load_map(editor, &s);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (!prev_armed) sh_rawmap_swap_arm(0);
+        sh_rawmap_reload_done();
         InterlockedExchange(&g_faulted, 1);
         InterlockedExchange(&g_state, SH_RELOAD_FAILED);
         ef_set_msg("the reload faulted; the frame hook is off for this session");
@@ -386,6 +400,7 @@ static void ef_service_reload(void *editor)
     }
 
     if (!prev_armed) sh_rawmap_swap_arm(0);
+    sh_rawmap_reload_done();
 
     /* LoadMap returns 0 on the success path (it returns 9 when the editor asked to deactivate
      * mid-load, and passes its inner loader's code through otherwise). */

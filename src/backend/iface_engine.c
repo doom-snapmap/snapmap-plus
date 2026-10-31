@@ -1486,6 +1486,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         mods.print           = ie_mods_print;
         mods.map_left        = ie_mods_map_left;
         sh_modui_bind(&mods);
+        /* The rawmap save's "share the .zip" line and toast. */
+        sh_rawmap_set_notify(ie_mods_toast, ie_mods_print);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */
 

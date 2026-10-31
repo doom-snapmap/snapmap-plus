@@ -107,6 +107,59 @@ int sh_rawmap_save_set_dest(const char *path);
 /* Count successful save mirrors for diagnostics. */
 unsigned long sh_rawmap_save_count(void);
 
+/* ---------------------------------------------------------------- a rawmap that names mods ------
+ * A rawmap's smpmod1 rows name the mods it places. The .json alone loads only
+ * where those mods are installed, so every rawmap save of a map with at least
+ * one row also writes the mods-carrying export (modexport.c) beside the JSON,
+ * at the same path with .zip (rawmap.json -> rawmap.zip), and says so with one
+ * toast and one console line. A save whose own path ends in .zip is the export
+ * already. A map with no rows writes only the JSON. */
+#define SH_RAWMAP_REPORT_PATH 260
+typedef struct sh_rawmap_save_report {
+    char json[SH_RAWMAP_REPORT_PATH];     /* "" when the save was a .zip */
+    char zip[SH_RAWMAP_REPORT_PATH];      /* the export, or "" for a map without mods */
+    unsigned long long json_bytes, zip_bytes;   /* zip_bytes 0 with zip set: it was refused */
+    unsigned mods;                        /* rows in the saved map */
+    char zip_error[192];                  /* why the export was not written */
+    unsigned long sequence;               /* increments on every reported write */
+} sh_rawmap_save_report;
+
+/* What the last rawmap write produced. Any thread. */
+void sh_rawmap_last_save(sh_rawmap_save_report *out);
+
+/* The export path for a JSON path: a trailing ".json" (any case) becomes
+ * ".zip", anything else gets ".zip" appended. 0 for a .zip path, an empty
+ * one, or one that does not fit. */
+int sh_rawmap_companion_zip_path(const char *json_path, char *out, size_t cap);
+
+/* How many mods the open map uses, as far as the backend knows without
+ * reading the editor: the rows of its last save since it opened, else the
+ * rows it was opened with. Any thread. */
+int sh_rawmap_open_map_mods(void);
+
+/* Where the save and load messages go besides the log: the editor toast and
+ * the game console (iface_engine.c binds both). Either may be NULL. */
+void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), void (*print)(const char *line));
+
+/* Main-thread tick: show the last save's sentence (toast and console line)
+ * once. Idle cost: one read. */
+void sh_rawmap_poll_main(void);
+
+/* The editor reload's own check, on its frame and before LoadMap (MAIN
+ * THREAD): read the staged source once (a .zip imports its mods here), count
+ * the mods it names that are not installed and, when there are any, hand them
+ * to the rawmap hold (modpublished.h) and refuse with the reason in `why`.
+ * On 1 the text is kept for the parse; call sh_rawmap_reload_done after
+ * LoadMap returns, on every path. */
+int  sh_rawmap_prepare_reload(char *why, int cap);
+void sh_rawmap_reload_done(void);
+
+/* The rawmap hold's resume: the mods are installed, so open the staged rawmap
+ * again (a reload now when the editor can take one; it stays staged for the
+ * next map open either way). `note` receives a sentence for the player when
+ * no reload was possible. Returns 1. */
+int sh_rawmap_reopen_after_mods(char *note, size_t cap);
+
 /* Bytes in the most recent successful mirror, or 0 before any write. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
@@ -206,7 +259,8 @@ int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_ids
 
 #ifdef SH_RAWMAP_TESTING
 /* Test-only: write bytes through the real destination resolver, so a test can check WHERE a save
- * lands and that a one-off destination is spent by it. Not present in shipping builds. */
+ * lands and that a one-off destination is spent by it, and what the save mirror reports after it
+ * (the export beside a map with mods). Not present in shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len);
 
 #endif
