@@ -66,35 +66,50 @@ int   modexport_probe(const char *zip_path, char *cause, size_t cause_cap);
 char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st, char *cause, size_t cause_cap);
 
 /* ---------------------------------------------- prefab exports ------ */
-/* A prefab's export has the same layout, with the prefab in place of the map:
+/* A prefab's export is one ZIP, written for every prefab, with or without mods:
  *
- *   prefab.json         the prefab file as the library holds it
- *   prefab.meta.json    its sidecar, whose "mods" rows name the builds carried
- *   export.json         {"bundles":[...],"format":1,"kind":"prefab","name":"<name>","prefab":"prefab.json"}
- *   mods/<id>@<version>+<build>/...   each bundle the rows name, as for a map
+ *   <name>.json                       the prefab file: the engine's JSON with its
+ *                                     "snapmapPlus" block (prefab_block.h), whose
+ *                                     "mods" rows name the builds the ZIP carries
+ *   mods/<id>@<version>+<build>/...   each bundle those rows name, as for a map
+ *   mods/legacy/<id>@<version>+<build>/...
  *
- * A map's importer refuses a prefab's export and the other way round. */
-#define MODEXPORT_PREFAB_ENTRY "prefab.json"
-#define MODEXPORT_PREFAB_META  "prefab.meta.json"
-#define MODEXPORT_PREFAB_MAX   (16u * 1024u * 1024u)
+ * There is no export.json: the prefab's own block is the index. The importer
+ * takes the one top-level .json (an idSnapEntityPrefab, or an idSnapMap that
+ * carries a block) and installs the carried bundles its rows name, each found
+ * by its bundle.canonical.json, whose SHA-256 is the bundle hash. An export
+ * that has been extracted (a folder holding <name>.json and mods/) imports as
+ * the ZIP does: the importer is given the .json, and its folder is the export.
+ *
+ * A map's importer refuses a prefab's export and the other way round; an
+ * export.json index without "map" (an earlier prefab layout) is refused. */
+#define MODEXPORT_PREFAB_MAX (16u * 1024u * 1024u)
 
-/* The sidecar to carry, written for the rows the export carries (a row that
- * pinned an earlier build names the current one). malloc'd, *len set; NULL
- * refuses the export. */
-typedef char *(*modexport_meta_fn)(void *ctx, const sh_modmanifest_list *rows, size_t *len);
+/* The prefab text to carry, given the rows the export carries (`moved` is 1
+ * when a row pinned an earlier build and now names the current one).
+ * malloc'd, *len set; NULL refuses the export. */
+typedef char *(*modexport_prefab_fn)(void *ctx, const sh_modmanifest_list *rows, int moved, size_t *len);
 
 /* Write a prefab's export: every bundle `rows` names must be installed and
- * usable. `meta` may be NULL (no sidecar entry). zip_path is UTF-8. */
+ * usable. `name` (UTF-8) names the entry <name>.json. text_for may be NULL
+ * (the prefab text is carried as given). zip_path is UTF-8. */
 int modexport_write_prefab(const char *name, const char *prefab, size_t len, const sh_modmanifest_list *rows,
-                           modexport_meta_fn meta, void *meta_ctx, const char *zip_path, modexport_stats *st,
+                           modexport_prefab_fn text_for, void *ctx, const char *zip_path, modexport_stats *st,
                            char *cause, size_t cause_cap);
 
-/* Import a prefab's export: verify it, install the bundles the store does not
- * hold (nothing already installed is written again), then return the prefab
- * text and its sidecar (malloc'd; *meta NULL when the export has none) and the
- * name export.json gives (may be empty). 1 on success, else 0 with the cause;
- * a damaged export installs nothing. */
-int modexport_read_prefab(const char *zip_path, char **prefab, size_t *prefab_len, char **meta, size_t *meta_len,
+/* The rows a prefab text names (its block's); the importer installs the
+ * carried bundles among them. Returns the count, or -1 to refuse. */
+typedef int (*modexport_rows_fn)(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows);
+
+/* Import a prefab's export: path (UTF-8) is the ZIP, or a .json whose folder
+ * is an extracted export. Verify it, install the bundles rows_of names that
+ * the export carries and the store does not hold (every carried bundle when
+ * rows_of is NULL; nothing already installed is written again), then return
+ * the prefab text (malloc'd) and its name (the .json's file name without the
+ * extension, UTF-8). 1 on success, else 0 with the cause; a damaged export
+ * installs nothing. st->bundles_absent counts rows naming a bundle the export
+ * does not carry and the store lacks. */
+int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
                           char *name, size_t name_cap, modexport_stats *st, char *cause, size_t cause_cap);
 
 /* ---------------------------------------------- rawmap file hooks ---- */

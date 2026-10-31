@@ -114,7 +114,11 @@ var prefabTransform = (function () {
         out += s.slice(start, i) + ' '; i = start = end + 2;
       } else i++;
     }
-    return JSON.parse(out + s.slice(start));
+    var doc = JSON.parse(out + s.slice(start));
+    // The product's own top-level block (description, tags, summary, mods) is not scene data;
+    // the host strips it before sending, and the preview and Limits skip it all the same.
+    if (doc && typeof doc === 'object' && !Array.isArray(doc)) delete doc.snapmapPlus;
+    return doc;
   }
 
   function countNavigationBoxes(sceneText) {

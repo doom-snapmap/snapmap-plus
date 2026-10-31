@@ -73,8 +73,9 @@ The header defines the complete ABI. These are the main entry points:
 | View menu navigation | `navmesh_view` at `+0x340` reports whether the preview is out of date and, when asked, requests an update on the game's next frame. |
 | Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save and camera writes run on the game's thread; the page waits up to one second, then drops the edit and logs it. |
 
-Prefab files and metadata use the path returned by `resolve_prefab_path`; their
-rename, delete and folder operations are native filesystem work. Feedback and
+Prefab files use the path returned by `resolve_prefab_path`; their rename,
+delete and folder operations are native filesystem work (an older prefab's
+read-only sidecar moves with it). Feedback and
 crash submission use a short-lived HTTPS worker in the host and the
 [feedback pipeline](feedback.md).
 
@@ -85,14 +86,14 @@ crash submission use a short-lived HTTPS worker in the host and the
 | host to page | `editorMode {entityMode, blueprint}` | The editor state, posted on change: module prefabs place only in Blueprint, object prefabs and new timelines in Object mode. |
 | page to host | `movePrefabs {names, fromFolders, toFolder}` / `deletePrefabs {names, folders}` | A multi-selection drop or delete, one tick, one `movePrefabsResult` / `deletePrefabsResult`, one list refresh. |
 | page to host | `flyTo {eid}` | Apply kind 4: the EditorFrame detour switches to Object mode and aims the camera at the entity; `flyToResult` confirms the queue only. |
-| page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the sidecar summary. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
+| page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the view of the summary the backend wrote into the file's block. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
 | page to host | `budgetTable` | Ask once for the budget table; the host answers `budgetTable {data}` (null until an editor has been entered) and re-sends it from its 330 ms poll whenever the table generation changes, that is after a palette rebuild. |
 | page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data}`; asked when the Prefabs tab opens and on each prefab selection. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
-| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's sidecar records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, version, bundle, size, installed}]}`); see [Prefabs and their mods](#prefabs-and-their-mods). |
+| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block (else its older sidecar) records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, version, bundle, size, installed}]}`); see [Prefabs and their mods](#prefabs-and-their-mods). |
 | host to page | `loadPrefabResult {result: 3 \| -7, message}` | 3: the placement is held while the mod store is asked for its missing mods; -7: refused because of its mods (the message says why, or is empty when the game's own notice did). |
-| page to host | `exportPrefab {name, folder}` / `importPrefab` | Open the Windows Save or Open dialog for a prefab ZIP; the host answers `prefabFileResult {op, ok, message, name?, cancelled?}` and refreshes the list after an import. |
+| page to host | `exportPrefab {name, folder}` / `importPrefab` | Open the Windows Save dialog for a prefab's ZIP, or the Open dialog for a ZIP or an extracted export's `.json`; the host answers `prefabFileResult {op, ok, message, name?, cancelled?}` and refreshes the list after an import. |
 
 ## Prefabs 3D preview
 
@@ -153,12 +154,28 @@ and usage are always read live, never hard-coded.
 
 ## Prefabs and their mods
 
-A prefab's sidecar records the mods its entities and modules need
-(`backend/prefab_mods.c`, see [architecture](architecture.md#prefabs-that-name-mods)).
-Create from Selection asks the backend to record them right after the file is
-written (`MODS_RECORD`); a module prefab's save writes them itself. Every
-sidecar write from the page goes through `META_WRITE`, so editing the
-description or tags, or clearing both, never drops the recorded rows.
+A prefab is one file. Its description, tags, a module prefab's summary and the
+mods its entities and modules need live in the file's own top-level
+`snapmapPlus` block, after the engine's members (`backend/prefab_block.h`,
+`backend/prefab_mods.c`, see [architecture](architecture.md#prefabs-that-name-mods)).
+Create from Selection writes the file the engine serialized and then asks the
+backend to write the block into it (`MODS_RECORD`); a module prefab's save
+writes the file with its block. Description and tag edits go through
+`META_WRITE`, which rewrites the block in place and keeps its summary and mod
+rows; clearing both fields clears them. No sidecar is written. The host never
+hands the block to the engine: Load / Place strips it after the mods are
+resolved and before the paste or the module merge, and Prefab Details sends
+the page the scene without it (`prefabTransform.parseScene` also drops the key,
+so the preview and Limits never see it).
+
+The page reads a prefab's details as the view, the flat object
+`{desc, tags, ...summary..., mods}` that `META_READ` returns from the block.
+A prefab saved before the block has none; when a `<name>.meta.json` sits beside
+it, the view is that sidecar, read-only: the first description or tag edit
+writes the block into the file and leaves the sidecar as it was. The list
+reads each prefab's view from at most the last 1 MB of its file (where the
+block is) for its tags, module kind and mods; it still never sends a scene,
+and a `.meta.json` is never listed as a prefab.
 
 The list shows a pill per prefab that records mods: "Mods: <id>" when every
 one is installed, "Needs mods: <id>" (warning colours) naming the missing ones
@@ -170,16 +187,20 @@ when the mod store has them and otherwise to ask for the prefab's ZIP export.
 P29's module warning stays above it; a module one of the rows provides is a
 mod, not a missing room.
 
-Load / Place asks the backend first (`MODS_RESOLVE`) for either kind of prefab
-whose sidecar exists. It answers place now, held (the host follows it with
-`MODS_POLL` on each think-loop turn and places the prefab again, through the
-same Load / Place, once the mods are installed), a module the player cannot
-get, or refused. The page shows the backend's text as a toast. Export (Prefab
-Details head) and Import (the list head) use the rawmap pickers' dialog with a
-"Prefab with its mods (*.zip)" type (`rawmap_picker.h`, `for_prefab_dialog`);
-the backend reads and writes the ZIP on the UI thread. The pure helpers sit
-between `// --- prefab mods (pure) ---` markers in `mockup.html` and are tested
-by `tests/prefab_mods_test.js`.
+Load / Place asks the backend first (`MODS_RESOLVE`, with the whole file) for
+either kind of prefab; one that names no mods is answered without the game. It
+answers place now, held (the host follows it with `MODS_POLL` on each
+think-loop turn and places the prefab again, through the same Load / Place,
+once the mods are installed), a module the player cannot get, or refused. The
+page shows the backend's text as a toast. Export (Prefab Details head) always
+writes one ZIP, `<name>.json` and `mods/<id>@<version>+<build>/...`, through the
+rawmap pickers' Save dialog with a "Prefab export (*.zip)" type, proposing
+`<name>.zip`. Import (the list head) uses the Open dialog with "Prefab exports
+(*.zip, *.json)": a ZIP, or the `.json` inside an extracted export folder,
+whose `mods/` folder holds the bundles (`rawmap_picker.h`,
+`for_prefab_dialog`). The backend reads and writes them on the UI thread. The
+pure helpers sit between `// --- prefab mods (pure) ---` markers in
+`mockup.html` and are tested by `tests/prefab_mods_test.js`.
 
 ## Mods tab
 

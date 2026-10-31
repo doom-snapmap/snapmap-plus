@@ -11,7 +11,12 @@
  * names a bundle it does not carry imports what it carries and counts the
  * rest as absent, which is what the rawmap gate then refuses or offers to
  * download; importing an export whose bundles are installed rewrites
- * nothing. Pure file work: no network.
+ * nothing. A prefab's export carries <name>.json and its bundles with no
+ * index (also without mods), each importer refuses the other's ZIP, the
+ * prefab importer installs only the carried bundles the prefab's rows name,
+ * reads an extracted export folder and a lone .json, and refuses a map's
+ * JSON, a non-prefab, the earlier export.json layout and two prefabs in one
+ * ZIP. Pure file work: no network.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -160,6 +165,68 @@ static unsigned count_entries_named(const unsigned char *zip, size_t len, const 
         }
     }
     return n;
+}
+
+static void put16(unsigned char *p, unsigned v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
+
+/* A ZIP of stored entries, for exports no release writes. */
+static int zip_stored(const char *path, int n, const char *const *names, const char *const *datas)
+{
+    unsigned char buf[16384], *p = buf, *cd0;
+    unsigned long offs[8];
+    int i;
+    for (i = 0; i < n; i++) {
+        size_t nl = strlen(names[i]), dl = strlen(datas[i]);
+        offs[i] = (unsigned long)(p - buf);
+        put32(p, 0x04034b50ul); put16(p + 4, 20); put16(p + 6, 0); put16(p + 8, 0); put16(p + 10, 0); put16(p + 12, 0x21);
+        put32(p + 14, crc32_of((const unsigned char *)datas[i], dl)); put32(p + 18, (unsigned long)dl); put32(p + 22, (unsigned long)dl);
+        put16(p + 26, (unsigned)nl); put16(p + 28, 0);
+        memcpy(p + 30, names[i], nl); memcpy(p + 30 + nl, datas[i], dl);
+        p += 30 + nl + dl;
+    }
+    cd0 = p;
+    for (i = 0; i < n; i++) {
+        size_t nl = strlen(names[i]), dl = strlen(datas[i]);
+        memset(p, 0, 46);
+        put32(p, 0x02014b50ul); put16(p + 4, 20); put16(p + 6, 20); put16(p + 14, 0x21);
+        put32(p + 16, crc32_of((const unsigned char *)datas[i], dl)); put32(p + 20, (unsigned long)dl); put32(p + 24, (unsigned long)dl);
+        put16(p + 28, (unsigned)nl); put32(p + 42, offs[i]);
+        memcpy(p + 46, names[i], nl);
+        p += 46 + nl;
+    }
+    memset(p, 0, 22);
+    put32(p, 0x06054b50ul); put16(p + 8, (unsigned)n); put16(p + 10, (unsigned)n);
+    put32(p + 12, (unsigned long)(p - cd0)); put32(p + 16, (unsigned long)(cd0 - buf));
+    p += 22;
+    return spit(path, buf, (size_t)(p - buf));
+}
+
+/* The prefab export's text callback: carries the given text with a mark, so
+ * the test sees it was asked, and records what it was given. */
+static int g_text_for_calls, g_text_for_moved;
+static size_t g_text_for_rows;
+static char *text_for(void *ctx, const sh_modmanifest_list *rows, int moved, size_t *len)
+{
+    const char *base = (const char *)ctx;
+    size_t n = strlen(base);
+    char *out = (char *)malloc(n + 1);
+    g_text_for_calls++;
+    g_text_for_moved = moved;
+    g_text_for_rows = rows ? rows->count : 0;
+    if (!out) return NULL;
+    memcpy(out, base, n + 1);
+    *len = n;
+    return out;
+}
+
+/* The importer's rows: those whose hashes ctx (a NULL-terminated list) names. */
+static int rows_named(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows)
+{
+    const sh_modmanifest_row *const *want = (const sh_modmanifest_row *const *)ctx;
+    (void)prefab; (void)len;
+    memset(rows, 0, sizeof *rows);
+    for (; want && *want; want++) sh_modmanifest_list_add(rows, *want);
+    return (int)rows->count;
 }
 
 static const char *const A_FILES[] = { "assets/generated/image/mods/test.alpha/a.bimage", "assets/generated/image/mods/test.alpha/shared.bimage", NULL };
@@ -466,6 +533,129 @@ int main(int argc, char **argv)
         sh_modmanifest_list_free(&rows);
         CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
         if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+    }
+
+    /* ---- a prefab's export: <name>.json and its bundles, no index ---- */
+    {
+        static const char PREFAB[] =
+            "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/test.alpha/thing\"}}],"
+            "\"grabDistance\":256,\"~type\":\"idSnapEntityPrefab\",\n\"snapmapPlus\":{\"format\":1,\"description\":\"\","
+            "\"tags\":[],\"mods\":[]}}";
+        static const char MAPJSON[] = "{\"entities\":[],\"~type\":\"idSnapMap\"}";
+        char pz[MAX_PATH * 2], pz2[MAX_PATH * 2], storeF[MAX_PATH * 2], storeG[MAX_PATH * 2], ex[MAX_PATH * 2];
+        char pj[MAX_PATH * 2], name[160], zkA[SH_MS_KEY_MAX + 1], entry[MAX_PATH];
+        const sh_modmanifest_row *only_a[] = { &ra, NULL };
+        sh_modmanifest_row ghost = rb;
+        const sh_modmanifest_row *a_and_ghost[] = { &ra, &ghost, NULL };
+        size_t zl = 0, len = 0;
+        unsigned char *z;
+        char *text = NULL;
+        _snprintf_s(pz, sizeof pz, _TRUNCATE, "%s\\Door.zip", tmp);
+        _snprintf_s(pz2, sizeof pz2, _TRUNCATE, "%s\\Door2.zip", tmp);
+        _snprintf_s(storeF, sizeof storeF, _TRUNCATE, "%s\\storeF", tmp);
+        _snprintf_s(storeG, sizeof storeG, _TRUNCATE, "%s\\storeG", tmp);
+        _snprintf_s(ex, sizeof ex, _TRUNCATE, "%s\\extracted export", tmp);
+        _snprintf_s(zkA, sizeof zkA, _TRUNCATE, "%s@%s+1", ra.id, ra.version);
+        strcpy_s(ghost.bundle, sizeof ghost.bundle, "5555555555555555555555555555555555555555555555555555555555555555");
+        CHECK(sh_ms_set_root(storeA));
+        CHECK(sh_modserve_index_build(storeA) >= 0);
+        memset(&rows, 0, sizeof rows);
+        CHECK(sh_modmanifest_list_add(&rows, &ra));
+        CHECK(modexport_write_prefab("Door", PREFAB, sizeof PREFAB - 1, &rows, NULL, NULL, pz, &st, cause, sizeof cause));
+        CHECK(st.bundles == 1);
+        z = slurp(pz, &zl);
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/%s/bundle.canonical.json", zkA);
+        CHECK(z && entry_data(z, zl, entry) != 0);
+        CHECK(z && entry_data(z, zl, "Door.json") != 0 && !memcmp(z + entry_data(z, zl, "Door.json"), PREFAB, sizeof PREFAB - 1));
+        CHECK(z && count_entries_named(z, zl, "export.json") == 0 && count_entries_named(z, zl, ".meta.json") == 0);
+        free(z);
+        /* The text callback sees the carried rows. */
+        g_text_for_calls = 0;
+        CHECK(modexport_write_prefab("Door", PREFAB, sizeof PREFAB - 1, &rows, text_for, (void *)MAPJSON, pz2, &st, cause, sizeof cause));
+        CHECK(g_text_for_calls == 1 && g_text_for_rows == 1 && g_text_for_moved == 0);
+        z = slurp(pz2, &zl);
+        CHECK(z && entry_data(z, zl, "Door.json") && !memcmp(z + entry_data(z, zl, "Door.json"), MAPJSON, sizeof MAPJSON - 1));
+        free(z);
+        sh_modmanifest_list_free(&rows);
+        /* No mods: still one ZIP, the prefab alone. */
+        CHECK(modexport_write_prefab("Crate", PREFAB, sizeof PREFAB - 1, NULL, NULL, NULL, pz2, &st, cause, sizeof cause) &&
+              st.bundles == 0 && st.entries == 1);
+        CHECK(!modexport_write_prefab("a/b", PREFAB, sizeof PREFAB - 1, NULL, NULL, NULL, pz2, &st, cause, sizeof cause) &&
+              strstr(cause, "cannot name a file"));
+
+        /* Each importer refuses the other's ZIP. */
+        CHECK(modexport_read(pz, &len, &st, cause, sizeof cause) == NULL && strstr(cause, "prefab's export, not a map's"));
+        CHECK(!modexport_probe(pz, cause, sizeof cause));
+        CHECK(!modexport_read_prefab(zip, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+              strstr(cause, "map's export, not a prefab's"));
+
+        /* Read into an empty store: the bundle the rows name installs, the text comes back. */
+        CHECK(sh_ms_set_root(storeF));
+        CHECK(sh_modserve_index_build(storeF) == 0);
+        CHECK(modexport_read_prefab(pz, rows_named, (void *)a_and_ghost, &text, &len, name, sizeof name, &st, cause, sizeof cause));
+        CHECK(text && len == sizeof PREFAB - 1 && !memcmp(text, PREFAB, len) && !strcmp(name, "Door"));
+        CHECK(st.bundles == 1 && st.bundles_installed == 1 && st.bundles_absent == 1);
+        CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1);
+        free(text); text = NULL;
+        /* A carried bundle no row names is left out. */
+        CHECK(sh_ms_set_root(storeG));
+        CHECK(sh_modserve_index_build(storeG) == 0);
+        {
+            const sh_modmanifest_row *none[] = { NULL };
+            CHECK(modexport_read_prefab(pz, rows_named, (void *)none, &text, &len, name, sizeof name, &st, cause, sizeof cause));
+            CHECK(st.bundles == 0 && st.bundles_installed == 0 && sh_modserve_bundle_state(ra.bundle, NULL, 0) == 0);
+            free(text); text = NULL;
+        }
+
+        /* An extracted export: the .json's folder is the export. */
+        CHECK(mt_unzip_stored(pz, ex) > 3);
+        _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Door.json", ex);
+        mt_write(ex, "mods\\other.mod@1.0.0+1\\bundle.canonical.json", "{\"id\":\"other.mod\"}");   /* unrelated, not named */
+        CHECK(modexport_read_prefab(pj, rows_named, (void *)only_a, &text, &len, name, sizeof name, &st, cause, sizeof cause));
+        if (!text) fprintf(stderr, "folder import: %s\n", cause);
+        CHECK(text && len == sizeof PREFAB - 1 && !memcmp(text, PREFAB, len) && !strcmp(name, "Door"));
+        CHECK(st.bundles == 1 && st.bundles_installed == 1 && sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1);
+        free(text); text = NULL;
+        /* A plain prefab file without mods/ beside it imports alone. */
+        _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Plain.json", tmp);
+        CHECK(spit(pj, PREFAB, sizeof PREFAB - 1));
+        CHECK(modexport_read_prefab(pj, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+              !strcmp(name, "Plain") && st.bundles == 0);
+        free(text); text = NULL;
+        /* A map's JSON is not a prefab; neither is an idSnapMap without a block. */
+        _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Map.json", tmp);
+        CHECK(spit(pj, MAPJSON, sizeof MAPJSON - 1));
+        CHECK(!modexport_read_prefab(pj, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+              strstr(cause, "is a map, not a prefab") && !name[0]);
+        CHECK(spit(pj, "{\"~type\":\"idDeclEntityDef\"}", 27));
+        CHECK(!modexport_read_prefab(pj, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+              strstr(cause, "is not a prefab"));
+        CHECK(spit(pj, "[1,2]", 5));
+        CHECK(!modexport_read_prefab(pj, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+              strstr(cause, "not prefab JSON"));
+        /* The earlier layout (export.json without "map") and two prefabs in one ZIP. */
+        {
+            static const char *const OLD_N[] = { "export.json", "prefab.json", "prefab.meta.json" };
+            static const char *const OLD_D[] = { "{\"bundles\":[],\"format\":1,\"kind\":\"prefab\",\"name\":\"Door\",\"prefab\":\"prefab.json\"}",
+                                                 "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\"}", "{\"desc\":\"\"}" };
+            static const char *const TWO_N[] = { "A.json", "B.json" };
+            static const char *const TWO_D[] = { "{\"~type\":\"idSnapEntityPrefab\"}", "{\"~type\":\"idSnapEntityPrefab\"}" };
+            static const char *const EXP_N[] = { "export.json" };
+            static const char *const EXP_D[] = { "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\"}" };
+            CHECK(zip_stored(pz2, 3, OLD_N, OLD_D));
+            CHECK(!modexport_read_prefab(pz2, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+                  strstr(cause, "earlier layout"));
+            CHECK(modexport_read(pz2, &len, &st, cause, sizeof cause) == NULL && strstr(cause, "has no map.rawmap.json"));
+            CHECK(zip_stored(pz2, 2, TWO_N, TWO_D));
+            CHECK(!modexport_read_prefab(pz2, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+                  strstr(cause, "more than one prefab"));
+            /* A prefab named "export" is a prefab, not an index. */
+            CHECK(zip_stored(pz2, 1, EXP_N, EXP_D));
+            CHECK(modexport_read_prefab(pz2, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
+                  !strcmp(name, "export"));
+            free(text); text = NULL;
+        }
+        CHECK(sh_ms_set_root(storeA));
     }
 
     HeapFree(GetProcessHeap(), 0, map);

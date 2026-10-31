@@ -459,8 +459,10 @@ These backend files share the work:
   It also holds a rawmap load whose mods are missing, as in
   [Rawmaps that name mods](#rawmaps-that-name-mods), and a prefab placement
   whose mods are missing, as in [Prefabs that name mods](#prefabs-that-name-mods).
-- `prefab_mods.c` records the mods a prefab needs in its sidecar, resolves
-  them before Load / Place, and writes and reads a prefab's ZIP, as in
+- `prefab_mods.c` keeps a prefab's description, tags, summary and the mods it
+  needs in the prefab file's own `snapmapPlus` block (`prefab_block.c` finds,
+  inserts and strips it), reads an older prefab's sidecar read-only, resolves
+  the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
@@ -1387,20 +1389,59 @@ A prefab is never handed to the engine while a mod it uses is missing, for the
 same reason as a rawmap: an entity on a mod's decl, or an instance of a mod's
 module, has nothing to resolve to.
 
+One file. A prefab is one file in the library: the engine's JSON (an
+`idSnapEntityPrefab`, or a module prefab's `idSnapMap`) with one product-owned
+top-level member, `snapmapPlus`, after the engine's own members
+(`prefab_block.h`):
+
+```
+"snapmapPlus":{"format":1,"description":"","tags":[],
+               "mods":[{"id","version","bundle","size","names"}...],
+               "summary":{...}}
+```
+
+`summary` is a module prefab's summary (module, entity, door-slot and variable
+counts, dropped wires and references, AI Navigation boxes, environments, the
+footprint and each module's box) and is absent for an object prefab. The block
+is inserted as `,\n"snapmapPlus":{...}` right after the last engine member, so
+removing that span gives back the engine's bytes exactly. The engine's
+reflection parser skips an unknown top-level key (on 13954591 a map carrying
+the block loaded clean and the engine's re-save dropped it), but nothing depends
+on that: every reader strips the block first. Load / Place strips it before the
+paste or the module merge, the module check and merge strip it again in the
+backend, the closure ignores it, and the Prefabs tab sends the page the scene
+without it (the page's scene parser also drops the key). The product writes a
+prefab file at Create and then only rewrites its block; the engine never
+re-saves one, so the block persists.
+
 Recording. Saving a prefab finds its mods exactly as a map's save does: the
 placed names of the prefab text (`sh_modmanifest_placed_names`: every
 `inherit`, `moduleName` and string inside an `edit` object) go through
 `modserve_bundles_for_names_visit`, which names every admitted bundle that
 provides one and the bundles its needs reach. Each bundle is one row in the
-manifest's form, `{"id","version","bundle","size","names"}`; a pinned hash an
-alias names resolves to the current build wherever a row is used, as for a map.
-The rows live in the prefab's sidecar, `<name>.meta.json`, under `"mods"`,
-beside the description, tags and a module prefab's summary; the prefab file
-itself stays the engine's bytes, so the engine never reads them and an older
-product ignores them. An object prefab's rows are written right after Create
-writes the file (`MODS_RECORD`), a module prefab's by the module save itself.
-A sidecar without `"mods"` (every prefab saved before this) names no mods and
-loads as before. The page's own sidecar writes keep the rows (`META_WRITE`).
+manifest's form; a pinned hash an alias names resolves to the current build
+wherever a row is used, as for a map. Create writes the file the engine
+serialized and then has the backend write a fresh block into it (`MODS_RECORD`:
+empty description and tags, the rows, `[]` when there are none); a module
+prefab's save writes the file with its block in one step. The Prefabs tab's
+description and tag edits rewrite the block in place (`META_WRITE`), keeping its
+summary and rows. No sidecar is written.
+
+The read-only sidecar. A prefab saved before the block has none. When a
+`<name>.meta.json` sits beside it, the list and Prefab Details show that
+sidecar's description, tags, summary and `"mods"` rows, and Load / Place,
+export and `sh_prefab mods` use its rows. It is not migrated: the first
+description or tag edit writes the block into the file from the sidecar's
+details and leaves the sidecar on disk as it was; from then on the block wins.
+A prefab with neither names no mods and loads as before. A sidecar is never
+listed as a prefab, and it follows its prefab when that is moved, renamed or
+deleted.
+
+The page and the slot see a prefab's details as one flat object, the view:
+the sidecar's shape, `{"desc","tags",...summary members...,"mods"}`. A block
+reads as a view and a view composes into a block (`prefab_mods.c`).
+`META_READ` returns the view of a file (its block, else its sidecar); the
+Prefabs list reads at most the last 1 MB of each file, where the block is.
 
 Resolving. Load / Place first reads the rows (`MODS_RESOLVE`, on the game
 thread):
@@ -1432,19 +1473,42 @@ thread):
 
 One hold runs at a time: a second placement while one waits is refused.
 
-Export and import. `sh_prefab export "<name>" "<path.zip>"` and the tab's
-Export write the rawmap export's layout (`modexport.h`) with the prefab in place
-of the map: `prefab.json`, `prefab.meta.json` (its rows naming the builds the ZIP
-carries), `export.json` with `"kind":"prefab"` and the name, and
-`mods/<id>@<version>+<build>/...`. A prefab saved before rows were recorded
-exports the closure of its text. Each importer refuses the other's ZIP.
-`sh_prefab import "<path.zip>"` and the tab's Import install the bundles the
-store lacks (hashes verified, nothing installed rewritten), rescan, and add the
-prefab under the name the export gives, else the ZIP's name; a prefab of that
-name with the same bytes is left alone (an import that finds everything already
-there writes nothing), one with other bytes is kept and the import takes
-"<name> (2)" and so on. `sh_prefab mods "<name>"` lists the rows and whether
-each is installed.
+Export. `sh_prefab export "<name>" "<path.zip>"` and the tab's Export always
+write one ZIP, also for a prefab that uses no mods (`modexport.h`):
+
+```
+<name>.json                        the prefab file, its block naming the builds carried
+mods/<id>@<version>+<build>/...    each bundle the block's rows name, as for a map
+mods/legacy/<id>@<version>+<build>/...
+```
+
+There is no `export.json` and no sidecar: the prefab's own block is the index.
+`<name>.json` is the file's bytes as they are on disk. A prefab with no block
+(saved before it, with or without a sidecar), one saved before rows were
+recorded (its rows are then the closure of its text) and one whose rows pin an
+earlier build are carried with their block written for the rows the ZIP
+carries; the file in the library is not changed. The Export dialog proposes
+`<name>.zip`.
+
+Import. `sh_prefab import "<path.zip or path.json>"` and the tab's Import (the
+Open dialog's "Prefab exports (*.zip, *.json)") take the ZIP, or a `.json`
+inside an extracted export folder: that folder is the export, the picked file is
+the prefab and a `mods/` folder beside it holds the bundles. The importer takes
+the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
+carries a block), finds each carried bundle by its `bundle.canonical.json`
+(whose SHA-256 is the bundle hash) and installs the ones the block's rows name
+that the store lacks, hashes verified and nothing installed rewritten; a carried
+bundle no row names is left out. It then rescans and adds the prefab under the
+`.json`'s file name. A prefab of that name with the same bytes is left alone (an
+import that finds everything already there writes nothing); one with other bytes
+is kept and the import takes "<name> (2)" and so on. A row the export does not
+carry is named in the result ("It also needs <id> <version>, which the export
+does not carry."), and Load / Place asks for it as above. Each importer refuses
+the other's ZIP: a rawmap export has `export.json` with `"map"`, and the prefab
+importer also refuses a map's JSON, two prefabs in one ZIP and an `export.json`
+index without `"map"` (the earlier prefab layout, which shipped in no release).
+`sh_prefab mods "<name>"` lists the block's rows (else the sidecar's) and
+whether each is installed.
 
 ### Publishing a map with mods
 
@@ -1526,8 +1590,10 @@ queue once on the worker and logs the counts.
 
 ## Module prefabs
 
-`module_prefab.c` saves the selected Blueprint modules as an `idSnapMap` file and
-places one by merging it into a fresh serialization of the open map
+`module_prefab.c` saves the selected Blueprint modules as an `idSnapMap` file,
+with the summary and mod rows in its `snapmapPlus` block (one file, see
+[Prefabs that name mods](#prefabs-that-name-mods)), and places one by stripping
+that block and merging the rest into a fresh serialization of the open map
 (`module_prefab_map.c`) and installing the result through the engine's Redo step
 (see `module_prefab.h`). Before the merge, Place checks every `moduleName` the
 file names, on the game thread: `sh_mp_check_modules` asks
@@ -1549,7 +1615,7 @@ load module") and keeps its entities, and the record builder SnapMapEditCtor run
 modulePalette" when FindModule returns the palette's end record. The Prefabs tab
 runs the same check (`SH_MODULE_PREFAB_CHECK`) when a module prefab is selected
 and shows the missing rooms above Limits; the check names nothing when no editor
-palette is open, and with the prefab's sidecar it leaves out the modules its
+palette is open, and with the prefab's block (or older sidecar) it leaves out the modules its
 mod rows provide, which the Prefabs tab lists as mods instead.
 
 ## Map behaviour carried by String Set nodes

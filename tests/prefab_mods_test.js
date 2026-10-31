@@ -1,6 +1,7 @@
-/* The Prefabs tab's mods: the status a prefab's sidecar records (backend/prefab_mods.c), the list
-   pill, the Prefab Details rows, the Load / Place answers about mods and the Export and Import
-   buttons, lifted from the shipped HTML; and the host's side of each message. Pure ASCII. */
+/* The Prefabs tab's mods: the status a prefab's snapmapPlus block records (backend/prefab_mods.c),
+   the list pill, the Prefab Details rows, the Load / Place answers about mods and the Export and
+   Import buttons, lifted from the shipped HTML; and the host's side of each message: the block
+   read for the list and details, stripped before the engine, and no sidecar written. Pure ASCII. */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -108,6 +109,29 @@ check(host.indexOf('poc_poll_prefab_mods();') !== -1, 'host: the think loop foll
 check(host.indexOf('SH_MODULE_PREFAB_MODS_RECORD') !== -1 && host.indexOf('SH_MODULE_PREFAB_META_WRITE') !== -1,
       'host: Save records the mods and description writes keep them');
 check(host.indexOf('L"},\\"mods\\":{"') !== -1 && host.indexOf('\\"modsStatus\\":\\"') !== -1, 'host: the list and details carry the status');
+
+/* One file per prefab: the host reads details from the block, strips it before the engine, writes no sidecar. */
+const strip = host.indexOf('body.resize(sh_prefab_block_strip(&body[0], body.size()));', load);
+check(strip !== -1 && strip > host.indexOf('if (!poc_resolve_prefab_mods(body)) return;', load) &&
+      strip < host.indexOf('poc_apply_place_module_prefab(body);', load) && strip < host.indexOf('it.kind = 2;', load),
+      'host: Load / Place strips the block after resolving the mods and before either kind reaches the engine');
+const resolve = host.indexOf('static bool poc_resolve_prefab_mods(');
+check(resolve !== -1 && host.indexOf('GetFileAttributesA(meta) == INVALID_FILE_ATTRIBUTES', resolve) === -1,
+      'host: the mods are resolved whether or not a sidecar exists (the block holds them)');
+const detail = host.indexOf('static void poc_send_prefab_detail(');
+check(detail !== -1 && host.indexOf('sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));', detail) !== -1,
+      'host: the selected prefab\'s scene ships without its block');
+check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('poc_prefab_view(path, mp, nullptr)') !== -1,
+      'host: the list and details read the view from the file (else its sidecar)');
+const rec = host.indexOf('call.op = SH_MODULE_PREFAB_MODS_RECORD;');
+check(rec !== -1 && host.indexOf('call.path = path;', rec) !== -1 && host.indexOf('call.path = path;', rec) < rec + 200,
+      'host: Create has the backend write the block into the prefab file');
+const save = host.indexOf('static void poc_apply_save_prefab_meta(');
+const saveEnd = host.indexOf('\n}\n', save);
+check(save !== -1 && host.slice(save, saveEnd).indexOf('fopen_s') === -1 && host.slice(save, saveEnd).indexOf('DeleteFileA') === -1 &&
+      host.slice(save, saveEnd).indexOf('call.path = path;') !== -1,
+      'host: description and tag edits go to the file\'s block; no sidecar is written or deleted');
+check(host.indexOf('call.meta_path = meta;\n    call.out = out;') === -1, 'host: the module prefab save writes no sidecar');
 
 /* The look. */
 check(/\.pf-mods\s*\{/.test(css) && /\.pf-mods\.pf-mods-missing\s*\{/.test(css) && /\.pc-mods\s*\{/.test(css) &&

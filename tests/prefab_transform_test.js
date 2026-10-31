@@ -99,6 +99,10 @@ const commented='{/*camera yaw*/\n   "cameraYaw" : 90.0,/*entities*/\n   "entiti
 check(tx.parseScene(commented).entities[0].displayName==='a /*not a comment*/ " b',
       'scene comments are dropped outside strings and kept inside them');
 check(tx.countNavigationBoxes(commented)===1,'a serializer-commented scene still counts its navigation boxes');
+const withBlock=commented.slice(0,-1)+',\n"snapmapPlus":{"format":1,"description":"d","tags":[],"mods":[],"summary":{"entities":[1]}}}';
+const parsedBlock=tx.parseScene(withBlock);
+check(!('snapmapPlus' in parsedBlock) && parsedBlock.entities.length===1 && tx.countNavigationBoxes(withBlock)===1,
+      'the product block is skipped: the scene reads as the engine wrote it');
 let threw=false; try { tx.parseScene('{/* open'); } catch (e) { threw=true; }
 check(threw,'an unterminated comment is a parse error');
 check(tx.navigationFlags('','snapmaps/volume/blocking',{blockDemons:true}).blockDemons===true &&

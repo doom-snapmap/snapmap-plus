@@ -711,13 +711,18 @@ static int mp_save(sh_module_prefab_call *call)
     }
     side = sh_mp_sidecar_json(&sum, rel ? (const float (*)[6])rel : NULL, NULL);
     if (side) {
-        /* The mods its modules and entities need, as a map's save records them. */
+        /* One file: the summary and the mods its modules and entities need (as
+         * a map's save records them) go into its snapmapPlus block. */
         int mods = 0;
-        char *with = sh_prefab_mods_with_closure(side, frag, flen, &mods);
-        if (with) { free(side); side = with; }
-        if (mods) mp_logf("MODPREFAB: the prefab needs %d mod(s); its sidecar records them", mods);
+        size_t olen = 0;
+        char *view = NULL, *file = sh_prefab_mods_module_file(frag, flen, side, &olen, &view, &mods);
+        free(side);
+        side = view;
+        if (file) { free(frag); frag = file; flen = olen; }
+        else { free(side); side = NULL; }
+        if (mods) mp_logf("MODPREFAB: the prefab needs %d mod(s); its block records them", mods);
     }
-    if (!side || !mp_write_file(call->path, frag, flen) || !mp_write_file(call->meta_path, side, strlen(side))) {
+    if (!side || !mp_write_file(call->path, frag, flen)) {
         mp_out(call, "the prefab file could not be written");
         goto done;
     }
@@ -743,15 +748,20 @@ static int mp_place(sh_module_prefab_call *call)
     float at[3];
     int first = 0, added = 0, boxes = 0;
     sh_mp_summary sum;
+    char *engine;
+    size_t elen = 0;
     if (!call->text || !sh_mp_is_module_file(call->text, call->text_len)) { mp_out(call, "not a module prefab"); return -1; }
-    if (!sh_mp_inspect(call->text, call->text_len, &sum, err, (int)sizeof err)) { mp_out(call, err); return -1; }
+    /* The merge reads the engine's members only: the product's block is left out. */
+    engine = sh_prefab_mods_strip_copy(call->text, call->text_len, &elen);
+    if (!engine) { mp_out(call, "out of memory"); return -1; }
+    if (!sh_mp_inspect(engine, elen, &sum, err, (int)sizeof err)) { free(engine); mp_out(call, err); return -1; }
     boxes = sum.has_nav_boxes;
-    if (InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE) { sh_mp_summary_free(&sum); mp_out(call, "a placement is still in progress"); return 0; }
+    if (InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE) { sh_mp_summary_free(&sum); free(engine); mp_out(call, "a placement is still in progress"); return 0; }
     c = (mp_capture *)calloc(1, sizeof *c);
-    if (!c) { sh_mp_summary_free(&sum); return 0; }
+    if (!c) { sh_mp_summary_free(&sum); free(engine); return 0; }
     c->op = SH_MODULE_PREFAB_PLACE;
     c->modules = &sum;
-    if (!mp_capture_run(c)) { sh_mp_summary_free(&sum); mp_out(call, "the game did not answer"); free(c); return 0; }
+    if (!mp_capture_run(c)) { sh_mp_summary_free(&sum); free(engine); mp_out(call, "the game did not answer"); free(c); return 0; }
     sh_mp_summary_free(&sum);
     c->modules = NULL;
     if (c->result == -6) {
@@ -761,6 +771,7 @@ static int mp_place(sh_module_prefab_call *call)
         mp_out(call, toast);
         if (c->json) HeapFree(GetProcessHeap(), 0, c->json);
         free(c);
+        free(engine);
         return -6;
     }
     if (c->result != 1) {
@@ -768,6 +779,7 @@ static int mp_place(sh_module_prefab_call *call)
         mp_out(call, r == -4 ? "switch to Blueprint mode" : "finish the Blueprint action first");
         if (c->json) HeapFree(GetProcessHeap(), 0, c->json);
         free(c);
+        free(engine);
         return r;
     }
     /* the anchor at the floor point under the cursor, on the 128 grid */
@@ -776,13 +788,15 @@ static int mp_place(sh_module_prefab_call *call)
         at[1] = 128.0f * floorf(c->floor[1] / 128.0f + 0.5f);
         at[2] = c->floor[2];
     } else { at[0] = at[1] = at[2] = 0.0f; }
-    if (!sh_mp_merge(c->json, c->len, call->text, call->text_len, at, &merged, &mlen, &first, &added, err, (int)sizeof err)) {
+    if (!sh_mp_merge(c->json, c->len, engine, elen, at, &merged, &mlen, &first, &added, err, (int)sizeof err)) {
+        free(engine);
         mp_logf("MODPREFAB: merge refused: %s", err);
         mp_out(call, err);
         HeapFree(GetProcessHeap(), 0, c->json);
         free(c);
         return -1;
     }
+    free(engine);
     AcquireSRWLockExclusive(&g_lock);
     if (g_phase != MP_IDLE) {
         ReleaseSRWLockExclusive(&g_lock);
@@ -815,18 +829,20 @@ static int mp_check(sh_module_prefab_call *call)
     memset(&rows, 0, sizeof rows);
     mp_out(call, "{\"checked\":false}");
     if (!g_run_on_main || !call->text || !sh_mp_is_module_file(call->text, call->text_len)) return -1;
-    if (!sh_mp_inspect(call->text, call->text_len, &sum, err, (int)sizeof err)) return -1;
+    {
+        size_t elen = 0;
+        char *engine = sh_prefab_mods_strip_copy(call->text, call->text_len, &elen);
+        int ok = engine && sh_mp_inspect(engine, elen, &sum, err, (int)sizeof err);
+        free(engine);
+        if (!ok) return -1;
+    }
     c = (mp_capture *)calloc(1, sizeof *c);
     if (!c) { sh_mp_summary_free(&sum); return -1; }
     c->op = SH_MODULE_PREFAB_CHECK;
     c->modules = &sum;
     c->checked = -1;
-    if (call->meta_path && call->meta_path[0]) {
-        size_t slen = 0;
-        char *side = sh_prefab_mods_read_file(call->meta_path, &slen);
-        if (sh_prefab_mods_sidecar_rows(side, slen, &rows) > 0) c->rows = &rows;
-        free(side);
-    }
+    /* The rows of its block, else of a sidecar beside it. */
+    if (sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows) > 0) c->rows = &rows;
     if (mp_capture_run(c) && c->result == 1) r = c->checked;
     sh_modmanifest_list_free(&rows);
     sh_mp_summary_free(&sum);
@@ -866,6 +882,7 @@ int sh_module_prefab_slot(struct sh_iface *self, sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_MODS_RESOLVE:
     case SH_MODULE_PREFAB_MODS_POLL:
     case SH_MODULE_PREFAB_META_WRITE:
+    case SH_MODULE_PREFAB_META_READ:
     case SH_MODULE_PREFAB_EXPORT:
     case SH_MODULE_PREFAB_IMPORT:
         /* The mods a prefab needs, for either kind (prefab_mods.c). */

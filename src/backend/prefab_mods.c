@@ -124,15 +124,19 @@ static void pm_sort(sh_modmanifest_list *list)
 
 int sh_prefab_mods_closure(const char *text, size_t len, sh_modmanifest_list *out)
 {
-    char **names = NULL;
-    size_t count;
+    char **names = NULL, *engine;
+    size_t count, elen = 0;
     int failed = 0;
     pm_closure c;
     if (!out) return -1;
     memset(out, 0, sizeof *out);
     if (!text || !len) return 0;
     memset(&c, 0, sizeof c);
-    count = sh_modmanifest_placed_names(text, len, &names, &failed);
+    /* The block's own strings are not placed names. */
+    engine = sh_prefab_mods_strip_copy(text, len, &elen);
+    if (!engine) return -1;
+    count = sh_modmanifest_placed_names(engine, elen, &names, &failed);
+    free(engine);
     if (failed) return -1;
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, pm_visit, &c);
     sh_modmanifest_names_free(names, count);
@@ -352,87 +356,255 @@ static void pm_rows_text(const sh_modmanifest_list *rows, char *out, size_t cap)
     }
 }
 
-int sh_prefab_mods_record(const char *text, size_t len, const char *meta_path, char **side_out)
+/* ==================================================================== */
+/* the block                                                             */
+/* ==================================================================== */
+
+/* The view's members the block keeps outside "summary". */
+static int pm_view_own_key(const char *key)
 {
-    sh_modmanifest_list rows, old;
-    char *side = NULL, *next = NULL, list[600];
-    size_t slen = 0, nlen = 0;
-    int n, had;
-    if (side_out) *side_out = NULL;
-    if (!meta_path || !meta_path[0]) return -1;
-    n = sh_prefab_mods_closure(text, len, &rows);
+    return !strcmp(key, "desc") || !strcmp(key, SH_PREFAB_MODS_KEY) || !strcmp(key, "tags") ||
+           !strcmp(key, "description") || !strcmp(key, "format") || !strcmp(key, "summary");
+}
+
+static mpj *pm_rows_array(const sh_modmanifest_list *rows)
+{
+    mpj *arr = mpj_new(MPJ_ARR);
+    size_t i;
+    if (!arr) return NULL;
+    for (i = 0; rows && i < rows->count; i++) {
+        size_t vl = 0;
+        char *v = sh_modmanifest_format_value(&rows->rows[i], &vl);
+        mpj *node = v ? mpj_parse(v, vl) : NULL;
+        free(v);
+        if (!node || !mpj_push(arr, node)) { mpj_free(arr); return NULL; }
+    }
+    return arr;
+}
+
+char *sh_prefab_mods_block_compose(const char *view, size_t len, const sh_modmanifest_list *rows, size_t *out_len)
+{
+    mpj *v = (view && len) ? mpj_parse(view, len) : NULL, *b, *summary, *node;
+    const mpj *m;
+    char *out = NULL;
+    int i, ok;
+    if (out_len) *out_len = 0;
+    if (v && v->type != MPJ_OBJ) { mpj_free(v); v = NULL; }
+    b = mpj_new(MPJ_OBJ);
+    summary = mpj_new(MPJ_OBJ);
+    if (!b || !summary) { mpj_free(b); mpj_free(summary); mpj_free(v); return NULL; }
+    ok = mpj_set(b, "format", mpj_new_int(SH_PREFAB_BLOCK_FORMAT));
+    m = v ? mpj_get(v, "desc") : NULL;
+    node = (m && m->type == MPJ_STR) ? mpj_clone(m) : mpj_new_str("");
+    ok = ok && node && mpj_set(b, "description", node);
+    m = v ? mpj_get(v, "tags") : NULL;
+    if (m && m->type == MPJ_ARR) {
+        /* Tags are strings; anything else in a hand-edited sidecar is left out. */
+        node = mpj_new(MPJ_ARR);
+        for (i = 0; node && i < m->n; i++)
+            if (m->items[i] && m->items[i]->type == MPJ_STR && !mpj_push(node, mpj_clone(m->items[i]))) node = NULL;
+    } else node = mpj_new(MPJ_ARR);
+    ok = ok && node && mpj_set(b, "tags", node);
+    if (rows) node = pm_rows_array(rows);
+    else {
+        m = v ? mpj_get(v, SH_PREFAB_MODS_KEY) : NULL;
+        node = (m && m->type == MPJ_ARR) ? mpj_clone(m) : mpj_new(MPJ_ARR);
+    }
+    ok = ok && node && mpj_set(b, SH_PREFAB_MODS_KEY, node);
+    for (i = 0; ok && v && i < v->n; i++) {
+        if (pm_view_own_key(v->keys[i])) continue;
+        ok = mpj_set(summary, v->keys[i], mpj_clone(v->items[i]));
+    }
+    if (ok && summary->n) { ok = mpj_set(b, "summary", summary); summary = NULL; }
+    if (ok) out = mpj_dump(b, out_len);
+    mpj_free(summary);
+    mpj_free(b);
+    mpj_free(v);
+    return out;
+}
+
+char *sh_prefab_mods_block_view(const char *block, size_t len, size_t *out_len)
+{
+    mpj *b, *v;
+    const mpj *m, *s;
+    char *out = NULL;
+    int i, ok;
+    if (out_len) *out_len = 0;
+    b = (block && len) ? mpj_parse(block, len) : NULL;
+    if (!b || b->type != MPJ_OBJ) { mpj_free(b); return NULL; }
+    v = mpj_new(MPJ_OBJ);
+    if (!v) { mpj_free(b); return NULL; }
+    m = mpj_get(b, "description");
+    ok = mpj_set(v, "desc", (m && m->type == MPJ_STR) ? mpj_clone(m) : mpj_new_str(""));
+    m = mpj_get(b, "tags");
+    ok = ok && mpj_set(v, "tags", (m && m->type == MPJ_ARR) ? mpj_clone(m) : mpj_new(MPJ_ARR));
+    s = mpj_get(b, "summary");
+    for (i = 0; ok && s && s->type == MPJ_OBJ && i < s->n; i++) {
+        if (pm_view_own_key(s->keys[i])) continue;
+        ok = mpj_set(v, s->keys[i], mpj_clone(s->items[i]));
+    }
+    m = mpj_get(b, SH_PREFAB_MODS_KEY);
+    if (ok && m && m->type == MPJ_ARR && m->n) ok = mpj_set(v, SH_PREFAB_MODS_KEY, mpj_clone(m));
+    if (ok) out = mpj_dump(v, out_len);
+    mpj_free(v);
+    mpj_free(b);
+    return out;
+}
+
+char *sh_prefab_mods_view_of(const char *text, size_t len, int tail, const char *meta_path, int *source, size_t *out_len)
+{
+    sh_prefab_block_span span;
+    char *view = NULL;
+    int found;
+    if (source) *source = SH_PREFAB_META_NONE;
+    if (out_len) *out_len = 0;
+    found = (text && len) ? (tail ? sh_prefab_block_find_tail(text, len, &span) : sh_prefab_block_find(text, len, &span)) : 0;
+    if (found == 1) view = sh_prefab_mods_block_view(text + span.value_at, span.value_len, out_len);
+    if (view) {
+        if (source) *source = SH_PREFAB_META_BLOCK;
+        return view;
+    }
+    /* A prefab saved before the block: its sidecar, read-only. */
+    if (meta_path && meta_path[0]) {
+        size_t slen = 0;
+        view = sh_prefab_mods_read_file(meta_path, &slen);
+        if (view && slen) {
+            if (source) *source = SH_PREFAB_META_SIDECAR;
+            if (out_len) *out_len = slen;
+            return view;
+        }
+        free(view);
+    }
+    return NULL;
+}
+
+int sh_prefab_mods_rows_of(const char *text, size_t len, const char *meta_path, sh_modmanifest_list *out)
+{
+    size_t vlen = 0;
+    char *view = sh_prefab_mods_view_of(text, len, 0, meta_path, NULL, &vlen);
+    int n = sh_prefab_mods_sidecar_rows(view, vlen, out);
+    free(view);
+    return n;
+}
+
+char *sh_prefab_mods_embed(const char *text, size_t len, const char *view, size_t view_len,
+                           const sh_modmanifest_list *rows, size_t *out_len)
+{
+    size_t blen = 0;
+    char *block, *out;
+    if (out_len) *out_len = 0;
+    block = sh_prefab_mods_block_compose(view, view_len, rows, &blen);
+    if (!block) return NULL;
+    out = sh_prefab_block_put(text, len, block, blen, out_len);
+    free(block);
+    return out;
+}
+
+char *sh_prefab_mods_strip_copy(const char *text, size_t len, size_t *out_len)
+{
+    char *copy;
+    if (out_len) *out_len = 0;
+    if (!text) return NULL;
+    copy = (char *)malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, text, len);
+    copy[len] = 0;
+    len = sh_prefab_block_strip(copy, len);
+    if (out_len) *out_len = len;
+    return copy;
+}
+
+/* The view of the block a text carries, for a caller that just wrote it. */
+static char *pm_view_in(const char *text, size_t len)
+{
+    sh_prefab_block_span span;
+    if (sh_prefab_block_find(text, len, &span) != 1) return NULL;
+    return sh_prefab_mods_block_view(text + span.value_at, span.value_len, NULL);
+}
+
+int sh_prefab_mods_record(const char *text, size_t len, const char *path, char **view_out)
+{
+    sh_modmanifest_list rows;
+    char *engine, *next, list[600];
+    size_t elen = 0, nlen = 0;
+    int n;
+    if (view_out) *view_out = NULL;
+    if (!path || !path[0] || !text || !len) return -1;
+    engine = sh_prefab_mods_strip_copy(text, len, &elen);
+    if (!engine) return -1;
+    n = sh_prefab_mods_closure(engine, elen, &rows);
     if (n < 0) {
-        pm_logf("PREFABS: %s: the prefab's mods could not be read; its sidecar is unchanged", meta_path);
+        pm_logf("PREFABS: %s: the prefab's mods could not be read; the file is left as the engine wrote it", path);
+        free(engine);
         return -1;
     }
-    side = sh_prefab_mods_read_file(meta_path, &slen);
-    had = sh_prefab_mods_sidecar_rows(side, slen, &old);
-    sh_modmanifest_list_free(&old);
-    if (!rows.count && had <= 0) {
-        /* Nothing to record and nothing recorded: the sidecar stays as it is. */
-        if (side_out) *side_out = side; else free(side);
-        return 0;
-    }
-    next = sh_prefab_mods_sidecar_set(side, slen, &rows, &nlen);
-    if (!next) {
-        pm_logf("PREFABS: %s is not a JSON object; the prefab's %d mod(s) were not recorded", meta_path, n);
-        free(side);
-        sh_modmanifest_list_free(&rows);
-        return -1;
-    }
-    if (!sh_prefab_mods_write_file(meta_path, next, nlen)) {
-        pm_logf("PREFABS: %s could not be written; the prefab's %d mod(s) were not recorded", meta_path, n);
-        free(side); free(next);
+    next = sh_prefab_mods_embed(engine, elen, NULL, 0, &rows, &nlen);
+    free(engine);
+    if (!next || !sh_prefab_mods_write_file(path, next, nlen)) {
+        pm_logf("PREFABS: %s: %s; the prefab's %d mod(s) were not recorded", path,
+                next ? "the file could not be written" : "the file is not a JSON object", n);
+        free(next);
         sh_modmanifest_list_free(&rows);
         return -1;
     }
     pm_rows_text(&rows, list, sizeof list);
-    pm_logf("PREFABS: %s records %d mod(s)%s%s", meta_path, n, n ? ": " : "", list);
-    free(side);
-    if (side_out) *side_out = next; else free(next);
+    pm_logf("PREFABS: %s records %d mod(s)%s%s", path, n, n ? ": " : "", list);
+    if (view_out) *view_out = pm_view_in(next, nlen);
+    free(next);
     sh_modmanifest_list_free(&rows);
     return n;
 }
 
-char *sh_prefab_mods_with_closure(const char *side, const char *prefab, size_t len, int *count)
+char *sh_prefab_mods_module_file(const char *prefab, size_t len, const char *summary, size_t *out_len, char **view_out,
+                                 int *count)
 {
     sh_modmanifest_list rows;
     char *out;
-    int n = sh_prefab_mods_closure(prefab, len, &rows);
+    int n;
+    if (out_len) *out_len = 0;
+    if (view_out) *view_out = NULL;
+    n = sh_prefab_mods_closure(prefab, len, &rows);
     if (count) *count = n < 0 ? 0 : n;
-    if (n <= 0) { sh_modmanifest_list_free(&rows); return NULL; }
-    out = sh_prefab_mods_sidecar_set(side, side ? strlen(side) : 0, &rows, NULL);
+    if (n < 0) memset(&rows, 0, sizeof rows);   /* recorded as naming none, as a map's save would */
+    out = sh_prefab_mods_embed(prefab, len, summary, summary ? strlen(summary) : 0, &rows, out_len);
     sh_modmanifest_list_free(&rows);
+    if (out && view_out) *view_out = pm_view_in(out, out_len ? *out_len : strlen(out));
     return out;
 }
 
-int sh_prefab_mods_meta_write(const char *body, size_t len, const char *meta_path)
+int sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, const char *meta_path)
 {
-    sh_modmanifest_list old;
-    char *disk, *merged = NULL;
-    size_t dlen = 0, mlen = 0;
-    int ok;
-    if (!meta_path || !meta_path[0]) return -1;
-    disk = sh_prefab_mods_read_file(meta_path, &dlen);
-    (void)sh_prefab_mods_sidecar_rows(disk, dlen, &old);
-    free(disk);
-    if (!body || !len) {
-        if (!old.count) {
-            sh_modmanifest_list_free(&old);
-            return (DeleteFileA(meta_path) || GetLastError() == ERROR_FILE_NOT_FOUND) ? 1 : -1;
-        }
-        /* No description or tags left, but the prefab still names its mods. */
-        merged = sh_prefab_mods_sidecar_set("{}", 2, &old, &mlen);
-    } else if (old.count) {
-        mpj *root = mpj_parse(body, len);
-        int has = root && root->type == MPJ_OBJ && mpj_get(root, SH_PREFAB_MODS_KEY) != NULL;
-        int object = root && root->type == MPJ_OBJ;
-        mpj_free(root);
-        if (object && !has) merged = sh_prefab_mods_sidecar_set(body, len, &old, &mlen);
+    mpj *b = NULL, *v = NULL;
+    const mpj *m;
+    char *text, *view, *nview = NULL, *next = NULL;
+    size_t tlen = 0, vlen = 0, nvlen = 0, nlen = 0;
+    int source = 0, ok = 0, i;
+    if (!path || !path[0]) return -1;
+    text = sh_prefab_mods_read_file(path, &tlen);
+    if (!text || !tlen) { free(text); return -1; }
+    view = sh_prefab_mods_view_of(text, tlen, 0, meta_path, &source, &vlen);
+    v = view ? mpj_parse(view, vlen) : NULL;
+    if (!v || v->type != MPJ_OBJ) { mpj_free(v); v = mpj_new(MPJ_OBJ); }
+    if (body && len) b = mpj_parse(body, len);
+    if (v) {
+        m = (b && b->type == MPJ_OBJ) ? mpj_get(b, "desc") : NULL;
+        ok = mpj_set(v, "desc", (m && m->type == MPJ_STR) ? mpj_clone(m) : mpj_new_str(""));
+        m = (b && b->type == MPJ_OBJ) ? mpj_get(b, "tags") : NULL;
+        if (m && m->type == MPJ_ARR) {
+            mpj *tags = mpj_new(MPJ_ARR);
+            for (i = 0; tags && i < m->n; i++)
+                if (m->items[i] && m->items[i]->type == MPJ_STR && !mpj_push(tags, mpj_clone(m->items[i]))) tags = NULL;
+            ok = ok && tags && mpj_set(v, "tags", tags);
+        } else ok = ok && mpj_set(v, "tags", mpj_new(MPJ_ARR));
+        if (ok) nview = mpj_dump(v, &nvlen);
     }
-    sh_modmanifest_list_free(&old);
-    ok = merged ? sh_prefab_mods_write_file(meta_path, merged, mlen) : sh_prefab_mods_write_file(meta_path, body, len);
-    free(merged);
+    if (nview) next = sh_prefab_mods_embed(text, tlen, nview, nvlen, NULL, &nlen);
+    ok = next && sh_prefab_mods_write_file(path, next, nlen);
+    if (ok && source == SH_PREFAB_META_SIDECAR)
+        pm_logf("PREFABS: %s: its details moved from its sidecar into the file; the sidecar is left as it was", path);
+    mpj_free(b);
+    mpj_free(v);
+    free(text); free(view); free(nview); free(next);
     return ok ? 1 : -1;
 }
 
@@ -567,8 +739,10 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
         sh_mp_module_check check;
         pm_known_ctx k;
         char err[256];
+        size_t elen = 0;
+        char *engine = sh_prefab_mods_strip_copy(text, len, &elen);
         memset(&sum, 0, sizeof sum);
-        if (sh_mp_inspect(text, len, &sum, err, (int)sizeof err)) {
+        if (engine && sh_mp_inspect(engine, elen, &sum, err, (int)sizeof err)) {
             k.rows = rows;
             k.known = o->module_known;
             if (sh_mp_check_modules(&sum, pm_known, &k, &check) > 0) {
@@ -578,10 +752,12 @@ int sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanife
                 pm_logf("PREFABS: placement of '%s' refused: %.300s", name ? name : "", line);
                 if (msg && cap) sh_mp_missing_toast(&check, msg, cap);
                 sh_mp_summary_free(&sum);
+                free(engine);
                 return SH_PREFAB_MODS_NEEDS_MODULE;
             }
             sh_mp_summary_free(&sum);
         }
+        free(engine);
     }
     for (i = 0; i < rows->count; i++) if (!pm_installed(rows->rows[i].bundle)) missing++;
     if (missing && o->restore) {
@@ -674,15 +850,29 @@ static int pm_utf8_to_acp(const char *utf8, char *out, size_t cap)
     return WideCharToMultiByte(CP_ACP, 0, wide, -1, out, (int)cap, NULL, NULL) > 0;
 }
 
-typedef struct pm_meta_ctx { const char *side; size_t len; } pm_meta_ctx;
+/* What the ZIP carries as <name>.json: the file's bytes, unless its block has
+ * to be written for the rows the ZIP carries. */
+typedef struct pm_export_ctx {
+    const char *text;
+    size_t len;
+    const char *view;
+    size_t view_len;
+    int rewrite;   /* no block, or rows found by the closure */
+} pm_export_ctx;
 
-static char *pm_meta_for(void *ctx, const sh_modmanifest_list *rows, size_t *len)
+static char *pm_export_text(void *ctx, const sh_modmanifest_list *rows, int moved, size_t *len)
 {
-    pm_meta_ctx *m = (pm_meta_ctx *)ctx;
-    char *out = sh_prefab_mods_sidecar_set(m->side, m->len, rows, len);
-    /* A hand-edited sidecar that is not JSON travels as a fresh one. */
-    if (!out) out = sh_prefab_mods_sidecar_set(NULL, 0, rows, len);
-    return out;
+    pm_export_ctx *x = (pm_export_ctx *)ctx;
+    char *out;
+    if (!x->rewrite && !moved) {
+        out = (char *)malloc(x->len + 1);
+        if (!out) return NULL;
+        memcpy(out, x->text, x->len);
+        out[x->len] = 0;
+        *len = x->len;
+        return out;
+    }
+    return sh_prefab_mods_embed(x->text, x->len, x->view, x->view_len, rows, len);
 }
 
 int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const char *name, const char *zip_utf8,
@@ -690,52 +880,59 @@ int sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const 
 {
     modexport_stats st;
     sh_modmanifest_list rows;
-    pm_meta_ctx mc;
-    char *text, *side, cause[400];
-    size_t len = 0, slen = 0;
-    int n, ok;
+    pm_export_ctx x;
+    char *text, *view, cause[400];
+    size_t len = 0, vlen = 0;
+    int n, ok, source = 0;
     const char *nm = name && name[0] ? name : "prefab";
     if (msg && cap) msg[0] = 0;
     if (!zip_utf8 || !zip_utf8[0]) { pm_msg(msg, cap, "Prefab %s was not exported: no ZIP was named.", nm); return -1; }
     if (!modexport_is_zip_path(zip_utf8)) { pm_msg(msg, cap, "Prefab %s was not exported: the file must end in .zip.", nm); return -1; }
     text = sh_prefab_mods_read_file(prefab_path, &len);
     if (!text || !len) { free(text); pm_msg(msg, cap, "Prefab %s was not exported: its file could not be read.", nm); return -1; }
-    side = sh_prefab_mods_read_file(meta_path, &slen);
-    n = sh_prefab_mods_sidecar_rows(side, slen, &rows);
+    view = sh_prefab_mods_view_of(text, len, 0, meta_path, &source, &vlen);
+    n = sh_prefab_mods_sidecar_rows(view, vlen, &rows);
+    memset(&x, 0, sizeof x);
+    x.text = text;
+    x.len = len;
+    x.view = view;
+    x.view_len = vlen;
+    x.rewrite = source != SH_PREFAB_META_BLOCK;
     if (n <= 0) {
         /* Saved before its mods were recorded: the mods installed now that its
          * entities and modules use. */
         sh_modmanifest_list_free(&rows);
         if (sh_prefab_mods_closure(text, len, &rows) < 0) memset(&rows, 0, sizeof rows);
+        if (rows.count) x.rewrite = 1;
     }
-    mc.side = side;
-    mc.len = slen;
-    ok = modexport_write_prefab(nm, text, len, &rows, pm_meta_for, &mc, zip_utf8, &st, cause, sizeof cause);
+    ok = modexport_write_prefab(nm, text, len, &rows, pm_export_text, &x, zip_utf8, &st, cause, sizeof cause);
     if (ok) {
         if (st.bundles)
             pm_msg(msg, cap, "Exported prefab %s with %u mod%s to %s (%llu KB).", nm, st.bundles, st.bundles == 1 ? "" : "s",
                    zip_utf8, (st.zip_bytes + 1023) / 1024);
         else pm_msg(msg, cap, "Exported prefab %s to %s; it uses no mods.", nm, zip_utf8);
-        pm_logf("PREFABS: export %s: %u bundle(s), %u blob(s) stored, %u deduplicated, %u entries, %llu byte(s) in %.0f ms",
-                zip_utf8, st.bundles, st.blobs_written, st.blobs_deduped, st.entries, st.zip_bytes, st.ms);
+        pm_logf("PREFABS: export %s: %u bundle(s), %u blob(s) stored, %u deduplicated, %u entries, %llu byte(s)%s in %.0f ms",
+                zip_utf8, st.bundles, st.blobs_written, st.blobs_deduped, st.entries, st.zip_bytes,
+                x.rewrite ? " (its block written for the export)" : "", st.ms);
     } else {
         pm_msg(msg, cap, "Prefab %s was not exported: %s.", nm, cause);
         pm_logf("PREFABS: export %s refused: %s", zip_utf8, cause);
     }
     sh_modmanifest_list_free(&rows);
     free(text);
-    free(side);
+    free(view);
     return ok ? 1 : -1;
 }
 
-/* The ZIP's file name without its folder and extension. */
-static void pm_zip_stem(const char *zip, char *out, size_t cap)
+/* The source's file name without its folder and extension. */
+static void pm_file_stem(const char *path, char *out, size_t cap)
 {
-    const char *base = zip, *p;
+    const char *base = path, *p;
     size_t n;
-    for (p = zip; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+    for (p = path; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
     n = strlen(base);
     if (n > 4 && !_stricmp(base + n - 4, ".zip")) n -= 4;
+    else if (n > 5 && !_stricmp(base + n - 5, ".json")) n -= 5;
     if (n >= cap) n = cap - 1;
     memcpy(out, base, n);
     out[n] = 0;
@@ -750,26 +947,35 @@ static int pm_same_bytes(const char *path, const char *data, size_t len)
     return same;
 }
 
-int sh_prefab_mods_import(const char *zip_utf8, const char *prefabs_dir, char *name_out, size_t name_cap,
+/* The importer's rows: the block's (an export carries no sidecar). */
+static int pm_import_rows(void *ctx, const char *prefab, size_t len, sh_modmanifest_list *rows)
+{
+    int n;
+    (void)ctx;
+    n = sh_prefab_mods_rows_of(prefab, len, NULL, rows);
+    return n < 0 ? 0 : n;
+}
+
+int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *name_out, size_t name_cap,
                           char *msg, size_t cap)
 {
     const sh_prefab_mods_ops *o = pm_ops();
     modexport_stats st;
     sh_modmanifest_list rows;
-    char *text = NULL, *side = NULL, given[256] = "", name[PM_NAME_MAX + 16], acp[PM_NAME_MAX * 2 + 16];
-    char dir[MAX_PATH * 2], path[MAX_PATH * 2], meta[MAX_PATH * 2], cause[400], extra[400] = "";
-    size_t len = 0, slen = 0, i, absent = 0, dl;
+    char *text = NULL, given[256] = "", name[PM_NAME_MAX + 16], acp[PM_NAME_MAX * 2 + 16];
+    char dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[400], extra[400] = "";
+    size_t len = 0, i, absent = 0, dl;
     int k, result = -1;
     if (name_out && name_cap) name_out[0] = 0;
     if (msg && cap) msg[0] = 0;
-    if (!zip_utf8 || !zip_utf8[0] || !prefabs_dir || !prefabs_dir[0]) { pm_msg(msg, cap, "No ZIP was named."); return -1; }
-    if (!modexport_read_prefab(zip_utf8, &text, &len, &side, &slen, given, sizeof given, &st, cause, sizeof cause)) {
+    if (!src_utf8 || !src_utf8[0] || !prefabs_dir || !prefabs_dir[0]) { pm_msg(msg, cap, "No file was named."); return -1; }
+    if (!modexport_read_prefab(src_utf8, pm_import_rows, NULL, &text, &len, given, sizeof given, &st, cause, sizeof cause)) {
         pm_msg(msg, cap, "The prefab was not imported: %s.", cause);
-        pm_logf("PREFABS: import %s refused: %s", zip_utf8, cause);
+        pm_logf("PREFABS: import %s refused: %s", src_utf8, cause);
         return -1;
     }
-    /* The name: the export's, else the ZIP's file name, else a plain one. */
-    if (!sh_prefab_mods_valid_name(given)) pm_zip_stem(zip_utf8, given, sizeof given);
+    /* The name: the .json's, else the source's file name, else a plain one. */
+    if (!sh_prefab_mods_valid_name(given)) pm_file_stem(src_utf8, given, sizeof given);
     if (!sh_prefab_mods_valid_name(given)) strcpy_s(given, sizeof given, "Imported prefab");
     if (!pm_utf8_to_acp(given, acp, sizeof acp)) strcpy_s(acp, sizeof acp, "Imported prefab");
     strncpy_s(dir, sizeof dir, prefabs_dir, _TRUNCATE);
@@ -780,26 +986,23 @@ int sh_prefab_mods_import(const char *zip_utf8, const char *prefabs_dir, char *n
         if (k == 1) strcpy_s(name, sizeof name, acp);
         else _snprintf_s(name, sizeof name, _TRUNCATE, "%s (%d)", acp, k);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s%s.json", dir, name);
-        _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s%s.meta.json", dir, name);
         if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { result = 1; break; }
         if (pm_same_bytes(path, text, len)) { result = 0; break; }
     }
     if (result < 0) {
         pm_msg(msg, cap, "The prefab was not imported: every name from \"%s\" to \"%s (99)\" is taken.", acp, acp);
-        free(text); free(side);
+        free(text);
         return -1;
     }
-    if (result == 1) {
-        if (!sh_prefab_mods_write_file(path, text, len) || (side && slen && !sh_prefab_mods_write_file(meta, side, slen))) {
-            DeleteFileA(path);
-            pm_msg(msg, cap, "The prefab was not imported: %s could not be written.", path);
-            free(text); free(side);
-            return -1;
-        }
+    if (result == 1 && !sh_prefab_mods_write_file(path, text, len)) {
+        DeleteFileA(path);
+        pm_msg(msg, cap, "The prefab was not imported: %s could not be written.", path);
+        free(text);
+        return -1;
     }
     if (name_out && name_cap) strncpy_s(name_out, name_cap, name, _TRUNCATE);
     /* Rows the export names but does not carry: the placement asks for them. */
-    if (sh_prefab_mods_sidecar_rows(side, slen, &rows) > 0) {
+    if (sh_prefab_mods_rows_of(text, len, NULL, &rows) > 0) {
         for (i = 0; i < rows.count; i++) {
             char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4];
             if (pm_installed(rows.rows[i].bundle)) continue;
@@ -808,7 +1011,7 @@ int sh_prefab_mods_import(const char *zip_utf8, const char *prefabs_dir, char *n
             strncat_s(extra, sizeof extra, label, _TRUNCATE);
             absent++;
         }
-        if (absent) strncat_s(extra, sizeof extra, ", which the ZIP does not carry.", _TRUNCATE);
+        if (absent) strncat_s(extra, sizeof extra, ", which the export does not carry.", _TRUNCATE);
     }
     sh_modmanifest_list_free(&rows);
     if (result == 1)
@@ -819,16 +1022,15 @@ int sh_prefab_mods_import(const char *zip_utf8, const char *prefabs_dir, char *n
                st.bundles_installed == 1 ? " was" : "s were", extra);
     else pm_msg(msg, cap, "Prefab %s and its mods are already here; nothing was changed.%s", name, extra);
     pm_logf("PREFABS: import %s -> %s: %u bundle(s) (%u installed, %u present), %u blob(s), %llu byte(s) in %.0f ms",
-            zip_utf8, result == 1 ? path : "(unchanged)", st.bundles, st.bundles_installed, st.bundles_present,
+            src_utf8, result == 1 ? path : "(unchanged)", st.bundles, st.bundles_installed, st.bundles_present,
             st.blobs_written, st.zip_bytes, st.ms);
     if (st.bundles_installed && o->refresh) (void)o->refresh();
     free(text);
-    free(side);
     return result;
 }
 
 /* ==================================================================== */
-/* the slot                                                              */
+/* the slot                                                            */
 /* ==================================================================== */
 
 static void pm_out(sh_module_prefab_call *call, const char *text)
@@ -866,11 +1068,18 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     if (!call) return 0;
     switch (call->op) {
     case SH_MODULE_PREFAB_MODS_RECORD: {
-        char *side = NULL;
-        int n = sh_prefab_mods_record(call->text, call->text_len, call->meta_path, &side);
-        pm_out(call, side ? side : "");
-        free(side);
+        char *view = NULL;
+        int n = sh_prefab_mods_record(call->text, call->text_len, call->path, &view);
+        pm_out(call, view ? view : "");
+        free(view);
         return n;
+    }
+    case SH_MODULE_PREFAB_META_READ: {
+        int source = SH_PREFAB_META_NONE;
+        char *view = sh_prefab_mods_view_of(call->text, call->text_len, call->tail, call->meta_path, &source, NULL);
+        pm_out(call, view ? view : "");
+        free(view);
+        return source;
     }
     case SH_MODULE_PREFAB_MODS_STATUS: {
         sh_modmanifest_list rows;
@@ -887,14 +1096,11 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_MODS_RESOLVE: {
         sh_modmanifest_list rows;
         pm_resolve_job job;
-        char *side;
-        size_t slen = 0;
         int n;
         pm_out(call, "");
         call->seq = 0;
-        side = sh_prefab_mods_read_file(call->meta_path, &slen);
-        n = sh_prefab_mods_sidecar_rows(side, slen, &rows);
-        free(side);
+        /* The block's rows, else a sidecar's (a prefab saved before the block). */
+        n = sh_prefab_mods_rows_of(call->text, call->text_len, call->meta_path, &rows);
         /* No rows: the placement goes on exactly as before. */
         if (n <= 0) { sh_modmanifest_list_free(&rows); return SH_PREFAB_MODS_PLACE; }
         memset(&job, 0, sizeof job);
@@ -915,7 +1121,7 @@ int sh_prefab_mods_slot(struct sh_module_prefab_call *call)
     case SH_MODULE_PREFAB_MODS_POLL:
         return sh_prefab_mods_poll(call->seq);
     case SH_MODULE_PREFAB_META_WRITE:
-        return sh_prefab_mods_meta_write(call->text, call->text_len, call->meta_path);
+        return sh_prefab_mods_meta_write(call->text, call->text_len, call->path, call->meta_path);
     case SH_MODULE_PREFAB_EXPORT: {
         char msg[PM_MSG_CAP];
         int r = sh_prefab_mods_export(call->path, call->meta_path, call->name, call->zip_path, msg, sizeof msg);
@@ -1020,17 +1226,18 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
     }
     if (!_stricmp(verb, "mods")) {
         sh_modmanifest_list rows;
-        char *side;
-        size_t slen = 0, i;
+        char *text;
+        size_t tlen = 0, i;
         int n;
         if (argc < 2 || !pm_find_prefab(argv[1], path, sizeof path, meta, sizeof meta, name, sizeof name)) {
             pm_linef("sh_prefab mods: no prefab named \"%s\".", argc > 1 ? argv[1] : "");
             return;
         }
-        side = sh_prefab_mods_read_file(meta, &slen);
-        n = sh_prefab_mods_sidecar_rows(side, slen, &rows);
-        free(side);
-        if (n < 0) { pm_linef("Prefab %s: its details file is not JSON, so its mods cannot be read.", name); return; }
+        text = sh_prefab_mods_read_file(path, &tlen);
+        if (!text) { pm_linef("Prefab %s: its file cannot be read.", name); return; }
+        n = sh_prefab_mods_rows_of(text, tlen, meta, &rows);
+        free(text);
+        if (n < 0) { pm_linef("Prefab %s: its details are not JSON, so its mods cannot be read.", name); return; }
         if (!n) pm_linef("Prefab %s records no mods.", name);
         else pm_linef("Prefab %s needs %d mod%s:", name, n, n == 1 ? "" : "s");
         for (i = 0; i < rows.count; i++) {
@@ -1043,20 +1250,22 @@ void sh_prefab_mods_command(int argc, const char *const *argv)
         return;
     }
     if (!_stricmp(verb, "export")) {
+        char name8[PM_NAME_MAX * 3 + 16];
         if (argc < 3) { pm_print("usage: sh_prefab export \"<name>\" \"<path.zip>\""); return; }
         if (!pm_find_prefab(argv[1], path, sizeof path, meta, sizeof meta, name, sizeof name)) {
             pm_linef("sh_prefab export: no prefab named \"%s\".", argv[1]);
             return;
         }
         if (!pm_acp_to_utf8(argv[2], zip, sizeof zip)) { pm_print("sh_prefab export: the ZIP path is not usable."); return; }
-        (void)sh_prefab_mods_export(path, meta, name, zip, msg, sizeof msg);
+        if (!pm_acp_to_utf8(name, name8, sizeof name8)) strncpy_s(name8, sizeof name8, name, _TRUNCATE);
+        (void)sh_prefab_mods_export(path, meta, name8, zip, msg, sizeof msg);
         pm_print(msg);
         return;
     }
     if (!_stricmp(verb, "import")) {
         char root[MAX_PATH * 2];
-        if (argc < 2) { pm_print("usage: sh_prefab import \"<path.zip>\""); return; }
-        if (!pm_acp_to_utf8(argv[1], zip, sizeof zip)) { pm_print("sh_prefab import: the ZIP path is not usable."); return; }
+        if (argc < 2) { pm_print("usage: sh_prefab import \"<path.zip or path.json>\""); return; }
+        if (!pm_acp_to_utf8(argv[1], zip, sizeof zip)) { pm_print("sh_prefab import: the path is not usable."); return; }
         if (!pm_root(root, sizeof root)) { pm_print("sh_prefab import: the prefabs folder cannot be found."); return; }
         (void)sh_prefab_mods_import(zip, root, name, sizeof name, msg, sizeof msg);
         pm_print(msg);

@@ -717,7 +717,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   };
   function previewFolderIndex(name) { for (var i = 0; i < previewPrefabs.folders.length; i++) if (previewPrefabs.folders[i].name === name) return i; return -1; }
   function previewFolderList(folder) { if (!folder) return previewPrefabs.root; var idx = previewFolderIndex(folder); return idx === -1 ? null : previewPrefabs.folders[idx].items; }
-  var previewMetaBodies = {};   // preview stand-in for the "<name>.meta.json" sidecars, keyed "<folder>/<name>"
+  var previewMetaBodies = {};   // preview stand-in for each prefab's details view (its snapmapPlus block), keyed "<folder>/<name>"
   previewMetaBodies['Hangar Block'] = JSON.stringify({desc: 'Two hangar rooms and the hall between them', tags: ['industrial'], kind: 'modules',
     moduleCount: 3, entityCount: 14, doorCount: 2, variableCount: 1, droppedWires: 1, droppedRefs: 0, hasNavigationBoxes: true,
     environments: ['ind_lazarus'], bounds: {min: [-1024, -512, 0], max: [2048, 1536, 768]},
@@ -3173,7 +3173,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'createModulePrefabResult') {
       var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
       if (d.result === 1) {
-        // the host wrote the summary sidecar; fold the dialog's description and tags into it
+        // the backend wrote the summary into the file's block; fold the dialog's description and tags into it
         var cmBody = {};
         if (d.summary && typeof d.summary === 'object') cmBody = d.summary;
         if (cmMeta && cmMeta.name === d.name) { try { var cmDt = JSON.parse(cmMeta.body); cmBody.desc = cmDt.desc; cmBody.tags = cmDt.tags; } catch (e) {} }
@@ -3336,9 +3336,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var pfListSeen = false;   // the open-folder set is pruned against disk only once a list has arrived
   var prefabTags = {};   // "<folder>/<name>" (or "<name>" at root) -> [tags], from the list message's meta map
   var prefabKinds = {};  // "<folder>/<name>" -> "modules" for module prefabs (object prefabs are absent)
-  var prefabMods = {};   // "<folder>/<name>" -> pfModsParse() of the mods its sidecar records (none are absent)
+  var prefabMods = {};   // "<folder>/<name>" -> pfModsParse() of the mods its block records (none are absent)
   var selectedPrefabKind = '';   // kind of the prefab whose details are shown
-  var metaExtra = null;          // the loaded sidecar minus desc/tags (a module prefab's summary), kept on save
+  var metaExtra = null;          // the loaded view minus desc/tags (a module prefab's summary, its mods); the backend keeps them
   // The editor's mode, posted by the host: module prefabs place only in Blueprint, object prefabs in Object mode.
   var edMode = {known: false, entityMode: 0, blueprint: 0};
   function pfKindOf(folder, name) { return prefabKinds[(folder ? folder + '/' : '') + name] || 'objects'; }
@@ -3401,7 +3401,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   // --- prefab tree (pure) ---
   // Rows in display order: a folder head, then its items when open, then the root items. A filter
-  // matches a NAME or any sidecar TAG (cross-folder search is what tags are for) and opens the
+  // matches a NAME or any TAG (cross-folder search is what tags are for) and opens the
   // folders it matches in; folders with no match are left out while filtering.
   function pfVisibleRows(data, tags, filter, openFolders) {
     filter = (filter || '').toLowerCase();
@@ -3657,7 +3657,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     item.scrollIntoView({block: 'nearest'});
   }
 
-  // Prefab Details combines the selected file's scene/count with its independent description/tag sidecar.
+  // Prefab Details combines the selected file's scene/count with its details view: the file's snapmapPlus
+  // block (description, tags, summary, mods), or the read-only sidecar of a prefab saved before the block.
   // The aggregate count is intentionally the only metadata summary and lives inside the preview overlay.
   function renderPrefabDetail(d) {
     var card = document.getElementById('prefabCard'), empty = document.getElementById('pcEmpty');
@@ -3667,7 +3668,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     empty.style.display = 'none'; card.style.display = 'flex';
     setPrefabButtons(true);
     document.getElementById('pcName').value = d.name;
-    // the sidecar body ships as a string; a missing/malformed sidecar just means "no metadata yet"
+    // the view ships as a string; a missing/malformed one just means "no metadata yet"
     var meta = {};
     if (d.meta) { try { meta = JSON.parse(d.meta) || {}; } catch (e) { meta = {}; } }
     var mDesc = (typeof meta.desc === 'string') ? meta.desc : '';
@@ -3706,7 +3707,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function pfBudgetSelect(d, doc, meta) {
     var modules = [], owner = null, entities = doc && Array.isArray(doc.entities) ? doc.entities : [];
     if (selectedPrefabKind === 'modules') {
-      // Place installs the file's own instances with their saved layer masks; the sidecar's list is the fallback.
+      // Place installs the file's own instances with their saved layer masks; the view's list is the fallback.
       if (doc && Array.isArray(doc.instances)) { var ms = prefabBudget.moduleScene(doc); modules = ms.modules; owner = ms.entityModule; }
       else if (Array.isArray(meta.modules)) modules = meta.modules.map(function(m){ return (m && m.name) || ''; });
     }
@@ -7217,11 +7218,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var name = document.getElementById('pcName').value; if (!name) return;
     showConfirm('Delete "' + name + '"? This removes the file from disk.', function(){ post({cmd:'deletePrefab', name: name, folder: selectedPrefabFolder}); });
   });
-  // Store description/tags in a sidecar so prefab JSON stays engine-compatible.
-  // Save changed metadata on blur; clearing both fields deletes the sidecar.
+  // Description and tags live in the prefab file's own snapmapPlus block, which every reader strips
+  // before the engine sees the file. Save changed metadata on blur; clearing both fields clears them.
   var metaBaseline = null;   // desc+tags signature of the LOADED selection; null = nothing loaded
   function parseTagsInput(v) {
-    // quotes/backslashes are stripped so a tag can never break the sidecar's JSON or the tag map scan
+    // quotes/backslashes are stripped so a tag can never break the block's JSON or the tag map scan
     return (v || '').split(',').map(function(t){ return t.replace(/["\\]/g, '').trim(); }).filter(function(t){ return !!t; });
   }
   function savePrefabMetaIfChanged() {
