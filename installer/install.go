@@ -228,6 +228,8 @@ func cmdInstall(f flags) error {
 		}
 	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
+	// The bundle's snapmap-plus-store converts a mods folder of earlier releases (never fails the install).
+	migrateStore(b.root, doom)
 	fmt.Printf("Done. Snapmap+ %s installed.\n", rec.Version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
 	fmt.Println("Launch DOOM and open the SnapMap editor.")

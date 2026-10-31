@@ -88,7 +88,7 @@ jobs:
           # Bundle the 2024 DLLs, the 2018 release's two files and the manifest; publish the
           # installer separately.
           Compress-Archive -Force -DestinationPath snapmap-plus-bundle.zip `
-            -Path dist\XINPUT1_4.dll, dist\XINPUT1_3.dll, dist\snapmap-plus, dist\MANIFEST.sha256
+            -Path dist\XINPUT1_4.dll, dist\XINPUT1_3.dll, dist\snapmap-plus, dist\MANIFEST.sha256, dist\snapmap-plus-store.exe, dist\TOOLS.sha256
       - name: Zip the debug symbols (maintainer artifact)
         shell: pwsh
         run: |
