@@ -61,11 +61,42 @@ func installLegacyRelease(f flags, doom string) error {
 	if f.token != "" {
 		args = append(args, "--token", f.token)
 	}
+	// That installer rewrites install.json in its own format and keeps backups in DOOM, so the
+	// installer's own state is carried across its run and the DOOM folder is brought to the 2018
+	// pair's contract before and after it.
+	dir := appDataDir()
+	saved, _ := loadStateAt(dir)
+	tidyRetiredFolders()
+	reportStartupTidy()
+	tidy2018(doom, "Cleaning the DOOM folder")
 	ui.Section("Installing files")
 	ui.Note("Running the %s installer for the 2018 build...", legacyReleaseTag)
 	runErr := runLegacyExe(exe, args)
 	ui.External()
 	dropLegacyCopy(digest)
+	if saved != nil {
+		updateStateAt(dir, func(r *installRecord) {
+			for name, e := range saved.Executables {
+				if _, have := r.Executables[name]; !have && ownsExecutable(filepath.Join(dir, name), e.SHA256) {
+					if r.Executables == nil {
+						r.Executables = map[string]exeEntry{}
+					}
+					r.Executables[name] = e
+				}
+			}
+			if r.SelfUpdate == nil {
+				r.SelfUpdate = saved.SelfUpdate
+			}
+			if r.DoomPath != "" {
+				r.DoomBuild = build2018
+			}
+		})
+	}
+	ui.Blank()
+	startupTidy = append(startupTidy, retireBookkeeping(dir, "")...)
+	tidyRetiredFolders()
+	reportStartupTidy()
+	tidy2018(doom, "Cleaning up after the "+legacyReleaseTag+" installer")
 	if runErr != nil {
 		var exit *exec.ExitError
 		if errors.As(runErr, &exit) {
@@ -74,6 +105,22 @@ func installLegacyRelease(f flags, doom string) error {
 		return fmt.Errorf("couldn't run the %s installer (%v)", legacyReleaseTag, runErr)
 	}
 	return nil
+}
+
+// tidy2018 brings a 2018 DOOM folder to its pair's contract: the April 2024 pair and every backup of
+// ours go, backups of files that were not ours move into cache\installer, and the record follows.
+func tidy2018(doom, title string) {
+	ui.LazySection(title)
+	dir := appDataDir()
+	rec, err := loadStateAt(dir)
+	if err != nil {
+		return
+	}
+	t := cleanDoomFolder(doom, buildPair(build2018), newOwnership(doom, rec, nil), rec)
+	printDoomTidy(t, dir)
+	if rec.DoomPath != "" || stateExists(dir) {
+		saveStateAt(dir, rec)
+	}
 }
 
 // dropLegacyCopy removes the copy the legacy installer keeps of itself in app data, while its bytes
@@ -92,10 +139,6 @@ func dropLegacyCopy(digest string) {
 		delete(rec, legacyExeName)
 	} else if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
 		delete(rec, legacyExeName)
-	}
-	if len(rec) == 0 {
-		os.Remove(filepath.Join(dir, executableRecordName))
-		return
 	}
 	saveExecutableRecord(dir, rec)
 }

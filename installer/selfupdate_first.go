@@ -63,6 +63,7 @@ func selfUpdateFirst(rawArgs []string) (relaunched bool, code int) {
 		ui.Warn("couldn't check for a newer snapmap-plus.exe: %v", err)
 		return false, 0
 	}
+	noteReleaseChecked(rel.TagName)
 	if !shouldSelfUpdate(version, rel.TagName) {
 		return false, 0
 	}

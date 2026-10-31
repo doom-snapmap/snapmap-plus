@@ -43,8 +43,13 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	if err := cmdInstall(flags{doom: doom, local: dist}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if !exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
-		t.Error("expected a backup of the pre-existing XINPUT1_4.dll")
+	// The pre-existing XINPUT1_4.dll is not ours: it is kept in the data folder, never in DOOM.
+	saved := filepath.Join(installerCacheDir(filepath.Join(tmp, "appdata", "snapmap-plus")), "backup", "XINPUT1_4.dll")
+	if readF(t, saved) != "ORIGINAL" || exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
+		t.Error("expected the pre-existing XINPUT1_4.dll kept in cache, installer, backup")
+	}
+	if exists(filepath.Join(doom, "platforms")) {
+		t.Error("a file outside the pair was installed")
 	}
 	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "backend" {
 		t.Errorf("deployed XINPUT1_4.dll = %q, want %q", got, "backend")
@@ -69,6 +74,9 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 		if exists(filepath.Join(doom, p)) {
 			t.Errorf("expected %q removed after uninstall", p)
 		}
+	}
+	if exists(saved) || exists(filepath.Join(tmp, "appdata", "snapmap-plus", "cache")) {
+		t.Error("uninstall left the restored backup or the installer cache")
 	}
 }
 

@@ -331,6 +331,13 @@ func (c *console) Answered(closed bool) {
 	c.started, c.blank = true, false
 }
 
+// Line writes one line another program printed, as given, under any pending section title.
+func (c *console) Line(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.emitLocked(false, strings.TrimRight(s, " "))
+}
+
 // Raw writes preformatted text, such as the changelog, unchanged and uncoloured.
 func (c *console) Raw(text string) {
 	if text == "" {

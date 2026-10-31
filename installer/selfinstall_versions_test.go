@@ -77,8 +77,8 @@ func TestOlderInstallerKeepsANewerStableCopy(t *testing.T) {
 	if err := cmdUninstall(flags{yes: true}); err != nil {
 		t.Fatal(err)
 	}
-	if exists(filepath.Join(r.data, executableVersionsName)) {
-		t.Error("uninstall left installer-versions.json for a removed copy")
+	if exists(filepath.Join(r.data, stateName)) || exists(filepath.Join(r.data, retiredVersionsRecord)) {
+		t.Error("uninstall left a record of a removed copy")
 	}
 }
 

@@ -377,23 +377,19 @@ func TestUpdateFromMockInstallsNewerRelease(t *testing.T) {
 	if got := readF(t, r.exe); got != string(installerBytes("v1.0.0-beta.2")) {
 		t.Errorf("snapmap-plus.exe = %q, want the new release's installer", got)
 	}
-	if got := readF(t, r.exe+".old"); got != string(installerBytes("v1.0.0-beta.1")) {
-		t.Errorf("the replaced image was not kept aside: %q", got)
+	// The replaced image is not running in this test, so it is removed at once.
+	if exists(r.exe+".old") || exists(filepath.Join(r.data, selfExeAsset+".old")) || exists(installerCacheDir(r.data)) {
+		t.Error("the replaced image was left behind")
 	}
-	if rec, err := loadUpdateRecord(r.exe); err != nil || rec.Backups[filepath.Base(r.exe)+".old"] == "" {
-		t.Errorf("the replaced image is not recorded for cleanup: %+v, %v", rec, err)
+	if rec, err := loadStateAt(r.data); err != nil || rec.SelfUpdate == nil ||
+		rec.SelfUpdate.PlacedSHA256 != sha256Hex(installerBytes("v1.0.0-beta.2")) || rec.SelfUpdate.Release != "v1.0.0-beta.2" {
+		t.Errorf("install.json does not carry the self-update state: %+v, %v", rec.SelfUpdate, err)
 	}
 	if got := readF(t, filepath.Join(r.data, selfExeAsset)); got != string(installerBytes("v1.0.0-beta.2")) {
 		t.Errorf("the stable app-data copy = %q, want the new installer", got)
 	}
 	sameSnapshot(t, "install and update", before, r.userSnapshot(t))
 	r.noTempLeftovers(t, "update")
-
-	// The next run sweeps the recorded backup.
-	cleanupSelfUpdateLeftovers()
-	if exists(r.exe + ".old") {
-		t.Error("the recorded backup survived the next run's cleanup")
-	}
 }
 
 // With no newer release, the installer keeps its image and the update rewrites identical DLLs.

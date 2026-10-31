@@ -25,33 +25,17 @@ const currentProxy = "XINPUT1_4.dll"
 // $uiRel in package.ps1 (a test checks all three).
 const currentUIDll = `snapmap-plus\snapmap-plus-ui-13954591.dll`
 
-// legacyBundleFiles are the 2018 release's files, which every release bundle also carries byte for
-// byte. Installers without build detection (legacyReleaseTag and earlier) install every file a
-// bundle lists, so on the 2018 build their update leaves these in place and the 2024 files are
-// inert (the 2018 executables import XINPUT1_3.dll). This installer never installs them for the
-// supported build, and removes them when an earlier installer left them there.
-var legacyBundleFiles = []string{"XINPUT1_3.dll", `snapmap-plus\snapmap-plus-ui.dll`}
-
-func isLegacyBundleFile(rel string) bool {
-	for _, l := range legacyBundleFiles {
-		if strings.EqualFold(filepath.Clean(rel), l) {
-			return true
-		}
-	}
-	return false
-}
-
-// splitBundleForBuild returns the files to install for the supported build and the 2018 files
-// the bundle also carries.
-func splitBundleForBuild(files []manifestEntry) (install, legacy []manifestEntry) {
+// splitBundleForBuild returns the bundle's files that make up pair, and the others it carries (a
+// bundle of an earlier release also carried the 2018 release's files), which are not installed.
+func splitBundleForBuild(files []manifestEntry, pair []string) (install, other []manifestEntry) {
 	for _, e := range files {
-		if isLegacyBundleFile(e.rel) {
-			legacy = append(legacy, e)
-		} else {
+		if containsRel(pair, e.rel) {
 			install = append(install, e)
+		} else {
+			other = append(other, e)
 		}
 	}
-	return install, legacy
+	return install, other
 }
 
 const (

@@ -93,6 +93,19 @@ func dropLegacyBackups(doom string, baks []backup) []backup {
 	kept := baks[:0]
 	list := ui.List("Removed copies saved aside by an earlier install")
 	defer list.Close()
+	// Unrecorded backups at those names are the original's files too.
+	for rel := range legacySharedBakRels {
+		for _, suf := range ourBackupSuffixes {
+			p := filepath.Join(doom, rel+suf)
+			recorded := false
+			for _, bk := range baks {
+				recorded = recorded || samePath(bk.Backup, p)
+			}
+			if !recorded && isRegular(p) && os.Remove(p) == nil {
+				list.Add(rel + suf)
+			}
+		}
+	}
 	for _, bk := range baks {
 		if !legacySharedBakRels[filepath.FromSlash(bk.Rel)] {
 			kept = append(kept, bk)

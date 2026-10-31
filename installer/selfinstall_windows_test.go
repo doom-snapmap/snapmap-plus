@@ -3,7 +3,6 @@
 package main
 
 import (
-	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -13,7 +12,7 @@ func TestLockedExecutableRecordRetainsThePreviousManifest(t *testing.T) {
 	if err := saveExecutableRecord(dir, executableRecord{"old.exe": "old hash"}); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, executableRecordName)
+	path := statePath(dir)
 	h, err := syscall.CreateFile(syscall.StringToUTF16Ptr(path), syscall.GENERIC_READ,
 		syscall.FILE_SHARE_READ, nil, syscall.OPEN_EXISTING, 0, 0)
 	if err != nil {

@@ -83,17 +83,16 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 		t.Errorf("package.ps1 does not package the frontend as %s", currentUIDll)
 	}
 	// The bundle carries only the April 2024 pair: the 2018 release's files are no longer packaged.
-	for _, gone := range []string{"LegacyBundle", "$legacyRels", "XINPUT1_3.dll"} {
+	for _, gone := range []string{"LegacyBundle", "$legacyRels", legacyProxy} {
 		if strings.Contains(pkg, gone) {
 			t.Errorf("package.ps1 still mentions %q", gone)
 		}
 	}
-	mustNot := `$mustNot = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")`
 	ci := read(".github/workflows/ci.yml")
 	if !strings.Contains(ci, `"`+currentUIDll+`"`) {
 		t.Errorf("the CI bundle guard does not require %s", currentUIDll)
 	}
-	if !strings.Contains(ci, mustNot) {
+	if !strings.Contains(ci, `$mustNot = @("`+legacyProxy+`", "`+legacyUIDll+`")`) {
 		t.Errorf("the CI bundle guard does not refuse the 2018 pair")
 	}
 	rel := read(".github/workflows/release.yml")
@@ -105,7 +104,7 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 			t.Errorf("release.yml still packages the 2018 files (%q)", gone)
 		}
 	}
-	if !strings.Contains(rel, mustNot) {
+	if !strings.Contains(rel, `$mustNot = @("`+legacyProxy+`", "`+legacyUIDll+`")`) {
 		t.Errorf("release.yml does not refuse a bundle holding the 2018 pair")
 	}
 }
@@ -119,7 +118,7 @@ func TestUniversalBundleInstallsOnlyTheSupportedBuild(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	r.installed(t, "v1.0.0-beta.2")
-	for _, rel := range legacyBundleFiles {
+	for _, rel := range buildPair(build2018) {
 		if exists(filepath.Join(r.doom, rel)) {
 			t.Errorf("the supported build got the 2018 file %s", rel)
 		}

@@ -97,7 +97,9 @@ func runMigrateStore(t *testing.T, bundle, mode string) (printed, tool string, c
 	saved := storeToolOut
 	storeToolOut = &out
 	defer func() { storeToolOut = saved }()
-	printed = captureStdout(t, func() { migrateStore(bundle, `D:\Games\DOOM`) })
+	var stdout string
+	errOut := captureStderr(t, func() { stdout = captureStdout(t, func() { migrateStore(bundle, `D:\Games\DOOM`) }) })
+	printed = stdout + errOut
 	if data, err := os.ReadFile(log); err == nil {
 		calls = strings.Split(strings.TrimSpace(string(data)), "\n")
 	}
@@ -117,7 +119,7 @@ func TestMigrateStoreRunsMigrateWhenCheckFindsWork(t *testing.T) {
 			t.Errorf("tool output lacks %q:\n%s", want, tool)
 		}
 	}
-	if strings.Contains(printed, "Warning") {
+	if strings.Contains(printed, "!!") {
 		t.Errorf("unexpected warning: %s", printed)
 	}
 	// The tool is kept beside the installer copy and recorded like one, so uninstall removes it.
@@ -127,7 +129,7 @@ func TestMigrateStoreRunsMigrateWhenCheckFindsWork(t *testing.T) {
 	}
 	rec, err := loadExecutableRecord(store)
 	if err != nil || rec[storeToolName] == "" {
-		t.Errorf("the placed tool is not recorded in %s: %v %v", executableRecordName, rec, err)
+		t.Errorf("the placed tool is not recorded in install.json: %v %v", rec, err)
 	}
 	cleanupOwnedExecutables(store, filepath.Join(store, "snapmap-plus.exe"))
 	if exists(placed) {
@@ -140,7 +142,7 @@ func TestMigrateStoreStopsWhenCheckIsClean(t *testing.T) {
 	if len(calls) != 1 || !strings.HasPrefix(calls[0], "check|") {
 		t.Fatalf("calls = %q", calls)
 	}
-	if !strings.Contains(tool, "  Nothing to migrate.") || strings.Contains(printed, "Warning") {
+	if !strings.Contains(tool, "  Nothing to migrate.") || strings.Contains(printed, "!!") {
 		t.Errorf("tool %q printed %q", tool, printed)
 	}
 }
@@ -150,7 +152,7 @@ func TestMigrateStoreWarnsWithoutTheTool(t *testing.T) {
 	if len(calls) != 0 || tool != "" {
 		t.Fatalf("a missing tool ran: %q %q", calls, tool)
 	}
-	if !strings.Contains(printed, "Warning: this Snapmap+ bundle has no snapmap-plus-store.exe") ||
+	if !strings.Contains(printed, "this Snapmap+ bundle has no snapmap-plus-store.exe") ||
 		!strings.Contains(printed, "Snapmap+ itself is installed.") {
 		t.Errorf("printed %q", printed)
 	}
@@ -162,10 +164,11 @@ func TestMigrateStoreWarnsWhenMigrateFails(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls = %q", calls)
 	}
-	want := `Warning: snapmap-plus-store.exe did not finish migrating your mods folder (exit code 1); Snapmap+ itself is installed. ` +
-		"To finish, close DOOM and run:\n" + `  "` + filepath.Join(store, storeToolName) + `" migrate "` + store + `" --doom "D:\Games\DOOM"`
-	if !strings.Contains(printed, want) {
-		t.Errorf("printed %q, want %q", printed, want)
+	for _, want := range []string{"snapmap-plus-store.exe did not finish migrating your mods folder (exit code 1); Snapmap+ itself is installed. " +
+		"To finish, close DOOM and run:", `  "` + filepath.Join(store, storeToolName) + `" migrate "` + store + `" --doom "D:\Games\DOOM"`} {
+		if !strings.Contains(printed, want) {
+			t.Errorf("printed %q, want %q", printed, want)
+		}
 	}
 	if !strings.Contains(tool, "  Partly done") {
 		t.Errorf("tool output %q", tool)
@@ -177,7 +180,7 @@ func TestMigrateStoreWarnsWhenCheckFails(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %q", calls)
 	}
-	if !strings.Contains(printed, "Warning: snapmap-plus-store.exe could not check your mods folder (exit code 2)") {
+	if !strings.Contains(printed, "snapmap-plus-store.exe could not check your mods folder (exit code 2)") {
 		t.Errorf("printed %q", printed)
 	}
 	if !strings.Contains(tool, "cannot be read") {
@@ -190,7 +193,7 @@ func TestMigrateStoreRefusesAnAlteredTool(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("an altered tool ran: %q", calls)
 	}
-	if !strings.Contains(printed, "Warning: the bundle's snapmap-plus-store.exe was not run (its SHA-256 does not match TOOLS.sha256)") {
+	if !strings.Contains(printed, "the bundle's snapmap-plus-store.exe was not run (its SHA-256 does not match TOOLS.sha256)") {
 		t.Errorf("printed %q", printed)
 	}
 	if exists(filepath.Join(appDataDir(), storeToolName)) {
@@ -209,7 +212,7 @@ func TestMigrateStoreKeepsAChangedCopy(t *testing.T) {
 	saved := storeToolOut
 	storeToolOut = io.Discard
 	defer func() { storeToolOut = saved }()
-	printed := captureStdout(t, func() { migrateStore(bundle, `D:\Games\DOOM`) })
+	printed := captureStderr(t, func() { migrateStore(bundle, `D:\Games\DOOM`) })
 	if got := readF(t, filepath.Join(store, storeToolName)); got != "the player's own file" {
 		t.Errorf("the player's file was replaced: %q", got)
 	}
