@@ -19,6 +19,12 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
  * engine runs the action on a later frame and the user positions the result. */
 int sh_apply_last_place_result(void);
 
+/* The Prefabs tab's view of Load / Place (sh_prefab_watch): seq counts the
+ * decided object pastes, result is the last one's SH_PREFAB_PLACE_* and reason
+ * says why it was staged only. Returns 1 while a queued paste is held in the
+ * 3D view (EntityMode in its grab), 0 otherwise. Any thread; guarded reads. */
+int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reason_cap);
+
 /* Maintenance after a successful native Frame, outside recovery. Unknown or
  * off-main callers do nothing. On leaving RUNNING, preserve verified persistent
  * storage or reset our matching unsafe staged-prefab slot. */

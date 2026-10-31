@@ -48,7 +48,10 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
 /* ext 34: the Mods tab (list, run, fetch, root). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x380);
+/* ext 35: the Prefabs tab's editor watch (module selection, held prefab, paste decision). */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_watch) == 0x380);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x388);
+SH_STATIC_ASSERT(sizeof(sh_prefab_watch) == 112);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
@@ -118,6 +121,18 @@ static int stub_mods(sh_iface *self, sh_mods_call *call)
     memcpy(call->out, doc, sizeof doc);
     return 1;
 }
+static int stub_prefab_watch(sh_iface *self, sh_prefab_watch *out)
+{
+    (void)self;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    out->modules_selected = 2;
+    out->held = SH_PREFAB_HELD_OBJECTS;
+    out->place_seq = 5;
+    out->place_result = SH_PREFAB_PLACE_STAGED;
+    strcpy(out->place_reason, "the editor is not in Object mode");
+    return 1;
+}
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -133,7 +148,17 @@ static int check_vtable_size_contract(sh_iface *iface)
     if (SH_IFACE_HAS_SLOT(&legacy, timeline_tile)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, budget)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, mods)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, prefab_watch)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
+    {
+        /* A backend from before ext 35 ends its table at +0x380: no watch, even with filler past it. */
+        static sh_iface ext34;
+        uint32_t *cell = (uint32_t *)(void *)ext34.mtx;
+        memset(&ext34, 0, sizeof ext34);
+        ext34.vtbl = (const sh_iface_vtbl *)(const void *)old_vtbl;
+        cell[0] = SH_IFACE_VTBL_MARK; cell[1] = 0x380u;
+        if (!SH_IFACE_HAS_SLOT(&ext34, mods) || SH_IFACE_HAS_SLOT(&ext34, prefab_watch)) return 0;
+    }
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
     return 1;
@@ -295,6 +320,23 @@ int main(void)
         call.out = buf; call.out_cap = (int)sizeof buf;
         if (iface->vtbl->mods(iface, &call) != 1 || call.generation != 2 || strcmp(buf, "{\"v\":1}") != 0) {
             fprintf(stderr, "iface_config_test: mods slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, prefab_watch)) {
+        fprintf(stderr, "iface_config_test: unbound prefab_watch slot reported present\n");
+        return 1;
+    }
+    engine_slots.prefab_watch = stub_prefab_watch;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_prefab_watch w;
+        memset(&w, 0xCC, sizeof w);
+        if (!SH_IFACE_HAS_SLOT(iface, prefab_watch) || iface->vtbl->prefab_watch(iface, &w) != 1 ||
+            w.modules_selected != 2 || w.held != SH_PREFAB_HELD_OBJECTS || w.place_seq != 5 ||
+            w.place_result != SH_PREFAB_PLACE_STAGED || strcmp(w.place_reason, "the editor is not in Object mode") != 0) {
+            fprintf(stderr, "iface_config_test: prefab_watch slot was not bound\n");
             return 1;
         }
     }

@@ -163,7 +163,13 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE,
         NULL,
         normalize_bool
-    }
+    },
+    /* The folder each file dialog opens in: the last one the player used for
+     * that dialog, "" until then (the WebView host picks the default). */
+    { "dialogs.prefab_export", SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL },
+    { "dialogs.prefab_import", SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL },
+    { "dialogs.rawmap_save",   SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL },
+    { "dialogs.rawmap_load",   SH_JSON_STRING, "\"\"", SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE, NULL, NULL }
 };
 
 #define CONFIG_COUNT (sizeof(g_registry) / sizeof(g_registry[0]))

@@ -268,6 +268,19 @@ static volatile LONG        g_we_staged      = 0;
 static volatile LONG        g_we_staged_count = 0;
 /* Most recent kind-2 staging/action result. */
 static volatile LONG        g_last_place_result = 0;
+/* Load / Place's paste as the Prefabs tab sees it (sh_apply_engine_place_watch).
+ * The game thread writes each decision's reason and result, then bumps the
+ * sequence. A queued paste is watched until EntityMode +0x1AC reads 4, the
+ * grab (1 idle, 2 selection; R-012), and then until it leaves 4 (Space or Esc). */
+#define AE_MODE_STATE_OFF     0x1ac
+#define AE_MODE_STATE_HELD    4
+#define AE_PASTE_HOLD_WAIT_MS 3000ULL
+static volatile LONG        g_place_seq;
+static volatile LONG        g_place_decided;
+static char                 g_place_reason[96];
+static const char          *g_place_why;          /* game thread: the staged-only cause */
+static volatile LONG        g_paste_watch;        /* 0 none, 1 queued, 2 held */
+static volatile ULONGLONG   g_paste_queued_at;
 /* A Load/Place armed the native paste. When the boxes it brings in arrive and
  * one carries the AI Navigation tick, ask for the same update the View menu
  * does, once, so the green preview and any refusal show without a menu trip.
@@ -1420,20 +1433,24 @@ static int ae_mkcmd_one(const char *prefab_text)
 
 static int ae_mkcmd_instantiate(const char *prefab_text)
 {
+    g_place_why = "the editor could not read the prefab";
     if (!ae_mkcmd_one(prefab_text)) return AE_PASTE_FAILED;
 
     /* Resolved paste worker/grab addresses are diagnostic only. Dispatch by action
  * so the engine performs the required state transitions itself. */
     const uint8_t *ed = ae_editor_session();
+    g_place_why = "no editor is open";
     if (!ed) { backend_log("C2 place: no editor session -> staged only"); return AE_PASTE_STAGED; }
 
     /* The mode subobject is active only in EntityMode (state 2). */
     int editor_state = 0;
+    g_place_why = "the editor is not in Object mode";
     if (!ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &editor_state) || editor_state != 2) {
         backend_log("C2 place: not EntityMode -> staged only");
         return AE_PASTE_STAGED;
     }
 
+    g_place_why = "the editor's copy and paste is unavailable";
     if (!sh_iface_engine_copy_paste_enabled()) {
         backend_log("C2 place: native copy/paste is disabled or unavailable -> staged only");
         return AE_PASTE_STAGED;
@@ -1443,6 +1460,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
     /* Native paste requires a nonempty, bounded staged entity list. */
     int ent_count = 0;
+    g_place_why = "the editor could not stage its entities";
     if (!ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count) ||
         ent_count < 1 || ent_count > PREFAB_MAX_ENTITIES) {
         char l[128];
@@ -1455,7 +1473,8 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
  * Reject manipulation state so a second Load/Place cannot clear a held
  * prefab. This state updates sooner than the layer-based snapshot guard. */
     int mode_state = 0;
-    if (!ae_read_u32_safe(ed + ED_MODE_OBJ_OFF + 0x1ac, &mode_state) ||
+    g_place_why = "something is already held in the 3D view";
+    if (!ae_read_u32_safe(ed + ED_MODE_OBJ_OFF + AE_MODE_STATE_OFF, &mode_state) ||
         (mode_state != 1 && mode_state != 2)) {
         char l[128];
         _snprintf_s(l, sizeof l, _TRUNCATE,
@@ -1471,6 +1490,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
     void *sel = NULL;
     int   sel_count = -1;
+    g_place_why = "the editor kept its selection";
     if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel ||
         !ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &sel_count) || sel_count != 0) {
         char l[128];
@@ -1482,6 +1502,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
     /* Native paste is unavailable while an entity is hovered. */
     int hovered = 0;
+    g_place_why = "the cursor was over an entity, where the editor does not paste";
     if (!ae_read_u32_safe((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered) || hovered != -1) {
         backend_log("C2 place: hovering an entity (engine refuses paste there) -> staged only");
         return AE_PASTE_STAGED;
@@ -1493,6 +1514,7 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
                                               MODE_IDLE_SUBSTATE_OFF + SUBSTATE_FLAGS1_OFF);
     /* Write the action ID before the arming word. */
     int armed = 0;
+    g_place_why = "the paste could not be requested";
     __try {
         *(volatile unsigned char *)flags1 = (unsigned char)(*(volatile unsigned char *)flags1 |
                                                             SUBSTATE_PASTE_AVAIL_BIT);
@@ -1555,10 +1577,16 @@ static int ae_run_item(int kind, int id, const char *text)
     if (kind == 2) {
         int pr = ae_mkcmd_instantiate(text);
         g_last_place_result = pr;
+        strncpy_s(g_place_reason, sizeof g_place_reason,
+                  pr == AE_PASTE_ARMED ? "" : (g_place_why ? g_place_why : ""), _TRUNCATE);
+        InterlockedExchange(&g_place_decided, pr);
         if (pr == AE_PASTE_ARMED) {
             g_nav_place_tick = GetTickCount64();
             InterlockedExchange(&g_nav_place_pending, 1);
+            g_paste_queued_at = GetTickCount64();
+            InterlockedExchange(&g_paste_watch, 1);
         }
+        InterlockedIncrement(&g_place_seq);   /* last: publishes the reason and result */
         return (pr != AE_PASTE_FAILED);
     }
     if (kind == 4) return sh_fly_to_request(id, sh_ui_get_iface());   /* fly to entity; serviced by the editor frames */
@@ -3129,6 +3157,12 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
         char populated = g_prefab_populate(prefab, (void *)ed, &populateStatus);
         g_grab_armed_thread = 0;
         if (g_grab_result.status == SH_PREFAB_GRAB_REFUSED) populated = 0;
+        else if (!(populated & 0xff)) {
+            char line[128];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "PREFAB: the editor's copy check refused the selection (status %d)", populateStatus);
+            backend_log(line);
+        }
         if (populated & 0xff) {
             g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
             g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;
@@ -3209,6 +3243,26 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
 int sh_apply_last_place_result(void)
 {
     return (int)g_last_place_result;
+}
+
+int sh_apply_engine_place_watch(int *seq, int *result, char *reason, size_t reason_cap)
+{
+    LONG w = InterlockedCompareExchange(&g_paste_watch, 0, 0);
+    int held = 0, state = 0, mode = 0;
+    if (seq) *seq = (int)InterlockedCompareExchange(&g_place_seq, 0, 0);
+    if (result) *result = (int)InterlockedCompareExchange(&g_place_decided, 0, 0);
+    if (reason && reason_cap) strncpy_s(reason, reason_cap, g_place_reason, _TRUNCATE);
+    if (!w) return 0;
+    {
+        const uint8_t *ed = ae_editor_session();
+        held = ed && ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &state) && state == 2 &&
+               ae_read_u32_safe(ed + ED_MODE_OBJ_OFF + AE_MODE_STATE_OFF, &mode) && mode == AE_MODE_STATE_HELD;
+    }
+    if (held) { InterlockedCompareExchange(&g_paste_watch, 2, 1); return 1; }
+    /* Held and let go (Space or Esc), or queued and never picked up. */
+    if (w == 2 || GetTickCount64() - g_paste_queued_at > AE_PASTE_HOLD_WAIT_MS)
+        InterlockedCompareExchange(&g_paste_watch, 0, w);
+    return 0;
 }
 
 /* Optional snapshots of staged prefab storage across Play. Historical staging
