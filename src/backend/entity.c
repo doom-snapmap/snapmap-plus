@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include "entity.h"
 #include "commands.h"
 #include "clipboard.h"
@@ -14,6 +15,7 @@
 #include "backend_log.h"
 #include "dumpmap_path.h"
 #include "engine_build.h"
+#include "typeinfo.h"
 
 /* Engine call contracts. */
 
@@ -516,6 +518,135 @@ void h_infinitehealth(idCmdArgs *a) { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_O
 void h_noplayerdeath(idCmdArgs *a)  { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYDEATH, "noPlayerDeath"); }
 void h_noplayerkill(idCmdArgs *a)   { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYKILL,  "noPlayerKill"); }
 void h_notarget(idCmdArgs *a)       { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOTARGET,   "noTarget"); }
+
+/* sh_playerevent: fire a player event on the local player through the engine's
+ * own event system. The event definition comes from the event manager by name
+ * (decl manager +0x90, FindByName +0x10); a record holds the compact argument
+ * format at +0x08, the argument count at +0x2C and the event number at +0x34.
+ * "process" dispatches at once through ProcessEvent with one argument, which
+ * copies the argument into the engine's 0x18-byte idEventArg array and calls
+ * idEvent::Execute (the receiver's vtable +0x20 dispatcher). "post" queues it
+ * through PostEventMS with one argument and a 0 ms delay; the queue is serviced
+ * on the next game frame. The argument is passed as type 'i': the engine's
+ * argument copy drops the value of a 'b' argument, and the queue's type check
+ * accepts 'i' for a bool parameter. */
+#define PE_EVMGR_ACCESSOR_VSLOT  0x90u
+#define PE_EV_FINDBYNAME_VSLOT   0x10u
+#define PE_REC_FORMAT_OFF        0x08u
+#define PE_REC_NUMARGS_OFF       0x2cu
+#define PE_REC_EVENTNUM_OFF      0x34u
+#define PE_PROCESS_EVENT1_RVA    SH_RVA(0xB46C30u, 0xB46220u)
+#define PE_POST_EVENT_MS1_RVA    SH_RVA(0xB45D80u, 0xB45370u)
+#define PE_EVENTARG_CLEAR_RVA    SH_RVA(0xB44640u, 0xB43A50u)
+/* idPlayer hands fields on build 13954591 (the 2018 reflection offsets + 0x28). */
+#define PE_HANDS_DEFAULT_OFF     0xb4a8u
+#define PE_HANDS_PRAETOR_OFF     0xb4b0u
+#define PE_HANDS_DOOMHANDS_OFF   0xb4c8u
+#define PE_HANDS_MODEL_OFF       0xb4d8u
+#define PE_HAS_PRAETOR_OFF       0xb510u   /* hasPraetorHandsAndBody, then force, handsModelStale, thirdPersonBodyModelStale */
+
+typedef struct { char type; char pad[7]; uint64_t value; uint64_t extra; } pe_event_arg;
+typedef void *(*pe_evmgr_acc_fn)(void *declmgr);
+typedef void *(*pe_find_fn)(void *evmgr, const char *name);
+typedef void *(*pe_process1_fn)(void *obj, void *ret, void *evdef, pe_event_arg *arg);
+typedef unsigned char (*pe_post_ms1_fn)(void *obj, void *evdef, int ms, pe_event_arg *arg);
+typedef void (*pe_clear_fn)(void *arg);
+
+static void *pe_find_eventdef(const char *name)
+{
+    void *declmgr = sh_typeinfo_get_declmgr();
+    if (declmgr == NULL) return NULL;
+    __try {
+        pe_evmgr_acc_fn acc = (pe_evmgr_acc_fn)read_vfn(declmgr, PE_EVMGR_ACCESSOR_VSLOT);
+        void *evmgr = acc ? acc(declmgr) : NULL;
+        pe_find_fn find = (pe_find_fn)read_vfn(evmgr, PE_EV_FINDBYNAME_VSLOT);
+        return find ? find(evmgr, name) : NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+}
+
+static void pe_print_hands(const uint8_t *player)
+{
+    uint8_t flags[4] = {0};
+    uintptr_t m[4] = {0};
+    if (!sh_safe_read(player + PE_HAS_PRAETOR_OFF, flags, sizeof flags) ||
+        !sh_safe_read(player + PE_HANDS_DEFAULT_OFF, (uint8_t *)&m[0], 8) ||
+        !sh_safe_read(player + PE_HANDS_PRAETOR_OFF, (uint8_t *)&m[1], 8) ||
+        !sh_safe_read(player + PE_HANDS_DOOMHANDS_OFF, (uint8_t *)&m[2], 8) ||
+        !sh_safe_read(player + PE_HANDS_MODEL_OFF, (uint8_t *)&m[3], 8)) {
+        sh_printf("sh_playerevent: hands fields unreadable.\n");
+        return;
+    }
+    const char *slot = m[3] == m[0] ? "default" : m[3] == m[1] ? "praetor" : m[3] == m[2] ? "doomhands" : "other";
+    sh_printf("sh_playerevent: hands model %p (%s slot); default %p praetor %p doomhands %p; "
+              "hasPraetor %u force %u handsStale %u bodyStale %u\n",
+              (void *)m[3], slot, (void *)m[0], (void *)m[1], (void *)m[2],
+              flags[0], flags[1], flags[2], flags[3]);
+}
+
+void h_sh_playerevent(idCmdArgs *a)
+{
+    const char *ev = cmd_argv(a, 1);
+    if (ev == NULL) {
+        sh_printf("usage: sh_playerevent hands | info <event> | <event> [int] [process|post]\n");
+        return;
+    }
+    void *gm = get_gamemgr();
+    void *player = gm ? gm_find_entity(gm, "player1") : NULL;
+    if (strcmp(ev, "hands") == 0) {
+        if (player == NULL) { sh_printf("sh_playerevent: no local player (start a playtest first).\n"); return; }
+        pe_print_hands((const uint8_t *)player);
+        return;
+    }
+    int info = strcmp(ev, "info") == 0;
+    if (info) {
+        ev = cmd_argv(a, 2);
+        if (ev == NULL) { sh_printf("usage: sh_playerevent info <event>\n"); return; }
+    }
+    uint8_t *rec = (uint8_t *)pe_find_eventdef(ev);
+    if (rec == NULL) { sh_printf("sh_playerevent: no event named '%s'.\n", ev); return; }
+    const char *fmt = NULL;
+    int numargs = -1, eventnum = -1;
+    sh_safe_read(rec + PE_REC_FORMAT_OFF, (uint8_t *)&fmt, sizeof fmt);
+    sh_safe_read(rec + PE_REC_NUMARGS_OFF, (uint8_t *)&numargs, sizeof numargs);
+    sh_safe_read(rec + PE_REC_EVENTNUM_OFF, (uint8_t *)&eventnum, sizeof eventnum);
+    char f[16] = {0};
+    if (fmt) sh_safe_read((const uint8_t *)fmt, (uint8_t *)f, sizeof f - 1);
+    sh_printf("sh_playerevent: '%s' eventDef %p eventnum %d (0x%x) args %d format '%s'\n",
+              ev, (void *)rec, eventnum, eventnum, numargs, f);
+    if (info) return;
+    if (player == NULL) { sh_printf("sh_playerevent: no local player (start a playtest first).\n"); return; }
+    if (numargs > 1 || (numargs == 1 && f[0] != 'b' && f[0] != 'i')) {
+        sh_printf("sh_playerevent: only events with no argument or one bool/int argument.\n");
+        return;
+    }
+    const char *vs = cmd_argv(a, 2);
+    const char *mode = cmd_argv(a, 3);
+    int post = mode != NULL && strcmp(mode, "post") == 0;
+    pe_event_arg arg = {0};
+    arg.type = 'i';
+    arg.value = (uint64_t)(uint32_t)(vs ? atoi(vs) : 0);
+    uint8_t *base = (uint8_t *)GetModuleHandleW(NULL);
+    uint32_t rva_p = PE_PROCESS_EVENT1_RVA, rva_q = PE_POST_EVENT_MS1_RVA, rva_c = PE_EVENTARG_CLEAR_RVA;
+    if (!rva_p || !rva_q || !rva_c || numargs != 1) {
+        sh_printf("sh_playerevent: unsupported executable or argument count.\n");
+        return;
+    }
+    pe_print_hands((const uint8_t *)player);
+    int ok = 0;
+    __try {
+        if (post) {
+            ok = ((pe_post_ms1_fn)(base + rva_q))(player, rec, 0, &arg) != 0;
+        } else {
+            uint8_t ret[0x18] = {0};
+            ((pe_process1_fn)(base + rva_p))(player, ret, rec, &arg);
+            ((pe_clear_fn)(base + rva_c))(ret);
+            ok = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = -1; }
+    sh_printf("sh_playerevent: %s %s(%d) on player1 %p: %s\n", post ? "posted" : "processed", ev,
+              vs ? atoi(vs) : 0, player, ok == 1 ? "ok" : ok == 0 ? "refused" : "faulted");
+    pe_print_hands((const uint8_t *)player);
+}
 
 /* Dependency installation. */
 
