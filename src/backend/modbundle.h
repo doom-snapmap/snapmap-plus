@@ -113,7 +113,7 @@
  * delete on Remove). A folder without one is the author's (Remove keeps its
  * files, moved to removed-mods). */
 #define SH_MB_ORIGIN_INSTALL   "install"        /* copied in by Install folder or sh_mods install */
-#define SH_MB_ORIGIN_DOWNLOAD  "download"       /* fetched from the mod store or a rawmap export */
+#define SH_MB_ORIGIN_DOWNLOAD  "download"       /* fetched from the mod store */
 #define SH_MB_ORIGIN_MIGRATION "migration"      /* converted from the retired overrides folder */
 #define SH_MB_ORIGIN_DELIVERY  "delivery"       /* converted from a package a map delivered */
 
@@ -277,8 +277,9 @@ char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, si
  * NULL when the text is not a JSON object. */
 char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
 
-/* The bundle.json form (pretty-printed, with "bundle"): what a rawmap export
- * ZIP carries (malloc'd, NUL-terminated), or NULL. */
+/* The bundle.json form (pretty-printed, with "bundle"), as the retired
+ * layout and earlier exports stored it (malloc'd, NUL-terminated), or NULL.
+ * Exports now carry mod.json itself (modexport.h). */
 char *sh_mb_bundle_json(const sh_mb_bundle *bundle, size_t *out_len);
 
 /* Read and check a built mod.json: the author block, the product block,
@@ -291,7 +292,7 @@ int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
 int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
 
 /* Read and check a manifest in the bundle.json form (Contract 1, with
- * "bundle"): a download, a rawmap ZIP, a folder of the retired layout. */
+ * "bundle"): a download, a folder of the retired layout. */
 int  sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out);
 
 /* Tree hash of a mod folder, the rebuild rule's key: SHA-256 over the

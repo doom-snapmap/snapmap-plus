@@ -149,4 +149,66 @@ static int mt_unzip_stored(const char *zip, const char *dir)
     return count;
 }
 
+static unsigned long mt_crc32(const unsigned char *p, size_t n)
+{
+    unsigned long c = 0xFFFFFFFFul;
+    size_t i;
+    int k;
+    for (i = 0; i < n; i++) {
+        c ^= p[i];
+        for (k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320ul ^ (c >> 1) : c >> 1;
+    }
+    return (c ^ 0xFFFFFFFFul) & 0xFFFFFFFFul;
+}
+
+static void mt_put16(unsigned char *p, unsigned v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
+static void mt_put32(unsigned char *p, unsigned long v)
+{
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+/* A ZIP of n stored text entries, for exports no release writes (the retired
+ * forms, hand-made layouts). Returns 1 written. */
+static int mt_zip_stored(const char *path, int n, const char *const *names, const char *const *datas)
+{
+    unsigned char *buf, *p, *cd0;
+    unsigned long offs[32];
+    size_t total = 22;
+    int i, ok;
+    FILE *f = NULL;
+    if (n > 32) return 0;
+    for (i = 0; i < n; i++) total += 30 + 46 + 2 * strlen(names[i]) + strlen(datas[i]);
+    buf = (unsigned char *)malloc(total);
+    if (!buf) return 0;
+    p = buf;
+    for (i = 0; i < n; i++) {
+        size_t nl = strlen(names[i]), dl = strlen(datas[i]);
+        offs[i] = (unsigned long)(p - buf);
+        memset(p, 0, 30);
+        mt_put32(p, 0x04034b50ul); mt_put16(p + 4, 20); mt_put16(p + 12, 0x21);
+        mt_put32(p + 14, mt_crc32((const unsigned char *)datas[i], dl)); mt_put32(p + 18, (unsigned long)dl);
+        mt_put32(p + 22, (unsigned long)dl); mt_put16(p + 26, (unsigned)nl);
+        memcpy(p + 30, names[i], nl); memcpy(p + 30 + nl, datas[i], dl);
+        p += 30 + nl + dl;
+    }
+    cd0 = p;
+    for (i = 0; i < n; i++) {
+        size_t nl = strlen(names[i]), dl = strlen(datas[i]);
+        memset(p, 0, 46);
+        mt_put32(p, 0x02014b50ul); mt_put16(p + 4, 20); mt_put16(p + 6, 20); mt_put16(p + 14, 0x21);
+        mt_put32(p + 16, mt_crc32((const unsigned char *)datas[i], dl)); mt_put32(p + 20, (unsigned long)dl);
+        mt_put32(p + 24, (unsigned long)dl); mt_put16(p + 28, (unsigned)nl); mt_put32(p + 42, offs[i]);
+        memcpy(p + 46, names[i], nl);
+        p += 46 + nl;
+    }
+    memset(p, 0, 22);
+    mt_put32(p, 0x06054b50ul); mt_put16(p + 8, (unsigned)n); mt_put16(p + 10, (unsigned)n);
+    mt_put32(p + 12, (unsigned long)(p - cd0)); mt_put32(p + 16, (unsigned long)(cd0 - buf));
+    p += 22;
+    ok = fopen_s(&f, path, "wb") == 0 && f && fwrite(buf, 1, (size_t)(p - buf), f) == (size_t)(p - buf);
+    if (f) fclose(f);
+    free(buf);
+    return ok;
+}
+
 #endif

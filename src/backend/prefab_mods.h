@@ -47,10 +47,12 @@
  * (module_prefab_map.h): nothing can install it.
  *
  * Export always writes one ZIP (modexport.h): <name>.json, the prefab file
- * with its block, and every bundle its rows name. Import takes that ZIP, or a
- * .json inside an extracted export folder, installs the bundles the store
- * lacks and adds the prefab to the library. Importing an export whose mods
- * and prefab are already there writes nothing.
+ * with its block, and every mod its rows name as its installed folder
+ * (mods/<folder>/mod.json and assets/). Import takes that ZIP, or a .json
+ * inside an extracted export folder, installs each carried folder the store
+ * does not serve as the ordinary install does, and adds the prefab to the
+ * library. Importing an export whose mods and prefab are already there
+ * writes nothing.
  *
  * Paths: prefab and sidecar paths are ANSI, as the Prefabs tab resolves them;
  * ZIP paths and prefab names given to export are UTF-8 (the file dialog's),
@@ -197,7 +199,8 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export
  * folder; UTF-8) into prefabs_dir (ANSI, with or without a trailing
- * separator): install the bundles the store lacks, then add the prefab under
+ * separator): install the carried mod folders the store does not serve
+ * (modexport_read_prefab), then add the prefab under
  * the .json's file name. A prefab of that name with the same bytes is left
  * alone; one with other bytes gets the next free "<name> (N)". 1 added, 0
  * already there (nothing written), -1 refused. name_out receives the name it

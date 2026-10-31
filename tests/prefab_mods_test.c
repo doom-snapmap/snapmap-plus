@@ -26,11 +26,13 @@
  *     a DLC module no row provides, with and without a block; a second
  *     placement while one waits; the slot's rows from the block or a sidecar,
  *     META_READ from the file, a tail or a sidecar;
- *   the ZIP: <name>.json as on disk and the bundle, no index, also for a
+ *   the ZIP: <name>.json as on disk and the mod's installed folder
+ *     (mods/<id>/mod.json and assets/ byte for byte), no index, also for a
  *     prefab without mods; refused by the map importer and refusing a map's
- *     ZIP; imported into an empty store and library, imported again without a
- *     write, a differing prefab of the same name kept beside it; an extracted
- *     export folder imported; a lone .json naming a mod it does not carry; a
+ *     ZIP and the retired bundle form; imported into an empty store and
+ *     library, imported again without a write, a differing prefab of the same
+ *     name kept beside it; an extracted export folder imported; a lone .json
+ *     naming a mod it does not carry; a
  *     prefab whose row names an uninstalled bundle refused; a prefab saved
  *     before the block exported with a block written for the ZIP only; the
  *     console verbs and the slot's outputs; prefab names.
@@ -865,7 +867,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     const char *e;
     FILETIME before_p, after_p, before_m, after_m;
 
-    printf("-- export: always one ZIP, <name>.json as it is on disk and the mod's bundle, nothing else\n");
+    printf("-- export: always one ZIP, <name>.json as it is on disk and the mod's installed folder, nothing else\n");
     reset_fakes();
     _snprintf_s(zipA, sizeof zipA, _TRUNCATE, "%s\\Door export.zip", tmp);
     _snprintf_s(libB, sizeof libB, _TRUNCATE, "%s\\libB", tmp);
@@ -877,11 +879,20 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     z = slurp(zipA, &zl);
     disk = slurp(prefab, &len);
     {
-        char entry[200];
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/%s@%s+1/bundle.canonical.json", door->id, door->version);
-        CHECK(z && zl > 0 && memmem_find(z, zl, entry));
+        char mj[MAX_PATH * 2], *disk_mj;
+        size_t ml = 0;
         e = zip_entry(z, zl, "Door.json", &el);
         CHECK(e && disk && el == len && !memcmp(e, disk, len));
+        /* The mod as it is installed: mods/test.door/mod.json and its asset, byte for byte. */
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\test.door\\mod.json", storeA);
+        disk_mj = slurp(mj, &ml);
+        e = zip_entry(z, zl, "mods/test.door/mod.json", &el);
+        CHECK(e && disk_mj && el == ml && !memcmp(e, disk_mj, ml));
+        free(disk_mj);
+        e = zip_entry(z, zl, "mods/test.door/assets/generated/decls/entitydef/mods/test.door/door.decl", &el);
+        CHECK(e && el == sizeof DOOR_DECL - 1 && !memcmp(e, DOOR_DECL, el));
+        CHECK(!memmem_find(z, zl, "bundle.canonical.json") && !memmem_find(z, zl, "bundle.json") && !memmem_find(z, zl, "mods/legacy/") &&
+              !memmem_find(z, zl, "test.door@"));
         CHECK(!memmem_find(z, zl, "export.json") && !memmem_find(z, zl, "prefab.meta.json") && !memmem_find(z, zl, "prefab.json"));
     }
     free(z);
@@ -916,6 +927,19 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
               !strcmp(msg, "The prefab was not imported: this is a map's export, not a prefab's."));
     }
 
+    printf("-- the prefab importer refuses the retired bundle form of earlier releases\n");
+    {
+        static const char *const OLD_N[] = { "Door.json", "mods/test.door@1.0.0+1/bundle.canonical.json" };
+        const char *old_d[2];
+        char zo[MAX_PATH * 2];
+        old_d[0] = STOCK_PREFAB;
+        old_d[1] = "{\"id\":\"test.door\"}";
+        _snprintf_s(zo, sizeof zo, _TRUNCATE, "%s\\old form.zip", tmp);
+        CHECK(mt_zip_stored(zo, 2, OLD_N, old_d));
+        CHECK(sh_prefab_mods_import(zo, libB, name, sizeof name, msg, sizeof msg) == -1 &&
+              !strcmp(msg, "The prefab was not imported: this export was made by an earlier release; export it again."));
+    }
+
     printf("-- import into an empty store and library: the mod installed, the prefab added, no sidecar\n");
     CHECK(sh_ms_set_root(storeB));
     CHECK(sh_modserve_index_build(storeB) == 0);
@@ -931,6 +955,9 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     free(text); free(disk);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.meta.json", libB);
     CHECK(!mt_exists(path));
+
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.door\\mod.json", storeB);
+    CHECK(mt_exists(path));   /* installed under its own name, as a folder from elsewhere is */
 
     printf("-- importing it again writes nothing\n");
     {
@@ -1114,6 +1141,7 @@ int main(int argc, char **argv)
 
     names();
     block();
+    comments(libA);
     recording(libA, &door);
     status(&door);
     resolving(&door);

@@ -3427,8 +3427,8 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
     return 1;
 }
 
-/* The bundle.json form (Contract 1 with "bundle"): a download, a rawmap ZIP,
- * a folder of the retired layout. Its pointers have no file in any folder the
+/* The bundle.json form (Contract 1 with "bundle"): a download, a folder of
+ * the retired layout. Its pointers have no file in any folder the
  * product creates. */
 int sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out)
 {

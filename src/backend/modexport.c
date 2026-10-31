@@ -8,7 +8,6 @@
 #include <limits.h>
 
 #include "modexport.h"
-#include "modsync.h"
 #include "modstore.h"
 #include "modbundle.h"
 #include "modmanifest.h"
@@ -491,42 +490,8 @@ static unsigned char *me_read_entry(const me_reader *r, long idx, size_t max, si
 
 /* ------------------------------------------------------------ helpers --- */
 
-typedef struct me_buf { char *p; size_t n, cap; int bad; } me_buf;
-
-static void me_put(me_buf *b, const char *s, size_t n)
-{
-    if (b->bad) return;
-    if (b->n + n + 1 > b->cap) {
-        size_t want = b->cap ? b->cap * 2 : 512;
-        char *g;
-        while (want < b->n + n + 1) want *= 2;
-        g = (char *)realloc(b->p, want);
-        if (!g) { b->bad = 1; return; }
-        b->p = g;
-        b->cap = want;
-    }
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = 0;
-}
-static void me_puts(me_buf *b, const char *s) { me_put(b, s, strlen(s)); }
-static void me_put_str(me_buf *b, const char *s)
-{
-    me_put(b, "\"", 1);
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        if (c == '"' || c == '\\') { char e[2] = { '\\', (char)c }; me_put(b, e, 2); }
-        else if (c < 0x20) { char e[8]; _snprintf_s(e, sizeof e, _TRUNCATE, "\\u%04x", c); me_puts(b, e); }
-        else me_put(b, (const char *)&c, 1);
-    }
-    me_put(b, "\"", 1);
-}
-
-/* The ZIP folder of a bundle: mods/[legacy/]<id>@<version>+<build>. */
-static void me_folder(const sh_mb_bundle *b, char *out, size_t cap)
-{
-    _snprintf_s(out, cap, _TRUNCATE, "mods/%s%s@%s+%llu", b->legacy ? "legacy/" : "", b->id, b->version, b->build);
-}
+#define ME_MODJSON_MAX   (16u * 1024u * 1024u)
+#define ME_MAX_MODS      256u
 
 static void me_join_native(char *out, size_t cap, const char *dir, const char *rel)
 {
@@ -536,46 +501,19 @@ static void me_join_native(char *out, size_t cap, const char *dir, const char *r
     for (i = strlen(dir); i < n; i++) if (out[i] == '/') out[i] = '\\';
 }
 
-/* A tiny set of 64-hex hashes. */
-typedef struct me_hset { char (*v)[SH_MB_HASH_HEX + 1]; long *slot; size_t n, cap, mask; } me_hset;
-
-static size_t me_hhash(const char *h)
+/* The entry a map's export names its map: the ZIP's own base name with .json
+ * ("my map.zip" carries "my map.json"). */
+static void me_map_entry(const char *zip_path, char *out, size_t cap)
 {
-    size_t x = 0;
-    int i;
-    for (i = 0; i < 16; i++) x = x * 16 + (size_t)((h[i] <= '9') ? h[i] - '0' : h[i] - 'a' + 10);
-    return x;
+    const char *base = zip_path, *p;
+    size_t n;
+    for (p = zip_path; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+    n = strlen(base);
+    if (n > 4 && !_stricmp(base + n - 4, ".zip")) n -= 4;
+    if (!n || n > 200) { strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK); return; }
+    _snprintf_s(out, cap, _TRUNCATE, "%.*s.json", (int)n, base);
+    if (!me_name_ok(out, strlen(out))) strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK);
 }
-
-static int me_hset_init(me_hset *s, size_t want)
-{
-    size_t cap = 64;
-    memset(s, 0, sizeof *s);
-    while (cap < want * 2) cap *= 2;
-    s->v = (char (*)[SH_MB_HASH_HEX + 1])malloc(sizeof *s->v * (want ? want : 1));
-    s->slot = (long *)malloc(sizeof(long) * cap);
-    if (!s->v || !s->slot) { free(s->v); free(s->slot); memset(s, 0, sizeof *s); return 0; }
-    memset(s->slot, 0xff, sizeof(long) * cap);
-    s->cap = want ? want : 1;
-    s->mask = cap - 1;
-    return 1;
-}
-
-/* Index of h, or -1; with add, inserts it (returns the new index). */
-static long me_hset_find(me_hset *s, const char *h, int add)
-{
-    size_t i = me_hhash(h) & s->mask;
-    while (s->slot[i] >= 0) {
-        if (strcmp(s->v[s->slot[i]], h) == 0) return s->slot[i];
-        i = (i + 1) & s->mask;
-    }
-    if (!add || s->n >= s->cap) return -1;
-    strcpy_s(s->v[s->n], SH_MB_HASH_HEX + 1, h);
-    s->slot[i] = (long)s->n;
-    return (long)s->n++;
-}
-
-static void me_hset_free(me_hset *s) { free(s->v); free(s->slot); memset(s, 0, sizeof *s); }
 
 /* ------------------------------------------------------------ write ----- */
 
@@ -586,12 +524,12 @@ static int mm_list_has(const sh_modmanifest_list *list, const char *bundle)
     return 0;
 }
 
-/* What one export carries besides its bundles: a map (whose rows are read from
+/* What one export carries besides its mods: a map (whose rows are read from
  * its text and rewritten when a row pins an earlier build) or a prefab (whose
  * rows are given, and whose text is asked for once the carried rows are
  * known). */
 typedef struct me_payload {
-    const char *entry;                 /* MODEXPORT_MAP_ENTRY or "<name>.json" */
+    const char *entry;                 /* "<name>.json" */
     const char *text;
     size_t len;
     const sh_modmanifest_list *rows;   /* prefab: the rows; map: NULL (read from text) */
@@ -605,8 +543,10 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
                     char *cause, size_t cap)
 {
     me_payload pl;
+    char entry[ME_NAME_MAX];
     memset(&pl, 0, sizeof pl);
-    pl.entry = MODEXPORT_MAP_ENTRY;
+    me_map_entry(zip_path ? zip_path : "", entry, sizeof entry);
+    pl.entry = entry;
     pl.text = map_json;
     pl.len = len;
     return me_write(&pl, zip_path, stp, cause, cap);
@@ -638,6 +578,50 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
     return me_write(&pl, zip_path, stp, cause, cap);
 }
 
+/* One installed mod as its store folder: mods/<name>/mod.json as it is on
+ * disk, then every file its bundle carries under assets/, each checked
+ * against the hash mod.json records. A stock pointer is an entry of mod.json
+ * and has no file here: installed game content never leaves the machine. */
+static int me_add_folder(me_writer *w, const sh_ms_entry *e, modexport_stats *st, char *cause, size_t cap)
+{
+    const sh_mb_bundle *b = &e->bundle;
+    char name[ME_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
+    unsigned char *bytes;
+    size_t blen = 0, k;
+    sh_mb_bundle check;
+    int same;
+    me_join_native(path, sizeof path, e->folder, "mod.json");
+    bytes = sh_mb_read_file(path, ME_MODJSON_MAX, &blen);
+    if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", e->name);
+    memset(&check, 0, sizeof check);
+    same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
+    sh_mb_free(&check);
+    if (!same) {
+        free(bytes);
+        return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; rescan and export again", e->name);
+    }
+    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", e->name);
+    me_add(w, name, bytes, blen);
+    free(bytes);
+    for (k = 0; k < b->file_count && !w->failed; k++) {
+        const sh_mb_file *f = &b->files[k];
+        if (f->stock) continue;
+        me_join_native(path, sizeof path, e->folder, f->path);
+        bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
+        if (bytes) {
+            sh_mb_sha256_hex(bytes, blen, actual);
+            if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
+        }
+        if (!bytes) return me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", e->name, f->path);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", e->name, f->path);
+        me_add(w, name, bytes, blen);
+        free(bytes);
+        st->files++;
+    }
+    if (w->failed) return me_cause(cause, cap, "%s", w->cause);
+    return 1;
+}
+
 static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char *cause, size_t cap)
 {
     const char *map_json = pl->text;
@@ -651,12 +635,10 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     sh_ms_list l;
     const sh_ms_entry **picked = NULL;
     me_writer w;
-    me_hset written;
-    me_buf index = {0};
     wchar_t *wfinal = NULL, *wtmp = NULL;
     char tmp[MAX_PATH * 4];
     unsigned rejected = 0;
-    size_t i, k, total_files = 0;
+    size_t i, k;
     double t0 = me_now_ms();
     int ok = 0, listed = 0, locked = 0;
     char *moved_map = NULL;
@@ -664,7 +646,6 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     memset(st, 0, sizeof *st);
     memset(&rows, 0, sizeof rows);
     memset(&w, 0, sizeof w);
-    memset(&written, 0, sizeof written);
     w.h = INVALID_HANDLE_VALUE;
     if (cause && cap) cause[0] = 0;
     if (!map_json || !len || len > MODEXPORT_MAP_MAX || !zip_path || !zip_path[0])
@@ -679,7 +660,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     st->bundles = (unsigned)rows.count;
     st->map_bytes = len;
 
-    modsync_store_lock();
+    modstore_lock();
     locked = 1;
     listed = sh_ms_enumerate(&l);
     if (!listed) { me_cause(cause, cap, "the mods store cannot be listed"); goto done; }
@@ -696,8 +677,8 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     }
     {
         /* A row may pin an earlier build (an alias): the export carries the
-         * build serving it now, and the exported map's rows name that build,
-         * so the importer needs no alias. */
+         * folder serving it now, and the exported rows name that build, so the
+         * importer needs no alias. */
         sh_modmanifest_list fixed;
         size_t moved = 0, map_len = 0;
         char err[160] = "";
@@ -758,27 +739,6 @@ rows_done:
         map_json = prefab_text;
         st->map_bytes = len;
     }
-    for (i = 0; i < rows.count; i++) total_files += picked[i]->bundle.file_count;
-    if (!me_hset_init(&written, total_files + 1)) { me_cause(cause, cap, "out of memory"); goto done; }
-
-    /* export.json: what the importer installs, in row order. A prefab's own
-     * block is its index, so its export has none. */
-    me_puts(&index, "{\"bundles\":[");
-    for (i = 0; i < rows.count; i++) {
-        char folder[MAX_PATH], num[32];
-        const sh_mb_bundle *b = &picked[i]->bundle;
-        me_folder(b, folder, sizeof folder);
-        _snprintf_s(num, sizeof num, _TRUNCATE, "%llu", b->build);
-        if (i) me_puts(&index, ",");
-        me_puts(&index, "{\"build\":"); me_puts(&index, num);
-        me_puts(&index, ",\"bundle\":"); me_put_str(&index, b->hash);
-        me_puts(&index, ",\"folder\":"); me_put_str(&index, folder);
-        me_puts(&index, ",\"id\":"); me_put_str(&index, b->id);
-        me_puts(&index, ",\"version\":"); me_put_str(&index, b->version);
-        me_puts(&index, "}");
-    }
-    me_puts(&index, "],\"format\":1,\"map\":\"" MODEXPORT_MAP_ENTRY "\"}");
-    if (index.bad) { me_cause(cause, cap, "out of memory"); goto done; }
 
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.smp-%lu.tmp", zip_path, GetCurrentProcessId());
     wfinal = sh_mb_wpath(zip_path);
@@ -788,46 +748,11 @@ rows_done:
     if (w.h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot create %s (error %lu)", zip_path, GetLastError()); goto done; }
 
     me_add(&w, pl->entry, map_json, len);
-    if (!prefab) me_add(&w, MODEXPORT_INDEX, index.p, index.n);
     for (i = 0; i < rows.count && !w.failed; i++) {
-        const sh_ms_entry *e = picked[i];
-        const sh_mb_bundle *b = &e->bundle;
-        char folder[MAX_PATH], name[MAX_PATH * 2], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
-        unsigned char *bytes;
-        size_t blen = 0;
         int dup = 0;
-        for (k = 0; k < i && !dup; k++) dup = picked[k] == e;
+        for (k = 0; k < i && !dup; k++) dup = picked[k] == picked[i];
         if (dup) continue;
-        me_folder(b, folder, sizeof folder);
-        /* The ZIP keeps the bundle.json form: both texts are derived from
-         * mod.json in memory; the canonical one is the exact text whose
-         * SHA-256 is the bundle hash. */
-        {
-            char *pretty = sh_mb_bundle_json(b, &blen);
-            if (!pretty) { me_cause(cause, cap, "out of memory"); goto done; }
-            _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.json", folder);
-            me_add(&w, name, pretty, blen);
-            free(pretty);
-        }
-        _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.canonical.json", folder);
-        me_add(&w, name, b->canonical, b->canonical_len);
-        for (k = 0; k < b->file_count && !w.failed; k++) {
-            const sh_mb_file *f = &b->files[k];
-            if (f->stock) continue;   /* installed content: the ZIP carries only the pointer */
-            if (me_hset_find(&written, f->blob, 0) >= 0) { st->blobs_deduped++; continue; }
-            me_join_native(path, sizeof path, e->folder, f->path);
-            bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
-            if (bytes) {
-                sh_mb_sha256_hex(bytes, blen, actual);
-                if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
-            }
-            if (!bytes) { me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", e->name, f->path); goto done; }
-            _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", folder, f->path);
-            me_add(&w, name, bytes, blen);
-            free(bytes);
-            me_hset_find(&written, f->blob, 1);
-            st->blobs_written++;
-        }
+        if (!me_add_folder(&w, picked[i], st, cause, cap)) goto done;
     }
     me_finish(&w);
     if (w.failed) { me_cause(cause, cap, "%s", w.cause); goto done; }
@@ -845,15 +770,13 @@ done:
     if (w.h != INVALID_HANDLE_VALUE) CloseHandle(w.h);
     if (!ok && wtmp) DeleteFileW(wtmp);
     me_writer_free(&w);
-    me_hset_free(&written);
-    free(index.p);
     free(picked);
     free(moved_map);
     free(prefab_text);
     free(wfinal);
     free(wtmp);
     if (listed) sh_ms_list_free(&l);
-    if (locked) modsync_store_unlock();
+    if (locked) modstore_unlock();
     sh_modmanifest_list_free(&rows);
     st->ms = me_now_ms() - t0;
     return ok;
@@ -861,44 +784,42 @@ done:
 
 /* ------------------------------------------------------------ read ------ */
 
-typedef struct me_ibundle {
-    int present;        /* installed and usable before the import */
-    char hash[SH_MB_HASH_HEX + 1];
-    char folder[MAX_PATH];
-    char *canonical;
-    size_t len;
-    sh_mb_bundle b;
-} me_ibundle;
+enum { ME_KIND_MAP = 1, ME_KIND_PREFAB = 2 };
+
+static sh_mb_exists_fn g_stock_fn;
+static void *g_stock_ctx;
+
+void modexport_set_stock(sh_mb_exists_fn stock, void *ctx)
+{
+    g_stock_ctx = ctx;
+    g_stock_fn = stock;
+}
+
+/* One mod folder an export carries that a row names. */
+typedef struct me_carry {
+    char name[SH_MS_NAME_MAX + 1];      /* the folder's name under mods/ */
+    sh_mb_bundle b;                     /* its mod.json, loaded: the bundle hash it records */
+    int present;                        /* the store serves that bundle already */
+    int installed;                      /* this import installed it, as `stored` */
+    char stored[SH_MS_KEY_MAX + 1];
+    char stage[MAX_PATH * 4];           /* its copy outside the store, which the install builds */
+    char why[SH_MB_CAUSE_MAX];          /* the last install refusal */
+} me_carry;
 
 typedef struct me_import {
     me_reader zr;
-    me_ibundle *bundles;
-    size_t nb;
-    me_hset blobs;      /* blob -> slot; entry index in entry_of */
-    long *entry_of;
+    me_carry *c;
+    size_t nc, cap;
+    int kind;                           /* what the export holds */
 } me_import;
 
 static void me_import_free(me_import *im)
 {
     size_t i;
-    for (i = 0; i < im->nb; i++) { free(im->bundles[i].canonical); sh_mb_free(&im->bundles[i].b); }
-    free(im->bundles);
-    me_hset_free(&im->blobs);
-    free(im->entry_of);
+    for (i = 0; i < im->nc; i++) sh_mb_free(&im->c[i].b);
+    free(im->c);
     me_reader_close(&im->zr);
     memset(im, 0, sizeof *im);
-}
-
-static char *me_with_bundle(const char *canonical, size_t len, const char *hash)
-{
-    size_t need = len + 96;
-    char *out;
-    if (len < 2 || canonical[0] != '{') return NULL;
-    out = (char *)malloc(need);
-    if (!out) return NULL;
-    _snprintf_s(out, need, _TRUNCATE, "{\"bundle\":\"%s\"%s%.*s", hash, canonical[1] != '}' ? "," : "",
-                (int)(len - 1), canonical + 1);
-    return out;
 }
 
 /* The entry is a top-level .json (no folder). */
@@ -906,338 +827,6 @@ static int me_top_json(const char *name)
 {
     size_t n = strlen(name);
     return n > 5 && !strchr(name, '/') && !_stricmp(name + n - 5, ".json");
-}
-
-/* An export.json that is an export index (a map's, or an earlier prefab
- * layout's) rather than a prefab named "export": 1 a map's index, 2 another
- * index, 0 not an index. */
-static int me_index_kind(const me_reader *r)
-{
-    long idx = me_find(r, MODEXPORT_INDEX);
-    unsigned char *text;
-    size_t len = 0;
-    mpj *root;
-    int kind = 0;
-    char ignored[64];
-    if (idx < 0) return 0;
-    text = me_read_entry(r, idx, ME_INDEX_MAX, &len, ignored, sizeof ignored);
-    if (!text) return 2;
-    root = mpj_parse((const char *)text, len);
-    free(text);
-    if (!root || root->type != MPJ_OBJ) kind = 2;
-    else if (mpj_get(root, "~type")) kind = 0;
-    else kind = mpj_get(root, "map") ? 1 : 2;
-    mpj_free(root);
-    return kind;
-}
-
-/* Read the manifests of im->bundles (hash and folder set; canonical already
- * read when set) and map every blob to the entry that carries it. */
-static int me_import_manifests(me_import *im, char *cause, size_t cap)
-{
-    size_t i, k, files = 0;
-    for (i = 0; i < im->nb; i++) {
-        me_ibundle *ib = &im->bundles[i];
-        char name[MAX_PATH * 2], actual[SH_MB_HASH_HEX + 1], expect[MAX_PATH];
-        char *with;
-        _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.canonical.json", ib->folder);
-        if (!ib->canonical) {
-            ib->canonical = (char *)me_read_entry(&im->zr, me_find(&im->zr, name), SH_MB_MANIFEST_MAX, &ib->len, cause, cap);
-            if (!ib->canonical) { me_import_free(im); return 0; }
-        }
-        sh_mb_sha256_hex(ib->canonical, ib->len, actual);
-        if (strcmp(actual, ib->hash) != 0) {
-            me_import_free(im);
-            return me_cause(cause, cap, "%s does not hash to the bundle %.16s it is listed as", name, ib->hash);
-        }
-        with = me_with_bundle(ib->canonical, ib->len, ib->hash);
-        if (!with || !sh_mb_load_manifest_text(with, strlen(with), &ib->b)) {
-            free(with);
-            me_cause(cause, cap, "%s is not a bundle this release accepts: %s", name, ib->b.first_cause);
-            me_import_free(im);
-            return 0;
-        }
-        free(with);
-        me_folder(&ib->b, expect, sizeof expect);
-        if (strcmp(expect, ib->folder) != 0) {
-            me_import_free(im);
-            return me_cause(cause, cap, "%s is filed under %s, not %s", ib->hash, ib->folder, expect);
-        }
-        files += ib->b.file_count;
-    }
-    if (!me_hset_init(&im->blobs, files + 1) || !(im->entry_of = (long *)malloc(sizeof(long) * (files + 1)))) {
-        me_import_free(im);
-        return me_cause(cause, cap, "out of memory");
-    }
-    for (i = 0; i < im->nb; i++) {
-        const sh_mb_bundle *b = &im->bundles[i].b;
-        for (k = 0; k < b->file_count; k++) {
-            char name[MAX_PATH * 2];
-            long e, s;
-            if (b->files[k].stock) continue;
-            if (me_hset_find(&im->blobs, b->files[k].blob, 0) >= 0) continue;
-            _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", im->bundles[i].folder, b->files[k].path);
-            e = me_find(&im->zr, name);
-            if (e < 0) continue;
-            s = me_hset_find(&im->blobs, b->files[k].blob, 1);
-            if (s >= 0) im->entry_of[s] = e;
-        }
-    }
-    return 1;
-}
-
-/* Open a map's export and read its index and manifests (nothing installed). */
-static int me_import_open(me_import *im, const char *zip_path, int manifests, char *cause, size_t cap)
-{
-    unsigned char *text;
-    size_t len = 0, i;
-    mpj *root = NULL;
-    const mpj *arr;
-    long idx;
-    memset(im, 0, sizeof *im);
-    if (!me_reader_open(&im->zr, zip_path, cause, cap)) return 0;
-    if (me_find(&im->zr, MODEXPORT_MAP_ENTRY) < 0) {
-        /* A prefab's export has no index and one top-level .json. */
-        int prefab = 0;
-        if (me_find(&im->zr, MODEXPORT_INDEX) < 0)
-            for (i = 0; i < im->zr.n && !prefab; i++) prefab = me_top_json(im->zr.e[i].name);
-        me_import_free(im);
-        if (prefab) return me_cause(cause, cap, "this is a prefab's export, not a map's");
-        return me_cause(cause, cap, "the export has no %s", MODEXPORT_MAP_ENTRY);
-    }
-    idx = me_find(&im->zr, MODEXPORT_INDEX);
-    if (idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export has no %s", MODEXPORT_INDEX); }
-    text = me_read_entry(&im->zr, idx, ME_INDEX_MAX, &len, cause, cap);
-    if (!text) { me_import_free(im); return 0; }
-    root = mpj_parse((const char *)text, len);
-    free(text);
-    arr = root && root->type == MPJ_OBJ ? mpj_get(root, "bundles") : NULL;
-    if (!root || root->type != MPJ_OBJ || !mpj_get(root, "format") || mpj_int(mpj_get(root, "format")) != MODEXPORT_FORMAT ||
-        !arr || arr->type != MPJ_ARR || arr->n > MODSYNC_MAX_BUNDLES) {
-        mpj_free(root);
-        me_import_free(im);
-        return me_cause(cause, cap, "%s is not an export index of format %d", MODEXPORT_INDEX, MODEXPORT_FORMAT);
-    }
-    im->bundles = (me_ibundle *)calloc((size_t)(arr->n ? arr->n : 1), sizeof *im->bundles);
-    if (!im->bundles) { mpj_free(root); me_import_free(im); return me_cause(cause, cap, "out of memory"); }
-    for (i = 0; i < (size_t)arr->n; i++) {
-        const mpj *o = arr->items[i], *h = mpj_get(o, "bundle"), *f = mpj_get(o, "folder");
-        me_ibundle *ib = &im->bundles[im->nb];
-        if (!h || h->type != MPJ_STR || !h->text || strlen(h->text) != SH_MB_HASH_HEX ||
-            !f || f->type != MPJ_STR || !f->text || strlen(f->text) >= sizeof ib->folder || strchr(f->text, '\\')) {
-            mpj_free(root);
-            me_import_free(im);
-            return me_cause(cause, cap, "%s lists a bundle without a hash or folder", MODEXPORT_INDEX);
-        }
-        strcpy_s(ib->hash, sizeof ib->hash, h->text);
-        strcpy_s(ib->folder, sizeof ib->folder, f->text);
-        im->nb++;
-    }
-    mpj_free(root);
-    if (!manifests) return 1;
-    return me_import_manifests(im, cause, cap);
-}
-/* Mark the bundles the store already holds (installed and usable). */
-static void me_installed_mark(me_import *im)
-{
-    sh_ms_list l;
-    size_t i;
-    modsync_store_lock();
-    if (sh_ms_enumerate(&l)) {
-        for (i = 0; i < im->nb; i++) {
-            /* A hash an alias names here (an earlier build of an installed
-             * folder) is present: the imported map loads what it resolves to. */
-            const sh_ms_entry *e = sh_ms_resolve(&l, im->bundles[i].hash);
-            im->bundles[i].present = e && sh_ms_entry_usable(e);
-        }
-        sh_ms_list_free(&l);
-    }
-    modsync_store_unlock();
-}
-
-static int me_carried(const me_import *im, const char *hash)
-{
-    size_t i;
-    for (i = 0; i < im->nb; i++) if (strcmp(im->bundles[i].hash, hash) == 0) return 1;
-    return 0;
-}
-
-typedef struct me_src { me_import *im; unsigned fetched; } me_src;
-
-static int me_zip_source(void *ctx, const char *sha, unsigned long long size, unsigned char **bytes, size_t *len,
-                         char *cause, size_t cap)
-{
-    me_src *s = (me_src *)ctx;
-    long slot = me_hset_find(&s->im->blobs, sha, 0);
-    if (slot < 0) return me_cause(cause, cap, "the export does not carry it");
-    *bytes = me_read_entry(&s->im->zr, s->im->entry_of[slot], (size_t)size, len, cause, cap);
-    if (!*bytes) return 0;
-    s->fetched++;
-    return 1;
-}
-
-int modexport_probe(const char *zip_path, char *cause, size_t cap)
-{
-    me_import im;
-    unsigned char *text;
-    size_t len = 0, i = 0;
-    if (cause && cap) cause[0] = 0;
-    if (!me_import_open(&im, zip_path, 0, cause, cap)) return 0;
-    text = me_read_entry(&im.zr, me_find(&im.zr, MODEXPORT_MAP_ENTRY), MODEXPORT_MAP_MAX, &len, cause, cap);
-    me_import_free(&im);
-    if (!text) return 0;
-    if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) i = 3;
-    while (i < len && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n')) i++;
-    if (i >= len || text[i] != '{') { free(text); return me_cause(cause, cap, "the export's map is not rawmap JSON"); }
-    free(text);
-    return 1;
-}
-
-/* Install every bundle the export carries that the store does not hold
- * (verifying hashes), then rebuild the serving index when one was installed.
- * Nothing already installed is written again. */
-static int me_install_all(me_import *im, modexport_stats *st, char *cause, size_t cap)
-{
-    me_src src;
-    size_t i;
-    st->bundles = (unsigned)im->nb;
-    st->entries = (unsigned)im->zr.n;
-    st->zip_bytes = im->zr.size;
-    src.im = im;
-    src.fetched = 0;
-    /* One listing decides what is installed already, so a reload of an
-     * imported export (the map load reads it again) costs one scan. */
-    me_installed_mark(im);
-    for (i = 0; i < im->nb; i++) {
-        modsync_install_info info;
-        char one[320];
-        if (im->bundles[i].present) { st->bundles_present++; continue; }
-        if (!modsync_install_manifest(im->bundles[i].canonical, im->bundles[i].len, im->bundles[i].hash, me_zip_source, &src,
-                                      &info, one, sizeof one))
-            return me_cause(cause, cap, "%s: %s", im->bundles[i].folder, one);
-        if (info.already_installed) st->bundles_present++;
-        else st->bundles_installed++;
-    }
-    st->blobs_written = src.fetched;
-    if (st->bundles_installed && sh_modserve_index_rescan() < 0)
-        me_log("MODS: import: bundles installed, but the serving index could not be rebuilt");
-    return 1;
-}
-
-char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char *cause, size_t cap)
-{
-    modexport_stats local;
-    modexport_stats *st = stp ? stp : &local;
-    me_import im;
-    unsigned char *text = NULL;
-    size_t len = 0, i;
-    double t0 = me_now_ms();
-    if (out_len) *out_len = 0;
-    memset(st, 0, sizeof *st);
-    if (cause && cap) cause[0] = 0;
-    if (!me_import_open(&im, zip_path, 1, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
-    if (!me_install_all(&im, st, cause, cap)) {
-        me_import_free(&im);
-        st->ms = me_now_ms() - t0;
-        return NULL;
-    }
-    text = me_read_entry(&im.zr, me_find(&im.zr, MODEXPORT_MAP_ENTRY), MODEXPORT_MAP_MAX, &len, cause, cap);
-    if (text) {
-        /* Rows that name a bundle the export did not carry and the store lacks. */
-        sh_modmanifest_list rows;
-        unsigned rejected = 0;
-        memset(&rows, 0, sizeof rows);
-        sh_modmanifest_read((const char *)text, len, &rows, &rejected);
-        for (i = 0; i < rows.count; i++)
-            if (!me_carried(&im, rows.rows[i].bundle) && !modsync_find_installed(rows.rows[i].bundle, NULL, 0)) {
-                st->bundles_absent++;
-                me_log("MODS: import: the map names %s@%s (bundle %.16s), which the export does not carry",
-                       rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
-            }
-        sh_modmanifest_list_free(&rows);
-        st->map_bytes = len;
-    }
-    me_import_free(&im);
-    st->ms = me_now_ms() - t0;
-    if (out_len) *out_len = len;
-    return (char *)text;
-}
-
-/* ------------------------------------------------------------ prefab read */
-
-#define ME_CANON_SUFFIX     "/bundle.canonical.json"
-#define ME_CANON_SUFFIX_LEN (sizeof ME_CANON_SUFFIX - 1)
-
-static int me_rows_name(const sh_modmanifest_list *rows, const char *hash)
-{
-    size_t i;
-    for (i = 0; rows && i < rows->count; i++) if (!_stricmp(rows->rows[i].bundle, hash)) return 1;
-    return 0;
-}
-
-/* "mods/<folder>" or "mods/legacy/<folder>", one segment deep. */
-static int me_bundle_folder_ok(const char *folder, size_t n)
-{
-    const char *rest;
-    size_t i;
-    if (n <= 5 || strncmp(folder, "mods/", 5)) return 0;
-    rest = folder + 5;
-    n -= 5;
-    if (n > 7 && !strncmp(rest, "legacy/", 7)) { rest += 7; n -= 7; }
-    if (!n || n >= MAX_PATH) return 0;
-    for (i = 0; i < n; i++) if (rest[i] == '/') return 0;
-    return 1;
-}
-
-/* One carried bundle: its hash is its canonical text's SHA-256. Takes
- * ownership of canonical. */
-static int me_add_bundle(me_import *im, size_t *cap_b, const char *folder, size_t folder_len, char *canonical, size_t len,
-                         char *cause, size_t cap)
-{
-    me_ibundle *ib;
-    if (im->nb >= MODSYNC_MAX_BUNDLES) { free(canonical); return me_cause(cause, cap, "the export carries too many bundles"); }
-    if (im->nb == *cap_b) {
-        size_t c2 = *cap_b ? *cap_b * 2 : 8;
-        me_ibundle *g = (me_ibundle *)realloc(im->bundles, sizeof *g * c2);
-        if (!g) { free(canonical); return me_cause(cause, cap, "out of memory"); }
-        memset(g + *cap_b, 0, sizeof *g * (c2 - *cap_b));
-        im->bundles = g;
-        *cap_b = c2;
-    }
-    ib = &im->bundles[im->nb++];
-    memset(ib, 0, sizeof *ib);
-    memcpy(ib->folder, folder, folder_len);
-    ib->folder[folder_len] = 0;
-    sh_mb_sha256_hex(canonical, len, ib->hash);
-    ib->canonical = canonical;
-    ib->len = len;
-    return 1;
-}
-
-/* A ZIP's bundles: every mods/[legacy/]<folder>/bundle.canonical.json entry
- * whose hash a row names. */
-static int me_prefab_zip_bundles(me_import *im, const sh_modmanifest_list *rows, int all, char *cause, size_t cap)
-{
-    size_t i, cap_b = 0;
-    for (i = 0; i < im->zr.n; i++) {
-        const char *name = im->zr.e[i].name;
-        size_t n = strlen(name), fl;
-        char *canonical, hash[SH_MB_HASH_HEX + 1];
-        size_t len = 0;
-        if (n <= ME_CANON_SUFFIX_LEN || strcmp(name + n - ME_CANON_SUFFIX_LEN, ME_CANON_SUFFIX)) continue;
-        fl = n - ME_CANON_SUFFIX_LEN;
-        if (!me_bundle_folder_ok(name, fl)) continue;
-        canonical = (char *)me_read_entry(&im->zr, (long)i, SH_MB_MANIFEST_MAX, &len, cause, cap);
-        if (!canonical) return 0;
-        sh_mb_sha256_hex(canonical, len, hash);
-        if (!all && !me_rows_name(rows, hash)) {
-            me_log("MODS: import: %.*s is carried but the prefab does not name it; left out", (int)fl, name);
-            free(canonical);
-            continue;
-        }
-        if (!me_add_bundle(im, &cap_b, name, fl, canonical, len, cause, cap)) return 0;
-    }
-    return 1;
 }
 
 static int me_reader_add(me_reader *r, const char *name, unsigned long long size)
@@ -1297,62 +886,69 @@ static int me_walk(me_reader *r, const wchar_t *abs, const char *rel, int depth,
     return 1;
 }
 
-/* A folder's bundles: <dir>\mods\[legacy\]<folder>\bundle.canonical.json
- * whose hash a row names; each one's folder is walked into entries. */
-static int me_prefab_dir_bundles(me_import *im, const sh_modmanifest_list *rows, int all, char *cause, size_t cap)
+/* The retired bundle form of earlier releases: a bundle.canonical.json
+ * anywhere, or an export.json that is an index rather than a prefab or map
+ * named "export". */
+static int me_retired(const me_reader *r)
 {
-    static const wchar_t *const SUBS[] = { L"mods", L"mods\\legacy" };
-    static const char *const SUBS8[] = { "mods", "mods/legacy" };
-    size_t cap_b = 0;
-    int s;
-    for (s = 0; s < 2; s++) {
-        wchar_t pattern[MAX_PATH * 2];
-        WIN32_FIND_DATAW fd;
-        HANDLE h;
-        _snwprintf_s(pattern, MAX_PATH * 2, _TRUNCATE, L"%s\\%s\\*", im->zr.dir, SUBS[s]);
-        h = FindFirstFileW(pattern, &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do {
-            wchar_t abs[MAX_PATH * 2];
-            char leaf[MAX_PATH * 3], folder[MAX_PATH * 3], canon_name[MAX_PATH * 3], hash[SH_MB_HASH_HEX + 1];
-            me_rent probe;
-            char *canonical;
-            size_t len = 0;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-            if (s == 0 && !_wcsicmp(fd.cFileName, L"legacy")) continue;
-            if (!me_w_to_utf8(fd.cFileName, leaf, sizeof leaf)) continue;
-            _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s/%s", SUBS8[s], leaf);
-            if (!me_bundle_folder_ok(folder, strlen(folder))) continue;
-            _snprintf_s(canon_name, sizeof canon_name, _TRUNCATE, "%s" ME_CANON_SUFFIX, folder);
-            memset(&probe, 0, sizeof probe);
-            probe.name = canon_name;
-            probe.method = ME_METHOD_FILE;
-            canonical = (char *)me_read_dir_entry(&im->zr, &probe, SH_MB_MANIFEST_MAX, &len, cause, cap);
-            if (!canonical) continue;   /* not a bundle folder */
-            sh_mb_sha256_hex(canonical, len, hash);
-            if (!all && !me_rows_name(rows, hash)) { free(canonical); continue; }
-            _snwprintf_s(abs, MAX_PATH * 2, _TRUNCATE, L"%s\\%s\\%s", im->zr.dir, SUBS[s], fd.cFileName);
-            if (!me_walk(&im->zr, abs, folder, 0, cause, cap) ||
-                !me_add_bundle(im, &cap_b, folder, strlen(folder), canonical, len, cause, cap)) {
-                FindClose(h);
-                return 0;
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+    static const char LEAF[] = "bundle.canonical.json";
+    const size_t ll = sizeof LEAF - 1;
+    size_t i;
+    long idx;
+    for (i = 0; i < r->n; i++) {
+        const char *name = r->e[i].name;
+        size_t n = strlen(name);
+        if (n >= ll && !_stricmp(name + n - ll, LEAF) && (n == ll || name[n - ll - 1] == '/')) return 1;
     }
-    if (cause && cap) cause[0] = 0;
-    return 1;
+    idx = me_find(r, MODEXPORT_INDEX);
+    if (idx >= 0) {
+        char ignored[64], type[64];
+        size_t len = 0;
+        unsigned char *text = me_read_entry(r, idx, ME_INDEX_MAX, &len, ignored, sizeof ignored);
+        int t = text ? sh_prefab_block_top_type((const char *)text, len, type, sizeof type) : -1;
+        free(text);
+        if (t != 1) return 1;
+    }
+    return 0;
 }
 
-/* Open the export: a ZIP, or the folder of a .json. *prefab_idx is the
- * prefab's entry. */
-static int me_prefab_open(me_import *im, const char *path, long *prefab_idx, char *cause, size_t cap)
+/* What a carried .json is: a prefab (an idSnapEntityPrefab, or an idSnapMap
+ * with a block), a map (an idSnapMap or an object without ~type, without a
+ * block), 0 not a JSON object, -1 an object of another type. */
+static int me_classify(const char *text, size_t len)
+{
+    sh_prefab_block_span span;
+    char type[64];
+    int t = sh_prefab_block_top_type(text, len, type, sizeof type);
+    if (t < 0) return 0;
+    if (t == 1 && strcmp(type, "idSnapEntityPrefab") && strcmp(type, "idSnapMap")) return -1;
+    if (t == 1 && !strcmp(type, "idSnapEntityPrefab")) return ME_KIND_PREFAB;
+    return sh_prefab_block_find(text, len, &span) == 1 ? ME_KIND_PREFAB : ME_KIND_MAP;
+}
+
+static const char *me_kind_word(int kind) { return kind == ME_KIND_PREFAB ? "prefab" : "map"; }
+
+static void me_open_fail(me_import *im, char **text)
+{
+    free(*text);
+    *text = NULL;
+    me_import_free(im);
+}
+
+/* Open an export for `want` and read its .json: a ZIP, or (a prefab only)
+ * the folder of a picked .json, whose mods/ folder is walked into entries as
+ * the ZIP's would be. *text (malloc'd) and *idx are the carried .json. The
+ * .json is read and checked before anything is installed: a damaged or
+ * mistaken export installs nothing. */
+static int me_open(me_import *im, const char *path, int want, char **text, size_t *len, long *idx, char *cause, size_t cap)
 {
     size_t n = path ? strlen(path) : 0, i;
+    int kind, dir = 0;
     memset(im, 0, sizeof *im);
-    *prefab_idx = -1;
-    if (n > 5 && !_stricmp(path + n - 5, ".json")) {
+    *text = NULL;
+    *len = 0;
+    *idx = -1;
+    if (want == ME_KIND_PREFAB && n > 5 && !_stricmp(path + n - 5, ".json")) {
         wchar_t *w = sh_mb_wpath(path), *slash;
         WIN32_FILE_ATTRIBUTE_DATA fa;
         char leaf[MAX_PATH * 3];
@@ -1373,28 +969,487 @@ static int me_prefab_open(me_import *im, const char *path, long *prefab_idx, cha
             me_import_free(im);
             return me_cause(cause, cap, "out of memory");
         }
-        *prefab_idx = 0;
-        return 1;
-    }
-    if (!me_reader_open(&im->zr, path, cause, cap)) return 0;
-    {
-        int kind = me_index_kind(&im->zr);
-        if (me_find(&im->zr, MODEXPORT_MAP_ENTRY) >= 0 || kind == 1) {
+        *idx = 0;
+        dir = 1;
+    } else {
+        if (!me_reader_open(&im->zr, path, cause, cap)) return 0;
+        if (me_retired(&im->zr)) {
             me_import_free(im);
-            return me_cause(cause, cap, "this is a map's export, not a prefab's");
+            return me_cause(cause, cap, "%s", want == ME_KIND_PREFAB ? MODEXPORT_RETIRED_PREFAB : MODEXPORT_RETIRED_MAP);
         }
-        if (kind == 2) {
-            me_import_free(im);
-            return me_cause(cause, cap, "this export uses an earlier layout that this release does not read; export the prefab again");
+        for (i = 0; i < im->zr.n; i++) {
+            if (!me_top_json(im->zr.e[i].name)) continue;
+            if (*idx >= 0) {
+                me_import_free(im);
+                return me_cause(cause, cap, "the export holds more than one %s", me_kind_word(want));
+            }
+            *idx = (long)i;
+        }
+        if (*idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export holds no %s", me_kind_word(want)); }
+    }
+    *text = (char *)me_read_entry(&im->zr, *idx, MODEXPORT_MAP_MAX, len, cause, cap);
+    if (!*text) { me_import_free(im); return 0; }
+    kind = me_classify(*text, *len);
+    if (kind != want) {
+        const char *file = im->zr.e[*idx].name;
+        if (kind == 0)
+            me_cause(cause, cap, want == ME_KIND_PREFAB ? "the export's prefab is not prefab JSON" : "the export's map is not rawmap JSON");
+        else if (want == ME_KIND_MAP)
+            me_cause(cause, cap, kind == ME_KIND_PREFAB ? "this is a prefab's export, not a map's" : "the export's map is not rawmap JSON");
+        else if (kind < 0) me_cause(cause, cap, "%s is not a prefab", file);
+        else if (dir) me_cause(cause, cap, "%s is a map, not a prefab", file);
+        else me_cause(cause, cap, "this is a map's export, not a prefab's");
+        me_open_fail(im, text);
+        return 0;
+    }
+    if (want == ME_KIND_PREFAB && *len > MODEXPORT_PREFAB_MAX) {
+        me_open_fail(im, text);
+        return me_cause(cause, cap, "the prefab is larger than %u bytes", MODEXPORT_PREFAB_MAX);
+    }
+    im->kind = want;
+    if (dir) {
+        /* The extracted export's mods/ folder. Sorting moves the entries, so
+         * the picked .json (the only top-level one) is found again. */
+        wchar_t mods[MAX_PATH * 2];
+        _snwprintf_s(mods, MAX_PATH * 2, _TRUNCATE, L"%s\\mods", im->zr.dir);
+        if (!me_walk(&im->zr, mods, "mods", 0, cause, cap) || !me_reader_sort(&im->zr, cause, cap)) {
+            me_open_fail(im, text);
+            return 0;
+        }
+        for (i = 0; i < im->zr.n; i++) if (me_top_json(im->zr.e[i].name)) { *idx = (long)i; break; }
+        if (me_retired(&im->zr)) {
+            me_open_fail(im, text);
+            return me_cause(cause, cap, "%s", MODEXPORT_RETIRED_PREFAB);
         }
     }
-    for (i = 0; i < im->zr.n; i++) {
-        if (!me_top_json(im->zr.e[i].name)) continue;
-        if (*prefab_idx >= 0) { me_import_free(im); return me_cause(cause, cap, "the export holds more than one prefab"); }
-        *prefab_idx = (long)i;
-    }
-    if (*prefab_idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export holds no prefab"); }
     return 1;
+}
+
+static int me_rows_name(const sh_modmanifest_list *rows, const char *hash)
+{
+    size_t i;
+    for (i = 0; rows && i < rows->count; i++) if (!_stricmp(rows->rows[i].bundle, hash)) return 1;
+    return 0;
+}
+
+static int me_carried(const me_import *im, const char *hash)
+{
+    size_t i;
+    for (i = 0; i < im->nc; i++) if (!_stricmp(im->c[i].b.hash, hash)) return 1;
+    return 0;
+}
+
+/* The carried folders, each mods/<name>/mod.json, whose bundle a row names
+ * (every one when `all`). A folder no row names is left out. */
+static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, char *cause, size_t cap)
+{
+    size_t i;
+    for (i = 0; i < im->zr.n; i++) {
+        const char *name = im->zr.e[i].name, *seg, *slash;
+        size_t sl, len = 0;
+        char *text;
+        me_carry *c;
+        sh_mb_bundle b;
+        if (strncmp(name, "mods/", 5)) continue;
+        seg = name + 5;
+        slash = strchr(seg, '/');
+        if (!slash || strcmp(slash, "/mod.json")) continue;
+        sl = (size_t)(slash - seg);
+        if (!sl || sl > SH_MS_NAME_MAX) continue;
+        text = (char *)me_read_entry(&im->zr, (long)i, ME_MODJSON_MAX, &len, cause, cap);
+        if (!text) return 0;
+        memset(&b, 0, sizeof b);
+        if (!sh_mb_load_text(text, len, &b)) {
+            me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
+            sh_mb_free(&b);
+            free(text);
+            continue;
+        }
+        free(text);
+        if ((!all && !me_rows_name(rows, b.hash)) || me_carried(im, b.hash)) {
+            me_log("MODS: import: mods/%.*s (%s@%s, bundle %.16s) is carried but the %s does not name it; left out",
+                   (int)sl, seg, b.id, b.version, b.hash, me_kind_word(im->kind));
+            sh_mb_free(&b);
+            continue;
+        }
+        if (im->nc >= ME_MAX_MODS) { sh_mb_free(&b); return me_cause(cause, cap, "the export carries too many mods"); }
+        if (im->nc == im->cap) {
+            size_t c2 = im->cap ? im->cap * 2 : 8;
+            me_carry *g = (me_carry *)realloc(im->c, sizeof *g * c2);
+            if (!g) { sh_mb_free(&b); return me_cause(cause, cap, "out of memory"); }
+            im->c = g;
+            im->cap = c2;
+        }
+        c = &im->c[im->nc++];
+        memset(c, 0, sizeof *c);
+        memcpy(c->name, seg, sl);
+        c->name[sl] = 0;
+        c->b = b;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------ install --- */
+
+static wchar_t *me_wjoin(const char *dir, const char *rel)
+{
+    char path[MAX_PATH * 4];
+    me_join_native(path, sizeof path, dir, rel);
+    return sh_mb_wpath(path);
+}
+
+static void me_wmkdirs_for(wchar_t *file)
+{
+    wchar_t *p = file;
+    if (!wcsncmp(p, L"\\\\?\\", 4)) p += 4;
+    if (p[0] && p[1] == L':') p += 3;
+    for (; *p; p++)
+        if (*p == L'\\') { *p = 0; CreateDirectoryW(file, NULL); *p = L'\\'; }
+}
+
+static int me_put_file(const char *dir, const char *rel, const void *data, size_t n)
+{
+    wchar_t *w = me_wjoin(dir, rel);
+    HANDLE h;
+    size_t off = 0;
+    int ok = 1;
+    if (!w) return 0;
+    me_wmkdirs_for(w);
+    h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    while (ok && off < n) {
+        DWORD chunk = (DWORD)((n - off) > (1u << 24) ? (1u << 24) : (n - off)), put = 0;
+        ok = WriteFile(h, (const unsigned char *)data + off, chunk, &put, NULL) && put == chunk;
+        off += put;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+/* Remove a folder this import made under the temporary directory. */
+static void me_rmtree(const wchar_t *dir)
+{
+    size_t dl = wcslen(dir), cap = dl + 4;
+    wchar_t *pattern = (wchar_t *)malloc(sizeof(wchar_t) * cap);
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    if (!pattern) return;
+    _snwprintf_s(pattern, cap, _TRUNCATE, L"%s\\*", dir);
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            size_t ccap = dl + wcslen(fd.cFileName) + 2;
+            wchar_t *child;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            child = (wchar_t *)malloc(sizeof(wchar_t) * ccap);
+            if (!child) continue;
+            _snwprintf_s(child, ccap, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                me_rmtree(child);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                RemoveDirectoryW(child);
+            else {
+                SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child);
+            }
+            free(child);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* A fresh folder under the temporary directory for this import's copies. */
+static int me_stage_root(char *out, size_t cap)
+{
+    static volatile LONG seq;
+    wchar_t tmp[MAX_PATH + 1];
+    char base[MAX_PATH * 4];
+    DWORD n = GetTempPathW(MAX_PATH + 1, tmp);
+    wchar_t *w;
+    int made;
+    size_t bl;
+    if (!n || n > MAX_PATH || !me_w_to_utf8(tmp, base, sizeof base)) return 0;
+    bl = strlen(base);
+    if (bl && (base[bl - 1] == '\\' || base[bl - 1] == '/')) base[bl - 1] = 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus-import-%lu-%ld", base, GetCurrentProcessId(),
+                InterlockedIncrement(&seq));
+    w = sh_mb_wpath(out);
+    if (!w) return 0;
+    me_rmtree(w);
+    made = CreateDirectoryW(w, NULL) != 0;
+    free(w);
+    return made;
+}
+
+/* Copy one carried folder out of the export (mod.json and assets/), then
+ * put back, from this player's game, the bytes of each stock pointer whose
+ * file the folder held (the export never carries game content), so the
+ * install builds the same pointers. */
+static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index, modexport_stats *st, char *cause,
+                    size_t cap)
+{
+    char prefix[SH_MS_NAME_MAX + 8];
+    size_t pl, i;
+    _snprintf_s(c->stage, sizeof c->stage, _TRUNCATE, "%s\\%zu", stage, index);
+    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", c->name);
+    pl = strlen(prefix);
+    for (i = 0; i < im->zr.n; i++) {
+        const char *name = im->zr.e[i].name, *rel;
+        unsigned char *bytes;
+        size_t len = 0;
+        int put;
+        if (strncmp(name, prefix, pl)) continue;
+        rel = name + pl;
+        if (strcmp(rel, "mod.json") && strncmp(rel, "assets/", 7)) {
+            me_log("MODS: import: %s is not part of a mod folder; left out", name);
+            continue;
+        }
+        bytes = me_read_entry(&im->zr, (long)i, (size_t)SH_MB_MAX_FILE, &len, cause, cap);
+        if (!bytes) return 0;
+        put = me_put_file(c->stage, rel, bytes, len);
+        free(bytes);
+        if (!put) return me_cause(cause, cap, "cannot copy %s out of the export (error %lu)", name, GetLastError());
+        st->files++;
+    }
+    for (i = 0; i < c->b.file_count; i++) {
+        const sh_mb_file *f = &c->b.files[i];
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        wchar_t *w;
+        int have, put;
+        if (!f->stock || f->absent) continue;
+        w = me_wjoin(c->stage, f->path);
+        have = w && GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (have) continue;
+        if (cause && cap) cause[0] = 0;
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, &len, f->path, cause, cap) != SH_MB_STOCK_OK) {
+            if (!cause || !cap || !cause[0]) me_cause(cause, cap, "%s names game content this game does not have", f->path);
+            return 0;
+        }
+        put = me_put_file(c->stage, f->path, bytes, len);
+        HeapFree(GetProcessHeap(), 0, bytes);
+        if (!put) return me_cause(cause, cap, "cannot copy %s out of the game (error %lu)", f->path, GetLastError());
+    }
+    return 1;
+}
+
+/* A carried folder name the store may keep: one Windows folder name. */
+static int me_name_safe(const char *name)
+{
+    size_t n = strlen(name);
+    if (!n || name[n - 1] == '.' || name[n - 1] == ' ' || name[0] == ' ') return 0;
+    return strpbrk(name, "<>\"|?*/\\:") == NULL;
+}
+
+static int me_folder_taken(const char *root, const char *name)
+{
+    wchar_t *w = me_wjoin(root, name);
+    int taken = !w || GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+    free(w);
+    return taken;
+}
+
+/* Remove what this import installed, and only that. */
+static void me_rollback(me_import *im, const char *root)
+{
+    size_t i;
+    for (i = 0; i < im->nc; i++) {
+        char path[MAX_PATH * 4];
+        if (!im->c[i].installed) continue;
+        me_join_native(path, sizeof path, root, im->c[i].stored);
+        if (sh_ms_remove_folder(path)) me_log("MODS: import: mods\\%s removed again", im->c[i].stored);
+        else me_log("MODS: import: mods\\%s could not be removed again; remove it by hand", im->c[i].stored);
+        im->c[i].installed = 0;
+    }
+}
+
+/* The ordinary install of each carried folder whose bundle the store does not
+ * already serve. Every folder is decided before anything is written: one
+ * whose id and version are installed with other content is refused. Then each
+ * one is copied out of the export and installed as a folder from elsewhere is
+ * (sh_ms_install_as: built, copied in, verified), under its own name when no
+ * folder of its id is installed and that name is free, else under the name
+ * the store gives a second folder of an id. The built bundle must be the one
+ * the rows name. A refusal removes what the import installed; nothing that
+ * was installed before is ever written. */
+static int me_install(me_import *im, modexport_stats *st, char *cause, size_t cap)
+{
+    sh_ms_list l;
+    sh_mb_resolver r;
+    char root[MAX_PATH * 4], stage[MAX_PATH * 4] = "";
+    size_t i, k, left = 0;
+    int ok = 0, listed = 0, progress, staged = 0;
+    const char *what = me_kind_word(im->kind);
+
+    st->bundles = (unsigned)im->nc;
+    st->entries = (unsigned)im->zr.n;
+    st->zip_bytes = im->zr.size;
+    if (!im->nc) return 1;
+    modstore_lock();
+    if (!sh_ms_root(root, sizeof root)) { me_cause(cause, cap, "the mods folder cannot be resolved"); goto done; }
+    listed = sh_ms_enumerate(&l);
+    if (!listed) { me_cause(cause, cap, "the mods folder cannot be listed"); goto done; }
+    for (i = 0; i < im->nc; i++) {
+        me_carry *c = &im->c[i];
+        const sh_ms_entry *e = sh_ms_resolve(&l, c->b.hash);
+        if (e && sh_ms_entry_usable(e)) { c->present = 1; st->bundles_present++; continue; }
+        if (e) {
+            me_cause(cause, cap, "the installed %s %s needs attention (%s); run sh_mods doctor verify", c->b.id, c->b.version,
+                     e->cause[0] ? e->cause : "it does not verify");
+            goto done;
+        }
+        for (k = 0; k < l.count; k++) {
+            const sh_ms_entry *o = &l.items[k];
+            if (o->loaded && !strcmp(o->bundle.id, c->b.id) && !strcmp(o->bundle.version, c->b.version)) {
+                me_cause(cause, cap, "the installed %s %s differs from the one the export carries", c->b.id, c->b.version);
+                goto done;
+            }
+        }
+        left++;
+    }
+    sh_ms_list_free(&l);
+    listed = 0;
+    if (!left) { ok = 1; goto done; }
+
+    if (!me_stage_root(stage, sizeof stage)) { me_cause(cause, cap, "no temporary folder could be made for the export's mods"); goto done; }
+    staged = 1;
+    for (i = 0; i < im->nc; i++)
+        if (!im->c[i].present && !me_stage(im, &im->c[i], stage, i, st, cause, cap)) goto done;
+
+    /* A mod that needs another carried one builds once that one is installed. */
+    r.installed = NULL;
+    r.installed_context = NULL;
+    r.stock = g_stock_fn;
+    r.stock_context = g_stock_ctx;
+    do {
+        progress = 0;
+        for (i = 0; i < im->nc && left; i++) {
+            me_carry *c = &im->c[i];
+            sh_ms_install_stats is;
+            sh_mb_bundle built;
+            const char *as = NULL;
+            int same_id = 0;
+            if (c->present || c->installed) continue;
+            if (sh_ms_enumerate(&l)) {
+                for (k = 0; k < l.count && !same_id; k++) same_id = l.items[k].loaded && !strcmp(l.items[k].bundle.id, c->b.id);
+                sh_ms_list_free(&l);
+            }
+            if (!same_id && me_name_safe(c->name) && !me_folder_taken(root, c->name)) as = c->name;
+            if (!sh_ms_install_as(c->stage, as, &r, c->stored, sizeof c->stored, &is, &built, c->why, sizeof c->why)) {
+                sh_mb_free(&built);
+                continue;
+            }
+            c->installed = 1;
+            left--;
+            progress = 1;
+            if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
+                me_log("MODS: import: mods/%s built to bundle %.16s, not %.16s as its mod.json records", c->name, built.hash,
+                       c->b.hash);
+                me_cause(cause, cap, "%s %s in the export does not build to the bundle the %s names", c->b.id, c->b.version, what);
+                sh_mb_free(&built);
+                goto rollback;
+            }
+            me_log("MODS: import: mods/%s installed as mods\\%s (%s@%s+%llu, bundle %.16s)%s", c->name, c->stored, built.id,
+                   built.version, built.build, built.hash, same_id ? ", beside the installed folder of that id" : "");
+            sh_mb_free(&built);
+            st->bundles_installed++;
+        }
+    } while (progress && left);
+    if (left) {
+        for (i = 0; i < im->nc; i++) {
+            const me_carry *c = &im->c[i];
+            if (c->present || c->installed) continue;
+            me_cause(cause, cap, "%s %s from the export does not install: %s", c->b.id, c->b.version, c->why);
+            break;
+        }
+        goto rollback;
+    }
+    ok = 1;
+    if (st->bundles_installed && sh_modserve_index_rescan() < 0)
+        me_log("MODS: import: mods installed, but the serving index could not be rebuilt");
+    goto done;
+rollback:
+    me_rollback(im, root);
+    st->bundles_installed = 0;
+done:
+    if (listed) sh_ms_list_free(&l);
+    modstore_unlock();
+    if (staged) {
+        wchar_t *w = sh_mb_wpath(stage);
+        if (w) { me_rmtree(w); free(w); }
+    }
+    return ok;
+}
+
+/* Rows that name a bundle the export does not carry and the store does not
+ * serve (by its hash or an alias of it). */
+static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows, modexport_stats *st)
+{
+    sh_ms_list l;
+    size_t i;
+    int listed;
+    modstore_lock();
+    listed = sh_ms_enumerate(&l);
+    for (i = 0; i < rows->count; i++) {
+        const sh_ms_entry *e;
+        if (me_carried(im, rows->rows[i].bundle)) continue;
+        e = listed ? sh_ms_resolve(&l, rows->rows[i].bundle) : NULL;
+        if (e && sh_ms_entry_usable(e)) continue;
+        st->bundles_absent++;
+        me_log("MODS: import: the %s names %s@%s (bundle %.16s), which the export does not carry",
+               me_kind_word(im->kind), rows->rows[i].id, rows->rows[i].version, rows->rows[i].bundle);
+    }
+    if (listed) sh_ms_list_free(&l);
+    modstore_unlock();
+}
+
+int modexport_probe(const char *zip_path, char *cause, size_t cap)
+{
+    me_import im;
+    char *text = NULL;
+    size_t len = 0;
+    long idx;
+    if (cause && cap) cause[0] = 0;
+    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) return 0;
+    free(text);
+    me_import_free(&im);
+    return 1;
+}
+
+char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char *cause, size_t cap)
+{
+    modexport_stats local;
+    modexport_stats *st = stp ? stp : &local;
+    me_import im;
+    sh_modmanifest_list rows;
+    char *text = NULL;
+    size_t len = 0;
+    unsigned rejected = 0;
+    long idx;
+    double t0 = me_now_ms();
+    if (out_len) *out_len = 0;
+    memset(st, 0, sizeof *st);
+    memset(&rows, 0, sizeof rows);
+    if (cause && cap) cause[0] = 0;
+    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
+    sh_modmanifest_read(text, len, &rows, &rejected);
+    if (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, st, cause, cap)) {
+        free(text);
+        text = NULL;
+        len = 0;
+    } else {
+        me_count_absent(&im, &rows, st);
+        st->map_bytes = len;
+    }
+    sh_modmanifest_list_free(&rows);
+    me_import_free(&im);
+    st->ms = me_now_ms() - t0;
+    if (out_len) *out_len = len;
+    return text;
 }
 
 int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
@@ -1404,11 +1459,10 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     modexport_stats *st = stp ? stp : &local;
     me_import im;
     sh_modmanifest_list rows;
-    unsigned char *text = NULL;
-    size_t len = 0, i;
+    char *text = NULL;
+    size_t len = 0;
     long idx = -1;
-    char type[64];
-    int dir, t, ok = 0;
+    int ok = 0;
     double t0 = me_now_ms();
     memset(&rows, 0, sizeof rows);
     if (prefab) *prefab = NULL;
@@ -1417,53 +1471,26 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     memset(st, 0, sizeof *st);
     if (cause && cap) cause[0] = 0;
     if (!prefab || !path || !path[0]) return me_cause(cause, cap, "nothing to read");
-    if (!me_prefab_open(&im, path, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return 0; }
-    dir = im.zr.dir != NULL;
-    /* The prefab is read and checked before anything is installed: a damaged
-     * export installs nothing. */
-    text = me_read_entry(&im.zr, idx, MODEXPORT_PREFAB_MAX, &len, cause, cap);
-    if (!text) goto done;
-    t = sh_prefab_block_top_type((const char *)text, len, type, sizeof type);
-    if (t < 0) { me_cause(cause, cap, "the export's prefab is not prefab JSON"); goto done; }
-    if (t == 1 && !strcmp(type, "idSnapMap")) {
-        sh_prefab_block_span span;
-        if (sh_prefab_block_find((const char *)text, len, &span) != 1) {
-            me_cause(cause, cap, "%s is a map, not a prefab", im.zr.e[idx].name);
-            goto done;
-        }
-    } else if (t != 1 || strcmp(type, "idSnapEntityPrefab")) {
-        me_cause(cause, cap, "%s is not a prefab", im.zr.e[idx].name);
-        goto done;
-    }
+    if (!me_open(&im, path, ME_KIND_PREFAB, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return 0; }
     if (name && name_cap) {
         size_t nl = strlen(im.zr.e[idx].name) - 5;
         if (nl >= name_cap) nl = name_cap - 1;
         memcpy(name, im.zr.e[idx].name, nl);
         name[nl] = 0;
     }
-    if (rows_of && rows_of(ctx, (const char *)text, len, &rows) < 0) {
+    if (rows_of && rows_of(ctx, text, len, &rows) < 0) {
         me_cause(cause, cap, "the prefab's mods cannot be read");
         goto done;
     }
-    if (dir ? !me_prefab_dir_bundles(&im, &rows, rows_of == NULL, cause, cap)
-            : !me_prefab_zip_bundles(&im, &rows, rows_of == NULL, cause, cap))
-        goto done;
-    if (dir && !me_reader_sort(&im.zr, cause, cap)) goto done;
-    if (!me_import_manifests(&im, cause, cap)) goto done;   /* frees im on failure */
-    if (!me_install_all(&im, st, cause, cap)) goto done;
-    for (i = 0; i < rows.count; i++)
-        if (!me_carried(&im, rows.rows[i].bundle) && !modsync_find_installed(rows.rows[i].bundle, NULL, 0)) {
-            st->bundles_absent++;
-            me_log("MODS: import: the prefab names %s@%s (bundle %.16s), which the export does not carry",
-                   rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
-        }
+    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, st, cause, cap)) goto done;
+    me_count_absent(&im, &rows, st);
     st->map_bytes = len;
     ok = 1;
 done:
     me_import_free(&im);
     sh_modmanifest_list_free(&rows);
     if (ok) {
-        *prefab = (char *)text;
+        *prefab = text;
         if (prefab_len) *prefab_len = len;
     } else {
         free(text);
@@ -1507,9 +1534,8 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
         return 0;
     }
     if (bundles) *bundles = st.bundles;
-    me_log("MODS: export %s: map %llu byte(s), %u bundle(s), %u blob(s) stored, %u deduplicated, %u entr%s, %llu byte(s) in %.0f ms",
-           path, st.map_bytes, st.bundles, st.blobs_written, st.blobs_deduped, st.entries, st.entries == 1 ? "y" : "ies",
-           st.zip_bytes, st.ms);
+    me_log("MODS: export %s: map %llu byte(s), %u mod folder(s), %u file(s) carried, %u entr%s, %llu byte(s) in %.0f ms",
+           path, st.map_bytes, st.bundles, st.files, st.entries, st.entries == 1 ? "y" : "ies", st.zip_bytes, st.ms);
     return st.zip_bytes;
 }
 
@@ -1523,8 +1549,8 @@ char *modexport_read_text(const char *path_acp, size_t *out_len)
     if (!me_acp_to_utf8(path_acp, path, sizeof path)) { me_log("MODS: import: the source path is not usable"); return NULL; }
     text = modexport_read(path, &len, &st, cause, sizeof cause);
     if (!text) { me_log("MODS: import %s: refused: %s", path, cause); return NULL; }
-    me_log("MODS: import %s: %u bundle(s) (%u installed, %u already present), %u blob(s) installed, map %llu byte(s), "
-           "%llu byte(s) read in %.0f ms%s", path, st.bundles, st.bundles_installed, st.bundles_present, st.blobs_written,
+    me_log("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
+           "%llu byte(s) read in %.0f ms%s", path, st.bundles, st.bundles_installed, st.bundles_present, st.files,
            st.map_bytes, st.zip_bytes, st.ms,
            st.bundles_absent ? "; the map also names mods the export does not carry" : "");
     if (!len || len > (size_t)INT_MAX) { free(text); return NULL; }
