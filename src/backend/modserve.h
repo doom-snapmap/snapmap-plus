@@ -108,6 +108,12 @@ typedef struct sh_modserve_hit {
  * path, else 0. */
 int sh_modserve_lookup(const char *request, sh_modserve_hit *out);
 
+/* The same lookup without the map scope (below): what the index holds for
+ * `request`, also when its bundle's shadows are withdrawn because the open map
+ * does not list it. For reports (the Mods tab, sh_mods doctor), never for
+ * serving. */
+int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out);
+
 /* 1 when an admitted bundle serves `module_name` (maps/modules/...decl, any
  * case) as a snapModule decl: the name a saved map's moduleName holds and the
  * private module palette (grid_room_native.c) is asked to find. */
@@ -388,11 +394,113 @@ int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_
 typedef void (*sh_modserve_line_fn)(void *context, const char *line);
 int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
 
+/* ------------------------------------------------------------------ map scope */
+
+/* A bundle's shadows (the stock files it replaces) and its requirements apply
+ * only while a map that lists the bundle is open in the editor or playing. A
+ * map lists a bundle by its manifest rows (a placed mod's row or a map-level
+ * row, modmanifest.h) and by its placed names (the save-time closure). New
+ * names (mods/<id>/...) are not scoped: they activate per map through the
+ * plan, and a lookup of one is answered whatever map is open.
+ *
+ * A shadow of a bundle the current map does not list is treated as withdrawn:
+ * sh_modserve_lookup, sh_modserve_open and the decl probe miss it, so the
+ * engine's own bytes answer, and the early-decl and gated-reload visits skip
+ * it. Its requirements are not accepted (sh_modserve_requirements_apply runs
+ * its deactivate lines and restores its cvars), except that in a map a bundle
+ * that adds Toybox rows keeps its requirements live, because the palette
+ * registers its rows in every map. With no map (the hub, and at boot) no
+ * map-scoped shadow is served and no map-scoped requirement is live.
+ *
+ * mod.json's author key "scope" chooses: "map" (the default) or "always" (the
+ * shadows and requirements apply whatever map is open, as before map scope).
+ * A bundle without the key whose shadows include editor-time content (a
+ * generated/decls/snapeditor*, snappropertyinspector* or snappalette* decl,
+ * or the editor's own movies generated/swf/snapmaps/snap_editor, entity_menu
+ * and list_view) is treated as "always", logged once:
+ *   MODS: scope: <id>@<version> shadows editor-time content (<request>); treated as "scope": "always" ...
+ *
+ * Scope is off until sh_modserve_scope_enable(1) (the product enables it in
+ * sh_modserve_index_boot); with it off every shadow serves as it always did.
+ *
+ * When the listing changes (sh_modserve_scope_set), every shadow decl, model
+ * and image of each bundle whose shadows turned on or off is marked pending
+ * exactly as a changed or gone shadow is at a rescan (sh_modserve_each_refresh,
+ * with `gone` set while withdrawn), and the inheritance closure is marked
+ * again (sh_modserve_refresh_expand), so the refresh primitives re-parse or
+ * reload them: the bundle's bytes come in, or the game's come back. */
+#define SH_MODSERVE_SCOPE_MAP    0
+#define SH_MODSERVE_SCOPE_ALWAYS 1
+
+void sh_modserve_scope_enable(int on);
+int  sh_modserve_scope_enabled(void);
+
+/* Set what the current map lists: `hashes` are bundle hashes (manifest rows,
+ * the placed closure; aliases resolve), `ids` bundle ids (a row whose bundle is
+ * not indexed names its mod by id), `map_open` 1 while a map is open in the
+ * editor or playing and 0 with none. Marks the files of the bundles that
+ * changed (above) and returns how many bundles changed, shadows or
+ * requirements. Any thread; serialised with index builds. */
+int  sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open);
+
+/* 1 while the last sh_modserve_scope_set said a map is open. */
+int  sh_modserve_scope_map_open(void);
+
+/* 1 when the listing can matter: scope is enabled and an admitted bundle is
+ * map-scoped with shadows or requirements, or the listing is not empty. The
+ * map manifest reads placed names at a load only then. */
+int  sh_modserve_scope_relevant(void);
+
+typedef struct sh_modserve_scope_info {
+    int scope;               /* SH_MODSERVE_SCOPE_* in effect */
+    int declared;            /* mod.json "scope": 0 absent, 1 "map", 2 "always" */
+    int automatic;           /* "always" because it shadows editor-time content */
+    int listed;              /* the current map lists it */
+    int map_open;            /* a map is open */
+    int shadows;             /* shadow files it serves */
+    int shadows_live;        /* 1 its shadows are served now */
+    int requirements;        /* 1 it has requirements */
+    int requirements_live;   /* 1 its requirements are accepted now (whether each cvar is live is the report's) */
+    char editor_path[160];   /* the first editor-time shadow, when automatic */
+} sh_modserve_scope_info;
+
+/* The scope of the admitted bundle `bundle_hash` (aliases resolve). 1 filled, 0 not admitted. */
+int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out);
+
+/* One line per admitted bundle, for sh_mods status, doctor and map:
+ *   scope: <id>@<version>: map: active in the open map (3 shadows, requirements)
+ *   scope: <id>@<version>: map: not active (the open map does not use it)
+ *   scope: <id>@<version>: map: not active (no map is open)
+ *   scope: <id>@<version>: always (mod.json)
+ *   scope: <id>@<version>: always (shadows editor-time content: <request>)
+ *   scope: <id>@<version>: map: new names only, nothing to scope
+ * then "scope: map scope is off" when it is disabled. Returns the line count. */
+int  sh_modserve_scope_report(sh_modserve_line_fn fn, void *context);
+
+/* The points that must read the open map itself (the Play entry: Play does
+ * not serialize the map) ask the bound source (modui.c) to recompute the
+ * listing from the current manifest and the placed names and call
+ * sh_modserve_scope_set. `when` is a SH_MODSERVE_RESTORE_* point. Returns
+ * what the source returns (the bundles that changed), 0 without one. */
+typedef int (*sh_modserve_scope_source_fn)(int when);
+void sh_modserve_set_scope_source(sh_modserve_scope_source_fn fn);
+int  sh_modserve_scope_source(int when);
+
 /* ------------------------------------------------------------------ queries */
 
 /* 1 installed and admitted, 0 not installed, -1 installed but skipped (the
  * first cause is copied to `cause` when non-NULL). */
 int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap);
+
+/* The admitted build that serves a mod: the bundle `bundle_hash` names
+ * (aliases resolve), else the newest admitted bundle of `id`; when a newer
+ * admitted build of the same id is installed it is that one, as the save-time
+ * closure and activation pick. 1 with *out filled, 0 when none. */
+typedef struct sh_modserve_bundle_ref {
+    char id[96], version[160], hash[SH_MODSERVE_HASH_HEX + 1];
+    unsigned long long size;   /* carried bytes, as a manifest row's size */
+} sh_modserve_bundle_ref;
+int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out);
 
 /* Map placed logical names (entityDef inherit names, or any decl name a
  * bundle provides) to the installed bundles that provide them, including the
@@ -647,6 +755,15 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n);
  * again before the level's decls load. No-op when nothing is asked or held
  * (sh_modserve_requirements_held). */
 void sh_modserve_play_begin(void);
+
+/* A scope change (sh_modserve_scope_set) brought into the running game, at
+ * a map load, the map exit, the Play entry and in the editor after a save or
+ * a map-level change: the requirements pass first (stopped bundles' cvars
+ * restored and deactivate lines run, started ones set and their activate
+ * lines run), then the pending re-parses and reloads (me_refresh_apply) and
+ * the gated reloads. Main thread. Logs one "MODS: scope: <phase>: ..." line.
+ * Returns 1 applied, 0 nothing pending, -1 refused (off the main thread). */
+int sh_modserve_scope_apply(const char *phase);
 
 /* After a rescan published a table: apply its pending changes now (main
  * thread, not during Play) or leave them for the next registration pass

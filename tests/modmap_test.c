@@ -138,6 +138,38 @@ int main(void)
         free(d);
     }
 
+    printf("-- a map-level row (an attached mod) adds no entity, name or reference\n");
+    {
+        static const char ONE[] =
+            "{\"entities\":[{\"displayName\":\"\",\"entityDef\":{\"className\":\"idSnapEntity\","
+            "\"inherit\":\"snapmaps/logic/relay\"},\"uniqueId\":3}],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+        sh_modmanifest_list rows, back;
+        sh_modmanifest_row row;
+        char *text;
+        size_t tl = 0;
+        unsigned rejected = 0;
+        memset(&rows, 0, sizeof rows);
+        memset(&back, 0, sizeof back);
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.id, sizeof row.id, "alex.bare-hands");
+        strcpy_s(row.version, sizeof row.version, "1.0.0");
+        memset(row.bundle, 'c', 64);
+        row.size = 77;
+        row.attached = 1;
+        CHECK(sh_modmanifest_list_add(&rows, &row));
+        text = sh_modmanifest_write(ONE, sizeof ONE - 1, &rows, &tl, err, sizeof err);
+        CHECK(text != NULL);
+        if (text) {
+            CHECK(sh_mm_parse(text, tl, &m, err, sizeof err) && m.ent_count == 1 && m.ents[0].uid == 3 &&
+                  m.ents[0].name_count == 1 && !strcmp(m.ents[0].names[0], "snapmaps/logic/relay"));
+            sh_mm_free(&m);
+            CHECK(sh_modmanifest_read(text, tl, &back, &rejected) == 1 && !rejected && back.rows[0].attached == 1);
+            HeapFree(GetProcessHeap(), 0, text);
+        }
+        sh_modmanifest_list_free(&back);
+        sh_modmanifest_list_free(&rows);
+    }
+
     printf("modmap_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

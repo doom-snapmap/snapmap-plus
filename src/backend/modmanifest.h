@@ -3,15 +3,20 @@
  *
  * A row is an ordinary snapVarString_t in variables.string[], appended last so
  * existing variable bindings keep their (type, index). Its initialValue is the
- * compact JSON {"id","version","bundle","size","names":[...]} where "bundle"
- * is the bundle hash and "names" the placed logical names the bundle provides
- * (informational). Rows never carry asset bytes.
+ * compact JSON {"id","version","bundle","size","attached"?,"names":[...]} where
+ * "bundle" is the bundle hash and "names" the placed logical names the bundle
+ * provides (informational). "attached": true marks a map-level row: the mod
+ * was attached to the map (the Mods tab's Use in this map, `sh_mods map add`)
+ * without placing anything, so the map keeps the row whatever it places. A
+ * reader that does not know the key treats the row as a placed mod's; an older
+ * product drops the row at its next save. Rows never carry asset bytes.
  *
  * Load: every parse the DeserializeFromJson detour sees reads the rows, keeps
  * them as the current map's manifest, strips them (allocCount[4] rewritten)
  * and asks the serving layer to activate the named bundles. Save: the
  * SerializeToJson detour computes the placed names, asks the serving layer
- * which bundles provide them, and appends one row per bundle.
+ * which bundles provide them, adds the current manifest's map-level rows, and
+ * appends one row per bundle.
  */
 #ifndef SNAPMAP_PLUS_MODMANIFEST_H
 #define SNAPMAP_PLUS_MODMANIFEST_H
@@ -40,6 +45,7 @@ typedef struct sh_modmanifest_row {
     unsigned long long size;
     char **names;          /* malloc'd strings; owned by the row */
     size_t name_count;
+    int attached;          /* a map-level row ("attached": true) */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -122,10 +128,13 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length);
 
 /* The SerializeToJson step: compute the placed names, ask
- * modserve_bundles_for_names for the bundles that provide them, and return the
- * text with one row per bundle appended (stale rows removed). NULL when the
- * text needs no change (no bundle and no stale row) or on failure, which is
- * logged; the engine's bytes are then saved unchanged. */
+ * modserve_bundles_for_names for the bundles that provide them, add every
+ * map-level row of the current manifest (renamed to the build that serves
+ * when the bundle resolver knows one; a row of a mod that is not installed is
+ * kept as it is), and return the text with one row per bundle appended (stale
+ * rows removed). NULL when the text needs no change (no bundle and no stale
+ * row) or on failure, which is logged; the engine's bytes are then saved
+ * unchanged. */
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length);
 
 /* The save step's restore hook (modui.c's recycle bin, the modserve.h
@@ -135,6 +144,22 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int hash_count, const char *const *names,
                                                size_t name_count, int when), int (*armed)(void));
 
+/* The map scope's hook (modui.c, modserve.h map scope): at every load, with
+ * the rows just read and, when `armed` answers above 0, the map's placed
+ * names (`when` SH_MODSERVE_RESTORE_LOAD), before the bundles are activated;
+ * at every save with the rows written (names NULL, `when` ..._SAVE). NULL
+ * unbinds. */
+typedef void (*sh_modmanifest_scope_fn)(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
+                                        int when);
+void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void));
+
+/* The build that serves a map-level row at save (modui.c binds the serving
+ * index): `bundle_hash` (aliases resolve), else the installed build of `id`.
+ * Fills id, version, bundle and size and returns 1, or 0 when nothing
+ * installed answers (the row is written as it is). */
+typedef int (*sh_modmanifest_resolve_fn)(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
+void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
+
 /* A copy of the manifest of the map last parsed (rows from its text). Free
  * with sh_modmanifest_list_free. Returns the row count. */
 size_t sh_modmanifest_current(sh_modmanifest_list *out);
@@ -143,6 +168,13 @@ size_t sh_modmanifest_current(sh_modmanifest_list *out);
  * (the next save rebuilds the rows from the placed entities). Returns the
  * number of rows dropped. */
 size_t sh_modmanifest_current_remove(const char *bundle);
+/* Attach a mod to the open map: mark the current manifest's row of
+ * `row->bundle` map-level, or add `row` as a map-level row (names dropped).
+ * The next save writes it (sh_modmanifest_on_save) and every later load keeps
+ * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
+int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
+/* A copy of the current manifest's map-level rows. Returns the row count. */
+size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* Forget the current manifest (tests). */
 void sh_modmanifest_reset(void);
 

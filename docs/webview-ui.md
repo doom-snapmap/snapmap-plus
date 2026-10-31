@@ -176,13 +176,20 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+) and Sharing. The head
-actions are Verify, Rebuild and Uninstall. With nothing selected the pane explains how mods work.
+the note that every player needs Snapmap+) and Sharing. About carries an Applies line when the
+backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
+requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
+nothing for a mod that only adds new names. The head actions are Use in this map, Verify, Rebuild
+and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
+for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
+from map and opens the same confirmation as the modal's row, which closes after the action. With
+nothing selected the pane explains how mods work.
 
 **Map modal.** The map button in the list pane's head opens the decl editor's focus modal
 (`.modal.decl-focus-modal` in `#modsMapModal`; the backdrop and Escape close it, Tab stays inside,
 focus returns to the opener) with the open map's details and one row per mod the map is linked to,
-each with Remove from map. Remove from map and Uninstall first send a dry run; its answer is the
+each with Remove from map. A map-level mod (`attached`) reads "Used by the whole map" instead of its
+placed-entity count, and removing it deletes nothing. Remove from map and Uninstall first send a dry run; its answer is the
 consequence list the confirmation shows, with exactly two buttons (Cancel, and Delete or
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
@@ -220,6 +227,9 @@ Per entry of `mods`:
 | `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
 | `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |
+| `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always`; absent when the serving index does not hold it. |
+| `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
+| `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
 
 `files` stays every file including stock pointers, and `pointers` the stock pointers. The page
 derives the carried count as files minus pointers: the head sentence counts carried files only, with
@@ -235,7 +245,7 @@ and `size` is the carried bytes.
 | `published` | object | `{state: "published", at}` when the record's `links` section holds an item published from this map (written by a publish with mods from this installation, dropped at its unpublish); `at` is the link's time. Absent otherwise: the product cannot tell an unpublished map from one published without mods or elsewhere, so it never sends `unpublished`. |
 | `uploaded` | object | `{claimed, at}`, sent with `published`: whether the record's `claims` section holds that item's claim, and its time. |
 | `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
-| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. |
+| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
 
 The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
@@ -257,6 +267,7 @@ again.
 | `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may carry `arg`, a folder name under `mods\` (no separators) that the host opens instead of the mods folder. |
 | `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
 | `verify` | Rehash that one folder's build (`""` still checks every build). |
+| `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its shadows and requirements apply at once, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
@@ -266,7 +277,7 @@ again.
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
-manifestRow, tagRemoved, vanillaAfter, published}`; `install` is null for `mapRemoveMod`, else
+manifestRow, tagRemoved, vanillaAfter, published, attached?}` (`attached` true for a map-level row); `install` is null for `mapRemoveMod`, else
 `{folder, disposition, movedTo}`: `disposition` is `move` and `movedTo` is `removed-mods\<name>` (a
 suffix when the name is taken there); an older backend sent `delete` for a folder the product made. A refused dry run is `ok: false` with the
 reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
@@ -283,7 +294,8 @@ last mod the search tag removed from the editor's copy of the map's tags. `unins
 the open map first, then moves the folder to `removed-mods\` (as `remove`) and rescans; the rescan's refresh rebuilds
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
-[--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions.
+[--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
+`sh_mods map add "<id>"` runs `mapAddMod`.
 
 ## Driving the page from a test
 

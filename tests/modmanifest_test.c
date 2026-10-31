@@ -1,6 +1,7 @@
 /* modmanifest_test -- the smpmod1 map manifest: grammar, row round trip,
  * strip and allocCount, ordering, the playtest bound, placed names, the
- * save-time closure through the serving layer, and the load step.
+ * save-time closure through the serving layer, the load step, and map-level
+ * rows (attached mods) with the map scope's hook and the row resolver.
  *
  * The serving layer (modserve_activate_bundles and
  * modserve_bundles_for_names_visit, declared in modserve.h) is replaced by
@@ -504,6 +505,165 @@ static void save_restore(void)
     sh_modmanifest_set_restore(NULL, NULL);
 }
 
+/* ---- map-level rows -------------------------------------------------------------------------- */
+
+#define HASH_C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+#define HASH_D "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+#define HASH_E "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+static int g_scope_calls, g_scope_when, g_scope_armed_value = 1;
+static size_t g_scope_rows, g_scope_names, g_scope_attached;
+static void fake_scope(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
+{
+    size_t i;
+    g_scope_calls++;
+    g_scope_when = when;
+    g_scope_rows = rows ? rows->count : 0;
+    g_scope_names = names ? name_count : 0;
+    g_scope_attached = 0;
+    for (i = 0; rows && i < rows->count; i++) g_scope_attached += rows->rows[i].attached ? 1u : 0u;
+}
+static int fake_scope_armed(void) { return g_scope_armed_value; }
+
+/* bare-hands is installed as a newer build (HASH_D); HASH_E is not installed. */
+static int fake_resolve(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    if ((bundle_hash && (!strcmp(bundle_hash, HASH_C) || !strcmp(bundle_hash, HASH_D))) || (id && !strcmp(id, "alex.bare-hands"))) {
+        strcpy_s(out->id, sizeof out->id, "alex.bare-hands");
+        strcpy_s(out->version, sizeof out->version, "1.1.0");
+        strcpy_s(out->bundle, sizeof out->bundle, HASH_D);
+        out->size = 777;
+        return 1;
+    }
+    return 0;
+}
+
+static void map_level(void)
+{
+    sh_modmanifest_row row, back;
+    sh_modmanifest_list rows, current;
+    char *value, *written, *engine, *saved, err[160];
+    size_t vlen = 0, wlen = 0, elen = 0, slen = 0;
+    printf("-- map-level rows: the attached key, load, save, attach, remove\n");
+    /* The key round-trips and is written only for a map-level row. */
+    make_row(&row, "alex.bare-hands", "1.0.0", HASH_C, 512);
+    value = sh_modmanifest_format_value(&row, &vlen);
+    CHECK(value && !strstr(value, "attached"));
+    free(value);
+    row.attached = 1;
+    value = sh_modmanifest_format_value(&row, &vlen);
+    CHECK(value && !strcmp(value, "{\"id\":\"alex.bare-hands\",\"version\":\"1.0.0\",\"bundle\":\"" HASH_C
+                                  "\",\"size\":512,\"attached\":true,\"names\":[]}"));
+    CHECK(value && sh_modmanifest_parse_value(value, vlen, &back, err, sizeof err) && back.attached == 1);
+    sh_modmanifest_row_free(&back);
+    free(value);
+    CHECK(sh_modmanifest_parse_value("{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_C "\",\"size\":1,\"attached\":false}",
+                                     strlen("{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_C "\",\"size\":1,\"attached\":false}"),
+                                     &back, err, sizeof err) && back.attached == 0);
+    sh_modmanifest_row_free(&back);
+
+    /* A map with a placed mod's row and a map-level row. */
+    memset(&rows, 0, sizeof rows);
+    {
+        sh_modmanifest_row placed;
+        make_row(&placed, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+        sh_modmanifest_row_add_name(&placed, "mods/alex.pink-imp/imp");
+        CHECK(sh_modmanifest_list_add(&rows, &placed));
+        sh_modmanifest_row_free(&placed);
+    }
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
+    CHECK(written != NULL);
+    sh_modmanifest_list_free(&rows);
+    if (!written) { sh_modmanifest_row_free(&row); return; }
+
+    sh_modmanifest_reset();
+    sh_modmanifest_set_scope(fake_scope, fake_scope_armed);
+    sh_modmanifest_set_resolver(fake_resolve);
+    g_installed = INSTALLED;
+    g_installed_count = 2;
+    g_scope_calls = 0;
+    engine = sh_modmanifest_prepare_load(written, wlen, &elen);
+    CHECK(engine != NULL && !strstr(engine, "smpmod1."));
+    /* The load hook sees both rows and the placed names, before activation. */
+    CHECK(g_scope_calls == 1 && g_scope_when == SH_MODSERVE_RESTORE_LOAD && g_scope_rows == 2 && g_scope_attached == 1 &&
+          g_scope_names > 0);
+    CHECK(g_activate_count == 2);
+    CHECK(sh_modmanifest_current(&current) == 2 && sh_modmanifest_current_attached(&rows) == 1 &&
+          !strcmp(rows.rows[0].bundle, HASH_C));
+    sh_modmanifest_list_free(&current);
+    sh_modmanifest_list_free(&rows);
+
+    /* Armed 0: no placed names are read at a load. */
+    g_scope_armed_value = 0;
+    if (engine) { HeapFree(GetProcessHeap(), 0, engine); engine = NULL; }
+    engine = sh_modmanifest_prepare_load(written, wlen, &elen);
+    CHECK(g_scope_calls == 2 && g_scope_names == 0 && g_scope_rows == 2);
+    g_scope_armed_value = 1;
+
+    /* The save keeps the map-level row (nothing places it), renamed to the
+     * build that serves; the closure's row is written as before. */
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, "alex.pink-imp") && strstr(saved, HASH_D) && !strstr(saved, HASH_C));
+    CHECK(saved && strstr(saved, "\\\"attached\\\":true"));
+    CHECK(g_scope_when == SH_MODSERVE_RESTORE_SAVE && g_scope_rows == 2 && g_scope_attached == 1);
+    CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].bundle, HASH_D) &&
+          !strcmp(rows.rows[0].version, "1.1.0"));
+    sh_modmanifest_list_free(&rows);
+    if (saved) {
+        /* Reloaded, the row is map-level again. */
+        char *again = sh_modmanifest_prepare_load(saved, slen, &elen);
+        CHECK(sh_modmanifest_current_attached(&rows) == 1 && rows.rows[0].attached);
+        sh_modmanifest_list_free(&rows);
+        if (again) HeapFree(GetProcessHeap(), 0, again);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+
+    /* Attach: a new row, then again (already attached), then a row of a mod
+     * not installed, which a save keeps as it is. */
+    make_row(&back, "bob.room", "2", HASH_B, 4096);
+    CHECK(sh_modmanifest_current_attach(&back) == 1 && sh_modmanifest_current_attach(&back) == 0);
+    sh_modmanifest_row_free(&back);
+    make_row(&back, "erin.gone", "3", HASH_E, 9);
+    sh_modmanifest_row_add_name(&back, "x/y");
+    CHECK(sh_modmanifest_current_attach(&back) == 1);
+    sh_modmanifest_row_free(&back);
+    make_row(&back, "Bad Id", "3", HASH_E, 9);
+    CHECK(sh_modmanifest_current_attach(&back) == -1);
+    sh_modmanifest_row_free(&back);
+    CHECK(sh_modmanifest_current_attached(&rows) == 3);
+    sh_modmanifest_list_free(&rows);
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, HASH_B) && strstr(saved, HASH_E) && strstr(saved, "erin.gone"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    /* Remove from map drops the row; the next save writes none for it. */
+    CHECK(sh_modmanifest_current_remove(HASH_D) == 1);
+    CHECK(sh_modmanifest_current_remove(HASH_E) == 1);
+    CHECK(sh_modmanifest_current_remove(HASH_B) == 1);
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && !strstr(saved, HASH_D) && !strstr(saved, HASH_B) && strstr(saved, "alex.pink-imp"));
+    CHECK(g_scope_attached == 0 && g_scope_rows == 1);
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    /* A map-level row alone (no placed mod, nothing served for it) is still written. */
+    g_installed_count = 0;
+    make_row(&back, "erin.gone", "3", HASH_E, 9);
+    CHECK(sh_modmanifest_current_attach(&back) == 1);
+    sh_modmanifest_row_free(&back);
+    saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &slen);
+    CHECK(saved && strstr(saved, "\"smpmod1.0.1\"") && strstr(saved, HASH_E));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    HeapFree(GetProcessHeap(), 0, written);
+    sh_modmanifest_row_free(&row);
+    sh_modmanifest_set_scope(NULL, NULL);
+    sh_modmanifest_set_resolver(NULL);
+    sh_modmanifest_reset();
+    g_installed_count = 2;
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -516,6 +676,7 @@ int main(void)
     save_restore();
     load_step();
     mod_json();
+    map_level();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

@@ -394,6 +394,9 @@ void sh_modserve_play_begin(void)
     /* An uninstalled mod the map being played still places comes back first;
      * the game-side refresh waits for the return to the editor. */
     if (on_main == 1) (void)sh_modserve_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_PLAY);
+    /* Map scope: entities placed since the load or the last save may list a
+     * bundle; its shadows and requirements come in before the level loads. */
+    if (on_main == 1 && sh_modserve_scope_source(SH_MODSERVE_RESTORE_PLAY) > 0) (void)sh_modserve_scope_apply("play");
     if (!sh_modserve_requirements_held()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
@@ -986,6 +989,37 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     return r.state;
 }
 
+/* A map-scope change (modserve.h): requirements first, so a bundle whose
+ * shadows come in has its gates live before its models reload, then what the
+ * listing marked. */
+int sh_modserve_scope_apply(const char *phase)
+{
+    sh_modserve_refresh r;
+    sh_modserve_diff d;
+    sh_modserve_gates g;
+    int held;
+    if (!phase) phase = "map";
+    if (me_on_main() != 1) {
+        me_log("scope: %s: not applied here (not on the main thread); the next registration pass applies it", phase);
+        return -1;
+    }
+    memset(&r, 0, sizeof r);
+    memset(&g, 0, sizeof g);
+    held = sh_modserve_requirements_held();
+    if (held) (void)sh_modserve_requirements_apply(me_gate_ops(), phase, &g);
+    sh_modserve_last_diff(&d);
+    if (!d.pending && !held) return 0;
+    if (g_bound && d.pending) {
+        me_refresh_apply(phase, 0, &r);
+        me_reload_ungated(phase, 0);
+    }
+    sh_modserve_last_diff(&d);
+    me_log("scope: %s: %d decl(s) re-parsed, %d model(s) and image(s) reloaded, %d requirement cvar(s) changed, "
+           "%d command(s) run, %d still pending%s", phase, r.reparsed, r.reloaded, g.changed, g.commands, d.pending,
+           g_bound ? "" : " (decl registration is unavailable on this build)");
+    return 1;
+}
+
 /* The plan's sources are registered; its loads have not run (me_run). A
  * rescan's pending changes are applied first, so a file whose bytes changed
  * is re-parsed as a change, not as an early decl. */
@@ -1295,6 +1329,7 @@ int sh_modserve_command(void *args, const char *verb)
                   st.opens_served, st.cache_hits, st.open_failures, st.probe_claims, st.editor_rows_registered,
                   st.editor_rows_failed, g_bound ? "bound" : "unavailable", g_probe_orig ? "hooked" : "not hooked");
         sh_modserve_each_bundle(me_print_bundle, NULL);
+        (void)sh_modserve_scope_report(me_print_line, NULL);
         (void)sh_modserve_requirements_report(me_print_line, NULL);
         {
             sh_modserve_diff d;

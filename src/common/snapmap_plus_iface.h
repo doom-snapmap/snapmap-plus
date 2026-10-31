@@ -418,6 +418,7 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13    /* arg: as MAP_REMOVE: what it would do; changes nothing */
 #define SH_MODS_ACT_REMOVED_EMPTY      14    /* arg: newline-separated folders of removed-mods ("" all): delete them */
 #define SH_MODS_ACT_REMOVED_RESTORE    15    /* arg: a folder of removed-mods or an id: move it back into mods */
+#define SH_MODS_ACT_MAP_ADD            16    /* arg: key (or an installed id): attach the mod to the open map (a map-level row) */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

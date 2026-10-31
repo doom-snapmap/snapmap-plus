@@ -22,8 +22,9 @@
  *             entities that use it and the wires and Timelines pointing at
  *             them (modmap.h)
  * The actions are install a folder, rebuild one, verify one, uninstall one
- * (the open map cleaned of it first), remove a mod from the open map, their
- * dry runs, migrate, rescan, and the older palette rebuild, Remove and removal
+ * (the open map cleaned of it first), attach a mod to the open map (a
+ * map-level row, modmanifest.h) and remove a mod from it, their dry runs,
+ * migrate, rescan, and the older palette rebuild, Remove and removal
  * of covered builds, which the tab no longer offers. What the tab stopped showing (every bundle's state,
  * legacy ones included, conflicts with their winners, shadows, verification)
  * is printed by sh_modui_doctor, the `sh_mods doctor` console verb.
@@ -104,6 +105,10 @@ typedef struct sh_modui_engine {
     void (*toast)(const char *title, const char *text);
     /* One line in the game console (no newline). */
     void (*print)(const char *line);
+    /* Bring a map-scope change into the running game (modserve.h,
+     * sh_modserve_scope_apply; none in a SH_MODUI_PURE build): 1 applied,
+     * 0 nothing pending, -1 refused. Main thread. */
+    int (*scope_apply)(const char *phase);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {
@@ -135,6 +140,20 @@ int  sh_modui_list(void);
  * follows it). Returns the result length, or -1 when refused before the
  * action ran.
  *
+ * MAP_ADD (arg: a key, or an installed id) attaches that mod to the open map:
+ * the current manifest gets a map-level row for the build that serves, the
+ * map scope is recomputed and applied at once, and the next save writes the
+ * row (so the map publishes, downloads and lists the mod); MAP_REMOVE drops
+ * the row again, deleting nothing when no entity uses the mod.
+ *
+ * Map scope: binding also registers the manifest's scope hook, its row
+ * resolver and the serving layer's scope source. At every load the listing is
+ * the rows and the placed names, applied at once; at every save the rows
+ * written, applied on the next editor tick; at the Play entry the current
+ * rows and the live placed names. The tick (sh_modui_poll_main) clears the
+ * listing when the editor that had the map open is gone (the hub), and sets
+ * it again when an editor map is open without one.
+ *
  * Reinstatement: binding registers the restore hook with modserve.h and
  * modmanifest.h. When a map load names a bundle that resolves to nothing
  * installed, a save or a Play entry finds placed names under mods/<id>/ of an
@@ -148,7 +167,10 @@ int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:
  *   map                         the open map: details, then each mod it uses
- *                               with its placed entities and references
+ *                               with its placed entities and references, whether
+ *                               it is map-level, its scope and whether it is
+ *                               active, then every bundle's scope
+ *   map add "<key|id>"          attach the mod to the open map (a map-level row)
  *   map remove "<key|id>" [--yes]   the dry run; with --yes it is performed
  *   uninstall "<key>" [--yes]       the dry run; with --yes it is performed
  *   removed                     the recycle bin: each folder in removed-mods

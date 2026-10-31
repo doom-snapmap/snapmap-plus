@@ -68,7 +68,7 @@ class FakeNode {
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
              'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
-             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn'];
+             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsUseBtn'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows'];
 /* store: a stand-in host (modsTab.standIn) that answers every modsAction synchronously, as the
@@ -230,7 +230,7 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
   assert.equal(modsTab.filterMods(modsTab.normalize(v3).mods, 'CYBER').length, 2);
 });
 test('action messages', () => {
-  assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify',
+  assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                                      'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'removedEmpty']);
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
   assert.deepEqual(modsTab.actionMessage('uninstall', 'a'), {cmd: 'modsAction', action: 'uninstall', arg: 'a'});
@@ -752,6 +752,63 @@ test('the stand-in host answers as the host does', () => {
 });
 
 /* ---- the page and host contract --------------------------------------------------------------- */
+test('Use in this map: a map-level mod is listed, marked, and removed again from the details pane', () => {
+  const h = live();
+  const use = h.nodes.modsUseBtn;
+  assert.equal(use.style.display, '', 'shown while a map is open');
+  assert.ok(use.disabled, 'nothing selected');
+  h.ui.select('airlock');
+  assert.equal(use.textContent, 'Use in this map');
+  assert.ok(!use.disabled && !/danger/.test(use.className));
+  use.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapAddMod', arg: 'airlock'});
+  assert.match(h.toasts.pop().text, /^Airlock is now used by the whole of Hell Guard Arena\./);
+  assert.equal(use.textContent, 'Remove from map', 'the document now lists it');
+  assert.match(use.className, /danger/);
+  h.nodes.modsMapBtn.click();
+  const row = h.nodes.modsMapHost.all('mods-map-row').find(n => n.getAttribute('data-key') === 'airlock');
+  assert.ok(row && row.getAttribute('data-attached') === 'true');
+  assert.equal(row.all('mods-map-level')[0].textContent, modsTab.MAP_LEVEL_TEXT);
+  h.ui.closeMap();
+  use.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveModPreview', arg: 'airlock'});
+  assert.equal(h.ui.state().modal.page, 'confirm');
+  const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
+  assert.equal(items[0], "Removes the mod from the map's list of mods; the whole map used it.", 'nothing is deleted');
+  modalButtons(h)[1].click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveMod', arg: 'airlock'});
+  assert.equal(h.ui.state().modal.open, false, 'started from the details pane: the dialog closes');
+  assert.equal(use.textContent, 'Use in this map');
+  /* already attached: the stand-in says so; no map open: hidden */
+  const h2 = live();
+  h2.ui.select('airlock');
+  h2.nodes.modsUseBtn.click();
+  h2.ui.act('mapAddMod', 'airlock');
+  assert.match(h2.toasts.pop().text, /already used by the whole of Hell Guard Arena/);
+  const closed = clone(v3);
+  closed.map = {entities: -1, names: 0, rows: [], placed: []};
+  const h3 = live(closed);
+  assert.equal(h3.nodes.modsUseBtn.style.display, 'none');
+});
+test('scope: where a mod applies is in About only when the backend says so', () => {
+  const doc = clone(v3);
+  const by = k => doc.mods.find(m => m.key === k);
+  by('airlock').scope = 'map'; by('airlock').scoped = true;
+  by('alex.r2-imp').scope = 'map'; by('alex.r2-imp').scoped = false;
+  by('crucible').scope = 'always'; by('crucible').scopeAuto = true;
+  by('commdish').scope = 'always';
+  const n = modsTab.normalize(doc), m = k => n.mods.find(x => x.key === k);
+  assert.equal(modsTab.scopeText(m('airlock')), 'Only in maps that use it');
+  assert.equal(modsTab.scopeText(m('alex.r2-imp')), '', 'new names only: nothing to say');
+  assert.equal(modsTab.scopeText(m('crucible')), 'In every map: it changes the editor itself');
+  assert.equal(modsTab.scopeText(m('commdish')), 'In every map');
+  assert.equal(modsTab.scopeText(m('dlc')), '', 'an older backend sends no scope');
+  const h = live(doc);
+  h.ui.select('airlock');
+  assert.match(section(h, 'about').textContent, /Applies Only in maps that use it/);
+  h.ui.select('dlc');
+  assert.ok(!/Applies/.test(section(h, 'about').textContent));
+});
 test('page contract', () => {
   assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));
   assert.ok(html.includes('<div class="content" id="panel-mods" style="display:none;">'));
@@ -766,7 +823,8 @@ test('page contract', () => {
   assert.match(panel, /id="modsMigrateBtn" style="display:none"/);
   assert.match(panel, /<button type="button" class="badge mods-attn" id="modsAttnBtn" aria-pressed="false"/);
   assert.ok(panel.indexOf('id="modsMapBtn"') < panel.indexOf('class="pane-splitter"'), 'the map button is in the left pane');
-  for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<']) assert.ok(panel.includes(label), 'head action ' + label);
+  for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<', '>Use in this map<']) assert.ok(panel.includes(label), 'head action ' + label);
+  assert.match(panel, /id="modsUseBtn" disabled style="display:none"/);
   for (const ic of ['check', 'triangle-alert', 'circle-info', 'folder-open', 'folder-input', 'map', 'chevron-down', 'x'])
     assert.ok(html.includes('<symbol id="icon-' + ic + '"'), 'icon ' + ic);
   /* the modal is the decl focus modal's markup */
@@ -802,7 +860,7 @@ test('page contract', () => {
   for (const k of ['"description"', '"origin"', '"migratedFrom"', '"servedBy"', '"builtAt"', '"bundle"', '"counts"', '"requirements"',
                    '"editorRowNames"', '"carriedPaths"', '"publishedMaps"', '"placedEntities"', '"references"', '"vanilla"',
                    'mapRemoveModPreview', 'uninstallPreview', '`editorRows`', 'files minus pointers', '`wire`',
-                   '"removed"', 'removedEmpty', '"restorable"'])
+                   '"removed"', 'removedEmpty', '"restorable"', 'mapAddMod', '"attached"', '"scope"', '"scopeAuto"', '"active"'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {
@@ -824,6 +882,8 @@ test('host and interface contract', () => {
   assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
   assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
   assert.match(iface, /#define SH_MODS_ACT_REMOVED_EMPTY      14/);
+  assert.match(iface, /#define SH_MODS_ACT_MAP_ADD            16/);
+  assert.ok(host.includes('case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";'));
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 

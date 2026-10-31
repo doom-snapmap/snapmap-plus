@@ -436,8 +436,9 @@ These backend files share the work:
   the engine's own level 1, and rebuilds the live palette inside process heap 0.
   A grandfathered bundle's shadows are planned like new names; the engine
   already knowing the source marks a stock decl, which is left to the provider.
-- `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows, and
-  `modlegacy.c` the retired `smpkg.` carriers, as below.
+- `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows (a placed
+  mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
+  retired `smpkg.` carriers, as below.
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
   folder (two folders declaring one id both flagged, a package a map delivered
   listed like any other) with what each carries, marks each installed or
@@ -615,8 +616,8 @@ engine provider does not have a name.
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
 defaults, installed mods, then the engine. Opens with mode 2 or higher are
-never served. A shadow applies to every map while its bundle is installed; a new
-name applies once it is registered: editor rows at the first palette build (or
+never served. A shadow applies while a map that lists its bundle is open or
+played (see [Map scope](#map-scope)); a new name applies once it is registered: editor rows at the first palette build (or
 `sh_mods palette rebuild`, or the load of a map that names their bundle, below),
 gameplay decls when a map that names their bundle loads. When two builds of one mod id serve a path, the most recently installed
 serves it, and a map naming the older bundle gets the newer files with a logged
@@ -886,8 +887,12 @@ with the cause, and its files first served before then are treated as below.
 The state lives across tables (a rescan replaces the index, not what was set);
 Nothing is restored at DOOM's exit; a cvar the engine archives to its own
 configuration may therefore keep a mod's value into the next session.
-`sh_mods status` and `sh_mods doctor` print `sh_modserve_requirements_report`,
-one line per requirement and whether it is live. Packages converted from the
+A bundle's requirements are accepted only while the map scope has its shadows
+in (below) or, in a map, when the bundle adds Toybox rows; a pass after the
+listing changes therefore runs the stopped bundles' deactivate lines and
+restores their cvars as it does after an uninstall. `sh_mods status` and
+`sh_mods doctor` print `sh_modserve_requirements_report`, one line per
+requirement and whether it is live. Packages converted from the
 retired formats keep only the two blacklist gates (below): their requirements
 were never accepted by a player installing them.
 
@@ -929,8 +934,13 @@ with the reason on the same line, while the editor holds an entity or a wire;
 before the first palette build it does nothing, because that build registers
 every row. A map without manifest rows never reaches it. On
 save it appends one row per bundle that provides a placed name (and each bundle
-their needs reach), after any navigation shards; with an empty table and no rows
-in the map it returns at once and the save is the engine's own bytes.
+their needs reach) and one per map-level row of the current manifest, after any
+navigation shards; with an empty table, no rows in the map and no map-level row
+it returns at once and the save is the engine's own bytes. A map-level row is
+written for the build that serves its mod (the bundle resolver modui.c binds,
+`sh_modserve_bundle_serving`), and the current manifest follows the rename; a
+row of a mod that is not installed is kept as it is, and an uninstalled one is
+reinstated from the recycle bin by its hash first.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
@@ -1017,6 +1027,62 @@ per category and a summary; the Mods tab's rescan result carries
 `refresh: {reparsed, reloaded, needsMapReload, needsRestart, pending,
 deferred, note}`, and `sh_mods rescan` (or `sh_mods refresh`) echoes the same
 lines to the console; `sh_mods status` says when changes are pending.
+
+### Map scope
+
+A bundle's shadows and requirements apply only while a map that lists the
+bundle is open in the editor or playing; its new names are never scoped. The
+listing is a set of bundle ids in `modserve.c`, set by
+`sh_modserve_scope_set` from manifest rows (hashes resolve through aliases;
+ids name rows of mods not indexed) and from the placed closure, with whether a
+map is open at all. Each admitted bundle has two flags computed from it and
+read lock-free: `shadows_off` (a map-scoped bundle the listing lacks) and
+`req_off` (the same, except in a map for a bundle that adds Toybox rows, whose
+rows the palette registers whatever map is open). A withdrawn shadow misses
+`sh_modserve_lookup`, `sh_modserve_open` and the decl probe, so the provider
+falls through to the engine; the early-decl and gated-reload visits skip it;
+reports read the index through `sh_modserve_lookup_indexed`. A conflict path
+whose winner is withdrawn falls through as well, even when another provider is
+listed.
+
+When the listing changes, every served shadow decl, model and image of each
+bundle whose shadows turned on or off is marked pending at generation 0 and the
+inheritance closure is marked again, and `sh_modserve_each_refresh` offers them
+with `gone` set while withdrawn (no gate needed for the game's bytes). The
+engine side is the refresh of a rescan: `sh_modserve_scope_apply` runs the
+requirements pass first, then `me_refresh_apply` (re-parse in process heap 0,
+reload in place by name) and the gated reloads. The listing is set and applied
+at:
+
+- a map load: `modmanifest.c` calls the scope hook (`modui.c`) with the rows
+  just read and, when `sh_modserve_scope_relevant`, the map's placed names,
+  before the bundles are activated, and applies at once;
+- a save: the hook gets the rows written (placed closure and map-level rows);
+  the change is applied on the next editor tick;
+- the Play entry: Play does not serialize the map, so `sh_modserve_play_begin`
+  asks the scope source (`modui.c`) to read the current manifest and the live
+  placed names, then applies before the requirements check and the level load;
+- the map exit: the main-thread tick (`sh_modui_poll_main`, polled while scope
+  can matter) clears the listing once the editor that showed the map loaded
+  last has no map open and neither Play nor a load runs (the hub), and sets it
+  again from the open map when an editor map is open without one;
+- the Mods tab's and the console's map add and Remove from map, at once.
+
+With no map (at boot, and at the hub after the editor) no map-scoped shadow
+serves and no map-scoped requirement is live. A published or My Maps launch
+from the hub keeps its listing until the next parse, because nothing marks the
+end of that Play. A `mod.json` author key `"scope"` (`"map"`, the default, or
+`"always"`; the builder refuses any other value) stays in the manifest's
+`extra`, so a mod without it keeps its canonical text and hash. A bundle
+without the key whose shadows include editor-time content is `always`, logged
+once per build: a `generated/decls/snapeditor*`, `snappropertyinspector*` or
+`snappalette*` decl, or the editor's own movies under
+`generated/swf/snapmaps/` (`snap_editor`, `entity_menu`, `list_view`).
+`sh_modserve_index_boot` enables scope for the product's index; the native
+tests enable it where they test it (`sh_modserve_scope_enable`).
+`sh_mods status`, `sh_mods doctor` and `sh_mods map` print
+`sh_modserve_scope_report`, one line per bundle with its scope and whether it
+is active for the open map.
 
 ### Migration of the retired overrides folder
 
@@ -1106,6 +1172,10 @@ built:
   run-length list) with exactly one end on them, or a Timeline
   (`idTarget_Timeline`) whose `entityEntRefs` row names one. The same edge model
   is what the module-prefab save walks when it cuts a selection.
+- A map-level mod is a row of the current manifest marked `attached`
+  (`sh_modmanifest_current_attach`, the tab's `mapAddMod` and `sh_mods map
+  add`): the map uses it without placing anything, so it is listed with no
+  entities and Remove from map deletes nothing and drops the row.
 - The map's details: its saved-map id and cloud-saved id from the editor's
   copy of the saved-map model (edit+0x7F8, +0x9B0), the search tag from that
   copy's tag list (edit+0x998, the list the next local save writes), the name
@@ -1141,8 +1211,11 @@ Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
 is read again from the editor, so the confirmation lists exactly what the dry
 run computed and the modal redraws from what the backend found afterwards.
-The console verbs `sh_mods map`, `sh_mods map remove "<id>" [--yes]` and
-`sh_mods uninstall "<id>" [--yes]` share the dry runs and the actions.
+The console verbs `sh_mods map`, `sh_mods map add "<id>"`, `sh_mods map remove
+"<id>" [--yes]` and `sh_mods uninstall "<id>" [--yes]` share the dry runs and
+the actions. Adding a mod to the map changes the current manifest only; the
+next save writes its row, so it publishes, downloads and carries the `mods` tag
+like a placed mod's.
 
 ### Published maps and missing mods
 

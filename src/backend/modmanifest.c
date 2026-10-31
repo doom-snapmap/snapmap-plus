@@ -355,6 +355,10 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     if (!mm_member_uint(&object, "size", &out->size)) {
         MM_ERR("row '%s' has no valid size", out->id); goto done;
     }
+    {
+        const char *attached = sh_json_object_get(&object, "attached");
+        out->attached = attached && !strcmp(attached, "true");
+    }
     names = sh_json_object_get(&object, "names");
     if (names) {
         const char *cursor = names, *end = names + strlen(names), *elem;
@@ -393,6 +397,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         mm_put_quoted(&t, row->bundle);
         _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
         mm_put(&t, number, strlen(number));
+        if (row->attached) mm_put(&t, ",\"attached\":true", 16);
         mm_put(&t, ",\"names\":[", 10);
         for (i = 0; i < keep; i++) {
             if (i) mm_put(&t, ",", 1);
@@ -466,6 +471,7 @@ size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list 
         existing = mm_list_find(out, row.bundle);
         if (existing) {
             size_t i;
+            if (row.attached) existing->attached = 1;
             for (i = 0; i < row.name_count; i++) sh_modmanifest_row_add_name(existing, row.names[i]);
             sh_modmanifest_row_free(&row);
         } else {
@@ -821,6 +827,92 @@ size_t sh_modmanifest_current_remove(const char *bundle)
     return dropped;
 }
 
+int sh_modmanifest_current_attach(const sh_modmanifest_row *row)
+{
+    sh_modmanifest_row fresh;
+    sh_modmanifest_row *have;
+    int r;
+    if (!row || !sh_modmanifest_valid_id(row->id) || !sh_modmanifest_valid_hash(row->bundle, strlen(row->bundle))) return -1;
+    AcquireSRWLockExclusive(&g_current_lock);
+    have = mm_list_find(&g_current, row->bundle);
+    if (have) {
+        r = have->attached ? 0 : 1;
+        have->attached = 1;
+    } else {
+        fresh = *row;
+        fresh.names = NULL;
+        fresh.name_count = 0;
+        fresh.attached = 1;
+        r = sh_modmanifest_list_add(&g_current, &fresh) ? 1 : -1;
+    }
+    ReleaseSRWLockExclusive(&g_current_lock);
+    return r;
+}
+
+size_t sh_modmanifest_current_attached(sh_modmanifest_list *out)
+{
+    size_t i;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    AcquireSRWLockShared(&g_current_lock);
+    for (i = 0; i < g_current.count; i++)
+        if (g_current.rows[i].attached && !sh_modmanifest_list_add(out, &g_current.rows[i])) break;
+    ReleaseSRWLockShared(&g_current_lock);
+    return out->count;
+}
+
+/* A save renamed a map-level row to the build that serves it: the current
+ * manifest follows, so the Mods tab and the next save name that build. */
+static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
+{
+    size_t i;
+    if (!strcmp(from, to->bundle)) return;
+    AcquireSRWLockExclusive(&g_current_lock);
+    if (!mm_list_find(&g_current, to->bundle))
+        for (i = 0; i < g_current.count; i++) {
+            sh_modmanifest_row *r = &g_current.rows[i];
+            if (strcmp(r->bundle, from)) continue;
+            strcpy_s(r->id, sizeof r->id, to->id);
+            strcpy_s(r->version, sizeof r->version, to->version);
+            strcpy_s(r->bundle, sizeof r->bundle, to->bundle);
+            r->size = to->size;
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_current_lock);
+}
+
+/* The map scope's hook and its arming (sh_modmanifest_set_scope). */
+static sh_modmanifest_scope_fn volatile g_scope;
+static int (*volatile g_scope_armed)(void);
+static sh_modmanifest_resolve_fn volatile g_resolve;
+
+void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
+{
+    g_scope = scope;
+    g_scope_armed = armed;
+}
+
+void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve) { g_resolve = resolve; }
+
+/* The load's listing: the rows, and the placed names when the hook asks. */
+static void mm_scope_load(const char *json, size_t length, const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_scope_fn scope = g_scope;
+    int (*armed)(void) = g_scope_armed;
+    sh_modmanifest_list none;
+    char **names = NULL;
+    size_t count = 0;
+    int failed = 0;
+    if (!scope) return;
+    memset(&none, 0, sizeof none);
+    if (armed && armed() > 0 && json && length) {
+        count = sh_modmanifest_placed_names(json, length, &names, &failed);
+        if (failed) { names = NULL; count = 0; }
+    }
+    scope(rows ? rows : &none, (const char *const *)names, count, SH_MODSERVE_RESTORE_LOAD);
+    sh_modmanifest_names_free(names, count);
+}
+
 /* "id@version, id@version, ..." for a log line. */
 static void mm_describe(const sh_modmanifest_list *list, char *out, size_t cap)
 {
@@ -849,6 +941,7 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
     if (!json || !length ||
         !sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) {
         mm_set_current(NULL);
+        mm_scope_load(json, length, NULL);
         modserve_activate_bundles(NULL, 0);
         return NULL;
     }
@@ -860,6 +953,9 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
         if (hashes) for (i = 0; i < list.count; i++) hashes[i] = list.rows[i].bundle;
     }
     mm_describe(&list, names, sizeof names);
+    /* The map scope first: the bundles' shadows and requirements are live
+     * before their gameplay decls register. */
+    mm_scope_load(json, length, &list);
     active = modserve_activate_bundles(hashes, hashes ? (int)list.count : 0);
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "MODS: map manifest names %zu bundle(s)%s%s; %u row(s) removed before parse; %d active",
@@ -931,12 +1027,44 @@ static int mm_cstr_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* Add the map-level rows to the save's rows: a bundle the placed closure
+ * already names gets its row marked, any other is added, renamed to the build
+ * that serves it when the resolver knows one. */
+static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attached)
+{
+    sh_modmanifest_resolve_fn resolve = g_resolve;
+    size_t i;
+    for (i = 0; i < attached->count; i++) {
+        sh_modmanifest_row row = attached->rows[i], served;
+        sh_modmanifest_row *have;
+        memset(&served, 0, sizeof served);
+        row.names = NULL;
+        row.name_count = 0;
+        if (resolve && resolve(row.bundle, row.id, &served) == 1 && sh_modmanifest_valid_id(served.id) &&
+            sh_modmanifest_valid_hash(served.bundle, strlen(served.bundle))) {
+            mm_current_rename(row.bundle, &served);
+            strcpy_s(row.id, sizeof row.id, served.id);
+            strcpy_s(row.version, sizeof row.version, served.version);
+            strcpy_s(row.bundle, sizeof row.bundle, served.bundle);
+            row.size = served.size;
+        }
+        sh_modmanifest_row_free(&served);
+        row.attached = 1;
+        have = mm_list_find(&ctx->list, row.bundle);
+        if (have) { have->attached = 1; continue; }
+        if (!sh_modmanifest_list_add(&ctx->list, &row)) return 0;
+    }
+    return 1;
+}
+
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length)
 {
     char **names = NULL;
     size_t count, i, written = 0;
     int failed = 0, stale, restore;
     mm_save_ctx ctx;
+    sh_modmanifest_list attached;
+    sh_modmanifest_scope_fn scope = g_scope;
     char *out = NULL;
     char err[192] = "", line[512], described[320];
 
@@ -944,26 +1072,43 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (!json || !length) return NULL;
     memset(&ctx, 0, sizeof ctx);
     stale = sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN) != NULL;
-    /* No installed bundle serves anything and the map carries no rows: the
-     * save is the engine's own bytes, without walking the map. */
+    /* No installed bundle serves anything, the map carries no rows and no
+     * map-level mod: the save is the engine's own bytes, without walking the
+     * map. */
     restore = g_restore && g_restore_armed && g_restore_armed() > 0;
-    if (!stale && !restore && !sh_modserve_active()) return NULL;
+    (void)sh_modmanifest_current_attached(&attached);
+    if (!stale && !restore && !attached.count && !sh_modserve_active()) {
+        if (scope && g_scope_armed && g_scope_armed() > 0) scope(&ctx.list, NULL, 0, SH_MODSERVE_RESTORE_SAVE);
+        return NULL;
+    }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
     if (failed) {
         backend_log("MODS: save manifest skipped -- the saved map's JSON did not read cleanly; "
                     "the save carries no manifest rows");
+        sh_modmanifest_list_free(&attached);
         return NULL;
     }
-    /* An uninstalled mod the map still places is reinstated first (its
-     * folder back in mods\, the index rebuilt), so the save writes its row. */
-    if (restore && count) (void)g_restore(NULL, 0, (const char *const *)names, count, SH_MODSERVE_RESTORE_SAVE);
+    /* An uninstalled mod the map still places, or a map-level mod that was
+     * uninstalled, is reinstated first (its folder back in mods\, the index
+     * rebuilt), so the save writes its row from the build that serves. */
+    if (restore && (count || attached.count)) {
+        const char **hashes = attached.count ? (const char **)calloc(attached.count, sizeof *hashes) : NULL;
+        for (i = 0; hashes && i < attached.count; i++) hashes[i] = attached.rows[i].bundle;
+        (void)g_restore(hashes, hashes ? (int)attached.count : 0, count ? (const char *const *)names : NULL, count,
+                        SH_MODSERVE_RESTORE_SAVE);
+        free((void *)hashes);
+    }
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
     sh_modmanifest_names_free(names, count);
+    if (!ctx.failed && attached.count && !mm_save_attached(&ctx, &attached)) ctx.failed = 1;
+    sh_modmanifest_list_free(&attached);
     if (ctx.failed) {
         backend_log("MODS: save manifest skipped -- the serving layer reported an invalid bundle");
         sh_modmanifest_list_free(&ctx.list);
         return NULL;
     }
+    /* What the map now lists: placed entities may have been added since the load. */
+    if (scope) scope(&ctx.list, NULL, 0, SH_MODSERVE_RESTORE_SAVE);
     if (ctx.list.count == 0 && !stale) return NULL;
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);

@@ -665,6 +665,15 @@ static void m_gates_only(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
 }
+/* The map scope's author key (modserve.h): kept under extra; a mod without it keeps its hash. */
+static void m_scope_always(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}},"
+                                 "\"scope\":\"always\""));
+}
+static void m_scope_map(const char *f) { mt_write(f, "mod.json", DESC(",\"scope\":\"map\"")); }
+static void m_scope_bad(const char *f) { mt_write(f, "mod.json", DESC(",\"scope\":\"global\"")); }
+static void m_scope_type(const char *f) { mt_write(f, "mod.json", DESC(",\"scope\":1")); }
 static void m_req_general(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"requirements\":{\"commands\":{\"deactivate\":[\"echo bye\"],"
@@ -796,7 +805,21 @@ static void test_refusals(const char *fixture, const char *tmp)
     CHECK(strstr(b.canonical, ",\"requirements\":" GATES_CANONICAL ",") != NULL);
     CHECK(!strcmp(b.hash, GATES_GOLDEN_HASH));
     if (strcmp(b.hash, GATES_GOLDEN_HASH)) fprintf(stderr, "  gates-only hash %s\n", b.hash);
+    CHECK(!strstr(b.canonical, "scope"));
     sh_mb_free(&b);
+    /* "scope": the same mod with the key travels under extra and hashes
+     * differently; without it the golden hash above stands. Only "map" and
+     * "always" are accepted. */
+    accepted(fixture, tmp, m_scope_always, &b);
+    CHECK(b.errors == 0 && b.extra && !strcmp(b.extra, "{\"scope\":\"always\"}"));
+    CHECK(strstr(b.canonical, ",\"extra\":{\"scope\":\"always\"},") != NULL);
+    CHECK(strcmp(b.hash, GATES_GOLDEN_HASH) != 0);
+    sh_mb_free(&b);
+    accepted(fixture, tmp, m_scope_map, &b);
+    CHECK(b.errors == 0 && b.extra && !strcmp(b.extra, "{\"scope\":\"map\"}"));
+    sh_mb_free(&b);
+    refused(fixture, tmp, m_scope_bad, &RESOLVER, "scope must be \"map\" or \"always\"");
+    refused(fixture, tmp, m_scope_type, &RESOLVER, "scope must be \"map\" or \"always\"");
     /* Any cvar and any console line: sorted names, string values (true "1",
      * false "0", integers as digits), lines trimmed and in the author's order,
      * "commands" before "cvars". */

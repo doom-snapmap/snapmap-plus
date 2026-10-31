@@ -224,6 +224,16 @@ static void fake_toast(const char *title, const char *text) { g_toasts++; _snpri
 static void fake_print(const char *line) { strncpy_s(g_print, sizeof g_print, line, _TRUNCATE); }
 static int fake_entity_valid(int uid) { return g_map_on && ent_alive(uid); }
 
+/* The map scope's game-side apply (sh_modserve_scope_apply): how often, and the last phase. */
+static int g_scope_applies;
+static char g_scope_phase[64];
+static int fake_scope_apply(const char *phase)
+{
+    g_scope_applies++;
+    strncpy_s(g_scope_phase, sizeof g_scope_phase, phase ? phase : "", _TRUNCATE);
+    return 1;
+}
+
 static const char *g_busy;
 static int fake_busy(char *cause, size_t cap)
 {
@@ -276,6 +286,7 @@ static void bind_fakes(void)
     e.migrate_pending = fake_mig_pending;
     e.migrate_start = fake_mig_start;
     e.migrate_busy = fake_mig_busy;
+    e.scope_apply = fake_scope_apply;
     sh_modui_bind(&e);
 }
 
@@ -1295,6 +1306,95 @@ int main(int argc, char **argv)
             }
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, bad, doctor_line, NULL) == 1 && has(g_doctor, "usage: sh_mods removed"));
+        }
+
+        printf("-- map add: a mod used by the whole map without placing anything, and the map scope that follows it\n");
+        {
+            const char *add_argv[] = { "map", "add", "alex.req" };
+            const char *map_argv[] = { "map" };
+            const char *bad_add[] = { "map", "add" };
+            sh_modmanifest_list att;
+            char *t, *saved;
+            size_t len = 0, out_len = 0;
+            int applies;
+            sh_modmanifest_reset();
+            open_test_map();
+            sh_modserve_scope_enable(1);
+            applies = g_scope_applies;
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            CHECK(has(doc, "\"action\":\"mapAddMod\",\"ok\":true,\"message\":\"Gates is now used by the whole of Imp Arena."));
+            free(doc);
+            /* Its requirements were out of scope with no map listing it; now they apply at once. */
+            CHECK(g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "map add"));
+            CHECK(sh_modmanifest_current_attached(&att) == 1 && sh_modserve_bundle_state(att.rows[0].bundle, NULL, 0) == 1 &&
+                  !strcmp(att.rows[0].id, "alex.req"));
+            sh_modmanifest_list_free(&att);
+            doc = list_doc();
+            CHECK(has(doc, "\"key\":\"alex.req\",\"id\":\"alex.req\"") && has(doc, "\"attached\":true,\"scope\":\"map\",\"active\":true"));
+            CHECK(has(doc, "\"otherKey\":\"\",\"nameCount\":0,\"names\":[],\"attached\":true}"));
+            CHECK(has(doc, "\"scope\":\"map\",\"scopeAuto\":false,\"scoped\":true"));
+            CHECK(has(doc, "\"vanilla\":false"));
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            CHECK(has(doc, "\"ok\":true,\"message\":\"Gates is already used by the whole of Imp Arena.\""));
+            free(doc);
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(3, add_argv, doctor_line, NULL) == 1 &&
+                  has(g_doctor, "MODS: map add alex.req: Gates is already used by the whole of Imp Arena.\n"));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(2, bad_add, doctor_line, NULL) == 1 && has(g_doctor, "usage: sh_mods map add"));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "(alex.req, installed): map-level (attached to the whole map), 0 placed entities, 0 wire or "
+                                "timeline reference(s); scope map, active\n"));
+            CHECK(has(g_doctor, "MODS: map: scope: alex.req@1.0.0: map (0 shadows, requirements): active in the open map\n"));
+            /* The save writes its row as a map-level row; nothing places it. */
+            t = map_text(&len);
+            saved = sh_modmanifest_on_save(t, len, &out_len);
+            CHECK(saved && strstr(saved, "smpmod1.") && strstr(saved, "alex.req") && strstr(saved, "\\\"attached\\\":true"));
+            if (saved) HeapFree(GetProcessHeap(), 0, saved);
+            /* The dry run and the removal: nothing to delete, the row goes. */
+            doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, "alex.req");
+            CHECK(has(doc, "\"entityCount\":0") && has(doc, "\"manifestRow\":true") && has(doc, "\"published\":true,\"attached\":true}"));
+            free(doc);
+            applies = g_scope_applies;
+            g_delete_calls = 0;
+            doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.req");
+            CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Gates from Imp Arena: no entity used it, so only its row was dropped"));
+            free(doc);
+            CHECK(g_delete_calls == 0 && sh_modmanifest_current_attached(&att) == 0 && g_scope_applies == applies + 1);
+            sh_modmanifest_list_free(&att);
+            /* Refusals. */
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "nobody");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"nobody is not installed.\""));
+            free(doc);
+            g_busy = "Play is running; return to the editor first";
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: Play is running; return to the editor first.\""));
+            free(doc);
+            g_busy = NULL;
+            /* The editor tick: in the map the listing holds; once the editor has left it (the hub) it goes. */
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            free(doc);
+            CHECK(sh_modserve_scope_map_open());
+            CHECK(sh_modui_poll_main(NULL) == 1);
+            applies = g_scope_applies;
+            g_map_on = 0;
+            CHECK(sh_modui_poll_main(NULL) == 0);
+            CHECK(!sh_modserve_scope_map_open() && g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "map exit"));
+            {
+            int placed = g_placed_count;
+            g_placed_count = -1;
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"No map is open in the editor.\""));
+            free(doc);
+            g_placed_count = placed;
+            }
+            /* Back in the editor without a load: the listing is set again from the open map. */
+            g_map_on = 1;
+            CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open() && !strcmp(g_scope_phase, "editor"));
+            sh_modserve_scope_enable(0);
+            sh_modmanifest_reset();
         }
 
         printf("-- rebuild: the folder built again from its files, then a rescan\n");
