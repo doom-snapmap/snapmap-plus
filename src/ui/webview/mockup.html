@@ -1341,7 +1341,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     else if (o.cmd === 'selectPrefab') {
       var d = previewPrefabDetails[o.name];
       var mk = (o.folder ? o.folder + '/' : '') + o.name;
-      onMessage(d ? {kind:'prefabDetail', name:o.name, ok:true, meta: previewMetaBodies[mk] || '', scene:d.scene || '', count:d.count}
+      onMessage(d ? {kind:'prefabDetail', name:o.name, ok:true, meta: previewMetaBodies[mk] || '', scene:d.scene || '', count:d.count,
+                     prefabKind: previewKindsMap()[mk] === 'modules' ? 'modules' : 'objects'}
                   : {kind:'prefabDetail', name:o.name, ok:false});
     }
     else if (o.cmd === 'resolvePrefabModel') {
@@ -3181,7 +3182,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var pfr = pfFileResultToast(d);
       if (pfr) toast(pfr.text, pfr.level);
     } else if (d.kind === 'editorMode') {
-      edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0};
+      edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0,
+                modules: typeof d.modules === 'number' ? d.modules : -1};
       pfRefreshModeUi(); updateCreateBtn();
     } else if (d.kind === 'createModulePrefabResult') {
       var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
@@ -3204,6 +3206,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       pfRenderLimits();
     } else if (d.kind === 'budgetUsage') {
       pfBudgetLive = d.data && typeof d.data === 'object' ? d.data : null;
+      pfBudgetHeld = d.held && typeof d.held === 'object' ? d.held : null;
       pfRenderLimits();
     } else if (d.kind === 'prefabModelResolved') {
       prefabViewport.modelResolved(d);
@@ -3256,6 +3259,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
+      else if (d.result === 4) toast('The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again', 'warn');
+      else if (d.result === 5) toast('The editor would not copy this selection -- select every entity wired to it or that it refers to, then try again', 'warn');
       else if (d.result === 3) toast('Could not anchor "' + d.name + '" -- point the view centre at the hovered entity and try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'setDisplayNamesResult') {
@@ -3270,10 +3275,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (d.result === 1) toast('Cleared stack 0 (' + d.count + ' id' + (d.count === 1 ? '' : 's') + ' removed)', 'ok');
       else toast('Clear stack 0 failed (editor down?)', 'err');
     } else if (d.kind === 'loadPrefabResult') {
-      /* The backend drain owns the OUTCOME toast ("Ready -- move it into position..." vs the
-         "press Ctrl+V" fallback), because only it knows whether the pick-up actually happened.
-         This one just confirms the request was accepted. A prefab whose mods are being fetched
-         or were refused says so first (prefab_mods.c). */
+      /* An object prefab's result comes once the game thread has queued the native paste (in
+         hand) or only staged it (Ctrl+V), with the reason (pfPlaceToast). A prefab whose mods
+         are being fetched or were refused says so first (prefab_mods.c). */
       var pml = pfModsLoadToast(d);
       if (pml) toast(pml.text, pml.level);
       else if (d.prefabKind === 'modules') {
@@ -3284,9 +3288,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         else if (d.result === -6) toast(d.message || ('"' + d.name + '" needs modules that are not in your palette'), 'warn');
         else toast('The editor refused to place "' + d.name + '" (see log)', 'err');
       }
-      else if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
-      else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
-      else toast('Could not stage "' + d.name + '" (editor down?)', 'err');
+      else { var plt = pfPlaceToast(d); toast(plt.text, plt.level); }
     } else if (d.kind === 'deletePrefabResult') {
       if (d.result === 1) {
         toast('Deleted "' + d.name + '"', 'ok');
@@ -3353,8 +3355,27 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var selectedPrefabKind = '';   // kind of the prefab whose details are shown
   var metaExtra = null;          // the loaded view minus desc/tags (a module prefab's summary, its mods); the backend keeps them
   // The editor's mode, posted by the host: module prefabs place only in Blueprint, object prefabs in Object mode.
-  var edMode = {known: false, entityMode: 0, blueprint: 0};
+  var edMode = {known: false, entityMode: 0, blueprint: 0, modules: -1};
   function pfKindOf(folder, name) { return prefabKinds[(folder ? folder + '/' : '') + name] || 'objects'; }
+  // --- prefab kind ---
+  // The host classifies a prefab by its file's top-level ~type (idSnapMap: modules, with or without
+  // a snapmapPlus block; idSnapEntityPrefab: objects) and says so in prefabKind; the view's "kind"
+  // is the fallback for a message that carries none.
+  function pfKindOfDetail(d, meta) {
+    if (d && (d.prefabKind === 'modules' || d.prefabKind === 'objects')) return d.prefabKind;
+    return meta && meta.kind === 'modules' ? 'modules' : 'objects';
+  }
+  // A module prefab saved without a block has no summary: count its modules and objects from the scene.
+  function pfModuleSummary(meta, doc, count) {
+    if (meta && (meta.moduleCount || (Array.isArray(meta.modules) && meta.modules.length))) return meta;
+    var out = {}, k;
+    for (k in (meta || {})) if (meta.hasOwnProperty(k)) out[k] = meta[k];
+    var mods = doc && Array.isArray(doc.instances) && typeof prefabBudget !== 'undefined' ? prefabBudget.moduleScene(doc).modules : [];
+    out.moduleCount = mods.length;
+    out.entityCount = doc && Array.isArray(doc.entities) ? doc.entities.length : (count || 0);
+    return out;
+  }
+  // --- prefab kind end ---
   function pfRefreshModeUi() {
     var b = document.getElementById('prefabLoadBtn'); if (!b) return;
     if (!selectedPrefabName) return;
@@ -3690,7 +3711,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('pcTags').value = mTags.join(', ');
     metaBaseline = mDesc.trim() + '\u0000' + parseTagsInput(mTags.join(',')).join(',');
     metaExtra = {}; for (var mk in meta) if (meta.hasOwnProperty(mk) && mk !== 'desc' && mk !== 'tags') metaExtra[mk] = meta[mk];
-    selectedPrefabKind = (meta.kind === 'modules') ? 'modules' : 'objects';
+    selectedPrefabKind = pfKindOfDetail(d, meta);
     // The selected scene is parsed exactly once and shared by the preview and the Limits section.
     var doc = null;
     if (d.scene) { try { doc = prefabTransform.parseScene(d.scene); } catch (e) { doc = null; } }
@@ -3698,7 +3719,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     pfShowMods(pfModsParse(d.modsStatus));
     if (selectedPrefabKind === 'modules') {
       prefabViewport.clear();
-      pfShowFootprint(meta);
+      pfShowFootprint(pfModuleSummary(meta, doc, d.count));
     } else {
       pfHideFootprint();
       var navBoxes = doc ? prefabTransform.countNavigationBoxes(doc) : 0;
@@ -3713,9 +3734,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- Limits: what the selected prefab adds to the map's budget (prefab_budget.js) ----
   // The backend's table (one block per palette row and per resident module) arrives once and again
-  // after a palette rebuild; usage arrives when the tab opens and on each selection. Only the selected
-  // prefab is ever summed, and its sum is memoized by folder/name, file signature and table generation.
+  // after a palette rebuild; usage arrives when the tab opens, on each selection and whenever the map's
+  // usage or the held prefab changes, and each arrival re-renders the rows. Only the selected prefab is
+  // ever summed, and its sum is memoized by folder/name, file signature and table generation.
   var pfBudgetTable = null, pfBudgetLive = null, pfBudgetAsked = false, pfBudgetSel = null;
+  var pfBudgetHeld = null;   // {name, folder, kind} of the prefab held in the 3D view, from budgetUsage
+  // Is the selected prefab the one held? Then its share is already in the live usage.
+  function pfBudgetIsHeld(held, sel) {
+    return !!(held && sel && held.name === sel.name && (held.folder || '') === (sel.folder || ''));
+  }
   var pfBudgetCache = prefabBudget.createCache(32);
   function pfBudgetSelect(d, doc, meta) {
     var modules = [], owner = null, entities = doc && Array.isArray(doc.entities) ? doc.entities : [];
@@ -3725,6 +3752,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else if (Array.isArray(meta.modules)) modules = meta.modules.map(function(m){ return (m && m.name) || ''; });
     }
     pfBudgetSel = {key: (d.folder || selectedPrefabFolder || '') + '/' + d.name + '|' + (d.sig || ''),
+                   name: d.name, folder: d.folder || selectedPrefabFolder || '',
                    entities: entities, modules: modules, entityModule: owner,
                    kind: selectedPrefabKind, parsed: !!doc || (selectedPrefabKind === 'modules' && modules.length > 0)};
     pfRenderLimits();
@@ -3743,7 +3771,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     bar.className = 'pcl-bar pcl-' + v.level; bar.setAttribute('aria-hidden', 'true');
     now.className = 'pcl-bar-now'; now.style.width = b + '%';
     add.className = 'pcl-bar-add'; add.style.left = b + '%'; add.style.width = Math.max(0, a - b) + '%';
-    if (v.add > 0 && b < 100) add.style.minWidth = '2px';
+    if (v.add > 0 && !v.held && b < 100) add.style.minWidth = '2px';
     bar.appendChild(now); bar.appendChild(add);
     return bar;
   }
@@ -3767,7 +3795,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       pfBudgetCache.set(ck, s);
     }
     var live = pfBudgetLive && pfBudgetLive.usage && pfBudgetLive.limits ? pfBudgetLive : pfBudgetTable;
-    var m = prefabBudget.meters(s.block, live.usage, live.limits);
+    var held = pfBudgetIsHeld(pfBudgetHeld, pfBudgetSel);
+    var m = prefabBudget.meters(s.block, live.usage, live.limits, held);
     if (section) section.classList.remove('pc-limits-empty');
     // One row per HUD meter; "Map after" takes the colour of prefabBudget.meterLevel (blue, yellow, red).
     prefabBudget.METERS.forEach(function(name){
@@ -3778,8 +3807,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var addText = prefabBudget.formatPercent(v.add);
       row.appendChild(pfLimitsCell(addText.charAt(0) === '<' ? addText : '+' + addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
       row.appendChild(pfLimitsCell(prefabBudget.formatPercent(v.after), 'pcl-num pcl-after pcl-' + v.level,
-        'Now ' + prefabBudget.formatPercent(v.before) + (v.level === 'over' ? '; placing it would reach this limit'
-                                                         : v.level === 'warn' ? '; placing it comes close to this limit' : '')));
+        held ? 'Now ' + prefabBudget.formatPercent(v.after) + ' with this prefab held' +
+               (v.level === 'over' ? '; it reaches this limit' : v.level === 'warn' ? '; it comes close to this limit' : '')
+             : 'Now ' + prefabBudget.formatPercent(v.before) + (v.level === 'over' ? '; placing it would reach this limit'
+                                                              : v.level === 'warn' ? '; placing it comes close to this limit' : '')));
       rows.appendChild(row);
     });
     var notes = [];
@@ -3790,7 +3821,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (s.filtered) notes.push(s.filtered + (s.filtered === 1 ? ' entity is' : ' entities are') + ' on a layer the editor does not count.');
     if (pfBudgetSel.kind === 'modules' && pfBudgetTable.layers && pfBudgetTable.layers.source !== 'decl')
       notes.push('Module layers unavailable; every module layer is counted.');
-    if (m.reached) notes.unshift('Placing this prefab would reach the map\'s limits.');
+    if (held) notes.unshift(m.reached ? 'This prefab is held in the 3D view and the map is at its limits with it.'
+                                      : 'This prefab is held in the 3D view: "Map after" is the map now, with it.');
+    else if (m.reached) notes.unshift('Placing this prefab would reach the map\'s limits.');
     note.textContent = notes.join(' ');
     prefabBudget.FIELDS.forEach(function(f, i){
       var item = document.createElement('div'), k = document.createElement('span'), n = document.createElement('span');
@@ -3870,6 +3903,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     panel.hidden = !open;
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     btn.title = open ? 'Hide the legend' : 'Show the legend';
+    // The preview knows, so the smallest preview can hide its status line under the open list.
+    var preview = btn.closest ? btn.closest('.pc-preview') : null;
+    if (preview && preview.classList) preview.classList.toggle('pc-legend-open', open);
     return open;
   }
   function pfLegendIsOpen(btn) { return btn.getAttribute('aria-expanded') === 'true'; }
@@ -7327,23 +7363,64 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   });
   // The live selection count gates prefab creation regardless of synchronization mode.
   var editorSelCount = PREVIEW ? 5 : 0;
-  function updateCreateBtn(){
-    var b = document.getElementById('prefabCreateBtn'); if (!b) return;
-    if (edMode.known && edMode.blueprint) {
-      // Blueprint: the selected modules and everything inside them become a module prefab
-      b.disabled = false;
-      b.setAttribute('title', 'Create a module prefab from the modules selected in Blueprint (their objects come along)');
-      b.setAttribute('aria-label', 'Create module prefab from the selected modules');
-      return;
+  // --- create gate ---
+  // Create, and the Create dialog's confirm, follow the editor's live selection: the selected
+  // entities in Object mode (selCount), the selected modules in Blueprint (editorMode.modules; -1
+  // when the backend cannot say, which leaves the gate to the engine's own refusal).
+  function pfCreateGate(mode, entities) {
+    if (mode.known && mode.blueprint) {
+      var mods = typeof mode.modules === 'number' ? mode.modules : -1;
+      if (mods === 0) return {enabled: false, modules: true, title: 'Select modules first'};
+      return {enabled: true, modules: true,
+              title: 'Create a module prefab from the ' + (mods > 0 ? mods + ' ' : '') + 'module' + (mods === 1 ? '' : 's') +
+                     ' selected in Blueprint (their objects come along)'};
     }
-    var label = editorSelCount > 0
-      ? 'Create from Selection (' + editorSelCount + ' selected)'
-      : 'Create from Selection - select entities in the editor first';
-    b.disabled = editorSelCount < 1;
-    b.setAttribute('title', label);
-    b.setAttribute('aria-label', label);
+    if (!(entities > 0)) return {enabled: false, modules: false, title: 'Select entities first'};
+    return {enabled: true, modules: false, title: 'Create from Selection (' + entities + ' selected)'};
   }
-  updateCreateBtn();
+  // --- create gate end ---
+  // --- place toast ---
+  // An object Load / Place says what is true once the game has decided it (the host's "placed"):
+  // in hand when the native paste was queued, staged only (with the reason) when Ctrl+V is needed.
+  function pfPlaceToast(d) {
+    var q = '"' + d.name + '"';
+    if (d.result === -1) return {text: 'Could not read ' + q + ' (see log)', level: 'err'};
+    if (d.result !== 1) return {text: 'Could not stage ' + q + ' (editor down?)', level: 'err'};
+    if (d.placed === 'queued') return {text: q + ' is in hand: position it and press Space, or Esc to cancel', level: 'ok'};
+    if (d.placed === 'staged') {
+      var why = d.reason ? ' because ' + d.reason : '';
+      var how = /cursor/.test(d.reason || '') ? 'move the cursor off the entity, then press Ctrl+V in the 3D view to place it'
+                                              : 'press Ctrl+V in the 3D view to place it';
+      return {text: q + ' is staged but not in hand' + why + ': ' + how, level: 'warn'};
+    }
+    return {text: q + ' was sent to the editor; if it is not in hand, press Ctrl+V in the 3D view to place it', level: 'ok'};
+  }
+  // --- place toast end ---
+  function updateCreateBtn(){
+    var g = pfCreateGate(edMode, editorSelCount);
+    var b = document.getElementById('prefabCreateBtn');
+    if (b) {
+      b.disabled = !g.enabled;
+      b.setAttribute('title', g.title);
+      b.setAttribute('aria-label', g.enabled ? (g.modules ? 'Create module prefab from the selected modules' : g.title) : g.title);
+    }
+    // The open dialog follows the selection too; it confirms only what it was opened for.
+    var c = document.getElementById('npCreate');
+    if (c) {
+      var ok = g.enabled && g.modules === npModuleMode;
+      c.disabled = !ok;
+      if (ok) c.removeAttribute('title'); else c.setAttribute('title', npModuleMode ? 'Select modules first' : 'Select entities first');
+    }
+    if (npSelInfo && pcModal && pcModal.style.display !== 'none') npSelInfo.textContent = pfCreateSelText();
+  }
+  function pfCreateSelText() {
+    if (npModuleMode) {
+      var mods = typeof edMode.modules === 'number' ? edMode.modules : -1;
+      return (mods > 0 ? 'From ' + mods + ' selected module' + (mods === 1 ? '' : 's') : 'From the modules selected in Blueprint') +
+             ' -- every object inside them comes along; places in Blueprint only';
+    }
+    return 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');
+  }
   var npSelInfo = document.getElementById('npSelInfo');
   // right-click menu on prefab items (reuses the entities #ctxmenu)
   if (prefabTree) prefabTree.addEventListener('contextmenu', function(e){
@@ -7512,16 +7589,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var pcCreateBtn = document.getElementById('prefabCreateBtn');
   var npModuleMode = false;   // the New Prefab dialog was opened from Blueprint: it saves modules
   if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){
+    if (!pfCreateGate(edMode, editorSelCount).enabled) return;
     npModuleMode = !!(edMode.known && edMode.blueprint);
-    if (npSelInfo) npSelInfo.textContent = npModuleMode
-      ? 'From the modules selected in Blueprint -- every object inside them comes along; places in Blueprint only'
-      : 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');
-    showPrefabModal(true); document.getElementById('npName').focus();
+    if (npSelInfo) npSelInfo.textContent = pfCreateSelText();
+    showPrefabModal(true); updateCreateBtn(); document.getElementById('npName').focus();
   });
   var npCancel = document.getElementById('npCancel');
   if (npCancel) npCancel.addEventListener('click', function(){ showPrefabModal(false); });
   var npCreate = document.getElementById('npCreate');
+  updateCreateBtn();
   if (npCreate) npCreate.addEventListener('click', function(){
+    if (npCreate.disabled) return;
     var name = (document.getElementById('npName').value || '').trim();
     if (!name) { if (typeof toast === 'function') toast('Enter a name', 'warn'); return; }
     function doCreate(){

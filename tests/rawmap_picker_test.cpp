@@ -3,6 +3,7 @@
 // (and proposes rawmap.zip) when the open map uses a mod, .json first when it
 // does not, and the mod count is read from the backend's status object.
 #include <stdio.h>
+#include <string.h>
 #include <wchar.h>
 
 #include "../src/ui/webview/rawmap_picker.h"
@@ -57,6 +58,34 @@ int main()
     CHECK(map_mods_from_status("{\"load\":\"a\",\"mapMods\":0}") == 0);
     CHECK(map_mods_from_status("{\"load\":\"a\"}") == 0);     /* an older backend */
     CHECK(map_mods_from_status(nullptr) == 0);
+
+    /* Each dialog keeps its own folder; the prefab ones start in Downloads, the rawmap ones in the rawmaps folder. */
+    CHECK(!strcmp(folder_config_key(KIND_PREFAB_EXPORT), "dialogs.prefab_export"));
+    CHECK(!strcmp(folder_config_key(KIND_PREFAB_IMPORT), "dialogs.prefab_import"));
+    CHECK(!strcmp(folder_config_key(KIND_RAWMAP_SAVE), "dialogs.rawmap_save"));
+    CHECK(!strcmp(folder_config_key(KIND_RAWMAP_LOAD), "dialogs.rawmap_load"));
+    CHECK(folder_config_key(9) == nullptr);
+    CHECK(default_folder(KIND_PREFAB_EXPORT) == FOLDER_DOWNLOADS && default_folder(KIND_PREFAB_IMPORT) == FOLDER_DOWNLOADS);
+    CHECK(default_folder(KIND_RAWMAP_SAVE) == FOLDER_RAWMAPS && default_folder(KIND_RAWMAP_LOAD) == FOLDER_RAWMAPS);
+
+    CHECK(folder_of(L"C:\\Users\\a\\Downloads\\stairs.zip") == L"C:\\Users\\a\\Downloads");
+    CHECK(folder_of(L"D:\\stairs.zip") == L"D:\\");
+    CHECK(folder_of(L"stairs.zip") == L"");
+
+    /* The kept folder round-trips through config.json as a JSON string, non-ASCII included. */
+    const std::wstring folder_plain = L"C:\\Users\\a\\Downloads";
+    CHECK(folder_to_config(folder_plain) == "\"C:\\\\Users\\\\a\\\\Downloads\"");
+    std::wstring back;
+    CHECK(folder_from_config(folder_to_config(folder_plain).c_str(), back) && back == folder_plain);
+    const std::wstring accented = L"C:\\Users\\Jos\u00e9\\T\u00e9l\u00e9chargements \"x\"";
+    CHECK(folder_from_config(folder_to_config(accented).c_str(), back) && back == accented);
+    CHECK(folder_from_config("\"C:\\\\Users\\\\Jos\xc3\xa9\"", back) && back == L"C:\\Users\\Jos\u00e9");   /* UTF-8 as stored */
+    CHECK(folder_from_config("  \"D:\\/x\"", back) && back == L"D:/x");
+    CHECK(!folder_from_config("\"\"", back) && back.empty());     /* the default: nothing kept yet */
+    CHECK(!folder_from_config("null", back));
+    CHECK(!folder_from_config("\"unterminated", back));
+    CHECK(!folder_from_config("\"bad \\q\"", back));
+    CHECK(!folder_from_config(nullptr, back));
 
     printf("rawmap_picker_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

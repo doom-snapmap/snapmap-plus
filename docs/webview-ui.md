@@ -17,6 +17,8 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
 | `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the grouped installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
+| `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
+| `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
 | `src/ui/webview/webview_json.{h,cpp}` | Text encoding, JSON escaping and field access for WebView messages. |
@@ -61,15 +63,17 @@ The header defines the complete ABI. These are the main entry points:
 | Entity list and state | Count, validity, classname, inherit, display name and serialization slots. |
 | Selection | `get_selection` at `+0x150`, `add_to_selection` at `+0x138`, and `clear_selection` at `+0x148`. |
 | Camera position | `get_editor_vec3` at `+0x08` and `set_editor_vec3` at `+0x00`. Position lock reapplies saved coordinates. |
-| Create prefab | `serialize_selection` at `+0xB0`; the engine requires hovering a selected entity. |
-| Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
+| Create prefab | `serialize_selection` at `+0xB0`; the engine's copy check (PrefabPopulate) requires the hovered entity to be one of the selected ones. The host checks `get_selection` and `hovered_id` first (`prefab_host.h`) and answers `createPrefabResult` 0 nothing selected, 2 nothing hovered, 4 the hovered entity is not selected, or, when the serializer still returns nothing, 5 (the check refused for its other causes: a wired or referenced entity left out, or one the editor does not copy; the backend logs its status). |
+| Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. The game thread decides on its next frame whether the paste was queued or the prefab only staged, and why (`prefab_watch`'s `place_seq`, `place_result`, `place_reason`); the host waits up to 2.5 s for that and posts `loadPrefabResult` with `placed`. |
+| Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
 | Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, WAIT follows a migration from any thread. See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
-| File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state; its file types come from `rawmap_picker.h` (Load lists `.json` and `.zip`; Save As puts `.zip` first when the status's `mapMods` is above zero, read on the UI thread before the picker thread starts). Loading stages a file: the swap substitutes it into the next map the engine parses. The status's `lastZip` fields name the export the last save wrote, and the path readout says to share it. |
+| File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state; its file types come from `rawmap_picker.h` (Load lists `.json` and `.zip`; Save As puts `.zip` first when the status's `mapMods` is above zero, read on the UI thread before the picker thread starts). Loading stages a file: the swap substitutes it into the next map the engine parses. A file `rawmap_configure` refuses (a prefab's export, an earlier release's `.zip`) is logged by the backend (`B1: rawmap: load of <path> refused: <reason>`), printed to the console on the next game tick ("The rawmap was not loaded: <reason>.") and logged by the host (`rawmap load: refused`), besides the page's "Refused:" toast. The status's `lastZip` fields name the export the last save wrote, and the path readout says to share it. |
+| File dialog folders | Every dialog opens in the last folder the player used for its kind, kept in `config.json`: `dialogs.rawmap_load`, `dialogs.rawmap_save`, `dialogs.prefab_export`, `dialogs.prefab_import` (UI read and write, `""` until first used). Without a kept folder, or when it no longer exists, the prefab dialogs open in Downloads (`SHGetKnownFolderPath(FOLDERID_Downloads)`) and the rawmap dialogs in the rawmaps folder, `%LOCALAPPDATA%\snapmap-plus`. The host reads the folder on the UI thread before the dialog's thread starts and keeps the picked file's folder when the dialog returns. |
 | View menu navigation | `navmesh_view` at `+0x340` reports whether the preview is out of date and, when asked, requests an update on the game's next frame. |
 | Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save and camera writes run on the game's thread; the page waits up to one second, then drops the edit and logs it. |
 
@@ -83,12 +87,14 @@ crash submission use a short-lived HTTPS worker in the host and the
 
 | Direction | Message | Meaning |
 |---|---|---|
-| host to page | `editorMode {entityMode, blueprint}` | The editor state, posted on change: module prefabs place only in Blueprint, object prefabs and new timelines in Object mode. |
+| host to page | `editorMode {entityMode, blueprint, modules}` | The editor state, posted on change: module prefabs place only in Blueprint, object prefabs and new timelines in Object mode. `modules` is the number of modules selected in Blueprint (0 outside it, -1 when the backend cannot say); with `selCount {count}`, the selected entities, it gates Create (below). |
+| host to page | `createPrefabResult {result, name, grab?}` | 1 saved; 0 nothing selected; 2 nothing hovered; 3 no usable grab frame; 4 the hovered entity is not selected ("The cursor is over an entity that is not selected -- hover one of the selected entities in the 3D view, then try again"); 5 the copy check refused the selection; -1 failed. |
 | page to host | `movePrefabs {names, fromFolders, toFolder}` / `deletePrefabs {names, folders}` | A multi-selection drop or delete, one tick, one `movePrefabsResult` / `deletePrefabsResult`, one list refresh. |
 | page to host | `flyTo {eid}` | Apply kind 4: the EditorFrame detour switches to Object mode and aims the camera at the entity; `flyToResult` confirms the queue only. |
 | page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the view of the summary the backend wrote into the file's block. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
 | page to host | `budgetTable` | Ask once for the budget table; the host answers `budgetTable {data}` (null until an editor has been entered) and re-sends it from its 330 ms poll whenever the table generation changes, that is after a palette rebuild. |
-| page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data}`; asked when the Prefabs tab opens and on each prefab selection. |
+| page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data, held}`; asked when the Prefabs tab opens and on each prefab selection. Once asked, the host posts it again from its 330 ms poll whenever the usage text or the held prefab changed (`prefab_host.h`'s gate), never an unchanged value. `held` is `{name, folder, kind}` of the prefab held in the 3D view after Load / Place, or null. |
+| host to page | `loadPrefabResult {result, name, placed, reason}` | For an object prefab, posted once the game thread has decided: `placed` is `queued` ("<name>" is in hand: position it and press Space, or Esc to cancel), `staged` ("<name>" is staged but not in hand because <reason>: press Ctrl+V in the 3D view to place it; for a hovered entity, move the cursor off it first) or `unknown` (no decision within 2.5 s). Module prefabs and the mod outcomes below keep their own fields. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
 | host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block (else its older sidecar) records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, version, bundle, size, installed}]}`); see [Prefabs and their mods](#prefabs-and-their-mods). |
@@ -140,7 +146,33 @@ legend of entity colours upwards (`pfLegendSetOpen` and `pfLegendAction` in the
 page, marked for test extraction). It is collapsed by default and stays open
 across object-prefab selections until the button, Escape with the focus on it,
 or a press elsewhere in the preview closes it. A module prefab's footprint
-hides the control.
+hides the control. The open list stays inside the preview (the control is at
+most the preview's height less 12px, the list scrolls past that), and at the
+smallest preview height, 130px when the window is at most 520px tall, the
+status row is hidden while the list is open (`pc-legend-open` on the preview),
+because two columns of four reach it there.
+
+A prefab's kind is its file's top-level `~type`: `idSnapMap` is a module
+prefab, with or without a `snapmapPlus` block, and `idSnapEntityPrefab` an
+object prefab. The list (`kinds`), Prefab Details (`prefabKind`, always sent)
+and Load / Place decide it the same way; the list reads the type from the last
+256 KB of the file with the block left out, and only a file whose tail names no
+type falls back to the view's `kind`. A module prefab without a block has no
+summary, so its footprint corner counts its modules and objects from the scene.
+
+## Creating a prefab
+
+Create (the list head's plus) and the Create dialog's confirm follow the
+editor's live selection (`pfCreateGate`, marked for test extraction): in Object
+mode the selected entities (`selCount`), in Blueprint the selected modules
+(`editorMode.modules`). With none selected both are disabled with the tooltip
+"Select entities first" or "Select modules first", and they enable as soon as a
+selection exists; the open dialog follows changes too. A backend that cannot
+count modules (-1) leaves the gate to the engine, and the host's precheck and
+the engine's own refusals stay the last line of defence.
+`tests/prefab_details_test.js` lifts the gate, the Load / Place toast
+(`pfPlaceToast`), the kind decision and the held Limits rule from the page and
+runs them, with the layout checks for the legend and the Limits table.
 
 ## Prefabs Limits section
 
@@ -173,7 +205,23 @@ The text uses `--infoText`, `--warnText` and `--dangerText`, the accent and
 danger colours tuned to at least 4.5:1 on `--panel` in both themes; the bars use
 `--accent`, `--warnText` and `--danger`. Tooltips give the raw counts and the
 current use. Details lists the twelve summed block fields, muted, in as many
-columns as the pane allows.
+columns as the pane allows. The four columns are `minmax` tracks (54-76px,
+24-150px, 58-74px, 58-74px, 12px gaps), so the table fits the narrowest Prefab
+Details pane (297px, 282px of content) without a horizontal scrollbar.
+
+"Map after" is live. Every `budgetUsage` the host sends re-renders the rows and
+bars, and the host sends one whenever the map's usage changes. The rule while a
+prefab is held: the editor's usage already counts a Load / Place that is held in
+the 3D view, before Space (the paste instantiates the entities, and a module
+placement installs its modules, before the grab; snaphak-re measured the usage
+held and after Space identical for object and module prefabs on both
+renderers). So while the selected prefab is the held one (`held` names its name
+and folder), "Map after" is the live usage itself and the bar's faint current
+part grows to it, with no solid share added; "This prefab" still shows the
+prefab's own share and a note says it is held. After Space or Esc `held` is
+null and the row reads usage plus this prefab again, which after Space is
+placing it a second time. Any other prefab, held or not, uses that ordinary
+rule (`prefabBudget.meters(add, usage, limits, held)`).
 
 ## Prefabs and their mods
 
@@ -220,7 +268,9 @@ once the mods are installed), a module the player cannot get, or refused. The
 page shows the backend's text as a toast. Export (Prefab Details head) always
 writes one ZIP, `<name>.json` and each mod as it is installed,
 `mods/<id>/mod.json` and `mods/<id>/assets/...`, through the rawmap pickers'
-Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`.
+Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`; it and
+Import open in the last folder used for each, Downloads the first time (see
+File dialog folders above).
 Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
 *.json)": a ZIP, or the `.json` inside an extracted export folder, whose
 `mods/` folder holds the mod folders (`rawmap_picker.h`, `for_prefab_dialog`).
@@ -422,7 +472,9 @@ and the parsed document is shared by the 3D preview, the AI Navigation count
 and the Limits sum, which is memoized (32 entries) by folder, name, file
 signature and table generation, so reselecting a prefab costs one cache hit
 and the meters are recomputed from the latest usage. The budget table is held
-once by the page and looked up by key.
+once by the page and looked up by key. The map's usage is read at the same
+330 ms cadence once the page has asked for it and posted only when it or the
+held prefab changed.
 Entity state and selection are sampled roughly every 330 ms. Timeline scanning
 is change-gated. Prefab rendering redraws when scene data, input, theme or
 viewport dimensions change.
