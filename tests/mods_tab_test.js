@@ -169,7 +169,7 @@ test('normalize: hostile and missing values', () => {
   assert.deepEqual(m.migrate, {entries: 0, pending: 0, running: false});
   assert.match(m.error, /cannot be read/);
   assert.equal(modsTab.normPreview(null), null);
-  assert.equal(modsTab.normPreview({action: 'uninstall', install: {disposition: 'shred'}}).install.disposition, 'delete');
+  assert.equal(modsTab.normPreview({action: 'uninstall', install: {disposition: 'shred'}}).install.disposition, 'recycle');
   const pv = modsTab.normPreview({action: 'mapRemoveMod', map: {references: [{kind: 'toybox', name: 'a'}, {kind: 'module', name: 'b'},
                                   {kind: 'wire', name: 'c'}, {kind: 'timeline', name: 'd'}]}});
   assert.deepEqual(pv.map.references.map(r => r.kind), ['wire', 'timeline'], 'only wires and timeline references are severed');
@@ -654,13 +654,13 @@ test('Uninstall: with the open map using the mod, and without', () => {
   assert.equal(items[1], 'Severs 1 wire or timeline reference to those entities. wire: Arena gate: open on wave 3');
   assert.ok(items.indexOf('Removes 4 Toybox rows from the editor (Lift door, Blast door, Hell gate, Vent door).') >= 0);
   assert.ok(items.indexOf("Removes the mod's row from the map's list of mods.") >= 0);
-  assert.ok(items.indexOf('Deletes the folder mods\\doors and its files.') >= 0, 'Uninstall deletes the folder');
-  assert.equal(items[items.length - 1], modsTab.UNDO_CLEARED);
-  assert.equal(modsTab.UNDO_CLEARED, 'Undo history is cleared.');
+  assert.equal(items[items.length - 1], 'Moves the folder mods\\doors to the Windows Recycle Bin.', 'Uninstall recycles the folder');
+  assert.ok(!items.some(t => /cannot be undone|Undo history/.test(t)), 'the undo line is the head, not a consequence');
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Uninstall']);
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map is cleaned of it first.');
-  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_PERMANENT);
-  assert.equal(modsTab.UNINSTALL_PERMANENT, 'This cannot be undone. Uninstalling:');
+  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_HEAD.undo);
+  assert.equal(modsTab.UNINSTALL_HEAD.undo, 'Undo history is cleared. The folder can be restored from the Recycle Bin by hand. Uninstalling:');
+  assert.equal(modsTab.UNINSTALL_HEAD.plain, 'The folder can be restored from the Recycle Bin by hand. Uninstalling:');
   assert.match(modalButtons(h)[1].className, /danger-solid/);
   modalButtons(h)[0].click();
   assert.equal(h.nodes.modsMapModal.style.display, 'none', 'Cancel from the details pane closes the dialog');
@@ -678,10 +678,9 @@ test('Uninstall: with the open map using the mod, and without', () => {
   h.nodes.modsUninstallBtn.click();
   items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.deepEqual(items, ['Removes 2 Toybox rows from the editor (Basin floor, Basin rim).',
-                           'Deletes the folder mods\\alex.mp-basin and its files.',
-                           modsTab.UNDO_CLEARED]);
+                           'Moves the folder mods\\alex.mp-basin to the Windows Recycle Bin.']);
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map does not use it.');
-  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_PERMANENT);
+  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_HEAD.undo, 'a map is open: its history is cleared');
   modalButtons(h)[1].click();
   assert.equal(rowOf(h, 'alex.mp-basin'), undefined);
   /* uninstalling one of two duplicates clears the other's attention */
@@ -691,24 +690,26 @@ test('Uninstall: with the open map using the mod, and without', () => {
   assert.equal(iconOf(rowOf(h, 'local.cyberdemon@0.0.0-05238b2e')), 'ok');
   assert.equal(h.nodes.modsAttnBtn.style.display, 'none');
 });
-test('Uninstall is permanent: saved maps that use it, the undo history, no bin', () => {
+test('Uninstall goes to the Recycle Bin: saved maps that use it, the undo history, no bin of its own', () => {
   /* the dry run's savedMaps and undoCleared become the confirmation's lines */
   const pv = modsTab.normPreview({action: 'uninstall', install: {folder: 'hell-guards', disposition: 'move', savedMaps: 3, undoCleared: true}});
-  assert.deepEqual(pv.install, {folder: 'hell-guards', disposition: 'delete', savedMaps: 3, undoCleared: true});
+  assert.deepEqual(pv.install, {folder: 'hell-guards', disposition: 'recycle', savedMaps: 3, undoCleared: true});
   assert.deepEqual(modsTab.consequenceLines(pv).map(c => c.text), [
-    'Deletes the folder mods\\hell-guards and its files.',
-    '3 of your saved maps use it; they will not open until a mod folder provides its assets again.',
-    'Undo history is cleared.']);
+    'Moves the folder mods\\hell-guards to the Windows Recycle Bin.',
+    '3 of your saved maps use it; they will not open until a mod folder provides its assets again.']);
+  assert.equal(modsTab.uninstallHead(pv), modsTab.UNINSTALL_HEAD.undo);
   /* none of them, or the saves could not be read: no line; no map open: the history is left alone */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 0}})).map(c => c.text),
-    ['Deletes the folder mods\\a and its files.']);
+    ['Moves the folder mods\\a to the Windows Recycle Bin.']);
+  assert.equal(modsTab.uninstallHead(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}})), modsTab.UNINSTALL_HEAD.plain,
+    'no map open: the head says nothing about undo');
   assert.equal(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}}).install.savedMaps, -1);
   /* an uninstall's result says what happened; the footer has no bin line */
   const h = live();
   rowOf(h, 'alex.mp-basin').click();
   h.nodes.modsUninstallBtn.click();
   modalButtons(h)[1].click();
-  assert.match(h.toasts.slice(-1)[0].text, /^Uninstalled .*\. Its folder was deleted and the undo history was cleared\.$/);
+  assert.match(h.toasts.slice(-1)[0].text, /^Uninstalled .*\. Its folder was moved to the Recycle Bin and the undo history was cleared\.$/);
   assert.ok(!('removed' in h.ui.state().model), 'a document\'s removed object is not read');
   /* a map row whose folder lacks a listed name */
   assert.deepEqual(modsTab.mapModStatus({state: 'incomplete'}).cause, 'installed, but it lacks files this map uses');

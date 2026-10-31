@@ -43,7 +43,8 @@ var modsTab = (function () {
   /* remove is the v2 name of uninstall; the page sends uninstall. The two *Preview actions are dry
      runs that answer with the consequence list the confirmation shows. mapAddMod attaches the
      selected mod to the open map without placing anything (a map-level row); it removes nothing,
-     so it has no dry run. Uninstall is permanent: there is no bin to empty or restore from. */
+     so it has no dry run. Uninstall moves the folder to the Windows Recycle Bin; the page has no bin
+     of its own to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
@@ -54,13 +55,16 @@ var modsTab = (function () {
   var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
                     unindexed: 'not scanned yet; reopen the Mods tab', skipped: 'installed but not in use',
                     attention: 'needs attention'};
-  /* Under the Uninstall confirmation's scope line: it cannot be undone. */
-  var UNINSTALL_PERMANENT = 'This cannot be undone. Uninstalling:';
+  /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
+  var UNINSTALL_HEAD = {
+    undo: 'Undo history is cleared. The folder can be restored from the Recycle Bin by hand. Uninstalling:',
+    plain: 'The folder can be restored from the Recycle Bin by hand. Uninstalling:'
+  };
+  function uninstallHead(pv) { return pv && pv.install && pv.install.undoCleared ? UNINSTALL_HEAD.undo : UNINSTALL_HEAD.plain; }
   /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
   function savedMapsText(n) {
     return n + ' of your saved maps use it; they will not open until a mod folder provides its assets again.';
   }
-  var UNDO_CLEARED = 'Undo history is cleared.';
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
     mapRemoveMod: 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.',
@@ -180,8 +184,9 @@ var modsTab = (function () {
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
                        references: normRefs(mp.references), manifestRow: bool(mp.manifestRow), attached: bool(mp.attached),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
-            /* Uninstall deletes the folder; savedMaps is -1 when the saves could not be read. */
-            install: ins ? {folder: str(ins.folder), disposition: 'delete',
+            /* Uninstall moves the folder to the Recycle Bin (older backends said move or delete);
+               savedMaps is -1 when the saves could not be read. */
+            install: ins ? {folder: str(ins.folder), disposition: 'recycle',
                             savedMaps: ins.savedMaps === undefined || ins.savedMaps === null ? -1 : num(ins.savedMaps),
                             undoCleared: bool(ins.undoCleared)} : null,
             /* uninstallPreview only: the Toybox rows uninstalling takes out of the editor */
@@ -211,9 +216,8 @@ var modsTab = (function () {
     if (pv.action === 'uninstall' && pv.editorRows.length)
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
-      out.push({text: 'Deletes the folder mods\\' + pv.install.folder + ' and its files.'});
+      out.push({text: 'Moves the folder mods\\' + pv.install.folder + ' to the Windows Recycle Bin.'});
       if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
-      if (pv.install.undoCleared) out.push({text: UNDO_CLEARED});
     }
     return out;
   }
@@ -773,7 +777,7 @@ var modsTab = (function () {
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
       body.appendChild(el('div', 'mods-note', uninstall
-        ? UNINSTALL_PERMANENT
+        ? uninstallHead(pv)
         : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
@@ -1021,9 +1025,9 @@ var modsTab = (function () {
               tagRemoved: left === 0 && docu.map.tagged !== false,
               vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
     }
-    /* Uninstall deletes the folder; the saved maps are not the preview's to count. */
+    /* Uninstall moves the folder to the Recycle Bin; the saved maps are not the preview's to count. */
     function installPart(b, open) {
-      return {folder: b.folder || b.key, disposition: 'delete', savedMaps: num(b.savedMaps), undoCleared: !!open};
+      return {folder: b.folder || b.key, disposition: 'recycle', savedMaps: num(b.savedMaps), undoCleared: !!open};
     }
     function removeFromMap(r) {
       docu.map.mods = mapMods().filter(function (x) { return x !== r; });
@@ -1062,7 +1066,7 @@ var modsTab = (function () {
         if (!b) { ok = false; msg = key + ' is not installed.'; }
         else {
           var open = !!(docu.map && docu.map.entities !== -1);
-          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was deleted' +
+          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was moved to the Recycle Bin' +
                 (open ? ' and the undo history was cleared.' : '.');
           if (r) removeFromMap(r);
           docu.mods = mods().filter(function (x) { return x !== b; });
@@ -1080,7 +1084,7 @@ var modsTab = (function () {
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
-          mapModStatus: mapModStatus, UNINSTALL_PERMANENT: UNINSTALL_PERMANENT, UNDO_CLEARED: UNDO_CLEARED, savedMapsText: savedMapsText,
+          mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create};
 })();
 

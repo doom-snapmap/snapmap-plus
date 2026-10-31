@@ -2,6 +2,7 @@
  * the rebuild rule and the upgrade from the retired layout. */
 #include <windows.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -274,21 +275,99 @@ static int ms_rmtree(const wchar_t *path, const wchar_t *root)
     return ok;
 }
 
-int sh_ms_remove_folder(const char *folder)
+/* ------------------------------------------------- the Recycle Bin ---- */
+
+#ifndef FOF_NORECURSEREPARSE
+#define FOF_NORECURSEREPARSE 0x8000   /* reparse points are items, never containers */
+#endif
+
+static int ms_exists(const wchar_t *path);
+static int ms_is_dir(const wchar_t *path);
+
+#if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
+static volatile LONG g_ms_recycle_refused;
+void sh_ms_recycle_refuse_for_test(int refuse) { InterlockedExchange(&g_ms_recycle_refused, refuse ? 1 : 0); }
+#endif
+
+/* Move a folder of the store (a \\?\ path) to the Windows Recycle Bin
+ * through the shell: FO_DELETE with FOF_ALLOWUNDO, no confirmation, progress
+ * or error UI, reparse points moved as themselves and never entered. Only a
+ * fixed drive's folder is offered: on a network or removable drive the shell
+ * would delete it outright without saying so. 1 when the folder went to the
+ * bin; else 0 with why the bin could not take it in `why`. */
+static int ms_recycle(const wchar_t *path, char *why, size_t cap)
 {
-    wchar_t *root = ms_wroot(), *w = folder ? sh_mb_wpath(folder) : NULL;
-    int ok = root && w && ms_rmtree(w, root);
-    free(root);
-    free(w);
-    return ok;
+    const wchar_t *plain = path;
+    wchar_t drive[4], *from;
+    SHFILEOPSTRUCTW op;
+    size_t n;
+    int rc;
+#if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
+    if (g_ms_recycle_refused) { ms_cause(why, cap, "the shell refused it (test)"); return 0; }
+#endif
+    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) { ms_cause(why, cap, "a network folder has no Recycle Bin"); return 0; }
+    if (!wcsncmp(path, L"\\\\?\\", 4)) plain = path + 4;
+    n = wcslen(plain);
+    /* The shell takes plain drive paths shorter than MAX_PATH only. */
+    if (n < 3 || plain[1] != L':' || plain[2] != L'\\') { ms_cause(why, cap, "the Recycle Bin cannot take this path"); return 0; }
+    if (n >= MAX_PATH) { ms_cause(why, cap, "its path is too long for the Recycle Bin"); return 0; }
+    drive[0] = plain[0]; drive[1] = L':'; drive[2] = L'\\'; drive[3] = 0;
+    if (GetDriveTypeW(drive) != DRIVE_FIXED) { ms_cause(why, cap, "drive %lc: has no Recycle Bin", plain[0]); return 0; }
+    from = (wchar_t *)calloc(n + 2, sizeof(wchar_t));   /* double-NUL terminated */
+    if (!from) { ms_cause(why, cap, "out of memory"); return 0; }
+    memcpy(from, plain, n * sizeof(wchar_t));
+    memset(&op, 0, sizeof op);
+    op.wFunc = FO_DELETE;
+    op.pFrom = from;
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NORECURSEREPARSE;
+    rc = SHFileOperationW(&op);
+    free(from);
+    if (rc) { ms_cause(why, cap, "the shell refused it (error 0x%x)", (unsigned)rc); return 0; }
+    if (op.fAnyOperationsAborted) { ms_cause(why, cap, "the shell stopped before it finished"); return 0; }
+    if (ms_exists(path)) { ms_cause(why, cap, "the shell left part of it in place"); return 0; }
+    return 1;
 }
 
-static int ms_is_dir(const wchar_t *path);
+/* Remove a tree under the store root: the Recycle Bin first, the outright
+ * delete (ms_rmtree: links removed, never followed) when the bin cannot take
+ * it. SH_MS_RECYCLED, SH_MS_DELETED, or 0 when it could not be removed. */
+static int ms_discard(const wchar_t *path, const wchar_t *root, char *why, size_t cap)
+{
+    if (why && cap) why[0] = 0;
+    if (!ms_inside(path, root)) return 0;
+    if (!ms_exists(path)) return SH_MS_DELETED;   /* nothing there: nothing to say */
+    if (ms_recycle(path, why, cap)) return SH_MS_RECYCLED;
+    return ms_rmtree(path, root) ? SH_MS_DELETED : 0;
+}
+
+static void ms_log_discard(const char *folder, int r, const char *why)
+{
+    if (r == SH_MS_RECYCLED) ms_log("MODS: store: moved mods\\%s to the Recycle Bin", ms_leaf(folder));
+    else if (r == SH_MS_DELETED && why && why[0])
+        ms_log("MODS: store: deleted mods\\%s outright; the Recycle Bin could not take it (%s)", ms_leaf(folder), why);
+}
+
+int sh_ms_remove_folder(const char *folder)
+{
+    wchar_t *root, *w;
+    char why[200] = "";
+    int r = 0;
+    modstore_lock();
+    root = ms_wroot();
+    w = folder ? sh_mb_wpath(folder) : NULL;
+    if (root && w) r = ms_discard(w, root, why, sizeof why);
+    ms_log_discard(folder, r, why);
+    free(root);
+    free(w);
+    modstore_unlock();
+    return r;
+}
 
 int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
 {
     wchar_t *root, *w;
-    int ok = 0;
+    char why[200] = "";
+    int r = 0;
     if (cause && cap) cause[0] = 0;
     if (!folder || !folder[0]) { ms_cause(cause, cap, "no folder named"); return 0; }
     modstore_lock();
@@ -297,14 +376,14 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
     if (!root || !w) ms_cause(cause, cap, "the store folder cannot be resolved");
     else if (!ms_child_of(w, root)) ms_cause(cause, cap, "%s is not a folder of the store", ms_leaf(folder));
     else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_leaf(folder));
-    else if (!ms_rmtree(w, root)) ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_leaf(folder),
-                                           GetLastError());
-    else ok = 1;
-    if (ok) ms_log("MODS: store: deleted mods\\%s", ms_leaf(folder));
+    else if ((r = ms_discard(w, root, why, sizeof why)) == 0)
+        ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_leaf(folder), GetLastError());
+    else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
+    ms_log_discard(folder, r, why);
     free(root);
     free(w);
     modstore_unlock();
-    return ok;
+    return r;
 }
 
 /* ---------------------------------------------------- the retired bin --- */

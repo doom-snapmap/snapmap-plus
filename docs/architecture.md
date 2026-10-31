@@ -558,15 +558,30 @@ scope listing, [Map scope](#map-scope)).
 `claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
 and `aliases`, each section written whole under one lock.
 
-Removal is permanent. Uninstall, Remove and the removal of covered builds
-delete the folder outright (`sh_ms_delete_mod_folder`: a direct child of the
-store root, deleted under the store lock, links removed and never followed),
-drop its aliases once no folder of its id remains (`sh_ms_alias_forget`), and
-rescan; the build cache follows at that rescan. Nothing brings a folder back: a
-map that still needs it refuses to open with the asset rule's sentence, and the
-download offer of a published map, a rawmap or a prefab is the only way the
-mod returns (as a new install). Uninstall also clears the open map's undo
-history (see [The Mods tab's map scope](#the-mods-tabs-map-scope)).
+Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
+covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct
+child of the store root, under the store lock, through `SHFileOperationW`
+`FO_DELETE` with `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT |
+FOF_NOERRORUI | FOF_NORECURSEREPARSE`, a double-NUL-terminated plain path,
+reparse points moved as themselves and never entered), drop its aliases once
+no folder of its id remains (`sh_ms_alias_forget`), and rescan; the build cache
+follows at that rescan. `sh_ms_remove_folder`, which the store upgrade and an
+import's rollback use, takes the same route under the same lock. The shell is
+offered only a folder on a fixed drive whose plain path is shorter than
+`MAX_PATH`; on a network or removable drive there is no bin and the shell would
+delete without saying so. When the bin cannot take the folder (that drive or
+path, or a shell error, or a folder the shell leaves in place), it is deleted
+outright, links removed and never followed, and the `MODS: store:` line ("deleted
+mods\<folder> outright; the Recycle Bin could not take it (<why>)") and the
+result text ("Its folder was deleted because the Recycle Bin could not take it
+(<why>).") say so; otherwise the line reads "moved mods\<folder> to the Recycle
+Bin". The product never brings a folder back: a map that still needs it
+refuses to open with the asset rule's sentence until the player restores the
+folder from the Recycle Bin by hand (the folder watcher's rescan builds it
+again) or the download offer of a published map, a rawmap or a prefab installs
+it again. Uninstall also clears the open map's undo history (see [The Mods
+tab's map scope](#the-mods-tabs-map-scope)), so Ctrl+Z cannot bring back what
+used the mod.
 
 The retired recycle bin. Earlier builds moved removed folders to
 `removed-mods\` beside `mods\` and recorded them in the record's `removed`
@@ -1308,15 +1323,18 @@ copy is unchanged until the map is published again. A mod placed as
 Blueprint modules, or reached only through another mod's needs, is refused
 with the cause.
 
-Uninstall is permanent. In order: the dry run and confirmation (as Remove
-from map's, plus the Toybox rows, "Deletes the folder mods\<folder> and its
-files.", how many local saves in My Maps carry a row of the mod, "N of your
-saved maps use it; they will not open until a mod folder provides its assets
-again", and, with a map open, "Undo history is cleared."); the native delete
+Uninstall, in order: the dry run and confirmation (as Remove from map's,
+headed "Undo history is cleared. The folder can be restored from the Recycle
+Bin by hand." with a map open and "The folder can be restored from the Recycle
+Bin by hand." without, plus the Toybox rows, "Moves the folder mods\<folder> to
+the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
+mod, "N of your saved maps use it; they will not open until a mod folder
+provides its assets again"); the native delete
 of the mod's entities from the open map, as Remove from map (a refusal, Play
 running, a load or a busy editor, deletes nothing and is reported); the open
 map's undo and redo history cleared so no snapshot older than the delete
-remains; the folder deleted and its record entries dropped; the rescan. The
+remains; the folder moved to the Recycle Bin (deleted outright when the bin
+cannot take it) and its record entries dropped; the rescan. The
 saved maps are counted from each `savegame.user\<profile>\SNAPMAPS<id>\map.decl`
 (a 4-byte checksum, then zlib of the map text; `sh_inflate_raw_upto`). The
 history is cleared by the engine's own undo push (`editor_undo.c`): the undo

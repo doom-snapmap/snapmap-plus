@@ -272,16 +272,31 @@ int  sh_ms_request_exists(void *list, const char *request);
  * link; the copy is writable. Returns 1. */
 int  sh_ms_copy_file(const wchar_t *from, const wchar_t *to);
 
-/* Remove a folder under the store root (reparse points are removed, never
- * followed). Refuses anything outside the root and the root itself. */
+/* How a folder left the store: moved to the Windows Recycle Bin, or deleted
+ * outright because the bin could not take it (a network or removable drive,
+ * a path the shell refuses, a shell error). */
+#define SH_MS_RECYCLED 1
+#define SH_MS_DELETED  2
+
+/* Remove a folder under the store root, under the store lock: to the Recycle
+ * Bin (SHFileOperationW, FOF_ALLOWUNDO, no UI, reparse points moved as
+ * themselves), else deleted outright with links removed and never followed.
+ * One "MODS: store:" line says which. Refuses anything outside the root and
+ * the root itself. SH_MS_RECYCLED, SH_MS_DELETED, or 0. */
 int  sh_ms_remove_folder(const char *folder);
 
-/* Uninstall's delete: `folder` (absolute) must be a direct child of the store
- * root that exists; it is deleted recursively under the store lock, links
- * removed and never followed. 1 deleted, else 0 with the first cause. The
- * record's aliases are the caller's (sh_ms_alias_forget) and the build cache
- * follows at the next sync. */
+/* Uninstall's removal: `folder` (absolute) must be a direct child of the
+ * store root that exists; it goes as sh_ms_remove_folder's does.
+ * SH_MS_RECYCLED; SH_MS_DELETED with why the bin could not take it in
+ * `cause`; else 0 with the first cause. The record's aliases are the caller's
+ * (sh_ms_alias_forget) and the build cache follows at the next sync. */
 int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
+
+#if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
+/* Test seam: nonzero makes every removal take the outright-delete fallback,
+ * as when the shell refuses. */
+void sh_ms_recycle_refuse_for_test(int refuse);
+#endif
 
 /* The retired recycle bin. Deletes every entry of removed-mods\ (the store
  * root's sibling), the folder itself, and the record's "removed" section,

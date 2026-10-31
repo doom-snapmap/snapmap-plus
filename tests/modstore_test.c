@@ -6,11 +6,15 @@
  * the upgrade of the retired layout (bundle.json, .state.json, blobs\ with
  * hard links, legacy\, the product files) to mod.json folders, and the
  * aliases a rebuild leaves (every earlier build of a folder resolves to the
- * current one in one hop; removal drops them only when nothing of the id is left).
+ * current one in one hop; removal drops them only when nothing of the id is left),
+ * and removal through the Windows Recycle Bin (a folder of the store only, links
+ * not followed; the outright delete when the shell refuses or the path is too
+ * long for it, and the log line saying so).
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -580,6 +584,94 @@ static void test_bin_sweep(const char *tmp)
     }
 }
 
+/* Items in the Recycle Bin of the drive `path` is on; -1 when it cannot be asked. */
+static long long bin_items(const char *path)
+{
+    SHQUERYRBINFO q;
+    char drive[4] = { path[0], ':', '\\', 0 };
+    memset(&q, 0, sizeof q);
+    q.cbSize = sizeof q;
+    return SHQueryRecycleBinA(drive, &q) == S_OK ? q.i64NumItems : -1;
+}
+
+/* Every removal of a mod folder goes to the Recycle Bin; the outright delete
+ * only when the shell cannot take it. */
+static void test_recycle(const char *tmp)
+{
+    char root[MAX_PATH], outside[MAX_PATH], precious[MAX_PATH], dir[MAX_PATH], cmd[MAX_PATH * 3], cause[300];
+    long long before, after;
+    int r, ci = getenv("CI") != NULL;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\recycle\\mods", tmp);
+    _snprintf_s(outside, sizeof outside, _TRUNCATE, "%s\\recycle\\outside", tmp);
+    _snprintf_s(precious, sizeof precious, _TRUNCATE, "%s\\precious.txt", outside);
+    CHECK(sh_ms_set_root(root));
+    mt_write(outside, "precious.txt", "not the store's");
+
+    /* To the bin: the folder leaves the store, a junction in it is moved as a link. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.binned", root);
+    make_small_mod(dir, "alex.binned");
+    _snprintf_s(cmd, sizeof cmd, _TRUNCATE, "cmd /c mklink /J \"%s\\link\" \"%s\" >nul 2>&1", dir, outside);
+    (void)system(cmd);
+    before = bin_items(dir);
+    g_logged = 0;
+    r = sh_ms_delete_mod_folder(dir, cause, sizeof cause);
+    after = bin_items(dir);
+    if (r != SH_MS_RECYCLED) fprintf(stderr, "  recycle: %d (%s)\n", r, cause);
+    CHECK(ci ? r != 0 : r == SH_MS_RECYCLED);
+    CHECK(!mt_exists(dir) && mt_exists(precious));
+    if (r == SH_MS_RECYCLED) {
+        CHECK(log_has("MODS: store: moved mods\\alex.binned to the Recycle Bin"));
+        CHECK(before < 0 || after > before);
+    }
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.binned-2", root);
+    make_small_mod(dir, "alex.binned");
+    r = sh_ms_remove_folder(dir);
+    CHECK((ci ? r != 0 : r == SH_MS_RECYCLED) && !mt_exists(dir));
+
+    /* Refused: outside the store, the store itself. Nothing is moved. */
+    CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a folder of the store"));
+    CHECK(!sh_ms_remove_folder(outside) && mt_exists(precious));
+    CHECK(!sh_ms_remove_folder(root) && mt_exists(root));
+    CHECK(!sh_ms_delete_mod_folder(root, cause, sizeof cause) && mt_exists(root));
+
+    /* The shell refuses: deleted outright, links removed and never followed, and said so. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.refused", root);
+    make_small_mod(dir, "alex.refused");
+    _snprintf_s(cmd, sizeof cmd, _TRUNCATE, "cmd /c mklink /J \"%s\\link\" \"%s\" >nul 2>&1", dir, outside);
+    (void)system(cmd);
+    sh_ms_recycle_refuse_for_test(1);
+    g_logged = 0;
+    CHECK(sh_ms_delete_mod_folder(dir, cause, sizeof cause) == SH_MS_DELETED && strstr(cause, "the shell refused it (test)"));
+    CHECK(!mt_exists(dir) && mt_exists(precious));
+    CHECK(log_has("MODS: store: deleted mods\\alex.refused outright; the Recycle Bin could not take it (the shell refused it (test))"));
+    make_small_mod(dir, "alex.refused");
+    CHECK(sh_ms_remove_folder(dir) == SH_MS_DELETED && !mt_exists(dir));
+    sh_ms_recycle_refuse_for_test(0);
+
+    /* A path the shell cannot take (longer than MAX_PATH): the outright delete. */
+    {
+        wchar_t wroot[MAX_PATH], wlong[MAX_PATH * 2], wfile[MAX_PATH * 2];
+        char longdir[MAX_PATH * 2];
+        size_t i;
+        HANDLE h;
+        char name[201];
+        for (i = 0; i < 200; i++) name[i] = 'x';
+        name[200] = 0;
+        MultiByteToWideChar(CP_ACP, 0, root, -1, wroot, MAX_PATH);
+        _snwprintf_s(wlong, MAX_PATH * 2, _TRUNCATE, L"\\\\?\\%s\\long-%S-%S", wroot, name, name + 170);
+        _snwprintf_s(wfile, MAX_PATH * 2, _TRUNCATE, L"%s\\mod.json", wlong);
+        CHECK(CreateDirectoryW(wlong, NULL));
+        h = CreateFileW(wfile, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        _snprintf_s(longdir, sizeof longdir, _TRUNCATE, "%s\\long-%s-%s", root, name, name + 170);
+        CHECK(strlen(longdir) >= MAX_PATH);
+        CHECK(sh_ms_delete_mod_folder(longdir, cause, sizeof cause) == SH_MS_DELETED &&
+              strstr(cause, "its path is too long for the Recycle Bin"));
+        CHECK(GetFileAttributesW(wlong) == INVALID_FILE_ATTRIBUTES);
+    }
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], root[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], key[160], cause[512] = "", fixture[MAX_PATH];
@@ -878,13 +970,14 @@ int main(int argc, char **argv)
     test_alias_note();
     test_tidy(tmp);
     test_bin_sweep(tmp);
+    test_recycle(tmp);
 
     test_upgrade(fixture, tmp);
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock, rebuild aliases, the second upgrade step and "
+    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock, rebuild aliases, the Recycle Bin, the second upgrade step and "
            "store upgrade pass\n");
     return 0;
 }

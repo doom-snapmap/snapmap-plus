@@ -638,7 +638,7 @@ void h_sh_mods(idCmdArgs *a)
     }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
     if (!_stricmp(verb, "removed")) {
-        mc_line("MODS: removed: the recycle bin is retired; Uninstall deletes a mod's folder for good");
+        mc_line("MODS: removed: Uninstalled mods go to the Windows Recycle Bin.");
         return;
     }
     if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall")) {
