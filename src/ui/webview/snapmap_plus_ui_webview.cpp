@@ -4715,6 +4715,12 @@ static void poc_think_loop()
             else if (!ready && was_visible) {
                 poc_perf_flush_collect("editor-hidden");
                 poc_log("perf lifecycle: editor-hidden");
+                /* The editor has let go of its map: the mode poll stops while the window is
+                 * hidden, so tell the page now (the Mods tab drops its "In this map" pills) and
+                 * make the next visible poll post the real state again. */
+                poc_post_json(L"{\"kind\":\"editorMode\",\"entityMode\":0,\"blueprint\":0,\"modules\":0,\"mapOpen\":0}");
+                g_editor_mode_last = -1;
+                g_editor_modules_last = -2;
                 ShowWindow(g_hwnd, SW_HIDE); was_visible = false;
             }
 
