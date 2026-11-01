@@ -3318,6 +3318,21 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                 continue;
             }
         }
+        if (ops->held) {
+            /* Registering a file re-parses a resource the engine already holds
+             * under that name; a permanent one is left to the game as `load`
+             * leaves it, so this pass never binds it to its level-1 objects. */
+            unsigned hstate = 0, hlife = 0;
+            if (ops->held(ops->context, s->type, s->name, &hstate, &hlife) == 1 &&
+                sh_modserve_load_left_to_engine(hlife, hstate, s->persist)) {
+                stock[i] = 3;
+                ms_log("%s: %s '%s' (%s) left to the game: permanent, %s (state 0x%02x lifetime %u); not registered "
+                       "by this pass, whose registration would re-parse it in place; the provider serves these bytes "
+                       "whenever the game parses it", phase, s->type, s->name, s->bundle_id,
+                       (hstate & 3) == 2 ? "not parsed yet" : "already parsed", hstate & 0xff, hlife);
+                continue;
+            }
+        }
         if (!ops->register_file(ops->context, s->type, s->name, s->reg_path)) {
             failed[i] = 1;
             InterlockedExchange(&f->reg_state, -1);
@@ -3335,6 +3350,13 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
         if (failed[i]) { s->ready = -1; continue; }
         if (f->reg_state == 1) { s->ready = 1; ready++; continue; }
         if (stock[i] == 2) { s->ready = 1; ready++; continue; }   /* withdrawn: the stock decl serves */
+        if (stock[i] == 3) {
+            /* Held permanent: left unregistered and unloaded (logged above). Not
+             * remembered as registered, so a pass that keeps its decls still can. */
+            s->ready = 1;
+            ready++;
+            continue;
+        }
         if (stock[i]) {
             /* Remembered as ready, so later loads of the map skip it quietly. */
             InterlockedExchange(&f->reg_state, 1);

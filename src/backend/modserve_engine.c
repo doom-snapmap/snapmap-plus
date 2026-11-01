@@ -313,6 +313,44 @@ static int op_decl_found(void *context, const char *type, const char *name)
     return found;
 }
 
+/* Whether the engine holds a resource of this name now, by a walk of the
+ * type's own resource list (DeclTypeByName answers the list object: its
+ * entries at +0x20, count at +0x28, each resource's owning list at +0x10 and
+ * name at +0x08). Unlike DeclFind it creates nothing and loads nothing, so
+ * asking does not change what the registration it guards would do. */
+#define ME_LIST_ENTRIES 0x20
+#define ME_LIST_COUNT   0x28
+#define ME_RES_NAME     0x08
+#define ME_RES_LIST     0x10
+static int op_held(void *context, const char *type, const char *name, unsigned *out_state, unsigned *out_lifetime)
+{
+    int held = -1;
+    (void)context;
+    *out_state = *out_lifetime = 0;
+    __try {
+        const unsigned char *m = (const unsigned char *)me_manager(type);
+        if (m) {
+            unsigned char *const *entries = *(unsigned char *const *const *)(m + ME_LIST_ENTRIES);
+            int count = *(const int *)(m + ME_LIST_COUNT), i;
+            if (count < 0 || count > (1 << 22) || (count && !entries)) return -1;
+            held = 0;
+            for (i = 0; i < count; ++i) {
+                const unsigned char *r = entries[i];
+                const char *n;
+                if (!r || *(const unsigned char *const *)(r + ME_RES_LIST) != m) continue;
+                n = *(const char *const *)(r + ME_RES_NAME);
+                if (n && !strcmp(n, name)) {
+                    *out_state = r[RES_STATE_OFF];
+                    *out_lifetime = *(const unsigned *)(r + RES_LIFETIME_OFF);
+                    held = 1;
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
+    return held;
+}
+
 /* The player's game archives, read through the engine provider (the same
  * reader the builder's stock check uses), then the installed archives
  * themselves (modstock.c), which also hold campaign-only content. */
@@ -334,7 +372,7 @@ static int op_stock_exists(void *context, const char *request)
 static void op_sources_published(void *context);
 static const char *g_reparse_phase = "plan";   /* the running pass, for the early-decl lines */
 static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists,
-                                              op_sources_published, op_decl_found, op_refusal };
+                                              op_sources_published, op_decl_found, op_refusal, op_held };
 
 /* ------------------------------------------------------------------ gates */
 

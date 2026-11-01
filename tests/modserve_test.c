@@ -2149,6 +2149,203 @@ static void test_permanent_first_parse(void)
     }
 }
 
+/* ------------------------------------------------------------------ registration re-parses a held decl (lane P53) */
+
+/* What the engine does that the earlier fake engines did not model:
+ * DeclRegisterFile re-parses an existing resource of the registered name on the
+ * spot (VK FUN_141559a30 -> FUN_141561af0 -> DeclParseSource), and an
+ * unlockModel's model field is set by DeclFind(md6Def, name, create), at the
+ * level the pass creates objects at. Observed live with a hardware watchpoint on
+ * the unlockModel's +0x70: the store came from op_register_file during the map
+ * activation, the md6Def it stored was at level 1, the purge at START MISSION
+ * freed it, and the shell map load after Play faulted reading it (VK RVA
+ * 0x33a130). This fake engine binds the same way, so the test fails if a pass
+ * that does not keep its decls re-parses a permanent decl by registration. */
+typedef struct hr_res {
+    const char *type, *name;
+    unsigned level, state;
+    int held;              /* the engine has a resource of this name */
+    int parses;
+    unsigned bound_level;  /* the unlockModel: level of the md6Def it points at, 0 null */
+} hr_res;
+static hr_res g_hr[3];     /* 0 the unlockModel, 1 its md6Def, 2 a map-scoped animWeb */
+static int hr_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
+static int hr_stock(void *c, const char *request) { (void)c; (void)request; return 1; }
+static hr_res *hr_find(const char *type, const char *name)
+{
+    int i;
+    for (i = 0; i < 3; ++i)
+        if (g_hr[i].type && !_stricmp(g_hr[i].type, type) && !strcmp(g_hr[i].name, name)) return &g_hr[i];
+    return NULL;
+}
+static void hr_parse(hr_res *r)
+{
+    r->parses++;
+    r->state = 0;
+    /* The unlockModel's parse resolves its model through DeclFind(create). The
+     * decl existence probe admits a name a bundle serves (sh_modserve_probe_claims),
+     * so the md6Def is created then, at the level of the pass: 1 in a map pass. */
+    if (r == &g_hr[0]) {
+        if (!g_hr[1].held) { g_hr[1].held = 1; g_hr[1].level = 1; g_hr[1].state = 2; }
+        r->bound_level = g_hr[1].level;
+    }
+}
+static int hr_register(void *c, const char *type, const char *name, const char *reg)
+{
+    hr_res *r = hr_find(type, name);
+    (void)c; (void)reg;
+    call_log("R", type, name);
+    if (r && r->held) hr_parse(r);            /* FUN_141559a30: an existing resource is re-parsed */
+    return 1;
+}
+static int hr_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    hr_res *r = hr_find(type, name);
+    (void)c;
+    if (!r) return 0;
+    if (!r->held) { r->held = 1; r->level = 1; r->state = 2; }
+    if (sh_modserve_load_left_to_engine(r->level, r->state, persist)) {
+        *state = r->state;
+        *lifetime = r->level;
+        return SH_MODSERVE_LOAD_LEFT;
+    }
+    call_log("L", type, name);
+    hr_parse(r);
+    *state = r->state;
+    *lifetime = r->level;
+    return 1;
+}
+static int hr_held(void *c, const char *type, const char *name, unsigned *state, unsigned *lifetime)
+{
+    hr_res *r = hr_find(type, name);
+    (void)c;
+    *state = *lifetime = 0;
+    if (!r || !r->held) return 0;
+    *state = r->state;
+    *lifetime = r->level;
+    return 1;
+}
+static const sh_modserve_engine_ops g_hr_ops = { NULL, hr_source, hr_register, hr_load, hr_stock,
+                                                 NULL, NULL, NULL, hr_held };
+static const sh_modserve_engine_ops g_hr_ops_unaware = { NULL, hr_source, hr_register, hr_load, hr_stock };
+
+static void hr_reset(unsigned unlock_level, unsigned unlock_state, int map_scoped_held)
+{
+    memset(g_hr, 0, sizeof g_hr);
+    g_hr[0].type = "unlockModel"; g_hr[0].name = "spidermastermind";
+    g_hr[0].level = unlock_level; g_hr[0].state = unlock_state; g_hr[0].held = 1;
+    g_hr[1].type = "md6Def"; g_hr[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
+    g_hr[2].type = "animWeb"; g_hr[2].name = "doors/airlock";
+    g_hr[2].held = map_scoped_held; g_hr[2].level = 1; g_hr[2].state = 0;
+    g_calls[0] = 0;
+    sh_modserve_test_reset_registration();   /* a new session: nothing remembered as registered */
+}
+
+static void test_registration_reparse_of_held_permanent(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], hash[65];
+    char *slash;
+    sh_modserve_plan p;
+    const char *hashes[1];
+    int unknown = 0, ready;
+    static const fx_file files[] = {
+        { "generated/decls/unlockmodel/spidermastermind.decl",
+          "{\n\tedit = {\n\t\tunlockModel = \"zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6\";\n\t}\n}\n",
+          -1, "unlockModel", "spidermastermind", NULL, '1' },
+        { "generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl",
+          "{\n\tinit = {\n\t}\n}\n",
+          -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6", NULL, '2' },
+        { "generated/decls/animweb/doors/airlock.decl",
+          "{\n}\n", -1, "animWeb", "doors/airlock", NULL, '3' },
+    };
+
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\heldreparse\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"legacy\": {},\n  ";
+    g_fx_restore = "generated/decls/unlockmodel/spidermastermind.decl";
+    make_bundle(root, "hr.spider@0.0.0+1", "hr.spider", "0.0.0", '6',
+                "\"generated/decls/unlockmodel/spidermastermind.decl\", "
+                "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\", "
+                "\"generated/decls/animweb/doors/airlock.decl\"",
+                files, 3, NULL);
+    g_fx_restore = NULL;
+    g_bundle_extra = NULL;
+    hash64('6', hash);
+    hashes[0] = hash;
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    /* The hazard itself, with an engine interface that cannot answer `held`: the
+     * registration re-parses the permanent unlockModel and binds it to the md6Def
+     * the pass created at level 1 (the live crash). */
+    hr_reset(4, 0x00, 1);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3 && unknown == 0);
+    log_clear();
+    (void)sh_modserve_plan_run(&p, &g_hr_ops_unaware, "map");
+    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    CHECK(g_hr[0].parses == 1 && g_hr[0].bound_level == 1);
+    sh_modserve_plan_free(&p);
+
+    /* The fix: a map pass leaves the held permanent decl unregistered and unparsed. */
+    hr_reset(4, 0x00, 1);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
+    log_clear();
+    ready = sh_modserve_plan_run(&p, &g_hr_ops, "map");
+    CHECK(ready == 3);
+    CHECK(!strstr(g_calls, "R:unlockModel:spidermastermind;") && !strstr(g_calls, "L:unlockModel:spidermastermind;"));
+    CHECK(g_hr[0].parses == 0 && g_hr[0].bound_level == 0 && g_hr[0].level == 4);
+    CHECK(log_has("map: unlockModel 'spidermastermind' (hr.spider) left to the game: permanent, already parsed "
+                  "(state 0x00 lifetime 4); not registered by this pass, whose registration would re-parse it in place"));
+    CHECK(!log_has("map: unlockModel 'spidermastermind' (hr.spider) READY"));
+    /* The md6Def, new to the engine, is registered and loaded as before (level 1). */
+    CHECK(strstr(g_calls, "R:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;") != NULL);
+    CHECK(g_hr[1].held && g_hr[1].level == 1);
+    /* A held map-scoped decl is still registered: what it binds dies with it. */
+    CHECK(strstr(g_calls, "R:animWeb:doors/airlock;") != NULL && g_hr[2].parses >= 1);
+    /* The provider still serves the shadow for the game's own parse. */
+    CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
+    sh_modserve_plan_free(&p);
+
+    /* The next map load asks again (nothing was remembered as registered) and leaves it again. */
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
+    log_clear();
+    g_calls[0] = 0;
+    ready = sh_modserve_plan_run(&p, &g_hr_ops, "map");
+    CHECK(ready == 3 && g_hr[0].parses == 0 && !strstr(g_calls, "unlockModel"));
+    sh_modserve_plan_free(&p);
+
+    /* Created by reference but never parsed (state 2): the same. */
+    hr_reset(4, 0x02, 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
+    log_clear();
+    ready = sh_modserve_plan_run(&p, &g_hr_ops, "map");
+    CHECK(ready == 3 && g_hr[0].parses == 0);
+    CHECK(log_has("map: unlockModel 'spidermastermind' (hr.spider) left to the game: permanent, not parsed yet "
+                  "(state 0x02 lifetime 4); not registered by this pass"));
+    /* Not held before: the animWeb is registered (and then loaded at level 1). */
+    CHECK(strstr(g_calls, "R:animWeb:doors/airlock;") != NULL);
+    sh_modserve_plan_free(&p);
+
+    /* A permanent decl whose earlier parse failed is registered as before. */
+    hr_reset(4, 0x01, 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
+    log_clear();
+    (void)sh_modserve_plan_run(&p, &g_hr_ops, "map");
+    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    sh_modserve_plan_free(&p);
+
+    /* A map-scoped unlockModel (level 1) is registered too: it is purged with what it names. */
+    hr_reset(1, 0x00, 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 3);
+    log_clear();
+    (void)sh_modserve_plan_run(&p, &g_hr_ops, "map");
+    CHECK(strstr(g_calls, "R:unlockModel:spidermastermind;") != NULL);
+    sh_modserve_plan_free(&p);
+    sh_modserve_test_reset_registration();
+}
+
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
@@ -2703,6 +2900,7 @@ int main(void)
     test_watermark();
     test_refusals();
     test_permanent_first_parse();
+    test_registration_reparse_of_held_permanent();
     test_bundle_extra();
     test_scope();
     test_scope_providers();

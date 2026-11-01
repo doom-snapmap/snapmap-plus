@@ -1131,6 +1131,25 @@ animWeb shadow whose models the engine cannot find is withdrawn before its
 re-parse, since the re-parse would free the stock web's nodes and rebuild
 nothing.
 
+Registering a file is itself a parse. DeclRegisterFile's loader looks up every
+decl the file defines, and an existing resource of that name is re-parsed on
+the spot (VK FUN_141559a30 -> FUN_141561af0 -> DeclParseSource), whatever its
+level. A decl pointer it reads is set by DeclFind with create, at the level of
+the pass. The registration source check misses archived stock decls, so a
+bundle's stock-named file reaches registration, and a map pass used to re-parse
+permanent decls that way. The unlockModel `spidermastermind` (level 4, its
+model null after boot) was bound to a `spider_mastermind.md6` the pass created
+at level 1. START MISSION's purge freed that object, and leaving Play faulted in
+`SetupModelList` (VK RVA 0x33a130). The registration phase therefore asks the
+engine first (`held`, a walk of the type's resource list that creates nothing)
+and does not register a permanent decl in a pass that does not keep its decls,
+by the same rule the load phase uses (`sh_modserve_load_left_to_engine`):
+`MODS: map: <type> '<name>' (<bundle>) left to the game: permanent, ...; not
+registered by this pass, whose registration would re-parse it in place`.
+Nothing is remembered, so a later pass decides again. Permanent shadows whose
+bundle bytes differ from the game's still reach the engine through the
+re-parse above and the refresh.
+
 The same race decides what a bundle's requirements mean for a resource: its
 cvars (the cut-content blacklist gates, for one) are applied only at the first
 registration pass, and anything the engine loaded before that resolved its

@@ -200,6 +200,14 @@ typedef struct sh_modserve_engine_ops {
     /* Optional: the engine's error text after `load` answered
      * SH_MODSERVE_LOAD_REFUSED, for the log and the console line. */
     void (*refusal)(void *context, char *out, size_t cap);
+    /* Optional: 1 when the engine already holds a resource of this type and
+     * name, with its state byte (+0x2c) and lifetime (+0x28); 0 when it holds
+     * none; -1 when it cannot tell. A pure lookup: nothing is created, loaded
+     * or parsed. DeclRegisterFile re-parses an existing resource of the name
+     * it registers on the spot (VK FUN_141559a30 -> FUN_141561af0 ->
+     * DeclParseSource), so the registration phase asks this first and leaves
+     * a decl to the game the way `load` does (sh_modserve_load_left_to_engine). */
+    int (*held)(void *context, const char *type, const char *name, unsigned *state, unsigned *lifetime);
 } sh_modserve_engine_ops;
 
 /* The console sink for the lines a player should see when a pass skips or
@@ -253,8 +261,15 @@ unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), un
 int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist);
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is
- * not registered yet (registration only publishes the source, so a decl that
- * names another during its parse finds it), then the loads in plan order.
+ * not registered yet (registration publishes the source, so a decl that names
+ * another during its parse finds it; when the engine already holds a resource
+ * of that name it also re-parses it at once), then the loads in plan order.
+ * A step the engine holds as a permanent decl is not registered by a pass that
+ * does not keep its decls (ops->held, sh_modserve_load_left_to_engine): the
+ * re-parse inside the registration binds it to objects the pass creates at
+ * level 1, which is how the menu collectible 'spidermastermind' came to point
+ * at a map-scoped spider_mastermind.md6 (lane P53, observed with a hardware
+ * watchpoint on the unlockModel's md6Def field).
  * Steps already registered by an earlier plan are skipped. One MODS: line per
  * step with the result and the state byte. Returns the number of steps that
  * ended ready (registered now or earlier), or -1 when ops is unusable. */
