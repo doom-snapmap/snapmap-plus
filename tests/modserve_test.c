@@ -2149,6 +2149,119 @@ static void test_permanent_first_parse(void)
     }
 }
 
+/* ------------------------------------------------------------------ permanent referrers keep what they name (lane P52) */
+
+static void kr_name(fake_res *r, const char *name, unsigned level)
+{
+    memset(r, 0, sizeof *r);
+    memcpy(r->pad + 8, &name, sizeof name);
+    r->level = level;
+}
+
+/* The invariant, not a name list: whatever a served decl held at level 4
+ * refers to (its recorded needs, the served files its text names, and their
+ * references in turn) is raised to 4 when the engine holds it at 1 or 2. The
+ * spider case is one instance: the menu collectible's unlockModel, permanent
+ * since boot, names the bundle's spider_mastermind.md6, which a map pass
+ * created at level 1 together with the anims and mesh it needs; Play freed it
+ * under the unlockModel (VK RVA 0x33a130 at the next shell map load). */
+static void test_keep_referenced(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], hash[65];
+    char *slash;
+    static fake_res r[16];
+    static fake_res *decls[16], *raws[16];
+    static fake_list ld, lr;
+    fake_list *head = &ld;
+    sh_modserve_kept k;
+    static const fx_file files[] = {
+        /* The permanent referrer: names the md6Def in its text, records no needs. */
+        { "generated/decls/unlockmodel/spidermastermind.decl",
+          "{\n\tedit = {\n\t\tunlockModel = \"zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6\";\n\t}\n}\n",
+          -1, "unlockModel", "spidermastermind", NULL, '1' },
+        /* What it names: needs its mesh and one anim; its text names a second anim. */
+        { "generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl",
+          "{\n\tinit = {\n\t\tanims = {\n\t\t\t\"md6/spider/menu/collectible_idle.md6anim\"\n\t\t}\n\t}\n}\n",
+          -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6",
+          "[{\"type\": \"baseModel\", \"name\": \"md6/spider/mesh/spider.md6mesh\"}, "
+          "{\"type\": \"anim\", \"name\": \"md6/spider/combat/idle.md6anim\"}, "
+          "{\"type\": \"anim\", \"name\": \"md6/stock/shared_idle.md6anim\"}]", '2' },
+        { "cooked/anim/md6/spider/menu/collectible_idle.bmd6anim", "anim", -1, "anim",
+          "md6/spider/menu/collectible_idle.md6anim", NULL, '3' },
+        { "cooked/anim/md6/spider/combat/idle.bmd6anim", "anim", -1, "anim", "md6/spider/combat/idle.md6anim", NULL, '4' },
+        { "generated/basemodel/md6/spider/mesh/spider.bmd6model", "mesh", -1, "baseModel", "md6/spider/mesh/spider.md6mesh",
+          NULL, '5' },
+        /* Another type entirely: a permanent entityDef naming a map-scoped material. */
+        { "generated/decls/entitydef/mods/kr.pack/thing.decl", "{\n\tskin = \"mods/kr.pack/skin\";\n}\n", -1, "entityDef",
+          "mods/kr.pack/thing", NULL, '6' },
+        { "generated/decls/material/mods/kr.pack/skin.decl", "{\n}\n", -1, "material", "mods/kr.pack/skin", NULL, '7' },
+        /* Served and map-scoped, but nothing permanent names it: the purge may take it. */
+        { "generated/decls/entitydef/mods/kr.pack/loose.decl", "{\n\tskin = \"mods/kr.pack/loose_skin\";\n}\n", -1,
+          "entityDef", "mods/kr.pack/loose", NULL, '8' },
+        { "generated/decls/material/mods/kr.pack/loose_skin.decl", "{\n}\n", -1, "material", "mods/kr.pack/loose_skin",
+          NULL, '9' },
+    };
+
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\keepref\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"legacy\": {},\n  ";
+    make_bundle(root, "kr.pack@0.0.0+1", "kr.pack", "0.0.0", 'c',
+                "\"generated/decls/unlockmodel/spidermastermind.decl\", "
+                "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\", "
+                "\"cooked/anim/md6/spider/menu/collectible_idle.bmd6anim\", \"cooked/anim/md6/spider/combat/idle.bmd6anim\", "
+                "\"generated/basemodel/md6/spider/mesh/spider.bmd6model\"",
+                files, 9, NULL);
+    g_bundle_extra = NULL;
+    (void)hash64('c', hash);
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    /* What the engine holds after the map pass (names in other case on purpose). */
+    kr_name(&r[0], "spidermastermind", 4);                                                  /* boot, permanent */
+    kr_name(&r[1], "ZION/characters/monsters/spider_mastermind/base/spider_mastermind.md6", 1);   /* the pass */
+    kr_name(&r[2], "md6/spider/menu/collectible_idle.md6anim", 1);
+    kr_name(&r[3], "md6/spider/combat/idle.md6anim", 2);
+    kr_name(&r[4], "md6/spider/mesh/spider.md6mesh", 4);                                    /* loaded at boot */
+    kr_name(&r[5], "md6/stock/shared_idle.md6anim", 1);                                     /* the game's own, for it */
+    kr_name(&r[6], "mods/kr.pack/thing", 4);
+    kr_name(&r[7], "mods/kr.pack/skin", 1);
+    kr_name(&r[8], "mods/kr.pack/loose", 1);
+    kr_name(&r[9], "mods/kr.pack/loose_skin", 1);
+    kr_name(&r[10], "unrelated/stock/thing", 1);
+    decls[0] = &r[0]; decls[1] = &r[1]; decls[2] = &r[6]; decls[3] = &r[7]; decls[4] = &r[8]; decls[5] = &r[9];
+    decls[6] = &r[10];
+    raws[0] = &r[2]; raws[1] = &r[3]; raws[2] = &r[4]; raws[3] = &r[5];
+    ld.name = "decls"; ld.next = &lr; ld.entries = decls; ld.count = 7;
+    lr.name = "raw"; lr.next = NULL; lr.entries = raws; lr.count = 4;
+
+    CHECK(sh_modserve_keep_referenced(&head, &k) == 1);
+    CHECK(k.referrers == 2 && k.lists == 2 && !k.oom);
+    /* The spider case: the md6Def, the anim its text names, the anim and the
+     * stock anim it needs; the mesh was permanent already. */
+    CHECK(r[1].level == 4 && r[2].level == 4 && r[3].level == 4 && r[5].level == 4 && r[4].level == 4);
+    /* The same rule for any type: the entityDef's material. */
+    CHECK(r[7].level == 4);
+    /* Nothing permanent names these: left to the purge. */
+    CHECK(r[8].level == 1 && r[9].level == 1 && r[10].level == 1);
+    CHECK(r[0].level == 4 && r[6].level == 4);
+    CHECK(k.raised == 5);
+    CHECK(strstr(k.names, "spider_mastermind.md6") && strstr(k.names, "mods/kr.pack/skin") && !strstr(k.names, "loose"));
+    /* A second walk finds nothing left to raise. */
+    CHECK(sh_modserve_keep_referenced(&head, &k) == 1 && k.raised == 0);
+
+    /* When nothing referring to it is permanent, the md6Def stays map-scoped. */
+    r[0].level = 1; r[1].level = 1; r[2].level = 1;
+    CHECK(sh_modserve_keep_referenced(&head, &k) == 1);
+    CHECK(r[1].level == 1 && r[2].level == 1);
+    /* A list that does not read as one: nothing raised, walk reported failed. */
+    lr.entries = NULL; lr.count = 2;
+    CHECK(sh_modserve_keep_referenced(&head, &k) == 0 && k.raised == 0);
+    CHECK(sh_modserve_keep_referenced(NULL, &k) == 0);
+    lr.entries = raws; lr.count = 4;
+}
+
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
@@ -2703,6 +2816,7 @@ int main(void)
     test_watermark();
     test_refusals();
     test_permanent_first_parse();
+    test_keep_referenced();
     test_bundle_extra();
     test_scope();
     test_scope_providers();

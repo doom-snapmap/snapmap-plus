@@ -3254,6 +3254,227 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
     return calls;
 }
 
+/* ------------------------------------------------------------------ permanent referrers */
+
+/* The lifetime invariant (modserve.h, sh_modserve_keep_referenced): a decl a
+ * permanent (level 4) decl refers to must not be freed under it. The walk
+ * works from what the engine holds, by name, through two kinds of reference:
+ * the need graph the bundle builder recorded, and every quoted string in a
+ * held decl's served text that names a file the index serves. */
+typedef struct ms_kr_res { unsigned char *res; const unsigned char *list; const char *name; } ms_kr_res;
+typedef struct ms_kr_set { ms_kr_res *v; size_t n, cap; int oom; } ms_kr_set;
+
+static void ms_kr_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_kr_set *s = (ms_kr_set *)context;
+    const char *name = *(const char *const *)(res + 8);
+    if (s->oom || !name) return;
+    if (s->n == s->cap) {
+        size_t cap = s->cap ? s->cap * 2 : 65536;
+        ms_kr_res *g = (ms_kr_res *)realloc(s->v, cap * sizeof *g);
+        if (!g) { s->oom = 1; return; }
+        s->v = g;
+        s->cap = cap;
+    }
+    s->v[s->n].res = res;
+    s->v[s->n].list = list;
+    s->v[s->n].name = name;
+    s->n++;
+}
+
+static int ms_kr_cmp(const void *a, const void *b)
+{
+    return _stricmp(((const ms_kr_res *)a)->name, ((const ms_kr_res *)b)->name);
+}
+
+/* The first entry held under `name` (sorted set), or -1. */
+static long ms_kr_find(const ms_kr_set *s, const char *name)
+{
+    size_t lo = 0, hi = s->n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (_stricmp(s->v[mid].name, name) < 0) lo = mid + 1; else hi = mid;
+    }
+    return lo < s->n && !_stricmp(s->v[lo].name, name) ? (long)lo : -1;
+}
+
+/* The longest lifetime held under `name`: 4 permanent, then 2, then 1; 0 when nothing is held. */
+static unsigned ms_kr_level(const ms_kr_set *s, const char *name)
+{
+    long i = ms_kr_find(s, name);
+    unsigned best = 0;
+    if (i < 0) return 0;
+    for (; (size_t)i < s->n && !_stricmp(s->v[i].name, name); ++i) {
+        unsigned l = *(unsigned *)(s->v[i].res + MS_RES_LEVEL);
+        if (l == 4) return 4;
+        if (l > best) best = l;
+    }
+    return best;
+}
+
+typedef struct ms_pname { const char *name; int file; } ms_pname;
+static int ms_pname_cmp(const void *a, const void *b)
+{
+    return _stricmp(((const ms_pname *)a)->name, ((const ms_pname *)b)->name);
+}
+
+typedef struct ms_keep_walk {
+    const ms_index *x;
+    const ms_kr_set *held;
+    ms_pname *names; size_t nnames;
+    unsigned char *seen;        /* per file: reached already */
+    int *queue; size_t qn, qcap;
+    const char **keep; size_t nkeep, ckeep;
+    int oom;
+} ms_keep_walk;
+
+static void ms_keep_name(ms_keep_walk *w, const char *name)
+{
+    if (w->oom || !name || !name[0]) return;
+    if (w->nkeep == w->ckeep) {
+        size_t cap = w->ckeep ? w->ckeep * 2 : 1024;
+        const char **g = (const char **)realloc((void *)w->keep, cap * sizeof *g);
+        if (!g) { w->oom = 1; return; }
+        w->keep = g;
+        w->ckeep = cap;
+    }
+    w->keep[w->nkeep++] = name;
+}
+
+/* File `j` is referred to by a held permanent decl or by its closure: keep
+ * its name, and follow what it refers to when the engine holds it below level
+ * 4 (one at level 4 is a referrer of its own and is walked as one). */
+static void ms_keep_file(ms_keep_walk *w, int j)
+{
+    const ms_file *f = &w->x->files[j];
+    unsigned level;
+    if (w->seen[j]) return;
+    w->seen[j] = 1;
+    ms_keep_name(w, f->pname);
+    level = ms_kr_level(w->held, f->pname);
+    if (level != 1 && level != 2) return;
+    if (w->qn == w->qcap) {
+        size_t cap = w->qcap ? w->qcap * 2 : 256;
+        int *g = (int *)realloc(w->queue, cap * sizeof *g);
+        if (!g) { w->oom = 1; return; }
+        w->queue = g;
+        w->qcap = cap;
+    }
+    w->queue[w->qn++] = j;
+}
+
+/* What file `i` refers to: its recorded needs, and the served files its text names. */
+static void ms_keep_refs(ms_keep_walk *w, int i)
+{
+    const ms_index *x = w->x;
+    const ms_file *f = &x->files[i];
+    int k;
+    for (k = 0; k < f->need_count; ++k) {
+        const ms_need *nd = &x->needs[f->need_first + k];
+        if (nd->file >= 0 && nd->file < x->nfiles) ms_keep_file(w, nd->file);
+        else ms_keep_name(w, nd->name);   /* the game's own content, loaded for this decl */
+    }
+    if (f->is_decl) {
+        size_t len = 0;
+        unsigned char *text = ms_file_bytes(f, &len);
+        mc_lex l;
+        mc_tok t;
+        if (!text) return;
+        l.t = (const char *)text;
+        l.len = len;
+        l.pos = 0;
+        while ((t = mc_next(&l)).kind != MC_END) {
+            char name[MS_NAME_MAX];
+            ms_pname key, *hit;
+            if (t.kind != MC_STR || t.n < 3 || t.n - 2 >= sizeof name) continue;
+            memcpy(name, t.p + 1, t.n - 2);
+            name[t.n - 2] = 0;
+            key.name = name;
+            key.file = -1;
+            hit = (ms_pname *)bsearch(&key, w->names, w->nnames, sizeof *w->names, ms_pname_cmp);
+            if (!hit) continue;
+            while (hit > w->names && !_stricmp(hit[-1].name, name)) hit--;
+            for (; hit < w->names + w->nnames && !_stricmp(hit->name, name); ++hit) ms_keep_file(w, hit->file);
+        }
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+}
+
+static int ms_cstr_icmp(const void *a, const void *b)
+{
+    return _stricmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+int sh_modserve_keep_referenced(const void *head_slot, sh_modserve_kept *out)
+{
+    const ms_index *x = g_index;
+    sh_modserve_kept local;
+    ms_kr_set held;
+    ms_keep_walk w;
+    int i, ok;
+    size_t q, k;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    if (!x || !head_slot) return 0;
+    memset(&held, 0, sizeof held);
+    ok = ms_res_walk(head_slot, ms_kr_one, &held, &out->lists);
+    if (!ok || held.oom) { free(held.v); return 0; }
+    qsort(held.v, held.n, sizeof *held.v, ms_kr_cmp);
+    memset(&w, 0, sizeof w);
+    w.x = x;
+    w.held = &held;
+    w.names = (ms_pname *)calloc((size_t)x->nfiles + 1, sizeof *w.names);
+    w.seen = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
+    if (!w.names || !w.seen) { free(w.names); free(w.seen); free(held.v); return 0; }
+    /* The files the index serves now, by the name they provide. */
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        if (!f->served || !f->pname || InterlockedCompareExchange((volatile LONG *)&f->withdrawn, 0, 0) ||
+            !x->bundles[f->bundle].admitted || ms_scoped(x, i) != i)
+            continue;
+        w.names[w.nnames].name = f->pname;
+        w.names[w.nnames].file = i;
+        w.nnames++;
+    }
+    qsort(w.names, w.nnames, sizeof *w.names, ms_pname_cmp);
+    /* The referrers: every served decl the engine holds at level 4, and
+     * breadth first through what they reach below level 4. */
+    for (k = 0; k < w.nnames && !w.oom; ++k) {
+        int f = w.names[k].file;
+        if (!x->files[f].is_decl || ms_kr_level(&held, x->files[f].pname) != 4) continue;
+        out->referrers++;
+        w.seen[f] = 1;
+        ms_keep_refs(&w, f);
+        for (q = 0; q < w.qn && !w.oom; ++q) ms_keep_refs(&w, w.queue[q]);
+        w.qn = 0;
+    }
+    /* Raise every held object under a kept name that a purge would free. */
+    if (!w.oom && w.nkeep) {
+        size_t at = 0;
+        qsort((void *)w.keep, w.nkeep, sizeof *w.keep, ms_cstr_icmp);
+        for (q = 0; q < held.n; ++q) {
+            unsigned *level = (unsigned *)(held.v[q].res + MS_RES_LEVEL);
+            if ((*level != 1 && *level != 2) ||
+                !bsearch(&held.v[q].name, w.keep, w.nkeep, sizeof *w.keep, ms_cstr_icmp))
+                continue;
+            *level = 4;
+            out->raised++;
+            if (at + strlen(held.v[q].name) + 8 < sizeof out->names) {
+                int n = _snprintf_s(out->names + at, sizeof out->names - at, _TRUNCATE, "%s%s", at ? ", " : "",
+                                    held.v[q].name);
+                if (n > 0) at += (size_t)n;
+            } else out->more++;
+        }
+    }
+    out->oom = w.oom;
+    free((void *)w.keep);
+    free(w.queue);
+    free(w.names);
+    free(w.seen);
+    free(held.v);
+    return !out->oom;
+}
+
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops, const char *phase)
 {
     ms_index *x = g_index;

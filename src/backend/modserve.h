@@ -309,6 +309,30 @@ int  sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w)
 int  sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_watermark *w, sh_modserve_raised *out);
 void sh_modserve_watermark_free(sh_modserve_watermark *w);
 
+/* The lifetime invariant for what bundles serve: a decl or resource that a
+ * permanent decl refers to is kept as long as the referrer. The engine frees
+ * every level-1 resource at each map unload and level 2 at a full teardown,
+ * whatever still points at it, and a parse binds a decl to whatever object
+ * its names resolve to at that moment, which inside a pass can be one the
+ * pass created at level 1. This walks the engine's resource lists, takes
+ * every decl the index serves that the engine holds at level 4 as a referrer,
+ * follows its references (the bundle's recorded needs, and every quoted
+ * string in its served text that names a file the index serves) and their
+ * references in turn through whatever is held below level 4, and raises
+ * every held object under a reached name from level 1 or 2 to 4. Nothing is
+ * created or loaded; names are matched without case. Returns 1 when the walk
+ * completed. Run on the main thread after every pass that loads or re-parses
+ * (map activation, the editor pass, a refresh), before the next purge. */
+typedef struct sh_modserve_kept {
+    unsigned referrers;   /* served decls held at level 4 */
+    unsigned raised;      /* held objects raised from level 1 or 2 to 4 */
+    unsigned lists;       /* resource lists walked */
+    unsigned more;        /* raised names not listed in names[] */
+    int oom;
+    char names[400];      /* the raised names, for the log */
+} sh_modserve_kept;
+int sh_modserve_keep_referenced(const void *head_slot, sh_modserve_kept *out);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

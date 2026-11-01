@@ -418,6 +418,26 @@ static const sh_modserve_gate_ops *me_gate_ops(void)
 /* Run a plan inside process heap 0: decl objects outlive every map. The
  * bundles' requirements are applied and read back first, outside the scope
  * (as map_bounds.c sets its cvars), and gate-blocked steps are marked. */
+/* After a pass: whatever a permanent decl the bundles serve refers to stays
+ * as long as it does (modserve.h, sh_modserve_keep_referenced). A parse binds
+ * a decl to the objects its names resolve to, and inside a pass those can be
+ * ones the pass created at level 1; the purge around Play would free them
+ * under the permanent decl (the menu collectible's unlockModel and the spider
+ * md6Def it names, VK RVA 0x33a130 at the next shell map load). */
+static void me_keep_referenced(const char *phase)
+{
+    sh_modserve_kept k;
+    if (!g_bound || !g_res_head || !sh_modserve_active() || me_on_main() != 1) return;
+    if (!sh_modserve_keep_referenced(g_res_head, &k)) {
+        me_log("%s: references of permanent decls not kept (%s)", phase,
+               k.oom ? "out of memory" : "the resource lists could not be walked");
+        return;
+    }
+    if (k.raised)
+        me_log("%s: kept %u object(s) that permanent decls refer to for the session (%u referrer(s), %u list(s)): %s%s",
+               phase, k.raised, k.referrers, k.lists, k.names, k.more ? ", ..." : "");
+}
+
 static int me_run(sh_modserve_plan *plan, const char *phase)
 {
     sh_process_heap_scope heap = { 0 };
@@ -434,6 +454,7 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
     __finally {
         if (!sh_process_heap_leave(&heap)) { me_log("%s: process heap scope did not balance", phase); ready = -1; }
     }
+    me_keep_referenced(phase);
     return ready;
 }
 
@@ -895,6 +916,7 @@ static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh
         out->reloaded += c.raw.reloaded;
         out->failed += c.decls.failed + c.decls.faulted + c.raw.failed + c.raw.faulted;
     }
+    if (c.decls.reparsed || c.raw.reloaded) me_keep_referenced(phase);
     free(c.raw.names);
 }
 
@@ -1179,6 +1201,7 @@ void sh_modserve_palette_before_build(void)
         me_refresh_apply("editor", 0, NULL);
         me_reparse_early("editor", 0);
         me_reload_ungated("editor", 0);
+        me_keep_referenced("editor");
         if (first) me_log("editor rows registered in 0.0 ms (0 rows)");
         return;
     }
@@ -1376,7 +1399,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
     if (plan.count) ready = me_run(&plan, "map");
-    else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
+    else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); me_keep_referenced("map"); ready = 0; }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
