@@ -3,6 +3,19 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.22 -- 2026-11-01 (beta)
+
+**Packages added to overrides later now get moved**
+
+Mod packages you drop into the overrides folder after the first conversion are now picked up and moved into the mods folder. A new migrate command runs that conversion on its own, without reinstalling.
+
+### New
+- Run snapmap-plus migrate to convert your overrides packages on its own, without downloading or reinstalling anything.
+
+### Improved
+- Packages you add to overrides after the first conversion are moved into mods the next time you run update or migrate.
+- Help text now reads in the same clear, sectioned style as the rest of the installer's output.
+
 ## v0.2.1-beta.21 -- 2026-11-01 (beta)
 
 **Map-wide mods, prefab sharing and a safer installer**
