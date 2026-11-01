@@ -3,7 +3,8 @@
  * Yes (fetch on a worker, activation, resume with a fresh parse of the retained
  * text), No, a failed fetch, a bundle that will not install, a second load
  * abandoning the hold, the joiner's host re-check, the warm-cache joiner branch
- * and My Maps play; and the rawmap gate: the rows a rawmap names counted
+ * and My Maps play; a parse whose classification another detour broke, the
+ * SnapMap feed's play and the launch boundary; and the rawmap gate: the rows a rawmap names counted
  * under the asset rule (an installed folder of the row's id serving its
  * names, whatever its hash), the store check, the refusal that names each
  * mod and the download that reopens the rawmap.
@@ -390,11 +391,128 @@ static void vanilla_and_installed_pass_through(void)
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, (void *)0x9999, NULL, NULL, NULL) == 1);
     CHECK(!sh_modpublished_holding());
 
-    /* A non-published parse never gates a published completion. */
+    /* A record from an earlier frame is some other load's: not gated. */
     reset();
-    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    tick(1);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
     CHECK(!sh_modpublished_holding());
+}
+
+static void unrecognized_parse_is_still_gated(void)
+{
+    printf("-- a parse whose return address another detour changed is still gated by its map object\n");
+    /* Observed live: with a second detour on DeserializeFromJson that rewrites
+     * the return address, every published read classified as OTHER and the
+     * browser completion passed a map whose six mods were missing. */
+    reset();
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding() && F.hold_ui == 1 && F.metadata_copies == 1);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "This map needs 1 mod: alex.pink-imp") != NULL);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_BROWSER_PLAY && !strcmp(F.resume_text, ONE_MOD));
+
+    /* Installed: it passes, unchanged. */
+    reset();
+    F.installed_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && !F.hold_ui);
+}
+
+static void feed_play_is_gated(void)
+{
+    printf("-- SnapMap feed play is held and resumed like the other completions\n");
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_FEED_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding() && F.metadata_copies == 1);
+    tick(1);
+    CHECK(F.asks == 1);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.activations == 1 && F.resumes == 1 && F.resume_hook == SH_MODPUB_FEED_PLAY);
+    CHECK(!strcmp(F.resume_id, METADATA) && !strcmp(F.resume_text, ONE_MOD));
+    /* Its launch, after the resume, passes the boundary: the record was consumed. */
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1);
+}
+
+static void launch_boundary(void)
+{
+    printf("-- the launch boundary holds or refuses a map that no gate saw\n");
+    /* A completion this module does not know: the parse is followed by the
+     * lobby launch in the same frame. Held, asked, resumed with the flag. */
+    reset();
+    F.token = 7;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, (void *)1) == 0);
+    CHECK(sh_modpublished_holding() && F.metadata_copies == 0);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "This map needs 2 mods: alex.pink-imp, bob.room") != NULL);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 2 && F.rescans == 1 && F.activations == 1 && F.activated_count == 2);
+    CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_LOBBY_LAUNCH && F.resume_extra == (void *)1);
+    CHECK(!strcmp(F.resume_text, TWO_MODS));
+    CHECK(!sh_modpublished_holding() && !sh_modpub_test_notice()[0]);
+
+    /* The screen it was held on is gone by the time the mods are in: abandoned. */
+    reset();
+    F.token = 7;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    F.token = 8;
+    tick_until_idle();
+    CHECK(F.resumes == 0 && F.activations == 0 && !sh_modpublished_holding());
+
+    /* No: nothing launches; the notice names the mod. */
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 0);
+    tick(1); F.answer = 2; tick(1);
+    CHECK(F.resumes == 0 && F.drop_ui == 1 && !sh_modpublished_holding());
+
+    /* An offline launch has no object to resume with: refused with the notice. */
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, MAP, NULL) == 0);
+    CHECK(!sh_modpublished_holding() && F.drop_ui == 1 && F.asks == 0);
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map needs mods that could not be prepared. The map was not loaded."));
+    tick(1);
+    CHECK(F.asks == 1 && F.ask_buttons == 0);
+
+    /* Installed mods, a parse a gate already decided, a parse of an earlier
+     * frame (the lobby's relaunch from the cache) and another map object all
+     * launch unchanged. */
+    reset();
+    F.installed_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1);
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1);
+    CHECK(F.asks == 0 && sh_modpublished_holding());   /* only the gate's hold */
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    tick(1);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && !sh_modpub_test_notice()[0]);
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, MANAGER, (void *)0x9999, NULL) == 1);
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, VANILLA, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, NULL) == 1);
+    /* decide never answers for the boundary's hooks. */
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, MAP, NULL, NULL, NULL) == 1);
 }
 
 static void yes_resumes_with_a_fresh_map(void)
@@ -810,6 +928,9 @@ int main(void)
 {
     classification();
     vanilla_and_installed_pass_through();
+    unrecognized_parse_is_still_gated();
+    feed_play_is_gated();
+    launch_boundary();
     yes_resumes_with_a_fresh_map();
     editor_only_row_plays_without_a_folder();
     no_drops();

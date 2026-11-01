@@ -7,21 +7,33 @@
  * whose bundles are all installed, and every map without manifest rows, passes
  * through: the engine sees no difference.
  *
- * Identification. The DeserializeFromJson detour (rawmap.c) classifies each
- * parse by its return address (PublishedMapRead+0x12A: the offline read of the
- * cache; SnapMapReadSizeLimit+0x5D: the profile reader under
- * PublishedMapComplete) and reports the parse here with the map object it
- * filled. The completion that follows receives that same object, so the hold
- * decision uses the manifest of exactly that parse.
+ * Identification. The DeserializeFromJson detour (rawmap.c) reports each
+ * parse here with the map object it filled and a classification by return
+ * address (PublishedMapRead+0x12A: the offline read of the cache;
+ * SnapMapReadSizeLimit+0x5D: the profile reader under PublishedMapComplete).
+ * The completion that follows a read receives that same object in the same
+ * frame, so a gate uses the record whose map is its map and which was made
+ * since the last main-thread tick. The classification is only reported: any
+ * other detour on DeserializeFromJson that rewrites the return address (a
+ * debugger's or an overlay's) makes every parse look like another kind, and
+ * a gate that required it would let every published map through.
  *
- * Hold points (lane N1a, both renderers):
+ * Hold points (both renderers):
  *   OnSnapPlay completion            (manager, request, metadata, map)
  *   browser published play           (browser, request, metadata, map)
+ *   SnapMap feed published read      (feed widget, request, metadata, map);
+ *                                    only its play action (3, at *request+8)
  *   PublishedMapCacheReady           (manager, request, metadata, map), joiner
  *   CacheMapForLobby, warm cache     (manager, id idStr*, revision idStr*), joiner
  *   LaunchLocalSnapMapForOfflinePlay (manager, localSavedModel*, map), My Maps
- * The SnapMap feed completion (VK 0x112B440) is not gated: its resume needs the
- * issuer's action int at request+8, which nothing here reconstructs yet.
+ *
+ * The launch boundary (sh_modpub_launch_gate). Every published play ends in
+ * PublishedMapLobbyLaunch (manager, flag) or PublishedMapOfflineLaunch
+ * (manager, metadata, map). A launch in the frame of a parse whose rows are
+ * still missing and that no gate decided (a completion this module does not
+ * know) is held at the lobby launch, or refused at the offline launch, which
+ * has no object left to resume with. So no launch path hands the engine a
+ * published map whose mods are absent.
  *
  * Threads: every entry point except the fetch job runs on DOOM's main thread;
  * network waits run on the modsync worker; the dialog is polled from the
@@ -79,7 +91,8 @@ int sh_modpublished_last_parse_published(void);
 
 /* ------------------------------------------------------------ the hold */
 
-/* Main-thread tick (called after every native frame): raises the pending
+/* Main-thread tick (called after every native frame): ends the frame a parse
+ * record belongs to, raises the pending
  * dialog, polls its answer, follows the fetch and resumes or drops. Idle cost:
  * two reads. */
 void sh_modpublished_poll(void);
@@ -103,6 +116,9 @@ enum sh_modpub_hook {
     SH_MODPUB_LOCAL_OFFLINE,
     SH_MODPUB_RAWMAP_LOAD,      /* not an engine hook: a rawmap load (sh_modpub_rawmap_hold) */
     SH_MODPUB_PREFAB_PLACE,     /* not an engine hook: a prefab placement (sh_modpub_prefab_hold) */
+    SH_MODPUB_FEED_PLAY,        /* the SnapMap feed completion, play action only */
+    SH_MODPUB_LOBBY_LAUNCH,     /* the launch boundary: PublishedMapLobbyLaunch (sh_modpub_launch_gate) */
+    SH_MODPUB_OFFLINE_LAUNCH,   /* the launch boundary: PublishedMapOfflineLaunch (refusal only) */
     SH_MODPUB_HOOKS
 };
 
@@ -111,8 +127,8 @@ typedef void (*sh_modpub_progress_fn)(void *ctx, unsigned long long done, unsign
 
 typedef struct sh_modpub_resume {
     int hook;
-    void *owner;              /* manager, or the browser for SH_MODPUB_BROWSER_PLAY */
-    void *extra;              /* SH_MODPUB_LOCAL_OFFLINE: the localSavedModel */
+    void *owner;              /* manager, the browser (BROWSER_PLAY) or the feed widget (FEED_PLAY) */
+    void *extra;              /* LOCAL_OFFLINE: the localSavedModel; LOBBY_LAUNCH: the flag argument */
     const void *metadata;     /* the retained copy (completions) */
     const char *text;         /* the retained text (completions and local play) */
     size_t length;
@@ -171,6 +187,14 @@ typedef struct sh_modpub_ops {
  * used by SH_MODPUB_CACHE_LOBBY; completions read them from `metadata`. */
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision);
+
+/* The launch boundary, asked by the PublishedMapLobbyLaunch
+ * (SH_MODPUB_LOBBY_LAUNCH, `map` NULL, `extra` the flag) and
+ * PublishedMapOfflineLaunch (SH_MODPUB_OFFLINE_LAUNCH) detours. Returns 1 to
+ * launch, 0 when the launch was held (lobby) or refused with the notice. Only a
+ * parse of this frame that no gate decided and whose rows are still missing
+ * stops a launch; launches without a parse (the lobby's own relaunch) pass. */
+int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
 
 /* ------------------------------------------------------------ rawmap loads
  * A rawmap (rawmap.c) carries the same manifest rows, and its mods have to be
@@ -249,7 +273,8 @@ void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name
 #ifndef SH_MODPUBLISHED_PURE
 #include "signatures.h"
 /* Bind the read sites, the metadata, map, dialog and lobby helpers and the
- * main-thread identity, then detour the five hold points (all or none).
+ * main-thread identity, then detour the six hold points and the two launch
+ * boundary functions (all or none).
  * Install after the DeserializeFromJson detour and the engine dialog. Returns
  * 1 when the gates are armed. */
 int sh_modpublished_install(const sig_result *results, size_t count, const uint8_t *module_base);

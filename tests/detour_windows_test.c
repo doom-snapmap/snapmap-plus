@@ -91,6 +91,9 @@ static const site SITES[] = {
     { "modpublished.c",       "PublishedMapCacheReady",     SITE_SIG, 0, 15, RELOCATES_AT, 7 },
     { "modpublished.c",       "CacheMapForLobby",           SITE_SIG, 0, 20, REPLAYS, 0 },
     { "modpublished.c",       "LaunchLocalSnapMapForOfflinePlay", SITE_SIG, 0, 22, REPLAYS, 0 },
+    { "modpublished.c",       "PublishedFeedPlayDone",      SITE_SIG, 0, 14, REPLAYS, 0 },
+    { "modpublished.c",       "PublishedMapLobbyLaunch",    SITE_SIG, 0, 18, REPLAYS, 0 },
+    { "modpublished.c",       "PublishedMapOfflineLaunch",  SITE_SIG, 0, 17, REPLAYS, 0 },
     { "modpublish.c",         "PublishAfterSave",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "modpublish.c",         "PublishFeedPost",            SITE_SIG, 0, 15, REPLAYS, 0 },
     { "modpublish.c",         "MapInfoUnpublishDone",       SITE_SIG, 0, 14, REPLAYS, 0 },
@@ -315,7 +318,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
     { "backend\\timeline_tile.c", 1 }, { "backend\\modserve_engine.c", 1 },
-    { "backend\\modpublished.c", 5 }, { "backend\\modpublish.c", 1 }, { "backend\\modaction.c", 1 },
+    { "backend\\modpublished.c", 8 }, { "backend\\modpublish.c", 1 }, { "backend\\modaction.c", 1 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };

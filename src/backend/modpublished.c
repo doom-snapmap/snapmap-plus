@@ -117,10 +117,15 @@ typedef struct pub_record {
     char *text;               /* only when missing > 0 */
     size_t length;
     unsigned long sequence;
+    unsigned long frame;      /* g_frame when it was made: a gate uses only a record of its own frame */
     int repeat;               /* the held map parsed again: this launch is held with the running hold */
 } pub_record;
 
 static pub_record g_record;
+/* Advanced by the main-thread tick after every native frame. A read's parse
+ * and the completion (and launch) it feeds run in one call chain, inside one
+ * frame; a record from an earlier frame belongs to some other load. */
+static unsigned long g_frame;
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
@@ -340,6 +345,9 @@ static const char *pub_hook_name(int hook)
     case SH_MODPUB_LOCAL_OFFLINE: return "My Maps play";
     case SH_MODPUB_RAWMAP_LOAD: return "rawmap load";
     case SH_MODPUB_PREFAB_PLACE: return "prefab placement";
+    case SH_MODPUB_FEED_PLAY: return "SnapMap feed play";
+    case SH_MODPUB_LOBBY_LAUNCH: return "lobby launch";
+    case SH_MODPUB_OFFLINE_LAUNCH: return "offline launch";
     default: return "?";
     }
 }
@@ -474,6 +482,7 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
         g_record.parsed = parsed;
         g_record.map = out_map;
         g_record.sequence = sequence;
+        g_record.frame = g_frame;
         g_record.valid = 1;
         pub_logf("MODS: '%s' was launched again while its mods %s; that launch is held with the first",
                  g_hold.id[0] ? g_hold.id : "the held map", g_hold.state == HOLD_FETCHING ? "download" : "are offered");
@@ -485,6 +494,7 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     g_record.parsed = parsed;
     g_record.map = out_map;
     g_record.sequence = sequence;
+    g_record.frame = g_frame;
     g_record.valid = 1;
     if (!parsed || !sh_modmanifest_current(&rows)) { sh_modmanifest_list_free(&rows); return; }
     g_record.rows = rows;
@@ -516,7 +526,14 @@ int sh_modpublished_last_parse_published(void)
 
 static int pub_is_completion(int hook)
 {
-    return hook == SH_MODPUB_ON_SNAP_PLAY || hook == SH_MODPUB_BROWSER_PLAY || hook == SH_MODPUB_CACHE_READY;
+    return hook == SH_MODPUB_ON_SNAP_PLAY || hook == SH_MODPUB_BROWSER_PLAY || hook == SH_MODPUB_CACHE_READY ||
+           hook == SH_MODPUB_FEED_PLAY;
+}
+
+/* The launch boundary's hooks: they are asked through sh_modpub_launch_gate. */
+static int pub_is_launch(int hook)
+{
+    return hook == SH_MODPUB_LOBBY_LAUNCH || hook == SH_MODPUB_OFFLINE_LAUNCH;
 }
 
 /* Build the hold from rows (copied) and, when given, the record's text (moved). */
@@ -570,7 +587,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     char item[PUB_ID_CAP] = "", rev[PUB_ID_CAP] = "";
     pub_record *record = &g_record;
     int begun;
-    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook)) return 1;
+    if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook) || pub_is_launch(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
 
@@ -596,15 +613,22 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         return 0;
     }
 
-    /* The record must be this call's parse: valid, on the main thread, and the
-     * same map object. Anything else is a launch this gate did not see parse. */
-    if (!record->valid || record->map != map ||
-        (pub_is_completion(hook) && record->kind == SH_MODPUB_PARSE_OTHER)) {
+    /* The record must be this call's parse: valid, on the main thread, the
+     * same map object and the same frame. Anything else is a launch this gate
+     * did not see parse. The return-address classification is not required:
+     * another detour on the parser can change it (see modpublished.h). */
+    if (!record->valid || record->map != map || record->frame != g_frame) {
         if (record->valid && record->rows.count && record->map != map)
             pub_logf("MODS: %s received map %p, not the last parsed %p; not gated", pub_hook_name(hook),
                      map, record->map);
+        else if (record->valid && record->rows.count)
+            pub_logf("MODS: %s received map %p, last parsed in an earlier frame; not gated", pub_hook_name(hook), map);
         return 1;
     }
+    if (pub_is_completion(hook) && record->kind == SH_MODPUB_PARSE_OTHER && record->rows.count)
+        pub_logf("MODS: %s: the parse that filled its map was not recognized as a published read (another detour "
+                 "on the parser changed its return address); the gate identifies it by its map object",
+                 pub_hook_name(hook));
     if (record->repeat) {
         /* Held with the running hold of the same map (parse_seen above). */
         int held = g_hold.state != HOLD_IDLE;
@@ -641,6 +665,41 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
              pub_hook_name(hook), item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
     if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
+    return 0;
+}
+
+int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
+{
+    pub_record *record = &g_record;
+    size_t missing;
+    int begun = -1;
+    if (!g_ops_set || !pub_is_launch(hook)) return 1;
+    if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
+    if (!pub_on_main()) return 1;
+    /* Only a parse of this frame that no gate decided: every gate consumes the
+     * record it decides on, and a launch without a parse (the lobby's own
+     * relaunch from the map cache) has none. */
+    if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
+    if (map && record->map != map) return 1;
+    missing = pub_count_missing(&record->rows);
+    if (!missing) { pub_record_clear(record); return 1; }
+    pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
+             record->sequence, record->map, (unsigned)missing);
+    if (hook == SH_MODPUB_LOBBY_LAUNCH)
+        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", &record->rows, record);
+    pub_record_clear(record);
+    if (begun > 0) {
+        pub_logf("MODS: %s needs %u missing mod(s) (%llu bytes); held for the player's answer", pub_hook_name(hook),
+                 (unsigned)g_hold.missing_count, g_hold.missing_bytes);
+        if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, manager);
+        return 0;
+    }
+    if (begun == 0) return 1;
+    /* Never hand the engine a published map whose mods are absent. An offline
+     * launch has no map object left to resume with, so it is refused. */
+    pub_logf("MODS: the %s was refused: its mods are not installed and it cannot be held", pub_hook_name(hook));
+    if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, manager);
+    pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
     return 0;
 }
 
@@ -1073,6 +1132,7 @@ static void pub_probe_finish(void)
 void sh_modpublished_poll(void)
 {
     pub_hold *h = &g_hold;
+    g_frame++;
     if (!g_ops_set) return;
     if (h->state == HOLD_IDLE && !g_notice[0] && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
@@ -1218,11 +1278,17 @@ typedef void *(*eng_idstr_ctor_fn)(void *, const char *);
 typedef void (*eng_object_fn)(void *);
 typedef void (*eng_show_fn)(void *, void *);
 typedef void (*eng_clear_fn)(void *, void *);
+typedef unsigned long long (*eng_lobby_launch_fn)(void *, unsigned char);
+typedef void (*eng_offline_launch_fn)(void *, const void *, void *);
 
-enum { ENG_ON_SNAP, ENG_BROWSER, ENG_READY, ENG_LOBBY, ENG_LOCAL, ENG_HOOKS };
+#define ENG_FEED_PLAY_ACTION 3     /* the feed completion's action int: 1 details, 2 author, 3 play */
+
+enum { ENG_ON_SNAP, ENG_BROWSER, ENG_READY, ENG_LOBBY, ENG_LOCAL, ENG_FEED, ENG_LOBBY_LAUNCH, ENG_OFFLINE_LAUNCH,
+       ENG_HOOKS };
 static const char *const ENG_HOOK_NAMES[ENG_HOOKS] = {
     "PublishedOnSnapPlayDone", "PublishedBrowserPlayDone", "PublishedMapCacheReady",
-    "CacheMapForLobby", "LaunchLocalSnapMapForOfflinePlay" };
+    "CacheMapForLobby", "LaunchLocalSnapMapForOfflinePlay", "PublishedFeedPlayDone",
+    "PublishedMapLobbyLaunch", "PublishedMapOfflineLaunch" };
 
 static struct {
     const uint8_t *site[ENG_HOOKS];
@@ -1315,9 +1381,30 @@ static int eng_string(const void *s, char *out, size_t cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
 }
 
+/* The shell's menu manager, the one every published-map screen belongs to. */
+static void *eng_shell_manager(void)
+{
+    __try {
+        void *shell = g_eng.shell_slot ? *g_eng.shell_slot : NULL;
+        return shell ? *(void **)((uint8_t *)shell + ENG_SHELL_MANAGER) : NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+}
+
+/* The manager's current screen id plus one (0: unknown). */
+static unsigned long long eng_screen_token(void)
+{
+    void *manager = eng_shell_manager();
+    if (!manager) return 0;
+    __try { return (unsigned long long)(unsigned)*(const int *)((const uint8_t *)manager + 0x08) + 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
 static void *eng_manager_of(int hook, void *owner)
 {
     if (!owner) return NULL;
+    /* The feed widget reaches its manager through its screen; the shell's
+     * manager is that manager. */
+    if (hook == SH_MODPUB_FEED_PLAY) return eng_shell_manager();
     if (hook != SH_MODPUB_BROWSER_PLAY) return owner;
     __try { return *(void **)((uint8_t *)owner + 0x10); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
@@ -1423,6 +1510,10 @@ static int eng_metadata_ids(void *c, const void *metadata, char *id, size_t id_c
 static unsigned long long eng_hold_token(void *c, int hook, void *owner, const void *extra)
 {
     (void)c; (void)owner;
+    /* A feed widget or a launch boundary resumes into the screen it was held
+     * on: the widget lives in that screen, the lobby launch reads the
+     * history record the completion pushed from it. */
+    if (hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH) return eng_screen_token();
     if (hook != SH_MODPUB_LOCAL_OFFLINE || !extra) return 0;
     __try { return *(const unsigned long long *)((const uint8_t *)extra + ENG_MODEL_KEY); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -1437,6 +1528,8 @@ static int eng_owner_current(void *c, int hook, void *owner, const void *extra, 
         if (!shell || *(void **)((uint8_t *)shell + ENG_SHELL_MANAGER) != manager) return 0;
         if (hook == SH_MODPUB_LOCAL_OFFLINE &&
             (!extra || *(const unsigned long long *)((const uint8_t *)extra + ENG_MODEL_KEY) != token)) return 0;
+        if ((hook == SH_MODPUB_FEED_PLAY || hook == SH_MODPUB_LOBBY_LAUNCH) && token &&
+            eng_screen_token() != token) return 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -1555,20 +1648,45 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
         if (note[0]) pub_notice(note);
         return ran;
     }
+    if (r && r->hook == SH_MODPUB_LOBBY_LAUNCH && r->text) {
+        /* The launch boundary held a map whose parse already ran: its map is
+         * in the cache. Bring the manifest's scope and activation up as that
+         * parse would have with the mods installed, then launch. */
+        size_t n = 0;
+        char *stripped = NULL;
+        __try { stripped = sh_modmanifest_prepare_load(r->text, r->length, &n); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the held launch's manifest step faulted"); }
+        if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
+    }
     if (!r || !sh_process_heap_enter(&g_eng.heap, &scope)) return 0;
     __try {
         if (r->hook == SH_MODPUB_CACHE_LOBBY) {
             ran = eng_cold_read(r->owner, r->id, r->revision);
+        } else if (r->hook == SH_MODPUB_LOBBY_LAUNCH) {
+            ((eng_lobby_launch_fn)g_eng.original[ENG_LOBBY_LAUNCH])(r->owner, (unsigned char)(uintptr_t)r->extra);
+            ran = 1;
         } else if (r->text && (map = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ENG_MAP_SIZE)) != NULL) {
             g_eng.map_ctor(map); constructed = 1;
             if (g_eng.parse(r->text, map)) {
+                ran = 1;
                 if (r->hook == SH_MODPUB_LOCAL_OFFLINE)
                     ((eng_local_fn)g_eng.original[ENG_LOCAL])(r->owner, r->extra, map);
-                else
+                else if (r->hook == SH_MODPUB_FEED_PLAY) {
+                    /* The feed completion reads only the action int at
+                     * request+8 and frees it with the engine's sized delete,
+                     * so it gets a new one from the engine's operator new. */
+                    uint8_t request[0x10];
+                    int *action = g_eng.op_new(sizeof(int));
+                    memset(request, 0, sizeof request);
+                    if (action) {
+                        *action = ENG_FEED_PLAY_ACTION;
+                        *(int **)(request + 8) = action;
+                        ((eng_completion_fn)g_eng.original[ENG_FEED])(r->owner, request, r->metadata, map);
+                    } else ran = 0;
+                } else
                     ((eng_completion_fn)g_eng.original[r->hook == SH_MODPUB_ON_SNAP_PLAY ? ENG_ON_SNAP :
                         r->hook == SH_MODPUB_BROWSER_PLAY ? ENG_BROWSER : ENG_READY])(
                         r->owner, NULL, r->metadata, map);
-                ran = 1;
             } else backend_log("MODS: the retained map text did not parse on resume");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1679,6 +1797,49 @@ static void eng_local_detour(void *manager, void *model, void *map)
         ((eng_local_fn)g_eng.original[ENG_LOCAL])(manager, model, map);
 }
 
+/* The SnapMap feed's read completion. Only the play action launches; details
+ * and author views pass. A held or refused play still runs the completion,
+ * with its action set to one that launches nothing, so the feed clears its
+ * wait state and the action's int is freed as the engine expects. */
+static void eng_feed_detour(void *widget, void *request, const void *metadata, void *map)
+{
+    int *action = NULL, value = -1;
+    __try {
+        action = request ? *(int **)((uint8_t *)request + 8) : NULL;
+        value = action ? *action : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { action = NULL; value = -1; }
+    if (value == ENG_FEED_PLAY_ACTION && !eng_decide(SH_MODPUB_FEED_PLAY, widget, metadata, map, NULL, NULL, NULL)) {
+        __try { *action = 0; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    }
+    ((eng_completion_fn)g_eng.original[ENG_FEED])(widget, request, metadata, map);
+}
+
+static int eng_launch_gate(int hook, void *manager, void *map, void *extra)
+{
+    if (!InterlockedCompareExchange(&g_eng.ready, 0, 0)) return 1;
+    __try { return sh_modpub_launch_gate(hook, manager, map, extra); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the published-map launch boundary faulted; the launch continues natively");
+        return 1;
+    }
+}
+
+/* The launch boundary. Its callers ignore the result; a held or refused
+ * launch returns 0, as the function does when the lobby cannot be entered. */
+static unsigned long long eng_lobby_launch_detour(void *manager, unsigned char flag)
+{
+    if (eng_launch_gate(SH_MODPUB_LOBBY_LAUNCH, manager, NULL, (void *)(uintptr_t)flag))
+        return ((eng_lobby_launch_fn)g_eng.original[ENG_LOBBY_LAUNCH])(manager, flag);
+    return 0;
+}
+
+static void eng_offline_launch_detour(void *manager, const void *metadata, void *map)
+{
+    if (eng_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, manager, map, NULL))
+        ((eng_offline_launch_fn)g_eng.original[ENG_OFFLINE_LAUNCH])(manager, metadata, map);
+}
+
 /* ------------------------------------------------------------ install */
 
 static int eng_bind(const sig_result *results, size_t count, const uint8_t *base)
@@ -1737,6 +1898,12 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
             memcmp(browser + 0x26, "\x48\x8b\x4b\x30\xc7\x43\x20\x00\x00\x00\x00\x48\x85\xc9\x74\x0b"
                                    "\x48\x8b\x01\xba\x0f\x00\x00\x00\xff\x50\x08\x48\x8b\x4b\x10", 31) ||
             !(g_eng.hide_progress = (eng_object_fn)eng_call(browser + 0x45))) return 0;
+        /* The launch boundary is what browser play and feed play call: the
+         * lobby launch at browser+0x9C and feed+0xE3, the offline launch at
+         * browser+0xAD. */
+        if (eng_call(browser + 0x9C) != (void *)g_eng.site[ENG_LOBBY_LAUNCH] ||
+            eng_call(browser + 0xAD) != (void *)g_eng.site[ENG_OFFLINE_LAUNCH] ||
+            eng_call(g_eng.site[ENG_FEED] + 0xE3) != (void *)g_eng.site[ENG_LOBBY_LAUNCH]) return 0;
         /* CacheReady: progress, then session -> lobby -> parameters. */
         if (memcmp(ready + 0x38, "\x48\x8b\x89\x38\x0a\x00\x00", 7) || memcmp(ready + 0x49, "\xff\x50\x30", 3) ||
             !(g_eng.session_slot = eng_rip(ready + 0x4C, "\x48\x8b\x0d", 3)) ||
@@ -1779,7 +1946,8 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
 int sh_modpublished_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     void *detours[ENG_HOOKS] = { (void *)eng_on_snap_detour, (void *)eng_browser_detour, (void *)eng_ready_detour,
-                                 (void *)eng_lobby_detour, (void *)eng_local_detour };
+                                 (void *)eng_lobby_detour, (void *)eng_local_detour, (void *)eng_feed_detour,
+                                 (void *)eng_lobby_launch_detour, (void *)eng_offline_launch_detour };
     if (InterlockedCompareExchange(&g_eng.ready, 0, 0)) return 1;
     if (!results || !module_base || !eng_bind(results, count, module_base)) {
         g_read_offline_return = g_read_online_return = NULL;
@@ -1795,11 +1963,19 @@ int sh_modpublished_install(const sig_result *results, size_t count, const uint8
     g_eng.original[ENG_READY] = hook_prepare_relative_call((void *)g_eng.site[ENG_READY], detours[ENG_READY], 15, 7);
     g_eng.original[ENG_LOBBY] = hook_prepare((void *)g_eng.site[ENG_LOBBY], detours[ENG_LOBBY], 20);
     g_eng.original[ENG_LOCAL] = hook_prepare((void *)g_eng.site[ENG_LOCAL], detours[ENG_LOCAL], 22);
+    /* Feed: seven pushes and sub rsp. Lobby launch: five pushes and the frame
+     * LEA (its stack-probe call follows at +23). Offline launch: three
+     * pushes, sub rsp and the frame-cookie store. All position-independent. */
+    g_eng.original[ENG_FEED] = hook_prepare((void *)g_eng.site[ENG_FEED], detours[ENG_FEED], 14);
+    g_eng.original[ENG_LOBBY_LAUNCH] = hook_prepare((void *)g_eng.site[ENG_LOBBY_LAUNCH], detours[ENG_LOBBY_LAUNCH], 18);
+    g_eng.original[ENG_OFFLINE_LAUNCH] = hook_prepare((void *)g_eng.site[ENG_OFFLINE_LAUNCH],
+                                                      detours[ENG_OFFLINE_LAUNCH], 17);
     for (size_t i = 0; i < ENG_HOOKS; i++) if (!g_eng.original[i]) goto failed;
     for (size_t i = 0; i < ENG_HOOKS; i++) if (hook_commit(g_eng.original[i]) != B2_PATCH_OK) goto failed;
     InterlockedExchange(&g_eng.ready, 1);
-    backend_log("MODS: published-map gates installed (published play, browser play, lobby join, cached lobby "
-                "join, My Maps play); maps whose mods are installed load natively");
+    backend_log("MODS: published-map gates installed (published play, browser play, SnapMap feed play, lobby join, "
+                "cached lobby join, My Maps play) with the lobby and offline launch boundary; maps whose mods are "
+                "installed load natively");
     return 1;
 failed:
     for (size_t i = ENG_HOOKS; i > 0; i--)

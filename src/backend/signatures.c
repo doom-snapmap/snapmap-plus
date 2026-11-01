@@ -1314,6 +1314,23 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 70 49 8B E8 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? "
       "48 8B 10 48 8B C8 FF 52 38 4C 8B 08 4C 8B C5 48 8B D6 48 8B C8 41 FF 91 B0 01 00 00 "
       "84 C0 74 07 B0 01 E9 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ??", 0xF9A170u, 0xF99620u },
+    { "PublishedFeedPlayDone",     /* idMenuWidget_SnapMapFeed published read completion (widget, request,
+                                    * metadata, map): the action int at *(request+8) is 1 details, 2 author, 3
+                                    * play (history push and lobby launch at +0xE3, or offline launch). Steal 14. */
+      "40 53 55 56 57 41 56 48 81 EC 50 01 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
+      "48 89 84 24 40 01 00 00 4D 8B F1 49 8B E8 48 8B FA 48 8B D9 48 8B 41 18 48 85 C0 75 09 48 8B",
+      0x112B440u, 0x112A5F0u },
+    { "PublishedMapLobbyLaunch",   /* idMenuManager_Shell::LaunchSnapMapLobbyForPublishedMap (manager, flag): the
+                                    * lobby from the newest history record. Steal 18: five pushes and the frame
+                                    * LEA; the stack-probe call follows at +23. */
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 BF FF FF B8 F0 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 "
+      "48 C7 44 24 38 FE FF FF FF 48 89 9C 24 28 42 00 00 48 89 B4 24 30 42 00 00 48 89 BC 24 38 42 00 00",
+      0xFA0770u, 0xF9FCA0u },
+    { "PublishedMapOfflineLaunch", /* idMenuManager_Shell::LaunchPublishedSnapMapForOfflinePlay (manager, metadata,
+                                    * map). Steal 17: three pushes, sub rsp and the frame-cookie store. */
+      "40 53 56 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 "
+      "49 8B D8 48 8B FA 48 8B F1 48 8D 4C 24 20 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 4C 8B 08 48 8B C8 41",
+      0xFA0400u, 0xF9F930u },
     { "LaunchLocalSnapMapForOfflinePlay", /* (manager, localSavedModel*, idSnapMap*): My Maps play, offline
                                     * only; its caller (VK fd2080) parses into a stack map. Steal 22. */
       "40 55 53 56 57 41 56 48 8D AC 24 50 FF FF FF 48 81 EC B0 01 00 00 48 C7 44 24 28 FE FF FF FF",

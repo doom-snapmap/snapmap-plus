@@ -1456,31 +1456,56 @@ Everything else reaches the engine unchanged: vanilla maps, and maps whose
 rows an installed folder serves, whatever its hash, which play with the
 installed copy.
 
-Identification. The `DeserializeFromJson` detour classifies each parse by the
-engine caller's return address: `PublishedMapRead`+0x12A is the offline read of
-the cached `map.decl`, `SnapMapReadSizeLimit`+0x5D the profile reader under
-`PublishedMapComplete`; anything else (editor, My Maps, a rawmap, the product's
-own resume) is another parse. After the manifest step and the native parse,
+Identification. The `DeserializeFromJson` detour reports each parse with the
+map object it filled and a classification by the engine caller's return
+address: `PublishedMapRead`+0x12A is the offline read of the cached `map.decl`,
+`SnapMapReadSizeLimit`+0x5D the profile reader under `PublishedMapComplete`;
+anything else (editor, My Maps, a rawmap, the product's own resume) is another
+parse. After the manifest step and the native parse,
 `sh_modpublished_parse_seen` records beside the kept rows the kind of read, the
-map object it filled and, when a named bundle is missing, a copy of the text.
-`sh_modpublished_last_parse` exposes the record.
+map object it filled, the frame it ran in and, when a named bundle is missing,
+a copy of the text. `sh_modpublished_last_parse` exposes the record.
 
-Hold points. The completion that follows a read receives the same map object,
-so each gate uses exactly that parse's record:
+Hold points. The completion that follows a read receives the same map object
+in the same frame (the main-thread tick after every native frame ends one), so
+each gate uses the record whose map is its map and whose frame is the current
+one. The classification is reported, not required: a second detour on
+`DeserializeFromJson` that rewrites the return address (a debugger's, an
+overlay's) makes every published read look like another parse, and gating on
+it let every map with missing mods through.
 
 | Gate | Vulkan / OpenGL RVA | Steal | Resume |
 |---|---|---|---|
 | `OnSnapPlay` read completion | 0xFA4A80 / 0xFA3FB0 | 18, the cookie load at +11 rewritten | `(manager, NULL, metadata, map)` |
 | Browser published play | 0xFD1E30 / 0xFD1320 | 20 | `(browser, NULL, metadata, map)` |
+| SnapMap feed read completion, play action only | 0x112B440 / 0x112A5F0 | 14 | `(widget, request, metadata, map)` with a request whose action int (+8, engine `operator new`) is 3 |
 | `PublishedMapCacheReady` (joiner) | 0xFA1D60 / 0xFA1290 | 15, stack-probe call at +7 | `(manager, NULL, metadata, map)` after the lobby host's item is re-checked |
 | `CacheMapForLobby`, warm cache (joiner) | 0xF9A170 / 0xF99620 | 20 | the function's own cold branch: wait text, CacheReady and error callbacks, `PublishedMapRead` |
 | `LaunchLocalSnapMapForOfflinePlay` (My Maps) | 0xF9FCF0 / 0xF9F220 | 22 | `(manager, model, map)` when the model is unchanged |
 
-None of these completions reads its request argument. The SnapMap feed
-completion (VK 0x112B440) is not gated: its resume needs the issuer's action int
-at request+8. The warm-cache branch never parses, so it uses the manifest this
-session saw for that item and revision at an earlier gated completion; an item
-never seen is not gated.
+None of these completions reads its request argument except the feed's, which
+reads only its action int (1 details, 2 author, 3 play) and frees it. A held or
+refused feed play still runs the completion with the action set to 0, which
+clears the feed's wait state, frees the int and launches nothing. The
+warm-cache branch never parses, so it uses the manifest this session saw for
+that item and revision at an earlier gated completion; an item never seen is
+not gated.
+
+The launch boundary. Every published play ends in `PublishedMapLobbyLaunch`
+(manager, flag; 0xFA0770 / 0xF9FCA0, steal 18) or `PublishedMapOfflineLaunch`
+(manager, metadata, map; 0xFA0400 / 0xF9F930, steal 17); the install checks that
+browser play calls them at +0x9C and +0xAD and the feed at +0xE3. Each gate
+consumes the record it decides on, so a record of the current frame that is
+still there at a launch, with rows the asset rule does not serve, belongs to a
+completion no gate knows. `sh_modpub_launch_gate` holds such a lobby launch with
+the same question (its resume runs the manifest step on the retained text and
+calls the launch with its flag, when the screen it was held on is still
+current) and refuses such an offline launch, which has no map object left to
+resume with, with "This map needs mods that could not be prepared. The map was
+not loaded." A launch without a parse of its frame (the lobby's own relaunch
+from the map cache) is not checked. The level load at START MISSION builds from
+the cached map and does not parse again, so this boundary is the last point at
+which a missing mod can be caught.
 
 The hold. When bundles are missing the gate retains a deep copy of the published
 metadata (the copy constructor `PublishedMapSelectionConstruct` uses, inside
