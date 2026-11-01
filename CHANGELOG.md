@@ -3,6 +3,35 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.21 -- 2026-11-01 (beta)
+
+**Map-wide mods, prefab sharing and a safer installer**
+
+Mods can now be used by a whole map without placing anything, and a mod's replaced game files apply only in maps that use it. Prefabs and rawmaps with mods are shared as a single ZIP, deleted mods and prefabs go to the Recycle Bin, and the installer now converts old mod folders for you.
+
+### New
+- **Mods:** Use a mod in the whole open map without placing anything, and the map saves, publishes and downloads it like any other mod.
+- **Mods:** A mod's requirements can now set console settings to any value and run console lines when it starts and stops, restoring what they replaced.
+- **Prefabs:** Export and Import a prefab as one ZIP that carries the mods it needs, installing them on import.
+- **Maps:** A rawmap of a map that uses mods also saves a .zip beside it holding the map and its mod folders, so others can open it.
+- **Logic:** A Set (String) node whose text starts with smp: runs a command on the activating player, while games without Snapmap+ just store the string.
+- **Installer:** Install and update now run a store tool that converts mod folders from earlier releases, sending anything it removes to the Recycle Bin.
+
+### Improved
+- **Mods:** Files a mod replaces apply only while a map that uses it is open or played, unless its mod.json sets the always scope.
+- **Mods:** The tab shows one list sorted by name, marks mods the open map uses with an In this map pill, and says where each folder came from.
+- **Mods:** Uninstall moves the folder to the Windows Recycle Bin so you can restore it by hand, and deleted prefabs go there too.
+- **Mods:** A mod folder you add, change or delete by hand is picked up automatically shortly after the folder goes quiet.
+- **Prefabs:** Placing a module prefab is refused up front when it names rooms your editor does not have, naming each missing room.
+- **Maps:** A map now plays with any installed mod folder that provides the content it uses, rather than one exact build.
+
+### Fixed
+- **Mods:** Leaving a playtest with certain mods installed no longer crashes the next main menu load.
+- **Maps:** A published or lobby map whose mods are missing no longer starts without them; the download prompt appears or the map is refused.
+- **Mods:** Pressing Play again on a map whose mods are downloading now waits for that download instead of restarting it.
+
+_Plus 38 smaller fixes and internal changes._
+
 ## v0.2.1-beta.20 -- 2026-10-30 (beta)
 
 **April 2024 DOOM support and a new mods system**
