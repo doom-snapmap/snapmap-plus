@@ -147,6 +147,9 @@ static const char *hash64(char c, char *out)
 static const char *g_bundle_extra;
 /* The author's "name" the next make_bundle writes (NULL: the id). */
 static const char *g_bundle_name;
+/* A files[] path written as a stock pointer to the game's own bytes under the
+ * same name (modbundle.h sh_mb_stock_restore), or NULL. */
+static const char *g_fx_restore;
 
 /* Write <root>\<folder>\mod.json (an author block and its product block) and
  * its files. A folder written under <root>\legacy stands for a package a map
@@ -198,6 +201,13 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
         const fx_file *f = &files[i];
         long long size = f->size >= 0 ? f->size : (long long)strlen(f->body ? f->body : "");
         char b[65];
+        if (g_fx_restore && !strcmp(g_fx_restore, f->path))
+            at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
+                              "      {\"path\": \"assets/%s\", \"stock\": {\"source\": \"%s\", \"sha256\": \"%s\"}, "
+                              "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
+                              f->path, f->path, hash64(f->blob, b), f->ptype, f->pname, f->needs ? f->needs : "[]",
+                              i + 1 < n ? "," : "");
+        else
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                           "      {\"path\": \"assets/%s\", \"sha256\": \"%s\", \"size\": %lld, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
@@ -2004,9 +2014,12 @@ static void test_refusals(void)
 /* ------------------------------------------------------------------ first parse of a permanent decl (lane P52) */
 
 /* The engine side of the P52 crash: the menu collectibles' unlockModel
- * 'spidermastermind' is permanent (level 4) but only created by reference
- * (state 2, not parsed), and the md6Def it names was created by this map pass
- * at level 1. DeclSourceFind knows neither, so the plan reaches the load. */
+ * 'spidermastermind' is permanent (level 4), and the md6Def it names was
+ * created by this map pass at level 1. In the first crash the bundle arrived
+ * after boot (taken here as a decl created by reference, state 2); in the
+ * second it was installed at boot, so the game had parsed the unlockModel
+ * through the provider before the Init promotion (state 0). DeclSourceFind
+ * knows neither decl, so the plan reaches the load. */
 typedef struct pf_res { const char *type, *name; unsigned level, state; int parses; } pf_res;
 static pf_res g_pf[2];
 static int pf_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
@@ -2051,63 +2064,89 @@ static void test_permanent_first_parse(void)
           -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6", NULL, '2' },
     };
 
-    /* The decision: only a permanent decl the engine has not parsed, and only
-     * in a pass that does not keep its decls. */
-    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 0) == 1);
+    int round;
+
+    /* The decision: every permanent decl that has not failed, and only in a
+     * pass that does not keep its decls. */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 0) == 1);       /* created by reference */
     CHECK(sh_modserve_load_left_to_engine(4, 0xc2, 0) == 1);       /* upper state bits are not the parse */
-    CHECK(sh_modserve_load_left_to_engine(4, 0x00, 0) == 0);       /* parsed: re-parsed in place as before */
-    CHECK(sh_modserve_load_left_to_engine(4, 0x03, 0) == 0);       /* failed or defaulted: not a reference */
-    CHECK(sh_modserve_load_left_to_engine(1, 0x02, 0) == 0);       /* map-scoped: purged with what it names */
-    CHECK(sh_modserve_load_left_to_engine(2, 0x02, 0) == 0);
-    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 1) == 0);       /* the editor pass keeps its closure */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x00, 0) == 1);       /* parsed (the second crash) */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x50, 0) == 1);
+    CHECK(sh_modserve_load_left_to_engine(4, 0x01, 0) == 0);       /* failed or defaulted: as before */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x03, 0) == 0);
+    CHECK(sh_modserve_load_left_to_engine(1, 0x00, 0) == 0);       /* map-scoped: purged with what it names */
+    CHECK(sh_modserve_load_left_to_engine(1, 0x02, 0) == 0);
+    CHECK(sh_modserve_load_left_to_engine(2, 0x00, 0) == 0);
+    CHECK(sh_modserve_load_left_to_engine(4, 0x00, 1) == 0);       /* the editor pass keeps its closure */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 1) == 0);
 
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) *slash = 0;
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\firstparse\\mods", top);
-    mkdirs(root);
-    g_bundle_extra = "\"legacy\": {},\n  ";
-    make_bundle(root, "pf.spider@0.0.0+1", "pf.spider", "0.0.0", '8',
-                "\"generated/decls/unlockmodel/spidermastermind.decl\", "
-                "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\"",
-                files, 2, NULL);
-    g_bundle_extra = NULL;
-    hash64('8', hash);
-    hashes[0] = hash;
-    CHECK(sh_modserve_index_build(root) == 1);
 
-    g_pf[0].type = "unlockModel"; g_pf[0].name = "spidermastermind";
-    g_pf[0].level = 4; g_pf[0].state = 0x02; g_pf[0].parses = 0;
-    g_pf[1].type = "md6Def"; g_pf[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
-    g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
+    /* Round 0: installed during a play hold (the unlockModel only referenced).
+     * Round 1: installed before boot (the unlockModel parsed at boot). */
+    for (round = 0; round < 2; ++round) {
+        unsigned before = round ? 0x00 : 0x02;
+        char digit = round ? '7' : '8';
+        char line[400];
+        _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\firstparse%d\\mods", top, round);
+        mkdirs(root);
+        g_bundle_extra = "\"legacy\": {},\n  ";
+        /* The second time the unlockModel is what the real bundle ships: a
+         * pointer to the game's own bytes under the same name. */
+        g_fx_restore = round ? "generated/decls/unlockmodel/spidermastermind.decl" : NULL;
+        make_bundle(root, "pf.spider@0.0.0+1", "pf.spider", "0.0.0", digit,
+                    "\"generated/decls/unlockmodel/spidermastermind.decl\", "
+                    "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\"",
+                    files, 2, NULL);
+        g_fx_restore = NULL;
+        g_bundle_extra = NULL;
+        hash64(digit, hash);
+        hashes[0] = hash;
+        CHECK(sh_modserve_index_build(root) == 1);
+        sh_modserve_test_reset_registration();   /* a new session: nothing remembered as ready */
+        /* The refresh and the early re-parse ask this before re-parsing a permanent decl. */
+        CHECK(sh_modserve_is_restore("generated/decls/unlockmodel/spidermastermind.decl") == round);
+        CHECK(sh_modserve_is_restore("generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/"
+                                     "spider_mastermind.md6.decl") == 0);
+        CHECK(sh_modserve_is_restore("generated/decls/unlockmodel/nothing.decl") == 0);
+        g_pf[0].type = "unlockModel"; g_pf[0].name = "spidermastermind";
+        g_pf[0].level = 4; g_pf[0].state = before; g_pf[0].parses = 0;
+        g_pf[1].type = "md6Def"; g_pf[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
+        g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
 
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2 && unknown == 0);
-    log_clear();
-    g_calls[0] = 0;
-    ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
-    CHECK(ready == 2);
-    /* The map pass never makes the collectible's first parse... */
-    CHECK(g_pf[0].parses == 0 && g_pf[0].state == 0x02 && g_pf[0].level == 4);
-    CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;"));
-    CHECK(log_has("map: unlockModel 'spidermastermind' (pf.spider) left to the game: permanent and not parsed yet "
-                  "(state 0x02 lifetime 4); the provider serves these bytes when the game parses it"));
-    CHECK(!log_has("map: unlockModel 'spidermastermind' (pf.spider) READY"));
-    /* ...while the map-scoped md6Def is still loaded with the bundle's bytes. */
-    CHECK(g_pf[1].parses == 1 && strstr(g_calls, "L:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;"));
-    CHECK(log_has("map: md6Def 'zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6' (pf.spider) READY: "
-                  "state 0x00 lifetime 1"));
-    /* The provider still serves the shadow for the game's own parse. */
-    CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
-    sh_modserve_plan_free(&p);
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2 && unknown == 0);
+        log_clear();
+        g_calls[0] = 0;
+        ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
+        CHECK(ready == 2);
+        /* The map pass never parses the permanent collectible... */
+        CHECK(g_pf[0].parses == 0 && g_pf[0].state == before && g_pf[0].level == 4);
+        CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;"));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "map: unlockModel 'spidermastermind' (pf.spider) left to the game: "
+                    "permanent, %s (state 0x%02x lifetime 4); the provider serves these bytes whenever the game parses it",
+                    round ? "already parsed" : "not parsed yet", before);
+        CHECK(log_has(line));
+        CHECK(!log_has("map: unlockModel 'spidermastermind' (pf.spider) READY"));
+        /* ...while the map-scoped md6Def is still loaded with the bundle's bytes. */
+        CHECK(g_pf[1].parses == 1 &&
+              strstr(g_calls, "L:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;"));
+        CHECK(log_has("map: md6Def 'zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6' (pf.spider) READY: "
+                      "state 0x00 lifetime 1"));
+        /* The provider still serves the shadow for the game's own parse. */
+        CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
+        sh_modserve_plan_free(&p);
 
-    /* The next map load skips both quietly. */
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2);
-    log_clear();
-    g_calls[0] = 0;
-    ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
-    CHECK(ready == 2 && g_calls[0] == 0 && g_pf[0].parses == 0 && g_pf[1].parses == 1);
-    CHECK(!log_has("left to the game"));
-    sh_modserve_plan_free(&p);
+        /* The next map load skips both quietly. */
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2);
+        log_clear();
+        g_calls[0] = 0;
+        ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
+        CHECK(ready == 2 && g_calls[0] == 0 && g_pf[0].parses == 0 && g_pf[1].parses == 1);
+        CHECK(!log_has("left to the game"));
+        sh_modserve_plan_free(&p);
+    }
 }
 
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,

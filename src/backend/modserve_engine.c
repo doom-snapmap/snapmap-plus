@@ -266,9 +266,9 @@ static int op_load(void *context, const char *type, const char *name, int persis
             /* DeclFind loads a name the probe admits on demand: a parse it
              * already refused is not run a second time. */
             int refused = me_refused(before, type, name);
-            /* A permanent decl the engine has not parsed yet: parsed here it
-             * would bind to decls this map pass created at level 1 and keep
-             * them after the purge (the menu collectibles' unlockModels). */
+            /* A permanent decl: parsed here it would bind to decls this map
+             * pass created at level 1 and keep them after the purge (the menu
+             * collectibles' unlockModels). out_* carry the levels before. */
             if (!refused && sh_modserve_load_left_to_engine(lifetime, state, persist)) {
                 *out_state = state;
                 *out_lifetime = lifetime;
@@ -614,6 +614,14 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
         if (!d) return 0;
         state = d[RES_STATE_OFF];
         if (state & 2) { r->pending++; return 0; }   /* not parsed yet: the provider will serve it */
+        /* A permanent decl served the game's own bytes: a re-parse would only
+         * rebind it to decls a pass may have created at level 1, which the
+         * next map unload frees under it (the menu collectibles' unlockModels). */
+        if (*(unsigned *)(d + RES_LIFETIME_OFF) == 4 && sh_modserve_is_restore(request) == 1) {
+            me_log("reparse: %s '%s' (%s) left as the game parsed it: permanent, and its bundle serves the game's own "
+                   "bytes", type, name, bundle_id);
+            return 1;
+        }
         /* An animWeb naming a model the engine cannot find would come out of
          * its parse empty (its nodes freed first, nothing rebuilt): the
          * game's own web stays. */

@@ -170,10 +170,10 @@ void sh_modserve_plan_free(sh_modserve_plan *plan);
  * truncated web that looks loaded (state bit 0 clear), so the state byte alone
  * cannot tell; the plan withdraws such a file and never loads it again. */
 #define SH_MODSERVE_LOAD_REFUSED 2
-/* `load` may also answer SH_MODSERVE_LOAD_LEFT: the decl is permanent and the
- * engine has not parsed it yet (sh_modserve_load_left_to_engine), so the pass
- * leaves its first parse to the game, which reads the bundle's bytes through
- * the provider when it needs the decl. Counted as ready. */
+/* `load` may also answer SH_MODSERVE_LOAD_LEFT: the decl is permanent
+ * (sh_modserve_load_left_to_engine), so the pass leaves it to the game, which
+ * reads the bundle's bytes through the provider whenever it parses the decl.
+ * Counted as ready. */
 #define SH_MODSERVE_LOAD_LEFT 3
 typedef struct sh_modserve_engine_ops {
     void *context;
@@ -240,14 +240,16 @@ unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), un
 
 /* 1 when a pass that does not keep its decls (persist 0, the map pass) must
  * not load the resource with level `lifetime` (+0x28) and state byte `state`
- * (+0x2c): a permanent decl (level 4) the engine created by reference and has
- * not parsed (state bits 0-1 == 2). Its first parse binds it to the decls it
- * names, and inside a map pass those are created or found at level 1, so the
- * next map unload frees them while the permanent decl keeps the pointers: the
- * menu collectibles' unlockModel 'spidermastermind' bound to a map-scoped
- * spider_mastermind.md6 this way and SetupModelList faulted on it at the next
- * shell map load (VK RVA 0x33a130). A decl the engine already parsed points
- * at objects that exist under those names and is re-parsed as before. */
+ * (+0x2c): any permanent decl (level 4) that has not failed (state bit 0),
+ * parsed or only created by reference. Parsing it binds it to the decls it
+ * names, and inside a map pass those can be objects the pass created at level
+ * 1, so the next map unload frees them while the permanent decl keeps the
+ * pointers. The menu collectibles' unlockModel 'spidermastermind', parsed at
+ * boot, was re-parsed by the map pass after the pass had created
+ * spider_mastermind.md6 at level 1, and SetupModelList faulted on the freed
+ * md6Def at the next shell map load (VK RVA 0x33a130). Nothing is lost by
+ * leaving it: a permanent decl was parsed through the provider, or by the
+ * early re-parse and the refresh, which already serve it the bundle's bytes. */
 int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist);
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is
@@ -776,6 +778,12 @@ int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn,
 
 /* How many times the provider served `request` from the published table. */
 long sh_modserve_open_count(const char *request);
+
+/* 1 when the file the index serves for `request` is a stock pointer that
+ * restores the game's own bytes under their own name (modbundle.h
+ * sh_mb_stock_restore): the engine holds those bytes parsed already, so an
+ * in-place re-parse changes nothing but what the decl points at. */
+int sh_modserve_is_restore(const char *request);
 
 /* Functions called after every table this layer publishes (boot, rescan),
  * on the thread that built it, outside the build lock, in the order they
