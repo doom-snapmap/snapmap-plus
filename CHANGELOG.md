@@ -26,7 +26,8 @@ Mods can now be used by a whole map without placing anything, and a mod's replac
 - **Maps:** A map now plays with any installed mod folder that provides the content it uses, rather than one exact build.
 
 ### Fixed
-- **Mods:** Leaving a playtest with certain mods installed no longer crashes the next main menu load.
+- **Mods:** Leaving a play session of a map that uses certain mods no longer crashes the game while the menu loads again.
+- **Mods:** A map no longer lists mods that only change the editor, so players who download it are not asked to install them.
 - **Maps:** A published or lobby map whose mods are missing no longer starts without them; the download prompt appears or the map is refused.
 - **Mods:** Pressing Play again on a map whose mods are downloading now waits for that download instead of restarting it.
 
