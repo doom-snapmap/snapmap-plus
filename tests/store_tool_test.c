@@ -298,6 +298,26 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
         CHECK(!strcmp(before, after));
         CHECK(g_discards == discards);
     }
+    /* An entry added to overrides\ after the migration is work again: check names it and migrate moves it. */
+    {
+        char ov1[MAX_PATH * 2], ov2[MAX_PATH * 2];
+        _snprintf_s(ov1, sizeof ov1, _TRUNCATE, "%s\\overrides\\tinypack", fixture);
+        _snprintf_s(ov2, sizeof ov2, _TRUNCATE, "%s\\overrides\\tinypack2", data);
+        Sleep(1100);   /* the record's migratedAt has one-second resolution; the new entry must be newer */
+        CHECK(copy_all(ov1, ov2));
+        mt_write(ov2, "package.json", "{\"id\": \"local.tinypack2\", \"name\": \"Tiny pack two\"}");
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
+        CHECK(said("  overrides\\: 1 entry added or changed since it was migrated") && said("1 kind(s) of work found"));
+        CHECK(!said("not yet moved into mods"));
+        CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+        /* The again pass rebuilds every entry, the ones done before included. */
+        CHECK(said("Done: overrides\\ moved into mods\\ (2 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused)"));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack2\\mod.json", data);
+        CHECK(mt_exists(path));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\mod.json", data);
+        CHECK(mt_exists(path));
+        CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    }
     free(before);
     free(after);
     sh_modstock_reset();

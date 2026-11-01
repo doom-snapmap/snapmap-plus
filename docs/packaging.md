@@ -100,8 +100,8 @@ nothing at startup. On install and update, after the DLLs are in place, the inst
 `snapmap-plus-store check` on `%LOCALAPPDATA%\snapmap-plus`; when that finds work it runs
 `snapmap-plus-store migrate <folder> --doom <the DOOM folder it installed into>`. The tool converts a
 `mods\` folder of earlier releases in place to one folder per mod with a `mod.json`, sends the retired
-`removed-mods\` to the Windows Recycle Bin, and moves the packages in the retired `overrides\` folder
-into `mods\` once, changing nothing in `overrides\` and removing only an empty `override-backups\`;
+`removed-mods\` to the Windows Recycle Bin, and moves the packages in the retired `overrides\` folder into `mods\` (a package added there after an
+earlier move included), changing nothing in `overrides\` and removing only an empty `override-backups\`;
 everything it deletes goes to the Recycle Bin. No `package-cache` or `package-staging` folder is
 created, and apart from removing an empty `override-backups\`, `package-cache\` or `package-staging\`
 the installer itself never creates, changes or removes `mods\` or the retired package folders. A missing or failing tool is a warning, never a failed install. See

@@ -310,7 +310,9 @@ does not refuse, since the engine already tolerates those names.
   It first runs `check`, which lists what it finds from earlier releases, and runs `migrate` only
   when there is something to do; its lines are printed as it goes, and a failure is a warning that
   names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
-  Everything it deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
+  `snapmap-plus migrate` runs the same check and migrate on its own, without reinstalling, which is
+  how a package dropped into `overrides\` after the first conversion gets moved. Everything it
+  deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
   at the next rescan, as before.
 - The installer leaves the DOOM folder holding exactly the two Snapmap+ files for the installed
   build, removing the other build's files, files of earlier releases and the backups earlier

@@ -50,6 +50,7 @@ embed the Windows resources. Use `build.ps1` for distributable executables.
 snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
 snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
 snapmap-plus uninstall [--doom <path>] [--yes]
+snapmap-plus migrate   [--doom <path>]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
 snapmap-plus version
@@ -287,12 +288,17 @@ converts `mods\` folders of the retired layout to one folder per mod with a
 `mod.json` (`bundle.json`, `.state.json`, `blobs\` and `legacy\` go, hard-linked
 files get their own copies, the old record files are folded into
 `mods\snapmap-plus.json`), sends the retired recycle bin `removed-mods\` to the
-Windows Recycle Bin, and moves the packages in `overrides\` into `mods\` once,
-leaving `overrides\` unchanged and removing only an empty `override-backups\`.
+Windows Recycle Bin, and moves the packages in `overrides\` into `mods\`, leaving
+`overrides\` unchanged and removing only an empty `override-backups\`; a package
+added to `overrides\` after that first move is moved by the next check and
+migrate, so running `update` again (or `migrate`) picks it up.
 Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
 check or migrate that does not finish is a warning, never a failed install; the
 warning gives the command to run by hand with DOOM closed,
 `"%LOCALAPPDATA%\snapmap-plus\snapmap-plus-store.exe" migrate "%LOCALAPPDATA%\snapmap-plus" --doom "<DOOM folder>"`.
+`snapmap-plus migrate [--doom <path>]` (`migratecmd.go`) runs the same check and
+migrate with the tool the last install or update kept in `%LOCALAPPDATA%\snapmap-plus`,
+without downloading or reinstalling anything; without the tool it points at `update`.
 Apart from removing empty retired folders, the installer itself never creates,
 changes or removes `mods\` or the retired package folders (see
 [Mods](../docs/capabilities.md#mods)). In the game, `sh_mods migrate` repeats the

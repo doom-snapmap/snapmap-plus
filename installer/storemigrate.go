@@ -41,29 +41,7 @@ func migrateStore(bundleRoot, doom string) {
 	if tool == "" {
 		return
 	}
-	rerun := fmt.Sprintf(`"%s" migrate "%s" --doom "%s"`, filepath.Join(dir, storeToolName), dir, doom)
-	code, err := runStoreTool(tool, "check", dir)
-	switch {
-	case err != nil:
-		ui.Warn("%s could not be run (%v), so your mods folder was not checked for files of earlier releases. "+
-			"To do it by hand, close DOOM and run:\n  %s", storeToolName, err, rerun)
-		return
-	case code == 0:
-		return
-	case code != 1:
-		ui.Warn("%s could not check your mods folder (exit code %d). To try again, close DOOM and run:\n  %s",
-			storeToolName, code, rerun)
-		return
-	}
-	code, err = runStoreTool(tool, "migrate", dir, "--doom", doom)
-	switch {
-	case err != nil:
-		ui.Warn("%s could not be run (%v), so your mods folder was not migrated. To do it by hand, close DOOM "+
-			"and run:\n  %s", storeToolName, err, rerun)
-	case code != 0:
-		ui.Warn("%s did not finish migrating your mods folder (exit code %d); Snapmap+ itself is installed. "+
-			"To finish, close DOOM and run:\n  %s", storeToolName, code, rerun)
-	}
+	runStoreMigration(tool, dir, doom)
 }
 
 // placeStoreTool checks the bundle's tool against TOOLS.sha256 and keeps a copy beside the installer's

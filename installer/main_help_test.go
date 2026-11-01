@@ -6,7 +6,7 @@ import (
 )
 
 func TestCommandHelpDoesNotPerformAction(t *testing.T) {
-	for _, command := range []string{"install", "update", "uninstall"} {
+	for _, command := range []string{"install", "update", "uninstall", "migrate"} {
 		for _, option := range []string{"--help", "-h"} {
 			t.Run(command+"/"+option, func(t *testing.T) {
 				root := t.TempDir()

@@ -263,7 +263,7 @@ static int st_scan_store(const st_store *s, st_scan *out)
     g_log_on = saved;
     out->kinds = (out->uc.layout_folders > 0) + out->uc.blobs_present + out->uc.legacy_present + (out->uc.record_files > 0) +
                  (out->uc.tidy_drops + out->uc.tidy_renames > 0 || out->uc.tidy_migration) + out->uc.bin_present +
-                 (out->uc.bin_section && !out->uc.bin_present) + out->ov_due;
+                 (out->uc.bin_section && !out->uc.bin_present) + (out->ov_due || out->ov_changed > 0);
     return 1;
 }
 
@@ -305,8 +305,8 @@ static void st_list(const st_scan *sc)
     if (sc->ov_due)
         st_say(0, "  overrides\\: %u entr%s not yet moved into mods\\", sc->ov_entries, sc->ov_entries == 1 ? "y" : "ies");
     if (sc->ov_changed)
-        st_say(0, "  note: overrides\\ has %d entr%s added or changed since it was migrated; 'sh_mods migrate --again' in "
-               "the game moves them", sc->ov_changed, sc->ov_changed == 1 ? "y" : "ies");
+        st_say(0, "  overrides\\: %d entr%s added or changed since it was migrated", sc->ov_changed,
+               sc->ov_changed == 1 ? "y" : "ies");
 }
 
 /* ---------------------------------------------------------- commands ---- */
@@ -323,7 +323,7 @@ static void st_usage(int err)
     st_emit(err, "check lists what needs migrating and changes nothing (exit 0 nothing to do, 1 work to do, 2 error).");
     st_emit(err, "migrate does that work; everything it deletes goes to the Recycle Bin (exit 0 done, 1 partly done,");
     st_emit(err, "2 error). It needs the DOOM folder to move overrides\\ (found through Steam when --doom is not");
-    st_emit(err, "given). Close DOOM first.");
+    st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. Close DOOM first.");
 }
 
 static void st_store_free(st_store *s)
@@ -405,7 +405,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && before.ov_due && g_steam) doom = st_steam_doom();
+    if (!doom && (before.ov_due || before.ov_changed) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
@@ -427,8 +427,9 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         int r = sh_ms_bin_sweep(NULL, NULL);
         if (r >= 0) st_part(done, sizeof done, "removed-mods\\ retired");
     }
-    /* 3. The retired overrides folder, with the game's archives as the stock bridge's install. */
-    if (before.ov_due) {
+    /* 3. The retired overrides folder, with the game's archives as the stock bridge's install. A
+     * folder migrated before whose entries were added to or changed since runs the pass again. */
+    if (before.ov_due || before.ov_changed) {
         if (!s->acp) {
             st_say(0, "  overrides\\: not moved: the store's path cannot be spelled in this system's code page");
         } else if (!doom) {
@@ -442,7 +443,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
             sh_modstock_set_install(doom_u8);
             sh_modstock_register();
             st_say(0, "  overrides\\: moving into mods\\, reading game files from %s", doom_u8 ? doom_u8 : "?");
-            r = sh_modmigrate_run(0, &ms);
+            r = sh_modmigrate_run(before.ov_due ? 0 : 1, &ms);
             if (r > 0)
                 st_part(done, sizeof done, "overrides\\ moved into mods\\ (%u built, %u delivered converted, %u reused, %u skipped, "
                         "%u refused)", ms.built, ms.converted, ms.reused, ms.skipped, ms.refused);

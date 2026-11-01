@@ -109,8 +109,10 @@ earlier release has a complete package converted into a local mod on load; any
 other package is removed. Nothing is loaded from
 `%LOCALAPPDATA%\snapmap-plus\overrides\`: on install and update the installer
 runs `snapmap-plus-store.exe`, which converts a mods folder of earlier releases
-and moves the packages in `overrides\` into `mods\`, leaving `overrides\` as it
-was for you to keep or delete; whatever it deletes goes to the Recycle Bin. See
+and moves the packages in `overrides\` into `mods\` (packages you add there later
+included), leaving `overrides\` as it was for you to keep or delete; whatever it
+deletes goes to the Recycle Bin. `snapmap-plus migrate` runs that conversion by
+itself, without reinstalling. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits
