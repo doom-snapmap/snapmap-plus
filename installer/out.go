@@ -352,21 +352,37 @@ func (c *console) Raw(text string) {
 	c.blank = text == "\n" || strings.HasSuffix(text, "\n\n")
 }
 
-// Help writes the usage text with its first line and the named heading lines in bold.
+// Help writes the usage text in the shape of every other command: the first line in bold, each named
+// heading as a section (a blank line, the title, a rule), command lines with their optional parts muted.
 func (c *console) Help(text string, headings ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w := c.stdout()
 	c.flushPending(w)
 	for i, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		bold := i == 0
+		if i == 0 {
+			c.writeLines(w, c.paint(w, ansiBold, l))
+			continue
+		}
+		heading := false
 		for _, h := range headings {
-			bold = bold || l == h
+			heading = heading || l == h
 		}
-		if bold {
-			l = c.paint(w, ansiBold, l)
+		switch {
+		case heading:
+			title := strings.TrimSuffix(l, ":")
+			c.gap(w)
+			c.writeLines(w, c.paint(w, ansiBold, title), c.paint(w, ansiGrey, strings.Repeat("-", len(title))))
+		case l == "":
+			c.gap(w)
+		case strings.HasPrefix(l, indent+"snapmap-plus "):
+			if k := strings.Index(l, " ["); k > 0 {
+				l = l[:k] + c.paint(w, ansiGrey, l[k:])
+			}
+			c.writeLines(w, l)
+		default:
+			c.writeLines(w, l)
 		}
-		c.writeLines(w, l)
 	}
 }
 
