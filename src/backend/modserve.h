@@ -170,6 +170,11 @@ void sh_modserve_plan_free(sh_modserve_plan *plan);
  * truncated web that looks loaded (state bit 0 clear), so the state byte alone
  * cannot tell; the plan withdraws such a file and never loads it again. */
 #define SH_MODSERVE_LOAD_REFUSED 2
+/* `load` may also answer SH_MODSERVE_LOAD_LEFT: the decl is permanent and the
+ * engine has not parsed it yet (sh_modserve_load_left_to_engine), so the pass
+ * leaves its first parse to the game, which reads the bundle's bytes through
+ * the provider when it needs the decl. Counted as ready. */
+#define SH_MODSERVE_LOAD_LEFT 3
 typedef struct sh_modserve_engine_ops {
     void *context;
     int (*source_registered)(void *context, const char *type, const char *name);
@@ -232,6 +237,18 @@ int sh_modserve_error_names_decl(const char *text, const char *type, const char 
  * permanent consumer still points at it. Returns the level the load left
  * (before the restore); `*was` receives the level before. */
 unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was);
+
+/* 1 when a pass that does not keep its decls (persist 0, the map pass) must
+ * not load the resource with level `lifetime` (+0x28) and state byte `state`
+ * (+0x2c): a permanent decl (level 4) the engine created by reference and has
+ * not parsed (state bits 0-1 == 2). Its first parse binds it to the decls it
+ * names, and inside a map pass those are created or found at level 1, so the
+ * next map unload frees them while the permanent decl keeps the pointers: the
+ * menu collectibles' unlockModel 'spidermastermind' bound to a map-scoped
+ * spider_mastermind.md6 this way and SetupModelList faulted on it at the next
+ * shell map load (VK RVA 0x33a130). A decl the engine already parsed points
+ * at objects that exist under those names and is re-parsed as before. */
+int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist);
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is
  * not registered yet (registration only publishes the source, so a decl that

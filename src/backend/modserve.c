@@ -3207,6 +3207,11 @@ unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), un
     return after;
 }
 
+int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist)
+{
+    return !persist && lifetime == 4 && (state & 3) == 2;
+}
+
 int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -3354,7 +3359,16 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             continue;
         }
         loaded = ops->load(ops->context, s->type, s->name, s->persist, &state, &lifetime);
-        if (loaded == SH_MODSERVE_LOAD_REFUSED) {
+        if (loaded == SH_MODSERVE_LOAD_LEFT) {
+            /* A permanent decl the game has not parsed: its first parse is the
+             * game's, outside this pass (sh_modserve_load_left_to_engine). */
+            InterlockedExchange(&f->reg_state, 1);
+            s->ready = 1;
+            ready++;
+            ms_log("%s: %s '%s' (%s) left to the game: permanent and not parsed yet (state 0x%02x lifetime %u); "
+                   "the provider serves these bytes when the game parses it", phase, s->type, s->name, s->bundle_id,
+                   state & 0xff, lifetime);
+        } else if (loaded == SH_MODSERVE_LOAD_REFUSED) {
             /* The parse failed although the load reports success: withdrawn,
              * so no later pass or demand load parses these bytes again. */
             char why[300];

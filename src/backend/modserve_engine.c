@@ -266,6 +266,14 @@ static int op_load(void *context, const char *type, const char *name, int persis
             /* DeclFind loads a name the probe admits on demand: a parse it
              * already refused is not run a second time. */
             int refused = me_refused(before, type, name);
+            /* A permanent decl the engine has not parsed yet: parsed here it
+             * would bind to decls this map pass created at level 1 and keep
+             * them after the purge (the menu collectibles' unlockModels). */
+            if (!refused && sh_modserve_load_left_to_engine(lifetime, state, persist)) {
+                *out_state = state;
+                *out_lifetime = lifetime;
+                return SH_MODSERVE_LOAD_LEFT;
+            }
             if (!refused && !(state & 1)) {
                 /* A new identity with no consumers takes the native source load
                  * once, at the persistent level, as timeline_tile.c does. */

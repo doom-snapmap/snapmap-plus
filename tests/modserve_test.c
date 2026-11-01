@@ -2001,6 +2001,115 @@ static void test_refusals(void)
     sh_modserve_set_console(NULL);
 }
 
+/* ------------------------------------------------------------------ first parse of a permanent decl (lane P52) */
+
+/* The engine side of the P52 crash: the menu collectibles' unlockModel
+ * 'spidermastermind' is permanent (level 4) but only created by reference
+ * (state 2, not parsed), and the md6Def it names was created by this map pass
+ * at level 1. DeclSourceFind knows neither, so the plan reaches the load. */
+typedef struct pf_res { const char *type, *name; unsigned level, state; int parses; } pf_res;
+static pf_res g_pf[2];
+static int pf_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
+static int pf_stock(void *c, const char *request) { (void)c; (void)request; return 1; }
+static int pf_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    int i;
+    (void)c;
+    for (i = 0; i < 2; ++i) {
+        pf_res *r = &g_pf[i];
+        if (_stricmp(r->type, type) || strcmp(r->name, name)) continue;
+        /* As op_load decides it. */
+        if (sh_modserve_load_left_to_engine(r->level, r->state, persist)) {
+            *state = r->state;
+            *lifetime = r->level;
+            return SH_MODSERVE_LOAD_LEFT;
+        }
+        call_log(persist ? "P" : "L", type, name);
+        r->state = 0;
+        r->parses++;
+        *state = r->state;
+        *lifetime = r->level;
+        return 1;
+    }
+    return 0;
+}
+static const sh_modserve_engine_ops g_pf_ops = { NULL, pf_source, fake_register, pf_load, pf_stock };
+
+static void test_permanent_first_parse(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], hash[65];
+    char *slash;
+    sh_modserve_plan p;
+    const char *hashes[1];
+    int unknown = 0, ready;
+    static const fx_file files[] = {
+        { "generated/decls/unlockmodel/spidermastermind.decl",
+          "{\n\tedit = {\n\t\tunlockModel = \"zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6\";\n\t}\n}\n",
+          -1, "unlockModel", "spidermastermind", NULL, '1' },
+        { "generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl",
+          "{\n\tinit = {\n\t}\n}\n",
+          -1, "md6Def", "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6", NULL, '2' },
+    };
+
+    /* The decision: only a permanent decl the engine has not parsed, and only
+     * in a pass that does not keep its decls. */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 0) == 1);
+    CHECK(sh_modserve_load_left_to_engine(4, 0xc2, 0) == 1);       /* upper state bits are not the parse */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x00, 0) == 0);       /* parsed: re-parsed in place as before */
+    CHECK(sh_modserve_load_left_to_engine(4, 0x03, 0) == 0);       /* failed or defaulted: not a reference */
+    CHECK(sh_modserve_load_left_to_engine(1, 0x02, 0) == 0);       /* map-scoped: purged with what it names */
+    CHECK(sh_modserve_load_left_to_engine(2, 0x02, 0) == 0);
+    CHECK(sh_modserve_load_left_to_engine(4, 0x02, 1) == 0);       /* the editor pass keeps its closure */
+
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\firstparse\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"legacy\": {},\n  ";
+    make_bundle(root, "pf.spider@0.0.0+1", "pf.spider", "0.0.0", '8',
+                "\"generated/decls/unlockmodel/spidermastermind.decl\", "
+                "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\"",
+                files, 2, NULL);
+    g_bundle_extra = NULL;
+    hash64('8', hash);
+    hashes[0] = hash;
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    g_pf[0].type = "unlockModel"; g_pf[0].name = "spidermastermind";
+    g_pf[0].level = 4; g_pf[0].state = 0x02; g_pf[0].parses = 0;
+    g_pf[1].type = "md6Def"; g_pf[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
+    g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
+
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2 && unknown == 0);
+    log_clear();
+    g_calls[0] = 0;
+    ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
+    CHECK(ready == 2);
+    /* The map pass never makes the collectible's first parse... */
+    CHECK(g_pf[0].parses == 0 && g_pf[0].state == 0x02 && g_pf[0].level == 4);
+    CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;"));
+    CHECK(log_has("map: unlockModel 'spidermastermind' (pf.spider) left to the game: permanent and not parsed yet "
+                  "(state 0x02 lifetime 4); the provider serves these bytes when the game parses it"));
+    CHECK(!log_has("map: unlockModel 'spidermastermind' (pf.spider) READY"));
+    /* ...while the map-scoped md6Def is still loaded with the bundle's bytes. */
+    CHECK(g_pf[1].parses == 1 && strstr(g_calls, "L:md6Def:zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6;"));
+    CHECK(log_has("map: md6Def 'zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6' (pf.spider) READY: "
+                  "state 0x00 lifetime 1"));
+    /* The provider still serves the shadow for the game's own parse. */
+    CHECK(sh_modserve_lookup("generated/decls/unlockmodel/spidermastermind.decl", NULL));
+    sh_modserve_plan_free(&p);
+
+    /* The next map load skips both quietly. */
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2);
+    log_clear();
+    g_calls[0] = 0;
+    ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
+    CHECK(ready == 2 && g_calls[0] == 0 && g_pf[0].parses == 0 && g_pf[1].parses == 1);
+    CHECK(!log_has("left to the game"));
+    sh_modserve_plan_free(&p);
+}
+
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
@@ -2554,6 +2663,7 @@ int main(void)
     test_editor_refs();
     test_watermark();
     test_refusals();
+    test_permanent_first_parse();
     test_bundle_extra();
     test_scope();
     test_scope_providers();
