@@ -1548,6 +1548,52 @@ int main(int argc, char **argv)
         CHECK(sh_modui_slot(NULL, NULL) == 0);
     }
 
+    printf("-- install through the tab: a folder of mods, and several picked folders\n");
+    {
+        char bulk[MAX_PATH], one[MAX_PATH], two[MAX_PATH], bad[MAX_PATH], arg[MAX_PATH * 2 + 2];
+        _snprintf_s(bulk, sizeof bulk, _TRUNCATE, "%s\\authoring\\bulk", tmp);
+        _snprintf_s(one, sizeof one, _TRUNCATE, "%s\\group\\bulk.one", bulk);
+        _snprintf_s(two, sizeof two, _TRUNCATE, "%s\\bulk.two", bulk);
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\bad", bulk);
+        mt_write(one, "mod.json", "{\"id\":\"bulk.one\",\"version\":\"1.0.0\",\"name\":\"Bulk one\",\"author\":\"t\"}");
+        mt_write(one, "assets\\generated\\image\\mods\\bulk.one\\a.bimage", "bytes of one");
+        mt_write(two, "mod.json", "{\"id\":\"bulk.two\",\"version\":\"1.0.0\",\"name\":\"Bulk two\",\"author\":\"t\"}");
+        mt_write(two, "assets\\generated\\image\\mods\\bulk.two\\a.bimage", "bytes of two");
+        mt_write(bad, "mod.json", "{}");
+        g_rescans = 0;
+        doc = run_doc(SH_MODS_ACT_INSTALL, bulk);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":true"));
+        CHECK(has(doc, "\"installedCount\":2,\"refusedCount\":1"));
+        CHECK(has(doc, "Installed 2 mods; 1 refused: bad ("));
+        CHECK(has(doc, "\"key\":\"bulk."));
+        CHECK(has(doc, "\"folder\":\"") && has(doc, "\\\\group\\\\bulk.one\",\"ok\":true,\"key\":\"bulk.one\""));
+        CHECK(has(doc, "\\\\bulk.two\",\"ok\":true,\"key\":\"bulk.two\""));
+        CHECK(has(doc, "\\\\bad\",\"ok\":false,\"key\":\"\""));
+        CHECK(g_rescans == 1);
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "bulk.one", "\"state\":\"installed\"") && bundle_has(doc, "bulk.two", "\"state\":\"installed\""));
+        free(doc);
+        /* Several picked folders, newline-separated: each a mod or a folder of mods. */
+        _snprintf_s(arg, sizeof arg, _TRUNCATE, "%s\n%s", one, two);
+        g_rescans = 0;
+        doc = run_doc(SH_MODS_ACT_INSTALL, arg);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":true") && has(doc, "\"installedCount\":2,\"refusedCount\":0"));
+        CHECK(has(doc, "\"message\":\"Installed 2 mods.\""));
+        CHECK(g_rescans == 1);
+        free(doc);
+        /* A folder with nothing below it is refused with the reason. */
+        _snprintf_s(arg, sizeof arg, _TRUNCATE, "%s\\empty", bulk);
+        CreateDirectoryA(arg, NULL);
+        doc = run_doc(SH_MODS_ACT_INSTALL, arg);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":false") && has(doc, "no mod.json in it or in any folder below it"));
+        free(doc);
+        /* A single picked mod folder keeps the single-mod result. */
+        doc = run_doc(SH_MODS_ACT_INSTALL, two);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":true") && has(doc, "\"key\":\"bulk.two\"") && !has(doc, "installedCount"));
+        free(doc);
+    }
+
     mt_remove_tree(tmp);
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;

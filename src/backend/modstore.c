@@ -892,6 +892,47 @@ static int ms_entry_cmp(const void *a, const void *b)
     return _stricmp(x->name, y->name);
 }
 
+int sh_ms_folder_is_mod(const char *folder)
+{
+    wchar_t *w = folder && folder[0] ? sh_mb_wpath(folder) : NULL;
+    int r = w && ms_is_dir(w) && ms_has_descriptor(w);
+    free(w);
+    return r;
+}
+
+int sh_ms_find_mods(const char *dir, char ***out, size_t *count)
+{
+    wchar_t *w;
+    ms_found_list found;
+    size_t i;
+    char **list = NULL;
+    if (out) *out = NULL;
+    if (count) *count = 0;
+    if (!dir || !dir[0] || !out || !count) return 0;
+    w = sh_mb_wpath(dir);
+    if (!w || !ms_is_dir(w)) { free(w); return 0; }
+    memset(&found, 0, sizeof found);
+    ms_find_mods(&found, w, L"", 0);
+    free(w);
+    if (found.count) {
+        list = (char **)calloc(found.count, sizeof *list);
+        if (!list) { ms_found_free(&found); return 0; }
+        for (i = 0; i < found.count; i++) list[i] = sh_mb_utf8(found.items[i].folder);
+    }
+    *out = list;
+    *count = found.count;
+    ms_found_free(&found);
+    return 1;
+}
+
+void sh_ms_find_free(char **folders, size_t count)
+{
+    size_t i;
+    if (!folders) return;
+    for (i = 0; i < count; i++) free(folders[i]);
+    free(folders);
+}
+
 int sh_ms_enumerate(sh_ms_list *out)
 {
     wchar_t *root;

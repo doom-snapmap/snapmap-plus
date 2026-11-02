@@ -699,6 +699,20 @@ static void test_nested(const char *tmp)
     mt_mkdirs_for(dir);
     CreateDirectoryA(dir, NULL);
 
+    {
+        char **mods = NULL;
+        size_t count = 0;
+        CHECK(sh_ms_find_mods(root, &mods, &count) && count == 3);
+        CHECK(sh_ms_folder_is_mod(mods && count ? mods[0] : "") && !sh_ms_folder_is_mod(root));
+        sh_ms_find_free(mods, count);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods", root);
+        CHECK(sh_ms_find_mods(dir, &mods, &count) && count == 2);
+        sh_ms_find_free(mods, count);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\empty-group", root);
+        CHECK(sh_ms_find_mods(dir, &mods, &count) && count == 0 && mods == NULL);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\nowhere", root);
+        CHECK(!sh_ms_find_mods(dir, &mods, &count));
+    }
     CHECK(sh_ms_enumerate(&list));
     CHECK(list.count == 3);
     CHECK(find_entry(&list, "alex.top") != NULL);

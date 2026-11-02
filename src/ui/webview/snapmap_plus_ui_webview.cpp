@@ -2918,7 +2918,9 @@ static bool poc_mods_fetch(std::string &out)
     return true;
 }
 
-/* The folder dialog for Install, on the worker thread (its own apartment). */
+/* The folder dialog for Install, on the worker thread (its own apartment). Several folders may be
+ * picked; they are joined with newlines, which no path contains, and the backend takes each one as
+ * a mod folder or as a folder of mods. */
 static bool poc_pick_mod_folder(std::wstring &out)
 {
     IFileOpenDialog *dlg = nullptr;
@@ -2928,8 +2930,9 @@ static bool poc_pick_mod_folder(std::wstring &out)
         return false;
     FILEOPENDIALOGOPTIONS opt = 0;
     if (SUCCEEDED(dlg->GetOptions(&opt)))
-        dlg->SetOptions(opt | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_PATHMUSTEXIST);
-    dlg->SetTitle(L"Install a mod: choose the folder that holds mod.json and assets");
+        dlg->SetOptions(opt | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT |
+                        FOS_PATHMUSTEXIST);
+    dlg->SetTitle(L"Install mods: choose mod folders, or a folder that holds several");
     dlg->SetOkButtonLabel(L"Install");
     {
         static const GUID kModFolderPickerGuid =
@@ -2948,16 +2951,23 @@ static bool poc_pick_mod_folder(std::wstring &out)
         }
     }
     if (SUCCEEDED(dlg->Show(g_hwnd))) {
-        IShellItem *item = nullptr;
-        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
-            PWSTR path = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                out = path;
-                ok = !out.empty();
-                CoTaskMemFree(path);
+        IShellItemArray *items = nullptr;
+        if (SUCCEEDED(dlg->GetResults(&items)) && items) {
+            DWORD count = 0;
+            items->GetCount(&count);
+            for (DWORD i = 0; i < count; i++) {
+                IShellItem *item = nullptr;
+                if (FAILED(items->GetItemAt(i, &item)) || !item) continue;
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    if (path[0]) { if (!out.empty()) out += L"\n"; out += path; }
+                    CoTaskMemFree(path);
+                }
+                item->Release();
             }
-            item->Release();
+            items->Release();
         }
+        ok = !out.empty();
     }
     dlg->Release();
     return ok;

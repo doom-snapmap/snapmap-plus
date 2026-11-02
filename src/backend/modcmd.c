@@ -184,7 +184,7 @@ static void mc_build(const char *folder)
     sh_ms_list_free(&list);
 }
 
-static void mc_install(const char *folder)
+static void mc_install_one(const char *folder, int rescan)
 {
     sh_mb_resolver r;
     sh_ms_install_stats st;
@@ -211,9 +211,27 @@ static void mc_install(const char *folder)
     if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause);
     else {
         mc_line("MODS: install %s: installed and verified as mods\\%s (bundle %s)", folder, key, b.hash);
-        mc_rescan("install");
+        if (rescan) mc_rescan("install");
     }
     sh_mb_free(&b);
+}
+
+/* `sh_mods install "<folder>"`: a mod folder installs as before; a folder
+ * without mod.json installs every mod folder found below it, with one rescan. */
+static void mc_install(const char *folder)
+{
+    char **mods = NULL;
+    size_t count = 0, i, done = 0;
+    if (sh_ms_folder_is_mod(folder)) { mc_install_one(folder, 1); return; }
+    if (!sh_ms_find_mods(folder, &mods, &count) || !count) {
+        mc_line("MODS: install %s: refused: no mod.json in it or in any folder below it", folder);
+        sh_ms_find_free(mods, count);
+        return;
+    }
+    mc_line("MODS: install %s: a folder of %zu mod(s)", folder, count);
+    for (i = 0; i < count; i++) { mc_install_one(mods[i], 0); done++; }
+    sh_ms_find_free(mods, count);
+    if (done) mc_rescan("install");
 }
 
 /* The rebuild rule (modstore.h): every folder whose tree changed since its

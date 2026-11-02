@@ -305,7 +305,12 @@ read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods
 
 **List pane.** The panel head carries the mod count and, when any mod needs attention, a yellow
 badge button with that number; pressing it (`aria-pressed`) shows only those rows. One toolbar row
-holds the filter, refresh, Open mods folder, Migrate (only while `migrate.pending > 0`) and install.
+holds the filter, refresh, Open mods folder, Migrate (only while `migrate.pending > 0`) and install. The
+install dialog allows several folders (`FOS_ALLOWMULTISELECT`), joined with newlines in the action's
+argument; a picked folder without `mod.json` stands for every mod folder below it. One picked mod
+answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:
+`installedCount`, `refusedCount`, `editorRows`, `items` (one `{folder, ok, key, id, bundle, cause,
+editorRows, replaced}` per mod), `key` the first installed folder, and `index` from the one rescan.
 The rows are one flat list sorted by display name (the name, else the id, else the folder) without
 case, then by id, then by folder; there are no groups, headers or carets. The filter matches name,
 id and folder, and it and the attention badge keep that order. The collapsed-groups setting of

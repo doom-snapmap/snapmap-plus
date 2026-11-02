@@ -1780,19 +1780,23 @@ static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
     mu_putn(b, "}", 1);
 }
 
-static int mu_install(const char *folder)
+static int mu_absolute(const char *folder)
+{
+    return folder && ((folder[0] && folder[1] == ':') || (folder[0] == '\\' && folder[1] == '\\'));
+}
+
+/* One mod folder, as the install button has always done it. */
+static int mu_install_one(const char *folder)
 {
     sh_mb_resolver r;
     sh_ms_install_stats st;
     sh_mb_bundle bd;
     mu_stock stock = { 0 };
     char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 256], note[160];
-    int ok, rows = 0, absolute;
+    int ok, rows = 0;
     size_t k;
     mu_buf b;
     memset(&b, 0, sizeof b);
-    absolute = folder && ((folder[0] && folder[1] == ':') || (folder[0] == '\\' && folder[1] == '\\'));
-    if (!absolute) return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder to install.");
     mu_log("install %s: building", folder);
     memset(&st, 0, sizeof st);
     key[0] = cause[0] = note[0] = 0;
@@ -1828,6 +1832,152 @@ static int mu_install(const char *folder)
     mu_kbool(&b, "stockUnchecked", stock.unavailable, 0);
     mu_kstr(&b, "index", note, 0);
     sh_mb_free(&bd);
+    return mu_result_tail(&b);
+}
+
+/* The install action's argument: one or more absolute folders, separated by
+ * newlines (the picker allows several). A picked folder that holds mod.json is
+ * one mod; one that does not is looked into for every mod folder below it, so
+ * a folder of mods, grouped or not, installs in one go. One picked mod keeps
+ * the single result above; anything else answers with the bulk result: how
+ * many installed and how many refused, with each refusal's cause, "key" the
+ * first installed folder so the page can select it, and one rescan at the
+ * end. */
+typedef struct mu_bulk_item { char *folder; int found; } mu_bulk_item;
+
+static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char *folder, int found)
+{
+    if (*n == *cap) {
+        size_t ncap = *cap ? *cap * 2 : 8;
+        mu_bulk_item *t = (mu_bulk_item *)realloc(*items, ncap * sizeof *t);
+        if (!t) return 0;
+        *items = t;
+        *cap = ncap;
+    }
+    (*items)[*n].folder = _strdup(folder);
+    (*items)[*n].found = found;
+    if (!(*items)[*n].folder) return 0;
+    (*n)++;
+    return 1;
+}
+
+static int mu_install(const char *arg)
+{
+    mu_bulk_item *items = NULL;
+    size_t n = 0, cap = 0, i, picked = 0;
+    const char *p = arg ? arg : "";
+    char first_key[SH_MS_KEY_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + 256], note[160] = "", refused_first[SH_MB_CAUSE_MAX + 300] = "";
+    unsigned installed = 0, refused = 0, rows = 0;
+    int rc, single_mod = 0;
+    mu_buf b, items_json;
+    memset(&b, 0, sizeof b);
+    memset(&items_json, 0, sizeof items_json);
+
+    /* Expand the picked folders into mod folders. */
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char folder[MAX_PATH * 4];
+        if (len >= sizeof folder) len = sizeof folder - 1;
+        memcpy(folder, p, len);
+        folder[len] = 0;
+        while (len && (folder[len - 1] == '\r' || folder[len - 1] == ' ')) folder[--len] = 0;
+        p = e ? e + 1 : p + strlen(p);
+        if (!len) continue;
+        picked++;
+        if (!mu_absolute(folder)) { mu_bulk_add(&items, &n, &cap, folder, 0); continue; }
+        if (sh_ms_folder_is_mod(folder)) { mu_bulk_add(&items, &n, &cap, folder, 1); if (picked == 1) single_mod = 1; continue; }
+        single_mod = 0;
+        {
+            char **mods = NULL;
+            size_t count = 0, k;
+            if (sh_ms_find_mods(folder, &mods, &count) && count) {
+                for (k = 0; k < count; k++) mu_bulk_add(&items, &n, &cap, mods[k], 2);
+                mu_log("install %s: a folder of %zu mod(s)", folder, count);
+            } else {
+                mu_bulk_add(&items, &n, &cap, folder, 0);
+            }
+            sh_ms_find_free(mods, count);
+        }
+    }
+    if (picked == 0) { free(items); return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder to install."); }
+    if (picked == 1 && single_mod && n == 1) {
+        rc = mu_install_one(items[0].folder);
+        free(items[0].folder);
+        free(items);
+        return rc;
+    }
+
+    /* Bulk: install each, rescan once. */
+    mu_putn(&items_json, "[", 1);
+    for (i = 0; i < n; i++) {
+        sh_mb_resolver r;
+        sh_ms_install_stats st;
+        sh_mb_bundle bd;
+        mu_stock stock = { 0 };
+        char key[SH_MS_KEY_MAX + 1] = "", cause[SH_MB_CAUSE_MAX] = "";
+        int ok = 0;
+        size_t k;
+        unsigned mod_rows = 0;
+        memset(&bd, 0, sizeof bd);
+        memset(&st, 0, sizeof st);
+        if (items[i].found) {
+            r.installed = NULL;
+            r.installed_context = NULL;
+            r.stock = mu_stock_exists;
+            r.stock_context = &stock;
+            mu_log("install %s: building", items[i].folder);
+            ok = sh_ms_install_from_folder(items[i].folder, &r, key, sizeof key, &st, &bd, cause, sizeof cause);
+            for (k = 0; k < bd.file_count; k++)
+                if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef")) mod_rows++;
+        } else {
+            strcpy_s(cause, sizeof cause, mu_absolute(items[i].folder) ? "no mod.json in it or in any folder below it"
+                                                                        : "not an absolute folder");
+        }
+        if (ok) {
+            installed++;
+            rows += mod_rows;
+            if (!first_key[0]) strcpy_s(first_key, sizeof first_key, key);
+            mu_log("install %s: installed and verified as %s (bundle %s)", items[i].folder, key, bd.hash);
+        } else {
+            refused++;
+            mu_log("install %s: refused: %s", items[i].folder, cause);
+            if (!refused_first[0])
+                _snprintf_s(refused_first, sizeof refused_first, _TRUNCATE, "%s (%s)", bd.id[0] ? bd.id : mu_leaf(items[i].folder), cause);
+        }
+        mu_putn(&items_json, i ? ",{" : "{", i ? 2 : 1);
+        mu_kstr(&items_json, "folder", items[i].folder, 1);
+        mu_kbool(&items_json, "ok", ok, 0);
+        mu_kstr(&items_json, "key", ok ? key : "", 0);
+        mu_kstr(&items_json, "id", bd.id, 0);
+        mu_kstr(&items_json, "bundle", ok ? bd.hash : "", 0);
+        mu_kstr(&items_json, "cause", ok ? "" : cause, 0);
+        mu_knum(&items_json, "editorRows", mod_rows, 0);
+        mu_kbool(&items_json, "replaced", st.replaced, 0);
+        mu_putn(&items_json, "}", 1);
+        sh_mb_free(&bd);
+    }
+    mu_putn(&items_json, "]", 1);
+    if (installed) mu_rescan(note, sizeof note);
+    if (installed && !refused)
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s%s.", installed, installed == 1 ? "" : "s",
+                    rows ? "; editor rows appear in the palette after the game restarts" : "");
+    else if (installed)
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s; %u refused: %s%s.", installed, installed == 1 ? "" : "s",
+                    refused, refused_first, refused > 1 ? ", and more (see the log)" : "");
+    else
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not installed: %s%s.", refused_first, refused > 1 ? ", and more (see the log)" : "");
+    mu_result_head(&b, SH_MODS_ACT_INSTALL, installed > 0, msg);
+    mu_kstr(&b, "key", first_key, 0);
+    mu_knum(&b, "installedCount", installed, 0);
+    mu_knum(&b, "refusedCount", refused, 0);
+    mu_knum(&b, "editorRows", rows, 0);
+    mu_key(&b, "items", 0);
+    mu_putn(&b, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
+    mu_kstr(&b, "index", note, 0);
+    for (i = 0; i < n; i++) free(items[i].folder);
+    free(items);
+    free(items_json.p);
     return mu_result_tail(&b);
 }
 

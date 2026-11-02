@@ -117,6 +117,17 @@ int  sh_ms_entry_matches(const sh_ms_entry *entry, const char *spec);
 int  sh_ms_enumerate(sh_ms_list *out);
 void sh_ms_list_free(sh_ms_list *list);
 
+/* Whether `folder` holds mod.json or package.json (a mod folder). */
+int  sh_ms_folder_is_mod(const char *folder);
+
+/* Every mod folder under `dir`, at any depth, the way the store walks its own
+ * root: a folder with a descriptor is a mod and is not entered, one without is
+ * entered to SH_MS_NEST_MAX levels; hidden and staging folders are skipped.
+ * `dir` itself is not listed. Absolute UTF-8 paths in *out, freed with
+ * sh_ms_find_free. Returns 1 when `dir` could be read. */
+int  sh_ms_find_mods(const char *dir, char ***out, size_t *count);
+void sh_ms_find_free(char **folders, size_t count);
+
 /* Aliases (the record's "aliases" section, hash -> hash) keep a map that pins
  * an earlier bundle hash loading: a delivered copy or a download whose content
  * an installed mod already serves, and every earlier build of a folder that
