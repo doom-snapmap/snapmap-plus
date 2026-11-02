@@ -507,10 +507,18 @@ the author's bytes, order and formatting never change. The canonical manifest
 is derived from both blocks in memory, for the hash and for the upload; its
 text is the Contract 1 text, so an unchanged mod keeps its hash. There is no
 blob store and there are no hard links: a mod's files live in its own
-`assets\` only. A folder the author drops in keeps its name; one the product
-makes (an install, a download, a migration, a delivered package) is `<id>`,
-else `<id>@<version>`; an export's import keeps the carried folder's name when
-no folder of its id is installed and the name is free. A package a map
+`assets\` only. A folder the author drops in keeps its name and may sit at any
+depth: a folder under `mods\` without `mod.json` or `package.json` is an
+organizing folder and is looked into (to eight levels, `SH_MS_NEST_MAX`), one
+with a descriptor is a mod and is not entered, so `mods\demon-mods\local.cyberdemon\`
+is the mod `local.cyberdemon` named `demon-mods\local.cyberdemon` (its path under
+`mods\`, which the listing, the console, the Mods tab and `sh_mods build` use; the
+console also takes a nested folder by its own name). Every scan walks the same way:
+the store listing (`sh_ms_enumerate`), the rebuild rule and the serving scan at boot.
+The product itself never nests: one it makes (an install, a download, a migration, a
+delivered package) is `<id>` at the root, else `<id>@<version>`, and the upgrade's
+renames leave nested folders where they are; an export's import keeps the carried
+folder's name when no folder of its id is installed and the name is free. A package a map
 delivered without a version gets one
 generated from its digest (`legacy-<digest16>`); it is part of the manifest
 and its hash, so it stays in `mod.json`, but it never names a folder (`<id>`,

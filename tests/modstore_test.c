@@ -576,7 +576,7 @@ static void test_bin_sweep(const char *tmp)
     {
         char cause[300], kept_dir[MAX_PATH];
         _snprintf_s(kept_dir, sizeof kept_dir, _TRUNCATE, "%s\\alex.kept", root);
-        CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a folder of the store"));
+        CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a mod folder of the store"));
         CHECK(!sh_ms_delete_mod_folder(root, cause, sizeof cause));
         CHECK(sh_ms_delete_mod_folder(kept_dir, cause, sizeof cause) && !mt_exists(kept_dir));
         CHECK(!sh_ms_delete_mod_folder(kept_dir, cause, sizeof cause) && strstr(cause, "is no longer in the store"));
@@ -629,7 +629,7 @@ static void test_recycle(const char *tmp)
     CHECK((ci ? r != 0 : r == SH_MS_RECYCLED) && !mt_exists(dir));
 
     /* Refused: outside the store, the store itself. Nothing is moved. */
-    CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a folder of the store"));
+    CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a mod folder of the store"));
     CHECK(!sh_ms_remove_folder(outside) && mt_exists(precious));
     CHECK(!sh_ms_remove_folder(root) && mt_exists(root));
     CHECK(!sh_ms_delete_mod_folder(root, cause, sizeof cause) && mt_exists(root));
@@ -670,6 +670,76 @@ static void test_recycle(const char *tmp)
               strstr(cause, "its path is too long for the Recycle Bin"));
         CHECK(GetFileAttributesW(wlong) == INVALID_FILE_ATTRIBUTES);
     }
+}
+
+/* Mod folders at any depth: an organizing folder without mod.json is looked
+ * into, a mod folder is not, and a nested mod is named by its path under
+ * mods\. Building in place, matching, verifying and deleting take that path. */
+static void test_nested(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH], cause[300], key[SH_MS_NAME_MAX + 1];
+    sh_ms_list list;
+    sh_ms_install_stats st;
+    sh_ms_verify_stats vs;
+    const sh_ms_entry *e;
+    int r, ci = getenv("CI") != NULL;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\nested\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.top", root);
+    make_small_mod(dir, "alex.top");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\alex.cyber", root);
+    make_small_mod(dir, "alex.cyber");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\bosses\\alex.spider", root);
+    make_small_mod(dir, "alex.spider");
+    /* A folder inside a mod is that mod's content, and an empty organizing
+     * folder holds nothing. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.top\\inner", root);
+    make_small_mod(dir, "alex.inner");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\empty-group\\deeper", root);
+    mt_mkdirs_for(dir);
+    CreateDirectoryA(dir, NULL);
+
+    CHECK(sh_ms_enumerate(&list));
+    CHECK(list.count == 3);
+    CHECK(find_entry(&list, "alex.top") != NULL);
+    e = find_entry(&list, "demon-mods\\alex.cyber");
+    CHECK(e != NULL);
+    CHECK(find_entry(&list, "demon-mods\\bosses\\alex.spider") != NULL);
+    CHECK(find_entry(&list, "alex.inner") == NULL && find_entry(&list, "alex.top\\inner") == NULL);
+    /* A nested folder answers to its path, either slash, and to its own name. */
+    CHECK(e && sh_ms_entry_matches(e, "demon-mods\\alex.cyber") && sh_ms_entry_matches(e, "demon-mods/alex.cyber") &&
+          sh_ms_entry_matches(e, "alex.cyber") && !sh_ms_entry_matches(e, "alex.top"));
+    sh_ms_list_free(&list);
+
+    /* Built in place, by its path under mods\. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\alex.cyber", root);
+    cause[0] = 0;
+    CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    if (cause[0]) fprintf(stderr, "  nested build: %s\n", cause);
+    CHECK(st.in_place && !strcmp(key, "demon-mods\\alex.cyber"));
+    CHECK(sh_ms_verify("alex.cyber", &vs, cause, sizeof cause) && vs.entries == 1);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "demon-mods\\alex.cyber");
+    CHECK(e && e->loaded && !strcmp(e->bundle.id, "alex.cyber"));
+    sh_ms_list_free(&list);
+    /* The organizing folder itself is not a mod. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods", root);
+    CHECK(!sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause) &&
+          strstr(cause, "has no mod.json"));
+    CHECK(!sh_ms_delete_mod_folder(dir, cause, sizeof cause) && strstr(cause, "is not a mod folder of the store") && mt_exists(dir));
+
+    /* Deleting a nested mod takes only its folder. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\bosses\\alex.spider", root);
+    g_logged = 0;
+    r = sh_ms_delete_mod_folder(dir, cause, sizeof cause);
+    if (r != SH_MS_RECYCLED) fprintf(stderr, "  nested recycle: %d (%s)\n", r, cause);
+    CHECK(ci ? r != 0 : r == SH_MS_RECYCLED);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\bosses", root);
+    CHECK(mt_exists(dir));
+    if (r == SH_MS_RECYCLED) CHECK(log_has("MODS: store: moved mods\\demon-mods\\bosses\\alex.spider to the Recycle Bin"));
+    CHECK(sh_ms_enumerate(&list) && list.count == 2);
+    sh_ms_list_free(&list);
 }
 
 int main(int argc, char **argv)
@@ -971,6 +1041,7 @@ int main(int argc, char **argv)
     test_tidy(tmp);
     test_bin_sweep(tmp);
     test_recycle(tmp);
+    test_nested(tmp);
 
     test_upgrade(fixture, tmp);
 

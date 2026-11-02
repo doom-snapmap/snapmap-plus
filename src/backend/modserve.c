@@ -983,9 +983,11 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
 }
 
 /* Every folder under the store root that holds mod.json (or a package.json
- * not built yet). The retired blobs\ and legacy\ folders, hidden folders and
- * install staging are not mods. */
-static void ms_scan_folder(ms_index *x, const char *dir)
+ * not built yet), at any depth: a folder without one is an organizing folder
+ * and is entered, to eight levels (modstore.h SH_MS_NEST_MAX); a mod folder is not entered. The
+ * retired blobs\ and legacy\ folders, hidden folders and install staging are
+ * not mods. `rel` is the folder's path below the root, a bundle's name. */
+static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int depth)
 {
     char pattern[MAX_PATH];
     WIN32_FIND_DATAA fd;
@@ -995,7 +997,7 @@ static void ms_scan_folder(ms_index *x, const char *dir)
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         ms_bundle *b;
-        char sub[MAX_PATH], probe[MAX_PATH];
+        char sub[MAX_PATH], probe[MAX_PATH], subrel[MAX_PATH];
         int mark_files = x->nfiles, mark_needs = x->nneeds;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
             continue;
@@ -1003,16 +1005,22 @@ static void ms_scan_folder(ms_index *x, const char *dir)
         if (!_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
         if (strstr(fd.cFileName, ".staging-") || strstr(fd.cFileName, ".old-")) continue;
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        if (rel && rel[0]) _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s\\%s", rel, fd.cFileName);
+        else strncpy_s(subrel, sizeof subrel, fd.cFileName, _TRUNCATE);
         _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\mod.json", sub);
         if (ms_file_size(probe) < 0) {
             _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\package.json", sub);
-            if (ms_file_size(probe) < 0) continue;   /* not a mod folder */
+            if (ms_file_size(probe) < 0) {
+                /* Not a mod folder: an organizing folder, looked into. */
+                if (depth + 1 < 8) ms_scan_folder(x, sub, subrel, depth + 1);
+                continue;
+            }
         }
         if (!ms_grow((void **)&x->bundles, &x->cbundles, x->nbundles + 1, sizeof(ms_bundle))) break;
         b = &x->bundles[x->nbundles++];
         memset(b, 0, sizeof *b);
         b->dir = ms_strdup(x, sub);
-        b->folder = ms_strdup(x, fd.cFileName);
+        b->folder = ms_strdup(x, subrel);
         b->first_file = x->nfiles;
         if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
         else ms_parse_bundle(x, b);
@@ -1021,7 +1029,7 @@ static void ms_scan_folder(ms_index *x, const char *dir)
             x->nfiles = mark_files;
             x->nneeds = mark_needs;
             b->file_count = 0;
-            ms_log("bundle '%s' skipped: %s", fd.cFileName, b->cause);
+            ms_log("bundle '%s' skipped: %s", subrel, b->cause);
         } else {
             b->admitted = 1;
         }
@@ -2314,7 +2322,7 @@ int sh_modserve_index_build(const char *mods_root)
     if (!x) { ReleaseSRWLockExclusive(&g_build_lock); ms_log("index refused: out of memory"); return -1; }
     strncpy_s(x->root, sizeof x->root, mods_root, _TRUNCATE);
     strncpy_s(g_last_root, sizeof g_last_root, mods_root, _TRUNCATE);
-    ms_scan_folder(x, mods_root);
+    ms_scan_folder(x, mods_root, "", 0);
     ms_load_aliases(x, mods_root);
     ms_load_editor_only(x, mods_root);
     if (!ms_resolve(x) || !ms_build_tables(x)) {

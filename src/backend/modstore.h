@@ -57,7 +57,8 @@ int      modstore_lock_busy(unsigned *generation);
 /* id@version+build; version may hold up to 4 UTF-8 bytes per code point. */
 #define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)
 /* A folder name under mods\. */
-#define SH_MS_NAME_MAX 255
+#define SH_MS_NAME_MAX 1023   /* a nested folder's path under mods\ */
+#define SH_MS_NEST_MAX 8      /* organizing folders are entered this many levels below mods\ */
 
 /* The store root. NULL or "" restores the default (%LOCALAPPDATA%\snapmap-plus\mods).
  * Tests point it at a temporary folder. Returns 1 when the root is set. */
@@ -67,7 +68,7 @@ int  sh_ms_root(char *out, size_t cap);
 
 typedef struct sh_ms_entry {
     char *folder;               /* absolute UTF-8 folder of the mod */
-    char  name[SH_MS_NAME_MAX + 1];   /* the folder's own name under mods\ */
+    char  name[SH_MS_NAME_MAX + 1];   /* the folder's path under mods\ ("x", or "group\x" when nested) */
     char  key[SH_MS_KEY_MAX + 1];     /* id@version+build from mod.json, or the folder name when unbuilt */
     int   delivered;            /* a package a map delivered (its product block's legacy object) */
     int   loaded;               /* mod.json read and its hash matched */

@@ -346,6 +346,16 @@ static void build_fixture(void)
         make_bundle(g_root, "gail.snd@1.0.0", "gail.snd", "1.0.0", '5', NULL, g, 1, NULL);
         make_bundle(g_root, "hank.snd@1.0.0", "hank.snd", "1.0.0", '6', NULL, h, 1, NULL);
     }
+    {
+        /* A mod the player filed under an organizing folder: found by its
+         * path under mods\. An empty organizing folder holds nothing. */
+        static const fx_file nested[] = {
+            { "generated/decls/entitydef/mods/ivy.nested/thing.decl", "entityDef nested {}", -1, "entityDef", "mods/ivy.nested/thing", NULL, '7' },
+        };
+        make_bundle(g_root, "demon-mods\\ivy.nested", "ivy.nested", "1.0.0", '8', NULL, nested, 1, NULL);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\empty-group\\deeper", g_root);
+        mkdirs(path);
+    }
     /* A hand-dropped folder that was never built. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\unbuilt\\mod.json", g_root);
     write_file(path, "{}", 2);
@@ -457,10 +467,10 @@ static void test_index_and_isolation(void)
 {
     sh_modserve_stats st;
     log_clear();
-    CHECK(sh_modserve_index_build(g_root) == 6);   /* alex x2, bob, fay, gail, legacy */
+    CHECK(sh_modserve_index_build(g_root) == 7);   /* alex x2, bob, fay, gail, legacy, ivy (nested) */
     sh_modserve_get_stats(&st);
-    CHECK(st.bundles_seen == 11);
-    CHECK(st.bundles_admitted == 6);
+    CHECK(st.bundles_seen == 12);
+    CHECK(st.bundles_admitted == 7);
     CHECK(st.conflicts == 1);
     CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
     CHECK(log_has("bundle 'dave.x@1.0.0' skipped: not validated: md6Def mesh missing"));
@@ -474,7 +484,8 @@ static void test_index_and_isolation(void)
     CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
                   "alex.pink-imp@1.0.0 (installed most recently)"));
     CHECK(log_has("bundle alex.pink-imp@1.0.0: superseded by alex.pink-imp@1.1.0"));
-    CHECK(log_has("MODS: index built in ") && log_has("(6 bundles, "));
+    CHECK(log_has("MODS: index built in ") && log_has("(7 bundles, "));
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivy.nested/thing.decl", NULL) != NULL);
     CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
     {
         char cause[200];
@@ -658,7 +669,7 @@ static void test_plan_alias(void)
     _snprintf_s(aliases, sizeof aliases, _TRUNCATE, "{\"%s\":\"%s\"}", OLD, g_hash_a);
     CHECK(sh_mb_record_put(g_root, "aliases", aliases));
     n = sh_modserve_index_build(g_root);
-    CHECK(n == 6);
+    CHECK(n == 7);
     hashes[0] = OLD;
     CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) >= 1 && unknown == 0);
     CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
@@ -779,7 +790,7 @@ static void test_rescan(void)
     sh_modserve_plan p;
     make_bundle(g_root, "gus.new@1.0.0", "gus.new", "1.0.0", '4', NULL, g, 1, NULL);
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
-    CHECK(sh_modserve_index_rescan() == 7);
+    CHECK(sh_modserve_index_rescan() == 8);
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
     CHECK(sh_modserve_lookup(A_ENT, NULL));
     /* Registrations made before the rescan are kept: nothing re-runs. */

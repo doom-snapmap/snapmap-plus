@@ -198,18 +198,107 @@ static int ms_inside(const wchar_t *path, const wchar_t *dir)
     return _wcsnicmp(path, dir, n) == 0 && path[n] == L'\\' && path[n + 1] != 0;
 }
 
-/* `path` is a direct child of `dir`. */
-static int ms_child_of(const wchar_t *path, const wchar_t *dir)
-{
-    size_t n = wcslen(dir);
-    return ms_inside(path, dir) && !wcschr(path + n + 1, L'\\');
-}
-
 static const char *ms_leaf(const char *folder)
 {
     const char *a = strrchr(folder ? folder : "", '\\'), *b = strrchr(folder ? folder : "", '/');
     const char *s = a > b ? a : b;
     return s ? s + 1 : (folder ? folder : "");
+}
+
+/* A folder's name under mods\: its path below the store root when it lies
+ * there (a nested folder keeps its organizing folders, "demon-mods\x"), else
+ * its leaf. Points into `folder`. */
+static const char *ms_rel(const char *folder)
+{
+    char root[MAX_PATH * 4];
+    size_t n;
+    if (!folder) return "";
+    if (!sh_ms_root(root, sizeof root)) return ms_leaf(folder);
+    n = strlen(root);
+    if (_strnicmp(folder, root, n) == 0 && (folder[n] == '\\' || folder[n] == '/') && folder[n + 1]) return folder + n + 1;
+    return ms_leaf(folder);
+}
+
+/* Folders of the store that can be mods: not hidden, not a staging or
+ * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
+static int ms_candidate(const WIN32_FIND_DATAW *fd)
+{
+    if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
+    if (fd->cFileName[0] == L'.') return 0;
+    if (!_wcsicmp(fd->cFileName, L"blobs") || !_wcsicmp(fd->cFileName, L"legacy")) return 0;
+    if (wcsstr(fd->cFileName, L".staging-") || wcsstr(fd->cFileName, L".old-")) return 0;
+    return 1;
+}
+
+static int ms_has_descriptor(const wchar_t *folder);
+
+/* The mod folders under a directory, at any depth: a candidate folder with
+ * mod.json or package.json is a mod and is not entered; one without is an
+ * organizing folder and is entered, down to SH_MS_NEST_MAX levels below the
+ * root. `rel` is each folder's path below the root. */
+typedef struct ms_found { wchar_t *folder, *rel; } ms_found;
+typedef struct ms_found_list { ms_found *items; size_t count, cap; } ms_found_list;
+
+static void ms_found_free(ms_found_list *l)
+{
+    size_t i;
+    for (i = 0; i < l->count; i++) { free(l->items[i].folder); free(l->items[i].rel); }
+    free(l->items);
+    memset(l, 0, sizeof *l);
+}
+
+static void ms_find_mods(ms_found_list *l, const wchar_t *dir, const wchar_t *rel, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(dir, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        wchar_t *child, *crel;
+        if (!ms_candidate(&fd)) continue;
+        child = ms_wjoin(dir, fd.cFileName);
+        crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
+        if (!child || !crel) { free(child); free(crel); break; }
+        if (ms_has_descriptor(child)) {
+            if (l->count == l->cap) {
+                size_t ncap = l->cap ? l->cap * 2 : 16;
+                ms_found *n = (ms_found *)realloc(l->items, ncap * sizeof *n);
+                if (!n) { free(child); free(crel); break; }
+                l->items = n;
+                l->cap = ncap;
+            }
+            l->items[l->count].folder = child;
+            l->items[l->count].rel = crel;
+            l->count++;
+        } else {
+            if (depth + 1 < SH_MS_NEST_MAX) ms_find_mods(l, child, crel, depth + 1);
+            free(child);
+            free(crel);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* `path` is a mod folder of the store: strictly inside the root, holding a
+ * descriptor, with no mod folder between it and the root (a folder inside a
+ * mod is that mod's content, not a mod). */
+static int ms_store_mod_folder(const wchar_t *path, const wchar_t *root)
+{
+    wchar_t *copy, *p;
+    size_t n = wcslen(root);
+    if (!ms_inside(path, root) || !ms_has_descriptor(path)) return 0;
+    copy = _wcsdup(path);
+    if (!copy) return 0;
+    for (p = copy + n + 1; (p = wcschr(p, L'\\')) != NULL; p++) {
+        int inner;
+        *p = 0;
+        inner = ms_has_descriptor(copy);
+        *p = L'\\';
+        if (inner) { free(copy); return 0; }
+    }
+    free(copy);
+    return 1;
 }
 
 /* --------------------------------------------------------- deletion ---- */
@@ -342,9 +431,9 @@ static int ms_retire(const wchar_t *path, const wchar_t *root, char *why, size_t
 
 static void ms_log_discard(const char *folder, int r, const char *why)
 {
-    if (r == SH_MS_RECYCLED) ms_log("MODS: store: moved mods\\%s to the Recycle Bin", ms_leaf(folder));
+    if (r == SH_MS_RECYCLED) ms_log("MODS: store: moved mods\\%s to the Recycle Bin", ms_rel(folder));
     else if (r == SH_MS_DELETED && why && why[0])
-        ms_log("MODS: store: deleted mods\\%s outright; the Recycle Bin could not take it (%s)", ms_leaf(folder), why);
+        ms_log("MODS: store: deleted mods\\%s outright; the Recycle Bin could not take it (%s)", ms_rel(folder), why);
 }
 
 int sh_ms_remove_folder(const char *folder)
@@ -374,10 +463,10 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
     root = ms_wroot();
     w = sh_mb_wpath(folder);
     if (!root || !w) ms_cause(cause, cap, "the store folder cannot be resolved");
-    else if (!ms_child_of(w, root)) ms_cause(cause, cap, "%s is not a folder of the store", ms_leaf(folder));
-    else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_leaf(folder));
+    else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_rel(folder));
+    else if (!ms_store_mod_folder(w, root)) ms_cause(cause, cap, "%s is not a mod folder of the store", ms_rel(folder));
     else if ((r = ms_retire(w, root, why, sizeof why)) == 0)
-        ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_leaf(folder), GetLastError());
+        ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_rel(folder), GetLastError());
     else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
     ms_log_discard(folder, r, why);
     free(root);
@@ -649,8 +738,12 @@ int sh_ms_entry_usable(const sh_ms_entry *e)
 int sh_ms_entry_matches(const sh_ms_entry *e, const char *spec)
 {
     size_t n;
+    char norm[SH_MS_NAME_MAX + 1];
     if (!e || !spec || !spec[0]) return 0;
-    if (!_stricmp(e->name, spec) || !_stricmp(e->key, spec)) return 1;
+    strncpy_s(norm, sizeof norm, spec, _TRUNCATE);
+    for (n = 0; norm[n]; n++) if (norm[n] == '/') norm[n] = '\\';
+    if (!_stricmp(e->name, norm) || !_stricmp(e->key, spec)) return 1;
+    if (strchr(e->name, '\\') && !strchr(norm, '\\') && !_stricmp(ms_leaf(e->name), norm)) return 1;   /* a nested folder by its own name */
     if (!e->loaded) return 0;
     if (!_stricmp(e->bundle.id, spec)) return 1;
     n = strlen(e->bundle.id);
@@ -681,17 +774,6 @@ void sh_ms_list_free(sh_ms_list *l)
     free(l->items);
     free(l->aliases);
     memset(l, 0, sizeof *l);
-}
-
-/* Folders of the store root that can be mods: not hidden, not a staging or
- * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
-static int ms_candidate(const WIN32_FIND_DATAW *fd)
-{
-    if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
-    if (fd->cFileName[0] == L'.') return 0;
-    if (!_wcsicmp(fd->cFileName, L"blobs") || !_wcsicmp(fd->cFileName, L"legacy")) return 0;
-    if (wcsstr(fd->cFileName, L".staging-") || wcsstr(fd->cFileName, L".old-")) return 0;
-    return 1;
 }
 
 static int ms_has_descriptor(const wchar_t *folder)
@@ -812,26 +894,18 @@ static int ms_entry_cmp(const void *a, const void *b)
 
 int sh_ms_enumerate(sh_ms_list *out)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *root, *pattern;
-    HANDLE h;
+    wchar_t *root;
+    ms_found_list found;
+    size_t i;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     root = ms_wroot();
     if (!root) return 0;
     if (!ms_exists(root)) { free(root); return 1; }
-    pattern = ms_wjoin(root, L"*");
-    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            wchar_t *child;
-            if (!ms_candidate(&fd)) continue;
-            child = ms_wjoin(root, fd.cFileName);
-            if (child) { ms_load_entry(out, child, fd.cFileName); free(child); }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
+    memset(&found, 0, sizeof found);
+    ms_find_mods(&found, root, L"", 0);
+    for (i = 0; i < found.count; i++) ms_load_entry(out, found.items[i].folder, found.items[i].rel);
+    ms_found_free(&found);
     free(root);
     if (out->count > 1) qsort(out->items, out->count, sizeof(sh_ms_entry), ms_entry_cmp);
     ms_load_aliases(out);
@@ -1236,17 +1310,23 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     if (_wcsicmp(src, root) == 0) { ms_cause(cause, cap, "that folder is the store itself, not a mod"); goto done; }
     if (!ms_mkdirs(root)) { ms_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
 
-    if (ms_child_of(src, root)) {
-        /* A folder of the store: built in place. */
+    if (ms_store_mod_folder(src, root)) {
+        /* A folder of the store, at any depth: built in place. */
+        char *rel = sh_mb_utf8(src + wcslen(root) + 1);
         st->in_place = 1;
-        if (!ms_build_in_place(folder, resolver, &b, cause, cap)) goto done;
+        if (!ms_build_in_place(folder, resolver, &b, cause, cap)) { free(rel); goto done; }
         for (i = 0; i < b.file_count; i++)
             if (b.files[i].stock) { st->stock_files++; st->stock_bytes += b.files[i].size; }
-        strncpy_s(name, sizeof name, ms_leaf(folder), _TRUNCATE);
+        strncpy_s(name, sizeof name, rel ? rel : ms_leaf(folder), _TRUNCATE);
+        free(rel);
         ok = 1;
         goto done;
     }
-    if (ms_inside(src, root)) { ms_cause(cause, cap, "that folder is inside a mod of the store, not a mod itself"); goto done; }
+    if (ms_inside(src, root)) {
+        ms_cause(cause, cap, ms_has_descriptor(src) ? "that folder is inside a mod of the store, not a mod itself"
+                                                    : "that folder of the store has no mod.json");
+        goto done;
+    }
 
     /* From elsewhere: built in memory, the source is not written. */
     have_list = sh_ms_enumerate(&list);
@@ -1387,9 +1467,8 @@ done:
 int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
 {
     sh_ms_sync_stats local;
-    WIN32_FIND_DATAW fd;
-    wchar_t *root, *pattern;
-    HANDLE h;
+    wchar_t *root;
+    ms_found_list found;
     char rootu[MAX_PATH * 4], *text = NULL, *out;
     sh_json_object cache, next;
     ULONGLONG t0 = GetTickCount64();
@@ -1404,21 +1483,16 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     modstore_lock();
     if (sh_mb_record_get(rootu, "cache", &text) == 1) sh_json_parse_object(text, strlen(text), 4, &cache);
     free(text);
-    pattern = ms_wjoin(root, L"*");
-    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            wchar_t *child;
+    memset(&found, 0, sizeof found);
+    ms_find_mods(&found, root, L"", 0);
+    {
+        size_t fi;
+        for (fi = 0; fi < found.count; fi++) {
             char *folder, tree[SH_MB_HASH_HEX + 1], value[SH_MB_HASH_HEX + 3], have[SH_MB_HASH_HEX + 1];
             const char *cached;
             sh_mb_bundle b;
             int current = 0;
-            if (!ms_candidate(&fd)) continue;
-            child = ms_wjoin(root, fd.cFileName);
-            if (!child || !ms_has_descriptor(child)) { free(child); continue; }
-            folder = sh_mb_utf8(child);
-            free(child);
+            folder = sh_mb_utf8(found.items[fi].folder);
             if (!folder) continue;
             st->folders++;
             have[0] = 0;
@@ -1437,7 +1511,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
                     if (b.prev_hash[0] && _stricmp(b.prev_hash, b.hash))
                         _snprintf_s(lineage, sizeof lineage, _TRUNCATE, "; bundle %.16s is now an alias of it", b.prev_hash);
                     ms_log("MODS: store: %s built: %s@%s+%llu, bundle %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s%s",
-                           ms_leaf(folder), b.id, b.version, b.build, b.hash, b.file_count, b.stock_count,
+                           ms_rel(folder), b.id, b.version, b.build, b.hash, b.file_count, b.stock_count,
                            (unsigned long long)(GetTickCount64() - b0),
                            have[0] && strcmp(have, b.hash) ? ", its tree changed" : (have[0] ? ", unchanged content" : ""),
                            lineage);
@@ -1448,7 +1522,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
                 } else {
                     st->failed++;
                     have[0] = 0;
-                    ms_log("MODS: store: %s refused: %s", ms_leaf(folder), cause);
+                    ms_log("MODS: store: %s refused: %s", ms_rel(folder), cause);
                 }
                 sh_mb_free(&b);
             }
@@ -1457,9 +1531,9 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
                 if (!cached || strcmp(cached, value)) changed = 1;
             }
             free(folder);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+        }
     }
+    ms_found_free(&found);
     if (next.count != cache.count) changed = 1;
     if (changed && (out = sh_json_serialize_object(&next, 0, NULL)) != NULL) {
         sh_mb_record_put(rootu, "cache", out);
@@ -2106,6 +2180,7 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
             for (k = 0; k < l.count; k++) if (l.items[k].loaded && !strcmp(l.items[k].bundle.id, e->bundle.id)) same++;
             _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->bundle.id);
             pl = strlen(prefix);
+            if (strchr(e->name, '\\')) continue;   /* a folder the player nested stays where it is */
             generated = strstr(e->name, "@legacy-") != NULL;
             if (same == 1 && !_strnicmp(e->name, prefix, pl) && ms_tidy_move(e->folder, rootu, e->bundle.id))
                 strcpy_s(to, sizeof to, e->bundle.id);
@@ -2333,6 +2408,7 @@ static void ms_check_tidy(const char *rootu, sh_ms_upgrade_check *out)
         if (dropped[i] || !e->loaded || !e->bundle.origin[0] || !e->bundle.id[0] || !_stricmp(e->name, e->bundle.id)) continue;
         for (k = 0; k < l.count; k++) if (!dropped[k] && l.items[k].loaded && !strcmp(l.items[k].bundle.id, e->bundle.id)) same++;
         _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->bundle.id);
+        if (strchr(e->name, '\\')) continue;
         if ((same == 1 && !_strnicmp(e->name, prefix, strlen(prefix))) || strstr(e->name, "@legacy-")) out->tidy_renames++;
     }
     free(dropped);
