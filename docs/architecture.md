@@ -887,6 +887,11 @@ with axis `axis * ownerAxis`, bound (`idEntity::Bind`, oriented) so it moves
 with the owner and the owner's destructor removes it, and appended to the
 owner's targets (`idEntity::AddTarget`) so a native `ActivateTargets` (Use
 with `activateTargetsOnUse`) activates it after the owner's earlier targets.
+SpawnEntityDef constructs the class the decl parsed (`CreateManagedClassFromDecl`
+reads decl `+0x60` through decl vtable `+0xB0`), so a companion whose resource
+state (`+0x2C`) marks a failed load or no load yet is skipped and logged rather
+than spawned as the bare idEntity a defaulted decl would give; the per-owner
+line names the class the first companion spawned as.
 Map entities reach CallSpawn after `SpawnEntitiesForLayers` has registered all
 of them, so companions number after the map's own. A companion's own
 companions are spawned once more, no deeper. Nothing is spawned when the game

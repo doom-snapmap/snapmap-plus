@@ -286,7 +286,9 @@ does not refuse, since the engine already tolerates those names.
   with the tile. A mod may only list its own tiles (`mods/<id>/...`), at most 16 companions each.
   Each companion entityDef is recorded as a need of its tile, so a map that places the tile also
   registers the companions (they may live in another installed bundle) and the bundle validator
-  checks that they resolve. Numbers in a mod.json are plain integers or fixed decimals such as
+  checks that they resolve. A companion's entityDef must load in SnapMap: one inheriting a
+  campaign-only entityDef such as `func/gui` fails to load and is skipped with a log line, so carry
+  that parent's class and edit in the companion itself. Numbers in a mod.json are plain integers or fixed decimals such as
   `-0.7071` (no exponent), kept as written in the bundle's canonical text. Nothing is spawned on a co-op client, and a mod with
   companions installed while the game runs needs a restart unless another one was installed at
   startup:
