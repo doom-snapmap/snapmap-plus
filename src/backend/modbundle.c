@@ -641,6 +641,23 @@ static int mb_plain_integer(const char *s, size_t n)
     return 1;
 }
 
+/* A plain integer followed by a point and 1 to 17 fraction digits, with no
+ * exponent: the canonical spelling of a fixed decimal such as the owner-local
+ * transforms in a companions block. The author's digits are kept verbatim so
+ * the canonical text, and therefore the bundle hash, never depends on float
+ * formatting. */
+static int mb_plain_decimal(const char *s, size_t n)
+{
+    size_t dot = 0, frac;
+    while (dot < n && s[dot] != '.') dot++;
+    if (dot == 0 || dot >= n) return 0;
+    if (!mb_plain_integer(s, dot)) return 0;
+    frac = n - dot - 1;
+    if (frac == 0 || frac > 17) return 0;
+    for (dot++; dot < n; dot++) if (s[dot] < '0' || s[dot] > '9') return 0;
+    return 1;
+}
+
 /* qsort_s comparator over member indices of the object passed as context. */
 static int mb_key_cmp(void *ctx, const void *a, const void *b)
 {
@@ -652,7 +669,7 @@ static int mb_key_cmp(void *ctx, const void *a, const void *b)
     return nx < ny ? -1 : nx > ny ? 1 : 0;
 }
 
-/* Canonical text of a value: sorted keys, no whitespace, integer numbers. */
+/* Canonical text of a value: sorted keys, no whitespace, integer or fixed-decimal numbers kept verbatim. */
 static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
 {
     size_t i;
@@ -661,8 +678,8 @@ static int mbj_canon(const mbj *v, mb_buf *b, char *cause, size_t cap)
     case MBJ_BOOL: mb_puts(b, v->b ? "true" : "false"); return 1;
     case MBJ_STR: mb_put_jstr(b, v->s, v->n); return 1;
     case MBJ_NUM:
-        if (!mb_plain_integer(v->s, v->n)) {
-            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "number %.32s is not a plain integer", v->s);
+        if (!mb_plain_integer(v->s, v->n) && !mb_plain_decimal(v->s, v->n)) {
+            if (cause) _snprintf_s(cause, cap, _TRUNCATE, "number %.32s is not a plain integer or fixed decimal", v->s);
             return 0;
         }
         mb_puts(b, strcmp(v->s, "-0") == 0 ? "0" : v->s);

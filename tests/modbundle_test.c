@@ -694,7 +694,8 @@ static void m_no_name(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.r
 static void m_bad_json(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.r2-imp\",\"id\":\"x\",\"name\":\"x\"}"); }
 static void m_bad_version(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.r2-imp\",\"version\":\"1/2\",\"name\":\"x\"}"); }
 static void m_reserved(const char *f) { mt_write(f, "mod.json", DESC(",\"files\":[]")); }
-static void m_float(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":1.5}")); }
+static void m_float(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":1.5e1}")); }
+static void m_decimal(const char *f) { mt_write(f, "mod.json", DESC(",\"hud\":{\"scale\":-1.5,\"pos\":[0.0,12.25,-0.70710678118654757]}")); }
 static void m_bad_cvar(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"g-god\":\"1\"}}")); }
 static void m_bad_cvar_value(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"r_fov\":90.5}}")); }
 static void m_bad_cvar_twice(const char *f) { mt_write(f, "mod.json", DESC(",\"requirements\":{\"cvars\":{\"r_fov\":1,\"R_FOV\":2}}")); }
@@ -790,7 +791,10 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_json, &RESOLVER, "invalid JSON");
     refused(fixture, tmp, m_bad_version, &RESOLVER, "version must be");
     refused(fixture, tmp, m_reserved, &RESOLVER, "may not contain files or bundle");
-    refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer");
+    refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer or fixed decimal");
+    accepted(fixture, tmp, m_decimal, &b);
+    CHECK(strstr(b.canonical, "\"pos\":[0.0,12.25,-0.70710678118654757]") != NULL);
+    sh_mb_free(&b);
     refused(fixture, tmp, m_bad_cvar, &RESOLVER, "requirements.cvars key g-god is not a cvar name");
     refused(fixture, tmp, m_bad_cvar_value, &RESOLVER, "requirements.cvars.r_fov must be a string, an integer or a boolean");
     refused(fixture, tmp, m_bad_cvar_twice, &RESOLVER, "names r_fov twice");

@@ -284,8 +284,10 @@ does not refuse, since the engine already tolerates those names.
   names an entityDef and its owner-local `origin` and `axis` (rows); `"activate": false` keeps one
   out of the Use order and `"bind": false` leaves it unbound, so it neither follows nor is removed
   with the tile. A mod may only list its own tiles (`mods/<id>/...`), at most 16 companions each.
-  Nothing is spawned on a co-op client, and a mod with companions installed while the game runs
-  needs a restart unless another one was installed at startup:
+  Numbers in a mod.json are plain integers or fixed decimals such as `-0.7071` (no exponent), kept
+  as written in the bundle's canonical text. Nothing is spawned on a co-op client, and a mod with
+  companions installed while the game runs needs a restart unless another one was installed at
+  startup:
 
       "companions": { "mods/<id>/my_panel": [
         { "entityDef": "mods/<id>/screen_left", "origin": [-57.4, 80.6, 98.3],
