@@ -28,6 +28,8 @@ static const uint8_t k_callspawn_prologue[CALLSPAWN_STOLEN] = {
 #define ENT_PHYSICS       0x808
 #define DECL_NAME         0x08
 #define DECL_INHERIT      0x58
+#define DECL_CLASS        0x60   /* what CreateManagedClassFromDecl constructs (decl vtable +0xB0) */
+#define RES_STATE         0x2c   /* idResource: bit 0 failed (a default stands in), bit 1 unloaded */
 #define VSLOT_SET_ORIGIN  0x338
 #define VSLOT_SET_AXIS    0x358
 #define PSLOT_GET_ORIGIN  0x80
@@ -120,6 +122,14 @@ static void *read_ptr(const void *base, size_t off)
     return p;
 }
 
+static unsigned char read_u8(const void *base, size_t off)
+{
+    unsigned char v = 0xff;
+    __try { v = *((const unsigned char *)base + off); }
+    __except (av_only(GetExceptionCode())) { v = 0xff; }
+    return v;
+}
+
 static void *vfn(void *obj, size_t slot)
 {
     void **vt = (void **)read_ptr(obj, 0);
@@ -192,6 +202,7 @@ static int owner_frame(void *owner, float origin[3], float axis[9])
 static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm, void *manager)
 {
     float origin[3], axis[9];
+    char first_class[64] = "";
     int i, made = 0;
     if (!owner_frame(owner, origin, axis)) {
         g_failed += o->count;
@@ -201,11 +212,22 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
     for (i = 0; i < o->count; i++) {
         const sh_companion_entry *e = &o->entries[i];
         float at[3], rot[9];
+        unsigned char state;
         void *decl = g_decl(manager, e->entitydef, 0), *child;
         set_vec_fn set_origin, set_axis;
         if (!decl) {
             g_failed++;
             cl_log("COMPANIONS: %s: companion %d '%s' is not a known entityDef; skipped", o->owner, i, e->entitydef);
+            continue;
+        }
+        /* SpawnEntityDef constructs the decl's parsed class. A decl whose load
+         * failed (an unknown inherit, say) is a default that would spawn as a
+         * bare idEntity, and an unloaded one has no class yet. */
+        state = read_u8(decl, RES_STATE);
+        if (state & 3) {
+            g_failed++;
+            cl_log("COMPANIONS: %s: companion %d '%s' %s; skipped", o->owner, i, e->entitydef,
+                   (state & 1) ? "failed to load (check its inherit and parse errors)" : "is not loaded");
             continue;
         }
         child = g_spawn_def(gm, decl, -1, SPAWN_ID_NONE, 0);
@@ -223,8 +245,13 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
         if (e->activate) g_add_target(owner, child);
         made++;
         g_spawned++;
+        if (i == 0 || !first_class[0]) {
+            const char *c = decl_str(decl, DECL_CLASS);
+            strncpy_s(first_class, sizeof first_class, c ? c : "?", _TRUNCATE);
+        }
     }
-    cl_log("COMPANIONS: %s: %d of %d companions spawned", o->owner, made, o->count);
+    cl_log("COMPANIONS: %s: %d of %d companions spawned (first as %s)", o->owner, made, o->count,
+           first_class[0] ? first_class : "-");
 }
 
 /* A rescan publishes a new serving table; its build stats tell it apart. */
