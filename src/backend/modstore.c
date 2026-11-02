@@ -370,6 +370,28 @@ static int ms_rmtree(const wchar_t *path, const wchar_t *root)
 #define FOF_NORECURSEREPARSE 0x8000   /* reparse points are items, never containers */
 #endif
 
+
+/* Move a whole folder, retrying briefly when Windows still holds the old name
+ * or the new one: right after a folder is moved aside, an indexer, a virus
+ * scanner or the engine's own just-closed handles can refuse the next move
+ * with ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION for a few tens of
+ * milliseconds (seen live: "cannot place ... (error 5)" that succeeded on an
+ * immediate retry). Any other error, or persistence past the budget, fails. */
+static BOOL ms_move_folder(const wchar_t *from, const wchar_t *to)
+{
+    int attempt;
+    for (attempt = 0; ; attempt++) {
+        DWORD err;
+        if (MoveFileExW(from, to, 0)) return TRUE;
+        err = GetLastError();
+        if ((err != ERROR_ACCESS_DENIED && err != ERROR_SHARING_VIOLATION) || attempt >= 20) {
+            SetLastError(err);
+            return FALSE;
+        }
+        Sleep(50);
+    }
+}
+
 static int ms_exists(const wchar_t *path);
 static int ms_is_dir(const wchar_t *path);
 
@@ -1461,7 +1483,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     }
     if (ms_exists(final)) {
         if (ms_exists(old)) ms_rmtree(old, root);
-        if (!MoveFileExW(final, old, 0)) {
+        if (!ms_move_folder(final, old)) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
             ms_cause(cause, cap, "cannot replace the installed %s; is a file in it open? (error %lu)", name, err);
@@ -1469,9 +1491,9 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         }
         st->replaced = 1;
     }
-    if (!MoveFileExW(staging, final, 0)) {
+    if (!ms_move_folder(staging, final)) {
         DWORD err = GetLastError();
-        if (st->replaced) MoveFileExW(old, final, 0);
+        if (st->replaced) ms_move_folder(old, final);
         ms_rmtree(staging, root);
         ms_cause(cause, cap, "cannot place %s (error %lu)", name, err);
         goto done;
