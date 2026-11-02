@@ -1011,8 +1011,11 @@ copy a map delivered, then the most recently installed. When every provider's
 text is a decl that differs from the others only inside lists (a block of
 `num = N;` and `item[i]` members, as the encounter conductor's `aiTypeList` or
 the whitelist inspectors' `validEncounters`, which every boss pack extends),
-the winner's text is served with the other providers' entries appended, so
-several boss packs work together. One `MODS: conflict:` line names the
+or only inside bags of repeated entries in the bare statement grammar of an
+md6Def (the `anim "<clip>" { event ... }` blocks of its `events`, its `alias`
+rows), the winner's text is served with the other providers' entries appended,
+so several boss packs work together and several mods may each add event rows
+to the player body. One `MODS: conflict:` line names the
 providers, the winner and the reason; `sh_mods doctor` prints the same. A
 registration pass (editor rows, map activation) also withdraws an animWeb
 whose `modelInfos` or `models` block names a model that no bundle provides and

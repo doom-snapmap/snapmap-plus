@@ -1252,6 +1252,9 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
     "\t\t\titem[1] = \"single_zombie\";\n\t\t\titem[2] = \"single_spider_mastermind\";\n\t\t}\n\t}\n}\n"
 
 /* animWeb-style text: outside the composable grammar (no '='). */
+#define MD6_HEAD "{\n\tinit {\n\t\tinherit \"player/tp_body\"\n\t}\n\tevents {\n"
+#define MD6_STOCK "\t\tanim \"md6/stock/walk.md6anim\" {\n\t\t\tevent \"ae_footstep\" {\n\t\t\t\tframe 4\n\t\t\t\trow 0\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n"
+#define MD6_TAIL(extra) "\t}\n\taliases {\n" extra "\t}\n\tuserChannelWeightGroupOverride {\n\t\t\"MD6_WEIGHTGROUP_ALL\"\n\t}\n}\n"
 #define AW_TEXT(extra) "{\n\tprops {\n\t\tgridSize 32\n\t\tmodelInfos {\n\t\t\t\"zion/characters/monsters/cyberdemon/base/cyberdemon.md6\" \"\"\n\t\t}\n\t}\n" extra "}\n"
 
 static int cf_source(void *c, const char *type, const char *name)
@@ -1565,6 +1568,39 @@ static void test_compose_unit(void)
     t[0] = AW_TEXT(""); t[1] = AW_TEXT("\tlayers {\n\t}\n");
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
     t[0] = "{ unterminated"; t[1] = WL_A;
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    /* Bare statement grammar: two mods each append event rows and aliases to
+     * the player body md6Def; the union keeps the stock clip and both additions. */
+    t[0] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/a/pickup.md6anim\" {\n\t\t\tevent \"ae_giveInventoryItem\" {\n\t\t\t\tframe 10\n\t\t\t\trow 1\n\t\t\t\tlocked 0\n\t\t\t\tinventoryItem \"weapon/mp/shotgun\"\n\t\t\t}\n\t\t}\n" MD6_TAIL("");
+    t[1] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/mods/b/control.md6anim\" {\n\t\t\tevent \"ae_releasePlayerFromSync\" {\n\t\t\t\tframe 0\n\t\t\t\trow 0\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n" MD6_TAIL("\t\talias {\n\t\t\tname \"mods/b/control\"\n\t\t\tanim \"md6/mods/b/control.md6anim\"\n\t\t}\n");
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 2);
+    if (out) {
+        CHECK(strstr(out, "anim \"md6/stock/walk.md6anim\" {") != NULL);
+        CHECK(strstr(out, "anim \"md6/a/pickup.md6anim\" {") != NULL);
+        CHECK(strstr(out, "anim \"md6/mods/b/control.md6anim\" {") != NULL);
+        CHECK(strstr(out, "inventoryItem \"weapon/mp/shotgun\"\n") != NULL);
+        CHECK(strstr(out, "name \"mods/b/control\"\n") != NULL && strstr(out, "\"MD6_WEIGHTGROUP_ALL\"\n") != NULL);
+        CHECK(strstr(out, "inherit \"player/tp_body\"\n") != NULL);
+        CHECK(strstr(out, "frame 10\n") != NULL && strstr(out, " = ") == NULL);
+        {
+            int again = -1;
+            char *twice;
+            t[0] = out;
+            twice = sh_modserve_test_compose(t, 2, &again);
+            CHECK(twice && again == 0 && !strcmp(twice, out));
+            free(twice);
+        }
+        free(out);
+    }
+    /* The same clip with a different row set is two meanings; a scalar that
+     * differs outside a bag refuses; a bag kind the winner lacks refuses. */
+    t[0] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/a/pickup.md6anim\" {\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 1\n\t\t\t\trow 1\n\t\t\t}\n\t\t}\n" MD6_TAIL("");
+    t[1] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/a/pickup.md6anim\" {\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 2\n\t\t\t\trow 1\n\t\t\t}\n\t\t}\n" MD6_TAIL("");
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = MD6_HEAD MD6_STOCK MD6_TAIL(""); t[1] = "{\n\tinit {\n\t\tinherit \"player/other\"\n\t}\n\tevents {\n" MD6_STOCK "\t}\n\taliases {\n\t}\n\tuserChannelWeightGroupOverride {\n\t\t\"MD6_WEIGHTGROUP_ALL\"\n\t}\n}\n";
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = AW_TEXT(""); t[1] = AW_TEXT("\tlayers {\n\t}\n");
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
 }
 

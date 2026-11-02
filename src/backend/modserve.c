@@ -1134,14 +1134,21 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
  *   stmt  := key '=' value [';'] | key ['='] '{' stmt* '}' [';']
  *   key   := word | "string"     value := word | "string" | ( group )
  *
+ * or in the bare statement grammar of md6Def and animWeb texts
+ *
+ *   stmt  := key value | key [name] '{' stmt* '}'     (no '=' or ';')
+ *
  * and the texts agree everywhere except inside lists (a block holding
- * `num = N;` and only `item[i]` members), the served text is the winner's
- * with every other provider's list items appended that the winner lacks
- * (matched by value, or by a block item's first scalar member such as
- * aiType), renumbered, and `num` set to the count. Any other difference, a
- * provider that lists an existing item with different content, or a text
- * outside the grammar leaves the winner's bytes as they are. Removal cannot
- * be expressed (no stock text is read here), so composition is a union. */
+ * `num = N;` and only `item[i]` members) or bags (a block whose members
+ * repeat a key, such as the `anim "clip" { ... }` blocks of an md6Def's
+ * events or its `alias { ... }` rows), the served text is the winner's with
+ * every other provider's list items or bag entries appended that the winner
+ * lacks (matched by value, by a named block's key and name, or by a block
+ * item's first scalar member such as aiType), lists renumbered and `num` set
+ * to the count. Any other difference, a provider that lists an existing item
+ * with different content, or a text outside the grammar leaves the winner's
+ * bytes as they are. Removal cannot be expressed (no stock text is read
+ * here), so composition is a union. */
 
 #define MC_DEPTH 32
 
@@ -1271,12 +1278,22 @@ static int mc_parse_block(mc_ctx *c, mc_lex *l, mc_node *parent, int depth)
         n->key_n = key.n;
         t = mc_next(l);
         if (t.kind == MC_EQ) { n->eq = 1; t = mc_next(l); }
+        if (!n->eq && (t.kind == MC_WORD || t.kind == MC_STR) && mc_peek(l).kind == MC_LB) {
+            /* A named block: `anim "clip" { ... }`. The name is part of the key. */
+            n->key_n = (size_t)(t.p + t.n - n->key);
+            t = mc_next(l);
+        }
         if (t.kind == MC_LB) {
             n->block = 1;
             if (!mc_parse_block(c, l, n, depth + 1)) return 0;
-        } else if (n->eq && (t.kind == MC_WORD || t.kind == MC_STR || t.kind == MC_GROUP)) {
+        } else if (t.kind == MC_WORD || t.kind == MC_STR || t.kind == MC_GROUP) {
             n->val = t.p;
             n->val_n = t.n;
+        } else if (t.kind == MC_RB && !n->eq) {
+            /* A bare member before the closing brace: `{ "MD6_WEIGHTGROUP_ALL" }`. */
+            n->val = t.p;
+            n->val_n = 0;
+            l->pos = (size_t)(t.p - l->t);
         } else return 0;
         if (mc_peek(l).kind == MC_SEMI) mc_next(l);
         if (!mc_add_kid(c, parent, n)) return 0;
@@ -1367,10 +1384,13 @@ static void mc_write_members(mc_buf *b, const mc_node *n, int depth)
             mc_write_members(b, k, depth + 1);
             mc_indent(b, depth);
             mc_put(b, "}\n", 2);
-        } else {
+        } else if (k->eq) {
             mc_put(b, " = ", 3);
             mc_put(b, k->val, k->val_n);
             mc_put(b, ";\n", 2);
+        } else {
+            if (k->val_n) { mc_put(b, " ", 1); mc_put(b, k->val, k->val_n); }
+            mc_put(b, "\n", 1);
         }
     }
 }
@@ -1400,10 +1420,33 @@ static int mc_equal(const mc_node *a, const mc_node *b)
     return eq;
 }
 
+/* The key word alone (`anim` of `anim "clip"`). */
+static size_t mc_word_n(const mc_node *n)
+{
+    size_t i = 0;
+    while (i < n->key_n && n->key[i] != ' ' && n->key[i] != '\t') i++;
+    return i;
+}
+
+static int mc_same_word(const mc_node *a, const mc_node *b)
+{
+    size_t x = mc_word_n(a), y = mc_word_n(b);
+    return x == y && !_strnicmp(a->key, b->key, x);
+}
+
 /* A list item's identity: a scalar's value, or a block's first scalar member. */
 static char *mc_identity(const mc_node *n)
 {
     int i;
+    if (n->block && mc_word_n(n) != n->key_n) {
+        /* A named block is its key and name. */
+        char *s = (char *)malloc(n->key_n + 1);
+        if (!s) return NULL;
+        memcpy(s, n->key, n->key_n);
+        s[n->key_n] = 0;
+        for (char *p = s; p < s + mc_word_n(n); ++p) *p = ms_fold(*p);
+        return s;
+    }
     if (n->block)
         for (i = 0; i < n->nkids; ++i)
             if (!n->kids[i]->block) {
@@ -1464,6 +1507,38 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
     for (i = 0; i < other->nkids; ++i) {
         const mc_node *o = other->kids[i];
         mc_node *b = NULL;
+        int bag = o->block && !o->eq && (mc_count_key(other, o) != 1 || mc_count_key(base, o) != 1 ||
+                                         mc_word_n(o) != o->key_n);
+        if (bag) {
+            /* A bag entry (`anim "clip" { }`, `alias { }`): matched by its
+             * identity among the base entries of the same key word. */
+            /* A key that repeats within one text (`event "ae_sound"` rows,
+             * `alias { }` rows) is matched by its whole text; a unique named
+             * block (`anim "clip"`) by its key and name. */
+            int exact = mc_count_key(other, o) != 1 || mc_count_key(base, o) != 1;
+            char *id = exact ? mc_text(o, NULL) : mc_identity(o);
+            int found = -1, same_word = 0;
+            if (!id) return 0;
+            for (k = 0; k < base->nkids && found < 0; ++k) {
+                char *bid;
+                if (!base->kids[k]->block || base->kids[k]->eq || !mc_same_word(base->kids[k], o)) continue;
+                same_word++;
+                bid = exact ? mc_text(base->kids[k], NULL) : mc_identity(base->kids[k]);
+                if (!bid) { free(id); return 0; }
+                if (!strcmp(id, bid)) found = k;
+                free(bid);
+            }
+            free(id);
+            if (found >= 0) {
+                if (base->kids[found]->key_n != o->key_n || _strnicmp(base->kids[found]->key, o->key, o->key_n)) return 0;
+                if (!mc_merge(c, base->kids[found], o, added)) return 0;
+                continue;
+            }
+            if (!same_word && base->nkids) return 0;   /* nothing of this kind in the winner: not a bag it holds */
+            if (!mc_add_kid(c, base, (mc_node *)o)) return 0;
+            (*added)++;
+            continue;
+        }
         if (mc_count_key(other, o) != 1 || mc_count_key(base, o) > 1) return 0;
         for (k = 0; k < base->nkids; ++k)
             if (base->kids[k]->key_n == o->key_n && !_strnicmp(base->kids[k]->key, o->key, o->key_n)) { b = base->kids[k]; break; }
@@ -1471,12 +1546,17 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
         if (b->block && o->block) { if (!mc_merge(c, b, o, added)) return 0; }
         else if (!mc_equal(b, o)) return 0;
     }
-    /* Members only the base has are another edit of the same kind. */
+    /* Members only the base has are another edit of the same kind, unless
+     * they are bag entries of a key word the other text also holds. */
     for (k = 0; k < base->nkids; ++k) {
         int found = 0;
+        const mc_node *bk = base->kids[k];
         for (i = 0; i < other->nkids && !found; ++i)
-            found = base->kids[k]->key_n == other->kids[i]->key_n &&
-                    !_strnicmp(base->kids[k]->key, other->kids[i]->key, other->kids[i]->key_n);
+            found = bk->key_n == other->kids[i]->key_n && !_strnicmp(bk->key, other->kids[i]->key, other->kids[i]->key_n);
+        if (found) continue;
+        if (bk->block && !bk->eq)
+            for (i = 0; i < other->nkids && !found; ++i)
+                found = other->kids[i]->block && !other->kids[i]->eq && mc_same_word(bk, other->kids[i]);
         if (!found) return 0;
     }
     return 1;
