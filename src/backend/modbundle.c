@@ -9,6 +9,7 @@
 #include <ctype.h>
 
 #include "modbundle.h"
+#include "companion.h"
 #include "config_json.h"
 #include "decl_text.h"
 #include "json_pretty.h"
@@ -1598,6 +1599,32 @@ static int mb_need_cmp(const void *a, const void *b)
     return c ? c : strcmp(x->name, y->name);
 }
 
+/* A tile's declared companions (the descriptor's "companions" block, kept in
+ * extra) are needs of the tile's own entityDef: the serving closure then
+ * registers them with the owner and the validator checks that they resolve. */
+static void mb_companion_needs(sh_mb_bundle *b)
+{
+    sh_companion_table t;
+    size_t i;
+    int k;
+    if (!b->extra) return;
+    memset(&t, 0, sizeof t);
+    if (sh_companion_add_bundle(&t, b->id, b->extra, strlen(b->extra), NULL, NULL) > 0) {
+        for (i = 0; i < b->file_count; i++) {
+            sh_mb_file *f = &b->files[i];
+            const sh_companion_owner *owner;
+            if (!f->is_decl || !f->ptype || !f->pname || _stricmp(f->ptype, "entityDef") != 0) continue;
+            owner = sh_companion_find(&t, f->pname);
+            if (!owner) continue;
+            for (k = 0; k < owner->count; k++)
+                if (!mb_add_need(f, "entityDef", owner->entries[k].entitydef, strlen(owner->entries[k].entitydef)))
+                    mb_error(b, "out of memory");
+            qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+        }
+    }
+    sh_companion_table_free(&t);
+}
+
 static int mb_file_cmp(const void *a, const void *b)
 {
     return strcmp(((const sh_mb_file *)a)->path, ((const sh_mb_file *)b)->path);
@@ -3127,6 +3154,8 @@ names:
             }
         }
     }
+
+    mb_companion_needs(b);
 
     /* A module is placed through its snapModuleInfo, which must travel with it. */
     for (i = 0; i < b->file_count; i++) {

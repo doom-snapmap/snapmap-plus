@@ -775,6 +775,12 @@ static void m_chain(const char *f)
     mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\child.decl",
              "{\r\n\tinherit = \"mods/alex.r2-imp/mid\";\r\n\tedit = {\r\n\t}\r\n}");
 }
+static void m_companions(const char *f)
+{
+    m_chain(f);
+    mt_write(f, "mod.json", DESC(",\"companions\":{\"mods/alex.r2-imp/mid\":[{\"entityDef\":\"mods/alex.r2-imp/child\","
+                             "\"origin\":[0.0,10.5,0.0],\"axis\":[[1,0,0],[0,1,0],[0,0,1]]}]}"));
+}
 static void m_chain_broken(const char *f)
 {
     mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\child.decl",
@@ -827,6 +833,14 @@ static void test_refusals(const char *fixture, const char *tmp)
         CHECK(child && child->need_count == 1 && has_need(child, "entityDef", "mods/alex.r2-imp/mid"));
         CHECK(mid && mid->need_count == 1 && has_need(mid, "entityDef", "mods/alex.r2-imp/imp_copy"));
         CHECK(strstr(b.canonical, "{\"blob\":\"") && strstr(b.canonical, "\"needs\":[{\"name\":\"mods/alex.r2-imp/mid\",\"type\":\"entityDef\"}]"));
+    }
+    sh_mb_free(&b);
+    accepted(fixture, tmp, m_companions, &b);
+    {
+        const sh_mb_file *mid = find_file(&b, "generated/decls/entitydef/mods/alex.r2-imp/mid.decl");
+        CHECK(mid && mid->need_count == 2 && has_need(mid, "entityDef", "mods/alex.r2-imp/child") &&
+              has_need(mid, "entityDef", "mods/alex.r2-imp/imp_copy"));
+        CHECK(b.extra && strstr(b.extra, "\"companions\""));
     }
     sh_mb_free(&b);
 
