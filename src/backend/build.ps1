@@ -36,7 +36,9 @@ param(
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
                            "modnet.c", "modsync.c", "modexport.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
-                           "modvt.c", "vt_harness.c"),
+                           "modvt.c", "vt_harness.c",
+                           # Owner-bound companions a mod declares for its tiles.
+                           "companion.c", "companion_sigs.c", "companion_engine.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

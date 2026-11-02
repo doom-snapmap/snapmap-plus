@@ -277,6 +277,19 @@ does not refuse, since the engine already tolerates those names.
   and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
   installed mod at startup, and two mods asking different things for one weapon turn the setting off
   for all weapons, with both named in the log.
+- A mod's `companions` setting gives one of its tiles its own helper entities: GUI displays, props
+  or speakers that appear with every placed copy of the tile when the map plays, sit where the
+  author put them relative to that copy, move with it, are removed with it, and are switched on in
+  the listed order when using the tile activates its targets (`activateTargetsOnUse`). Each entry
+  names an entityDef and its owner-local `origin` and `axis` (rows); `"activate": false` keeps one
+  out of the Use order and `"bind": false` leaves it unbound, so it neither follows nor is removed
+  with the tile. A mod may only list its own tiles (`mods/<id>/...`), at most 16 companions each.
+  Nothing is spawned on a co-op client, and a mod with companions installed while the game runs
+  needs a restart unless another one was installed at startup:
+
+      "companions": { "mods/<id>/my_panel": [
+        { "entityDef": "mods/<id>/screen_left", "origin": [-57.4, 80.6, 98.3],
+          "axis": [[-0.7071, -0.7071, 0], [0.7071, -0.7071, 0], [0, 0, 1]] } ] }
 - A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<id>/` plays the Wwise
   event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
   bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<id>_<name>.bnk`, built with Wwise or
@@ -655,6 +668,7 @@ Engine detours and resource-loader shadows the backend installs.
 | Strids injector | Combines the user's `strings\strids.json` with the built-in strings. A refresh publishes the owned values without duplicate rows, retaining storage needed by live native readers. See `src/backend/strids.h`. |
 | Text-field clipboard | **Ctrl+C / Ctrl+V in the editor's text fields** — every free-text property (datapad and transmission message bodies) plus the text-backed int / float / vec3 / size inspectors. Copies the selection, or the whole field when nothing is selected; pastes over the selection, or at the caret. Multi-line text pasted into a single-line field collapses each break to a space; datapad bodies keep their newlines. Respects the field's own character cap. Vanilla has no text clipboard at all here (only the dev console accepts a paste) — and it is genuinely absent rather than disabled: the engine's SWF text-edit key handler has no Ctrl branch whatsoever. Entity-level Ctrl+C/Ctrl+V and Ctrl+X are untouched. Exceeds the original. |
 | Boot pacing | DOOM reaches the SnapMap hub in about 19 s on Vulkan and 22 s on OpenGL instead of about 158 s and 141 s (warm boots on the test machine). The engine's startup resource preload was paced by waits, not by the disk: the load-screen video slept 10 ms at a time while holding the lock the file-stream thread needs, and the main thread polled every read with `Sleep(1)`. `boot_pacing.c` releases that lock for the video's sleep and lets the poll spin and yield before it sleeps. The load-screen video and progress ring look and play as before. Both sites are byte-checked and patched about 0.1 s after launch; when a site does not match, it is logged and left alone. Map loads run through the same two sites. |
+| Owner-bound companions | When an installed mod declares `companions`, detours `idClass::CallSpawn` so that each entity spawned from a listed tile gets its companions right after its own spawn: spawned through the game's own SpawnEntityDef, placed relative to the tile, bound to it and added to its targets in order. With no such mod the spawn path is untouched. See [Mods](#mods). |
 | String Set commands | Detours the Set (String) action's `DoAction`; a literal value starting with `smp:` runs as a command on the activator's player before the stock write (see [Map behaviour](#map-behaviour-string-set-commands)). |
 | Fault handling | The clone replaces the original's two kill-detours (which terminate DOOM) with the recover-in-place fault-shield (see [`fidelity.md`](fidelity.md)). |
 | SuperScript table | Merge the parked `cs_*` SuperScript objects into the engine's eventDef enumerate/lookup/dispatch paths. |

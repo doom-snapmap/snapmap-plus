@@ -488,6 +488,9 @@ These backend files share the work:
   (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, the builder's only form of
   `.mega2`) as one page-source record, as in
   [Mod virtual-texture families](#mod-virtual-texture-families).
+- `companion.c` reads the `companions` key of every admitted bundle's author
+  block and `companion_engine.c` spawns them, as in
+  [Owner-bound companions](#owner-bound-companions).
 - `modpublish.c` uploads a map's bundles when the map is published, claims
   them under the published item, releases the claim at unpublish, and refuses
   a copy to My Maps that the map service would reject, as in
@@ -865,6 +868,34 @@ together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
 The first open of each served render-program file logs
 `MODS: renderprog: served <request> (<id>@<version>, <n> bytes)` (the first 64),
 which shows the variant this GPU binds.
+### Owner-bound companions
+
+A bundle's `companions` key (author block of `mod.json`, kept under `extra`)
+maps owner entityDefs, which must be the bundle's own `mods/<id>/` names, to
+1..16 companions `{entityDef, origin, axis, activate, bind}` (`companion.h`
+has the grammar and refusals; a refused block adds nothing and is logged
+`COMPANIONS: <id> REFUSED: ...`; the first bundle to declare an owner keeps
+it). `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
+0x141584A90, 14 stolen bytes) only when at least one owner is declared at
+startup, and logs `COMPANIONS: installed ...` and one line per owner
+spawn (`<owner>: n of m companions spawned`), the first 64 lines. After the original spawn chain
+returns, an idEntity whose entityDef (`+0x6D0`) is an owner, or inherits one
+through `mods/` names (`+0x58`), gets each companion in list order: spawned by
+the game's SpawnEntityDef (game vtable `+0x450`, as idAnimated starting
+attachments are), placed at the owner's physics origin plus `origin * axis`
+with axis `axis * ownerAxis`, bound (`idEntity::Bind`, oriented) so it moves
+with the owner and the owner's destructor removes it, and appended to the
+owner's targets (`idEntity::AddTarget`) so a native `ActivateTargets` (Use
+with `activateTargetsOnUse`) activates it after the owner's earlier targets.
+Map entities reach CallSpawn after `SpawnEntitiesForLayers` has registered all
+of them, so companions number after the map's own. A companion's own
+companions are spawned once more, no deeper. Nothing is spawned when the game
+is a network client. Access violations inside the pass are contained and
+counted; an engine exception propagates to the engine. The signatures are
+private to `companion_sigs.c` and checked on both executables by
+`companion_test`. The capability name `snapmap.owner_companions` is reserved
+for the engine-capability facility once it carries hook rows.
+
 ### Mod modules
 
 A bundle module is `maps/modules/mods/<id>/<leaf>.decl` (provides `snapModule`,

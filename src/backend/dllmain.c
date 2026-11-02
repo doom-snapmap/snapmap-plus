@@ -52,6 +52,7 @@
 #include "cvars.h"
 #include "entity.h"
 #include "modaction.h"
+#include "companion_engine.h"
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "vt_harness.h"
@@ -497,6 +498,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* smp: commands carried by String Variable Set nodes (needs the game
          * manager from sh_entity_install and the decl manager above). */
         (void)sh_modaction_install(results, db, g_doom_base);
+
+        /* Owner-bound companions (companion_engine.h): CallSpawn is detoured only
+         * when an admitted bundle declares companions; uses the game manager and
+         * the decl registry resolved above. */
+        if (overrides_installed) (void)sh_companions_install(results, db, g_doom_base);
 
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
