@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.23 -- 2026-11-03 (beta)
+
+**Mod tiles can bring their own helper entities**
+
+Mods can now give a tile companion entities such as displays, props or speakers that appear with every placed copy, move with it and switch on when the tile is used. You can also install a whole folder of mods at once and group mod folders in subfolders.
+
+### New
+- A mod can give one of its tiles up to 16 companion entities that appear with every placed copy, sit where the author put them, move with the tile and switch on in order when it is used.
+- The install button now accepts several folders at once, and picking a folder without a mod description installs every mod found below it, reporting how many installed and how many were refused.
+- Mod folders can sit inside organizing subfolders under the mods folder, and they are listed, rebuilt, verified and uninstalled just like top-level ones.
+
+### Improved
+- Several mods that each add extra rows to the same shared game definition are now served together instead of one of them winning.
+- Mod settings accept decimal numbers such as -0.7071, not just whole numbers.
+
+### Fixed
+- Installing a mod no longer fails with an access-denied error when Windows briefly holds the old folder, and a companion whose definition cannot load is skipped with an explanatory log line instead of appearing as an empty object.
+
+_Plus 3 smaller fixes and internal changes._
+
 ## v0.2.1-beta.22 -- 2026-11-01 (beta)
 
 **Packages added to overrides later now get moved**
