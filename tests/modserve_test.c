@@ -1593,6 +1593,33 @@ static void test_compose_unit(void)
         }
         free(out);
     }
+    /* A winner whose aliases bag holds an entry composes with a text whose
+     * aliases bag is empty (the stock text), as the reverse order already did. */
+    t[0] = MD6_HEAD MD6_STOCK MD6_TAIL("\t\talias {\n\t\t\tname \"mods/b/control\"\n\t\t\tanim \"md6/mods/b/control.md6anim\"\n\t\t}\n");
+    t[1] = MD6_HEAD MD6_STOCK MD6_TAIL("");
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 0 && strstr(out, "name \"mods/b/control\"\n") != NULL);
+    free(out);
+    /* Two new clips whose rows are identical (a door's kick and its reverse,
+     * each hiding the HUD at frame 1) are two entries, matched by name, not one. */
+    t[0] = MD6_HEAD MD6_STOCK MD6_TAIL("");
+    t[1] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/doors/kick_down_PLAYER.md6anim\" {\n\t\t\tevent \"ae_hideHudForContextPrompt\" {\n\t\t\t\tframe 1\n\t\t\t\trow 30\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n"
+           "\t\tanim \"md6/doors/kick_down_reverse_PLAYER.md6anim\" {\n\t\t\tevent \"ae_hideHudForContextPrompt\" {\n\t\t\t\tframe 1\n\t\t\t\trow 30\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n" MD6_TAIL("");
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 2);
+    if (out) {
+        CHECK(strstr(out, "anim \"md6/doors/kick_down_PLAYER.md6anim\" {") != NULL);
+        CHECK(strstr(out, "anim \"md6/doors/kick_down_reverse_PLAYER.md6anim\" {") != NULL);
+        {
+            int again = -1;
+            char *twice;
+            t[0] = out;
+            twice = sh_modserve_test_compose(t, 2, &again);
+            CHECK(twice && again == 0 && !strcmp(twice, out));
+            free(twice);
+        }
+        free(out);
+    }
     /* The same clip with a different row set is two meanings; a scalar that
      * differs outside a bag refuses; a bag kind the winner lacks refuses. */
     t[0] = MD6_HEAD MD6_STOCK "\t\tanim \"md6/a/pickup.md6anim\" {\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 1\n\t\t\t\trow 1\n\t\t\t}\n\t\t}\n" MD6_TAIL("");

@@ -1514,8 +1514,10 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
              * identity among the base entries of the same key word. */
             /* A key that repeats within one text (`event "ae_sound"` rows,
              * `alias { }` rows) is matched by its whole text; a unique named
-             * block (`anim "clip"`) by its key and name. */
-            int exact = mc_count_key(other, o) != 1 || mc_count_key(base, o) != 1;
+             * block (`anim "clip"`) by its key and name. A key the winner
+             * lacks is new, not a repeat: two new clips with the same rows
+             * (a door's kick and its reverse) are two entries, not one. */
+            int exact = mc_count_key(other, o) > 1 || mc_count_key(base, o) > 1;
             char *id = exact ? mc_text(o, NULL) : mc_identity(o);
             int found = -1, same_word = 0;
             if (!id) return 0;
@@ -1547,16 +1549,20 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
         else if (!mc_equal(b, o)) return 0;
     }
     /* Members only the base has are another edit of the same kind, unless
-     * they are bag entries of a key word the other text also holds. */
+     * they are bag entries of a key word the other text also holds, or the
+     * other's block is empty (the stock `aliases { }`): an empty bag holds
+     * nothing to disagree with, as it does when the winner's is the empty one. */
     for (k = 0; k < base->nkids; ++k) {
         int found = 0;
         const mc_node *bk = base->kids[k];
         for (i = 0; i < other->nkids && !found; ++i)
             found = bk->key_n == other->kids[i]->key_n && !_strnicmp(bk->key, other->kids[i]->key, other->kids[i]->key_n);
         if (found) continue;
-        if (bk->block && !bk->eq)
+        if (bk->block && !bk->eq) {
+            if (!other->nkids) continue;
             for (i = 0; i < other->nkids && !found; ++i)
                 found = other->kids[i]->block && !other->kids[i]->eq && mc_same_word(bk, other->kids[i]);
+        }
         if (!found) return 0;
     }
     return 1;
