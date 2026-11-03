@@ -3,6 +3,19 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.24 -- 2026-11-03 (beta)
+
+**Scenes can hide the HUD while they play**
+
+A mod's scene can now hide the health and ammo display for its duration using the game's own animation events on the player's body, and bring it back when the scene releases you. This works during SnapMap Play; the editor and campaign are unchanged.
+
+### New
+- A scene played by a mod can hide the health and ammo display while it runs and restore it on the frame it lets you go, using the game's existing hide and show animation events.
+- If a scene is cut short and never restores the display, it comes back the next time you start Play.
+
+### Improved
+- Mods that add new animation definitions combine more reliably instead of being turned away when one side has an entry the other lacks.
+
 ## v0.2.1-beta.23 -- 2026-11-03 (beta)
 
 **Mod tiles can bring their own helper entities**
