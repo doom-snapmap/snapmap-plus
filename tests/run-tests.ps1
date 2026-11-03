@@ -70,6 +70,7 @@ $tests = @(
     @{ name = "edit_pair_test"; src = 'edit_pair_test.c'; arg = "" }
     @{ name = "engine_cvar_read_test"; src = 'engine_cvar_read_test.c'; arg = "" }
     @{ name = "modhud_scene_test"; src = 'modhud_scene_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = "" }
+    @{ name = "modscene_place_test"; src = 'modscene_place_test.c ..\src\backend\modscene_place.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING /DSH_MODSCENE_PLACE_PURE'; arg = "" }
     @{ name = "apply_dispatch_test"; src = 'apply_dispatch_test.c ..\src\backend\prefab_grab.c ..\src\backend\perf.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; defs = '/Gy'; arg = "" }
     @{ name = "snapstack_pair_test"; src = 'snapstack_pair_test.c'; defs = '/Gy'; arg = "" }
     @{ name = "crash_report_test"; src = 'crash_report_test.c ..\src\fault_shield\crash_record_format.c ..\src\backend\config_json.c'; arg = "" }

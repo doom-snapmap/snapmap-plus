@@ -48,6 +48,9 @@ static const site SITES[] = {
     { "apply_engine.c",       "GridApplyEntityTree",        SITE_SIG, 0, 18, REPLAYS, 0 },
     { "apply_engine.c",       "PrefabGrabFrame",            SITE_SIG, 0, 19, REPLAYS, 0 },
     { "modhud_scene.c",       "EventDispatchBase",          SITE_SIG, 0, 14, REPLAYS, 0 },
+    { "modscene_place.c",     "SceneInteractionDoAction",   SITE_SIG, 0, 17, REPLAYS, 0 },
+    { "modscene_place.c",     "InteractableUsedOutput",     SITE_SIG, 0, 17, REPLAYS, 0 },
+    { "modscene_place.c",     "InteractionOnActionRequest", SITE_SIG, 0, 14, REPLAYS, 0 },
     { "commands.c",           "RenderLogStub",              SITE_SIG, 0, 14, STUB_PADDING, 6 },
     { "commands.c",           "AddCommand",                 SITE_SIG, 0, 15, REPLAYS, 0 },
     { "editor_frame.c",       "EditorFrame",                SITE_SIG, 0, 25, REPLAYS, 0 },
@@ -334,7 +337,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
     { "backend\\timeline_tile.c", 1 }, { "backend\\modserve_engine.c", 1 },
     { "backend\\modpublished.c", 8 }, { "backend\\modpublish.c", 1 }, { "backend\\modaction.c", 1 },
-    { "backend\\companion_engine.c", 1 }, { "backend\\modhud_scene.c", 1 },
+    { "backend\\companion_engine.c", 1 }, { "backend\\modhud_scene.c", 1 }, { "backend\\modscene_place.c", 1 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };

@@ -1457,5 +1457,22 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 33 C4 48 89 44 24 58 48 8B E9 4C 8B 05 ?? ?? ?? ?? 49 8B 80 28 81 29 00 4C 8B 78 48 4D 85 FF 0F 84 ?? ?? ?? ?? 33 "
       "F6 8B 81 F8 03 00 00"
       , 0x9E26C0u, 0x9E19B0u },
+    /* Scene nodes play at the player (modscene_place.c; snaphak-re R313).
+     * Unique on both build 13954591 executables. */
+    { "SceneInteractionDoAction", /* idSnapMapAction_Interaction::DoAction(this, activator), vtable +0x8E8 (VK vtable 0x142186FD0 / GL 0x1421A0D20): for each target (+0x3F0, count +0x3F8, 0x20-byte references) posts the interaction-action event with the action int at +0xCA8 and the activator, or the target itself when it is NULL. Steal 17. */
+      "4C 8B DC 55 57 41 56 48 83 EC 60 8B 81 F8 03 00 00 33 FF 4C 8B F2 48 8B E9 85 C0 0F 8E B5 00 00 00 49 89 5B 10 49 89 73 18 33 F6 3B F8 7D 3D "
+      "48 8B 9D F0 03 00 00 48 03 DE 8B 03 48 8D 53 04 3B 02 75 1B 3D FE FF FF 01 74 1C 48 83 7B 08 00 75 15 48 83 3D ?? ?? ?? ?? 00 74 0B 48 8B D3 "
+      "48 8B CB E8 ?? ?? ?? ?? 48 8B 5B 08 EB 02 33 DB 48 85 DB 74 3F 4D 85 F6 48 8D 4C 24 48 49 8B D6 48 0F 44 D3 E8 ?? ?? ?? ?? 8B 95 A8 0C 00 00 "
+      "4C 8D 4C 24 30 89 54 24 38 45 33 C0 48 8D 15 ?? ?? ?? ?? C6 44 24 30 69"
+      , 0x9DCCC0u, 0x9DBFB0u },
+    { "InteractableUsedOutput", /* idInteractable vtable +0xAA0 (this): FireOutput(this, SNAP_EVENT_INTERACTABLE_USED = 0x33, the user entity at +0x5208 after refreshing its reference at +0x5200), tail-jumped. Reached from the interactable's event dispatcher; the only FireOutput call site that loads 0x33 into EDX. Steal 17. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8D 99 00 52 00 00 48 8B F9 8B 03 48 8D 53 04 3B 02 75 1B 3D FE FF FF 01 74 1C 48 83 7B 08 00 75 15 "
+      "48 83 3D ?? ?? ?? ?? 00 74 0B 48 8B D3 48 8B CB E8 ?? ?? ?? ?? 4C 8B 43 08 BA 33 00 00 00 48 8B CF 48 8B 5C 24 30 48 83 C4 20 5F E9"
+      , 0x91EA30u, 0x91DB40u },
+    { "InteractionOnActionRequest", /* idInteractionComponent::OnActionRequest(this, owner, const idInteractionAction_t *, requester) -> bool: false when +0x70 is NULL, else loads requester+0x388 (its name) for the debug line before any check, so a NULL requester faults (R312: the interactable's sync-end reset, idInteractable vtable +0xA38, sends action 3 with its stored user). Steal 14. */
+      "48 89 6C 24 18 56 41 56 41 57 48 83 EC 30 48 83 79 70 00 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 75 11 32 C0 48 8B 6C 24 60 48 83 C4 30 41 5F "
+      "41 5E 5E C3 0F B6 89 71 09 00 00 4C 8D 05 ?? ?? ?? ?? 48 89 5C 24 50 48 8D 15 ?? ?? ?? ?? 48 89 7C 24 58 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
+      "49 8B BE 88 03 00 00 48 8B 9D 88 03 00 00"
+      , 0x6BEE80u, 0x6BE150u },
     { NULL, NULL, 0 }   /* terminator */
 };

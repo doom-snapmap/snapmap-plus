@@ -286,6 +286,17 @@ does not refuse, since the engine already tolerates those names.
   the editor and the campaign they are left to the engine. A hide the scene never paired with a show
   (a sync cut short) is undone at the next Play entry. The log says `scene-hud installed` and, once
   per Play each way, `hidden by a scene` and `shown again`.
+- A mod's scene node (a logic hexagon whose Activate input is the mod's `mods/<id>/actions/scene_play`
+  row, an `idSnapMapAction_Interaction` with `IA_ACTIVATE`) plays its scene where the activating
+  player stands, facing the way they look, instead of at the node: during SnapMap Play the backend
+  moves the node to the player's feet with the player's view yaw before the engine starts the sync,
+  and when the node raises On Scene Finished (`SNAP_EVENT_INTERACTABLE_USED`) it teleports that player
+  back to where they stood, with the same view angles. An Activate on such a row from anything but a
+  player (a demon walking into a trigger) is dropped, and the engine's interaction request with no
+  requester, which used to end Play with an engine error, is refused (R312, R313). Other
+  interaction actions and the editor are left to the engine. The log says `scene-place installed`
+  and, once per Play, `a scene node plays at`, `returned after the scene`, `dropped an Activate` and
+  `refused interaction action`.
 - A mod's `companions` setting gives one of its tiles its own helper entities: GUI displays, props
   or speakers that appear with every placed copy of the tile when the map plays, sit where the
   author put them relative to that copy, move with it, are removed with it, and are switched on in

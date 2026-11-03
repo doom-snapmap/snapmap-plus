@@ -49,6 +49,7 @@
 #include <stdlib.h>
 #include "modserve.h"
 #include "modhud_scene.h"
+#include "modscene_place.h"
 #include "modbundle.h"
 #include "overrides.h"
 #include "modstock.h"
@@ -493,6 +494,7 @@ void sh_modserve_play_begin(void)
 {
     int on_main;
     sh_modhud_scene_play_begin();
+    sh_modscene_place_play_begin();
     on_main = me_on_main();
     /* Map scope: entities placed since the load or the last save may list a
      * bundle; its shadows and requirements come in before the level loads. */

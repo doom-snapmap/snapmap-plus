@@ -31,6 +31,7 @@
 #include "modsound.h"
 #include "modhud.h"
 #include "modhud_scene.h"
+#include "modscene_place.h"
 #include "modstore.h"
 #include "modstock.h"
 #include "modpublished.h"
@@ -446,6 +447,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_apply_engine_install_edit_hook(results, db);
         /* Scenes hide and show the HUD through their own animation events. */
         (void)sh_modhud_scene_install(results, db);
+        /* Mod scene nodes play at the player who activated them. */
+        (void)sh_modscene_place_install(results, db, g_doom_base);
 
         /* Expose live entity reads so navigation sees marks edited since map load. */
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
