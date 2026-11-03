@@ -277,6 +277,15 @@ does not refuse, since the engine already tolerates those names.
   and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
   installed mod at startup, and two mods asking different things for one weapon turn the setting off
   for all weapons, with both named in the log.
+- A scene a mod plays through a sync animation can hide the HUD for its duration with the game's
+  own animation events on the player's third-person body: `ae_hideHudForContextPrompt` on the
+  frame the scene starts and `ae_showHudForContextPrompt` on the frame it releases the player, in
+  the mod's `player/mp/tp_body_mp.md6` event rows for that animation. In the engine the hide event
+  reaches nothing and the show event only restores the campaign HUD screen, so during SnapMap Play
+  the backend turns the two events into `g_showHud` 0 and 1 (the base event dispatcher, R306); in
+  the editor and the campaign they are left to the engine. A hide the scene never paired with a show
+  (a sync cut short) is undone at the next Play entry. The log says `scene-hud installed` and, once
+  per Play each way, `hidden by a scene` and `shown again`.
 - A mod's `companions` setting gives one of its tiles its own helper entities: GUI displays, props
   or speakers that appear with every placed copy of the tile when the map plays, sit where the
   author put them relative to that copy, move with it, are removed with it, and are switched on in

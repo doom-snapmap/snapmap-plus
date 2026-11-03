@@ -868,6 +868,12 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n);
  * (sh_modserve_requirements_held). */
 void sh_modserve_play_begin(void);
 
+/* 1 during SnapMap Play, 0 otherwise, -1 unknown (the editor's deactivation reason). */
+int sh_modserve_engine_in_play(void);
+
+/* Set one engine cvar by name through the requirements gate (immediate); 1 when set. */
+int sh_modserve_engine_set_cvar(const char *cvar, const char *value);
+
 /* A scope change (sh_modserve_scope_set) brought into the running game, at
  * a map load, the map exit, the Play entry and in the editor after a save or
  * a map-level change: the requirements pass first (stopped bundles' cvars

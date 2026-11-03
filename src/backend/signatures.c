@@ -879,6 +879,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 F2 0F 10 81 70 01 00 00 48 8B FA "
       "8B 81 78 01 00 00 48 8D 55 AF 48 81 C1 7C 01 00 00",
       0x12164D0u, 0x1215920u },
+    { "EventDispatchBase",  /* idEventArg *(this, ret, const idEventDef *ev, args). The base event
+                             * dispatcher every entity class chains into: switches on ev+0x34 minus
+                             * 0x18 (CMP EAX,0x12D after the pre-dispatch vtable+0x40/+0x38 calls).
+                             * Carries ae_hideHudForContextPrompt (0x123, an empty stub) and
+                             * ae_showHudForContextPrompt (0x124, idPlayerHud::RestoreHudState).
+                             * First 21 bytes are position-independent; the first RIP operand is
+                             * the security cookie at +0x1d (R306). */
+      "40 55 53 56 57 41 56 41 57 48 8D 6C 24 D1 48 81 EC A8 00 00 00 48 C7 45 DF FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 49 8B F9 4D 8B F0 48 8B DA 48 8B F1 45 33 FF "
+      "44 89 7D DB 4C 8B 11 49 8B D0 41 FF 52 40 84 C0 74 18 4C 8B 16 4C 8B CF 4D 8B C6 48 8B D3 "
+      "48 8B CE 41 FF 52 38 E9 D1 0D 00 00 41 8B 46 34 83 C0 E8 3D 2D 01 00 00 0F 87 AE 0D 00 00",
+      0x14A5950u, 0x14A5AF0u },
     { "MemLocalGet",       /* idMemLocal *(void). Resolve the accessor rather than computing the
                              * singleton address. Many magic-static getters resemble this;
                              * frame size, MOV R8D,4, and GS TLS load distinguish the pattern. */

@@ -48,6 +48,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "modserve.h"
+#include "modhud_scene.h"
 #include "modbundle.h"
 #include "overrides.h"
 #include "modstock.h"
@@ -475,9 +476,23 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
     return ready;
 }
 
+static int me_in_play(void);
+
+/* 1 during SnapMap Play, 0 otherwise, -1 unknown. */
+int sh_modserve_engine_in_play(void)
+{
+    return me_in_play();
+}
+
+int sh_modserve_engine_set_cvar(const char *cvar, const char *value)
+{
+    return gate_set(NULL, cvar, value) == SH_MODSERVE_GATE_SET;
+}
+
 void sh_modserve_play_begin(void)
 {
     int on_main;
+    sh_modhud_scene_play_begin();
     on_main = me_on_main();
     /* Map scope: entities placed since the load or the last save may list a
      * bundle; its shadows and requirements come in before the level loads. */
