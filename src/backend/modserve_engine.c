@@ -455,19 +455,49 @@ static const sh_modserve_gate_ops *me_gate_ops(void)
     return g_cvar_set && g_cvar_slot ? &g_gate_ops : &g_lines_ops;
 }
 
-/* Run a plan inside process heap 0: decl objects outlive every map. The
- * bundles' requirements are applied and read back first, outside the scope
- * (as map_bounds.c sets its cvars), and gate-blocked steps are marked. */
-static int me_run(sh_modserve_plan *plan, const char *phase)
+/* The editor closure's watermark (modserve.h, SH_MODSERVE_PART_*). A boot
+ * editor pass creates everything its rows lead the engine to create inside
+ * one watermark and keeps it; work for those rows done later (a refresh after
+ * an in-session install, a map pass registering a decl a row needs) takes one
+ * of its own, so it is kept the same way. Nested work inside a watermark
+ * (the editor pass, a kept plan part) is covered by the outer one: depth
+ * counts them, and g_refresh_part limits the refresh run inside a kept plan
+ * part to the closure (the editor pass refreshes everything inside its own). */
+static int g_mark_depth;
+static int g_refresh_part = SH_MODSERVE_PART_ALL;
+
+typedef struct me_closure { sh_modserve_watermark mark; int counted; } me_closure;
+
+static void me_closure_begin(me_closure *c)
+{
+    memset(c, 0, sizeof *c);
+    if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &c->mark))
+        me_log("editor closure: resource watermark unavailable (%s); what the editor rows' decls create now is not kept",
+               g_res_head ? "the resource lists could not be walked" : "decl_resource_head unresolved");
+    g_mark_depth++;
+    c->counted = 1;
+}
+
+static void me_closure_end(me_closure *c, const char *phase, const char *what)
+{
+    if (c->counted) g_mark_depth--;
+    if (c->mark.ok) {
+        sh_modserve_raised raised;
+        if (sh_modserve_watermark_raise(g_res_head, &c->mark, &raised) && raised.created)
+            me_log("%s: %u resource(s) the %s created kept for the session, as at boot (%u new, %u lists): %s", phase,
+                   raised.raised, what, raised.created, raised.lists, raised.summary);
+        else if (!raised.lists) me_log("%s: resource lists could not be walked after the %s; not kept", phase, what);
+    }
+    sh_modserve_watermark_free(&c->mark);
+}
+
+static void me_reparse_early(const char *phase, int in_heap);
+static void me_reload_ungated(const char *phase, int in_heap);
+
+static int me_run_plan(sh_modserve_plan *plan, const char *phase)
 {
     sh_process_heap_scope heap = { 0 };
-    sh_modserve_gates gates;
     int ready = -1;
-    if (!g_bound) { me_log("%s: decl registry unavailable on this build", phase); return -1; }
-    if (plan->count) {
-        sh_modserve_requirements_apply(me_gate_ops(), phase, &gates);
-        sh_modserve_plan_block_unmet(plan, &gates);
-    }
     if (!sh_process_heap_enter(&g_heap, &heap)) { me_log("%s: process heap scope unavailable; nothing registered", phase); return -1; }
     g_reparse_phase = phase;
     __try { ready = sh_modserve_plan_run(plan, &g_ops, phase); }
@@ -475,6 +505,51 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
         if (!sh_process_heap_leave(&heap)) { me_log("%s: process heap scope did not balance", phase); ready = -1; }
     }
     return ready;
+}
+
+/* Run a plan inside process heap 0: decl objects outlive every map. The
+ * bundles' requirements are applied and read back first, outside the scope
+ * (as map_bounds.c sets its cvars), and gate-blocked steps are marked.
+ * Outside a watermark, the steps an editor row needs that are not registered
+ * yet run first inside one (sh_modserve_plan_split): a map pass or a refresh
+ * plan that registers them keeps what they create, as the boot editor pass
+ * does; the rest of the plan runs after, at the engine's own level. */
+static int me_run(sh_modserve_plan *plan, const char *phase)
+{
+    sh_modserve_gates gates;
+    if (!g_bound) { me_log("%s: decl registry unavailable on this build", phase); return -1; }
+    if (plan->count) {
+        sh_modserve_requirements_apply(me_gate_ops(), phase, &gates);
+        sh_modserve_plan_block_unmet(plan, &gates);
+    }
+    if (!g_mark_depth && plan->count) {
+        sh_modserve_plan kept, rest;
+        int n = sh_modserve_plan_split(plan, &kept, &rest);
+        if (n > 0) {
+            me_closure c;
+            int ra, rb = 0, part = g_refresh_part;
+            me_closure_begin(&c);
+            g_refresh_part = SH_MODSERVE_PART_EDITOR;
+            ra = me_run_plan(&kept, phase);
+            g_refresh_part = part;
+            me_closure_end(&c, phase, "decls editor rows need");
+            sh_modserve_plan_merge_ready(plan, &kept);
+            if (rest.count) {
+                (void)sh_modserve_plan_block_failed_needs(&rest);
+                rb = me_run_plan(&rest, phase);
+                sh_modserve_plan_merge_ready(plan, &rest);
+            } else {
+                /* The early shadows and gated reloads a pass's sources hook
+                 * runs belong to no row: outside the watermark. */
+                me_reparse_early(phase, 0);
+                me_reload_ungated(phase, 0);
+            }
+            sh_modserve_plan_free(&kept);
+            sh_modserve_plan_free(&rest);
+            return ra < 0 || rb < 0 ? -1 : ra + rb;
+        }
+    }
+    return me_run_plan(plan, phase);
 }
 
 static int me_in_play(void);
@@ -900,7 +975,7 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
     return 0;
 }
 
-static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh *out)
+static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_refresh *out, int part)
 {
     me_refresh c;
     sh_process_heap_scope heap = { 0 };
@@ -918,14 +993,14 @@ static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh
         return;
     }
     __try {
-        if (sh_modserve_each_refresh(me_refresh_visit, &c) && c.raw.n && g_res_head)
+        if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head)
             (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
     } __finally {
         if (!in_heap && !sh_process_heap_leave(&heap)) me_rlog("refresh: heap scope did not balance at the %s", phase);
     }
     t1 = me_now_ms();
     c.stage = 1;
-    if (c.raw.n && g_res_head) (void)sh_modserve_each_refresh(me_refresh_visit, &c);
+    if (c.raw.n && g_res_head) (void)sh_modserve_each_refresh_part(me_refresh_visit, &c, part);
     if (c.decls.reparsed || c.decls.faulted || c.not_held) {
         for (i = 0; i < c.decls.ntypes; ++i)
             me_rlog("refresh: re-parsed %d %s decl(s) whose served bytes or parent changed (%s%s)", c.decls.types[i].count,
@@ -953,6 +1028,24 @@ static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh
     free(c.raw.names);
 }
 
+/* Apply a refresh. Outside a watermark, the editor closure's changes (rows
+ * and what they need, modserve.h) are applied first inside one, so what their
+ * re-parse and reload create is kept for the session as at boot, then the
+ * rest at the engine's own level. Inside a watermark: the part it covers. */
+static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh *out)
+{
+    if (g_mark_depth) { me_refresh_apply_part(phase, in_heap, out, g_refresh_part); return; }
+    if (g_bound && me_on_main() == 1 && sh_modserve_refresh_editor_pending() > 0) {
+        me_closure c;
+        me_closure_begin(&c);
+        me_refresh_apply_part(phase, in_heap, out, SH_MODSERVE_PART_EDITOR);
+        me_closure_end(&c, phase, "editor rows' refresh");
+        me_refresh_apply_part(phase, in_heap, out, SH_MODSERVE_PART_REST);
+        return;
+    }
+    me_refresh_apply_part(phase, in_heap, out, SH_MODSERVE_PART_ALL);
+}
+
 static void me_refresh_note(sh_modserve_refresh *r, const char *fmt, ...)
 {
     size_t at = strlen(r->note);
@@ -978,6 +1071,8 @@ static volatile LONG g_refresh_watch;
  * builds it with every row. */
 static volatile LONG g_palette_wanted;
 
+static void me_keep_rows(const char *phase);
+
 static void me_refresh_editor(const char *phase, sh_modserve_refresh *r)
 {
     sh_modserve_plan plan;
@@ -991,6 +1086,10 @@ static void me_refresh_editor(const char *phase, sh_modserve_refresh *r)
     }
     sh_modserve_plan_free(&plan);
     if (!InterlockedCompareExchange(&g_palette_wanted, 0, 0)) return;
+    /* The rows' references before anything else creates them: the editor
+     * redraws a placed entity of a changed row from its new references, and
+     * an object the editor creates for it would be map-scoped. */
+    me_keep_rows(phase);
     if (!sh_timeline_tile_palette()) {
         InterlockedExchange(&g_palette_wanted, 0);
         me_rlog("refresh: editor rows changed; no editor palette yet, the first editor entry builds it with them");
@@ -1173,6 +1272,9 @@ static void op_sources_published(void *context)
 {
     (void)context;
     me_refresh_apply(g_reparse_phase, 1, NULL);
+    /* Inside a kept plan part (me_run) only the editor closure is applied;
+     * the early shadows and gated reloads run with the rest of the plan. */
+    if (g_mark_depth && g_refresh_part == SH_MODSERVE_PART_EDITOR) return;
     me_reparse_early(g_reparse_phase, 1);
     me_reload_ungated(g_reparse_phase, 1);
 }
@@ -1184,7 +1286,11 @@ static void op_sources_published(void *context)
  * boot is raised to 4, as everything a stock row names was at the boot
  * promotion. The row's parse normally made the object; one it did not is
  * created by name first. Only the level changes: contents load on demand. */
-typedef struct me_keep { int kept, permanent, created, missing, loaded; } me_keep;
+typedef struct me_keep {
+    int kept, permanent, created, missing, loaded;
+    int older;                            /* kept from level 1 although it predates the watermark */
+    const sh_modserve_watermark *mark;    /* the pass's watermark, or NULL */
+} me_keep;
 
 static void me_keep_ref(void *context, const char *type, const char *name, const char *row)
 {
@@ -1205,11 +1311,57 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
             k->loaded++;
         }
         if (*(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) == 1) {
+            /* Created before the watermark (by an open map's own load, say):
+             * what its earlier parse created is not new to the watermark and
+             * stays at the engine's level. A row names an md6Def by name only
+             * (the editor finds it at entity Init, VK FUN_14123b340 / GL
+             * FUN_14123a7e0, without creating it), so such an md6Def is left
+             * whole at level 1: kept alone it would outlive its MD6 model, and
+             * the next Play built an animator on the freed model (R315 live,
+             * VK DOOM+0x173fb46). An animWeb or material the row holds by
+             * pointer is kept, as before. */
+            int older = k->mark && sh_modserve_watermark_has(k->mark, decl);
+            if (older) k->older++;
+            if (older && !_stricmp(type, "md6Def")) {
+                me_log("editor: %s '%s' left at level 1 (editor row '%s' names it): it was created before this pass, "
+                       "and keeping it without the resources its parse created would outlive them", type, name, row);
+                return;
+            }
             *(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) = 4;
             k->kept++;
-            me_log("editor: %s '%s' kept for the session (editor row '%s' points at it)", type, name, row);
+            if (older)
+                me_log("editor: %s '%s' kept for the session (editor row '%s' points at it); it was created at level 1 "
+                       "before this pass, so the resources its parse created are not kept with it", type, name, row);
+            else me_log("editor: %s '%s' kept for the session (editor row '%s' points at it)", type, name, row);
         } else k->permanent++;
     } __except (me_fault_filter(GetExceptionCode())) { me_log_fault("keep", type, name, before); }
+}
+
+/* The keeper of an editor pass for the rows this session registered, inside
+ * a watermark of its own (a refresh whose rows changed, before the palette
+ * rebuild, which may be refused and retried later). */
+static void me_keep_rows(const char *phase)
+{
+    sh_modserve_plan plan;
+    me_closure c;
+    me_keep keep = { 0, 0, 0, 0, 0, 0, NULL };
+    sh_process_heap_scope heap = { 0 };
+    int refs = 0;
+    if (!g_bound || me_on_main() != 1 || g_mark_depth) return;
+    if (sh_modserve_plan_editor(&plan) <= 0) { sh_modserve_plan_free(&plan); return; }
+    sh_modserve_plan_mark_registered(&plan);
+    me_closure_begin(&c);
+    keep.mark = c.mark.ok ? &c.mark : NULL;
+    if (sh_process_heap_enter(&g_heap, &heap)) {
+        __try { refs = sh_modserve_editor_refs(&plan, me_keep_ref, &keep); }
+        __finally { if (!sh_process_heap_leave(&heap)) me_log("%s: process heap scope did not balance", phase); }
+    }
+    me_closure_end(&c, phase, "editor rows' references");
+    if (refs && (keep.kept || keep.missing))
+        me_rlog("refresh: %d decl(s) editor rows point at kept for the session at the %s (%d created here, %d parsed "
+                "here, %d older), %d already permanent, %d not found", keep.kept, phase, keep.created, keep.loaded,
+                keep.older, keep.permanent, keep.missing);
+    sh_modserve_plan_free(&plan);
 }
 
 void sh_modserve_palette_before_build(void)
@@ -1241,20 +1393,30 @@ void sh_modserve_palette_before_build(void)
     if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &mark))
         me_log("editor: resource watermark unavailable (%s); only the decls rows name are kept",
                g_res_head ? "the resource lists could not be walked" : "decl_resource_head unresolved");
-    ready = me_run(&plan, "editor");
+    /* The pass's watermark covers its registration, the refresh its sources
+     * publish, and the keeper (me_run neither splits nor nests another). */
     {
-        me_keep keep = { 0, 0, 0, 0, 0 };
+        int part = g_refresh_part;
+        g_mark_depth++;
+        g_refresh_part = SH_MODSERVE_PART_ALL;
+        ready = me_run(&plan, "editor");
+        g_refresh_part = part;
+    }
+    {
+        me_keep keep = { 0, 0, 0, 0, 0, 0, NULL };
         sh_process_heap_scope heap = { 0 };
         int refs = 0;
+        keep.mark = mark.ok ? &mark : NULL;
         /* Inside process heap 0, as registration: an object created here outlives every map. */
         if (sh_process_heap_enter(&g_heap, &heap)) {
             __try { refs = sh_modserve_editor_refs(&plan, me_keep_ref, &keep); }
             __finally { if (!sh_process_heap_leave(&heap)) me_log("editor: process heap scope did not balance"); }
         }
         if (refs && (keep.kept || keep.missing))
-            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here, %d parsed here), %d already permanent, %d not found",
-                   keep.kept, keep.created, keep.loaded, keep.permanent, keep.missing);
+            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here, %d parsed here, %d older), %d already permanent, %d not found",
+                   keep.kept, keep.created, keep.loaded, keep.older, keep.permanent, keep.missing);
     }
+    g_mark_depth--;
     if (mark.ok) {
         sh_modserve_raised raised;
         if (sh_modserve_watermark_raise(g_res_head, &mark, &raised) && raised.created)

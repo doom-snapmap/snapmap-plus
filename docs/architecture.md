@@ -1051,6 +1051,39 @@ lists before it runs and keeps every resource created since then that is
 still at level 1, and every step of the editor plan is registered at the
 session lifetime.
 
+The editor closure is every served file of a bundle that adds editor rows,
+and every served file one of those needs, at any depth
+(`ms_mark_editor_closure`, per table). The whole bundle counts, not only what
+its rows need today, because a later build's row can name a decl a map pass
+already registered at level 1 (an open map's activation had made the keycard
+md6Def a new row attaches, and keeping that decl alone outlived its model).
+Every pass treats
+it as the boot editor pass does, because after an in-session install the
+same work happens elsewhere: the rescan re-parses the changed rows and
+registers the new decls they need (an editor-only md6Def, say) before the
+palette rebuild takes its watermark, and an idDeclFX an `fxInfo` names, an
+attachment's md6Def or a new md6Def's MD6 model and anims were then created
+at level 1 outside any watermark; the rebuild's keeper raised only the decl
+objects a row names, not what they hold, and the Play purge freed the rest
+under them (VK purge 0x141572170 / GL 0x141573300 frees every level-1
+resource; the editor's FX start VK 0x1412a9e60 / GL 0x1412a9540 and
+idEntityModels::Init VK 0x1412ab690 / GL 0x1412aad70 then read freed
+objects on the return to the editor). So a refresh applies the closure's
+pending changes first inside a watermark of its own and keeps what they
+create, then the rest at the engine's level
+(`sh_modserve_each_refresh_part`); a plan step for a closure decl keeps its
+decl in any pass (`sh_modserve_step.persist`), and outside a watermark
+`me_run` runs those steps first inside one (`sh_modserve_plan_split`), the
+rest after; and a rescan whose rows changed runs the keeper inside a
+watermark before the palette rebuild, which may be refused and retried. Outside
+the editor plan such a step is kept unless the engine already holds the decl
+permanently (`persist` 2), which is left to the game as a map pass leaves it.
+A decl the keeper finds at level 1 from before its watermark (created by the
+engine's own load) is counted as `older`: an md6Def is left whole at level 1,
+since a row names it only by name and the editor finds it without creating it
+(VK FUN_14123b340 / GL FUN_14123a7e0); an animWeb or material a row holds by
+pointer is kept, and its own resources stay map-scoped.
+
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
 {"activate": [...], "deactivate": [...]}}`) are read only through the builder's
 canonical form (`sh_mb_requirements_canonical`): sorted cvar names with string

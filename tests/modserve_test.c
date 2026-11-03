@@ -653,7 +653,15 @@ static void test_plan(void)
     CHECK(step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp") < 0);
     CHECK(step_index(&p, "md6Def", "mods/alex.pink-imp/imp.md6") < step_index(&p, "entityDef", "mods/alex.pink-imp/imp"));
     CHECK(step_index(&p, "entityDef", "mods/bob.skins/thing") < 0);   /* not named */
-    for (i = 0; i < p.count; ++i) CHECK(!p.steps[i].persist);
+    /* A map pass keeps what the editor closure holds unless the engine holds it
+     * permanently (2), as the editor pass would; the fireball the row-less
+     * 1.1.0 build serves stays at the engine's level. */
+    for (i = 0; i < p.count; ++i) {
+        int closure = !strcmp(p.steps[i].name, "mods/alex.pink-imp/imp.md6") ||
+                      !strcmp(p.steps[i].name, "mods/alex.pink-imp/imp") || !strcmp(p.steps[i].name, "mods/alex.pink-imp/skin");
+        CHECK(p.steps[i].persist == (closure ? 2 : 0));
+    }
+    CHECK(!p.steps[step_index(&p, "entityDef", "mods/alex.pink-imp/fireball")].persist);
     sh_modserve_plan_free(&p);
 }
 
@@ -1909,6 +1917,207 @@ static void test_watermark(void)
     CHECK(sh_modserve_watermark_take(NULL, &w) == 0);
     sh_modserve_watermark_free(&w);
     lm.next = NULL;
+    /* Membership: what existed when the watermark was taken. */
+    CHECK(sh_modserve_watermark_take(&head, &w) == 1);
+    CHECK(sh_modserve_watermark_has(&w, &r[6]) && sh_modserve_watermark_has(&w, &r[0]) && !sh_modserve_watermark_has(&w, &r[7]));
+    anims[5] = &r[7]; la.count = 6;
+    CHECK(!sh_modserve_watermark_has(&w, &r[7]) && !sh_modserve_watermark_has(NULL, &r[0]));
+    sh_modserve_watermark_free(&w);
+    CHECK(!sh_modserve_watermark_has(&w, &r[0]));
+    la.count = 5;
+}
+
+/* ------------------------------------------------------------------ editor closure after an in-session install (R-315) */
+
+#define CL_ROW   "generated/decls/snapeditorentitydef/mods/cl.mod/tile.decl"
+#define CL_ENT   "generated/decls/entitydef/mods/cl.mod/tile.decl"
+#define CL_MD6   "generated/decls/md6def/mods/cl.mod/s/body.md6.decl"
+#define CL_MESH  "generated/basemodel/md6/mods/cl.mod/body.bmd6model"
+#define CL_SCENE "generated/decls/entitydef/mods/cl.mod/scene.decl"
+#define CL_GAME  "generated/decls/entitydef/mods/cl.game/gameplay.decl"
+#define CL_PRIV  "generated/decls/md6def/mods/cl.mod/editor_preview/tile.md6.decl"
+#define CL_NEW   "generated/decls/entitydef/mods/cl.game/newgame.decl"
+#define CL_ROW_V2 "{\n\tedit = {\n\t\teventInfo = { idleEvent = { animInfo = { animHandle = \"ci_editor_preview/idle\"; } } }\n" \
+    "\t\trenderInfo = {\n\t\t\trenderModelName = \"mods/cl.mod/editor_preview/tile.md6\";\n" \
+    "\t\t\trenderModelAttachments = { num = 1; item[0] = { renderModelName = \"zion/objects/props_char/keycard_blue.md6\"; tagName = \"pre_pickup\"; } }\n" \
+    "\t\t}\n\t\tfxInfo = { fxDecl = \"fx/titan_hell_switch\"; startCondition = \"FX_NONE\"; }\n" \
+    "\t\tentityDef = \"mods/cl.mod/tile\";\n\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/cl\";\n\t}\n}\n"
+
+typedef struct cl_seen { char order[1024]; } cl_seen;
+static int cl_visit(void *context, const sh_modserve_refresh_item *it)
+{
+    cl_seen *c = (cl_seen *)context;
+    size_t at = strlen(c->order);
+    _snprintf_s(c->order + at, sizeof c->order - at, _TRUNCATE, "%s;", it->name);
+    return 1;
+}
+
+/* A mod booted with older rows, then installed again in-session with rows
+ * that need new decls: every file of a bundle with rows, and everything a row
+ * needs, is the editor closure (a row-less bundle's decl is not); a refresh applies that part on its own (inside the engine side's
+ * watermark) and the rest after; a map or refresh plan keeps the closure's
+ * new decls and runs them first; a later part does not load what needs a
+ * failed kept decl; and the keeper visits every reference a registered row
+ * names, its attachments' models included. */
+static void test_editor_closure(void)
+{
+    static const fx_file v1[] = {
+        { CL_ROW, "{ edit = { entityDef = \"mods/cl.mod/tile\"; } }", -1, "snapEditorEntityDef", "mods/cl.mod/tile",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/cl.mod/tile\"}]", '1' },
+        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/cl.mod/tile",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", '2' },
+        { CL_MD6, "md6Def body { mesh 1 }", -1, "md6Def", "mods/cl.mod/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/cl.mod/body.md6mesh\"}]", '3' },
+        { CL_MESH, "MESH1", -1, "baseModel", "md6/mods/cl.mod/body.md6mesh", NULL, '4' },
+        { CL_SCENE, "entityDef scene1 {}", -1, "entityDef", "mods/cl.mod/scene", NULL, '5' },
+    };
+    static const fx_file g1[] = { { CL_GAME, "entityDef game1 {}", -1, "entityDef", "mods/cl.game/gameplay", NULL, '5' } };
+    static const fx_file v2[] = {
+        { CL_ROW, CL_ROW_V2, -1, "snapEditorEntityDef", "mods/cl.mod/tile",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/cl.mod/tile\"},"
+          "{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/editor_preview/tile.md6\"}]", '6' },
+        { CL_ENT, "entityDef tile {}", -1, "entityDef", "mods/cl.mod/tile",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", '2' },
+        { CL_MD6, "md6Def body { mesh 2 }", -1, "md6Def", "mods/cl.mod/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/cl.mod/body.md6mesh\"}]", '7' },
+        { CL_MESH, "MESH2", -1, "baseModel", "md6/mods/cl.mod/body.md6mesh", NULL, '8' },
+        { CL_SCENE, "entityDef scene2 {}", -1, "entityDef", "mods/cl.mod/scene", NULL, '9' },
+        { CL_PRIV, "md6Def tile { inherit = \"mods/cl.mod/s/body.md6\" }", -1, "md6Def", "mods/cl.mod/editor_preview/tile.md6",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/s/body.md6\"}]", 'a' },
+    };
+    static const fx_file g2[] = {
+        { CL_GAME, "entityDef game2 {}", -1, "entityDef", "mods/cl.game/gameplay", NULL, '9' },
+        { CL_NEW, "entityDef newgame {}", -1, "entityDef", "mods/cl.game/newgame",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cl.mod/editor_preview/tile.md6\"}]", 'b' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], hash[65];
+    char *slash;
+    const char *h[2];
+    char hash2[65];
+    sh_modserve_plan p, kept, rest;
+    sh_modserve_diff d;
+    cl_seen seen;
+    int i;
+    printf("-- editor closure: an in-session install keeps what its rows need, as a boot does\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\closure\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "cl.mod", "cl.mod", "1.0.0", 'c', NULL, v1, 5, NULL);
+    make_bundle(root, "cl.game", "cl.game", "1.0.0", 'e', NULL, g1, 1, NULL);
+    CHECK(sh_modserve_index_build(root) == 2);
+    /* What earlier tests' tables left pending (their gone shadows) is settled first. */
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(cl_visit, &seen);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    sh_modserve_test_reset_registration();
+    /* Boot: the editor pass registers the row and its closure; a map uses the mod. */
+    CHECK(sh_modserve_plan_editor(&p) == 3);
+    for (i = 0; i < p.count; ++i) CHECK(p.steps[i].persist == 1);
+    CHECK(sh_modserve_plan_run(&p, &g_fake, "editor") == 3);
+    sh_modserve_plan_free(&p);
+    h[0] = hash64('c', hash);
+    h[1] = hash64('e', hash2);
+    CHECK(sh_modserve_plan_bundles(h, 2, &p, NULL) == 4);
+    /* A map pass keeps every decl of a bundle with rows unless the engine
+     * holds it permanently (2); a row-less bundle's decl stays at the engine's level. */
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.mod/tile")].persist == 2);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/s/body.md6")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.mod/scene")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.game/gameplay")].persist == 0);
+    /* The row bundle's unregistered scene decl is kept; the registered ones and the gameplay decl are not. */
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1 && kept.count == 1 && !strcmp(kept.steps[0].name, "mods/cl.mod/scene") &&
+          rest.count == 3);
+    sh_modserve_plan_free(&kept);
+    sh_modserve_plan_free(&rest);
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 4 && strstr(g_calls, "P:entityDef:mods/cl.mod/scene;") &&
+          strstr(g_calls, "L:entityDef:mods/cl.game/gameplay;"));
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_refresh_editor_pending() == 0);
+
+    /* The in-session install: the row gains an editor-only md6Def, an
+     * attachment and an FX; the body model changes; a gameplay decl changes. */
+    make_bundle(root, "cl.mod", "cl.mod", "1.0.0", 'd', NULL, v2, 6, NULL);
+    make_bundle(root, "cl.game", "cl.game", "1.0.0", 'f', NULL, g2, 2, NULL);
+    CHECK(sh_modserve_index_rescan() == 2);
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed == 5 && d.changed_rows == 1 && d.added_active == 2 && d.pending == 5);
+    /* Row, md6Def, model and the row bundle's scene decl are the closure's
+     * pending part; the row-less bundle's gameplay decl is not. */
+    CHECK(sh_modserve_refresh_editor_pending() == 4);
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_EDITOR) == 4);
+    CHECK(strstr(seen.order, "mods/cl.mod/tile;") && strstr(seen.order, "mods/cl.mod/s/body.md6;") &&
+          strstr(seen.order, "mods/cl.mod/scene;") && strstr(seen.order, "md6/mods/cl.mod/body.md6mesh;") &&
+          !strstr(seen.order, "gameplay"));
+    /* Dependency order inside the part: the md6Def before the row, the model last. */
+    CHECK(strstr(seen.order, "body.md6;") < strstr(seen.order, "mods/cl.mod/tile;") &&
+          strstr(seen.order, "mods/cl.mod/tile;") < strstr(seen.order, "body.md6mesh;"));
+    CHECK(sh_modserve_refresh_editor_pending() == 0);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 1);
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST) == 1 && !strcmp(seen.order, "mods/cl.game/gameplay;"));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_ALL) == 0);
+
+    /* The new decls: the editor-only md6Def is kept and runs first; the new
+     * gameplay decl that needs it runs after, at the engine's level, with the
+     * registered md6Def both need. */
+    CHECK(sh_modserve_plan_refresh(&p) == 3);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/editor_preview/tile.md6")].persist == 2);
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/cl.game/newgame")].persist == 0);
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1 && kept.count == 1 && rest.count == 2);
+    CHECK(!strcmp(kept.steps[0].name, "mods/cl.mod/editor_preview/tile.md6") && step_index(&rest, "entityDef", "mods/cl.game/newgame") >= 0 &&
+          step_index(&rest, "md6Def", "mods/cl.mod/s/body.md6") >= 0);
+    /* The kept part fails: the later part does not load what needs it. */
+    g_calls[0] = 0;
+    g_fail_load = "mods/cl.mod/editor_preview/tile.md6";
+    log_clear();
+    CHECK(sh_modserve_plan_run(&kept, &g_fake, "refresh") == 0);
+    CHECK(sh_modserve_plan_block_failed_needs(&rest) == 1 && rest.blocked == 1);
+    CHECK(sh_modserve_plan_run(&rest, &g_fake, "refresh") == 1);   /* the registered md6Def only */
+    CHECK(!strstr(g_calls, "newgame") && log_has("refresh: entityDef 'mods/cl.game/newgame' (cl.game) BLOCKED"));
+    sh_modserve_plan_merge_ready(&p, &kept);
+    sh_modserve_plan_merge_ready(&p, &rest);
+    CHECK(p.steps[step_index(&p, "md6Def", "mods/cl.mod/editor_preview/tile.md6")].ready == -1 &&
+          p.steps[step_index(&p, "entityDef", "mods/cl.game/newgame")].ready == -1 &&
+          p.steps[step_index(&p, "md6Def", "mods/cl.mod/s/body.md6")].ready == 1);
+    sh_modserve_plan_free(&kept);
+    sh_modserve_plan_free(&rest);
+    CHECK(kept.steps == NULL && rest.count == 0);
+    g_fail_load = NULL;
+    /* The retry keeps it: persist load, after which nothing is left to keep. */
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 1);
+    CHECK(sh_modserve_plan_run(&kept, &g_fake, "refresh") == 1 && strstr(g_calls, "P:md6Def:mods/cl.mod/editor_preview/tile.md6;"));
+    CHECK(sh_modserve_plan_block_failed_needs(&rest) == 0);
+    CHECK(sh_modserve_plan_run(&rest, &g_fake, "refresh") == 2 && strstr(g_calls, "L:entityDef:mods/cl.game/newgame;"));
+    sh_modserve_plan_free(&kept);
+    sh_modserve_plan_free(&rest);
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) == 0);
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_plan_split(NULL, &kept, &rest) == -1);
+
+    /* The keeper for the rows this session registered: every reference the
+     * changed row names, the attachment's stock md6Def included. */
+    CHECK(sh_modserve_plan_editor(&p) == 4);
+    g_refs[0] = 0;
+    CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 0);
+    sh_modserve_plan_mark_registered(&p);
+    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/cl.mod/tile")].ready == 1);
+    CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 3);
+    CHECK(strstr(g_refs, "md6Def:mods/cl.mod/editor_preview/tile.md6<mods/cl.mod/tile;") &&
+          strstr(g_refs, "md6Def:zion/objects/props_char/keycard_blue.md6<mods/cl.mod/tile;") &&
+          strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/cl<mods/cl.mod/tile;"));
+    sh_modserve_plan_free(&p);
+    /* Leave the table the next test expects. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
 }
 
 /* ------------------------------------------------------------------ refusals (issue 132) */
@@ -2972,6 +3181,7 @@ int main(void)
     test_conflicts();
     test_editor_refs();
     test_watermark();
+    test_editor_closure();
     test_refusals();
     test_permanent_first_parse();
     test_registration_reparse_of_held_permanent();

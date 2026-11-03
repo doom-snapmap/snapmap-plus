@@ -135,7 +135,10 @@ typedef struct sh_modserve_step {
     const char *reg_path;    /* DeclRegisterFile source, e.g. "md6def/mods/.../imp.md6.decl" */
     const char *bundle_id;
     int         rank;        /* 0 other decls, 1 md6Def, 2 entityDef, 3 snapEditorEntityDef */
-    int         persist;     /* 1: keep through map purges (lifetime 4) */
+    int         persist;     /* 1: keep through map purges (lifetime 4), every editor-plan step; 2: in
+                                any other plan, a decl of the editor closure (modserve.c
+                                ms_mark_editor_closure), kept unless the engine already holds it
+                                permanently, which is left to the game as a map pass leaves it */
     int         shadow;      /* a grandfathered bundle's shadow, or a restored stock decl (modbundle.h
                                 sh_mb_stock_restore): skipped as stock when the engine has its source */
     const char *blocked;     /* NULL, or the first cause (static or index-owned text) */
@@ -323,6 +326,8 @@ int  sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w)
 /* Raise what the walk now finds beyond `w`; returns 1 when the walk completed. */
 int  sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_watermark *w, sh_modserve_raised *out);
 void sh_modserve_watermark_free(sh_modserve_watermark *w);
+/* 1 when `resource` existed when `w` was taken. */
+int  sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource);
 
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
@@ -770,6 +775,42 @@ typedef struct sh_modserve_refresh_item {
  * not offered to the early-decl visit. Returns the number visited. */
 typedef int (*sh_modserve_refresh_fn)(void *context, const sh_modserve_refresh_item *item);
 int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context);
+
+/* The editor closure (13954591, both renderers). A boot-time editor pass
+ * registers every editor row and every served file a row needs, at any
+ * depth, inside its resource watermark, so everything the engine creates for
+ * them (an md6Def's MD6 model and anims, the idDeclFX an fxInfo names, the
+ * md6Def of an attachment) is raised to level 4 and survives the Play purge.
+ * After an in-session install the same work happened outside any watermark:
+ * the rescan re-parsed the changed rows and registered the new decls they
+ * need at level 1 before the palette rebuild took its watermark, whose keeper
+ * then raised only the decl objects a row names, not what they hold, and the
+ * Play purge freed the rest under them. A refresh therefore applies its
+ * editor-closure part first, inside a watermark of its own, and the rest
+ * after. Part SH_MODSERVE_PART_ALL visits everything (the editor pass, whose
+ * watermark covers it all); PART_EDITOR only closure files; PART_REST every
+ * other item, gone shadows included. */
+#define SH_MODSERVE_PART_ALL    0
+#define SH_MODSERVE_PART_EDITOR 1
+#define SH_MODSERVE_PART_REST   2
+int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int part);
+
+/* Pending editor-closure work of a refresh: closure files still marked
+ * changed (new closure decls are kept by their plan, sh_modserve_plan_split). */
+int sh_modserve_refresh_editor_pending(void);
+
+/* Split a plan into the steps that keep their decls (persist) and are not
+ * registered yet, and the rest, both in plan order. Returns the number of
+ * kept steps (0: nothing to keep, both outputs empty), or -1. The parts own
+ * their steps (sh_modserve_plan_free each). */
+int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept, sh_modserve_plan *rest);
+/* Copy the parts' ready marks back into the plan they came from. */
+void sh_modserve_plan_merge_ready(sh_modserve_plan *plan, const sh_modserve_plan *part);
+/* Block the steps whose needed decl failed in an earlier part. Returns the count. */
+int sh_modserve_plan_block_failed_needs(sh_modserve_plan *plan);
+/* Mark each step ready when its file is registered this session (so
+ * sh_modserve_editor_refs visits rows a refresh did not register itself). */
+void sh_modserve_plan_mark_registered(sh_modserve_plan *plan);
 
 /* What a refresh did (modserve_engine.c fills it; the Mods tab's rescan
  * result carries it as {reparsed, reloaded, needsMapReload, needsRestart, note}). */

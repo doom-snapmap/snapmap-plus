@@ -55,6 +55,7 @@ typedef struct ms_file {
     volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
     volatile LONG refresh_new;            /* a new gameplay decl of a mod this session registered: register it now */
+    int editor_closure;                   /* an editor row, or a served file a row needs at any depth (ms_mark_editor_closure) */
     /* Map scope: the other providers of a shadow path, in winner order
      * (x->alts), so a path whose winner the open map does not list is served
      * by a provider it does list. */
@@ -2015,6 +2016,42 @@ static void ms_resolve_needs(ms_index *x)
     for (i = 0; i < x->nneeds; ++i) x->needs[i].file = ms_need_provider(x, x->needs[i].type, x->needs[i].name);
 }
 
+/* The editor closure: every served file of an admitted bundle that adds
+ * editor rows, and every served file one of those needs, at any depth.
+ * Whatever the engine creates while it registers, parses or reloads one of
+ * these is kept for the session, as a boot-time editor pass keeps its rows'
+ * closure, so every pass treats them the same way (sh_modserve_step.persist,
+ * the closure part of sh_modserve_each_refresh_part). The whole bundle counts,
+ * not only what its rows need today: a later build's row can name a decl a
+ * map pass already registered (R315 live: an open map's activation had made
+ * the keycard md6Def a new row attaches, at level 1, and the keeper could
+ * only raise the decl, not its model). Needs are closed under this mark, so a
+ * closure decl's parents and models are in it too. */
+static void ms_mark_editor_closure(ms_index *x)
+{
+    int *queue, nq = 0, qh = 0, i, k;
+    if (!x->nfiles) return;
+    queue = (int *)malloc(sizeof(int) * (size_t)x->nfiles);
+    if (!queue) return;
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        if (f->served && x->bundles[f->bundle].admitted && (f->is_sedef || x->bundles[f->bundle].has_rows)) {
+            f->editor_closure = 1;
+            queue[nq++] = i;
+        }
+    }
+    while (qh < nq) {
+        const ms_file *f = &x->files[queue[qh++]];
+        for (k = 0; k < f->need_count; ++k) {
+            int p = x->needs[f->need_first + k].file;
+            if (p < 0 || x->files[p].editor_closure || !x->files[p].served) continue;
+            x->files[p].editor_closure = 1;
+            queue[nq++] = p;
+        }
+    }
+    free(queue);
+}
+
 /* ------------------------------------------------------------------ build and publish */
 
 /* Map scope: the file that serves winner `f`'s path for the current listing.
@@ -2418,6 +2455,7 @@ int sh_modserve_index_build(const char *mods_root)
         return -1;
     }
     ms_resolve_needs(x);
+    ms_mark_editor_closure(x);
     for (i = 0; i < x->nbundles; ++i) x->admitted += x->bundles[i].admitted;
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
@@ -2869,8 +2907,11 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         s->bundle_id = x->bundles[f->bundle].id;
         s->rank = f->rank;
         /* The editor plan keeps every step for the session: a row is kept, and
-         * what its parse points at must outlive the purges around Play. */
-        s->persist = persist_sedefs;
+         * what its parse points at must outlive the purges around Play. A
+         * decl an editor row needs is kept by whichever pass registers it
+         * first (a map pass, or a refresh after an in-session install), as
+         * the boot editor pass would have kept it. */
+        s->persist = persist_sedefs ? 1 : f->editor_closure ? 2 : 0;
         /* A restored stock decl is planned like a shadow: left to the provider
          * when the engine knows its source, registered when it does not. */
         s->shadow = f->is_shadow || f->is_restore;
@@ -3282,6 +3323,12 @@ int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn,
     return ms_res_walk(head_slot, ms_each_res_one, &e, NULL);
 }
 
+int sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource)
+{
+    uintptr_t key = (uintptr_t)resource;
+    return w && w->ok && w->n && bsearch(&key, w->res, w->n, sizeof(uintptr_t), ms_uptr_cmp) != NULL;
+}
+
 void sh_modserve_watermark_free(sh_modserve_watermark *w)
 {
     if (!w) return;
@@ -3303,7 +3350,7 @@ unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), un
 
 int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist)
 {
-    return !persist && lifetime == 4 && !(state & 1);
+    return persist != 1 && lifetime == 4 && !(state & 1);
 }
 
 int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context)
@@ -4724,7 +4771,18 @@ static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_r
     return 1;
 }
 
+/* Whether a file belongs to the part of a refresh asked for. */
+static int ms_in_part(const ms_file *f, int part)
+{
+    return part == SH_MODSERVE_PART_ALL || (part == SH_MODSERVE_PART_EDITOR) == (f->editor_closure != 0);
+}
+
 int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
+{
+    return sh_modserve_each_refresh_part(fn, context, SH_MODSERVE_PART_ALL);
+}
+
+int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int part)
 {
     const ms_index *x = g_index;
     int pass, i, visited = 0;
@@ -4733,6 +4791,8 @@ int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
      * that inherit from them by generation and rank, then models and images. */
     for (pass = 0; pass <= 6; ++pass) {
         if (pass == 4) {
+            /* Gone shadows return to the game's bytes: never the editor part. */
+            if (part == SH_MODSERVE_PART_EDITOR) continue;
             for (i = 0; i < x->ngone; ++i) {
                 ms_gone *g = (ms_gone *)&x->gone[i];
                 const ms_file *of = &g->from->files[g->file];
@@ -4754,7 +4814,7 @@ int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
                         ms_file *f = (ms_file *)&x->files[i];
                         if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !f->served || f->withdrawn ||
                             !x->bundles[f->bundle].admitted || !f->ptype || !f->pname || !f->is_decl ||
-                            f->refresh_gen != gen || f->rank != rank)
+                            f->refresh_gen != gen || f->rank != rank || !ms_in_part(f, part))
                             continue;
                         visited += ms_refresh_one(x, f, SH_MODSERVE_RF_DECL, fn, context);
                     }
@@ -4764,7 +4824,7 @@ int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
             ms_file *f = (ms_file *)&x->files[i];
             int kind = ms_kind(f);
             if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !f->served || f->withdrawn ||
-                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname)
+                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname || !ms_in_part(f, part))
                 continue;
             if (pass < 4 ? (kind != SH_MODSERVE_RF_DECL || f->rank != pass || f->refresh_gen) : kind == SH_MODSERVE_RF_DECL)
                 continue;
@@ -4795,6 +4855,94 @@ int sh_modserve_plan_refresh(sh_modserve_plan *out)
     r = any ? ms_plan_from(x, mark, 0, out) : 0;
     free(mark);
     return r;
+}
+
+int sh_modserve_refresh_editor_pending(void)
+{
+    const ms_index *x = g_index;
+    int i, n = 0;
+    if (!x) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        int eff;
+        if (!f->editor_closure || !f->served || f->withdrawn || !x->bundles[f->bundle].admitted || !f->ptype || !f->pname)
+            continue;
+        if (!InterlockedCompareExchange((volatile LONG *)&f->refresh, 0, 0)) continue;
+        /* An item waiting for its bundle's gates is not applied now either. */
+        eff = ms_scoped(x, i);
+        if (eff >= 0 && !ms_gates_ok(x, &x->files[eff])) continue;
+        n++;
+    }
+    return n;
+}
+
+int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept, sh_modserve_plan *rest)
+{
+    const ms_index *x = g_index;
+    int i, nk = 0;
+    if (kept) memset(kept, 0, sizeof *kept);
+    if (rest) memset(rest, 0, sizeof *rest);
+    if (!plan || !kept || !rest) return -1;
+    for (i = 0; i < plan->count; ++i) {
+        const sh_modserve_step *s = &plan->steps[i];
+        /* A step already registered needs no watermark: plan_run skips it. */
+        if (s->persist && !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1)) nk++;
+    }
+    if (!nk) return 0;
+    kept->steps = (sh_modserve_step *)calloc((size_t)nk, sizeof(sh_modserve_step));
+    rest->steps = (sh_modserve_step *)calloc((size_t)(plan->count - nk ? plan->count - nk : 1), sizeof(sh_modserve_step));
+    if (!kept->steps || !rest->steps) { sh_modserve_plan_free(kept); sh_modserve_plan_free(rest); return -1; }
+    for (i = 0; i < plan->count; ++i) {
+        const sh_modserve_step *s = &plan->steps[i];
+        int keep = s->persist && !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1);
+        sh_modserve_plan *to = keep ? kept : rest;
+        to->steps[to->count++] = *s;
+        if (s->blocked) to->blocked++;
+    }
+    return kept->count;
+}
+
+void sh_modserve_plan_merge_ready(sh_modserve_plan *plan, const sh_modserve_plan *part)
+{
+    int i, j;
+    if (!plan || !part) return;
+    for (j = 0; j < part->count; ++j)
+        for (i = 0; i < plan->count; ++i)
+            if (plan->steps[i].file == part->steps[j].file) { plan->steps[i].ready = part->steps[j].ready; break; }
+}
+
+int sh_modserve_plan_block_failed_needs(sh_modserve_plan *plan)
+{
+    const ms_index *x = g_index;
+    int i, k, n = 0;
+    if (!plan || !x) return 0;
+    for (i = 0; i < plan->count; ++i) {
+        sh_modserve_step *s = &plan->steps[i];
+        const ms_file *f;
+        if (s->blocked || s->file < 0 || s->file >= x->nfiles) continue;
+        f = &x->files[s->file];
+        for (k = 0; k < f->need_count; ++k) {
+            const ms_need *nd = &x->needs[f->need_first + k];
+            if (nd->file >= 0 && nd->file != s->file && x->files[nd->file].reg_state == -1) {
+                s->blocked = "needs a decl an editor row keeps, which failed";
+                plan->blocked++;
+                n++;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+void sh_modserve_plan_mark_registered(sh_modserve_plan *plan)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!plan || !x) return;
+    for (i = 0; i < plan->count; ++i) {
+        sh_modserve_step *s = &plan->steps[i];
+        s->ready = s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1 ? 1 : 0;
+    }
 }
 
 void sh_modserve_last_diff(sh_modserve_diff *out)
