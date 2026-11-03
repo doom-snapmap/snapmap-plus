@@ -16,6 +16,7 @@
 #include "signatures.h"
 #include "host_image.h"
 #include "companion_engine.h"
+#include "modscene_decl.h"
 #include "../src/fault_shield/engine_layout.h"
 
 /* RVA_FRAME is an SH_RVA pair; evaluate it for the image under test rather
@@ -25,7 +26,8 @@ static const uint8_t *g_image;
 #define SH_RVA(vk, gl) sh_host_image_rva(g_image, (uint32_t)(vk), (uint32_t)(gl))
 
 enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISBRANCH, SITE_DECODED,
-                 SITE_COMPANION /* a private signature of companion_sigs.c */ };
+                 SITE_COMPANION /* a private signature of companion_sigs.c */,
+                 SITE_MODSCENE /* a private signature of modscene_sigs.c */ };
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
@@ -109,6 +111,7 @@ static const site SITES[] = {
     { "modpublish.c",         "MapInfoCopyToMyMaps",        SITE_SIG, 0, 19, REPLAYS, 0 },
     { "modaction.c",          "StringSetDoAction",          SITE_SIG, 0, 20, REPLAYS, 0 },
     { "companion_engine.c",   "CompanionCallSpawn",         SITE_COMPANION, 0, 14, REPLAYS, 0 },
+    { "modscene_place.c",     "SceneSyncStart",             SITE_MODSCENE, 0, 17, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -277,6 +280,17 @@ static void check_image(const char *path)
             for (k = 0; SH_COMPANION_SIGNATURES[k].name && strcmp(SH_COMPANION_SIGNATURES[k].name, s->name); k++) {}
             if (!SH_COMPANION_SIGNATURES[k].name ||
                 sig_resolve_one(base, &SH_COMPANION_SIGNATURES[k], &own) != SIG_OK || !own.addr) {
+                report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
+                continue;
+            }
+            code = (const uint8_t *)own.addr + s->offset;
+        }
+        if (s->kind == SITE_MODSCENE) {
+            sig_result own;
+            size_t k;
+            for (k = 0; SH_MODSCENE_SPAWN_SIGNATURES[k].name && strcmp(SH_MODSCENE_SPAWN_SIGNATURES[k].name, s->name); k++) {}
+            if (!SH_MODSCENE_SPAWN_SIGNATURES[k].name ||
+                sig_resolve_one(base, &SH_MODSCENE_SPAWN_SIGNATURES[k], &own) != SIG_OK || !own.addr) {
                 report(label, s->owner, s->name, 0, s->stolen, 0, "", "SIGNATURE unresolved", 0);
                 continue;
             }

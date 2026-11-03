@@ -8,7 +8,8 @@
  * the node's sync wherever the node entity stands: the interaction's
  * sync-start helper copies the owner's physics origin and axis into the sync
  * when the link runs, and the sync pulls the player there (R312). During
- * SnapMap Play the backend detours three engine functions:
+ * SnapMap Play the backend detours three engine functions (and, for scenes
+ * blocks, a fourth: see below):
  *
  *   Interaction DoAction   when the acting row is a mod's scene_play and the
  *                          activator is a player, every target node is moved
@@ -30,8 +31,22 @@
  *                          handle). This guard applies in every state: the
  *                          engine dereferences that requester unconditionally.
  *
+ * A mod's "scenes" block (modscene_decl.h) can change that per node: the
+ * scene plays at the node's placed transform instead ("at_node"), or at the
+ * player with its first player pose on the player's feet, turned toward the
+ * node ("player", "reaim"); entities it lists ("spawn") are queued at the
+ * frame the node marks when the node fires and spawned the way idTarget_Spawn
+ * spawns (spawn position and orientation set before the spawn chain, then
+ * "show") inside the fourth detour, the interaction link's sync-start helper,
+ * right after the engine started the node's sync, so a demon and the
+ * player's track start on one tick and a sync that does not start spawns
+ * nothing; and the return can be switched off ("return"). A node keeps its
+ * first placement for the whole Play, so a reused node anchors where it was
+ * put.
+ *
  * Every other interaction action, every stock row and the editor are left to
- * the engine. Records are cleared at each Play entry.
+ * the engine. Records are cleared, and the scenes blocks read again, at each
+ * Play entry.
  *
  * Logs (backend log and console; the runtime lines once per Play each):
  *   scene-place installed: mod scene nodes play at the activating player
@@ -42,6 +57,17 @@
  *   scene-place: dropped an Activate from <who>: only a player can play a scene node
  *   scene-place: refused interaction action <n> for <owner>: it has no requester
  *   scene-place: <a reason the scene plays at the node or the player stays>
+ *   scene-place: scene spawns available: a mod's scenes block can spawn at its node when its sync starts
+ *   scene-place: <node> plays at <player> (... scene at x y z, yaw[, turned toward the anchor]; anchor ...)
+ *   scene-place: <node> plays at its node (scene at x y z, yaw)
+ *   scene-place: <node> spawned <entityDef> at x y z, yaw with its sync
+ *   scene-place: <node> could not spawn <entityDef>: <reason>
+ *   scene-place: <node>'s sync did not start; nothing was spawned
+ *   scene-place: <node> finished its scene; the player stays
+ *   scene-place: the HUD was shown again when the scene finished
+ * (When a scene node raises On Scene Finished and a scene hid the HUD without
+ * its show event firing, the HUD is shown again: sh_modhud_scene_restore.)
+ * (the scenes lines for every activation, up to 48 a Play).
  */
 #ifndef SNAPMAP_PLUS_MODSCENE_PLACE_H
 #define SNAPMAP_PLUS_MODSCENE_PLACE_H

@@ -286,8 +286,9 @@ does not refuse, since the engine already tolerates those names.
   the mod's `player/mp/tp_body_mp.md6` event rows for that animation. In the engine the hide event
   reaches nothing and the show event only restores the campaign HUD screen, so during SnapMap Play
   the backend turns the two events into `g_showHud` 0 and 1 (the base event dispatcher, R306); in
-  the editor and the campaign they are left to the engine. A hide the scene never paired with a show
-  (a sync cut short) is undone at the next Play entry. The log says `scene-hud installed` and, once
+  the editor and the campaign they are left to the engine. A hide whose show never fired (a show row
+  on a frame the sync no longer plays) is undone when a mod scene node raises On Scene Finished, and
+  otherwise at the next Play entry. The log says `scene-hud installed` and, once
   per Play each way, `hidden by a scene` and `shown again`.
 - A mod's scene node (a logic hexagon whose Activate input is the mod's `mods/<id>/actions/scene_play`
   row, an `idSnapMapAction_Interaction` with `IA_ACTIVATE`) plays its scene where the activating
@@ -300,6 +301,33 @@ does not refuse, since the engine already tolerates those names.
   interaction actions and the editor are left to the engine. The log says `scene-place installed`
   and, once per Play, `a scene node plays at`, `returned after the scene`, `dropped an Activate` and
   `refused interaction action`.
+- A mod's `scenes` setting can give each of its scene nodes a second frame: an anchor, which is the
+  node's own placement in the editor. The entry for a node (its `mods/<id>/...` entityDef) gives
+  poses as `[x, y, z, yaw]` in the frame of the node's sync: `anchor` is the scene pose the node
+  marks (where a demon arrives, facing the way the node is turned), and `player` is the player's first
+  pose in the scene. Each `spawn` entity (up to 4, an `entityDef` and optionally its own `at` pose,
+  the anchor when omitted) is spawned at the node's placement the moment the node's sync starts, the
+  way the game's own spawn targets spawn (position and orientation set before the spawn chain, then
+  `show`); a sync that does not start (the node is busy, disabled or used up) spawns nothing. An
+  entity with an entrance animation (`spawnSettings.initialState` `AIOVERRIDE_PLAY_ENTRANCE_ANIMATION`
+  and `entranceAnimPath`) plays it from there, as campaign demons arrive. With `player` the sync still
+  plays where the activating player stands, with the scene's first player pose on their feet, and
+  `reaim` (on by default) turns it so that the player faces the bearing toward the node the scene
+  was authored with; the sync's own pull-in blends the view. `"plays": "at_node"` plays the whole
+  sync at the node instead and leaves the player where they are. `return` (off for an entry with
+  `spawn` or `at_node`, on otherwise) teleports the player back after On Scene Finished as above.
+  A node's anchor is where it was placed in the editor for the whole Play, even after the backend
+  moved it onto a player. A mod may only list its own nodes; an unknown key, a malformed pose or a
+  foreign name refuses the mod's whole block with a log line, and the first mod to list a node
+  keeps it. Spawned entityDefs are recorded as needs of their node, as companions are. Numbers are
+  plain integers or fixed decimals. The log says `scene spawns available` once, and for each
+  activation `plays at <player> (... turned toward the anchor ...)`, `plays at its node`,
+  `spawned <entityDef> at ... with its sync`, `could not spawn`, `sync did not start` and `finished
+  its scene; the player stays` (48 lines a Play at most):
+
+      "scenes": { "mods/<id>/imp_arrival": {
+        "anchor": [563.095, 16.698, 0.352, 179.998], "player": [-33.678, 0, 0, 0],
+        "spawn": [ { "entityDef": "mods/<id>/entrance/imp" } ] } }
 - A mod's `companions` setting gives one of its tiles its own helper entities: GUI displays, props
   or speakers that appear with every placed copy of the tile when the map plays, sit where the
   author put them relative to that copy, move with it, are removed with it, and are switched on in

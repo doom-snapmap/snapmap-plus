@@ -42,6 +42,11 @@ int sh_modhud_scene_install(const sig_result *results, size_t n);
 /* Play is starting: show the HUD again if a scene hid it and never showed it. */
 void sh_modhud_scene_play_begin(void);
 
+/* A mod scene node finished its scene (On Scene Finished): show the HUD again
+ * if a scene hid it and its show event never fired (a show row on a frame the
+ * sync no longer plays, R320). Returns 1 when it showed the HUD. */
+int sh_modhud_scene_restore(void);
+
 /* Counters for diagnostics: events seen (hide, show) and whether the HUD is hidden now. */
 void sh_modhud_scene_stats(unsigned *hides, unsigned *shows, int *hidden);
 

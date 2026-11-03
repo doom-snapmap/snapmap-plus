@@ -182,12 +182,15 @@ $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c 
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
 $tests += @{ name = "companion_test"; src = 'companion_test.c ..\src\backend\companion.c ..\src\backend\companion_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Mod scenes blocks: the grammar and where a scene plays; with images, the two
+# spawn signatures, the game's vtable slots that hold them and the show-post stub.
+$tests += @{ name = "modscene_decl_test"; src = 'modscene_decl_test.c ..\src\backend\modscene_decl.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Native idFile / idFileSystem slots the backend calls, against the images.
 # Mod virtual-texture families against a fake record table, and with the executables the decoded VT surface.
 $tests += @{ name = "modvt_test"; src = 'modvt_test.c ..\src\backend\modvt.c ..\src\backend\modserve.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODVT_PURE /DSH_MODSERVE_PURE /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib ole32.lib'; arg = $identityImages }
 $tests += @{ name = "native_slots_test"; src = 'native_slots_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Every fixed detour window against the images: boundary and relative operands.
-$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
+$tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
 # The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced
 # it (CI builds first); with images, also their XInput imports.
 $proxyDir = Join-Path (Resolve-Path (Join-Path $here '..')).Path 'build'

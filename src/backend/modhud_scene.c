@@ -88,6 +88,13 @@ void sh_modhud_scene_play_begin(void)
     }
 }
 
+int sh_modhud_scene_restore(void)
+{
+    if (sh_modserve_engine_in_play() != 1 || !InterlockedCompareExchange(&g_hidden, 0, 0)) return 0;
+    ms_apply(1);
+    return !InterlockedCompareExchange(&g_hidden, 0, 0);
+}
+
 void sh_modhud_scene_stats(unsigned *hides, unsigned *shows, int *hidden)
 {
     if (hides) *hides = (unsigned)InterlockedCompareExchange(&g_hides, 0, 0);

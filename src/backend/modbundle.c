@@ -10,6 +10,7 @@
 
 #include "modbundle.h"
 #include "companion.h"
+#include "mp_json.h"
 #include "config_json.h"
 #include "decl_text.h"
 #include "json_pretty.h"
@@ -1625,6 +1626,44 @@ static void mb_companion_needs(sh_mb_bundle *b)
     sh_companion_table_free(&t);
 }
 
+/* What a scene node's "scenes" entry spawns (modscene_decl.h, kept in extra)
+ * is a need of the node's own entityDef, like a companion: the serving closure
+ * registers it with the node and the validator checks that it resolves. The
+ * block's grammar is checked when the game reads it; here only well-formed
+ * spawn names count. */
+static void mb_scene_needs(sh_mb_bundle *b)
+{
+    mpj *root, *block;
+    size_t i;
+    int k, j;
+    if (!b->extra) return;
+    root = mpj_parse(b->extra, strlen(b->extra));
+    block = (root && root->type == MPJ_OBJ) ? mpj_get(root, "scenes") : NULL;
+    if (block && block->type == MPJ_OBJ) {
+        for (i = 0; i < b->file_count; i++) {
+            sh_mb_file *f = &b->files[i];
+            int added = 0;
+            if (!f->is_decl || !f->ptype || !f->pname || _stricmp(f->ptype, "entityDef") != 0) continue;
+            for (k = 0; k < block->n; k++) {
+                const mpj *spawn;
+                if (_stricmp(block->keys[k], f->pname) != 0 || !block->items[k] || block->items[k]->type != MPJ_OBJ)
+                    continue;
+                spawn = mpj_get(block->items[k], "spawn");
+                if (!spawn || spawn->type != MPJ_ARR) continue;
+                for (j = 0; j < spawn->n; j++) {
+                    const mpj *def = (spawn->items[j] && spawn->items[j]->type == MPJ_OBJ)
+                                         ? mpj_get(spawn->items[j], "entityDef") : NULL;
+                    if (!def || def->type != MPJ_STR || !def->text[0]) continue;
+                    if (!mb_add_need(f, "entityDef", def->text, strlen(def->text))) mb_error(b, "out of memory");
+                    added = 1;
+                }
+            }
+            if (added) qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+        }
+    }
+    mpj_free(root);
+}
+
 static int mb_file_cmp(const void *a, const void *b)
 {
     return strcmp(((const sh_mb_file *)a)->path, ((const sh_mb_file *)b)->path);
@@ -3156,6 +3195,7 @@ names:
     }
 
     mb_companion_needs(b);
+    mb_scene_needs(b);
 
     /* A module is placed through its snapModuleInfo, which must travel with it. */
     for (i = 0; i < b->file_count; i++) {

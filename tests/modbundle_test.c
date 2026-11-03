@@ -781,6 +781,18 @@ static void m_companions(const char *f)
     mt_write(f, "mod.json", DESC(",\"companions\":{\"mods/alex.r2-imp/mid\":[{\"entityDef\":\"mods/alex.r2-imp/child\","
                              "\"origin\":[0.0,10.5,0.0],\"axis\":[[1,0,0],[0,1,0],[0,0,1]]}]}"));
 }
+/* A scenes entry's spawn entityDef is a need of the scene node's own decl. */
+static void m_scenes(const char *f)
+{
+    m_chain(f);
+    mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alex.r2-imp/mid\":{\"anchor\":[563.095,16.698,0.352,179.998],"
+                             "\"player\":[-33.678,0,0,0],\"spawn\":[{\"entityDef\":\"mods/alex.r2-imp/child\"}]}}"));
+}
+static void m_scenes_missing(const char *f)
+{
+    m_chain(f);
+    mt_write(f, "mod.json", DESC(",\"scenes\":{\"mods/alex.r2-imp/mid\":{\"spawn\":[{\"entityDef\":\"mods/alex.r2-imp/gone\"}]}}"));
+}
 static void m_chain_broken(const char *f)
 {
     mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\child.decl",
@@ -843,6 +855,15 @@ static void test_refusals(const char *fixture, const char *tmp)
         CHECK(b.extra && strstr(b.extra, "\"companions\""));
     }
     sh_mb_free(&b);
+    accepted(fixture, tmp, m_scenes, &b);
+    {
+        const sh_mb_file *mid = find_file(&b, "generated/decls/entitydef/mods/alex.r2-imp/mid.decl");
+        CHECK(mid && mid->need_count == 2 && has_need(mid, "entityDef", "mods/alex.r2-imp/child") &&
+              has_need(mid, "entityDef", "mods/alex.r2-imp/imp_copy"));
+        CHECK(b.extra && strstr(b.extra, "\"scenes\""));
+    }
+    sh_mb_free(&b);
+    refused(fixture, tmp, m_scenes_missing, &RESOLVER, "needs entityDef mods/alex.r2-imp/gone, which resolves to nothing");
 
     /* A declared shadow of a stock decl is accepted. */
     accepted(fixture, tmp, m_shadow_ok, &b);
