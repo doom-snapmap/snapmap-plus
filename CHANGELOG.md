@@ -11,7 +11,7 @@ Mods can now give a tile companion entities such as displays, props or speakers 
 
 ### New
 - A mod can give one of its tiles up to 16 companion entities that appear with every placed copy, sit where the author put them, move with the tile and switch on in order when it is used.
-- The install button now accepts several folders at once, and picking a folder without a mod description installs every mod found below it, reporting how many installed and how many were refused.
+- The install button now accepts several folders at once, and picking a folder that holds mods installs every mod found below it, reporting how many installed and how many were refused.
 - Mod folders can sit inside organizing subfolders under the mods folder, and they are listed, rebuilt, verified and uninstalled just like top-level ones.
 
 ### Improved
