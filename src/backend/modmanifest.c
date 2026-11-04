@@ -383,6 +383,17 @@ static size_t mm_choice_count(const char *lines)
 /* row value                                                             */
 /* ==================================================================== */
 
+/* A product version as the row carries it: 1-32 printable ASCII bytes
+ * without quotes, backslashes or spaces ("v0.2.1-beta.24", "0.3.0"). */
+static int mm_version_ok(const char *v)
+{
+    size_t i, n = v ? strlen(v) : 0;
+    if (!n || n >= SH_MODMANIFEST_VERSION_CAP) return 0;
+    for (i = 0; i < n; i++)
+        if ((unsigned char)v[i] <= 0x20 || (unsigned char)v[i] >= 0x7f || v[i] == '"' || v[i] == '\\') return 0;
+    return 1;
+}
+
 int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_row *out,
                                char *err, size_t err_cap)
 {
@@ -412,6 +423,10 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         const char *attached = sh_json_object_get(&object, "attached");
         out->attached = attached && !strcmp(attached, "true");
     }
+    /* "product": the least Snapmap+ version the map needs; one that does not
+     * read is dropped (the row stays). */
+    if (!mm_member_text(&object, "product", out->product, sizeof out->product, 0) || !mm_version_ok(out->product))
+        out->product[0] = 0;
     {
         /* Registry choices: entries that do not read are skipped (the row stays). */
         const char *choices = sh_json_object_get(&object, "choices");
@@ -473,6 +488,10 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
         mm_put(&t, number, strlen(number));
         if (row->attached) mm_put(&t, ",\"attached\":true", 16);
+        if (row->product[0] && mm_version_ok(row->product)) {
+            mm_put(&t, ",\"product\":", 11);
+            mm_put_quoted(&t, row->product);
+        }
         if (kc) {
             const char *p = row->choices;
             size_t c;
@@ -1035,6 +1054,116 @@ static void mm_choices_save(sh_modmanifest_list *rows)
     }
 }
 
+/* ---- product version (DESIGN-additive 2.7) */
+
+static SRWLOCK g_product_lock = SRWLOCK_INIT;
+static char g_product_override[SH_MODMANIFEST_VERSION_CAP];
+static int g_product_overridden, g_product_read;
+static char g_product_installed[SH_MODMANIFEST_VERSION_CAP];
+static sh_modmanifest_product_need_fn volatile g_product_need;
+
+void sh_modmanifest_set_product_version(const char *version)
+{
+    AcquireSRWLockExclusive(&g_product_lock);
+    g_product_overridden = version != NULL;
+    strncpy_s(g_product_override, sizeof g_product_override, version ? version : "", _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_product_lock);
+}
+
+void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need) { g_product_need = need; }
+
+/* The installer's record: the first "version" key of install.json. */
+static void mm_read_installed_version(char *out, size_t cap)
+{
+    char la[MAX_PATH], path[MAX_PATH], data[4096];
+    HANDLE h;
+    DWORD got = 0;
+    const char *p, *q;
+    out[0] = 0;
+    if (!GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH)) return;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus\\install.json", la);
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    if (!ReadFile(h, data, sizeof data - 1, &got, NULL)) got = 0;
+    CloseHandle(h);
+    data[got] = 0;
+    p = strstr(data, "\"version\"");
+    if (!p || !(p = strchr(p + 9, ':')) || !(p = strchr(p, '"'))) return;
+    q = strchr(++p, '"');
+    if (!q || (size_t)(q - p) >= cap) return;
+    memcpy(out, p, (size_t)(q - p));
+    out[q - p] = 0;
+}
+
+int sh_modmanifest_product_version(char *out, size_t cap)
+{
+    char v[SH_MODMANIFEST_VERSION_CAP] = "";
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    AcquireSRWLockExclusive(&g_product_lock);
+    if (g_product_overridden) strcpy_s(v, sizeof v, g_product_override);
+    else {
+#ifdef SH_PRODUCT_VERSION
+        strncpy_s(v, sizeof v, SH_PRODUCT_VERSION, _TRUNCATE);
+#else
+        if (!g_product_read) { mm_read_installed_version(g_product_installed, sizeof g_product_installed); g_product_read = 1; }
+        strcpy_s(v, sizeof v, g_product_installed);
+#endif
+    }
+    ReleaseSRWLockExclusive(&g_product_lock);
+    if (!mm_version_ok(v)) return 0;
+    strncpy_s(out, cap, v, _TRUNCATE);
+    return 1;
+}
+
+int sh_modmanifest_rows_product(const sh_modmanifest_list *rows, char *out, size_t cap)
+{
+    size_t i;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    for (i = 0; rows && i < rows->count; i++)
+        if (rows->rows[i].product[0]) { strncpy_s(out, cap, rows->rows[i].product, _TRUNCATE); return 1; }
+    return 0;
+}
+
+int sh_modmanifest_current_product(char *out, size_t cap)
+{
+    int r;
+    AcquireSRWLockShared(&g_current_lock);
+    r = sh_modmanifest_rows_product(&g_current, out, cap);
+    ReleaseSRWLockShared(&g_current_lock);
+    return r;
+}
+
+/* At a save: every row carries the product version when the map needs the product. */
+static void mm_product_save(sh_modmanifest_list *rows, int grid)
+{
+    sh_modmanifest_product_need_fn need = g_product_need;
+    char v[SH_MODMANIFEST_VERSION_CAP], line[200];
+    size_t i;
+    int any = grid;
+    for (i = 0; i < rows->count; i++) rows->rows[i].product[0] = 0;
+    if (!rows->count) return;
+    for (i = 0; i < rows->count && !any; i++) any = rows->rows[i].choices[0] != 0;
+    if (!any && need) any = need(rows) > 0;
+    if (!any) return;
+    if (!sh_modmanifest_product_version(v, sizeof v)) {
+        backend_log("MODS: save manifest: the map needs Snapmap+ features, but this build's version is unknown; "
+                    "no product version is recorded");
+        return;
+    }
+    for (i = 0; i < rows->count; i++) strcpy_s(rows->rows[i].product, sizeof rows->rows[i].product, v);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: save manifest: the map needs Snapmap+ %s or later (%s)", v,
+                grid ? "a Grid Room variant" : "a registry or registry choice");
+    backend_log(line);
+}
+
+/* A placed name of a Grid Room variant (the product's own module catalog). */
+static int mm_grid_name(const char *name)
+{
+    return name && !_strnicmp(name, "maps/modules/smpgrid/", 21);
+}
+
 void sh_modmanifest_reset(void)
 {
     mm_set_current(NULL);
@@ -1314,7 +1443,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 {
     char **names = NULL;
     size_t count, i, written = 0;
-    int failed = 0, stale;
+    int failed = 0, stale, grid = 0;
     mm_save_ctx ctx;
     sh_modmanifest_list attached;
     sh_modmanifest_scope_fn scope = g_scope;
@@ -1334,6 +1463,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         return NULL;
     }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
+    for (i = 0; !failed && i < count && !grid; i++) grid = mm_grid_name(names[i]);
     if (failed) {
         backend_log("MODS: save manifest skipped -- the saved map's JSON did not read cleanly; "
                     "the save carries no manifest rows");
@@ -1355,6 +1485,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     mm_choices_save(&ctx.list);
+    mm_product_save(&ctx.list, grid);
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);

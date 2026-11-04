@@ -782,7 +782,10 @@ static void choices(void)
     /* The save writes each choice on the row of its key and drops one naming
      * a key the map declares no build of, with a line. */
     g_mods_lines = 0;
+    sh_modmanifest_set_product_version("v0.3.0-test");
     saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    /* A map with a registry choice needs the product: every row says which. */
+    CHECK(saved && strstr(saved, "\\\"attached\\\":true,\\\"product\\\":\\\"v0.3.0-test\\\",\\\"choices\\\""));
     CHECK(saved && strstr(saved, "\\\"choices\\\":{\\\"player.hands\\\":\\\"bob.room\\\"}"));
     CHECK(saved && strstr(saved, "\\\"choices\\\":{\\\"weapons/weapon/zion/player/sp/pistol\\\":\\\"alex.pink-imp\\\"}"));
     CHECK(saved && !strstr(saved, "carol.gone"));
@@ -794,6 +797,7 @@ static void choices(void)
         again = sh_modmanifest_prepare_load(saved, slen, &elen);
         CHECK(g_choice_calls == 1 && g_choice_n == 2 && sh_modmanifest_current_choice("player.hands", key, sizeof key) &&
               !strcmp(key, "bob.room"));
+        CHECK(sh_modmanifest_current_product(key, sizeof key) == 1 && !strcmp(key, "v0.3.0-test"));
         if (again) HeapFree(GetProcessHeap(), 0, again);
         HeapFree(GetProcessHeap(), 0, saved);
     }
@@ -806,7 +810,78 @@ static void choices(void)
     if (engine) HeapFree(GetProcessHeap(), 0, engine);
     HeapFree(GetProcessHeap(), 0, written);
     sh_modmanifest_reset();
+    sh_modmanifest_set_product_version(NULL);
     g_installed_count = 2;
+}
+
+static int g_need_answer;
+static int need_hook(const sh_modmanifest_list *rows) { (void)rows; return g_need_answer; }
+
+/* "product" (DESIGN-additive 2.7): the least Snapmap+ version a map needs. */
+static void product(void)
+{
+    sh_modmanifest_row row, back;
+    sh_modmanifest_list rows;
+    char err[192], *value, *written, *engine, *saved, v[40];
+    size_t len, wlen, elen, slen;
+    printf("-- product: the version a map needs\n");
+    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+    strcpy_s(row.product, sizeof row.product, "v0.2.1-beta.25");
+    value = sh_modmanifest_format_value(&row, &len);
+    CHECK(value && strstr(value, ",\"size\":11782,\"product\":\"v0.2.1-beta.25\",\"names\":["));
+    CHECK(value && sh_modmanifest_parse_value(value, len, &back, err, sizeof err) && !strcmp(back.product, "v0.2.1-beta.25"));
+    sh_modmanifest_row_free(&back);
+    free(value);
+    sh_modmanifest_row_free(&row);
+    {
+        /* One that does not read is dropped; the row stays. An older row has none. */
+        static const char odd[] = "{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,"
+                                  "\"product\":\"has a space\",\"names\":[]}";
+        static const char old[] = "{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,\"names\":[]}";
+        CHECK(sh_modmanifest_parse_value(odd, sizeof odd - 1, &back, err, sizeof err) && !back.product[0]);
+        sh_modmanifest_row_free(&back);
+        CHECK(sh_modmanifest_parse_value(old, sizeof old - 1, &back, err, sizeof err) && !back.product[0]);
+        sh_modmanifest_row_free(&back);
+    }
+    /* A map without choices writes it only when the serving side says a
+     * declared mod needs the product; an unknown version writes none. */
+    memset(&rows, 0, sizeof rows);
+    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+    row.attached = 1;
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    CHECK(written != NULL);
+    if (!written) return;
+    sh_modmanifest_reset();
+    engine = sh_modmanifest_prepare_load(written, wlen, &elen);
+    CHECK(engine && sh_modmanifest_current_product(v, sizeof v) == 0);
+    sh_modmanifest_set_product_version("0.3.0");
+    sh_modmanifest_set_product_need(need_hook);
+    g_need_answer = 0;
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && !strstr(saved, "product"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    g_need_answer = 1;
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, "\\\"product\\\":\\\"0.3.0\\\""));
+    if (saved) {
+        char *again = sh_modmanifest_prepare_load(saved, slen, &elen);
+        CHECK(sh_modmanifest_current_product(v, sizeof v) == 1 && !strcmp(v, "0.3.0"));
+        if (again) HeapFree(GetProcessHeap(), 0, again);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+    sh_modmanifest_set_product_version("");
+    CHECK(!sh_modmanifest_product_version(v, sizeof v));
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && !strstr(saved, "product"));
+    if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    sh_modmanifest_set_product_need(NULL);
+    sh_modmanifest_set_product_version(NULL);
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    HeapFree(GetProcessHeap(), 0, written);
+    sh_modmanifest_reset();
 }
 
 int main(void)
@@ -823,6 +898,7 @@ int main(void)
     mod_json();
     map_level();
     choices();
+    product();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

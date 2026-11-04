@@ -3,7 +3,7 @@
  *
  * A row is an ordinary snapVarString_t in variables.string[], appended last so
  * existing variable bindings keep their (type, index). Its initialValue is the
- * compact JSON {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
+ * compact JSON {"id","version","bundle","size","attached"?,"product"?,"choices"?,"names":[...]}
  * where "bundle" is the bundle hash and "names" the placed logical names the
  * bundle provides (informational). "choices": {"<slot>": "<key>", ...} records
  * the map's registry choices (modregistry.h: which declared mod serves a
@@ -11,7 +11,13 @@
  * "weapons/<stock weapon decl>"); a save writes each choice on the row of the
  * key it names, a load reads them from every row (the first row naming a
  * slot wins). Names are dropped before choices when a row would exceed its
- * budget. "attached": true marks a map-level row: the mod
+ * budget. "product": "<version>" is the Snapmap+ version the map needs at
+ * least (DESIGN-additive 2.7): written on every row at a save when the map
+ * uses a product-only feature or registry (a registry choice, a declared
+ * mod whose intent the product generates: player fields, weapons, extends,
+ * conductor rows; a Grid Room variant module), the running product's own
+ * version (sh_modmanifest_product_version); a load reads the first row's.
+ * A reader that predates it ignores it. "attached": true marks a map-level row: the mod
  * was attached to the map (the Mods tab's Use in this map, `sh_mods map add`)
  * without placing anything, so the map keeps the row whatever it places. A
  * reader that does not know the key treats the row as a placed mod's; an older
@@ -57,6 +63,7 @@ typedef struct sh_modmanifest_row {
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
     char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<key>\n" per entry, in text order */
+    char product[SH_MODMANIFEST_VERSION_CAP];   /* its "product": the least Snapmap+ version the map needs, "" none */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -204,5 +211,25 @@ size_t sh_modmanifest_current_choices(char *out, size_t cap);
 /* The choices a list of rows carries, merged (the first row naming a slot
  * wins), as "slot\tkey\n" lines. Returns their count. */
 size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap);
+
+/* ------------------------------------------------------------ product ---- */
+
+/* The running product's version, as the save writes it in "product": the
+ * build's SH_PRODUCT_VERSION when defined, else the first "version" of
+ * %LOCALAPPDATA%\snapmap-plus\install.json (the installer's record, read
+ * once), else "" (nothing is written). 1 with it in out. */
+int  sh_modmanifest_product_version(char *out, size_t cap);
+/* Tests and tools: the version the save writes (NULL returns to the rule above). */
+void sh_modmanifest_set_product_version(const char *version);
+/* 1 when the map with these rows and placed names needs a product-only
+ * feature or registry. modui binds the serving side (a row's bundle states
+ * registry intent); the manifest itself counts registry choices and Grid
+ * Room variant modules (maps/modules/smpgrid/). NULL unbinds. */
+typedef int (*sh_modmanifest_product_need_fn)(const sh_modmanifest_list *rows);
+void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need);
+/* The "product" the rows carry (the first non-empty), "" when none. 1 found. */
+int  sh_modmanifest_rows_product(const sh_modmanifest_list *rows, char *out, size_t cap);
+/* The open map's "product" (read at its load, written at its save). */
+int  sh_modmanifest_current_product(char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */
