@@ -459,7 +459,7 @@ These backend files share the work:
 - `modstock.c` is the read-only installed-resource bridge behind stock
   pointers, below.
 - `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
-  (`status`, `rescan`, `palette rebuild`) to `modserve_engine.c` (a rescan runs
+  (`status`, `rescan`, `palette rebuild`, `held`) to `modserve_engine.c` (a rescan runs
   the rebuild rule first) and owns `build`, `install`, `list` and `verify`. Its
   `modbundle_build_folder` is the builder entry the legacy converter calls, with
   the game's archives as the stock resolver.
@@ -474,6 +474,11 @@ These backend files share the work:
   the engine's own level 1, and rebuilds the live palette inside process heap 0.
   A grandfathered bundle's shadows are planned like new names; the engine
   already knowing the source marks a stock decl, which is left to the provider.
+  It applies a refresh in place (re-parse, reload, the anims of a map pass) and
+  arms the companions detour at its main-thread gates.
+- `modledger.c` is the served-bytes ledger: per request path, the bytes the
+  provider gave the engine this session, read lock-free by the refresh
+  decision and `sh_mods held`.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows (a placed
   mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
   retired `smpkg.` carriers, as below.
@@ -894,9 +899,13 @@ Wwise allocates through the engine allocator's current heap, so a rerun from
 the console with a map open put the reloaded stream packages in the map heap,
 the map unload freed them, and the next streamed sound read a freed package
 (a crash at the Play load). A mod installed mid-session plays at
-its next map; a bank whose bytes change keeps the loaded copy (Wwise keeps the
-first bytes for a bank id) until the game restarts, and a removed bank stays
-loaded until then. `sh_mods status` lists each bank and whether it was
+its next map: its banks go through the same per-bank wrapper at the next
+main-thread pass, never through `s_loadBanks` with a map open. A bank whose
+bytes change under a name already loaded keeps the loaded copy (Wwise keeps the
+first bytes for a bank id and answers a second load with 69,
+AK_BankAlreadyLoaded) until the game restarts, and a removed bank stays
+loaded until then; so do two builds of one key whose bank differs under one
+stem, since the bank id is the stem's FNV-1. `sh_mods status` lists each bank and whether it was
 submitted. The events file (`soundbanksinfo.events`) is not extended: a mod
 event needs no record to play (it only feeds the by-id lookup; without one
 the event is never distance-virtualized).
@@ -935,8 +944,25 @@ maps owner entityDefs, which must be the bundle's own `mods/<id>/` names, to
 has the grammar and refusals; a refused block adds nothing and is logged
 `COMPANIONS: <id> REFUSED: ...`; the first bundle to declare an owner keeps
 it). `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
-0x141584A90, 14 stolen bytes) only when at least one owner is declared at
-startup, and logs `COMPANIONS: installed ...` and one line per owner
+0x141584A90, 14 stolen bytes) only once an admitted bundle declares an owner:
+at startup when one does, otherwise at the first main-thread gate after one is
+installed (`sh_companions_ensure`, called beside the probe's own lazy commit at
+the Play build `sh_modserve_play_begin`, the map load
+`modserve_activate_bundles`, the editor palette pass, `sh_mods rescan` and the
+return to the editor). CallSpawn runs on DOOM's main thread only, with no
+inlined copy (reports ADD-G2, and ADD-V1 live: 2,132 Vulkan and 2,130 OpenGL
+entries, all on the main thread), and the editor's map load spawns nothing
+while Play precedes every spawn burst, so a commit from the main thread at one
+of those gates is race-free and comes before the spawns it is for. The gate
+checks, in order (`sh_companion_arm_decide`): the boot resolution succeeded
+(it is cached; nothing is resolved later), the detour is not live yet, the
+caller is DOOM's main thread (`main_thread_id`; never armed from another
+thread), the serving index was published again since the table was built and
+the rebuilt table has an owner, and CallSpawn's 14 bytes are still the
+expected ones (another detour there refuses). Once committed the detour stays
+for the session; it is never unhooked mid-session, since a main-thread frame
+inside GetType returns into the trampoline. It logs `COMPANIONS: installed ...
+(<gate>)` and one line per owner
 spawn (`<owner>: n of m companions spawned`), the first 64 lines. After the original spawn chain
 returns, an idEntity whose entityDef (`+0x6D0`) is an owner, or inherits one
 through `mods/` names (`+0x58`), gets each companion in list order: spawned by
@@ -1328,7 +1354,25 @@ health). Applying uses the two primitives above: each marked decl the engine
 holds parsed is re-parsed (state bits cleared, `ResourceGenericLoad` inside
 process heap 0), parents before children, a gone shadow so that the engine
 reads its own bytes again; each marked model and image it holds loaded is
-reloaded in place by name, only once its bundle's gates are live. A decl the
+reloaded in place by name, only once its bundle's gates are live. A changed
+`anim` (`cooked/anim/<stem>.bmd6anim`, refresh kind `SH_MODSERVE_RF_ANIM`) is
+reloaded at a map pass only (`modserve_activate_bundles`): there the engine's
+purge has run (every SnapMap map load purges levels 1 and 2, report ADD-G1),
+the departed map's entities are gone and the next map's are not spawned yet;
+marked anywhere else it waits for the next map load. Only an anim held at
+level 4 is reloaded (a level-1 anim is freed at every transition and read
+again from the current bytes); its served bytes are checked first against what
+the engine's Load accepts (magic and version `0x2602414d` read big-endian, the
+skeleton name's length), because a failed Load frees the data the held anim
+points at, and one that fails the check is kept as it is and logged
+(`MODS: reload: anim '<name>' kept as the engine holds it: ...`). After the
+reloads the md6Def and animWeb decls the open map serves that name a reloaded
+anim are re-parsed, so what they built from the old data is rebuilt (which
+engine objects cache an anim's data pointer is not established). Raw names
+match the list entries case-insensitively with the id's `-` and `_` as one. A
+skeleton has no in-place route (it heads an ordered closure of models, anims
+and decls that is unsafe while any animator lives); `sh_mods held` counts the
+mod skeletons held at level 4, and a changed skeleton stays a restart. A decl the
 engine has not parsed, or a resource it has not loaded, is settled, since its
 next load reads the current bytes, and a settled decl is no early decl. The
 rescan applies the marks at once on the main thread, except during SnapMap
@@ -1348,14 +1392,43 @@ the first editor entry builds it with every row; a refused rebuild (an entity
 or wire held) is retried by `sh_mods palette rebuild`. What stays reported
 rather than applied: new names of a mod no map has used this session (they
 register when a map that names the mod loads), a changed movie (read at the
-next map load), and changed files nothing reloads in this process (sound
-banks, animations and other raw files besides models and images) or removed
-non-row decl names, which need a restart; a stock decl no bundle serves that
+next map load), a changed anim (reloaded in place at the next map load), and
+changed files nothing reloads in this process (a sound bank whose bytes
+changed under a name Wwise already loaded, skeletons and other raw files
+besides models, images and anims) or removed non-row decl names, which need a
+restart; a stock decl no bundle serves that
 inherits a changed one cannot be found from the index. The log carries one `MODS: refresh:` line
 per category and a summary; the Mods tab's rescan result carries
 `refresh: {reparsed, reloaded, needsMapReload, needsRestart, pending,
 deferred, note}`, and `sh_mods rescan` (or `sh_mods refresh`) echoes the same
 lines to the console; `sh_mods status` says when changes are pending.
+
+Served-bytes ledger (`modledger.c`): the engine records no byte identity for
+raw resources and, after a production read, none for decls but entityDef
+(report ADD-G3), so the product keeps its own. Every serve through
+`sh_modserve_open` (the provider's `+0x148` open, which the raw loaders and
+the decl read path both reach) calls the serve listener, which records per
+request path the serving bundle's hash and the file's identity: the first 64
+bits of its recorded SHA-256, or an FNV-1a 64 of the bytes for a composed text
+or a file without one. A product read of served bytes (the anim check, the
+dependents search) is not recorded. Records live in a fixed open-address table
+of 16,384 paths (32,768 slots), published once and updated under a per-record
+sequence count, so readers take no lock; a serve past the bound is counted and
+the ledger then calls itself incomplete. It is bound in `sh_modserve_install`
+and is complete only when the provider served nothing before that. At a
+refresh, a pending model, image or anim is reloaded only when the ledger says
+the bytes the engine was given differ from what the open map serves now
+(`sh_modledger_decide`: KEEP when equal, REFRESH when different, GAME when a
+complete ledger has no record: the engine's object never had a mod's bytes and
+is not refreshed); shadows and withdrawn paths, and decls (a child is marked
+for its parent's change, not its own), keep the marks alone. At each map pass
+the ledger is also swept: a held name the provider served whose bytes differ
+from what the declared builds serve, which the marks left, is refreshed by its
+type's route (`MODS: map: ledger: ...`), and a held skeleton or other raw type
+is reported as a restart. `sh_mods held [filter]` prints the ledger (request,
+bundle, file identity, serves, whether and at which level the engine holds the
+name) and the census of level-4 names the product served, by type, ending with
+the count of mod skeletons held at level 4.
 
 ### Map scope
 
@@ -1442,9 +1515,14 @@ at:
 
 With no map (at boot, and at the hub after the editor) no undeclared shadow
 serves. A published or My Maps launch from the hub keeps its listing until the
-next parse, because nothing marks the end of that Play, and runs in the EDITOR
-mode: the launch gate does not set PLAY yet, so an undeclared bundle's names
-and surfaces stay reachable there (nothing the map declares names them). A
+next parse, because nothing marks the end of that Play, and runs in PLAY mode:
+the launch boundary (`PublishedMapLobbyLaunch`, `PublishedMapOfflineLaunch`,
+`LaunchLocalSnapMapForOfflinePlay`, and the resume of a held one) sets
+`SH_MODSERVE_MODE_PLAY` and applies it before the original launches, so an
+undeclared bundle serves nothing in the map; nothing marks the end of that
+Play, so the editor's tick sets EDITOR again when the editor next shows a map,
+and an editor palette pass does it first (a pass in PLAY would not register
+undeclared rows). A
 `mod.json` author key `"scope"` stays in the manifest's `extra`, so a mod with
 it keeps its canonical text and hash; it is ignored.
 `sh_modserve_index_boot` enables scope for the product's index; the native
@@ -1456,9 +1534,16 @@ what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
 <key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or
 `the game (no declared bundle provides it)`), and the counts per layer. The
-walks of the engine's resource lists (watermarks, `sh_modserve_resource_each`)
-hold the engine's resource lock once `sh_modserve_set_resource_lock` binds it
-(ADD-G3), and run their callbacks after it is released. The map load's `MODS: map manifest names ...` line
+walks of the engine's resource lists (watermarks, `sh_modserve_resource_each`,
+`op_held`, the ledger's census and sweep) hold the engine's resource lock: the
+static struct whose first qword is the CRITICAL_SECTION every list add, remove
+and find takes (generated globals entry `resource_lock`, Vulkan RVA 0x5D79238,
+OpenGL 0x467E8B8, decoded from the end of ResourceStaticPromote into the lock's
+accessor; `globals_test` checks it sits 0x3D8 past `decl_resource_head` on both
+renderers), bound in `sh_modserve_install` through
+`sh_modserve_set_resource_lock` (ADD-G3). The accessor builds the section on
+first use, so a NULL pointer means no list was touched yet. Callbacks and
+loads run after it is released. The map load's `MODS: map manifest names ...` line
 ends with the registration steps the activation found ready, or "no new decls
 to register" for bundles of shadows and requirements only.
 
