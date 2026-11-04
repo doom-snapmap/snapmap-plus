@@ -776,7 +776,13 @@ int main(int argc, char **argv)
     CHECK(bundle_has(doc, key2, "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
     CHECK(bundle_has(doc, key1, "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
     CHECK(count_of(doc, "\"newest\":true,\"builds\":[") == 1 && count_of(doc, "\"newest\":false,\"builds\":[") == 1);
-    CHECK(bundle_has(doc, key1, "\"servedBy\":\"alex.r2-imp@1.0.1\""));
+    {
+        /* The newest build serves the key with no map open; its folder is named
+         * <key>@<hash16> since installs beside are by hash. */
+        char served[128];
+        _snprintf_s(served, sizeof served, _TRUNCATE, "\"servedBy\":\"%s\"", key2);
+        CHECK(bundle_has(doc, key1, served));
+    }
     CHECK(count_of(doc, "\"newest\":true,\"failed\":false") == 2);   /* the newest build, in each row's list */
     CHECK(count_of(doc, "\"otherBuilds\":") == 2);
     free(doc);
