@@ -955,7 +955,7 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                     _snprintf_s(here, sizeof here, _TRUNCATE, "; for the open map: %s", m->list.items[open].name);
                 else
                     _snprintf_s(here, sizeof here, _TRUNCATE, "; for the open map: the game's copy (%s)",
-                                sh_modserve_scope_map_open() ? "the map lists none of its providers" : "no map is open");
+                                sh_modserve_scope_map_open() ? "the map declares none of its providers" : "no map is open");
             }
             if (conflict) {
                 sh_modserve_conflict ci;
@@ -2615,6 +2615,9 @@ static void mu_scope_tick(int editor_map)
         return;
     }
     InterlockedExchange(&g_scope_editor, 1);
+    /* Back in the editor (after Play): undeclared bundles offer their names again. */
+    if (sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_EDITOR && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR))
+        (void)mu_scope_apply("editor");
     if (!sh_modserve_scope_map_open() && sh_modserve_scope_relevant()) {
         if (mu_listing_live()) (void)mu_scope_apply("editor");
     } else if (InterlockedCompareExchange(&g_scope_owed, 0, 0)) (void)mu_scope_apply("save");
@@ -3306,7 +3309,8 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
         _snprintf_s(key, sizeof key, _TRUNCATE, "%s+%llu", e->bundle.id, e->bundle.build);
     else strncpy_s(key, sizeof key, e->key, _TRUNCATE);
     if (!strcmp(u->state, "superseded"))
-        _snprintf_s(state, sizeof state, _TRUNCATE, "superseded, %s serves %d of its path(s)",
+        _snprintf_s(state, sizeof state, _TRUNCATE, "another build of its key, %s, serves %d of its path(s) with no map open; "
+                    "a map saved with this build still serves this one",
                     u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "a newer build", u->superseded_paths);
     else strncpy_s(state, sizeof state, u->state, _TRUNCATE);
     mu_say(o, "%s mods\\%s (%s): %s%s%s%s%s", e->delivered ? "bundle delivered by a map," : u->legacy ? "migrated bundle" : "bundle",
@@ -3357,7 +3361,8 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
             if (w < 0) break;
             at += (size_t)w;
         }
-        mu_say(&o, "duplicate id %s: %s; another installed mod declares this id; change one id in its mod.json", id, keys);
+        mu_say(&o, "key %s: installed at several builds: %s; each map serves the build it was saved with (one row per "
+               "hash follows under scope)", id, keys);
     }
     pending = e->migrate_pending ? e->migrate_pending(&entries) : -2;
     if (pending == -2) mu_say(&o, "migration: not available in this build");

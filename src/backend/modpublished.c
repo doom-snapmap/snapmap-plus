@@ -130,9 +130,10 @@ static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
 /* The asset rule (modserve.h sh_modserve_row_served): a row is served when an
- * installed folder declares its id and provides every name it lists,
- * whatever its bundle hash. `subject` is the word the cause uses ("map",
- * "prefab"). */
+ * installed folder at its bundle hash (or an alias of it) provides every
+ * name it lists; a folder of the key at another hash is another build and
+ * does not serve it (modserve.h, "installed at another build"). `subject` is
+ * the word the cause uses ("map", "prefab"). */
 static int pub_row_state(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     if (cause && cap) cause[0] = 0;
