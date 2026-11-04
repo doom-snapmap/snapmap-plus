@@ -335,7 +335,17 @@ it), "Imported from an export" (`install`) and "Downloaded for a map you played"
 `delivery`). About carries an Applies line when the
 backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
 requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
-nothing for a mod that only adds new names. The head actions are Use in this map, Verify, Rebuild
+nothing for a mod that only adds new names. After What it adds, **What it is made of** shows the
+builder's derived facts (`facts`) when the backend sends them: "Legacy, rebuild to isolate" for a
+converted first-generation package (`legacy`), then Adds, Borrows (game files under its own names),
+Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only; never in a map, with
+the paths in a `details` list), Replaces (each path, marked "declared: affects only maps that declare
+this mod" when the descriptor's `replaces` names it, or "a copy of a registry: express it as intent")
+and Registries (player fields, weapons, extends targets and conductor encounters, generated per map
+that declares the mod). **Builds of this mod** lists every build of the key (`builds`, one line per
+hash with its build number, the newest marked) when several are installed: each map uses the build it
+was saved with. A failed latest build (`buildFailed`) is a yellow row whose cause reads "its latest
+build failed: <cause>; serving build N from its snapshot". The head actions are Use in this map, Verify, Rebuild
 and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
 for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
 from map and opens the same confirmation as the modal's row, which closes after the action. With
@@ -345,7 +355,16 @@ nothing selected the pane explains how mods work.
 (`.modal.decl-focus-modal` in `#modsMapModal`; the backdrop and Escape close it, Tab stays inside,
 focus returns to the opener) with the open map's details and one row per mod the map is linked to,
 each with Remove from map. A map-level mod (`attached`) reads "Used by the whole map" instead of its
-placed-entity count, and removing it deletes nothing. Remove from map and Uninstall first send a dry run; its answer is the
+placed-entity count, and "Declared, nothing placed" when nothing of it is placed (`nothingPlaced`);
+removing it deletes nothing. A row whose key has a newer installed build (`upgrade`) carries
+**Upgrade this map to the installed build** (`mapUpgradeMod`; its hover says which build the map uses
+and which is installed); the result says what changes (files changed, added, removed) and that the map
+must be saved to keep it. A row pinning a build that is not installed while its key is installed at
+another reads "installed at another build" (`otherBuild`). When the map records the Snapmap+ version
+it needs (`product`), the map details read "Needs Snapmap+ <version> or later". When several declared
+mods set one player field or weapon slot (`registryClashes`), **Choices between mods** shows one select
+per slot with its providers, the serving one selected; a change sends `chooseRegistry` with
+`"<slot>\t<key>"`, and the next document shows what the backend serves. Remove from map and Uninstall first send a dry run; its answer is the
 consequence list the confirmation shows, with exactly two buttons (Cancel, and Delete or
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
@@ -391,6 +410,11 @@ Per entry of `mods`:
 | `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always`; absent when the serving index does not hold it. |
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
+| `"legacy"` | bool | A converted first-generation package (its `legacy` record): its names are campaign names until it is rebuilt under a key. |
+| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, declared, registry}], "registries": {...}}`. `declared` is the descriptor's `replaces` escape hatch; `registry` a carried copy of a registry the product generates; `registries` is the product block's object (`player` fields and `weapons`, `extends`, `conductor` encounters, `strings`). |
+| `"newest"` | bool | The newest installed build of its key (build number, then install time). |
+| `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |
+| `"buildFailed"` | object | `{cause, snapshot, servingBuild}` when the folder's latest build was refused: the last good build serves, from its snapshot when `snapshot`. |
 
 `files` stays every file including stock pointers, and `pointers` the stock pointers. The page
 derives the carried count as files minus pointers: the head sentence counts carried files only, with
@@ -408,6 +432,13 @@ and `size` is the carried bytes.
 | `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
 | `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `incomplete` (a folder of its id is installed but lacks a name the map's row lists), `skipped` or `missing`, judged by the asset rule ([architecture](architecture.md#mods)), so a row pinning another build of an installed id is `installed`; `rows[].state` is `active`, `superseded`, `"incomplete"`, `skipped` or `missing` the same way, with the refusal sentence in `cause`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
+| `"registryClashes"` | array | One `{slot, "providers": [{id, name}], chosen, serving}` per player field (`player.hands`, `player.handsD1`, `player.body`, `player.handsAnimWeb`) or weapon slot (`weapons/<stock weapon>`) two or more declared mods set, in row order; `chosen` is the map's choice ("" none), `serving` the key that serves. |
+| `"product"` | string | The Snapmap+ version the map records it needs (its `smpprod1.` variable); absent when none. |
+
+Each entry of `mods` and `rows` may also carry `"upgrade": {folder, bundle, version, build, fromBuild}`
+(the key's newest installed build when the map pins another), `mods` entries `"nothingPlaced"` (a
+map-level row with nothing placed) and `"bundle"` (the hash the map uses), and `state` may be
+`otherBuild` (the row's build is not installed; its key is, at another hash).
 
 The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
 
@@ -426,6 +457,8 @@ again.
 | `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
 | `verify` | Rehash that one folder's build (`""` still checks every build). |
 | `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its shadows and requirements apply at once, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |
+| `chooseRegistry` | `arg` is `"<slot>\t<key>"` (an empty key clears): the open map's choice of which declared mod serves that player field or weapon slot, saved with the map and applied at once (`sh_mods choose`). |
+| `mapUpgradeMod` | `arg` is a declared mod's id: the open map's row moves to the key's newest installed build, the listing follows at once and the next save writes the new hash; the message says how many files changed, were added and removed (`sh_mods map upgrade`). |
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
@@ -456,7 +489,27 @@ the open map first, then clears the undo history (`editor_undo.c`, see
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
-`sh_mods map add "<id>"` runs `mapAddMod`.
+`sh_mods map add "<id>"` runs `mapAddMod`, `sh_mods map upgrade "<id>"` runs `mapUpgradeMod` and
+`sh_mods choose "<slot>" "<key>"` runs `chooseRegistry`.
+
+| Console verb | Tab equivalent |
+|---|---|
+| `sh_mods map` | the map modal |
+| `sh_mods map add "<id>"` | Use in this map (`mapAddMod`) |
+| `sh_mods map upgrade "<id>"` | Upgrade this map to the installed build (`mapUpgradeMod`) |
+| `sh_mods map remove "<id>" [--yes]` | Remove from map (`mapRemoveModPreview`, `mapRemoveMod`) |
+| `sh_mods uninstall "<id>" [--yes]` | Uninstall (`uninstallPreview`, `uninstall`) |
+| `sh_mods choose "<slot>" "<key>"` | Choices between mods (`chooseRegistry`) |
+| `sh_mods rebuild "<folder>"` | Rebuild (`rebuild`) |
+| `sh_mods verify "<folder>"` | Verify (`verify`) |
+| `sh_mods install "<folder>"` | the install button (`install`) |
+| `sh_mods rescan` | the refresh button (`rescan`) |
+| `sh_mods migrate` | Migrate (`migrate`) |
+| `sh_mods new "<name>"` | none (makes a mod folder under a generated key) |
+| `sh_mods doctor [verify]` | none (every bundle's state; one line per build of a key; per path the layer that serves it; the registries and their clashes) |
+| `sh_mods held [filter]` | none (what the game was served and holds this session) |
+| `sh_mods status`, `list`, `build`, `copystock`, `palette rebuild` | none |
+| `sh_mods push`, `pull`, `release`, `retry`, `export`, `import`, `cancel` | none (the mod store) |
 
 ## Timeline events
 
