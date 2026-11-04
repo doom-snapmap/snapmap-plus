@@ -74,6 +74,12 @@ typedef struct ms_file {
     int registry;                         /* a registry's synthetic file: 1 + its position among them, else 0 */
     int registry_keyed;                   /* that file is the key of its path */
     int registry_of;                      /* a winner at a registry's path: 1 + that registry's file, else 0 */
+    /* An input of the registries only: an extends partial or a bodyEvents
+     * file its bundle's product block names (registries.extends,
+     * registries.player.bodyEvents). It holds entries in a stock decl's
+     * grammar, not a decl: never registered, planned, refreshed or answered
+     * to the engine; the generator reads it from the bundle (ms_reg_text). */
+    int partial;
 } ms_file;
 
 /* A text composed for one listing (arena; memoized per winner by the set of declared providers). */
@@ -2780,7 +2786,7 @@ static const ms_bundle *ms_gate_of(const ms_index *x, const ms_file *f)
 
 static int ms_live(const ms_index *x, const ms_file *f)
 {
-    return (f->served && x->bundles[f->bundle].admitted) || f->registry_keyed;
+    return ((f->served && x->bundles[f->bundle].admitted) || f->registry_keyed) && !f->partial;
 }
 
 static int ms_is_type(const char *t, const char *want) { return t && !_stricmp(t, want); }
@@ -2886,6 +2892,23 @@ oom:
     return 0;
 }
 
+/* The bundle's files its intent names as registry inputs (ms_file.partial). */
+static void ms_mark_partials(ms_index *x, const ms_bundle *b, const sh_mr_intent *in)
+{
+    char lower[SH_MB_REQUEST_MAX + 1];
+    int k, w;
+    for (w = -1; w < (int)in->ext_count; ++w) {
+        const char *name = w < 0 ? in->player[SH_MB_PLAYER_BODY_EVENTS] : in->ext_partials[w];
+        if (!name || strlen(name) >= sizeof lower) continue;
+        strcpy_s(lower, sizeof lower, name);
+        ms_lower(lower);
+        for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
+            ms_file *f = &x->files[k];
+            if (f->is_decl && f->pname && !strcmp(f->pname, lower) && !f->is_shadow) f->partial = 1;
+        }
+    }
+}
+
 /* Which bundles the registries read: intent, a registry file, an encounter. */
 static void ms_registry_relevant(ms_index *x)
 {
@@ -2897,6 +2920,7 @@ static void ms_registry_relevant(ms_index *x)
         if (!b->admitted) continue;
         if ((b->extra || b->registries) && sh_modregistry_intent(b->registries, b->extra, &in)) {
             b->reg_relevant = sh_modregistry_intent_any(&in);
+            ms_mark_partials(x, b, &in);
             sh_modregistry_intent_free(&in);
         }
         for (k = b->first_file; !b->reg_relevant && k < b->first_file + b->file_count; ++k) {
@@ -4293,6 +4317,9 @@ static const ms_file *ms_lookup_file_ex(const ms_index **out_index, const char *
     __try { f = ms_find(x->slots, x->mask, request); }
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
     if (f < 0 || x->files[f].withdrawn) return NULL;
+    /* A registry input is the generator's, never the engine's: a lookup of
+     * it (the provider, the existence probe, a decl read) is not served. */
+    if (x->files[f].partial) return NULL;
     /* A registry's synthetic file has bytes only for a listing. */
     if (x->files[f].registry && (!scoped || !InterlockedCompareExchange(&g_scope_on, 0, 0))) return NULL;
     /* Map scope: a shadow path whose providers the current map does not list
@@ -4571,7 +4598,7 @@ static int ms_need_blocks(const char *name)
  * has the source (a stock decl: served by the provider, never reloaded). */
 static int ms_plannable(const ms_index *x, const ms_file *f)
 {
-    return f->is_decl && (!f->is_shadow || x->bundles[f->bundle].grandfathered);
+    return f->is_decl && !f->partial && (!f->is_shadow || x->bundles[f->bundle].grandfathered);
 }
 
 /* Collect `roots` and the closure of bundle-provided decls they need into an

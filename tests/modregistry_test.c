@@ -749,6 +749,11 @@ static void test_map_add_registries(void)
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/k.hands/body\";"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
+    /* Its bodyEvents file is merged into the body and never offered as a decl. */
+    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/k.hands/b.md6anim"));
+    CHECK(!sh_modserve_lookup("generated/decls/md6def/mods/k.hands/body_events.md6.decl", NULL) &&
+          sh_modserve_probe_claims("generated/decls/md6def/mods/k.hands/body_events.md6.decl") == 0 &&
+          !strstr(seen.requests, "body_events"));
     {
         char got[2][SH_MODSERVE_HASH_HEX + 1];
         CHECK(sh_modserve_scope_hashes(got, 2) == 1 && !strcmp(got[0], hh));
@@ -817,6 +822,21 @@ static void test_map_remove_withdraws(void)
     (void)sh_modserve_each_refresh(rf_apply, &seen);
     CHECK(sh_modserve_lookup(RM_GIBS, NULL) && sh_modserve_lookup(RM_ENC, NULL) && sh_modserve_lookup(REQ_SPIDER, NULL));
     CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1 && strstr(text, "mods/k.spider/breakable/gibs"));
+    /* Its extends partial is the generator's input only: not in the map's activation plan, not
+     * answered to the engine's probe or provider, although the conductor carries its entry. */
+    {
+        sh_modserve_plan plan;
+        int unknown = 0, s, part = 0, gibs = 0;
+        CHECK(sh_modserve_plan_bundles(list, 1, &plan, &unknown) > 0);
+        for (s = 0; s < plan.count; ++s) {
+            part += !strcmp(plan.steps[s].name, "mods/k.spider/conductor_entries");
+            gibs += !strcmp(plan.steps[s].name, "mods/k.spider/breakable/gibs");
+        }
+        CHECK(part == 0 && gibs == 1);
+        sh_modserve_plan_free(&plan);
+        CHECK(!sh_modserve_lookup(RM_PART, NULL) && sh_modserve_probe_claims(RM_PART) == 0 && sh_modserve_probe_claims(RM_GIBS) == 1);
+        CHECK(sh_modserve_lookup_indexed(RM_PART, NULL) == 0);
+    }
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_lookup(RM_GIBS, NULL));
     (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
     /* Removed in the editor: the replacement and the conductor go back to the game's at once. */
