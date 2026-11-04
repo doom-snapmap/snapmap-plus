@@ -550,6 +550,106 @@ static void test_generation(void)
     sh_mb_set_stock_ops(NULL);
 }
 
+/* What a refresh walk offers: the requests, and the gates of the player entity's. */
+typedef struct rf_seen { char requests[4096]; int player_gates; } rf_seen;
+static int rf_visit(void *context, const sh_modserve_refresh_item *it)
+{
+    rf_seen *s = (rf_seen *)context;
+    strcat_s(s->requests, sizeof s->requests, it->request);
+    strcat_s(s->requests, sizeof s->requests, ";");
+    if (!strcmp(it->request, REQ_PLAYER)) s->player_gates = it->gates_live;
+    return 0;   /* keep pending */
+}
+
+/* L2b's leftovers: a rescan marks changed registry text, generated text is
+ * gated by its sources' requirements, and a carried copy of a non-fixed
+ * extends target is the base its partials extend. */
+static void test_leftovers(void)
+{
+    static const fx body1[] = {
+        { "generated/decls/md6def/mods/k.edit/body_events.md6.decl", "md6Def", "mods/k.edit/body_events.md6",
+          "{\n\tevents {\n\t\tanim \"md6/mods/k.edit/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n\t}\n}\n" },
+    };
+    static const fx body2[] = {
+        { "generated/decls/md6def/mods/k.edit/body_events.md6.decl", "md6Def", "mods/k.edit/body_events.md6",
+          "{\n\tevents {\n\t\tanim \"md6/mods/k.edit/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
+          "\t\tanim \"md6/mods/k.edit/two.md6anim\" {\n\t\t\tevent \"ae_show\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n\t}\n}\n" },
+    };
+    static const fx gated[] = {
+        { "generated/decls/entitydef/mods/k.gated/body.decl", "entityDef", "mods/k.gated/body", "{ inherit = \"player_tp_body_mp\"; }" },
+    };
+    static const fx copy[] = {   /* a pack built before extends: its own copy of the spider states, one graph added */
+        { "generated/decls/aifsmmanager/states/spidermastermind.decl", "aiFSMManager", "states/spidermastermind",
+          "{\n\tedit = {\n\t\tobject = {\n\t\t\tdebugFlags = 6;\n\t\t}\n\t\tsubGraphs = {\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n"
+          "\t\t\t\t\tname = \"spiderMastermind\";\n\t\t\t\t}\n\t\t\t}\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n"
+          "\t\t\t\t\tname = \"legacy_root\";\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" },
+    };
+    static const fx part[] = {
+        { "generated/decls/aifsmmanager/mods/k.ext/more.decl", "aiFSMManager", "mods/k.ext/more",
+          "{\n\tedit = {\n\t\tsubGraphs = {\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n\t\t\t\t\tname = \"ext_root\";\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" },
+    };
+    static char text[65536];
+    char root[MAX_PATH], he[65], hg[65], hc[65], hx[65];
+    const char *list[3];
+    sh_mb_stock_ops ops;
+    sh_modserve_diff d;
+    rf_seen seen;
+    printf("-- registries: rescan marks, gates of generated text, carried copies of extends targets\n");
+    memset(&ops, 0, sizeof ops);
+    ops.identify = st_identify;
+    ops.read = st_read;
+    ops.verify = st_verify;
+    sh_mb_set_stock_ops(&ops);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\set-left\\mods", g_top);
+    mkdirs(root);
+    make_mod(root, "edit", "k.edit", '6', "\"player\": {\"bodyEvents\": \"mods/k.edit/body_events.md6\"},", NULL, NULL, body1, 1, 0);
+    make_mod(root, "gated", "k.gated", '7',
+             "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}}, \"player\": {\"body\": \"mods/k.gated/body\"},",
+             NULL, NULL, gated, 1, 0);
+    make_mod(root, "copy", "k.copy", '8', NULL, NULL, "\"generated/decls/aifsmmanager/states/spidermastermind.decl\"", copy, 1, 1);
+    make_mod(root, "ext", "k.ext", '9', NULL, "{\"extends\": {\"aifsmmanager/states/spidermastermind\": \"mods/k.ext/more\"}}",
+             NULL, part, 1, 0);
+    hash_of('6', he); hash_of('7', hg); hash_of('8', hc); hash_of('9', hx);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 4);
+    list[0] = he; list[1] = hg;
+    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
+    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/k.edit/one.md6anim") && !strstr(text, "two.md6anim"));
+    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "mods/k.gated/body"));
+    /* The author edits the partial; the rescan marks the body for refresh. */
+    make_mod(root, "edit", "k.edit", '6', "\"player\": {\"bodyEvents\": \"mods/k.edit/body_events.md6\"},", NULL, NULL, body2, 1, 0);
+    CHECK(sh_modserve_index_build(root) == 4);
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed_decls >= 1);
+    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "two.md6anim"));
+    memset(&seen, 0, sizeof seen);
+    seen.player_gates = -1;
+    (void)sh_modserve_each_refresh(rf_visit, &seen);
+    CHECK(strstr(seen.requests, REQ_BODY ";") != NULL || (printf("  refresh: %s\n", seen.requests), 0));
+    /* The player entity's text comes from k.gated, whose cvar is not live: gated as its source. */
+    make_mod(root, "gated", "k.gated", '7',
+             "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}}, \"player\": {\"hands\": \"player/fp_hands.md6\", "
+             "\"body\": \"mods/k.gated/body\"},", NULL, NULL, gated, 1, 0);
+    CHECK(sh_modserve_index_build(root) == 4);
+    memset(&seen, 0, sizeof seen);
+    seen.player_gates = -1;
+    (void)sh_modserve_each_refresh(rf_visit, &seen);
+    CHECK(seen.player_gates == 0 || (printf("  player gates %d: %s\n", seen.player_gates, seen.requests), 0));
+    /* A carried copy of a non-fixed extends target is the base the partials extend. */
+    list[0] = hc; list[1] = hx;
+    CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
+    CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && strstr(text, "ext_root") &&
+          strstr(text, "spiderMastermind"));
+    /* With no partial, the copy itself serves (it was served before registries). */
+    list[0] = hc;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && !strstr(text, "ext_root"));
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    sh_modmanifest_reset();
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 int main(void)
 {
     char tmp[MAX_PATH];
@@ -560,6 +660,7 @@ int main(void)
     test_text();
     test_extends();
     test_generation();
+    test_leftovers();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
