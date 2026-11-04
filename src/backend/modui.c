@@ -847,14 +847,12 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     mu_strs_free(declared, nd);
 }
 
-/* The newest build of a key: the one built most recently (a folder rebuilt
- * from source starts its build numbers again at 1, so the number alone would
- * rank an old install above it), then the higher build number, then the
- * latest install. */
+/* The newest build of a key: the one built most recently, then the later
+ * folder name. Build numbers are per-folder counters (a folder rebuilt from
+ * source starts again at 1, and an install beside no longer continues the
+ * numbering), so they say nothing across folders. */
 static int mu_build_newer(const sh_ms_entry *a, const sh_ms_entry *b)
 {
-    if (a->installed_at != b->installed_at) return a->installed_at > b->installed_at;
-    if (a->bundle.build != b->bundle.build) return a->bundle.build > b->bundle.build;
     return mu_newer(a, b);
 }
 
