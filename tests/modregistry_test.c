@@ -751,6 +751,23 @@ static void test_map_add_registries(void)
     CHECK(d.pending == 0);
     /* Its bodyEvents file is merged into the body and never offered as a decl. */
     CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/k.hands/b.md6anim"));
+    /* The registry report gives the merged body's totals and lists the bodyEvents file as a partial. */
+    {
+        static char rep[16384];
+        char want[200];
+        int clips = 0, aliases = 0;
+        const char *p;
+        for (p = text; (p = strstr(p, "anim \"")) != NULL; p++) clips++;
+        for (p = text; (p = strstr(p, "alias {")) != NULL; p++) aliases++;
+        rep[0] = 0;
+        CHECK(sh_modserve_registry_report(report_line, rep) > 0);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "player body: the merged body holds %d clip%s and %d alias", clips - aliases,
+                    clips - aliases == 1 ? "" : "s", aliases);
+        if (!strstr(rep, want)) printf("   want %s\n%s\n", want, rep);
+        CHECK(strstr(rep, want) != NULL);
+        CHECK(strstr(rep, "registry partial generated/decls/md6def/mods/k.hands/body_events.md6.decl: partial, read by the "
+                          "generator (k.hands@1.0.0") != NULL);
+    }
     CHECK(!sh_modserve_lookup("generated/decls/md6def/mods/k.hands/body_events.md6.decl", NULL) &&
           sh_modserve_probe_claims("generated/decls/md6def/mods/k.hands/body_events.md6.decl") == 0 &&
           !strstr(seen.requests, "body_events"));
@@ -836,6 +853,17 @@ static void test_map_remove_withdraws(void)
         sh_modserve_plan_free(&plan);
         CHECK(!sh_modserve_lookup(RM_PART, NULL) && sh_modserve_probe_claims(RM_PART) == 0 && sh_modserve_probe_claims(RM_GIBS) == 1);
         CHECK(sh_modserve_lookup_indexed(RM_PART, NULL) == 0);
+        /* The doctor's registry report names it as the generator's input; it is no conflict. */
+        CHECK(sh_modserve_is_partial(RM_PART) && !sh_modserve_is_partial(RM_GIBS) && !sh_modserve_is_partial(REQ_CONDUCTOR));
+        {
+            static char rep[16384];
+            rep[0] = 0;
+            CHECK(sh_modserve_registry_report(report_line, rep) > 0);
+            CHECK(strstr(rep, "registry partial " RM_PART ": partial, read by the generator (k.spider@1.0.0 (7777777777777777)); "
+                              "never served to the game") != NULL);
+            CHECK(strstr(rep, "registry: 1 partial file(s), read by the generator") != NULL);
+            CHECK(!sh_modserve_conflict_info(RM_PART, NULL));
+        }
     }
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_lookup(RM_GIBS, NULL));
     (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);

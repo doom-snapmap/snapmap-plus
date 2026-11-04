@@ -1668,8 +1668,14 @@ its name (`modregistry.c` generates the texts, `modserve.c` serves them,
   are read once per index through the installed-content reader; a registry it
   cannot read serves the game's file, with one line. With map scope off
   nothing is generated. `sh_modserve_registry_report` prints one line per
-  registry, what was generated and every clash; `MODS: registry: ...` lines
-  log each generation.
+  registry, what was generated and every clash, the merged body's totals
+  (`player body: the merged body holds <clips> clips and <aliases> aliases`,
+  an alias row not counted as a clip), and one `registry partial <path>:
+  partial, read by the generator` line per partial of an admitted bundle;
+  `MODS: registry: ...` lines log each generation. The doctor's shadow and
+  conflict pass skips partials (`sh_modserve_is_partial`): nothing serves one
+  by design, so it is never "a conflict nothing serves", and the doctor's
+  conflict count equals the index's.
 - **Choices.** Each choice is written on the row of the key it names; a load
   reads them from every row (first row per slot) and gives them to the index
   (`sh_modserve_scope_set_choices`) before the listing; a choice naming a key

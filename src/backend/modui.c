@@ -1061,8 +1061,12 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
         for (k = 0; k < u->e->bundle.file_count; k++) {
             const sh_mb_file *f = &u->e->bundle.files[k];
             /* Several mods provide the path with different bytes (one of
-             * them serves it, possibly composed), or nothing serves it. */
-            int conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL);
+             * them serves it, possibly composed), or nothing serves it. A
+             * registry input is the generator's (the registry report lists
+             * it): nothing serves it by design. */
+            int conflict;
+            if (sh_modserve_is_partial(f->request)) continue;
+            conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL);
             if (!f->shadowed && !conflict) continue;
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;

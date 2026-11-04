@@ -767,6 +767,28 @@ static int mr_conductor(const sh_mr_source *src, int n, const char *stock, size_
     return 1;
 }
 
+/* Occurrences of `needle` in the text: the body's clip blocks ("anim \"",
+ * not_alias: on a line that is not an alias row, which names its clip with
+ * the same word) and its alias rows ("alias {"). */
+static int mr_count(const char *text, size_t len, const char *needle, int not_alias)
+{
+    size_t n = strlen(needle), i, line = 0;
+    int c = 0;
+    for (i = 0; n && i + n <= len; i++) {
+        if (text[i] == '\n') { line = i + 1; continue; }
+        if (text[i] != needle[0] || memcmp(text + i, needle, n)) continue;
+        if (not_alias) {
+            size_t q;
+            int alias = 0;
+            for (q = line; q + 5 <= i && !alias; q++) alias = !memcmp(text + q, "alias", 5);
+            if (alias) continue;
+        }
+        c++;
+        i += n - 1;
+    }
+    return c;
+}
+
 /* One line per clip whose rows two sources (or the game and a source) give
  * differently: the clip is served once with the union of its rows. */
 typedef struct mr_merge_ctx { sh_mr_result *r; const char *who; int clips; } mr_merge_ctx;
@@ -836,6 +858,13 @@ static int mr_body(const sh_mr_source *src, int n, const char *stock, size_t sto
         r->body_sources++;
         mr_line(r, "player body: %d entr%s from %s%s", added, added == 1 ? "y" : "ies", so->who,
                 part ? "" : " (its carried copy)");
+    }
+    if (cur) {
+        /* The merged body's totals, so the doctor shows what the packs made. */
+        int clips = mr_count(cur, cur_len, "anim \"", 1), aliases = mr_count(cur, cur_len, "alias {", 0);
+        mr_line(r, "player body: the merged body holds %d clip%s and %d alias%s, %zu bytes, from %d source%s", clips,
+                clips == 1 ? "" : "s", aliases, aliases == 1 ? "" : "es", cur_len, r->body_sources,
+                r->body_sources == 1 ? "" : "s");
     }
     r->text[SH_MR_BODY] = cur;
     r->len[SH_MR_BODY] = cur_len;

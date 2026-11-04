@@ -3713,6 +3713,27 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
             fn(context, line);
             n++;
         }
+        {
+            /* The registries' inputs (extends partials, bodyEvents files):
+             * read by the generator, never served, so never a conflict. */
+            int k, partials = 0;
+            for (k = 0; k < x->nfiles; ++k) {
+                const ms_file *f = &x->files[k];
+                const ms_bundle *b;
+                if (!f->partial || !x->bundles[f->bundle].admitted) continue;
+                b = &x->bundles[f->bundle];
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry partial %s: partial, read by the generator (%s@%s (%.16s)); "
+                            "never served to the game", f->request, b->id, b->version, b->hash);
+                fn(context, line);
+                n++;
+                partials++;
+            }
+            if (partials) {
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry: %d partial file(s), read by the generator", partials);
+                fn(context, line);
+                n++;
+            }
+        }
         for (i = 0; i < g_scope_nchoice; ++i) {
             _snprintf_s(line, sizeof line, _TRUNCATE, "registry choice: %s -> %s", g_scope_choice[i].slot,
                         g_scope_choice[i].key);
@@ -4308,6 +4329,16 @@ int sh_modserve_active(void)
 }
 
 /* ------------------------------------------------------------------ serve */
+
+int sh_modserve_is_partial(const char *request)
+{
+    const ms_index *x = g_index;
+    int f;
+    if (!x || !x->nkeys || !request) return 0;
+    __try { f = ms_find(x->slots, x->mask, request); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
+    return f >= 0 && x->files[f].partial && x->bundles[x->files[f].bundle].admitted;
+}
 
 static const ms_file *ms_lookup_file_ex(const ms_index **out_index, const char *request, int scoped)
 {

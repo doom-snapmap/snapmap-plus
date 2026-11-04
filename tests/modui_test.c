@@ -74,6 +74,7 @@ static const char *const STOCK[] = {
     "generated/decls/snapeditorentitydef/demons/demon_base.decl",
     "generated/decls/material/textures/guis/snapmaps/entity_icons/demons/imp_enc.decl",
     "generated/decls/entitydef/ai/demon/imp_coop.decl",
+    "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl",   /* an extends target */
     "generated/decls/entitydef/snapmaps/placeablesnapaiencounter/imp.decl",
     "generated/decls/renderprog/skinvmtr.decl",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/rage_taunt.bmd6anim",
@@ -1888,6 +1889,37 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_INSTALL, two);
         CHECK(has(doc, "\"action\":\"install\",\"ok\":true") && has(doc, "\"key\":\"bulk.two\"") && !has(doc, "installedCount"));
         free(doc);
+    }
+
+    printf("-- the doctor: an extends partial is the generator's input, listed by the registry report, never a conflict\n");
+    {
+        char part[MAX_PATH];
+        const char *dr2, *first, *last;
+        int c_index = -1, c_list = -1;
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s\\authoring\\alex.part", tmp);
+        mt_write(part, "mod.json", "{\"id\":\"alex.part\",\"version\":\"1.0.0\",\"name\":\"Partial\",\"author\":\"t\","
+                                   "\"extends\":{\"entitydef/ai/conductor/coop/snapmap_default\":\"mods/alex.part/conductor_entries\"}}");
+        mt_write(part, "assets\\generated\\decls\\entitydef\\mods\\alex.part\\conductor_entries.decl",
+                 "{\r\n\tedit = {\r\n\t\taiTypeList = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"1048576\";\r\n"
+                 "\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_INSTALL, part);
+        if (!has(doc, "\"ok\":true")) printf("    %s\n", doc);
+        CHECK(has(doc, "\"ok\":true"));
+        free(doc);
+        dr2 = doctor(0);
+        CHECK(dr2 && !has(dr2, "conflict generated/decls/entitydef/mods/alex.part/conductor_entries.decl"));
+        CHECK(has(dr2, "MODS: doctor: registry partial generated/decls/entitydef/mods/alex.part/conductor_entries.decl: partial, "
+                       "read by the generator (alex.part@1.0.0 ("));
+        /* The index line and the conflict list agree. */
+        first = dr2 ? strstr(dr2, "MODS: doctor: serving index: ") : NULL;
+        if (first && (first = strstr(first, " shadow(s), ")) != NULL) c_index = atoi(first + 12);
+        for (last = dr2; last && (first = strstr(last, " conflict(s), ")) != NULL; last = first + 1) {
+            const char *bol = first;
+            while (bol > dr2 && bol[-1] != '\n') bol--;
+            if (!strncmp(bol, "MODS: doctor: ", 14) && bol[14] >= '0' && bol[14] <= '9') c_list = atoi(bol + 14);
+        }
+        if (c_index != c_list) printf("    index %d, list %d\n%s\n", c_index, c_list, dr2 ? dr2 : "");
+        CHECK(c_index >= 0 && c_index == c_list);
     }
 
     /* A map that records the product version it needs: the document says which. */

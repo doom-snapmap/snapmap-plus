@@ -624,6 +624,11 @@ int  sh_modserve_scope_set_choices(const char *const *slots, const char *const *
  * ("registry: conductor: aiType 524288 -> ...", "registry: player.hands: set
  * by ...; serving ..."), then the choices. Returns the lines. */
 int  sh_modserve_registry_report(sh_modserve_line_fn fn, void *context);
+/* 1 when `request` is a registry input of an admitted bundle (an extends
+ * partial or a bodyEvents file its product block names): the generator reads
+ * it, nothing serves it, and the doctor lists it under the registry report,
+ * never as a conflict. */
+int  sh_modserve_is_partial(const char *request);
 /* The composer's entry points for the registries (malloc'd text, NULL when
  * the texts do not compose): texts[0] composed with the others' list and
  * bag entries (the rule of shadows several declared bundles carry); and an
