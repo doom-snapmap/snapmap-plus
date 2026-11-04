@@ -2852,6 +2852,16 @@ static void test_scope(void)
     g_events[0] = 0;
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[3], "knights") && !strcmp(g_text_val[1], "0"));
     CHECK(ev_first("C:echo hands on") < 0);
+    /* Its Play (ADD-L6 K): no undeclared bundle keeps its requirements,
+     * Toybox rows or not, so r.rows' cvar is the game's again; back in the
+     * editor its rows need it, and it is applied again. */
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], ""));
+    g_report[0] = 0;
+    sh_modserve_scope_report(report_line, NULL);
+    CHECK(strstr(g_report, "scope: r.rows@1.0.0 (5555555555555555)") && !strstr(g_report, "requirements stay live"));
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], "knights"));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: a.hands@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "

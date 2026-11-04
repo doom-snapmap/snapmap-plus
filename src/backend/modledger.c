@@ -286,3 +286,26 @@ int sh_modledger_tally_truncated(const sh_modledger_tally_type *row)
 {
     return row && strlen(row->names) >= sizeof row->names - 5;
 }
+
+/* --------------------------------------------------------- name folding */
+
+static char ml_name_fold(char c)
+{
+    if (c == '-') return '_';
+    if (c == 92) return '/';
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+int sh_modledger_name_contains(const char *text, const char *needle)
+{
+    size_t n, i, j, len;
+    if (!needle || !needle[0]) return 1;
+    if (!text) return 0;
+    n = strlen(needle);
+    len = strlen(text);
+    for (i = 0; i + n <= len; ++i) {
+        for (j = 0; j < n && ml_name_fold(text[i + j]) == ml_name_fold(needle[j]); ++j) {}
+        if (j == n) return 1;
+    }
+    return 0;
+}

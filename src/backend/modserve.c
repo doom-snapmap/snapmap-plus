@@ -3418,9 +3418,10 @@ static int ms_scope_compute(ms_index *x, int mark)
             else if (play) sv = 0;
             else sv = (b->newest ? MS_SV_NEW : 0) | MS_SV_RESTORE;
             /* Requirements are cvars: a declared bundle's apply; a bundle with
-             * Toybox rows keeps them, because the palette registers its rows
-             * in every map and with none open; an inert build never. */
-            roff = on && rank[i] < 0 && !ms_scope_always(b) && (inert || !(b->has_rows && b->newest));
+             * Toybox rows keeps them outside Play, because the palette
+             * registers its rows in every editor map and with none open; in
+             * Play no undeclared bundle's apply; an inert build never. */
+            roff = on && rank[i] < 0 && !ms_scope_always(b) && (inert || play || !(b->has_rows && b->newest));
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
             was_rank = InterlockedExchange(&b->rank, on ? rank[i] : -1);
@@ -6826,6 +6827,21 @@ int sh_modserve_refresh_editor_pending(void)
         eff = ms_scoped(x, i);
         if (eff >= 0 && !ms_gates_ok(x, &x->files[eff])) continue;
         if (eff < 0 && !f->is_shadow) continue;   /* a withdrawn name waits for a map that serves it */
+        n++;
+    }
+    return n;
+}
+
+int sh_modserve_refresh_pending_anims(void)
+{
+    const ms_index *x = g_index;
+    int i, n = 0;
+    if (!x) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        if (!InterlockedCompareExchange((volatile LONG *)&f->refresh, 0, 0) || !ms_live(x, f) || f->withdrawn ||
+            !f->ptype || !f->pname || ms_kind(f) != SH_MODSERVE_RF_ANIM)
+            continue;
         n++;
     }
     return n;

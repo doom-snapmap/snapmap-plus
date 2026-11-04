@@ -338,9 +338,12 @@ static void test_anim_kind(const char *top)
     list[0] = h1;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(sh_modserve_lookup(AN_WALK, &hit) && !strcmp(hit.bundle_hash, h1));
+    /* One anim waits for the map pass; settling it there leaves none (ADD-L6 K). */
+    CHECK(sh_modserve_refresh_pending_anims() == 1);
     memset(&s, 0, sizeof s);
     sh_modserve_each_refresh(on_refresh, &s);
     CHECK(s.walk == 1 && s.kinds_ok == 1 && s.idle == 0 && s.decl == 0);
+    CHECK(sh_modserve_refresh_pending_anims() == 0);
     /* The ledger agrees: the held walk carries the other build's bytes, idle the same bytes. */
     CHECK(sh_modledger_find(AN_WALK, &rec) && now_ident(AN_WALK, &now));
     CHECK(sh_modledger_decide(&rec, &now, 0, 1) == SH_MODLEDGER_REFRESH);
@@ -436,6 +439,18 @@ static void test_tally(void)
     CHECK(sh_modledger_tally_add(NULL, "x", "y") == NULL);
 }
 
+/* `sh_mods held <filter>` folds names as the product does (ADD-L6 K): the id
+ * may be spelled with '-' or '_', in any case, with either slash. */
+static void test_name_filter(void)
+{
+    const char *req = "cooked/anim/md6/mods/v3_anim/loop.bmd6anim";
+    CHECK(sh_modledger_name_contains(req, "v3-anim") && sh_modledger_name_contains(req, "v3_anim"));
+    CHECK(sh_modledger_name_contains(req, "MODS/V3-ANIM/") && sh_modledger_name_contains(req, "mods\\v3_anim"));
+    CHECK(sh_modledger_name_contains(req, "") && sh_modledger_name_contains(req, NULL));
+    CHECK(!sh_modledger_name_contains(req, "v3.anim") && !sh_modledger_name_contains(NULL, "x"));
+    CHECK(!sh_modledger_name_contains("ab", "abc"));
+}
+
 int main(void)
 {
     char top[MAX_PATH], tmp[MAX_PATH];
@@ -449,6 +464,7 @@ int main(void)
     test_decide();
     test_anim_kind(top);
     test_tally();
+    test_name_filter();
     printf("modledger_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

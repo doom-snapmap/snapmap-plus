@@ -523,8 +523,9 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * mod.json's "scope" key no longer chooses (logged once when present).
  *
  * Requirements: a declared bundle's apply; an undeclared bundle that adds
- * Toybox rows (its newest build) keeps them live, because the palette
- * registers its rows in every map and with none open; any other undeclared
+ * Toybox rows (its newest build) keeps them live outside Play, because the
+ * palette registers its rows in every editor map and with none open (in Play
+ * no undeclared bundle's are accepted); any other undeclared
  * bundle's are not accepted (sh_modserve_requirements_apply runs its
  * deactivate lines and restores its cvars).
  *
@@ -905,6 +906,10 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
 /* Pending editor-closure work of a refresh: closure files still marked
  * changed (new closure decls are kept by their plan, sh_modserve_plan_split). */
 int sh_modserve_refresh_editor_pending(void);
+/* Anims marked for refresh and not settled yet: they wait for a map pass,
+ * which reloads them in place (or finds the bytes already held) and settles
+ * them. The engine side says so once they are all settled. */
+int sh_modserve_refresh_pending_anims(void);
 
 /* Split a plan into the steps that keep their decls (persist) and are not
  * registered yet, and the rest, both in plan order. Returns the number of

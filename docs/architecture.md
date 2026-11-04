@@ -1520,8 +1520,11 @@ the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
   nothing.
 
 Requirements: a declared bundle's apply; an undeclared newest build that adds
-Toybox rows keeps them, because the palette registers its rows in every map
-and with none open; any other undeclared bundle's are not accepted (`req_off`).
+Toybox rows keeps them outside Play, because the palette registers its rows
+in every editor map and with none open; in Play (the editor's, or a hub
+launch) no undeclared bundle's are accepted, so their cvars are the game's
+from the Play entry and applied again when the editor shows a map; any other
+undeclared bundle's are not accepted (`req_off`).
 A `mod.json` `"scope"` key no longer chooses (logged once). Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the

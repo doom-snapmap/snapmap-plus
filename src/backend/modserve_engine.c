@@ -1272,6 +1272,9 @@ static int me_in_play(void)
  * held anim may be reloaded in place (report ADD-G1). Anims marked at any
  * other point wait for it. */
 static int g_anim_pass;
+/* Anims the last refresh outside a map pass left waiting: the map pass says
+ * when it has settled them, so the count does not read as stuck. */
+static int g_anims_waited;
 
 typedef struct me_refresh {
     me_reparse decls;
@@ -1358,8 +1361,14 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     if (c.kept || c.game)
         me_rlog("refresh: ledger: %d model(s), image(s) and anim(s) already hold the bytes served now, %d were never "
                "given a mod's bytes; not reloaded", c.kept, c.game);
-    if (c.anims_waiting)
-        me_rlog("refresh: %d anim(s) wait for the next map load, where held anims are reloaded in place", c.anims_waiting);
+    if (c.anims_waiting) {
+        g_anims_waited = c.anims_waiting;
+        if (!strcmp(phase, "map load"))
+            me_rlog("refresh: %d anim(s) wait for this load's map pass, where held anims are reloaded in place",
+                    c.anims_waiting);
+        else
+            me_rlog("refresh: %d anim(s) wait for the next map load, where held anims are reloaded in place", c.anims_waiting);
+    }
     if (!g_res_head && c.raw.n)
         me_rlog("refresh: %d model(s), image(s) and anim(s) not reloaded (decl_resource_head unresolved)", c.raw.n);
     if (c.gated)
@@ -2077,6 +2086,18 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
     me_ledger_sweep("map");
     g_anim_pass = 0;
+    if (g_anims_waited) {
+        int left = sh_modserve_refresh_pending_anims();
+        if (!left) {
+            me_log("map: the %d anim(s) that waited for a map load are settled (reloaded in place or already held); "
+                   "none wait now", g_anims_waited);
+            g_anims_waited = 0;
+        } else if (left != g_anims_waited) {
+            me_log("map: %d of the %d anim(s) that waited are settled; %d still wait", g_anims_waited - left,
+                   g_anims_waited, left);
+            g_anims_waited = left;
+        }
+    }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
@@ -2139,7 +2160,7 @@ static void me_census_visit(void *context, const sh_modledger_rec *rec)
                 _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
         } else c->held1++;
     }
-    if (c->filter && c->filter[0] && (!rec->request || !strstr(rec->request, c->filter))) return;
+    if (c->filter && c->filter[0] && !sh_modledger_name_contains(rec->request, c->filter)) return;
     if (c->lines >= ME_HELD_LINES) { c->skipped++; return; }
     c->lines++;
     sh_printf("  %s  bundle %016llx  %s %016llx  %llu bytes  served %ld  %s%s\n", rec->request ? rec->request : "?",

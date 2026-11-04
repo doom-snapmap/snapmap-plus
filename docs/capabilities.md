@@ -199,8 +199,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   hub, or opening a map that does not use the mod, gives the game's own files back. In the editor, and
   with no map open, a mod the map does not use still offers its Toybox rows and everything under
   `mods/<key>/` (placing one makes the map use the mod at the next save), never its replacements; in
-  Play it offers nothing. A mod that adds Toybox rows keeps its requirements in every map, since its
-  rows are offered in every map. `"scope"` in a `mod.json` no longer changes anything. A mod that
+  Play it offers nothing. A mod that adds Toybox rows keeps its requirements in the editor, since its
+  rows are offered in every map, but not in the Play of a map that does not use it. `"scope"` in a `mod.json` no longer changes anything. A mod that
   replaces something the editor itself uses (an editor settings, palette or property-inspector decl, or
   the editor's own movies: the editor tweaks, and the older packages whose Toybox rows are such
   replacements) applies in every map as before, with one log line. When several mods a map uses

@@ -124,6 +124,11 @@ sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const cha
 /* 1 when the row's names were cut short (the log then ends ", ..."). */
 int sh_modledger_tally_truncated(const sh_modledger_tally_type *row);
 
+/* 1 when `needle` occurs in `text` under the product's name folding: ASCII
+ * case, '-' as '_' (a mod id is spelled with either) and '\' as '/'. An empty
+ * needle matches. `sh_mods held <filter>` uses it. Pure. */
+int sh_modledger_name_contains(const char *text, const char *needle);
+
 /* Tests: drop every record and reset the counters (not thread-safe). */
 void sh_modledger_reset(void);
 
