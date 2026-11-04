@@ -38,6 +38,13 @@ static int log_has(const char *needle)
     for (i = 0; i < n; i++) if (strstr(g_log[i], needle)) return 1;
     return 0;
 }
+static int log_count(const char *needle)
+{
+    unsigned i, n = g_logged < 64 ? g_logged : 64;
+    int c = 0;
+    for (i = 0; i < n; i++) if (strstr(g_log[i], needle)) c++;
+    return c;
+}
 
 static const char *const STOCK[] = {
     "generated/decls/material/textures/guis/snapmaps/entity_icons/demons/imp_enc.decl",
@@ -203,10 +210,77 @@ static void test_boot_sync(const char *fixture, const char *tmp)
              "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited\r\n}");
     CHECK(sh_ms_sync_pending() == 1);
     CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 1) == 1);
+    sh_ms_boot_release();   /* the startup install is done with the store */
     for (i = 0; i < 400 && InterlockedCompareExchange(&g_boot_rescans, 0, 0) < 2; i++) Sleep(25);
     CHECK(g_boot_rescans == 2);
     for (i = 0; i < 400 && sh_ms_sync_pending() != 0; i++) Sleep(25);
     CHECK(sh_ms_sync_pending() == 0);
+}
+
+/* The startup install never waits on the boot build: the background build
+ * starts only once the install has released the store, and while it runs it
+ * hands the store to a waiting operation between two folders. */
+static HANDLE g_between_seen;
+static volatile LONG g_between_calls;
+static void boot_between(unsigned built)
+{
+    unsigned waits = modstore_lock_waits();
+    int i;
+    (void)built;
+    if (InterlockedIncrement(&g_between_calls) != 1) return;
+    SetEvent(g_between_seen);
+    /* Hold the first hand-over until the main thread is waiting for the store. */
+    for (i = 0; i < 3000 && modstore_lock_waits() == waits; i++) Sleep(1);
+}
+
+static void test_boot_release(const char *tmp)
+{
+    char a[MAX_PATH * 2], c[MAX_PATH * 2];
+    unsigned waits;
+    LONG rescans, at_lock;
+    int i, built_at_lock;
+    printf("-- boot: the build waits for the startup install, then yields the store between folders\n");
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\boot\\mods\\alex.r2-imp", tmp);
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\boot\\mods\\campaign\\alex.boot", tmp);
+    mt_append(a, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n// edited at boot\r\n");
+    mt_write(c, "assets\\generated\\decls\\entitydef\\mods\\alex.boot\\thing.decl",
+             "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited twice\r\n}");
+    CHECK(sh_ms_sync_pending() == 2);
+    sh_ms_test_boot_rearm();
+    rescans = InterlockedCompareExchange(&g_boot_rescans, 0, 0);
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 1) == 1);
+    /* The startup install's own store operations, while the build thread is up: none waits. */
+    waits = modstore_lock_waits();
+    for (i = 0; i < 20; i++) {
+        modstore_lock();
+        Sleep(10);
+        modstore_unlock();
+    }
+    CHECK(modstore_lock_waits() == waits);
+    CHECK(sh_ms_sync_pending() == 2 && g_boot_rescans == rescans);   /* nothing built before the release */
+    CHECK(!sh_ms_boot_released());
+    /* The release: the build starts; a store operation between two folders waits one folder at most. */
+    g_between_seen = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_between_calls = 0;
+    sh_ms_test_between_folders = boot_between;
+    g_logged = 0;
+    sh_ms_boot_release();
+    CHECK(sh_ms_boot_released());
+    CHECK(WaitForSingleObject(g_between_seen, 20000) == WAIT_OBJECT_0);
+    modstore_lock();   /* the build holds the store: this waits until its hand-over */
+    at_lock = InterlockedCompareExchange(&g_boot_rescans, 0, 0);
+    built_at_lock = log_count(" built: ");
+    modstore_unlock();
+    /* It had the store after the first folder's build, before the second's. */
+    CHECK(modstore_lock_waits() == waits + 1 && at_lock == rescans && built_at_lock == 1);
+    for (i = 0; i < 800 && InterlockedCompareExchange(&g_boot_rescans, 0, 0) == rescans; i++) Sleep(25);
+    CHECK(g_boot_rescans == rescans + 1);
+    for (i = 0; i < 400 && !log_has("MODS: store: boot: 2 of 2 folder(s) built"); i++) Sleep(25);
+    CHECK(log_has("MODS: store: boot: the startup install released the store after"));
+    CHECK(log_has("MODS: store: boot: 2 of 2 folder(s) built (0 refused)"));
+    CHECK(sh_ms_sync_pending() == 0);   /* the cache kept both folders across the hand-over */
+    sh_ms_test_between_folders = NULL;
+    CloseHandle(g_between_seen);
 }
 
 static void test_alias_note(void)
@@ -1276,6 +1350,7 @@ int main(int argc, char **argv)
 
     test_upgrade(fixture, tmp);
     test_boot_sync(fixture, tmp);
+    test_boot_release(tmp);
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);

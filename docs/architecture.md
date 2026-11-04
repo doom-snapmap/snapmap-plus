@@ -773,7 +773,13 @@ would, with the install's indexes (`modstock.c`) as the stock reader, then
 rebuilds the serving index, whose listeners pass the table to the game. A first
 build of the 15 converted folders takes about 10 s, so it never runs on the
 boot thread; the same folders built this way carry the same bundle hashes as an
-in-game rescan's.
+in-game rescan's. The thread waits until the startup install has released the
+store (`sh_ms_boot_release`, at the end of the install in `dllmain.c`): the
+install takes the store itself (the publish launch reads the upload queue and
+the claims), and a build holding it delayed the startup by the build's length.
+While it builds, the thread hands the store to any operation waiting for it
+between two folders, so an editor map open in that time waits one folder's
+build at most; only the index rebuild at its end touches serving.
 The store tool's `sh_ms_upgrade` converts the retired layout once (before the
 overrides migration): every
 `<id>@<version>+<build>\` folder gets `mod.json` from its `bundle.json` and

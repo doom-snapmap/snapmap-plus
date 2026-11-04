@@ -261,6 +261,19 @@ int  sh_ms_sync_pending(void);
 typedef int (*sh_ms_rescan_fn)(void);
 int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background);
 
+/* The startup install is done with the store: the background boot build,
+ * which waits for this (up to two minutes), may start. The install takes the
+ * store itself (the publish launch reads the upload queue and the claims), so
+ * the build starts after it and never holds it up; while the build runs it
+ * hands the store to any operation that waits for it, between two folders.
+ * Any thread; idempotent. sh_ms_boot_released: 1 once called. */
+void sh_ms_boot_release(void);
+int  sh_ms_boot_released(void);
+#ifdef SH_MODSTORE_TESTING
+void sh_ms_test_boot_rearm(void);                            /* the next boot build waits for a release again */
+extern void (*sh_ms_test_between_folders)(unsigned built);   /* the boot build, between two folders */
+#endif
+
 /* The first cause of the last refused build of `folder` in this process, or
  * "" (sh_ms_sync and installs record it; enumeration reports it, with the
  * snapshot that serves meanwhile in sh_ms_entry.snapshot). */

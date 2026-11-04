@@ -356,7 +356,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Folders not built yet (a first boot after a conversion, a folder
          * dropped in by hand) are built off this thread as a rescan builds
          * them, then indexed: they serve on this boot, not after the Mods
-         * tab's first rescan. Stock bytes come from the install's indexes. */
+         * tab's first rescan. Stock bytes come from the install's indexes.
+         * The build starts once this install has released the store
+         * (sh_ms_boot_release below), so the install never waits on it. */
         {
             sh_mb_resolver boot_r;
             memset(&boot_r, 0, sizeof boot_r);
@@ -554,6 +556,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     /* Arm the resident fault shield after startup resolution. */
 
     shield_install(g_doom_base, g_doom_size);
+
+    /* The install is done with the mod store: the boot build may start. */
+    sh_ms_boot_release();
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "startup: install complete at process age %lu ms (signature scan %lu ms)",

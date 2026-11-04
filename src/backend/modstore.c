@@ -24,6 +24,7 @@ static CRITICAL_SECTION g_ms_lock;
 static volatile LONG    g_ms_lock_waits;
 static volatile LONG    g_ms_lock_depth;   /* nested holds of the owner; read from any thread */
 static volatile LONG    g_ms_lock_gen;     /* outermost holds released so far */
+static volatile LONG    g_ms_lock_waiting; /* threads waiting for it now (the boot build yields to them) */
 
 static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
 {
@@ -38,8 +39,10 @@ void modstore_lock(void)
     if (!TryEnterCriticalSection(&g_ms_lock)) {
         /* Held by another thread: wait for it rather than fail. */
         InterlockedIncrement(&g_ms_lock_waits);
+        InterlockedIncrement(&g_ms_lock_waiting);
         backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
         EnterCriticalSection(&g_ms_lock);
+        InterlockedDecrement(&g_ms_lock_waiting);
     }
     InterlockedIncrement(&g_ms_lock_depth);
 }
@@ -59,6 +62,25 @@ int modstore_lock_busy(unsigned *generation)
 unsigned modstore_lock_waits(void)
 {
     return (unsigned)InterlockedCompareExchange(&g_ms_lock_waits, 0, 0);
+}
+
+/* The boot build's hand-over between folders: when another thread waits for
+ * the store and this thread holds it once (not inside a larger step), the
+ * hold is released until the waiter has it, then taken again (after the
+ * waiter's operation). 1 when it yielded. */
+static int ms_lock_yield(void)
+{
+    int i;
+    if (InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) <= 0 ||
+        InterlockedCompareExchange(&g_ms_lock_depth, 0, 0) != 1)
+        return 0;
+    modstore_unlock();
+    /* The waiter leaves the count once it holds the lock; until then this
+     * thread stays off it, so the critical section's unfair hand-over cannot
+     * give it straight back. */
+    for (i = 0; i < 2000 && InterlockedCompareExchange(&g_ms_lock_waiting, 0, 0) > 0; i++) Sleep(1);
+    modstore_lock();
+    return 1;
 }
 
 static char g_ms_root[MAX_PATH * 4];
@@ -2014,15 +2036,33 @@ done:
 
 /* ------------------------------------------------------------- sync ---- */
 
-int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
+#ifdef SH_MODSTORE_TESTING
+void (*sh_ms_test_between_folders)(unsigned built);
+#endif
+
+/* A cache section read again after a yield: the hold it was read under ended. */
+static void ms_cache_reread(const char *rootu, sh_json_object *cache)
+{
+    char *text = NULL;
+    sh_json_object_free(cache);
+    memset(cache, 0, sizeof *cache);
+    if (sh_mb_record_get(rootu, "cache", &text) == 1) sh_json_parse_object(text, strlen(text), 4, cache);
+    free(text);
+}
+
+/* The sync. With `yield` (the boot build) the store is handed to any thread
+ * waiting for it between two folders, so the build never holds up a store
+ * operation for longer than one folder's build; what another operation wrote
+ * meanwhile (a cache note, a new folder) is kept. */
+static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yield)
 {
     sh_ms_sync_stats local;
     wchar_t *root;
     ms_found_list found;
     char rootu[MAX_PATH * 4], *text = NULL, *out;
-    sh_json_object cache, next;
+    sh_json_object cache, next, start;
     ULONGLONG t0 = GetTickCount64();
-    int changed = 0;
+    int changed = 0, yielded = 0;
     if (!st) st = &local;
     memset(st, 0, sizeof *st);
     root = ms_wroot();
@@ -2030,8 +2070,12 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     if (!ms_exists(root)) { free(root); return 1; }
     memset(&cache, 0, sizeof cache);
     memset(&next, 0, sizeof next);
+    memset(&start, 0, sizeof start);
     modstore_lock();
-    if (sh_mb_record_get(rootu, "cache", &text) == 1) sh_json_parse_object(text, strlen(text), 4, &cache);
+    if (sh_mb_record_get(rootu, "cache", &text) == 1) {
+        sh_json_parse_object(text, strlen(text), 4, &cache);
+        if (yield) sh_json_parse_object(text, strlen(text), 4, &start);
+    }
     free(text);
     memset(&found, 0, sizeof found);
     ms_find_mods(&found, root, L"", 0);
@@ -2042,6 +2086,13 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
             const char *cached;
             sh_mb_bundle b;
             int current = 0;
+#ifdef SH_MODSTORE_TESTING
+            if (yield && fi && sh_ms_test_between_folders) sh_ms_test_between_folders(st->rebuilt);
+#endif
+            if (yield && fi && ms_lock_yield()) {
+                yielded = 1;
+                ms_cache_reread(rootu, &cache);   /* a folder built meanwhile is current now */
+            }
             folder = sh_mb_utf8(found.items[fi].folder);
             if (!folder) continue;
             st->folders++;
@@ -2095,6 +2146,20 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
             free(folder);
         }
     }
+    if (yielded) {
+        /* Another operation held the store between two folders: a folder it
+         * added is pruned against the folders present now, and a cache entry
+         * it noted (not in the section this pass started from) is kept. */
+        size_t q;
+        ms_found_free(&found);
+        ms_find_mods(&found, root, L"", 0);
+        ms_cache_reread(rootu, &cache);
+        for (q = 0; q < cache.count; q++) {
+            const sh_json_member *mb = &cache.members[q];
+            if (sh_json_object_get(&next, mb->key) || sh_json_object_get(&start, mb->key)) continue;
+            if (sh_json_object_set(&next, mb->key, mb->value_json, 4)) changed = 1;
+        }
+    }
     ms_snapshot_prune(&found);
     ms_found_free(&found);
     if (next.count != cache.count) changed = 1;
@@ -2105,11 +2170,14 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     modstore_unlock();
     sh_json_object_free(&cache);
     sh_json_object_free(&next);
+    sh_json_object_free(&start);
     free(root);
     st->ms = GetTickCount64() - t0;
     sh_ms_alias_prune();
     return 1;
 }
+
+int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st) { return ms_sync(resolver, st, 0); }
 
 int sh_ms_sync_pending(void)
 {
@@ -2153,7 +2221,44 @@ int sh_ms_sync_pending(void)
 static sh_mb_resolver g_boot_resolver;
 static sh_ms_rescan_fn g_boot_rescan;
 
-static void ms_boot_run(int pending)
+/* The startup install's release of the store (sh_ms_boot_release): a manual
+ * reset event the boot build waits on before it touches the store. */
+static INIT_ONCE g_boot_release_once = INIT_ONCE_STATIC_INIT;
+static HANDLE    g_boot_release;
+static volatile LONG g_boot_released;
+
+static BOOL CALLBACK ms_boot_release_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+{
+    (void)once; (void)p; (void)ctx;
+    g_boot_release = CreateEventW(NULL, TRUE, FALSE, NULL);
+    return TRUE;
+}
+
+static HANDLE ms_boot_release_event(void)
+{
+    InitOnceExecuteOnce(&g_boot_release_once, ms_boot_release_init, NULL, NULL);
+    return g_boot_release;
+}
+
+void sh_ms_boot_release(void)
+{
+    HANDLE h = ms_boot_release_event();
+    InterlockedExchange(&g_boot_released, 1);
+    if (h) SetEvent(h);
+}
+
+int sh_ms_boot_released(void) { return InterlockedCompareExchange(&g_boot_released, 0, 0) != 0; }
+
+#ifdef SH_MODSTORE_TESTING
+void sh_ms_test_boot_rearm(void)
+{
+    HANDLE h = ms_boot_release_event();
+    InterlockedExchange(&g_boot_released, 0);
+    if (h) ResetEvent(h);
+}
+#endif
+
+static void ms_boot_run(int pending, int yield)
 {
     sh_ms_sync_stats st;
     ULONGLONG t0 = GetTickCount64();
@@ -2162,17 +2267,31 @@ static void ms_boot_run(int pending)
     if (pending <= 0) return;
     ms_log("MODS: store: boot: %d folder(s) not built yet (or changed since their build); building them, as a rescan "
            "would", pending);
-    if (!sh_ms_sync(&g_boot_resolver, &st)) { ms_log("MODS: store: boot: the store could not be read; nothing built"); return; }
+    if (!ms_sync(&g_boot_resolver, &st, yield)) { ms_log("MODS: store: boot: the store could not be read; nothing built"); return; }
     if (st.rebuilt && g_boot_rescan) n = g_boot_rescan();
     ms_log("MODS: store: boot: %u of %u folder(s) built (%u refused) in %llu ms%s", st.rebuilt, st.folders, st.failed,
            (unsigned long long)(GetTickCount64() - t0),
            !st.rebuilt ? "" : n >= 0 ? "; the serving index was rebuilt with them" : "; the serving index could not be rebuilt");
 }
 
+/* How long the boot build waits for the startup install to release the
+ * store before it builds anyway (a startup that never reaches its end). */
+#define MS_BOOT_RELEASE_WAIT_MS 120000
+
 static DWORD WINAPI ms_boot_thread(LPVOID unused)
 {
+    HANDLE h = ms_boot_release_event();
+    ULONGLONG t0 = GetTickCount64();
     (void)unused;
-    ms_boot_run(-1);
+    /* The startup install takes the store (the publish launch, the gates);
+     * the build waits until it is done, so the startup never waits on it. */
+    if (h && WaitForSingleObject(h, MS_BOOT_RELEASE_WAIT_MS) != WAIT_OBJECT_0)
+        ms_log("MODS: store: boot: the startup install did not release the store within %u s; checking the folders now",
+               MS_BOOT_RELEASE_WAIT_MS / 1000);
+    else
+        ms_log("MODS: store: boot: the startup install released the store after %llu ms; checking the folders",
+               (unsigned long long)(GetTickCount64() - t0));
+    ms_boot_run(-1, 1);
     return 0;
 }
 
@@ -2185,14 +2304,16 @@ int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int 
     g_boot_rescan = rescan;
     if (background) {
         /* The check reads every folder's tree (about 170 ms for 15 converted
-         * folders), so it runs on the thread too. */
+         * folders), so it runs on the thread too, once the startup install
+         * has released the store (sh_ms_boot_release). */
+        (void)ms_boot_release_event();
         h = CreateThread(NULL, 0, ms_boot_thread, NULL, 0, NULL);
         if (!h) { ms_log("MODS: store: boot: the build thread could not start; the Mods tab's rescan builds them"); return -1; }
         CloseHandle(h);
         return 1;
     }
     pending = sh_ms_sync_pending();
-    if (pending > 0) ms_boot_run(pending);
+    if (pending > 0) ms_boot_run(pending, 0);
     return pending;
 }
 
