@@ -427,10 +427,26 @@ These backend files share the work:
   at the game's own name, served from the player's disk, never carried and
   never refused; SnapMap's provider cannot see campaign-only content without
   it), or a replacement (any other file at a game name). Replacements and
-  editor tweaks are the bundle's `shadows`, derived and never declared; a
-  replacement is still accepted and reported while replacements are retired,
-  and `sh_mb_set_refuse_replacements(1)` turns that into a build failure
-  (legacy bundles exempt). The author keys `shadows`, `stock`
+  editor tweaks are the bundle's `shadows`, derived and never declared. A
+  replacement fails the build ("would replace <request>: put it under
+  mods/<key>/ or declare the intent in mod.json"): the refusal is on by
+  default (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT` 1; `sh_mb_set_refuse_replacements(0)`
+  is the refusal-off builder path the tests use). Exempt are legacy bundles,
+  registry copies, editor tweaks, folders the product received (origin
+  `download`, `delivery`, `migration`) and builds on a thread that called
+  `sh_mb_keep_replacements_here(1)` (an import of content the product
+  received). The one escape hatch is the descriptor's `"replaces": ["<game
+  request path>"]`, accepted only for a file the mod carries at a game name
+  that no registry or player intent expresses (a registry path, a weapon decl
+  or a name under `mods/` is refused): it builds as a replacement with the line
+  "replaces <path> (declared): affects only maps that declare this mod". The
+  descriptor's `"extends": {"<stock decl>": "mods/<key>/<partial>"}` is checked
+  against the one table of list-shaped targets (`sh_mb_extend_target`, which
+  modregistry.c shares): the target must be on it and a stock decl the game
+  holds, the partial a decl of the mod under its key of the target's type
+  folder whose members lie on the target's containers
+  (`sh_mb_extend_partial_ok`); it is recorded under `registries.extends`.
+  The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
   The key is the author `id` when present (deprecated), else the product
@@ -481,7 +497,19 @@ These backend files share the work:
   decision and `sh_mods held`.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows (a placed
   mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
-  retired `smpkg.` carriers, as below.
+  retired `smpkg.` carriers, as below. It also owns the product-version
+  variable `smpprod1.<version>` (initialValue the same version), one per map,
+  appended last like the rows: a save writes it when the map uses a registry
+  choice, a declared mod with registry intent (player fields, weapons,
+  extends, conductor rows) or surfaced content (modui's hook), or a Grid Room
+  variant module (`maps/modules/smpgrid/`); the version is the build's
+  `SH_PRODUCT_VERSION`, which `src/backend/build.ps1` writes to the generated
+  header `build/obj/backend/product_version.gen.h` from the release tag
+  (`SNAPMAPPLUS_VERSION`) or else the newest `CHANGELOG.md` entry. A load reads
+  and strips it (`sh_modmanifest_product`); it is never a row, so a map that
+  needs the product but no mod is never counted as missing a mod, and an older
+  product keeps it as an inert string variable. `sh_modmanifest_version_compare`
+  orders versions (`v0.2.1-beta.24` before `v0.2.1-beta.25` before `v0.2.1`).
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
   folder (two folders declaring one id both flagged, a package a map delivered
   listed like any other) with what each carries, marks each installed or
@@ -910,8 +938,15 @@ main-thread pass, never through `s_loadBanks` with a map open. A bank whose
 bytes change under a name already loaded keeps the loaded copy (Wwise keeps the
 first bytes for a bank id and answers a second load with 69,
 AK_BankAlreadyLoaded) until the game restarts, and a removed bank stays
-loaded until then; so do two builds of one key whose bank differs under one
-stem, since the bank id is the stem's FNV-1. `sh_mods status` lists each bank and whether it was
+loaded until then. Two builds of one key never share a stem: the serving
+index serves every carried bank of a keyed bundle as
+`sound/soundbanks/pc/<stem>.<hash16>.bnk`, with its BKHD bank id rewritten
+to that stem's FNV-1, and rewrites every quoted `"<stem>"`, `"<stem>.bnk"` or
+`".../<stem>.bnk"` in the bundle's served decl texts to match; the rewritten
+bytes are written once under `mods\.served\<key>@<hash16>\` (a dot folder
+the scanners skip) and served from there, with their own size and hash. A
+changed build is therefore a new bank to Wwise, and the ledger and the
+refresh see a new name. A grandfathered package keeps its banks as they are. `sh_mods status` lists each bank and whether it was
 submitted. The events file (`soundbanksinfo.events`) is not extended: a mod
 event needs no record to play (it only feeds the by-id lookup; without one
 the event is never distance-virtualized).
@@ -1621,8 +1656,18 @@ its name (`modregistry.c` generates the texts, `modserve.c` serves them,
   the save writes no row for is dropped with one line.
 - **The refusal switch.** The builder never refuses a registry file
   (`sh_mb_registry_request`): "replaces <request>: express it as player
-  intent". The switch itself stays off by default
-  (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT`).
+  intent". The switch is on by default (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT`);
+  `replaces` is the declared escape hatch (see the bundle builder above).
+- **Rescans, gates and carried copies.** A rescan that changes a registry's
+  generated text for the listing (an edited `bodyEvents` or extends partial,
+  a player field) marks the path that serves it for refresh, as a changed decl
+  is marked. A generated text is gated by the requirement gates of the first
+  source with requirements that contributed to it (bare-hands' cvar gates its
+  player entity text), as a bundle's own file is. A serving bundle that
+  carries its own copy of a non-fixed extends target (a pack built before
+  extends) makes that copy the base its and other bundles' partials extend;
+  with no partial the copy serves as it did, and a second copy is named in
+  one line.
 
 ### Migration of the retired overrides folder
 

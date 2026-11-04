@@ -664,6 +664,7 @@ void h_sh_mods(idCmdArgs *a)
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
         sh_printf("%s\n", SH_MODCMD_HELP_TAB);
+        sh_printf("%s\n", SH_MODCMD_HELP_AUTHOR);
         sh_printf("%s\n", SH_MODCMD_HELP_STORE);
         sh_printf("Migration: the installer moves the retired overrides folder into the mods store (snapmap-plus-store migrate); 'sh_mods migrate' runs the same move by hand when the migration section of mods\\snapmap-plus.json does not record it as done, 'sh_mods migrate --again' repeats it after you change overrides.\n");
         return;
@@ -696,7 +697,7 @@ void h_sh_mods(idCmdArgs *a)
         mc_line("MODS: removed: Uninstalled mods go to the Windows Recycle Bin.");
         return;
     }
-    if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall")) {
+    if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall") || !_stricmp(verb, "choose")) {
         /* The Mods tab's map details, Remove from map and Uninstall
          * (modui.c): the same dry runs and actions; --yes performs one. */
         const char *argv[8];

@@ -809,6 +809,105 @@ static void choices(void)
     g_installed_count = 2;
 }
 
+static int g_need_answer;
+static int need_hook(const sh_modmanifest_list *rows) { (void)rows; return g_need_answer; }
+
+/* "smpprod1.<version>" (DESIGN-additive 2.7): the least Snapmap+ version a
+ * map needs, its own string variable, never a row. */
+static void product(void)
+{
+    char v[40], *put, *again, *loaded, *saved, err[192];
+    size_t plen, alen, llen, slen, wlen;
+    unsigned count = 0;
+    printf("-- product: the version a map needs, written, stripped, read and compared\n");
+    /* Compare: older, newer, equal; a release after its prereleases. */
+    CHECK(sh_modmanifest_version_compare("v0.2.1-beta.24", "v0.2.1-beta.25") == -1);
+    CHECK(sh_modmanifest_version_compare("v0.2.1-beta.25", "v0.2.1-beta.24") == 1);
+    CHECK(sh_modmanifest_version_compare("v0.2.1-beta.24", "0.2.1-beta.24") == 0);
+    CHECK(sh_modmanifest_version_compare("v0.2.1", "v0.2.1-beta.30") == 1);
+    CHECK(sh_modmanifest_version_compare("v0.2.1-beta.9", "v0.2.1-beta.10") == -1);
+    CHECK(sh_modmanifest_version_compare("v0.2.10", "v0.2.9") == 1);
+    CHECK(sh_modmanifest_version_compare("v1.0.0", "v0.9.9") == 1);
+    CHECK(sh_modmanifest_version_compare("v0.3.0-alpha", "v0.3.0-beta") == -1);
+    CHECK(sh_modmanifest_version_compare("dev", "v0.3.0") == -2);
+    CHECK(sh_modmanifest_version_valid("v0.2.1-beta.24") && !sh_modmanifest_version_valid("a b") &&
+          !sh_modmanifest_version_valid(""));
+    /* Write: one variable appended last, allocCount raised; written again it replaces itself. */
+    put = sh_modmanifest_product_put(MAP, sizeof MAP - 1, "v0.3.0", &plen);
+    CHECK(put && strstr(put, "\"name\":\"smpprod1.v0.3.0\"") && alloc_string_count(put, &count) && count == 3);
+    CHECK(put && sh_modmanifest_product_read(put, plen, v, sizeof v) && !strcmp(v, "v0.3.0"));
+    again = put ? sh_modmanifest_product_put(put, plen, "v0.3.1", &alen) : NULL;
+    CHECK(again && !strstr(again, "smpprod1.v0.3.0") && strstr(again, "smpprod1.v0.3.1") &&
+          alloc_string_count(again, &count) && count == 3);
+    /* Strip (version NULL): the map as it was. */
+    if (again) {
+        size_t blen;
+        char *bare = sh_modmanifest_product_put(again, alen, NULL, &blen);
+        CHECK(bare && !strstr(bare, "smpprod1.") && alloc_string_count(bare, &count) && count == 2 &&
+              !sh_modmanifest_product_read(bare, blen, v, sizeof v));
+        if (bare) HeapFree(GetProcessHeap(), 0, bare);
+    }
+    CHECK(!sh_modmanifest_product_read(MAP, sizeof MAP - 1, v, sizeof v) && !v[0]);
+    /* A load reads and strips it, with or without rows; the getter answers. */
+    sh_modmanifest_reset();
+    loaded = again ? sh_modmanifest_prepare_load(again, alen, &llen) : NULL;
+    CHECK(loaded && !strstr(loaded, "smpprod1.") && sh_modmanifest_product(v, sizeof v) && !strcmp(v, "v0.3.1"));
+    {
+        sh_modmanifest_list rows;
+        sh_modmanifest_row row;
+        char *withrows, *lr;
+        size_t lrl;
+        memset(&rows, 0, sizeof rows);
+        make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+        row.attached = 1;
+        CHECK(sh_modmanifest_list_add(&rows, &row));
+        sh_modmanifest_row_free(&row);
+        withrows = again ? sh_modmanifest_write(again, alen, &rows, &wlen, err, sizeof err) : NULL;
+        sh_modmanifest_list_free(&rows);
+        CHECK(withrows && strstr(withrows, "smpprod1.v0.3.1") && strstr(withrows, "smpmod1.0.1"));
+        lr = withrows ? sh_modmanifest_prepare_load(withrows, wlen, &lrl) : NULL;
+        CHECK(lr && !strstr(lr, "smpprod1.") && !strstr(lr, "smpmod1.") && sh_modmanifest_product(v, sizeof v) &&
+              !strcmp(v, "v0.3.1"));
+        /* The rows read are mods; the product variable is never one of them. */
+        {
+            sh_modmanifest_list cur;
+            CHECK(sh_modmanifest_current(&cur) == 1);
+            sh_modmanifest_list_free(&cur);
+        }
+        /* A save: the hook says a declared mod needs the product, so the
+         * running version is written; it says no, and the stale one goes. */
+        sh_modmanifest_set_product_version("v0.3.2");
+        sh_modmanifest_set_product_need(need_hook);
+        g_need_answer = 1;
+        saved = lr ? sh_modmanifest_on_save(lr, lrl, &slen) : NULL;
+        CHECK(saved && strstr(saved, "smpprod1.v0.3.2") && !strstr(saved, "smpprod1.v0.3.1") &&
+              sh_modmanifest_product(v, sizeof v) && !strcmp(v, "v0.3.2"));
+        if (saved) {
+            char *s2;
+            size_t s2l;
+            g_need_answer = 0;
+            s2 = sh_modmanifest_on_save(saved, slen, &s2l);
+            CHECK(s2 && !strstr(s2, "smpprod1.") && !sh_modmanifest_product(v, sizeof v));
+            if (s2) HeapFree(GetProcessHeap(), 0, s2);
+            HeapFree(GetProcessHeap(), 0, saved);
+        }
+        /* An unknown version writes none. */
+        sh_modmanifest_set_product_version("");
+        g_need_answer = 1;
+        saved = lr ? sh_modmanifest_on_save(lr, lrl, &slen) : NULL;
+        CHECK(!saved || !strstr(saved, "smpprod1."));
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        sh_modmanifest_set_product_need(NULL);
+        sh_modmanifest_set_product_version(NULL);
+        if (lr) HeapFree(GetProcessHeap(), 0, lr);
+        if (withrows) HeapFree(GetProcessHeap(), 0, withrows);
+    }
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    if (again) HeapFree(GetProcessHeap(), 0, again);
+    if (put) HeapFree(GetProcessHeap(), 0, put);
+    sh_modmanifest_reset();
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -823,6 +922,7 @@ int main(void)
     mod_json();
     map_level();
     choices();
+    product();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

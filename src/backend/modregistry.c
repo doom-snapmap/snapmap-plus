@@ -43,35 +43,16 @@ int sh_modregistry_weapon_request(const char *slot, char *out, size_t cap)
 }
 
 /* The list-shaped stock decls the product extends (DESIGN-additive 2.4):
- * a target pattern ("<type folder>/<name>", '*' a trailing wildcard), the
- * grammar of its entries, their containers, and the fixed registry it is. */
-typedef struct mr_target { const char *pattern; int kind; const char *containers; int fixed; } mr_target;
-static const mr_target g_targets[] = {
-    { "entitydef/ai/conductor/coop/snapmap_default", SH_MR_LIST, "edit/aiTypeList", SH_MR_CONDUCTOR },
-    { "md6def/player/mp/tp_body_mp.md6", SH_MR_BAG, "events;aliases", SH_MR_BODY },
-    { "aifsmmanager/states/*", SH_MR_BAG, "edit/subGraphs", -1 },
-    { "snappropertyinspector_whitelistencounterdecl/*", SH_MR_LIST, "edit/validEncounters", -1 },
-    { "snappropertyinspector_whitelistencounterdecllist/*", SH_MR_LIST, "edit/validEncounters", -1 },
-};
+ * one table with the builder (sh_mb_extend_target, modbundle.c), so a
+ * target the builder accepts is one the generator extends. */
+#define MR_CONDUCTOR_TARGET "entitydef/ai/conductor/coop/snapmap_default"
+#define MR_BODY_TARGET      "md6def/player/mp/tp_body_mp.md6"
+#define MR_BODY_CONTAINERS  "events;aliases"
 
 int sh_modregistry_extend_target(const char *target, int *kind, const char **containers, int *fixed,
                                  char *cause, size_t cap)
 {
-    size_t i, n = target ? strlen(target) : 0;
-    if (cause && cap) cause[0] = 0;
-    for (i = 0; n && !strpbrk(target, " \t\r\n\"\\") && i < sizeof g_targets / sizeof g_targets[0]; ++i) {
-        const char *p = g_targets[i].pattern;
-        size_t pn = strlen(p);
-        int hit = p[pn - 1] == '*' ? n > pn - 1 && !_strnicmp(target, p, pn - 1) && !strchr(target + pn - 1, '/')
-                                   : !_stricmp(target, p);
-        if (!hit) continue;
-        if (kind) *kind = g_targets[i].kind;
-        if (containers) *containers = g_targets[i].containers;
-        if (fixed) *fixed = g_targets[i].fixed;
-        return 1;
-    }
-    if (cause && cap) _snprintf_s(cause, cap, _TRUNCATE, "%s is not a list the product extends", target ? target : "");
-    return 0;
+    return sh_mb_extend_target(target, kind, containers, fixed, cause, cap);
 }
 
 int sh_modregistry_extend_request(const char *target, char *out, size_t cap)
@@ -712,7 +693,7 @@ static int mr_conductor(const sh_mr_source *src, int n, const char *stock, size_
         }
         {
             size_t plen = 0;
-            const char *part = mr_ext_text(so, g_targets[0].pattern, &plen);
+            const char *part = mr_ext_text(so, MR_CONDUCTOR_TARGET, &plen);
             if (part) {
                 mr_rows_ctx c = { r, s, so, 1, 0 };
                 if (sh_modregistry_conductor_rows(part, plen, mr_row, &c) < 0)
@@ -793,7 +774,7 @@ static int mr_body(const sh_mr_source *src, int n, const char *stock, size_t sto
     int s, any = 0;
     for (s = 0; s < n; ++s) any |= src[s].body_events || src[s].carried[SH_MR_BODY] ||
                                    (src[s].intent && src[s].intent->player[SH_MB_PLAYER_BODY_EVENTS]) ||
-                                   mr_ext_text(&src[s], g_targets[1].pattern, NULL);
+                                   mr_ext_text(&src[s], MR_BODY_TARGET, NULL);
     if (!any) return 1;
     if (!stock) {
         mr_line(r, "player body: the game's %s could not be read; the game's own file serves", g_requests[SH_MR_BODY]);
@@ -806,14 +787,14 @@ static int mr_body(const sh_mr_source *src, int n, const char *stock, size_t sto
         int added = 0;
         char *next = NULL;
         size_t plen = 0;
-        const char *part = so->body_events ? so->body_events : mr_ext_text(so, g_targets[1].pattern, &plen);
+        const char *part = so->body_events ? so->body_events : mr_ext_text(so, MR_BODY_TARGET, &plen);
         if (so->body_events) plen = so->body_events_len;
         if (so->intent && so->intent->player[SH_MB_PLAYER_BODY_EVENTS] && !so->body_events) {
             mr_line(r, "player body: %s names bodyEvents %s, which it does not serve; skipped", so->who,
                     so->intent->player[SH_MB_PLAYER_BODY_EVENTS]);
         }
         if (part) {
-            next = sh_modserve_compose_extend(base, base_len, part, plen, g_targets[1].containers, SH_MR_BAG, &len, &added);
+            next = sh_modserve_compose_extend(base, base_len, part, plen, MR_BODY_CONTAINERS, SH_MR_BAG, &len, &added);
             if (!next)
                 mr_line(r, "player body: %s's bodyEvents %s do not append to the body (an entry the body already "
                         "holds with other content, or a text outside the md6Def grammar); skipped", so->who,

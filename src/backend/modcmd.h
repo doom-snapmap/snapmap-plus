@@ -10,8 +10,15 @@
  *                                  the cause and the last good build serving, from its snapshot)
  *   sh_mods new "<name>"           make mods\<key>\ for a new mod under a generated key (modstore.h)
  *   sh_mods doctor [verify]        what the Mods tab does not show: every bundle's state and
- *                                  cause, duplicate ids, migration, conflicts with their
- *                                  winners, shadows; `verify` rehashes every build
+ *                                  cause, one line per build of a key installed at several,
+ *                                  per path the layer that serves it and why, the registries
+ *                                  and their clashes, migration, shadows; `verify` rehashes
+ *                                  every build
+ *   sh_mods held [filter]          what the game was served under each name this session and
+ *                                  what it holds (modserve_engine.c)
+ *   sh_mods choose "<slot>" "<key>"   the open map's registry choice: which declared mod serves
+ *                                  a player field or weapon slot several of them set
+ *                                  (player.hands, weapons/<stock weapon>); an empty key clears
  *   sh_mods verify "<folder|id|id@version>"  rehash installed mods and record the result
  *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
  *   sh_mods map                    the open map and each mod it uses: placed entities, and the
@@ -19,6 +26,8 @@
  *                                  where each mod applies (modui.c, modserve.h map scope)
  *   sh_mods map add "<id>"         use that mod in the whole open map without placing anything
  *                                  (a map-level manifest row; the next save writes it)
+ *   sh_mods map upgrade "<id>"     move the open map's row of that mod to its newest installed
+ *                                  build (the map pins the build it was saved with)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
  *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, its undo history cleared,
  *                                       then the folder moved to the Windows Recycle Bin); --yes does it
@@ -66,6 +75,15 @@
                            "does it, 'sh_mods rebuild \"<folder>\"' " \
                            "builds a mod folder again and rescans, 'sh_mods new \"<name>\"' makes a new mod's folder " \
                            "under a generated key (its files go under assets\\mods\\<key>\\)."
+/* Printed by 'sh_mods help' after SH_MODCMD_HELP_TAB: authoring and the additive model's verbs. */
+#define SH_MODCMD_HELP_AUTHOR "Authoring: 'sh_mods new \"<name>\"' makes a mod folder under a generated key, " \
+                              "'sh_mods held [filter]' prints what the game was served under each name this session and " \
+                              "what it still holds, 'sh_mods choose \"<slot>\" \"<key>\"' picks which declared mod serves " \
+                              "a player field or weapon slot several of the open map's mods set (player.hands, " \
+                              "player.handsD1, player.body, player.handsAnimWeb, weapons/<stock weapon>; an empty key " \
+                              "clears), 'sh_mods map upgrade \"<id>\"' moves the open map to a mod's newest installed " \
+                              "build, and 'sh_mods doctor' prints one line per build of a key, which layer serves each " \
+                              "path several mods carry, and the registries with their clashes."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
                              "'sh_mods pull \"<bundle hash>\"' downloads and installs one, 'sh_mods release \"<ref>\"' drops " \

@@ -283,8 +283,11 @@ static void test_builder(const char *tmp)
     CHECK_CAUSE(b, "must be a request path, without assets/");
     sh_mb_free(&b);
 
-    /* Without a reader: nothing becomes a pointer and a declared one is refused. */
+    /* Without a reader: nothing becomes a pointer and a declared one is refused.
+     * The files at game names are then carried replacements, so these cases
+     * build with the replacement refusal off (the refusal is modbundle_test's). */
     sh_mb_set_stock_ops(NULL);
+    sh_mb_set_refuse_replacements(0);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod7", tmp);
     make_mod(dir, NULL);
     mt_delete(dir, "assets\\" REQ_TOME);
@@ -297,6 +300,7 @@ static void test_builder(const char *tmp)
     CHECK(!sh_mb_build(dir, &RESOLVER, &b));
     CHECK_CAUSE(b, "installed-content reader is unavailable");
     sh_mb_free(&b);
+    sh_mb_set_refuse_replacements(1);
     sh_modstock_register();
 
     /* Manifest grammar: a pointer may not carry blob or size, and its source
@@ -544,7 +548,9 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         mt_write(other, "mod.json", "{\"id\":\"t.other\",\"name\":\"Other\",\"shadows\":[\"" P_IMAGE "\"]}");
         put_rel(other, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
         sh_mb_set_stock_ops(NULL);
+        sh_mb_set_refuse_replacements(0);   /* carried at a game name: a replacement */
         CHECK(sh_ms_install_from_folder(other, &RESOLVER, key2, sizeof key2, &st, NULL, cause, sizeof cause));
+        sh_mb_set_refuse_replacements(1);
         sh_modstock_register();
         CHECK(st.stock_files == 0 && st.copied == 1);
         CHECK(sh_modserve_index_build(store) == 2);

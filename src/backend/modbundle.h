@@ -261,6 +261,16 @@ typedef struct sh_mb_bundle {
     char **weapon_slots, **weapon_decls;
     size_t weapon_count;
     char *registries;      /* compact JSON of the product block's "registries" object, or NULL */
+    /* extends (DESIGN-additive 2.4): ext_targets[i] a list-shaped stock decl
+     * ("<type folder>/<name>", on sh_mb_extend_target's table), ext_partials[i]
+     * the mod's partial decl under mods/<key>/ whose entries the product
+     * appends to it in maps that declare the mod; as the author wrote them. */
+    char **ext_targets, **ext_partials;
+    size_t ext_count;
+    /* replaces: game request paths the author declares this mod replaces
+     * (the escape hatch for a file no registry can express), lower-cased. */
+    char **replaces;
+    size_t replace_count;
     char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
     size_t note_count, note_cap;
 } sh_mb_bundle;
@@ -454,17 +464,27 @@ const char *sh_mb_class_name(int cls);
 /* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
-/* The replacement refusal (DESIGN-additive 2.1, 7). Off (phase 1): a file at
- * a game name with other bytes is accepted, served as a shadow and reported.
- * On: it fails the build with "would replace <request>: put it under
- * mods/<key>/ or declare the intent in mod.json". Editor tweaks, surfaces and
- * grandfathered (legacy) bundles are never refused. Process-wide; the
- * default is SH_MB_REFUSE_REPLACEMENTS_DEFAULT (phase 2 turns it on). */
+/* The replacement refusal (DESIGN-additive 2.1, 7). On (the default since
+ * phase 3): a file at a game name with other bytes fails the build with
+ * "would replace <request>: put it under mods/<key>/ or declare the intent in
+ * mod.json", unless the descriptor's "replaces" names it (the escape hatch,
+ * reported as "replaces <path> (declared): affects only maps that declare
+ * this mod"). Off: such a file is accepted, served as a shadow and reported.
+ * Editor tweaks, surfaces, registry copies and grandfathered (legacy)
+ * bundles are never refused, nor is a folder the product received
+ * (origin download, delivery or migration: a bundle installed by hash is
+ * never refused on its files). Process-wide; the default is
+ * SH_MB_REFUSE_REPLACEMENTS_DEFAULT. */
 #ifndef SH_MB_REFUSE_REPLACEMENTS_DEFAULT
-#define SH_MB_REFUSE_REPLACEMENTS_DEFAULT 0
+#define SH_MB_REFUSE_REPLACEMENTS_DEFAULT 1
 #endif
 void sh_mb_set_refuse_replacements(int on);
 int  sh_mb_refuse_replacements(void);
+/* For the calling thread only: 1 keeps replacements in the builds it runs
+ * whatever the switch says (an install of content the product received,
+ * such as a rawmap or prefab import, is never refused on its files); 0 ends
+ * it. Thread-local, so a worker's import never changes a rescan's rule. */
+void sh_mb_keep_replacements_here(int on);
 
 /* Trim ASCII whitespace, lower-case, and validate a mod id: 1-64 characters of
  * [a-z0-9._-], starting and ending with a letter or digit, no "..".
@@ -540,6 +560,22 @@ int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int m
 #define SH_MB_REGISTRY_PLAYER    "generated/decls/entitydef/player/coop.decl"
 /* 1 conductor, 2 player body, 3 player entity, 0 not a registry file (case-insensitive). */
 int  sh_mb_registry_request(const char *request);
+
+/* The list-shaped stock decls a mod may extend (descriptor "extends",
+ * DESIGN-additive 2.4), one table for the builder and the registry generator
+ * (modregistry.c): 1 with the grammar kind (SH_MB_EXTEND_LIST: `num = N;
+ * item[i]` lists; SH_MB_EXTEND_BAG: repeated or named blocks), its containers
+ * ("edit/aiTypeList", ';' between several) and the fixed registry it is (0
+ * conductor, 1 player body, as modregistry's SH_MR_*, or -1) when `target`
+ * ("<type folder>/<name>", any case; '*' in the table matches one segment) is
+ * on it; else 0 with "<target> is not a list the product extends". */
+#define SH_MB_EXTEND_LIST 1
+#define SH_MB_EXTEND_BAG  2
+int  sh_mb_extend_target(const char *target, int *kind, const char **containers, int *fixed, char *cause, size_t cap);
+/* 1 when `text` is a decl body ({ ... }, comments and strings allowed) whose
+ * members all lie on or under one of `containers` ("a/b;c"): the structural
+ * check of an extends partial. 0 with the first member outside in cause. */
+int  sh_mb_extend_partial_ok(const char *text, size_t len, const char *containers, char *cause, size_t cap);
 
 /* The canonical text of a mod.json "requirements" value (JSON text of the
  * member's value), as the builder writes it into the manifest:

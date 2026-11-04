@@ -780,6 +780,34 @@ static void m_shadow_undeclared(const char *f)
     mt_write(f, "mod.json", DESC(""));
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
+/* The escape hatch: the same replacement, declared. */
+static void m_replaces_declared(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
+    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+}
+static void m_replaces_registry(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/player/coop.decl\"]"));
+}
+static void m_replaces_absent(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
+}
+static void m_replaces_weapon(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/weapon/zion/player/sp/pistol.decl\"]"));
+}
+static void m_replaces_not_array(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"replaces\":\"generated/decls/entitydef/monster/imp.decl\""));
+}
+/* An undeclared replacement in a folder the product downloaded. */
+static void m_shadow_downloaded(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"snapmap-plus\":{\"origin\":\"download\"}"));
+    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+}
 static void m_shadow_not_shipped(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]")); }
 static void m_shadow_traversal(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/../decls/x.decl\"]")); }
 static void m_requirements(const char *f)
@@ -901,15 +929,44 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_scenes_missing, &RESOLVER, "needs entityDef mods/alex.r2-imp/gone, which resolves to nothing");
 
-    /* A replacement of a stock decl is accepted in phase 1, served as a
-     * shadow and reported; the canonical shadows are derived from the files,
-     * so the same mod with or without its old "shadows" key has one hash. */
+    /* The refusal is on by default: a replacement of a stock decl fails the
+     * build, and the descriptor's "replaces" declares it instead. */
+    CHECK(sh_mb_refuse_replacements());
+    refused(fixture, tmp, m_shadow_ok, &RESOLVER,
+            "would replace generated/decls/entitydef/monster/imp.decl: put it under mods/alex.r2-imp/ or declare the intent");
+    accepted(fixture, tmp, m_replaces_declared, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed &&
+          b.classes.replaces == 1 && b.replace_count == 1);
+    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl (declared): affects only maps that declare this mod") &&
+          !has_note(&b, "replacements are retired"));
+    CHECK(b.extra && strstr(b.extra, "\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
+    sh_mb_free(&b);
+    refused(fixture, tmp, m_replaces_registry, &RESOLVER, "a registry the product generates per map");
+    refused(fixture, tmp, m_replaces_absent, &RESOLVER, "which this mod does not carry");
+    refused(fixture, tmp, m_replaces_weapon, &RESOLVER, "name it in player.weapons instead");
+    refused(fixture, tmp, m_replaces_not_array, &RESOLVER, "replaces must be an array");
+    /* An install of received content (a rawmap import) keeps them on its own thread. */
+    sh_mb_keep_replacements_here(1);
+    accepted(fixture, tmp, m_shadow_ok, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1);
+    sh_mb_free(&b);
+    sh_mb_keep_replacements_here(0);
+    /* A folder the product received (a download) is never refused on its files. */
+    accepted(fixture, tmp, m_shadow_downloaded, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1 && !strcmp(b.origin, SH_MB_ORIGIN_DOWNLOAD));
+    sh_mb_free(&b);
+
+    /* With the refusal off (the phase 1 builder path), a replacement of a
+     * stock decl is accepted, served as a shadow and reported; the canonical
+     * shadows are derived from the files, so the same mod with or without its
+     * old "shadows" key has one hash. */
+    sh_mb_set_refuse_replacements(0);
     accepted(fixture, tmp, m_shadow_ok, &b);
     CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed);
     CHECK(find_file(&b, "generated/decls/entitydef/monster/imp.decl")->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1);
     CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
     CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
-          has_note(&b, "replacements are being retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
+          has_note(&b, "replacements are retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
     {
         sh_mb_bundle undeclared;
         char shadow_hash[65];
@@ -928,6 +985,7 @@ static void test_refusals(const char *fixture, const char *tmp)
           strstr(b.first_warning, "resolves to nothing (a replaced stock file") != NULL &&
           find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->shadowed);
     sh_mb_free(&b);
+    sh_mb_set_refuse_replacements(1);
     /* Values normalise to strings; unknown keys travel under extra. */
     accepted(fixture, tmp, m_requirements, &b);
     CHECK(b.requirements && !strcmp(b.requirements, GATES_CANONICAL));
@@ -1304,6 +1362,8 @@ static int fake_stock_exists(void *ctx, const char *request)
 {
     if (!strcmp(request, STOCK_BANK)) return 1;
     if (sh_mb_registry_request(request)) return 1;   /* the registries' game files */
+    if (!strcmp(request, "generated/decls/aifsmmanager/states/spidermastermind.decl")) return 1;   /* an extends target */
+    if (!strncmp(request, "generated/decls/aifsmmanager/states/", 36)) return 0;
     return fake_find(request) ? 1 : stock_exists(ctx, request);
 }
 static const sh_mb_resolver FAKE_RESOLVER = { NULL, NULL, fake_stock_exists, NULL };
@@ -1337,6 +1397,9 @@ static void test_classes(const char *fixture, const char *tmp)
     mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
              "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
     sh_mb_set_stock_ops(&ops);
+    /* Every cell is built with the refusal off (the phase 1 builder path);
+     * the refusal itself is checked below. */
+    sh_mb_set_refuse_replacements(0);
     CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  classes refused: %s\n", b.first_cause);
     f = find_file(&b, "generated/image/mods/alex.r2_imp/rock_copy.bimage");
@@ -1385,7 +1448,7 @@ static void test_classes(const char *fixture, const char *tmp)
     CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 13 && back.classes.borrows == 1 &&
           back.classes.surfaces == 1 && back.classes.replaces == 1 && back.classes.editor == 1);
     sh_mb_free(&back);
-    /* The refusal switch (phase 2 turns it on): the replacement fails the
+    /* The refusal switch (on by default): the replacement fails the
      * build with its cause; the editor tweak and the surface at game names do
      * not. Off again, the same folder builds to the same hash. */
     {
@@ -1477,6 +1540,47 @@ static void test_classes(const char *fixture, const char *tmp)
         rp_put(folder, "assets\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
         CHECK(!sh_mb_build(folder, &FAKE_RESOLVER, &b));
         CHECK_CAUSE(b, "a stock sound bank cannot be replaced");
+        sh_mb_free(&b);
+    }
+    sh_mb_set_refuse_replacements(1);   /* the default */
+    /* extends: a list-shaped stock decl on the product's table, a partial of
+     * the mod's own entries under the key, recorded under registries.extends. */
+    {
+        static const char PART[] = "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n"
+                                   "\t\t\t\t\tname = \"smm_root\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n";
+        static const char *const PART_FILE = "assets\\generated\\decls\\aifsmmanager\\mods\\alex.r2-imp\\spider_fsm.decl";
+        char ext[MAX_PATH];
+        _snprintf_s(ext, sizeof ext, _TRUNCATE, "%s\\classes_extends", tmp);
+        CHECK(mt_copy_tree(fixture, ext));
+        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/spidermastermind\":\"mods/alex.r2-imp/spider_fsm\"}"));
+        mt_write(ext, PART_FILE, PART);
+        CHECK(sh_mb_build(ext, &FAKE_RESOLVER, &b) && b.ext_count == 1);
+        if (b.errors) fprintf(stderr, "  extends refused: %s\n", b.first_cause);
+        CHECK(b.registries && strstr(b.registries, "\"extends\":{\"aifsmmanager/states/spidermastermind\":"
+                                                   "\"mods/alex.r2-imp/spider_fsm\"}"));
+        CHECK(sh_mb_extend_partial_ok(PART, strlen(PART), "edit/subGraphs", cause, sizeof cause));
+        CHECK(!sh_mb_extend_partial_ok("{ init { mesh \"x\" } }", 21, "events;aliases", cause, sizeof cause) &&
+              strstr(cause, "member init is outside events;aliases"));
+        CHECK(sh_mb_extend_partial_ok("{ edit = { validEncounters = { num = 1; item[0] = \"a\"; } } }", 60,
+                                      "edit/validEncounters", cause, sizeof cause));
+        CHECK(!sh_mb_extend_partial_ok("{ edit = { x = 1; } }", 21, "edit/validEncounters", cause, sizeof cause));
+        CHECK(!sh_mb_extend_partial_ok("{ edit = { ", 11, "edit/validEncounters", cause, sizeof cause));
+        sh_mb_free(&b);
+        mt_write(ext, PART_FILE, "{\r\n\tedit = {\r\n\t\tobject = {\r\n\t\t\tdebugFlags = 6;\r\n\t\t}\r\n\t}\r\n}\r\n");
+        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
+        CHECK_CAUSE(b, "the extends partial for aifsmmanager/states/spidermastermind: member object is outside edit/subGraphs");
+        sh_mb_free(&b);
+        mt_write(ext, "mod.json", DESC(",\"extends\":{\"entitydef/player/coop\":\"mods/alex.r2-imp/spider_fsm\"}"));
+        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
+        CHECK_CAUSE(b, "entitydef/player/coop is not a list the product extends");
+        sh_mb_free(&b);
+        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/spidermastermind\":\"mods/alex.r2-imp/gone\"}"));
+        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
+        CHECK_CAUSE(b, "names mods/alex.r2-imp/gone, which this mod does not provide as a aifsmmanager decl");
+        sh_mb_free(&b);
+        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/nobody\":\"mods/alex.r2-imp/spider_fsm\"}"));
+        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
+        CHECK_CAUSE(b, "aifsmmanager/states/nobody is not a stock decl the game holds");
         sh_mb_free(&b);
     }
 }

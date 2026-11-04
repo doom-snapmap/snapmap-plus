@@ -22,6 +22,8 @@ jobs:
       # Both DLL build scripts read this toolset version. If the runner removes it,
       # select a supported version from the build error and validate the new output.
       SNAPMAPPLUS_VCVARS_VER: '14.44.35207'
+      # The backend stamps this tag as the product version a saved map records.
+      SNAPMAPPLUS_VERSION: ${{ github.ref_name }}
     steps:
       - name: Keep the final 2018 release intact
         shell: bash
