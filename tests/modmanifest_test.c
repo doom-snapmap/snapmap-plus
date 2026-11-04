@@ -380,8 +380,15 @@ static void save_closure(void)
     g_installed_count = 2;
 
     /* The imp is placed (inherit and an edit value); the room module is not. */
+    sh_modmanifest_reset();
     out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
     CHECK(out != NULL && g_lookup_calls == 1);
+    /* The open map's record follows the save (a map loaded with no rows, from a rawmap). */
+    {
+        sh_modmanifest_list cur;
+        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A) && cur.rows[0].name_count == 2);
+        sh_modmanifest_list_free(&cur);
+    }
     if (out) {
         CHECK(sh_modmanifest_read(out, n, &back, NULL) == 1 && back.count == 1);
         CHECK(back.count == 1 && !strcmp(back.rows[0].bundle, HASH_A) && back.rows[0].name_count == 2 &&
@@ -401,7 +408,10 @@ static void save_closure(void)
         {
             size_t n2 = 0;
             char *clean = sh_modmanifest_on_save(out, n, &n2);
+            sh_modmanifest_list cur;
             CHECK(clean && !strstr(clean, "smpmod1.") && !strcmp(clean, MAP));
+            CHECK(sh_modmanifest_current(&cur) == 0);   /* and its rows go with them */
+            sh_modmanifest_list_free(&cur);
             if (clean) HeapFree(GetProcessHeap(), 0, clean);
         }
         HeapFree(GetProcessHeap(), 0, out);

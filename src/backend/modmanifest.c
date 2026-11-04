@@ -1645,6 +1645,10 @@ static char *mm_save_rows(const char *json, size_t length, size_t *out_length, i
             err[0] ? err : "unknown", described[0] ? described : "its bundles");
     }
     backend_log(line);
+    /* The open map's record is what it now saves: `sh_mods map`, the Mods tab
+     * and the next listing read these rows, not the ones it was loaded with
+     * (a map opened from a rawmap had none). */
+    if (out) mm_set_current(&ctx.list);
     sh_modmanifest_list_free(&ctx.list);
     return out;
 }
