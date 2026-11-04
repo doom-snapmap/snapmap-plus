@@ -1696,6 +1696,31 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
     }
 }
 
+/* A bare (unquoted) word naming a mod resource whose name holds '-'. The
+ * engine's breakable and material lexers end a bare word at '-', so
+ * `fx mods/local.spider-mastermind/fx/x` reaches the game as three tokens and
+ * the decl falls back to defaults. A quoted token reaches the decl lookup
+ * whole, so a decl name is quoted (it keeps its hyphen under mods/<key>/); a
+ * raw file (an image, a model) may instead spell the key with '_', the
+ * spelling the engine derives its path with. */
+int sh_mb_scan_bare_hyphen(const unsigned char *text, size_t len, sh_mb_bare_fn fn, void *ctx)
+{
+    size_t pos = 0, counted = 0;
+    int line = 1, found = 0;
+    if (!text) return 0;
+    for (;;) {
+        mb_tok t = mb_next_tok(text, len, &pos);
+        size_t at;
+        if (t.kind == TK_END) break;
+        if (t.kind != TK_WORD || t.n <= 5 || !mb_ieq_n(t.p, 5, "mods/") || !memchr(t.p, '-', t.n)) continue;
+        at = (size_t)((const unsigned char *)t.p - text);
+        for (; counted < at; counted++) if (text[counted] == '\n') line++;
+        found++;
+        if (fn) fn(ctx, line, t.p, t.n);
+    }
+    return found;
+}
+
 /* ------------------------------------------------------ bundle helpers ---- */
 
 static void mb_error(sh_mb_bundle *b, const char *fmt, ...)
@@ -1706,6 +1731,15 @@ static void mb_error(sh_mb_bundle *b, const char *fmt, ...)
         _vsnprintf_s(b->first_cause, sizeof b->first_cause, _TRUNCATE, fmt, ap);
         va_end(ap);
     }
+}
+
+typedef struct mb_bare_ctx { sh_mb_bundle *b; const sh_mb_file *f; } mb_bare_ctx;
+
+static void mb_bare_cb(void *context, int line, const char *name, size_t len)
+{
+    mb_bare_ctx *c = (mb_bare_ctx *)context;
+    mb_error(c->b, "%s line %d: '%.*s' is written without quotes and contains '-', which the game splits at the "
+                   "hyphen; quote it (a decl name), or for a raw file spell the key with '_'", c->f->path, line, (int)len, name);
 }
 
 static void mb_warn(sh_mb_bundle *b, const char *fmt, ...)
@@ -4115,9 +4149,11 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 /* A module's entity texts are quoted strings: nothing to scan. */
             } else {
                 mb_need_ctx nc = { f, 0 };
+                mb_bare_ctx bc = { b, f };
                 sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
                 if (nc.oom) mb_error(b, "out of memory");
                 qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+                sh_mb_scan_bare_hyphen(text, len, mb_bare_cb, &bc);
             }
             free(text);
         } else if (mb_ends(f->request, ".bnk") && !b->legacy) {

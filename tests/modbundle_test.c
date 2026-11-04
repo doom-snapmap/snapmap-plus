@@ -1723,6 +1723,50 @@ static void m_kit_events_bare(const char *f)
     mt_write(f, "mod.json", DESC(",\"player\":{\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b\"}"));
 }
 
+/* A bare word naming a mod resource with '-' in it: the engine's breakable
+ * and material lexers split it at '-' (the spider's smm_damage_gibs line 35
+ * and its materials' transmap stages). Quoted, the same name is fine. */
+#define BARE_BREAKABLE "assets\\generated\\decls\\breakable\\mods\\alex.r2-imp\\breakable\\gibs.decl"
+static const char g_spider_breakable[] =
+    "{\r\n\tbouncyness\t\t\t\t0.300000\r\n\tgravity\t\t\t\t\t0.000000 0.000000 -750.000000\r\n"
+    "\texplosion {\r\n\t\tfx\t\t\t\t\t\t\tmods/alex.r2-imp/fx/gore/smm_wound_pop\r\n"
+    "\t\tposition\t\t\t\t\t\t0.000000 0.000000 -6.000000\r\n\t}\r\n}\r\n";
+static void m_bare_hyphen(const char *f) { mt_write(f, BARE_BREAKABLE, g_spider_breakable); }
+static void m_quoted_hyphen(const char *f)
+{
+    mt_write(f, BARE_BREAKABLE, "{\r\n\texplosion {\r\n\t\tfx \"mods/alex.r2-imp/fx/gore/smm_wound_pop\"\r\n\t}\r\n}\r\n");
+}
+typedef struct bare_hit { int n, line[4]; char name[4][128]; } bare_hit;
+static void bare_cb(void *ctx, int line, const char *name, size_t len)
+{
+    bare_hit *h = (bare_hit *)ctx;
+    if (h->n < 4) { h->line[h->n] = line; _snprintf_s(h->name[h->n], 128, _TRUNCATE, "%.*s", (int)len, name); }
+    h->n++;
+}
+
+static void test_bare_hyphen(const char *fixture, const char *tmp)
+{
+    static const char mat[] =
+        "{\r\n\tstage {\r\n\t\ttransmap1\tmods/local.spider-mastermind/models/effects/misc/skull_beam$bc7\r\n"
+        "\t}\r\n\ttransmap\tmods/local.rocks/ok_no_hyphen\r\n\teditorimage \"mods/local.spider-mastermind/x\"\r\n"
+        "\t// mods/local.spider-mastermind/in_a_comment\r\n}\r\n";
+    bare_hit h;
+    sh_mb_bundle b;
+    memset(&h, 0, sizeof h);
+    CHECK(sh_mb_scan_bare_hyphen((const unsigned char *)mat, strlen(mat), bare_cb, &h) == 1);
+    CHECK(h.n == 1 && h.line[0] == 3 && !strcmp(h.name[0], "mods/local.spider-mastermind/models/effects/misc/skull_beam$bc7"));
+    memset(&h, 0, sizeof h);
+    CHECK(sh_mb_scan_bare_hyphen((const unsigned char *)g_spider_breakable, strlen(g_spider_breakable), bare_cb, &h) == 1);
+    CHECK(h.n == 1 && h.line[0] == 5 && !strcmp(h.name[0], "mods/alex.r2-imp/fx/gore/smm_wound_pop"));
+    refused(fixture, tmp, m_bare_hyphen, &RESOLVER,
+            "assets/generated/decls/breakable/mods/alex.r2-imp/breakable/gibs.decl line 5: "
+            "'mods/alex.r2-imp/fx/gore/smm_wound_pop' is written without quotes and contains '-', "
+            "which the game splits at the hyphen; quote it (a decl name), or for a raw file spell the key with '_'");
+    accepted(fixture, tmp, m_quoted_hyphen, &b);
+    CHECK(b.errors == 0);
+    sh_mb_free(&b);
+}
+
 static void test_player(const char *fixture, const char *tmp)
 {
     sh_mb_bundle b;
@@ -1792,6 +1836,7 @@ int main(int argc, char **argv)
     test_classes(full, tmp);
     test_keys(full, tmp);
     test_player(full, tmp);
+    test_bare_hyphen(full, tmp);
     test_renderprogs(tmp);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modbundle_test: %d failure(s)\n", failures); return 1; }

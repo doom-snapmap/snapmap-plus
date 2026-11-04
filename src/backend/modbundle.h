@@ -649,6 +649,13 @@ typedef void (*sh_mb_need_fn)(void *context, const char *type,
 void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t len,
                       sh_mb_need_fn callback, void *context);
 
+/* Bare (unquoted) words that name a mod resource ("mods/...") and contain
+ * '-': the engine's breakable and material lexers split them. The callback
+ * receives the 1-based line and the word (not NUL-terminated). Returns the
+ * count. The builder refuses each one. */
+typedef void (*sh_mb_bare_fn)(void *context, int line, const char *name, size_t name_len);
+int  sh_mb_scan_bare_hyphen(const unsigned char *text, size_t len, sh_mb_bare_fn callback, void *context);
+
 /* Render programs. MD5 of data, and MD5fold: the four little-endian 32-bit
  * words of the digest XORed together, the engine's decl and stage checksum. */
 void     sh_mb_md5(const void *data, size_t len, unsigned char digest[16]);
