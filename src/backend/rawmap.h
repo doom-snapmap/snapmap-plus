@@ -137,6 +137,12 @@ int sh_rawmap_companion_zip_path(const char *json_path, char *out, size_t cap);
  * rows it was opened with. Any thread. */
 int sh_rawmap_open_map_mods(void);
 
+/* 1 while the open map is a rawmap the swap opened and no save has named it
+ * yet, with the rawmap's file name in `name` ("" otherwise). Its edit still
+ * holds the id of the saved map the reload borrowed, so this is the open
+ * map's identity until the first save. */
+int sh_rawmap_open_unsaved(char *name, size_t cap);
+
 /* Where the save and load messages go besides the log: the editor toast and
  * the game console (iface_engine.c binds both). Either may be NULL. */
 void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), void (*print)(const char *line));

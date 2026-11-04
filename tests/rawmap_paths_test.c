@@ -746,6 +746,43 @@ static void a_staged_rawmap_with_a_retired_payload_loads_plain(void)
     clean_state();
 }
 
+/* A rawmap the swap opens is a new map until a save names it: its identity is
+ * the rawmap's, not the saved map whose id the reload borrowed. */
+static void a_rawmap_open_is_unsaved_until_its_first_save(void)
+{
+    static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
+    unsigned char str[IDSTR_SIZE] = {0};
+    char staged[MAX_PATH], name[MAX_PATH];
+    printf("\n-- a rawmap opened as a new map is unsaved until its first save\n");
+    clean_state();
+    CHECK(write_file("rawmap_open_unsaved.json", plain, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    sh_rawmap_set_branch_tag(0);
+    g_deser_orig = fixture_deser;
+    CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
+    sh_rawmap_swap_arm(1);
+    CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"entities\":[{}]}", (void *)1) == 1);
+    CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_open_unsaved.json"));
+    /* An export of the live map (a snapshot) is not a save. */
+    g_ser_orig = fixture_serialize;
+    CHECK(sh_rawmap_snapshot(fixture_map_to_json, (void *)1, str));
+    CHECK(sh_rawmap_open_unsaved(NULL, 0));
+    /* The first save names it. */
+    sh_rawmap_swap_arm(0);
+    CHECK(sh_ser_detour((void *)1, str, 1) == 1);
+    CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
+    /* Opened again, then the engine's own map: that map is itself. */
+    sh_rawmap_swap_arm(1);
+    CHECK(sh_deser_detour(plain, (void *)1) == 1 && sh_rawmap_open_unsaved(NULL, 0));
+    sh_rawmap_swap_arm(0);
+    CHECK(sh_deser_detour(plain, (void *)1) == 1 && !sh_rawmap_open_unsaved(NULL, 0));
+    g_ser_orig = NULL;
+    sh_rawmap_set_branch_tag(1);
+    g_deser_orig = NULL;
+    DeleteFileA(staged);
+    clean_state();
+}
+
 /* A save never embeds a package: the serializer's bytes reach the caller unchanged. */
 static void saves_carry_no_package_payload(void)
 {
@@ -1054,6 +1091,7 @@ int main(void)
     a_staged_rawmap_with_a_retired_payload_loads_plain();
     a_reload_into_the_same_map_object_is_a_new_map();
     saves_carry_no_package_payload();
+    a_rawmap_open_is_unsaved_until_its_first_save();
     a_rawmap_without_its_mods_never_reaches_the_engine();
     a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
     a_rawmap_whose_mods_are_installed_loads();

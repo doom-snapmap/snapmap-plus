@@ -1569,6 +1569,9 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
         if (mp->have_mm) mu_map_attribute(mp);
         if (e->map_info && e->map_info(&mp->info) == 1) {
             mp->have_info = 1;
+            /* A rawmap opened as a new map: the ids are the borrowed saved
+             * map's until the first save names it. */
+            if (mp->info.opened_from[0]) mp->info.local_id[0] = mp->info.cloud_id[0] = 0;
             (void)mu_saved_details(mp->info.local_id, mp->name, sizeof mp->name, &mp->saved);
             for (i = 0; rec && i < rec->link_count && !mp->link; i++) {
                 const mu_link *l = &rec->links[i];
@@ -3732,8 +3735,12 @@ static void mu_say_map(const mu_out *o)
             struct tm tm;
             if (!localtime_s(&tm, &t)) strftime(when, sizeof when, "%Y-%m-%d %H:%M", &tm);
         }
-        mu_line(o, "map: %s (id %s), %d entities, last saved %s", mp.name[0] ? mp.name : "(not saved yet)",
-                mp.have_info && mp.info.local_id[0] ? mp.info.local_id : "none", mp.entities, when);
+        if (mp.have_info && mp.info.opened_from[0])
+            mu_line(o, "map: not saved yet (opened from the rawmap %s; the first save names it), %d entities",
+                    mp.info.opened_from, mp.entities);
+        else
+            mu_line(o, "map: %s (id %s), %d entities, last saved %s", mp.name[0] ? mp.name : "(not saved yet)",
+                    mp.have_info && mp.info.local_id[0] ? mp.info.local_id : "none", mp.entities, when);
         if (mp.link) mu_line(o, "map: published as item %s; its mods %s", mp.link->item, mp.claim ? "are uploaded (a claim is stored)" : "have no stored claim");
         else mu_line(o, "map: no publish of it with mods is recorded on this computer");
         mu_line(o, "map: search tag mods: %s", !mp.have_info || mp.info.tagged < 0 ? "unknown" : mp.info.tagged ? "present" : "absent");

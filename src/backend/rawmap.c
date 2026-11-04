@@ -216,6 +216,32 @@ static char *manifest_prepare_guarded(const char *json, size_t len)
  * name; off, it overwrites the map the rawmap opened over. */
 static volatile LONG g_branch_tag    = 1;
 static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map was substituted by the swap */
+/* The open map's identity after a swap: a new map, not saved yet, opened from
+ * this file (its base name). The reload that opens it borrows the saved map
+ * the editor had open, whose id the edit keeps until the first save, so the
+ * Mods tab and `sh_mods map` ask this, not the edit's id (sh_rawmap_open_unsaved). */
+static SRWLOCK g_open_lock = SRWLOCK_INIT;
+static char g_open_name[MAX_PATH];
+static volatile LONG g_open_unsaved = 0;
+
+static void open_identity_set(const char *name)
+{
+    AcquireSRWLockExclusive(&g_open_lock);
+    if (name) strncpy_s(g_open_name, sizeof g_open_name, name, _TRUNCATE);
+    else g_open_name[0] = '\0';
+    InterlockedExchange(&g_open_unsaved, name ? 1 : 0);
+    ReleaseSRWLockExclusive(&g_open_lock);
+}
+
+int sh_rawmap_open_unsaved(char *name, size_t cap)
+{
+    int unsaved;
+    AcquireSRWLockShared(&g_open_lock);
+    unsaved = InterlockedCompareExchange(&g_open_unsaved, 0, 0) != 0;
+    if (name && cap) strncpy_s(name, cap, unsaved ? g_open_name : "", _TRUNCATE);
+    ReleaseSRWLockShared(&g_open_lock);
+    return unsaved;
+}
 
 void sh_rawmap_set_branch_tag(int on) { InterlockedExchange(&g_branch_tag, on ? 1 : 0); }
 int  sh_rawmap_branch_tag_enabled(void) { return InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0; }
@@ -606,6 +632,7 @@ static int sh_deser_detour(const char *json, void *out_map)
                             "opened loads as itself", src, (unsigned)missing);
                 backend_log(line);
                 InterlockedExchange(&g_open_is_rawmap, 0);
+                open_identity_set(NULL);
                 rc = deser_prepared(json, out_map);
                 /* After the parse: the parse record abandons any hold begun before it. */
                 (void)rawmap_hold_guarded(&rows, name);
@@ -630,6 +657,12 @@ static int sh_deser_detour(const char *json, void *out_map)
             rc = deser_prepared(ours, out_map);
             /* The open map came from a rawmap, which is what the branch answer keys off. */
             InterlockedExchange(&g_open_is_rawmap, 1);
+            {
+                char src[MAX_PATH], name[MAX_PATH];
+                resolve_source_path(src, sizeof src);
+                rawmap_base_name(src, name, sizeof name);
+                open_identity_set(rc ? name : NULL);
+            }
             InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
             HeapFree(GetProcessHeap(), 0, ours);
             return rc;
@@ -637,6 +670,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         /* Unreadable substitute: use the engine input. */
     }
     InterlockedExchange(&g_open_is_rawmap, 0);   /* the engine's own map: let the engine answer */
+    open_identity_set(NULL);
     return deser_prepared(json, out_map);
 }
 
@@ -1670,6 +1704,9 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     /* The map manifest goes last so its rows are the final string variables. */
     manifest_on_save(out_idstr);
+    /* A save of a map opened from a rawmap makes it a saved map of its own:
+     * the edit's id and name are its from now on. */
+    open_identity_set(NULL);
     {
         const char *saved = NULL;
         int saved_len = 0;

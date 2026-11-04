@@ -1355,6 +1355,7 @@ static int ie_mods_map_info(sh_modui_map_info *out)
     ie_mods_idstr(edit + IE_EDIT_LOCAL_ID, out->local_id, sizeof out->local_id);
     ie_mods_idstr(edit + IE_EDIT_CLOUD_ID, out->cloud_id, sizeof out->cloud_id);
     out->tagged = sh_modpublish_edit_tag(edit, "mods", 0);
+    (void)sh_rawmap_open_unsaved(out->opened_from, sizeof out->opened_from);
     return 1;
 }
 

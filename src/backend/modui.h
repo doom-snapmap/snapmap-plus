@@ -136,6 +136,10 @@ typedef struct sh_modui_map_info {
     char local_id[64];     /* the saved-map id, "" before the first save */
     char cloud_id[64];     /* its cloud-saved item id, "" when none */
     int  tagged;           /* the search tag "mods": 1, 0, or -1 unknown */
+    /* The rawmap file the open map was opened from, while no save has named
+     * it (sh_rawmap_open_unsaved), else "". The edit's ids then still name
+     * the saved map the reload borrowed, so they are not the open map's. */
+    char opened_from[260];
 } sh_modui_map_info;
 
 /* Bind the engine operations. NULL binds only the product defaults: no

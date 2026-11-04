@@ -206,13 +206,16 @@ static int fake_map_json(char **out, size_t *len)
 }
 
 static int g_tagged = 1;
+static const char *g_opened_from;   /* a rawmap the swap opened, not saved yet (sh_rawmap_open_unsaved) */
 static int fake_map_info(sh_modui_map_info *out)
 {
     if (!g_map_on) return 0;
     memset(out, 0, sizeof *out);
+    /* After a rawmap open the edit still holds the borrowed saved map's ids. */
     strcpy_s(out->local_id, sizeof out->local_id, "ABCDEF0123456789ABCD");
     strcpy_s(out->cloud_id, sizeof out->cloud_id, "6ae40b378bf5037d3d63bd23");
     out->tagged = g_tagged;
+    if (g_opened_from) strcpy_s(out->opened_from, sizeof out->opened_from, g_opened_from);
     return 1;
 }
 
@@ -1599,6 +1602,20 @@ int main(int argc, char **argv)
             doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
             CHECK(has(doc, "\"ok\":true,\"message\":\"Gates is already used by the whole of Imp Arena.\""));
             free(doc);
+            /* A rawmap opened in its place (sh_rawmaps load) is a new map until its first save:
+             * the borrowed saved map's name and id are not the open map's. */
+            g_opened_from = "v2b-empty.rawmap.json";
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: map: not saved yet (opened from the rawmap v2b-empty.rawmap.json; the first save names "
+                                "it), 5 entities\n"));
+            CHECK(!has(g_doctor, "Imp Arena") && !has(g_doctor, "ABCDEF0123456789ABCD"));
+            doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
+            CHECK(has(doc, "\"message\":\"Gates is already used by the whole of the open map.\""));
+            free(doc);
+            g_opened_from = NULL;
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1 && has(g_doctor, "MODS: map: Imp Arena (id ABCDEF0123456789ABCD)"));
             g_doctor[0] = 0;
             CHECK(sh_modui_command(3, add_argv, doctor_line, NULL) == 1 &&
                   has(g_doctor, "MODS: map add alex.req: Gates is already used by the whole of Imp Arena.\n"));
