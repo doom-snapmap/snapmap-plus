@@ -578,47 +578,154 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
     return me_write(&pl, zip_path, stp, cause, cap);
 }
 
-/* One installed mod as its store folder: mods/<name>/mod.json as it is on
- * disk, then every file its bundle carries under assets/, each checked
- * against the hash mod.json records. A stock pointer is an entry of mod.json
- * and has no file here: installed game content never leaves the machine. */
-static int me_add_folder(me_writer *w, const sh_ms_entry *e, modexport_stats *st, char *cause, size_t cap)
+/* One declared build as the folder it is installed as: mods/<name>/mod.json
+ * as it is on disk (its bundle hash checked), then every file its bundle
+ * carries under assets/, each checked against the hash mod.json records,
+ * read from `files_dir` and, where that copy differs, from `alt_dir` (the
+ * folder's last good build snapshot, DESIGN-additive 2.8, or the folder
+ * itself). A stock pointer is an entry of mod.json and has no file here:
+ * installed game content never leaves the machine. */
+static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *b, const char *modjson_path,
+                        const char *files_dir, const char *alt_dir, modexport_stats *st, char *cause, size_t cap)
 {
-    const sh_mb_bundle *b = &e->bundle;
     char name[ME_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
     int same;
-    me_join_native(path, sizeof path, e->folder, "mod.json");
-    bytes = sh_mb_read_file(path, ME_MODJSON_MAX, &blen);
-    if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", e->name);
+    bytes = sh_mb_read_file(modjson_path, ME_MODJSON_MAX, &blen);
+    if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", zip_name);
     memset(&check, 0, sizeof check);
     same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
     sh_mb_free(&check);
     if (!same) {
         free(bytes);
-        return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; rescan and export again", e->name);
+        return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; rescan and export again", zip_name);
     }
-    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", e->name);
+    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", zip_name);
     me_add(w, name, bytes, blen);
     free(bytes);
     for (k = 0; k < b->file_count && !w->failed; k++) {
         const sh_mb_file *f = &b->files[k];
+        int pass;
         if (f->stock) continue;
-        me_join_native(path, sizeof path, e->folder, f->path);
-        bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
-        if (bytes) {
-            sh_mb_sha256_hex(bytes, blen, actual);
-            if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
+        bytes = NULL;
+        for (pass = 0; pass < 2 && !bytes; pass++) {
+            const char *dir = pass ? alt_dir : files_dir;
+            if (!dir || !dir[0]) continue;
+            me_join_native(path, sizeof path, dir, f->path);
+            bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
+            if (bytes) {
+                sh_mb_sha256_hex(bytes, blen, actual);
+                if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
+            }
         }
-        if (!bytes) return me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", e->name, f->path);
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", e->name, f->path);
+        if (!bytes) return me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", zip_name, f->path);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", zip_name, f->path);
         me_add(w, name, bytes, blen);
         free(bytes);
         st->files++;
     }
     if (w->failed) return me_cause(cause, cap, "%s", w->cause);
+    return 1;
+}
+
+/* A declared build the export carries: an installed folder at exactly the
+ * row's hash, else a last good build snapshot at that hash with no folder
+ * (mods\.builds\<key>@<hash16>\, the folder moved on), else the folder an
+ * alias of the hash names (the author rebuilt it in place; the rows are moved
+ * to it, as that is the build this machine serves). */
+typedef struct me_pick {
+    const sh_ms_entry *e;               /* exact or alias */
+    int snap;                           /* a snapshot only: b and dir */
+    sh_mb_bundle b;
+    char dir[MAX_PATH * 4];
+} me_pick;
+
+static void me_pick_free(me_pick *p) { if (p->snap) sh_mb_free(&p->b); memset(p, 0, sizeof *p); }
+
+static const sh_mb_bundle *me_pick_bundle(const me_pick *p) { return p->snap ? &p->b : p->e ? &p->e->bundle : NULL; }
+
+static int me_snapshot_at(const char *root, const char *hash, me_pick *out)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern;
+    char pat[MAX_PATH * 4];
+    HANDLE h;
+    int found = 0;
+    _snprintf_s(pat, sizeof pat, _TRUNCATE, "%s\\%s\\*@%.16s", root, SH_MS_BUILDS_DIR, hash);
+    pattern = sh_mb_wpath(pat);
+    if (!pattern) return 0;
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        char leaf[MAX_PATH * 4], mj[MAX_PATH * 4];
+        unsigned char *text;
+        size_t len = 0;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, leaf, (int)sizeof leaf, NULL, NULL)) continue;
+        _snprintf_s(out->dir, sizeof out->dir, _TRUNCATE, "%s\\%s\\%s", root, SH_MS_BUILDS_DIR, leaf);
+        me_join_native(mj, sizeof mj, out->dir, "bundle.json");
+        text = sh_mb_read_file(mj, ME_MODJSON_MAX, &len);
+        if (!text) continue;
+        memset(&out->b, 0, sizeof out->b);
+        if (sh_mb_load_text((const char *)text, len, &out->b) && !strcmp(out->b.hash, hash)) found = 1;
+        else sh_mb_free(&out->b);
+        free(text);
+    } while (!found && FindNextFileW(h, &fd));
+    FindClose(h);
+    if (found) out->snap = 1;
+    else out->dir[0] = 0;
+    return found;
+}
+
+/* 1 exact, 2 snapshot, 3 alias, 0 none. */
+static int me_pick_row(const sh_ms_list *l, const char *root, const char *hash, me_pick *out)
+{
+    size_t i;
+    const sh_ms_entry *e;
+    memset(out, 0, sizeof *out);
+    for (i = 0; i < l->count; i++)
+        if (!strcmp(l->items[i].bundle.hash, hash) && sh_ms_entry_usable(&l->items[i])) { out->e = &l->items[i]; return 1; }
+    if (root && me_snapshot_at(root, hash, out)) return 2;
+    e = sh_ms_resolve(l, hash);
+    if (e && sh_ms_entry_usable(e)) { out->e = e; return 3; }
+    return 0;
+}
+
+static int me_add_pick(me_writer *w, const me_pick *p, modexport_stats *st, char *cause, size_t cap)
+{
+    char mj[MAX_PATH * 4];
+    if (p->snap) {
+        me_join_native(mj, sizeof mj, p->dir, "bundle.json");
+        return me_add_build(w, p->b.id, &p->b, mj, p->dir, NULL, st, cause, cap);
+    }
+    me_join_native(mj, sizeof mj, p->e->folder, "mod.json");
+    /* While the folder's latest build is failed, its files may hold other
+     * bytes: the last good build's are read from its snapshot first. */
+    if (p->e->build_failed[0] && p->e->snapshot)
+        return me_add_build(w, p->e->name, &p->e->bundle, mj, p->e->snapshot, p->e->folder, st, cause, cap);
+    return me_add_build(w, p->e->name, &p->e->bundle, mj, p->e->folder, p->e->snapshot, st, cause, cap);
+}
+
+/* The rows were moved to the builds that serve them: pick again. */
+static int me_repick(me_pick **picked, size_t old_n, const sh_ms_list *l, const char *root,
+                     const sh_modmanifest_list *rows, char *cause, size_t cap)
+{
+    size_t i;
+    me_pick *p = (me_pick *)calloc(rows->count ? rows->count : 1, sizeof *p);
+    if (!p) return me_cause(cause, cap, "out of memory");
+    for (i = 0; i < rows->count; i++)
+        if (!me_pick_row(l, root, rows->rows[i].bundle, &p[i])) {
+            size_t k;
+            for (k = 0; k < i; k++) me_pick_free(&p[k]);
+            free(p);
+            return me_cause(cause, cap, "%s (bundle %.16s) is not installed", rows->rows[i].id, rows->rows[i].bundle);
+        }
+    for (i = 0; i < old_n; i++) me_pick_free(&(*picked)[i]);
+    free(*picked);
+    *picked = p;
     return 1;
 }
 
@@ -633,7 +740,8 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     modexport_stats *st = stp ? stp : &local;
     sh_modmanifest_list rows;
     sh_ms_list l;
-    const sh_ms_entry **picked = NULL;
+    me_pick *picked = NULL;
+    char root[MAX_PATH * 4] = "";
     me_writer w;
     wchar_t *wfinal = NULL, *wtmp = NULL;
     char tmp[MAX_PATH * 4];
@@ -664,29 +772,33 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     locked = 1;
     listed = sh_ms_enumerate(&l);
     if (!listed) { me_cause(cause, cap, "the mods store cannot be listed"); goto done; }
-    picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
+    if (!sh_ms_root(root, sizeof root)) root[0] = 0;
+    picked = (me_pick *)calloc(rows.count ? rows.count : 1, sizeof *picked);
     if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
+    /* Each declared bundle at its declared hash (DESIGN-additive 4). */
     for (i = 0; i < rows.count; i++) {
-        picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
-        if (picked[i] && !sh_ms_entry_usable(picked[i])) picked[i] = NULL;
-        if (!picked[i]) {
+        int how = me_pick_row(&l, root, rows.rows[i].bundle, &picked[i]);
+        if (!how) {
             me_cause(cause, cap, "the %s needs %s@%s (bundle %.16s), which is not installed or failed verification",
                      prefab ? "prefab" : "map", rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
             goto done;
         }
+        if (how == 2)
+            me_log("MODS: export: %s at bundle %.16s is carried from its last good build snapshot %s", rows.rows[i].id,
+                   rows.rows[i].bundle, picked[i].dir);
     }
     {
         /* A row may pin an earlier build (an alias): the export carries the
          * folder serving it now, and the exported rows name that build, so the
          * importer needs no alias. */
         sh_modmanifest_list fixed;
-        size_t moved = 0, map_len = 0;
+        size_t moved = 0, map_len = 0, old_n = rows.count;
         char err[160] = "";
-        for (i = 0; i < rows.count; i++) if (strcmp(picked[i]->bundle.hash, rows.rows[i].bundle)) moved++;
+        for (i = 0; i < rows.count; i++) if (strcmp(me_pick_bundle(&picked[i])->hash, rows.rows[i].bundle)) moved++;
         if (moved) {
             memset(&fixed, 0, sizeof fixed);
             for (i = 0; i < rows.count; i++) {
-                const sh_mb_bundle *b = &picked[i]->bundle;
+                const sh_mb_bundle *b = me_pick_bundle(&picked[i]);
                 sh_modmanifest_row *r = NULL;
                 for (k = 0; k < fixed.count && !r; k++) if (!strcmp(fixed.rows[k].bundle, b->hash)) r = &fixed.rows[k];
                 if (r) {
@@ -712,7 +824,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
                 me_log("MODS: export: %zu row(s) pinned an earlier build; the export carries and names the current one(s)", moved);
                 sh_modmanifest_list_free(&rows);
                 rows = fixed;
-                for (i = 0; i < rows.count; i++) picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
+                if (!me_repick(&picked, old_n, &l, root, &rows, cause, cap)) goto done;
                 st->bundles = (unsigned)rows.count;
                 goto rows_done;
             }
@@ -727,7 +839,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             len = map_len;
             sh_modmanifest_list_free(&rows);
             rows = fixed;
-            for (i = 0; i < rows.count; i++) picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
+            if (!me_repick(&picked, old_n, &l, root, &rows, cause, cap)) goto done;
             st->bundles = (unsigned)rows.count;
             st->map_bytes = len;
         }
@@ -750,9 +862,9 @@ rows_done:
     me_add(&w, pl->entry, map_json, len);
     for (i = 0; i < rows.count && !w.failed; i++) {
         int dup = 0;
-        for (k = 0; k < i && !dup; k++) dup = picked[k] == picked[i];
+        for (k = 0; k < i && !dup; k++) dup = !strcmp(me_pick_bundle(&picked[k])->hash, me_pick_bundle(&picked[i])->hash);
         if (dup) continue;
-        if (!me_add_folder(&w, picked[i], st, cause, cap)) goto done;
+        if (!me_add_pick(&w, &picked[i], st, cause, cap)) goto done;
     }
     me_finish(&w);
     if (w.failed) { me_cause(cause, cap, "%s", w.cause); goto done; }
@@ -770,6 +882,7 @@ done:
     if (w.h != INVALID_HANDLE_VALUE) CloseHandle(w.h);
     if (!ok && wtmp) DeleteFileW(wtmp);
     me_writer_free(&w);
+    if (picked) for (i = 0; i < rows.count; i++) me_pick_free(&picked[i]);
     free(picked);
     free(moved_map);
     free(prefab_text);
@@ -1245,14 +1358,6 @@ static int me_name_safe(const char *name)
     return strpbrk(name, "<>\"|?*/\\:") == NULL;
 }
 
-static int me_folder_taken(const char *root, const char *name)
-{
-    wchar_t *w = me_wjoin(root, name);
-    int taken = !w || GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
-    free(w);
-    return taken;
-}
-
 /* Remove what this import installed, and only that. */
 static void me_rollback(me_import *im, const char *root)
 {
@@ -1267,10 +1372,11 @@ static void me_rollback(me_import *im, const char *root)
     }
 }
 
-/* The asset rule for a carried folder (modserve.h sh_modserve_row_served):
- * an installed folder declares its id and the serving index resolves every
- * name the rows that name its bundle list (a prefab's block rows, a map's
- * rows). */
+/* The asset rule for a carried folder (modserve.h sh_modserve_row_served),
+ * pinned to its hash: the serving index has that bundle (or an alias of it,
+ * or the record knows it changes only the editor) and it resolves every name
+ * the rows that name its bundle list. Another build of the key never serves
+ * it (DESIGN-additive 2.5). */
 static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
 {
     sh_modmanifest_row row;
@@ -1280,6 +1386,7 @@ static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
     memset(&row, 0, sizeof row);
     if (strlen(c->b.id) >= sizeof row.id) return 0;
     strcpy_s(row.id, sizeof row.id, c->b.id);
+    strcpy_s(row.bundle, sizeof row.bundle, c->b.hash);
     for (i = 0; rows && i < rows->count; i++)
         if (!_stricmp(rows->rows[i].bundle, c->b.hash)) total += rows->rows[i].name_count;
     if (total && !(names = (char **)calloc(total, sizeof *names))) return 0;
@@ -1293,30 +1400,17 @@ static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows)
     return st == SH_MODSERVE_ROW_SERVED;
 }
 
-/* A folder name beside the installed folders of an id: "<id>@<version>",
- * else "<id>@<version>-2", "-3", ... */
-static int me_beside_name(const char *root, const char *id, const char *version, char *out, size_t cap)
-{
-    int k;
-    for (k = 1; k < 100; k++) {
-        if (k == 1) _snprintf_s(out, cap, _TRUNCATE, "%s@%s", id, version && version[0] ? version : "0.0.0");
-        else _snprintf_s(out, cap, _TRUNCATE, "%s@%s-%d", id, version && version[0] ? version : "0.0.0", k);
-        if (me_name_safe(out) && !me_folder_taken(root, out)) return 1;
-    }
-    return 0;
-}
-
-/* The ordinary install of each carried folder the store does not already
- * serve. A carried folder whose bundle the store holds (by hash or alias), or
- * whose id an installed folder declares and whose listed names that folder
- * provides (the asset rule, whatever the bytes), is skipped and counted as
- * already installed. Every other one is copied out of the export and
- * installed as a folder from elsewhere is (sh_ms_install_as: built, copied
- * in, verified), under its own name when no folder of its id is installed and
- * that name is free, else beside the installed folders of its id under
- * "<id>@<version>" (a free variant when that is taken). The built bundle must
- * be the one its own mod.json names. A refusal removes what the import
- * installed; nothing that was installed before is ever written. */
+/* The ordinary install by hash (DESIGN-additive 4) of each carried folder the
+ * store does not already serve. A carried folder whose bundle the store holds
+ * (by hash or alias) is skipped and counted as already installed. Every other
+ * one is copied out of the export and installed as a folder from elsewhere is
+ * (sh_ms_install_with, origin "imported": built, copied in, verified), under
+ * its key when no folder of the key is installed and that name is free, else
+ * beside the installed builds of its key as <key>@<hash16>
+ * (sh_ms_build_folder_name). Another build of the key is never a refusal and
+ * never written over. The built bundle must be the one its own mod.json names.
+ * A refusal removes what the import installed; nothing that was installed
+ * before is ever written. */
 static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_stats *st, char *cause, size_t cap)
 {
     sh_ms_list l;
@@ -1340,7 +1434,7 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
         if ((e && sh_ms_entry_usable(e)) || me_carry_served(c, rows)) {
             c->present = 1;
             st->bundles_present++;
-            me_log("MODS: import: mods/%s skipped: an installed folder of %s provides what the %s uses", c->name, c->b.id, what);
+            me_log("MODS: import: mods/%s skipped: %s at bundle %.16s is installed", c->name, c->b.id, c->b.hash);
             continue;
         }
         if (e) {
@@ -1370,25 +1464,22 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
             me_carry *c = &im->c[i];
             sh_ms_install_stats is;
             sh_mb_bundle built;
-            const char *as = NULL;
-            char beside[SH_MS_NAME_MAX + 1];
-            int same_id = 0;
+            char as[SH_MS_NAME_MAX + 1];
+            int same_id = 0, named;
             if (c->present || c->installed) continue;
             if (sh_ms_enumerate(&l)) {
                 for (k = 0; k < l.count && !same_id; k++) same_id = l.items[k].loaded && !strcmp(l.items[k].bundle.id, c->b.id);
                 sh_ms_list_free(&l);
             }
-            if (!same_id && me_name_safe(c->name) && !me_folder_taken(root, c->name)) as = c->name;
-            /* Beside an installed folder of the id, never over it (the store's
-             * own name for the same id and version would replace it). */
-            else if (same_id) {
-                if (!me_beside_name(root, c->b.id, c->b.version, beside, sizeof beside)) {
-                    me_cause(cause, cap, "no free folder name beside the installed %s", c->b.id);
-                    goto rollback;
-                }
-                as = beside;
+            /* Rule 1: the first build of a key takes the key, every later one
+             * <key>@<hash16> beside it, whatever the export's folder was called. */
+            named = sh_ms_build_folder_name(root, c->b.id, c->b.hash, same_id, as, sizeof as);
+            if (!named || !me_name_safe(as)) {
+                me_cause(cause, cap, "no free folder name for %s at %.16s", c->b.id, c->b.hash);
+                goto rollback;
             }
-            if (!sh_ms_install_as(c->stage, as, &r, c->stored, sizeof c->stored, &is, &built, c->why, sizeof c->why)) {
+            if (!sh_ms_install_with(c->stage, as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
+                                    c->why, sizeof c->why)) {
                 sh_mb_free(&built);
                 continue;
             }
@@ -1403,7 +1494,7 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
                 goto rollback;
             }
             me_log("MODS: import: mods/%s installed as mods\\%s (%s@%s+%llu, bundle %.16s)%s", c->name, c->stored, built.id,
-                   built.version, built.build, built.hash, same_id ? ", beside the installed folder of that id" : "");
+                   built.version, built.build, built.hash, same_id ? ", beside the installed build(s) of that key" : "");
             sh_mb_free(&built);
             st->bundles_installed++;
         }

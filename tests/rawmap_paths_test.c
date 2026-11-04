@@ -889,11 +889,10 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(strstr(R.print, "Rawmap rawmap_mods_missing.json needs 1 mod you do not have") != NULL);
     ticks(4);
     CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
-    CHECK(!strcmp(R.print, "Rawmap rawmap_mods_missing.json was not loaded: it needs test.alpha 1.0, which you do "
-                           "not have and the mod store does not hold. Ask the map's author for its .zip export, "
-                           "which carries the mods."));
-    CHECK(R.asks == 1 && !strcmp(R.ask, "This map was not loaded. It needs mods you do not have and the mod store "
-                                        "does not hold: test.alpha 1.0. Ask the map's author for its .zip export."));
+    /* The denial gate's cause 3: never published, and no folder at its hash. */
+    CHECK(!strcmp(R.print, "This map needs test.alpha at a build that is not installed and was never published. "
+                           "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
 
     printf("-- the editor reload refuses on its own frame, before LoadMap\n");
     {
@@ -903,7 +902,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
         CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
         CHECK(g_prepared == NULL && !g_in_reload);
         ticks(4);
-        CHECK(strstr(R.print, "test.alpha 1.0") && strstr(R.print, ".zip export"));
+        CHECK(strstr(R.print, "This map needs test.alpha at a build") && strstr(R.print, "rawmap ZIP"));
     }
     DeleteFileA(staged);
     mods_end();

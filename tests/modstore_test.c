@@ -767,7 +767,7 @@ int main(int argc, char **argv)
     sh_ms_hit hit;
     sh_mb_bundle b;
     const sh_ms_entry *e;
-    char h1[65], h0[65], d1[65] = "", d2[65] = "", d3[65] = "";
+    char h1[65], h0[65], d1[65] = "", d2[65] = "", d3[65] = "", k101[SH_MS_KEY_MAX + 1] = "";
 
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
@@ -834,38 +834,73 @@ int main(int argc, char **argv)
     CHECK(vs.entries == 1 && vs.files == 13);
     CHECK(!sh_ms_verify("alex.r2-imp@9.9.9", &vs, cause, sizeof cause) && strstr(cause, "no installed mod"));
 
-    /* Reinstalling unchanged content keeps build 1 and replaces the folder. */
+    /* Install by hash (DESIGN-additive 4). Reinstalling unchanged content is
+     * the bundle already present: nothing is copied, nothing replaced. */
+    g_logged = 0;
     CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    CHECK(!strcmp(key, "alex.r2-imp") && st.replaced && st.copied == 13);
+    CHECK(!strcmp(key, "alex.r2-imp") && st.present && !st.replaced && st.copied == 0);
+    CHECK(log_has("is already installed as alex.r2-imp; nothing was copied"));
     CHECK(sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause));
 
-    /* Changed content of the same version replaces it as build 2 (no blobs). */
+    /* Changed content of the same version is another build of the key: it is
+     * installed beside the first as <key>@<hash16>, never over it, and never
+     * refused for "same version, different files". Both are listed, each
+     * hash resolves to its own folder, and no alias joins them. */
     mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n// edited\r\n");
     mt_write(src, "mod.json", slurp(fixture, "mod.json", NULL));
-    g_logged = 0;
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
-    CHECK(!strcmp(key, "alex.r2-imp") && st.replaced && b.build == 2 && strcmp(b.hash, h1));
-    /* A map pinning build 1 loads build 2: the replaced hash is an alias. */
-    CHECK(log_has("1 earlier bundle(s) now resolve to it"));
-    CHECK(sh_ms_enumerate(&list));
-    CHECK(alias_of(&list, h1) && !strcmp(alias_of(&list, h1), b.hash));
-    e = sh_ms_resolve(&list, h1);
-    CHECK(e && !strcmp(e->name, "alex.r2-imp") && !strcmp(e->bundle.hash, b.hash));
-    CHECK(sh_ms_resolve(&list, b.hash) == e);
-    CHECK(!sh_ms_resolve(&list, "0000000000000000000000000000000000000000000000000000000000000000"));
-    sh_ms_list_free(&list);
-    strcpy_s(h1, sizeof h1, b.hash);
-    sh_mb_free(&b);
+    {
+        char beside[SH_MS_KEY_MAX + 1], want[SH_MS_KEY_MAX + 1];
+        unsigned char *first_before = (unsigned char *)slurp(root, "alex.r2-imp\\mod.json", NULL), *first_after;
+        CHECK(sh_ms_install_from_folder(src, &RESOLVER, beside, sizeof beside, &st, &b, cause, sizeof cause));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "alex.r2-imp@%.16s", b.hash);
+        CHECK(!strcmp(beside, want) && !st.replaced && !st.present && strcmp(b.hash, h1));
+        CHECK(!strcmp(b.version, "1.0.0") && !strcmp(b.origin, "install"));
+        first_after = (unsigned char *)slurp(root, "alex.r2-imp\\mod.json", NULL);
+        CHECK(first_before && first_after && !strcmp((char *)first_before, (char *)first_after));   /* not rewritten */
+        free(first_before); free(first_after);
+        CHECK(sh_ms_enumerate(&list) && list.count == 2);
+        e = sh_ms_resolve(&list, h1);
+        CHECK(e && !strcmp(e->name, "alex.r2-imp") && !strcmp(e->bundle.hash, h1));
+        e = sh_ms_resolve(&list, b.hash);
+        CHECK(e && !strcmp(e->name, want));
+        CHECK(!alias_of(&list, h1) && !alias_of(&list, b.hash));
+        CHECK(!sh_ms_resolve(&list, "0000000000000000000000000000000000000000000000000000000000000000"));
+        sh_ms_list_free(&list);
+        /* Installed again: present, in its own folder. */
+        CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+        CHECK(!strcmp(key, want) && st.present);
+        /* Uninstalling one build leaves the other. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, want);
+        CHECK(sh_ms_remove_folder(path) && !mt_has(root, want));
+        CHECK(sh_ms_enumerate(&list) && list.count == 1);
+        e = sh_ms_resolve(&list, h1);
+        CHECK(e && !strcmp(e->name, "alex.r2-imp") && sh_ms_entry_usable(e));
+        CHECK(!sh_ms_resolve(&list, b.hash));
+        sh_ms_list_free(&list);
+        CHECK(sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause) && vs.entries == 1);
+        sh_mb_free(&b);
+    }
+    /* The rule names folders: the first build of a key its key, every later
+     * one <key>@<hash16>, a folder already holding the hash answers 2. */
+    {
+        char nm[SH_MS_KEY_MAX + 1];
+        CHECK(sh_ms_build_folder_name(root, "alex.r2-imp", h1, 1, nm, sizeof nm) == 1);
+        CHECK(!strncmp(nm, "alex.r2-imp@", 12) && strlen(nm) == 12 + 16);
+        CHECK(sh_ms_build_folder_name(root, "alex.r2-imp", h1, 0, nm, sizeof nm) == 2 && !strcmp(nm, "alex.r2-imp"));
+        CHECK(sh_ms_build_folder_name(root, "alex.fresh", h1, 0, nm, sizeof nm) == 1 && !strcmp(nm, "alex.fresh"));
+    }
 
-    /* A second version installs beside it as <id>@<version>. */
+    /* A second version is another hash of the key: beside it, <key>@<hash16>. */
     {
         char *desc = slurp(fixture, "mod.json", NULL), *v = desc ? strstr(desc, "1.0.0") : NULL;
         if (v) v[4] = '1';
         mt_write(src, "mod.json", desc ? desc : "");
         free(desc);
     }
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    CHECK(!strcmp(key, "alex.r2-imp@1.0.1") && !st.replaced);
+    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    _snprintf_s(k101, sizeof k101, _TRUNCATE, "alex.r2-imp@%.16s", b.hash);
+    CHECK(!strcmp(key, k101) && !st.replaced && !strcmp(b.version, "1.0.1"));
+    sh_mb_free(&b);
 
     /* Two folders of one id: a decl both provide is a conflict; a raw file
      * with equal bytes in both is a dedupe. */
@@ -878,37 +913,50 @@ int main(int argc, char **argv)
 
     /* Corruption is detected, recorded in mod.json, and disables that folder. */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.1\\assets\\generated\\basemodel\\md6\\mods\\alex.r2_imp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model",
-                root);
+                "%s\\%s\\assets\\generated\\basemodel\\md6\\mods\\alex.r2_imp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model",
+                root, k101);
     {
         FILE *f = NULL;
         if (fopen_s(&f, path, "r+b") == 0 && f) { fputc('X', f); fclose(f); }
     }
-    CHECK(!sh_ms_verify("alex.r2-imp@1.0.1", &vs, cause, sizeof cause));
+    CHECK(!sh_ms_verify(k101, &vs, cause, sizeof cause));
     CHECK(strstr(cause, "imp_copy.bmd6model does not match mod.json") != NULL);
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.r2-imp@1.0.1");
+    e = find_entry(&list, k101);
     CHECK(e && e->loaded && e->sizes_ok && !e->validated && !sh_ms_entry_usable(e));
     CHECK(e && strstr(e->cause, "does not match"));
     CHECK(sh_ms_resolve_need(&list, "md6Def", "mods/alex.r2-imp/imp_copy.md6", &hit) == SH_MS_HIT);
     sh_ms_list_free(&list);
     {
-        char *text = slurp(root, "alex.r2-imp@1.0.1\\mod.json", NULL);
+        char mj[SH_MS_KEY_MAX + 16], *text;
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", k101);
+        text = slurp(root, mj, NULL);
         CHECK(text && strstr(text, "\"validated\": false") && strstr(text, "\"cause\": \"assets/"));
         free(text);
     }
     /* A missing file shows at enumeration without hashing. */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.1\\assets\\generated\\image\\mods\\alex.r2_imp\\imp_icon.bimage", root);
+                "%s\\%s\\assets\\generated\\image\\mods\\alex.r2_imp\\imp_icon.bimage", root, k101);
     DeleteFileA(path);
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.r2-imp@1.0.1");
+    e = find_entry(&list, k101);
     CHECK(e && !e->sizes_ok && strstr(e->cause, "missing"));
     sh_ms_list_free(&list);
 
     /* Removed: one folder of the id is left. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.1", root);
-    CHECK(sh_ms_remove_folder(path) && !mt_has(root, "alex.r2-imp@1.0.1"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, k101);
+    CHECK(sh_ms_remove_folder(path) && !mt_has(root, k101));
+
+    /* An in-place rebuild of a store folder (the author edits it) keeps its
+     * name and makes the earlier hash an alias, so maps pinning it load. */
+    mt_append(root, "alex.r2-imp\\assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n// in place\r\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp", root);
+    CHECK(sh_ms_install_from_folder(path, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(st.in_place && !strcmp(key, "alex.r2-imp") && strcmp(b.hash, h0));
+    CHECK(sh_ms_enumerate(&list) && alias_of(&list, h0) && !strcmp(alias_of(&list, h0), b.hash));
+    sh_ms_list_free(&list);
+    strcpy_s(h1, sizeof h1, b.hash);
+    sh_mb_free(&b);
 
     /* A folder dropped into mods\ by hand keeps its name; unbuilt, it is
      * listed as such, and the rebuild rule builds it in place. */

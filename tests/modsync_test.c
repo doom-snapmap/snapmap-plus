@@ -6,8 +6,11 @@
  *   409 at the manifest renegotiated, claim and re-claim with the secret
  *   kept in the claims section of mods\snapmap-plus.json, release, a 503
  *   queued in its pending section and retried, a 422 not queued, a cancelled
- *   push queued, a map pinning an earlier build of a folder uploading its
- *   current build, and downloads into empty stores: installed as mods\<id> with
+ *   push queued, a map pinning an earlier build of a folder rebuilt in place
+ *   uploading its current build, claims named by hash, the gate's probe
+ *   (found, 404, 451, 503, nothing listening, a borrow the game lacks), a
+ *   second build of an installed key downloaded beside it as <key>@<hash16>,
+ *   and downloads into empty stores: installed as mods\<id> with
  *   mod.json, verified and in the serving index, the same bundle again
  *   fetched from nowhere, a file an installed mod already holds copied
  *   instead of fetched, and a blob or manifest whose bytes do not match its
@@ -112,6 +115,66 @@ static const char *const X_BYTES[] = { "extra bytes", NULL };
 static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
 static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
 
+static const char *const G2_BYTES[] = { "gamma bytes, second build", NULL };
+static const char *const R_FILES[] = { "assets/generated/image/mods/test.borrow/rock.bimage", "assets/generated/image/mods/test.borrow/own.bimage", NULL };
+static const char *const R_BYTES[] = { "ROCK-GAME-BYTES-0123456789", "borrow's own bytes", NULL };
+#define ROCK_SOURCE "generated/image/stock/rock.bimage"
+
+/* A fake installed game holding one file (ROCK_SOURCE) with R_BYTES[0], and
+ * one of another revision that holds other bytes there. */
+static int g_game_lacks;
+static int rock_same(unsigned long long size, const char *sha)
+{
+    char h[65];
+    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), h);
+    return size == strlen(R_BYTES[0]) && !strcmp(h, sha);
+}
+static int rock_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+{
+    (void)ctx; (void)request;
+    if (g_game_lacks || !rock_same(size, sha)) return SH_MB_STOCK_ABSENT;
+    strcpy_s(source, cap, ROCK_SOURCE);
+    return SH_MB_STOCK_OK;
+}
+static int rock_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
+{
+    (void)ctx;
+    if (g_game_lacks || strcmp(source, ROCK_SOURCE)) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), sha);
+    *size = strlen(R_BYTES[0]);
+    return SH_MB_STOCK_OK;
+}
+static int rock_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
+{
+    char h[65];
+    (void)ctx;
+    if (strcmp(source, ROCK_SOURCE)) return SH_MB_STOCK_ABSENT;
+    if (g_game_lacks) return SH_MB_STOCK_MISMATCH;
+    sh_mb_sha256_hex(R_BYTES[0], strlen(R_BYTES[0]), h);
+    if (strcmp(h, sha)) return SH_MB_STOCK_MISMATCH;
+    if (size) *size = strlen(R_BYTES[0]);
+    return SH_MB_STOCK_OK;
+}
+static int rock_read(void *ctx, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    unsigned long long size = 0;
+    int r = rock_verify(ctx, source, sha, &size);
+    if (r != SH_MB_STOCK_OK) return r;
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, R_BYTES[0], (size_t)size);
+    *len = (size_t)size;
+    return SH_MB_STOCK_OK;
+}
+static int rock_has_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
+{ g_game_lacks = 0; return rock_verify(ctx, source, sha, size); }
+static int rock_lacks_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
+{ g_game_lacks = 1; return rock_verify(ctx, source, sha, size); }
+static int rock_has_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+{ g_game_lacks = 0; return rock_match(ctx, request, size, sha, source, cap); }
+static const sh_mb_stock_ops GAME_HAS_ROCK = { NULL, rock_has_match, rock_identify, rock_has_verify, rock_read };
+static const sh_mb_stock_ops GAME_LACKS_ROCK = { NULL, rock_match, rock_identify, rock_lacks_verify, rock_read };
+
 /* The builder's stock resolver: every shadow names a stock resource. */
 static int stock_yes(void *context, const char *request) { (void)context; (void)request; return 1; }
 
@@ -119,7 +182,7 @@ int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], storeB[MAX_PATH * 2], storeC[MAX_PATH * 2], dir[MAX_PATH * 2];
     char url[64], keyA[SH_MS_KEY_MAX + 1], keyB[SH_MS_KEY_MAX + 1], keyG[SH_MS_KEY_MAX + 1], keyX[SH_MS_KEY_MAX + 1];
-    char keyE[SH_MS_KEY_MAX + 1];
+    char keyE[SH_MS_KEY_MAX + 1], keyG2[SH_MS_KEY_MAX + 1], keyR[SH_MS_KEY_MAX + 1], hG2[65], hR[65];
     char hA[65], hB[65], hG[65], hX[65], hE[65], claim1[33], secret1[65], claim_again[33], path[MAX_PATH * 2];
     modsync_stats st;
     int puts_before;
@@ -269,7 +332,11 @@ int main(int argc, char **argv)
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\delta", src);
         make_mod(dir, "test.delta", NULL, D_FILES, D_BYTES);
         CHECK(install(dir, keyD, hD1));
-        make_mod(dir, "test.delta", NULL, D_FILES, D2_BYTES);
+        /* The author edits the installed folder in place: build 2 in the same
+         * folder, the earlier hash an alias of it. (An install from elsewhere
+         * would land beside it by hash instead.) */
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\test.delta", storeA);
+        mt_write(dir, "assets\\generated\\image\\mods\\test.delta\\d.bimage", D2_BYTES[0]);
         CHECK(install(dir, keyD, hD2) && strcmp(hD1, hD2));   /* the same folder, build 2 */
         CHECK(modsync_find_installed(hD1, folder, sizeof folder) && strstr(folder, "test.delta"));
         CHECK(modsync_upload_bundles(old, 1, "map-6", NULL, &st));
@@ -298,6 +365,28 @@ int main(int argc, char **argv)
         const char *one[] = { hE };
         CHECK(modsync_upload_bundles(one, 1, "map-e", NULL, &st) && stub_has_bundle(hE));
     }
+    /* The denial gate asks whether this machine published a bundle: a claim
+     * it holds names it (map-2 claims beta); a released claim does not. */
+    CHECK(modsync_claim_names(hB) == 1 && modsync_claim_names(hE) == 1);
+    CHECK(modsync_claim_names("1111111111111111111111111111111111111111111111111111111111111111") == 0);
+
+    /* ---- a second build of gamma and a mod that borrows a game file ---- */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma2", src); make_mod(dir, "test.gamma", NULL, G_FILES, G2_BYTES);
+    CHECK(install(dir, keyG2, hG2) && strcmp(hG2, hG) && strncmp(keyG2, "test.gamma@", 11) == 0);
+    {
+        const char *one[] = { hG2 };
+        CHECK(modsync_upload_bundles(one, 1, "map-g2", NULL, &st) && stub_has_bundle(hG2));
+    }
+    sh_mb_set_stock_ops(&GAME_HAS_ROCK);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\borrow", src); make_mod(dir, "test.borrow", NULL, R_FILES, R_BYTES);
+    CHECK(install(dir, keyR, hR));
+    {
+        const char *one[] = { hR };
+        int blobs = g_stub.blob_puts;
+        CHECK(modsync_upload_bundles(one, 1, "map-r", NULL, &st) && stub_has_bundle(hR));
+        CHECK(g_stub.blob_puts == blobs + 1);   /* the borrow's bytes never leave the machine */
+    }
+    sh_mb_set_stock_ops(NULL);
 
     /* ---- download into an empty store ---- */
     CHECK(sh_ms_set_root(storeB));
@@ -381,6 +470,61 @@ int main(int argc, char **argv)
     CHECK(!modsync_fetch_bundle("1111111111111111111111111111111111111111111111111111111111111111", NULL, &st) &&
           st.code == MODNET_E_NOT_FOUND);
     CHECK(modsync_fetch_bundle(hG, NULL, &st) && sh_modserve_bundle_state(hG, NULL, 0) == 1);
+
+    /* ---- install by hash: another build of an installed key lands beside it ---- */
+    {
+        char want[SH_MS_KEY_MAX + 1];
+        sh_ms_list l;
+        CHECK(modsync_fetch_bundle(hG2, NULL, &st) && !st.already_installed && st.bundles_created == 1);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "test.gamma@%.16s", hG2);
+        CHECK(!strcmp(st.key, want));
+        CHECK(sh_modserve_bundle_state(hG, NULL, 0) == 1 && sh_modserve_bundle_state(hG2, NULL, 0) == 1);
+        CHECK(sh_ms_enumerate(&l) && l.count == 2);
+        sh_ms_list_free(&l);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeC, want);
+        CHECK(file_contains(path, "\"origin\": \"download\""));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.gamma\\mod.json", storeC);
+        CHECK(mt_exists(path));   /* the first build keeps its folder and name */
+        /* Fetched again: present, nothing replaced. */
+        CHECK(modsync_fetch_bundle(hG2, NULL, &st) && st.already_installed);
+    }
+
+    /* ---- the gate's probe against the loopback store ---- */
+    {
+        modsync_probe pr;
+        int found = modsync_probe_bundle(hG2, NULL, &pr);
+        CHECK(found == 1 && pr.found == 1 && !pr.game_lacks && !strcmp(pr.id, "test.gamma") && !strcmp(pr.name, "test.gamma"));
+        CHECK(pr.size == strlen(G2_BYTES[0]));
+        /* Never on the store (404): absent. */
+        CHECK(modsync_probe_bundle("2222222222222222222222222222222222222222222222222222222222222222", NULL, &pr) == 0 &&
+              pr.code == MODNET_E_NOT_FOUND);
+        /* On the takedown list (451): as absent as 404 for the player. */
+        stub_fail_next("GET /mods/bundle/", 451);
+        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == 0 && pr.code == MODNET_E_BLOCKED);
+        /* A 503: the store did not answer. */
+        stub_fail_next("GET /mods/bundle/", 503);
+        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == -1 && pr.code == MODNET_E_UNAVAILABLE);
+        /* Nothing listening: unreachable. */
+        CHECK(modnet_set_base_url("http://127.0.0.1:1"));
+        CHECK(modsync_probe_bundle(hG2, NULL, &pr) == -1 && pr.found == -1 && modnet_unreachable(pr.code));
+        CHECK(modnet_set_base_url(url));
+        /* Held, but its borrow names a game file this game lacks (another
+         * revision): the probe names the source, and the download refuses it
+         * before any blob is fetched. */
+        sh_mb_set_stock_ops(&GAME_LACKS_ROCK);
+        CHECK(modsync_probe_bundle(hR, NULL, &pr) == 1 && pr.game_lacks && !strcmp(pr.source, ROCK_SOURCE));
+        {
+            int blobs = g_stub.blob_gets;
+            CHECK(!modsync_fetch_bundle(hR, NULL, &st) && st.code == MODNET_E_GAME && st.game_lacks &&
+                  !strcmp(st.game_source, ROCK_SOURCE) && g_stub.blob_gets == blobs);
+            CHECK(sh_modserve_bundle_state(hR, NULL, 0) == 0);
+        }
+        /* The same bundle where the game holds the file: installs. */
+        sh_mb_set_stock_ops(&GAME_HAS_ROCK);
+        CHECK(modsync_probe_bundle(hR, NULL, &pr) == 1 && !pr.game_lacks);
+        CHECK(modsync_fetch_bundle(hR, NULL, &st) && sh_modserve_bundle_state(hR, NULL, 0) == 1);
+        sh_mb_set_stock_ops(NULL);
+    }
 
     modnet_shutdown();
     stub_stop();

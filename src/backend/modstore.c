@@ -1742,9 +1742,9 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
     return 1;
 }
 
-static int ms_install_locked(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
-                             char *name_out, size_t name_cap, sh_ms_install_stats *st,
-                             sh_mb_bundle *bundle_out, char *cause, size_t cap);
+static int ms_install_locked(const char *folder, const char *as_name, const char *origin,
+                             const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                             sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap);
 
 int sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
                               char *name_out, size_t name_cap, sh_ms_install_stats *stats,
@@ -1757,12 +1757,47 @@ int sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolv
                      char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                      sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
+    return sh_ms_install_with(folder, as_name, NULL, resolver, name_out, name_cap, stats, bundle_out, cause, cap);
+}
+
+int sh_ms_install_with(const char *folder, const char *as_name, const char *origin, const sh_mb_resolver *resolver,
+                       char *name_out, size_t name_cap, sh_ms_install_stats *stats,
+                       sh_mb_bundle *bundle_out, char *cause, size_t cap)
+{
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, as_name, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, as_name, origin, resolver, name_out, name_cap, stats ? stats : &local, bundle_out,
+                           cause, cap);
     modstore_unlock();
     return ok;
+}
+
+int sh_ms_build_folder_name(const char *mods_root, const char *key, const char *hash, int key_installed,
+                            char *out, size_t cap)
+{
+    int round;
+    if (!mods_root || !key || !key[0] || !hash || strlen(hash) < 16 || !out || !cap) return 0;
+    for (round = key_installed ? 1 : 0; round < 12; round++) {
+        char leaf[SH_MB_ID_MAX + 48], path[MAX_PATH * 4];
+        wchar_t *w;
+        DWORD a;
+        if (round == 0) strcpy_s(leaf, sizeof leaf, key);
+        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%.16s", key, hash);
+        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%.16s-%d", key, hash, round);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", mods_root, leaf);
+        w = sh_mb_wpath(path);
+        a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (a == INVALID_FILE_ATTRIBUTES) { strncpy_s(out, cap, leaf, _TRUNCATE); return 1; }
+        if (a & FILE_ATTRIBUTE_DIRECTORY) {
+            sh_mb_bundle have;
+            int same = sh_mb_load_folder(path, &have) && strcmp(have.hash, hash) == 0;
+            sh_mb_free(&have);
+            if (same) { strncpy_s(out, cap, leaf, _TRUNCATE); return 2; }
+        }
+    }
+    return 0;
 }
 
 /* The mod.json author text of a source folder (mod.json, else package.json). */
@@ -1778,9 +1813,9 @@ static char *ms_author_text(const wchar_t *src, size_t *len)
     return t;
 }
 
-static int ms_install_locked(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
-                             char *name_out, size_t name_cap, sh_ms_install_stats *st,
-                             sh_mb_bundle *bundle_out, char *cause, size_t cap)
+static int ms_install_locked(const char *folder, const char *as_name, const char *origin,
+                             const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                             sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
     sh_mb_bundle b;
     sh_mb_resolver chain_resolver;
@@ -1834,33 +1869,52 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         goto done;
     }
     {
-        /* The build counter continues from the installed folder of the same
-         * id and version: unchanged content keeps its number, changed content
-         * takes the next one (the source folder carries no product block). */
-        const sh_ms_entry *same = NULL;
-        for (i = 0; i < list.count && !same; i++) {
+        /* Install by hash (DESIGN-additive 4). A usable folder that already
+         * holds this bundle is the install: nothing is copied. A folder named
+         * by the caller (as_name: a migration's target) of the same id and
+         * version is replaced, and its build counter continues: unchanged
+         * content keeps its number, changed content takes the next one.
+         * Otherwise the bundle gets a folder of its own by rule 1
+         * (sh_ms_build_folder_name): its key when no folder of the key is
+         * installed, else <key>@<hash16> beside the others. Nothing installed
+         * is ever replaced, and same-version-other-files is never refused:
+         * the hash is the identity. */
+        const sh_ms_entry *same = NULL, *present = NULL;
+        int key_installed = 0;
+        for (i = 0; i < list.count; i++) {
             const sh_ms_entry *e = &list.items[i];
-            if (e->loaded && !strcmp(e->bundle.id, b.id) && !strcmp(e->bundle.version, b.version) &&
-                (!as_name || !as_name[0] || !_stricmp(e->name, as_name))) same = e;
+            if (!e->loaded || strcmp(e->bundle.id, b.id)) continue;
+            key_installed = 1;
+            if (!present && !strcmp(e->bundle.hash, b.hash) && sh_ms_entry_usable(e)) present = e;
+            if (!same && as_name && as_name[0] && !strcmp(e->bundle.version, b.version) && !_stricmp(e->name, as_name))
+                same = e;
         }
-        if (same && same->bundle.build) {
-            sh_mb_renumber(&b, same->bundle.build);
-            if (strcmp(b.hash, same->bundle.hash) != 0) sh_mb_renumber(&b, same->bundle.build + 1);
-            else b.built = same->bundle.built;
-        }
-        if (same && (!as_name || !as_name[0])) strncpy_s(name, sizeof name, same->name, _TRUNCATE);
-        if (same) strcpy_s(replaced_hash, sizeof replaced_hash, same->bundle.hash);
-    }
-    if (as_name && as_name[0]) {
-        strncpy_s(name, sizeof name, as_name, _TRUNCATE);
-    } else {
-        if (!name[0] && !sh_mb_folder_name(rootu, b.id, b.version, b.hash, name, sizeof name)) {
+        if (as_name && as_name[0]) {
+            if (same && same->bundle.build) {
+                sh_mb_renumber(&b, same->bundle.build);
+                if (strcmp(b.hash, same->bundle.hash) != 0) sh_mb_renumber(&b, same->bundle.build + 1);
+                else b.built = same->bundle.built;
+            }
+            if (same) strcpy_s(replaced_hash, sizeof replaced_hash, same->bundle.hash);
+            strncpy_s(name, sizeof name, as_name, _TRUNCATE);
+        } else if (present) {
+            strncpy_s(name, sizeof name, present->name, _TRUNCATE);
+            st->present = 1;
+            for (i = 0; i < b.file_count; i++)
+                if (b.files[i].stock) { st->stock_files++; st->stock_bytes += b.files[i].size; }
             sh_ms_list_free(&list);
-            ms_cause(cause, cap, "no free folder name for %s@%s", b.id, b.version);
+            ms_log("MODS: store: %s@%s (bundle %.16s) is already installed as %s; nothing was copied", b.id, b.version,
+                   b.hash, name);
+            ok = 1;
+            goto done;
+        } else if (!sh_ms_build_folder_name(rootu, b.id, b.hash, key_installed, name, sizeof name)) {
+            sh_ms_list_free(&list);
+            ms_cause(cause, cap, "no free folder name for %s at %.16s", b.id, b.hash);
             goto done;
         }
     }
     sh_ms_list_free(&list);
+    if (origin && origin[0]) strncpy_s(b.origin, sizeof b.origin, origin, _TRUNCATE);
     if (!b.origin[0]) strcpy_s(b.origin, sizeof b.origin, SH_MB_ORIGIN_INSTALL);
     for (i = 0; i < b.file_count; i++) {
         if (!b.files[i].stock) continue;

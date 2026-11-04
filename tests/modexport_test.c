@@ -9,12 +9,16 @@
  * both, the map text returned unchanged); a second import installs nothing
  * and rewrites nothing. A damaged entry and a folder whose files do not build
  * to the bundle its row names are refused and leave nothing installed; a
- * mod installed with another version takes the second folder beside it as
- * <id>@<version>, and that folder name travels in a later export; the same
- * id and version installed with other content refuses the import; a mod that
- * needs another carried one installs after it. A map naming a bundle it does
- * not carry imports what it carries and counts the rest as absent; a map
- * pinning an earlier build exports the current one. The rawmap hooks take
+ * mod installed at another build (another version, or the same version with
+ * other files) takes the carried build beside it as <key>@<hash16>, origin
+ * "imported", and that folder name travels in a later export; nothing is
+ * refused for a mod reason; a mod that needs another carried one installs
+ * after it. A map naming a bundle it does not carry imports what it carries
+ * and counts the rest as absent. Export by hash: a map pinning one build of
+ * two installed carries exactly that build and round-trips on a second store;
+ * a failed folder's build is carried from its last good build snapshot, a
+ * build whose folder is gone from its snapshot alone, and a build rebuilt in
+ * place through its alias, naming the current one. The rawmap hooks take
  * ANSI paths and return process-heap text. A prefab's export has the same
  * layout (also without mods); each importer refuses the other's ZIP; the
  * prefab importer installs only the carried folders the prefab's rows name,
@@ -513,7 +517,7 @@ int main(int argc, char **argv)
      * whatever its bytes or version; one that lacks a path gets the carried folder beside it ---- */
     {
         char storeH[MAX_PATH * 2], storeI[MAX_PATH * 2], storeJ[MAX_PATH * 2], before[MAX_PATH * 2], zipH[MAX_PATH * 2];
-        char key2[SH_MS_KEY_MAX + 1], *text;
+        char key2[SH_MS_KEY_MAX + 1], *text, beside_a[SH_MS_KEY_MAX + 1];
         sh_modmanifest_row ra2, ra3;
         unsigned char *b1, *b2;
         size_t l1 = 0, l2 = 0, len = 0;
@@ -532,13 +536,21 @@ int main(int argc, char **argv)
         if (!text) fprintf(stderr, "beside import: %s\n", cause);
         CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
         free(text);
-        /* 1.0.0 lands beside 2.0.0 under the store's name for a second folder of an id. */
-        CHECK(has_folder(storeH, "test.alpha@1.0.0") && has_folder(storeH, "test.beta") && folder_count(storeH) == 3);
+        /* 1.0.0 lands beside 2.0.0 under rule 1: <key>@<hash16> for a later build of a key. */
+        _snprintf_s(beside_a, sizeof beside_a, _TRUNCATE, "test.alpha@%.16s", ra.bundle);
+        CHECK(has_folder(storeH, beside_a) && has_folder(storeH, "test.beta") && folder_count(storeH) == 3);
+        {
+            char mj[MAX_PATH * 2];
+            _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\%s\\mod.json", storeH, beside_a);
+            unsigned char *t = slurp(mj, NULL);
+            CHECK(t && strstr((const char *)t, "\"origin\": \"imported\""));
+            free(t);
+        }
         b2 = slurp(before, &l2);
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));   /* the installed folder is not rewritten */
         free(b1); free(b2);
         CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(ra2.bundle, NULL, 0) == 1);
-        /* That folder's name travels: an export from storeH carries mods/test.alpha@1.0.0/. */
+        /* That folder's name travels: an export from storeH carries mods/test.alpha@<hash16>/. */
         {
             const sh_modmanifest_row *one[] = { &ra, NULL };
             size_t ml = 0, zl = 0;
@@ -546,15 +558,17 @@ int main(int argc, char **argv)
             unsigned char *z;
             CHECK(m1 && modexport_write(m1, ml, zipH, &st, cause, sizeof cause) && st.bundles == 1);
             z = slurp(zipH, &zl);
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.alpha@1.0.0\\mod.json", storeH);
-            CHECK(z && entry_is_file(z, zl, "mods/test.alpha@1.0.0/mod.json", path) && entry_data(z, zl, "two versions.json"));
+            char ename[160];
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeH, beside_a);
+            _snprintf_s(ename, sizeof ename, _TRUNCATE, "mods/%s/mod.json", beside_a);
+            CHECK(z && entry_is_file(z, zl, ename, path) && entry_data(z, zl, "two versions.json"));
             CHECK(z && entry_data(z, zl, "mods/test.alpha/mod.json") == 0 && count_entries(z, zl) == 4);
             free(z);
             if (m1) HeapFree(GetProcessHeap(), 0, m1);
-            /* ... and an empty store installs it under that name. */
+            /* ... and an empty store installs it under its key (the first build of the key there). */
             CHECK(fresh_store(storeJ));
             text = modexport_read(zipH, &len, &st, cause, sizeof cause);
-            CHECK(text && st.bundles_installed == 1 && has_folder(storeJ, "test.alpha@1.0.0") && folder_count(storeJ) == 1);
+            CHECK(text && st.bundles_installed == 1 && has_folder(storeJ, "test.alpha") && folder_count(storeJ) == 1);
             free(text);
         }
         /* storeI holds test.alpha 1.0.0 with other bytes at the same paths:
@@ -570,7 +584,7 @@ int main(int argc, char **argv)
         if (!text) fprintf(stderr, "served import: %s\n", cause);
         CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
         free(text);
-        CHECK(folder_count(storeI) == 3 && has_folder(storeI, "test.beta") && has_folder(storeI, "test.alpha@1.0.0"));
+        CHECK(folder_count(storeI) == 3 && has_folder(storeI, "test.beta") && has_folder(storeI, beside_a));
         b2 = slurp(before, &l2);
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
         free(b1); free(b2);
@@ -590,7 +604,7 @@ int main(int argc, char **argv)
             if (!text) fprintf(stderr, "beside same version: %s\n", cause);
             CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
             free(text);
-            CHECK(has_folder(storeL, "test.alpha") && has_folder(storeL, "test.alpha@1.0.0") && folder_count(storeL) == 3);
+            CHECK(has_folder(storeL, "test.alpha") && has_folder(storeL, beside_a) && folder_count(storeL) == 3);
             b2 = slurp(before, &l2);
             CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
             free(b1); free(b2);
@@ -653,47 +667,128 @@ int main(int argc, char **argv)
         CHECK(modexport_read_text(plain, &len) == NULL);
     }
 
-    /* ---- a map pinning an earlier build of a folder ---- */
+    /* ---- export by hash (DESIGN-additive 4): each declared build at its
+     * declared hash, also beside another build of its key, from a failed
+     * folder's last good build snapshot, from a snapshot whose folder is gone,
+     * and through an alias of a folder rebuilt in place ---- */
     {
         static const char *const C2_BYTES[] = { "gamma bytes, edited", NULL };
-        sh_modmanifest_row rc2;
+        static const char *const C3_BYTES[] = { "gamma bytes, edited in place", NULL };
+        sh_modmanifest_row rc2, rc3;
         sh_modmanifest_list got;
         unsigned rejected = 0;
-        char zip3[MAX_PATH * 2], storeD[MAX_PATH * 2], *pinned, *text;
+        char zip3[MAX_PATH * 2], storeD[MAX_PATH * 2], *pinned, *text, beside_c[SH_MS_KEY_MAX + 1], gfolder[MAX_PATH * 2];
+        char snapdir[MAX_PATH * 4], storeD2[MAX_PATH * 2], storeD3[MAX_PATH * 2], storeD4[MAX_PATH * 2];
+        char storeP[MAX_PATH * 2];
         size_t pl = 0, len = 0;
         const sh_modmanifest_row *pin_rows[] = { &ra, &rc, NULL };
         const sh_modmanifest_row *two_builds[] = { &rc, NULL, NULL };
+        const sh_modmanifest_row *only_c[] = { &rc, NULL };
         _snprintf_s(zip3, sizeof zip3, _TRUNCATE, "%s\\pinned.zip", tmp);
         _snprintf_s(storeD, sizeof storeD, _TRUNCATE, "%s\\storeD", tmp);
+        _snprintf_s(storeD2, sizeof storeD2, _TRUNCATE, "%s\\storeD2", tmp);
+        _snprintf_s(storeD3, sizeof storeD3, _TRUNCATE, "%s\\storeD3", tmp);
+        _snprintf_s(storeD4, sizeof storeD4, _TRUNCATE, "%s\\storeD4", tmp);
+        _snprintf_s(storeP, sizeof storeP, _TRUNCATE, "%s\\storeP", tmp);
         CHECK(fresh_store(storeA));
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", src);
         make_mod(dir, "test.gamma", C_FILES, C2_BYTES);
-        CHECK(install(dir, keyC, &rc2) && strcmp(rc2.bundle, rc.bundle));   /* the same folder, build 2 */
+        CHECK(install(dir, keyC, &rc2) && strcmp(rc2.bundle, rc.bundle));   /* another build of the key */
+        _snprintf_s(beside_c, sizeof beside_c, _TRUNCATE, "test.gamma@%.16s", rc2.bundle);
+        CHECK(!strcmp(keyC, beside_c) && has_folder(storeA, "test.gamma"));
+        /* A map pinning the first build carries exactly that build; its rows are unchanged. */
         pinned = map_naming(BASE_MAP, sizeof BASE_MAP - 1, pin_rows, &pl);
         CHECK(pinned && strstr(pinned, rc.bundle));
         CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause));
         if (!pinned || !st.bundles) fprintf(stderr, "pinned export: %s\n", cause);
         CHECK(st.bundles == 2);
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zip3, &zl);
+            CHECK(z && entry_data(z, zl, "mods/test.gamma/mod.json") && count_entries_with(z, zl, "mods/test.gamma@") == 0);
+            free(z);
+        }
+        /* Imported on a second store, it round-trips: the same hashes, the map as written. */
         CHECK(fresh_store(storeD));
         CHECK(sh_modserve_index_build(storeD) == 0);
         text = modexport_read(zip3, &len, &st, cause, sizeof cause);
         if (!text) fprintf(stderr, "pinned import: %s\n", cause);
         CHECK(text && st.bundles_installed == 2);
-        /* The exported map names the build the export carries. */
         memset(&got, 0, sizeof got);
         if (text) sh_modmanifest_read(text, len, &got, &rejected);
         CHECK(got.count == 2 && rejected == 0);
-        CHECK(got.count == 2 && (!strcmp(got.rows[0].bundle, rc2.bundle) || !strcmp(got.rows[1].bundle, rc2.bundle)));
-        CHECK(text && !strstr(text, rc.bundle));
-        CHECK(sh_modserve_bundle_state(rc2.bundle, NULL, 0) == 1);
+        CHECK(got.count == 2 && (!strcmp(got.rows[0].bundle, rc.bundle) || !strcmp(got.rows[1].bundle, rc.bundle)));
+        CHECK(text && !strstr(text, rc2.bundle) && pinned && len == pl && !memcmp(text, pinned, pl));
+        CHECK(sh_modserve_bundle_state(rc.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(rc2.bundle, NULL, 0) == 0);
         sh_modmanifest_list_free(&got);
         free(text);
         if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
-        /* Two rows naming two builds of one folder become one row and one folder. */
+        /* The second build into the same second store lands beside the first. */
+        pinned = map_naming(BASE_MAP, sizeof BASE_MAP - 1, (const sh_modmanifest_row *[]){ &rc2, NULL }, &pl);
+        CHECK(sh_ms_set_root(storeA));
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
+        CHECK(sh_ms_set_root(storeD) && sh_modserve_index_build(storeD) >= 0);
+        text = modexport_read(zip3, &len, &st, cause, sizeof cause);
+        CHECK(text && st.bundles_installed == 1 && has_folder(storeD, "test.gamma") && has_folder(storeD, beside_c));
+        CHECK(sh_modserve_bundle_state(rc.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(rc2.bundle, NULL, 0) == 1);
+        free(text);
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+        /* Two rows naming two builds of one key: two folders. */
         CHECK(fresh_store(storeA));
+        CHECK(install(dir, keyC, &rc2) && !strcmp(keyC, beside_c));
         two_builds[1] = &rc2;
         pinned = map_naming(BASE_MAP, sizeof BASE_MAP - 1, two_builds, &pl);
-        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1 && st.entries == 1 + 1 + 1);
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 2 &&
+              st.entries == 1 + 2 * (1 + 1));
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+
+        /* The folder's latest build failed after its files were edited: the
+         * declared build is carried from its last good build snapshot. */
+        pinned = map_naming(BASE_MAP, sizeof BASE_MAP - 1, only_c, &pl);
+        _snprintf_s(gfolder, sizeof gfolder, _TRUNCATE, "%s\\test.gamma", storeA);
+        mt_write(gfolder, "assets\\generated\\image\\mods\\test.gamma\\c.bimage", "edited, not built");
+        sh_ms_note_build_failure(gfolder, "test: the edit does not build");
+        CHECK(sh_ms_snapshot_of(gfolder, snapdir, sizeof snapdir));
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
+        if (!st.bundles) fprintf(stderr, "snapshot export: %s\n", cause);
+        CHECK(fresh_store(storeD2));
+        text = modexport_read(zip3, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "snapshot import: %s\n", cause);
+        CHECK(text && st.bundles_installed == 1 && sh_modserve_bundle_state(rc.bundle, NULL, 0) == 1);
+        free(text);
+        /* The folder is gone and only its snapshot holds the build. */
+        CHECK(sh_ms_set_root(storeA));
+        mt_remove_tree(gfolder);
+        CHECK(mt_exists(snapdir));
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
+        if (!st.bundles) fprintf(stderr, "snapshot-only export: %s\n", cause);
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zip3, &zl);
+            CHECK(z && entry_data(z, zl, "mods/test.gamma/mod.json"));
+            free(z);
+        }
+        CHECK(fresh_store(storeD3));
+        text = modexport_read(zip3, &len, &st, cause, sizeof cause);
+        CHECK(text && st.bundles_installed == 1 && has_folder(storeD3, "test.gamma") &&
+              sh_modserve_bundle_state(rc.bundle, NULL, 0) == 1);
+        free(text);
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+
+        /* Rebuilt in place by its author: the earlier hash is an alias, the
+         * export carries the build this machine serves and names it. */
+        CHECK(fresh_store(storeP));
+        make_mod(dir, "test.gamma", C_FILES, C_BYTES);
+        CHECK(install(dir, keyC, &rc) && !strcmp(keyC, "test.gamma"));
+        _snprintf_s(gfolder, sizeof gfolder, _TRUNCATE, "%s\\test.gamma", storeP);
+        mt_write(gfolder, "assets\\generated\\image\\mods\\test.gamma\\c.bimage", C3_BYTES[0]);
+        CHECK(install(gfolder, keyC, &rc3) && strcmp(rc3.bundle, rc.bundle));
+        pinned = map_naming(BASE_MAP, sizeof BASE_MAP - 1, only_c, &pl);
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
+        CHECK(fresh_store(storeD4));
+        text = modexport_read(zip3, &len, &st, cause, sizeof cause);
+        CHECK(text && strstr(text, rc3.bundle) && !strstr(text, rc.bundle));
+        free(text);
         if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
     }
 

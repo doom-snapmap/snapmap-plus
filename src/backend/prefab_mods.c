@@ -1304,6 +1304,7 @@ static int pm_default_root(char *out, size_t cap) { (void)out; (void)cap; return
 #include "grid_room_native.h"
 #include "apply_engine.h"
 #include "ui_bridge.h"
+#include "modstore.h"
 
 static int eng_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
@@ -1335,12 +1336,26 @@ static int eng_listed(const sh_modmanifest_row *row)
     return listed;
 }
 
-/* The Mods tab's Use in this map, for the build that serves the row. */
+/* The Mods tab's Use in this map, for the build the prefab pins: the Mods
+ * tab names a build by its folder, so the folder at the row's hash (or the
+ * one an alias of it names) is passed, never the key alone, which would
+ * declare the newest build of the key when two are installed
+ * (DESIGN-additive 2.5). */
 static int eng_attach(const sh_modmanifest_row *row, char *note, size_t cap)
 {
     sh_modserve_bundle_ref ref;
+    sh_ms_list l;
+    char folder[SH_MS_NAME_MAX + 1] = "";
     const char *key = row->id;
     if (sh_modserve_bundle_serving(row->bundle, row->id, &ref) && ref.id[0]) key = ref.id;
+    modstore_lock();
+    if (sh_ms_enumerate(&l)) {
+        const sh_ms_entry *e = sh_ms_resolve(&l, row->bundle);
+        if (e && sh_ms_entry_usable(e)) strncpy_s(folder, sizeof folder, e->name, _TRUNCATE);
+        sh_ms_list_free(&l);
+    }
+    modstore_unlock();
+    if (folder[0]) key = folder;
     (void)sh_modui_run(SH_MODS_ACT_MAP_ADD, key);
     if (eng_listed(row)) return 1;
     if (note && cap) strncpy_s(note, cap, "the Mods tab can add it with Use in this map", _TRUNCATE);

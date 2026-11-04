@@ -102,9 +102,16 @@ int sh_modpublished_holding(void);
 
 /* The question as raised: "This map needs N mod(s): <names> (<size>).
  * Download and install now?", names that do not fit summarized as "and K
- * more". Always shorter than 256 bytes (the native dialog body). */
+ * more". Always shorter than 256 bytes (the native dialog body). A mod whose
+ * key is installed at another build is listed as "<key> (build <h8>, you
+ * have <h8>)". */
 void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
                                       unsigned long long bytes);
+/* The question for one mod installed at another build (DESIGN-additive 2.5):
+ * "This <thing> needs <title> at build <want16>; you have build <have16>.
+ * Download build <want16> (<size>) and install it beside yours?" */
+void sh_modpublished_compose_other_build_question(char *out, size_t cap, const char *thing, const char *title,
+                                                  const char *want, const char *have, unsigned long long bytes);
 
 /* ------------------------------------------------------------ seam */
 
@@ -140,6 +147,81 @@ typedef struct sh_modpub_resume {
 #define SH_MODPUB_ROW_MISSING    0
 #define SH_MODPUB_ROW_SERVED     1
 #define SH_MODPUB_ROW_INCOMPLETE 2
+
+/* ------------------------------------------------------------ the denial gate
+ * DESIGN-additive 2.8. Every hold (published plays, lobby joins, My Maps,
+ * rawmap loads, prefab placements) first asks the mod store about each
+ * missing bundle on the worker (the probe) and then makes one decision per
+ * bundle, sh_modpub_gate_decide. A bundle the store holds and this machine can
+ * install is obtainable: the player is asked once with the size, and Yes
+ * fetches it by hash and installs it beside any other build of its key. Every
+ * other bundle denies the launch, in exactly one of four causes, each with its
+ * own sentence in the game's own dialog and one console line:
+ *
+ *   1 GONE             published, and the store answers not found (404, or
+ *                      451 on the takedown list): its author unpublished it,
+ *                      or it was removed. Permanent for this machine.
+ *   2 UNREACHABLE      the store could not be asked or did not answer.
+ *   3 NEVER_PUBLISHED  never published (a My Maps save, a rawmap, a prefab
+ *                      with no claim of this machine's naming the bundle) and
+ *                      no store has it: the author's folder is gone.
+ *   4 GAME_REVISION    the store has it, but a borrow names game bytes this
+ *                      machine lacks (a different game revision). Permanent.
+ *
+ * "Installed at another build" (sh_modserve_row_other_build) is never a cause:
+ * it is the obtainable case, and the question names both builds.
+ *
+ * Placeholders (phase 6) plug in here and nowhere else: a placeholder system
+ * adds a verdict that sh_modpub_gate_decide returns instead of a denial, and
+ * the hold resumes with stand-ins for the bundles so decided. */
+enum sh_modpub_store_answer {
+    SH_MODPUB_STORE_UNREACHABLE = -1,
+    SH_MODPUB_STORE_ABSENT      = 0,
+    SH_MODPUB_STORE_HAS         = 1
+};
+enum sh_modpub_verdict {
+    SH_MODPUB_GATE_OBTAIN          = 0,   /* fetch by hash, install beside */
+    SH_MODPUB_GATE_GONE            = 1,
+    SH_MODPUB_GATE_UNREACHABLE     = 2,
+    SH_MODPUB_GATE_NEVER_PUBLISHED = 3,
+    SH_MODPUB_GATE_GAME_REVISION   = 4
+};
+typedef struct sh_modpub_gate_facts {
+    int store;          /* sh_modpub_store_answer for the bundle's hash */
+    int game_lacks;     /* the store has it, and a borrow in it names game bytes this machine lacks */
+    int published;      /* the map came from the map service (any published hook), or a claim this
+                           machine holds names the bundle */
+    int other_build;    /* the key is installed at another hash (informational: never a denial) */
+} sh_modpub_gate_facts;
+
+/* The one decision: a sh_modpub_verdict. */
+int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
+
+/* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
+ * line say it: "This <subject> needs <title> at a build that ...". `subject`
+ * is "map" or "prefab" (NULL: "map"), `title` "<name> (<key>)" or the key,
+ * `source` the borrow's installed path (verdict 4). The dialog shows it
+ * truncated to the native body (255 bytes); the console line is whole. */
+void sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
+                            char *out, size_t cap);
+
+/* What the probe learned about one bundle (modsync.h modsync_probe). */
+typedef struct sh_modpub_probe {
+    int found;          /* sh_modpub_store_answer */
+    int game_lacks;
+    char source[260];   /* game_lacks: the borrow's installed source path */
+    char name[128];     /* found: the bundle's display name */
+} sh_modpub_probe;
+
+/* Product versions ("v0.2.1-beta.24", "0.3.0"): negative, 0 or positive as a
+ * is older than, equal to or newer than b (semantic-version order: numeric
+ * major.minor.patch, then a release after its pre-releases, pre-release
+ * identifiers numerically or by text). A leading "v" is ignored. */
+int  sh_modpub_version_compare(const char *a, const char *b);
+
+/* The product-version notice (DESIGN-additive 2.7): "This map needs Snapmap+
+ * <version> or later." */
+void sh_modpub_product_notice(char *out, size_t cap, const char *version);
 
 /* Everything the state machine asks of the engine and of the lanes it depends
  * on. Production binds these at install; tests supply fakes. */
@@ -178,6 +260,24 @@ typedef struct sh_modpub_ops {
     int  (*store_has)(void *c, const char *hash, volatile int *cancel);
     /* One line on the game console. */
     void (*print)(void *c, const char *line);
+    /* The gate's probe (modsync_probe_bundle): fills *out and returns
+     * out->found. NULL: store_has answers `found` alone. Worker thread. */
+    int  (*store_probe)(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out);
+    /* 1 when a claim this machine holds names the bundle (modsync_claim_names). */
+    int  (*claimed)(void *c, const char *hash);
+    /* The row's key installed at another build (sh_modserve_row_other_build):
+     * 1 with that build's hash and its display name ("" when unknown). */
+    int  (*other_build)(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name, size_t name_cap);
+    /* A display name for the row's mod from what this machine knows, else 0. */
+    int  (*mod_name)(void *c, const sh_modmanifest_row *row, char *out, size_t cap);
+    /* The product version the row asks for (its "product" member,
+     * DESIGN-additive 2.7), else 0. */
+    int  (*row_product)(void *c, const sh_modmanifest_row *row, char *out, size_t cap);
+    /* The running product's version, else 0 (unknown: no notice). */
+    int  (*product_version)(void *c, char *out, size_t cap);
+    /* After a fetch that failed with game content this machine lacks: the
+     * borrow's source path, else 0. */
+    int  (*fetch_detail)(void *c, const char *hash, char *out, size_t cap);
 } sh_modpub_ops;
 
 /* The decision a hook detour asks for before calling its original. Returns 1
@@ -203,12 +303,12 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
  * asks which rows are missing before any parse (the asset rule:
  * modserve.h sh_modserve_row_served) and, when some are, never hands the map
  * to the engine. The hold
- * then asks the mod store on the worker whether it has every missing bundle.
- * When it has, the player gets the question a My Maps launch asks and Yes
- * fetches, installs and opens the rawmap again (the resume, hook
- * SH_MODPUB_RAWMAP_LOAD). When it lacks any, the load is refused with a
- * one-button notice and one console line naming each mod it lacks and
- * saying the map needs its author's .zip export. Rows are only counted when
+ * then asks the mod store on the worker about every missing bundle (the
+ * denial gate above, as for every hold). When each is obtainable, the player
+ * gets the question a My Maps launch asks and Yes fetches, installs and opens
+ * the rawmap again (the resume, hook SH_MODPUB_RAWMAP_LOAD). Otherwise the
+ * load is denied with the gate's sentence for the first denied bundle in a
+ * one-button notice and one console line per denied bundle. Rows are only counted when
  * the gates are bound (sh_modpub_test_set_ops, or the install); otherwise
  * nothing is missing and the rawmap loads as before. */
 
@@ -234,14 +334,13 @@ void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *m
 /* ------------------------------------------------------------ prefab placements
  * A prefab records the mods it needs (prefab_mods.h) and is never handed to
  * the engine while one is missing. Its placement is held like a rawmap load:
- * the store is asked on the worker; when it has every missing bundle the
- * player is asked "This prefab needs N mod(s): ..."; Yes fetches and installs
- * them and calls the ready callback (main thread, from the tick), which brings
- * them into the open map, and the placement goes on. When the store lacks any
- * or cannot be reached, the placement is refused with the one-button notice
- * and one console line naming each mod (id and version) and saying to ask for
- * the prefab's .zip export. No, a failed download and a bundle that will not
- * install behave as for a map, with "The prefab was not placed." */
+ * the store is asked on the worker; when every missing bundle is obtainable
+ * the player is asked "This prefab needs N mod(s): ..."; Yes fetches and
+ * installs them and calls the ready callback (main thread, from the tick),
+ * which brings them into the open map, and the placement goes on. Otherwise
+ * the placement is denied with the gate's sentences ("This prefab needs ...").
+ * No, a failed download and a bundle that will not install behave as for a
+ * map, with "The prefab was not placed." */
 
 /* Hold a placement whose rows name missing bundles; `name` is the prefab's
  * name the messages use. Returns 1 held (the store is being asked), 0 when
