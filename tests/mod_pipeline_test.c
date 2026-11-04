@@ -432,9 +432,10 @@ static void legacy_form(const char *root)
              "{\r\n\tinherit = \"monster/imp\";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"custom/missing.md6\";\r\n\t\t}\r\n\t}\r\n}");
     mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}");
 
-    /* Without the legacy block the same descriptor is refused. */
+    /* Without the legacy block the same descriptor is refused: its shadows
+     * are ignored, and custom/thing is neither under the key nor a game name. */
     mt_write(folder, "mod.json", NO_LEGACY_DESC);
-    CHECK(sh_mb_build(folder, &r, &b) == 0 && strstr(b.first_cause, "not a stock resource"));
+    CHECK(sh_mb_build(folder, &r, &b) == 0 && strstr(b.first_cause, "the game has no file of that name"));
     sh_mb_free(&b);
     /* With it: built, the unresolved heuristic need only warns. */
     mt_write(folder, "mod.json", LEGACY_DESC);

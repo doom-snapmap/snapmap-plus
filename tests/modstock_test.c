@@ -215,8 +215,13 @@ static void test_builder(const char *tmp)
     CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T + (sizeof DECL_A - 1));
     f = find(&b, REQ_COPY);
     CHECK(f && f->stock && f->stock_source && !strcmp(f->stock_source, P_IMAGE));
+    /* Additive mods: the installed bytes at the game's own name are a no-op,
+     * not a shadow, whatever the descriptor's old "shadows" said. */
     f = find(&b, P_IMAGE);
-    CHECK(f && f->stock && f->shadowed);
+    CHECK(f && f->stock && !f->shadowed && f->cls == SH_MB_CLASS_NOOP && b.shadow_count == 0);
+    f = find(&b, REQ_COPY);
+    CHECK(f && f->cls == SH_MB_CLASS_BORROW);
+    CHECK(b.classes.noops == 1 && b.classes.borrows == 3 && b.classes.adds == 1);
     f = find(&b, REQ_TOME);   /* .tome is outside the whitelist, but it is installed content */
     CHECK(f && f->stock && !strcmp(f->stock_source, P_TOME));
     f = find(&b, REQ_ALIAS);
@@ -258,10 +263,13 @@ static void test_builder(const char *tmp)
     CHECK(!sh_mb_build(dir, &RESOLVER, &b));
     CHECK_CAUSE(b, "which this game does not have");
     sh_mb_free(&b);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod4", tmp);   /* declared over a carried file with other bytes */
+    /* Declared over a carried file with other bytes: the entry is ignored and
+     * the file's bytes decide (an addition). */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod4", tmp);
     make_mod(dir, ",\"stock\":{\"" REQ_OWN "\":{\"source\":\"" P_IMAGE "\"}}");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "is carried with other bytes");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b));
+    f = find(&b, REQ_OWN);
+    CHECK(f && !f->stock && f->cls == SH_MB_CLASS_ADD);
     sh_mb_free(&b);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod5", tmp);   /* a .tome that is not installed content */
     make_mod(dir, NULL);

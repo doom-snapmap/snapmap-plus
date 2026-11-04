@@ -332,13 +332,14 @@ static void test_builder(const char *tmp, const char *install)
     CHECK(b.errors == 1);
     CHECK_CAUSE(b, "is not a well-formed decl");
     sh_mb_free(&b);
-    /* A pointer outside the namespace that only aliases (not a restore) needs shadows. */
+    /* A pointer outside the namespace that only aliases (not a restore) is
+     * refused unless its name is a game name it replaces. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena_alias", tmp);
     make_module_mod(dir, ID, R_DECL, 1, MODULE_TEXT,
                     ",\"generated/decls/material/textures/t_arena/alias.decl\":{\"source\":\"" S_MAT "\"}");
     CHECK(!sh_mb_build(dir, &RESOLVER, &b));
     CHECK(b.errors == 1);
-    CHECK_CAUSE(b, "is outside mods/" ID "/ and is not listed in shadows");
+    CHECK_CAUSE(b, "is outside mods/" ID "/, and the game has no file of that name");
     sh_mb_free(&b);
 }
 

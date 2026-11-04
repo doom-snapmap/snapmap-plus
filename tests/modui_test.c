@@ -963,7 +963,7 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(bundle_has(doc, "alex.shade-b", "\"state\":\"attention\",\"cause\":\""));
         CHECK(!bundle_has(doc, "alex.shade-b", "\"cause\":\"\""));
-        CHECK(bundle_has(doc, "alex.shade-b", "is missing its required id"));
+        CHECK(bundle_has(doc, "alex.shade-b", "is missing its required name"));   /* the id is optional now */
         CHECK(bundle_has(doc, "alex.shade-a", "\"state\":\"installed\""));
         free(doc);
         dr = doctor(0);

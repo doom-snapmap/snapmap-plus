@@ -366,9 +366,11 @@ static void test_builder(void)
     put_bank("assets/sound/mods/p6probe/p6probe_x.bnk", "p6probe_x", 0x71, 0);
     build_expect(0, "sound/soundbanks/pc/<stem>.bnk");
     drop("assets/sound/mods/p6probe/p6probe_x.bnk");
+    /* Additive mods: the old "shadows" key is ignored, so listing the mod's
+     * own bank changes nothing (a stock bank's refusal: modbundle_test). */
     put("mod.json", "{\"id\": \"p6probe\", \"version\": \"1.0.0\", \"name\": \"Sound probe\", "
                     "\"shadows\": [\"sound/soundbanks/pc/p6probe_sfx.bnk\"]}");
-    build_expect(0, "cannot be replaced");
+    build_expect(1, "");
     put("mod.json", DESC);
     build_expect(1, "");
 

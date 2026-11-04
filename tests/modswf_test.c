@@ -243,10 +243,11 @@ static void test_builder(void)
     CHECK(b.file_count == 4 && swf == 2 && b.shadow_count == 2);
     sh_mb_free(&b);
 
-    /* A movie at a stock path that is not listed is refused by the namespace rule. */
+    /* Additive mods: the shadows are derived from the files, so a movie at a
+     * stock path is a replacement whether or not the old list names it. */
     put("mod.json", "{\"id\": \"alex.screens\", \"version\": \"1.0.0\", \"name\": \"Screens\", "
                     "\"shadows\": [\"generated/swf/screens_tech/vega_flat.bimage\"]}");
-    CHECK(!sh_mb_build(g_dir, &resolver, &b) && strstr(b.first_cause, "vega_flat.bswf"));
+    CHECK(sh_mb_build(g_dir, &resolver, &b) && b.shadow_count == 2 && b.classes.replaces == 2);
     sh_mb_free(&b);
     /* A .bswf outside generated/swf/ is not a carried type. */
     put("mod.json", "{\"id\": \"alex.screens\", \"version\": \"1.0.0\", \"name\": \"Screens\", "

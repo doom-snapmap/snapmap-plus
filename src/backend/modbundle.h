@@ -14,14 +14,31 @@
  * whole built manifest and is written only by the product:
  *
  *   "snapmap-plus": {
- *     "format": 1, "build": 3, "bundle": "<sha256>", "built": <unix seconds>,
+ *     "format": 1, "key": "<the mod's key>", "build": 3, "bundle": "<sha256>", "built": <unix seconds>,
  *     "validated": true, "cause": "<first cause when not validated>",
- *     "origin": "install" | "download" | "migration" | "delivery",   absent for the author's own folder
+ *     "origin": "install" | "download" | "migration" | "delivery" | "by-hand",
  *     "legacy": {...},                 converted first-generation packages only
+ *     "classes": {"adds", "borrows", "replaces", "editor", "noops"},
+ *     "editor": ["<request>", ...],    files classified as editor tweaks
+ *     "registries": {"player": {...}, "conductor": ["<encounter decl>", ...], "strings": ["<key>", ...]},
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false}]
  *   }
+ *
+ * Additive mods (phase 1). The builder classifies every file from its path
+ * and bytes (SH_MB_CLASS_*); "shadows" is derived from the classification
+ * (every replacement and every editor tweak outside the namespace), and the
+ * author keys "shadows", "stock" and "scope" are accepted and ignored with
+ * one report line each, so the canonical manifest of an existing mod keeps
+ * its text and hash. An author "stock" entry without a file under assets/
+ * still builds a pointer ("inAssets": false) and is reported. The key is the
+ * author "id" when present (deprecated), else the product block "key", else
+ * the folder's own name; the canonical "id" is the key. "key", "classes",
+ * "editor" and "registries" are derived facts outside the canonical text.
+ * "origin" "by-hand" is "" in memory (a folder the author made). A grandfathered
+ * bundle (a "legacy" record) keeps its declared shadows and every rule of
+ * before; it is classified for reporting only.
  *
  * Writing the block never touches the author block: the file is spliced. The
  * old block member is cut out (from the end of the member before it to the
@@ -140,13 +157,53 @@ typedef struct sh_mb_file {
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
     int declared;          /* builder: named by the descriptor's stock object */
     int absent;            /* a stock pointer with no file under assets/ ("inAssets": false) */
+    int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
 } sh_mb_file;
+
+/* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
+ * file's path and bytes, never from the descriptor:
+ *   EDITOR   an editor-only type (sh_mb_editor_time), at any path
+ *   ADD      under the mod's own namespace, bytes the game does not hold
+ *   BORROW   under the namespace, a stock pointer (the game's own bytes)
+ *   NOOP     a stock pointer restoring installed content at its own name
+ *   REPLACE  any other file at a game name: served as a shadow. Accepted
+ *            and reported while replacements are retired; a later release
+ *            refuses them. */
+#define SH_MB_CLASS_NONE    0
+#define SH_MB_CLASS_ADD     1
+#define SH_MB_CLASS_BORROW  2
+#define SH_MB_CLASS_REPLACE 3
+#define SH_MB_CLASS_EDITOR  4
+#define SH_MB_CLASS_NOOP    5
+
+typedef struct sh_mb_classes {
+    unsigned adds, borrows, replaces, editor, noops;
+} sh_mb_classes;
+
+/* Registry intent (DESIGN-additive 2.4): the author block's "player" object.
+ * Each member names a mod name under the key or a stock name that resolves. */
+#define SH_MB_PLAYER_HANDS       0
+#define SH_MB_PLAYER_HANDS_D1    1
+#define SH_MB_PLAYER_BODY        2
+#define SH_MB_PLAYER_BODY_EVENTS 3
+#define SH_MB_PLAYER_FIELDS      4
+/* The member names, in SH_MB_PLAYER_* order. */
+extern const char *const sh_mb_player_fields[SH_MB_PLAYER_FIELDS];
+
+/* Where a bundle's key came from (sh_mb_bundle.key_source). */
+#define SH_MB_KEY_FROM_ID     1   /* the author block's "id" (deprecated, kept as the key) */
+#define SH_MB_KEY_FROM_BLOCK  2   /* the product block's "key" */
+#define SH_MB_KEY_FROM_FOLDER 3   /* the folder's own name, at its first build */
+#define SH_MB_KEY_SUFFIX      4u  /* random characters a generated key ends with */
+/* "origin" the builder writes for a folder the author made ("" in memory). */
+#define SH_MB_ORIGIN_BY_HAND  "by-hand"
 
 /* A pointer an author wrote in the descriptor's "stock" object. */
 typedef struct sh_mb_stock_decl {
     char *request;         /* lower-cased request path */
     char *source;          /* lower-cased installed path */
     char  sha256[SH_MB_HASH_HEX + 1];   /* "" when the author left it to the builder */
+    int   carried;         /* carried forward from the product block ("inAssets": false), not the author's */
 } sh_mb_stock_decl;
 
 /* Where each need of a build was found. */
@@ -188,6 +245,14 @@ typedef struct sh_mb_bundle {
     unsigned errors, warnings;
     char  first_cause[SH_MB_CAUSE_MAX];
     char  first_warning[SH_MB_CAUSE_MAX];
+    /* Additive mods, phase 1. `id` above is the key: the namespace and the
+     * canonical "id". */
+    int   key_source;      /* SH_MB_KEY_FROM_*, 0 when unknown (a manifest) */
+    sh_mb_classes classes; /* counts of the files' classes */
+    char *player[SH_MB_PLAYER_FIELDS];   /* the "player" intent, NULL when unset */
+    char *registries;      /* compact JSON of the product block's "registries" object, or NULL */
+    char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
+    size_t note_count, note_cap;
 } sh_mb_bundle;
 
 /* Existence of one lower-cased request path: 1 present, 0 absent, -1 cannot
@@ -249,7 +314,12 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * written to disk. The build number comes from the folder's previous product
  * block: kept when the content (without build and bundle) is unchanged,
  * previous + 1 when it changed, 1 when there is none; "built" is kept while
- * the bundle hash is unchanged. */
+ * the bundle hash is unchanged. Every file is classified (out->files[].cls,
+ * out->classes); a file outside the namespace that is not a no-op must be a
+ * game name (resolver->stock), and is then a replacement and a shadow. The
+ * key is resolved (out->key_source), the "player" intent checked against the
+ * files and the game, out->registries filled, and out->notes holds the
+ * report lines the build log prints. */
 int  sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
 /* Write `<folder>\mod.json`: the author block (the folder's mod.json without
@@ -358,6 +428,18 @@ void sh_mb_free(sh_mb_bundle *bundle);
 int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 
 /* ----------------------------------------------------------- helpers ---- */
+
+/* A key for a new mod named `name`: a slug of the name (lower-case letters
+ * and digits, other runs as one '-', at most 59 characters, "mod" when
+ * nothing is left) plus '-' and SH_MB_KEY_SUFFIX random characters of
+ * [a-z0-9] ("hell-guards-7f3k"). Returns 1 with a valid id in out. */
+int  sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1]);
+
+/* "adds", "borrows", "replaces", "editor", "noops" for SH_MB_CLASS_*, else "". */
+const char *sh_mb_class_name(int cls);
+
+/* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 noops"). */
+void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
 /* Trim ASCII whitespace, lower-case, and validate a mod id: 1-64 characters of
  * [a-z0-9._-], starting and ending with a letter or digit, no "..".

@@ -39,6 +39,13 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
     return 0;
 }
 
+static int has_note(const sh_mb_bundle *b, const char *needle)
+{
+    size_t i;
+    for (i = 0; i < b->note_count; i++) if (strstr(b->notes[i], needle)) return 1;
+    return 0;
+}
+
 static const sh_mb_file *find_file(const sh_mb_bundle *b, const char *request)
 {
     size_t i;
@@ -759,6 +766,13 @@ static void m_shadow_not_stock(const char *f)
     mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/not_stock.decl\"]"));
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
 }
+static void m_desc_plain(const char *f) { mt_write(f, "mod.json", DESC("")); }
+/* The same replacement without the retired "shadows" key. */
+static void m_shadow_undeclared(const char *f)
+{
+    mt_write(f, "mod.json", DESC(""));
+    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+}
 static void m_shadow_not_shipped(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]")); }
 static void m_shadow_traversal(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/../decls/x.decl\"]")); }
 static void m_requirements(const char *f)
@@ -804,7 +818,8 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_bundle b;
     sh_mb_resolver no_stock = { NULL, NULL, NULL, NULL };
     refused(fixture, tmp, m_bad_id, &RESOLVER, "id must be");
-    refused(fixture, tmp, m_no_id, &RESOLVER, "missing its required id");
+    /* No id: the folder's own name is the key, and the files must live under it. */
+    refused(fixture, tmp, m_no_id, &RESOLVER, "the path does not contain /mods/case");
     refused(fixture, tmp, m_no_name, &RESOLVER, "missing its required name");
     refused(fixture, tmp, m_bad_json, &RESOLVER, "invalid JSON");
     refused(fixture, tmp, m_bad_version, &RESOLVER, "version must be");
@@ -832,9 +847,23 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_type, &RESOLVER, "names no decl type");
     refused(fixture, tmp, m_ill_formed, &RESOLVER, "not a well-formed decl");
     refused(fixture, tmp, m_missing_need, &RESOLVER, "resolves to nothing");
-    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "not a stock resource");
-    refused(fixture, tmp, m_shadow_not_shipped, &RESOLVER, "is not in the bundle");
-    refused(fixture, tmp, m_shadow_traversal, &RESOLVER, "traversal");
+    /* Additive mods: a file at a name outside the namespace must be a game
+     * name; the author's shadows list is ignored, whatever it says. */
+    refused(fixture, tmp, m_shadow_not_stock, &RESOLVER, "outside mods/alex.r2-imp/, and the game has no file of that name");
+    {
+        char plain[65];
+        accepted(fixture, tmp, m_desc_plain, &b);
+        strcpy_s(plain, sizeof plain, b.hash);
+        CHECK(b.errors == 0 && b.note_count == 1 && has_note(&b, "id: \"alex.r2-imp\" is kept as the key"));
+        sh_mb_free(&b);
+        accepted(fixture, tmp, m_shadow_not_shipped, &b);
+        CHECK(b.errors == 0 && b.shadow_count == 0 && has_note(&b, "shadows: ignored: derived from the files"));
+        CHECK(!strcmp(b.hash, plain));
+        sh_mb_free(&b);
+        accepted(fixture, tmp, m_shadow_traversal, &b);
+        CHECK(b.errors == 0 && b.shadow_count == 0 && !strcmp(b.hash, plain));
+        sh_mb_free(&b);
+    }
     refused(fixture, tmp, m_nothing, &no_stock, "cannot be checked against the game");
 
     refused(fixture, tmp, m_chain_broken, &RESOLVER, "needs entityDef mods/alex.r2-imp/mid, which resolves to nothing");
@@ -865,10 +894,24 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_scenes_missing, &RESOLVER, "needs entityDef mods/alex.r2-imp/gone, which resolves to nothing");
 
-    /* A declared shadow of a stock decl is accepted. */
+    /* A replacement of a stock decl is accepted in phase 1, served as a
+     * shadow and reported; the canonical shadows are derived from the files,
+     * so the same mod with or without its old "shadows" key has one hash. */
     accepted(fixture, tmp, m_shadow_ok, &b);
     CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed);
+    CHECK(find_file(&b, "generated/decls/entitydef/monster/imp.decl")->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1);
     CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
+    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
+          has_note(&b, "replacements are being retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
+    {
+        sh_mb_bundle undeclared;
+        char shadow_hash[65];
+        strcpy_s(shadow_hash, sizeof shadow_hash, b.hash);
+        accepted(fixture, tmp, m_shadow_undeclared, &undeclared);
+        CHECK(undeclared.errors == 0 && undeclared.shadow_count == 1 && !strcmp(undeclared.hash, shadow_hash));
+        CHECK(!has_note(&undeclared, "shadows: ignored"));
+        sh_mb_free(&undeclared);
+    }
     sh_mb_free(&b);
     /* A shadow keeping a stock name the game lacks is reported, not refused;
      * the same dangling name in a mod's own decl still refuses (m_missing_need). */
@@ -903,8 +946,15 @@ static void test_refusals(const char *fixture, const char *tmp)
     accepted(fixture, tmp, m_scope_map, &b);
     CHECK(b.errors == 0 && b.extra && !strcmp(b.extra, "{\"scope\":\"map\"}"));
     sh_mb_free(&b);
-    refused(fixture, tmp, m_scope_bad, &RESOLVER, "scope must be \"map\" or \"always\"");
-    refused(fixture, tmp, m_scope_type, &RESOLVER, "scope must be \"map\" or \"always\"");
+    /* "scope" is accepted and ignored by the builder (kept in extra, so a
+     * mod's hash is unchanged); only a grandfathered bundle still checks it. */
+    accepted(fixture, tmp, m_scope_bad, &b);
+    CHECK(b.errors == 0 && b.extra && !strcmp(b.extra, "{\"scope\":\"global\"}") &&
+          has_note(&b, "scope: ignored: derived from the files"));
+    sh_mb_free(&b);
+    accepted(fixture, tmp, m_scope_type, &b);
+    CHECK(b.errors == 0 && b.extra && !strcmp(b.extra, "{\"scope\":1}"));
+    sh_mb_free(&b);
     /* Any cvar and any console line: sorted names, string values (true "1",
      * false "0", integers as digits), lines trimmed and in the author's order,
      * "commands" before "cvars". */
@@ -1179,6 +1229,291 @@ static void test_renderprogs(const char *tmp)
     rp_case(tmp, RP_GLSL, "debug dump of generated GLSL");
 }
 
+/* ------------------------------------------------------ additive mods ---- */
+
+/* A fake installed game for the classification cells: two entries with bytes. */
+typedef struct fake_entry { const char *source; const char *text; } fake_entry;
+static const fake_entry FAKE[] = {
+    { "generated/image/stock/rock.bimage", "ROCK-BYTES-0123456789" },
+    { "generated/decls/entitydef/stock/crate.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}" },
+    { NULL, NULL }
+};
+static const fake_entry *fake_find(const char *source)
+{
+    int i;
+    for (i = 0; FAKE[i].source; i++) if (!strcmp(FAKE[i].source, source)) return &FAKE[i];
+    return NULL;
+}
+static int fake_same(const fake_entry *e, unsigned long long size, const char *sha)
+{
+    char h[65];
+    sh_mb_sha256_hex(e->text, strlen(e->text), h);
+    return strlen(e->text) == size && !strcmp(h, sha);
+}
+static int fake_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+{
+    const fake_entry *own = fake_find(request);
+    int i;
+    (void)ctx;
+    if (own && fake_same(own, size, sha)) { strcpy_s(source, cap, own->source); return SH_MB_STOCK_OK; }
+    for (i = 0; FAKE[i].source; i++)
+        if (fake_same(&FAKE[i], size, sha)) { strcpy_s(source, cap, FAKE[i].source); return SH_MB_STOCK_OK; }
+    return SH_MB_STOCK_ABSENT;
+}
+static int fake_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
+{
+    const fake_entry *e = fake_find(source);
+    (void)ctx;
+    if (!e) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(e->text, strlen(e->text), sha);
+    *size = strlen(e->text);
+    return SH_MB_STOCK_OK;
+}
+static int fake_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
+{
+    const fake_entry *e = fake_find(source);
+    char h[65];
+    (void)ctx;
+    if (!e) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(e->text, strlen(e->text), h);
+    if (strcmp(h, sha)) return SH_MB_STOCK_MISMATCH;
+    if (size) *size = strlen(e->text);
+    return SH_MB_STOCK_OK;
+}
+static int fake_read(void *ctx, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    const fake_entry *e = fake_find(source);
+    unsigned long long size = 0;
+    int r = fake_verify(ctx, source, sha, &size);
+    if (r != SH_MB_STOCK_OK) return r;
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, e->text, (size_t)size);
+    *len = (size_t)size;
+    return SH_MB_STOCK_OK;
+}
+#define STOCK_BANK "sound/soundbanks/pc/doom_ui.bnk"
+static int fake_stock_exists(void *ctx, const char *request)
+{
+    if (!strcmp(request, STOCK_BANK)) return 1;
+    return fake_find(request) ? 1 : stock_exists(ctx, request);
+}
+static const sh_mb_resolver FAKE_RESOLVER = { NULL, NULL, fake_stock_exists, NULL };
+
+static int count_class(const sh_mb_bundle *b, int cls)
+{
+    size_t i;
+    int n = 0;
+    for (i = 0; i < b->file_count; i++) n += b->files[i].cls == cls;
+    return n;
+}
+
+/* Every cell of the classification (DESIGN-additive 2.1, 2.6): add, borrow,
+ * no-op, replacement (accepted and reported in phase 1), editor tweak under
+ * the key and at a game name; the shadows derived; the product block's
+ * derived facts written and read back. */
+static void test_classes(const char *fixture, const char *tmp)
+{
+    static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read };
+    sh_mb_bundle b, back;
+    const sh_mb_file *f;
+    char folder[MAX_PATH], cause[512], path[MAX_PATH];
+    unsigned char *text;
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\classes", tmp);
+    CHECK(mt_copy_tree(fixture, folder));
+    mt_write(folder, "assets\\generated\\image\\mods\\alex.r2_imp\\rock_copy.bimage", FAKE[0].text);   /* borrow */
+    mt_write(folder, "assets\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* no-op */
+    mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
+             "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
+    mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
+             "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
+    sh_mb_set_stock_ops(&ops);
+    CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  classes refused: %s\n", b.first_cause);
+    f = find_file(&b, "generated/image/mods/alex.r2_imp/rock_copy.bimage");
+    CHECK(f && f->cls == SH_MB_CLASS_BORROW && f->stock && !strcmp(f->stock_source, FAKE[0].source) && !f->shadowed);
+    f = find_file(&b, "generated/image/stock/rock.bimage");
+    CHECK(f && f->cls == SH_MB_CLASS_NOOP && f->stock && !f->shadowed);
+    f = find_file(&b, "generated/decls/entitydef/monster/imp.decl");
+    CHECK(f && f->cls == SH_MB_CLASS_REPLACE && !f->stock && f->shadowed);
+    f = find_file(&b, "generated/decls/snapeditorentitydef/demons/demon_base.decl");
+    CHECK(f && f->cls == SH_MB_CLASS_EDITOR && f->shadowed);
+    f = find_file(&b, "generated/decls/snapeditorentitydef/mods/alex.r2-imp/imp_copy.decl");
+    CHECK(f && f->cls == SH_MB_CLASS_EDITOR && !f->shadowed);
+    f = find_file(&b, "generated/decls/entitydef/mods/alex.r2-imp/imp_copy.decl");
+    CHECK(f && f->cls == SH_MB_CLASS_ADD);
+    CHECK(b.classes.adds == 11 && b.classes.borrows == 1 && b.classes.noops == 1 && b.classes.replaces == 1 &&
+          b.classes.editor == 3);
+    CHECK(count_class(&b, SH_MB_CLASS_EDITOR) == 3 && count_class(&b, SH_MB_CLASS_NONE) == 0);
+    /* The shadows are exactly the files at game names outside the namespace. */
+    CHECK(b.shadow_count == 2 && !strcmp(b.shadows[0], "generated/decls/entitydef/monster/imp.decl") &&
+          !strcmp(b.shadows[1], "generated/decls/snapeditorentitydef/demons/demon_base.decl"));
+    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
+          !has_note(&b, "replaces generated/decls/snapeditorentitydef"));
+    /* The product block carries the derived facts; loading reads the key and
+     * recomputes the classes from the same files. */
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+    text = sh_mb_read_file(path, 1 << 20, NULL);
+    CHECK(text && strstr((const char *)text, "\"key\": \"alex.r2-imp\"") &&
+          strstr((const char *)text, "\"origin\": \"by-hand\"") &&
+          strstr((const char *)text, "\"classes\": {") && strstr((const char *)text, "\"replaces\": 1") &&
+          strstr((const char *)text, "\"editor\": [") && strstr((const char *)text, "\"registries\": {"));
+    free(text);
+    CHECK(sh_mb_load_folder(folder, &back));
+    if (back.errors) fprintf(stderr, "  classes reload: %s\n", back.first_cause);
+    CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 11 && back.classes.borrows == 1 &&
+          back.classes.noops == 1 && back.classes.replaces == 1 && back.classes.editor == 3);
+    sh_mb_free(&back);
+    /* A rebuild keeps the hash and the build number. */
+    {
+        char h1[65];
+        strcpy_s(h1, sizeof h1, b.hash);
+        sh_mb_free(&b);
+        CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b) && !strcmp(b.hash, h1) && b.build == 1 && !b.origin[0]);
+    }
+    sh_mb_free(&b);
+    /* A descriptor's stock entry over a carried file is a hint: the bytes
+     * decide. Other bytes than the source it names make an addition. */
+    mt_write(folder, "mod.json", DESC(",\"stock\":{\"generated/image/mods/alex.r2_imp/imp_icon.bimage\":"
+                                      "{\"source\":\"generated/image/stock/rock.bimage\"}}"));
+    CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  stock hint: %s\n", b.first_cause);
+    f = find_file(&b, "generated/image/mods/alex.r2_imp/imp_icon.bimage");
+    CHECK(f && f->cls == SH_MB_CLASS_ADD && !f->stock && has_note(&b, "stock: ignored: derived from the files"));
+    CHECK(!has_note(&b, "stock alias without a file"));
+    sh_mb_free(&b);
+    /* An entry without a file still builds a pointer, reported. */
+    mt_write(folder, "mod.json", DESC(",\"stock\":{\"generated/image/mods/alex.r2_imp/alias.bimage\":"
+                                      "{\"source\":\"generated/image/stock/rock.bimage\"}}"));
+    CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b));
+    f = find_file(&b, "generated/image/mods/alex.r2_imp/alias.bimage");
+    CHECK(f && f->stock && f->absent && f->cls == SH_MB_CLASS_BORROW);
+    CHECK(has_note(&b, "stock alias without a file: copy the file into assets/ instead (1 entry, 0 at the game's own "
+                       "name, 1 under other names; first generated/image/mods/alex.r2_imp/alias.bimage)"));
+    sh_mb_free(&b);
+    sh_mb_set_stock_ops(NULL);
+    /* A stock sound bank is never a replacement (Wwise loads every stock
+     * bank before mods are read). */
+    {
+        unsigned char bank[24];
+        uint32_t v;
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\classes_bank", tmp);
+        CHECK(mt_copy_tree(fixture, folder));
+        memset(bank, 0, sizeof bank);
+        memcpy(bank, "BKHD", 4);
+        v = 16; memcpy(bank + 4, &v, 4);
+        v = 0x71; memcpy(bank + 8, &v, 4);
+        v = sh_mb_fnv1_lower("doom_ui", 7); memcpy(bank + 12, &v, 4);
+        rp_put(folder, "assets\\sound\\soundbanks\\pc\\doom_ui.bnk", bank, sizeof bank);
+        CHECK(!sh_mb_build(folder, &FAKE_RESOLVER, &b));
+        CHECK_CAUSE(b, "a stock sound bank cannot be replaced");
+        sh_mb_free(&b);
+    }
+}
+
+/* The key: the author id when present, else the product block's key, else
+ * the folder's own name; the namespace rule uses it, the canonical "id" is it. */
+static void test_keys(const char *fixture, const char *tmp)
+{
+    sh_mb_bundle b, back;
+    char folder[MAX_PATH], renamed[MAX_PATH], cause[512], key[SH_MB_ID_MAX + 1], h1[65];
+    /* The folder's name, at the first build of a hand-made folder. */
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\keys", tmp);
+    CreateDirectoryA(folder, NULL);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\keys\\alex.r2-imp", tmp);
+    CHECK(mt_copy_tree(fixture, folder));
+    mt_write(folder, "mod.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\"}");
+    CHECK(sh_mb_build(folder, &RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  folder key: %s\n", b.first_cause);
+    CHECK(!strcmp(b.id, "alex.r2-imp") && b.key_source == SH_MB_KEY_FROM_FOLDER && has_note(&b, "from the folder's name"));
+    CHECK(b.canonical && strstr(b.canonical, ",\"id\":\"alex.r2-imp\","));
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    strcpy_s(h1, sizeof h1, b.hash);
+    sh_mb_free(&b);
+    /* Written into the product block, the key survives a rename of the folder,
+     * and the same content keeps its hash. */
+    _snprintf_s(renamed, sizeof renamed, _TRUNCATE, "%s\\keys\\Renamed Folder", tmp);
+    CHECK(MoveFileA(folder, renamed));
+    CHECK(sh_mb_build(renamed, &RESOLVER, &b));
+    CHECK(!strcmp(b.id, "alex.r2-imp") && b.key_source == SH_MB_KEY_FROM_BLOCK && !strcmp(b.hash, h1) && b.build == 1);
+    sh_mb_free(&b);
+    CHECK(sh_mb_load_folder(renamed, &back) && !strcmp(back.id, "alex.r2-imp") && back.key_source == SH_MB_KEY_FROM_BLOCK);
+    sh_mb_free(&back);
+    /* The author id wins over the block's key (and is reported deprecated). */
+    mt_write(renamed, "mod.json", "{\"id\":\"other.key\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\","
+                                  "\"snapmap-plus\":{\"format\":1,\"key\":\"alex.r2-imp\"}}");
+    CHECK(!sh_mb_build(renamed, &RESOLVER, &b));
+    CHECK(!strcmp(b.id, "other.key") && b.key_source == SH_MB_KEY_FROM_ID && strstr(b.first_cause, "mods/other.key/"));
+    sh_mb_free(&b);
+    /* An invalid folder name is refused with what to do. */
+    mt_write(renamed, "mod.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\"}");
+    CHECK(!sh_mb_build(renamed, &RESOLVER, &b));
+    CHECK_CAUSE(b, "the folder name \"Renamed Folder\" cannot be the mod's key");
+    sh_mb_free(&b);
+    /* A bad key in the block is refused. */
+    mt_write(renamed, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"key\":\"Bad Key\"}}");
+    CHECK(!sh_mb_build(renamed, &RESOLVER, &b));
+    CHECK_CAUSE(b, "\"snapmap-plus\".key must be");
+    sh_mb_free(&b);
+    /* Generated keys: slug plus four random characters. */
+    CHECK(sh_mb_key_generate("Hell Guards!", key) && !strncmp(key, "hell-guards-", 12) && strlen(key) == 16);
+    {
+        size_t i;
+        int ok = 1;
+        for (i = 12; i < 16; i++) ok &= (key[i] >= 'a' && key[i] <= 'z') || (key[i] >= '0' && key[i] <= '9');
+        CHECK(ok);
+    }
+    CHECK(sh_mb_key_generate("  ***  ", key) && !strncmp(key, "mod-", 4) && strlen(key) == 8);
+    {
+        char longname[200], k2[SH_MB_ID_MAX + 1];
+        memset(longname, 'a', 150);
+        longname[150] = 0;
+        CHECK(sh_mb_key_generate(longname, key) && strlen(key) == SH_MB_ID_MAX);
+        CHECK(sh_mb_key_generate("Same Name", key) && sh_mb_key_generate("Same Name", k2));
+    }
+}
+
+/* The player intent: names under the key provided by the mod, stock names
+ * that resolve, refusals for an unresolved name, a value of the wrong JSON
+ * type, a name of the wrong decl type and an unknown member. Registries:
+ * the conductor's encounter decls and the string keys. */
+static void m_player_ok(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":\"monster/imp.md6\",\"body\":\"mods/alex.r2-imp/imp_copy\","
+                                 "\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b.md6\"},"
+                                 "\"strings\":{\"en\":{\"mods/alex.r2-imp/row\":\"Row\",\"plain_key\":\"Plain\"}}"));
+    mt_write(f, "assets\\generated\\decls\\snapaiencounter\\mods\\alex.r2-imp\\imp_enc.decl", "{\r\n}");
+}
+static void m_player_unresolved(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"handsD1\":\"monster/none.md6\"}")); }
+static void m_player_missing(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"body\":\"mods/alex.r2-imp/nothing\"}")); }
+static void m_player_number(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":3}")); }
+static void m_player_array(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":[\"hands\"]")); }
+static void m_player_decltype(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy.md6\"}")); }
+static void m_player_member(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"feet\":\"monster/imp.md6\"}")); }
+
+static void test_player(const char *fixture, const char *tmp)
+{
+    sh_mb_bundle b;
+    accepted(fixture, tmp, m_player_ok, &b);
+    CHECK(b.errors == 0 && b.player[SH_MB_PLAYER_HANDS] && !strcmp(b.player[SH_MB_PLAYER_HANDS], "monster/imp.md6"));
+    CHECK(b.registries && !strcmp(b.registries,
+          "{\"conductor\":[\"mods/alex.r2-imp/imp_enc\"],\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy\","
+          "\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b.md6\",\"hands\":\"monster/imp.md6\"},"
+          "\"strings\":[\"mods/alex.r2-imp/row\",\"plain_key\"]}"));
+    if (b.registries) printf("modbundle_test: registries %s\n", b.registries);
+    CHECK(has_note(&b, "string plain_key will need namespacing") && !has_note(&b, "string mods/alex.r2-imp/row"));
+    /* The intent stays in extra: part of the manifest, never rewritten. */
+    CHECK(b.extra && strstr(b.extra, "\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy\""));
+    sh_mb_free(&b);
+    refused(fixture, tmp, m_player_unresolved, &RESOLVER, "player.handsD1 names monster/none.md6, which is neither");
+    refused(fixture, tmp, m_player_missing, &RESOLVER, "player.body names mods/alex.r2-imp/nothing, which this mod does not provide");
+    refused(fixture, tmp, m_player_number, &RESOLVER, "player.hands must be a string");
+    refused(fixture, tmp, m_player_array, &RESOLVER, "player must be an object");
+    refused(fixture, tmp, m_player_decltype, &RESOLVER, "it must name an entityDef");
+    refused(fixture, tmp, m_player_member, &RESOLVER, "player key feet is not supported");
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
@@ -1199,6 +1534,9 @@ int main(int argc, char **argv)
     test_block_legacy(full, tmp);
     test_record(tmp);
     test_refusals(full, tmp);
+    test_classes(full, tmp);
+    test_keys(full, tmp);
+    test_player(full, tmp);
     test_renderprogs(tmp);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modbundle_test: %d failure(s)\n", failures); return 1; }
