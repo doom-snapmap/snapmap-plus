@@ -95,6 +95,21 @@ typedef struct sh_modserve_hit {
     const char *stock_source;/* its installed source, or NULL */
 } sh_modserve_hit;
 
+/* Per-build bank stems (DESIGN-additive 6): every carried .bnk of a keyed
+ * bundle is served as sound/soundbanks/pc/<stem>.<hash16>.bnk, its BKHD bank
+ * id rewritten to the FNV-1 of that stem, and every quoted "<stem>",
+ * "<stem>.bnk" or ".../<stem>.bnk" in the bundle's served decl texts is
+ * rewritten to match; the rewritten bytes are written once under
+ * <mods>\.served\<key>@<hash16>\ and served from there. So a changed build
+ * is a new bank to Wwise, and the ledger and refresh see a new name. A
+ * grandfathered (legacy) package keeps its banks as they are. */
+/* `text` with every quoted "<stem>", "<stem>.bnk" or ".../<stem>.bnk" (ASCII
+ * case-insensitive) spelled with `renamed` instead of `stem`. Malloc'd, or
+ * NULL when nothing changed. Pure. */
+char *sh_modserve_bank_rename_text(const char *text, size_t len, const char *stem, const char *renamed, size_t *out_len);
+/* Rewrite a bank's BKHD id to FNV-1 of `stem` in place. 1 done, 0 not a BKHD bank. Pure. */
+int  sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem);
+
 /* Constant-time, allocation-free lookup of an engine request path (any case,
  * either separator). Returns 1 and fills *out (when non-NULL) for a served
  * path, else 0. */

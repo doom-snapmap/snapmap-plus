@@ -2425,6 +2425,7 @@ static int ms_id_registered(const ms_index *t, const char *id)
  * of unchanged bytes carry over; changed decls, models and images become
  * pending; a gone shadow decl is pending (the engine re-reads the game's
  * bytes); a gone new name stays registered until DOOM restarts. */
+static ms_body *ms_reg_body(const ms_index *x, int file);
 static void ms_diff(ms_index *x, const ms_index *old)
 {
     sh_modserve_diff *d = &x->diff;
@@ -2498,6 +2499,27 @@ static void ms_diff(ms_index *x, const ms_index *old)
         } else if (of->is_sedef && of->ptype && of->pname) {
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
+    }
+    /* Registries (L2b deviation 7): a rescan that changes the text a registry
+     * generates for the listing (an edited bodyEvents partial, an extends
+     * partial, a player field) marks the path that serves it, as a changed
+     * decl is marked. */
+    for (i = 0; i < x->reg_count; ++i) {
+        int nf = x->reg_first + i, of = -1, j, target = -1;
+        const ms_body *nb = ms_reg_body(x, nf), *ob = NULL;
+        for (j = 0; j < old->reg_count && of < 0; ++j)
+            if (!strcmp(old->files[old->reg_first + j].request, x->files[nf].request)) of = old->reg_first + j;
+        if (of >= 0) ob = ms_reg_body(old, of);
+        if (!nb && !ob) continue;
+        if (nb && ob && nb->len == ob->len && !memcmp(nb->p, ob->p, nb->len)) continue;
+        if (x->files[nf].registry_keyed) target = nf;
+        else
+            for (j = 0; j < x->nfiles && target < 0; ++j) if (x->files[j].registry_of == nf + 1) target = j;
+        if (target < 0 || !x->files[target].ptype || !x->files[target].pname) continue;
+        InterlockedExchange(&x->files[target].refresh_gen, 0);
+        InterlockedExchange(&x->files[target].refresh, 1);
+        d->changed++;
+        d->changed_decls++;
     }
     /* Gone shadows an earlier rescan left pending, still not served. */
     for (i = 0; i < old->ngone; ++i) {
@@ -2670,12 +2692,26 @@ typedef struct ms_reg_memo {
     const char **lines;                   /* sh_modserve_registry_report */
     int nlines, nsources;
     unsigned char pass[SH_MR_FIXED];      /* the text equals a serving bundle's own copy: that copy serves, gated as its bundle */
+    int *gate;                            /* per registry file: the source bundle whose requirement gates gate its text, or -1 */
     struct ms_reg_memo *next;
 } ms_reg_memo;
 
 #define MS_REG_SOURCE_MAX 256
 static struct { char slot[SH_MR_SLOT_MAX]; char key[SH_MR_KEY_MAX]; } g_scope_choice[SH_MR_CHOICES_MAX];
 static int g_scope_nchoice;           /* the open map's registry choices (g_scope_lock) */
+
+/* The bundle whose requirement gates gate what `f` serves: its own, or, for
+ * a registry's generated text, the first source with requirements that
+ * contributed to it (L2b deviation 8). */
+static const ms_bundle *ms_gate_of(const ms_index *x, const ms_file *f)
+{
+    if (f->registry) {
+        const ms_reg_memo *m = (const ms_reg_memo *)InterlockedCompareExchangePointer((PVOID volatile *)&x->reg_cur, NULL, NULL);
+        int k = (int)(f - x->files) - x->reg_first;
+        if (m && m->gate && k >= 0 && k < x->reg_count && m->gate[k] >= 0) return &x->bundles[m->gate[k]];
+    }
+    return &x->bundles[f->bundle];
+}
 
 static int ms_live(const ms_index *x, const ms_file *f)
 {
@@ -2891,6 +2927,7 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
     size_t **elens = (size_t **)calloc((size_t)(n ? n : 1), sizeof *elens);
     sh_mr_stock *ext = (sh_mr_stock *)calloc((size_t)(x->reg_count + 1), sizeof *ext);
     int *ext_file = (int *)calloc((size_t)(x->reg_count + 1), sizeof *ext_file);
+    int *ext_carrier = (int *)malloc(sizeof(int) * (size_t)(x->reg_count + 1));
     int next = 0;
     char **owned = NULL;
     int nowned = 0, cowned = 0, i, k;
@@ -2898,7 +2935,8 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
     sh_mr_result r;
     ms_reg_memo *m = NULL;
     memset(&r, 0, sizeof r);
-    if (!src || !in || !decls || !wfiles || !etexts || !elens || !ext || !ext_file) goto done;
+    if (!src || !in || !decls || !wfiles || !etexts || !elens || !ext || !ext_file || !ext_carrier) goto done;
+    for (i = 0; i < x->reg_count + 1; ++i) ext_carrier[i] = -1;
     ms_registry_stock(x);
     for (i = 0; i < g_scope_nchoice; ++i) { choices[i].slot = g_scope_choice[i].slot; choices[i].key = g_scope_choice[i].key; }
     for (i = 0; i < n; ++i) {
@@ -3030,6 +3068,30 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
         ext[next].target = ms_strdup(x, tgt);
         ext[next].text = x->reg_xtext[k];
         ext[next].len = x->reg_xlen[k];
+        /* A serving bundle that carries its own copy of the target (a pack
+         * built before extends, L2b deviation 9): that copy is the base the
+         * partials extend, the first in serving order; later ones are named. */
+        for (i = 0; i < n; ++i) {
+            int q;
+            for (q = set[i]->first_file; q < set[i]->first_file + set[i]->file_count; ++q) {
+                size_t len = 0;
+                char *t;
+                if (strcmp(x->files[q].request, f->request)) continue;
+                if (ext_carrier[next] >= 0) {
+                    ms_log("registry: extends %s: %s@%s also carries a copy; the first copy (%s) is the base", tgt,
+                           set[i]->id, set[i]->version, set[ext_carrier[next]]->id);
+                    break;
+                }
+                t = ms_reg_text(&x->files[q], &len);
+                if (!ms_reg_own(&owned, &nowned, &cowned, t)) break;
+                ext[next].text = t;
+                ext[next].len = len;
+                ext_carrier[next] = i;
+                ms_log("registry: extends %s: %s@%s carries a copy of it; that copy is the base the partials extend", tgt,
+                       set[i]->id, set[i]->version);
+                break;
+            }
+        }
         ext_file[next++] = k;
     }
     if (!sh_modregistry_generate(src, n, x->reg_stock, x->reg_stock_len, ext, next, choices, g_scope_nchoice, &r))
@@ -3048,8 +3110,39 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
             m->pass[k] = src[i].carried[k] && src[i].carried_len[k] == r.len[k] && !memcmp(src[i].carried[k], r.text[k], r.len[k]);
         if (!m->pass[k]) m->body[k] = ms_reg_body_new(x, r.text[k], r.len[k]);
     }
-    for (i = 0; i < r.next && i < next; ++i)
-        if (r.ext_text[i]) m->body[ext_file[i]] = ms_reg_body_new(x, r.ext_text[i], r.ext_len[i]);
+    for (i = 0; i < next; ++i) {
+        if (i < r.next && r.ext_text[i]) m->body[ext_file[i]] = ms_reg_body_new(x, r.ext_text[i], r.ext_len[i]);
+        else if (ext_carrier[i] >= 0 && ext[i].text) m->body[ext_file[i]] = ms_reg_body_new(x, ext[i].text, ext[i].len);
+    }
+    /* The gates of the generated texts: the first contributing source with requirements. */
+    m->gate = (int *)ms_alloc(x, sizeof(int) * (size_t)(x->reg_count ? x->reg_count : 1));
+    if (m->gate) {
+        int f2;
+        for (k = 0; k < x->reg_count; ++k) m->gate[k] = -1;
+#define MS_GATE(K, S) do { if ((K) >= 0 && (K) < x->reg_count && m->gate[K] < 0 && (S) >= 0 && (S) < n && \
+                               ms_req_needs(set[S])) m->gate[K] = (int)(set[S] - x->bundles); } while (0)
+        for (i = 0; i < r.nentries; ++i) MS_GATE(SH_MR_CONDUCTOR, r.entries[i].source);
+        for (i = 0; i < n; ++i)
+            if (src[i].body_events || src[i].carried[SH_MR_BODY]) MS_GATE(SH_MR_BODY, i);
+        for (f2 = 0; f2 < SH_MB_PLAYER_FIELDS; ++f2) MS_GATE(SH_MR_PLAYER, r.player_from[f2]);
+        for (i = 0; i < next; ++i) {
+            int s2;
+            MS_GATE(ext_file[i], ext_carrier[i]);
+            for (s2 = 0; s2 < n; ++s2) {
+                size_t e;
+                for (e = 0; src[s2].intent && e < src[s2].intent->ext_count; ++e)
+                    if (src[s2].ext_texts && src[s2].ext_texts[e] && !_stricmp(src[s2].intent->ext_targets[e], ext[i].target))
+                        MS_GATE(ext_file[i], s2);
+            }
+        }
+        for (i = 0; i < r.nweapons; ++i) {
+            char req[SH_MB_REQUEST_MAX + 1];
+            if (!sh_modregistry_weapon_request(r.weapons[i].slot + 8, req, sizeof req)) continue;
+            for (k = SH_MR_FIXED; k < x->reg_count; ++k)
+                if (!strcmp(x->files[x->reg_first + k].request, req)) MS_GATE(k, r.weapons[i].source);
+        }
+#undef MS_GATE
+    }
     for (i = 0; i < r.nweapons; ++i) {
         char req[SH_MB_REQUEST_MAX + 1];
         if (!sh_modregistry_weapon_request(r.weapons[i].slot + 8, req, sizeof req)) continue;
@@ -3099,6 +3192,7 @@ done:
         if (elens) free(elens[i]);
     }
     free(src); free(in); free(decls); free(wfiles); free((void *)etexts); free(elens); free(ext); free(ext_file);
+    free(ext_carrier);
     return m;
 }
 
@@ -3776,6 +3870,213 @@ int sh_modserve_scope_source(int when)
     return r;
 }
 
+/* ------------------------------------------------------------------ per-build bank stems */
+
+static int ms_ci_eq(const char *a, const char *b, size_t n)
+{
+    return _strnicmp(a, b, n) == 0;
+}
+
+char *sh_modserve_bank_rename_text(const char *text, size_t len, const char *stem, const char *renamed, size_t *out_len)
+{
+    size_t sn = stem ? strlen(stem) : 0, rn = renamed ? strlen(renamed) : 0, i = 0, out_n = 0, cap;
+    char *out = NULL;
+    int changed = 0;
+    if (out_len) *out_len = 0;
+    if (!text || !sn || !rn) return NULL;
+    cap = len + 64;
+    out = (char *)malloc(cap + 1);
+    if (!out) return NULL;
+    while (i < len) {
+        if (text[i] == '"') {
+            size_t e = i + 1, body, k;
+            while (e < len && text[e] != '"' && text[e] != '\n') { if (text[e] == '\\' && e + 1 < len) e++; e++; }
+            body = e - (i + 1);
+            /* the stem is the whole string, the string less ".bnk", or its last part before ".bnk" */
+            for (k = 0; e < len && text[e] == '"' && k < 1; k++) {
+                const char *s = text + i + 1;
+                size_t at = (size_t)-1;
+                if (body == sn && ms_ci_eq(s, stem, sn)) at = 0;
+                else if (body == sn + 4 && ms_ci_eq(s, stem, sn) && ms_ci_eq(s + sn, ".bnk", 4)) at = 0;
+                else if (body > sn + 4 && ms_ci_eq(s + body - 4, ".bnk", 4) && ms_ci_eq(s + body - 4 - sn, stem, sn) &&
+                         s[body - 5 - sn] == '/')
+                    at = body - 4 - sn;
+                if (at != (size_t)-1) {
+                    size_t need = out_n + body + rn + 2;
+                    if (need + (len - e) > cap) {
+                        char *g;
+                        cap = need + (len - e) + 64;
+                        g = (char *)realloc(out, cap + 1);
+                        if (!g) { free(out); return NULL; }
+                        out = g;
+                    }
+                    out[out_n++] = '"';
+                    memcpy(out + out_n, s, at); out_n += at;
+                    memcpy(out + out_n, renamed, rn); out_n += rn;
+                    memcpy(out + out_n, s + at + sn, body - at - sn); out_n += body - at - sn;
+                    out[out_n++] = '"';
+                    i = e + 1;
+                    changed = 1;
+                    goto next;
+                }
+            }
+            if (out_n + (e + 1 - i) > cap) {
+                char *g;
+                cap = out_n + (e + 1 - i) + (len - e) + 64;
+                g = (char *)realloc(out, cap + 1);
+                if (!g) { free(out); return NULL; }
+                out = g;
+            }
+            k = e < len ? e + 1 : e;
+            memcpy(out + out_n, text + i, k - i);
+            out_n += k - i;
+            i = k;
+            continue;
+        }
+        if (out_n + 1 > cap) {
+            char *g;
+            cap = cap * 2 + 64;
+            g = (char *)realloc(out, cap + 1);
+            if (!g) { free(out); return NULL; }
+            out = g;
+        }
+        out[out_n++] = text[i++];
+next:   ;
+    }
+    if (!changed) { free(out); return NULL; }
+    out[out_n] = 0;
+    if (out_len) *out_len = out_n;
+    return out;
+}
+
+int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem)
+{
+    uint32_t id;
+    if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) || !stem) return 0;
+    id = sh_mb_fnv1_lower(stem, strlen(stem));
+    memcpy(bytes + 12, &id, 4);
+    return 1;
+}
+
+/* Create every directory of `path` (a file path) below the mods root. */
+static int ms_mkdirs_for(const char *path)
+{
+    char dir[MS_PATH_MAX];
+    wchar_t wide[MS_PATH_MAX + 8];
+    char *p;
+    strncpy_s(dir, sizeof dir, path, _TRUNCATE);
+    p = strrchr(dir, '\\');
+    if (!p) return 0;
+    *p = 0;
+    for (p = dir + 3; *p; ++p) {
+        if (*p != '\\') continue;
+        *p = 0;
+        if (ms_wide(dir, wide, sizeof wide / sizeof wide[0])) CreateDirectoryW(wide, NULL);
+        *p = '\\';
+    }
+    return ms_wide(dir, wide, sizeof wide / sizeof wide[0]) && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+}
+
+/* Write `bytes` at `path` unless it already holds exactly them. 1 the file holds them. */
+static int ms_write_served(const char *path, const unsigned char *bytes, size_t len)
+{
+    size_t have_len = 0;
+    unsigned char *have = ms_read_whole(path, (size_t)SH_MODSERVE_MAX_FILE, &have_len);
+    wchar_t wide[MS_PATH_MAX + 8];
+    HANDLE h;
+    DWORD put = 0;
+    int same = have && have_len == len && !memcmp(have, bytes, len), ok;
+    if (have) HeapFree(GetProcessHeap(), 0, have);
+    if (same) return 1;
+    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
+    h = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
+    CloseHandle(h);
+    return ok;
+}
+
+/* Serve `f` from rewritten bytes: written under .served, size and blob follow. */
+static int ms_serve_rewritten(ms_index *x, const ms_bundle *b, ms_file *f, const unsigned char *bytes, size_t len)
+{
+    char path[MS_PATH_MAX], blob[SH_MB_HASH_HEX + 1], *p;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.served\\%s@%.16s\\%s", x->root, b->id, b->hash, f->request);
+    for (p = path; *p; ++p) if (*p == '/') *p = '\\';
+    if (!ms_write_served(path, bytes, len)) return 0;
+    sh_mb_sha256_hex(bytes, len, blob);
+    f->disk = ms_strdup(x, path);
+    f->blob = ms_strdup(x, blob);
+    f->size = (uint64_t)len;
+    return f->disk && f->blob;
+}
+
+#define MS_BANKS_MAX 16
+static void ms_bank_stems(ms_index *x)
+{
+    int bi;
+    for (bi = 0; bi < x->nbundles; ++bi) {
+        ms_bundle *b = &x->bundles[bi];
+        char stems[MS_BANKS_MAX][SH_MB_BANK_STEM_MAX + 1], renamed[MS_BANKS_MAX][SH_MB_BANK_STEM_MAX + 20];
+        int n = 0, i, k;
+        if (!b->admitted || b->legacy || b->grandfathered || !b->hash || strlen(b->hash) != 64 || !b->id) continue;
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            char stem[SH_MB_BANK_STEM_MAX + 1], req[SH_MB_REQUEST_MAX + 1];
+            unsigned char *bytes;
+            size_t len = 0;
+            if (f->stock || !sh_mb_bank_stem(f->request, stem, sizeof stem)) continue;
+            if (n >= MS_BANKS_MAX) { ms_log("bundle '%s': more than %d banks; the rest keep their names", b->id, MS_BANKS_MAX); break; }
+            _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, b->hash);
+            bytes = ms_read_whole(f->disk, (size_t)SH_MODSERVE_MAX_FILE, &len);
+            if (!bytes || !sh_modserve_bank_patch_id(bytes, len, renamed[n])) {
+                if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+                ms_log("bundle '%s': %s cannot be served under a per-build stem (unreadable or not a BKHD bank); it keeps "
+                       "its name", b->id, f->request);
+                continue;
+            }
+            _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s.bnk", renamed[n]);
+            if (!ms_serve_rewritten(x, b, f, bytes, len)) {
+                HeapFree(GetProcessHeap(), 0, bytes);
+                ms_log("bundle '%s': %s could not be written under .served; it keeps its name", b->id, f->request);
+                continue;
+            }
+            HeapFree(GetProcessHeap(), 0, bytes);
+            f->request = ms_strdup(x, req);
+            if (!f->request) continue;
+            if (!f->is_decl) f->pname = (char *)f->request;
+            strcpy_s(stems[n], sizeof stems[0], stem);
+            ms_log("bundle '%s': bank %s.bnk served as %s.bnk (a build of its own to Wwise)", b->id, stem, renamed[n]);
+            n++;
+        }
+        if (!n) continue;
+        /* The bundle's served decls naming a bank follow the rename. */
+        for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            unsigned char *bytes;
+            char *text = NULL;
+            size_t len = 0, tl = 0;
+            int changed = 0;
+            if (!f->is_decl || f->stock) continue;
+            bytes = ms_read_whole(f->disk, 8u << 20, &len);
+            if (!bytes) continue;
+            text = (char *)malloc(len + 1);
+            if (text) { memcpy(text, bytes, len); text[len] = 0; tl = len; }
+            HeapFree(GetProcessHeap(), 0, bytes);
+            for (k = 0; text && k < n; ++k) {
+                size_t nl = 0;
+                char *next = sh_modserve_bank_rename_text(text, tl, stems[k], renamed[k], &nl);
+                if (next) { free(text); text = next; tl = nl; changed = 1; }
+            }
+            if (changed && text) {
+                if (ms_serve_rewritten(x, b, f, (const unsigned char *)text, tl))
+                    ms_log("bundle '%s': %s names its bank; served with the per-build stem", b->id, f->request);
+                else ms_log("bundle '%s': %s names its bank but could not be rewritten", b->id, f->request);
+            }
+            free(text);
+        }
+    }
+}
+
 int sh_modserve_index_build(const char *mods_root)
 {
     ms_index *x, *old;
@@ -3790,6 +4091,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_scan_folder(x, mods_root, "", 0);
     ms_load_aliases(x, mods_root);
     ms_load_editor_only(x, mods_root);
+    ms_bank_stems(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
@@ -4132,8 +4434,8 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
      * served before its bundle's requirement gates were live was resolved by
      * the engine against the cut-content blacklists (modserve.h). */
     first = InterlockedIncrement((volatile LONG *)&f->opens) == 1;
-    if (first && ms_req_needs(&x->bundles[f->bundle]) &&
-        !InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].req_live, 0, 0))
+    if (first && ms_req_needs(ms_gate_of(x, f)) &&
+        !InterlockedCompareExchange((volatile LONG *)&ms_gate_of(x, f)->req_live, 0, 0))
         InterlockedExchange((volatile LONG *)&f->opened_ungated, 1);
     if (first &&
         (!strncmp(f->request, "generated/renderprogs/", 22) || !strncmp(f->request, "generated/spirv/", 16) ||
@@ -6085,7 +6387,7 @@ static int ms_settled_before(const ms_index *x, const ms_file *f);
 /* The bundle has cvar requirements and they are all live now. */
 static int ms_gates_live_for(const ms_index *x, const ms_file *f)
 {
-    const ms_bundle *b = &x->bundles[f->bundle];
+    const ms_bundle *b = ms_gate_of(x, f);
     return ms_req_needs(b) && InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0);
 }
 
@@ -6263,7 +6565,7 @@ int sh_modserve_refresh_expand(void)
 
 static int ms_gates_ok(const ms_index *x, const ms_file *f)
 {
-    return !ms_req_needs(&x->bundles[f->bundle]) || ms_gates_live_for(x, f);
+    return !ms_req_needs(ms_gate_of(x, f)) || ms_gates_live_for(x, f);
 }
 
 static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_refresh_fn fn, void *context)

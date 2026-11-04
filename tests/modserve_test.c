@@ -3704,6 +3704,72 @@ static void test_dependency_names(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* Per-build bank stems (DESIGN-additive 6): a bundle's bank is served under
+ * <stem>.<hash16>.bnk with its BKHD id rewritten, and its decl naming the
+ * bank follows; another build of the key is another bank to Wwise. */
+static void test_bank_stems(void)
+{
+    static const char DECL[] = "sound mods/b.bank/hit {\r\n\tbank = \"b_bank_sfx.bnk\";\r\n\tevent = \"play_hit\";\r\n}";
+    static const fx_file files[] = {
+        { "sound/soundbanks/pc/b_bank_sfx.bnk", NULL, 24, "soundBank", "sound/soundbanks/pc/b_bank_sfx.bnk", NULL, '1' },
+        { "generated/decls/sound/mods/b.bank/hit.decl", DECL, -1, "sound", "mods/b.bank/hit", NULL, '2' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], req[160], h[65], stem[64];
+    unsigned char bank[24], *bytes = NULL;
+    size_t len = 0;
+    uint32_t v, id;
+    char *slash, *t;
+    int pass;
+    printf("-- additive: per-build bank stems\n");
+    /* The text rewrite alone. */
+    t = sh_modserve_bank_rename_text("a = \"b_bank_sfx\"; c = \"x/b_bank_sfx.bnk\"; d = \"B_BANK_SFX.bnk\"; e = \"b_bank_sfxy\";",
+                                     strlen("a = \"b_bank_sfx\"; c = \"x/b_bank_sfx.bnk\"; d = \"B_BANK_SFX.bnk\"; e = \"b_bank_sfxy\";"),
+                                     "b_bank_sfx", "b_bank_sfx.1111111111111111", &len);
+    CHECK(t && !strcmp(t, "a = \"b_bank_sfx.1111111111111111\"; c = \"x/b_bank_sfx.1111111111111111.bnk\"; "
+                          "d = \"b_bank_sfx.1111111111111111.bnk\"; e = \"b_bank_sfxy\";"));
+    free(t);
+    CHECK(sh_modserve_bank_rename_text("nothing here", 12, "b_bank_sfx", "b_bank_sfx.1", &len) == NULL);
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\banks\\mods", top);
+    mkdirs(root);
+    for (pass = 0; pass < 2; pass++) {
+        char digit = pass ? '6' : '5';
+        memset(bank, 0, sizeof bank);
+        memcpy(bank, "BKHD", 4);
+        v = 16; memcpy(bank + 4, &v, 4);
+        v = 0x71; memcpy(bank + 8, &v, 4);
+        v = sh_mb_fnv1_lower("b_bank_sfx", 10); memcpy(bank + 12, &v, 4);
+        make_bundle(root, "b.bank", "b.bank", "1.0.0", digit, NULL, files, 2, NULL);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\b.bank\\assets\\sound\\soundbanks\\pc\\b_bank_sfx.bnk", root);
+        write_file(path, (const char *)bank, sizeof bank);
+        sh_modserve_scope_enable(0);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 1);
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "b_bank_sfx.%.16s", hash64(digit, h));
+        _snprintf_s(req, sizeof req, _TRUNCATE, "sound/soundbanks/pc/%s.bnk", stem);
+        CHECK(!sh_modserve_lookup("sound/soundbanks/pc/b_bank_sfx.bnk", NULL));
+        {
+            sh_modserve_hit hit;
+            CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path && strstr(hit.disk_path, "\\.served\\b.bank@") && hit.size == 24);
+        }
+        CHECK(log_has("bank b_bank_sfx.bnk served as b_bank_sfx."));
+        CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == 24 && !memcmp(bytes, "BKHD", 4));
+        if (bytes) {
+            memcpy(&id, bytes + 12, 4);
+            CHECK(id == sh_mb_fnv1_lower(stem, strlen(stem)) && id != sh_mb_fnv1_lower("b_bank_sfx", 10));
+            HeapFree(GetProcessHeap(), 0, bytes);
+            bytes = NULL;
+        }
+        {
+            char want[200];
+            _snprintf_s(want, sizeof want, _TRUNCATE, "bank = \"%s.bnk\";", stem);
+            CHECK(strstr(ad_served("generated/decls/sound/mods/b.bank/hit.decl"), want) != NULL);
+        }
+    }
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -3743,6 +3809,7 @@ int main(void)
     test_resource_lock();
     test_row_served();
     test_dependency_names();
+    test_bank_stems();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }
