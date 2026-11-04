@@ -18,7 +18,7 @@
  *     "validated": true, "cause": "<first cause when not validated>",
  *     "origin": "install" | "download" | "migration" | "delivery" | "by-hand",
  *     "legacy": {...},                 converted first-generation packages only
- *     "classes": {"adds", "borrows", "replaces", "editor", "noops"},
+ *     "classes": {"adds", "borrows", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
  *     "registries": {"player": {...}, "conductor": ["<encounter decl>", ...], "strings": ["<key>", ...]},
  *     "shadows": ["<request>", ...],
@@ -28,7 +28,7 @@
  *
  * Additive mods (phase 1). The builder classifies every file from its path
  * and bytes (SH_MB_CLASS_*); "shadows" is derived from the classification
- * (every replacement and every editor tweak outside the namespace), and the
+ * (every replacement and every editor tweak at a game name), and the
  * author keys "shadows", "stock" and "scope" are accepted and ignored with
  * one report line each, so the canonical manifest of an existing mod keeps
  * its text and hash. An author "stock" entry without a file under assets/
@@ -162,22 +162,26 @@ typedef struct sh_mb_file {
 
 /* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
  * file's path and bytes, never from the descriptor:
- *   EDITOR   an editor-only type (sh_mb_editor_time), at any path
+ *   EDITOR   an editor-only type (sh_mb_editor_time) outside the namespace:
+ *            a local tweak. The same types under the namespace are ADD or
+ *            BORROW: a Toybox row the mod adds travels with it.
  *   ADD      under the mod's own namespace, bytes the game does not hold
  *   BORROW   under the namespace, a stock pointer (the game's own bytes)
- *   NOOP     a stock pointer restoring installed content at its own name
+ *   SURFACE  a stock pointer restoring installed content at its own name:
+ *            served from the player's disk, never carried, never refused
+ *            (SnapMap's own provider cannot see campaign-only content)
  *   REPLACE  any other file at a game name: served as a shadow. Accepted
- *            and reported while replacements are retired; a later release
- *            refuses them. */
+ *            and reported while replacements are retired; refused when
+ *            sh_mb_refuse_replacements is on. */
 #define SH_MB_CLASS_NONE    0
 #define SH_MB_CLASS_ADD     1
 #define SH_MB_CLASS_BORROW  2
 #define SH_MB_CLASS_REPLACE 3
 #define SH_MB_CLASS_EDITOR  4
-#define SH_MB_CLASS_NOOP    5
+#define SH_MB_CLASS_SURFACE 5
 
 typedef struct sh_mb_classes {
-    unsigned adds, borrows, replaces, editor, noops;
+    unsigned adds, borrows, replaces, editor, surfaces;
 } sh_mb_classes;
 
 /* Registry intent (DESIGN-additive 2.4): the author block's "player" object.
@@ -186,7 +190,8 @@ typedef struct sh_mb_classes {
 #define SH_MB_PLAYER_HANDS_D1    1
 #define SH_MB_PLAYER_BODY        2
 #define SH_MB_PLAYER_BODY_EVENTS 3
-#define SH_MB_PLAYER_FIELDS      4
+#define SH_MB_PLAYER_HANDS_ANIM_WEB 4   /* the first-person hands animWeb (player/mp handsAnimWeb) */
+#define SH_MB_PLAYER_FIELDS      5
 /* The member names, in SH_MB_PLAYER_* order. */
 extern const char *const sh_mb_player_fields[SH_MB_PLAYER_FIELDS];
 
@@ -250,6 +255,11 @@ typedef struct sh_mb_bundle {
     int   key_source;      /* SH_MB_KEY_FROM_*, 0 when unknown (a manifest) */
     sh_mb_classes classes; /* counts of the files' classes */
     char *player[SH_MB_PLAYER_FIELDS];   /* the "player" intent, NULL when unset */
+    /* player.weapons (the player kit, DESIGN-additive 2.9): weapon_slots[i] is
+     * a stock weapon decl name the game finds the weapon by, weapon_decls[i]
+     * the mod's own weapon decl (mods/<key>/...) served under it. */
+    char **weapon_slots, **weapon_decls;
+    size_t weapon_count;
     char *registries;      /* compact JSON of the product block's "registries" object, or NULL */
     char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
     size_t note_count, note_cap;
@@ -315,8 +325,9 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * block: kept when the content (without build and bundle) is unchanged,
  * previous + 1 when it changed, 1 when there is none; "built" is kept while
  * the bundle hash is unchanged. Every file is classified (out->files[].cls,
- * out->classes); a file outside the namespace that is not a no-op must be a
- * game name (resolver->stock), and is then a replacement and a shadow. The
+ * out->classes); a file outside the namespace that is not a surface must be
+ * a game name (resolver->stock), and is then a shadow: an editor tweak, or a
+ * replacement (refused when sh_mb_refuse_replacements is on). The
  * key is resolved (out->key_source), the "player" intent checked against the
  * files and the game, out->registries filled, and out->notes holds the
  * report lines the build log prints. */
@@ -435,11 +446,23 @@ int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
  * [a-z0-9] ("hell-guards-7f3k"). Returns 1 with a valid id in out. */
 int  sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1]);
 
-/* "adds", "borrows", "replaces", "editor", "noops" for SH_MB_CLASS_*, else "". */
+/* "adds", "borrows", "replaces", "editor", "surfaces" for SH_MB_CLASS_*, else "". */
 const char *sh_mb_class_name(int cls);
 
-/* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 noops"). */
+/* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
+
+/* The replacement refusal (DESIGN-additive 2.1, 7). Off (phase 1): a file at
+ * a game name with other bytes is accepted, served as a shadow and reported.
+ * On: it fails the build with "would replace <request>: put it under
+ * mods/<key>/ or declare the intent in mod.json". Editor tweaks, surfaces and
+ * grandfathered (legacy) bundles are never refused. Process-wide; the
+ * default is SH_MB_REFUSE_REPLACEMENTS_DEFAULT (phase 2 turns it on). */
+#ifndef SH_MB_REFUSE_REPLACEMENTS_DEFAULT
+#define SH_MB_REFUSE_REPLACEMENTS_DEFAULT 0
+#endif
+void sh_mb_set_refuse_replacements(int on);
+int  sh_mb_refuse_replacements(void);
 
 /* Trim ASCII whitespace, lower-case, and validate a mod id: 1-64 characters of
  * [a-z0-9._-], starting and ending with a letter or digit, no "..".

@@ -215,13 +215,13 @@ static void test_builder(const char *tmp)
     CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T + (sizeof DECL_A - 1));
     f = find(&b, REQ_COPY);
     CHECK(f && f->stock && f->stock_source && !strcmp(f->stock_source, P_IMAGE));
-    /* Additive mods: the installed bytes at the game's own name are a no-op,
+    /* Additive mods: the installed bytes at the game's own name are a surface,
      * not a shadow, whatever the descriptor's old "shadows" said. */
     f = find(&b, P_IMAGE);
-    CHECK(f && f->stock && !f->shadowed && f->cls == SH_MB_CLASS_NOOP && b.shadow_count == 0);
+    CHECK(f && f->stock && !f->shadowed && f->cls == SH_MB_CLASS_SURFACE && b.shadow_count == 0);
     f = find(&b, REQ_COPY);
     CHECK(f && f->cls == SH_MB_CLASS_BORROW);
-    CHECK(b.classes.noops == 1 && b.classes.borrows == 3 && b.classes.adds == 1);
+    CHECK(b.classes.surfaces == 1 && b.classes.borrows == 3 && b.classes.adds == 1);
     f = find(&b, REQ_TOME);   /* .tome is outside the whitelist, but it is installed content */
     CHECK(f && f->stock && !strcmp(f->stock_source, P_TOME));
     f = find(&b, REQ_ALIAS);

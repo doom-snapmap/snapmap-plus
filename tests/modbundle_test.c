@@ -289,6 +289,9 @@ static const char *const STOCK[] = {
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim",
     "generated/decls/entitydef/monster/imp.decl",
     "generated/decls/md6def/monster/imp.md6.decl",
+    "generated/decls/weapon/weapon/zion/player/sp/pistol.decl",
+    "generated/decls/weapon/weapon/zion/player/sp/chainsaw.decl",
+    "generated/decls/animweb/player/fp_hands_mp.decl",
     NULL
 };
 static unsigned g_stock_misses;
@@ -1309,9 +1312,10 @@ static int count_class(const sh_mb_bundle *b, int cls)
 }
 
 /* Every cell of the classification (DESIGN-additive 2.1, 2.6): add, borrow,
- * no-op, replacement (accepted and reported in phase 1), editor tweak under
- * the key and at a game name; the shadows derived; the product block's
- * derived facts written and read back. */
+ * surface, replacement (accepted and reported in phase 1), an editor type
+ * under the key (an addition) and at a game name (an editor tweak); the
+ * shadows derived; the product block's derived facts written and read back;
+ * the replacement refusal switched on. */
 static void test_classes(const char *fixture, const char *tmp)
 {
     static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read };
@@ -1322,7 +1326,7 @@ static void test_classes(const char *fixture, const char *tmp)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\classes", tmp);
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "assets\\generated\\image\\mods\\alex.r2_imp\\rock_copy.bimage", FAKE[0].text);   /* borrow */
-    mt_write(folder, "assets\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* no-op */
+    mt_write(folder, "assets\\generated\\image\\stock\\rock.bimage", FAKE[0].text);                     /* surface */
     mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl",                           /* replacement */
              "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
     mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
@@ -1333,18 +1337,27 @@ static void test_classes(const char *fixture, const char *tmp)
     f = find_file(&b, "generated/image/mods/alex.r2_imp/rock_copy.bimage");
     CHECK(f && f->cls == SH_MB_CLASS_BORROW && f->stock && !strcmp(f->stock_source, FAKE[0].source) && !f->shadowed);
     f = find_file(&b, "generated/image/stock/rock.bimage");
-    CHECK(f && f->cls == SH_MB_CLASS_NOOP && f->stock && !f->shadowed);
+    CHECK(f && f->cls == SH_MB_CLASS_SURFACE && f->stock && !f->shadowed);
     f = find_file(&b, "generated/decls/entitydef/monster/imp.decl");
     CHECK(f && f->cls == SH_MB_CLASS_REPLACE && !f->stock && f->shadowed);
     f = find_file(&b, "generated/decls/snapeditorentitydef/demons/demon_base.decl");
     CHECK(f && f->cls == SH_MB_CLASS_EDITOR && f->shadowed);
+    /* An editor type under the key is a Toybox row the mod adds: it travels. */
     f = find_file(&b, "generated/decls/snapeditorentitydef/mods/alex.r2-imp/imp_copy.decl");
-    CHECK(f && f->cls == SH_MB_CLASS_EDITOR && !f->shadowed);
+    CHECK(f && f->cls == SH_MB_CLASS_ADD && !f->shadowed);
+    f = find_file(&b, "generated/decls/snapeditorentitydef/mods/alex.r2-imp/imp_copy_b.decl");
+    CHECK(f && f->cls == SH_MB_CLASS_ADD && !f->shadowed);
     f = find_file(&b, "generated/decls/entitydef/mods/alex.r2-imp/imp_copy.decl");
     CHECK(f && f->cls == SH_MB_CLASS_ADD);
-    CHECK(b.classes.adds == 11 && b.classes.borrows == 1 && b.classes.noops == 1 && b.classes.replaces == 1 &&
-          b.classes.editor == 3);
-    CHECK(count_class(&b, SH_MB_CLASS_EDITOR) == 3 && count_class(&b, SH_MB_CLASS_NONE) == 0);
+    CHECK(b.classes.adds == 13 && b.classes.borrows == 1 && b.classes.surfaces == 1 && b.classes.replaces == 1 &&
+          b.classes.editor == 1);
+    CHECK(count_class(&b, SH_MB_CLASS_EDITOR) == 1 && count_class(&b, SH_MB_CLASS_NONE) == 0);
+    {
+        char line[160];
+        sh_mb_classes_text(&b.classes, line, sizeof line);
+        CHECK(!strcmp(line, "13 adds, 1 borrows, 1 replaces, 1 editor, 1 surfaces"));
+    }
+    CHECK(has_note(&b, "surfaces 1 game file") && !has_note(&b, "surfaces generated/"));
     /* The shadows are exactly the files at game names outside the namespace. */
     CHECK(b.shadow_count == 2 && !strcmp(b.shadows[0], "generated/decls/entitydef/monster/imp.decl") &&
           !strcmp(b.shadows[1], "generated/decls/snapeditorentitydef/demons/demon_base.decl"));
@@ -1358,13 +1371,33 @@ static void test_classes(const char *fixture, const char *tmp)
     CHECK(text && strstr((const char *)text, "\"key\": \"alex.r2-imp\"") &&
           strstr((const char *)text, "\"origin\": \"by-hand\"") &&
           strstr((const char *)text, "\"classes\": {") && strstr((const char *)text, "\"replaces\": 1") &&
-          strstr((const char *)text, "\"editor\": [") && strstr((const char *)text, "\"registries\": {"));
+          strstr((const char *)text, "\"editor\": [") && strstr((const char *)text, "\"registries\": {") &&
+          strstr((const char *)text, "\"surfaces\": 1") && !strstr((const char *)text, "noops") &&
+          !strstr((const char *)text, "\"generated/decls/snapeditorentitydef/mods/"));
     free(text);
     CHECK(sh_mb_load_folder(folder, &back));
     if (back.errors) fprintf(stderr, "  classes reload: %s\n", back.first_cause);
-    CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 11 && back.classes.borrows == 1 &&
-          back.classes.noops == 1 && back.classes.replaces == 1 && back.classes.editor == 3);
+    CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 13 && back.classes.borrows == 1 &&
+          back.classes.surfaces == 1 && back.classes.replaces == 1 && back.classes.editor == 1);
     sh_mb_free(&back);
+    /* The refusal switch (phase 2 turns it on): the replacement fails the
+     * build with its cause; the editor tweak and the surface at game names do
+     * not. Off again, the same folder builds to the same hash. */
+    {
+        char h0[65];
+        strcpy_s(h0, sizeof h0, b.hash);
+        CHECK(!sh_mb_refuse_replacements());
+        sh_mb_set_refuse_replacements(1);
+        CHECK(sh_mb_refuse_replacements());
+        CHECK(!sh_mb_build(folder, &FAKE_RESOLVER, &back) && back.errors == 1 &&
+              strstr(back.first_cause, "would replace generated/decls/entitydef/monster/imp.decl: put it under "
+                                       "mods/alex.r2-imp/ or declare the intent in mod.json") != NULL);
+        if (back.errors != 1) fprintf(stderr, "  refusal: %u error(s), first %s\n", back.errors, back.first_cause);
+        sh_mb_free(&back);
+        sh_mb_set_refuse_replacements(0);
+        CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &back) && !strcmp(back.hash, h0));
+        sh_mb_free(&back);
+    }
     /* A rebuild keeps the hash and the build number. */
     {
         char h1[65];
@@ -1491,6 +1524,64 @@ static void m_player_number(const char *f) { mt_write(f, "mod.json", DESC(",\"pl
 static void m_player_array(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":[\"hands\"]")); }
 static void m_player_decltype(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy.md6\"}")); }
 static void m_player_member(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"feet\":\"monster/imp.md6\"}")); }
+/* handsAnimWeb and weapons (the player kit). */
+#define KIT_WEAPON "assets\\generated\\decls\\weapon\\mods\\alex.r2-imp\\weapon\\pistol.decl"
+#define KIT_WEB    "assets\\generated\\decls\\animweb\\mods\\alex.r2-imp\\hands_web.decl"
+static void m_kit_ok(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/hands_web\",\"weapons\":{"
+                                 "\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/pistol\","
+                                 "\"weapon/zion/player/sp/chainsaw\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
+    mt_write(f, KIT_WEAPON, "{\r\n}");
+    mt_write(f, KIT_WEB, "{\r\n}");
+}
+static void m_kit_stock_web(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"player/fp_hands_mp\"}"));
+}
+static void m_kit_web_unresolved(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"player/none\"}"));
+}
+static void m_kit_web_type(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/imp_copy\"}"));
+}
+static void m_kit_key_unresolved(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/nothing\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
+    mt_write(f, KIT_WEAPON, "{\r\n}");
+}
+static void m_kit_key_own(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"mods/alex.r2-imp/weapon/pistol\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
+    mt_write(f, KIT_WEAPON, "{\r\n}");
+}
+static void m_kit_value_unresolved(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/none\"}}"));
+}
+static void m_kit_value_stock(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"weapon/zion/player/sp/chainsaw\"}}"));
+}
+static void m_kit_value_type(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/imp_copy\"}}"));
+}
+static void m_kit_value_number(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":4}}"));
+}
+static void m_kit_not_object(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":[\"weapon/zion/player/sp/pistol\"]}"));
+}
+/* bodyEvents names the md6Def by its decl name, ".md6" included. */
+static void m_kit_events_bare(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b\"}"));
+}
 
 static void test_player(const char *fixture, const char *tmp)
 {
@@ -1512,6 +1603,30 @@ static void test_player(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_player_array, &RESOLVER, "player must be an object");
     refused(fixture, tmp, m_player_decltype, &RESOLVER, "it must name an entityDef");
     refused(fixture, tmp, m_player_member, &RESOLVER, "player key feet is not supported");
+    /* The player kit: handsAnimWeb like hands, weapons keyed by stock weapon
+     * decls, each value a weapon decl of the mod; both in registries.player. */
+    accepted(fixture, tmp, m_kit_ok, &b);
+    CHECK(b.errors == 0 && b.weapon_count == 2 && b.player[SH_MB_PLAYER_HANDS_ANIM_WEB] &&
+          !strcmp(b.player[SH_MB_PLAYER_HANDS_ANIM_WEB], "mods/alex.r2-imp/hands_web"));
+    CHECK(b.registries && !strcmp(b.registries,
+          "{\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/hands_web\",\"weapons\":{"
+          "\"weapon/zion/player/sp/chainsaw\":\"mods/alex.r2-imp/weapon/pistol\","
+          "\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/pistol\"}}}"));
+    if (b.registries) printf("modbundle_test: kit registries %s\n", b.registries);
+    sh_mb_free(&b);
+    accepted(fixture, tmp, m_kit_stock_web, &b);
+    CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"handsAnimWeb\":\"player/fp_hands_mp\""));
+    sh_mb_free(&b);
+    refused(fixture, tmp, m_kit_web_unresolved, &RESOLVER, "player.handsAnimWeb names player/none, which is neither");
+    refused(fixture, tmp, m_kit_web_type, &RESOLVER, "player.handsAnimWeb names mods/alex.r2-imp/imp_copy, which is a entityDef; it must name an animWeb");
+    refused(fixture, tmp, m_kit_key_unresolved, &RESOLVER, "player.weapons key weapon/zion/player/sp/nothing is not a stock weapon decl");
+    refused(fixture, tmp, m_kit_key_own, &RESOLVER, "player.weapons key mods/alex.r2-imp/weapon/pistol is under mods/alex.r2-imp/");
+    refused(fixture, tmp, m_kit_value_unresolved, &RESOLVER, "player.weapons.weapon/zion/player/sp/pistol names mods/alex.r2-imp/weapon/none, which this mod does not provide");
+    refused(fixture, tmp, m_kit_value_stock, &RESOLVER, "names weapon/zion/player/sp/chainsaw, which is not under mods/alex.r2-imp/");
+    refused(fixture, tmp, m_kit_value_type, &RESOLVER, "names mods/alex.r2-imp/imp_copy, which is a entityDef; it must name a weapon");
+    refused(fixture, tmp, m_kit_value_number, &RESOLVER, "player.weapons.weapon/zion/player/sp/pistol must be a string");
+    refused(fixture, tmp, m_kit_not_object, &RESOLVER, "player.weapons must be an object");
+    refused(fixture, tmp, m_kit_events_bare, &RESOLVER, "player.bodyEvents names mods/alex.r2-imp/imp_copy_b, which is a snapEditorEntityDef; it must name an md6Def");
 }
 
 int main(int argc, char **argv)
