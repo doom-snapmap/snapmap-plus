@@ -501,7 +501,7 @@ static void mu_entry_rows(mu_model *m, size_t i)
     for (k = 0; k < e->bundle.file_count && u->row_count < u->editor_rows; k++) {
         const sh_mb_file *f = &e->bundle.files[k];
         char path[MAX_PATH * 4], *text = NULL, *tag = NULL, *def = NULL, *name = NULL, *c;
-        if (!f->ptype || _stricmp(f->ptype, "snapEditorEntityDef")) continue;
+        if (!f->ptype || _stricmp(f->ptype, "snapEditorEntityDef") || f->cls == SH_MB_CLASS_EDITOR) continue;
         if (!f->stock) {
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", e->folder, f->path);
             for (c = path; *c; c++) if (*c == '/') *c = '\\';
@@ -582,7 +582,8 @@ static int mu_model_build(mu_model *m)
         if (e->loaded)
             for (k = 0; k < e->bundle.file_count; k++) {
                 const sh_mb_file *f = &e->bundle.files[k];
-                if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef")) u->editor_rows++;
+                /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
+                if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
                 if (f->shadowed) u->shadows++;
             }
         if (!e->loaded) {
@@ -2082,7 +2083,8 @@ static int mu_install_one(const char *folder)
     r.stock_context = &stock;
     ok = sh_ms_install_from_folder(folder, &r, key, sizeof key, &st, &bd, cause, sizeof cause);
     for (k = 0; k < bd.file_count; k++)
-        if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef")) rows++;
+        if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") && bd.files[k].cls != SH_MB_CLASS_EDITOR)
+            rows++;
     if (!ok) {
         mu_log("install %s: refused: %s", folder, cause);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not installed: %s", cause[0] ? cause : "the mod could not be built");
@@ -2205,7 +2207,8 @@ static int mu_install(const char *arg)
             mu_log("install %s: building", items[i].folder);
             ok = sh_ms_install_from_folder(items[i].folder, &r, key, sizeof key, &st, &bd, cause, sizeof cause);
             for (k = 0; k < bd.file_count; k++)
-                if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef")) mod_rows++;
+                if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") &&
+                    bd.files[k].cls != SH_MB_CLASS_EDITOR) mod_rows++;
         } else {
             strcpy_s(cause, sizeof cause, mu_absolute(items[i].folder) ? "no mod.json in it or in any folder below it"
                                                                         : "not an absolute folder");

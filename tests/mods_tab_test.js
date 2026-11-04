@@ -857,6 +857,10 @@ test('additive: derived facts, the declared replacement marker, registry contrib
   assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Replaces: 500 game files/.test(fs.textContent));
   h.ui.select('alex.r2-imp');
   assert.match(section(h, 'facts').textContent, /Registries: 4 entries generated per map that declares it/);
+  /* Editor tweaks are counted as editor tweaks, never as Toybox rows the mod adds. */
+  h.ui.select('local.my-overrides');
+  assert.match(section(h, 'adds').textContent, /^What it adds 63 editor tweaks/);
+  assert.ok(!/Toybox row/.test(section(h, 'adds').textContent), 'an editor tweak is not a Toybox row');
   h.ui.select('airlock');
   assert.equal(section(h, 'facts'), undefined, 'nothing derived: no section');
 });

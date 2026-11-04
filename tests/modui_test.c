@@ -1165,6 +1165,29 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_INSTALL, req);
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
+        /* Editor tweaks (a stock row changed in this editor) are not Toybox rows the mod adds;
+         * a row under its key is. */
+        {
+            char tw[MAX_PATH * 2];
+            _snprintf_s(tw, sizeof tw, _TRUNCATE, "%s\\authoring\\alex.tweak", tmp);
+            CreateDirectoryA(tw, NULL);
+            mt_write(tw, "mod.json", "{\"id\":\"alex.tweak\",\"version\":\"1.0.0\",\"name\":\"Tweaks\",\"author\":\"tester\"}");
+            mt_write(tw, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl", "{\r\n\t// tweaked\r\n}\r\n");
+            mt_write(tw, "assets\\generated\\decls\\snapeditorentitydef\\mods\\alex.tweak\\row.decl", "{\r\n}\r\n");
+            doc = run_doc(SH_MODS_ACT_INSTALL, tw);
+            CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"alex.tweak\"") && has(doc, "\"editorRows\":1"));
+            free(doc);
+            doc = list_doc();
+            {
+                const char *p = strstr(doc, "\"key\":\"alex.tweak\""), *e = p ? strstr(p + 1, "\"key\":") : NULL;
+                const char *rows = p ? strstr(p, "\"editorRows\":1,") : NULL, *names = p ? strstr(p, "\"editorRowNames\":[\"mods/alex.tweak/row\"]") : NULL;
+                const char *tweak = p ? strstr(p, "\"editor\":1,") : NULL;
+                CHECK(p && rows && names && tweak && (!e || (rows < e && names < e && tweak < e)));
+            }
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.tweak");
+            free(doc);
+        }
         /* The saved map's game.details, and the record's link and claim for its published item. */
         _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\saves", tmp);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPSABCDEF0123456789ABCD", saves);

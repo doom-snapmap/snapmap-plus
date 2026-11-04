@@ -630,6 +630,8 @@ var modsTab = (function () {
       } else if (b.editorRows > 0) {
         adds.appendChild(el('div', 'mods-line', plural(b.editorRows, 'Toybox row')));
       }
+      /* Editor tweaks change stock rows in this computer's editor; they are not rows the mod adds. */
+      if (b.facts && b.facts.editor) adds.appendChild(el('div', 'mods-line', plural(b.facts.editor, 'editor tweak')));
       countLines(b.counts).forEach(function (t) { adds.appendChild(el('div', 'mods-line', t)); });
       if (adds.children.length === 1) adds.appendChild(el('div', 'mods-line muted', 'Adds no Toybox rows.'));
 
