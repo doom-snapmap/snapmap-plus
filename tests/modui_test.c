@@ -1722,6 +1722,17 @@ int main(int argc, char **argv)
                     }
                     CHECK(load_gone_row("alex.req", GONE_REQ, pass));
                     CHECK(sh_modmanifest_substituted(GONE_REQ, sub, sizeof sub) && !strcmp(sub, ref.hash));
+                    /* sh_mods map and the doctor say why: the row's build, and the build that serves it. */
+                    _snprintf_s(want, sizeof want, _TRUNCATE, "alex.req: declared at build %.16s (not installed), serving "
+                                "build %.16s (alex.req) in the editor; 'sh_mods map upgrade \"alex.req\"' moves the map to it",
+                                GONE_REQ, ref.hash);
+                    g_doctor[0] = 0;
+                    CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
+                    CHECK(has(g_doctor, "MODS: map:   ") && has(g_doctor, want));
+                    CHECK(has(g_doctor, pass ? "(alex.req, otherBuild)" : "(alex.req, installed)"));
+                    g_doctor[0] = 0;
+                    CHECK(sh_modui_doctor(0, doctor_line, NULL) == 1);
+                    CHECK(has(g_doctor, "MODS: doctor: map row ") && has(g_doctor, want));
                     log_clear();
                     g_doctor[0] = 0;
                     CHECK(sh_modui_command(4, rm_argv, doctor_line, NULL) == 1);

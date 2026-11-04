@@ -2641,6 +2641,32 @@ static void mu_line(const mu_out *o, const char *fmt, ...)
     o->fn(o->context, line);
 }
 
+/* A row the editor serves through another build of its key (a SUBSTITUTE
+ * load): why remove and upgrade act on the key, not on the declared build. */
+static void mu_say_substituted(const mu_out *o, const mu_model *m, const char *prefix, const char *id,
+                               const char *declared, const char *serving)
+{
+    int at = mu_find_hash(m, serving);
+    mu_line(o, "%s%s: declared at build %.16s (%s), serving build %.16s (%s) in the editor; 'sh_mods map upgrade "
+               "\"%s\"' moves the map to it, and Remove from map drops the row by its key", prefix, id, declared,
+            mu_find_hash(m, declared) >= 0 ? "installed" : "not installed", serving,
+            at >= 0 ? m->list.items[at].name : "not installed", id);
+}
+
+/* Each row of the open map the editor serves through another build. */
+static void mu_say_substitutions(const mu_out *o, const mu_model *m, const char *prefix)
+{
+    sh_modmanifest_list rows;
+    size_t i;
+    if (!sh_modmanifest_current(&rows)) return;
+    for (i = 0; i < rows.count; i++) {
+        char sub[SH_MODMANIFEST_HASH_CAP];
+        if (sh_modmanifest_substituted(rows.rows[i].bundle, sub, sizeof sub))
+            mu_say_substituted(o, m, prefix, rows.rows[i].id, rows.rows[i].bundle, sub);
+    }
+    sh_modmanifest_list_free(&rows);
+}
+
 /* 1 with the cause when the game cannot take a change now. */
 static int mu_busy(char *cause, size_t cap)
 {
@@ -3727,12 +3753,7 @@ static void mu_say_map(const mu_out *o)
                     x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
                     x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "",
                     scope);
-            {
-                char sub[SH_MODMANIFEST_HASH_CAP];
-                if (sh_modmanifest_substituted(x->hash, sub, sizeof sub))
-                    mu_line(o, "map:   declared at build %.16s, installed build %.16s serves it in the editor; "
-                               "'sh_mods map upgrade \"%s\"' moves the map to it", x->hash, sub, x->id);
-            }
+            if (x->declared[0]) mu_say_substituted(o, &m, "map:   ", x->id, x->declared, x->hash);
             for (k = 0; k < x->uid_count && k < MU_MAX_MAP_ENTITIES; k++) {
                 char name[300];
                 mu_entity_label(&m, sh_mm_find(&mp.mm, x->uids[k]), x->uids[k], name, sizeof name);
@@ -3880,6 +3901,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
            st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
     for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);
     (void)sh_modserve_scope_report(mu_say_requirement, &o);
+    mu_say_substitutions(&o, &m, "doctor: map row ");             /* rows served through another build */
     (void)sh_modserve_registry_report(mu_say_requirement, &o);   /* what the registries generate, every clash */
     (void)sh_modserve_requirements_report(mu_say_requirement, &o);
     for (i = 0; i < m.row_count; i++) {
