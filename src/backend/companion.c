@@ -257,6 +257,12 @@ void sh_companion_compose(const float owner_origin[3], const float owner_axis[9]
                                   e->axis[i * 3 + 2] * owner_axis[6 + j];
 }
 
+void sh_companion_spawn_pose(const float owner_origin[3], const float owner_axis[9],
+                             const sh_companion_entry *e, float out[SH_COMPANION_SPAWN_POSE_FLOATS])
+{
+    sh_companion_compose(owner_origin, owner_axis, e, out, out + 3);
+}
+
 int sh_companion_arm_decide(const sh_companion_arm *a)
 {
     if (!a || !a->resolved) return SH_COMPANION_ARM_UNRESOLVED;

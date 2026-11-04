@@ -1019,10 +1019,18 @@ inside GetType returns into the trampoline. It logs `COMPANIONS: installed ...
 (<gate>)` and one line per owner
 spawn (`<owner>: n of m companions spawned`), the first 64 lines. After the original spawn chain
 returns, an idEntity whose entityDef (`+0x6D0`) is an owner, or inherits one
-through `mods/` names (`+0x58`), gets each companion in list order: spawned by
-the game's SpawnEntityDef (game vtable `+0x450`, as idAnimated starting
-attachments are), placed at the owner's physics origin plus `origin * axis`
-with axis `axis * ownerAxis`, bound (`idEntity::Bind`, oriented) so it moves
+through `mods/` names (`+0x58`), gets each companion in list order: spawned
+the way `idTarget_Spawn` spawns at a pose (game vtable `+0x448` creates it,
+its `spawnPosition` `+0x3A8` and `spawnOrientation` `+0x3B4` get the owner's
+physics origin plus `origin * axis` and the axis `axis * ownerAxis`, and
+`+0x458` registers it and runs CallSpawn), so the class's own Spawn places it.
+Placing it after the spawn is not enough: SpawnEntityDef (`+0x450`) runs
+CallSpawn before it returns, entity SetOrigin and SetAxis write the physics
+only, and an idProp_Coop stays where its Spawn presented it. When the create
+and finish calls do not resolve, the companion falls back to SpawnEntityDef,
+SetOrigin, SetAxis and UpdateVisuals (`+0x3C0`, as the engine's `setOrigin`
+event pairs them); the per-owner line counts both routes. Each companion is
+then bound (`idEntity::Bind`, oriented) so it moves
 with the owner and the owner's destructor removes it, and appended to the
 owner's targets (`idEntity::AddTarget`) so a native `ActivateTargets` (Use
 with `activateTargetsOnUse`) activates it after the owner's earlier targets.

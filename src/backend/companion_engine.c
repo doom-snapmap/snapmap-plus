@@ -12,6 +12,7 @@
 #include "entity.h"
 #include "hook.h"
 #include "modserve.h"
+#include "modscene_decl.h"
 #include "engine_globals.h"
 
 enum { CS_CALLSPAWN, CS_BIND, CS_ADDTARGET, CS_SPAWNDEF, CS_ISCLIENT, CS_COUNT };
@@ -33,6 +34,10 @@ static const uint8_t k_callspawn_prologue[CALLSPAWN_STOLEN] = {
 #define RES_STATE         0x2c   /* idResource: bit 0 failed (a default stands in), bit 1 unloaded */
 #define VSLOT_SET_ORIGIN  0x338
 #define VSLOT_SET_AXIS    0x358
+#define VSLOT_UPDATE_VISUALS 0x3c0 /* physics +0x110, then BecomeActive(TH_UPDATEVISUALS) */
+#define ENT_SPAWN_POSE    0x3a8   /* spawnPosition, then spawnOrientation rows at +0x3B4 */
+#define GAME_CREATE_SLOT  0x448   /* the idTarget_Spawn route: create, write the pose, finish */
+#define GAME_FINISH_SLOT  0x458
 #define PSLOT_GET_ORIGIN  0x80
 #define PSLOT_GET_AXIS    0x88
 #define SPAWN_ID_NONE     0x1fffffe   /* the engine's unset spawn id, as the attachment call passes */
@@ -52,6 +57,9 @@ typedef const float *(*phys_get_fn)(void *phys, int id);
 typedef void *(*str_ctor_fn)(void *, const char *);
 typedef void *(*type_fn)(void *, const char *);
 typedef void *(*find_decl_fn)(void *, const char *, unsigned char);
+typedef void *(*create_fn)(void *gm, void *decl, void *edit_args);
+typedef void  (*finish_fn)(void *gm, void *ent, int entnum, unsigned long long spawn_id, int arg5, void *arg6);
+typedef void  (*vfn0_fn)(void *ent);
 
 static callspawn_fn  g_orig;
 static bind_fn       g_bind;
@@ -63,6 +71,8 @@ static const uint8_t *g_anchor;
 static void         *g_register;
 static type_fn       g_type;
 static find_decl_fn  g_decl;
+static create_fn     g_create;   /* idGameLocal vtable +0x448, modscene_sigs.c */
+static finish_fn     g_finish;   /* +0x458: register, then CallSpawn */
 
 static sh_companion_table g_table;
 static volatile LONG g_stale = 1;
@@ -203,11 +213,59 @@ static int owner_frame(void *owner, float origin[3], float axis[9])
     return 1;
 }
 
+/* Spawn `decl` at a world pose the way idTarget_Spawn::SpawnSingleEntity does
+ * (snaphak-re R320): create it, write spawnPosition and spawnOrientation,
+ * then finish, whose CallSpawn runs the class's Spawn with that pose. The
+ * class places itself, which is the only placement an idProp_Coop keeps
+ * (ADD-L6 G). NULL when the route is unavailable, or when the created object
+ * is not an entity (it is still finished, and returned in *loose). */
+
+static void *spawn_posed(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS], void **loose)
+{
+    uint8_t edit_args[32];
+    void *obj, *ent;
+    *loose = NULL;
+    if (!g_create || !g_finish) return NULL;
+    if (vfn(gm, GAME_CREATE_SLOT) != (void *)g_create || vfn(gm, GAME_FINISH_SLOT) != (void *)g_finish) return NULL;
+    /* The default edit-state arguments (VK 0x140342C30, GL 0x140342880). */
+    memset(edit_args, 0, sizeof edit_args);
+    edit_args[4] = 1;
+    edit_args[8] = 2;
+    edit_args[12] = 0x01; edit_args[13] = 0x01;
+    edit_args[17] = 0x01;
+    obj = g_create(gm, decl, edit_args);
+    if (!obj) return NULL;
+    ent = g_is_entity(obj);
+    if (ent) memcpy((uint8_t *)ent + ENT_SPAWN_POSE, pose, SH_COMPANION_SPAWN_POSE_FLOATS * sizeof(float));
+    g_finish(gm, obj, -1, (unsigned long long)SPAWN_ID_NONE, -1, NULL);
+    if (!ent) *loose = obj;
+    return ent;
+}
+
+/* The fallback when the create and finish calls did not resolve: spawn, then
+ * move. Entity SetOrigin and SetAxis write the physics only; the engine's own
+ * setOrigin event follows them with UpdateVisuals, so this does too. A class
+ * that stops presenting after its spawn can still keep its spawn placement. */
+static void *spawn_then_move(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS])
+{
+    void *child = g_spawn_def(gm, decl, -1, SPAWN_ID_NONE, 0);
+    set_vec_fn set_origin, set_axis;
+    vfn0_fn update_visuals;
+    if (!child) return NULL;
+    set_origin = (set_vec_fn)vfn(child, VSLOT_SET_ORIGIN);
+    set_axis = (set_vec_fn)vfn(child, VSLOT_SET_AXIS);
+    update_visuals = (vfn0_fn)vfn(child, VSLOT_UPDATE_VISUALS);
+    if (set_origin) set_origin(child, pose);
+    if (set_axis) set_axis(child, pose + 3);
+    if (update_visuals) update_visuals(child);
+    return child;
+}
+
 static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm, void *manager)
 {
     float origin[3], axis[9];
     char first_class[64] = "";
-    int i, made = 0;
+    int i, made = 0, posed = 0;
     if (!owner_frame(owner, origin, axis)) {
         g_failed += o->count;
         cl_log("COMPANIONS: %s: the owner's transform could not be read; no companions", o->owner);
@@ -215,10 +273,9 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
     }
     for (i = 0; i < o->count; i++) {
         const sh_companion_entry *e = &o->entries[i];
-        float at[3], rot[9];
+        float pose[SH_COMPANION_SPAWN_POSE_FLOATS];
         unsigned char state;
-        void *decl = g_decl(manager, e->entitydef, 0), *child;
-        set_vec_fn set_origin, set_axis;
+        void *decl = g_decl(manager, e->entitydef, 0), *child, *loose = NULL;
         if (!decl) {
             g_failed++;
             cl_log("COMPANIONS: %s: companion %d '%s' is not a known entityDef; skipped", o->owner, i, e->entitydef);
@@ -234,17 +291,16 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
                    (state & 1) ? "failed to load (check its inherit and parse errors)" : "is not loaded");
             continue;
         }
-        child = g_spawn_def(gm, decl, -1, SPAWN_ID_NONE, 0);
+        sh_companion_spawn_pose(origin, axis, e, pose);
+        child = spawn_posed(gm, decl, pose, &loose);
+        if (child) posed++;
+        else if (!loose) child = spawn_then_move(gm, decl, pose);
         if (!child) {
             g_failed++;
-            cl_log("COMPANIONS: %s: companion %d '%s' did not spawn", o->owner, i, e->entitydef);
+            cl_log("COMPANIONS: %s: companion %d '%s' did not spawn%s", o->owner, i, e->entitydef,
+                   loose ? " as an entity" : "");
             continue;
         }
-        sh_companion_compose(origin, axis, e, at, rot);
-        set_origin = (set_vec_fn)vfn(child, VSLOT_SET_ORIGIN);
-        set_axis = (set_vec_fn)vfn(child, VSLOT_SET_AXIS);
-        if (set_origin) set_origin(child, at);
-        if (set_axis) set_axis(child, rot);
         if (e->bind) g_bind(child, owner, BIND_ORIENTED);
         if (e->activate) g_add_target(owner, child);
         made++;
@@ -254,8 +310,8 @@ static void spawn_companions(void *owner, const sh_companion_owner *o, void *gm,
             strncpy_s(first_class, sizeof first_class, c ? c : "?", _TRUNCATE);
         }
     }
-    cl_log("COMPANIONS: %s: %d of %d companions spawned (first as %s)", o->owner, made, o->count,
-           first_class[0] ? first_class : "-");
+    cl_log("COMPANIONS: %s: %d of %d companions spawned (first as %s; %d at their spawn pose, %d moved after their spawn)",
+           o->owner, made, o->count, first_class[0] ? first_class : "-", posed, made - posed);
 }
 
 /* A rescan publishes a new serving table; its build stats tell it apart. */
@@ -354,6 +410,25 @@ static int resolve(const sig_result *results, size_t count, const uint8_t *modul
     if (!g_anchor || !g_register || !g_type || !g_decl) {
         backend_log("COMPANIONS: the decl registry is unresolved; companions are unavailable");
         return 0;
+    }
+    /* The spawn-pose route: idTarget_Spawn's create and finish calls. */
+    {
+        sig_result create, finish;
+        g_create = NULL;
+        g_finish = NULL;
+        for (i = 0; SH_MODSCENE_SPAWN_SIGNATURES[i].name; i++) {
+            const sig_entry *s = &SH_MODSCENE_SPAWN_SIGNATURES[i];
+            if (!strcmp(s->name, "SceneCreateEntity") && sig_resolve_one(module_base, s, &create) == SIG_OK)
+                g_create = (create_fn)create.addr;
+            else if (!strcmp(s->name, "SceneFinishSpawn") && sig_resolve_one(module_base, s, &finish) == SIG_OK)
+                g_finish = (finish_fn)finish.addr;
+        }
+        if (!g_create || !g_finish) {
+            g_create = NULL;
+            g_finish = NULL;
+            backend_log("COMPANIONS: the engine's create and finish calls did not resolve; companions are moved "
+                        "after their spawn, which a class that places itself at spawn ignores");
+        }
     }
     return 1;
 }

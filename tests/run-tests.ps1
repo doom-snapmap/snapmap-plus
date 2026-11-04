@@ -183,7 +183,7 @@ $tests += @{ name = "modsound_test"; src = 'modsound_test.c ..\src\backend\modso
 $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODHUD_TESTING /DSH_PATCH_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
-$tests += @{ name = "companion_test"; src = 'companion_test.c ..\src\backend\companion.c ..\src\backend\companion_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+$tests += @{ name = "companion_test"; src = 'companion_test.c ..\src\backend\companion.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Mod scenes blocks: the grammar and where a scene plays; with images, the two
 # spawn signatures, the game's vtable slots that hold them and the show-post stub.
 $tests += @{ name = "modscene_decl_test"; src = 'modscene_decl_test.c ..\src\backend\modscene_decl.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }

@@ -84,6 +84,15 @@ int sh_companion_owner_namespace(const char *name);
 void sh_companion_compose(const float owner_origin[3], const float owner_axis[9],
                           const sh_companion_entry *e, float out_origin[3], float out_axis[9]);
 
+/* The spawn pose the engine reads in the companion's own spawn chain: world
+ * origin, then world axis rows, the twelve floats idEntity keeps from
+ * spawnPosition (+0x3A8) through spawnOrientation (+0x3B4). The engine side
+ * writes them between create and finish, as idTarget_Spawn does, so the
+ * class's Spawn places the companion itself (companion_engine.h). */
+#define SH_COMPANION_SPAWN_POSE_FLOATS 12
+void sh_companion_spawn_pose(const float owner_origin[3], const float owner_axis[9],
+                             const sh_companion_entry *e, float out[SH_COMPANION_SPAWN_POSE_FLOATS]);
+
 void sh_companion_table_free(sh_companion_table *t);
 
 /* Arming the CallSpawn detour after boot (companion_engine.h,

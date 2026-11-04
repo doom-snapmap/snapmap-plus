@@ -6,7 +6,10 @@
  * uniquely at its recorded RVA for that renderer, CallSpawn starts with the 14
  * whole position-independent bytes the detour steals, the SpawnEntityDef
  * wrapper's second call is the idEntity cast, and Bind names its
- * "Tried to bind an object to itself." error. */
+ * "Tried to bind an object to itself." error. The spawn pose (ADD-L6 G): the
+ * twelve floats written at spawnPosition are the composed world transform,
+ * the create and finish calls resolve, finish reaches CallSpawn, and entity
+ * SetOrigin is the physics-only tail jump that never updates the visuals. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +18,7 @@
 #include <math.h>
 #include "companion.h"
 #include "companion_engine.h"
+#include "modscene_decl.h"
 #include "signatures.h"
 #include "host_image.h"
 
@@ -158,6 +162,29 @@ static void test_compose(void)
     }
 }
 
+/* The spawn pose block: spawnPosition (+0x3A8), then spawnOrientation rows
+ * (+0x3B4), as compose gives them. The v3-companions case: an owner yawed
+ * +90 at (200, 0, 16), its companion 64 above it. */
+static void test_spawn_pose(void)
+{
+    const float origin[3] = { 200.0f, 0.0f, 16.0f };
+    const float axis[9] = { 0, 1, 0,  -1, 0, 0,  0, 0, 1 };
+    sh_companion_entry e;
+    float pose[SH_COMPANION_SPAWN_POSE_FLOATS], at[3], rot[9];
+    int i;
+    CHECK(SH_COMPANION_SPAWN_POSE_FLOATS * sizeof(float) == 0x3B4 - 0x3A8 + 9 * sizeof(float));
+    memset(&e, 0, sizeof e);
+    e.origin[2] = 64.0f;
+    e.axis[0] = e.axis[4] = e.axis[8] = 1.0f;
+    for (i = 0; i < SH_COMPANION_SPAWN_POSE_FLOATS; i++) pose[i] = -12345.0f;
+    sh_companion_spawn_pose(origin, axis, &e, pose);
+    sh_companion_compose(origin, axis, &e, at, rot);
+    CHECK(close_to(pose[0], 200.0f) && close_to(pose[1], 0.0f) && close_to(pose[2], 80.0f));
+    for (i = 0; i < 3; i++) CHECK(pose[i] == at[i]);
+    for (i = 0; i < 9; i++) CHECK(pose[3 + i] == rot[i]);
+    CHECK(close_to(pose[3], 0) && close_to(pose[4], 1) && close_to(pose[6], -1) && close_to(pose[11], 1));
+}
+
 /* ---- runtime arming (sh_companions_ensure's checks) -------------------- */
 
 static int arm(int resolved, int on_main, int installed, int changed, int owners, int prologue_ok)
@@ -274,6 +301,42 @@ static void test_image(const char *path)
         memcpy(&disp, lea + 3, 4);
         CHECK(!memcmp(lea + 7 + disp, text, sizeof text));
     }
+    {
+        /* The spawn-pose route: create and finish resolve at their RVAs, and
+         * finish's register-then-spawn reaches CallSpawn with one direct call. */
+        sig_result create, finish;
+        const sig_entry *sc = NULL, *sf = NULL;
+        int k, j, calls = 0;
+        for (k = 0; SH_MODSCENE_SPAWN_SIGNATURES[k].name; k++) {
+            if (!strcmp(SH_MODSCENE_SPAWN_SIGNATURES[k].name, "SceneCreateEntity")) sc = &SH_MODSCENE_SPAWN_SIGNATURES[k];
+            if (!strcmp(SH_MODSCENE_SPAWN_SIGNATURES[k].name, "SceneFinishSpawn")) sf = &SH_MODSCENE_SPAWN_SIGNATURES[k];
+        }
+        CHECK(sc && sf);
+        if (sc && sf) {
+            CHECK(sig_resolve_one(base, sc, &create) == SIG_OK &&
+                  create.rva == (id && id->vulkan ? sc->rva_vk : sc->rva_gl));
+            CHECK(sig_resolve_one(base, sf, &finish) == SIG_OK &&
+                  finish.rva == (id && id->vulkan ? sf->rva_vk : sf->rva_gl));
+            for (j = 0; j < 0xC0; j++) {
+                const uint8_t *p = base + finish.rva + j;
+                int32_t rel;
+                if (p[0] != 0xE8) continue;
+                memcpy(&rel, p + 1, 4);
+                if ((uint32_t)(finish.rva + j + 5 + rel) == r[0].rva) calls++;
+            }
+            printf("%s finish reaches CallSpawn: %d direct call(s)\n", calls == 1 ? "OK " : "BAD", calls);
+            CHECK(calls == 1);
+        }
+    }
+    {
+        /* Entity SetOrigin (vtable +0x338): mov rcx,[rcx+0x808]; or r8d,-1;
+         * mov rax,[rcx]; jmp [rax+0x60]. The physics alone moves; nothing
+         * updates the visuals, so a placement after the spawn needs one. */
+        static const uint8_t set_origin[18] = { 0x48, 0x8B, 0x89, 0x08, 0x08, 0x00, 0x00, 0x41, 0x83, 0xC8, 0xFF,
+                                                0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x60 };
+        uint32_t at = id && id->vulkan ? 0x82ABB0u : 0x829D70u;
+        CHECK(!memcmp(base + at, set_origin, sizeof set_origin));
+    }
     free(base);
 }
 
@@ -284,6 +347,7 @@ int main(int argc, char **argv)
     test_refusals();
     test_namespace_and_order();
     test_compose();
+    test_spawn_pose();
     test_arm();
     for (i = 1; i < argc; i++) test_image(argv[i]);
     if (g_fail) { printf("companion_test: FAILED\n"); return 1; }

@@ -6,12 +6,20 @@
  * in the companions table (companion.h) gets its companions. Map entities
  * reach CallSpawn from idGameLocal::SpawnEntitiesForLayers' "Spawning %d
  * entities" pass, after every map entity has been registered, so companions
- * take entity numbers after the map's own. Each companion is spawned through
- * idGameLocal::SpawnEntityDef (game vtable +0x450, the call the engine's own
- * idAnimated starting attachments make), placed with the entity SetOrigin and
- * SetAxis slots, bound with idEntity::Bind (oriented) and appended to the
- * owner's targets with idEntity::AddTarget, in list order. Nothing is spawned
- * on a network client, which receives server-spawned entities itself.
+ * take entity numbers after the map's own. Each companion is spawned the way
+ * idTarget_Spawn::SpawnSingleEntity spawns at a pose: game vtable +0x448
+ * creates it, its spawnPosition (+0x3A8) and spawnOrientation (+0x3B4) get the
+ * owner-relative world transform, and +0x458 finishes it (register, then
+ * CallSpawn), so the class's own Spawn places it. Placing after the spawn is
+ * not enough: SpawnEntityDef (+0x450) runs CallSpawn before it returns, the
+ * entity SetOrigin/SetAxis slots write the physics only, and an idProp_Coop
+ * stays where its Spawn presented it, the world origin (ADD-L6 G). When the
+ * create and finish calls do not resolve, the companion falls back to
+ * SpawnEntityDef, SetOrigin, SetAxis and UpdateVisuals (+0x3C0), the pair the
+ * engine's setOrigin event makes. It is then bound with idEntity::Bind
+ * (oriented) and appended to the owner's targets with idEntity::AddTarget, in
+ * list order. Nothing is spawned on a network client, which receives
+ * server-spawned entities itself.
  *
  * Build 13954591 addresses, both executables (signatures are private to this
  * file and resolve by pattern on either image):
@@ -21,9 +29,13 @@
  *   SpawnEntityDef wrapper    VK 0x1403BCFF0  GL 0x1403BC950  (game vtable +0x450;
  *                             its second call is the idEntity cast, VK 0x1413B34E0 GL 0x1413B3370)
  *   idGameLocal::IsClient     VK 0x140398370  GL 0x140397C80
+ *   create (vtable +0x448)    VK 0x140384DF0  GL 0x140384690  (modscene_sigs.c)
+ *   finish (vtable +0x458)    VK 0x1403BCF10  GL 0x1403BC870  (modscene_sigs.c)
  * Offsets (both): entity +0x6D0 entityDef, +0x808 physics, +0x3F0/+0x3F8
  * targets; entityDef +0x08 name, +0x58 inherit; entity vtable +0x338 SetOrigin,
- * +0x358 SetAxis; physics vtable +0x80 GetOrigin(id), +0x88 GetAxis(id).
+ * +0x358 SetAxis, +0x3C0 UpdateVisuals; entity +0x3A8 spawnPosition, +0x3B4
+ * spawnOrientation; physics vtable +0x80 GetOrigin(id), +0x88 GetAxis(id).
+
  *
  * The detour is committed only when an admitted bundle declares companions.
  * With no such bundle the spawn chain is untouched. A bundle with companions
