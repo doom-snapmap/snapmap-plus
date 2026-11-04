@@ -830,7 +830,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     for (k = 0, shown = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         const sh_mb_file *f = &bd->files[k];
         int dec = 0;
-        if (f->cls != SH_MB_CLASS_REPLACE && !(bd->legacy && f->shadowed)) continue;
+        if (f->cls != SH_MB_CLASS_REPLACE) continue;
         for (q = 0; q < nd && !dec; q++) dec = !strcmp(declared[q], f->request);
         if (!first) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);

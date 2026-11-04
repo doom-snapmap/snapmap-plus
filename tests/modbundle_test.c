@@ -938,7 +938,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed &&
           b.classes.replaces == 1 && b.replace_count == 1);
     CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl (declared): affects only maps that declare this mod") &&
-          !has_note(&b, "replacements are being retired"));
+          !has_note(&b, "replacements are retired"));
     CHECK(b.extra && strstr(b.extra, "\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
     sh_mb_free(&b);
     refused(fixture, tmp, m_replaces_registry, &RESOLVER, "a registry the product generates per map");
@@ -966,7 +966,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     CHECK(find_file(&b, "generated/decls/entitydef/monster/imp.decl")->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1);
     CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
     CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
-          has_note(&b, "replacements are being retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
+          has_note(&b, "replacements are retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
     {
         sh_mb_bundle undeclared;
         char shadow_hash[65];

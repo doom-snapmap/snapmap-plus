@@ -3984,10 +3984,12 @@ static void mb_report(sh_mb_bundle *b)
     }
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
-        if (f->cls == SH_MB_CLASS_REPLACE && sh_mb_registry_request(f->request))
+        if (f->cls == SH_MB_CLASS_REPLACE && sh_mb_registry_request(f->request)) {
+            /* a registry copy: never refused, generated per map from intent */
             mb_note(b, "replaces %s: express it as player intent (the product generates this registry per map)",
                     f->request);
-        else if (f->cls == SH_MB_CLASS_REPLACE && mb_replace_declared(b, f->request)) {
+            declared++;
+        } else if (f->cls == SH_MB_CLASS_REPLACE && mb_replace_declared(b, f->request)) {
             mb_note(b, "replaces %s (declared): affects only maps that declare this mod", f->request);
             declared++;
         } else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s", f->request);
@@ -3999,9 +4001,9 @@ static void mb_report(sh_mb_bundle *b)
     }
     if (b->classes.surfaces) mb_note(b, "surfaces %u game file%s", b->classes.surfaces, b->classes.surfaces == 1 ? "" : "s");
     if (b->classes.replaces > declared)
-        mb_note(b, "replacements are being retired: %u file(s) replace game files and are served as before; a later "
-                "release refuses them (put new files under mods/%s/; the player entity becomes the player intent)",
-                b->classes.replaces - declared, b->id);
+        mb_note(b, "replacements are retired: %u file(s) replace game files without a \"replaces\" declaration; this "
+                "build keeps them (refusal off, or a folder the product received), a store build refuses them (put new "
+                "files under mods/%s/ or declare the intent in mod.json)", b->classes.replaces - declared, b->id);
     if (aliases)
         mb_note(b, "stock alias without a file: copy the file into assets/ instead (%zu entr%s, %zu at the game's own "
                 "name, %zu under other names; first %s)", aliases, aliases == 1 ? "y" : "ies", at_game, aliases - at_game,
