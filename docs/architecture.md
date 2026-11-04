@@ -520,7 +520,15 @@ conductor, strings), shadows, `files` (path, sha256, size, provides, needs) and
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
 serving, and the store records the failure on the folder (`sh_mods list`:
 "build failed: <cause>; serving build N"); a folder that never built is
-skipped. The
+skipped. Because the author edits files in place, the serving index reads a
+failed folder's build from the store's snapshot of it,
+`mods\.builds\<key>@<hash16>\` (its `bundle.json` and carried files), when
+one exists (`ms_parse_bundle`, from the cause `sh_ms_build_cause` reports),
+logging `bundle '<folder>': its latest build failed (<cause>); serving the last
+good build <key>@<hash16> from <snapshot>`; without a snapshot it serves the
+folder's last good block and says so. The serving index takes a bundle's key
+from the author block's `id` when present, else from the product block's
+`key`, so a folder made by `sh_mods new` is served. The
 product writes the block by splicing: the old member is cut from the end of
 the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
@@ -565,26 +573,29 @@ alias. Saving a map writes rows from the serving index, so they name the
 build that serves. Removing a folder keeps its aliases while a folder of that
 id remains and drops them once none does.
 
-The asset rule. A map, rawmap or prefab needs the paths its manifest rows
-list (the placed names, `mods/<id>/...`); a mod folder provides them; the
-bundle hash is a download key. `sh_modserve_row_served(row, cause, cap)`
-(`modserve.c`, `sh_modserve_row_served_for` with the word "prefab") is the one
-predicate every hold uses: a row is served when an admitted bundle declares
-its id and every name it lists resolves through the serving index to an
-admitted bundle, whichever provides it (a placed name, any provided name, or a
-served request path); missing when no admitted bundle declares the id;
-incomplete when one does but a listed name does not resolve. Its cause is the
-refusal: "This map uses Hell Guards (local.hell-guard), which is not
-installed." or "Hell Guards (local.hell-guard) is installed but does not
-provide mods/local.hell-guard/hell_guard_combo_enc, which this map uses." (the
-first three missing names, then "and N more"; the folder's own name when one
-declares the id, else the id alone; "prefab" for a prefab). A folder rebuilt
-with new bytes at the same paths therefore still serves every map that used
-it, whatever its hash. Activation follows the same rule
-(`sh_modmanifest_activate`): each row is activated through the build that
-serves its id now (`sh_modserve_bundle_serving`). The per-map listing of a
-bundle that shadows stock paths or sets requirements stays keyed by id (the
-scope listing, [Map scope](#map-scope)).
+The asset rule. A map, rawmap or prefab pins the builds its manifest rows
+name by bundle hash (DESIGN-additive 2.5: what the author saw is what every
+player gets). `sh_modserve_row_served(row, cause, cap)` (`modserve.c`,
+`sh_modserve_row_served_for` with the word "prefab") is the one predicate
+every hold uses: a row is served when the installed folder at the row's hash
+(or an alias of it) is admitted and every name it lists resolves, in that
+build or through the serving index; missing when no admitted folder has that
+hash, also when the key is installed at another hash (another build, inert
+for the map); incomplete when the build is admitted but a listed name does
+not resolve. Its cause is the refusal: "This map uses Hell Guards
+(local.hell-guard), which is not installed.", "This map uses Hell Guards
+(local.hell-guard) at build <hash16>, which is not installed;
+local.hell-guard is installed at another build (<hash16>)." or "Hell Guards
+(local.hell-guard) is installed but does not provide
+mods/local.hell-guard/hell_guard_combo_enc, which this map uses." (the first
+three missing names, then "and N more"; the folder's own name, else the key
+alone; "prefab" for a prefab). A missing row is fetched by its hash, so a
+folder rebuilt with new bytes is installed beside the build a map pins, never
+over it; `sh_modserve_row_other_build` answers the other build for the launch
+gate's wording. `sh_modserve_bundle_serving` with a hash answers exactly that
+build (an alias resolves), never a newer one of the key, so activation and the
+save keep each row's pin; without a hash it answers the newest build of the
+key. The scope listing is keyed by hash too ([Map scope](#map-scope)).
 What a placed entity depends on. The save closure and the map listing resolve
 each placed name (`sh_modmanifest_placed_names`: the `inherit` and
 `moduleName` values and every string in an entity's `edit` state) through
@@ -772,9 +783,12 @@ retired overrides layer did). Opens with mode 2 or higher are
 never served. A shadow applies while a map that lists its bundle is open or
 played (see [Map scope](#map-scope)); a new name applies once it is registered: editor rows at the first palette build (or
 `sh_mods palette rebuild`, or the load of a map that names their bundle, below),
-gameplay decls when a map that names their bundle loads. When two builds of one mod id serve a path, the most recently installed
-serves it, and a map naming the older bundle gets the newer files with a logged
-line.
+gameplay decls when a map that names their bundle loads. Two builds of one key
+are never a conflict: each map serves the build its rows pin and the other is
+inert for it; with no map open the newest build (built time, then folder) serves
+its names for the Toybox, and the index build logs one `MODS: key <key>: builds
+<hash16> (<version>) and <hash16> (<version>) both provide paths with other
+bytes; ...` line.
 
 Cooked movies need a second route (`modswf.c`). A `.bswf` is an idFileResource,
 and its Load (vtable `+0x40`, signature `FileResourceLoad`) opens through the
@@ -1017,23 +1031,33 @@ is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
 `weapon-hud compiled: N rules`, `weapon-hud installed: ...`, and
 `weapon-hud active: ...` on first use.
 
-When bundles of different mods provide one path with different bytes, one of
-them always serves it: leaving it to the engine broke every boss pack at Play,
-because their other files are served and name it, and the game's SnapMap
-archive has no copy of campaign content to fall back to (the Cyberdemon's
-animWeb defaulted to an empty one and `AnimWeb ... has no nodes` ended the
-process). The winner is the provider with the fewest needs no admitted bundle
-provides, then the bytes most providers carry, then an installed mod over a
-copy a map delivered, then the most recently installed. When every provider's
+When bundles of different keys provide one path with different bytes, the
+open map decides among the providers it declares ([Map scope](#map-scope)):
+the fewest needs the declared bundles do not provide, then the bytes most
+declared providers carry, then the order of the map's rows. Nothing about the
+install counts (time, folder, or whether a map delivered the copy), so a map
+serves the same bytes on every machine whatever else is installed. With map
+scope off, the static winner serves: the same two rules over every admitted
+bundle, then the key and hash in name order. A path that only undeclared
+bundles provide is left to the game while a map is open: their names have no
+reach in it. (Before phase 2 one provider always served such a path, because
+leaving it to the engine broke every boss pack at Play when their other files
+were served and named it; the Cyberdemon's animWeb defaulted to an empty one
+and `AnimWeb ... has no nodes` ended the process. A map that declares the pack
+now serves all of it.) When every provider's
 text is a decl that differs from the others only inside lists (a block of
 `num = N;` and `item[i]` members, as the encounter conductor's `aiTypeList` or
 the whitelist inspectors' `validEncounters`, which every boss pack extends),
 or only inside bags of repeated entries in the bare statement grammar of an
 md6Def (the `anim "<clip>" { event ... }` blocks of its `events`, its `alias`
-rows), the winner's text is served with the other providers' entries appended,
-so several boss packs work together and several mods may each add event rows
-to the player body. One `MODS: conflict:` line names the
-providers, the winner and the reason; `sh_mods doctor` prints the same. A
+rows), the winner's text is served with the other declared providers' entries
+appended (composed per listing and memoized on the path, `ms_scope_compose`),
+so several boss packs a map declares work together and several mods may each
+add event rows to the player body; an undeclared mod's entries are never
+composed in. Editor-time bundles (below) compose with each other in every map,
+as before. One `MODS: conflict:` line at the index build names the
+providers, the static winner and the reason; `sh_mods doctor` prints, per path,
+which layer serves it for the open map and why. A
 registration pass (editor rows, map activation) also withdraws an animWeb
 whose `modelInfos` or `models` block names a model that no bundle provides and
 the engine cannot find. The engine's parse looks each model up with DeclFind
@@ -1307,34 +1331,59 @@ lines to the console; `sh_mods status` says when changes are pending.
 
 ### Map scope
 
-A bundle's shadows and requirements apply only while a map that lists the
-bundle is open in the editor or playing; its new names are never scoped. The
-listing is a set of bundle ids in `modserve.c`, set by
-`sh_modserve_scope_set` from manifest rows (hashes resolve through aliases;
-ids name rows of mods not indexed) and from the placed closure, with whether a
-map is open at all. Each admitted bundle has two flags computed from it and
-read lock-free: `shadows_off` (a map-scoped bundle the listing lacks) and
-`req_off` (the same, except in a map for a bundle that adds Toybox rows, whose
-rows the palette registers whatever map is open). A withdrawn shadow misses
-`sh_modserve_lookup`, `sh_modserve_open` and the decl probe, so the provider
-falls through to the engine; the early-decl and gated-reload visits skip it;
-reports read the index through `sh_modserve_lookup_indexed`. Admission is per
-path, not per winner: `ms_resolve` records a shadow path's other providers on
-its winner (`alt_first`, in the conflict rules' order for different bytes,
-index order for identical bytes), and when the winner's bundle is withdrawn
-`ms_scope_compute` picks the first provider the listing admits
-(`scope_alt`), whose own file then serves the path (`ms_scoped`). So a path
-two installs carry with the same bytes (a renamed or forked copy) is served in
-a map that lists either one, and a conflict whose winner is unlisted is served
-by the listed provider the winner rules rank next, uncomposed; only a path none
-of whose providers is listed falls through. `sh_mods doctor` adds, per shadow
-or conflict path, which provider serves it for the open map.
+Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
+it declares serve, then the game. The listing is the declared bundles' hashes
+in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
+rows and the placed closure (hashes resolve through aliases; a key alone
+declares nothing), with whether a map is open, and a mode,
+`sh_modserve_scope_mode`: `SH_MODSERVE_MODE_PLAY` from the Play entry
+(`sh_modserve_scope_source` with `SH_MODSERVE_AT_PLAY`) until the editor's
+tick sets `SH_MODSERVE_MODE_EDITOR` again (`modui.c`), and EDITOR with no map.
+The first hash of a key in row order declares that key; every other build of
+it is inert for the map. Each admitted bundle gets serve flags computed from
+the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
 
-When the listing changes, every shadow decl, model and image whose serving
+- declared: everything it carries;
+- another build of a declared key: nothing;
+- an editor-time bundle (its shadows include a `generated/decls/snapeditor*`,
+  `snappropertyinspector*` or `snappalette*` decl, or the editor's own movies
+  under `generated/swf/snapmaps/`): everything, in every map, as before phase
+  2; that is `my-overrides`' editor tweaks and the grandfathered packages whose
+  Toybox rows are shadows (hell guard, spider mastermind, rocks, Olivia), until
+  they are rebuilt under a key;
+- otherwise, in the editor and with no map open: the names under its key, for
+  the newest build of the key only (the Toybox offers its rows; placing one
+  declares it at the next save), and its surfaces; never its shadows. In Play:
+  nothing.
+
+Requirements: a declared bundle's apply; an undeclared newest build that adds
+Toybox rows keeps them, because the palette registers its rows in every map
+and with none open; any other undeclared bundle's are not accepted (`req_off`).
+A `mod.json` `"scope"` key no longer chooses (logged once). Per path,
+`ms_resolve` records every provider of a path several bundles carry on its
+static winner (`alt_first`: the static rules' order for different bytes, the
+newest build first for one key, index order for identical bytes), and
+`ms_scope_compute` chooses the file that serves it for the listing
+(`scope_alt`, read by `ms_scoped` on every lookup): among the declared (and
+editor-time) providers by the conflict rules above, composed when their texts
+compose, else the first provider an undeclared bundle may serve, else none.
+A path with no file misses `sh_modserve_lookup`, `sh_modserve_open` and the
+decl probe, so the provider falls through to the engine; the early-decl and
+gated-reload visits skip it; reports read the static index through
+`sh_modserve_lookup_indexed`. The editor plan registers the rows whose path
+the listing serves (`sh_modserve_plan_editor`), and the save-time closure and
+the map listing map a placed name to the build the open map serves
+(`modserve_bundles_for_names_visit`), so a save keeps each row's pin.
+
+When the listing or the mode changes, every shadow decl, model and image whose serving
 bytes changed (withdrawn, admitted, or moved to a provider with other bytes;
 moving between identical copies marks nothing) is marked pending at generation
-0 and the inheritance closure is marked again, and `sh_modserve_each_refresh` offers them
-with `gone` set while withdrawn (no gate needed for the game's bytes). The
+0, and so is every name another build of its key now serves with other bytes
+than the ones last served (`scope_last`); the inheritance closure is marked
+again, and `sh_modserve_each_refresh` offers them
+with `gone` set while a shadow is withdrawn (no gate needed for the game's
+bytes). A withdrawn name is never offered: it has no game bytes to go back to,
+so the engine keeps what it parsed until a map serves it again. The
 engine side is the refresh of a rescan: `sh_modserve_scope_apply` runs the
 requirements pass first, then `me_refresh_apply` (re-parse in process heap 0,
 reload in place by name) and the gated reloads. The listing is set and applied
@@ -1363,21 +1412,25 @@ at:
   editor map is open without one;
 - the Mods tab's and the console's map add and Remove from map, at once.
 
-With no map (at boot, and at the hub after the editor) no map-scoped shadow
-serves and no map-scoped requirement is live. A published or My Maps launch
-from the hub keeps its listing until the next parse, because nothing marks the
-end of that Play. A `mod.json` author key `"scope"` (`"map"`, the default, or
-`"always"`; the builder refuses any other value) stays in the manifest's
-`extra`, so a mod without it keeps its canonical text and hash. A bundle
-without the key whose shadows include editor-time content is `always`, logged
-once per build: a `generated/decls/snapeditor*`, `snappropertyinspector*` or
-`snappalette*` decl, or the editor's own movies under
-`generated/swf/snapmaps/` (`snap_editor`, `entity_menu`, `list_view`).
+With no map (at boot, and at the hub after the editor) no undeclared shadow
+serves. A published or My Maps launch from the hub keeps its listing until the
+next parse, because nothing marks the end of that Play, and runs in the EDITOR
+mode: the launch gate does not set PLAY yet, so an undeclared bundle's names
+and surfaces stay reachable there (nothing the map declares names them). A
+`mod.json` author key `"scope"` stays in the manifest's `extra`, so a mod with
+it keeps its canonical text and hash; it is ignored.
 `sh_modserve_index_boot` enables scope for the product's index; the native
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
-`sh_modserve_scope_report`, one line per bundle with its scope and whether it
-is active for the open map. The map load's `MODS: map manifest names ...` line
+`sh_modserve_scope_report`: one header per key installed at several builds,
+one line per build (key, version, hash, its names, shadows and surfaces, and
+what it serves for the open map), then per path several bundles provide with
+different bytes which layer serves it and why (`serving: <request>:
+<key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or
+`the game (no declared bundle provides it)`), and the counts per layer. The
+walks of the engine's resource lists (watermarks, `sh_modserve_resource_each`)
+hold the engine's resource lock once `sh_modserve_set_resource_lock` binds it
+(ADD-G3), and run their callbacks after it is released. The map load's `MODS: map manifest names ...` line
 ends with the registration steps the activation found ready, or "no new decls
 to register" for bundles of shadows and requirements only.
 
@@ -1437,8 +1490,8 @@ them are `.bswf` movies (bundles carry movies under `generated/swf/` only, serve
 by `modswf.c`; a pack migrated before that was left out can be migrated again
 with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
 shares one with a delivered or converted package (the beta.19 `doors` packs),
-the most recently installed bundle serves every path they share, whichever
-map is open. Stock names are not checked during the migration because the
+the two are builds of one key: each map serves the build it pins, and with no
+map open the newest serves. Stock names are not checked during the migration because the
 pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.
 
@@ -1548,10 +1601,10 @@ like a placed mod's.
 
 A published map is native by default: the product touches its launch only when
 its text carries an `smpmod1.` row the asset rule does not find served (no
-installed folder of the row's id, or one that lacks a name the row lists).
-Everything else reaches the engine unchanged: vanilla maps, and maps whose
-rows an installed folder serves, whatever its hash, which play with the
-installed copy.
+installed folder at the row's hash, also when the key is installed at another
+build, or one that lacks a name the row lists). Everything else reaches the
+engine unchanged: vanilla maps, and maps whose rows the installed folders at
+their hashes serve.
 
 Identification. The `DeserializeFromJson` detour reports each parse with the
 map object it filled and a classification by the engine caller's return

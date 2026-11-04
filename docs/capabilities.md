@@ -178,20 +178,23 @@ does not refuse, since the engine already tolerates those names.
   new editor rows appear in the palette when the editor is first opened; a mod installed after that
   needs `sh_mods palette rebuild`. A mod that fails a check is skipped on its own with one logged
   reason; the rest still load.
-- A mod's replacements of the game's own files (its `shadows`) and its `requirements` apply only in
-  maps that use it: while such a map is open in the editor or being played. A map uses a mod when it
-  places something the mod provides or when the mod was added to the whole map (below). Opening the
-  map brings the mod's replaced player definition, HUD movie or material in (decls are parsed again,
-  models and images reloaded), and leaving it for the hub, or opening a map that does not use the mod,
-  gives the game's own files back. With no map open nothing a map-scoped mod replaces is served. The
-  mod's new content (its Toybox rows and everything under `mods/<id>/`) is not affected; a mod that adds
-  Toybox rows also keeps its requirements in every map, since its rows are offered in every map. A mod
-  can opt out with `"scope": "always"` in its `mod.json` (`"map"` is the default; any other value is
-  refused when it is built), and a mod without the key that replaces something the editor itself uses
-  (an editor settings, palette or property-inspector decl, or the editor's own movies) is treated as
-  `always`, with one log line. A mod without the key keeps the bundle hash it had. When two installed
-  mods replace the same file (a renamed or forked copy, for example), a map that uses either one gets
-  the replacement, from the mod it uses. Opening the Settings screen from the editor's Start menu keeps
+- A map serves exactly the mods it uses, at the build it was saved with, then the game: while a map
+  is open in the editor or played, a mod it does not use serves nothing in it, and one mod never takes
+  precedence over another. A map uses a mod when it places something the mod provides or when the mod
+  was added to the whole map (below). Opening the map brings the mod's replaced player definition, HUD
+  movie or material in (decls are parsed again, models and images reloaded), and leaving it for the
+  hub, or opening a map that does not use the mod, gives the game's own files back. In the editor, and
+  with no map open, a mod the map does not use still offers its Toybox rows and everything under
+  `mods/<key>/` (placing one makes the map use the mod at the next save), never its replacements; in
+  Play it offers nothing. A mod that adds Toybox rows keeps its requirements in every map, since its
+  rows are offered in every map. `"scope"` in a `mod.json` no longer changes anything. A mod that
+  replaces something the editor itself uses (an editor settings, palette or property-inspector decl, or
+  the editor's own movies: the editor tweaks, and the older packages whose Toybox rows are such
+  replacements) applies in every map as before, with one log line. When several mods a map uses
+  replace the same file with different bytes, the one whose needs the map's mods satisfy, then the
+  bytes most of them carry, then the first in the map's list serves, with their list entries combined
+  (the encounter conductor, the player body's event rows); the order you installed them never
+  matters. Opening the Settings screen from the editor's Start menu keeps
   the map's mods applied. `sh_mods status`, `sh_mods doctor` and `sh_mods map` print each mod's scope
   and whether it is active in the open map, and `sh_mods doctor` prints which mod serves each replaced
   file for the open map. A published map played from the hub keeps its mods applied until the next map
@@ -236,10 +239,12 @@ does not refuse, since the engine already tolerates those names.
   limit cannot be copied to My Maps.
 - The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
-- A map needs the paths its mods provide, not a particular build: a map, rawmap or prefab plays
-  with whatever installed folder declares the mod's id and provides every name the map uses,
-  whatever its hash (a folder rebuilt with new bytes at the same paths still serves). The bundle
-  hash is only the key a download asks the mod store for.
+- A map plays with the exact build of each mod it was saved with: a map, rawmap or prefab is served
+  by the installed folder at the bundle hash its row records. A folder of the same mod at another
+  hash (an update, a fork) is another build: it is installed beside the one a map uses and never
+  replaces it for that map, and the map's own build is downloaded by its hash ("installed at another
+  build"). Both builds stay installed; each map serves its own, and with no map open the newest one
+  offers its Toybox rows. `sh_mods doctor` lists one row per build under the mod.
 - Playing a published map (or a My Maps map) that uses a mod no installed folder provides asks
   first, in the game's own Yes/No dialog, naming the mods and their size, after one console line
   per mod: "This map uses Hell Guards (local.hell-guard), which is not installed." or "Hell Guards
