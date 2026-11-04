@@ -422,11 +422,15 @@ These backend files share the work:
   under `mods/<key>/`; raw files and skins decls may spell the key the way the
   engine derives binary names (`-` becomes `_`). Every file is classified from
   its path and bytes: an addition or a borrow (a stock pointer) under the key,
-  an editor tweak (an editor-only type, at any path), a no-op (the game's own
-  bytes at the game's own name), or a replacement (any other file at a game
-  name). Replacements and editor tweaks outside the key are the bundle's
-  `shadows`, derived and never declared; a replacement is still accepted and
-  reported while replacements are retired. The author keys `shadows`, `stock`
+  editor-only types included (a Toybox row travels with its mod), an editor
+  tweak (an editor-only type outside the key), a surface (the game's own bytes
+  at the game's own name, served from the player's disk, never carried and
+  never refused; SnapMap's provider cannot see campaign-only content without
+  it), or a replacement (any other file at a game name). Replacements and
+  editor tweaks are the bundle's `shadows`, derived and never declared; a
+  replacement is still accepted and reported while replacements are retired,
+  and `sh_mb_set_refuse_replacements(1)` turns that into a build failure
+  (legacy bundles exempt). The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
   The key is the author `id` when present (deprecated), else the product
@@ -508,8 +512,8 @@ These backend files share the work:
 
 The store. A folder is `mod.json` plus `assets\`. `mod.json` has
 two blocks in one object: every key but `snapmap-plus` is the author's (id,
-name, version, description, author, strings, requirements, hud, player (the
-registry intent), and any other key, kept and carried as the manifest's
+name, version, description, author, strings, requirements, hud, player (the registry intent: hands, handsD1, handsAnimWeb, body,
+bodyEvents and the weapons kit), and any other key, kept and carried as the manifest's
 `extra`; the retired shadows, stock and scope are read as above), and
 `snapmap-plus` is the product's, the whole built manifest: format, key, build,
 bundle hash, built time, validated and cause, origin (`by-hand` for a folder
@@ -519,8 +523,13 @@ conductor, strings), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"inAssets": false` when no file stands behind one). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
 serving, and the store records the failure on the folder (`sh_mods list`:
-"build failed: <cause>; serving build N"); a folder that never built is
-skipped. The
+"build failed: <cause>; serving build N from snapshot <path>"); a folder that
+never built is skipped. Because authors edit files in place, every successful
+build of a store folder keeps a snapshot of its carried files and its
+`mod.json` under `mods\.builds\<key>@<hash16>\` (one per folder, named in the
+record's `snapshots` section, replaced by the next successful build, removed
+with the folder); while a rebuild is failed, `sh_ms_entry.snapshot` names the
+folder the last good bytes are read from. The
 product writes the block by splicing: the old member is cut from the end of
 the member before it, the new one appended after the author's last member, so
 the author's bytes, order and formatting never change. The canonical manifest
