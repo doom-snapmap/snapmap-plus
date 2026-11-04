@@ -86,6 +86,28 @@ void sh_companion_compose(const float owner_origin[3], const float owner_axis[9]
 
 void sh_companion_table_free(sh_companion_table *t);
 
+/* Arming the CallSpawn detour after boot (companion_engine.h,
+ * sh_companions_ensure). The engine side fills what it knows and asks; a
+ * BUILD answer means "rebuild the table from the current index, set `owners`,
+ * and ask again". Fields: resolved (boot resolution succeeded), on_main (1 the
+ * caller is DOOM's main thread, 0 another thread, -1 unknown), installed (the
+ * detour is live), index_changed (the serving index was published again since
+ * the table was built), owners (owners in the table, -1 not rebuilt yet),
+ * prologue_ok (CallSpawn's first 14 bytes are the expected ones). Pure. */
+#define SH_COMPANION_ARM_UNCHANGED   0   /* nothing to do: no new index since the last table */
+#define SH_COMPANION_ARM_LIVE        1   /* already armed; the live detour follows the index itself */
+#define SH_COMPANION_ARM_COMMIT      2   /* commit the detour now */
+#define SH_COMPANION_ARM_BUILD       3   /* rebuild the table, then ask again */
+#define SH_COMPANION_ARM_UNRESOLVED (-1) /* boot resolution did not run or failed */
+#define SH_COMPANION_ARM_OFF_MAIN   (-2) /* never armed from another thread */
+#define SH_COMPANION_ARM_NO_OWNER   (-3) /* the rebuilt table has no owner: the spawn chain stays untouched */
+#define SH_COMPANION_ARM_FOREIGN    (-4) /* CallSpawn's prologue changed (another detour): refused */
+typedef struct sh_companion_arm {
+    int resolved, on_main, installed, index_changed, owners, prologue_ok;
+} sh_companion_arm;
+int sh_companion_arm_decide(const sh_companion_arm *a);
+const char *sh_companion_arm_name(int decision);
+
 #ifdef __cplusplus
 }
 #endif

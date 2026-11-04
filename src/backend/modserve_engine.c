@@ -67,6 +67,8 @@
 #include "modsound.h"
 #include "strids.h"
 #include "editor_delete.h"
+#include "modledger.h"
+#include "companion_engine.h"
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -114,6 +116,8 @@ static const void *g_cvar_slot;
 static buffer_cmd_fn g_buffer_cmd;
 static void *g_cmdsys;
 static const unsigned char *g_editor;  /* editor_singleton: idSnapEditorLocal, constructed in place */
+static void *g_res_lock;               /* resource_lock: the static struct whose first qword is the CRITICAL_SECTION */
+static __declspec(thread) int g_peek;  /* a product read of served bytes: not a serve to the engine */
 
 extern volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* modserve.c */
 
@@ -167,6 +171,119 @@ static void me_log_fault(const char *what, const char *type, const char *name, c
     me_log("%s %s '%s' FAULTED (exception 0x%08lx)%s%s", what, type, name, (unsigned long)g_fault_code,
            (after[0] && strcmp(after, before)) ? "; engine error: " : "",
            (after[0] && strcmp(after, before)) ? after : "");
+}
+
+/* The engine's resource lock (report ADD-G3): every list add, remove and find
+ * takes it, and list add swap-removes and grows the entry arrays, so every
+ * walk of a list here holds it. Recursive on one thread. Its accessor builds
+ * the CRITICAL_SECTION on first use, so a NULL pointer means no list has been
+ * touched yet and nothing can race the walk. */
+static CRITICAL_SECTION *me_lock(void)
+{
+    CRITICAL_SECTION *cs = NULL;
+    if (!g_res_lock) return NULL;
+    __try { cs = *(CRITICAL_SECTION *const *)g_res_lock; } __except (EXCEPTION_EXECUTE_HANDLER) { cs = NULL; }
+    if (cs) EnterCriticalSection(cs);
+    return cs;
+}
+
+static void me_unlock(CRITICAL_SECTION *cs) { if (cs) LeaveCriticalSection(cs); }
+
+/* Raw resource names: case-insensitive, and the id's '-' and '_' are one
+ * (a decl names md6/mods/<id>/..., the file may spell the id either way). */
+static char me_fold(char c)
+{
+    if (c == '-') return '_';
+    if (c == '\\') return '/';
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+static int me_name_eq(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    for (; *a && *b; ++a, ++b) if (me_fold(*a) != me_fold(*b)) return 0;
+    return !*a && !*b;
+}
+
+/* `name` inside `body` under the same folding. */
+static int me_body_names(const unsigned char *body, size_t len, const char *name)
+{
+    size_t n = strlen(name), i, j;
+    if (!n || len < n) return 0;
+    for (i = 0; i + n <= len; ++i) {
+        for (j = 0; j < n && me_fold((char)body[i + j]) == me_fold(name[j]); ++j) {}
+        if (j == n) return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ ledger */
+
+/* The provider's serves (modledger.h). A product read of served bytes
+ * (validation, the dependents search) sets g_peek and is not recorded. */
+static void me_serve_listener(const char *request, const char *bundle_hash, const char *file_hash,
+                              const unsigned char *bytes, size_t length)
+{
+    sh_modledger_ident id;
+    if (g_peek) return;
+    if (sh_modledger_ident_of(bundle_hash, file_hash, bytes, length, &id)) (void)sh_modledger_record(request, &id);
+}
+
+/* What the open map serves for `request` now. 1 with its identity. */
+static int me_now_ident(const char *request, sh_modledger_ident *out)
+{
+    const char *bundle = NULL, *file = NULL;
+    const unsigned char *body = NULL;
+    size_t body_len = 0;
+    uint64_t size = 0;
+    if (!sh_modserve_serve_identity(request, &bundle, &file, &body, &body_len, &size)) return 0;
+    if (!file && !body) return 0;
+    return sh_modledger_ident_of(bundle, file, body, body ? body_len : (size_t)size, out);
+}
+
+/* The ledger's decision for a pending refresh item (sh_modledger_decide). */
+static int me_ledger_decision(const sh_modserve_refresh_item *it)
+{
+    sh_modledger_rec rec;
+    sh_modledger_ident now;
+    int has = sh_modledger_find(it->request, &rec), have_now = !it->gone && me_now_ident(it->request, &now);
+    return sh_modledger_decide(has ? &rec : NULL, have_now ? &now : NULL, it->shadow || it->gone,
+                               sh_modledger_complete());
+}
+
+/* The served bytes of `request` for a product check, not recorded as a serve. */
+static unsigned char *me_peek(const char *request, size_t *len)
+{
+    unsigned char *bytes = NULL;
+    int r;
+    *len = 0;
+    g_peek = 1;
+    r = sh_modserve_open(request, &bytes, len);
+    g_peek = 0;
+    return r > 0 ? bytes : NULL;
+}
+
+/* A .bmd6anim the engine's Load accepts (VK 0x1415c60e0 / GL 0x1415c72d0):
+ * the first dword read big-endian is 0x2602414d (magic 0x2602, version
+ * 0x414d), two header dwords, then the skeleton name (int32 length, text).
+ * A load that fails frees the held anim's data (ResourceReconstruct), so the
+ * bytes are checked before the load is asked for. */
+#define ME_ANIM_MAGIC 0x2602414du
+static int me_anim_bytes_ok(const unsigned char *b, size_t len, char *why, size_t cap)
+{
+    uint32_t magic, n;
+    if (!b || len < 16) { _snprintf_s(why, cap, _TRUNCATE, "%zu bytes, shorter than the header", len); return 0; }
+    magic = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+    if (magic != ME_ANIM_MAGIC) {
+        _snprintf_s(why, cap, _TRUNCATE, "magic and version 0x%08x, not 0x%08x", magic, ME_ANIM_MAGIC);
+        return 0;
+    }
+    memcpy(&n, b + 12, 4);
+    if (!n || n > 512 || 16u + n > len) {
+        _snprintf_s(why, cap, _TRUNCATE, "skeleton name length %u does not fit %zu bytes", n, len);
+        return 0;
+    }
+    return 1;
 }
 
 /* ------------------------------------------------------------------ registry */
@@ -327,15 +444,19 @@ static int op_decl_found(void *context, const char *type, const char *name)
 static int op_held(void *context, const char *type, const char *name, unsigned *out_state, unsigned *out_lifetime)
 {
     int held = -1;
+    const unsigned char *m = NULL;
+    CRITICAL_SECTION *cs;
     (void)context;
     *out_state = *out_lifetime = 0;
+    __try { m = (const unsigned char *)me_manager(type); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    if (!m) return -1;
+    cs = me_lock();
     __try {
-        const unsigned char *m = (const unsigned char *)me_manager(type);
-        if (m) {
+        {
             unsigned char *const *entries = *(unsigned char *const *const *)(m + ME_LIST_ENTRIES);
             int count = *(const int *)(m + ME_LIST_COUNT), i;
-            if (count < 0 || count > (1 << 22) || (count && !entries)) return -1;
-            held = 0;
+            if (count < 0 || count > (1 << 22) || (count && !entries)) count = -1;
+            held = count < 0 ? -1 : 0;
             for (i = 0; i < count; ++i) {
                 const unsigned char *r = entries[i];
                 const char *n;
@@ -350,7 +471,97 @@ static int op_held(void *context, const char *type, const char *name, unsigned *
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { held = -1; }
+    me_unlock(cs);
     return held;
+}
+
+/* Every resource of every list (decl_resource_head; list +0x08 type, +0x10
+ * class, +0x18 next, +0x20 entries, +0x28 count), copied under the resource
+ * lock; the caller works on the copy after it is released. */
+#define ME_LIST_TYPE  0x08
+#define ME_LIST_CLASS 0x10
+#define ME_LIST_NEXT  0x18
+typedef struct me_held { const char *type, *cls, *name; void *obj; unsigned lifetime; unsigned char state; } me_held;
+typedef struct me_held_set { me_held *v; int n, cap, lists, ok; } me_held_set;
+
+static void me_held_free(me_held_set *s) { free(s->v); memset(s, 0, sizeof *s); }
+
+static int me_held_collect(me_held_set *s, int level4_only)
+{
+    CRITICAL_SECTION *cs;
+    memset(s, 0, sizeof *s);
+    if (!g_res_head) return 0;
+    cs = me_lock();
+    __try {
+        const unsigned char *l = *(const unsigned char *const *)g_res_head;
+        for (; l && s->lists < 4096; l = *(const unsigned char *const *)(l + ME_LIST_NEXT), s->lists++) {
+            unsigned char *const *entries = *(unsigned char *const *const *)(l + ME_LIST_ENTRIES);
+            int count = *(const int *)(l + ME_LIST_COUNT), i;
+            const char *type = *(const char *const *)(l + ME_LIST_TYPE), *cls = *(const char *const *)(l + ME_LIST_CLASS);
+            if (count < 0 || count > (1 << 22) || (count && !entries)) break;
+            for (i = 0; i < count; ++i) {
+                const unsigned char *r = entries[i];
+                unsigned lifetime;
+                if (!r) continue;
+                lifetime = *(const unsigned *)(r + RES_LIFETIME_OFF);
+                if (level4_only && lifetime != 4) continue;
+                if (s->n == s->cap) {
+                    int cap = s->cap ? s->cap * 2 : 4096;
+                    me_held *v = (me_held *)realloc(s->v, (size_t)cap * sizeof *v);
+                    if (!v) break;
+                    s->v = v;
+                    s->cap = cap;
+                }
+                s->v[s->n].type = type;
+                s->v[s->n].cls = cls;
+                s->v[s->n].name = *(const char *const *)(r + ME_RES_NAME);
+                s->v[s->n].obj = (void *)r;
+                s->v[s->n].lifetime = lifetime;
+                s->v[s->n].state = r[RES_STATE_OFF];
+                s->n++;
+            }
+        }
+        s->ok = !l;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { s->ok = 0; }
+    me_unlock(cs);
+    return s->ok;
+}
+
+static int me_name_cmp(const char *a, const char *b)
+{
+    for (; *a && *b; ++a, ++b) {
+        char x = me_fold(*a), y = me_fold(*b);
+        if (x != y) return (unsigned char)x < (unsigned char)y ? -1 : 1;
+    }
+    return *a ? 1 : *b ? -1 : 0;
+}
+
+static int me_held_cmp(const void *pa, const void *pb)
+{
+    const me_held *a = (const me_held *)pa, *b = (const me_held *)pb;
+    int c = _stricmp(a->type ? a->type : "", b->type ? b->type : "");
+    return c ? c : me_name_cmp(a->name ? a->name : "", b->name ? b->name : "");
+}
+
+/* Sorted by type and folded name, for me_held_find. */
+static void me_held_sort(me_held_set *s)
+{
+    if (s->n > 1) qsort(s->v, (size_t)s->n, sizeof *s->v, me_held_cmp);
+}
+
+/* The held resource of a type list and name (folded) in a sorted set, or NULL. */
+static const me_held *me_held_find(const me_held_set *s, const char *type, const char *name)
+{
+    int lo = 0, hi = s->n - 1;
+    me_held key;
+    key.type = type;
+    key.name = name;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2, c = me_held_cmp(&key, &s->v[mid]);
+        if (!c) return &s->v[mid];
+        if (c < 0) hi = mid - 1; else lo = mid + 1;
+    }
+    return NULL;
 }
 
 /* The player's game archives, read through the engine provider (the same
@@ -571,6 +782,10 @@ void sh_modserve_play_begin(void)
     sh_modhud_scene_play_begin();
     sh_modscene_place_play_begin();
     on_main = me_on_main();
+    /* Companions first: Play precedes every spawn burst of the session
+     * (report ADD-V1) and does not parse the map again, so the map gate alone
+     * misses a mod installed since the last map load. */
+    if (on_main == 1) (void)sh_companions_ensure("play");
     /* Map scope: entities placed since the load or the last save may list a
      * bundle; its shadows and requirements come in before the level loads. */
     if (on_main == 1 && sh_modserve_scope_source(SH_MODSERVE_AT_PLAY) > 0) (void)sh_modserve_scope_apply("play");
@@ -639,6 +854,7 @@ static void me_index_changed(void)
 {
     sh_run_on_main_fn run = NULL;
     int result = 0;
+    sh_companions_refresh();   /* the companion table follows the index at the next gate or owner spawn */
     sh_strids_request_refresh();
     if (me_on_main() == 1) { (void)sh_strids_refresh_pending(); return; }
     sh_apply_engine_get_run_on_main(&run);
@@ -672,6 +888,19 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     g_res_head = (const void *)glb_resolve(module_base, "decl_resource_head", NULL);
     g_editor = (const unsigned char *)glb_resolve(module_base, "editor_singleton", NULL);
+    /* The resource lock: every list walk here and in modserve.c holds it. */
+    g_res_lock = (void *)glb_resolve(module_base, "resource_lock", NULL);
+    sh_modserve_set_resource_lock(g_res_lock);
+    if (!g_res_lock) me_log("resource lock unresolved; the resource lists are walked without it");
+    /* The served-bytes ledger: complete only when nothing was served before this point. */
+    {
+        sh_modserve_stats st;
+        sh_modserve_get_stats(&st);
+        sh_modledger_set_complete(st.opens_served == 0);
+        sh_modserve_set_serve_listener(me_serve_listener);
+        me_log("served-bytes ledger bound (%s)", st.opens_served ? "the provider served files before it; a held name "
+               "with no record is refreshed rather than trusted" : "every serve of the session is recorded");
+    }
     g_bound = g_ctor && g_dtor && g_anchor && g_type && g_register && g_source && g_decl && g_generic_load &&
               sh_process_heap_bind(&g_heap, results, count, module_base) && g_main_thread_at;
     for (i = 0; i < count; ++i)
@@ -829,21 +1058,35 @@ static void me_reparse_early(const char *phase, int in_heap)
  * and pixels with the blacklists off. Matched by name within the list of its
  * class (idMD6Model, idImage), since a material and an image can share one. */
 #define ME_RAW_MAX 4096
-typedef struct me_raw_name { const char *name; int image; int hit; } me_raw_name;
+#define ME_RAW_MODEL 0
+#define ME_RAW_IMAGE 1
+#define ME_RAW_ANIM  2
+typedef struct me_raw_name { const char *name, *request; int kind, hit, done; } me_raw_name;
 typedef struct me_raw {
     me_raw_name *names; int n, cap;
-    int reloaded, models, images, failed, faulted;
+    int reloaded, models, images, anims, failed, faulted;
+    int refused;          /* anims whose served bytes the engine's Load would refuse: the held one is kept */
+    int anims_level1;     /* anims held below level 4: read from the current bytes at their next load */
     char first[700];
 } me_raw;
+
+static int me_raw_kind(const char *type)
+{
+    if (type && !_stricmp(type, "image")) return ME_RAW_IMAGE;
+    if (type && !_stricmp(type, "anim")) return ME_RAW_ANIM;
+    return ME_RAW_MODEL;
+}
 
 static int me_raw_collect(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
 {
     me_raw *r = (me_raw *)context;
-    (void)request; (void)bundle_id;
+    (void)bundle_id;
     if (r->n < r->cap) {
         r->names[r->n].name = name;
-        r->names[r->n].image = !_stricmp(type, "image");
+        r->names[r->n].request = request;
+        r->names[r->n].kind = me_raw_kind(type);
         r->names[r->n].hit = 0;
+        r->names[r->n].done = 0;
         r->n++;
     }
     return 0;
@@ -855,34 +1098,119 @@ static int me_raw_settle(void *context, const char *type, const char *name, cons
     return 1;
 }
 
+static void me_raw_note(me_raw *r, const char *name)
+{
+    if (strlen(r->first) + strlen(name) + 3 < sizeof r->first)
+        _snprintf_s(r->first + strlen(r->first), sizeof r->first - strlen(r->first), _TRUNCATE, "%s%s",
+                    r->first[0] ? ", " : "", name);
+}
+
+/* An anim is reloaded only when it is held for the session (level 4: stock,
+ * or raised with the editor closure); a level-1 anim is freed at every map
+ * transition and read again from the current bytes. Its served bytes are
+ * checked first: a Load that fails frees the data the held anim points at. */
+static int me_anim_ready(me_raw *r, unsigned char *d, const me_raw_name *n)
+{
+    char why[160];
+    unsigned char *bytes;
+    size_t len = 0;
+    int ok;
+    if (*(const unsigned *)(d + RES_LIFETIME_OFF) != 4) { r->anims_level1++; return 0; }
+    bytes = n->request ? me_peek(n->request, &len) : NULL;
+    if (!bytes) _snprintf_s(why, sizeof why, _TRUNCATE, "its bundle's bytes could not be read");
+    ok = bytes && me_anim_bytes_ok(bytes, len, why, sizeof why);
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    if (!ok) {
+        r->refused++;
+        me_log("reload: anim '%s' kept as the engine holds it: the served %s is not one its Load accepts (%s)", n->name,
+               n->request ? n->request : "file", why);
+    }
+    return ok;
+}
+
 static void me_raw_one(void *context, const char *list_class, void *resource, const char *name)
 {
     me_raw *r = (me_raw *)context;
-    int i, image;
+    int i, kind;
     if (!list_class) return;
-    if (!_stricmp(list_class, "idImage")) image = 1;
-    else if (!_stricmp(list_class, "idMD6Model")) image = 0;
+    if (!_stricmp(list_class, "idImage")) kind = ME_RAW_IMAGE;
+    else if (!_stricmp(list_class, "idMD6Model")) kind = ME_RAW_MODEL;
+    else if (!_stricmp(list_class, "idMD6Anim")) kind = ME_RAW_ANIM;
     else return;
     for (i = 0; i < r->n; ++i) {
         unsigned char *d;
-        if (r->names[i].hit || r->names[i].image != image || _stricmp(r->names[i].name, name)) continue;
+        if (r->names[i].hit || r->names[i].kind != kind || !me_name_eq(r->names[i].name, name)) continue;
         r->names[i].hit = 1;
         d = (unsigned char *)resource;
         __try {
-            if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates */
+            if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates and bytes */
+            if (kind == ME_RAW_ANIM && !me_anim_ready(r, d, &r->names[i])) return;
             me_load_in_place(d, "reload", list_class, name);
             if (d[RES_STATE_OFF] & 1) r->failed++;
             r->reloaded++;
-            if (image) r->images++; else r->models++;
-            if (strlen(r->first) + strlen(name) + 3 < sizeof r->first)
-                _snprintf_s(r->first + strlen(r->first), sizeof r->first - strlen(r->first), _TRUNCATE, "%s%s",
-                            r->first[0] ? ", " : "", name);
+            r->names[i].done = 1;
+            if (r->names[i].request) (void)sh_modledger_bind(r->names[i].request, d);
+            if (kind == ME_RAW_IMAGE) r->images++;
+            else if (kind == ME_RAW_ANIM) r->anims++;
+            else r->models++;
+            me_raw_note(r, name);
         } __except (me_fault_filter(GetExceptionCode())) {
             r->faulted++;
             me_log("reload: %s '%s' FAULTED (exception 0x%08lx)", list_class, name, (unsigned long)g_fault_code);
         }
         return;
     }
+}
+
+/* After anims reloaded in place: the md6Def and animWeb decls the open map
+ * serves that name one are parsed again, so whatever they built from the old
+ * data is rebuilt from the new (which objects cache an anim's data pointer
+ * is not established, report ADD-G1). Inside process heap 0, main thread. */
+#define ME_DEP_SEEN 256
+typedef struct me_dep {
+    const me_raw *raw;
+    me_reparse *decls;
+    int found;
+    const char *seen[ME_DEP_SEEN];
+    int nseen;
+} me_dep;
+
+static void me_dep_visit(void *context, const char *request, uint64_t size, const char *bundle_id, const char *version,
+                         const char *bundle_hash)
+{
+    me_dep *c = (me_dep *)context;
+    unsigned char *body;
+    size_t len = 0;
+    int i;
+    (void)size; (void)version; (void)bundle_hash;
+    if (strncmp(request, "generated/decls/md6def/", 23) && strncmp(request, "generated/decls/animweb/", 24)) return;
+    for (i = 0; i < c->nseen; ++i) if (!strcmp(c->seen[i], request)) return;
+    body = me_peek(request, &len);
+    if (!body) return;
+    for (i = 0; i < c->raw->n; ++i) {
+        char type[64], name[SH_MB_REQUEST_MAX + 1];
+        if (c->raw->names[i].kind != ME_RAW_ANIM || !c->raw->names[i].done ||
+            !me_body_names(body, len, c->raw->names[i].name))
+            continue;
+        if (sh_mb_logical_name(request, type, sizeof type, name, sizeof name)) {
+            if (c->nseen < ME_DEP_SEEN) c->seen[c->nseen++] = request;
+            (void)me_reparse_one(c->decls, type, name, request, bundle_id);
+            c->found++;
+        }
+        break;
+    }
+    HeapFree(GetProcessHeap(), 0, body);
+}
+
+static int me_anim_dependents(const me_raw *raw, me_reparse *decls)
+{
+    me_dep c;
+    if (!raw->anims) return 0;
+    memset(&c, 0, sizeof c);
+    c.raw = raw;
+    c.decls = decls;
+    sh_modserve_each_served(me_dep_visit, &c);
+    return c.found;
 }
 
 static void me_reload_ungated(const char *phase, int in_heap)
@@ -953,17 +1281,28 @@ static int me_in_play(void)
     return !active && reason == 3;
 }
 
+/* A map pass (modserve_activate_bundles): the engine's purge has run, the
+ * departed map's entities are gone and the next map's are not spawned, so a
+ * held anim may be reloaded in place (report ADD-G1). Anims marked at any
+ * other point wait for it. */
+static int g_anim_pass;
+
 typedef struct me_refresh {
     me_reparse decls;
     me_raw raw;
-    int stage;            /* 0 decls and collect, 1 settle the collected models and images */
+    int stage;            /* 0 decls and collect, 1 settle the collected models, images and anims */
     int not_held, gated;
+    int kept;             /* held with the bytes served now (the ledger): nothing to reload */
+    int game;             /* never served by a mod this session (the ledger): not refreshed */
+    int anims_waiting;    /* anims marked outside a map pass */
+    int dependents;       /* md6Def and animWeb decls re-parsed after their anims reloaded */
 } me_refresh;
 
 static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
 {
     me_refresh *c = (me_refresh *)context;
     if (!it->gates_live) { if (!c->stage) c->gated++; return 0; }
+    if (it->kind == SH_MODSERVE_RF_ANIM && !g_anim_pass) { if (!c->stage) c->anims_waiting++; return 0; }
     if (it->kind == SH_MODSERVE_RF_DECL) {
         int before = c->decls.reparsed + c->decls.faulted;
         (void)me_reparse_one(&c->decls, it->type, it->name, it->request, it->bundle_id);
@@ -971,6 +1310,14 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
         return 1;
     }
     if (c->stage) return 1;
+    /* Raw resources: the ledger says whether the bytes the engine was given
+     * under this name differ from the bytes served now. (Decls keep the
+     * marks alone: a child is marked for its parent's change, not its own.) */
+    switch (me_ledger_decision(it)) {
+    case SH_MODLEDGER_KEEP: c->kept++; return 1;
+    case SH_MODLEDGER_GAME: c->game++; return 1;
+    default: break;
+    }
     (void)me_raw_collect(&c->raw, it->type, it->name, it->request, it->bundle_id);
     return 0;
 }
@@ -993,8 +1340,10 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
         return;
     }
     __try {
-        if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head)
+        if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head) {
             (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
+            c.dependents = me_anim_dependents(&c.raw, &c.decls);
+        }
     } __finally {
         if (!in_heap && !sh_process_heap_leave(&heap)) me_rlog("refresh: heap scope did not balance at the %s", phase);
     }
@@ -1007,23 +1356,33 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
                    c.decls.types[i].type, c.decls.types[i].names,
                    strlen(c.decls.types[i].names) >= sizeof c.decls.types[i].names - 5 ? ", ..." : "");
         me_rlog("refresh: decls: %d re-parsed at the %s in %.1f ms (%d read through the provider, %d failed, %d faulted; "
-               "%d not held, read at their next parse)", c.decls.reparsed, phase, t1 - t0, c.decls.through_provider,
-               c.decls.failed, c.decls.faulted, c.not_held);
+               "%d not held, read at their next parse%s)", c.decls.reparsed, phase, t1 - t0, c.decls.through_provider,
+               c.decls.failed, c.decls.faulted, c.not_held, c.dependents ? "; includes the md6Def and animWeb decls "
+               "naming a reloaded anim" : "");
     }
     if (c.raw.n)
-        me_rlog("refresh: models and images: reloaded %d model(s) and %d image(s) at the %s (%d failed, %d faulted; "
-               "%d of %d not held, read at their next load)%s%s%s", c.raw.models, c.raw.images, phase, c.raw.failed,
-               c.raw.faulted, c.raw.n - c.raw.reloaded - c.raw.faulted, c.raw.n, c.raw.first[0] ? ": " : "",
-               c.raw.first, c.raw.reloaded > 0 && strlen(c.raw.first) + 40 >= sizeof c.raw.first ? ", ..." : "");
+        me_rlog("refresh: models, images and anims: reloaded %d model(s), %d image(s) and %d anim(s) at the %s (%d failed, "
+               "%d faulted, %d anim(s) refused before loading, %d anim(s) below level 4 read at their next load; %d of %d "
+               "not held, read at their next load)%s%s%s", c.raw.models, c.raw.images, c.raw.anims, phase, c.raw.failed,
+               c.raw.faulted, c.raw.refused, c.raw.anims_level1, c.raw.n - c.raw.reloaded - c.raw.faulted, c.raw.n,
+               c.raw.first[0] ? ": " : "", c.raw.first,
+               c.raw.reloaded > 0 && strlen(c.raw.first) + 40 >= sizeof c.raw.first ? ", ..." : "");
+    if (c.dependents)
+        me_rlog("refresh: %d md6Def and animWeb decl(s) naming a reloaded anim re-parsed at the %s", c.dependents, phase);
+    if (c.kept || c.game)
+        me_rlog("refresh: ledger: %d model(s), image(s) and anim(s) already hold the bytes served now, %d were never "
+               "given a mod's bytes; not reloaded", c.kept, c.game);
+    if (c.anims_waiting)
+        me_rlog("refresh: %d anim(s) wait for the next map load, where held anims are reloaded in place", c.anims_waiting);
     if (!g_res_head && c.raw.n)
-        me_rlog("refresh: %d model(s) and image(s) not reloaded (decl_resource_head unresolved)", c.raw.n);
+        me_rlog("refresh: %d model(s), image(s) and anim(s) not reloaded (decl_resource_head unresolved)", c.raw.n);
     if (c.gated)
         me_rlog("refresh: %d change(s) wait for their bundles' requirements, applied at the next editor pass or map load",
                c.gated);
     if (out) {
         out->reparsed += c.decls.reparsed;
         out->reloaded += c.raw.reloaded;
-        out->failed += c.decls.failed + c.decls.faulted + c.raw.failed + c.raw.faulted;
+        out->failed += c.decls.failed + c.decls.faulted + c.raw.failed + c.raw.faulted + c.raw.refused;
     }
     free(c.raw.names);
 }
@@ -1112,6 +1471,7 @@ static int me_refresh_main(void *context)
     sh_modserve_diff d;
     (void)context;
     if (me_in_play() == 1 || me_on_main() != 1) return 0;
+    (void)sh_companions_ensure("return to the editor");
     sh_modserve_last_diff(&d);
     memset(&r, 0, sizeof r);
     if (d.pending) me_refresh_apply("return to the editor", 0, &r);
@@ -1164,6 +1524,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     const char *why = NULL;
     memset(&r, 0, sizeof r);
     if (main == 1) (void)sh_modserve_refresh_expand();
+    if (main == 1) (void)sh_companions_ensure("rescan");
     /* Requirements follow the new table at once: a mod uninstalled or dropped
      * has its cvars restored and its deactivate lines run, a new one is set.
      * During Play, or off the main thread, the next pass does it. */
@@ -1191,7 +1552,7 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         sh_modserve_last_diff(&d);
     }
     r.pending = d.pending + (why ? d.added_active : 0) + (InterlockedCompareExchange(&g_palette_wanted, 0, 0) && why ? 1 : 0);
-    r.needs_map_reload = d.changed_map + (r.palette < 0 ? rows : 0);
+    r.needs_map_reload = d.changed_map + d.changed_anims + (r.palette < 0 ? rows : 0);
     r.needs_restart = d.changed_restart + d.gone_names;
     r.state = why && r.pending ? 2 : 1;
     if (!why && r.palette < 0 && g_bound) {
@@ -1215,7 +1576,8 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
         me_rlog("refresh: %d new decl name(s) of mods no map has used this session register when a map that uses the "
                 "mod loads", later);
     if (r.needs_map_reload) {
-        me_rlog("refresh: needs a map reload: %d changed movie(s)%s", d.changed_map,
+        me_rlog("refresh: needs a map reload: %d changed movie(s), %d changed anim(s) (reloaded in place at the next map "
+                "load)%s", d.changed_map, d.changed_anims,
                 r.palette < 0 ? ", and the editor rows until the palette is rebuilt" : "");
         me_refresh_note(&r, "%d change(s) need a map reload%s", r.needs_map_reload,
                         r.palette < 0 ? " ('sh_mods palette rebuild' applies the editor rows)" : "");
@@ -1379,6 +1741,14 @@ void sh_modserve_palette_before_build(void)
     (void)sh_strids_refresh_pending();
     if (!g_bound || !sh_modserve_active()) return;
     me_ensure_probe();
+    (void)sh_companions_ensure("editor");
+    /* A palette pass is the editor's: the PLAY mode a hub launch set at its
+     * launch boundary (modpublished.c), which nothing ends, must not refuse
+     * undeclared rows' sources here (the editor's tick resets it too, but only
+     * once the editor shows a map). */
+    if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && me_in_play() != 1 && me_on_main() == 1 &&
+        sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
+        (void)sh_modserve_scope_apply("editor");
     t0 = me_now_ms();
     if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
     if (!plan.count) {
@@ -1577,11 +1947,100 @@ static void me_sync_rows(const char *const *bundle_hashes, int n)
                me_rebuild_reason(res.rebuild), res.rows_before);
 }
 
+/* The ledger's backstop at a map pass (modledger.h): a name the provider
+ * served this session whose bytes differ from what the open map serves now,
+ * that the engine holds and that the scope marks did not settle, is refreshed
+ * in place by its type's mechanism (decls re-parsed; models, images and anims
+ * reloaded); a held skeleton or other raw type has no in-place route and is
+ * reported. Stock paths (shadows) and paths the map does not serve are left
+ * to the marks. Main thread, inside process heap 0. */
+#define ME_SWEEP_MAX 512
+typedef struct me_sweep_item { const char *request; } me_sweep_item;
+typedef struct me_sweep { me_sweep_item v[ME_SWEEP_MAX]; int n, over; } me_sweep;
+
+static void me_sweep_collect(void *context, const sh_modledger_rec *rec)
+{
+    me_sweep *s = (me_sweep *)context;
+    sh_modledger_ident now;
+    sh_modserve_hit hit;
+    if (!rec->request || !me_now_ident(rec->request, &now) || sh_modledger_same(&rec->id, &now)) return;
+    if (!sh_modserve_lookup(rec->request, &hit) || hit.is_shadow) return;
+    if (s->n < ME_SWEEP_MAX) s->v[s->n++].request = rec->request;
+    else s->over++;
+}
+
+static void me_ledger_sweep(const char *phase)
+{
+    me_sweep *s;
+    me_held_set held;
+    me_reparse decls;
+    me_raw raw;
+    sh_process_heap_scope heap = { 0 };
+    int i, restart = 0;
+    char restart_first[300] = "";
+    if (!g_bound || me_on_main() != 1 || !g_res_head) return;
+    s = (me_sweep *)calloc(1, sizeof *s);
+    if (!s) return;
+    (void)sh_modledger_each(me_sweep_collect, s);
+    if (!s->n) { free(s); return; }
+    if (!me_held_collect(&held, 0)) { me_log("%s: ledger: resource lists could not be walked", phase); me_held_free(&held); free(s); return; }
+    me_held_sort(&held);
+    memset(&decls, 0, sizeof decls);
+    memset(&raw, 0, sizeof raw);
+    raw.cap = ME_SWEEP_MAX;
+    raw.names = (me_raw_name *)calloc((size_t)raw.cap, sizeof *raw.names);
+    if (!raw.names || !sh_process_heap_enter(&g_heap, &heap)) {
+        me_log("%s: ledger: %d held name(s) with other bytes not refreshed (%s)", phase, s->n,
+               raw.names ? "process heap scope unavailable" : "out of memory");
+        free(raw.names); me_held_free(&held); free(s);
+        return;
+    }
+    __try {
+        for (i = 0; i < s->n; ++i) {
+            char type[64], name[SH_MB_REQUEST_MAX + 1];
+            const me_held *h;
+            sh_modserve_hit hit;
+            const char *rq = s->v[i].request;
+            if (!sh_mb_logical_name(rq, type, sizeof type, name, sizeof name)) continue;
+            h = me_held_find(&held, type, name);
+            if (!h || (h->state & 2)) continue;   /* not held loaded: its next load reads the current bytes */
+            if (!strncmp(rq, "generated/decls/", 16)) {
+                if (sh_modserve_lookup(rq, &hit)) (void)me_reparse_one(&decls, type, name, rq, hit.bundle_id);
+                continue;
+            }
+            if (!_stricmp(type, "baseModel") || !_stricmp(type, "image") || (!_stricmp(type, "anim") && g_anim_pass)) {
+                raw.names[raw.n].name = h->name;
+                raw.names[raw.n].request = rq;
+                raw.names[raw.n].kind = me_raw_kind(type);
+                raw.n++;
+                me_raw_one(&raw, h->cls, h->obj, h->name);
+                continue;
+            }
+            restart++;
+            if (strlen(restart_first) + strlen(name) + 16 < sizeof restart_first)
+                _snprintf_s(restart_first + strlen(restart_first), sizeof restart_first - strlen(restart_first),
+                            _TRUNCATE, "%s%s %s", restart_first[0] ? ", " : "", type, name);
+        }
+        if (raw.anims) (void)me_anim_dependents(&raw, &decls);
+    } __finally {
+        if (!sh_process_heap_leave(&heap)) me_log("%s: ledger: heap scope did not balance", phase);
+    }
+    me_log("%s: ledger: %d held name(s) carried other bytes than the open map serves: %d decl(s) re-parsed, %d model(s), "
+           "%d image(s) and %d anim(s) reloaded (%d failed, %d refused)%s%s%s", phase, s->n + s->over,
+           decls.reparsed, raw.models, raw.images, raw.anims, decls.failed + raw.failed + raw.faulted, raw.refused,
+           restart ? "; needs a restart (no in-place route): " : "", restart_first, s->over ? "; more not checked" : "");
+    free(raw.names);
+    me_held_free(&held);
+    free(s);
+}
+
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
     sh_modserve_plan plan;
     int unknown = 0, ready, main = me_on_main();
     double t0;
+    /* Companions follow the index at every map load, a map with no rows included. */
+    if (main == 1) (void)sh_companions_ensure("map");
     /* A map without manifest rows: nothing to do, nothing logged. */
     if (n <= 0 || !bundle_hashes) return 0;
     if (main != 1) { me_log("activation refused: not on the main thread"); return -1; }
@@ -1592,8 +2051,12 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
+    /* The map pass: held anims may be reloaded in place (g_anim_pass). */
+    g_anim_pass = me_in_play() != 1;
     if (plan.count) ready = me_run(&plan, "map");
     else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
+    me_ledger_sweep("map");
+    g_anim_pass = 0;
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
@@ -1614,6 +2077,95 @@ static void me_print_bundle(void *context, const char *id, const char *version, 
 static void me_print_line(void *context, const char *line) { (void)context; sh_printf("  %s\n", line); }
 
 static int me_rebuild_main(void *context) { (void)context; return modserve_palette_rebuild_requested(); }
+
+/* `sh_mods held [filter]`: the census of level-4 resources whose names the
+ * product served this session, by type (report ADD-G1's open item: whether
+ * a mod skeleton ever reaches level 4), then the ledger itself. */
+#define ME_HELD_TYPES 24
+#define ME_HELD_LINES 200
+typedef struct me_census_type { char type[40]; int count; char names[240]; } me_census_type;
+typedef struct me_census {
+    const me_held_set *held;
+    const char *filter;
+    me_census_type types[ME_HELD_TYPES];
+    int ntypes, records, held4, held1, lines, skipped;
+} me_census;
+
+static me_census_type *me_census_slot(me_census *c, const char *type)
+{
+    int i;
+    for (i = 0; i < c->ntypes; ++i) if (!_stricmp(c->types[i].type, type)) return &c->types[i];
+    if (c->ntypes == ME_HELD_TYPES) return &c->types[ME_HELD_TYPES - 1];
+    strncpy_s(c->types[c->ntypes].type, sizeof c->types[c->ntypes].type, type, _TRUNCATE);
+    return &c->types[c->ntypes++];
+}
+
+static void me_census_visit(void *context, const sh_modledger_rec *rec)
+{
+    me_census *c = (me_census *)context;
+    char type[64], name[SH_MB_REQUEST_MAX + 1];
+    const me_held *h = NULL;
+    c->records++;
+    if (rec->request && sh_mb_logical_name(rec->request, type, sizeof type, name, sizeof name))
+        h = me_held_find(c->held, type, name);
+    if (h) {
+        (void)sh_modledger_bind(rec->request, h->obj);
+        if (h->lifetime == 4) {
+            me_census_type *t = me_census_slot(c, type);
+            size_t at = strlen(t->names);
+            c->held4++;
+            t->count++;
+            if (at + strlen(name) + 3 < sizeof t->names)
+                _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+        } else c->held1++;
+    }
+    if (c->filter && c->filter[0] && (!rec->request || !strstr(rec->request, c->filter))) return;
+    if (c->lines >= ME_HELD_LINES) { c->skipped++; return; }
+    c->lines++;
+    sh_printf("  %s  bundle %016llx  %s %016llx  %llu bytes  served %ld  %s%s\n", rec->request ? rec->request : "?",
+              (unsigned long long)rec->id.bundle, rec->id.kind == SH_MODLEDGER_ID_SHA ? "sha256" : "fnv64",
+              (unsigned long long)rec->id.file, (unsigned long long)rec->id.length, rec->serves,
+              !h ? "not held" : h->lifetime == 4 ? "held at level 4" : "held at level 1",
+              h && (h->state & 2) ? " (not loaded)" : h && (h->state & 1) ? " (failed or default)" : "");
+}
+
+static void me_print_held(const char *filter)
+{
+    me_held_set held;
+    me_census c;
+    sh_modledger_stats st;
+    int i;
+    sh_modledger_get_stats(&st);
+    if (!me_held_collect(&held, 0)) {
+        sh_printf("sh_mods held: the resource lists could not be walked%s\n",
+                  g_res_head ? "" : " (decl_resource_head unresolved)");
+        me_held_free(&held);
+        return;
+    }
+    me_held_sort(&held);
+    memset(&c, 0, sizeof c);
+    c.held = &held;
+    c.filter = filter;
+    sh_printf("sh_mods held: ledger: %u of %u request path(s) recorded, %lu serve(s), %s%s; %d resource(s) in %d list(s)%s\n",
+              st.records, st.cap, st.serves, st.complete ? "complete" : "incomplete",
+              st.overflow ? " (table full)" : !st.complete ? " (the provider served before the ledger was bound)" : "",
+              held.n, held.lists, g_res_lock ? "" : " (walked without the resource lock)");
+    sh_printf("sh_mods held: ledger records%s%s:\n", filter && filter[0] ? " matching " : "", filter && filter[0] ? filter : "");
+    (void)sh_modledger_each(me_census_visit, &c);
+    if (c.skipped) sh_printf("  ... %d more\n", c.skipped);
+    sh_printf("sh_mods held: level 4 names the product served: %d (%d more held at level 1); by type:%s\n", c.held4,
+              c.held1, c.ntypes ? "" : " none");
+    for (i = 0; i < c.ntypes; ++i)
+        sh_printf("  %s %d: %s%s\n", c.types[i].type, c.types[i].count, c.types[i].names,
+                  strlen(c.types[i].names) + 8 >= sizeof c.types[i].names ? ", ..." : "");
+    {
+        int skel = 0;
+        for (i = 0; i < c.ntypes; ++i) if (!_stricmp(c.types[i].type, "skeleton")) skel = c.types[i].count;
+        sh_printf("sh_mods held: skeletons a mod serves held at level 4: %d (%s)\n", skel,
+                  skel ? "a changed one keeps its bytes until a restart" : "none; a mod skeleton is read again at each map load");
+    }
+    me_held_free(&held);
+}
 
 int sh_modserve_command(void *args, const char *verb)
 {
@@ -1644,10 +2196,15 @@ int sh_modserve_command(void *args, const char *verb)
         sh_modsound_print_status();
         return 1;
     }
+    if (!_stricmp(verb, "held")) {
+        me_print_held(arg);
+        return 1;
+    }
     if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) {
         sh_modserve_refresh r;
         int n = sh_modserve_index_rescan();
         me_ensure_probe();
+        if (me_on_main() == 1) (void)sh_companions_ensure("rescan");
         sh_printf("sh_mods: rescan %s (%d bundles active); new editor rows need 'sh_mods palette rebuild'\n",
                   n < 0 ? "refused" : "done", n < 0 ? 0 : n);
         if (n >= 0) {

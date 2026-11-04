@@ -119,6 +119,14 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   installed over delivered, recency), the composition of list decls (the boss
   packs' conductor and whitelist), the animWebs a registration pass withdraws
   for a model nothing provides, and the Play-time requirements check.
+- `modledger_test.c` checks the served-bytes ledger: identities, records and
+  their updates under any spelling, binding, the bound and its overflow,
+  concurrent serves from eight threads, and the KEEP / REFRESH / GAME decision;
+  then, against a fixture of one key at two hashes, that a scope switch marks
+  the anim whose bytes differ (as an anim) and not the one both builds carry,
+  that the ledger's record matches what the index serves until another build is
+  declared, and that a rescan counts a changed anim as a map-load reload and a
+  changed skeleton as a restart.
 - `mod_pipeline_test.c` links the builder, the serving index, the manifest and
   the legacy converter together: a built fixture is admitted, saved as one
   `smpmod1.` row and activated on the next load; a legacy-form bundle with

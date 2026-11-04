@@ -2245,6 +2245,9 @@ static int ms_kind(const ms_file *f)
     if (f->is_decl) return SH_MODSERVE_RF_DECL;
     if (f->ptype && !_stricmp(f->ptype, "baseModel")) return SH_MODSERVE_RF_MODEL;
     if (f->ptype && !_stricmp(f->ptype, "image")) return SH_MODSERVE_RF_IMAGE;
+    /* Held anims (level 4) are reloaded in place at a map pass (report ADD-G1);
+     * a skeleton has no in-place route and stays a restart. */
+    if (f->ptype && !_stricmp(f->ptype, "anim") && !strncmp(f->request, "cooked/anim/", 12)) return SH_MODSERVE_RF_ANIM;
     return 0;
 }
 
@@ -2317,6 +2320,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
                 if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
                 else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
                 else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
+                else if (kind == SH_MODSERVE_RF_ANIM) d->changed_anims++;
             }
             continue;
         }
@@ -2334,6 +2338,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
         else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
         else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
+        else if (kind == SH_MODSERVE_RF_ANIM) d->changed_anims++;
         else if (!strncmp(f->request, "generated/swf/", 14)) d->changed_map++;
         else { d->changed_restart++; ms_diff_note(d->restart_first, sizeof d->restart_first, f->request); }
     }
@@ -3273,8 +3278,36 @@ static void ms_cache_put(const ms_file *f, const unsigned char *bytes, size_t le
     if (mine) HeapFree(GetProcessHeap(), 0, mine);
 }
 
+static sh_modserve_serve_fn volatile g_serve_listener;
+
+void sh_modserve_set_serve_listener(sh_modserve_serve_fn fn)
+{
+    InterlockedExchangePointer((PVOID volatile *)&g_serve_listener, (PVOID)fn);
+}
+
+int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                               const unsigned char **body, size_t *body_len, uint64_t *size)
+{
+    const ms_index *x = NULL;
+    const ms_file *f = ms_lookup_file(&x, request);
+    const unsigned char *b;
+    size_t bl = 0;
+    if (bundle_hash) *bundle_hash = NULL;
+    if (file_hash) *file_hash = NULL;
+    if (body) *body = NULL;
+    if (body_len) *body_len = 0;
+    if (size) *size = 0;
+    if (!f) return 0;
+    b = ms_body_of(f, &bl);
+    if (bundle_hash) *bundle_hash = x->bundles[f->bundle].hash;
+    if (b) { if (body) *body = b; if (body_len) *body_len = bl; if (size) *size = bl; }
+    else { if (file_hash) *file_hash = f->blob; if (size) *size = f->size; }
+    return 1;
+}
+
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
 {
+    sh_modserve_serve_fn listen;
     const ms_index *x = NULL;
     const ms_file *f;
     unsigned char *buf = NULL;
@@ -3331,6 +3364,8 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
         ms_log("shadow '%s' served from %s@%s (%zu bytes%s)", f->request, x->bundles[f->bundle].id,
                x->bundles[f->bundle].version, len, body ? ", composed with the other providers' list entries" : "");
+    listen = (sh_modserve_serve_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_serve_listener, NULL, NULL);
+    if (listen) listen(f->request, x->bundles[f->bundle].hash, body ? NULL : f->blob, buf, len);
     *bytes = buf;
     *length = len;
     return 1;

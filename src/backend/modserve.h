@@ -777,12 +777,14 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
 #define SH_MODSERVE_RF_DECL  1
 #define SH_MODSERVE_RF_MODEL 2   /* baseModel */
 #define SH_MODSERVE_RF_IMAGE 3
+#define SH_MODSERVE_RF_ANIM  4   /* anim (cooked/anim/<stem>.bmd6anim): reloaded at a map pass only */
 
 typedef struct sh_modserve_diff {
     int changed;                          /* served requests whose bytes changed */
     int changed_decls, changed_models, changed_images;
+    int changed_anims;                    /* anims, reloaded in place at the next map load */
     int changed_map;                      /* other files the next map load reads again (generated/swf/) */
-    int changed_restart;                  /* other files nothing reloads in this process (sound banks, anims, ...) */
+    int changed_restart;                  /* other files nothing reloads in this process (sound banks, skeletons, ...) */
     int added, added_decls, added_rows;   /* new requests; of them new decl names; of those editor rows */
     int added_active;                     /* new gameplay decl names of mods registered this session */
     int changed_rows;                     /* changed editor rows (snapEditorEntityDef) */
@@ -892,6 +894,22 @@ void sh_modserve_set_resource_lock(void *lock);
 
 /* How many times the provider served `request` from the published table. */
 long sh_modserve_open_count(const char *request);
+
+/* Served bytes (the ledger, modledger.h). The listener is called by
+ * sh_modserve_open on every successful serve, on the serving thread, with the
+ * indexed request (lowercase; the string lives for the process), the hash of
+ * the bundle that served it, the file's recorded SHA-256 (NULL for a composed
+ * text or a file without one) and the bytes served. NULL removes it. */
+typedef void (*sh_modserve_serve_fn)(const char *request, const char *bundle_hash, const char *file_hash,
+                                     const unsigned char *bytes, size_t length);
+void sh_modserve_set_serve_listener(sh_modserve_serve_fn fn);
+
+/* What sh_modserve_open would serve for `request` now, without serving it:
+ * 1 with the bundle hash and either the file's SHA-256 (*file_hash) or, for a
+ * composed text, its bytes (*body, *body_len; index memory, valid for the
+ * process); both NULL when the file records no hash. 0 when nothing serves it. */
+int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                               const unsigned char **body, size_t *body_len, uint64_t *size);
 
 /* 1 when the file the index serves for `request` is a stock pointer that
  * restores the game's own bytes under their own name (modbundle.h

@@ -257,6 +257,32 @@ void sh_companion_compose(const float owner_origin[3], const float owner_axis[9]
                                   e->axis[i * 3 + 2] * owner_axis[6 + j];
 }
 
+int sh_companion_arm_decide(const sh_companion_arm *a)
+{
+    if (!a || !a->resolved) return SH_COMPANION_ARM_UNRESOLVED;
+    if (a->installed) return SH_COMPANION_ARM_LIVE;
+    if (a->on_main != 1) return SH_COMPANION_ARM_OFF_MAIN;
+    if (a->owners < 0) return a->index_changed ? SH_COMPANION_ARM_BUILD : SH_COMPANION_ARM_UNCHANGED;
+    if (!a->owners) return SH_COMPANION_ARM_NO_OWNER;
+    if (!a->prologue_ok) return SH_COMPANION_ARM_FOREIGN;
+    return SH_COMPANION_ARM_COMMIT;
+}
+
+const char *sh_companion_arm_name(int decision)
+{
+    switch (decision) {
+    case SH_COMPANION_ARM_UNCHANGED: return "unchanged";
+    case SH_COMPANION_ARM_LIVE: return "live";
+    case SH_COMPANION_ARM_COMMIT: return "commit";
+    case SH_COMPANION_ARM_BUILD: return "build";
+    case SH_COMPANION_ARM_UNRESOLVED: return "unresolved";
+    case SH_COMPANION_ARM_OFF_MAIN: return "off the main thread";
+    case SH_COMPANION_ARM_NO_OWNER: return "no owner";
+    case SH_COMPANION_ARM_FOREIGN: return "prologue changed";
+    default: return "?";
+    }
+}
+
 void sh_companion_table_free(sh_companion_table *t)
 {
     if (!t) return;

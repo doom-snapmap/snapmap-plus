@@ -1482,12 +1482,13 @@ static void test_refresh(void)
     CHECK(sh_modserve_index_rescan() == 1);
     sh_modserve_last_diff(&d);
     CHECK(d.changed == 4 && d.changed_decls == 2 && d.changed_models == 1 && d.changed_images == 0);
-    CHECK(d.changed_restart == 1 && strstr(d.restart_first, RF_ANIM) && d.changed_map == 0);
+    /* A changed anim is reloaded in place at the next map pass (lane L2c), not a restart. */
+    CHECK(d.changed_anims == 1 && d.changed_restart == 0 && d.changed_map == 0);
     CHECK(d.added == 2 && d.added_decls == 2 && d.added_rows == 1 && d.added_active == 1 && d.changed_rows == 0);
     /* The shadowed stock editor row that went counts as a gone row too (the
      * palette must be built again without the mod's version of it). */
     CHECK(d.gone == 4 && d.gone_shadows == 2 && d.gone_names == 1 && d.gone_rows == 2);
-    CHECK(d.pending == 6 && d.dependents == 0);
+    CHECK(d.pending == 7 && d.dependents == 0);
     /* The new gameplay decl of the mod in use is planned once; the new row is the palette's. */
     {
         sh_modserve_plan p;
@@ -1501,12 +1502,12 @@ static void test_refresh(void)
     CHECK(sh_modserve_refresh_expand() == 3);
     CHECK(sh_modserve_refresh_expand() == 0);
     sh_modserve_last_diff(&d);
-    CHECK(d.pending == 9 && d.dependents == 3);
+    CHECK(d.pending == 10 && d.dependents == 3);
     /* Exactly the changed decls, the gone shadow, the inheriting decls by
-     * generation and the changed model, in that order. */
+     * generation and the changed model and anim, in that order. */
     memset(&s, 0, sizeof s);
     s.keep_raw = 1;
-    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 9);
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 10);
     CHECK(strstr(s.order, "1:snapEditorEntityDef:mods/rf.mod/oldrow:gone;"));
     CHECK(strstr(s.order, "mods/rf.mod/child:now;") && strstr(s.order, "mods/rf.mod/orphan:now;") &&
           strstr(s.order, "mods/rf.mod/grandchild:now;") && !strstr(s.order, "decoy"));
@@ -1516,22 +1517,24 @@ static void test_refresh(void)
     CHECK(strstr(s.order, "1:entityDef:monster/zombie:now;") && strstr(s.order, "1:entityDef:mods/rf.mod/name:now;"));
     CHECK(strstr(s.order, "1:entityDef:monster/gonezombie:gone;"));
     CHECK(strstr(s.order, "2:baseModel:md6/mods/rf.mod/body.md6mesh:now;"));
+    CHECK(strstr(s.order, "4:anim:md6/mods/rf.mod/idle.md6anim:now;") &&
+          strstr(s.order, "rf.mod/grandchild:") < strstr(s.order, "4:anim:"));
     CHECK(strstr(s.order, "mods/rf.mod/name:now;") < strstr(s.order, "gonezombie") &&
           strstr(s.order, "gonezombie") < strstr(s.order, "baseModel"));
-    CHECK(!strstr(s.order, "keep") && !strstr(s.order, "skin") && !strstr(s.order, "idle") &&
+    CHECK(!strstr(s.order, "keep") && !strstr(s.order, "skin") &&
           !strstr(s.order, "rf.mod/new") && !strstr(s.order, "oldname") && !strstr(s.order, ":gated"));
-    /* The decls are settled and no early decl; the model is still pending. */
+    /* The decls are settled and no early decl; the model and the anim are still pending. */
     sh_modserve_last_diff(&d);
-    CHECK(d.pending == 1);
+    CHECK(d.pending == 2);
     memset(&u, 0, sizeof u);
     sh_modserve_each_unopened_shadow(unopened_visit, &u);
     CHECK(!strstr(u.order, "monster/zombie"));
-    /* A rescan of the same bytes changes nothing and keeps the pending model. */
+    /* A rescan of the same bytes changes nothing and keeps the pending model and anim. */
     CHECK(sh_modserve_index_rescan() == 1);
     sh_modserve_last_diff(&d);
-    CHECK(d.changed == 0 && d.added == 0 && d.gone == 0 && d.pending == 1);
+    CHECK(d.changed == 0 && d.added == 0 && d.gone == 0 && d.pending == 2);
     memset(&s, 0, sizeof s);
-    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 1 && strstr(s.order, "baseModel"));
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 2 && strstr(s.order, "baseModel") && strstr(s.order, "4:anim:"));
     sh_modserve_last_diff(&d);
     CHECK(d.pending == 0);
     memset(&s, 0, sizeof s);

@@ -26,7 +26,10 @@
  * +0x358 SetAxis; physics vtable +0x80 GetOrigin(id), +0x88 GetAxis(id).
  *
  * The detour is committed only when an admitted bundle declares companions.
- * With no such bundle the spawn chain is untouched. */
+ * With no such bundle the spawn chain is untouched. A bundle with companions
+ * installed after boot arms it at the next main-thread gate
+ * (sh_companions_ensure): the map load, the Play build, the editor palette
+ * pass, a rescan. Once committed it stays for the session. */
 #ifndef SH_COMPANION_ENGINE_H
 #define SH_COMPANION_ENGINE_H
 #include <stddef.h>
@@ -46,7 +49,22 @@ extern "C" {
  * one owner is declared. Idempotent. Returns 1 when the detour is live. */
 int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base);
 
-/* Re-read the bundles' companions at the next spawn (after a rescan). */
+/* Arm the detour after boot, at a gate the product owns on DOOM's main
+ * thread, before the spawns it precedes (reports ADD-G2, ADD-V1). Checks, in
+ * order: boot resolution succeeded (it is cached, so no signature is resolved
+ * here); the detour is not live yet (1 at once when it is: it is never
+ * unhooked mid-session); the caller is DOOM's main thread (main_thread_id;
+ * never armed from another thread, where a spawn could be inside the 14-byte
+ * window); the serving index changed since the table was built and the
+ * rebuilt table has an owner; CallSpawn's prologue bytes are still the
+ * expected ones (companion.h, sh_companion_arm_decide). Logs
+ * `COMPANIONS: installed on CallSpawn at <p> for <n> owner(s) (<phase>)` when
+ * it commits. Returns 1 when the detour is live. */
+int sh_companions_ensure(const char *phase);
+
+/* Mark the table stale: a new serving index (the index listener calls it).
+ * The live detour re-reads it at the next owner spawn, an unarmed one at the
+ * next gate. */
 void sh_companions_refresh(void);
 
 /* Restore CallSpawn. Call only while no spawn can run (no map loading).

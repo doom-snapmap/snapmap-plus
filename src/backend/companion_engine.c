@@ -12,6 +12,7 @@
 #include "entity.h"
 #include "hook.h"
 #include "modserve.h"
+#include "engine_globals.h"
 
 enum { CS_CALLSPAWN, CS_BIND, CS_ADDTARGET, CS_SPAWNDEF, CS_ISCLIENT, CS_COUNT };
 
@@ -67,6 +68,9 @@ static sh_companion_table g_table;
 static volatile LONG g_stale = 1;
 static sh_modserve_stats g_built_from;
 static int  g_resolved;
+static const uint32_t *g_main_thread_at;   /* main_thread_id: DOOM's main thread */
+static void *g_target;                      /* CallSpawn, resolved once */
+static volatile LONG g_off_main_logged;
 static long g_spawned, g_failed, g_owners_seen;
 static int  g_log_lines;
 static __declspec(thread) int g_depth;
@@ -354,26 +358,17 @@ static int resolve(const sig_result *results, size_t count, const uint8_t *modul
     return 1;
 }
 
-int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base)
+static int prologue_ok(void)
 {
-    static void *target;
-    void *tramp;
-    if (g_orig && hook_is_installed((void *)g_orig)) return 1;
-    if (!g_resolved) {
-        if (!module_base || !resolve(results, count, module_base, &target)) return 0;
-        g_resolved = 1;
-    }
-    InterlockedExchange(&g_stale, 0);
-    if (!build_table()) {
-        InterlockedExchange(&g_stale, 1);
-        backend_log("COMPANIONS: no admitted bundle declares companions; the spawn chain is untouched");
-        return 0;
-    }
-    if (memcmp(target, k_callspawn_prologue, CALLSPAWN_STOLEN)) {
-        backend_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed");
-        return 0;
-    }
-    tramp = hook_prepare(target, (void *)callspawn_detour, CALLSPAWN_STOLEN);
+    int same = 0;
+    __try { same = !memcmp(g_target, k_callspawn_prologue, CALLSPAWN_STOLEN); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+    return same;
+}
+
+static int commit_detour(const char *phase)
+{
+    void *tramp = hook_prepare(g_target, (void *)callspawn_detour, CALLSPAWN_STOLEN);
     if (!tramp) {
         cl_log("COMPANIONS: trampoline preparation failed (%s)", hook_last_failure());
         return 0;
@@ -384,8 +379,92 @@ int sh_companions_install(const sig_result *results, size_t count, const uint8_t
         backend_log("COMPANIONS: the CallSpawn detour commit failed");
         return 0;
     }
-    cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s)", target, g_table.count);
+    if (phase) cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s) (%s)", g_target, g_table.count, phase);
+    else cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s)", g_target, g_table.count);
     return 1;
+}
+
+int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base)
+{
+    if (g_orig && hook_is_installed((void *)g_orig)) return 1;
+    if (!g_resolved) {
+        if (!module_base || !resolve(results, count, module_base, &g_target)) return 0;
+        /* For the runtime arm: only DOOM's main thread runs CallSpawn (ADD-G2, ADD-V1). */
+        g_main_thread_at = (const uint32_t *)glb_resolve(module_base, "main_thread_id", NULL);
+        g_resolved = 1;
+    }
+    InterlockedExchange(&g_stale, 0);
+    if (!build_table()) {
+        backend_log("COMPANIONS: no admitted bundle declares companions; the spawn chain is untouched until one "
+                    "does (it is armed then at the next map load or Play, on the main thread)");
+        return 0;
+    }
+    if (!prologue_ok()) {
+        backend_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed");
+        return 0;
+    }
+    return commit_detour(NULL);
+}
+
+static int on_main_thread(void)
+{
+    uint32_t id = 0;
+    if (!g_main_thread_at) return -1;
+    __try { id = *g_main_thread_at; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    if (!id) return -1;
+    return id == GetCurrentThreadId() ? 1 : 0;
+}
+
+/* A new serving index since the table was built: the index listener's mark,
+ * or other build stats (the test the live detour makes at each owner spawn). */
+static int index_changed(void)
+{
+    sh_modserve_stats now;
+    if (InterlockedCompareExchange(&g_stale, 0, 0)) return 1;
+    sh_modserve_get_stats(&now);
+    return now.build_ms != g_built_from.build_ms || now.bundles_admitted != g_built_from.bundles_admitted ||
+           now.files != g_built_from.files;
+}
+
+/* Runtime arming (companion_engine.h). Every check comes before the table is
+ * read again, so a session without companions costs a stats compare per gate. */
+int sh_companions_ensure(const char *phase)
+{
+    sh_companion_arm a;
+    int d;
+    const char *at = phase ? phase : "gate";
+    memset(&a, 0, sizeof a);
+    a.resolved = g_resolved;
+    a.installed = g_orig && hook_is_installed((void *)g_orig);
+    a.on_main = a.resolved && !a.installed ? on_main_thread() : 0;
+    a.index_changed = a.resolved && !a.installed && a.on_main == 1 ? index_changed() : 0;
+    a.owners = -1;
+    a.prologue_ok = -1;
+    d = sh_companion_arm_decide(&a);
+    if (d == SH_COMPANION_ARM_BUILD) {
+        InterlockedExchange(&g_stale, 0);
+        a.owners = build_table();
+        a.prologue_ok = a.owners > 0 ? prologue_ok() : -1;
+        d = sh_companion_arm_decide(&a);
+    }
+    switch (d) {
+    case SH_COMPANION_ARM_LIVE: return 1;
+    case SH_COMPANION_ARM_COMMIT: return commit_detour(at);
+    case SH_COMPANION_ARM_OFF_MAIN:
+        if (!InterlockedExchange(&g_off_main_logged, 1))
+            cl_log("COMPANIONS: not armed at the %s: %s; a main-thread gate arms it", at,
+                   a.on_main ? "the main thread is unknown" : "not on DOOM's main thread");
+        return 0;
+    case SH_COMPANION_ARM_FOREIGN:
+        cl_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed at the %s", at);
+        return 0;
+    case SH_COMPANION_ARM_NO_OWNER:
+        cl_log("COMPANIONS: new serving index at the %s; no admitted bundle declares companions", at);
+        return 0;
+    default:
+        return 0;
+    }
 }
 
 void sh_companions_refresh(void)

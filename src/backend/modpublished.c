@@ -1635,6 +1635,20 @@ static int eng_cold_read(void *manager, const char *id, const char *revision)
     return 1;
 }
 
+/* A hub launch (a published map, a My Maps play) runs in the serving layer's
+ * Play mode from the launch on, as the editor's Play does, so a mod the map
+ * does not declare serves nothing in it (modserve.h, sh_modserve_scope_mode).
+ * The editor's tick (modui.c) sets the editor mode again when the editor next
+ * shows a map. Main thread. */
+static void eng_scope_play(const char *why)
+{
+    __try {
+        if (sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0) (void)sh_modserve_scope_apply(why);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the launch's serving mode change faulted; the launch continues");
+    }
+}
+
 static int eng_resume(void *c, const sh_modpub_resume *r)
 {
     sh_process_heap_scope scope;
@@ -1659,6 +1673,8 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
         __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the held launch's manifest step faulted"); }
         if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
     }
+    if (r && (r->hook == SH_MODPUB_LOBBY_LAUNCH || r->hook == SH_MODPUB_LOCAL_OFFLINE))
+        eng_scope_play(r->hook == SH_MODPUB_LOBBY_LAUNCH ? "published launch" : "My Maps play");
     if (!r || !sh_process_heap_enter(&g_eng.heap, &scope)) return 0;
     __try {
         if (r->hook == SH_MODPUB_CACHE_LOBBY) {
@@ -1794,8 +1810,10 @@ static unsigned char eng_lobby_detour(void *manager, const void *id, const void 
 
 static void eng_local_detour(void *manager, void *model, void *map)
 {
-    if (eng_decide(SH_MODPUB_LOCAL_OFFLINE, manager, NULL, map, model, NULL, NULL))
+    if (eng_decide(SH_MODPUB_LOCAL_OFFLINE, manager, NULL, map, model, NULL, NULL)) {
+        eng_scope_play("My Maps play");
         ((eng_local_fn)g_eng.original[ENG_LOCAL])(manager, model, map);
+    }
 }
 
 /* The SnapMap feed's read completion. Only the play action launches; details
@@ -1830,15 +1848,19 @@ static int eng_launch_gate(int hook, void *manager, void *map, void *extra)
  * launch returns 0, as the function does when the lobby cannot be entered. */
 static unsigned long long eng_lobby_launch_detour(void *manager, unsigned char flag)
 {
-    if (eng_launch_gate(SH_MODPUB_LOBBY_LAUNCH, manager, NULL, (void *)(uintptr_t)flag))
+    if (eng_launch_gate(SH_MODPUB_LOBBY_LAUNCH, manager, NULL, (void *)(uintptr_t)flag)) {
+        eng_scope_play("published launch");
         return ((eng_lobby_launch_fn)g_eng.original[ENG_LOBBY_LAUNCH])(manager, flag);
+    }
     return 0;
 }
 
 static void eng_offline_launch_detour(void *manager, const void *metadata, void *map)
 {
-    if (eng_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, manager, map, NULL))
+    if (eng_launch_gate(SH_MODPUB_OFFLINE_LAUNCH, manager, map, NULL)) {
+        eng_scope_play("published launch");
         ((eng_offline_launch_fn)g_eng.original[ENG_OFFLINE_LAUNCH])(manager, metadata, map);
+    }
 }
 
 /* ------------------------------------------------------------ install */
