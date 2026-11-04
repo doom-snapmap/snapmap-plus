@@ -1810,8 +1810,65 @@ static int mc_only_containers(const mc_node *n, const char *path, size_t plen, c
     return 1;
 }
 
+static void mc_merge_quiet(void *context, const char *key, size_t key_n, int rows, int kept)
+{
+    (void)context; (void)key; (void)key_n; (void)rows; (void)kept;
+}
+
+/* A named bag entry both texts hold with different content (`anim "clip"`
+ * whose event rows differ): the union of the two, the base's members first.
+ * A member the base holds with the same text is skipped; a block member or a
+ * repeated key (`event "ae_sound"` rows, `alias { }` rows) the base lacks is
+ * appended; a scalar the base sets otherwise keeps the base's value (*kept).
+ * Returns the members appended, -1 when out of memory. */
+static int mc_union_rows(mc_ctx *c, mc_node *q, const mc_node *o, int *kept)
+{
+    int i, k, rows = 0;
+    for (i = 0; i < o->nkids; ++i) {
+        mc_node *m = o->kids[i];
+        char *t = mc_text(m, NULL);
+        int dup = 0, same_key = 0;
+        if (!t) return -1;
+        for (k = 0; k < q->nkids && !dup; ++k) {
+            const mc_node *b = q->kids[k];
+            char *bt;
+            if (b->key_n != m->key_n || _strnicmp(b->key, m->key, m->key_n) || b->block != m->block) continue;
+            same_key = 1;
+            bt = mc_text(b, NULL);
+            if (!bt) { free(t); return -1; }
+            if (!strcmp(t, bt)) dup = 1;
+            free(bt);
+        }
+        free(t);
+        if (dup) continue;
+        if (same_key && !m->block && mc_count_key(o, m) == 1 && mc_count_key(q, m) == 1) { (*kept)++; continue; }
+        if (!mc_add_kid(c, q, m)) return -1;
+        rows++;
+    }
+    return rows;
+}
+
+static char *mc_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
+                               const char *containers, int kind, size_t *len, int *added,
+                               sh_modserve_merge_fn on_merge, void *merge_ctx);
+
 char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
                                  const char *containers, int kind, size_t *len, int *added)
+{
+    return mc_compose_extend(base, base_len, part, part_len, containers, kind, len, added, NULL, NULL);
+}
+
+char *sh_modserve_compose_extend_rows(const char *base, size_t base_len, const char *part, size_t part_len,
+                                      const char *containers, size_t *len, int *added,
+                                      sh_modserve_merge_fn on_merge, void *context)
+{
+    return mc_compose_extend(base, base_len, part, part_len, containers, SH_MR_BAG, len, added,
+                             on_merge ? on_merge : mc_merge_quiet, context);
+}
+
+static char *mc_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
+                               const char *containers, int kind, size_t *len, int *added,
+                               sh_modserve_merge_fn on_merge, void *merge_ctx)
 {
     mc_ctx c = { NULL, 0 };
     mc_node *b, *p;
@@ -1842,19 +1899,27 @@ char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *
                 const mc_node *o = pc->kids[i];
                 char *t = mc_text(o, NULL);
                 int dup = 0, clash = 0;
+                mc_node *held = NULL;
                 if (!t) { ok = 0; break; }
                 for (k = 0; k < bc->nkids && !dup; ++k) {
-                    const mc_node *q = bc->kids[k];
+                    mc_node *q = bc->kids[k];
                     char *qt;
                     if (q->key_n != o->key_n || _strnicmp(q->key, o->key, o->key_n) || q->block != o->block) continue;
                     qt = mc_text(q, NULL);
                     if (!qt) { ok = 0; break; }
                     if (!strcmp(t, qt)) dup = 1;
-                    else if (mc_word_n(o) != o->key_n) clash = 1;   /* a named entry (`anim "clip"`) the base says otherwise */
+                    else if (mc_word_n(o) != o->key_n) { clash = 1; if (!held) held = q; }   /* a named entry (`anim "clip"`) the base says otherwise */
                     free(qt);
                 }
                 free(t);
                 if (!ok || dup) continue;
+                if (clash && on_merge && held && held->block && o->block) {
+                    /* Per entry: the clip keeps one block holding both texts' rows. */
+                    int kept = 0, rows = mc_union_rows(&c, held, o, &kept);
+                    if (rows < 0) { ok = 0; break; }
+                    on_merge(merge_ctx, o->key, o->key_n, rows, kept);
+                    continue;
+                }
                 if (clash || !o->block || !mc_add_kid(&c, bc, (mc_node *)o)) { ok = 0; break; }
                 (*added)++;
             }

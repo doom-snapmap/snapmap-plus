@@ -1604,9 +1604,13 @@ its name (`modregistry.c` generates the texts, `modserve.c` serves them,
   grammar of each target's entries. Lists (`num = N; item[i]`): the conductor's
   `edit.aiTypeList`, the whitelist inspectors' `edit.validEncounters`. Bags
   (blocks appended, identical text skipped, a named block the game's text holds
-  with other content refused): the body's `events` and `aliases` (spelled
-  `player.bodyEvents`), and `aifsmmanager/states/<demon>` `edit.subGraphs`. Any
-  other target is "not a list the product extends".
+  with other content refused): `aifsmmanager/states/<demon>` `edit.subGraphs`.
+  The body's `events` and `aliases` (spelled `player.bodyEvents`) are a bag
+  merged per entry: a clip (`anim "<clip>"`) that the game or an earlier source
+  already holds with other rows stays one block holding the union of the rows
+  (identical rows once; the game's first, then the declared bundles' in row
+  order), with one line per merged clip; an alias row once. Any other target is
+  "not a list the product extends".
 - **Sources.** The bundles that serve for the listing and state registry
   intent, in row order, then editor-time bundles by key. Intent is the author
   block's `player` object and `extends` (the product block's

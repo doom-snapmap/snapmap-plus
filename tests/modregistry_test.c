@@ -271,6 +271,146 @@ static void test_extends(void)
     free(t);
 }
 
+/* ------------------------------------------------------------------ body events merged per entry */
+
+typedef struct merge_tally { int clips, rows; } merge_tally;
+static void merge_cb(void *c, const char *key, size_t key_n, int rows, int kept)
+{
+    merge_tally *t = (merge_tally *)c;
+    (void)key; (void)key_n; (void)kept;
+    t->clips++;
+    t->rows += rows;
+}
+
+static char *read_all(const char *path, size_t *len)
+{
+    FILE *f = NULL;
+    char *b;
+    long n;
+    if (fopen_s(&f, path, "rb") || !f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    b = (char *)malloc((size_t)n + 1);
+    if (b && fread(b, 1, (size_t)n, f) != (size_t)n) { free(b); b = NULL; }
+    fclose(f);
+    if (b) { b[n] = 0; *len = (size_t)n; }
+    return b;
+}
+
+/* The distinct `anim "<clip>"` names of the texts: the clip blocks sit
+ * exactly two tabs deep in both the partials and the composer's spelling. */
+static int distinct_clips(const char *const *texts, int n)
+{
+    static char seen[512][300];
+    int count = 0, i;
+    for (i = 0; i < n; ++i) {
+        const char *p = texts[i];
+        while ((p = strstr(p, "\n\t\tanim \"")) != NULL) {
+            const char *s = p + 9, *e = strchr(s, '"');
+            int k, dup = 0;
+            p = s;
+            if (!e || e - s >= 300) continue;
+            for (k = 0; k < count && !dup; ++k) dup = strlen(seen[k]) == (size_t)(e - s) && !strncmp(seen[k], s, (size_t)(e - s));
+            if (dup || count >= 512) continue;
+            memcpy(seen[count], s, (size_t)(e - s));
+            seen[count][e - s] = 0;
+            count++;
+        }
+    }
+    return count;
+}
+
+static void test_body_rows(const char *mods)
+{
+    static const char CLASH[] =   /* the game's clip with one more row and one it already holds */
+        "{\n\tevents {\n\t\tanim \"md6/a.md6anim\" {\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 1\n\t\t\t}\n"
+        "\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n\t}\n}\n";
+    static const char A[] =
+        "{\n\tevents {\n\t\tanim \"md6/mods/k/elevator_PLAYER.md6anim\" {\n\t\t\tevent \"ae_sound\" {\n\t\t\t\tframe 18\n\t\t\t}\n\t\t}\n\t}\n"
+        "\taliases {\n\t\talias { name \"mods/k/x\" anim \"md6/mods/k/x.md6anim\" }\n\t}\n}\n";
+    static const char B[] =   /* the same clip with the hud rows another pack adds, and the same alias */
+        "{\n\tevents {\n\t\tanim \"md6/mods/k/elevator_PLAYER.md6anim\" {\n\t\t\tevent \"ae_hideHudForContextPrompt\" {\n\t\t\t\tframe 0\n\t\t\t}\n"
+        "\t\t\tevent \"ae_sound\" {\n\t\t\t\tframe 18\n\t\t\t}\n\t\t\tevent \"ae_showHudForContextPrompt\" {\n\t\t\t\tframe 400\n\t\t\t}\n\t\t}\n\t}\n"
+        "\taliases {\n\t\talias { name \"mods/k/x\" anim \"md6/mods/k/x.md6anim\" }\n\t}\n}\n";
+    merge_tally mt = { 0, 0 };
+    size_t len = 0, l2 = 0;
+    int added = 0;
+    char *t, *u;
+    printf("-- registries: body events merged per entry\n");
+    /* The named clip the game holds: one block, the game's row first, the new row once. */
+    t = sh_modserve_compose_extend_rows(STOCK_BODY, strlen(STOCK_BODY), CLASH, strlen(CLASH), "events;aliases", &len, &added,
+                                        merge_cb, &mt);
+    CHECK(t && added == 0 && mt.clips == 1 && mt.rows == 1 && count_of(t, "anim \"md6/a.md6anim\"") == 1 &&
+          count_of(t, "frame 1\n") == 1 && strstr(t, "frame 2\n") && strstr(t, "frame 1\n") < strstr(t, "frame 2\n"));
+    free(t);
+    /* Two packs giving one clip: the union of their rows, in row order; the alias once. */
+    mt.clips = mt.rows = 0;
+    t = sh_modserve_compose_extend_rows(STOCK_BODY, strlen(STOCK_BODY), A, strlen(A), "events;aliases", &len, &added, merge_cb, &mt);
+    u = t ? sh_modserve_compose_extend_rows(t, len, B, strlen(B), "events;aliases", &l2, &added, merge_cb, &mt) : NULL;
+    CHECK(u && added == 0 && mt.clips == 1 && mt.rows == 2 && count_of(u, "elevator_PLAYER.md6anim\" {") == 1 &&
+          count_of(u, "ae_sound") == 1 && strstr(u, "ae_hideHudForContextPrompt") && strstr(u, "ae_showHudForContextPrompt") &&
+          strstr(u, "ae_sound") < strstr(u, "ae_hideHudForContextPrompt") && count_of(u, "alias {") == 1);
+    free(u);
+    free(t);
+    /* The plain extend still refuses the clash (other targets keep their rule). */
+    CHECK(sh_modserve_compose_extend(STOCK_BODY, strlen(STOCK_BODY), CLASH, strlen(CLASH), "events;aliases", SH_MR_BAG, &len, &added) == NULL);
+
+    /* The converted campaign packs 1 and 2 (23 entries, and 41: 40 clips and
+     * one alias; pack 1's clips are all pack 2's, three of them with fewer
+     * rows), when the owner's converted folder is present. */
+    {
+        char p1[MAX_PATH], p2[MAX_PATH];
+        char *a = NULL, *b = NULL;
+        size_t la = 0, lb = 0;
+        _snprintf_s(p1, sizeof p1, _TRUNCATE, "%s/campaign-interactables/campaign-interactables-1/assets/generated/decls/md6def/mods/"
+                    "campaign-interactables/body_events.md6.decl", mods ? mods : "");
+        _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s/campaign-interactables/campaign-interactables-2/assets/generated/decls/md6def/mods/"
+                    "campaign-interactables-2/body_events.md6.decl", mods ? mods : "");
+        if (mods && *mods) { a = read_all(p1, &la); b = read_all(p2, &lb); }
+        if (!a || !b) {
+            printf("   real partials not present (%s); skipped\n", mods && *mods ? mods : "no folder given");
+        } else {
+            const char *both[2], *one[1];
+            int ca, cb, cu, order;
+            one[0] = a; ca = distinct_clips(one, 1);
+            one[0] = b; cb = distinct_clips(one, 1);
+            both[0] = a; both[1] = b; cu = distinct_clips(both, 2);
+            printf("   real partials: pack 1 %d clips, pack 2 %d clips, %d distinct\n", ca, cb, cu);
+            CHECK(ca == 23 && cb == 40 && count_of(a, "alias {") == 0 && count_of(b, "alias {") == 1);
+            for (order = 0; order < 2; ++order) {
+                const char *first = order ? b : a, *second = order ? a : b;
+                size_t lf = order ? lb : la, ls = order ? la : lb;
+                merge_tally m2 = { 0, 0 }, again = { 0, 0 };
+                int add1 = 0, add2 = 0, add3 = 0;
+                char *x = sh_modserve_compose_extend_rows(STOCK_BODY, strlen(STOCK_BODY), first, lf, "events;aliases", &len, &add1, merge_cb, &m2);
+                char *y = x ? sh_modserve_compose_extend_rows(x, len, second, ls, "events;aliases", &l2, &add2, merge_cb, &m2) : NULL;
+                char *z1 = NULL, *z2 = NULL;
+                size_t lz = 0;
+                CHECK(x && y);
+                if (!y) { free(x); continue; }
+                /* Every clip of both packs once (plus the stand-in game clip). */
+                one[0] = y;
+                CHECK(distinct_clips(one, 1) == cu + 1 && count_of(y, "\n\t\tanim \"") == cu + 1);
+                /* Every row of both is held: composing either pack again adds nothing. */
+                z1 = sh_modserve_compose_extend_rows(y, l2, a, la, "events;aliases", &lz, &add3, merge_cb, &again);
+                CHECK(z1 && add3 == 0);
+                z2 = sh_modserve_compose_extend_rows(y, l2, b, lb, "events;aliases", &lz, &add3, merge_cb, &again);
+                CHECK(z2 && add3 == 0 && again.rows == 0);
+                printf("   order %s: %d + %d entries appended, %d clip(s) merged with %d row(s)\n", order ? "2,1" : "1,2",
+                       add1, add2, m2.clips, m2.rows);
+                CHECK(add1 + add2 == cu + 1 && m2.clips == 3 && count_of(y, "alias {") == 1);
+                free(z1);
+                free(z2);
+                free(x);
+                free(y);
+            }
+        }
+        free(a);
+        free(b);
+    }
+}
+
 /* ------------------------------------------------------------------ a synthetic declared set */
 
 static char g_top[MAX_PATH];
@@ -650,7 +790,7 @@ static void test_leftovers(void)
     sh_mb_set_stock_ops(NULL);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
     printf("modregistry_test\n");
@@ -659,6 +799,7 @@ int main(void)
     mkdirs(g_top);
     test_text();
     test_extends();
+    test_body_rows(argc > 1 ? argv[1] : NULL);
     test_generation();
     test_leftovers();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

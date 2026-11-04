@@ -150,6 +150,7 @@ typedef struct sh_mr_result {
     char *text[SH_MR_FIXED];   /* malloc'd; NULL: nothing to generate, the game's file serves */
     size_t len[SH_MR_FIXED];
     int body_added;            /* bag entries appended to the body */
+    int body_merged;           /* clips served once with the union of several sources' rows */
     int body_sources;          /* sources whose events were taken */
     int player_set;            /* player fields set */
     const char *player_value[SH_MB_PLAYER_FIELDS];   /* the value serving per field (points into an intent) */

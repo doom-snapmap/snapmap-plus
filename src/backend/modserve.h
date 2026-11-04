@@ -636,6 +636,17 @@ int  sh_modserve_registry_report(sh_modserve_line_fn fn, void *context);
 char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, int n, size_t *len, int *added);
 char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
                                  const char *containers, int kind, size_t *len, int *added);
+/* The bag case merged per entry (the player body events): a named block
+ * the base holds with other content (`anim "clip"` with other event rows)
+ * is not refused but becomes one block with the union of both texts' rows,
+ * the base's first, identical rows once; a scalar both set differently keeps
+ * the base's (counted in kept). on_merge (may be NULL) is called once per
+ * merged entry with its key text (`anim "<clip>"`, not NUL-terminated) and
+ * the rows appended to it. *added counts the new entries only. */
+typedef void (*sh_modserve_merge_fn)(void *context, const char *key, size_t key_n, int rows, int kept);
+char *sh_modserve_compose_extend_rows(const char *base, size_t base_len, const char *part, size_t part_len,
+                                      const char *containers, size_t *len, int *added,
+                                      sh_modserve_merge_fn on_merge, void *context);
 
 /* The points that must read the open map itself (the Play entry: Play does
  * not serialize the map) ask the bound source (modui.c) to recompute the

@@ -767,6 +767,22 @@ static int mr_conductor(const sh_mr_source *src, int n, const char *stock, size_
     return 1;
 }
 
+/* One line per clip whose rows two sources (or the game and a source) give
+ * differently: the clip is served once with the union of its rows. */
+typedef struct mr_merge_ctx { sh_mr_result *r; const char *who; int clips; } mr_merge_ctx;
+
+static void mr_body_merged(void *context, const char *key, size_t key_n, int rows, int kept)
+{
+    mr_merge_ctx *m = (mr_merge_ctx *)context;
+    m->clips++;
+    if (!rows && !kept)
+        mr_line(m->r, "player body: %.*s: the clip already holds every row %s gives", (int)key_n, key, m->who);
+    else
+        mr_line(m->r, "player body: %.*s: %d event row%s from %s merged into the clip the body already holds%s",
+                (int)key_n, key, rows, rows == 1 ? "" : "s", m->who,
+                kept ? " (a value both set otherwise keeps the earlier one)" : "");
+}
+
 static int mr_body(const sh_mr_source *src, int n, const char *stock, size_t stock_len, sh_mr_result *r)
 {
     char *cur = NULL;
@@ -794,10 +810,13 @@ static int mr_body(const sh_mr_source *src, int n, const char *stock, size_t sto
                     so->intent->player[SH_MB_PLAYER_BODY_EVENTS]);
         }
         if (part) {
-            next = sh_modserve_compose_extend(base, base_len, part, plen, MR_BODY_CONTAINERS, SH_MR_BAG, &len, &added);
+            mr_merge_ctx mc = { r, so->who, 0 };
+            next = sh_modserve_compose_extend_rows(base, base_len, part, plen, MR_BODY_CONTAINERS, &len, &added,
+                                                   mr_body_merged, &mc);
+            if (next) r->body_merged += mc.clips;
             if (!next)
-                mr_line(r, "player body: %s's bodyEvents %s do not append to the body (an entry the body already "
-                        "holds with other content, or a text outside the md6Def grammar); skipped", so->who,
+                mr_line(r, "player body: %s's bodyEvents %s do not append to the body (a text outside the md6Def "
+                        "grammar, or members outside events and aliases); skipped", so->who,
                         so->intent ? so->intent->player[SH_MB_PLAYER_BODY_EVENTS] : "");
         } else if (so->carried[SH_MR_BODY]) {
             const char *texts[2];
