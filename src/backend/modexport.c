@@ -1478,11 +1478,16 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
                 me_cause(cause, cap, "no free folder name for %s at %.16s", c->b.id, c->b.hash);
                 goto rollback;
             }
+            /* An imported folder is the author's build as it was: its
+             * replacements are kept, never refused (DESIGN-additive 2.8). */
+            sh_mb_keep_replacements_here(1);
             if (!sh_ms_install_with(c->stage, as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
                                     c->why, sizeof c->why)) {
+                sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
             }
+            sh_mb_keep_replacements_here(0);
             c->installed = 1;
             left--;
             progress = 1;

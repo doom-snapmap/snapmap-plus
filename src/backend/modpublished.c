@@ -2149,14 +2149,12 @@ static int eng_other_build(void *c, const sh_modmanifest_row *row, char *hash, s
     return 1;
 }
 
-/* DESIGN-additive 2.7, reading side. The row member "product" is lane L2b's
- * (modmanifest.c parses it into sh_modmanifest_row); until it lands no row
- * names a version and no notice is shown. When it does, this body becomes
- * `if (!row->product[0]) return 0; strncpy_s(out, cap, row->product, _TRUNCATE); return 1;`. */
+/* DESIGN-additive 2.7, reading side: the map's own smpprod1 variable
+ * (modmanifest.c), one per map, so every row answers the same version. */
 static int eng_row_product(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
 {
-    (void)c; (void)row; (void)out; (void)cap;
-    return 0;
+    (void)c; (void)row;
+    return sh_modmanifest_product(out, cap);
 }
 
 /* The installed product version: install.json's "version" (the installer
