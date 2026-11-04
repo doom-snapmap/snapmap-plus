@@ -489,6 +489,8 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_MAP_ADD            16    /* arg: key (or an installed id): attach the mod to the open map (a map-level row) */
 #define SH_MODS_ACT_WATCH_RESCAN       17    /* the folder watcher's rescan: as RESCAN, or "deferred":true while Play runs,
                                                 a map loads or a store write holds the lock */
+#define SH_MODS_ACT_CHOOSE             18    /* arg: "<slot>\t<key>": the open map's registry choice (an empty key clears) */
+#define SH_MODS_ACT_MAP_UPGRADE        19    /* arg: a declared mod's id: the open map's row moves to the installed build */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

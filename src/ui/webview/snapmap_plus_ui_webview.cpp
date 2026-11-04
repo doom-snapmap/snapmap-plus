@@ -3042,6 +3042,8 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_REMOVED_EMPTY:      return L"removedEmpty";
     case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN:       return L"watchRescan";
+    case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
+    case SH_MODS_ACT_MAP_UPGRADE:        return L"mapUpgradeMod";
     default:                      return L"";
     }
 }
@@ -3063,6 +3065,8 @@ static int poc_mods_action_code(const std::wstring &name)
     if (name == L"mapRemoveModPreview") return SH_MODS_ACT_MAP_REMOVE_PREVIEW;
     if (name == L"removedEmpty")        return SH_MODS_ACT_REMOVED_EMPTY;
     if (name == L"mapAddMod")           return SH_MODS_ACT_MAP_ADD;
+    if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
+    if (name == L"mapUpgradeMod")       return SH_MODS_ACT_MAP_UPGRADE;
     return 0;
 }
 

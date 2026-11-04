@@ -34,6 +34,7 @@
 #include "modstore.h"
 #include "modserve.h"
 #include "modmanifest.h"
+#include "modregistry.h"
 #include "mod_test_util.h"
 #include "editor_delete.h"
 
@@ -652,6 +653,9 @@ int main(int argc, char **argv)
     CHECK(!has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
     CHECK(has(doc, "at build 0000000000000000, which is not installed; alex.r2-imp is installed at another build ("));
     CHECK(has(doc, "\"inManifest\":false"));
+    /* Its own state, not "skipped": installed at another build, and the upgrade offered. */
+    CHECK(has(doc, "\"state\":\"otherBuild\",\"cause\":\"This map uses"));
+    CHECK(has(doc, "\"attached\":false,\"upgrade\":{\"folder\":\"alex.r2-imp\""));
     free(doc);
     /* No folder declares the id: missing, with the refusal's sentence. */
     load_map_naming("alex.other", "00000000000000000000000000000000000000000000000000000000000000bb");
@@ -707,8 +711,13 @@ int main(int argc, char **argv)
     }
     free(doc);
     doc = list_doc();
-    CHECK(bundle_has(doc, key2, "\"state\":\"attention\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":true"));
-    CHECK(bundle_has(doc, key1, "\"state\":\"attention\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":true"));
+    /* Two builds of one key are not attention (DESIGN-additive 2.5): one row
+     * per hash, the newest marked, each listing every build of the key. */
+    CHECK(bundle_has(doc, key2, "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
+    CHECK(bundle_has(doc, key1, "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
+    CHECK(count_of(doc, "\"newest\":true,\"builds\":[") == 1 && count_of(doc, "\"newest\":false,\"builds\":[") == 1);
+    CHECK(bundle_has(doc, key1, "\"servedBy\":\"alex.r2-imp@1.0.1\""));
+    CHECK(count_of(doc, "\"newest\":true,\"failed\":false") == 2);   /* the newest build, in each row's list */
     CHECK(count_of(doc, "\"otherBuilds\":") == 2);
     free(doc);
     dr = doctor(0);
@@ -723,6 +732,35 @@ int main(int argc, char **argv)
     load_map_naming("alex.r2-imp", hash1);
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
     CHECK(has(doc, "\"action\":\"pruneList\",\"ok\":true") && has(doc, "\"candidates\":[]"));
+    free(doc);
+    /* The map pins the older build: the tab offers the installed one, and
+     * Upgrade moves the map's row to it and says what changes. */
+    doc = list_doc();
+    CHECK(has(doc, "\"upgrade\":{\"folder\":\"alex.r2-imp@1.0.1\",\"bundle\":\""));
+    free(doc);
+    doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
+    if (!has(doc, "\"ok\":true")) fprintf(stderr, "  upgrade: %s\n", doc ? doc : "(none)");
+    CHECK(has(doc, "\"ok\":true") && has(doc, "This map now uses R2 Imp copy build 1 (") &&
+          has(doc, "1 file(s) changed, 0 added, 0 removed"));
+    free(doc);
+    {
+        sh_modmanifest_list cur;
+        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, hash2));
+        sh_modmanifest_list_free(&cur);
+    }
+    doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
+    CHECK(has(doc, "already uses the installed build"));
+    free(doc);
+    /* A registry choice goes through the manifest; an invalid slot is refused. */
+    doc = run_doc(SH_MODS_ACT_CHOOSE, "player.hands\talex.r2-imp");
+    CHECK(has(doc, "\"ok\":true") && has(doc, "player.hands now comes from alex.r2-imp"));
+    free(doc);
+    {
+        char chosen[80];
+        CHECK(sh_modregistry_choices_get("player.hands", chosen, sizeof chosen) && !strcmp(chosen, "alex.r2-imp"));
+    }
+    doc = run_doc(SH_MODS_ACT_CHOOSE, "bad slot\talex.r2-imp");
+    CHECK(has(doc, "\"ok\":false"));
     free(doc);
     sh_modmanifest_reset();
     g_placed_count = 0;
@@ -778,10 +816,10 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":true") && has(doc, "\"inPlace\":true"));
         free(doc);
         doc = list_doc();
-        CHECK(bundle_has(doc, "twin-a", "\"state\":\"attention\"") &&
-              bundle_has(doc, "twin-a", "\"otherBuilds\":0,\"duplicateId\":true"));
-        CHECK(bundle_has(doc, "twin-b", "\"state\":\"attention\"") &&
-              bundle_has(doc, "twin-b", "\"otherBuilds\":0,\"duplicateId\":true"));
+        CHECK(bundle_has(doc, "twin-a", "\"state\":\"installed\"") &&
+              bundle_has(doc, "twin-a", "\"otherBuilds\":0,\"duplicateId\":false"));
+        CHECK(bundle_has(doc, "twin-b", "\"state\":\"installed\"") &&
+              bundle_has(doc, "twin-b", "\"otherBuilds\":0,\"duplicateId\":false"));
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: key alex.twin: installed at several builds: mods\\twin-a (your folder), mods\\twin-b "
@@ -929,6 +967,10 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
         CHECK(bundle_has(doc, "alex.shade-a", "\"state\":\"installed\""));   /* a conflict is the doctor's, not the tab's */
+        /* Derived facts: the declared replacement carries the escape-hatch marker. */
+        CHECK(has(doc, "\"replacements\":[{\"path\":\"generated/decls/entitydef/monster/imp.decl\",\"declared\":true,"
+                       "\"registry\":false}],\"registries\":{}}"));
+        CHECK(has(doc, "\"facts\":{\"adds\":"));
         free(doc);
         dr = doctor(1);
         CHECK(has(dr, "MODS: doctor: verify: rehashing every build\nMODS: doctor: verify: Verified 3 build(s): every file matches."));
@@ -1085,7 +1127,7 @@ int main(int argc, char **argv)
                        "\"placedCount\":2,\"placedModules\":0,\"references\":[{\"kind\":\"wire\",\"name\":\"Relay #3 to "
                        "mods/alex.r2-imp/imp_copy #1\"},{\"kind\":\"wire\",\"name\":\"Gate imp #2 to Relay #3\"},"
                        "{\"kind\":\"timeline\",\"name\":\"Wave 2 #4\"}]"));
-        CHECK(has(doc, "\"vanilla\":false}"));
+        CHECK(has(doc, "\"vanilla\":false,\"registryClashes\":[]"));
         keys_match_fixture(payload, doc);
         free(doc);
 
@@ -1149,7 +1191,7 @@ int main(int argc, char **argv)
             if (saved) HeapFree(GetProcessHeap(), 0, saved);
         }
         doc = list_doc();
-        CHECK(has(doc, "\"tagged\":false,\"mods\":[],\"vanilla\":true}"));
+        CHECK(has(doc, "\"tagged\":false,\"mods\":[],\"vanilla\":true,\"registryClashes\":[]"));
         free(doc);
         doc = run_doc(SH_MODS_ACT_MAP_REMOVE, key2);
         CHECK(has(doc, "\"ok\":false") && has(doc, "The open map does not use R2 Imp copy."));
@@ -1311,7 +1353,7 @@ int main(int argc, char **argv)
             CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
             CHECK(!mt_exists(path));
             doc = list_doc();
-            CHECK(!has(doc, "\"key\":\"alex.r2-imp@1.0.1\"") && has(doc, "\"mods\":[],\"vanilla\":true}"));
+            CHECK(!has(doc, "\"key\":\"alex.r2-imp@1.0.1\"") && has(doc, "\"mods\":[],\"vanilla\":true,"));
             free(doc);
         }
 
@@ -1387,7 +1429,8 @@ int main(int argc, char **argv)
                   !strcmp(att.rows[0].id, "alex.req"));
             sh_modmanifest_list_free(&att);
             doc = list_doc();
-            CHECK(has(doc, "\"key\":\"alex.req\",\"id\":\"alex.req\"") && has(doc, "\"attached\":true,\"scope\":\"map\",\"active\":true"));
+            CHECK(has(doc, "\"key\":\"alex.req\",\"id\":\"alex.req\"") && has(doc, "\"attached\":true,\"nothingPlaced\":true,\"bundle\":\"") &&
+                  has(doc, "\"scope\":\"map\",\"active\":true"));
             CHECK(has(doc, "\"otherKey\":\"\",\"nameCount\":0,\"names\":[],\"attached\":true}"));
             CHECK(has(doc, "\"scope\":\"map\",\"scopeAuto\":false,\"scoped\":true"));
             CHECK(has(doc, "\"vanilla\":false"));

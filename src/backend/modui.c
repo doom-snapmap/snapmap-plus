@@ -11,6 +11,7 @@
 #include "modstore.h"
 #include "modserve.h"
 #include "modmanifest.h"
+#include "modregistry.h"
 #include "backend_log.h"
 #include "config_json.h"
 #include "modmap.h"
@@ -110,6 +111,7 @@ static int mu_scope_armed(void);
 static int mu_scope_source(int when);
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 static int mu_scope_now(const char *phase);
+static int mu_product_need(const sh_modmanifest_list *rows);
 
 void sh_modui_bind(const sh_modui_engine *engine)
 {
@@ -141,6 +143,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     /* The map scope: what the open map lists, and the build a map-level row names. */
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
+    sh_modmanifest_set_product_need(mu_product_need);
     sh_modserve_set_scope_source(mu_scope_source);
 }
 
@@ -285,7 +288,8 @@ typedef struct mu_entry {
 typedef struct mu_row {
     int serving;                 /* the entry shown */
     int builds;                  /* entries in the row (always 1: a folder is a row) */
-    int duplicate;               /* another folder declares the same id */
+    int duplicate;               /* another folder holds the same key at the same hash (an exact copy) */
+    int same_key;                /* another folder declares the same key (another build, or a copy) */
 } mu_row;
 
 typedef struct mu_model {
@@ -543,8 +547,14 @@ static int mu_model_rows(mu_model *m)
         r->serving = (int)i;
         r->builds = 1;
         r->duplicate = 0;
+        /* Two hashes of one key are two builds (DESIGN-additive 2.5): each map
+         * serves the build it was saved with, so that is never attention. Only
+         * an exact copy (one key, one hash) is a duplicate. */
+        for (k = 0; k < n && e->loaded && !r->same_key; k++)
+            r->same_key = k != i && m->list.items[k].loaded && !strcmp(m->list.items[k].bundle.id, e->bundle.id);
         for (k = 0; k < n && e->loaded && !r->duplicate; k++)
-            r->duplicate = k != i && m->list.items[k].loaded && !strcmp(m->list.items[k].bundle.id, e->bundle.id);
+            r->duplicate = k != i && m->list.items[k].loaded && !strcmp(m->list.items[k].bundle.id, e->bundle.id) &&
+                           !strcmp(m->list.items[k].bundle.hash, e->bundle.hash);
         m->entries[i].row = (int)m->row_count++;
     }
     return 1;
@@ -756,6 +766,138 @@ static int mu_suffix(const char *s, const char *suffix)
     return n >= k && !_stricmp(s + n - k, suffix);
 }
 
+static const char *mu_entry_title(const sh_ms_entry *s);
+
+/* ---- additive facts (DESIGN-additive 2.1, 2.4, 2.6, 2.9) */
+
+/* The author block's "replaces" (the declared escape hatch), malloc'd
+ * lower-cased paths; returns the count. */
+static size_t mu_declared_replaces(const sh_mb_bundle *bd, char ***out)
+{
+    mpj *x;
+    const mpj *v;
+    size_t n = 0;
+    int i;
+    *out = NULL;
+    if (!bd->extra) return 0;
+    x = mpj_parse(bd->extra, strlen(bd->extra));
+    v = x ? mpj_get(x, "replaces") : NULL;
+    if (v && v->type == MPJ_ARR && v->n > 0 && (*out = (char **)calloc((size_t)v->n, sizeof(char *))) != NULL)
+        for (i = 0; i < v->n; i++)
+            if (v->items[i] && v->items[i]->type == MPJ_STR) {
+                char *s = sh_mm_decode(v->items[i]->text), *c;
+                if (!s) continue;
+                for (c = s; *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+                (*out)[n++] = s;
+            }
+    mpj_free(x);
+    return n;
+}
+
+static void mu_strs_free(char **v, size_t n)
+{
+    size_t i;
+    for (i = 0; v && i < n; i++) free(v[i]);
+    free(v);
+}
+
+/* What the builder derived from the files (payload "facts"): the classes,
+ * the editor tweaks, every replacement with whether the descriptor declares
+ * it or it is a registry copy, and the registry contributions (the product
+ * block's "registries": player fields and weapons, extends targets,
+ * conductor encounters, string keys). */
+static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
+{
+    char **declared = NULL;
+    size_t nd = mu_declared_replaces(bd, &declared), k, q, shown = 0;
+    int first = 1;
+    mu_puts(b, ",\"facts\":{");
+    mu_knum(b, "adds", bd->classes.adds, 1);
+    mu_knum(b, "borrows", bd->classes.borrows, 0);
+    mu_knum(b, "surfaces", bd->classes.surfaces, 0);
+    mu_knum(b, "editor", bd->classes.editor, 0);
+    mu_knum(b, "replaces", bd->classes.replaces, 0);
+    mu_puts(b, ",\"editorTweaks\":[");
+    for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
+        if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;
+        if (!first) mu_putn(b, ",", 1);
+        mu_str(b, bd->files[k].request);
+        first = 0;
+        shown++;
+    }
+    mu_puts(b, "],\"replacements\":[");
+    first = 1;
+    for (k = 0, shown = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
+        const sh_mb_file *f = &bd->files[k];
+        int dec = 0;
+        if (f->cls != SH_MB_CLASS_REPLACE && !(bd->legacy && f->shadowed)) continue;
+        for (q = 0; q < nd && !dec; q++) dec = !strcmp(declared[q], f->request);
+        if (!first) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "path", f->request, 1);
+        mu_kbool(b, "declared", dec, 0);
+        mu_kbool(b, "registry", sh_mb_registry_request(f->request) != 0, 0);
+        mu_putn(b, "}", 1);
+        first = 0;
+        shown++;
+    }
+    mu_puts(b, "],\"registries\":");
+    mu_puts(b, bd->registries && bd->registries[0] == '{' ? bd->registries : "{}");
+    mu_putn(b, "}", 1);
+    mu_strs_free(declared, nd);
+}
+
+/* The newest build of a key: the highest build number, then the latest install. */
+static int mu_build_newer(const sh_ms_entry *a, const sh_ms_entry *b)
+{
+    if (a->bundle.build != b->bundle.build) return a->bundle.build > b->bundle.build;
+    return mu_newer(a, b);
+}
+
+/* The entry of the newest build of `id` (loaded entries only), or -1. */
+static int mu_newest_of(const mu_model *m, const char *id)
+{
+    size_t i;
+    int best = -1;
+    for (i = 0; id && i < m->list.count; i++) {
+        const sh_ms_entry *e = &m->list.items[i];
+        if (!e->loaded || strcmp(e->bundle.id, id)) continue;
+        if (best < 0 || mu_build_newer(e, &m->list.items[best])) best = (int)i;
+    }
+    return best;
+}
+
+/* One row per hash under a key (DESIGN-additive 2.2, 2.5): "newest" marks
+ * the newest build, "builds" lists every build of the key when there are
+ * several. */
+static void mu_put_builds(mu_buf *b, const mu_model *m, const mu_entry *u)
+{
+    const sh_ms_entry *e = u->e;
+    int newest = mu_newest_of(m, e->bundle.id), count = 0, first = 1;
+    size_t i;
+    for (i = 0; i < m->list.count; i++)
+        if (m->list.items[i].loaded && !strcmp(m->list.items[i].bundle.id, e->bundle.id)) count++;
+    mu_kbool(b, "newest", newest >= 0 && &m->list.items[newest] == e, 0);
+    if (count < 2) return;
+    mu_puts(b, ",\"builds\":[");
+    for (i = 0; i < m->list.count; i++) {
+        const sh_ms_entry *x = &m->list.items[i];
+        if (!x->loaded || strcmp(x->bundle.id, e->bundle.id)) continue;
+        if (!first) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "folder", x->name, 1);
+        mu_kstr(b, "bundle", x->bundle.hash, 0);
+        mu_knum(b, "build", x->bundle.build, 0);
+        mu_kstr(b, "version", mu_version(x->bundle.version), 0);
+        mu_knum(b, "builtAt", x->bundle.built > 0 ? (unsigned long long)x->bundle.built : 0, 0);
+        mu_kbool(b, "newest", (int)i == newest, 0);
+        mu_kbool(b, "failed", x->build_failed[0] != 0, 0);
+        mu_putn(b, "}", 1);
+        first = 0;
+    }
+    mu_putn(b, "]", 1);
+}
+
 /* Payload v3's fields of one mod (webview-ui.md, Mods tab). */
 static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, const mu_entry *u)
 {
@@ -813,6 +955,19 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
             mu_kbool(b, "scopeAuto", si.automatic, 0);
             mu_kbool(b, "scoped", si.scope == SH_MODSERVE_SCOPE_MAP && (si.shadows > 0 || si.requirements), 0);
         }
+    }
+    if (e->loaded) {
+        mu_kbool(b, "legacy", u->legacy, 0);
+        mu_put_facts(b, bd);
+        mu_put_builds(b, m, u);
+    }
+    if (e->loaded && e->build_failed[0]) {
+        /* The latest build was refused; the last good build serves (DESIGN-additive 2.8). */
+        mu_puts(b, ",\"buildFailed\":{");
+        mu_kstr(b, "cause", e->build_failed, 1);
+        mu_kbool(b, "snapshot", e->snapshot != NULL, 0);
+        mu_knum(b, "servingBuild", bd->build, 0);
+        mu_putn(b, "}", 1);
     }
 }
 
@@ -1441,7 +1596,112 @@ static const char *mu_row_state(const mu_model *m, const sh_modmanifest_row *r, 
         return at >= 0 && m->entries[at].superseded_paths ? "superseded" : "active";
     }
     if (st == SH_MODSERVE_ROW_INCOMPLETE) return "incomplete";
+    {
+        /* The row's own build is not installed but its key is, at another
+         * hash (DESIGN-additive 2.5): "installed at another build". */
+        sh_modserve_bundle_ref ob;
+        if (mu_find_hash(m, r->bundle) < 0 && sh_modserve_row_other_build(r, &ob) == 1) return "otherBuild";
+    }
     return at >= 0 ? "skipped" : "missing";
+}
+
+/* "upgrade": the key's newest installed build when it is not the one `hash`
+ * names (the map pins an older build; DESIGN-additive 2.5). */
+static void mu_put_upgrade(mu_buf *b, const mu_model *m, const char *id, const char *hash)
+{
+    int at = mu_newest_of(m, id), from = mu_find_hash(m, hash);
+    const sh_ms_entry *e;
+    if (at < 0 || mu_same_bundle(m, hash, m->list.items[at].bundle.hash)) return;
+    e = &m->list.items[at];
+    if (sh_modserve_bundle_state(e->bundle.hash, NULL, 0) != 1) return;
+    mu_puts(b, ",\"upgrade\":{");
+    mu_kstr(b, "folder", e->name, 1);
+    mu_kstr(b, "bundle", e->bundle.hash, 0);
+    mu_kstr(b, "version", mu_version(e->bundle.version), 0);
+    mu_knum(b, "build", e->bundle.build, 0);
+    mu_knum(b, "fromBuild", from >= 0 ? m->list.items[from].bundle.build : 0, 0);
+    mu_putn(b, "}", 1);
+}
+
+/* The registry slots the open map's declared mods set (player fields and
+ * weapon slots, modregistry.h): every slot two or more keys set, with its
+ * providers in row order, the map's choice and the key that serves. */
+typedef struct mu_slot { char slot[SH_MR_SLOT_MAX]; char keys[8][SH_MB_ID_MAX + 1]; int n; } mu_slot;
+
+static void mu_slot_add(mu_slot *slots, int *ns, int cap, const char *slot, const char *key)
+{
+    int i, k;
+    for (i = 0; i < *ns; i++) if (!_stricmp(slots[i].slot, slot)) break;
+    if (i == *ns) {
+        if (*ns >= cap) return;
+        memset(&slots[i], 0, sizeof slots[i]);
+        strncpy_s(slots[i].slot, sizeof slots[i].slot, slot, _TRUNCATE);
+        (*ns)++;
+    }
+    for (k = 0; k < slots[i].n; k++) if (!strcmp(slots[i].keys[k], key)) return;
+    if (slots[i].n < 8) strncpy_s(slots[i].keys[slots[i].n++], sizeof slots[i].keys[0], key, _TRUNCATE);
+}
+
+static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
+{
+    static const char *const fields[] = { "hands", "handsD1", "body", "handsAnimWeb" };
+    mu_slot *slots = (mu_slot *)calloc(64, sizeof *slots);
+    int ns = 0, i, k, first = 1;
+    size_t r;
+    mu_puts(b, ",\"registryClashes\":[");
+    for (r = 0; slots && r < mp->rows.count; r++) {
+        int at = mu_find_hash(m, mp->rows.rows[r].bundle);
+        const sh_mb_bundle *bd;
+        mpj *x;
+        const mpj *pl, *w;
+        if (at < 0) continue;
+        bd = &m->list.items[at].bundle;
+        if (!bd->registries) continue;
+        x = mpj_parse(bd->registries, strlen(bd->registries));
+        pl = x ? mpj_get(x, "player") : NULL;
+        for (k = 0; pl && pl->type == MPJ_OBJ && k < 4; k++) {
+            char slot[64];
+            if (!mpj_get(pl, fields[k])) continue;
+            _snprintf_s(slot, sizeof slot, _TRUNCATE, "player.%s", fields[k]);
+            mu_slot_add(slots, &ns, 64, slot, bd->id);
+        }
+        w = pl && pl->type == MPJ_OBJ ? mpj_get(pl, "weapons") : NULL;
+        for (k = 0; w && w->type == MPJ_OBJ && k < w->n; k++) {
+            char slot[SH_MR_SLOT_MAX], *name = sh_mm_decode(w->keys[k]);
+            if (!name) continue;
+            _snprintf_s(slot, sizeof slot, _TRUNCATE, "weapons/%s", name);
+            free(name);
+            mu_slot_add(slots, &ns, 64, slot, bd->id);
+        }
+        mpj_free(x);
+    }
+    for (i = 0; slots && i < ns; i++) {
+        char chosen[SH_MB_ID_MAX + 1] = "";
+        const char *serving;
+        if (slots[i].n < 2) continue;
+        (void)sh_modregistry_choices_get(slots[i].slot, chosen, sizeof chosen);
+        serving = slots[i].keys[0];
+        for (k = 0; k < slots[i].n; k++) if (chosen[0] && !strcmp(slots[i].keys[k], chosen)) serving = slots[i].keys[k];
+        if (!first) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "slot", slots[i].slot, 1);
+        mu_puts(b, ",\"providers\":[");
+        for (k = 0; k < slots[i].n; k++) {
+            int at = mu_newest_of(m, slots[i].keys[k]);
+            if (k) mu_putn(b, ",", 1);
+            mu_putn(b, "{", 1);
+            mu_kstr(b, "id", slots[i].keys[k], 1);
+            mu_kstr(b, "name", at >= 0 ? mu_entry_title(&m->list.items[at]) : slots[i].keys[k], 0);
+            mu_putn(b, "}", 1);
+        }
+        mu_putn(b, "]", 1);
+        mu_kstr(b, "chosen", chosen, 0);
+        mu_kstr(b, "serving", serving, 0);
+        mu_putn(b, "}", 1);
+        first = 0;
+    }
+    mu_putn(b, "]", 1);
+    free(slots);
 }
 
 /* The state a map entry shows: installed, superseded, incomplete, skipped,
@@ -1554,6 +1814,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         }
         mu_putn(b, "]", 1);
         mu_kbool(b, "attached", r->attached, 0);
+        mu_put_upgrade(b, m, r->id, r->bundle);
         mu_putn(b, "}", 1);
     }
     mu_puts(b, "],\"placed\":[");
@@ -1618,6 +1879,10 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_kbool(b, "inManifest", x->in_rows, 0);
             mu_kbool(b, "viaNeeds", x->in_closure && !x->named, 0);
             mu_kbool(b, "attached", x->attached, 0);
+            /* A map-level row and nothing of it placed: "declared, nothing placed". */
+            mu_kbool(b, "nothingPlaced", x->attached && !x->uid_count && !x->modules, 0);
+            mu_kstr(b, "bundle", x->hash, 0);
+            mu_put_upgrade(b, m, x->id, x->hash);
             {
                 sh_modserve_scope_info si;
                 if (sh_modserve_bundle_scope(x->hash, &si)) {
@@ -1629,6 +1894,11 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         }
         mu_putn(b, "]", 1);
         mu_kbool(b, "vanilla", mp->mod_count == 0, 0);
+        mu_put_clashes(b, m, mp);
+        {
+            char pv[SH_MODMANIFEST_VERSION_CAP];
+            if (sh_modmanifest_product(pv, sizeof pv)) mu_kstr(b, "product", pv, 0);
+        }
     }
     mu_putn(b, "}", 1);
 }
@@ -1689,6 +1959,8 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
     case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN: return "watchRescan";
+    case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
+    case SH_MODS_ACT_MAP_UPGRADE: return "mapUpgradeMod";
     default: return "unknown";
     }
 }
@@ -2582,6 +2854,27 @@ static int mu_scope_source(int when)
 }
 
 /* The build that serves a map-level row at save. */
+/* The product version a saved map records (modmanifest.h, "smpprod1."): a
+ * declared mod whose intent the product generates (player fields, weapons,
+ * extends, conductor rows) or that surfaces campaign content needs it. */
+static int mu_product_need(const sh_modmanifest_list *rows)
+{
+    sh_ms_list list;
+    size_t i, k;
+    int need = 0;
+    if (!rows || !rows->count || !sh_ms_enumerate(&list)) return 0;
+    for (i = 0; i < rows->count && !need; i++)
+        for (k = 0; k < list.count && !need; k++) {
+            const sh_mb_bundle *bd = &list.items[k].bundle;
+            if (!list.items[k].loaded || strcmp(bd->hash, rows->rows[i].bundle)) continue;
+            need = bd->classes.surfaces > 0 ||
+                   (bd->registries && (strstr(bd->registries, "\"player\"") || strstr(bd->registries, "\"extends\"") ||
+                                       strstr(bd->registries, "\"conductor\"")));
+        }
+    sh_ms_list_free(&list);
+    return need;
+}
+
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
 {
     sh_modserve_bundle_ref ref;
@@ -3100,6 +3393,127 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
+/* ---- registry choice and upgrade (DESIGN-additive 2.4, 2.5) */
+
+/* The open map's registry choice for a slot several declared mods set
+ * (`sh_mods choose`, the tab's clash select): saved with the map, applied at once. */
+static int mu_choose(const char *slot, const char *key, const mu_out *o)
+{
+    const int action = SH_MODS_ACT_CHOOSE;
+    char line[600], cause[SH_MB_CAUSE_MAX], msg[700];
+    int r;
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        mu_line(o, "choose %s: refused: %s", slot ? slot : "", cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    r = sh_modregistry_choose_command(slot, key, line, sizeof line);
+    if (r > 0) (void)mu_scope_apply("choose");
+    if (r >= 0) InterlockedIncrement(&g_gen);
+    if (o && o->fn) o->fn(o->context, line);
+    else mu_log("%s", line + (strncmp(line, "MODS: ", 6) ? 0 : 6));
+    if (r < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s.", line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14));
+    else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; the choice is saved with the map.", slot, key);
+    else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s: the map's choice is cleared; the first mod in the map's list serves it.", slot);
+    return mu_simple_result(action, r >= 0, msg);
+}
+
+/* How two builds of one key differ, in carried paths. */
+static void mu_build_diff(const sh_mb_bundle *a, const sh_mb_bundle *b, unsigned *changed, unsigned *added,
+                          unsigned *removed)
+{
+    size_t i, k;
+    *changed = *added = *removed = 0;
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i], *g = NULL;
+        for (k = 0; k < a->file_count && !g; k++) if (!strcmp(a->files[k].request, f->request)) g = &a->files[k];
+        if (!g) (*added)++;
+        else if (strcmp(g->blob, f->blob)) (*changed)++;
+    }
+    for (i = 0; i < a->file_count; i++) {
+        int found = 0;
+        for (k = 0; k < b->file_count && !found; k++) found = !strcmp(a->files[i].request, b->files[k].request);
+        if (!found) (*removed)++;
+    }
+}
+
+/* "Upgrade this map to the installed build": the open map's row of `id`
+ * moves to the key's newest installed build; the listing follows at once and
+ * the next save writes the new hash. */
+static int mu_map_upgrade(const char *id, const mu_out *o)
+{
+    const int action = SH_MODS_ACT_MAP_UPGRADE;
+    mu_model m;
+    sh_modmanifest_list rows;
+    sh_modmanifest_row to;
+    char msg[900], cause[SH_MB_CAUSE_MAX], title[300], from_text[80];
+    int newest, from = -1, ok = 0;
+    size_t i, at = (size_t)-1;
+    if (!id || !id[0]) return mu_simple_result(action, 0, "Name a mod the map declares.");
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        mu_line(o, "map upgrade %s: refused: %s", id, cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    (void)sh_modmanifest_current(&rows);
+    newest = mu_newest_of(&m, id);
+    if (newest < 0) {
+        /* A folder name: its key. */
+        for (i = 0; i < m.list.count && newest < 0; i++)
+            if (m.list.items[i].loaded && !strcmp(m.list.items[i].name, id)) newest = mu_newest_of(&m, m.list.items[i].bundle.id);
+    }
+    for (i = 0; newest >= 0 && i < rows.count && at == (size_t)-1; i++)
+        if (!strcmp(rows.rows[i].id, m.list.items[newest].bundle.id)) at = i;
+    strncpy_s(title, sizeof title, newest >= 0 ? mu_entry_title(&m.list.items[newest]) : id, _TRUNCATE);
+    if (!rows.count)
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No map that declares mods is open in the editor.");
+    else if (newest < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", id);
+    else if (at == (size_t)-1) _snprintf_s(msg, sizeof msg, _TRUNCATE, "The open map does not declare %s.", title);
+    else if (mu_same_bundle(&m, rows.rows[at].bundle, m.list.items[newest].bundle.hash)) {
+        ok = 1;
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "The map already uses the installed build of %s.", title);
+    } else if (sh_modserve_bundle_state(m.list.items[newest].bundle.hash, cause, sizeof cause) != 1) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "The installed build of %s is not in use: %s.", title,
+                    cause[0] ? cause : "refresh the Mods tab");
+    } else {
+        const sh_mb_bundle *nb = &m.list.items[newest].bundle;
+        unsigned changed = 0, added = 0, removed = 0;
+        from = mu_find_hash(&m, rows.rows[at].bundle);
+        memset(&to, 0, sizeof to);
+        strncpy_s(to.id, sizeof to.id, nb->id, _TRUNCATE);
+        strncpy_s(to.version, sizeof to.version, nb->version, _TRUNCATE);
+        strcpy_s(to.bundle, sizeof to.bundle, nb->hash);
+        to.size = nb->total_size;
+        if (from >= 0) {
+            mu_build_diff(&m.list.items[from].bundle, nb, &changed, &added, &removed);
+            _snprintf_s(from_text, sizeof from_text, _TRUNCATE, "build %llu (%.16s)", m.list.items[from].bundle.build,
+                        rows.rows[at].bundle);
+        } else {
+            _snprintf_s(from_text, sizeof from_text, _TRUNCATE, "build %.16s, which is not installed here", rows.rows[at].bundle);
+        }
+        if (!sh_modmanifest_current_rename(rows.rows[at].bundle, &to)) {
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "The map's row of %s could not be moved to the installed build.", title);
+        } else {
+            ok = 1;
+            (void)mu_scope_now("map upgrade");
+            InterlockedIncrement(&g_gen);
+            if (from >= 0)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s: %u file(s) "
+                            "changed, %u added, %u removed. Save the map to keep it; players are offered the new build.",
+                            title, nb->build, nb->hash, from_text, changed, added, removed);
+            else
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s. Save the map "
+                            "to keep it; players are offered the new build.", title, nb->build, nb->hash, from_text);
+            mu_log("map upgrade %s: %.16s -> %.16s", nb->id, rows.rows[at].bundle, nb->hash);
+        }
+    }
+    mu_line(o, "map upgrade %s: %s", id, msg);
+    sh_modmanifest_list_free(&rows);
+    mu_model_free(&m);
+    return mu_simple_result(action, ok, msg);
+}
+
 /* ---- rebuild */
 
 /* Build one folder again from its files (as 'sh_mods build'), write its
@@ -3223,6 +3637,7 @@ static void mu_say_map(const mu_out *o)
         }
     }
     (void)sh_modserve_scope_report(mu_say_scope, (void *)o);
+    (void)sh_modserve_registry_report(mu_say_scope, (void *)o);
     mu_map_free(&mp);
     mu_record_free(&rec);
     mu_model_free(&m);
@@ -3237,9 +3652,22 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     o.fn = line;
     o.context = context;
     if (!verb) return 0;
-    if (_stricmp(verb, "map") && _stricmp(verb, "uninstall")) return 0;
+    if (_stricmp(verb, "map") && _stricmp(verb, "uninstall") && _stricmp(verb, "choose")) return 0;
     if (!mu_on_main()) return -1;
+    if (!_stricmp(verb, "choose")) {
+        if (argc < 2 || argc > 3 || !argv[1][0]) {
+            mu_line(&o, "choose: usage: sh_mods choose \"<slot>\" \"<key>\" (an empty key, or none, clears the choice)");
+            return 1;
+        }
+        (void)mu_choose(argv[1], argc == 3 ? argv[2] : "", &o);
+        return 1;
+    }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
+    if (!_stricmp(verb, "map") && !_stricmp(argv[1], "upgrade")) {
+        if (argc != 3 || !argv[2][0]) { mu_line(&o, "map: usage: sh_mods map upgrade \"<id>\""); return 1; }
+        (void)mu_map_upgrade(argv[2], &o);
+        return 1;
+    }
     first = !_stricmp(verb, "map") ? 2 : 1;
     if (!_stricmp(verb, "map") && !_stricmp(argv[1], "add")) {
         if (argc != 3 || !argv[2][0]) { mu_line(&o, "map: usage: sh_mods map add \"<id>\""); return 1; }
@@ -3247,7 +3675,8 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
         return 1;
     }
     if (!_stricmp(verb, "map") && _stricmp(argv[1], "remove")) {
-        mu_line(&o, "map: usage: sh_mods map, sh_mods map add \"<id>\", or sh_mods map remove \"<id>\" [--yes]");
+        mu_line(&o, "map: usage: sh_mods map, sh_mods map add \"<id>\", sh_mods map upgrade \"<id>\", or sh_mods map "
+                    "remove \"<id>\" [--yes]");
         return 1;
     }
     for (i = first; i < argc; i++) {
@@ -3341,21 +3770,22 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
            st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
     for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);
     (void)sh_modserve_scope_report(mu_say_requirement, &o);
+    (void)sh_modserve_registry_report(mu_say_requirement, &o);   /* what the registries generate, every clash */
     (void)sh_modserve_requirements_report(mu_say_requirement, &o);
     for (i = 0; i < m.row_count; i++) {
         const char *id = m.list.items[m.rows[i].serving].bundle.id;
         char keys[800];
         size_t at = 0;
         int earlier = 0;
-        if (!m.rows[i].duplicate) continue;
+        if (!m.rows[i].same_key) continue;
         for (k = 0; k < i && !earlier; k++)
-            earlier = m.rows[k].duplicate && !strcmp(m.list.items[m.rows[k].serving].bundle.id, id);
+            earlier = m.rows[k].same_key && !strcmp(m.list.items[m.rows[k].serving].bundle.id, id);
         if (earlier) continue;
         keys[0] = 0;
         for (k = i; k < m.row_count; k++) {
             const mu_entry *u = &m.entries[m.rows[k].serving];
             int w;
-            if (!m.rows[k].duplicate || strcmp(u->e->bundle.id, id)) continue;
+            if (!m.rows[k].same_key || strcmp(u->e->bundle.id, id)) continue;
             w = _snprintf_s(keys + at, sizeof keys - at, _TRUNCATE, "%smods\\%s (%s)", at ? ", " : "", u->e->name,
                             u->origin[0] ? u->origin : "your folder");
             if (w < 0) break;
@@ -3465,6 +3895,16 @@ int sh_modui_run(int action, const char *arg)
         return mu_simple_result(action, 0, "Uninstalled mods go to the Windows Recycle Bin.");
     case SH_MODS_ACT_MAP_ADD:
         return mu_map_add(arg, NULL);
+    case SH_MODS_ACT_CHOOSE: {
+        char slot[SH_MR_SLOT_MAX] = "";
+        const char *tab = arg ? strchr(arg, '\t') : NULL;
+        if (!tab || (size_t)(tab - arg) >= sizeof slot) return mu_simple_result(action, 0, "Choose a slot and a mod.");
+        memcpy(slot, arg, (size_t)(tab - arg));
+        slot[tab - arg] = 0;
+        return mu_choose(slot, tab + 1, NULL);
+    }
+    case SH_MODS_ACT_MAP_UPGRADE:
+        return mu_map_upgrade(arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
