@@ -597,6 +597,31 @@ int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *o
  * Returns the line count. */
 int  sh_modserve_scope_report(sh_modserve_line_fn fn, void *context);
 
+/* Registries (modregistry.h): the open map's registry choices, the listing's
+ * second input (the map manifest gives them at every load, before the
+ * listing, and at every choice). Slots and keys are copied; with `recompute`
+ * the listing is recomputed and marked as sh_modserve_scope_set does, and the
+ * bundles whose serving changed are returned (a change of generated text
+ * counts one). Cleared when a listing with no map open is set. */
+int  sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute);
+/* One line per registry path ("registry <request>: generated, N bytes" or
+ * "the game's own file"), then what was generated and every clash
+ * ("registry: conductor: aiType 524288 -> ...", "registry: player.hands: set
+ * by ...; serving ..."), then the choices. Returns the lines. */
+int  sh_modserve_registry_report(sh_modserve_line_fn fn, void *context);
+/* The composer's entry points for the registries (malloc'd text, NULL when
+ * the texts do not compose): texts[0] composed with the others' list and
+ * bag entries (the rule of shadows several declared bundles carry); and an
+ * extends partial appended to base: the partial may hold only blocks on the
+ * ';'-separated container paths ("events;aliases", "edit/aiTypeList"), and
+ * each container's entries are appended to base's (kind SH_MR_LIST: list
+ * items matched by value or first member, renumbered; SH_MR_BAG: blocks,
+ * identical text skipped, a named block the base holds with other text
+ * refused). *added counts the entries appended. */
+char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, int n, size_t *len, int *added);
+char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
+                                 const char *containers, int kind, size_t *len, int *added);
+
 /* The points that must read the open map itself (the Play entry: Play does
  * not serialize the map) ask the bound source (modui.c) to recompute the
  * listing from the current manifest and the placed names and call

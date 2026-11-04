@@ -20,6 +20,10 @@ static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
 void backend_log(const char *message) { (void)message; }
+/* The registry choices' input (modmanifest.c gives them at every load). */
+int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
+{ (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
+
 int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)bundle_hashes; (void)n; return 0; }
 int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out)
 { (void)bundle_hash; (void)id; if (out) memset(out, 0, sizeof *out); return 0; }

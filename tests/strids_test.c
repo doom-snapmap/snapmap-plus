@@ -467,6 +467,34 @@ static void test_bundle_layer(const char *user_path)
     CHECK(g_dictionary.count == before);
 }
 
+/* Keys under each mod's key (DESIGN-additive 2.4): six packs each carry
+ * mods/<key>/ci_tab with the same text. Identical text under different keys
+ * is two rows and no conflict; one key with two texts is still one. */
+static void test_namespaced_keys(const char *user_path)
+{
+    static const fake_bundle packs[] = {
+        { "campaign-interactables", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"mods/campaign-interactables/ci_tab\":\"Campaign Interactables\"}}}" },
+        { "campaign-interactables-2", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"mods/campaign-interactables-2/ci_tab\":\"Campaign Interactables\"}}}" },
+        { "campaign-interactables-doors", "0.1.0", 0, 1,
+          "{\"strings\":{\"en\":{\"mods/campaign-interactables-doors/ci_tab\":\"Campaign Interactables\"}}}" },
+    };
+    CHECK(write_text(user_path, "{}"));
+    set_bundles(packs, (int)(sizeof packs / sizeof packs[0]));
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("mods/campaign-interactables/ci_tab") == 1 && count_key("mods/campaign-interactables-2/ci_tab") == 1 &&
+          count_key("mods/campaign-interactables-doors/ci_tab") == 1);
+    CHECK(value_for("mods/campaign-interactables-2/ci_tab") &&
+          !strcmp(value_for("mods/campaign-interactables-2/ci_tab"), "Campaign Interactables"));
+    CHECK(strstr(g_log, "REFUSED") == NULL);
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("mods/campaign-interactables-2/ci_tab") == 0);
+}
+
+
 static void invoke_sort_hook(void)
 {
     int before = g_sorts;
@@ -648,6 +676,7 @@ int main(void)
     CHECK(write_text(path, "{}"));
     CHECK(rearm_strings() == 1);
     test_bundle_layer(path);
+    test_namespaced_keys(path);
     test_dictionary_retirement(path);
     test_sort_hook_recovery(path);
     /* A malformed suffix after NUL is still part of the input document. */

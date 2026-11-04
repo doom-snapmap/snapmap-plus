@@ -1547,6 +1547,77 @@ loads run after it is released. The map load's `MODS: map manifest names ...` li
 ends with the registration steps the activation found ready, or "no new decls
 to register" for bundles of shadows and requirements only.
 
+### Registries
+
+A registry is a fixed-name game file the product generates per map from the
+declared bundles' intent (DESIGN-additive 2.4); no bundle carries a file at
+its name (`modregistry.c` generates the texts, `modserve.c` serves them,
+`modregistry_choices.c` holds the map's choices).
+
+- **Which.** The encounter conductor
+  (`entitydef/ai/conductor/coop/snapmap_default`), the player body
+  (`md6def/player/mp/tp_body_mp.md6`), the player entity (`entitydef/player/coop`),
+  one weapon slot per stock weapon decl a `player.weapons` names
+  (`generated/decls/weapon/<stock name>.decl`), and the targets of `extends`:
+  one table in `modregistry.c` (`sh_modregistry_extend_target`) with the
+  grammar of each target's entries. Lists (`num = N; item[i]`): the conductor's
+  `edit.aiTypeList`, the whitelist inspectors' `edit.validEncounters`. Bags
+  (blocks appended, identical text skipped, a named block the game's text holds
+  with other content refused): the body's `events` and `aliases` (spelled
+  `player.bodyEvents`), and `aifsmmanager/states/<demon>` `edit.subGraphs`. Any
+  other target is "not a list the product extends".
+- **Sources.** The bundles that serve for the listing and state registry
+  intent, in row order, then editor-time bundles by key. Intent is the author
+  block's `player` object and `extends` (the product block's
+  `registries.extends` first); a bundle built before the intent that still
+  carries a registry file contributes that copy: a conductor copy its
+  `aiTypeList` rows whose `aiType` is a number that is not a stock bit, a body
+  copy composed as shadows compose, a player entity copy as the base the
+  player fields edit.
+- **Texts.** The conductor is the game's text with one item per custom
+  encounter type, `{ aiType = "<bit>"; entityDef = "<ai>"; }`, appended to
+  `aiTypeList` (num raised, every other byte as the game's). The bit is
+  assigned per map: the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
+  (`1 << 19` up to `1 << 29`, eleven per map), in row order, then by the name
+  of the encounter decl whose `memberType` names the author's number, so two
+  packs never claim one bit; every `snapAiEncounter` `memberType` and
+  `snapAiScore` `aiType` of that bundle naming the author's number is served
+  rewritten to the assigned bit (the same synthetic body mechanism, on the
+  bundle's own file). The body and other extends targets are the game's text
+  with each source's partial merged into its containers by the composer
+  (`sh_modserve_compose_extend`; the partial may hold nothing else). The
+  player entity sets `handsModelMPUseDoomHands` (hands),
+  `handsModelMPUseDoomHands_D1` (handsD1), `thirdPersonBodyMPUseDoomHands`
+  (body) and `handsAnimWeb` inside `edit`, every other byte as the game's (the
+  coop loadout stays). A weapon slot serves the named mod decl's bytes under the
+  stock name, in maps that declare the mod only.
+- **Clashes.** Two sources setting one player field or weapon slot: the map's
+  choice (`"choices"` in the manifest rows, `sh_modregistry_choices_set`,
+  `sh_modregistry_choose_command` for `sh_mods choose "<slot>" "<key>"`), else
+  the first in row order, with one line naming the slot and the command.
+- **Serving.** The index carries one synthetic file per registry path,
+  belonging to a pseudo-bundle (`snapmap-plus.registries`, one past the bundle
+  count, never admitted, so no bundle walk sees it), never served by name or
+  need. Where a bundle file wins the path its winner points at the synthetic
+  file and the scope pick moves to it; elsewhere the synthetic file is the
+  path's key. Generated texts are memoized per serving set and choices in the
+  index arena and read through `scope_body` like a composed text. A text equal
+  to a serving bundle's own copy leaves that copy serving, gated by its own
+  bundle. With nothing generated the game's file answers. The game's texts
+  are read once per index through the installed-content reader; a registry it
+  cannot read serves the game's file, with one line. With map scope off
+  nothing is generated. `sh_modserve_registry_report` prints one line per
+  registry, what was generated and every clash; `MODS: registry: ...` lines
+  log each generation.
+- **Choices.** Each choice is written on the row of the key it names; a load
+  reads them from every row (first row per slot) and gives them to the index
+  (`sh_modserve_scope_set_choices`) before the listing; a choice naming a key
+  the save writes no row for is dropped with one line.
+- **The refusal switch.** The builder never refuses a registry file
+  (`sh_mb_registry_request`): "replaces <request>: express it as player
+  intent". The switch itself stays off by default
+  (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT`).
+
 ### Migration of the retired overrides folder
 
 Releases up to v0.2.1-beta.19 kept packages in `overrides\`. The store tool's

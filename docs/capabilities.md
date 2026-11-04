@@ -203,6 +203,13 @@ does not refuse, since the engine already tolerates those names.
   and whether it is active in the open map, and `sh_mods doctor` prints which mod serves each replaced
   file for the open map. A published map played from the hub keeps its mods applied until the next map
   opens.
+- Lists and fixed objects several mods extend are generated per map from the mods the map uses
+  (registries): the encounter conductor's demon list, with the spawn-type numbers assigned per map so two
+  boss packs never collide; the player body's event rows; the player entity's hands, Doom hands, body and
+  hands animWeb; a weapon a mod serves under the stock weapon's name; and the other list-shaped decls a mod
+  `extends` (AI FSM states, encounter whitelists). When two mods a map uses set the same player field or
+  weapon, the map's choice (`sh_mods choose "<slot>" "<mod key>"`, saved with the map) decides, else the
+  first in the map's list, with one log line.
 - A saved map records each mod a placed entity needs as one `smpmod1.` string variable, and the
   next load activates exactly those mods. A mod can also be used by the whole map without placing
   anything (the Mods tab's **Use in this map**, `sh_mods map add "<id>"`), for a mod that only replaces

@@ -327,6 +327,59 @@ static void mm_put_quoted(mm_text *t, const char *s)
 }
 
 /* ==================================================================== */
+/* registry choices                                                      */
+/* ==================================================================== */
+
+/* A slot as the manifest stores it: printable, no quote, tab or backslash. */
+static int mm_slot_ok(const char *slot)
+{
+    size_t i, n = slot ? strlen(slot) : 0;
+    if (!n || n >= SH_MODMANIFEST_SLOT_MAX) return 0;
+    for (i = 0; i < n; i++)
+        if ((unsigned char)slot[i] <= 0x20 || slot[i] == '"' || slot[i] == '\\' || (unsigned char)slot[i] >= 0x7f) return 0;
+    return 1;
+}
+
+/* The key for `slot` in "slot\tkey\n" lines, copied to key (when not NULL). 1 found. */
+static int mm_choice_find(const char *lines, const char *slot, char *key, size_t cap)
+{
+    const char *p = lines;
+    size_t sn = slot ? strlen(slot) : 0;
+    while (p && *p) {
+        const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+        if (!tab || !nl || tab > nl) break;
+        if ((size_t)(tab - p) == sn && !strncmp(p, slot, sn)) {
+            if (key && cap) {
+                size_t kn = (size_t)(nl - tab - 1);
+                if (kn >= cap) kn = cap - 1;
+                memcpy(key, tab + 1, kn);
+                key[kn] = 0;
+            }
+            return 1;
+        }
+        p = nl + 1;
+    }
+    return 0;
+}
+
+/* Append "slot\tkey\n" unless the slot is there. 0 when it does not fit. */
+static int mm_choice_add(char *lines, size_t cap, const char *slot, const char *key)
+{
+    size_t at = strlen(lines), need = strlen(slot) + strlen(key) + 2;
+    if (mm_choice_find(lines, slot, NULL, 0)) return 1;
+    if (at + need + 1 > cap) return 0;
+    _snprintf_s(lines + at, cap - at, _TRUNCATE, "%s\t%s\n", slot, key);
+    return 1;
+}
+
+static size_t mm_choice_count(const char *lines)
+{
+    size_t n = 0;
+    for (; lines && *lines; ++lines) n += *lines == '\n';
+    return n;
+}
+
+/* ==================================================================== */
 /* row value                                                             */
 /* ==================================================================== */
 
@@ -359,6 +412,26 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         const char *attached = sh_json_object_get(&object, "attached");
         out->attached = attached && !strcmp(attached, "true");
     }
+    {
+        /* Registry choices: entries that do not read are skipped (the row stays). */
+        const char *choices = sh_json_object_get(&object, "choices");
+        sh_json_object co = {0};
+        size_t c;
+        if (choices && *choices == '{' && sh_native_json_parse_object(choices, strlen(choices), 2, &co)) {
+            for (c = 0; c < co.count && c < SH_MODMANIFEST_CHOICES_MAX; c++) {
+                char *key = mm_decode(co.members[c].value_json, strlen(co.members[c].value_json));
+                char slot[SH_MODMANIFEST_SLOT_MAX];
+                if (key && co.members[c].key_length < sizeof slot) {
+                    memcpy(slot, co.members[c].key, co.members[c].key_length);
+                    slot[co.members[c].key_length] = 0;
+                    if (mm_slot_ok(slot) && sh_modmanifest_valid_id(key))
+                        (void)mm_choice_add(out->choices, sizeof out->choices, slot, key);
+                }
+                free(key);
+            }
+            sh_json_object_free(&co);
+        }
+    }
     names = sh_json_object_get(&object, "names");
     if (names) {
         const char *cursor = names, *end = names + strlen(names), *elem;
@@ -382,10 +455,12 @@ done:
 
 char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_length)
 {
-    size_t keep, i;
+    size_t keep, i, kc, nc;
     if (out_length) *out_length = 0;
     if (!row) return NULL;
-    /* Drop names from the end until the row fits its budget. */
+    nc = mm_choice_count(row->choices);
+    /* Drop names from the end until the row fits its budget, then choices. */
+    for (kc = nc + 1; kc-- > 0;)
     for (keep = row->name_count + 1; keep-- > 0;) {
         mm_text t = {0};
         char number[32];
@@ -398,6 +473,24 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
         mm_put(&t, number, strlen(number));
         if (row->attached) mm_put(&t, ",\"attached\":true", 16);
+        if (kc) {
+            const char *p = row->choices;
+            size_t c;
+            mm_put(&t, ",\"choices\":{", 12);
+            for (c = 0; c < kc && p && *p; c++) {
+                const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+                char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
+                if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
+                memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
+                memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
+                if (c) mm_put(&t, ",", 1);
+                mm_put_quoted(&t, slot);
+                mm_put(&t, ":", 1);
+                mm_put_quoted(&t, key);
+                p = nl + 1;
+            }
+            mm_put(&t, "}", 1);
+        }
         mm_put(&t, ",\"names\":[", 10);
         for (i = 0; i < keep; i++) {
             if (i) mm_put(&t, ",", 1);
@@ -405,8 +498,7 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         }
         mm_put(&t, "]}", 2);
         if (t.failed) { free(t.p); return NULL; }
-        if (t.n <= SH_MODMANIFEST_ROW_MAX || keep == 0) {
-            if (t.n > SH_MODMANIFEST_ROW_MAX) { free(t.p); return NULL; }
+        if (t.n <= SH_MODMANIFEST_ROW_MAX) {
             if (out_length) *out_length = t.n;
             return t.p;
         }
@@ -810,7 +902,146 @@ size_t sh_modmanifest_current(sh_modmanifest_list *out)
     return n;
 }
 
-void sh_modmanifest_reset(void) { mm_set_current(NULL); }
+/* The open map's registry choices ("slot\tkey\n" lines), under g_current_lock. */
+static char g_choices[SH_MODMANIFEST_CHOICES_CAP];
+
+/* Give the choices to the serving index (its choice input of the listing). */
+static int mm_choices_push(int recompute)
+{
+    char copy[SH_MODMANIFEST_CHOICES_CAP], *p;
+    const char *slots[SH_MODMANIFEST_CHOICES_MAX], *keys[SH_MODMANIFEST_CHOICES_MAX];
+    int n = 0;
+    AcquireSRWLockShared(&g_current_lock);
+    memcpy(copy, g_choices, sizeof copy);
+    ReleaseSRWLockShared(&g_current_lock);
+    for (p = copy; *p && n < SH_MODMANIFEST_CHOICES_MAX;) {
+        char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+        if (!tab || !nl || tab > nl) break;
+        *tab = 0;
+        *nl = 0;
+        slots[n] = p;
+        keys[n++] = tab + 1;
+        p = nl + 1;
+    }
+    return sh_modserve_scope_set_choices(slots, keys, n, recompute);
+}
+
+size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap)
+{
+    size_t i;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    for (i = 0; rows && i < rows->count; i++) {
+        const char *p = rows->rows[i].choices;
+        while (*p) {
+            const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
+            if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
+            memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
+            memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
+            (void)mm_choice_add(out, cap, slot, key);
+            p = nl + 1;
+        }
+    }
+    return mm_choice_count(out);
+}
+
+int sh_modmanifest_current_choose(const char *slot, const char *key)
+{
+    char next[SH_MODMANIFEST_CHOICES_CAP], *p;
+    size_t at = 0;
+    int ok = 1;
+    if (!mm_slot_ok(slot) || (key && key[0] && !sh_modmanifest_valid_id(key))) return -1;
+    next[0] = 0;
+    AcquireSRWLockExclusive(&g_current_lock);
+    /* Every other slot as it was, then this one (the order of choosing). */
+    for (p = g_choices; *p;) {
+        char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+        size_t len;
+        if (!tab || !nl || tab > nl) break;
+        len = (size_t)(nl - p) + 1;
+        if (!((size_t)(tab - p) == strlen(slot) && !strncmp(p, slot, strlen(slot))) && at + len < sizeof next) {
+            memcpy(next + at, p, len);
+            at += len;
+            next[at] = 0;
+        }
+        p = nl + 1;
+    }
+    if (key && key[0]) ok = mm_choice_add(next, sizeof next, slot, key);
+    if (ok) memcpy(g_choices, next, sizeof g_choices);
+    ReleaseSRWLockExclusive(&g_current_lock);
+    if (!ok) return -1;
+    return mm_choices_push(1);
+}
+
+int sh_modmanifest_current_choice(const char *slot, char *key, size_t cap)
+{
+    int r;
+    if (key && cap) key[0] = 0;
+    if (!slot) return 0;
+    AcquireSRWLockShared(&g_current_lock);
+    r = mm_choice_find(g_choices, slot, key, cap);
+    ReleaseSRWLockShared(&g_current_lock);
+    return r;
+}
+
+size_t sh_modmanifest_current_choices(char *out, size_t cap)
+{
+    size_t n;
+    if (!out || !cap) return 0;
+    AcquireSRWLockShared(&g_current_lock);
+    strncpy_s(out, cap, g_choices, _TRUNCATE);
+    n = mm_choice_count(g_choices);
+    ReleaseSRWLockShared(&g_current_lock);
+    return n;
+}
+
+/* The choices of a loaded map, set without a recompute: the listing that
+ * follows (the scope hook) computes the registries with them. */
+static void mm_choices_load(const sh_modmanifest_list *rows)
+{
+    char lines[SH_MODMANIFEST_CHOICES_CAP];
+    (void)sh_modmanifest_rows_choices(rows, lines, sizeof lines);
+    AcquireSRWLockExclusive(&g_current_lock);
+    memcpy(g_choices, lines, sizeof g_choices);
+    ReleaseSRWLockExclusive(&g_current_lock);
+    (void)mm_choices_push(0);
+}
+
+/* At a save: each choice on the row of the key it names. */
+static void mm_choices_save(sh_modmanifest_list *rows)
+{
+    char lines[SH_MODMANIFEST_CHOICES_CAP], *p, line[400];
+    size_t i;
+    AcquireSRWLockShared(&g_current_lock);
+    memcpy(lines, g_choices, sizeof lines);
+    ReleaseSRWLockShared(&g_current_lock);
+    for (i = 0; i < rows->count; i++) rows->rows[i].choices[0] = 0;
+    for (p = lines; *p;) {
+        char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+        int placed = 0;
+        if (!tab || !nl || tab > nl) break;
+        *tab = 0;
+        *nl = 0;
+        for (i = 0; i < rows->count && !placed; i++)
+            if (!strcmp(rows->rows[i].id, tab + 1))
+                placed = mm_choice_add(rows->rows[i].choices, sizeof rows->rows[i].choices, p, tab + 1);
+        if (!placed) {
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "MODS: save manifest: the choice %s -> %s is not saved: the map declares no build of %s", p, tab + 1, tab + 1);
+            backend_log(line);
+        }
+        p = nl + 1;
+    }
+}
+
+void sh_modmanifest_reset(void)
+{
+    mm_set_current(NULL);
+    AcquireSRWLockExclusive(&g_current_lock);
+    g_choices[0] = 0;
+    ReleaseSRWLockExclusive(&g_current_lock);
+}
 
 size_t sh_modmanifest_current_remove(const char *bundle)
 {
@@ -967,6 +1198,7 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
     if (!json || !length ||
         !sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) {
         mm_set_current(NULL);
+        mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
         modserve_activate_bundles(NULL, 0);
         return NULL;
@@ -976,7 +1208,9 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
 
     mm_describe(&list, names, sizeof names);
     /* The map scope first: the bundles' shadows and requirements are live
-     * before their gameplay decls register. */
+     * before their gameplay decls register; the registry choices before the
+     * listing that computes the registries. */
+    mm_choices_load(&list);
     mm_scope_load(json, length, &list);
     active = sh_modmanifest_activate(&list);
     /* `active` counts the registration steps the activation found ready (new
@@ -1120,6 +1354,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (ctx.list.count == 0 && !stale) return NULL;
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
+    mm_choices_save(&ctx.list);
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);

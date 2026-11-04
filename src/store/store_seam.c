@@ -10,6 +10,10 @@
 #include "modserve.h"
 #include "modbundle.h"
 
+/* The registry choices' input (modmanifest.c gives them at every load). */
+int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
+{ (void)slots; (void)keys; (void)n; (void)recompute; return 0; }
+
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
     (void)bundle_hashes;
