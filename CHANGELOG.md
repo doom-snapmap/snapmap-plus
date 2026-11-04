@@ -10,7 +10,7 @@ latest stable version is what `snapmap-plus update` installs.
 Mods can now play a scene where the activating player stands, spawn entities at the scene node as the scene starts, and hide the HUD for the scene's duration. Installing a mod while the editor is open is also safe now.
 
 ### New
-- A mod's scene node now plays its scene where the activating player stands and faces, and puts them back where they were once the scene finishes.
+- A mod's scene node now plays its scene where the activating player stands and faces, and can put them back where they were once the scene finishes.
 - A mod's scenes setting can spawn up to four entities, such as an arriving demon, at the node's placement the moment the scene starts, entrance animation included.
 - Scenes can hide the health and ammo panels while they play and bring them back when the scene releases the player, during Play only.
 
