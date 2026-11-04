@@ -223,6 +223,15 @@ static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map was substituted
 static SRWLOCK g_open_lock = SRWLOCK_INIT;
 static char g_open_name[MAX_PATH];
 static volatile LONG g_open_unsaved = 0;
+/* The saved-map id the swap's map borrowed, read from the edit the first time
+ * the branch answer is asked; "" until then. While the edit still holds it the
+ * open map is the rawmap's and Save asks for a name. Once a save gave the map
+ * its own id it is a saved map like any other: the engine answers, so the next
+ * Save writes that map instead of asking again (ADD-L6 F2). */
+static char g_borrowed_id[64];
+static sh_rawmap_edit_id_fn g_edit_id;
+
+void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn) { g_edit_id = fn; }
 
 static void open_identity_set(const char *name)
 {
@@ -231,6 +240,29 @@ static void open_identity_set(const char *name)
     else g_open_name[0] = '\0';
     InterlockedExchange(&g_open_unsaved, name ? 1 : 0);
     ReleaseSRWLockExclusive(&g_open_lock);
+}
+
+/* A swap opened a map: its borrowed id is read again at the next answer. */
+static void open_borrow_reset(void)
+{
+    AcquireSRWLockExclusive(&g_open_lock);
+    g_borrowed_id[0] = '\0';
+    ReleaseSRWLockExclusive(&g_open_lock);
+}
+
+/* 1 while the open map is the swap's and its edit still holds the borrowed id
+ * (or the edit cannot be read). The first read records the id. */
+static int open_still_borrowed(void)
+{
+    char id[64] = "";
+    sh_rawmap_edit_id_fn fn = g_edit_id;
+    int same = 1;
+    if (!fn || fn(id, sizeof id) != 1 || !id[0]) return 1;
+    AcquireSRWLockExclusive(&g_open_lock);
+    if (!g_borrowed_id[0]) strncpy_s(g_borrowed_id, sizeof g_borrowed_id, id, _TRUNCATE);
+    else same = !strcmp(g_borrowed_id, id);
+    ReleaseSRWLockExclusive(&g_open_lock);
+    return same;
 }
 
 int sh_rawmap_open_unsaved(char *name, size_t cap)
@@ -258,8 +290,12 @@ int sh_rawmap_load_is_safe(void)
 static unsigned char sh_isbranch_detour(void *editor)
 {
     if (InterlockedCompareExchange(&g_open_is_rawmap, 0, 0) != 0 &&
-        InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0)
-        return 1;
+        InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0) {
+        if (open_still_borrowed()) return 1;
+        /* Saved under its own id since: no longer the rawmap's borrowed map. */
+        InterlockedExchange(&g_open_is_rawmap, 0);
+        backend_log("B1: the map opened from a rawmap has its own saved-map id now; Save writes it");
+    }
     return g_isbranch_orig ? g_isbranch_orig(editor) : 0;
 }
 
@@ -656,6 +692,7 @@ static int sh_deser_detour(const char *json, void *out_map)
             backend_log(line);
             rc = deser_prepared(ours, out_map);
             /* The open map came from a rawmap, which is what the branch answer keys off. */
+            open_borrow_reset();
             InterlockedExchange(&g_open_is_rawmap, 1);
             {
                 char src[MAX_PATH], name[MAX_PATH];

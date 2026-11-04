@@ -1001,6 +1001,77 @@ static void a_rawmap_whose_mods_are_installed_loads(void)
     mods_end();
 }
 
+/* ADD-L6 F2: a rawmap opened over a map that pins a build takes the rawmap's
+ * own rows, never the borrowed map's, and once its first save gave it its
+ * own saved-map id the next Save writes that map instead of asking again. */
+static char g_fake_edit_id[64];
+static int fake_edit_id(char *out, size_t cap)
+{
+    if (!g_fake_edit_id[0]) return 0;
+    strcpy_s(out, cap, g_fake_edit_id);
+    return 1;
+}
+
+static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
+{
+    static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
+    unsigned char str[IDSTR_SIZE] = {0};
+    char staged[MAX_PATH], name[MAX_PATH];
+    sh_modmanifest_list cur;
+    printf("\n-- a rawmap opened over a map with rows takes its own rows; after its first save Save writes it\n");
+    mods_begin();
+    R.installed = 1;
+    sh_rawmap_set_edit_id_reader(fake_edit_id);
+    /* The editor has a map open whose row pins a build. */
+    sh_rawmap_swap_arm(0);
+    CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A));
+    sh_modmanifest_list_free(&cur);
+    /* A rawmap without rows opened over it: none of the borrowed map's rows stays. */
+    CHECK(write_file("rawmap_own_rows.json", plain, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    sh_rawmap_load_arm_once();
+    CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1 && !strcmp(g_parsed, plain));
+    CHECK(sh_modmanifest_current(&cur) == 0);
+    sh_modmanifest_list_free(&cur);
+    CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_own_rows.json"));
+    /* While the edit holds the borrowed id, Save asks for a name. */
+    sh_rawmap_set_branch_tag(1);
+    strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "BORROWED00000000000A");
+    CHECK(sh_isbranch_detour(NULL) == 1 && sh_isbranch_detour(NULL) == 1);
+    /* The first save names it: the edit now holds its own id, and the second
+     * Save writes that map (the engine answers; it is no branch). */
+    g_ser_orig = fixture_serialize;
+    CHECK(sh_ser_detour((void *)1, str, 1) == 1);
+    CHECK(!sh_rawmap_open_unsaved(NULL, 0));
+    strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "OWNID000000000000000B");
+    CHECK(sh_isbranch_detour(NULL) == 0 && sh_isbranch_detour(NULL) == 0);
+    /* An edit whose id cannot be read keeps the safe answer. */
+    sh_rawmap_set_branch_tag(0);
+    DeleteFileA(staged);
+    /* A rawmap with a row opened over a map: exactly its rows, and a fresh borrow. */
+    CHECK(write_file("rawmap_own_rows2.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    sh_rawmap_load_arm_once();
+    CHECK(sh_deser_detour(plain, (void *)1) == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_A));
+    sh_modmanifest_list_free(&cur);
+    sh_rawmap_set_branch_tag(1);
+    g_fake_edit_id[0] = 0;
+    CHECK(sh_isbranch_detour(NULL) == 1);
+    strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "BORROWED00000000000C");
+    CHECK(sh_isbranch_detour(NULL) == 1);
+    /* A browser load of another map: the engine's map, itself. */
+    sh_rawmap_swap_arm(0);
+    CHECK(sh_deser_detour(plain, (void *)1) == 1);
+    CHECK(!sh_rawmap_open_unsaved(NULL, 0) && sh_isbranch_detour(NULL) == 0);
+    sh_rawmap_set_edit_id_reader(NULL);
+    g_fake_edit_id[0] = 0;
+    g_ser_orig = NULL;
+    DeleteFileA(staged);
+    mods_end();
+}
+
 static void a_save_with_mods_writes_the_zip_beside_the_json(void)
 {
     char target[MAX_PATH], zip[MAX_PATH], status[4096];
@@ -1095,6 +1166,7 @@ int main(void)
     a_rawmap_without_its_mods_never_reaches_the_engine();
     a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
     a_rawmap_whose_mods_are_installed_loads();
+    a_rawmap_open_takes_its_own_rows_and_then_its_own_id();
     a_save_with_mods_writes_the_zip_beside_the_json();
 
     DeleteFileA(archive);

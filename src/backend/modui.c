@@ -2821,6 +2821,8 @@ static volatile LONG g_scope_launch;
 typedef struct mu_listing {
     const char **hashes, **ids;
     size_t nh, ch, ni, ci;
+    char **own;          /* hashes the listing chose itself (mu_listing_visit), one block each */
+    size_t no, co;
 } mu_listing;
 
 static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const char *s)
@@ -2851,13 +2853,38 @@ static int mu_listing_skipped(const char *hash)
     return 0;
 }
 
-/* The closure's bundle hashes are the serving index's own strings. */
+/* The build a placed name (or its closure) lists. The closure resolves each
+ * name under the listing in force, which at a load is the previous map's, so
+ * the build it reports may be one that map declared (ADD-L6 F2: a rawmap
+ * opened over a map pinning an older build saved that build). The listing
+ * instead takes, per key, what the new map serves: the build its rows declare
+ * (already listed), else the newest build of the key, as an undeclared name
+ * serves. The closure's own hashes are the serving index's strings; a chosen
+ * newest build is copied into the listing. */
 static void mu_listing_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
                              unsigned long long size, const char *name)
 {
     mu_listing *l = (mu_listing *)context;
-    (void)bundle_id; (void)version; (void)size; (void)name;
+    sh_modserve_bundle_ref newest;
+    size_t i;
+    (void)version; (void)size; (void)name;
     if (mu_listing_skipped(bundle_hash)) return;
+    for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the key */
+    if (bundle_id && sh_modserve_bundle_serving(NULL, bundle_id, &newest) && _stricmp(newest.hash, bundle_hash ? bundle_hash : "")) {
+        if (mu_listing_skipped(newest.hash)) return;
+        if (l->no == l->co) {
+            size_t nc = l->co ? l->co * 2 : 8;
+            char **na = (char **)realloc((void *)l->own, nc * sizeof *na);
+            if (!na) return;
+            l->own = na;
+            l->co = nc;
+        }
+        if ((l->own[l->no] = (char *)malloc(SH_MODSERVE_HASH_HEX + 1)) == NULL) return;
+        strcpy_s(l->own[l->no], SH_MODSERVE_HASH_HEX + 1, newest.hash);
+        mu_listing_push(&l->hashes, &l->nh, &l->ch, l->own[l->no]);
+        l->no++;
+        return;
+    }
     mu_listing_push(&l->hashes, &l->nh, &l->ch, bundle_hash);
 }
 
@@ -2883,6 +2910,8 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     changed = sh_modserve_scope_set(l.hashes, (int)l.nh, l.ids, (int)l.ni, map_open);
     free((void *)l.hashes);
     free((void *)l.ids);
+    for (i = 0; i < l.no; i++) free(l.own[i]);
+    free((void *)l.own);
     free(sub);
     return changed;
 }

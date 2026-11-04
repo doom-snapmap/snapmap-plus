@@ -1344,6 +1344,17 @@ static void ie_mods_idstr(const uint8_t *s, char *out, size_t cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
 }
 
+/* The open edit's local saved-map id, for the rawmap branch answer. */
+static int ie_mods_edit_id(char *out, size_t cap)
+{
+    uint8_t *edit = (uint8_t *)ie_mods_edit();
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!edit) return 0;
+    ie_mods_idstr(edit + IE_EDIT_LOCAL_ID, out, cap);
+    return out[0] != 0;
+}
+
 static int ie_mods_map_info(sh_modui_map_info *out)
 {
     uint8_t *edit = (uint8_t *)ie_mods_edit();
@@ -1533,6 +1544,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         sh_modui_bind(&mods);
         /* The rawmap save's "share the .zip" line and toast. */
         sh_rawmap_set_notify(ie_mods_toast, ie_mods_print);
+        sh_rawmap_set_edit_id_reader(ie_mods_edit_id);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */
 

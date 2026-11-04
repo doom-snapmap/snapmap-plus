@@ -2024,6 +2024,8 @@ int main(int argc, char **argv)
         _snprintf_s(twin, sizeof twin, _TRUNCATE, "%s\\authoring\\twin.key", tmp);
         mt_write(twin, "mod.json", "{\"id\":\"twin.key\",\"version\":\"1.0.0\",\"name\":\"Twin\",\"author\":\"t\"}");
         mt_write(twin, "assets\\generated\\image\\mods\\twin.key\\a.bimage", "the first build's bytes");
+        mt_write(twin, "assets\\generated\\decls\\entitydef\\mods\\twin.key\\thing.decl",
+                 "{\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\n}\n");
         doc = run_doc(SH_MODS_ACT_INSTALL, twin);
         CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"twin.key\""));
         h = doc ? strstr(doc, "\"bundle\":\"") : NULL;
@@ -2054,6 +2056,73 @@ int main(int argc, char **argv)
         _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, build %s)\n", beside, h2);
         CHECK(has(g_doctor, line));
         CHECK(has(g_doctor, "MODS: uninstall twin.key: dry run; add --yes to do it\n"));
+        /* A map load lists, for its placed names, the build the new map
+         * serves (its rows' build, else the newest), never the build the
+         * previous map declared: a rawmap opened over a map pinning the
+         * first build saved that build (ADD-L6 F2). */
+        {
+            static const char TWIN_MAP[] =
+                "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/twin.key/thing\","
+                "\"name\":\"\",\"state\":{}}}],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+            sh_modmanifest_list rows, cur, saved_rows;
+            sh_modmanifest_row row;
+            sh_modserve_bundle_ref first, newest;
+            char got[8][SH_MODSERVE_HASH_HEX + 1], err[256], *text, *loaded, *saved;
+            size_t tl = 0, ll = 0, sl = 0;
+            unsigned rejected = 0;
+            int n;
+            CHECK(sh_modserve_bundle_serving(NULL, "twin.key", &newest) && !_strnicmp(newest.hash, h2, 16));
+            {
+                /* The first build by its folder's hash. */
+                sh_ms_list all;
+                size_t q;
+                memset(&first, 0, sizeof first);
+                CHECK(sh_ms_enumerate(&all));
+                for (q = 0; q < all.count; q++)
+                    if (all.items[q].loaded && !strcmp(all.items[q].name, "twin.key"))
+                        strcpy_s(first.hash, sizeof first.hash, all.items[q].bundle.hash);
+                sh_ms_list_free(&all);
+                CHECK(first.hash[0] && !_strnicmp(first.hash, h1, 16));
+            }
+            sh_modserve_scope_enable(1);
+            /* The map open before pins the first build by its row. */
+            memset(&rows, 0, sizeof rows);
+            memset(&row, 0, sizeof row);
+            strcpy_s(row.id, sizeof row.id, "twin.key");
+            strcpy_s(row.version, sizeof row.version, "1.0.0");
+            strcpy_s(row.bundle, sizeof row.bundle, first.hash);
+            CHECK(sh_modmanifest_row_add_name(&row, "mods/twin.key/thing"));
+            CHECK(sh_modmanifest_list_add(&rows, &row));
+            sh_modmanifest_row_free(&row);
+            text = sh_modmanifest_write(TWIN_MAP, sizeof TWIN_MAP - 1, &rows, &tl, err, sizeof err);
+            sh_modmanifest_list_free(&rows);
+            CHECK(text != NULL);
+            loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+            if (text) HeapFree(GetProcessHeap(), 0, text);
+            n = sh_modserve_scope_hashes(got, 8);
+            CHECK(n == 1 && !_stricmp(got[0], first.hash));
+            /* The map opened over it carries no row and places the tile. */
+            loaded = sh_modmanifest_prepare_load(TWIN_MAP, sizeof TWIN_MAP - 1, &ll);
+            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+            CHECK(sh_modmanifest_current(&cur) == 0);
+            sh_modmanifest_list_free(&cur);
+            n = sh_modserve_scope_hashes(got, 8);
+            CHECK(n == 1 && !_stricmp(got[0], newest.hash));
+            /* Its first save records the newest build. */
+            saved = sh_modmanifest_on_save(TWIN_MAP, sizeof TWIN_MAP - 1, &sl);
+            CHECK(saved != NULL);
+            memset(&saved_rows, 0, sizeof saved_rows);
+            if (saved) {
+                sh_modmanifest_read(saved, sl, &saved_rows, &rejected);
+                HeapFree(GetProcessHeap(), 0, saved);
+            }
+            CHECK(saved_rows.count == 1 && !_stricmp(saved_rows.rows[0].bundle, newest.hash));
+            sh_modmanifest_list_free(&saved_rows);
+            CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+            sh_modmanifest_reset();
+            sh_modserve_scope_enable(0);
+        }
         /* The tab names one folder, as before. */
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "twin.key");
         CHECK(has(doc, "\"install\":{\"folder\":\"twin.key\",") && !has(doc, "\"folders\":"));

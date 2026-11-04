@@ -143,6 +143,13 @@ int sh_rawmap_open_map_mods(void);
  * map's identity until the first save. */
 int sh_rawmap_open_unsaved(char *name, size_t cap);
 
+/* The edit's saved-map id (its local id idStr) for the branch answer: 1 with
+ * `out` filled, else 0. iface_engine.c binds it. While the edit of a map the
+ * swap opened still holds the id its reload borrowed, Save asks for a name;
+ * once a save gave it its own id, Save writes that map (the engine answers). */
+typedef int (*sh_rawmap_edit_id_fn)(char *out, size_t cap);
+void sh_rawmap_set_edit_id_reader(sh_rawmap_edit_id_fn fn);
+
 /* Where the save and load messages go besides the log: the editor toast and
  * the game console (iface_engine.c binds both). Either may be NULL. */
 void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), void (*print)(const char *line));
