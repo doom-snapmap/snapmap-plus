@@ -355,7 +355,33 @@ static char *run_doc(int action, const char *arg)
     return fetch();
 }
 
-static int has(const char *doc, const char *needle) { return doc && strstr(doc, needle) != NULL; }
+/* Install by hash (DESIGN-additive 4) names the second build of a key's
+ * folder <key>@<hash16>, not <key>@<version>: once the test installs it,
+ * g_k2 holds that folder name, and K2 rewrites the folder name the
+ * expectations below spell as "alex.r2-imp@1.0.1" (never the entry key
+ * "alex.r2-imp@1.0.1+1", nor the id@version a "map: mod" line starts with). */
+static char g_k2[160];
+static const char *K2(const char *lit)
+{
+    static char ring[8][4096];
+    static int at;
+    static const char from[] = "alex.r2-imp@1.0.1";
+    char *out = ring[at++ & 7];
+    const char *p = lit;
+    size_t n = 0, fl = sizeof from - 1;
+    if (!g_k2[0] || !lit) return lit;
+    while (*p && n + 200 < sizeof ring[0]) {
+        if (!strncmp(p, from, fl) && p[fl] != '+' && !(p - lit >= 9 && !strncmp(p - 9, "map: mod ", 9))) {
+            size_t kl = strlen(g_k2);
+            memcpy(out + n, g_k2, kl);
+            n += kl;
+            p += fl;
+        } else out[n++] = *p++;
+    }
+    out[n] = 0;
+    return out;
+}
+static int has(const char *doc, const char *needle) { needle = K2(needle); return doc && strstr(doc, needle) != NULL; }
 
 /* The JSON object of the row whose key is `key` inside doc's "mods". */
 static int bundle_has(const char *doc, const char *key, const char *needle)
@@ -698,8 +724,13 @@ int main(int argc, char **argv)
         free(desc);
     }
     doc = run_doc(SH_MODS_ACT_INSTALL, src);
-    CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"alex.r2-imp@1.0.1\""));
-    strcpy_s(key2, sizeof key2, "alex.r2-imp@1.0.1");
+    {
+        const char *k = doc ? strstr(doc, "\"key\":\"alex.r2-imp@") : NULL;
+        size_t kl = 0;
+        if (k) { k += 7; while (k[kl] && k[kl] != '"' && kl + 1 < sizeof g_k2) kl++; memcpy(g_k2, k, kl); g_k2[kl] = 0; }
+    }
+    CHECK(has(doc, "\"ok\":true") && g_k2[0] && strlen(g_k2) == strlen("alex.r2-imp@") + 16);
+    strcpy_s(key2, sizeof key2, g_k2);
     {
         const char *h = doc ? strstr(doc, "\"bundle\":\"") : NULL;
         if (h) { memcpy(hash2, h + 10, 64); hash2[64] = 0; }
@@ -731,7 +762,7 @@ int main(int argc, char **argv)
     CHECK(!has(doc, "\"key\":\"alex.r2-imp@1.0.1\""));
     free(doc);
     /* Only confirmed keys, and the newest build never. */
-    doc = run_doc(SH_MODS_ACT_PRUNE_APPLY, "alex.r2-imp@1.0.1\n");
+    doc = run_doc(SH_MODS_ACT_PRUNE_APPLY, K2("alex.r2-imp@1.0.1\n"));
     CHECK(has(doc, "\"ok\":false") && has(doc, "\"removed\":[]"));
     free(doc);
     {
@@ -1258,9 +1289,9 @@ int main(int argc, char **argv)
         printf("-- the console verbs share the dry runs and actions; --yes performs them\n");
         {
             const char *map_argv[] = { "map" };
-            const char *rm_argv[] = { "map", "remove", "alex.r2-imp@1.0.1" };
-            const char *un_argv[] = { "uninstall", "alex.r2-imp@1.0.1" };
-            const char *un_yes[] = { "uninstall", "alex.r2-imp@1.0.1", "--yes" };
+            const char *rm_argv[] = { "map", "remove", g_k2 };
+            const char *un_argv[] = { "uninstall", g_k2 };
+            const char *un_yes[] = { "uninstall", g_k2, "--yes" };
             const char *bad[] = { "map", "frob" };
             const char *other[] = { "list" };
             g_doctor[0] = 0;

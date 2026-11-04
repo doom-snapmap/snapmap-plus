@@ -3,10 +3,11 @@
  *
  *   <name>.json                the map text (manifest rows included) or the
  *                              prefab file (its "snapmapPlus" block, prefab_block.h)
- *   mods/<folder>/mod.json     each mod the rows name, exactly as it is installed:
- *   mods/<folder>/assets/...   the store folder's own name (<id>, or <id>@<version>
- *                              when the store holds two folders for one id) and
- *                              its mod.json and carried files byte for byte
+ *   mods/<folder>/mod.json     each mod the rows name, at the hash the row
+ *   mods/<folder>/assets/...   declares, as the folder it is installed as (the
+ *                              store folder's own name: <key>, or <key>@<hash16>
+ *                              for a later build of the key), its mod.json and
+ *                              carried files byte for byte
  *
  * There is no index, no bundle.json and no canonical manifest: the .json's
  * rows name the bundles, and each carried mod.json records its own bundle
@@ -17,19 +18,26 @@
  * also accepts deflate (8), so a file repacked by another tool still imports.
  * No ZIP64: an export is limited to 65535 entries and 4 GiB.
  *
- * Import is the ordinary install of each carried folder whose bundle a row
- * names: a folder the store already serves (the bundle hash, or an alias of
- * it) is skipped and counted as already installed; otherwise the folder is
- * copied out of the export to a temporary folder and installed from there
- * (sh_ms_install_as, building and verifying it as any folder from elsewhere),
- * under its own name when no folder of its id is installed and that name is
- * free, else beside the installed id under the store's own name
- * (<id>@<version>). An installed folder of the same id and version with other
- * content refuses the import, because nothing installed is ever rewritten.
- * The built bundle hash must equal the row's; on any refusal the folders this
- * import installed are removed again. The serving index is rebuilt after an
- * install. A ZIP in the retired bundle form of earlier releases (any
- * bundle.canonical.json, or an export.json index) is refused.
+ * Export by hash (DESIGN-additive 4): each row's bundle is carried at exactly
+ * its hash, from the installed folder of that build (its last good build
+ * snapshot's files while the folder's latest build is failed), else from a
+ * snapshot at that hash under mods\.builds\ when the folder moved on, else
+ * from the folder an alias of the hash names (the author rebuilt it in
+ * place), whose build the exported rows then name.
+ *
+ * Import is the ordinary install by hash of each carried folder whose bundle
+ * a row names: a folder the store already serves (the bundle hash, or an
+ * alias of it) is skipped and counted as already installed; otherwise the
+ * folder is copied out of the export to a temporary folder and installed from
+ * there (sh_ms_install_with, origin "imported", building and verifying it as
+ * any folder from elsewhere), under its key when no folder of the key is
+ * installed and that name is free, else beside the installed builds of its
+ * key as <key>@<hash16>. Another build of the key is never written over and
+ * never refuses the import. The built bundle hash must equal the row's; on any
+ * refusal the folders this import installed are removed again. The serving
+ * index is rebuilt after an install. A ZIP in the retired bundle form of
+ * earlier releases (any bundle.canonical.json, or an export.json index) is
+ * refused.
  *
  * File work only, no network. Paths are UTF-8 unless marked ACP.
  */

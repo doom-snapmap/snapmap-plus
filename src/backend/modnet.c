@@ -88,7 +88,19 @@ const char *modnet_code_text(int code)
     case MODNET_E_RATE:        return "rate limited";
     case MODNET_E_BLOCKED:     return "blocked by takedown";
     case MODNET_E_UNAVAILABLE: return "the mod store is unavailable";
+    case MODNET_E_GAME:        return "it needs game content this game does not hold";
     default:                   return "error";
+    }
+}
+
+int modnet_unreachable(int code)
+{
+    switch (code) {
+    case MODNET_E_CONFIG: case MODNET_E_NET: case MODNET_E_TIMEOUT: case MODNET_E_HTTP: case MODNET_E_PROTOCOL:
+    case MODNET_E_RATE: case MODNET_E_UNAVAILABLE:
+        return 1;
+    default:
+        return 0;
     }
 }
 

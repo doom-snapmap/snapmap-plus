@@ -38,6 +38,7 @@
  *     console verbs and the slot's outputs; prefab names.
  * argv[1] is unused; -v echoes the backend log. */
 #define WIN32_LEAN_AND_MEAN
+#include "mod_store_stub.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,8 @@
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/module_prefab_map.h"
+#include "../src/backend/modsync.h"
+#include "../src/backend/modnet.h"
 #include "../src/common/snapmap_plus_iface.h"
 #include "mod_test_util.h"
 
@@ -681,7 +684,7 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 2);
     sh_modmanifest_list_free(&rows);
 
-    printf("-- the store lacks it: refused, naming the mod and the ZIP, never placed\n");
+    printf("-- the store lacks it: denied (never published), naming the mod and the ZIP, never placed\n");
     reset_fakes();
     F.store = 0;
     rows_of(&rows, door, 1);
@@ -689,11 +692,9 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(r == SH_PREFAB_MODS_HELD);
     tick(3);
     CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod 2.0, which you do not have and the mod "
-                                "store does not hold. Ask the prefab's author for its .zip export, which carries the mods."));
-    CHECK(F.asks == 1 && F.ask_buttons == 0 &&
-          !strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed. Ask its "
-                              "author for the .zip export."));
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that is not installed and was never published. "
+                                "Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
 
     printf("-- the store cannot be reached: said so, nothing downloaded\n");
@@ -703,11 +704,9 @@ static void resolving(const sh_modmanifest_row *door)
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     tick(3);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
-    CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod 2.0, which you do not have, and the mod "
-                                "store could not be reached. Try again, or ask the prefab's author for its .zip export, "
-                                "which carries the mods."));
-    CHECK(!strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed. The mod store "
-                              "could not be reached; try again, or ask its author for the .zip export."));
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that could not be downloaded: the mod store did "
+                                "not answer. Connect and try again."));
+    CHECK(!strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
 
     printf("-- No: nothing downloaded, the prefab is not placed\n");
@@ -1129,6 +1128,299 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     }
 }
 
+/* ==================================================================== */
+/* The denial gate end to end: the real probe and fetch (modsync.c,       */
+/* modnet.c) against the loopback store stub (mod_store_stub.h), the real */
+/* serving index's asset rule, and a rawmap hold.                         */
+/* ==================================================================== */
+
+static char g_e_source[260];
+static int g_e_resumes;
+static int g_e_game_lacks;
+
+static int e_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+{
+    (void)c;
+    return sh_modserve_row_served_for(row, subject, cause, cap);
+}
+static int e_rescan(void *c) { (void)c; return sh_modserve_index_rescan() >= 0; }
+static int e_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, volatile int *cancel)
+{
+    modnet_io io;
+    modsync_stats st;
+    (void)c; (void)progress;
+    memset(&io, 0, sizeof io);
+    io.cancel = (volatile long *)cancel;
+    F.fetches++;
+    if (modsync_fetch_bundle(hash, &io, &st)) return 0;
+    if (st.game_lacks) strcpy_s(g_e_source, sizeof g_e_source, st.game_source);
+    return st.code ? st.code : -1;
+}
+static int e_fetch_detail(void *c, const char *hash, char *out, size_t cap)
+{
+    (void)c; (void)hash;
+    if (!g_e_source[0]) return 0;
+    strcpy_s(out, cap, g_e_source);
+    return 1;
+}
+static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
+{
+    modnet_io io;
+    modsync_probe pr;
+    (void)c;
+    memset(&io, 0, sizeof io);
+    io.cancel = (volatile long *)cancel;
+    (void)modsync_probe_bundle(hash, &io, &pr);
+    memset(out, 0, sizeof *out);
+    out->found = pr.found > 0 ? SH_MODPUB_STORE_HAS : pr.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
+    out->game_lacks = pr.game_lacks;
+    strcpy_s(out->source, sizeof out->source, pr.source);
+    strcpy_s(out->name, sizeof out->name, pr.name);
+    return out->found;
+}
+static int e_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
+static int e_other_build(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name, size_t name_cap)
+{
+    sh_modserve_bundle_ref ref;
+    (void)c;
+    if (!sh_modserve_row_other_build(row, &ref)) return 0;
+    strcpy_s(hash, hash_cap, ref.hash);
+    name[0] = 0;
+    (void)name_cap;
+    return 1;
+}
+static int e_resume(void *c, const sh_modpub_resume *r) { (void)c; (void)r; g_e_resumes++; return 1; }
+
+static const sh_modpub_ops E_OPS = {
+    NULL, p_on_main, e_row_state, e_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
+    p_worker_run, e_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, e_resume, p_log,
+    NULL, p_print, e_store_probe, e_claimed, e_other_build, NULL, NULL, NULL, e_fetch_detail
+};
+
+/* A fake installed game: one file at ROCK_SRC, with the bytes a mod borrows,
+ * and (g_e_game_lacks) another revision holding other bytes there. */
+#define ROCK_SRC "generated/image/stock/rock.bimage"
+static const char ROCK_BYTES[] = "ROCK-GAME-BYTES-0123456789";
+static int e_rock_ok(unsigned long long size, const char *sha)
+{
+    char h[65];
+    sh_mb_sha256_hex(ROCK_BYTES, strlen(ROCK_BYTES), h);
+    return !g_e_game_lacks && size == strlen(ROCK_BYTES) && !strcmp(h, sha);
+}
+static int e_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+{
+    (void)ctx; (void)request;
+    if (!e_rock_ok(size, sha)) return SH_MB_STOCK_ABSENT;
+    strcpy_s(source, cap, ROCK_SRC);
+    return SH_MB_STOCK_OK;
+}
+static int e_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
+{
+    (void)ctx;
+    if (g_e_game_lacks || strcmp(source, ROCK_SRC)) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(ROCK_BYTES, strlen(ROCK_BYTES), sha);
+    *size = strlen(ROCK_BYTES);
+    return SH_MB_STOCK_OK;
+}
+static int e_verify(void *ctx, const char *source, const char *sha, unsigned long long *size)
+{
+    (void)ctx;
+    if (strcmp(source, ROCK_SRC)) return SH_MB_STOCK_ABSENT;
+    if (!e_rock_ok(strlen(ROCK_BYTES), sha)) return SH_MB_STOCK_MISMATCH;
+    if (size) *size = strlen(ROCK_BYTES);
+    return SH_MB_STOCK_OK;
+}
+static int e_read(void *ctx, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    int r = e_verify(ctx, source, sha, NULL);
+    if (r != SH_MB_STOCK_OK) return r;
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, sizeof ROCK_BYTES);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, ROCK_BYTES, strlen(ROCK_BYTES));
+    *len = strlen(ROCK_BYTES);
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops E_GAME = { NULL, e_match, e_identify, e_verify, e_read };
+
+/* Install a one-image mod (and, with `borrow`, a borrowed game image) from src. */
+static int e_install(const char *src, const char *id, const char *name, const char *bytes, int borrow,
+                     sh_modmanifest_row *row, char *folder_out, size_t folder_cap)
+{
+    char json[256], rel[200], key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    int ok;
+    _snprintf_s(json, sizeof json, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"%s\"}", id, name);
+    mt_write(src, "mod.json", json);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\own.bimage", id);
+    mt_write(src, rel, bytes);
+    if (borrow) {
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\rock.bimage", id);
+        mt_write(src, rel, ROCK_BYTES);
+    }
+    memset(&b, 0, sizeof b);
+    ok = sh_ms_install_from_folder(src, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+    if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
+    memset(row, 0, sizeof *row);
+    if (ok) {
+        strcpy_s(row->id, sizeof row->id, b.id);
+        strcpy_s(row->version, sizeof row->version, b.version);
+        strcpy_s(row->bundle, sizeof row->bundle, b.hash);
+        row->size = b.total_size;
+        if (folder_out) strcpy_s(folder_out, folder_cap, key);
+    }
+    sh_mb_free(&b);
+    return ok;
+}
+
+static void e_stub_drop(const char *hash)
+{
+    int i;
+    EnterCriticalSection(&g_stub.cs);
+    for (i = 0; i < g_stub.nbundles; i++) if (!strcmp(g_stub.bundles[i].hash, hash)) g_stub.bundles[i].hash[0] = 0;
+    LeaveCriticalSection(&g_stub.cs);
+}
+
+/* Hold a rawmap naming `row` and run it to the end: the one-button notice, or
+ * the question (answered `answer`, 0 to leave it asked). */
+static void e_hold(const sh_modmanifest_row *row, int answer)
+{
+    sh_modmanifest_list rows;
+    memset(&rows, 0, sizeof rows);
+    sh_modmanifest_list_add(&rows, row);
+    sh_modpub_test_reset();   /* the last notice, left asked, goes */
+    memset(&F, 0, sizeof F);
+    F.answer = answer;
+    CHECK(sh_modpub_rawmap_hold(&rows, "e2e.json") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick(6);
+}
+
+static void gate_end_to_end(const char *tmp)
+{
+    char url[64], author[MAX_PATH * 2], player[MAX_PATH * 2], srcd[MAX_PATH * 2], folder[SH_MS_KEY_MAX + 1];
+    char want[1024];
+    sh_modmanifest_row gone, never, borrow, twob1, twob2;
+    modsync_stats st;
+    printf("-- the denial gate against the loopback store: each cause worded, the other-build prompt\n");
+    CHECK(stub_start() > 0);
+    stub_url(url, sizeof url);
+    CHECK(modnet_set_base_url(url));
+    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\e2e_author", tmp);
+    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\e2e_player", tmp);
+    sh_modpub_test_reset();
+    sh_modpub_test_set_ops(&E_OPS);
+
+    /* The author's machine: four mods built, three published (claims kept). */
+    CHECK(sh_ms_set_root(author));
+    sh_mb_set_stock_ops(&E_GAME);
+    g_e_game_lacks = 0;
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\gone", tmp);
+    CHECK(e_install(srcd, "test.gone", "Gone Mod", "gone bytes", 0, &gone, NULL, 0));
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\never", tmp);
+    CHECK(e_install(srcd, "test.never", "Never Mod", "never bytes", 0, &never, NULL, 0));
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\borrow", tmp);
+    CHECK(e_install(srcd, "test.borrow", "Borrowing Mod", "borrow bytes", 1, &borrow, NULL, 0));
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\twob1", tmp);
+    CHECK(e_install(srcd, "test.twob", "Two Builds", "first build bytes", 0, &twob1, NULL, 0));
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\twob2", tmp);
+    CHECK(e_install(srcd, "test.twob", "Two Builds", "second build bytes", 0, &twob2, folder, sizeof folder));
+    CHECK(strcmp(twob1.bundle, twob2.bundle) && !strncmp(folder, "test.twob@", 10));   /* installed beside */
+    {
+        const char *g[] = { gone.bundle }, *b[] = { borrow.bundle }, *t[] = { twob2.bundle };
+        CHECK(modsync_upload_bundles(g, 1, "map-gone", NULL, &st));
+        CHECK(modsync_upload_bundles(b, 1, "map-borrow", NULL, &st));
+        CHECK(modsync_upload_bundles(t, 1, "map-twob", NULL, &st));
+    }
+    CHECK(sh_modserve_index_build(author) >= 4);
+
+    /* Cause 1, on the author's machine: the map was published from here (a
+     * claim names the bundle), the bundle was taken down at the store, and
+     * the author's folder is gone. */
+    e_stub_drop(gone.bundle);
+    {
+        char path[MAX_PATH * 2];
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.gone", author);
+        CHECK(sh_ms_remove_folder(path));
+        CHECK(sh_modserve_index_build(author) >= 3);
+    }
+    e_hold(&gone, 0);
+    CHECK(!strcmp(F.last_print, "This map needs test.gone at a build that is no longer available: its author "
+                                "unpublished it, or it was removed. This is permanent on this machine."));
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print) && F.fetches == 0);
+    printf("    cause 1: %s\n", F.last_ask);
+
+    /* Cause 3: never published, and no folder at its hash. */
+    {
+        char path[MAX_PATH * 2];
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.never", author);
+        CHECK(sh_ms_remove_folder(path));
+        CHECK(sh_modserve_index_build(author) >= 2);
+    }
+    e_hold(&never, 0);
+    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that is not installed and was never published. "
+                              "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
+    printf("    cause 3: %s\n", F.last_ask);
+
+    /* The player's machine: nothing installed but the first build of test.twob. */
+    CHECK(sh_ms_set_root(player));
+    _snprintf_s(srcd, sizeof srcd, _TRUNCATE, "%s\\e2e_src\\twob1", tmp);
+    CHECK(e_install(srcd, "test.twob", "Two Builds", "first build bytes", 0, &twob1, folder, sizeof folder));
+    CHECK(!strcmp(folder, "test.twob"));
+    CHECK(sh_modserve_index_build(player) == 1);
+
+    /* Cause 1 on a player's machine reached through a published path is the
+     * hold's own test (modpublished_test); here the rawmap of a mod nobody
+     * published reads cause 3 the same way. */
+    e_hold(&gone, 0);
+    CHECK(strstr(F.last_ask, "This map needs test.gone at a build that is not installed and was never published.") == F.last_ask);
+
+    /* Cause 4: the store has it, but its borrow names a file this game holds
+     * with other bytes (another game revision). */
+    g_e_game_lacks = 1;
+    e_hold(&borrow, 0);
+    CHECK(!strcmp(F.last_ask, "This map needs Borrowing Mod (test.borrow) at a build that needs a file this game does not "
+                              "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent on "
+                              "this machine."));
+    CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
+    printf("    cause 4: %s\n", F.last_ask);
+    g_e_game_lacks = 0;
+
+    /* Cause 2: the store setting points where nothing answers. */
+    CHECK(modnet_set_base_url("http://127.0.0.1:1"));
+    e_hold(&twob2, 0);
+    CHECK(!strcmp(F.last_ask, "This map needs test.twob at a build that could not be downloaded: the mod store did not "
+                              "answer. Connect and try again."));
+    printf("    cause 2: %s\n", F.last_ask);
+    CHECK(modnet_set_base_url(url));
+
+    /* Installed at another build: obtainable. The question names both
+     * builds; Yes downloads the map's build by hash and installs it beside. */
+    e_hold(&twob2, 1);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "This map needs Two Builds (test.twob) at build %.16s; you have build %.16s. "
+                "Download build %.16s (under 0.1 MB) and install it beside yours?", twob2.bundle, twob1.bundle, twob2.bundle);
+    CHECK(F.asks == 1 && F.ask_buttons == 6 && !strcmp(F.last_ask, want));
+    printf("    other build: %s\n", F.last_ask);
+    for (int i = 0; i < 200 && sh_modpublished_holding(); i++) tick(1);
+    CHECK(!sh_modpublished_holding() && F.fetches == 1 && g_e_resumes == 1);
+    {
+        char beside[SH_MS_KEY_MAX + 1], path[MAX_PATH * 2];
+        _snprintf_s(beside, sizeof beside, _TRUNCATE, "test.twob@%.16s", twob2.bundle);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", player, beside);
+        CHECK(mt_exists(path));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.twob\\mod.json", player);
+        CHECK(mt_exists(path));
+        CHECK(sh_modserve_bundle_state(twob1.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(twob2.bundle, NULL, 0) == 1);
+    }
+
+    sh_mb_set_stock_ops(NULL);
+    sh_modpub_test_reset();
+    sh_modpub_test_set_ops(NULL);
+    modnet_shutdown();
+    stub_stop();
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], libA[MAX_PATH * 2];
@@ -1154,6 +1446,7 @@ int main(int argc, char **argv)
     resolving(&door);
     resolve_through_slot(libA, &door);
     zip(tmp, libA, storeA, &door);
+    gate_end_to_end(tmp);
 
     sh_modpub_test_reset();
     sh_ms_set_root(NULL);

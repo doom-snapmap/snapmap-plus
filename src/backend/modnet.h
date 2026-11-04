@@ -58,8 +58,18 @@ enum {
     MODNET_E_REFUSED     = -14,   /* 400, 411, 415, 422: the store refused the content */
     MODNET_E_RATE        = -15,   /* 429 */
     MODNET_E_BLOCKED     = -16,   /* 451: on the takedown list */
-    MODNET_E_UNAVAILABLE = -17    /* 5xx */
+    MODNET_E_UNAVAILABLE = -17,   /* 5xx */
+    /* Not a store answer: the bundle was obtained, but a borrow (stock
+     * pointer) in it names game bytes this machine does not hold, a different
+     * game revision, so it cannot be installed here (DESIGN-additive 2.8,
+     * case 4). modsync sets it; no request returns it. */
+    MODNET_E_GAME        = -18
 };
+
+/* The codes that mean the store could not be asked or did not answer:
+ * the network, a timeout, the address, 5xx, 429, an unexpected or malformed
+ * response. 1 for those, 0 otherwise (an answer, a refusal, a local error). */
+int modnet_unreachable(int code);
 
 typedef struct modnet_result {
     int  code;                    /* MODNET_OK or a MODNET_E_ value */

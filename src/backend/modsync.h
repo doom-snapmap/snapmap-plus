@@ -17,13 +17,17 @@
  * retry could fix is queued in its "pending" section and retried by
  * modsync_retry_pending.
  *
- * Download: the bundle manifest is fetched and verified against its hash;
+ * Download (install by hash, DESIGN-additive 4): the bundle manifest is
+ * fetched and verified against its hash; a borrow the installed game lacks
+ * refuses it before anything is fetched (MODNET_E_GAME, the source named);
  * each file is copied from an installed mod that holds the same bytes, else
- * fetched, and verified; the folder <data>\mods\<id>\ (else <id>@<version>,
- * sh_mb_folder_name) gets mod.json (an author block from the manifest and the
- * product block) and assets\, is verified by sh_ms_verify, and the serving
- * index is rebuilt. A bundle whose content an installed mod of the same id
- * already serves is not stored twice: its hash is recorded as an alias.
+ * fetched, and verified; the folder <data>\mods\<key>\ for the first build of
+ * its key, else <key>@<hash16> beside the others (sh_ms_build_folder_name),
+ * gets mod.json (an author block from the manifest and the product block,
+ * origin "download") and assets\, is verified by sh_ms_verify, and the
+ * serving index is rebuilt. Nothing installed is replaced. A bundle whose
+ * content an installed mod of the same key already serves is not stored
+ * twice: its hash is recorded as an alias.
  *
  * Every call blocks and does file and network work: never on DOOM's main
  * thread for the network calls. Calls into the store are serialised by
@@ -58,6 +62,8 @@ typedef struct modsync_stats {
     char key[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* download: the installed folder (relative) */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
     char cause[256];
+    int game_lacks;                 /* download: refused because a borrow names game bytes this machine lacks */
+    char game_source[260];          /* that borrow's installed source path */
 } modsync_stats;
 
 /* Serialise store work across the command and worker threads: the store
@@ -104,6 +110,8 @@ typedef struct modsync_install_info {
     unsigned long long bytes_fetched;
     int already_installed;
     char rel[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* the folder under mods\ */
+    int game_lacks;                 /* refused: a borrow names game bytes this machine lacks */
+    char game_source[260];          /* that borrow's installed source path */
 } modsync_install_info;
 
 /* Install a bundle from its canonical manifest text (whose SHA-256 must be
@@ -118,5 +126,31 @@ int  modsync_install_manifest(const char *canonical, size_t len, const char *has
 /* The installed, usable bundle with this hash: 1 and its folder (UTF-8),
  * else 0. */
 int  modsync_find_installed(const char *hash, char *folder, size_t cap);
+
+/* ------------------------------------------------------ the gate's probe ---- */
+
+/* What the denial gate (modpublished.h, sh_modpub_gate_decide) asks the mod
+ * store about one bundle before the player is asked anything. */
+typedef struct modsync_probe {
+    int found;                      /* 1 the store holds it, 0 absent (404, or 451 on the takedown
+                                       list), -1 the store could not be asked or did not answer */
+    int code;                       /* the MODNET_ code of GET /mods/bundle/<hash> */
+    int game_lacks;                 /* found, but a borrow names game bytes this machine lacks */
+    char source[260];               /* that borrow's installed source path */
+    char name[128];                 /* found: the bundle's display name */
+    char id[SH_MB_ID_MAX + 1];      /* found: its key */
+    char version[4 * SH_MB_VERSION_MAX + 1];
+    unsigned long long size;        /* found: carried bytes */
+    char cause[256];
+} modsync_probe;
+
+/* GET the bundle manifest (at most 1 MB, nothing installed) and check each
+ * borrow against the installed game (sh_mb_stock_verify). Returns out->found.
+ * Worker thread; network. */
+int  modsync_probe_bundle(const char *bundle_hash, const modnet_io *io, modsync_probe *out);
+
+/* 1 when a claim this machine holds (the "claims" section) names the bundle:
+ * a map of this machine's was published with it and not unpublished. */
+int  modsync_claim_names(const char *bundle_hash);
 
 #endif /* SNAPMAP_PLUS_MODSYNC_H */

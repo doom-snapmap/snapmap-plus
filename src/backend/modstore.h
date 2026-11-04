@@ -9,9 +9,11 @@
  *
  * A folder is a mod when it holds mod.json (or, before its first build,
  * package.json). Folder names are the author's for a folder dropped in by
- * hand and "<id>" (else "<id>@<version>", sh_mb_folder_name) for one the
- * product creates. Identity is the id in mod.json: two folders declaring one
- * id are both kept and both listed. Stock pointers (modbundle.h) are never
+ * hand and, for one the product creates (an install, an import, a download),
+ * rule 1 of DESIGN-additive 4 (sh_ms_build_folder_name): "<key>" for the
+ * first build of a key, "<key>@<hash16>" for every later one, beside it.
+ * Identity is the bundle hash: two folders declaring one key are two builds,
+ * both kept and both listed, and a map serves the one it pins. Stock pointers (modbundle.h) are never
  * stored: they are resolved against the installed game at install and on
  * verification, and a pointer the game lacks (or holds with other bytes)
  * fails the bundle with that first cause.
@@ -26,9 +28,11 @@
  * tool (src/store, snapmap-plus-store.exe), which the installer runs.
  *
  * Installing a folder from elsewhere builds it in memory (the source folder
- * is not written), copies its mod.json author text and its carried files into
- * a new folder (a folder with the same id and version is replaced), verifies
- * the copy and records it. Verification (rehash every file) runs at install
+ * is not written) and installs by hash: a usable folder that already holds
+ * the bundle is the install (nothing is copied); otherwise its mod.json
+ * author text and its carried files are copied into a new folder by rule 1,
+ * beside any other build of its key, never over one, the copy is verified
+ * and recorded. Nothing is refused for "same version, other files". Verification (rehash every file) runs at install
  * and on request, never at boot.
  *
  * File work only, on the calling thread; no engine calls. Every writer of the
@@ -178,16 +182,19 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* carried files copied into the store */
     int in_place;               /* the source folder was inside the store */
-    int replaced;               /* a folder of the same id@version was replaced */
+    int replaced;               /* the named target (as_name), or a damaged copy of this bundle, was replaced */
+    int present;                /* a usable folder already holds this bundle: nothing was copied */
     unsigned stock_files;       /* stock pointers: nothing stored for them */
     unsigned long long stock_bytes;   /* their installed size */
 } sh_ms_install_stats;
 
 /* Build `folder`: in place when it is a folder of the store (its mod.json
- * product block is written), else into a new store folder named
- * `as_name` when given, else by sh_mb_folder_name (a folder holding the
- * same id and version is replaced); verify the result and record it in the
- * build cache. `resolver` may be NULL; the store's installed bundles are
+ * product block is written), else by hash: when a usable folder already
+ * holds the built bundle, that folder is the result (stats->present, nothing
+ * copied); else into a new store folder named `as_name` when given (a folder
+ * of that name with the same id and version is replaced: a migration's
+ * target), else by sh_ms_build_folder_name, beside every other build of the
+ * key; verify the result and record it in the build cache. `resolver` may be NULL; the store's installed bundles are
  * consulted in addition to it. On success name_out holds the folder name.
  * bundle_out (optional) receives the built bundle; release it with
  * sh_mb_free. Returns 1 on success, else 0 with the first cause. */
@@ -197,6 +204,22 @@ int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolve
 int  sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
                       char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                       sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+/* The same, recording `origin` (SH_MB_ORIGIN_*, SH_MS_ORIGIN_IMPORTED; NULL:
+ * "install") in the new folder's product block. */
+#define SH_MS_ORIGIN_IMPORTED "imported"   /* carried by a rawmap or prefab ZIP */
+int  sh_ms_install_with(const char *folder, const char *as_name, const char *origin, const sh_mb_resolver *resolver,
+                        char *name_out, size_t name_cap, sh_ms_install_stats *stats,
+                        sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+
+/* Rule 1 (DESIGN-additive 4): the folder name under `mods_root` (UTF-8) for
+ * the build of `key` at `hash`. With no folder of the key installed
+ * (`key_installed` 0) the key itself when that name is free; else, and for
+ * every later build, "<key>@<first 16 hex of hash>", then "<key>@<hash16>-2"
+ * and so on. Returns 1 with a free name, 2 with the name of a folder that
+ * already holds a build at `hash` (placed again when it is damaged), 0 when
+ * no name is free. */
+int  sh_ms_build_folder_name(const char *mods_root, const char *key, const char *hash, int key_installed,
+                             char *out, size_t cap);
 
 typedef struct sh_ms_verify_stats {
     unsigned files, bytes_mb, entries;

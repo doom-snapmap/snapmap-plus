@@ -112,6 +112,15 @@ typedef struct fake {
     int other_a;                     /* another build of alex.pink-imp: 1 serves its names, 2 lacks one */
     int prints;
     char last_print[1024];
+    char prints_all[8192];
+    /* the gate */
+    int probe_ops;                   /* 1: store_probe is bound (else store_has answers alone) */
+    int game_lacks_a;                /* the store has alex.pink-imp, but its borrow names a file this game lacks */
+    int claimed_a;                   /* a claim this machine holds names alex.pink-imp */
+    int other_build_a;               /* alex.pink-imp is installed at another build (OTHER_A) */
+    int fetch_detail_calls;
+    char product_a[32];              /* alex.pink-imp's row asks for this product version */
+    char running[32];                /* the running product's version, "" unknown */
 } fake;
 
 static fake F;
@@ -272,13 +281,64 @@ static void f_print(void *c, const char *line)
     (void)c;
     F.prints++;
     strcpy_s(F.last_print, sizeof F.last_print, line);
+    strncat_s(F.prints_all, sizeof F.prints_all, line, _TRUNCATE);
+    strncat_s(F.prints_all, sizeof F.prints_all, "\n", _TRUNCATE);
+}
+
+#define OTHER_A "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+#define ROCK    "generated/image/stock/rock.bimage"
+static int f_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
+{
+    memset(out, 0, sizeof *out);
+    out->found = f_store_has(c, hash, cancel);
+    if (!strcmp(hash, HASH_A) && out->found > 0) {
+        strcpy_s(out->name, sizeof out->name, "Pink Imp");
+        if (F.game_lacks_a) { out->game_lacks = 1; strcpy_s(out->source, sizeof out->source, ROCK); }
+    }
+    return out->found;
+}
+static int f_claimed(void *c, const char *hash) { (void)c; return F.claimed_a && !strcmp(hash, HASH_A); }
+static int f_other_build(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name, size_t name_cap)
+{
+    (void)c;
+    if (!F.other_build_a || strcmp(row->id, "alex.pink-imp")) return 0;
+    strcpy_s(hash, hash_cap, OTHER_A);
+    strcpy_s(name, name_cap, "Pink Imp");
+    return 1;
+}
+static int f_mod_name(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
+{
+    (void)c; (void)row; (void)out; (void)cap;
+    return 0;   /* nothing installed names it */
+}
+static int f_row_product(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
+{
+    (void)c;
+    if (!F.product_a[0] || strcmp(row->id, "alex.pink-imp")) return 0;
+    strcpy_s(out, cap, F.product_a);
+    return 1;
+}
+static int f_product_version(void *c, char *out, size_t cap)
+{
+    (void)c;
+    if (!F.running[0]) return 0;
+    strcpy_s(out, cap, F.running);
+    return 1;
+}
+static int f_fetch_detail(void *c, const char *hash, char *out, size_t cap)
+{
+    (void)c; (void)hash;
+    F.fetch_detail_calls++;
+    strcpy_s(out, cap, ROCK);
+    return 1;
 }
 
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
-    f_store_has, f_print
+    f_store_has, f_print, f_store_probe, f_claimed, f_other_build, f_mod_name, f_row_product,
+    f_product_version, f_fetch_detail
 };
 
 static void reset(void)
@@ -304,9 +364,19 @@ static void parse(int kind, const char *text, void *map)
     if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
 }
 
+/* One main-thread tick. Every hold asks the store first (the denial gate's
+ * probe, on the worker): a tick that finds the hold probing waits for the
+ * probe and then ticks once more, which is where the question used to be
+ * raised, so "the next tick asks" still reads as one tick. */
 static void tick(int n)
 {
-    for (int i = 0; i < n; i++) { F.ticks++; sh_modpublished_poll(); }
+    for (int i = 0; i < n; i++) {
+        int probed = 0;
+        F.ticks++;
+        sh_modpublished_poll();
+        for (int k = 0; k < 4000 && sh_modpub_test_state() == 4; k++) { Sleep(1); sh_modpublished_poll(); probed = 1; }
+        if (probed) sh_modpublished_poll();
+    }
 }
 
 /* Tick until the worker finished and the tick observed it. */
@@ -799,7 +869,7 @@ static void the_question(void)
 /* Tick until the store check has finished and the hold moved on. */
 static void tick_until_probed(void)
 {
-    for (int i = 0; i < 2000 && sh_modpub_test_state() == 4; i++) { tick(1); Sleep(1); }
+    for (int i = 0; i < 4000 && sh_modpub_test_state() == 4; i++) { F.ticks++; sh_modpublished_poll(); Sleep(1); }
 }
 
 static void rawmap_missing_counts_rows(void)
@@ -836,7 +906,7 @@ static void rawmap_missing_counts_rows(void)
 static void rawmap_store_lacks_refuses(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a rawmap whose mods the store lacks is refused, naming each mod and the .zip\n");
+    printf("-- a rawmap whose mods the store lacks is denied: cause 3, never published\n");
     reset();
     F.store_b = 0;                       /* bob.room was never published */
     CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2);
@@ -846,18 +916,16 @@ static void rawmap_store_lacks_refuses(void)
     /* One line per row the asset rule names, then the store check. */
     CHECK(F.prints == 3 && strstr(F.last_print, "Rawmap shared.json needs 2 mods you do not have") != NULL);
     tick_until_probed();
-    CHECK(F.store_calls == 2);           /* both asked, so the refusal can name every one */
+    CHECK(F.store_calls == 2);           /* both asked, so the denial can name every one */
     CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.resumes == 0 && F.activations == 0);
-    CHECK(!strcmp(F.last_print, "Rawmap shared.json was not loaded: it needs bob.room 1, which you do not have and "
-                                "the mod store does not hold. Ask the map's author for its .zip export, which "
-                                "carries the mods."));
+    CHECK(!strcmp(F.last_print, "This map needs bob.room at a build that is not installed and was never published. "
+                                "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     tick(2);
     CHECK(F.asks == 1 && F.ask_buttons == 0);
-    /* One row: the notice is the asset rule's sentence. */
-    CHECK(!strcmp(F.last_ask, "This map uses bob.room, which is not installed. The map was not loaded. Ask its author "
-                              "for the .zip export."));
+    CHECK(!strcmp(F.last_ask, "This map needs bob.room at a build that is not installed and was never published. "
+                              "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
 
-    printf("-- a store that cannot be reached is said so, and nothing is downloaded\n");
+    printf("-- a store that cannot be reached: cause 2, nothing downloaded\n");
     reset();
     F.store_a = -1;
     CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
@@ -866,9 +934,9 @@ static void rawmap_store_lacks_refuses(void)
     tick_until_probed();
     tick(2);
     CHECK(F.fetch_calls == 0 && F.resumes == 0 && !sh_modpublished_holding());
-    CHECK(!strcmp(F.last_ask, "This map uses alex.pink-imp, which is not installed. The map was not loaded. The mod "
-                              "store could not be reached; try again, or ask its author for the .zip export."));
-    CHECK(strstr(F.last_print, "the mod store could not be reached") != NULL);
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that could not be downloaded: the mod store did "
+                              "not answer. Connect and try again."));
+    CHECK(!strcmp(F.last_print, F.last_ask));
 }
 
 static void rawmap_store_has_downloads_and_reopens(void)
@@ -912,6 +980,254 @@ static void rawmap_store_has_downloads_and_reopens(void)
     sh_modmanifest_list_free(&rows);
 }
 
+/* ---- the denial gate (DESIGN-additive 2.8) ------------------------------------------------- */
+
+static void gate_decision_and_wording(void)
+{
+    sh_modpub_gate_facts f;
+    char text[1024];
+    printf("-- the gate: one decision, four causes\n");
+    memset(&f, 0, sizeof f);
+    f.store = SH_MODPUB_STORE_HAS;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);
+    f.other_build = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);   /* another build installed: obtainable */
+    f.game_lacks = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GAME_REVISION);
+    memset(&f, 0, sizeof f);
+    f.store = SH_MODPUB_STORE_ABSENT;
+    f.published = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GONE);
+    f.published = 0;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);
+    f.store = SH_MODPUB_STORE_UNREACHABLE;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_UNREACHABLE);
+    f.published = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_UNREACHABLE);
+    CHECK(sh_modpub_gate_decide(NULL) == SH_MODPUB_GATE_UNREACHABLE);
+
+    sh_modpub_gate_wording(SH_MODPUB_GATE_GONE, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that is no longer available: its "
+                        "author unpublished it, or it was removed. This is permanent on this machine."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that could not be downloaded: the mod "
+                        "store did not answer. Connect and try again."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that is not installed and was never "
+                        "published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_GAME_REVISION, "map", "Hell Guards (hell-guards-7f3k)", ROCK, text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that needs a file this game does not "
+                        "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent on "
+                        "this machine."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "prefab", "door-kit", NULL, text, sizeof text);
+    CHECK(!strcmp(text, "This prefab needs door-kit at a build that is not installed and was never published. Restore "
+                        "its folder from the Recycle Bin or load the prefab's ZIP export."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_OBTAIN, "map", "x", NULL, text, sizeof text);
+    CHECK(!text[0]);
+    if (getenv("MODPUB_TEST_WORDS")) {
+        int v;
+        for (v = 1; v <= 4; v++) {
+            sh_modpub_gate_wording(v, "map", "Hell Guards (hell-guards-7f3k)", ROCK, text, sizeof text);
+            printf("    cause %d: %s\n", v, text);
+        }
+    }
+}
+
+/* Hold a published play of ONE_MOD, run the probe, and return the notice the
+ * player is shown (ticked until the one-button notice is raised). */
+static void published_denial(int hook)
+{
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(hook, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 4 && F.asks == 0);
+    tick(3);
+}
+
+static void gate_causes_through_the_hold(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- cause 1: a published map whose bundle left the store; never asked, permanent\n");
+    reset();
+    F.probe_ops = 1;
+    F.store_a = 0;
+    published_denial(SH_MODPUB_ON_SNAP_PLAY);
+    CHECK(!sh_modpublished_holding() && F.fetch_calls == 0 && F.drop_ui == 1 && F.metadata_frees == 1);
+    CHECK(F.asks == 1 && F.ask_buttons == 0);
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that is no longer available: its author "
+                              "unpublished it, or it was removed. This is permanent on this machine."));
+    CHECK(!strcmp(F.last_print, F.last_ask));
+    /* A joiner's check words it the same (the lobby path holds the host's map). */
+    reset();
+    F.store_a = 0;
+    published_denial(SH_MODPUB_CACHE_READY);
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that is no longer available: its author "
+                              "unpublished it, or it was removed. This is permanent on this machine."));
+    /* A My Maps map published from this machine (a claim names the bundle). */
+    reset();
+    F.store_a = 0;
+    F.claimed_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(strstr(F.last_ask, "is no longer available: its author unpublished it, or it was removed.") != NULL);
+
+    printf("-- cause 2: the store did not answer\n");
+    reset();
+    F.store_a = -1;
+    published_denial(SH_MODPUB_BROWSER_PLAY);
+    CHECK(F.fetch_calls == 0 && !sh_modpublished_holding());
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that could not be downloaded: the mod store did "
+                              "not answer. Connect and try again."));
+    reset();
+    F.store_a = -1;
+    published_denial(SH_MODPUB_CACHE_READY);   /* a joiner: the same sentence */
+    CHECK(strstr(F.last_ask, "could not be downloaded: the mod store did not answer. Connect and try again.") != NULL);
+
+    printf("-- cause 3: a My Maps map never published whose folder is gone\n");
+    reset();
+    F.store_a = 0;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that is not installed and was never published. "
+                              "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    /* A prefab's placement: its own wording. */
+    reset();
+    F.store_a = 0;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick(3);
+    CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp at a build that is not installed and was never "
+                              "published. Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
+
+    printf("-- cause 4: the store has it, but a borrow names a file this game does not hold\n");
+    reset();
+    F.game_lacks_a = 1;
+    published_denial(SH_MODPUB_ON_SNAP_PLAY);
+    CHECK(F.fetch_calls == 0 && !sh_modpublished_holding());
+    CHECK(!strcmp(F.last_ask, "This map needs Pink Imp (alex.pink-imp) at a build that needs a file this game does not "
+                              "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent "
+                              "on this machine."));
+    CHECK(!strcmp(F.last_print, F.last_ask));
+
+    printf("-- the fetch's own failure is decided by the same gate\n");
+    reset();
+    F.fetch_fails = -11;                 /* MODNET_E_NOT_FOUND: purged between the probe and the fetch */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1);
+    F.answer = 1;
+    tick_until_idle();
+    tick(2);
+    CHECK(F.resumes == 0 && strstr(F.last_ask, "is no longer available: its author unpublished it") != NULL);
+    reset();
+    F.fetch_fails = -18;                 /* MODNET_E_GAME */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    tick_until_idle();
+    tick(2);
+    CHECK(F.fetch_detail_calls == 1 && strstr(F.last_ask, "(generated/image/stock/rock.bimage): a different game revision.") != NULL);
+    reset();
+    F.fetch_fails = -4;                  /* MODNET_E_NET */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    tick_until_idle();
+    tick(2);
+    CHECK(strstr(F.last_ask, "the mod store did not answer. Connect and try again.") != NULL);
+
+    printf("-- several denied: the first in the dialog, one console line each\n");
+    reset();
+    F.store_a = 0;
+    F.store_b = -1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(strstr(F.last_ask, "This map needs alex.pink-imp at a build that is no longer available") == F.last_ask);
+    CHECK(strstr(F.last_ask, "1 more mod cannot be obtained; see the console.") != NULL);
+    CHECK(strstr(F.prints_all, "This map needs bob.room at a build that could not be downloaded") != NULL);
+}
+
+static void gate_other_build_prompt(void)
+{
+    printf("-- installed at another build: obtainable; the question names both builds\n");
+    reset();
+    F.other_build_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1 && F.ask_buttons == 6);
+    CHECK(!strcmp(F.last_ask, "This map needs Pink Imp (alex.pink-imp) at build aaaaaaaaaaaaaaaa; you have build "
+                              "cccccccccccccccc. Download build aaaaaaaaaaaaaaaa (3.0 MB) and install it beside yours?"));
+    if (getenv("MODPUB_TEST_WORDS")) printf("    other build: %s\n", F.last_ask);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.resumes == 1);
+    /* With another missing mod, the list names the builds. */
+    reset();
+    F.other_build_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(!strcmp(F.last_ask, "This map needs 2 mods: alex.pink-imp (build aaaaaaaa, you have cccccccc), bob.room "
+                              "(4.0 MB). Download and install now?"));
+}
+
+static void gate_product_version(void)
+{
+    printf("-- the product-version notice: once, by name, when the running product is older\n");
+    CHECK(sh_modpub_version_compare("v0.2.1-beta.24", "0.3.0") < 0);
+    CHECK(sh_modpub_version_compare("v0.2.1-beta.24", "v0.2.1-beta.9") > 0);
+    CHECK(sh_modpub_version_compare("0.2.1", "0.2.1-beta.30") > 0);
+    CHECK(sh_modpub_version_compare("v0.2.1", "0.2.1") == 0);
+    CHECK(sh_modpub_version_compare("1.10.0", "1.9.9") > 0);
+    CHECK(sh_modpub_version_compare("0.2.1-beta", "0.2.1-beta.1") < 0);
+    CHECK(sh_modpub_version_compare("0.2.1-alpha.2", "0.2.1-beta.1") < 0);
+    reset();
+    F.installed_a = 1;
+    strcpy_s(F.product_a, sizeof F.product_a, "0.3.0");
+    strcpy_s(F.running, sizeof F.running, "v0.2.1-beta.24");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);   /* the launch goes on */
+    CHECK(!strcmp(F.last_print, "This map needs Snapmap+ 0.3.0 or later."));
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map needs Snapmap+ 0.3.0 or later."));
+    if (getenv("MODPUB_TEST_WORDS")) printf("    product: %s\n", F.last_print);
+    tick(2);
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map needs Snapmap+ 0.3.0 or later."));
+    /* Once per map and session. */
+    F.prints = 0;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(F.prints == 0 && !sh_modpub_test_notice()[0]);
+    /* A product as new as the map asks, or an unknown running version: nothing. */
+    reset();
+    F.installed_a = 1;
+    strcpy_s(F.product_a, sizeof F.product_a, "0.3.0");
+    strcpy_s(F.running, sizeof F.running, "v0.3.0");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(F.prints == 0 && !sh_modpub_test_notice()[0]);
+    reset();
+    F.installed_a = 1;
+    strcpy_s(F.product_a, sizeof F.product_a, "0.3.0");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(F.prints == 0 && !sh_modpub_test_notice()[0]);
+    /* My Maps says so too. */
+    reset();
+    F.installed_a = 1;
+    strcpy_s(F.product_a, sizeof F.product_a, "0.3.0");
+    strcpy_s(F.running, sizeof F.running, "v0.2.1-beta.24");
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(!strcmp(F.last_print, "This map needs Snapmap+ 0.3.0 or later."));
+}
+
 static void the_refusal(void)
 {
     char text[256];
@@ -949,6 +1265,10 @@ int main(void)
     rawmap_store_lacks_refuses();
     rawmap_store_has_downloads_and_reopens();
     the_refusal();
+    gate_decision_and_wording();
+    gate_causes_through_the_hold();
+    gate_other_build_prompt();
+    gate_product_version();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

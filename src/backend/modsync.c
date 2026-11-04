@@ -642,6 +642,10 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         if (!b.files[i].stock) continue;
         if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, one, sizeof one) !=
             SH_MB_STOCK_OK) {
+            /* DESIGN-additive 2.8, case 4: permanent for this machine. */
+            info->game_lacks = 1;
+            strncpy_s(info->game_source, sizeof info->game_source,
+                      b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path, _TRUNCATE);
             msy_cause(cause, cap, "refused: %s", one);
             sh_mb_free(&b);
             return 0;
@@ -677,8 +681,16 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         ok = 1;
         goto done;
     }
-    named = sh_mb_folder_name(root, b.id, b.version, hash, name, sizeof name);
-    if (!named) { msy_cause(cause, cap, "no free folder for %s@%s in the store", b.id, b.version); goto done; }
+    /* Install by hash, rule 1 (DESIGN-additive 4): the first build of a key
+     * takes the key as its folder name, every later one <key>@<hash16>
+     * beside it; nothing installed is replaced. */
+    {
+        int key_installed = 0;
+        for (i = 0; listed && i < list.count && !key_installed; i++)
+            key_installed = list.items[i].loaded && !strcmp(list.items[i].bundle.id, b.id);
+        named = sh_ms_build_folder_name(root, b.id, hash, key_installed, name, sizeof name);
+    }
+    if (!named) { msy_cause(cause, cap, "no free folder for %s at %.16s in the store", b.id, hash); goto done; }
     replace = named == 2;   /* the same bundle, damaged or unbuilt: placed again */
     strncpy_s(info->rel, sizeof info->rel, name, _TRUNCATE);
     _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, name);
@@ -1185,6 +1197,11 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     st->blobs_missing = info.blobs_fetched;
     if (!ok) {
         st->ms = msy_now_ms() - t0;
+        if (info.game_lacks) {
+            st->game_lacks = 1;
+            strncpy_s(st->game_source, sizeof st->game_source, info.game_source, _TRUNCATE);
+            return msy_stats_fail(st, MODNET_E_GAME, "%s", cause);
+        }
         return msy_stats_fail(st, src.code != MODNET_OK ? src.code : MODNET_E_REFUSED, "%s", cause);
     }
     st->already_installed = info.already_installed;
@@ -1193,6 +1210,82 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     st->ms = msy_now_ms() - t0;
     st->code = MODNET_OK;
     return 1;
+}
+
+/* ------------------------------------------------------------ probe ----- */
+
+int modsync_probe_bundle(const char *hash, const modnet_io *io, modsync_probe *out)
+{
+    modsync_probe local;
+    modnet_result r;
+    char *text = NULL, *with = NULL;
+    size_t len = 0, i;
+    sh_mb_bundle b;
+    int code;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    memset(&b, 0, sizeof b);
+    if (!modnet_valid_hash(hash)) { out->found = -1; out->code = MODNET_E_ARG; return -1; }
+    code = modnet_get_bundle(hash, &text, &len, io, &r);
+    out->code = code;
+    if (code == MODNET_E_NOT_FOUND || code == MODNET_E_BLOCKED) { out->found = 0; return 0; }
+    if (code != MODNET_OK) {
+        out->found = -1;
+        strncpy_s(out->cause, sizeof out->cause, r.message[0] ? r.message : modnet_code_text(code), _TRUNCATE);
+        return -1;
+    }
+    out->found = 1;
+    with = msy_with_bundle(text, len, hash);
+    if (with && sh_mb_load_manifest_text(with, strlen(with), &b)) {
+        if (b.name) strncpy_s(out->name, sizeof out->name, b.name, _TRUNCATE);
+        strncpy_s(out->id, sizeof out->id, b.id, _TRUNCATE);
+        strncpy_s(out->version, sizeof out->version, b.version, _TRUNCATE);
+        out->size = b.total_size;
+        /* The borrows name this player's game: one it lacks (or holds with
+         * other bytes) makes the bundle uninstallable here, case 4. */
+        for (i = 0; i < b.file_count; i++) {
+            char one[SH_MB_CAUSE_MAX];
+            if (!b.files[i].stock) continue;
+            if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, one, sizeof one) ==
+                SH_MB_STOCK_OK)
+                continue;
+            out->game_lacks = 1;
+            strncpy_s(out->source, sizeof out->source,
+                      b.files[i].stock_source ? b.files[i].stock_source : b.files[i].path, _TRUNCATE);
+            strncpy_s(out->cause, sizeof out->cause, one, _TRUNCATE);
+            break;
+        }
+    } else {
+        strncpy_s(out->cause, sizeof out->cause, b.first_cause[0] ? b.first_cause : "the manifest does not read",
+                  _TRUNCATE);
+    }
+    sh_mb_free(&b);
+    free(with);
+    free(text);
+    return 1;
+}
+
+int modsync_claim_names(const char *hash)
+{
+    mpj *doc, *claims;
+    int i, k, found = 0;
+    if (!modnet_valid_hash(hash)) return 0;
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_CLAIMS_SECTION, "claims");
+    modsync_store_unlock();
+    claims = doc ? mpj_get(doc, "claims") : NULL;
+    for (i = 0; claims && claims->type == MPJ_OBJ && i < claims->n; i++) {
+        const mpj *list = claims->items[i] ? mpj_get(claims->items[i], "bundles") : NULL;
+        for (k = 0; list && list->type == MPJ_ARR && k < list->n && !found; k++)
+            found = mpj_str_is(list->items[k], hash);
+        /* Clear the secret this tree holds before release. */
+        {
+            const mpj *sec = claims->items[i] ? mpj_get(claims->items[i], "secret") : NULL;
+            if (sec && sec->type == MPJ_STR && sec->text) SecureZeroMemory(sec->text, strlen(sec->text));
+        }
+    }
+    mpj_free(doc);
+    return found;
 }
 
 /* ------------------------------------------------------------ release --- */
