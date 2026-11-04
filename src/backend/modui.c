@@ -2771,12 +2771,28 @@ static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const cha
     (*arr)[(*n)++] = s;
 }
 
+/* Builds a map remove just took out of the map: its entity delete commits
+ * after the call returns (SH_EDITOR_DELETE_DISPATCHED), so the placed names
+ * read for the listing may still name them; they are not listed again by
+ * that closure. Main thread; set and cleared around the remove's listing. */
+#define MU_LISTING_SKIP 8
+static char g_listing_skip[MU_LISTING_SKIP][SH_MODSERVE_HASH_HEX + 1];
+static int g_listing_skip_n;
+
+static int mu_listing_skipped(const char *hash)
+{
+    int i;
+    for (i = 0; hash && i < g_listing_skip_n; i++) if (!_stricmp(g_listing_skip[i], hash)) return 1;
+    return 0;
+}
+
 /* The closure's bundle hashes are the serving index's own strings. */
 static void mu_listing_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
                              unsigned long long size, const char *name)
 {
     mu_listing *l = (mu_listing *)context;
     (void)bundle_id; (void)version; (void)size; (void)name;
+    if (mu_listing_skipped(bundle_hash)) return;
     mu_listing_push(&l->hashes, &l->nh, &l->ch, bundle_hash);
 }
 
@@ -3074,17 +3090,27 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
         }
     }
     /* Its row goes; with the last mod, so do the rows of mods only it needed. */
+    g_listing_skip_n = 0;
+    if (x->hash[0]) strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, x->hash);
     for (i = 0; i < mp->rows.count; i++) {
         size_t k;
         int drop = 0;
         for (k = 0; k < mp->mod_count && !drop; k++)
             if (mu_same_bundle(m, mp->rows.rows[i].bundle, mp->mods[k].hash))
                 drop = (int)k == p->mod || (p->vanilla_after && mu_mapmod_follows(&mp->mods[k]));
-        if (drop) rows += sh_modmanifest_current_remove(mp->rows.rows[i].bundle);
+        if (!drop) continue;
+        rows += sh_modmanifest_current_remove(mp->rows.rows[i].bundle);
+        if (g_listing_skip_n < MU_LISTING_SKIP && strlen(mp->rows.rows[i].bundle) == SH_MODSERVE_HASH_HEX &&
+            !mu_listing_skipped(mp->rows.rows[i].bundle))
+            strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, mp->rows.rows[i].bundle);
     }
     if (p->tag_removed && e->remove_tag) tag = e->remove_tag(MU_TAG);
-    /* The mod's shadows and requirements leave with it. */
+    /* The mod's shadows, registries and requirements leave with it at once:
+     * its deleted entities, whose delete has not committed yet, do not keep
+     * it listed. The next listing (a save, the Play entry) reads the map as
+     * it is then. */
     (void)mu_scope_now("map remove");
+    g_listing_skip_n = 0;
     InterlockedIncrement(&g_gen);
     mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s", key, x->uid_count,
            x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows,

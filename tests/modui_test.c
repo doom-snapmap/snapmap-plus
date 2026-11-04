@@ -1584,6 +1584,37 @@ int main(int argc, char **argv)
             /* Back in the editor without a load: the listing is set again from the open map. */
             g_map_on = 1;
             CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open() && !strcmp(g_scope_phase, "editor"));
+            /* Remove from map of a placed mod: the entities' delete commits after the call, so the
+             * placed names still name them while the listing is computed; the mod is withdrawn anyway. */
+            {
+                char before[8][SH_MODSERVE_HASH_HEX + 1], after[8][SH_MODSERVE_HASH_HEX + 1];
+                int nb, na, i, req_before = 0, req_after = 0;
+                sh_modserve_bundle_ref ref;
+                const char *placed0 = g_placed[0];
+                int placed_n = g_placed_count;
+                open_test_map();
+                g_ents[1].inherit = "mods/alex.req/twin";
+                g_ents[2].inherit = "mods/alex.req/twin";
+                g_placed[0] = "mods/alex.req/twin";
+                g_placed_count = 1;
+                CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+                CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open());
+                nb = sh_modserve_scope_hashes(before, 8);
+                for (i = 0; i < nb && i < 8; i++)
+                    req_before += sh_modserve_bundle_serving(before[i], NULL, &ref) && !strcmp(ref.id, "alex.req");
+                g_delete_calls = 0;
+                doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.req");
+                if (!has(doc, "\"ok\":true")) printf("    %s\n", doc);
+                CHECK(has(doc, "\"action\":\"mapRemoveMod\",\"ok\":true"));
+                free(doc);
+                CHECK(g_delete_calls == 1 && !strcmp(g_placed[0], "mods/alex.req/twin"));   /* not committed yet */
+                na = sh_modserve_scope_hashes(after, 8);
+                for (i = 0; i < na && i < 8; i++)
+                    req_after += sh_modserve_bundle_serving(after[i], NULL, &ref) && !strcmp(ref.id, "alex.req");
+                CHECK(req_before == 1 && req_after == 0 && na == nb - 1);
+                g_placed[0] = placed0;
+                g_placed_count = placed_n;
+            }
             sh_modserve_scope_enable(0);
             sh_modmanifest_reset();
         }

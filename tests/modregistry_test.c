@@ -768,6 +768,83 @@ static void test_map_add_registries(void)
     sh_mb_set_stock_ops(NULL);
 }
 
+/* "Remove from map" of a converted boss pack (its names under its key, a
+ * Toybox row, an encounter, its conductor entries as an extends partial and
+ * the one replacement it declares): at once its replacement and its conductor
+ * entries go back to the game's (pending, offered as the game's), its names
+ * keep serving the editor's Toybox, and in Play every path of it falls
+ * through to the game. */
+#define RM_GIBS  "generated/decls/entitydef/mods/k.spider/breakable/gibs.decl"
+#define RM_ENC   "generated/decls/snapaiencounter/mods/k.spider/single_spider.decl"
+#define RM_ROW   "generated/decls/snapeditorentitydef/mods/k.spider/spider.decl"
+#define RM_PART  "generated/decls/entitydef/mods/k.spider/conductor_entries.decl"
+static void test_map_remove_withdraws(void)
+{
+    static const fx spider[] = {
+        { RM_GIBS, "entityDef", "mods/k.spider/breakable/gibs", "{ inherit = \"breakable/base\"; }" },
+        { RM_ENC, "snapAiEncounter", "mods/k.spider/single_spider",
+          "{\n\tedit = {\n\t\tmemberList = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n\t\t\t\tmemberType = \"1048576\";\n\t\t\t}\n\t\t}\n\t}\n}" },
+        { RM_ROW, "snapEditorEntityDef", "mods/k.spider/spider", "{ edit = { entityDef = \"mods/k.spider/breakable/gibs\"; } }" },
+        { RM_PART, "entityDef", "mods/k.spider/conductor_entries",
+          "{\n\tedit = {\n\t\taiTypeList = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n\t\t\t\taiType = \"1048576\";\n"
+          "\t\t\t\tentityDef = \"mods/k.spider/breakable/gibs\";\n\t\t\t}\n\t\t}\n\t}\n}" },
+        { REQ_SPIDER, "aiFSMManager", "states/spidermastermind", "{\n\tedit = {\n\t\tsubGraphs = {\n\t\t}\n\t}\n}\n" },
+    };
+    char root[MAX_PATH], hk[65];
+    static char text[65536];
+    const char *list[1];
+    sh_modserve_diff d;
+    rf_seen seen;
+    sh_mb_stock_ops ops;
+    printf("-- registries: map remove withdraws a pack at once; in Play its paths fall through to the game\n");
+    memset(&ops, 0, sizeof ops);
+    ops.identify = st_identify;
+    ops.read = st_read;
+    ops.verify = st_verify;
+    sh_mb_set_stock_ops(&ops);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\set-r\\mods", g_top);
+    mkdirs(root);
+    make_mod(root, "k.spider", "k.spider", '7', NULL,
+             "{\"extends\": {\"entitydef/ai/conductor/coop/snapmap_default\": \"mods/k.spider/conductor_entries\"}, "
+             "\"replaces\": [\"" REQ_SPIDER "\"]}", "\"" REQ_SPIDER "\"", spider, 5, 0);
+    hash_of('7', hk);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 1);
+    /* Declared: everything it carries serves, the conductor names its demon. */
+    list[0] = hk;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_apply, &seen);
+    CHECK(sh_modserve_lookup(RM_GIBS, NULL) && sh_modserve_lookup(RM_ENC, NULL) && sh_modserve_lookup(REQ_SPIDER, NULL));
+    CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1 && strstr(text, "mods/k.spider/breakable/gibs"));
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_lookup(RM_GIBS, NULL));
+    (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    /* Removed in the editor: the replacement and the conductor go back to the game's at once. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending >= 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_apply, &seen);
+    CHECK(strstr(seen.requests, REQ_SPIDER "(game);") && strstr(seen.requests, REQ_CONDUCTOR "(game);"));
+    CHECK(!sh_modserve_lookup(REQ_SPIDER, NULL) && open_text(REQ_CONDUCTOR, text, sizeof text) <= 0);
+    CHECK(sh_modserve_scope_hashes(NULL, 0) == 0);
+    /* Its names still serve the editor's Toybox (the row and what it names). */
+    CHECK(sh_modserve_lookup(RM_ROW, NULL) && sh_modserve_lookup(RM_GIBS, NULL));
+    /* The next Play: nothing of it serves; each path falls through to the game. */
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 1);
+    CHECK(!sh_modserve_lookup(RM_GIBS, NULL) && !sh_modserve_lookup(RM_ENC, NULL) && !sh_modserve_lookup(RM_ROW, NULL) &&
+          !sh_modserve_lookup(RM_PART, NULL) && !sh_modserve_lookup(REQ_SPIDER, NULL) && !sh_modserve_lookup(REQ_CONDUCTOR, NULL));
+    {
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        CHECK(sh_modserve_open(RM_GIBS, &bytes, &len) == 0 && !bytes);
+    }
+    (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 /* L2b's leftovers: a rescan marks changed registry text, generated text is
  * gated by its sources' requirements, and a carried copy of a non-fixed
  * extends target is the base its partials extend. */
@@ -869,6 +946,7 @@ int main(int argc, char **argv)
     test_body_rows(argc > 1 ? argv[1] : NULL);
     test_generation();
     test_map_add_registries();
+    test_map_remove_withdraws();
     test_leftovers();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
