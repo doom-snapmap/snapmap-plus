@@ -391,7 +391,26 @@ static unsigned count_of(const char *doc, const char *needle)
     return n;
 }
 
-/* Every "key": the page's fixture uses must be written by the backend. */
+/* The documents the fixture's keys are checked against: one document cannot
+ * show every state at once (two builds of a key, a map with a product
+ * version), so the test keeps the ones that do. */
+static char *g_union;
+static size_t g_union_len;
+static void union_add(const char *doc)
+{
+    size_t n = doc ? strlen(doc) : 0;
+    char *g = n ? (char *)realloc(g_union, g_union_len + n + 2) : NULL;
+    if (!g) return;
+    g_union = g;
+    memcpy(g_union + g_union_len, doc, n);
+    g_union_len += n;
+    g_union[g_union_len++] = '\n';
+    g_union[g_union_len] = 0;
+}
+
+/* Every "key": the page's fixture uses must be written by the backend. The
+ * members of a "registries" object are a mod's own data, not the payload's
+ * keys, and are skipped. */
 static void keys_match_fixture(const char *fixture_path, const char *doc)
 {
     size_t len = 0;
@@ -413,6 +432,16 @@ static void keys_match_fixture(const char *fixture_path, const char *doc)
             _snprintf_s(probe, sizeof probe, _TRUNCATE, "\"%s\":", key);
             seen++;
             if (!strstr(doc, probe)) { fprintf(stderr, "  fixture key %s is not in the backend document\n", key); missing++; }
+            if (!strcmp(key, "registries")) {
+                /* skip the object's members */
+                const char *o = strchr(q, '{');
+                int depth = 0;
+                for (; o && *o; o++) {
+                    if (*o == '{') depth++;
+                    else if (*o == '}' && --depth == 0) break;
+                }
+                if (o && *o) { p = o + 1; continue; }
+            }
         }
         p = q + 1;
     }
@@ -737,6 +766,7 @@ int main(int argc, char **argv)
      * Upgrade moves the map's row to it and says what changes. */
     doc = list_doc();
     CHECK(has(doc, "\"upgrade\":{\"folder\":\"alex.r2-imp@1.0.1\",\"bundle\":\""));
+    union_add(doc);   /* builds of one key, and the upgrade offer */
     free(doc);
     doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
     if (!has(doc, "\"ok\":true")) fprintf(stderr, "  upgrade: %s\n", doc ? doc : "(none)");
@@ -1128,7 +1158,7 @@ int main(int argc, char **argv)
                        "mods/alex.r2-imp/imp_copy #1\"},{\"kind\":\"wire\",\"name\":\"Gate imp #2 to Relay #3\"},"
                        "{\"kind\":\"timeline\",\"name\":\"Wave 2 #4\"}]"));
         CHECK(has(doc, "\"vanilla\":false,\"registryClashes\":[]"));
-        keys_match_fixture(payload, doc);
+        union_add(doc);
         free(doc);
 
         printf("-- map remove: the dry run, refusals, then the removal\n");
@@ -1646,6 +1676,26 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"action\":\"install\",\"ok\":true") && has(doc, "\"key\":\"bulk.two\"") && !has(doc, "installedCount"));
         free(doc);
     }
+
+    /* A map that records the product version it needs: the document says which. */
+    {
+        char *text, *loaded;
+        size_t tl = 0, ll = 0;
+        text = sh_modmanifest_product_put(MAP, sizeof MAP - 1, "v0.2.1-beta.25", &tl);
+        CHECK(text != NULL);
+        if (text) {
+            loaded = sh_modmanifest_prepare_load(text, tl, &ll);
+            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+            HeapFree(GetProcessHeap(), 0, text);
+        }
+        doc = list_doc();
+        CHECK(has(doc, "\"product\":\"v0.2.1-beta.25\""));
+        union_add(doc);
+        free(doc);
+    }
+    keys_match_fixture(payload, g_union ? g_union : "");
+    free(g_union);
+    g_union = NULL;
 
     mt_remove_tree(tmp);
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);

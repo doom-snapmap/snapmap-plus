@@ -242,7 +242,10 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall']);
+                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
+                                     'mapUpgradeMod']);
+  assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'player.hands\tk.a'),
+                   {cmd: 'modsAction', action: 'chooseRegistry', arg: 'player.hands\tk.a'});
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
   assert.deepEqual(modsTab.actionMessage('uninstall', 'a'), {cmd: 'modsAction', action: 'uninstall', arg: 'a'});
   for (const gone of ['remove', 'palette', 'pruneList', 'pruneApply', 'removedEmpty', 'format-c']) assert.equal(modsTab.actionMessage(gone), null);
@@ -430,7 +433,7 @@ test('details: every section for a v3 mod', () => {
   assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
   assert.equal(d.all('mods-detail-head')[0].all('mods-status-icon')[0].getAttribute('data-status'), 'ok');
   assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Installed and serving 24 files, 476 more read from your install');
-  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'files', 'requirements', 'sharing']);
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'facts', 'files', 'requirements', 'sharing']);
   const about = section(h, 'about').textContent;
   for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Build 2', 'Description The three Hell Guard brothers',
                    'Folder local.hell-guard', 'Moved from the old overrides folder (overrides\\hell-guards)'])
@@ -616,7 +619,7 @@ test('the map modal opens and closes like the decl focus modal', () => {
 test('Remove from map: the dry run drives the confirmation; two buttons; the document drives the result', () => {
   const h = live();
   h.nodes.modsMapBtn.click();
-  const removeBtn = () => h.nodes.modsMapHost.all('mods-map-row')[0].tags('button')[0];
+  const removeBtn = () => h.nodes.modsMapHost.all('mods-map-row')[0].tags('button').find(b => b.textContent === 'Remove from map');
   removeBtn().click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveModPreview', arg: 'local.hell-guard'});
   assert.equal(h.ui.state().modal.page, 'confirm');
@@ -654,7 +657,7 @@ test('Remove from map: the dry run drives the confirmation; two buttons; the doc
   const hand = harness();
   shown(hand);
   hand.nodes.modsMapBtn.click();
-  hand.nodes.modsMapHost.all('mods-map-row')[1].tags('button')[0].click();
+  hand.nodes.modsMapHost.all('mods-map-row')[1].tags('button').find(b => b.textContent === 'Remove from map').click();
   hand.ui.onMessage({kind: 'modsActionResult', action: 'mapRemoveModPreview', ok: true, data: {ok: true, preview: {action: 'mapRemoveMod', key: 'doors', name: 'All doors',
     map: {name: 'Hell Guard Arena', entities: ['Blast door 1'], entityCount: 1, references: [], manifestRow: true}}}});
   assert.deepEqual(hand.nodes.modsMapHost.tags('li').map(n => n.textContent), ['Deletes 1 placed entity from Hell Guard Arena. Blast door 1',
@@ -663,7 +666,7 @@ test('Remove from map: the dry run drives the confirmation; two buttons; the doc
   hand.ui.onMessage({kind: 'modsActionResult', action: 'mapRemoveMod', ok: true, data: {ok: true, message: 'Removed.'}});
   assert.equal(hand.nodes.modsMapHost.all('mods-map-row').length, 5, 'still the last document');
   /* a refused dry run says why and stays on the list */
-  hand.nodes.modsMapHost.all('mods-map-row')[1].tags('button')[0].click();
+  hand.nodes.modsMapHost.all('mods-map-row')[1].tags('button').find(b => b.textContent === 'Remove from map').click();
   hand.ui.onMessage({kind: 'modsActionResult', action: 'mapRemoveModPreview', ok: false, message: 'The editor is busy.', data: null});
   assert.deepEqual(hand.toasts.pop(), {text: 'The editor is busy.', kind: 'err'});
   assert.equal(hand.ui.state().modal.page, 'list');
@@ -672,10 +675,10 @@ test('the last removal leaves a vanilla map', () => {
   const h = live();
   h.nodes.modsMapBtn.click();
   for (let n = 5; n > 1; n--) {
-    h.nodes.modsMapHost.all('mods-map-row')[0].tags('button')[0].click();
+    h.nodes.modsMapHost.all('mods-map-row')[0].tags('button').find(b => b.textContent === 'Remove from map').click();
     modalButtons(h)[1].click();
   }
-  h.nodes.modsMapHost.all('mods-map-row')[0].tags('button')[0].click();
+  h.nodes.modsMapHost.all('mods-map-row')[0].tags('button').find(b => b.textContent === 'Remove from map').click();
   const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.ok(items.indexOf('Removes the search tag mods: this is the last mod the map uses.') >= 0);
   assert.ok(items.indexOf('The map then needs no mods and plays without Snapmap+.') >= 0);
@@ -827,6 +830,82 @@ test('scope: where a mod applies is in About only when the backend says so', () 
   assert.match(section(h, 'about').textContent, /Applies Only in maps that use it/);
   h.ui.select('dlc');
   assert.ok(!/Applies/.test(section(h, 'about').textContent));
+});
+/* ---- the additive model (DESIGN-additive 2.1 to 2.9) ------------------------------------------- */
+test('additive: derived facts, the declared replacement marker, registry contributions, legacy', () => {
+  const n = modsTab.normalize(v3), m = k => n.mods.find(x => x.key === k);
+  const r2 = m('alex.r2-imp');
+  assert.equal(r2.facts.adds, 13);
+  assert.deepEqual(r2.facts.player, [{field: 'body', value: 'mods/alex.r2-imp/player_body'}, {field: 'hands', value: 'player/fp_hands.md6'}]);
+  assert.deepEqual(r2.facts.extends, [{target: 'aifsmmanager/states/imp', partial: 'mods/alex.r2-imp/imp_states'}]);
+  const lines = modsTab.factLines(r2);
+  assert.deepEqual(lines.map(l => l.label), ['Adds', 'Registries']);
+  assert.deepEqual(lines[1].list, ['player.body: mods/alex.r2-imp/player_body', 'player.hands: player/fp_hands.md6',
+                                   'extends aifsmmanager/states/imp with mods/alex.r2-imp/imp_states', 'encounter mods/alex.r2-imp/single_imp']);
+  const mo = modsTab.factLines(m('local.my-overrides'));
+  assert.equal(mo[0].label, 'Editor tweaks');
+  assert.match(mo[0].text, /63 files, on this computer only; never in a map/);
+  const sp = modsTab.factLines(m('local.spider-mastermind')).find(l => l.label === 'Replaces');
+  assert.deepEqual(sp.list, ['generated/decls/aifsmmanager/states/spidermastermind.decl (' + modsTab.DECLARED_TEXT + ')']);
+  const hg = modsTab.factLines(m('local.hell-guard')).find(l => l.label === 'Replaces');
+  assert.match(hg.list[0], /snapmap_default\.decl \(a copy of a registry: express it as intent\)$/);
+  assert.equal(m('local.hell-guard').legacy, true);
+  assert.equal(modsTab.normalize(v2).mods[0].facts, null, 'a v2 document sends no facts');
+  const h = live();
+  h.ui.select('local.hell-guard');
+  const fs = section(h, 'facts');
+  assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Replaces: 500 game files/.test(fs.textContent));
+  h.ui.select('alex.r2-imp');
+  assert.match(section(h, 'facts').textContent, /Registries: 4 entries generated per map that declares it/);
+  h.ui.select('airlock');
+  assert.equal(section(h, 'facts'), undefined, 'nothing derived: no section');
+});
+test('additive: one row per build of a key, the newest marked; a failed build', () => {
+  const h = live();
+  h.ui.select('local.cyberdemon@0.0.0');
+  const bs = section(h, 'builds');
+  assert.ok(bs);
+  const lines = bs.all('mods-build');
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lines.map(l => l.getAttribute('data-newest')), ['false', 'true']);
+  assert.match(lines[1].textContent, /Build 2 .* newest/);
+  assert.ok(/current/.test(lines[0].className), 'the selected folder is marked');
+  const doc = clone(v3);
+  doc.mods.find(x => x.key === 'airlock').buildFailed = {cause: 'assets/x.decl: parse error', snapshot: true, servingBuild: 1};
+  const info = modsTab.statusInfo(modsTab.normalize(doc).mods.find(x => x.key === 'airlock'));
+  assert.equal(info.tone, 'warn');
+  assert.equal(info.cause, 'its latest build failed: assets/x.decl: parse error; serving build 1 from its snapshot');
+});
+test('additive: the map modal: installed at another build, declared nothing placed, upgrade, clash choice, product', () => {
+  const doc = clone(v3);
+  doc.map.mods.push({key: 'airlock', id: 'airlock', version: '0.0.0', state: 'installed', placedEntities: [], placedCount: 0,
+                     references: [], size: 0, attached: true, nothingPlaced: true});
+  doc.map.mods.find(x => x.id === 'jo.lava-floor').state = 'otherBuild';
+  doc.map.registryClashes = [{slot: 'player.hands', providers: [{id: 'k.a', name: 'Bare Hands'}, {id: 'k.b', name: 'Gloves'}],
+                              chosen: '', serving: 'k.a'}];
+  const h = live(doc);
+  h.ui.openMap();
+  const text = modalText(h);
+  assert.match(text, /Needs Snapmap\+ v0\.2\.1-beta\.25 or later/);
+  assert.match(text, /Declared, nothing placed/);
+  assert.match(text, /installed at another build/);
+  assert.equal(modsTab.mapModStatus({state: 'otherBuild'}).cause, 'installed at another build');
+  /* the upgrade */
+  const up = modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT);
+  assert.ok(up && /build 2 is installed/.test(up.title));
+  up.click();
+  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'mapUpgradeMod', arg: 'alex.r2-imp'});
+  assert.ok(!modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT), 'the next document has no upgrade left');
+  /* the clash: one select per slot, its change written through the backend */
+  const sel = h.nodes.modsMapHost.tags('select');
+  assert.equal(sel.length, 1);
+  assert.equal(sel[0].getAttribute('data-slot'), 'player.hands');
+  assert.match(modalText(h), /First-person hands/);
+  sel[0].value = 'k.b';
+  sel[0].dispatch('change');
+  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'chooseRegistry', arg: 'player.hands\tk.b'});
+  assert.equal(h.ui.state().model.map.clashes[0].serving, 'k.b', 'the page shows what the backend returned');
+  assert.equal(modsTab.slotText('weapons/zion/player/sp/pistol'), 'Weapon zion/player/sp/pistol');
 });
 test('page contract', () => {
   assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));

@@ -7,7 +7,9 @@
    rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
    (which this tab no longer shows). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
-   editorRowNames, carriedPaths, publishedMaps and scope (docs/webview-ui.md). Every v3 field is optional:
+   editorRowNames, carriedPaths, publishedMaps and scope, and the additive model's derived facts (facts:
+   adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
+   legacy, builds per key (newest marked) and a failed build (docs/webview-ui.md). Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
    after every action; showing the tab asks for a rescan. Nothing polls. The list is one flat list the
    page scrolls natively; a row the open map uses carries an "In this map" pill (from the document's
@@ -45,13 +47,14 @@ var modsTab = (function () {
      so it has no dry run. Uninstall moves the folder to the Windows Recycle Bin; the page has no bin
      of its own to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall'];
+                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry', 'mapUpgradeMod'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'info'};
   /* A map needs the paths its rows list; a mod folder provides them (the asset rule). */
   var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
+                    otherBuild: 'installed at another build',
                     unindexed: 'not scanned yet; reopen the Mods tab', skipped: 'installed but not in use',
                     attention: 'needs attention'};
   /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
@@ -81,6 +84,18 @@ var modsTab = (function () {
   };
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
+  var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
+  var LEGACY_TEXT = 'Legacy, rebuild to isolate';
+  var UPGRADE_TEXT = 'Upgrade this map to the installed build';
+  var DECLARED_TEXT = 'declared: affects only maps that declare this mod';
+  var REGISTRY_COPY_TEXT = 'a copy of a registry: express it as intent';
+  /* The registry slots a clash names (modregistry.h). */
+  var SLOT_TEXT = {'player.hands': 'First-person hands', 'player.handsD1': 'First-person hands (classic)',
+                   'player.body': 'Third-person body', 'player.handsAnimWeb': 'Hands animations'};
+  function slotText(slot) {
+    if (has(SLOT_TEXT, slot)) return SLOT_TEXT[slot];
+    return slot.indexOf('weapons/') === 0 ? 'Weapon ' + slot.slice(8) : slot;
+  }
 
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
   function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
@@ -108,6 +123,30 @@ var modsTab = (function () {
     if (!r || !obj(r.cvars)) return null;
     return {activate: c ? normNames(c.activate) : [], deactivate: c ? normNames(c.deactivate) : []};
   }
+  /* The derived facts (payload facts): null when the backend did not send them. */
+  function normFacts(v) {
+    var f = obj(v);
+    if (!f) return null;
+    var reg = obj(f.registries) || {}, player = obj(reg.player) || {}, ext = obj(reg.extends) || {}, weapons = obj(player.weapons) || {};
+    return {adds: num(f.adds), borrows: num(f.borrows), surfaces: num(f.surfaces), editor: num(f.editor), replaces: num(f.replaces),
+            editorTweaks: normNames(f.editorTweaks),
+            replacements: arr(f.replacements).map(function (r) { r = obj(r) || {}; return {path: str(r.path), declared: bool(r.declared), registry: bool(r.registry)}; })
+              .filter(function (r) { return r.path.length > 0; }),
+            player: Object.keys(player).filter(function (k) { return typeof player[k] === 'string'; }).sort()
+              .map(function (k) { return {field: k, value: str(player[k])}; }),
+            weapons: Object.keys(weapons).sort().map(function (k) { return {slot: k, decl: str(weapons[k])}; }),
+            extends: Object.keys(ext).sort().map(function (k) { return {target: k, partial: str(ext[k])}; }),
+            conductor: normNames(reg.conductor)};
+  }
+  function normBuild(v) {
+    v = obj(v) || {};
+    return {folder: str(v.folder), bundle: str(v.bundle), build: num(v.build), version: str(v.version), builtAt: num(v.builtAt),
+            newest: bool(v.newest), failed: bool(v.failed)};
+  }
+  function normFailed(v) {
+    v = obj(v);
+    return v ? {cause: str(v.cause), snapshot: bool(v.snapshot), servingBuild: num(v.servingBuild)} : null;
+  }
   function normMod(b) {
     b = b && typeof b === 'object' ? b : {};
     var state = has(STATES, b.state) ? b.state : 'attention';
@@ -122,7 +161,10 @@ var modsTab = (function () {
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
-            scope: b.scope === 'map' || b.scope === 'always' ? b.scope : '', scopeAuto: bool(b.scopeAuto), scoped: bool(b.scoped)};
+            scope: b.scope === 'map' || b.scope === 'always' ? b.scope : '', scopeAuto: bool(b.scopeAuto), scoped: bool(b.scoped),
+            /* additive */
+            facts: normFacts(b.facts), legacy: bool(b.legacy), newest: b.newest !== false,
+            builds: Array.isArray(b.builds) ? b.builds.map(normBuild) : [], buildFailed: normFailed(b.buildFailed)};
   }
   /* The About line for where the mod applies; '' when the backend did not say or nothing is scoped. */
   function scopeText(b) {
@@ -159,9 +201,19 @@ var modsTab = (function () {
   function normMapMod(m) {
     m = obj(m) || {};
     var names = normNames(m.placedEntities);
+    var up = obj(m.upgrade);
     return {key: str(m.key), id: str(m.id), version: str(m.version), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
-            references: normRefs(m.references), size: num(m.size), attached: bool(m.attached)};
+            references: normRefs(m.references), size: num(m.size), attached: bool(m.attached),
+            nothingPlaced: bool(m.nothingPlaced),
+            upgrade: up ? {folder: str(up.folder), bundle: str(up.bundle), version: str(up.version), build: num(up.build),
+                           fromBuild: num(up.fromBuild)} : null};
+  }
+  function normClash(c) {
+    c = obj(c) || {};
+    return {slot: str(c.slot), chosen: str(c.chosen), serving: str(c.serving),
+            providers: arr(c.providers).map(function (p) { p = obj(p) || {}; return {id: str(p.id), name: str(p.name) || str(p.id)}; })
+              .filter(function (p) { return p.id.length > 0; })};
   }
   function normMap(m) {
     m = obj(m);
@@ -173,7 +225,9 @@ var modsTab = (function () {
             uploaded: up ? {claimed: bool(up.claimed), at: num(up.at)} : null,
             tagged: typeof m.tagged === 'boolean' ? m.tagged : null,
             mods: Array.isArray(m.mods) ? m.mods.map(normMapMod) : null,
-            vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null};
+            vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null,
+            clashes: arr(m.registryClashes).map(normClash).filter(function (c) { return c.slot && c.providers.length > 1; }),
+            product: str(m.product)};
   }
   /* A dry run's consequence list (mapRemoveModPreview, uninstallPreview). */
   function normPreview(v) {
@@ -253,6 +307,12 @@ var modsTab = (function () {
   /* One of the three states, its one-line cause (the icon's hover title) and the details sentence. */
   function statusInfo(b) {
     var cause;
+    if (b.buildFailed) {
+      cause = 'its latest build failed: ' + (b.buildFailed.cause || 'see the build log') +
+              (b.buildFailed.snapshot ? '; serving build ' + b.buildFailed.servingBuild + ' from its snapshot'
+                                      : '; serving build ' + b.buildFailed.servingBuild);
+      return {tone: 'warn', icon: STATUS.warn.icon, label: STATUS.warn.label, cause: cause, sentence: 'Needs attention: ' + cause};
+    }
     if (b.duplicateId || b.state === 'attention') {
       cause = b.duplicateId ? DUPLICATE_TEXT : (b.cause || 'not in use');
       return {tone: 'warn', icon: STATUS.warn.icon, label: STATUS.warn.label, cause: cause,
@@ -292,6 +352,33 @@ var modsTab = (function () {
       if (n > 0) out.push(p[1].replace('%s', plural(n, COUNT_NOUNS[p[0]][0], COUNT_NOUNS[p[0]][1])));
     });
     return out;
+  }
+
+  /* The derived facts as {label, text, list?} lines, in the details pane's order. */
+  function factLines(b) {
+    var f = b.facts, out = [];
+    if (!f) return out;
+    if (f.adds) out.push({label: 'Adds', text: plural(f.adds, 'new file')});
+    if (f.borrows) out.push({label: 'Borrows', text: plural(f.borrows, 'game file') + ' under its own names, read from your install'});
+    if (f.surfaces) out.push({label: 'Surfaces', text: plural(f.surfaces, 'game file') + ' SnapMap cannot see, read from your install'});
+    if (f.editor) out.push({label: 'Editor tweaks', text: plural(f.editor, 'file') + ', on this computer only; never in a map', list: f.editorTweaks});
+    if (f.replacements.length || f.replaces) {
+      var rl = f.replacements.map(function (r) {
+        return r.path + (r.declared ? ' (' + DECLARED_TEXT + ')' : r.registry ? ' (' + REGISTRY_COPY_TEXT + ')' : '');
+      });
+      out.push({label: 'Replaces', text: plural(Math.max(f.replaces, f.replacements.length), 'game file'), list: rl});
+    }
+    var reg = [];
+    f.player.forEach(function (p) { reg.push('player.' + p.field + ': ' + p.value); });
+    f.weapons.forEach(function (w) { reg.push('weapon ' + w.slot + ': ' + w.decl); });
+    f.extends.forEach(function (e) { reg.push('extends ' + e.target + ' with ' + e.partial); });
+    f.conductor.forEach(function (c) { reg.push('encounter ' + c); });
+    if (reg.length) out.push({label: 'Registries', text: plural(reg.length, 'entry', 'entries') + ' generated per map that declares it', list: reg});
+    return out;
+  }
+  function upgradeTitle(r) {
+    var u = r.upgrade;
+    return u ? 'This map uses build ' + (u.fromBuild || '?') + '; build ' + u.build + ' is installed. Upgrading changes the map\'s row; save the map to keep it.' : '';
   }
 
   function actionMessage(action, arg) {
@@ -350,7 +437,8 @@ var modsTab = (function () {
                      rebuild: 'Building the mod again...', verify: 'Checking every file of the mod...',
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
-                     mapAddMod: 'Adding the mod to the map...',
+                     mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
+                     mapUpgradeMod: 'Moving the map to the installed build...',
                      migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
     function selectedMod() {
@@ -545,6 +633,33 @@ var modsTab = (function () {
       countLines(b.counts).forEach(function (t) { adds.appendChild(el('div', 'mods-line', t)); });
       if (adds.children.length === 1) adds.appendChild(el('div', 'mods-line muted', 'Adds no Toybox rows.'));
 
+      var facts = factLines(b);
+      if (facts.length || b.legacy) {
+        var fs = section(box, 'facts', 'What it is made of');
+        if (b.legacy) fs.appendChild(el('div', 'mods-line mods-legacy', LEGACY_TEXT));
+        facts.forEach(function (l) {
+          if (l.list && l.list.length) {
+            var d = el('details', 'pc-limits-details mods-paths');
+            d.appendChild(el('summary', '', l.label + ': ' + l.text));
+            var dl = el('div', 'mods-paths-list');
+            l.list.forEach(function (n) { dl.appendChild(el('div', '', n)); });
+            d.appendChild(dl);
+            fs.appendChild(d);
+          } else field(fs, l.label, l.text);
+        });
+      }
+      if (b.builds.length > 1) {
+        var bs = section(box, 'builds', 'Builds of this mod');
+        b.builds.forEach(function (x) {
+          var line = 'Build ' + x.build + (x.version ? ' (' + x.version + ')' : '') + ' \u00b7 ' + x.bundle.slice(0, 16) +
+                     (x.newest ? ' \u00b7 newest' : '') + (x.failed ? ' \u00b7 its latest build failed' : '');
+          var row = el('div', 'mods-line mods-build' + (x.folder === b.key ? ' current' : ''), line);
+          row.setAttribute('data-newest', x.newest ? 'true' : 'false');
+          bs.appendChild(row);
+        });
+        bs.appendChild(el('div', 'mods-note', 'Each map uses the build it was saved with; the newest serves with no map open.'));
+      }
+
       var files = section(box, 'files', 'Files');
       var carried = Math.max(0, b.files - b.pointers);
       field(files, 'Carried', plural(carried, 'file') + ', ' + formatSize(b.size));
@@ -680,6 +795,26 @@ var modsTab = (function () {
         field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));
       }
       if (m.saved) field(det, 'Last saved', formatDate(m.saved));
+      if (m.product) field(det, 'Needs', 'Snapmap+ ' + m.product + ' or later');
+      if (m.clashes.length) {
+        var cs = section(body, 'clashes', 'Choices between mods');
+        cs.appendChild(el('div', 'mods-note', 'Several mods of this map set the same part of the player. Pick which one this map uses; the choice is saved with the map.'));
+        m.clashes.forEach(function (c) {
+          var sel = el('select', 'mods-clash');
+          sel.setAttribute('data-slot', c.slot);
+          c.providers.forEach(function (p) {
+            var o = el('option', '', p.name + (p.name !== p.id ? ' (' + p.id + ')' : ''));
+            o.value = p.id;
+            if (p.id === c.serving) o.selected = true;
+            sel.appendChild(o);
+          });
+          sel.value = c.serving;
+          sel.disabled = !!busy;
+          sel.addEventListener('change', function () { act('chooseRegistry', c.slot + '\t' + str(sel.value)); });
+          modalButtons.push(sel);
+          field(cs, slotText(c.slot), sel);
+        });
+      }
       if (!m.mods) return;
       var list = section(body, 'mapMods', 'Mods in this map');
       if (!m.mods.length) {
@@ -698,7 +833,7 @@ var modsTab = (function () {
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', modName(r.key, r.id)));
       text.appendChild(el('div', 'mods-row-sub', (r.version ? r.id + ' \u00b7 ' + r.version : r.id) + ' \u00b7 ' + formatSize(r.size)));
-      var uses = r.attached
+      var uses = r.nothingPlaced ? NOTHING_PLACED_TEXT : r.attached
         ? MAP_LEVEL_TEXT + (r.placedCount ? ', and ' + plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it') : '')
         : plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it');
       text.appendChild(el('div', 'mods-map-uses' + (r.attached ? ' mods-map-level' : ''), uses + (info.tone === 'warn' ? '; ' + info.cause : '')));
@@ -706,6 +841,7 @@ var modsTab = (function () {
       if (r.references.length) text.appendChild(el('div', 'mods-map-uses', 'Also used by ' + r.references.map(refText).join(', ')));
       row.appendChild(text);
       var name = modName(r.key, r.id);
+      if (r.upgrade) row.appendChild(modalButton(UPGRADE_TEXT, '', function () { act('mapUpgradeMod', r.id); }, upgradeTitle(r)));
       row.appendChild(modalButton('Remove from map', 'danger', function () {
         modal.from = 'map';
         act('mapRemoveModPreview', r.key || r.id);
@@ -991,6 +1127,23 @@ var modsTab = (function () {
                                    viaNeeds: false, attached: true});
           msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '.';
         }
+      } else if (a === 'chooseRegistry') {
+        var tab = key.indexOf('\t'), slot = tab < 0 ? key : key.slice(0, tab), pick = tab < 0 ? '' : key.slice(tab + 1);
+        var cl = docu.map && Array.isArray(docu.map.registryClashes) ? docu.map.registryClashes.filter(function (c) { return c.slot === slot; })[0] : null;
+        if (!cl) { ok = false; msg = 'The open map has no choice for ' + slot + '.'; }
+        else {
+          cl.chosen = pick;
+          cl.serving = pick || (cl.providers[0] && cl.providers[0].id) || '';
+          msg = pick ? slot + ' now comes from ' + pick + ' in this map; the choice is saved with the map.'
+                     : slot + ": the map's choice is cleared; the first mod in the map's list serves it.";
+        }
+      } else if (a === 'mapUpgradeMod') {
+        var um = mapMods().filter(function (x) { return x.id === key; })[0];
+        if (!um || !um.upgrade) { ok = false; msg = 'The map already uses the installed build of ' + key + '.'; }
+        else {
+          msg = 'This map now uses ' + nameOf(um.key, um.id) + ' build ' + um.upgrade.build + ' instead of build ' + um.upgrade.fromBuild + '. Save the map to keep it.';
+          um.upgrade = null;
+        }
       } else if (a === 'mapRemoveModPreview') {
         if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
         else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.id), map: mapPart(r), install: null};
@@ -1025,7 +1178,9 @@ var modsTab = (function () {
           originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
-          SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create};
+          SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, DECLARED_TEXT: DECLARED_TEXT,
+          factLines: factLines, slotText: slotText};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = modsTab;
