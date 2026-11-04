@@ -154,6 +154,61 @@ static int alias_targets(const sh_ms_list *l, const char *to)
 }
 
 /* The section stays flat: a chain of notes re-points every earlier alias. */
+/* The boot's rebuild rule (sh_ms_boot_sync): a store whose folders have no
+ * product block (the first boot after a conversion) is built at boot as a
+ * rescan builds it, then the index is rebuilt; nothing pending, nothing runs. */
+static volatile LONG g_boot_rescans;
+static int boot_rescan(void) { InterlockedIncrement(&g_boot_rescans); return 1; }
+
+static void test_boot_sync(const char *fixture, const char *tmp)
+{
+    char root[MAX_PATH], a[MAX_PATH * 2], c[MAX_PATH * 2];
+    const char *mj;
+    int i;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    printf("-- boot: folders not built yet are built as a rescan builds them, then indexed\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\boot\\mods", tmp);
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\boot", tmp);
+    CreateDirectoryA(a, NULL);
+    CreateDirectoryA(root, NULL);
+    CHECK(sh_ms_set_root(root));
+    CHECK(sh_ms_sync_pending() == 0);
+    g_boot_rescans = 0;
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 0);
+    /* Two converted folders: author blocks only, as the converter writes them. */
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\alex.r2-imp", root);
+    CHECK(mt_copy_tree(fixture, a));
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\campaign\\alex.boot", root);
+    mt_write(c, "mod.json", "{\"id\":\"alex.boot\",\"version\":\"0.1.0\",\"name\":\"Boot\"}");
+    mt_write(c, "assets\\generated\\decls\\entitydef\\mods\\alex.boot\\thing.decl", "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n}");
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "alex.r2-imp");
+    CHECK(e && !e->loaded && strstr(e->cause, "not built"));
+    sh_ms_list_free(&list);
+    CHECK(sh_ms_sync_pending() == 2);
+    g_logged = 0;
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 2 && g_boot_rescans == 1);
+    CHECK(log_has("MODS: store: boot: 2 folder(s) not built yet") && log_has("MODS: store: boot: 2 of 2 folder(s) built (0 refused)"));
+    mj = slurp(a, "mod.json", NULL);
+    CHECK(mj && strstr(mj, "snapmap-plus"));
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "alex.r2-imp");
+    CHECK(e && sh_ms_entry_usable(e));
+    sh_ms_list_free(&list);
+    /* The next boot: nothing pending, nothing built, no rescan. */
+    CHECK(sh_ms_sync_pending() == 0 && sh_ms_boot_sync(&RESOLVER, boot_rescan, 0) == 0 && g_boot_rescans == 1);
+    /* An edit made while the game was closed: built in the background, then indexed. */
+    mt_write(c, "assets\\generated\\decls\\entitydef\\mods\\alex.boot\\thing.decl",
+             "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited\r\n}");
+    CHECK(sh_ms_sync_pending() == 1);
+    CHECK(sh_ms_boot_sync(&RESOLVER, boot_rescan, 1) == 1);
+    for (i = 0; i < 400 && InterlockedCompareExchange(&g_boot_rescans, 0, 0) < 2; i++) Sleep(25);
+    CHECK(g_boot_rescans == 2);
+    for (i = 0; i < 400 && sh_ms_sync_pending() != 0; i++) Sleep(25);
+    CHECK(sh_ms_sync_pending() == 0);
+}
+
 static void test_alias_note(void)
 {
     sh_ms_list l;
@@ -1220,6 +1275,7 @@ int main(int argc, char **argv)
     test_nested(tmp);
 
     test_upgrade(fixture, tmp);
+    test_boot_sync(fixture, tmp);
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);

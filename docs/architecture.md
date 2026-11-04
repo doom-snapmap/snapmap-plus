@@ -742,7 +742,7 @@ lines as its action lines and a summary, and exits 0 when nothing is left to do,
 nothing and changes nothing. The installer runs it on install and update (see
 [installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
 The rebuild rule is unchanged: a folder without a product block is built at the
-next rescan.
+next rescan, or at the next boot (below).
 
 The folder watchers. The lists follow the disk. The window's host
 (`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
@@ -766,7 +766,14 @@ opened again every five seconds.
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the
 cache for its bundle; that runs on a rescan (the Mods tab, `sh_mods rescan`,
-an install), never at boot, because a build needs the game's resource reader.
+an install) and at boot (`sh_ms_boot_sync`): after the boot index, a thread of
+its own checks the trees and, when a folder is not built yet or changed while
+the game was closed (the first boot after a conversion), builds it as a rescan
+would, with the install's indexes (`modstock.c`) as the stock reader, then
+rebuilds the serving index, whose listeners pass the table to the game. A first
+build of the 15 converted folders takes about 10 s, so it never runs on the
+boot thread; the same folders built this way carry the same bundle hashes as an
+in-game rescan's.
 The store tool's `sh_ms_upgrade` converts the retired layout once (before the
 overrides migration): every
 `<id>@<version>+<build>\` folder gets `mod.json` from its `bundle.json` and

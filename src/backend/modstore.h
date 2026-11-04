@@ -243,6 +243,24 @@ typedef struct sh_ms_sync_stats {
  * per rebuilt or refused folder. Returns 1 when the store could be read. */
 int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
 
+/* The folders sh_ms_sync would build now (no product block, or a tree its
+ * cache does not hold as built), from the tree hashes alone (file sizes and
+ * times: no file is read). -1 when the store cannot be read. */
+int  sh_ms_sync_pending(void);
+
+/* The boot's rebuild rule (DESIGN-additive 2.8): a store whose folders are
+ * not built yet (a first boot after a conversion or an install by hand) is
+ * built as a rescan builds it, so a fresh folder serves on its first boot.
+ * With folders pending, sh_ms_sync runs and then `rescan` (the serving index;
+ * its listeners pass the new table to the game). background 1 does the check
+ * and the build on a thread of its own (a first build of the 15 converted
+ * folders takes about 10 s) and returns 1 when it started; background 0 runs
+ * them here and returns the folders that were pending (0: nothing built, no
+ * rescan). -1 when the store cannot be read or the thread cannot start. The
+ * resolver is copied. */
+typedef int (*sh_ms_rescan_fn)(void);
+int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background);
+
 /* The first cause of the last refused build of `folder` in this process, or
  * "" (sh_ms_sync and installs record it; enumeration reports it, with the
  * snapshot that serves meanwhile in sh_ms_entry.snapshot). */

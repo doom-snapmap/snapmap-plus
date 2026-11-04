@@ -929,7 +929,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         char pkg[MAX_PATH];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
         if (ms_file_size(path) >= 0) ms_fail(b, "mod.json unreadable or over %u MiB", SH_MODSERVE_MAX_JSON >> 20);
-        else if (ms_file_size(pkg) >= 0) ms_fail(b, "not built yet (package.json only; a rescan of the Mods tab builds it)");
+        else if (ms_file_size(pkg) >= 0) ms_fail(b, "not built yet (package.json only; the boot builds it in the background, as a rescan of the Mods tab does)");
         else ms_fail(b, "no mod.json");
         return;
     }
@@ -1077,7 +1077,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     b->installed_at = built;
     if (!block_v) {
         if (last[0]) ms_fail(b, "its last build was refused: %s", last);
-        else ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; a rescan of the Mods tab builds it)");
+        else ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; the boot builds it in the background, as a rescan of the Mods tab does)");
     }
     else if (format != 1) ms_fail(b, "mod.json product block format %g is not supported (this build reads format 1)", format);
     if (!b->id || !ms_valid_id(b->id))

@@ -129,6 +129,13 @@ static int no_priority_signature(const char *name) { (void)name; return 0; }
 static int no_priority_ready(const sig_result *results, size_t count)
 { (void)results; (void)count; return 1; }
 
+/* The boot build's stock check (modstore.h sh_ms_boot_sync): the install's indexes. */
+static int boot_stock_exists(void *context, const char *request)
+{
+    (void)context;
+    return sh_modstock_exists(request);
+}
+
 static DWORD WINAPI bootstrap_thread(LPVOID p)
 {
     (void)p;
@@ -346,6 +353,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * which upgrades the retired layout, retires removed-mods\ and moves
          * overrides\ into the store (modstore.h, modmigrate.h). */
         (void)sh_modserve_index_boot();
+        /* Folders not built yet (a first boot after a conversion, a folder
+         * dropped in by hand) are built off this thread as a rescan builds
+         * them, then indexed: they serve on this boot, not after the Mods
+         * tab's first rescan. Stock bytes come from the install's indexes. */
+        {
+            sh_mb_resolver boot_r;
+            memset(&boot_r, 0, sizeof boot_r);
+            boot_r.stock = boot_stock_exists;
+            (void)sh_ms_boot_sync(&boot_r, sh_modserve_index_rescan, 1);
+        }
 
         /* Inject custom #str_ entries before the first top-level language-table sort,
          * after the serving index so the first pass already carries the admitted

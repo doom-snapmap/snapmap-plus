@@ -2111,6 +2111,91 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     return 1;
 }
 
+int sh_ms_sync_pending(void)
+{
+    wchar_t *root;
+    ms_found_list found;
+    char rootu[MAX_PATH * 4], *text = NULL;
+    sh_json_object cache;
+    size_t fi;
+    int pending = 0;
+    root = ms_wroot();
+    if (!root || !sh_ms_root(rootu, sizeof rootu)) { free(root); return -1; }
+    if (!ms_exists(root)) { free(root); return 0; }
+    memset(&cache, 0, sizeof cache);
+    memset(&found, 0, sizeof found);
+    modstore_lock();
+    if (sh_mb_record_get(rootu, "cache", &text) == 1) sh_json_parse_object(text, strlen(text), 4, &cache);
+    free(text);
+    ms_find_mods(&found, root, L"", 0);
+    for (fi = 0; fi < found.count; fi++) {
+        char *folder = sh_mb_utf8(found.items[fi].folder), tree[SH_MB_HASH_HEX + 1], value[SH_MB_HASH_HEX + 3];
+        const char *cached;
+        sh_mb_bundle b;
+        int current = 0;
+        if (!folder) continue;
+        if (sh_mb_load_folder(folder, &b) && sh_mb_tree_hash(folder, tree)) {
+            cached = sh_json_object_get(&cache, tree);
+            _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", b.hash);
+            current = cached && !strcmp(cached, value);
+        }
+        sh_mb_free(&b);
+        if (!current) pending++;
+        free(folder);
+    }
+    modstore_unlock();
+    ms_found_free(&found);
+    sh_json_object_free(&cache);
+    free(root);
+    return pending;
+}
+
+static sh_mb_resolver g_boot_resolver;
+static sh_ms_rescan_fn g_boot_rescan;
+
+static void ms_boot_run(int pending)
+{
+    sh_ms_sync_stats st;
+    ULONGLONG t0 = GetTickCount64();
+    int n = -1;
+    if (pending < 0) pending = sh_ms_sync_pending();
+    if (pending <= 0) return;
+    ms_log("MODS: store: boot: %d folder(s) not built yet (or changed since their build); building them, as a rescan "
+           "would", pending);
+    if (!sh_ms_sync(&g_boot_resolver, &st)) { ms_log("MODS: store: boot: the store could not be read; nothing built"); return; }
+    if (st.rebuilt && g_boot_rescan) n = g_boot_rescan();
+    ms_log("MODS: store: boot: %u of %u folder(s) built (%u refused) in %llu ms%s", st.rebuilt, st.folders, st.failed,
+           (unsigned long long)(GetTickCount64() - t0),
+           !st.rebuilt ? "" : n >= 0 ? "; the serving index was rebuilt with them" : "; the serving index could not be rebuilt");
+}
+
+static DWORD WINAPI ms_boot_thread(LPVOID unused)
+{
+    (void)unused;
+    ms_boot_run(-1);
+    return 0;
+}
+
+int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background)
+{
+    int pending;
+    HANDLE h;
+    memset(&g_boot_resolver, 0, sizeof g_boot_resolver);
+    if (resolver) g_boot_resolver = *resolver;
+    g_boot_rescan = rescan;
+    if (background) {
+        /* The check reads every folder's tree (about 170 ms for 15 converted
+         * folders), so it runs on the thread too. */
+        h = CreateThread(NULL, 0, ms_boot_thread, NULL, 0, NULL);
+        if (!h) { ms_log("MODS: store: boot: the build thread could not start; the Mods tab's rescan builds them"); return -1; }
+        CloseHandle(h);
+        return 1;
+    }
+    pending = sh_ms_sync_pending();
+    if (pending > 0) ms_boot_run(pending);
+    return pending;
+}
+
 /* ---------------------------------------------------------- upgrade ---- */
 /* The retired layout (Contract 2): <id>@<version>+<build>\ folders with
  * bundle.json, bundle.canonical.json and .state.json, their assets\ hard-linked
