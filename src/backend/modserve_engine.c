@@ -929,21 +929,10 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
  * source through the provider, which now serves the bundle's bytes. One the
  * engine has not parsed yet is left for the provider. Main thread, inside
  * process heap 0 (a re-parsed decl lives for the process). */
-#define ME_REPARSE_TYPES 12
-typedef struct me_reparse_type { const char *type; int count; char names[160]; } me_reparse_type;
 typedef struct me_reparse {
-    me_reparse_type types[ME_REPARSE_TYPES];
-    int ntypes, reparsed, through_provider, failed, faulted, pending, skipped, restored;
+    sh_modledger_tally tally;   /* per type, for the log (copies the type: dependents pass a stack buffer) */
+    int reparsed, through_provider, failed, faulted, pending, skipped, restored;
 } me_reparse;
-
-static me_reparse_type *me_reparse_slot(me_reparse *r, const char *type)
-{
-    int i;
-    for (i = 0; i < r->ntypes; ++i) if (!strcmp(r->types[i].type, type)) return &r->types[i];
-    if (r->ntypes == ME_REPARSE_TYPES) return &r->types[ME_REPARSE_TYPES - 1];
-    r->types[r->ntypes].type = type;
-    return &r->types[r->ntypes++];
-}
 
 /* Every in-place load keeps the resource's lifetime: ResourceGenericLoad's
  * failure path reconstructs the object (ResourceReconstruct, VK 0x1416c67f0),
@@ -992,16 +981,12 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
             return 1;
         }
         {
-            me_reparse_type *t = me_reparse_slot(r, type);
-            size_t at = strlen(t->names);
             int refused;
             me_load_in_place(d, "reparse", type, name);
             state = d[RES_STATE_OFF];
             refused = me_refused(before, type, name);
             r->reparsed++;
-            t->count++;
-            if (at < sizeof t->names - 4)
-                _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+            (void)sh_modledger_tally_add(&r->tally, type, name);
             if (sh_modserve_open_count(request) > 0) r->through_provider++;
             if ((state & 1) || refused) {
                 r->failed++;
@@ -1044,9 +1029,10 @@ static void me_reparse_early(const char *phase, int in_heap)
         if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: early-decl re-parse heap scope did not balance", phase);
     }
     if (!r.reparsed && !r.faulted && !r.skipped) return;
-    for (i = 0; i < r.ntypes; ++i)
-        me_log("reparsed %d %s decl(s) the engine parsed before the serving index (%s%s)", r.types[i].count,
-               r.types[i].type, r.types[i].names, strlen(r.types[i].names) >= sizeof r.types[i].names - 5 ? ", ..." : "");
+    for (i = 0; i < r.tally.ntypes; ++i)
+        me_log("reparsed %d %s decl(s) the engine parsed before the serving index (%s%s)", r.tally.types[i].count,
+               r.tally.types[i].type, r.tally.types[i].names,
+               sh_modledger_tally_truncated(&r.tally.types[i]) ? ", ..." : "");
     me_log("%s: early decls: %d re-parsed in %.1f ms (%d read through the provider, %d failed, %d restored, %d faulted, "
            "%d withdrawn unparsed); %d of %d unserved shadow(s) not parsed yet", phase, r.reparsed, me_now_ms() - t0,
            r.through_provider, r.failed, r.restored, r.faulted, r.skipped, r.pending, offered);
@@ -1351,10 +1337,10 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
     c.stage = 1;
     if (c.raw.n && g_res_head) (void)sh_modserve_each_refresh_part(me_refresh_visit, &c, part);
     if (c.decls.reparsed || c.decls.faulted || c.not_held) {
-        for (i = 0; i < c.decls.ntypes; ++i)
-            me_rlog("refresh: re-parsed %d %s decl(s) whose served bytes or parent changed (%s%s)", c.decls.types[i].count,
-                   c.decls.types[i].type, c.decls.types[i].names,
-                   strlen(c.decls.types[i].names) >= sizeof c.decls.types[i].names - 5 ? ", ..." : "");
+        for (i = 0; i < c.decls.tally.ntypes; ++i)
+            me_rlog("refresh: re-parsed %d %s decl(s) whose served bytes or parent changed (%s%s)",
+                   c.decls.tally.types[i].count, c.decls.tally.types[i].type, c.decls.tally.types[i].names,
+                   sh_modledger_tally_truncated(&c.decls.tally.types[i]) ? ", ..." : "");
         me_rlog("refresh: decls: %d re-parsed at the %s in %.1f ms (%d read through the provider, %d failed, %d faulted; "
                "%d not held, read at their next parse%s)", c.decls.reparsed, phase, t1 - t0, c.decls.through_provider,
                c.decls.failed, c.decls.faulted, c.not_held, c.dependents ? "; includes the md6Def and animWeb decls "

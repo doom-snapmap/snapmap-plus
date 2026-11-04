@@ -388,6 +388,54 @@ static void test_anim_kind(const char *top)
     sh_modserve_set_serve_listener(NULL);
 }
 
+/* The re-parse log's per-type tally (ADD-L6 I). An anim dependent's type is
+ * a stack buffer filled from its request path; V3's line printed the bytes
+ * that buffer held later ("re-parsed 1 0;>5 decl(s)"). The tally keeps its
+ * own copy. */
+static void tally_one(sh_modledger_tally *t, const char *request)
+{
+    char type[64];
+    const char *slash = strchr(request, '/');
+    size_t n = slash ? (size_t)(slash - request) : strlen(request);
+    memcpy(type, request, n);
+    type[n] = 0;
+    (void)sh_modledger_tally_add(t, type, slash ? slash + 1 : request);
+    memset(type, 0xA5, sizeof type);   /* the frame is reused after the call */
+}
+
+static void test_tally(void)
+{
+    sh_modledger_tally t;
+    char longname[64];
+    int i;
+    memset(&t, 0, sizeof t);
+    tally_one(&t, "md6Def/mods/v3-anim/imp.md6");
+    tally_one(&t, "animWeb/mods/v3-anim/imp");
+    tally_one(&t, "md6Def/mods/v3-anim/other.md6");
+    CHECK(t.ntypes == 2);
+    CHECK(!strcmp(t.types[0].type, "md6Def") && t.types[0].count == 2);
+    CHECK(!strcmp(t.types[0].names, "mods/v3-anim/imp.md6, mods/v3-anim/other.md6"));
+    CHECK(!strcmp(t.types[1].type, "animWeb") && t.types[1].count == 1);
+    CHECK(!sh_modledger_tally_truncated(&t.types[0]));
+    /* Names stop before the row fills; the log then says ", ...". */
+    for (i = 0; i < 20; i++) {
+        _snprintf_s(longname, sizeof longname, _TRUNCATE, "entityDef/mods/x/a_rather_long_decl_name_%02d", i);
+        tally_one(&t, longname);
+    }
+    CHECK(t.types[2].count == 20 && sh_modledger_tally_truncated(&t.types[2]));
+    CHECK(strlen(t.types[2].names) < sizeof t.types[2].names);
+    /* A full table counts further types in its last row. */
+    memset(&t, 0, sizeof t);
+    for (i = 0; i < SH_MODLEDGER_TALLY_TYPES + 3; i++) {
+        _snprintf_s(longname, sizeof longname, _TRUNCATE, "type%02d/n", i);
+        tally_one(&t, longname);
+    }
+    CHECK(t.ntypes == SH_MODLEDGER_TALLY_TYPES);
+    CHECK(!strcmp(t.types[SH_MODLEDGER_TALLY_TYPES - 1].type, "type11"));
+    CHECK(t.types[SH_MODLEDGER_TALLY_TYPES - 1].count == 4);
+    CHECK(sh_modledger_tally_add(NULL, "x", "y") == NULL);
+}
+
 int main(void)
 {
     char top[MAX_PATH], tmp[MAX_PATH];
@@ -400,6 +448,7 @@ int main(void)
     test_threads();
     test_decide();
     test_anim_kind(top);
+    test_tally();
     printf("modledger_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

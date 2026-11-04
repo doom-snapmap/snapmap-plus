@@ -1,6 +1,7 @@
 /* modledger.c -- the served-bytes ledger (modledger.h). */
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "modledger.h"
 
@@ -254,4 +255,34 @@ void sh_modledger_reset(void)
     if (t) memset(t, 0, sizeof(ml_slot) * SH_MODLEDGER_SLOTS);
     g_records = g_serves = g_overflow = g_seq = 0;
     g_complete = 1;
+}
+
+/* ------------------------------------------------------------ pass tally */
+
+sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const char *type, const char *name)
+{
+    sh_modledger_tally_type *row = NULL;
+    size_t at;
+    int i;
+    if (!t) return NULL;
+    if (!type) type = "?";
+    for (i = 0; i < t->ntypes; ++i)
+        if (!strcmp(t->types[i].type, type)) { row = &t->types[i]; break; }
+    if (!row) {
+        if (t->ntypes == SH_MODLEDGER_TALLY_TYPES) row = &t->types[SH_MODLEDGER_TALLY_TYPES - 1];
+        else {
+            row = &t->types[t->ntypes++];
+            strncpy_s(row->type, sizeof row->type, type, _TRUNCATE);
+        }
+    }
+    row->count++;
+    at = strlen(row->names);
+    if (name && at < sizeof row->names - 4)
+        _snprintf_s(row->names + at, sizeof row->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+    return row;
+}
+
+int sh_modledger_tally_truncated(const sh_modledger_tally_type *row)
+{
+    return row && strlen(row->names) >= sizeof row->names - 5;
 }

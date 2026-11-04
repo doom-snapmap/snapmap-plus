@@ -108,6 +108,22 @@ void sh_modledger_get_stats(sh_modledger_stats *out);
 int sh_modledger_decide(const sh_modledger_rec *rec, const sh_modledger_ident *now, int stock, int complete);
 const char *sh_modledger_decision_name(int decision);
 
+/* A refresh pass's per-type tally for its log lines ("re-parsed N <type>
+ * decl(s) (names)"). The type name is copied: callers pass it from a stack
+ * buffer (an anim dependent's type comes from its request path), which is gone
+ * by the time the pass prints. A full table counts further types in the last
+ * row. Pure; one pass's own structure, no lock. */
+#define SH_MODLEDGER_TALLY_TYPES 12
+typedef struct sh_modledger_tally_type { char type[48]; int count; char names[160]; } sh_modledger_tally_type;
+typedef struct sh_modledger_tally {
+    sh_modledger_tally_type types[SH_MODLEDGER_TALLY_TYPES];
+    int ntypes;
+} sh_modledger_tally;
+/* Count `name` under `type` (exact case); returns its row. */
+sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const char *type, const char *name);
+/* 1 when the row's names were cut short (the log then ends ", ..."). */
+int sh_modledger_tally_truncated(const sh_modledger_tally_type *row);
+
 /* Tests: drop every record and reset the counters (not thread-safe). */
 void sh_modledger_reset(void);
 
