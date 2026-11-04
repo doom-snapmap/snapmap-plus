@@ -214,6 +214,25 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 typedef int (*sh_modmanifest_resolve_fn)(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
+/* An editor open of the author's own map whose row pins a build that is no
+ * longer installed (DESIGN-additive 2.5, 2.8): the installed build of the
+ * same key serves in its place for this editor session, reported "declared
+ * at build X, installed build Y"; the row keeps X until the author upgrades
+ * the map (sh_mods map upgrade, the Mods tab) or a save re-pins it. The
+ * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
+ * (why: the gate's sentence, may be empty). Bound by modpublished.c, which
+ * asks its denial gate (sh_modpub_gate_decide, an editor open). Play, the hub,
+ * rawmap loads and prefab placements keep their gate's denial; only a parse
+ * the engine makes for the editor (sh_modmanifest_set_editor_load 1, set by
+ * the parse detour for a read that is not a published map's) substitutes. */
+typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap,
+                                            char *why, size_t why_cap);
+void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);
+void sh_modmanifest_set_editor_load(int editor);
+/* The build serving in place of a declared one in the open map: 1 with it in
+ * out, 0 when `declared` is served as itself. */
+int  sh_modmanifest_substituted(const char *declared, char *out, size_t cap);
+
 /* A copy of the manifest of the map last parsed (rows from its text). Free
  * with sh_modmanifest_list_free. Returns the row count. */
 size_t sh_modmanifest_current(sh_modmanifest_list *out);

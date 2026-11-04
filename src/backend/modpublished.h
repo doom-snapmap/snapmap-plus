@@ -184,7 +184,8 @@ enum sh_modpub_verdict {
     SH_MODPUB_GATE_GONE            = 1,
     SH_MODPUB_GATE_UNREACHABLE     = 2,
     SH_MODPUB_GATE_NEVER_PUBLISHED = 3,
-    SH_MODPUB_GATE_GAME_REVISION   = 4
+    SH_MODPUB_GATE_GAME_REVISION   = 4,
+    SH_MODPUB_GATE_SUBSTITUTE      = 5    /* the editor opens the author's map: the installed build serves */
 };
 typedef struct sh_modpub_gate_facts {
     int store;          /* sh_modpub_store_answer for the bundle's hash */
@@ -192,10 +193,21 @@ typedef struct sh_modpub_gate_facts {
     int published;      /* the map came from the map service (any published hook), or a claim this
                            machine holds names the bundle */
     int other_build;    /* the key is installed at another hash (informational: never a denial) */
+    int editor;         /* the editor opens the map (a My Maps map or a map opened by the author), not
+                           Play, the hub, a rawmap load or a prefab placement */
 } sh_modpub_gate_facts;
 
-/* The one decision: a sh_modpub_verdict. */
+/* The one decision: a sh_modpub_verdict. In the editor, a build that is not
+ * installed while another build of its key is never denies: the installed
+ * build serves, reported "declared at build X, installed build Y", and the
+ * Mods tab offers to upgrade the map (SUBSTITUTE, DESIGN-additive 2.5). With
+ * no build of the key installed the editor gets the cause as everywhere. */
 int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
+
+/* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
+ * for an editor open: the gate with editor set, the row's other build from
+ * the other_build op, the store not asked (an editor open has no hold). */
+int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap);
 
 /* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
  * line say it: "This <subject> needs <title> at a build that ...". `subject`

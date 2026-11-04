@@ -982,6 +982,44 @@ static void rawmap_store_has_downloads_and_reopens(void)
 
 /* ---- the denial gate (DESIGN-additive 2.8) ------------------------------------------------- */
 
+/* The author's map in the editor: a declared build that is gone while the
+ * key is installed at another build substitutes (2.5); with no build of the
+ * key it is the same cause as everywhere; Play and the hub keep the gate. */
+static void gate_editor_substitutes(void)
+{
+    sh_modpub_gate_facts f;
+    sh_modmanifest_row row;
+    char hash[80], why[600];
+    printf("-- the gate: the editor opens the author's map with the installed build of a key\n");
+    memset(&f, 0, sizeof f);
+    f.editor = 1;
+    f.store = SH_MODPUB_STORE_ABSENT;
+    f.other_build = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
+    f.store = SH_MODPUB_STORE_UNREACHABLE;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
+    f.other_build = 0;
+    f.store = SH_MODPUB_STORE_ABSENT;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);   /* the key is not installed: denied */
+    f.editor = 0;
+    f.other_build = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);   /* Play, the hub: denied as before */
+    /* The manifest's op: the other build's hash, or the cause. */
+    reset();
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "alex.pink-imp");
+    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
+    F.other_build_a = 1;
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
+    F.other_build_a = 0;
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 && !hash[0] &&
+          strstr(why, "This map needs alex.pink-imp at a build that is not installed and was never published."));
+    F.claimed_a = 1;
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 &&
+          strstr(why, "at a build that is no longer available"));
+    reset();
+}
+
 static void gate_decision_and_wording(void)
 {
     sh_modpub_gate_facts f;
@@ -1269,6 +1307,7 @@ int main(void)
     gate_causes_through_the_hold();
     gate_other_build_prompt();
     gate_product_version();
+    gate_editor_substitutes();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

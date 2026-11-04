@@ -443,6 +443,9 @@ void sh_modpublished_compose_prefab_question(char *out, size_t cap, const char *
 int sh_modpub_gate_decide(const sh_modpub_gate_facts *f)
 {
     if (!f) return SH_MODPUB_GATE_UNREACHABLE;
+    /* The author's own map in the editor: the installed build of the key
+     * serves (DESIGN-additive 2.5), whatever the store would say. */
+    if (f->editor && f->other_build) return SH_MODPUB_GATE_SUBSTITUTE;
     /* A placeholder system (DESIGN-additive 7, phase 6) answers here, with a
      * verdict of its own, before any denial below. */
     if (f->store == SH_MODPUB_STORE_HAS) return f->game_lacks ? SH_MODPUB_GATE_GAME_REVISION : SH_MODPUB_GATE_OBTAIN;
@@ -480,6 +483,34 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
         out[0] = 0;
         break;
     }
+}
+
+int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+{
+    sh_modpub_gate_facts facts;
+    char other[SH_MODMANIFEST_HASH_CAP] = "", name[128] = "", title[300];
+    int verdict;
+    if (hash_out && hash_cap) hash_out[0] = 0;
+    if (why && why_cap) why[0] = 0;
+    if (!row || !g_ops_set) return 0;
+    memset(&facts, 0, sizeof facts);
+    facts.editor = 1;
+    facts.store = SH_MODPUB_STORE_ABSENT;   /* not asked: an editor open holds nothing */
+    facts.published = g_ops.claimed && row->bundle[0] && g_ops.claimed(g_ops.context, row->bundle);
+    facts.other_build = g_ops.other_build && g_ops.other_build(g_ops.context, row, other, sizeof other, name, sizeof name) &&
+                        other[0];
+    verdict = sh_modpub_gate_decide(&facts);
+    if (verdict == SH_MODPUB_GATE_SUBSTITUTE) {
+        if (hash_out && hash_cap) strcpy_s(hash_out, hash_cap, other);
+        return 1;
+    }
+    if (why && why_cap) {
+        const char *key = row->id[0] ? row->id : row->bundle;
+        if (name[0] && _stricmp(name, key)) _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", name, key);
+        else _snprintf_s(title, sizeof title, _TRUNCATE, "%s", key);
+        sh_modpub_gate_wording(verdict, "map", title, NULL, why, why_cap);
+    }
+    return 0;
 }
 
 /* "<name> (<key>)", or the key when no name is known or it is the key. */
@@ -1537,7 +1568,7 @@ void sh_modpublished_poll(void)
 #ifdef SH_MODPUBLISHED_TESTING
 void sh_modpub_test_set_ops(const sh_modpub_ops *ops)
 {
-    if (ops) { g_ops = *ops; g_ops_set = 1; }
+    if (ops) { g_ops = *ops; g_ops_set = 1; sh_modmanifest_set_substitute(sh_modpub_editor_substitute); }
     else { memset(&g_ops, 0, sizeof g_ops); g_ops_set = 0; }
 }
 void sh_modpub_test_set_read_sites(const void *offline_return, const void *online_return)
@@ -2428,6 +2459,7 @@ int sh_modpublished_install(const sig_result *results, size_t count, const uint8
         return 0;
     }
     g_ops = ENG_OPS; g_ops_set = 1;
+    sh_modmanifest_set_substitute(sh_modpub_editor_substitute);
     /* OnSnapPlay: 11 bytes of pushes and sub, then the 7-byte security-cookie
      * load, rewritten. CacheReady: the stack-probe call at +7. The others are
      * whole, position-independent prologues. */

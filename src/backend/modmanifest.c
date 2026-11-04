@@ -1115,6 +1115,74 @@ static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
     ReleaseSRWLockExclusive(&g_current_lock);
 }
 
+/* Substitutions of the open map (sh_modmanifest_substituted), under g_current_lock. */
+#define MM_SUBST_MAX 32
+typedef struct mm_subst { char from[SH_MODMANIFEST_HASH_CAP], to[SH_MODMANIFEST_HASH_CAP]; } mm_subst;
+static mm_subst g_subst[MM_SUBST_MAX];
+static int g_nsubst;
+static sh_modmanifest_substitute_fn volatile g_substitute;
+static volatile LONG g_editor_load;
+
+void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute) { g_substitute = substitute; }
+void sh_modmanifest_set_editor_load(int editor) { InterlockedExchange(&g_editor_load, editor ? 1 : 0); }
+
+int sh_modmanifest_substituted(const char *declared, char *out, size_t cap)
+{
+    int i, hit = 0;
+    if (!declared) return 0;
+    AcquireSRWLockShared(&g_current_lock);
+    for (i = 0; i < g_nsubst && !hit; i++)
+        if (!strcmp(g_subst[i].from, declared)) {
+            hit = 1;
+            if (out && cap) strcpy_s(out, cap, g_subst[i].to);
+        }
+    ReleaseSRWLockShared(&g_current_lock);
+    return hit;
+}
+
+static void mm_subst_drop(const char *from)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_current_lock);
+    for (i = 0; i < g_nsubst; i++)
+        if (!strcmp(g_subst[i].from, from)) { g_subst[i] = g_subst[--g_nsubst]; break; }
+    ReleaseSRWLockExclusive(&g_current_lock);
+}
+
+/* At a load: which declared builds the editor serves through another build. */
+static void mm_subst_load(const sh_modmanifest_list *list)
+{
+    sh_modmanifest_substitute_fn sub = g_substitute;
+    int editor = InterlockedCompareExchange(&g_editor_load, 0, 0) != 0;
+    size_t i;
+    AcquireSRWLockExclusive(&g_current_lock);
+    g_nsubst = 0;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    if (!list || !editor || !sub) return;
+    for (i = 0; i < list->count; i++) {
+        const sh_modmanifest_row *r = &list->rows[i];
+        sh_modserve_bundle_ref ref;
+        char to[SH_MODMANIFEST_HASH_CAP] = "", why[400] = "", line[700];
+        if (sh_modserve_bundle_serving(r->bundle, NULL, &ref)) continue;   /* its own build serves */
+        if (sub(r, to, sizeof to, why, sizeof why) == 1 && sh_modmanifest_valid_hash(to, strlen(to)) && strcmp(to, r->bundle)) {
+            AcquireSRWLockExclusive(&g_current_lock);
+            if (g_nsubst < MM_SUBST_MAX) {
+                strcpy_s(g_subst[g_nsubst].from, sizeof g_subst[g_nsubst].from, r->bundle);
+                strcpy_s(g_subst[g_nsubst].to, sizeof g_subst[g_nsubst].to, to);
+                g_nsubst++;
+            }
+            ReleaseSRWLockExclusive(&g_current_lock);
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "MODS: map: %s: declared at build %.16s, installed build %.16s serves it in the editor; "
+                        "'sh_mods map upgrade \"%s\"' (the Mods tab's Upgrade this map) moves the map to it",
+                        r->id, r->bundle, to, r->id);
+        } else if (why[0]) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: map: %s: %s", r->id, why);
+        } else continue;
+        backend_log(line);
+    }
+}
+
 int sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to)
 {
     int found = 0;
@@ -1125,7 +1193,7 @@ int sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to
     for (i = 0; i < g_current.count && !found; i++) found = !strcmp(g_current.rows[i].bundle, from);
     if (found && mm_list_find(&g_current, to->bundle)) found = 0;
     ReleaseSRWLockShared(&g_current_lock);
-    if (found) mm_current_rename(from, to);
+    if (found) { mm_current_rename(from, to); mm_subst_drop(from); }
     return found;
 }
 
@@ -1193,7 +1261,8 @@ int sh_modmanifest_activate(const sh_modmanifest_list *rows)
         if (sh_modserve_bundle_serving(rows->rows[i].bundle, rows->rows[i].id, &ref) &&
             strlen(ref.hash) == SH_MOD_HASH_CHARS)
             strcpy_s(served[i], sizeof served[i], ref.hash);
-        else strcpy_s(served[i], sizeof served[i], rows->rows[i].bundle);
+        else if (!sh_modmanifest_substituted(rows->rows[i].bundle, served[i], sizeof served[i]))
+            strcpy_s(served[i], sizeof served[i], rows->rows[i].bundle);
         hashes[i] = served[i];
     }
     active = modserve_activate_bundles(hashes, (int)rows->count);
@@ -1414,6 +1483,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     if (!json || !length ||
         !sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) {
         mm_set_current(NULL);
+        mm_subst_load(NULL);
         mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
         modserve_activate_bundles(NULL, 0);
@@ -1426,6 +1496,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
+    mm_subst_load(&list);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);
     active = sh_modmanifest_activate(&list);

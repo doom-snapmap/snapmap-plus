@@ -2806,9 +2806,14 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     mu_listing l;
     size_t i;
     int changed;
+    char (*sub)[SH_MODMANIFEST_HASH_CAP] = NULL;
     memset(&l, 0, sizeof l);
+    if (rows && rows->count) sub = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(rows->count, sizeof *sub);
     for (i = 0; rows && i < rows->count; i++) {
-        mu_listing_push(&l.hashes, &l.nh, &l.ch, rows->rows[i].bundle);
+        /* A declared build the editor serves through the installed one (2.5). */
+        if (sub && sh_modmanifest_substituted(rows->rows[i].bundle, sub[i], sizeof sub[i]))
+            mu_listing_push(&l.hashes, &l.nh, &l.ch, sub[i]);
+        else mu_listing_push(&l.hashes, &l.nh, &l.ch, rows->rows[i].bundle);
         mu_listing_push(&l.ids, &l.ni, &l.ci, rows->rows[i].id);
     }
     if (names && name_count && sh_modserve_active())
@@ -2816,6 +2821,7 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     changed = sh_modserve_scope_set(l.hashes, (int)l.nh, l.ids, (int)l.ni, map_open);
     free((void *)l.hashes);
     free((void *)l.ids);
+    free(sub);
     return changed;
 }
 
@@ -3671,6 +3677,12 @@ static void mu_say_map(const mu_out *o)
                     x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
                     x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "",
                     scope);
+            {
+                char sub[SH_MODMANIFEST_HASH_CAP];
+                if (sh_modmanifest_substituted(x->hash, sub, sizeof sub))
+                    mu_line(o, "map:   declared at build %.16s, installed build %.16s serves it in the editor; "
+                               "'sh_mods map upgrade \"%s\"' moves the map to it", x->hash, sub, x->id);
+            }
             for (k = 0; k < x->uid_count && k < MU_MAX_MAP_ENTITIES; k++) {
                 char name[300];
                 mu_entity_label(&m, sh_mm_find(&mp.mm, x->uids[k]), x->uids[k], name, sizeof name);

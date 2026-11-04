@@ -530,7 +530,13 @@ int sh_rawmap_reopen_after_mods(char *note, size_t cap)
 /* Parse the chosen bytes after preparation and record the map's render settings. */
 static int deser_prepared(const char *json, void *out_map)
 {
-    char *prepared = prepare_map_buffer(json);
+    char *prepared;
+    /* A read that is not a published map's is the editor's (My Maps, an opened
+     * map): a row whose build is gone is served by its key's installed build.
+     * Play, the hub and rawmap loads were held by the gate before this parse. */
+    sh_modmanifest_set_editor_load(g_parse_kind == SH_MODPUB_PARSE_OTHER);
+    prepared = prepare_map_buffer(json);
+    sh_modmanifest_set_editor_load(0);
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     /* Beside the manifest the preparation kept: which read this was, the map it
      * filled, and the text, for the published-map and offline-play gates. */

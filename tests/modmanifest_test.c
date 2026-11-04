@@ -370,6 +370,75 @@ static void placed_names(void)
     CHECK(failed && n == 0 && names == NULL);
 }
 
+/* The substitute op as modpublished binds it: alex.gone is installed at HASH_A's build. */
+static int g_subst_calls;
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+{
+    g_subst_calls++;
+    if (!strcmp(row->id, "alex.gone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
+    strcpy_s(why, why_cap, "This map needs nobody.here at a build that is not installed and was never published.");
+    return 0;
+}
+
+static void editor_substitution(void)
+{
+    sh_modmanifest_list rows = {0};
+    sh_modmanifest_row row;
+    char err[256], sub[80], *text, *loaded;
+    size_t tl = 0, ll = 0;
+    static const char gone[] = "00000000000000000000000000000000000000000000000000000000000000ab";
+    static const char none[] = "00000000000000000000000000000000000000000000000000000000000000cd";
+    printf("-- an editor open serves a gone build's key through its installed build\n");
+    g_installed = INSTALLED;
+    g_installed_count = 2;
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "alex.gone");
+    strcpy_s(row.version, sizeof row.version, "0.9.0");
+    strcpy_s(row.bundle, sizeof row.bundle, gone);
+    row.size = 10;
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    strcpy_s(row.id, sizeof row.id, "nobody.here");
+    strcpy_s(row.bundle, sizeof row.bundle, none);
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
+    CHECK(text != NULL);
+    sh_modmanifest_set_substitute(fake_substitute);
+    /* A published map's parse: never substituted. */
+    g_subst_calls = 0;
+    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    CHECK(g_subst_calls == 0 && !sh_modmanifest_substituted(gone, sub, sizeof sub));
+    /* The editor's parse: the installed build serves; the row keeps its declared build. */
+    sh_modmanifest_set_editor_load(1);
+    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+    sh_modmanifest_set_editor_load(0);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    CHECK(g_subst_calls == 2 && sh_modmanifest_substituted(gone, sub, sizeof sub) && !strcmp(sub, HASH_A));
+    CHECK(!sh_modmanifest_substituted(none, sub, sizeof sub));
+    CHECK(g_activate_count == 2 && (!strcmp(g_activated[0], HASH_A) || !strcmp(g_activated[1], HASH_A)));
+    CHECK(strstr(g_last_log, "MODS: map manifest names 2 bundle(s)") != NULL);
+    {
+        sh_modmanifest_list cur;
+        CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].bundle, gone));
+        sh_modmanifest_list_free(&cur);
+    }
+    /* Upgrade this map: the row moves to the installed build and the substitution ends. */
+    strcpy_s(row.id, sizeof row.id, "alex.gone");
+    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
+    CHECK(sh_modmanifest_current_rename(gone, &row) == 1 && !sh_modmanifest_substituted(gone, sub, sizeof sub));
+    /* The next load starts over. */
+    sh_modmanifest_set_editor_load(1);
+    loaded = text ? sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll) : NULL;
+    sh_modmanifest_set_editor_load(0);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    CHECK(!sh_modmanifest_substituted(gone, sub, sizeof sub));
+    sh_modmanifest_set_substitute(NULL);
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_reset();
+    g_installed_count = 0;
+}
+
 static void save_closure(void)
 {
     char *out;
@@ -927,6 +996,7 @@ int main(void)
     playtest_bound();
     placed_names();
     save_closure();
+    editor_substitution();
     activate_by_id();
     load_step();
     mod_json();
