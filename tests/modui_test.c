@@ -1673,6 +1673,54 @@ int main(int argc, char **argv)
             g_map_left = 1;
             CHECK(sh_modui_poll_main(NULL) == 0);
             CHECK(!sh_modserve_scope_map_open() && g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "map exit"));
+            /* The editor map's rows go with its listing, and a hub launch
+             * declares exactly the launched map's rows (ADD-L6 H). */
+            {
+                sh_modmanifest_list cur;
+                char got[8][SH_MODSERVE_HASH_HEX + 1];
+                sh_modserve_bundle_ref ref;
+                const char *placed0 = g_placed[0];
+                int placed_n = g_placed_count;
+                size_t ll = 0;
+                char *l;
+                CHECK(sh_modmanifest_current(&cur) == 0);
+                sh_modmanifest_list_free(&cur);
+                /* A Play entry at the hub reads nothing from the editor, whose
+                 * entities still name a mod. */
+                g_placed[0] = "mods/alex.req/twin";
+                g_placed_count = 1;
+                (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0);
+                /* A My Maps play of a map that declares nothing: nothing is declared in its Play. */
+                l = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll);
+                if (l) HeapFree(GetProcessHeap(), 0, l);
+                (void)sh_modui_scope_launch("My Maps play");
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0 && sh_modserve_scope_map_open());
+                CHECK(sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY);
+                (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0);
+                CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &ref));
+                {
+                    sh_modserve_scope_info si;
+                    CHECK(sh_modserve_bundle_scope(ref.hash, &si) && !si.listed && si.play);
+                }
+                /* One that declares alex.req: exactly its row, whatever the editor shows. */
+                load_map_naming("alex.req", ref.hash);
+                (void)sh_modui_scope_launch("My Maps play");
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1 && !_stricmp(got[0], ref.hash));
+                (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1);
+                /* Its Play over, back at the hub: nothing is declared, in the editor mode. */
+                applies = g_scope_applies;
+                CHECK(sh_modui_poll_main(NULL) == 0);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0 && !sh_modserve_scope_map_open());
+                CHECK(!strcmp(g_scope_phase, "hub") && sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_EDITOR);
+                CHECK(sh_modmanifest_current(&cur) == 0);
+                sh_modmanifest_list_free(&cur);
+                CHECK(sh_modui_poll_main(NULL) == 0 && g_scope_applies == applies + 1);   /* once */
+                g_placed[0] = placed0;
+                g_placed_count = placed_n;
+            }
             {
             int placed = g_placed_count;
             g_placed_count = -1;
@@ -1681,9 +1729,14 @@ int main(int argc, char **argv)
             free(doc);
             g_placed_count = placed;
             }
-            /* Back in the editor without a load: the listing is set again from the open map. */
+            /* Back in the editor, which opens the map again: the listing is the open map's. */
+            {
+                sh_modserve_bundle_ref req;
+                CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &req));
+                load_map_naming("alex.req", req.hash);
+            }
             g_map_on = 1;
-            CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open() && !strcmp(g_scope_phase, "editor"));
+            CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open() && !strcmp(g_scope_phase, "map load"));
             /* Remove from map of a placed mod: the entities' delete commits after the call, so the
              * placed names still name them while the listing is computed; the mod is withdrawn anyway. */
             {

@@ -2810,12 +2810,13 @@ static int mu_saved_maps_using(const char *id)
 
 /* ---- map scope (modserve.h): what the open map lists */
 
-/* A save changed the listing (applied on the next editor tick), and whether
- * the editor has shown the map loaded last (the tick clears the listing once
- * that editor is gone; a published map played from the hub keeps its listing
- * until the next load). */
+/* A save changed the listing (applied on the next editor tick), whether the
+ * editor has shown the map loaded last (the tick clears the listing once that
+ * editor is gone), and whether a hub launch set the listing (the tick clears
+ * it once that Play is over: at the hub nothing is declared). */
 static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
+static volatile LONG g_scope_launch;
 
 typedef struct mu_listing {
     const char **hashes, **ids;
@@ -2950,12 +2951,39 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
     else InterlockedExchange(&g_scope_owed, 1);
 }
 
-/* The serving layer's source at the Play entry: Play does not serialize the map. */
+/* The serving layer's source at the Play entry: Play does not serialize the
+ * map. Only the editor's Play reads the open map live; a hub launch keeps the
+ * listing its launch gate set (sh_modui_scope_launch), since the editor's
+ * entities and manifest are not the launched map's (ADD-L6 H). */
 static int mu_scope_source(int when)
 {
     (void)when;
     if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
+    if (!InterlockedCompareExchange(&g_scope_editor, 0, 0)) return 0;
     return mu_listing_live();
+}
+
+int sh_modui_scope_launch(const char *why)
+{
+    sh_modmanifest_list rows;
+    int changed = 0, moved;
+    const char *at = why && why[0] ? why : "launch";
+    if (!mu_on_main()) return 0;
+    if (!sh_modserve_scope_enabled()) {
+        if (sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0) (void)mu_scope_apply(at);
+        return 0;
+    }
+    InterlockedExchange(&g_scope_editor, 0);
+    InterlockedExchange(&g_scope_launch, 1);
+    (void)sh_modmanifest_current(&rows);
+    /* The rows alone: a launched map declares what it carries rows for. */
+    changed = mu_listing_set(&rows, NULL, 0, 1);
+    moved = sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0;
+    mu_log("scope: %s: the launched map declares %zu row(s)%s", at, rows.count,
+           rows.count ? "; nothing else serves in its Play" : "; no mod serves in its Play");
+    sh_modmanifest_list_free(&rows);
+    if (changed || moved) (void)mu_scope_apply(at);
+    return changed;
 }
 
 /* The build that serves a map-level row at save. */
@@ -3007,14 +3035,25 @@ static void mu_scope_tick(int editor_map)
     if (!editor_map) {
         if (InterlockedCompareExchange(&g_scope_editor, 0, 0) && sh_modserve_scope_map_open() &&
             !(e->map_left && e->map_left() == 0)) {
+            /* The rows go with the listing: a hub launch or a Play entry must
+             * not read the editor map's manifest as its own. */
             InterlockedExchange(&g_scope_editor, 0);
+            sh_modmanifest_current_close();
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
-                mu_log("scope: the editor left the map; its mods' shadows and requirements are withdrawn");
+                mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
+            }
+        } else if (InterlockedExchange(&g_scope_launch, 0)) {
+            /* The tick waits out Play and loads, so a hub launch's Play is over. */
+            sh_modmanifest_current_close();
+            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+                mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
+                (void)mu_scope_apply("hub");
             }
         }
         return;
     }
+    InterlockedExchange(&g_scope_launch, 0);
     InterlockedExchange(&g_scope_editor, 1);
     /* Back in the editor (after Play): undeclared bundles offer their names again. */
     if (sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_EDITOR && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR))
@@ -3507,7 +3546,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             }
             if (builds > 1) {
                 char built[40];
-                _snprintf_s(built, sizeof built, _TRUNCATE, " (%d of %d builds)", rm.removed, builds);
+                _snprintf_s(built, sizeof built, _TRUNCATE, " (%zu of %d builds)", rm.removed, builds);
                 strncat_s(title, sizeof title, built, _TRUNCATE);
             }
             mu_log("uninstall %s: %s%s", key, !ok ? "the folder could not be removed" : rm.outright ? "the folder was deleted outright"
@@ -4210,5 +4249,6 @@ void sh_modui_test_reset(void)
     InterlockedExchange(&g_undo_owed, 0);
     InterlockedExchange(&g_scope_owed, 0);
     InterlockedExchange(&g_scope_editor, 0);
+    InterlockedExchange(&g_scope_launch, 0);
 }
 #endif

@@ -255,6 +255,10 @@ int    sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row 
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* Forget the current manifest (tests). */
 void sh_modmanifest_reset(void);
+/* The open map closed (the editor left it, or a hub launch's Play is over):
+ * its rows, substitutions and registry choices go, so nothing reads them as
+ * the next map's. */
+void sh_modmanifest_current_close(void);
 
 /* The open map's registry choices (modregistry.h): read from the rows at
  * every load, written at every save on the row of the key each names (a

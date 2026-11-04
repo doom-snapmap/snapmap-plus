@@ -177,10 +177,12 @@ int  sh_modui_list(void);
  * Map scope: binding also registers the manifest's scope hook, its row
  * resolver and the serving layer's scope source. At every load the listing is
  * the rows and the placed names, applied at once; at every save the rows
- * written, applied on the next editor tick; at the Play entry the current
- * rows and the live placed names. The tick (sh_modui_poll_main) clears the
- * listing when the editor that had the map open is gone (the hub), and sets
- * it again when an editor map is open without one.
+ * written, applied on the next editor tick; at the editor's Play entry the
+ * current rows and the live placed names; at a hub launch the launched map's
+ * rows alone (sh_modui_scope_launch). The tick (sh_modui_poll_main) clears
+ * the listing and the current rows when the editor that had the map open is
+ * gone (the hub) or a hub launch's Play is over, and sets the listing again
+ * when an editor map is open without one.
  *
  * The uninstall's dry run reports, with the consequences, how many local
  * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a
@@ -210,6 +212,14 @@ int  sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, 
  * scope's part. */
 int  sh_modui_poll_due(void);
 int  sh_modui_poll_main(void *context);
+
+/* A hub launch (a My Maps play, a published launch) passed its gate: the map
+ * scope declares exactly the launched map's rows (its parse made them the
+ * current manifest; the editor's exit cleared the editor map's), and the
+ * serving mode is Play. The Play entry then keeps this listing instead of
+ * reading the editor, and the tick clears it once that Play is over. Main
+ * thread. Returns the bundles whose serving changed. */
+int  sh_modui_scope_launch(const char *why);
 
 /* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
 int  sh_modui_wait(unsigned ms);

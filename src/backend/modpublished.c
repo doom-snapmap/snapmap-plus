@@ -1610,6 +1610,7 @@ const char *sh_modpub_test_notice(void) { return g_notice; }
 #include "engine_dialog.h"
 #include "modserve.h"
 #include "modstore.h"
+#include "modui.h"      /* sh_modui_scope_launch: a hub launch's listing */
 #include "process_heap_scope.h"
 #include "rawmap.h"     /* sh_rawmap_reopen_after_mods: a rawmap hold's resume */
 #include "commands.h"   /* sh_printf: the rawmap refusal's console line */
@@ -2020,13 +2021,15 @@ static int eng_cold_read(void *manager, const char *id, const char *revision)
 
 /* A hub launch (a published map, a My Maps play) runs in the serving layer's
  * Play mode from the launch on, as the editor's Play does, so a mod the map
- * does not declare serves nothing in it (modserve.h, sh_modserve_scope_mode).
- * The editor's tick (modui.c) sets the editor mode again when the editor next
- * shows a map. Main thread. */
+ * does not declare serves nothing in it (modserve.h, sh_modserve_scope_mode),
+ * and it declares exactly the launched map's rows, which its parse made the
+ * current manifest (modui.h, sh_modui_scope_launch): never the last editor
+ * map's. The tick (modui.c) clears that listing once the Play is over, and
+ * sets the editor mode again when the editor next shows a map. Main thread. */
 static void eng_scope_play(const char *why)
 {
     __try {
-        if (sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0) (void)sh_modserve_scope_apply(why);
+        (void)sh_modui_scope_launch(why);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the launch's serving mode change faulted; the launch continues");
     }

@@ -1046,6 +1046,14 @@ void sh_modmanifest_reset(void)
     ReleaseSRWLockExclusive(&g_current_lock);
 }
 
+static void mm_subst_load(const sh_modmanifest_list *list);
+
+void sh_modmanifest_current_close(void)
+{
+    sh_modmanifest_reset();
+    mm_subst_load(NULL);
+}
+
 static void mm_subst_drop(const char *from);
 
 size_t sh_modmanifest_current_remove(const char *bundle)

@@ -1560,6 +1560,8 @@ at:
 - the Play entry: Play does not serialize the map, so `sh_modserve_play_begin`
   asks the scope source (`modui.c`) to read the current manifest and the live
   placed names, then applies before the requirements check and the level load;
+  only the editor's Play reads them: a hub launch keeps the listing its launch
+  gate set, since the editor's entities are not the launched map's;
 - the map exit: the main-thread tick (`sh_modui_poll_main`, polled while scope
   can matter) clears the listing once the editor that showed the map loaded
   last has its screen down, neither Play nor a load runs (`load_state` reads
@@ -1571,18 +1573,24 @@ at:
   the browser) or 8 (exiting) with the deactivate reason at `+0x2366C` not
   equal to 4. The Settings screen opened from the Start menu also takes the
   editor screen down and also reads state 8, but with reason 4 (shutdown
-  reads 1), so the listing stays. The tick sets the listing again from the open map when an
+  reads 1), so the listing stays. The current manifest goes with it
+  (`sh_modmanifest_current_close`), so nothing later reads the editor map's
+  rows as another map's. The tick sets the listing again from the open map when an
   editor map is open without one;
 - the Mods tab's and the console's map add and Remove from map, at once.
 
 With no map (at boot, and at the hub after the editor) no undeclared shadow
-serves. A published or My Maps launch from the hub keeps its listing until the
-next parse, because nothing marks the end of that Play, and runs in PLAY mode:
-the launch boundary (`PublishedMapLobbyLaunch`, `PublishedMapOfflineLaunch`,
-`LaunchLocalSnapMapForOfflinePlay`, and the resume of a held one) sets
-`SH_MODSERVE_MODE_PLAY` and applies it before the original launches, so an
-undeclared bundle serves nothing in the map; nothing marks the end of that
-Play, so the editor's tick sets EDITOR again when the editor next shows a map,
+serves. A published or My Maps launch from the hub declares exactly the
+launched map's rows and runs in PLAY mode: the launch boundary
+(`PublishedMapLobbyLaunch`, `PublishedMapOfflineLaunch`,
+`LaunchLocalSnapMapForOfflinePlay`, and the resume of a held one) calls
+`sh_modui_scope_launch`, which lists the current manifest's rows (the launched
+map's parse made them current; the editor's exit cleared the editor map's),
+sets `SH_MODSERVE_MODE_PLAY` and applies it before the original launches, so
+an undeclared bundle serves nothing in the map. The tick waits out Play and
+loads, so its first pass at the hub after that Play clears the listing and the
+current rows and returns to EDITOR mode (`scope: the launched map's Play is
+over`); the editor's tick also sets EDITOR when the editor next shows a map,
 and an editor palette pass does it first (a pass in PLAY would not register
 undeclared rows). A
 `mod.json` author key `"scope"` stays in the manifest's `extra`, so a mod with
