@@ -30,7 +30,8 @@
  *                                  build (the map pins the build it was saved with)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
  *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, its undo history cleared,
- *                                       then the folder moved to the Windows Recycle Bin); --yes does it
+ *                                       then the folder moved to the Windows Recycle Bin); --yes does it;
+ *                                       a key loses every build, "<id>@<hash16>" one build
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
  *   sh_mods push "<id@version+build>" "<ref>"   upload a bundle to the mod store and claim it under ref

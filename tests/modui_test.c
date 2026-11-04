@@ -1960,6 +1960,65 @@ int main(int argc, char **argv)
     g_union = NULL;
 
     mt_remove_tree(tmp);
+    printf("-- uninstall by key from the console: every build of the key; <key>@<hash16>: that build\n");
+    {
+        char twin[MAX_PATH], beside[200] = "", h1[17] = "", h2[17] = "", one[240], line[400], gone[MAX_PATH * 2];
+        const char *by_key[] = { "uninstall", "twin.key" };
+        const char *by_key_yes[] = { "uninstall", "twin.key", "--yes" };
+        const char *by_build[] = { "uninstall", one };
+        const char *k, *h;
+        size_t kl = 0;
+        _snprintf_s(twin, sizeof twin, _TRUNCATE, "%s\\authoring\\twin.key", tmp);
+        mt_write(twin, "mod.json", "{\"id\":\"twin.key\",\"version\":\"1.0.0\",\"name\":\"Twin\",\"author\":\"t\"}");
+        mt_write(twin, "assets\\generated\\image\\mods\\twin.key\\a.bimage", "the first build's bytes");
+        doc = run_doc(SH_MODS_ACT_INSTALL, twin);
+        CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"twin.key\""));
+        h = doc ? strstr(doc, "\"bundle\":\"") : NULL;
+        if (h) memcpy(h1, h + 10, 16);
+        free(doc);
+        mt_write(twin, "assets\\generated\\image\\mods\\twin.key\\a.bimage", "the second build's other bytes");
+        doc = run_doc(SH_MODS_ACT_INSTALL, twin);
+        CHECK(has(doc, "\"ok\":true"));
+        k = doc ? strstr(doc, "\"key\":\"twin.key@") : NULL;
+        if (k) { k += 7; while (k[kl] && k[kl] != '"' && kl + 1 < sizeof beside) kl++; memcpy(beside, k, kl); beside[kl] = 0; }
+        h = doc ? strstr(doc, "\"bundle\":\"") : NULL;
+        if (h) memcpy(h2, h + 10, 16);
+        free(doc);
+        CHECK(beside[0] && h1[0] && h2[0] && strcmp(h1, h2));
+        /* <key>@<hash16> names the first build alone, whose folder is the bare key. */
+        _snprintf_s(one, sizeof one, _TRUNCATE, "twin.key@%s", h1);
+        g_doctor[0] = 0;
+        CHECK(sh_modui_command(2, by_build, doctor_line, NULL) == 1);
+        CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\twin.key to the Windows Recycle Bin"));
+        CHECK(!has(g_doctor, "builds of twin.key") && !has(g_doctor, beside));
+        /* The key: every build, each folder named, in the dry run. */
+        g_doctor[0] = 0;
+        CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);
+        CHECK(has(g_doctor, "MODS: uninstall: removes all 2 builds of twin.key; to keep one, uninstall the others as "
+                            "\"twin.key@<build>\"\n"));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\twin.key (twin.key 1.0.0, build %s)\n", h1);
+        CHECK(has(g_doctor, line));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, build %s)\n", beside, h2);
+        CHECK(has(g_doctor, line));
+        CHECK(has(g_doctor, "MODS: uninstall twin.key: dry run; add --yes to do it\n"));
+        /* The tab names one folder, as before. */
+        doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "twin.key");
+        CHECK(has(doc, "\"install\":{\"folder\":\"twin.key\",") && !has(doc, "\"folders\":"));
+        free(doc);
+        /* --yes removes both; the key is then not installed. */
+        g_doctor[0] = 0;
+        CHECK(sh_modui_command(3, by_key_yes, doctor_line, NULL) == 1);
+        CHECK(has(g_doctor, "MODS: uninstall twin.key: Uninstalled Twin (2 of 2 builds)"));
+        CHECK(has(g_doctor, "Their folders were moved to the Recycle Bin"));
+        _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\twin.key", g_root);
+        CHECK(!mt_exists(gone));
+        _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\%s", g_root, beside);
+        CHECK(!mt_exists(gone));
+        g_doctor[0] = 0;
+        CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);
+        CHECK(has(g_doctor, "MODS: uninstall twin.key: twin.key is not installed.\n"));
+    }
+
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

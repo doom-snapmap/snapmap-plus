@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #include "snapmap_plus_iface.h"
 #include "modui.h"
@@ -3275,9 +3276,57 @@ static const char *mu_entry_title(const sh_ms_entry *s)
     return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
 }
 
+/* The folders an uninstall of `key` removes, marked in `mark` (the list's
+ * size); returns how many. The tab names one folder. The console (by_key)
+ * names a key: "<key>" is every build of it (each folder whose mod.json id is
+ * the key; a folder of that name when no build has the id),
+ * "<key>@<hash16>" one build (its bundle hash starts with the hex), and any
+ * other name with '@' the folder of that name. */
+static int mu_uninstall_targets(const mu_model *m, const char *key, int by_key, unsigned char *mark)
+{
+    char id[SH_MB_ID_MAX + 1] = "";
+    const char *at = strchr(key, '@'), *hex = NULL;
+    size_t i, hexlen = 0;
+    int n = 0, by_id = 0;
+    if (by_key && at && at > key && (size_t)(at - key) <= SH_MB_ID_MAX) {
+        for (hexlen = 0; at[1 + hexlen] && isxdigit((unsigned char)at[1 + hexlen]); hexlen++) {}
+        if (!at[1 + hexlen] && hexlen >= 8 && hexlen <= SH_MB_HASH_HEX) {
+            memcpy(id, key, (size_t)(at - key));
+            id[at - key] = 0;
+            hex = at + 1;
+        }
+    }
+    if (by_key && !at)
+        for (i = 0; i < m->list.count && !by_id; i++)
+            if (m->list.items[i].loaded && !_stricmp(m->list.items[i].bundle.id, key)) by_id = 1;
+    for (i = 0; i < m->list.count; i++) {
+        const sh_ms_entry *s = &m->list.items[i];
+        int hit = !strcmp(s->name, key);
+        if (by_id && s->loaded && !_stricmp(s->bundle.id, key)) hit = 1;
+        if (hex && s->loaded && !_stricmp(s->bundle.id, id) && !_strnicmp(s->bundle.hash, hex, hexlen)) hit = 1;
+        mark[i] = (unsigned char)hit;
+        n += hit;
+    }
+    return n;
+}
+
+/* One build an uninstall removes, for the dry run: its folder, its build and
+ * the last good build kept for it. */
+static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *s)
+{
+    char snap[MAX_PATH * 4];
+    if (s->loaded)
+        mu_line(o, "%s:   mods\\%s (%s %s, build %.16s)", verb, mu_leaf(s->folder), s->bundle.id,
+                s->bundle.version[0] ? s->bundle.version : "-", s->bundle.hash);
+    else mu_line(o, "%s:   mods\\%s (not built)", verb, mu_leaf(s->folder));
+    if (sh_ms_snapshot_of(s->folder, snap, sizeof snap) == 1)
+        mu_line(o, "%s:     and its last good build .builds\\%s", verb, mu_leaf(snap));
+}
+
 /* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the
- * tab and the console (o non-NULL prints the same consequences). */
-static int mu_map_action(int action, const char *key, const mu_out *o)
+ * tab and the console (o non-NULL prints the same consequences; by_key, the
+ * console's uninstall, removes every build of a key, mu_uninstall_targets). */
+static int mu_map_action(int action, const char *key, const mu_out *o, int by_key)
 {
     int uninstall = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_UNINSTALL_PREVIEW;
     int apply = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_MAP_REMOVE;
@@ -3289,8 +3338,9 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
     mu_plan p;
     mu_buf b;
     char msg[MAX_PATH * 4 + 600], cause[300], title[300];
-    int entry = -1, ok = 1;
-    size_t i;
+    int entry = -1, ok = 1, builds = 0;
+    unsigned char *targets = NULL;
+    size_t i, t;
     memset(&b, 0, sizeof b);
     if (!key || !key[0]) {
         mu_line(o, "%s: no mod named", verb);
@@ -3304,8 +3354,16 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     mu_record_load(&m, &rec);
     mu_map_build(&mp, &m, &rec);
-    for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
-    mu_plan_build(&m, &mp, key, &p);
+    targets = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
+    if (!targets) { mu_map_free(&mp); mu_record_free(&rec); mu_model_free(&m); return -1; }
+    if (uninstall) {
+        builds = mu_uninstall_targets(&m, key, by_key, targets);
+        for (i = 0; i < m.list.count && entry < 0; i++) if (targets[i]) entry = (int)i;
+    } else {
+        for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
+    }
+    /* The open map's part goes by the first build's folder (its rows match by key). */
+    mu_plan_build(&m, &mp, uninstall && entry >= 0 ? m.list.items[entry].name : key, &p);
     if (entry >= 0) strncpy_s(title, sizeof title, mu_entry_title(&m.list.items[entry]), _TRUNCATE);
     else if (p.mod >= 0) strncpy_s(title, sizeof title, mp.mods[p.mod].id, _TRUNCATE);
     else strncpy_s(title, sizeof title, key, _TRUNCATE);
@@ -3351,11 +3409,27 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
             mu_kstr(&b, "disposition", "recycle", 0);
             mu_kint(&b, "savedMaps", saved, 0);
             mu_kbool(&b, "undoCleared", mp.entities >= 0, 0);
+            if (builds > 1) {
+                size_t k = 0;
+                mu_puts(&b, ",\"folders\":[");
+                for (t = 0; t < m.list.count; t++) {
+                    if (!targets[t]) continue;
+                    if (k++) mu_putn(&b, ",", 1);
+                    mu_str(&b, mu_leaf(m.list.items[t].folder));
+                }
+                mu_putn(&b, "]", 1);
+            }
             mu_putn(&b, "}", 1);
             mu_puts(&b, ",\"editorRows\":[");
-            for (i = 0; i < (size_t)m.entries[entry].row_count; i++) {
-                if (i) mu_putn(&b, ",", 1);
-                mu_str(&b, m.entries[entry].row_names[i]);
+            {
+                int k = 0;
+                for (t = 0; t < m.list.count; t++) {
+                    if (!targets[t]) continue;
+                    for (i = 0; i < (size_t)m.entries[t].row_count; i++) {
+                        if (k++) mu_putn(&b, ",", 1);
+                        mu_str(&b, m.entries[t].row_names[i]);
+                    }
+                }
             }
             mu_putn(&b, "]", 1);
         }
@@ -3364,11 +3438,26 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
             if (p.mod >= 0) mu_say_plan(o, verb, &m, &mp, &p);
             else if (uninstall) mu_line(o, "%s: the open map does not use it", verb);
             if (uninstall) {
-                if (m.entries[entry].row_count)
-                    mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, m.entries[entry].row_count);
-                for (i = 0; i < (size_t)m.entries[entry].row_count; i++) mu_line(o, "%s:   %s", verb, m.entries[entry].row_names[i]);
-                mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
-                        mu_leaf(s->folder));
+                int rows = 0;
+                for (t = 0; t < m.list.count; t++) if (targets[t]) rows += m.entries[t].row_count;
+                if (rows) mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, rows);
+                for (t = 0; t < m.list.count; t++)
+                    for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
+                        mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
+                if (builds > 1) {
+                    mu_line(o, "%s: removes all %d builds of %s; to keep one, uninstall the others as \"%s@<build>\"",
+                            verb, builds, key, key);
+                    mu_line(o, "%s: moves these folders to the Windows Recycle Bin; restore them from there by hand", verb);
+                    for (t = 0; t < m.list.count; t++) if (targets[t]) mu_say_target(o, verb, &m.list.items[t]);
+                    mu_line(o, "%s: drops their rows in snapmap-plus.json (last good builds and build aliases)", verb);
+                } else {
+                    char snap[MAX_PATH * 4];
+                    mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
+                            mu_leaf(s->folder));
+                    if (by_key && sh_ms_snapshot_of(s->folder, snap, sizeof snap) == 1)
+                        mu_line(o, "%s: removes its last good build .builds\\%s and its row in snapmap-plus.json", verb,
+                                mu_leaf(snap));
+                }
                 if (saved > 0)
                     mu_line(o, "%s: %d of your saved maps use it; they will not open until a mod folder provides its assets "
                             "again", verb, saved);
@@ -3412,20 +3501,27 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
             }
             if (!removing) ok = 0;
             else {
-                removing[entry] = 1;
+                for (t = 0; t < m.list.count; t++) removing[t] = targets[t];
                 mu_remove_marked(&m, removing, &rm);
                 ok = rm.removed > 0 && rm.failed == 0;
+            }
+            if (builds > 1) {
+                char built[40];
+                _snprintf_s(built, sizeof built, _TRUNCATE, " (%d of %d builds)", rm.removed, builds);
+                strncat_s(title, sizeof title, built, _TRUNCATE);
             }
             mu_log("uninstall %s: %s%s", key, !ok ? "the folder could not be removed" : rm.outright ? "the folder was deleted outright"
                    : "the folder was moved to the Recycle Bin", removed_from_map ? " after the open map was cleaned of it" : "");
             if (ok && rm.outright)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was deleted because the Recycle Bin could not "
-                            "take it (%s)%s", title, removed_from_map ? " and removed it from the open map" : "", rm.outright_why,
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. %s deleted because the Recycle Bin could not "
+                            "take it (%s)%s", title, removed_from_map ? " and removed it from the open map" : "",
+                            rm.removed > 1 ? "Their folders were" : "Its folder was", rm.outright_why,
                             mp.entities < 0 ? "." : undo > 0 ? ", and the undo history was cleared."
                                                              : "; the undo history could not be cleared.");
             else if (ok)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was moved to the Recycle Bin%s", title,
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. %s moved to the Recycle Bin%s", title,
                             removed_from_map ? " and removed it from the open map" : "",
+                            rm.removed > 1 ? "Their folders were" : "Its folder was",
                             mp.entities < 0 ? "." : undo > 0 ? " and the undo history was cleared."
                                                              : "; the undo history could not be cleared.");
             else
@@ -3437,6 +3533,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
         mu_line(o, "%s %s: %s", verb, key, msg);
         mu_result_head(&b, action, ok, msg);
     }
+    free(targets);
     mu_plan_free(&p);
     mu_map_free(&mp);
     mu_record_free(&rec);
@@ -3830,8 +3927,8 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
         mu_line(&o, "%s: usage: sh_mods %s \"<id>\" [--yes]", verb, !_stricmp(verb, "map") ? "map remove" : "uninstall");
         return 1;
     }
-    if (!_stricmp(verb, "map")) (void)mu_map_action(yes ? SH_MODS_ACT_MAP_REMOVE : SH_MODS_ACT_MAP_REMOVE_PREVIEW, key, &o);
-    else (void)mu_map_action(yes ? SH_MODS_ACT_UNINSTALL : SH_MODS_ACT_UNINSTALL_PREVIEW, key, &o);
+    if (!_stricmp(verb, "map")) (void)mu_map_action(yes ? SH_MODS_ACT_MAP_REMOVE : SH_MODS_ACT_MAP_REMOVE_PREVIEW, key, &o, 0);
+    else (void)mu_map_action(yes ? SH_MODS_ACT_UNINSTALL : SH_MODS_ACT_UNINSTALL_PREVIEW, key, &o, 1);
     return 1;
 }
 
@@ -4031,7 +4128,7 @@ int sh_modui_run(int action, const char *arg)
     case SH_MODS_ACT_UNINSTALL_PREVIEW:
     case SH_MODS_ACT_MAP_REMOVE:
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW:
-        return mu_map_action(action, arg, NULL);
+        return mu_map_action(action, arg, NULL, 0);
     case SH_MODS_ACT_REMOVED_EMPTY:
     case SH_MODS_ACT_REMOVED_RESTORE:
         /* The product's own bin is retired: Uninstall moves the folder to the Windows Recycle Bin. */

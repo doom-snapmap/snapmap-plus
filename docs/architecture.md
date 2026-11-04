@@ -1862,7 +1862,9 @@ is read again from the editor, so the confirmation lists exactly what the dry
 run computed and the modal redraws from what the backend found afterwards.
 The console verbs `sh_mods map`, `sh_mods map add "<id>"`, `sh_mods map remove
 "<id>" [--yes]` and `sh_mods uninstall "<id>" [--yes]` share the dry runs and
-the actions. Adding a mod to the map changes the current manifest only; the
+the actions; the console's uninstall of a key removes every installed build of
+it (`mu_uninstall_targets`), `"<id>@<hash16>"` one build, where the tab names
+one folder. Adding a mod to the map changes the current manifest only; the
 next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
 
