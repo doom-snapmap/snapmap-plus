@@ -707,9 +707,17 @@ typedef struct ms_bcause { char *folder; char cause[SH_MB_CAUSE_MAX]; } ms_bcaus
 static ms_bcause *g_bcause;
 static size_t g_bcause_count, g_bcause_cap;
 
+/* A folder spelled with or without the long-path prefix is one folder. */
+static const char *ms_plain(const char *folder)
+{
+    return folder && !strncmp(folder, "\\\\?\\", 4) && strncmp(folder, "\\\\?\\UNC\\", 8) ? folder + 4 : folder;
+}
+
 static void ms_note_cause(const char *folder, const char *cause)
 {
     size_t i;
+    folder = ms_plain(folder);
+    if (!folder) return;
     modstore_lock();
     for (i = 0; i < g_bcause_count; i++)
         if (!_stricmp(g_bcause[i].folder, folder)) {
@@ -738,12 +746,18 @@ static void ms_note_cause(const char *folder, const char *cause)
     modstore_unlock();
 }
 
+void sh_ms_note_build_failure(const char *folder, const char *cause)
+{
+    if (folder && cause && cause[0]) ms_note_cause(folder, cause);
+}
+
 void sh_ms_build_cause(const char *folder, char *out, size_t cap)
 {
     size_t i;
     if (!out || !cap) return;
     out[0] = 0;
     if (!folder) return;
+    folder = ms_plain(folder);
     modstore_lock();
     for (i = 0; i < g_bcause_count; i++)
         if (!_stricmp(g_bcause[i].folder, folder)) { strncpy_s(out, cap, g_bcause[i].cause, _TRUNCATE); break; }
@@ -835,6 +849,8 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
         return;
     }
     _snprintf_s(e->key, sizeof e->key, _TRUNCATE, "%s@%s+%llu", e->bundle.id, e->bundle.version, e->bundle.build);
+    /* A rebuild that failed leaves this (the last good) build serving. */
+    sh_ms_build_cause(e->folder, e->build_failed, sizeof e->build_failed);
     e->delivered = e->bundle.delivered;
     e->validated = e->bundle.validated;
     e->installed_at = e->bundle.built;
@@ -1082,8 +1098,74 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 {
     int ok;
     if (!folder || !b) return 0;
+    ms_note_cause(folder, NULL);   /* a build succeeded: no earlier failure stands */
     ok = sh_ms_cache_note(folder, b->hash);
     if (b->prev_hash[0] && _stricmp(b->prev_hash, b->hash)) sh_ms_alias_note(b->prev_hash, b->hash);
+    return ok;
+}
+
+/* ---------------------------------------------------------- new mod ---- */
+
+int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                  char *cause, size_t cap)
+{
+    char key[SH_MB_ID_MAX + 1], esc[SH_MB_NAME_MAX * 6 + 1], text[SH_MB_NAME_MAX * 6 + 512], *u;
+    wchar_t *root = NULL, *dir = NULL, *assets = NULL, *desc = NULL, wkey[SH_MB_ID_MAX + 1];
+    size_t i, n = 0, points = 0;
+    int tries, ok = 0;
+    if (key_out) key_out[0] = 0;
+    if (folder_out && folder_cap) folder_out[0] = 0;
+    while (name && (*name == ' ' || *name == '\t')) name++;
+    if (!name || !name[0]) return ms_cause(cause, cap, "a new mod needs a name");
+    for (i = 0; name[i]; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c & 0xC0) != 0x80) points++;
+        if (n + 7 >= sizeof esc) break;
+        if (c == '"' || c == '\\') { esc[n++] = '\\'; esc[n++] = (char)c; }
+        else if (c < 0x20) n += (size_t)_snprintf_s(esc + n, sizeof esc - n, _TRUNCATE, "\\u%04x", c);
+        else esc[n++] = (char)c;
+    }
+    esc[n] = 0;
+    while (n && esc[n - 1] == ' ') esc[--n] = 0;
+    if (points > SH_MB_NAME_MAX) return ms_cause(cause, cap, "a mod name is at most %u characters", SH_MB_NAME_MAX);
+    root = ms_wroot();
+    if (!root) return ms_cause(cause, cap, "the store folder cannot be resolved");
+    modstore_lock();
+    for (tries = 0; tries < 16 && !dir; tries++) {
+        if (!sh_mb_key_generate(name, key)) break;
+        MultiByteToWideChar(CP_UTF8, 0, key, -1, wkey, SH_MB_ID_MAX + 1);
+        dir = ms_wjoin(root, wkey);
+        if (dir && ms_exists(dir)) { free(dir); dir = NULL; }
+    }
+    if (!dir) { ms_cause(cause, cap, "no free key could be generated for \"%s\"", name); goto done; }
+    assets = ms_wjoin_utf8(dir, "assets\\mods");
+    {
+        wchar_t *k = assets ? ms_wjoin(assets, wkey) : NULL;
+        free(assets);
+        assets = k;
+    }
+    desc = ms_wjoin(dir, L"mod.json");
+    if (!assets || !desc || !ms_mkdirs(assets)) { ms_cause(cause, cap, "cannot create the folder for %s (error %lu)", key, GetLastError()); goto done; }
+    /* The author block holds what the files cannot say (DESIGN-additive 2.9);
+     * the product block the key, which never changes afterwards. */
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n"
+                "  \"player\": {},\r\n\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": 1,\r\n    \"key\": \"%s\",\r\n"
+                "    \"origin\": \"" SH_MB_ORIGIN_BY_HAND "\"\r\n  }\r\n}\r\n", esc, key);
+    if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", key); goto done; }
+    u = sh_mb_utf8(dir);
+    if (folder_out && folder_cap && u)   /* the plain spelling, without the long-path prefix */
+        strncpy_s(folder_out, folder_cap, !strncmp(u, "\\\\?\\", 4) && strncmp(u, "\\\\?\\UNC\\", 8) ? u + 4 : u, _TRUNCATE);
+    free(u);
+    if (key_out) strcpy_s(key_out, SH_MB_ID_MAX + 1, key);
+    ms_log("MODS: store: new mod %s (\"%s\") created as mods\\%s", key, name, key);
+    ok = 1;
+done:
+    modstore_unlock();
+    free(root);
+    free(dir);
+    free(assets);
+    free(desc);
     return ok;
 }
 
@@ -1294,9 +1376,12 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
     if (!sh_mb_build(folder, &chain_resolver, b)) {
         sh_ms_list_free(&list);
+        /* Last good build (DESIGN-additive 2.8): mod.json is not touched, so
+         * the previous product block, and the bundle it names, stays in
+         * force and keeps serving; the failure is the folder's state
+         * (sh_ms_build_cause, sh_ms_entry.build_failed). A folder that never
+         * built has no block and stays skipped. */
         ms_note_cause(folder, b->first_cause);
-        /* A block that still loads keeps its files, marked not validated. */
-        sh_mb_set_state(folder, 0, b->first_cause, one, sizeof one);
         return ms_cause(cause, cap, "%s", b->first_cause);
     }
     sh_ms_list_free(&list);
@@ -1569,23 +1654,27 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
                 char cause[SH_MB_CAUSE_MAX];
                 ULONGLONG b0 = GetTickCount64();
                 if (ms_build_in_place(folder, resolver, &b, cause, sizeof cause)) {
-                    char lineage[96] = "";
+                    char lineage[96] = "", classes[160];
                     st->rebuilt++;
+                    sh_mb_classes_text(&b.classes, classes, sizeof classes);
                     if (b.prev_hash[0] && _stricmp(b.prev_hash, b.hash))
                         _snprintf_s(lineage, sizeof lineage, _TRUNCATE, "; bundle %.16s is now an alias of it", b.prev_hash);
-                    ms_log("MODS: store: %s built: %s@%s+%llu, bundle %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s%s",
+                    ms_log("MODS: store: %s built: %s@%s+%llu, bundle %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s%s; %s",
                            ms_rel(folder), b.id, b.version, b.build, b.hash, b.file_count, b.stock_count,
                            (unsigned long long)(GetTickCount64() - b0),
                            have[0] && strcmp(have, b.hash) ? ", its tree changed" : (have[0] ? ", unchanged content" : ""),
-                           lineage);
+                           lineage, classes);
                     strcpy_s(have, sizeof have, b.hash);
                     sh_mb_tree_hash(folder, tree);   /* a package.json became mod.json: same author bytes */
                     _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", have);
                     changed = 1;
                 } else {
                     st->failed++;
-                    have[0] = 0;
-                    ms_log("MODS: store: %s refused: %s", ms_rel(folder), cause);
+                    if (have[0])
+                        ms_log("MODS: store: %s build failed: %s; serving the last good build (bundle %.16s)",
+                               ms_rel(folder), cause, have);
+                    else ms_log("MODS: store: %s refused: %s", ms_rel(folder), cause);
+                    have[0] = 0;   /* not cached: the folder is built again at the next rescan */
                 }
                 sh_mb_free(&b);
             }

@@ -950,15 +950,50 @@ int main(int argc, char **argv)
     CHECK(strcmp(d1, d2) && alias_of(&list, d1) && !strcmp(alias_of(&list, d1), d2));
     CHECK(sh_ms_resolve(&list, d1) == e);
     sh_ms_list_free(&list);
-    /* A refused rebuild leaves the cause on the folder, which stops serving. */
-    mt_write(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl", "{\r\n}");
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    /* Last good build: a refused rebuild leaves mod.json as it was, so build 2
+     * keeps serving, and the failure with its cause is the folder's state. */
+    {
+        char before[MAX_PATH * 2];
+        size_t n1 = 0, n2 = 0;
+        unsigned char *t1, *t2;
+        _snprintf_s(before, sizeof before, _TRUNCATE, "%s\\mod.json", hand);
+        t1 = sh_mb_read_file(before, 1 << 20, &n1);
+        mt_write(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl", "{\r\n}");
+        g_logged = 0;
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+        CHECK(log_has("My Dropped Mod build failed: ") && log_has("; serving the last good build (bundle "));
+        t2 = sh_mb_read_file(before, 1 << 20, &n2);
+        CHECK(t1 && t2 && n1 == n2 && !memcmp(t1, t2, n1));   /* not touched, still validated */
+        free(t1);
+        free(t2);
+    }
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "My Dropped Mod");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "outside mods/alex.dropped/"));
+    CHECK(e && sh_ms_entry_usable(e) && e->bundle.build == 2 && !strcmp(e->bundle.hash, d2) && !e->cause[0]);
+    CHECK(e && strstr(e->build_failed, "outside mods/alex.dropped/"));
     sh_ms_list_free(&list);
+    /* The failure is asked again at every rescan until a build succeeds. */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1 && ss.rebuilt == 0);
     mt_delete(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "My Dropped Mod");
+    CHECK(e && sh_ms_entry_usable(e) && e->bundle.build == 2 && !e->build_failed[0]);
+    sh_ms_list_free(&list);
+    /* A folder that never built stays skipped, with its cause. */
+    {
+        char never[MAX_PATH * 2];
+        _snprintf_s(never, sizeof never, _TRUNCATE, "%s\\never-built", root);
+        mt_write(never, "mod.json", "{\"name\":\"Never\"}");
+        mt_write(never, "assets\\generated\\decls\\entitydef\\other\\y.decl", "{\r\n}");
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, "never-built");
+        CHECK(e && !e->loaded && !sh_ms_entry_usable(e) && strstr(e->cause, "outside mods/never-built/"));
+        sh_ms_list_free(&list);
+        CHECK(sh_ms_remove_folder(never));
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    }
     /* Another edit: build 3. Chained rebuilds stay one hop: builds 1 and 2
      * both name build 3, and no alias names an alias. */
     mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
@@ -978,6 +1013,35 @@ int main(int argc, char **argv)
     /* sh_mods install of a store folder builds it in place. */
     CHECK(sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     CHECK(st.in_place && !strcmp(key, "My Dropped Mod"));
+
+    /* New mod: a folder named by a generated key, which its product block
+     * records; the first build keeps it, and the descriptor has no id. */
+    {
+        char nk[SH_MB_ID_MAX + 1], nf[MAX_PATH * 2], rel[MAX_PATH];
+        unsigned char *text;
+        CHECK(sh_ms_new_mod("Hell \"Guards\"", nk, nf, sizeof nf, cause, sizeof cause));
+        if (!nk[0]) fprintf(stderr, "  new mod: %s\n", cause);
+        CHECK(!strncmp(nk, "hell-guards-", 12) && strlen(nk) == 16);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\%s", nk);
+        CHECK(mt_has(nf, "mod.json") && mt_has(nf, rel));
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\mod.json", nf);
+        text = sh_mb_read_file(rel, 1 << 16, NULL);
+        CHECK(text && strstr((const char *)text, "\"name\": \"Hell \\\"Guards\\\"\"") && !strstr((const char *)text, "\"id\""));
+        free(text);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\guard.decl", nk);
+        mt_write(nf, rel, "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n}");
+        g_logged = 0;
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.rebuilt == 1);
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, nk);
+        CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.id, nk) && e->bundle.key_source == SH_MB_KEY_FROM_BLOCK &&
+              !e->bundle.origin[0] && e->bundle.classes.adds == 1 && !strcmp(e->bundle.name, "Hell \"Guards\""));
+        sh_ms_list_free(&list);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\%s", root, nk);
+        CHECK(sh_ms_remove_folder(rel));
+        CHECK(!sh_ms_new_mod("   ", nk, nf, sizeof nf, cause, sizeof cause) && strstr(cause, "needs a name"));
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    }
 
     /* The store lock: a second installer waits for the holder (a migration
      * folder), it does not fail; two installers at once both succeed. */

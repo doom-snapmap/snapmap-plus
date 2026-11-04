@@ -76,6 +76,10 @@ typedef struct sh_ms_entry {
     int   validated;            /* the product block's "validated" */
     long long installed_at;     /* the product block's "built" */
     char  cause[SH_MB_CAUSE_MAX];   /* why the entry is unusable, or the block's cause */
+    /* A loaded entry whose latest rebuild in this process was refused: its
+     * cause. The bundle above, the last good build, keeps serving
+     * (DESIGN-additive 2.8); "" when the latest build succeeded or none ran. */
+    char  build_failed[SH_MB_CAUSE_MAX];
     sh_mb_bundle bundle;
 } sh_ms_entry;
 
@@ -211,6 +215,21 @@ int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
 /* The first cause of the last refused build of `folder` in this process, or
  * "" (sh_ms_sync and installs record it; enumeration reports it). */
 void sh_ms_build_cause(const char *folder, char *out, size_t cap);
+
+/* Record a refused build of `folder` (absolute) that a caller ran itself
+ * (`sh_mods build`): the same per-folder state sh_ms_sync records. The
+ * folder's mod.json is not touched, so a previous build keeps serving. A
+ * later successful build (sh_ms_note_build) clears it. */
+void sh_ms_note_build_failure(const char *folder, const char *cause);
+
+/* New mod (DESIGN-additive 2.2, 4): a folder under the store root named by a
+ * key generated from `name` (sh_mb_key_generate), holding a descriptor (name,
+ * version "0.1.0", empty description and author, an empty "player" intent)
+ * whose product block records the key and origin "by-hand", and an empty
+ * assets\mods\<key>\. The folder is built at the next rescan. Returns 1 with
+ * the key and the absolute folder; 0 with the cause. */
+int  sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                   char *cause, size_t cause_cap);
 
 /* Record `folder` (absolute) as built from its current tree: cache[tree] =
  * bundle hash. Returns 1 on success. */

@@ -141,6 +141,18 @@ static void mc_needs_line(const char *verb, const sh_mb_bundle *b)
         mc_line("MODS: %s %s@%s+%llu: %u warning(s), first: %s", verb, b->id, b->version, b->build, b->warnings, b->first_warning);
 }
 
+/* The key, the classes and the builder's report lines (additive mods). */
+static void mc_classes_line(const char *verb, const char *folder, const sh_mb_bundle *b)
+{
+    static const char *const from[] = { "", " (the author id, deprecated)", " (the product block)", " (the folder's name)" };
+    char classes[160];
+    size_t i;
+    sh_mb_classes_text(&b->classes, classes, sizeof classes);
+    mc_line("MODS: %s %s: key %s%s; %s", verb, folder, b->id,
+            from[b->key_source >= 0 && b->key_source <= 3 ? b->key_source : 0], classes);
+    for (i = 0; i < b->note_count; i++) mc_line("MODS: %s %s: %s", verb, folder, b->notes[i]);
+}
+
 static void mc_build(const char *folder)
 {
     sh_ms_list list;
@@ -156,13 +168,23 @@ static void mc_build(const char *folder)
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
     if (!sh_mb_build(folder, &r, &b)) {
+        sh_mb_bundle last;
         if (b.id[0]) {
             mc_line("MODS: build %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.build,
                     b.descriptor, b.file_count, b.total_size);
             mc_needs_line("build", &b);
+            mc_classes_line("build", folder, &b);
         }
         if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
         mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
+        /* The last good build stays in force: mod.json is not written. */
+        if (sh_mb_load_folder(folder, &last))
+            mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s)", folder, b.first_cause, last.build,
+                    last.hash);
+        else
+            mc_line("MODS: build %s: build failed: %s; no earlier build serves", folder, b.first_cause);
+        sh_mb_free(&last);
+        if (mc_in_store(folder)) sh_ms_note_build_failure(folder, b.first_cause);
         sh_mb_free(&b);
         sh_ms_list_free(&list);
         return;
@@ -171,6 +193,7 @@ static void mc_build(const char *folder)
             b.descriptor, b.file_count, b.total_size);
     mc_needs_line("build", &b);
     mc_stock_line("build", folder, &b);
+    mc_classes_line("build", folder, &b);
     if (!sh_mb_write(&b, folder, cause, sizeof cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     else {
@@ -260,11 +283,17 @@ static void mc_list(void)
     for (i = 0; i < list.count; i++) {
         const sh_ms_entry *e = &list.items[i];
         const char *state = sh_ms_entry_usable(e) ? "installed" : "needs attention";
-        if (e->loaded)
+        if (e->loaded) {
+            char classes[160];
+            sh_mb_classes_text(&e->bundle.classes, classes, sizeof classes);
             mc_line("MODS: list: mods\\%s  %s%s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->key,
                     e->delivered ? " (delivered by a map)" : "", e->bundle.hash, e->bundle.file_count,
                     e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
-        else
+            mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (legacy)" : "", classes);
+            if (e->build_failed[0])
+                mc_line("MODS: list: mods\\%s  build failed: %s; serving build %llu", e->name, e->build_failed,
+                        e->bundle.build);
+        } else
             mc_line("MODS: list: mods\\%s  %s: %s", e->name, state, e->cause);
     }
     sh_ms_list_free(&list);
@@ -680,6 +709,17 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     mc_join_args(a, 2, arg, sizeof arg);
+    if (!_stricmp(verb, "new")) {
+        /* New mod: a folder named by a generated key, built at the next rescan. */
+        char key[SH_MB_ID_MAX + 1], cause[SH_MB_CAUSE_MAX];
+        if (!arg[0]) { sh_printf("usage: sh_mods new \"<name>\"\n"); return; }
+        if (!sh_ms_new_mod(arg, key, folder, sizeof folder, cause, sizeof cause)) {
+            mc_line("MODS: new \"%s\": refused: %s", arg, cause);
+            return;
+        }
+        mc_line("MODS: new \"%s\": key %s, folder %s; put its files under assets\\mods\\%s\\ and rescan", arg, key, folder, key);
+        return;
+    }
     if (!_stricmp(verb, "verify")) {
         if (!arg[0]) { sh_printf("usage: sh_mods verify \"<id@version+build>\"\n"); return; }
         mc_verify(arg);
@@ -753,6 +793,7 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
                 b.version, b.build, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);
         mc_stock_line("build", folder, &b);
+        mc_classes_line("build", folder, &b);
     }
     if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
     sh_mb_free(&b);
