@@ -1051,6 +1051,19 @@ int sh_modserve_engine_set_cvar(const char *cvar, const char *value);
  * Returns 1 applied, 0 nothing pending, -1 refused (off the main thread). */
 int sh_modserve_scope_apply(const char *phase);
 
+/* The listing's declared builds (the last sh_modserve_scope_set), in row
+ * order: up to cap copied into out (NULL to count). Returns the count. */
+int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap);
+
+/* A declared set the author changed in the editor ("Use in this map", an
+ * upgrade): the map load's activation for the listing's builds, then the
+ * scope apply. Their decls not registered this session are registered (a
+ * name the map now uses resolves at the next Play without a reload), the
+ * generated registries and every other pending change are re-parsed and
+ * reloaded in place, and the requirements are applied. Main thread, not in
+ * Play; elsewhere it is sh_modserve_scope_apply. Returns what that returns. */
+int sh_modserve_scope_activate(const char *phase);
+
 /* After a rescan published a table: apply its pending changes now (main
  * thread, not during Play) or leave them for the next registration pass
  * (the editor palette pass, a map's activation), which applies them between

@@ -101,6 +101,7 @@ static void mu_defaults(sh_modui_engine *e)
     e->migrate_start = sh_modmigrate_start;
     e->migrate_busy = sh_modmigrate_busy;
     e->scope_apply = sh_modserve_scope_apply;
+    e->scope_activate = sh_modserve_scope_activate;
     e->clear_undo = sh_editor_undo_clear;
     e->undo_pending = sh_editor_delete_native_pending;
 #endif
@@ -135,6 +136,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->toast) g_engine.toast = engine->toast;
         if (engine->print) g_engine.print = engine->print;
         if (engine->scope_apply) g_engine.scope_apply = engine->scope_apply;
+        if (engine->scope_activate) g_engine.scope_activate = engine->scope_activate;
         if (engine->map_left) g_engine.map_left = engine->map_left;
         if (engine->clear_undo) g_engine.clear_undo = engine->clear_undo;
         if (engine->undo_pending) g_engine.undo_pending = engine->undo_pending;
@@ -2832,6 +2834,21 @@ static int mu_scope_now(const char *phase)
     return changed;
 }
 
+/* A mod the author added to the open map (or upgraded): its decls are
+ * registered and its registries served at once, as a load would. */
+static int mu_scope_now_declared(const char *phase)
+{
+    const sh_modui_engine *e = mu_engine();
+    int changed;
+    if (!sh_modserve_scope_enabled()) return 0;
+    changed = mu_listing_live();
+    if (!changed) return 0;
+    if (!e->scope_activate) { (void)mu_scope_apply(phase); return changed; }
+    InterlockedExchange(&g_scope_owed, 0);
+    (void)e->scope_activate(phase);
+    return changed;
+}
+
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
 
 /* The manifest's hook: a load applies at once (before activation), a save on
@@ -3377,7 +3394,7 @@ static int mu_map_add(const char *key, const mu_out *o)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already used by the whole of %s.", title, where);
         } else {
             ok = 1;
-            (void)mu_scope_now("map add");
+            (void)mu_scope_now_declared("map add");
             InterlockedIncrement(&g_gen);
             mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.id, row.version, row.bundle,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
@@ -3498,7 +3515,7 @@ static int mu_map_upgrade(const char *id, const mu_out *o)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "The map's row of %s could not be moved to the installed build.", title);
         } else {
             ok = 1;
-            (void)mu_scope_now("map upgrade");
+            (void)mu_scope_now_declared("map upgrade");
             InterlockedIncrement(&g_gen);
             if (from >= 0)
                 _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s: %u file(s) "

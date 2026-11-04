@@ -701,6 +701,73 @@ static int rf_visit(void *context, const sh_modserve_refresh_item *it)
     return 0;   /* keep pending */
 }
 
+/* A refresh walk that applies what it is offered (the engine's re-parse). */
+static int rf_apply(void *context, const sh_modserve_refresh_item *it)
+{
+    rf_seen *s = (rf_seen *)context;
+    strcat_s(s->requests, sizeof s->requests, it->request);
+    strcat_s(s->requests, sizeof s->requests, it->gone ? "(game);" : ";");
+    return 1;
+}
+
+/* "Use in this map" and "Remove from map" on the open map: the generated
+ * player entity and weapon slot are pending at once and offered to the
+ * refresh, so the scope apply re-parses them in place (it skipped the
+ * refresh while only served files counted as pending). */
+static void test_map_add_registries(void)
+{
+    char root[MAX_PATH], hh[65];
+    static char text[65536];
+    const char *list[1];
+    sh_modserve_diff d;
+    rf_seen seen;
+    sh_mb_stock_ops ops;
+    printf("-- registries: map add and remove bring the generated registries in and out at once\n");
+    memset(&ops, 0, sizeof ops);
+    ops.identify = st_identify;
+    ops.read = st_read;
+    ops.verify = st_verify;
+    sh_mb_set_stock_ops(&ops);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\set-a\\mods", g_top);
+    hash_of('4', hh);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(root) == 5);
+    /* An open map that declares nothing; whatever the table brought is settled. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_apply, &seen);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0 && open_text(REQ_PLAYER, text, sizeof text) <= 0);
+    /* Map add of the hands mod: player/coop and the pistol slot are generated, pending and offered. */
+    list[0] = hh;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending >= 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_apply, &seen);
+    CHECK(strstr(seen.requests, REQ_PLAYER ";") && strstr(seen.requests, REQ_PISTOL ";"));
+    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/k.hands/body\";"));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    {
+        char got[2][SH_MODSERVE_HASH_HEX + 1];
+        CHECK(sh_modserve_scope_hashes(got, 2) == 1 && !strcmp(got[0], hh));
+    }
+    /* Map remove: back to the game's texts, pending and offered as the game's. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending >= 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_apply, &seen);
+    printf("   offered after remove: %s\n", seen.requests);
+    CHECK(strstr(seen.requests, REQ_PLAYER "(game);") && strstr(seen.requests, REQ_PISTOL "(game);"));
+    CHECK(open_text(REQ_PLAYER, text, sizeof text) <= 0 && !sh_modserve_lookup(REQ_PISTOL, NULL));
+    CHECK(sh_modserve_scope_hashes(NULL, 0) == 0);
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    sh_modserve_scope_enable(0);
+    sh_mb_set_stock_ops(NULL);
+}
+
 /* L2b's leftovers: a rescan marks changed registry text, generated text is
  * gated by its sources' requirements, and a carried copy of a non-fixed
  * extends target is the base its partials extend. */
@@ -801,6 +868,7 @@ int main(int argc, char **argv)
     test_extends();
     test_body_rows(argc > 1 ? argv[1] : NULL);
     test_generation();
+    test_map_add_registries();
     test_leftovers();
     printf("%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

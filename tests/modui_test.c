@@ -252,6 +252,14 @@ static int fake_scope_apply(const char *phase)
     return 1;
 }
 
+/* The activation for an author's change (sh_modserve_scope_activate). */
+static int g_scope_activates;
+static int fake_scope_activate(const char *phase)
+{
+    g_scope_activates++;
+    return fake_scope_apply(phase);
+}
+
 /* modui.h map_left while the editor screen is down: 1 left (hub), 0 a menu over the map, -1 unknown. */
 static int g_map_left = 1;
 static int fake_map_left(void) { return g_map_left; }
@@ -309,6 +317,7 @@ static void bind_fakes(void)
     e.migrate_start = fake_mig_start;
     e.migrate_busy = fake_mig_busy;
     e.scope_apply = fake_scope_apply;
+    e.scope_activate = fake_scope_activate;
     e.map_left = fake_map_left;
     e.clear_undo = fake_clear_undo;
     e.undo_pending = fake_undo_pending;
@@ -1487,11 +1496,13 @@ int main(int argc, char **argv)
             open_test_map();
             sh_modserve_scope_enable(1);
             applies = g_scope_applies;
+            g_scope_activates = 0;
             doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
             CHECK(has(doc, "\"action\":\"mapAddMod\",\"ok\":true,\"message\":\"Gates is now used by the whole of Imp Arena."));
             free(doc);
-            /* Its requirements were out of scope with no map listing it; now they apply at once. */
-            CHECK(g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "map add"));
+            /* Its requirements were out of scope with no map listing it; now they apply at once, through the
+             * activation a map load runs (its decls registered, its registries served). */
+            CHECK(g_scope_applies == applies + 1 && g_scope_activates == 1 && !strcmp(g_scope_phase, "map add"));
             CHECK(sh_modmanifest_current_attached(&att) == 1 && sh_modserve_bundle_state(att.rows[0].bundle, NULL, 0) == 1 &&
                   !strcmp(att.rows[0].id, "alex.req"));
             sh_modmanifest_list_free(&att);

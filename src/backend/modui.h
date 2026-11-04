@@ -111,6 +111,10 @@ typedef struct sh_modui_engine {
      * sh_modserve_scope_apply; none in a SH_MODUI_PURE build): 1 applied,
      * 0 nothing pending, -1 refused. Main thread. */
     int (*scope_apply)(const char *phase);
+    /* The same for a declared set the author changed (map add, upgrade):
+     * the declared builds' decls are registered first, as a map load does
+     * (modserve.h sh_modserve_scope_activate). Unbound: scope_apply. */
+    int (*scope_activate)(const char *phase);
     /* Whether the editor has left the map it had open, asked when the editor
      * screen is down (map_info 0): 1 left (no editor state runs: the hub or
      * the map browser, or the editor is exiting or shutting down), 0 a menu

@@ -3610,6 +3610,16 @@ static void ms_scope_add_hash(const char *hash)
     strcpy_s(g_scope_hashes[g_scope_n++], SH_MODSERVE_HASH_HEX + 1, lower);
 }
 
+int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap)
+{
+    int i, n;
+    AcquireSRWLockShared(&g_scope_lock);
+    n = g_scope_n;
+    for (i = 0; out && i < n && i < cap; ++i) strcpy_s(out[i], SH_MODSERVE_HASH_HEX + 1, g_scope_hashes[i]);
+    ReleaseSRWLockShared(&g_scope_lock);
+    return n;
+}
+
 int sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open)
 {
     ms_index *x;
@@ -6841,8 +6851,11 @@ void sh_modserve_last_diff(sh_modserve_diff *out)
     if (!x) return;
     *out = x->diff;
     out->pending = 0;
+    /* What the refresh walks visit: a served file, or a registry's synthetic
+     * file (player/coop, the conductor, a weapon slot), which serves the
+     * generated text under the game's name and is never "served" itself. */
     for (i = 0; i < x->nfiles; ++i)
-        if (InterlockedCompareExchange((volatile LONG *)&x->files[i].refresh, 0, 0) && x->files[i].served &&
+        if (InterlockedCompareExchange((volatile LONG *)&x->files[i].refresh, 0, 0) && ms_live(x, &x->files[i]) &&
             !x->files[i].withdrawn)
             out->pending++;
     for (i = 0; i < x->ngone; ++i)

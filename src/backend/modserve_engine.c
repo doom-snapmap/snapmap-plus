@@ -1627,6 +1627,40 @@ int sh_modserve_scope_apply(const char *phase)
     return 1;
 }
 
+int sh_modserve_scope_activate(const char *phase)
+{
+    char (*h)[SH_MODSERVE_HASH_HEX + 1] = NULL;
+    const char **list = NULL;
+    sh_modserve_plan plan;
+    int n, i, unknown = 0;
+    if (!phase) phase = "map";
+    if (me_on_main() != 1 || !g_bound || me_in_play() == 1 || !sh_modserve_scope_map_open())
+        return sh_modserve_scope_apply(phase);
+    n = sh_modserve_scope_hashes(NULL, 0);
+    if (n > 0) {
+        h = (char (*)[SH_MODSERVE_HASH_HEX + 1])calloc((size_t)n, sizeof *h);
+        list = (const char **)calloc((size_t)n, sizeof *list);
+    }
+    if (n > 0 && h && list) {
+        n = sh_modserve_scope_hashes(h, n);
+        for (i = 0; i < n; ++i) list[i] = h[i];
+        if (sh_modserve_plan_bundles(list, n, &plan, &unknown) >= 0) {
+            if (plan.count) {
+                double t0 = me_now_ms();
+                /* As a map load runs it: requirements, the sources, the
+                 * pending re-parses (op_sources_published), then the loads. */
+                int ready = me_run(&plan, phase);
+                me_log("scope: %s: the map's %d declared bundle(s) activated (%d steps, %d ready, %d blocked) in %.1f ms",
+                       phase, n - unknown, plan.count, ready < 0 ? 0 : ready, plan.blocked, me_now_ms() - t0);
+            }
+            sh_modserve_plan_free(&plan);
+        }
+    } else if (n > 0) me_log("scope: %s: activation skipped (out of memory)", phase);
+    free(list);
+    free(h);
+    return sh_modserve_scope_apply(phase);
+}
+
 /* The plan's sources are registered; its loads have not run (me_run). A
  * rescan's pending changes are applied first, so a file whose bytes changed
  * is re-parsed as a change, not as an early decl. */
