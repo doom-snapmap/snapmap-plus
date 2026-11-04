@@ -570,31 +570,37 @@ is the mod `local.cyberdemon` named `demon-mods\local.cyberdemon` (its path unde
 `mods\`, which the listing, the console, the Mods tab and `sh_mods build` use; the
 console also takes a nested folder by its own name). Every scan walks the same way:
 the store listing (`sh_ms_enumerate`), the rebuild rule and the serving scan at boot.
-The product itself never nests: one it makes (an install, a download, a migration, a
-delivered package) is `<id>` at the root, else `<id>@<version>`, and the upgrade's
-renames leave nested folders where they are; an export's import keeps the carried
-folder's name when no folder of its id is installed and the name is free. A package a map
+The product itself never nests. Installs, imports and downloads place folders by hash
+(rule 1 of DESIGN-additive 4, `sh_ms_build_folder_name`): the first build of a key is
+`<key>` at the root, every later build `<key>@<first 16 hex of its bundle hash>` beside
+it (`-2`, `-3` ... when that is taken); a build already installed is not installed again
+(`sh_ms_install_stats.present`), and nothing installed is replaced, so "same version,
+other files" is never a refusal. Each records its `origin` (`install`, `imported` for a
+rawmap or prefab ZIP, `download`). A migration's named target keeps the older rule
+(`<id>`, else `<id>@<version>`), and the upgrade's renames leave nested folders where
+they are. A package a map
 delivered without a version gets one
 generated from its digest (`legacy-<digest16>`); it is part of the manifest
 and its hash, so it stays in `mod.json`, but it never names a folder (`<id>`,
 else `<id>-<hash 8>`) and the Mods tab and the doctor do not show it.
-Identity is the id: two folders declaring one id are both kept and both
-flagged. A download whose content an installed mod of the same id already
+Identity is the bundle hash: two folders declaring one key are two builds,
+both kept and both listed. A download whose content an installed mod of the same key already
 serves is not stored; its hash is recorded as an alias of the installed
 bundle. A package a map delivered is not stored when an installed mod that
 was not itself delivered declares its id (whatever the content), or provides
 every path it provides under another id (a copy renamed by its packager);
 the installed mod answers the carrier, and the second upgrade step records
-the copy's hash as an alias of it. A folder built again with new
-content (the rebuild rule, `sh_mods build`, an install replacing the folder of
-the same id and version) records the hash its product block named before as an
+the copy's hash as an alias of it. A folder built again in place with new
+content (the rebuild rule, `sh_mods build`, an install of a folder of the store
+itself or a migration's target) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
 current one. The aliases stay flat: an alias naming the old hash is re-pointed
 at the new one, so one hop always resolves. After each pass of the rebuild rule
 the store drops every alias whose target no folder builds to any more (a
 folder deleted or replaced by hand), with one `MODS: store:` line. Aliases are a lookup aid for
 store downloads and exports only: upload sends and claims the current build,
-and export carries it and rewrites the exported map's rows to name it, both
+and export, when no folder or snapshot holds the declared hash itself, carries
+the aliased build and rewrites the exported map's rows to name it, both
 through `sh_ms_resolve`. Nothing refuses or brings anything back because of an
 alias. Saving a map writes rows from the serving index, so they name the
 build that serves. Removing a folder keeps its aliases while a folder of that
@@ -1781,6 +1787,49 @@ engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
 "This map needs N mod(s): <names> (<size>). Download and install now?". Each
 row it asks for prints the asset rule's sentence on the console first.
 
+The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
+completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
+the modsync worker that asks the store about each missing bundle
+(`modsync_probe_bundle`: `GET /mods/bundle/<hash>`, then each borrow checked
+against the installed game with `sh_mb_stock_verify`). One function,
+`sh_modpub_gate_decide`, then decides each bundle from three facts: what the
+store answered (held, absent for 404 and 451, unreachable for a network
+failure, a timeout, an unusable address, 429, 5xx or an unexpected response),
+whether a borrow names game bytes this machine lacks, and whether the map is
+published (every map-service hook is; a My Maps map, rawmap or prefab when a
+claim this machine holds names the bundle, `modsync_claim_names`). Held and
+installable is obtainable; any other answer denies the launch in one of four
+causes, `sh_modpub_gate_wording`:
+
+| cause | when | sentence (after "This map needs <name> (<key>) at a build that ") |
+|---|---|---|
+| 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
+| 2 unreachable | the store did not answer | "could not be downloaded: the mod store did not answer. Connect and try again." |
+| 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
+| 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
+
+A denial drops the hold before anything is asked or fetched: the first denied
+bundle's sentence is the one-button notice (with "N more mods cannot be
+obtained; see the console." when there are more) and every denied bundle gets
+one console line. A prefab's sentences say "prefab" and "the prefab's ZIP
+export". The title is the store manifest's name, else an installed build's,
+else the key alone. A key installed at another build (`sh_modserve_row_other_build`)
+is never a cause: it is the obtainable case, and with one such mod the question
+names both builds ("This map needs <title> at build <h16>; you have build <h16>.
+Download build <h16> (<size>) and install it beside yours?"); in a longer list
+the mod reads "<key> (build <h8>, you have <h8>)". A fetch that fails after Yes
+is decided by the same function (404 and 451, a network failure, and
+`MODNET_E_GAME`, the download's own borrow refusal, whose source the fetch
+keeps). A placeholder system (phase 6) would plug in at `sh_modpub_gate_decide`
+with a verdict of its own and touch nothing else.
+
+The product version (DESIGN-additive 2.7). A gated completion, My Maps play and
+the launch boundary read the version each row asks for (its `product` member,
+which the save will write) and, when the running product (`install.json`'s
+`version`) is older, raise "This map needs Snapmap+ <version> or later." once
+per map and session, with a console line; the launch goes on. Until the save
+writes the member, `eng_row_product` answers nothing and no notice is shown.
+
 Yes starts one job on the modsync worker that fetches every missing bundle by
 hash and logs a progress line every two seconds. When the job is done, on a main
 tick, the index is rescanned, every fetched bundle must be admitted, the screen
@@ -1795,10 +1844,9 @@ abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled. After No, a hold that
 asked for one row shows that row's sentence and "The map was not loaded."
 (for example "This map uses Hell Guards (local.hell-guard), which is not
-installed. The map was not loaded."). The download lands by the store's rule:
-it replaces a folder of that id the product made (origin download, install or
-delivery) and sits beside an author's own folder under `<id>@<version>`, both
-serving by the conflict rule; the resume checks every row against the asset
+installed. The map was not loaded."). The download lands by hash (rule 1):
+under its key when no folder of the key is installed, else beside them as
+`<key>@<hash16>`, never over one; the resume checks every row against the asset
 rule again.
 
 ### Rawmaps that name mods
@@ -1819,20 +1867,15 @@ misses mods is not substituted, the map being opened loads as itself, and the
 hold starts after that parse. Inside a reload window a failed check parses
 nothing rather than the borrowed saved map.
 
-The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) begins one
-state earlier than a published map's: a worker job asks the mod store for each
-missing bundle (`GET /mods/bundle/<hash>`; 404 and 451 mean absent). When the
-store has them all, the player gets the question a My Maps launch asks, and Yes
-fetches and installs them; the resume does not activate anything (the rawmap's
-own parse does) but opens the rawmap again, through a reload when the editor can
-take one and otherwise staged for the next map open, with a notice saying so.
-When the store lacks any, or cannot be reached, the load is refused with a
-one-button notice and one console line naming each such mod (id and version) and
-saying the map needs its author's `.zip` export; the asset rule's sentence for
-each row comes first on the console, and with one row it is the notice ("...
-which is not installed. The map was not loaded. Ask its author for the .zip
-export."). No and a failed download behave
-as for a published map. The gate is bound with the published-map gates; on a
+The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) runs the
+denial gate first, as every hold does (see Published maps and missing mods).
+When every missing bundle is obtainable, the player gets the question a My Maps
+launch asks, and Yes fetches and installs them; the resume does not activate
+anything (the rawmap's own parse does) but opens the rawmap again, through a
+reload when the editor can take one and otherwise staged for the next map open,
+with a notice saying so. Otherwise the load is denied with the gate's
+sentences; the asset rule's sentence for each row comes first on the console.
+No and a failed download behave as for a published map. The gate is bound with the published-map gates; on a
 build where they did not install, nothing is counted missing and rawmaps load as
 before.
 
@@ -1848,14 +1891,21 @@ rows writes only the JSON. `sh_rawmaps status` and the File menu's status
 for the open map) report what the last save wrote. A ZIP left beside a JSON by
 an earlier save is not deleted when the map later stops using mods.
 
-The ZIP (`modexport.h`) carries the map and each mod its rows name, as the
-mod is installed:
+The ZIP (`modexport.h`) carries the map and each mod its rows name, at the
+bundle hash the row declares, as that build is installed:
 
 ```
 <name>.json                the map text, its smpmod1 rows included, named after the ZIP
-mods/<folder>/mod.json     the store folder's own name (<id>, or <id>@<version> when
-mods/<folder>/assets/...   the store holds two folders for one id), byte for byte
+mods/<folder>/mod.json     the store folder's own name (<key>, or <key>@<hash16> for a
+mods/<folder>/assets/...   later build of the key), byte for byte
 ```
+
+Each row's build is taken from the installed folder at exactly that hash (while
+that folder's latest build is failed, its carried files are read from its last
+good build snapshot, `mods\.builds\<key>@<hash16>\`, whose bytes the hash
+names); else from a snapshot at that hash whose folder moved on (its
+`bundle.json` is carried as the folder's `mod.json`); else from the folder an
+alias of the hash names, as below.
 
 There is no `export.json`, no `bundle.json` and no `bundle.canonical.json`, no
 `legacy/` level and no `+<build>` suffix: the rows name the bundles, and each
@@ -1863,26 +1913,26 @@ carried `mod.json` records its bundle hash in its product block (with its
 `legacy` record, if any). A stock pointer is an entry of `mod.json`, so the
 folder carries it; installed game content is never written into the ZIP, so a
 pointer whose bytes an author's folder holds under `assets\` travels without
-them. A row pinning an earlier build carries the folder serving it now, and the
-exported map's rows name that build.
+them. A row whose build only an alias still answers (the author rebuilt that
+folder in place) carries the folder serving it now, and the exported map's rows
+name that build.
 
-Importing it is the ordinary install of each carried folder whose bundle a row
-names (`modexport_read`, on whichever thread loads the map; a carried folder no
-row names is left out):
+Importing it is the ordinary install by hash of each carried folder whose
+bundle a row names (`modexport_read`, on whichever thread loads the map; a
+carried folder no row names is left out):
 
-- a carried folder the store already holds (by its hash, or an alias of it),
-  or one whose id an installed folder declares and whose listed names (the
-  rows that name its bundle) that folder serves (the asset rule, whatever its
-  bytes or version), is skipped and counted as already installed; nothing in
-  that folder is written;
+- a carried folder the store already holds (by its hash, or an alias of it) is
+  skipped and counted as already installed; nothing in that folder is written.
+  Another build of its key never counts: a map pins its build;
 - each remaining folder is copied out of the ZIP into a temporary folder (with
   the bytes of a pointer the folder held filled from this player's own game)
   and installed from there as any folder from elsewhere is
-  (`sh_ms_install_as`: built, copied into the store, verified): under its own
-  name when no folder of its id is installed and that name is free, else
-  beside the installed folders of its id under `<id>@<version>` (a free
-  `<id>@<version>-2`, ... when that is taken), never over one. A mod that needs
-  another carried mod is built after it;
+  (`sh_ms_install_with`, origin `imported`: built, copied into the store,
+  verified) under rule 1: its key when no folder of the key is installed and
+  that name is free, else `<key>@<hash16>` beside the installed builds, never
+  over one, whatever the carried folder was called and whatever its version.
+  Same version with other files is not a refusal. A mod that needs another
+  carried mod is built after it;
 - the built bundle hash must equal the one the carried `mod.json` names;
   otherwise, and on any other refusal, exactly the folders this import
   installed are removed and the load is refused ("<id> <version> in the export
@@ -1977,22 +2027,23 @@ thread):
   through the builds that serve them
   (`modserve_activate_bundles`) and each one the open map does not list (its
   scope listing, else its manifest rows) is attached as a map-level row through
-  the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`), with one
+  the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`, given the
+  folder of the build at the row's hash, so the map declares the prefab's
+  build and not the newest of its key), with one
   console line: "Prefab <name> uses <id> <version>; this map did not list it,
   so it was added to the map (the Mods tab's Remove from map takes it out).".
   Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
-  with its own hook (`SH_MODPUB_PREFAB_PLACE`): the store is asked on the worker;
-  when it has every missing bundle the engine's Yes/No asks "This prefab needs
-  N mod(s): <names> (<size>). Download and install now?", Yes fetches and
-  installs them, and the ready callback runs the step above; only rows the
-  asset rule reports missing or incomplete are asked for; the Prefabs tab,
-  polling `MODS_POLL`, then places the prefab through its ordinary Load /
-  Place. When the store lacks any or cannot be reached, the notice says "This
-  prefab was not placed. It needs mods you do not have ..." and one console line
-  names each mod (id and version) and asks for the prefab's `.zip` export. No,
-  a failed download and a bundle that will not install end as for a map, with
-  "The prefab was not placed.";
+  with its own hook (`SH_MODPUB_PREFAB_PLACE`): the denial gate asks the store
+  on the worker; when every missing bundle is obtainable the engine's Yes/No asks
+  "This prefab needs N mod(s): <names> (<size>). Download and install now?", Yes
+  fetches and installs them by hash, and the ready callback runs the step above;
+  only rows the asset rule reports missing or incomplete are asked for; the
+  Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
+  Load / Place. Otherwise the placement is denied with the gate's prefab
+  sentences ("This prefab needs <title> at a build that ..."). No, a failed
+  download and a bundle that will not install end as for a map, with "The
+  prefab was not placed.";
 - with the gates unbound (a build where the published-map gates did not
   install) the same refusal is printed and toasted without asking the store.
 
@@ -2004,8 +2055,8 @@ write one ZIP, also for a prefab that uses no mods, in a map's layout
 
 ```
 <name>.json                the prefab file, its block naming the builds carried
-mods/<folder>/mod.json     each mod the block's rows name, as it is installed:
-mods/<folder>/assets/...   the store folder's name and its files, byte for byte
+mods/<folder>/mod.json     each mod the block's rows name, at the hash the row records,
+mods/<folder>/assets/...   as that build is installed: the store folder's name and its files
 ```
 
 There is no `export.json`, no sidecar and no bundle manifest: the prefab's own
@@ -2024,10 +2075,9 @@ the prefab and a `mods/` folder beside it holds the mod folders. The importer
 takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
 carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
 names a bundle the block's rows name, exactly as a map's import does (see
-[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when an installed
-folder of its id serves the names the block's rows list (the asset rule),
-installed under its own name or beside the installed folders of its id
-otherwise, and removed again when it does not build to the hash its own
+[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when the store holds
+its hash, installed by hash under rule 1 otherwise (its key, or `<key>@<hash16>`
+beside the installed builds), and removed again when it does not build to the hash its own
 `mod.json` names; a carried folder no row names is left out. It then rescans and adds the prefab under the `.json`'s file
 name. A prefab of that name with the same bytes is left alone (an
 import that finds everything already there writes nothing); one with other bytes
