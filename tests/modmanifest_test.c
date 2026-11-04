@@ -678,6 +678,137 @@ static void map_level(void)
     g_installed_count = 2;
 }
 
+/* ---- registry choices (modregistry.h): the row member, the budget, load, choose, save ------- */
+
+static int g_choice_calls, g_choice_n, g_choice_recompute;
+static char g_choice_last[512];
+int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
+{
+    int i;
+    size_t at = 0;
+    g_choice_calls++;
+    g_choice_n = n;
+    g_choice_recompute = recompute;
+    g_choice_last[0] = 0;
+    for (i = 0; i < n && at + 2 < sizeof g_choice_last; i++) {
+        int w = _snprintf_s(g_choice_last + at, sizeof g_choice_last - at, _TRUNCATE, "%s=%s;", slots[i], keys[i]);
+        if (w < 0) break;
+        at += (size_t)w;
+    }
+    return recompute ? 1 : 0;
+}
+
+static void choices(void)
+{
+    sh_modmanifest_row row, back;
+    sh_modmanifest_list rows;
+    char err[192], *value, *written, *engine, *saved, key[80], lines[SH_MODMANIFEST_CHOICES_CAP];
+    size_t len, wlen, elen, slen, i;
+    static const char *slots[] = { "weapons/weapon/zion/player/sp/chainsaw", "weapons/weapon/zion/player/sp/pistol",
+                                   "weapons/weapon/zion/player/sp/gauss_rifle", "player.hands", "player.body" };
+
+    /* The member round trip, entries in text order. */
+    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\talex.pink-imp\nweapons/weapon/zion/player/sp/pistol\talex.pink-imp\n");
+    value = sh_modmanifest_format_value(&row, &len);
+    CHECK(value && strstr(value, ",\"choices\":{\"player.hands\":\"alex.pink-imp\",\"weapons/weapon/zion/player/sp/pistol\":\"alex.pink-imp\"}"));
+    CHECK(value && sh_modmanifest_parse_value(value, len, &back, err, sizeof err) && !strcmp(back.choices, row.choices));
+    sh_modmanifest_row_free(&back);
+    free(value);
+    /* Entries that do not read are skipped; the row stays. */
+    {
+        static const char odd[] = "{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"" HASH_A "\",\"size\":1,"
+                                  "\"choices\":{\"player.hands\":\"Bad Id\",\"bad slot\":\"a.b\",\"player.body\":\"a.b\",\"x\":3},"
+                                  "\"names\":[]}";
+        CHECK(sh_modmanifest_parse_value(odd, sizeof odd - 1, &back, err, sizeof err) && !strcmp(back.choices, "player.body\ta.b\n"));
+        sh_modmanifest_row_free(&back);
+    }
+    /* The budget drops names before choices. */
+    for (i = 0; i < 40; i++) {
+        char name[96];
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/alex.pink-imp/a_rather_long_placed_name_number_%02zu", i);
+        sh_modmanifest_row_add_name(&row, name);
+    }
+    row.choices[0] = 0;
+    for (i = 0; i < 5; i++) {
+        size_t at = strlen(row.choices);
+        _snprintf_s(row.choices + at, sizeof row.choices - at, _TRUNCATE, "%s\talex.pink-imp\n", slots[i]);
+    }
+    value = sh_modmanifest_format_value(&row, &len);
+    CHECK(value && len <= SH_MODMANIFEST_ROW_MAX);
+    CHECK(value && sh_modmanifest_parse_value(value, len, &back, err, sizeof err) && !strcmp(back.choices, row.choices) &&
+          back.name_count < row.name_count);
+    sh_modmanifest_row_free(&back);
+    free(value);
+    sh_modmanifest_row_free(&row);
+
+    /* A load gives the choices to the serving index before the listing, the
+     * first row naming a slot winning; no recompute (the listing follows). */
+    memset(&rows, 0, sizeof rows);
+    make_row(&row, "alex.pink-imp", "1.0.0", HASH_A, 11782);
+    row.attached = 1;
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\talex.pink-imp\n");
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    make_row(&row, "bob.room", "2", HASH_B, 4096);
+    row.attached = 1;
+    strcpy_s(row.choices, sizeof row.choices, "player.hands\tbob.room\nplayer.body\tbob.room\n");
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    CHECK(sh_modmanifest_rows_choices(&rows, lines, sizeof lines) == 2 &&
+          !strcmp(lines, "player.hands\talex.pink-imp\nplayer.body\tbob.room\n"));
+    written = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &wlen, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    CHECK(written != NULL);
+    if (!written) return;
+    sh_modmanifest_reset();
+    g_installed_count = 0;
+    g_choice_calls = 0;
+    engine = sh_modmanifest_prepare_load(written, wlen, &elen);
+    CHECK(g_choice_calls == 1 && g_choice_n == 2 && g_choice_recompute == 0 &&
+          !strcmp(g_choice_last, "player.hands=alex.pink-imp;player.body=bob.room;"));
+    CHECK(sh_modmanifest_current_choice("player.hands", key, sizeof key) == 1 && !strcmp(key, "alex.pink-imp"));
+    CHECK(sh_modmanifest_current_choice("player.handsD1", key, sizeof key) == 0 && !key[0]);
+
+    /* A choice: recomputed at once; a cleared one is gone; an invalid one refused. */
+    CHECK(sh_modmanifest_current_choose("player.hands", "bob.room") == 1 && g_choice_recompute == 1 &&
+          !strcmp(g_choice_last, "player.body=bob.room;player.hands=bob.room;"));
+    CHECK(sh_modmanifest_current_choose("weapons/weapon/zion/player/sp/pistol", "alex.pink-imp") == 1 && g_choice_n == 3);
+    CHECK(sh_modmanifest_current_choose("player.body", NULL) == 1 && g_choice_n == 2);
+    CHECK(sh_modmanifest_current_choose("player.body", "Bad Id") == -1 && sh_modmanifest_current_choose("bad slot", "a.b") == -1);
+    CHECK(sh_modmanifest_current_choose("player.handsD1", "carol.gone") == 1);
+    CHECK(sh_modmanifest_current_choices(lines, sizeof lines) == 3);
+
+    /* The save writes each choice on the row of its key and drops one naming
+     * a key the map declares no build of, with a line. */
+    g_mods_lines = 0;
+    saved = engine ? sh_modmanifest_on_save(engine, elen, &slen) : NULL;
+    CHECK(saved && strstr(saved, "\\\"choices\\\":{\\\"player.hands\\\":\\\"bob.room\\\"}"));
+    CHECK(saved && strstr(saved, "\\\"choices\\\":{\\\"weapons/weapon/zion/player/sp/pistol\\\":\\\"alex.pink-imp\\\"}"));
+    CHECK(saved && !strstr(saved, "carol.gone"));
+    CHECK(g_mods_lines >= 1);
+    if (saved) {
+        /* Reloaded: the same choices (minus the dropped one). */
+        char *again;
+        g_choice_calls = 0;
+        again = sh_modmanifest_prepare_load(saved, slen, &elen);
+        CHECK(g_choice_calls == 1 && g_choice_n == 2 && sh_modmanifest_current_choice("player.hands", key, sizeof key) &&
+              !strcmp(key, "bob.room"));
+        if (again) HeapFree(GetProcessHeap(), 0, again);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+    /* A map without rows clears them. */
+    {
+        char *none = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &elen);
+        CHECK(g_choice_n == 0 && sh_modmanifest_current_choices(lines, sizeof lines) == 0);
+        if (none) HeapFree(GetProcessHeap(), 0, none);
+    }
+    if (engine) HeapFree(GetProcessHeap(), 0, engine);
+    HeapFree(GetProcessHeap(), 0, written);
+    sh_modmanifest_reset();
+    g_installed_count = 2;
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -691,6 +822,7 @@ int main(void)
     load_step();
     mod_json();
     map_level();
+    choices();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

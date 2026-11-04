@@ -1303,6 +1303,7 @@ static int fake_read(void *ctx, const char *source, const char *sha, unsigned ch
 static int fake_stock_exists(void *ctx, const char *request)
 {
     if (!strcmp(request, STOCK_BANK)) return 1;
+    if (sh_mb_registry_request(request)) return 1;   /* the registries' game files */
     return fake_find(request) ? 1 : stock_exists(ctx, request);
 }
 static const sh_mb_resolver FAKE_RESOLVER = { NULL, NULL, fake_stock_exists, NULL };
@@ -1401,6 +1402,37 @@ static void test_classes(const char *fixture, const char *tmp)
         sh_mb_set_refuse_replacements(0);
         CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &back) && !strcmp(back.hash, h0));
         sh_mb_free(&back);
+    }
+    /* A registry file (the player entity, the body, the conductor) is never
+     * refused: the product generates it from intent, and packs built before
+     * the intent existed keep building, told to express it as intent. */
+    {
+        char reg[MAX_PATH];
+        size_t k;
+        int noted = 0;
+        _snprintf_s(reg, sizeof reg, _TRUNCATE, "%s\\classes-registry", tmp);
+        CHECK(mt_copy_tree(fixture, reg));
+        mt_write(reg, "assets\\generated\\decls\\entitydef\\player\\coop.decl", "{\r\n\tinherit = \"player/mp\";\r\n}");
+        CHECK(sh_mb_registry_request("generated/decls/entitydef/player/coop.decl") == 3 &&
+              sh_mb_registry_request("GENERATED/decls/md6def/player/mp/tp_body_mp.md6.decl") == 2 &&
+              !sh_mb_registry_request("generated/decls/entitydef/player/mp.decl"));
+        sh_mb_set_refuse_replacements(1);
+        CHECK(sh_mb_build(reg, &FAKE_RESOLVER, &back) && back.classes.replaces == 1);
+        if (back.errors) fprintf(stderr, "  registry refused: %s\n", back.first_cause);
+        for (k = 0; k < back.note_count; k++)
+            noted |= strstr(back.notes[k], "replaces generated/decls/entitydef/player/coop.decl: express it as player intent") != NULL;
+        CHECK(noted);
+        {
+            /* An md6 collision model is placed by a name the game ships under generated/model/. */
+            char keys[2][SH_MB_REQUEST_MAX + 1];
+            CHECK(sh_mb_model_keys("md6/monsters/x/collision/death.lwo", keys, 2) == 2 &&
+                  !strcmp(keys[0], "cooked/model/md6/monsters/x/collision/death.bmodel") &&
+                  !strcmp(keys[1], "generated/model/md6/monsters/x/collision/death.bmodel"));
+            CHECK(sh_mb_model_keys("models/a/b.bmodel", keys, 2) == 1 && !strcmp(keys[0], "models/a/b.bmodel"));
+            CHECK(sh_mb_model_keys("textures/a.tga", keys, 2) == 0);
+        }
+        sh_mb_free(&back);
+        sh_mb_set_refuse_replacements(0);
     }
     /* A rebuild keeps the hash and the build number. */
     {

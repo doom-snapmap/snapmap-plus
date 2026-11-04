@@ -3,9 +3,15 @@
  *
  * A row is an ordinary snapVarString_t in variables.string[], appended last so
  * existing variable bindings keep their (type, index). Its initialValue is the
- * compact JSON {"id","version","bundle","size","attached"?,"names":[...]} where
- * "bundle" is the bundle hash and "names" the placed logical names the bundle
- * provides (informational). "attached": true marks a map-level row: the mod
+ * compact JSON {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
+ * where "bundle" is the bundle hash and "names" the placed logical names the
+ * bundle provides (informational). "choices": {"<slot>": "<key>", ...} records
+ * the map's registry choices (modregistry.h: which declared mod serves a
+ * player field or weapon slot several of them set, "player.hands",
+ * "weapons/<stock weapon decl>"); a save writes each choice on the row of the
+ * key it names, a load reads them from every row (the first row naming a
+ * slot wins). Names are dropped before choices when a row would exceed its
+ * budget. "attached": true marks a map-level row: the mod
  * was attached to the map (the Mods tab's Use in this map, `sh_mods map add`)
  * without placing anything, so the map keeps the row whatever it places. A
  * reader that does not know the key treats the row as a placed mod's; an older
@@ -37,6 +43,10 @@
 #define SH_MODMANIFEST_NAME_MAX   512
 #define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */
 #define SH_MODMANIFEST_MAX_ROWS   4096
+/* Registry choices a row carries ("slot\tkey\n" lines) and per map. */
+#define SH_MODMANIFEST_CHOICES_CAP 768
+#define SH_MODMANIFEST_SLOT_MAX    160
+#define SH_MODMANIFEST_CHOICES_MAX 64
 
 typedef struct sh_modmanifest_row {
     char id[SH_MODMANIFEST_ID_CAP];
@@ -46,6 +56,7 @@ typedef struct sh_modmanifest_row {
     char **names;          /* malloc'd strings; owned by the row */
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
+    char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<key>\n" per entry, in text order */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -176,5 +187,22 @@ int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* Forget the current manifest (tests). */
 void sh_modmanifest_reset(void);
+
+/* The open map's registry choices (modregistry.h): read from the rows at
+ * every load, written at every save on the row of the key each names (a
+ * choice naming a key the save writes no row for is dropped, logged), and
+ * given to the serving index as its choice input
+ * (sh_modserve_scope_set_choices) at the load, before the listing. */
+/* Set (key) or clear (key NULL or "") the choice for `slot`, and give the
+ * choices to the serving index, which recomputes the registries. Returns the
+ * bundles whose serving changed (>= 0), -1 for an invalid slot or key. */
+int    sh_modmanifest_current_choose(const char *slot, const char *key);
+/* 1 with the key chosen for `slot` in `key`, 0 when there is none. */
+int    sh_modmanifest_current_choice(const char *slot, char *key, size_t cap);
+/* The choices as "slot\tkey\n" lines in `out`. Returns their count. */
+size_t sh_modmanifest_current_choices(char *out, size_t cap);
+/* The choices a list of rows carries, merged (the first row naming a slot
+ * wins), as "slot\tkey\n" lines. Returns their count. */
+size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */

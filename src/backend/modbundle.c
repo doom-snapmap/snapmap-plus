@@ -1237,6 +1237,34 @@ int sh_mb_model_key(const char *name, char *out, size_t cap)
     return mb_binary_name("cooked", "model", name, "bmodel", out, cap);
 }
 
+int sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max)
+{
+    size_t n;
+    int k = 0;
+    if (!name || !out || max <= 0) return 0;
+    n = strlen(name);
+    if (!n || strchr(name, '"') || strchr(name, ' ')) return 0;
+    if (mb_iends(name, n, ".bmodel")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
+    if (!mb_iends(name, n, ".lwo") && !mb_iends(name, n, ".ase") && !mb_iends(name, n, ".ma") &&
+        !mb_iends(name, n, ".obj") && !mb_iends(name, n, ".fbx"))
+        return 0;
+    /* As sh_mb_need_requests resolves a model need: cooked/model/ for
+     * authored models, generated/model/ for the md6 collision models the game
+     * ships only there. */
+    if (mb_binary_name("cooked", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+    if (k < max && mb_binary_name("generated", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+    return k;
+}
+
+int sh_mb_registry_request(const char *request)
+{
+    static const char *const names[] = { SH_MB_REGISTRY_CONDUCTOR, SH_MB_REGISTRY_BODY, SH_MB_REGISTRY_PLAYER };
+    int i;
+    if (!request) return 0;
+    for (i = 0; i < 3; ++i) if (!_stricmp(request, names[i])) return i + 1;
+    return 0;
+}
+
 int sh_mb_editor_time(const char *request)
 {
     static const char *const prefixes[] = {
@@ -2087,6 +2115,15 @@ int sh_mb_stock_verify(const char *source, const char *sha256, unsigned long lon
     if (size) *size = r == SH_MB_STOCK_OK ? got : 0;
     if (r != SH_MB_STOCK_OK) mb_stock_cause(r, source, path, cause, cap);
     return r;
+}
+
+int sh_mb_stock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    if (sha256) sha256[0] = 0;
+    if (size) *size = 0;
+    if (!source || !sha256 || !size) return SH_MB_STOCK_ABSENT;
+    return ops && ops->identify ? ops->identify(ops->context, source, sha256, size) : SH_MB_STOCK_UNAVAILABLE;
 }
 
 int sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
@@ -3563,7 +3600,10 @@ static void mb_report(sh_mb_bundle *b)
     }
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
-        if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s", f->request);
+        if (f->cls == SH_MB_CLASS_REPLACE && sh_mb_registry_request(f->request))
+            mb_note(b, "replaces %s: express it as player intent (the product generates this registry per map)",
+                    f->request);
+        else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s", f->request);
         if (f->absent && f->declared && !b->stock_decls[f->declared - 1].carried) {
             if (!first_alias) first_alias = f->request;
             aliases++;
@@ -3800,7 +3840,12 @@ names:
                              f->path, b->id);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
-                if (got == 1 && sh_mb_refuse_replacements() && !sh_mb_editor_time(f->request)) {
+                /* A registry file (sh_mb_registry_request) is generated per map
+                 * from intent; a bundle still carrying one builds with it, so
+                 * the installed campaign packs and bare-hands keep building
+                 * until they are rebuilt with intent. */
+                if (got == 1 && sh_mb_refuse_replacements() && !sh_mb_editor_time(f->request) &&
+                    !sh_mb_registry_request(f->request)) {
                     mb_error(b, "would replace %s: put it under mods/%s/ or declare the intent in mod.json", f->request,
                              b->id);
                 } else if (got == 1) {

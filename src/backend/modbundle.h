@@ -311,6 +311,8 @@ int  sh_mb_stock_available(void);
 /* The registered operations, with a first cause naming `path` when not OK. */
 int  sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
                         const char *path, char *cause, size_t cause_cap);
+/* The registered identify operation: OK with the installed entry's sha256 and size, ABSENT or UNAVAILABLE. */
+int  sh_mb_stock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size);
 int  sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
                       const char *path, char *cause, size_t cause_cap);
 
@@ -521,6 +523,23 @@ int  sh_mb_editor_only(const sh_mb_bundle *bundle);
  * request the provider is asked for (cooked/model/models/.../x.bmodel,
  * lower-cased). 1 on success; 0 when `name` is not a model reference. */
 int  sh_mb_model_key(const char *name, char *out, size_t cap);
+/* Every request a model reference may be served under, in the order a model
+ * need resolves (sh_mb_need_requests "model"): cooked/model/<stem>.bmodel,
+ * then generated/model/<stem>.bmodel (the md6 collision models
+ * md6/.../collision/x.lwo ship only there). Returns the count (0 when `name`
+ * is not a model reference); a .bmodel path is its own single request. */
+int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max);
+
+/* Registries (DESIGN-additive 2.4): fixed-name game files the product
+ * generates per map from the declared bundles' intent (modregistry.h). No
+ * bundle should carry one; a carried copy is a replacement the refusal
+ * switch exempts, with the note "replaces <request>: express it as player
+ * intent ...", so packs built before the intent existed keep building. */
+#define SH_MB_REGISTRY_CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
+#define SH_MB_REGISTRY_BODY      "generated/decls/md6def/player/mp/tp_body_mp.md6.decl"
+#define SH_MB_REGISTRY_PLAYER    "generated/decls/entitydef/player/coop.decl"
+/* 1 conductor, 2 player body, 3 player entity, 0 not a registry file (case-insensitive). */
+int  sh_mb_registry_request(const char *request);
 
 /* The canonical text of a mod.json "requirements" value (JSON text of the
  * member's value), as the builder writes it into the manifest:
