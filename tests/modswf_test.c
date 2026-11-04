@@ -230,11 +230,15 @@ static void test_builder(void)
     logical("generated/swf/x.bswf", "swf", "swf/x.swf");
     logical("generated/swf/screens_tech/vega_flat.bimage", "file", "generated/swf/screens_tech/vega_flat.bimage");
 
-    /* A private movie under mods/<id>/ and a listed stock shadow build. */
+    /* A private movie under mods/<id>/ and a stock screen replaced through the
+     * descriptor's "replaces" (the escape hatch: no registry expresses a SWF
+     * screen image) build with the refusal on. */
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_dir, sizeof g_dir, _TRUNCATE, "%ssh_modswf_test_%lu\\alex.screens", tmp, GetCurrentProcessId());
     put("mod.json", "{\"id\": \"alex.screens\", \"version\": \"1.0.0\", \"name\": \"Screens\", "
                     "\"shadows\": [\"generated/swf/screens_tech/vega_flat.bswf\", "
+                    "\"generated/swf/screens_tech/vega_flat.bimage\"], "
+                    "\"replaces\": [\"generated/swf/screens_tech/vega_flat.bswf\", "
                     "\"generated/swf/screens_tech/vega_flat.bimage\"]}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
     CHECK(sh_mb_build(g_dir, &resolver, &b));
@@ -242,6 +246,11 @@ static void test_builder(void)
     for (i = 0; i < b.file_count; i++) if (!strcmp(b.files[i].ptype, "swf")) swf++;
     CHECK(b.file_count == 4 && swf == 2 && b.shadow_count == 2);
     sh_mb_free(&b);
+    /* Undeclared, the same files are refused. */
+    put("mod.json", "{\"id\": \"alex.screens\", \"version\": \"1.0.0\", \"name\": \"Screens\"}");
+    CHECK(!sh_mb_build(g_dir, &resolver, &b) && strstr(b.first_cause, "would replace generated/swf/screens_tech/"));
+    sh_mb_free(&b);
+    sh_mb_set_refuse_replacements(0);   /* the refusal-off builder path */
 
     /* Additive mods: the shadows are derived from the files, so a movie at a
      * stock path is a replacement whether or not the old list names it. */
@@ -256,6 +265,7 @@ static void test_builder(void)
     put("assets/generated/image/mods/alex.screens/stray.bswf", "x");
     CHECK(!sh_mb_build(g_dir, &resolver, &b) && strstr(b.first_cause, "file type not allowed"));
     sh_mb_free(&b);
+    sh_mb_set_refuse_replacements(1);
 
     drop("assets/generated/image/mods/alex.screens/stray.bswf");
     for (i = 0; movies[i]; i++) drop(movies[i]);

@@ -501,7 +501,8 @@ static void put_shadow_mod(const char *folder, const char *id, const char *body)
     char desc[512];
     _snprintf_s(desc, sizeof desc, _TRUNCATE,
                 "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"Shade\",\"author\":\"tester\","
-                "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]}", id);
+                "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],"
+                "\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]}", id);   /* the escape hatch */
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "mod.json", desc);
     mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", body);
