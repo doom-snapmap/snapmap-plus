@@ -42,7 +42,21 @@ static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
 static int g_echo;
-void backend_log(const char *message) { if (g_echo && message) printf("    %s\n", message); }
+static char g_logbuf[1 << 16];   /* every backend line since the last clear */
+static size_t g_logat;
+void backend_log(const char *message)
+{
+    size_t n;
+    if (g_echo && message) printf("    %s\n", message);
+    if (!message) return;
+    n = strlen(message);
+    if (g_logat + n + 2 >= sizeof g_logbuf) g_logat = 0;
+    memcpy(g_logbuf + g_logat, message, n);
+    g_logat += n;
+    g_logbuf[g_logat++] = '\n';
+    g_logbuf[g_logat] = 0;
+}
+static void log_clear(void) { g_logat = 0; g_logbuf[0] = 0; }
 
 /* The map manifest's load step activates bundles through the serving layer's
  * engine half; the tab only reads the record it keeps. */
@@ -322,6 +336,51 @@ static void bind_fakes(void)
     e.clear_undo = fake_clear_undo;
     e.undo_pending = fake_undo_pending;
     sh_modui_bind(&e);
+}
+
+/* The manifest's substitute op (modpublished.c sh_modpub_editor_substitute):
+ * the installed build of the row's key. */
+static char g_subst_to[80];
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+{
+    (void)row;
+    if (why && why_cap) why[0] = 0;
+    if (!g_subst_to[0]) return 0;
+    strcpy_s(hash_out, hash_cap, g_subst_to);
+    return 1;
+}
+
+static const char GONE_REQ[] = "00000000000000000000000000000000000000000000000000000000000000ab";
+
+/* An editor load of the open test map with one row of `id` at `gone`
+ * (map-level when attached): the manifest substitutes the installed build. */
+static int load_gone_row(const char *id, const char *gone, int attached)
+{
+    sh_modmanifest_list rows;
+    sh_modmanifest_row row;
+    char err[256], *text, *loaded;
+    size_t len = 0, tl = 0, ll = 0;
+    const char *map;
+    memset(&rows, 0, sizeof rows);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, id);
+    strcpy_s(row.version, sizeof row.version, "0.9.0");
+    strcpy_s(row.bundle, sizeof row.bundle, gone);
+    row.size = 10;
+    row.attached = attached;
+    if (!sh_modmanifest_list_add(&rows, &row)) return 0;
+    map = map_text(&len);
+    text = sh_modmanifest_write(map, len, &rows, &tl, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    if (!text) { printf("    write: %s\n", err); return 0; }
+    sh_modmanifest_set_substitute(fake_substitute);
+    sh_modmanifest_set_editor_load(1);
+    loaded = sh_modmanifest_prepare_load(text, tl, &ll);
+    sh_modmanifest_set_editor_load(0);
+    sh_modmanifest_set_substitute(NULL);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    HeapFree(GetProcessHeap(), 0, text);
+    return 1;
 }
 
 /* sh_modui_doctor's lines, one per line. */
@@ -1637,6 +1696,47 @@ int main(int argc, char **argv)
                 CHECK(req_before == 1 && req_after == 0 && na == nb - 1);
                 g_placed[0] = placed0;
                 g_placed_count = placed_n;
+            }
+            /* A row on a build that is gone, which the editor serves through the installed
+             * build of its key (the SUBSTITUTE verdict): Remove from map drops it by key,
+             * placed or map-level, and says both builds. */
+            {
+                const char *placed0 = g_placed[0];
+                int placed_n = g_placed_count, pass;
+                sh_modserve_bundle_ref ref;
+                char want[400], sub[80];
+                CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &ref));
+                strcpy_s(g_subst_to, sizeof g_subst_to, ref.hash);
+                for (pass = 0; pass < 2; pass++) {
+                    sh_modmanifest_list cur;
+                    const char *rm_argv[] = { "map", "remove", "alex.req", "--yes" };
+                    open_test_map();
+                    if (!pass) {
+                        g_ents[1].inherit = "mods/alex.req/twin";
+                        g_ents[2].inherit = "mods/alex.req/twin";
+                        g_placed[0] = "mods/alex.req/twin";
+                        g_placed_count = 1;
+                    } else {
+                        g_placed[0] = placed0;
+                        g_placed_count = placed_n;
+                    }
+                    CHECK(load_gone_row("alex.req", GONE_REQ, pass));
+                    CHECK(sh_modmanifest_substituted(GONE_REQ, sub, sizeof sub) && !strcmp(sub, ref.hash));
+                    log_clear();
+                    g_doctor[0] = 0;
+                    CHECK(sh_modui_command(4, rm_argv, doctor_line, NULL) == 1);
+                    _snprintf_s(want, sizeof want, _TRUNCATE, "1 manifest row(s) dropped (alex.req declared at build %.16s, "
+                                "served by build %.16s)", GONE_REQ, ref.hash);
+                    if (!has(g_logbuf, want)) printf("    %s%s\n", g_logbuf, g_doctor);
+                    CHECK(has(g_logbuf, want));
+                    CHECK(sh_modmanifest_current(&cur) == 0);
+                    sh_modmanifest_list_free(&cur);
+                    CHECK(!sh_modmanifest_substituted(GONE_REQ, sub, sizeof sub));
+                    CHECK(g_delete_calls >= 0);
+                }
+                g_placed[0] = placed0;
+                g_placed_count = placed_n;
+                g_subst_to[0] = 0;
             }
             sh_modserve_scope_enable(0);
             sh_modmanifest_reset();

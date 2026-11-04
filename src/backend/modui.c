@@ -1291,6 +1291,9 @@ typedef struct mu_mapmod {
     int *uids;                /* the entities that use it */
     size_t uid_count, uid_cap;
     int modules;              /* placed modules (Blueprint instances) that use it */
+    /* Its row's declared build when the editor serves the row through this
+     * (installed) build of its key (a SUBSTITUTE load, DESIGN-additive 2.5). */
+    char declared[SH_MODMANIFEST_HASH_CAP];
 } mu_mapmod;
 
 /* A (placed name, mod) match of the closure. */
@@ -1533,6 +1536,7 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
         size_t i, k;
         for (i = 0; i < mp->rows.count; i++) {
             const sh_modmanifest_row *row = &mp->rows.rows[i];
+            char sub_ok[SH_MODMANIFEST_HASH_CAP];
             int mod = -1;
             /* A row naming an alias of a bundle the closure reached is that mod. */
             for (k = 0; k < mp->mod_count && mod < 0; k++)
@@ -1540,8 +1544,23 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             /* The asset rule: a row is its mod by id, whatever build serves it. */
             for (k = 0; k < mp->mod_count && mod < 0; k++)
                 if (mp->mods[k].in_closure && !_stricmp(mp->mods[k].id, row->id)) mod = (int)k;
+            /* A row whose build is gone, served in the editor by the installed
+             * build of its key: that build is the mod. */
+            sub_ok[0] = 0;
+            if (!sh_modmanifest_substituted(row->bundle, sub_ok, sizeof sub_ok) || strlen(sub_ok) != SH_MODSERVE_HASH_HEX)
+                sub_ok[0] = 0;
+            if (sub_ok[0]) {
+                for (k = 0; k < mp->mod_count && mod < 0; k++)
+                    if (mu_same_bundle(m, mp->mods[k].hash, sub_ok)) mod = (int)k;
+                if (mod < 0) mod = mu_mapmod_add(mp, sub_ok, row->id, row->version, row->size);
+            }
             if (mod < 0) mod = mu_mapmod_add(mp, row->bundle, row->id, row->version, row->size);
-            if (mod >= 0) { mp->mods[mod].in_rows = 1; if (row->attached) mp->mods[mod].attached = 1; }
+            if (mod >= 0) {
+                mp->mods[mod].in_rows = 1;
+                if (row->attached) mp->mods[mod].attached = 1;
+                if (sub_ok[0] && strcmp(row->bundle, mp->mods[mod].hash))
+                    strcpy_s(mp->mods[mod].declared, sizeof mp->mods[mod].declared, row->bundle);
+            }
         }
         if (mp->have_mm) mu_map_attribute(mp);
         if (e->map_info && e->map_info(&mp->info) == 1) {
@@ -1569,6 +1588,14 @@ static void mu_map_free(mu_map *mp)
     free(mp->hits);
     if (mp->have_mm) sh_mm_free(&mp->mm);
     memset(mp, 0, sizeof *mp);
+}
+
+/* Whether the manifest row is the map entry's: its build (or an alias of it),
+ * or a build of its key (the asset rule: a row on a build that is gone, which
+ * the editor serves through the installed build, is that mod's row). */
+static int mu_row_is_mod(const mu_model *m, const sh_modmanifest_row *row, const mu_mapmod *x)
+{
+    return mu_same_bundle(m, row->bundle, x->hash) || (x->id[0] && !_stricmp(row->id, x->id));
 }
 
 /* Whether the open map pins `hash`, directly or through an alias. */
@@ -2907,14 +2934,17 @@ static int mu_product_need(const sh_modmanifest_list *rows)
     size_t i, k;
     int need = 0;
     if (!rows || !rows->count || !sh_ms_enumerate(&list)) return 0;
-    for (i = 0; i < rows->count && !need; i++)
+    for (i = 0; i < rows->count && !need; i++) {
+        char sub[SH_MODMANIFEST_HASH_CAP];
+        if (!sh_modmanifest_substituted(rows->rows[i].bundle, sub, sizeof sub)) sub[0] = 0;
         for (k = 0; k < list.count && !need; k++) {
             const sh_mb_bundle *bd = &list.items[k].bundle;
-            if (!list.items[k].loaded || strcmp(bd->hash, rows->rows[i].bundle)) continue;
+            if (!list.items[k].loaded || (strcmp(bd->hash, rows->rows[i].bundle) && strcmp(bd->hash, sub))) continue;
             need = bd->classes.surfaces > 0 ||
                    (bd->registries && (strstr(bd->registries, "\"player\"") || strstr(bd->registries, "\"extends\"") ||
                                        strstr(bd->registries, "\"conductor\"")));
         }
+    }
     sh_ms_list_free(&list);
     return need;
 }
@@ -3004,6 +3034,9 @@ static int mu_map_find(const mu_model *m, const mu_map *mp, const char *key)
         if (!strcmp(m->list.items[i].name, key) && m->list.items[i].loaded) entry = (int)i;
     for (i = 0; entry >= 0 && i < mp->mod_count; i++)
         if (mu_same_bundle(m, mp->mods[i].hash, m->list.items[entry].bundle.hash)) return (int)i;
+    /* A row of the folder's key at another build (a substituted row). */
+    for (i = 0; entry >= 0 && i < mp->mod_count; i++)
+        if (mp->mods[i].in_rows && !_stricmp(mp->mods[i].id, m->list.items[entry].bundle.id)) return (int)i;
     for (i = 0; i < mp->mod_count; i++)
         if (mu_mapmod_entry(m, &mp->mods[i]) < 0 && !strcmp(mp->mods[i].id, key)) return (int)i;
     return -1;
@@ -3084,8 +3117,9 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
 {
     const sh_modui_engine *e = mu_engine();
     const mu_mapmod *x = &mp->mods[p->mod];
-    size_t i, rows = 0;
+    size_t i, rows = 0, at = 0;
     int tag = 0;
+    char dropped[400] = "";
     if (p->refusal[0]) { _snprintf_s(msg, cap, _TRUNCATE, "%s", p->refusal); return 0; }
     if (x->uid_count) {
         int st;
@@ -3102,13 +3136,26 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
     g_listing_skip_n = 0;
     if (x->hash[0]) strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, x->hash);
     for (i = 0; i < mp->rows.count; i++) {
-        size_t k;
+        const sh_modmanifest_row *row = &mp->rows.rows[i];
+        size_t k, n;
         int drop = 0;
+        /* By key: a row on a build that is gone is the mod's row too. */
         for (k = 0; k < mp->mod_count && !drop; k++)
-            if (mu_same_bundle(m, mp->rows.rows[i].bundle, mp->mods[k].hash))
+            if (mu_row_is_mod(m, row, &mp->mods[k]))
                 drop = (int)k == p->mod || (p->vanilla_after && mu_mapmod_follows(&mp->mods[k]));
         if (!drop) continue;
-        rows += sh_modmanifest_current_remove(mp->rows.rows[i].bundle);
+        n = sh_modmanifest_current_remove(row->bundle);
+        rows += n;
+        if (n && at < sizeof dropped - 1) {
+            int w;
+            if (!strcmp(row->bundle, x->hash) || _stricmp(row->id, x->id))
+                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s at build %.16s", at ? ", " : " (",
+                                row->id, row->bundle);
+            else
+                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s declared at build %.16s, served by "
+                                "build %.16s", at ? ", " : " (", row->id, row->bundle, x->hash);
+            if (w > 0) at += (size_t)w;
+        }
         if (g_listing_skip_n < MU_LISTING_SKIP && strlen(mp->rows.rows[i].bundle) == SH_MODSERVE_HASH_HEX &&
             !mu_listing_skipped(mp->rows.rows[i].bundle))
             strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, mp->rows.rows[i].bundle);
@@ -3121,8 +3168,9 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
     (void)mu_scope_now("map remove");
     g_listing_skip_n = 0;
     InterlockedIncrement(&g_gen);
-    mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s", key, x->uid_count,
-           x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows,
+    if (at && at < sizeof dropped - 1) strcat_s(dropped, sizeof dropped, ")");
+    mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s%s", key, x->uid_count,
+           x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows, dropped,
            !p->tag_removed ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
                                                                              : ", the search tag could not be removed");
     msg[0] = 0;
@@ -3410,9 +3458,11 @@ static int mu_map_add(const char *key, const mu_out *o)
         sh_modmanifest_row row;
         const mu_mapmod *x = NULL;
         memset(&row, 0, sizeof row);
-        /* A row the map already has for this mod (an earlier build, an alias) is the one marked. */
+        /* A row the map already has for this mod (an earlier build, an alias,
+         * a build of its key that is gone) is the one marked. */
         for (i = 0; i < mp.rows.count && !row.bundle[0]; i++)
-            if (mu_same_bundle(&m, mp.rows.rows[i].bundle, ref.hash)) row = mp.rows.rows[i];
+            if (mu_same_bundle(&m, mp.rows.rows[i].bundle, ref.hash) || !_stricmp(mp.rows.rows[i].id, ref.id))
+                row = mp.rows.rows[i];
         if (!row.bundle[0]) {
             strncpy_s(row.id, sizeof row.id, ref.id, _TRUNCATE);
             strncpy_s(row.version, sizeof row.version, ref.version, _TRUNCATE);

@@ -1046,6 +1046,8 @@ void sh_modmanifest_reset(void)
     ReleaseSRWLockExclusive(&g_current_lock);
 }
 
+static void mm_subst_drop(const char *from);
+
 size_t sh_modmanifest_current_remove(const char *bundle)
 {
     size_t i, w, dropped = 0;
@@ -1058,6 +1060,7 @@ size_t sh_modmanifest_current_remove(const char *bundle)
     }
     g_current.count = w;
     ReleaseSRWLockExclusive(&g_current_lock);
+    if (dropped) mm_subst_drop(bundle);   /* the editor no longer serves it through another build */
     return dropped;
 }
 
