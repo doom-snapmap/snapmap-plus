@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.24 -- 2026-11-04 (beta)
+
+**Mod scenes play at the player and spawn demons**
+
+Mods can now play a scene where the activating player stands, spawn entities at the scene node as the scene starts, and hide the HUD for the scene's duration. Installing a mod while the editor is open is also safe now.
+
+### New
+- A mod's scene node now plays its scene where the activating player stands and faces, and puts them back where they were once the scene finishes.
+- A mod's scenes setting can spawn up to four entities, such as an arriving demon, at the node's placement the moment the scene starts, entrance animation included.
+- Scenes can hide the health and ammo panels while they play and bring them back when the scene releases the player, during Play only.
+
+### Improved
+- A scene entry can instead play the whole scene at the node and leave the player where they are standing.
+
+### Fixed
+- Play no longer ends with an engine error when a demon walks into a scene trigger; the activation is simply ignored.
+- Installing a mod while the editor is open no longer leads to a crash on the next Play or when leaving, so the session behaves as after a restart.
+
+_Plus 1 smaller fix and internal change._
+
 ## v0.2.1-beta.23 -- 2026-11-03 (beta)
 
 **Mod tiles can bring their own helper entities**
