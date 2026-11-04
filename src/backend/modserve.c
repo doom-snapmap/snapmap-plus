@@ -2857,27 +2857,40 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
         why = InterlockedCompareExchange((volatile LONG *)&f->scope_alt, 0, 0) == -1 ? MS_WHY_NONE : f->scope_why;
         if (!sh_modserve_scope_enabled()) why = -1;
         {
-            char who[200], others[400];
-            size_t at = 0;
-            others[0] = 0;
+            char who[200], others[400], merged[400], tail[860];
+            size_t at = 0, mt = 0;
+            size_t blen = 0;
+            int composed = p >= 0 && ms_body_of(&x->files[p], &blen) != NULL;
+            others[0] = merged[0] = 0;
             for (k = -1; k < f->alt_count; ++k) {
                 int c = k < 0 ? i : x->alts[f->alt_first + k], w;
+                const ms_bundle *cb = &x->bundles[x->files[c].bundle];
                 char one[200];
                 if (c == p) continue;
-                ms_who(&x->bundles[x->files[c].bundle], one, sizeof one);
+                ms_who(cb, one, sizeof one);
+                /* A composed text carries the entries of the other providers that serve for the listing. */
+                if (composed && (why < 0 || ((cb->sv & ms_sv_class(&x->files[c])) && (cb->rank >= 0 || ms_scope_always(cb))))) {
+                    w = _snprintf_s(merged + mt, sizeof merged - mt, _TRUNCATE, "%s%s", mt ? ", " : "", one);
+                    if (w > 0) mt += (size_t)w;
+                    continue;
+                }
                 w = _snprintf_s(others + at, sizeof others - at, _TRUNCATE, "%s%s", at ? ", " : "", one);
                 if (w < 0) break;
                 at += (size_t)w;
             }
+            _snprintf_s(tail, sizeof tail, _TRUNCATE, "%s%s%s%s", mt ? "; with the entries of: " : "", merged,
+                        at ? "; not served: " : "", others);
             if (p >= 0) {
                 const ms_bundle *b = &x->bundles[x->files[p].bundle];
+                const char *text = why < 0 ? "map scope is off" :
+                                   composed && b->rank < 0 ? "editor-time content, composed with the other editor-time providers" :
+                                   g_why_text[why];
                 ms_who(b, who, sizeof who);
                 if (b->rank >= 0)
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s, declared (row %ld): %s; not served: %s",
-                                f->request, who, (long)b->rank + 1, why < 0 ? "map scope is off" : g_why_text[why], others);
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s, declared (row %ld): %s%s",
+                                f->request, who, (long)b->rank + 1, text, tail);
                 else
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s; not served: %s", f->request, who,
-                                why < 0 ? "map scope is off" : g_why_text[why], others);
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s%s", f->request, who, text, tail);
             } else
                 _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not served: %s", f->request,
                             g_why_text[MS_WHY_NONE], others);
