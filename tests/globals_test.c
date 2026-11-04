@@ -193,6 +193,9 @@ int main(int argc, char **argv)
     check_adjacent(base, "main_thread_id",       "load_state",           (uint32_t)-4, &bad);
     check_adjacent(base, "main_thread_id",       "error_state",          0x08, &bad);
     check_adjacent(base, "resource_manager_ctx", "material_manager_ctx", 0xE0, &bad);
+    /* The resource lock sits 0x3D8 past the resource list-of-lists head on both
+     * renderers; its accessor builds the CRITICAL_SECTION on first use. */
+    check_adjacent(base, "decl_resource_head",   "resource_lock",        0x3D8, &bad);
 
     printf("======================================================================\n");
     printf("global resolver [%s]: %zu/%zu resolved; %d failures\n",

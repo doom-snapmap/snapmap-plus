@@ -90,6 +90,15 @@
    "vk_rva": "0x5c43b30",
    "gl_rva": "0x45491b0"
   },
+  "resource_lock": {
+   "anchor": "C7 42 28 04 00 00 00 48 83 E9 01 79 EB 4D 8B 40 18 4D 85 C0 75 D2 48 8B CB E8 ?? ?? ?? ?? 90 48 83 C4 30 5B C3 CC CC CC 40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 BA 04 00 00 00 48 8B 0C C8 8B 04 0A 39 05 ?? ?? ?? ?? 7E 42 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 3D ?? ?? ?? ?? FF 75 2D 48 8D 1D ?? ?? ?? ??",
+   "disp_slot": 114,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x5d79238",
+   "gl_rva": "0x467e8b8",
+   "note": "engine resource lock: a static struct whose first qword is the CRITICAL_SECTION every resource-list add, remove and find takes, built on first use by its accessor (Vulkan 0x1572B80, OpenGL 0x1573D10); the anchor runs from the end of ResourceStaticPromote into that accessor's LEA of the struct"
+  },
   "resource_manager_ctx": {
    "anchor": "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 86 B8 A0 29 00 ?? 89 ?? 08 5C 28 00",
    "disp_slot": 3,

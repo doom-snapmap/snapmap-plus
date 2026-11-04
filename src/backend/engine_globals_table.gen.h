@@ -115,6 +115,12 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
       .anchor = "4C 8D 05 ?? ?? ?? ?? 48 8B D7 48 8B CB F2 48 0F 2A C0 48 8B 45 70 48 89 44 24 28",
       .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C43B30u, .rva_gl = 0x45491B0u },
 
+    { .name = "resource_lock",
+      /* engine resource lock: a static struct whose first qword is the CRITICAL_SECTION every resource-list add, remove and find takes, built on first use by its accessor (Vulkan 0x1572B80, OpenGL 0x1573D10); the anchor runs from the end of ResourceStaticPromote into that accessor's LEA of the struct.
+       * Build 13954591: Vulkan 0x5D79238, OpenGL 0x467E8B8. */
+      .anchor = "C7 42 28 04 00 00 00 48 83 E9 01 79 EB 4D 8B 40 18 4D 85 C0 75 D2 48 8B CB E8 ?? ?? ?? ?? 90 48 83 C4 30 5B C3 CC CC CC 40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 BA 04 00 00 00 48 8B 0C C8 8B 04 0A 39 05 ?? ?? ?? ?? 7E 42 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 3D ?? ?? ?? ?? FF 75 2D 48 8D 1D ?? ?? ?? ??",
+      .disp_slot = 114, .disp_tail = 0, .delta = 0, .rva_vk = 0x5D79238u, .rva_gl = 0x467E8B8u },
+
     { .name = "resource_manager_ctx",
       /* resource type-manager context.
        * Build 13954591: Vulkan 0x66C4980, OpenGL 0x4FC9F40. */
