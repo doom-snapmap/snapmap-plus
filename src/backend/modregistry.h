@@ -171,6 +171,11 @@ int  sh_modregistry_generate(const sh_mr_source *src, int n, const char *const s
                              const sh_mr_choice *choices, int nchoices, sh_mr_result *out);
 void sh_modregistry_result_free(sh_mr_result *r);
 
+/* The clip blocks of a player body text: each `anim "<clip>" {` block directly
+ * inside its top-level `events` block. An alias row's `anim` reference, on
+ * one line or several, is not one. Pure. */
+int  sh_modregistry_body_clips(const char *text, size_t len);
+
 /* ------------------------------------------------------------ text ------ */
 
 /* The conductor: `stock` with n items appended to edit.aiTypeList (num

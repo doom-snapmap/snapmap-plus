@@ -321,6 +321,24 @@ static int distinct_clips(const char *const *texts, int n)
     return count;
 }
 
+/* The body's clip count is structural (V2c: 228 for 227): an alias row's anim
+ * reference is not a clip, on one line or written across several. */
+static void test_body_clip_count(void)
+{
+    static const char BODY[] =
+        "{\n\tinit {\n\t\tinherit \"player/tp_body.md6\"\n\t}\n\tevents {\n"
+        "\t\tanim \"md6/a.md6anim\" {\n\t\t\tevent \"ae_x\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
+        "\t\tanim \"md6/b \\\"q\\\".md6anim\"\n\t\t{\n\t\t}\n"
+        "\t\t// anim \"md6/commented.md6anim\" {\n"
+        "\t}\n\taliases {\n"
+        "\t\talias { name \"mods/k/one\" anim \"md6/mods/k/one.md6anim\" }\n"
+        "\t\talias {\n\t\t\tname \"mods/k/two\"\n\t\t\tanim \"md6/mods/k/two.md6anim\"\n\t\t}\n"
+        "\t}\n\tprops {\n\t\tprop \"x.md6\" {\n\t\t\tanim \"md6/not_a_clip.md6anim\" {\n\t\t\t}\n\t\t}\n\t}\n}\n";
+    printf("-- the body's clips counted by structure, not by an alias row's anim word\n");
+    CHECK(sh_modregistry_body_clips(BODY, strlen(BODY)) == 2);
+    CHECK(sh_modregistry_body_clips("", 0) == 0 && sh_modregistry_body_clips("{ events {", 10) == 0);
+}
+
 static void test_body_rows(const char *mods)
 {
     static const char CLASH[] =   /* the game's clip with one more row and one it already holds */
@@ -400,6 +418,8 @@ static void test_body_rows(const char *mods)
                 printf("   order %s: %d + %d entries appended, %d clip(s) merged with %d row(s)\n", order ? "2,1" : "1,2",
                        add1, add2, m2.clips, m2.rows);
                 CHECK(add1 + add2 == cu + 1 && m2.clips == 3 && count_of(y, "alias {") == 1);
+                /* Pack 2's alias row is no clip: the stand-in game clip and the packs' distinct ones. */
+                CHECK(sh_modregistry_body_clips(y, l2) == cu + 1);
                 free(z1);
                 free(z2);
                 free(x);
@@ -991,6 +1011,7 @@ int main(int argc, char **argv)
     mkdirs(g_top);
     test_text();
     test_extends();
+    test_body_clip_count();
     test_body_rows(argc > 1 ? argv[1] : NULL);
     test_generation();
     test_map_add_registries();
