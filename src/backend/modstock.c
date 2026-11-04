@@ -51,6 +51,7 @@ static char *g_names;
 static size_t g_names_len;
 static uint32_t *g_by_name;                     /* row indices sorted by hash */
 static uint32_t *g_by_size;                     /* row indices sorted by (size, ext, container, name) */
+static unsigned char *g_slice_dup;              /* 1: an earlier row of g_by_size names the same slice */
 static HANDLE g_files[MST_CONTAINERS][2];
 static double g_load_ms;
 static char g_cause[160];
@@ -206,6 +207,7 @@ static void mst_free_table(void)
     free(g_names); g_names = NULL; g_names_len = 0;
     free(g_by_name); g_by_name = NULL;
     free(g_by_size); g_by_size = NULL;
+    free(g_slice_dup); g_slice_dup = NULL;
     AcquireSRWLockExclusive(&g_memo_lock);
     free(g_sha); g_sha = NULL;
     free(g_sha_done); g_sha_done = NULL;
@@ -230,6 +232,40 @@ static int __cdecl mst_size_order(const void *a, const void *b)
     c = strcmp(g_names + x->name, g_names + y->name);
     if (c) return c;
     return *(const uint32_t *)a < *(const uint32_t *)b ? -1 : 1;
+}
+
+/* Rows naming one slice (same archive, store and offset) under one
+ * extension, in g_by_size order: all but the first are duplicates. */
+typedef struct mst_slice_key { uint64_t offset; uint32_t ext, pos; uint8_t container, selector; } mst_slice_key;
+
+static int __cdecl mst_slice_order(const void *a, const void *b)
+{
+    const mst_slice_key *x = (const mst_slice_key *)a, *y = (const mst_slice_key *)b;
+    if (x->container != y->container) return x->container < y->container ? -1 : 1;
+    if (x->selector != y->selector) return x->selector < y->selector ? -1 : 1;
+    if (x->offset != y->offset) return x->offset < y->offset ? -1 : 1;
+    if (x->ext != y->ext) return x->ext < y->ext ? -1 : 1;
+    return x->pos < y->pos ? -1 : x->pos > y->pos;
+}
+
+static int mst_mark_slice_dups(void)
+{
+    mst_slice_key *k = (mst_slice_key *)malloc(sizeof(mst_slice_key) * (g_nrows ? g_nrows : 1));
+    uint32_t i;
+    g_slice_dup = (unsigned char *)calloc(g_nrows ? g_nrows : 1, 1);
+    if (!k || !g_slice_dup) { free(k); return 0; }
+    for (i = 0; i < g_nrows; i++) {
+        const mst_row *r = &g_rows[g_by_size[i]];
+        k[i].offset = r->offset; k[i].ext = r->ext; k[i].pos = i;
+        k[i].container = r->container; k[i].selector = r->selector;
+    }
+    qsort(k, g_nrows, sizeof *k, mst_slice_order);
+    for (i = 1; i < g_nrows; i++)
+        if (k[i].container == k[i - 1].container && k[i].selector == k[i - 1].selector &&
+            k[i].offset == k[i - 1].offset && k[i].ext == k[i - 1].ext)
+            g_slice_dup[g_by_size[k[i].pos]] = 1;
+    free(k);
+    return 1;
 }
 
 static int mst_grow(void **p, size_t *cap, size_t need, size_t elem)
@@ -344,6 +380,7 @@ static void mst_load_locked(void)
     for (i = 0; i < g_nrows; i++) g_by_name[i] = g_by_size[i] = i;
     qsort(g_by_name, g_nrows, sizeof(uint32_t), mst_name_order);
     qsort(g_by_size, g_nrows, sizeof(uint32_t), mst_size_order);
+    if (!mst_mark_slice_dups()) { strcpy_s(g_cause, sizeof g_cause, "out of memory sorting the installed indexes"); goto fail; }
     g_load_ms = mst_now_ms() - t0;
     InterlockedExchange(&g_state, MST_READY);
     {
@@ -515,35 +552,56 @@ static int mst_copy_source(const char *name, char *out, size_t cap)
     return 1;
 }
 
+/* Bytes hashing to `want` at exactly `name`: every row of that name and size
+ * (both archives, which hold different bytes under some names), then a loose
+ * file. 1 with source filled, 0 when none. */
+static int mst_match_at(const char *name, unsigned long long size, const unsigned char want[32], const char *sha256,
+                        char *source, size_t source_cap)
+{
+    unsigned char got[32];
+    uint32_t first, count, i;
+    char path[MAX_PATH * 4 + 64];
+    int which;
+    first = mst_name_range(name, &count);
+    for (i = first; i < first + count; i++) {
+        uint32_t r = g_by_name[i];
+        if (g_rows[r].size != size || !mst_name_eq(g_names + g_rows[r].name, name)) continue;
+        if (mst_row_sha(r, got) && !memcmp(got, want, 32))
+            return mst_copy_source(g_names + g_rows[r].name, source, source_cap);
+    }
+    for (which = 0; which < 2; which++) {
+        char hex[SH_MB_HASH_HEX + 1];
+        unsigned long long n = 0;
+        if (!mst_loose_path(name, which, path, sizeof path) || mst_loose_size(path) != (long long)size) continue;
+        if (mst_loose_sha(path, hex, &n) && n == size && !strcmp(hex, sha256))
+            return mst_copy_source(name, source, source_cap);
+    }
+    return 0;
+}
+
 int sh_modstock_match(const char *request, unsigned long long size, const char *sha256,
                       char *source, size_t source_cap)
 {
     unsigned char want[32], got[32];
-    uint32_t first, count, i, candidates = 0;
+    uint32_t i;
     unsigned long long budget = 0;
-    char path[MAX_PATH * 4 + 64];
+    char stripped[SH_MB_REQUEST_MAX + 1];
     uint32_t ext;
-    int which;
     if (source && source_cap) source[0] = 0;
     if (!request || !sha256 || !source || !mst_unhex(sha256, want) || !size) return SH_MB_STOCK_ABSENT;
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
-    /* The file's own path: every row of that name and size. */
-    first = mst_name_range(request, &count);
-    for (i = first; i < first + count; i++) {
-        uint32_t r = g_by_name[i];
-        if (g_rows[r].size != size || !mst_name_eq(g_names + g_rows[r].name, request)) continue;
-        if (mst_row_sha(r, got) && !memcmp(got, want, 32))
-            return mst_copy_source(g_names + g_rows[r].name, source, source_cap) ? SH_MB_STOCK_OK : SH_MB_STOCK_ABSENT;
-    }
-    /* A loose file at that path. */
-    for (which = 0; which < 2; which++) {
-        char hex[SH_MB_HASH_HEX + 1];
-        unsigned long long n = 0;
-        if (!mst_loose_path(request, which, path, sizeof path) || mst_loose_size(path) != (long long)size) continue;
-        if (mst_loose_sha(path, hex, &n) && n == size && !strcmp(hex, sha256))
-            return mst_copy_source(request, source, source_cap) ? SH_MB_STOCK_OK : SH_MB_STOCK_ABSENT;
-    }
-    /* A renamed copy: rows of the same decoded size and extension. */
+    /* The file's own path. */
+    if (mst_match_at(request, size, want, sha256, source, source_cap)) return SH_MB_STOCK_OK;
+    /* The path with its mods/<key>/ segment removed: where a copy moved under
+     * a key came from. */
+    if (sh_mb_strip_key(request, stripped, sizeof stripped) &&
+        mst_match_at(stripped, size, want, sha256, source, source_cap))
+        return SH_MB_STOCK_OK;
+    if (source_cap) source[0] = 0;
+    /* A renamed copy: rows of the same decoded size and extension, hashed
+     * lazily in (size, extension, archive, name) order until one matches or
+     * SH_MODSTOCK_RENAMED_BYTES are hashed. No candidate count: image sizes
+     * the game uses for thousands of rows are searched to the budget. */
     if (size > 0xffffffffull) return SH_MB_STOCK_ABSENT;
     ext = mst_ext_hash(request, strlen(request));
     {
@@ -556,16 +614,12 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
         }
         for (i = lo; i < g_nrows; i++) {
             const mst_row *m = &g_rows[g_by_size[i]];
-            uint32_t k;
-            int seen = 0;
-            if (m->size != size || m->ext != ext || i - lo >= 16u * SH_MODSTOCK_RENAMED_MAX) break;
+            if (m->size != size || m->ext != ext) break;
             /* One slice can be named by several rows; hash it once. */
-            for (k = lo; k < i && !seen; k++) {
-                const mst_row *o = &g_rows[g_by_size[k]];
-                seen = o->container == m->container && o->selector == m->selector && o->offset == m->offset;
-            }
-            if (seen) continue;
-            if (++candidates > SH_MODSTOCK_RENAMED_MAX || budget + size > SH_MODSTOCK_RENAMED_BYTES) break;
+            if (g_slice_dup[g_by_size[i]]) continue;
+            /* Every candidate counts, remembered or not, so the answer never
+             * depends on what the process hashed before. */
+            if (budget + size > SH_MODSTOCK_RENAMED_BYTES) break;
             budget += size;
             if (mst_row_sha(g_by_size[i], got) && !memcmp(got, want, 32) &&
                 mst_copy_source(g_names + m->name, source, source_cap))

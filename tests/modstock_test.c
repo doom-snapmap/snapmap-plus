@@ -324,6 +324,131 @@ static void test_builder(const char *tmp)
     }
 }
 
+/* ------------------------------------- renamed copies, names, dead needs ---- */
+/* A third install (D3): 100 rows of one image size and extension before the
+ * one a copy equals (more than the 64 candidates the matcher once stopped
+ * at), one name both archives hold with other bytes, an md6 collision model
+ * shipped only under generated/model/, and a stock md6Def naming a clip no
+ * archive holds. */
+
+#define D3_MANY      100
+#define D3_LATE      "generated/image/z/late.bimage"
+#define D3_TWO       "generated/image/two/v.bimage"
+#define D3_COLLISION "generated/model/md6/m/collision/c.bmodel"
+#define D3_MD6       "generated/decls/md6def/m/x.md6.decl"
+static const char MD6_STOCK[] = "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t}\r\n}\r\n";
+static unsigned char D3_IMG[D3_MANY][300], LATE_B[300], TWO_SNAP[300], TWO_CAMP[300], COLL_B[64];
+static char D3_NAMES[D3_MANY][64];
+
+static void make_install3(const char *d3)
+{
+    entry g[D3_MANY + 4], s[1];
+    int i, k;
+    for (i = 0; i < D3_MANY; i++) {
+        for (k = 0; k < 300; k++) D3_IMG[i][k] = (unsigned char)(k * 5 + i * 17 + 2);
+        _snprintf_s(D3_NAMES[i], sizeof D3_NAMES[i], _TRUNCATE, "generated/image/a/%03d.bimage", i);
+        g[i].path = D3_NAMES[i]; g[i].bytes = D3_IMG[i]; g[i].n = 300; g[i].patch = 0; g[i].deflate = 0;
+    }
+    for (k = 0; k < 300; k++) { LATE_B[k] = (unsigned char)(k ^ 0x3c); TWO_SNAP[k] = (unsigned char)(k * 9 + 4); TWO_CAMP[k] = (unsigned char)(k * 19 + 6); }
+    for (k = 0; k < 64; k++) COLL_B[k] = (unsigned char)(k + 33);
+    g[D3_MANY].path = D3_LATE;           g[D3_MANY].bytes = LATE_B;      g[D3_MANY].n = 300;
+    g[D3_MANY + 1].path = D3_TWO;        g[D3_MANY + 1].bytes = TWO_CAMP; g[D3_MANY + 1].n = 300;
+    g[D3_MANY + 2].path = D3_COLLISION;  g[D3_MANY + 2].bytes = COLL_B;   g[D3_MANY + 2].n = sizeof COLL_B;
+    g[D3_MANY + 3].path = D3_MD6;        g[D3_MANY + 3].bytes = (const unsigned char *)MD6_STOCK; g[D3_MANY + 3].n = sizeof MD6_STOCK - 1;
+    for (i = D3_MANY; i < D3_MANY + 4; i++) { g[i].patch = 0; g[i].deflate = 0; }
+    s[0].path = D3_TWO; s[0].bytes = TWO_SNAP; s[0].n = 300; s[0].patch = 0; s[0].deflate = 0;
+    write_container(d3, "gameresources", g, D3_MANY + 4);
+    write_container(d3, "snap_gameresources", s, 1);
+}
+
+static void l1c_mod(const char *dir, const char *rel, const char *text)
+{
+    mt_write(dir, "mod.json", "{\"id\":\"t.l1c\",\"name\":\"L1c test\"}");
+    mt_write(dir, rel, text);
+}
+
+static void test_renamed_names_dead(const char *tmp)
+{
+    char d3[MAX_PATH * 2], dir[MAX_PATH * 2], src[SH_MB_REQUEST_MAX + 1], h[65], cut[SH_MB_REQUEST_MAX + 1];
+    unsigned long long size = 0;
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+
+    /* The key cut, both spellings, wherever a path segment starts. */
+    CHECK(sh_mb_strip_key("generated/image/mods/olivia_pierce_complete/models/a.bimage", cut, sizeof cut) &&
+          !strcmp(cut, "generated/image/models/a.bimage"));
+    CHECK(sh_mb_strip_key("generated/decls/md6def/mods/olivia-pierce-complete/zion/x.md6.decl", cut, sizeof cut) &&
+          !strcmp(cut, "generated/decls/md6def/zion/x.md6.decl"));
+    CHECK(sh_mb_strip_key("md6/mods/local.hell_guard/characters/A.lwo", cut, sizeof cut) && !strcmp(cut, "md6/characters/a.lwo"));
+    CHECK(sh_mb_strip_key("mods/k/x.decl", cut, sizeof cut) && !strcmp(cut, "x.decl"));
+    CHECK(!sh_mb_strip_key("generated/image/godmods/k/x.bimage", cut, sizeof cut));
+    CHECK(!sh_mb_strip_key("generated/image/mods/x.bimage", cut, sizeof cut));
+    CHECK(!sh_mb_strip_key("generated/image/stock/b.bimage", cut, sizeof cut));
+
+    _snprintf_s(d3, sizeof d3, _TRUNCATE, "%s\\d3", tmp);
+    make_install3(d3);
+    sh_modstock_set_install(d3);
+    /* A renamed copy past 64 same-size candidates is found (budget only). */
+    hex_of(LATE_B, sizeof LATE_B, h);
+    CHECK(sh_modstock_match("generated/image/mods/t.l1c/q/elsewhere.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+          !strcmp(src, D3_LATE));
+    /* The de-namespaced path is tried first, under either key spelling. */
+    CHECK(sh_modstock_match("generated/image/mods/t_l1c/z/late.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+          !strcmp(src, D3_LATE));
+    /* A name both archives hold with other bytes: the variant whose bytes the
+     * copy has is the one named, whichever archive holds it. */
+    hex_of(TWO_CAMP, sizeof TWO_CAMP, h);
+    CHECK(sh_modstock_match("generated/image/mods/t.l1c/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+          !strcmp(src, D3_TWO) && sh_modstock_verify(src, h, &size) == SH_MB_STOCK_OK && size == 300);
+    hex_of(TWO_SNAP, sizeof TWO_SNAP, h);
+    CHECK(sh_modstock_match("generated/image/mods/t.l1c/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+          !strcmp(src, D3_TWO));
+    /* Bytes no row holds stay absent, and the source is left empty. */
+    hex_of(D3_IMG[0], 299, h);
+    CHECK(sh_modstock_match("generated/image/mods/t.l1c/a/000.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_ABSENT && !src[0]);
+
+    /* An md6 collision model name resolves to generated/model/, as the game ships it. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
+    l1c_mod(dir, "assets\\generated\\decls\\entitydef\\mods\\t.l1c\\death.decl",
+            "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.needs.stock == 1 && b.needs.unresolved == 0);
+    if (b.errors) fprintf(stderr, "  collision model: %s\n", b.first_cause);
+    sh_mb_free(&b);
+
+    /* A copied stock md6Def keeping a clip no archive holds: a warning naming
+     * the stock decl, not an error. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c2", tmp);
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\x.md6.decl",
+            "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// namespaced copy\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1);
+    CHECK(strstr(b.first_warning, "names anim md6/m/dead.md6anim, which no archive holds; the game's own " D3_MD6
+                                  " names it too") != NULL);
+    f = find(&b, "generated/decls/md6def/mods/t.l1c/m/x.md6.decl");
+    CHECK(f && !f->stock && f->cls == SH_MB_CLASS_ADD);
+    sh_mb_free(&b);
+    /* The same text byte for byte under another stem is a borrow: its text is
+     * the game's, and the warning names its source. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c3", tmp);
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\other.md6.decl", MD6_STOCK);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 1);
+    CHECK(strstr(b.first_warning, "the game's own " D3_MD6 " names it too") != NULL);
+    sh_mb_free(&b);
+    /* A dead name only the mod introduces stays an error. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c4", tmp);
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\x.md6.decl",
+            "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t}\r\n\tanim \"md6/m/mine.md6anim\" {\r\n\t}\r\n}\r\n");
+    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1 && b.warnings == 1);
+    CHECK_CAUSE(b, "needs anim md6/m/mine.md6anim, which resolves to nothing");
+    sh_mb_free(&b);
+    /* With no stock decl of that stem, a dead clip is the mod's own: an error. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c5", tmp);
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\y.md6.decl",
+            "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// not a copy of y\r\n\t}\r\n}\r\n");
+    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK_CAUSE(b, "needs anim md6/m/dead.md6anim, which resolves to nothing");
+    sh_mb_free(&b);
+}
+
 /* ------------------------------------------------- store, sync, serve ---- */
 
 typedef struct blob_src { int calls; } blob_src;
@@ -567,6 +692,8 @@ int main(void)
     sh_modstock_register();
     test_bridge(d1);
     test_builder(tmp);
+    test_renamed_names_dead(tmp);
+    sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();
     mt_remove_tree(tmp);

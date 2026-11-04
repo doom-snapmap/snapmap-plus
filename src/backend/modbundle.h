@@ -572,9 +572,20 @@ int  sh_mb_logical_name(const char *request, char *type, size_t type_cap,
 const char *sh_mb_decl_type(const char *folder, size_t folder_len);
 
 /* Request paths the engine would ask the provider for when it loads the
- * logical (type, name). Lower-cased. Returns the number written (0..max). */
+ * logical (type, name). Lower-cased. Returns the number written (0..max).
+ * A model name (.lwo, .ase, .ma, .obj, .fbx) is cooked/model/<stem>.bmodel,
+ * then generated/model/<stem>.bmodel: the game ships its md6 collision
+ * models (md6/.../collision/<x>.lwo) only under generated/model/, beside
+ * their generated/cm/ collision. */
 int  sh_mb_need_requests(const char *type, const char *name,
                          char out[][SH_MB_REQUEST_MAX + 1], int max);
+
+/* The path or name with its first "mods/<key>/" segment removed (at the
+ * start or after a '/', key any non-empty segment, so both spellings of a key,
+ * '-' in decl names and '_' in md6 paths, are cut): the installed name a
+ * renamed copy most likely came from. Returns 1 and fills out (lower-cased)
+ * when a segment was removed, 0 otherwise. */
+int  sh_mb_strip_key(const char *in, char *out, size_t cap);
 
 /* Tolerant decl reference scan (see modbundle.c for the keys). The callback
  * receives each reference; name is not NUL-terminated. */

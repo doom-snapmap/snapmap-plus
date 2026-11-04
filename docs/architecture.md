@@ -438,6 +438,20 @@ These backend files share the work:
   folder under a generated key (a slug and four random characters). A bundle
   with a `legacy` record (a converted first-generation package) keeps its
   declared shadows and the rules of before, and its unresolved needs only warn.
+  In any other bundle a need that resolves to nothing fails the build, with
+  three exceptions that only warn: an image (stock materials name
+  virtual-texture sources with no standalone image), a need of a replacement,
+  and a need the game's own text also names ("names <x>, which no archive
+  holds; the game's own <decl> names it too"). That last one covers a stock
+  pointer (its text is the installed text) and a carried decl under the key
+  whose stock twin, the installed decl at its request with `mods/<key>/` cut
+  (`sh_mb_strip_key`), names the same resource: shipped md6Defs keep event
+  and alias blocks of clips no archive holds, so a copy of one builds without
+  dropping them. A need only the mod introduces stays an error. A model name
+  (`.lwo` and the like) resolves at `cooked/model/<stem>.bmodel` or
+  `generated/model/<stem>.bmodel`: the md6 collision models the
+  death-collision entities name (`md6/.../collision/<x>.lwo`) ship only
+  under `generated/model/md6/`, beside `generated/cm/md6/`.
 - `modstore.c` owns the store: the mod folders, install, verification, the
   rebuild rule and the one-time upgrade of the retired layout, below, which the
   store tool runs. Files are hashed at install and on `sh_mods doctor verify`,
@@ -757,9 +771,15 @@ virtual texture). It reads the archives directly rather than through the
 engine provider because SnapMap's provider does not see campaign-only
 content in `gameresources`, which is what the boss packs copy. Identity is
 size first: the builder hashes only entries whose decoded size equals the
-file's, at the file's own path, then entries of the same size and extension
-elsewhere (a renamed copy; at most 64 candidates and 256 MiB hashed per
-file), and each slice is hashed at most once per process; measured on the
+file's, at the file's own path, then at that path with its `mods/<key>/`
+segment cut (either spelling of the key; where a copy moved under a key came
+from), each time every row of the name in both archives (they hold different
+bytes under some names, and the one whose bytes match is named), then entries
+of the same size and extension elsewhere (a renamed copy, in size, extension,
+archive and name order until one matches or 256 MiB are hashed for the file;
+no candidate count, since image sizes the game uses for thousands of rows
+would otherwise stop the search early), and each slice is hashed at most once
+per process; measured on the
 owner's packs, a build hashes about the bytes that become pointers, never the
 archives. Installing a downloaded bundle resolves every pointer first, and a
 game that lacks the entry or holds other bytes (a different revision) refuses

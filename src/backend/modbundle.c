@@ -1288,12 +1288,43 @@ int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQ
     }
     if (mb_ieq_n(type, tl, "model")) {
         if (mb_iends(name, nl, ".bmodel")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
-        return mb_binary_name("cooked", "model", name, "bmodel", out[0], SH_MB_REQUEST_MAX + 1);
+        /* cooked/model/ for authored models; the md6 collision models
+         * (md6/.../collision/<x>.lwo, named by the death-collision entities)
+         * ship only as generated/model/md6/... beside generated/cm/md6/...,
+         * and 13954591 holds no cooked/model/md6/ row at all. */
+        if (mb_binary_name("cooked", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        if (k < max && mb_binary_name("generated", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        return k;
     }
     if (sh_mb_decl_type(type, tl)) {
         int w = _snprintf_s(out[0], SH_MB_REQUEST_MAX + 1, _TRUNCATE, "generated/decls/%s/%s.decl", type, name);
         if (w < 0) return 0;
         mb_lower(out[0]);
+        return 1;
+    }
+    return 0;
+}
+
+int sh_mb_strip_key(const char *in, char *out, size_t cap)
+{
+    size_t n, i;
+    if (!in || !out || !cap) return 0;
+    out[0] = 0;
+    n = strlen(in);
+    for (i = 0; i + 5 < n; i++) {
+        const char *seg, *end;
+        size_t head, tail;
+        if (i && in[i - 1] != '/') continue;
+        if (_strnicmp(in + i, "mods/", 5) != 0) continue;
+        seg = in + i + 5;
+        end = strchr(seg, '/');
+        if (!end || end == seg || !end[1]) continue;
+        head = i;
+        tail = strlen(end + 1);
+        if (head + tail + 1 > cap) return 0;
+        memcpy(out, in, head);
+        memcpy(out + head, end + 1, tail + 1);
+        mb_lower(out);
         return 1;
     }
     return 0;
@@ -2693,6 +2724,63 @@ static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_
     return unknown ? -1 : 0;
 }
 
+/* The installed text a file came from, for needs the game's own text leaves
+ * dangling. A pointer's text is the installed text (source: the pointer's).
+ * A carried decl under the key is compared with the installed decl at its
+ * request with the mods/<key>/ segment cut (a copy of stock text after the
+ * namespace rewrite), loaded once per file on its first unresolved need. */
+typedef struct mb_twin {
+    int state;                          /* 0 not looked up, 1 loaded, -1 none */
+    sh_mb_file text;                    /* only needs, need_count used */
+    char source[SH_MB_REQUEST_MAX + 1];
+} mb_twin;
+
+static void mb_twin_reset(mb_twin *t)
+{
+    size_t i;
+    for (i = 0; i < t->text.need_count; i++) { free(t->text.needs[i].type); free(t->text.needs[i].name); }
+    free(t->text.needs);
+    memset(t, 0, sizeof *t);
+}
+
+static void mb_twin_load(mb_twin *t, const sh_mb_file *f)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    unsigned long long size = 0;
+    unsigned char *text = NULL;
+    size_t len = 0;
+    t->state = -1;
+    if (!f->is_decl || !f->ptype || !ops || !ops->identify) return;
+    if (!sh_mb_strip_key(f->request, t->source, sizeof t->source)) return;
+    if (ops->identify(ops->context, t->source, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX) return;
+    if (sh_mb_stock_read(t->source, sha, &text, &len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
+    if (sh_decl_text_well_formed(text, len)) {
+        mb_need_ctx nc = { &t->text, 0 };
+        sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
+        if (!nc.oom) t->state = 1;
+    }
+    HeapFree(GetProcessHeap(), 0, text);
+}
+
+/* The installed decl that names this unresolved need too, or NULL. */
+static const char *mb_stock_names_too(mb_twin *t, const sh_mb_file *f, const sh_mb_need *need)
+{
+    char cut[SH_MB_REQUEST_MAX + 1];
+    int has_cut;
+    size_t i;
+    if (f->stock && f->stock_source) return f->stock_source;
+    if (!t->state) mb_twin_load(t, f);
+    if (t->state != 1) return NULL;
+    has_cut = sh_mb_strip_key(need->name, cut, sizeof cut);
+    for (i = 0; i < t->text.need_count; i++) {
+        const sh_mb_need *s = &t->text.needs[i];
+        if (strcmp(s->type, need->type) != 0) continue;
+        if (_stricmp(s->name, need->name) == 0 || (has_cut && _stricmp(s->name, cut) == 0)) return t->source;
+    }
+    return NULL;
+}
+
 /* ----------------------------------------------------- render programs ---- */
 /* A bundle that carries a render program must carry what the engine checks:
  * the cooked program's checksum is MD5fold of the served decl text, each
@@ -3828,8 +3916,11 @@ names:
     }
     for (i = 0; i < b->file_count; i++) {
         sh_mb_file *f = &b->files[i];
+        mb_twin twin;
+        memset(&twin, 0, sizeof twin);
         for (k = 0; k < f->need_count; k++) {
             int got = mb_resolve_one(b, &own, r, &f->needs[k]);
+            const char *also;
             b->needs.total++;
             if (got == 1) continue;
             b->needs.unresolved++;
@@ -3853,12 +3944,21 @@ names:
             else if (f->shadowed && got == 0)
                 mb_warn(b, "%s needs %s %s, which resolves to nothing (a replaced stock file: reported, not refused)",
                         f->path, f->needs[k].type, f->needs[k].name);
+            /* The game's own text of the decl this file is or was copied
+             * from names the same missing resource (stock md6Defs keep event
+             * and alias blocks of clips no archive holds): the engine already
+             * tolerates it, so a copy that keeps it is reported, not refused.
+             * A need only the mod introduces stays an error. */
+            else if (got == 0 && (also = mb_stock_names_too(&twin, f, &f->needs[k])) != NULL)
+                mb_warn(b, "%s names %s %s, which no archive holds; the game's own %s names it too", f->path,
+                        f->needs[k].type, f->needs[k].name, also);
             else if (got < 0)
                 mb_error(b, "%s needs %s %s, which is not in the bundle and cannot be checked against the game (resource reader unavailable)",
                          f->path, f->needs[k].type, f->needs[k].name);
             else
                 mb_error(b, "%s needs %s %s, which resolves to nothing", f->path, f->needs[k].type, f->needs[k].name);
         }
+        mb_twin_reset(&twin);
     }
     mb_classify_all(b);
     mb_player_resolve(b, &own, user);

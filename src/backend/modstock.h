@@ -13,11 +13,13 @@
  * it. A slice's SHA-256 is computed at most once per process.
  *
  * Identity is size first: the builder hashes only installed entries whose
- * decoded size equals the file's, at the file's own path first, then entries
- * of the same size and extension elsewhere (a renamed copy, at most
- * SH_MODSTOCK_RENAMED_MAX of them per file and SH_MODSTOCK_RENAMED_BYTES
- * hashed), so a build hashes about the bytes that become pointers rather than
- * the archives.
+ * decoded size equals the file's, at the file's own path first (every row of
+ * that name in both archives, which hold different bytes under some names),
+ * then at the path with its mods/<key>/ segment removed (where a copy moved
+ * under a key came from, sh_mb_strip_key), then entries of the same size and
+ * extension elsewhere (a renamed copy, until SH_MODSTOCK_RENAMED_BYTES are
+ * hashed for the file; no candidate count), so a build hashes about the bytes
+ * that become pointers rather than the archives.
  *
  * Thread-safe: the table is immutable once loaded; reads are positional.
  */
@@ -28,8 +30,7 @@
 #include "modbundle.h"
 
 #define SH_MODSTOCK_MAX_SLICE      (512ull << 20)  /* the largest entry read or hashed in memory */
-#define SH_MODSTOCK_RENAMED_MAX    64u             /* renamed-copy candidates hashed per file */
-#define SH_MODSTOCK_RENAMED_BYTES  (256ull << 20)  /* and their bytes per file */
+#define SH_MODSTOCK_RENAMED_BYTES  (256ull << 20)  /* renamed-copy bytes hashed per file */
 
 /* The install folder (the one holding base\), UTF-8. NULL or "" restores the
  * default, the host executable's folder. Drops a loaded table. */

@@ -239,7 +239,11 @@ static void test_need_requests(void)
        "generated/anim/md6/x/a.md6skl/_default.bmd6anim");
     nr("image", "models/monsters/imp/imp.tga", 1, "generated/image/models/monsters/imp/imp.bimage", NULL);
     nr("image", "env/black_px", 1, "generated/image/env/black_px.bimage", NULL);
-    nr("model", "models/a/b.lwo", 1, "cooked/model/models/a/b.bmodel", NULL);
+    nr("model", "models/a/b.lwo", 2, "cooked/model/models/a/b.bmodel", "generated/model/models/a/b.bmodel");
+    /* An md6 collision model ships only under generated/model/ (13954591). */
+    nr("model", "md6/mods/local.hell-guard/characters/monsters/talisman_guard/base/assets/collision/killfront_chest_punches.lwo", 2,
+       "cooked/model/md6/mods/local.hell_guard/characters/monsters/talisman_guard/base/assets/collision/killfront_chest_punches.bmodel",
+       "generated/model/md6/mods/local.hell_guard/characters/monsters/talisman_guard/base/assets/collision/killfront_chest_punches.bmodel");
     nr("model", "maps/modules/x/y.bmodel", 1, "maps/modules/x/y.bmodel", NULL);
     nr("md6Def", "mods/alex.r2-imp/imp_copy.md6", 1, "generated/decls/md6def/mods/alex.r2-imp/imp_copy.md6.decl", NULL);
     nr("renderProg", "skinvmtr", 1, "generated/decls/renderprog/skinvmtr.decl", NULL);
