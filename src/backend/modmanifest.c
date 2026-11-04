@@ -12,6 +12,9 @@
 #include "map_shards.h"
 #include "config_json.h"
 #include "backend_log.h"
+#ifdef SH_HAVE_PRODUCT_VERSION
+#include "product_version.gen.h"   /* SH_PRODUCT_VERSION, written by src/backend/build.ps1 */
+#endif
 
 /* ==================================================================== */
 /* rows                                                                  */
@@ -383,17 +386,6 @@ static size_t mm_choice_count(const char *lines)
 /* row value                                                             */
 /* ==================================================================== */
 
-/* A product version as the row carries it: 1-32 printable ASCII bytes
- * without quotes, backslashes or spaces ("v0.2.1-beta.24", "0.3.0"). */
-static int mm_version_ok(const char *v)
-{
-    size_t i, n = v ? strlen(v) : 0;
-    if (!n || n >= SH_MODMANIFEST_VERSION_CAP) return 0;
-    for (i = 0; i < n; i++)
-        if ((unsigned char)v[i] <= 0x20 || (unsigned char)v[i] >= 0x7f || v[i] == '"' || v[i] == '\\') return 0;
-    return 1;
-}
-
 int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_row *out,
                                char *err, size_t err_cap)
 {
@@ -423,10 +415,6 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
         const char *attached = sh_json_object_get(&object, "attached");
         out->attached = attached && !strcmp(attached, "true");
     }
-    /* "product": the least Snapmap+ version the map needs; one that does not
-     * read is dropped (the row stays). */
-    if (!mm_member_text(&object, "product", out->product, sizeof out->product, 0) || !mm_version_ok(out->product))
-        out->product[0] = 0;
     {
         /* Registry choices: entries that do not read are skipped (the row stays). */
         const char *choices = sh_json_object_get(&object, "choices");
@@ -488,10 +476,6 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
         _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
         mm_put(&t, number, strlen(number));
         if (row->attached) mm_put(&t, ",\"attached\":true", 16);
-        if (row->product[0] && mm_version_ok(row->product)) {
-            mm_put(&t, ",\"product\":", 11);
-            mm_put_quoted(&t, row->product);
-        }
         if (kc) {
             const char *p = row->choices;
             size_t c;
@@ -1054,116 +1038,6 @@ static void mm_choices_save(sh_modmanifest_list *rows)
     }
 }
 
-/* ---- product version (DESIGN-additive 2.7) */
-
-static SRWLOCK g_product_lock = SRWLOCK_INIT;
-static char g_product_override[SH_MODMANIFEST_VERSION_CAP];
-static int g_product_overridden, g_product_read;
-static char g_product_installed[SH_MODMANIFEST_VERSION_CAP];
-static sh_modmanifest_product_need_fn volatile g_product_need;
-
-void sh_modmanifest_set_product_version(const char *version)
-{
-    AcquireSRWLockExclusive(&g_product_lock);
-    g_product_overridden = version != NULL;
-    strncpy_s(g_product_override, sizeof g_product_override, version ? version : "", _TRUNCATE);
-    ReleaseSRWLockExclusive(&g_product_lock);
-}
-
-void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need) { g_product_need = need; }
-
-/* The installer's record: the first "version" key of install.json. */
-static void mm_read_installed_version(char *out, size_t cap)
-{
-    char la[MAX_PATH], path[MAX_PATH], data[4096];
-    HANDLE h;
-    DWORD got = 0;
-    const char *p, *q;
-    out[0] = 0;
-    if (!GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH)) return;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus\\install.json", la);
-    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    if (!ReadFile(h, data, sizeof data - 1, &got, NULL)) got = 0;
-    CloseHandle(h);
-    data[got] = 0;
-    p = strstr(data, "\"version\"");
-    if (!p || !(p = strchr(p + 9, ':')) || !(p = strchr(p, '"'))) return;
-    q = strchr(++p, '"');
-    if (!q || (size_t)(q - p) >= cap) return;
-    memcpy(out, p, (size_t)(q - p));
-    out[q - p] = 0;
-}
-
-int sh_modmanifest_product_version(char *out, size_t cap)
-{
-    char v[SH_MODMANIFEST_VERSION_CAP] = "";
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    AcquireSRWLockExclusive(&g_product_lock);
-    if (g_product_overridden) strcpy_s(v, sizeof v, g_product_override);
-    else {
-#ifdef SH_PRODUCT_VERSION
-        strncpy_s(v, sizeof v, SH_PRODUCT_VERSION, _TRUNCATE);
-#else
-        if (!g_product_read) { mm_read_installed_version(g_product_installed, sizeof g_product_installed); g_product_read = 1; }
-        strcpy_s(v, sizeof v, g_product_installed);
-#endif
-    }
-    ReleaseSRWLockExclusive(&g_product_lock);
-    if (!mm_version_ok(v)) return 0;
-    strncpy_s(out, cap, v, _TRUNCATE);
-    return 1;
-}
-
-int sh_modmanifest_rows_product(const sh_modmanifest_list *rows, char *out, size_t cap)
-{
-    size_t i;
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    for (i = 0; rows && i < rows->count; i++)
-        if (rows->rows[i].product[0]) { strncpy_s(out, cap, rows->rows[i].product, _TRUNCATE); return 1; }
-    return 0;
-}
-
-int sh_modmanifest_current_product(char *out, size_t cap)
-{
-    int r;
-    AcquireSRWLockShared(&g_current_lock);
-    r = sh_modmanifest_rows_product(&g_current, out, cap);
-    ReleaseSRWLockShared(&g_current_lock);
-    return r;
-}
-
-/* At a save: every row carries the product version when the map needs the product. */
-static void mm_product_save(sh_modmanifest_list *rows, int grid)
-{
-    sh_modmanifest_product_need_fn need = g_product_need;
-    char v[SH_MODMANIFEST_VERSION_CAP], line[200];
-    size_t i;
-    int any = grid;
-    for (i = 0; i < rows->count; i++) rows->rows[i].product[0] = 0;
-    if (!rows->count) return;
-    for (i = 0; i < rows->count && !any; i++) any = rows->rows[i].choices[0] != 0;
-    if (!any && need) any = need(rows) > 0;
-    if (!any) return;
-    if (!sh_modmanifest_product_version(v, sizeof v)) {
-        backend_log("MODS: save manifest: the map needs Snapmap+ features, but this build's version is unknown; "
-                    "no product version is recorded");
-        return;
-    }
-    for (i = 0; i < rows->count; i++) strcpy_s(rows->rows[i].product, sizeof rows->rows[i].product, v);
-    _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: save manifest: the map needs Snapmap+ %s or later (%s)", v,
-                grid ? "a Grid Room variant" : "a registry or registry choice");
-    backend_log(line);
-}
-
-/* A placed name of a Grid Room variant (the product's own module catalog). */
-static int mm_grid_name(const char *name)
-{
-    return name && !_strnicmp(name, "maps/modules/smpgrid/", 21);
-}
-
 void sh_modmanifest_reset(void)
 {
     mm_set_current(NULL);
@@ -1241,6 +1115,20 @@ static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
     ReleaseSRWLockExclusive(&g_current_lock);
 }
 
+int sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to)
+{
+    int found = 0;
+    size_t i;
+    if (!from || !to || !sh_modmanifest_valid_hash(to->bundle, strlen(to->bundle)) || !sh_modmanifest_valid_id(to->id))
+        return 0;
+    AcquireSRWLockShared(&g_current_lock);
+    for (i = 0; i < g_current.count && !found; i++) found = !strcmp(g_current.rows[i].bundle, from);
+    if (found && mm_list_find(&g_current, to->bundle)) found = 0;
+    ReleaseSRWLockShared(&g_current_lock);
+    if (found) mm_current_rename(from, to);
+    return found;
+}
+
 /* The map scope's hook and its arming (sh_modmanifest_set_scope). */
 static sh_modmanifest_scope_fn volatile g_scope;
 static int (*volatile g_scope_armed)(void);
@@ -1314,7 +1202,206 @@ int sh_modmanifest_activate(const sh_modmanifest_list *rows)
     return active;
 }
 
+/* ==================================================================== */
+/* product version                                                       */
+/* ==================================================================== */
+
+int sh_modmanifest_version_valid(const char *v)
+{
+    size_t i, n = v ? strlen(v) : 0;
+    if (!n || n >= SH_MODMANIFEST_VERSION_CAP) return 0;
+    for (i = 0; i < n; i++)
+        if ((unsigned char)v[i] <= 0x20 || (unsigned char)v[i] >= 0x7f || v[i] == '"' || v[i] == '\\') return 0;
+    return 1;
+}
+
+/* MAJOR.MINOR.PATCH and the prerelease text after '-', or 0. */
+static int mm_version_parts(const char *v, unsigned long nums[3], const char **pre)
+{
+    int k;
+    if (!v) return 0;
+    if (*v == 'v' || *v == 'V') v++;
+    for (k = 0; k < 3; k++) {
+        char *end;
+        if (!sh_shard_is_digit(*v)) return 0;
+        nums[k] = strtoul(v, &end, 10);
+        v = end;
+        if (k < 2) { if (*v != '.') return 0; v++; }
+    }
+    if (*v == '-' && v[1]) { *pre = v + 1; return 1; }
+    if (*v == '+' || !*v) { *pre = NULL; return 1; }
+    return 0;
+}
+
+int sh_modmanifest_version_compare(const char *a, const char *b)
+{
+    unsigned long na[3], nb[3];
+    const char *pa, *pb;
+    int k;
+    if (!mm_version_parts(a, na, &pa) || !mm_version_parts(b, nb, &pb)) return -2;
+    for (k = 0; k < 3; k++) if (na[k] != nb[k]) return na[k] < nb[k] ? -1 : 1;
+    if (!pa || !pb) return !pa && !pb ? 0 : (!pa ? 1 : -1);   /* a release is newer than its prereleases */
+    while (*pa || *pb) {
+        const char *ea = pa, *eb = pb;
+        int da = 1, db = 1, c;
+        size_t la, lb;
+        while (*ea && *ea != '.' && *ea != '+') { da &= sh_shard_is_digit(*ea) ? 1 : 0; ea++; }
+        while (*eb && *eb != '.' && *eb != '+') { db &= sh_shard_is_digit(*eb) ? 1 : 0; eb++; }
+        la = (size_t)(ea - pa);
+        lb = (size_t)(eb - pb);
+        if (!la || !lb) return !la && !lb ? 0 : (!la ? -1 : 1);   /* fewer parts is older */
+        if (da && db) {
+            unsigned long x = strtoul(pa, NULL, 10), y = strtoul(pb, NULL, 10);
+            if (x != y) return x < y ? -1 : 1;
+        } else if (da != db) {
+            return da ? -1 : 1;   /* numeric parts sort before text */
+        } else {
+            c = strncmp(pa, pb, la < lb ? la : lb);
+            if (c) return c < 0 ? -1 : 1;
+            if (la != lb) return la < lb ? -1 : 1;
+        }
+        pa = *ea == '.' ? ea + 1 : ea;
+        pb = *eb == '.' ? eb + 1 : eb;
+        if (*pa == '+') pa += strlen(pa);
+        if (*pb == '+') pb += strlen(pb);
+    }
+    return 0;
+}
+
+int sh_modmanifest_product_read(const char *json, size_t length, char *out, size_t cap)
+{
+    size_t pos = 0, hdr_len, chunk_len;
+    const char *hdr, *chunk;
+    if (out && cap) out[0] = 0;
+    if (!json || !length || !out || !cap) return 0;
+    if (!sh_shard_find(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN)) return 0;
+    while (sh_shard_next(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN, &pos,
+                         &hdr, &hdr_len, &chunk, &chunk_len)) {
+        char v[SH_MODMANIFEST_VERSION_CAP];
+        size_t n = hdr_len - SH_MODMANIFEST_PRODUCT_MAGIC_LEN;
+        if (hdr_len <= SH_MODMANIFEST_PRODUCT_MAGIC_LEN || n >= sizeof v) continue;
+        memcpy(v, hdr + SH_MODMANIFEST_PRODUCT_MAGIC_LEN, n);
+        v[n] = 0;
+        if (!sh_modmanifest_version_valid(v)) continue;
+        strncpy_s(out, cap, v, _TRUNCATE);
+        return 1;
+    }
+    return 0;
+}
+
+static int mm_product_filter(const char *hdr, size_t hdr_len, void *ctx)
+{
+    (void)ctx;
+    return hdr_len > SH_MODMANIFEST_PRODUCT_MAGIC_LEN &&
+           !memcmp(hdr, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN);
+}
+
+char *sh_modmanifest_product_put(const char *json, size_t length, const char *version, size_t *out_length)
+{
+    char *base = NULL, *out = NULL, header[SH_MODMANIFEST_PRODUCT_MAGIC_LEN + SH_MODMANIFEST_VERSION_CAP];
+    size_t base_len = 0, w = 0;
+    unsigned elements = 0, runs = 0;
+    int failed = 0, valid = sh_modmanifest_version_valid(version);
+    sh_shard_out part;
+    if (out_length) *out_length = 0;
+    if (!json || !length) return NULL;
+    if (sh_shard_find(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN)) {
+        base = sh_shard_strip(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN,
+                              mm_product_filter, NULL, 64, &base_len, &elements, &runs, &failed);
+        if (failed) { if (base) HeapFree(GetProcessHeap(), 0, base); return NULL; }
+    }
+    if (!valid) {
+        if (base && out_length) *out_length = base_len;
+        return base;
+    }
+    _snprintf_s(header, sizeof header, _TRUNCATE, "%s%s", SH_MODMANIFEST_PRODUCT_MAGIC, version);
+    part.header = header;
+    part.chunk = version;             /* a valid version needs no escaping */
+    part.chunk_len = strlen(version);
+    out = sh_shard_insert(base ? base : json, base ? base_len : length, &part, 1, &w, NULL, 0);
+    if (base) HeapFree(GetProcessHeap(), 0, base);
+    if (out && out_length) *out_length = w;
+    return out;
+}
+
+static SRWLOCK g_product_lock = SRWLOCK_INIT;
+static char g_product_override[SH_MODMANIFEST_VERSION_CAP];
+static int g_product_overridden;
+static char g_product_map[SH_MODMANIFEST_VERSION_CAP];   /* the open map's */
+static sh_modmanifest_product_need_fn volatile g_product_need;
+
+void sh_modmanifest_set_product_version(const char *version)
+{
+    AcquireSRWLockExclusive(&g_product_lock);
+    g_product_overridden = version != NULL;
+    strncpy_s(g_product_override, sizeof g_product_override, version ? version : "", _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_product_lock);
+}
+
+void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need) { g_product_need = need; }
+
+int sh_modmanifest_product_version(char *out, size_t cap)
+{
+    char v[SH_MODMANIFEST_VERSION_CAP] = "";
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    AcquireSRWLockShared(&g_product_lock);
+    if (g_product_overridden) strcpy_s(v, sizeof v, g_product_override);
+#ifdef SH_PRODUCT_VERSION
+    else strncpy_s(v, sizeof v, SH_PRODUCT_VERSION, _TRUNCATE);
+#endif
+    ReleaseSRWLockShared(&g_product_lock);
+    if (!sh_modmanifest_version_valid(v)) return 0;
+    strncpy_s(out, cap, v, _TRUNCATE);
+    return 1;
+}
+
+static void mm_product_set_map(const char *v)
+{
+    AcquireSRWLockExclusive(&g_product_lock);
+    strncpy_s(g_product_map, sizeof g_product_map, v ? v : "", _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_product_lock);
+}
+
+int sh_modmanifest_product(char *out, size_t cap)
+{
+    if (!out || !cap) return 0;
+    AcquireSRWLockShared(&g_product_lock);
+    strncpy_s(out, cap, g_product_map, _TRUNCATE);
+    ReleaseSRWLockShared(&g_product_lock);
+    return out[0] != 0;
+}
+
+static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
+
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length)
+{
+    char v[SH_MODMANIFEST_VERSION_CAP], line[160];
+    char *bare, *rows;
+    size_t bare_len = 0, rows_len = 0;
+    if (out_length) *out_length = 0;
+    if (!json || !length || !sh_shard_find(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN)) {
+        mm_product_set_map(NULL);
+        return mm_prepare_rows(json, length, out_length);
+    }
+    (void)sh_modmanifest_product_read(json, length, v, sizeof v);
+    mm_product_set_map(v);
+    if (v[0]) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: the map needs Snapmap+ %s or later", v);
+        backend_log(line);
+    }
+    bare = sh_modmanifest_product_put(json, length, NULL, &bare_len);
+    rows = mm_prepare_rows(bare ? bare : json, bare ? bare_len : length, &rows_len);
+    if (rows) {
+        if (bare) HeapFree(GetProcessHeap(), 0, bare);
+        if (out_length) *out_length = rows_len;
+        return rows;
+    }
+    if (bare && out_length) *out_length = bare_len;
+    return bare;
+}
+
+static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length)
 {
     sh_modmanifest_list list = {0};
     unsigned rejected = 0, removed = 0;
@@ -1439,11 +1526,61 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
     return 1;
 }
 
+static char *mm_save_rows(const char *json, size_t length, size_t *out_length, int *need);
+
+/* A product-only feature in the saved text: a Grid Room variant module. */
+static int mm_product_feature(const char *json, size_t length)
+{
+    return sh_shard_find(json, length, "maps/modules/smpgrid/", 21) != NULL;
+}
+
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length)
+{
+    char *rows, *out, v[SH_MODMANIFEST_VERSION_CAP], have[SH_MODMANIFEST_VERSION_CAP], line[200];
+    const char *base;
+    size_t rows_len = 0, base_len, out_len = 0;
+    int need = 0, stale;
+    if (out_length) *out_length = 0;
+    rows = mm_save_rows(json, length, &rows_len, &need);
+    if (!json || !length) return rows;
+    base = rows ? rows : json;
+    base_len = rows ? rows_len : length;
+    if (!need) need = mm_product_feature(base, base_len);
+    stale = sh_modmanifest_product_read(base, base_len, have, sizeof have) ||
+            sh_shard_find(base, base_len, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN) != NULL;
+    if (need && !sh_modmanifest_product_version(v, sizeof v)) {
+        backend_log("MODS: save: the map uses Snapmap+ features, but this build has no product version; none is recorded");
+        need = 0;
+    }
+    if (!need) v[0] = 0;
+    mm_product_set_map(v);
+    if (!need && !stale) {
+        if (out_length) *out_length = rows_len;
+        return rows;
+    }
+    if (need && stale && !strcmp(have, v)) {
+        if (out_length) *out_length = rows_len;
+        return rows;
+    }
+    out = sh_modmanifest_product_put(base, base_len, need ? v : NULL, &out_len);
+    if (!out) {
+        if (out_length) *out_length = rows_len;
+        return rows;
+    }
+    if (rows) HeapFree(GetProcessHeap(), 0, rows);
+    if (need) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: save: the map records that it needs Snapmap+ %s or later", v);
+        backend_log(line);
+    }
+    if (out_length) *out_length = out_len;
+    return out;
+}
+
+static char *mm_save_rows(const char *json, size_t length, size_t *out_length, int *need)
 {
     char **names = NULL;
     size_t count, i, written = 0;
-    int failed = 0, stale, grid = 0;
+    int failed = 0, stale;
     mm_save_ctx ctx;
     sh_modmanifest_list attached;
     sh_modmanifest_scope_fn scope = g_scope;
@@ -1463,7 +1600,6 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
         return NULL;
     }
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
-    for (i = 0; !failed && i < count && !grid; i++) grid = mm_grid_name(names[i]);
     if (failed) {
         backend_log("MODS: save manifest skipped -- the saved map's JSON did not read cleanly; "
                     "the save carries no manifest rows");
@@ -1485,7 +1621,13 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 
     qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
     mm_choices_save(&ctx.list);
-    mm_product_save(&ctx.list, grid);
+    {
+        /* The product version a map needs: a registry choice, or a declared
+         * mod with registry intent or surfaced content (modui's hook). */
+        sh_modmanifest_product_need_fn pn = g_product_need;
+        for (i = 0; i < ctx.list.count && !*need; i++) *need = ctx.list.rows[i].choices[0] != 0;
+        if (!*need && pn && ctx.list.count) *need = pn(&ctx.list) > 0;
+    }
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);

@@ -3,7 +3,7 @@
  *
  * A row is an ordinary snapVarString_t in variables.string[], appended last so
  * existing variable bindings keep their (type, index). Its initialValue is the
- * compact JSON {"id","version","bundle","size","attached"?,"product"?,"choices"?,"names":[...]}
+ * compact JSON {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
  * where "bundle" is the bundle hash and "names" the placed logical names the
  * bundle provides (informational). "choices": {"<slot>": "<key>", ...} records
  * the map's registry choices (modregistry.h: which declared mod serves a
@@ -11,13 +11,7 @@
  * "weapons/<stock weapon decl>"); a save writes each choice on the row of the
  * key it names, a load reads them from every row (the first row naming a
  * slot wins). Names are dropped before choices when a row would exceed its
- * budget. "product": "<version>" is the Snapmap+ version the map needs at
- * least (DESIGN-additive 2.7): written on every row at a save when the map
- * uses a product-only feature or registry (a registry choice, a declared
- * mod whose intent the product generates: player fields, weapons, extends,
- * conductor rows; a Grid Room variant module), the running product's own
- * version (sh_modmanifest_product_version); a load reads the first row's.
- * A reader that predates it ignores it. "attached": true marks a map-level row: the mod
+ * budget. "attached": true marks a map-level row: the mod
  * was attached to the map (the Mods tab's Use in this map, `sh_mods map add`)
  * without placing anything, so the map keeps the row whatever it places. A
  * reader that does not know the key treats the row as a placed mod's; an older
@@ -29,6 +23,17 @@
  * SerializeToJson detour computes the placed names, asks the serving layer
  * which bundles provide them, adds the current manifest's map-level rows, and
  * appends one row per bundle.
+ *
+ * Product version (DESIGN-additive 2.7): one more string variable,
+ * "smpprod1.<version>" (its initialValue the same version), appended last the
+ * same way, says the least Snapmap+ version the map needs. A save writes it
+ * when the map uses a registry choice, a declared mod with registry intent
+ * (player fields, weapons, extends, conductor rows) or surfaced content, or a
+ * product-only feature (a Grid Room variant module); the version is the
+ * running product's (SH_PRODUCT_VERSION, stamped at build time). A load reads
+ * and strips it like the rows (sh_modmanifest_product); a product that
+ * predates it keeps it as an inert string variable. It is never a row, so a
+ * map that needs the product but no mod is never counted as missing a mod.
  */
 #ifndef SNAPMAP_PLUS_MODMANIFEST_H
 #define SNAPMAP_PLUS_MODMANIFEST_H
@@ -63,7 +68,6 @@ typedef struct sh_modmanifest_row {
     size_t name_count;
     int attached;          /* a map-level row ("attached": true) */
     char choices[SH_MODMANIFEST_CHOICES_CAP];   /* its "choices": "<slot>\t<key>\n" per entry, in text order */
-    char product[SH_MODMANIFEST_VERSION_CAP];   /* its "product": the least Snapmap+ version the map needs, "" none */
 } sh_modmanifest_row;
 
 typedef struct sh_modmanifest_list {
@@ -137,6 +141,39 @@ void sh_modmanifest_names_free(char **names, size_t count);
 int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest_row *out,
                                  char *err, size_t err_cap);
 
+/* ------------------------------------------------------------ product ---- */
+
+#define SH_MODMANIFEST_PRODUCT_MAGIC     "smpprod1."
+#define SH_MODMANIFEST_PRODUCT_MAGIC_LEN 9
+
+/* 1 when `v` is a product version a map may record: 1-32 printable ASCII
+ * bytes without quotes, backslashes or spaces ("v0.2.1-beta.24", "0.3.0"). */
+int  sh_modmanifest_version_valid(const char *v);
+/* Compare two product versions: [v]MAJOR.MINOR.PATCH[-pre.release]; a
+ * release is newer than its prereleases, prerelease parts compare as numbers
+ * when both are digits, else as text. -1 a older than b, 0 equal, 1 newer,
+ * -2 either does not read. */
+int  sh_modmanifest_version_compare(const char *a, const char *b);
+/* The "smpprod1.<version>" variable of `json`: 1 with the version in out
+ * (the first that reads), 0 none. */
+int  sh_modmanifest_product_read(const char *json, size_t length, char *out, size_t cap);
+/* `json` with every "smpprod1." variable removed and, when `version` is a
+ * valid one, one appended. Process-heap buffer (HeapFree), or NULL when
+ * nothing changed or the text does not read. */
+char *sh_modmanifest_product_put(const char *json, size_t length, const char *version, size_t *out_length);
+/* The running product's version, as a save writes it: SH_PRODUCT_VERSION
+ * (stamped by src/backend/build.ps1), else "" (nothing is written). */
+int  sh_modmanifest_product_version(char *out, size_t cap);
+/* Tests and tools: the version the save writes (NULL returns to the rule above). */
+void sh_modmanifest_set_product_version(const char *version);
+/* The open map's product version (read at its load, written at its save):
+ * 1 with it in out, 0 when the map records none. */
+int  sh_modmanifest_product(char *out, size_t cap);
+/* 1 when a declared mod of these rows needs the product (modui binds it:
+ * registry intent or surfaced content). NULL unbinds. */
+typedef int (*sh_modmanifest_product_need_fn)(const sh_modmanifest_list *rows);
+void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need);
+
 /* ------------------------------------------------------------ hooks ------ */
 
 /* Activate the rows' mods: each row through the build that serves it now
@@ -190,6 +227,11 @@ size_t sh_modmanifest_current_remove(const char *bundle);
  * The next save writes it (sh_modmanifest_on_save) and every later load keeps
  * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
+/* Point the current manifest's row of `from` (exact hash) at the build `to`
+ * names (id, version, bundle, size): the Mods tab's "upgrade this map to the
+ * installed build". The next listing and save follow it. 1 renamed, 0 no such
+ * row or `to` is already a row. */
+int    sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to);
 /* A copy of the current manifest's map-level rows. Returns the row count. */
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* Forget the current manifest (tests). */
@@ -211,25 +253,5 @@ size_t sh_modmanifest_current_choices(char *out, size_t cap);
 /* The choices a list of rows carries, merged (the first row naming a slot
  * wins), as "slot\tkey\n" lines. Returns their count. */
 size_t sh_modmanifest_rows_choices(const sh_modmanifest_list *rows, char *out, size_t cap);
-
-/* ------------------------------------------------------------ product ---- */
-
-/* The running product's version, as the save writes it in "product": the
- * build's SH_PRODUCT_VERSION when defined, else the first "version" of
- * %LOCALAPPDATA%\snapmap-plus\install.json (the installer's record, read
- * once), else "" (nothing is written). 1 with it in out. */
-int  sh_modmanifest_product_version(char *out, size_t cap);
-/* Tests and tools: the version the save writes (NULL returns to the rule above). */
-void sh_modmanifest_set_product_version(const char *version);
-/* 1 when the map with these rows and placed names needs a product-only
- * feature or registry. modui binds the serving side (a row's bundle states
- * registry intent); the manifest itself counts registry choices and Grid
- * Room variant modules (maps/modules/smpgrid/). NULL unbinds. */
-typedef int (*sh_modmanifest_product_need_fn)(const sh_modmanifest_list *rows);
-void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need);
-/* The "product" the rows carry (the first non-empty), "" when none. 1 found. */
-int  sh_modmanifest_rows_product(const sh_modmanifest_list *rows, char *out, size_t cap);
-/* The open map's "product" (read at its load, written at its save). */
-int  sh_modmanifest_current_product(char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODMANIFEST_H */
