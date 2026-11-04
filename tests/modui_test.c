@@ -643,11 +643,13 @@ int main(int argc, char **argv)
     free(doc);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, key1);
     CHECK(mt_exists(path));
-    /* The asset rule: a row naming another build of an installed id whose
-     * names that folder provides is active, played with the installed copy. */
+    /* The asset rule: a row pins its build; the installed folder of the key
+     * at another hash is another build, inert for the map (additive 2.5),
+     * and the row is not served until its own build is fetched. */
     load_map_naming("alex.r2-imp", "00000000000000000000000000000000000000000000000000000000000000aa");
     doc = list_doc();
-    CHECK(has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
+    CHECK(!has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
+    CHECK(has(doc, "at build 0000000000000000, which is not installed; alex.r2-imp is installed at another build ("));
     CHECK(has(doc, "\"inManifest\":false"));
     free(doc);
     /* No folder declares the id: missing, with the refusal's sentence. */
@@ -709,11 +711,13 @@ int main(int argc, char **argv)
     CHECK(count_of(doc, "\"otherBuilds\":") == 2);
     free(doc);
     dr = doctor(0);
-    CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp (alex.r2-imp@1.0.0+1): superseded, alex.r2-imp@1.0.1 serves 1 of its "
-                  "path(s); from an installed copy\n"));
+    CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp (alex.r2-imp@1.0.0+1): another build of its key, alex.r2-imp@1.0.1, "
+                  "serves 1 of its path(s) with no map open; a map saved with this build still serves this one; from an "
+                  "installed copy\n"));
     CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp@1.0.1 (alex.r2-imp@1.0.1+1): active; from an installed copy\n"));
-    CHECK(has(dr, "MODS: doctor: duplicate id alex.r2-imp: mods\\alex.r2-imp (an installed copy), mods\\alex.r2-imp@1.0.1 "
-                  "(an installed copy); another installed mod declares this id; change one id in its mod.json\n"));
+    CHECK(has(dr, "MODS: doctor: key alex.r2-imp: installed at several builds: mods\\alex.r2-imp (an installed copy), "
+                  "mods\\alex.r2-imp@1.0.1 (an installed copy); each map serves the build it was saved with (one row per hash "
+                  "follows under scope)\n"));
     /* While the open map's record names the first it is kept. */
     load_map_naming("alex.r2-imp", hash1);
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
@@ -779,9 +783,10 @@ int main(int argc, char **argv)
               bundle_has(doc, "twin-b", "\"otherBuilds\":0,\"duplicateId\":true"));
         free(doc);
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: duplicate id alex.twin: mods\\twin-a (your folder), mods\\twin-b (your folder); "
-                      "another installed mod declares this id; change one id in its mod.json\n"));
-        CHECK(has(dr, "MODS: doctor: bundle mods\\twin-a (alex.twin@1.0.0+1): superseded, twin-b serves 1 of its path(s)\n"));
+        CHECK(has(dr, "MODS: doctor: key alex.twin: installed at several builds: mods\\twin-a (your folder), mods\\twin-b "
+                      "(your folder); each map serves the build it was saved with (one row per hash follows under scope)\n"));
+        CHECK(has(dr, "MODS: doctor: bundle mods\\twin-a (alex.twin@1.0.0+1): another build of its key, twin-b, serves 1 of its "
+                      "path(s) with no map open; a map saved with this build still serves this one\n"));
         /* Remove one: the author's own folder goes to the Recycle Bin too; the product keeps no bin. */
         doc = run_doc(SH_MODS_ACT_REMOVE, "twin-b");
         CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "Removed Twin. Its folder was moved to the Recycle Bin.") &&
@@ -908,11 +913,13 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
-        /* Two mods' shadows with different bytes: one serves (here the later
-         * install; the texts differ outside lists), and the doctor says why. */
+        /* Two mods' shadows with different bytes: with no map the static
+         * winner serves (no rule separates them, so the first key; the install
+         * order never counts), and the doctor says why. */
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-b serves it "
-                      "(installed most recently); from alex.shade-a, alex.shade-b\n"));
+        CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-a serves it "
+                      "(no rule separates them; the first key in name order (a map's rows decide while it is open)); "
+                      "from alex.shade-a, alex.shade-b\n"));
         CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 grandfathered shadow(s)\n"));
         /* Every section populated for the key comparison with the page's fixture. */
         load_map_naming("alex.r2-imp", hash2);
@@ -1396,7 +1403,9 @@ int main(int argc, char **argv)
             CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
             CHECK(has(g_doctor, "(alex.req, installed): map-level (attached to the whole map), 0 placed entities, 0 wire or "
                                 "timeline reference(s); scope map, active\n"));
-            CHECK(has(g_doctor, "MODS: map: scope: alex.req@1.0.0: map (0 shadows, requirements): active in the open map\n"));
+            CHECK(has(g_doctor, "MODS: map: scope: alex.req@1.0.0 (") &&
+                  has(g_doctor, "0 shadows, 0 surfaces, requirements): declared by the open map (row 1): serves everything it "
+                                "carries\n"));
             /* The save writes its row as a map-level row; nothing places it. */
             t = map_text(&len);
             saved = sh_modmanifest_on_save(t, len, &out_len);

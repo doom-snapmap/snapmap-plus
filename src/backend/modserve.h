@@ -4,7 +4,12 @@
  *
  * Layout read (Contract 5, written by the builder and the store, never here):
  *   <data>\mods\<folder>\mod.json      the author block and the product block
- *                                      ("snapmap-plus": hash, files, shadows, validated)
+ *                                      ("snapmap-plus": key, hash, files, shadows, validated)
+ *   <data>\mods\.builds\<key>@<hash16>\  the store's snapshot of a folder's last good
+ *                                      build (bundle.json and the carried files), served
+ *                                      while the folder's latest build has failed
+ * A bundle's key (its "id" everywhere below) is the author block's "id" when
+ * present, else the product block's "key" (DESIGN-additive 2.2).
  *   <data>\mods\<folder>\assets\...    the files at engine paths
  *   <data>\mods\snapmap-plus.json      the product record; its "aliases" map a
  *                                      dropped delivered copy's hash to the kept bundle
@@ -474,57 +479,76 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
 
 /* ------------------------------------------------------------------ map scope */
 
-/* A bundle's shadows (the stock files it replaces) and its requirements apply
- * only while a map that lists the bundle is open in the editor or playing. A
- * map lists a bundle by its manifest rows (a placed mod's row or a map-level
- * row, modmanifest.h) and by its placed names (the save-time closure). New
- * names (mods/<id>/...) are not scoped: they activate per map through the
- * plan, and a lookup of one is answered whatever map is open.
+/* Two layers (DESIGN-additive 2.3, 2.5): while a map is open or played, the
+ * bundles it declares serve, then the game. A map declares a bundle by the
+ * hash of its manifest rows (a placed mod's row or a map-level row,
+ * modmanifest.h) and of its placed names (the save-time closure); the first
+ * hash of a key in row order declares that key, and every other build of the
+ * key is inert for the map. A key alone declares nothing.
  *
- * A shadow path is admitted when any bundle that provides it is listed (or
- * always-scoped): its winner serves when the winner's bundle is listed, else
- * the first listed provider in winner order (the same bytes when another
- * install carries them, a renamed or forked copy; for different bytes the
- * conflict rules' next choice, uncomposed). A path none of whose providers is
- * listed is withdrawn: sh_modserve_lookup, sh_modserve_open and the decl
- * probe miss it, so the engine's own bytes answer, and the early-decl and
- * gated-reload visits skip it. An unlisted bundle's requirements are not accepted (sh_modserve_requirements_apply runs
- * its deactivate lines and restores its cvars), except that in a map a bundle
- * that adds Toybox rows keeps its requirements live, because the palette
- * registers its rows in every map. With no map (the hub, and at boot) no
- * map-scoped shadow is served and no map-scoped requirement is live.
+ * Per path, the file that serves it for the open map is chosen among the
+ * providers the map declares: the fewest needs the declared bundles do not
+ * provide, then the bytes most declared providers carry, then the order of the
+ * map's rows. When every declared provider's text is a decl that differs only
+ * inside lists or bags, their entries are composed (modserve.c). Nothing about
+ * the install counts: the result is the same for any install order and any
+ * other local mods.
  *
- * mod.json's author key "scope" chooses: "map" (the default) or "always" (the
- * shadows and requirements apply whatever map is open, as before map scope).
- * A bundle without the key whose shadows include editor-time content (a
- * generated/decls/snapeditor*, snappropertyinspector* or snappalette* decl,
- * or the editor's own movies generated/swf/snapmaps/snap_editor, entity_menu
- * and list_view) is treated as "always", logged once:
- *   MODS: scope: <id>@<version> shadows editor-time content (<request>); treated as "scope": "always" ...
+ * A bundle the map does not declare: in the editor (SH_MODSERVE_MODE_EDITOR)
+ * and with no map open, the names under its key serve (the Toybox offers its
+ * rows; placing one declares it at the next save) for the newest build of each
+ * key only, and its surfaces (the game's own bytes at the game's name) serve;
+ * its shadows never. In Play and in a map launched outside the editor
+ * (SH_MODSERVE_MODE_PLAY) it serves nothing. A bundle whose shadows include
+ * editor-time content (a generated/decls/snapeditor*, snappropertyinspector*
+ * or snappalette* decl, or the editor's own movies) is the editor-tweak class
+ * or a grandfathered package, and serves everything it carries in every map,
+ * logged once:
+ *   MODS: scope: <id>@<version> shadows editor-time content (<request>); it serves in every map ...
+ * mod.json's "scope" key no longer chooses (logged once when present).
+ *
+ * Requirements: a declared bundle's apply; an undeclared bundle that adds
+ * Toybox rows (its newest build) keeps them live, because the palette
+ * registers its rows in every map and with none open; any other undeclared
+ * bundle's are not accepted (sh_modserve_requirements_apply runs its
+ * deactivate lines and restores its cvars).
  *
  * Scope is off until sh_modserve_scope_enable(1) (the product enables it in
- * sh_modserve_index_boot); with it off every shadow serves as it always did.
+ * sh_modserve_index_boot); with it off every bundle serves everything, by the
+ * static winner rules (sh_modserve_conflict).
  *
- * When the listing changes (sh_modserve_scope_set), every shadow decl, model
- * and image whose serving bytes changed (withdrawn, admitted, or served by
- * another provider with other bytes) is marked pending
- * exactly as a changed or gone shadow is at a rescan (sh_modserve_each_refresh,
- * with `gone` set while withdrawn), and the inheritance closure is marked
- * again (sh_modserve_refresh_expand), so the refresh primitives re-parse or
- * reload them: the bundle's bytes come in, or the game's come back. */
+ * When the listing or the mode changes, every shadow decl, model and image
+ * whose serving bytes changed (withdrawn, admitted, or served by another
+ * provider with other bytes) is marked pending exactly as a changed or gone
+ * shadow is at a rescan (sh_modserve_each_refresh, with `gone` set while
+ * withdrawn), and so is every name another build of its key now serves with
+ * other bytes than the ones last served; the inheritance closure is marked
+ * again (sh_modserve_refresh_expand). A withdrawn name is never marked: the
+ * engine keeps what it parsed until a map serves the name again. */
 #define SH_MODSERVE_SCOPE_MAP    0
 #define SH_MODSERVE_SCOPE_ALWAYS 1
+
+#define SH_MODSERVE_MODE_EDITOR  0   /* the editor, the hub, no map: undeclared bundles offer their names */
+#define SH_MODSERVE_MODE_PLAY    1   /* Play, a published or My Maps launch: undeclared bundles serve nothing */
 
 void sh_modserve_scope_enable(int on);
 int  sh_modserve_scope_enabled(void);
 
-/* Set what the current map lists: `hashes` are bundle hashes (manifest rows,
- * the placed closure; aliases resolve), `ids` bundle ids (a row whose bundle is
- * not indexed names its mod by id), `map_open` 1 while a map is open in the
- * editor or playing and 0 with none. Marks the files of the bundles that
- * changed (above) and returns how many bundles changed, shadows or
- * requirements. Any thread; serialised with index builds. */
+/* Set what the current map declares: `hashes` are bundle hashes in row order
+ * (manifest rows, then the placed closure; aliases resolve); `ids` are
+ * ignored (a key declares nothing; kept for the callers), `map_open` 1 while a
+ * map is open in the editor or playing and 0 with none (0 also returns the
+ * mode to SH_MODSERVE_MODE_EDITOR). Marks the files whose served bytes
+ * changed (above) and returns how many bundles changed what they serve or
+ * their requirements. Any thread; serialised with index builds. */
 int  sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open);
+
+/* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
+ * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY
+ * until the editor shows the map (modui.c), the editor's tick sets EDITOR.
+ * Marks as sh_modserve_scope_set does and returns the bundles that changed. */
+int  sh_modserve_scope_mode(int mode);
+int  sh_modserve_scope_mode_get(void);
 
 /* 1 while the last sh_modserve_scope_set said a map is open. */
 int  sh_modserve_scope_map_open(void);
@@ -536,12 +560,18 @@ int  sh_modserve_scope_relevant(void);
 
 typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
-    int declared;            /* mod.json "scope": 0 absent, 1 "map", 2 "always" */
+    int declared;            /* mod.json "scope": 0 absent, 1 "map", 2 "always" (ignored) */
     int automatic;           /* "always" because it shadows editor-time content */
-    int listed;              /* the current map lists it */
+    int listed;              /* the current map declares it (this build) */
+    int rank;                /* its position among the declared bundles (0 the first row), or -1 */
+    int inert;               /* the current map declares another build of its key */
     int map_open;            /* a map is open */
+    int play;                /* the open map is played (SH_MODSERVE_MODE_PLAY) */
+    int newest;              /* the newest admitted build of its key */
+    int names;               /* files under its key (new names) */
     int shadows;             /* shadow files it serves */
-    int shadows_live;        /* 1 its shadows are served now */
+    int surfaces;            /* surfaces (the game's bytes at the game's name) */
+    int names_live, shadows_live, surfaces_live;   /* 1 each class is served now */
     int requirements;        /* 1 it has requirements */
     int requirements_live;   /* 1 its requirements are accepted now (whether each cvar is live is the report's) */
     char editor_path[160];   /* the first editor-time shadow, when automatic */
@@ -550,14 +580,21 @@ typedef struct sh_modserve_scope_info {
 /* The scope of the admitted bundle `bundle_hash` (aliases resolve). 1 filled, 0 not admitted. */
 int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out);
 
-/* One line per admitted bundle, for sh_mods status, doctor and map:
- *   scope: <id>@<version>: map: active in the open map (3 shadows, requirements)
- *   scope: <id>@<version>: map: not active (the open map does not use it)
- *   scope: <id>@<version>: map: not active (no map is open)
- *   scope: <id>@<version>: always (mod.json)
- *   scope: <id>@<version>: always (shadows editor-time content: <request>)
- *   scope: <id>@<version>: map: new names only, nothing to scope
- * then "scope: map scope is off" when it is disabled. Returns the line count. */
+/* For sh_mods status, doctor and map: one header per key installed at several
+ * builds, then one line per admitted bundle (one per hash) with what it serves
+ * for the open map,
+ *   scope: key <key>: 2 builds installed; each map serves the build it was saved with, ...
+ *   scope: <key>@<version> (<hash16>) (N names, N shadows, N surfaces[, requirements]): <state>
+ * where the state is "declared by the open map (row N): serves everything it
+ * carries", "inert: the open map declares another build of its key", "not
+ * declared by the map being played: serves nothing", "not declared (no map is
+ * open): its names serve for the Toybox ...", "editor-time content (...)" or
+ * "map scope is off: ..."; then, per path several bundles provide, which
+ * layer serves it and why (at most 40 lines), and one count line:
+ *   serving: <request>: <key>@<version> (<hash16>), declared (row N): <why>; not served: <others>
+ *   serving: <request>: the game (no declared bundle provides it); not served: <providers>
+ *   serving: N path(s) from bundles the open map declares, M from undeclared bundles (...), K left to the game
+ * Returns the line count. */
 int  sh_modserve_scope_report(sh_modserve_line_fn fn, void *context);
 
 /* The points that must read the open map itself (the Play entry: Play does
@@ -575,20 +612,23 @@ int  sh_modserve_scope_source(int when);
  * first cause is copied to `cause` when non-NULL). */
 int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap);
 
-/* The asset rule. A map, rawmap or prefab needs the paths its manifest rows
- * list; a mod folder provides them. A row is SERVED when an admitted bundle
- * declares the row's id and every name the row lists resolves through the
- * serving index to an admitted bundle (any provider, unscoped); MISSING when
- * no admitted bundle declares the id (a folder of the id that was skipped is
- * named in the cause); INCOMPLETE when one declares it but a listed name does
- * not resolve. The row's bundle hash is not consulted: it is the key a
- * download asks the store for. `cause` (when non-NULL) gets the sentence a
- * refusal shows, for a MISSING row "This map uses Hell Guards
- * (local.hell-guard), which is not installed." and for an INCOMPLETE one
- * "Hell Guards (local.hell-guard) is installed but does not provide <the
- * first three names>[ and N more], which this map uses."; `subject` replaces
- * "map" ("rawmap", "prefab"). The title is the installed folder's name when
- * one declares the id, else the id alone. Lock-free; any thread. */
+/* The asset rule. A map, rawmap or prefab needs the builds its manifest rows
+ * pin. A row is SERVED when the installed folder at the row's bundle hash (or
+ * an alias of it) is admitted and every name the row lists resolves, in that
+ * build or through the serving index; MISSING when no admitted folder has the
+ * hash, also when the key is installed at another build (that build is inert
+ * for the map, and the hold fetches the row's own build by hash, as for a key
+ * that is not installed); INCOMPLETE when the build is admitted but a listed
+ * name does not resolve. `cause` (when non-NULL) gets the sentence a refusal
+ * shows, for a MISSING row "This map uses Hell Guards (local.hell-guard),
+ * which is not installed.", "This map uses Hell Guards (local.hell-guard) at
+ * build <hash16>, which is not installed; local.hell-guard is installed at
+ * another build (<hash16>)." or "... which is installed but cannot be used:
+ * <cause>." (the folder at that hash, or of that key, was skipped), and for an
+ * INCOMPLETE one "Hell Guards (local.hell-guard) is installed but does not
+ * provide <the first three names>[ and N more], which this map uses.";
+ * `subject` replaces "map" ("rawmap", "prefab"). The title is the installed
+ * folder's name, else the key alone. Lock-free; any thread. */
 #define SH_MODSERVE_ROW_MISSING    0
 #define SH_MODSERVE_ROW_SERVED     1
 #define SH_MODSERVE_ROW_INCOMPLETE 2
@@ -603,15 +643,21 @@ int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, si
 int sh_modserve_editor_only_recorded(const char *bundle_hash);
 int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
 
-/* The admitted build that serves a mod: the bundle `bundle_hash` names
- * (aliases resolve), else the newest admitted bundle of `id`; when a newer
- * admitted build of the same id is installed it is that one, as the save-time
- * closure and activation pick. 1 with *out filled, 0 when none. */
+/* The admitted build that serves a mod: with `bundle_hash`, exactly that
+ * bundle (aliases resolve), or none when it is not installed, whatever other
+ * build of the key is (a map pins its build, DESIGN-additive 2.5); without
+ * one, the newest admitted bundle of `id` (built time, then folder). 1 with
+ * *out filled, 0 when none. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], version[160], hash[SH_MODSERVE_HASH_HEX + 1];
     unsigned long long size;   /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
 int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out);
+
+/* 1 with *out filled (the newest admitted build of the row's key) when the
+ * row's own build is not installed but its key is at another hash: the
+ * "installed at another build" case the launch gate words (phase 4). */
+int sh_modserve_row_other_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
 
 /* Map placed logical names (entityDef inherit names, or any decl name a
  * bundle provides) to the installed bundles that provide them, including the
@@ -633,17 +679,19 @@ typedef void (*sh_modserve_closure_fn)(void *context, const char *bundle_id, con
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context);
 
-/* A path several admitted bundles of different mods provide with different
- * bytes. One provider always serves it (the path is never left to the
- * engine, whose SnapMap archives may hold no copy of campaign content). The
- * winner is the provider with the fewest needs no admitted bundle provides,
- * then the bytes most providers carry, then an installed mod over a copy a
- * map delivered (legacy\), then the most recently installed. When every
+/* A path several admitted bundles of different keys provide with different
+ * bytes. With map scope on, which provider serves it is decided per map
+ * among the declared providers (the map scope rules above; `served_*`, `game`,
+ * `composed` and `reason` describe the open map). The static winner, which
+ * serves with map scope off, is the provider with the fewest needs no
+ * admitted bundle provides, then the bytes most providers carry, then the key
+ * and hash in name order (nothing about the install counts). When every
  * provider's text is a decl that differs only inside lists (a block of
  * `num = N;` and `item[i]` members, such as the encounter conductor's
  * aiTypeList or a whitelist inspector's validEncounters), the winner's text
  * is served with the other providers' list entries appended (composed). One
- * MODS: line per conflict names the providers, the winner and why:
+ * MODS: line per conflict at the index build names the providers, the static
+ * winner and why:
  *   MODS: conflict: shadow '<path>' is provided by a@1, b@2; serving a@1 (<reason>)
  *   MODS: conflict: shadow '<path>' is provided by ...; serving a@1's text with the others' list entries (N added)
  * Pointers stay valid for the process. */
@@ -651,8 +699,9 @@ typedef struct sh_modserve_conflict {
     const char *request, *providers, *reason;
     const char *served_id, *served_version, *served_hash;
     int count;        /* providers */
-    int composed;     /* 1: list entries of every provider merged */
+    int composed;     /* 1: list entries of every provider merged (the declared ones, with map scope on) */
     int withdrawn;    /* 1: a registration pass withdrew the winner (see plan_run) */
+    int game;         /* 1: the open map declares none of its providers; the game's bytes answer */
 } sh_modserve_conflict;
 
 /* 1 and *out filled when `request` (any case) is such a path, else 0. */
@@ -828,9 +877,18 @@ typedef struct sh_modserve_refresh {
 } sh_modserve_refresh;
 
 /* Walk the engine's resource lists (decl_resource_head): fn(context, the
- * list's class name, the resource, its name). 1 when the walk completed. */
+ * list's class name, the resource, its name). The entries are collected under
+ * the engine's resource lock (sh_modserve_set_resource_lock) and `fn` runs
+ * after it is released. 1 when the walk completed. */
 typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
 int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context);
+
+/* The engine's resource lock (report ADD-G3): `lock` is the address of the
+ * static struct whose first qword is the CRITICAL_SECTION pointer every list
+ * add, remove and find takes (13954591: VK RVA 0x5D79238, GL 0x467E8B8).
+ * Every walk of the lists here (watermarks, sh_modserve_resource_each) holds
+ * it while it reads the entry arrays. NULL (the default) walks without it. */
+void sh_modserve_set_resource_lock(void *lock);
 
 /* How many times the provider served `request` from the published table. */
 long sh_modserve_open_count(const char *request);

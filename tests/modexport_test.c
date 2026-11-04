@@ -557,9 +557,9 @@ int main(int argc, char **argv)
             CHECK(text && st.bundles_installed == 1 && has_folder(storeJ, "test.alpha@1.0.0") && folder_count(storeJ) == 1);
             free(text);
         }
-        /* storeI holds test.alpha 1.0.0 with other bytes at the same paths: it
-         * provides what the map uses, so the carried folder is skipped and
-         * counted as already installed; only test.beta installs. */
+        /* storeI holds test.alpha 1.0.0 with other bytes at the same paths:
+         * another build of the key, not the one the map pins (additive 2.5),
+         * so the carried build is installed beside it, as is test.beta. */
         CHECK(fresh_store(storeI));
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alpha3", src); make_mod(dir, "test.alpha", A_FILES, A3_BYTES);
         CHECK(install(dir, key2, &ra3) && strcmp(ra3.bundle, ra.bundle));
@@ -568,9 +568,9 @@ int main(int argc, char **argv)
         CHECK(sh_modserve_index_build(storeI) == 1);
         text = modexport_read(zip, &len, &st, cause, sizeof cause);
         if (!text) fprintf(stderr, "served import: %s\n", cause);
-        CHECK(text && st.bundles_installed == 1 && st.bundles_present == 1);
+        CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
         free(text);
-        CHECK(folder_count(storeI) == 2 && has_folder(storeI, "test.beta") && !has_folder(storeI, "test.alpha@1.0.0"));
+        CHECK(folder_count(storeI) == 3 && has_folder(storeI, "test.beta") && has_folder(storeI, "test.alpha@1.0.0"));
         b2 = slurp(before, &l2);
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
         free(b1); free(b2);

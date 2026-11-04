@@ -56,13 +56,27 @@ typedef struct ms_file {
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
     volatile LONG refresh_new;            /* a new gameplay decl of a mod this session registered: register it now */
     int editor_closure;                   /* an editor row, or a served file a row needs at any depth (ms_mark_editor_closure) */
-    /* Map scope: the other providers of a shadow path, in winner order
-     * (x->alts), so a path whose winner the open map does not list is served
-     * by a provider it does list. */
+    /* Map scope: the other providers of a path several admitted bundles
+     * provide, in winner order (x->alts), so the file that serves the path is
+     * chosen per map from the bundles the open map declares (ms_scope_compute). */
     int alt_first, alt_count;             /* a winner's alternates */
     int alt_of;                           /* an alternate's winner, or -1 */
-    volatile LONG scope_alt;              /* a withdrawn winner's serving alternate for the listing, or -1 */
+    volatile LONG scope_alt;              /* a winner's path: the file serving it for the listing, or -1 (the game's) */
+    volatile LONG scope_last;             /* a winner's path: the last file that served it under scope, or -1 */
+    struct ms_body *volatile scope_body;  /* the picked file: the text composed from the declared providers, or NULL */
+    struct ms_body *scope_composed;       /* a winner: the texts composed for earlier listings (memo, build lock) */
+    int scope_why;                        /* a winner: why its path is served as it is (MS_WHY_*) */
 } ms_file;
+
+/* A text composed for one listing (arena; memoized per winner by the set of declared providers). */
+typedef struct ms_body {
+    const unsigned char *p;
+    size_t len;
+    uint64_t set;                         /* which of the winner's candidates (bit 0 the winner) it was composed from */
+    uint64_t order;                       /* a hash of their order (the pick first, then the map's rows) */
+    int added;
+    struct ms_body *next;
+} ms_body;
 
 /* One path several bundles provide with different bytes, and what serves it. */
 typedef struct ms_conflict {
@@ -92,12 +106,28 @@ typedef struct ms_bundle {
     double installed_at;
     char cause[MS_CAUSE_MAX];
     /* Map scope (modserve.h). */
-    int scope_declared;                   /* mod.json "scope": 0 absent, 1 "map", 2 "always" */
-    const char *scope_editor;             /* the first editor-time shadow (absent key: "always"), or NULL */
+    int scope_declared;                   /* mod.json "scope": 0 absent, 1 "map", 2 "always" (read for the report only) */
+    const char *scope_editor;             /* the first editor-time shadow (the editor-tweak class: always), or NULL */
     int has_rows, has_shadows;            /* adds Toybox rows; serves shadow files */
-    volatile LONG shadows_off;            /* its shadows are withdrawn: the current map does not list it */
+    volatile LONG shadows_off;            /* its shadows are withdrawn: the current map does not declare it */
     volatile LONG req_off;                /* its requirements are not accepted for the current map */
+    volatile LONG sv;                     /* MS_SV_*: what it serves for the current listing */
+    volatile LONG rank;                   /* its row's position among the bundles the open map declares, or -1 */
+    volatile LONG inert;                  /* the open map declares its key at another hash */
+    /* The key (modserve.h): the author block's "id" when present, else the product block's "key". */
+    const char *key_from;                 /* "id" or "key" */
+    int newest;                           /* the newest admitted build of its key (built time, then folder) */
+    /* Last good build (DESIGN-additive 2.8): the folder's build failed, so the
+     * files come from the store's snapshot of the build that serves. */
+    const char *files_dir;                /* where its files are read: the folder, or the snapshot */
+    const char *snapshot;                 /* the snapshot folder served from, or NULL */
+    const char *build_failed;             /* the failed build's cause, or NULL */
 } ms_bundle;
+
+#define MS_SV_NEW     1                   /* names under its key (and grandfathered new names) */
+#define MS_SV_SHADOW  2                   /* files at game names that differ from the game's */
+#define MS_SV_RESTORE 4                   /* surfaces: the game's own bytes under the game's name */
+#define MS_SV_ALL     (MS_SV_NEW | MS_SV_SHADOW | MS_SV_RESTORE)
 
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
@@ -128,6 +158,7 @@ typedef struct ms_index {
 } ms_index;
 
 static ms_index *volatile g_index;
+static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
 static void ms_req_index(ms_index *x, const ms_index *old);
@@ -660,14 +691,14 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
                      !strncmp(subject, ns_s, strlen(ns_s)) || strstr(subject, mid_s) != NULL;
         }
         if (!inside) {
-            ms_fail(b, "'%s' is outside mods/%s/ and not listed in shadows", request, b->id);
+            ms_fail(b, "'%s' is outside mods/%s/ (its key) and not listed in shadows", request, b->id);
             return;
         }
     }
     {
         char disk[MS_PATH_MAX];
         char *p;
-        _snprintf_s(disk, sizeof disk, _TRUNCATE, "%s\\%s", b->dir, path);
+        _snprintf_s(disk, sizeof disk, _TRUNCATE, "%s\\%s", b->files_dir ? b->files_dir : b->dir, path);
         for (p = disk; *p; ++p) if (*p == '/') *p = '\\';
         f->disk = ms_strdup(x, disk);
         if (!f->disk) { ms_fail(b, "out of memory"); return; }
@@ -809,6 +840,36 @@ static int ms_delivered(const char *v, const char *ve)
     return 1;
 }
 
+/* The key and bundle hash a mod.json text names (author "id", else the
+ * product block's "key"; the product block's "bundle"), arena strings or NULL. */
+static void ms_peek_identity(ms_index *x, const unsigned char *text, size_t len, char **key, char **hash)
+{
+    ms_json c;
+    char k[64];
+    const char *v, *ve;
+    char *id = NULL, *bk = NULL;
+    c.p = (const char *)text;
+    c.e = c.p + len;
+    *key = *hash = NULL;
+    if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) c.p += 3;
+    if (!ms_jenter(&c, '{')) return;
+    while (ms_jnext(&c, '}')) {
+        if (!ms_jmember(&c, k, sizeof k, &v, &ve)) break;
+        if (!strcmp(k, "id")) id = ms_trim(ms_jstr(x, v, ve, 96));
+        else if (!strcmp(k, SH_MB_BLOCK_KEY)) {
+            ms_json o = { v, ve };
+            if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
+                if (!ms_jmember(&o, k, sizeof k, &v, &ve)) break;
+                if (!strcmp(k, "key")) bk = ms_trim(ms_jstr(x, v, ve, 96));
+                else if (!strcmp(k, "bundle")) *hash = ms_jstr(x, v, ve, 64);
+            }
+        }
+    }
+    *key = id && id[0] ? id : bk;
+    if (*key) ms_lower(*key);
+    if (*hash) ms_lower(*hash);
+}
+
 /* Parse <dir>\mod.json into the index; leaves b->cause set on failure. The
  * author block gives the identity, the requirements and "extra" (every key the
  * product does not read itself: strings, hud, description, ...); the product
@@ -831,6 +892,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     int nshadows = 0, cshadows = 0, i, validated = 1, members = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
+    char last[SH_MB_CAUSE_MAX] = "", *block_key = NULL;
+    int manifest = 0;   /* the text is a snapshot's bundle.json (Contract 1 form), not a mod.json */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
     if (!text) {
@@ -847,9 +910,38 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         HeapFree(GetProcessHeap(), 0, text);
         return;
     }
+    /* Last good build: a folder whose latest build failed keeps its last good
+     * product block (the store never rewrites it), but the author edits the
+     * files in place, so the build is served from the store's snapshot of it,
+     * mods\.builds\<key>@<hash16>\ (bundle.json and the carried files). */
+    {
+        sh_modserve_build_cause_fn cause_fn = g_build_cause;
+        if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
+        if (last[0]) {
+            char *pk = NULL, *ph = NULL;
+            ms_peek_identity(x, text, len, &pk, &ph);
+            if (pk && ph && ms_valid_hash(ph) && x->root[0]) {
+                char snap[MAX_PATH], mpath[MAX_PATH];
+                unsigned char *mtext;
+                size_t mlen = 0;
+                _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\%s@%.16s", x->root, pk, ph);
+                _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\bundle.json", snap);
+                mtext = ms_read_whole(mpath, SH_MODSERVE_MAX_JSON, &mlen);
+                if (mtext && sh_json_validate_ex((const char *)mtext, mlen, MS_JSON_DEPTH, &kind, &err) && kind == SH_JSON_OBJECT) {
+                    HeapFree(GetProcessHeap(), 0, text);
+                    text = mtext;
+                    len = mlen;
+                    manifest = 1;
+                    b->snapshot = b->files_dir = ms_strdup(x, snap);
+                } else if (mtext) HeapFree(GetProcessHeap(), 0, mtext);
+            }
+            b->build_failed = ms_strdup(x, last);
+        }
+    }
     c.p = (const char *)text;
     c.e = c.p + len;
     if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) c.p += 3;
+    if (manifest) { block_v = c.p; block_e = c.e; format = 1; }   /* one object: author and product members */
     ms_jenter(&c, '{');
     while (ms_jnext(&c, '}')) {
         const char *ks = c.p;
@@ -858,9 +950,29 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else if (!strcmp(key, "version")) version = ms_jstr(x, v, ve, 160);
         else if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, 400);
         else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
-        else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
+        else if (!manifest && !strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "format") || !strcmp(key, "author") || !strcmp(key, "homepage") ||
                  !strcmp(key, "shadows") || !strcmp(key, "stock")) continue;
+        else if (manifest) {
+            /* bundle.json: its "extra" is the author block's other keys. */
+            if (!strcmp(key, "extra") && !members && v < ve && *v == '{' && ve - v > 2) {
+                ms_json eo = { v, ve };
+                char ek[64];
+                const char *ev, *eve;
+                /* Kept as the object's members; the closing brace is added below. */
+                ms_text_put(&extra, v, (size_t)(ve - v - 1));
+                members = 1;
+                if (ms_jenter(&eo, '{')) while (ms_jnext(&eo, '}')) {
+                    if (!ms_jmember(&eo, ek, sizeof ek, &ev, &eve)) break;
+                    if (!strcmp(ek, "legacy") && ev < eve && *ev == '{') { author_legacy_v = ev; author_legacy_e = eve; }
+                    if (!strcmp(ek, "scope")) {
+                        if (eve - ev == 5 && !memcmp(ev, "\"map\"", 5)) b->scope_declared = 1;
+                        else if (eve - ev == 8 && !memcmp(ev, "\"always\"", 8)) b->scope_declared = 2;
+                    }
+                }
+            }
+            continue;
+        }
         else {
             /* Everything else is the author's, kept for the readers of
              * "extra" (strids.c, modhud.c); a "legacy" object grandfathers. */
@@ -879,7 +991,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         ms_json o = { block_v, block_e };
         if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
             if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
-            if (!strcmp(key, "format")) { if (!ms_jnum(v, ve, &format)) format = -1; }
+            if (!strcmp(key, "format")) { if (!manifest && !ms_jnum(v, ve, &format)) format = -1; }
+            else if (!strcmp(key, "key")) block_key = ms_jstr(x, v, ve, 96);
             else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
             else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
             else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
@@ -920,21 +1033,26 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             shadows[nshadows++] = s;
         }
     }
+    /* The key: the author block's "id" when present (deprecated, honoured
+     * because every installed mod and published map names mods/<id>/), else
+     * the product block's "key" the builder generated. */
     id = ms_trim(id);
+    block_key = ms_trim(block_key);
+    b->key_from = "id";
+    if ((!id || !id[0]) && block_key && block_key[0]) { id = block_key; b->key_from = "key"; }
     if (id) ms_lower(id);
     b->id = id;
     b->version = ms_trim(version);
     b->name = ms_trim(name);
     b->installed_at = built;
     if (!block_v) {
-        char last[SH_MB_CAUSE_MAX] = "";
-        sh_modserve_build_cause_fn cause_fn = g_build_cause;
-        if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
         if (last[0]) ms_fail(b, "its last build was refused: %s", last);
         else ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; a rescan of the Mods tab builds it)");
     }
     else if (format != 1) ms_fail(b, "mod.json product block format %g is not supported (this build reads format 1)", format);
-    if (!b->id || !ms_valid_id(b->id)) ms_fail(b, "bundle id '%s' is not valid", b->id ? b->id : "");
+    if (!b->id || !ms_valid_id(b->id))
+        ms_fail(b, "bundle key '%s' is not valid (mod.json has no valid \"id\" and its product block no valid \"key\")",
+                b->id ? b->id : "");
     if (!b->version) b->version = "";
     if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "mod.json has no bundle hash");
     if (!files_v && !stock_v) ms_fail(b, "mod.json lists no files");
@@ -1025,6 +1143,10 @@ static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int de
         b->first_file = x->nfiles;
         if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
         else ms_parse_bundle(x, b);
+        if (b->build_failed && !b->snapshot && b->hash)
+            ms_log("bundle '%s': its latest build failed (%s); no snapshot of the last good build %s@%.16s exists, so "
+                   "the folder's files serve under that build's sizes", subrel, b->build_failed, b->id ? b->id : "?",
+                   b->hash);
         if (b->cause[0]) {
             /* Failure isolation: drop this bundle's rows, keep everything else. */
             x->nfiles = mark_files;
@@ -1033,6 +1155,9 @@ static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int de
             ms_log("bundle '%s' skipped: %s", subrel, b->cause);
         } else {
             b->admitted = 1;
+            if (b->snapshot)
+                ms_log("bundle '%s': its latest build failed (%s); serving the last good build %s@%.16s from %s", subrel,
+                       b->build_failed ? b->build_failed : "no cause recorded", b->id, b->hash, b->snapshot);
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -1610,16 +1735,20 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
 
 /* ------------------------------------------------------------------ conflict winner
  *
- * When several bundles of different mods provide one path with different
- * bytes, one of them serves it (the path is never left to the engine: a pack's
- * other files are served and name it, and for campaign content the game has no
- * SnapMap copy to fall back to; lane MG2). In order:
- *   1. the provider with the fewest needs no admitted bundle provides (needs
- *      the game satisfies count alike for every provider, so the difference
- *      is what one copy names that nothing installed supplies);
- *   2. the bytes most providers carry;
- *   3. an authored or migrated mod over a copy a map delivered (legacy\);
- *   4. the most recently installed, then the folder name. */
+ * When several bundles provide one path with different bytes, which one
+ * serves is decided per map among the bundles the map declares
+ * (ms_scope_compute, DESIGN-additive 2.3): no installed mod takes precedence
+ * over another, and nothing about the install (time, folder, who delivered it)
+ * counts. In order:
+ *   1. the provider with the fewest needs the declared bundles do not provide
+ *      (needs the game satisfies count alike for every provider, so the
+ *      difference is what one copy names that nothing declared supplies);
+ *   2. the bytes most declared providers carry;
+ *   3. the order of the map's rows.
+ * The static winner below (the same rules over every admitted bundle, then the
+ * newest build of one key, then the key and the hash) serves only with map
+ * scope off and is the first candidate for a path no declared bundle provides.
+ * Two builds of one key are never a conflict: each map pins its own hash. */
 
 typedef struct ms_avail { char **keys; int n; } ms_avail;   /* sorted "type\x01name" and request keys of admitted files */
 
@@ -1668,10 +1797,22 @@ static int ms_unresolved(const ms_index *x, const ms_avail *av, const ms_file *f
     return missing;
 }
 
+/* The static tie-break: of two builds of one key the newer, else the key, then the hash. */
+static int ms_static_before(const ms_index *x, int a, int b)
+{
+    const ms_bundle *ba = &x->bundles[a], *bb = &x->bundles[b];
+    int c;
+    if (a == b) return 0;
+    if (!strcmp(ba->id, bb->id)) return ms_newer(x, a, b);
+    c = strcmp(ba->id, bb->id);
+    if (c) return c < 0;
+    return strcmp(ba->hash, bb->hash) < 0;
+}
+
 /* Index of the winning key in keys[i..j), and the reason. */
 static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, const char **reason)
 {
-    int k, best = i, unres[64], share[64], m = j - i > 64 ? 64 : j - i, tie_un = 1, tie_sh = 1, tie_leg = 1;
+    int k, best = i, unres[64], share[64], m = j - i > 64 ? 64 : j - i, tie_un = 1, tie_sh = 1, tie_key = 1;
     for (k = 0; k < m; ++k) {
         const ms_file *f = &x->files[keys[i + k].file];
         int q;
@@ -1684,22 +1825,21 @@ static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, in
     }
     for (k = 1; k < m; ++k) {
         const ms_file *f = &x->files[keys[i + k].file], *b = &x->files[keys[best].file];
-        int fl = x->bundles[f->bundle].legacy, bl = x->bundles[b->bundle].legacy, kb = best - i;
+        int kb = best - i;
         if (unres[k] != unres[kb]) { if (unres[k] < unres[kb]) best = i + k; continue; }
         if (share[k] != share[kb]) { if (share[k] > share[kb]) best = i + k; continue; }
-        if (fl != bl) { if (!fl) best = i + k; continue; }
-        if (ms_newer(x, f->bundle, b->bundle)) best = i + k;
+        if (ms_static_before(x, f->bundle, b->bundle)) best = i + k;
     }
     for (k = 0; k < m; ++k) {
         const ms_file *f = &x->files[keys[i + k].file], *b = &x->files[keys[best].file];
         if (unres[k] != unres[best - i]) tie_un = 0;
         if (share[k] != share[best - i]) tie_sh = 0;
-        if (x->bundles[f->bundle].legacy != x->bundles[b->bundle].legacy) tie_leg = 0;
+        if (strcmp(x->bundles[f->bundle].id, x->bundles[b->bundle].id)) tie_key = 0;
     }
     if (!tie_un) *reason = "its needs resolve against the installed bundles where the others' do not";
     else if (!tie_sh) *reason = "most providers carry these bytes";
-    else if (!tie_leg) *reason = "an installed mod is preferred over a copy a map delivered";
-    else *reason = "installed most recently";
+    else if (tie_key) *reason = "the newest build of its key";
+    else *reason = "no rule separates them; the first key in name order (a map's rows decide while it is open)";
     return best;
 }
 
@@ -1708,22 +1848,26 @@ static int ms_conflict_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, ((const ms_conflict *)b)->request);
 }
 
-/* Map scope: the other providers of a shadow path, recorded on its winner in
- * the order the winner rules rank them (`ordered`, different bytes) or in
- * index order (identical bytes), so that a provider the open map lists can
- * serve the path while the winner's bundle is withdrawn (ms_scope_compute).
- * Without memory the path keeps only its winner. */
+/* Map scope: the other providers of a path, recorded on its winner in the
+ * order the static winner rules rank them (`ordered` 1, different bytes), the
+ * newest build first (`ordered` 2, builds of one key) or in index order
+ * (identical bytes), so that the provider the open map declares serves the
+ * path (ms_scope_compute). Up to 63 alternates; without memory the path keeps
+ * only its winner. */
 static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, int winner, int ordered)
 {
     ms_key rest[64];
     int k, m = 0;
-    for (k = i; k < j && m < 64; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
+    for (k = i; k < j && m < 63; ++k) if (keys[k].file != winner) rest[m++] = keys[k];
     if (!m || !ms_grow((void **)&x->alts, &x->calts, x->nalts + m, sizeof(int))) return;
     x->files[winner].alt_first = x->nalts;
     x->files[winner].alt_count = m;
     while (m > 0) {
         const char *why = NULL;
-        int b = ordered && av && m > 1 ? ms_pick(x, av, rest, 0, m, &why) : 0;
+        int b = 0, q;
+        if (ordered == 1 && av && m > 1) b = ms_pick(x, av, rest, 0, m, &why);
+        else if (ordered == 2)
+            for (q = 1; q < m; ++q) if (ms_newer(x, x->files[rest[q].file].bundle, x->files[rest[b].file].bundle)) b = q;
         x->alts[x->nalts++] = rest[b].file;
         x->files[rest[b].file].alt_of = winner;
         memmove(&rest[b], &rest[b + 1], sizeof *rest * (size_t)(m - b - 1));
@@ -1750,6 +1894,10 @@ static int ms_resolve(ms_index *x)
         x->files[i].alt_first = x->files[i].alt_count = 0;
         x->files[i].alt_of = -1;
         x->files[i].scope_alt = -1;
+        x->files[i].scope_last = -1;
+        x->files[i].scope_body = NULL;
+        x->files[i].scope_composed = NULL;
+        x->files[i].scope_why = 0;
         if (x->bundles[x->files[i].bundle].admitted) { keys[n].key = x->files[i].request; keys[n].file = i; keys[n].alias = 0; n++; }
     }
     qsort(keys, (size_t)n, sizeof *keys, ms_key_cmp);
@@ -1778,12 +1926,15 @@ static int ms_resolve(ms_index *x)
         }
         if (j - i == 1 || same_blob) {
             x->files[winner].served = 1;
-            if (j - i > 1 && any_shadow) ms_record_alts(x, NULL, keys, i, j, winner, 0);
+            if (j - i > 1) ms_record_alts(x, NULL, keys, i, j, winner, 0);
         } else if (same_id) {
-            /* Two installed versions of one mod: the most recently installed serves. */
+            /* Two builds of one key (a fork, or an update beside the build a
+             * map pins): never a conflict. Each map serves the build it
+             * declares; the newest is the static winner (no map open). */
             for (k = i + 1; k < j; ++k)
                 if (ms_newer(x, x->files[keys[k].file].bundle, x->files[winner].bundle)) winner = keys[k].file;
             x->files[winner].served = 1;
+            ms_record_alts(x, NULL, keys, i, j, winner, 2);
             for (k = i; k < j; ++k)
                 if (keys[k].file != winner) superseded_by[x->files[keys[k].file].bundle] = x->files[winner].bundle;
         } else {
@@ -1878,9 +2029,10 @@ static int ms_resolve(ms_index *x)
     if (logged > MS_CONFLICT_LOGS) ms_log("%d more conflicts not listed", logged - MS_CONFLICT_LOGS);
     for (i = 0; i < x->nbundles; ++i)
         if (superseded_by[i] >= 0)
-            ms_log("bundle %s@%s: superseded by %s@%s (installed later) for the paths both provide",
-                   x->bundles[i].id, x->bundles[i].version, x->bundles[superseded_by[i]].id,
-                   x->bundles[superseded_by[i]].version);
+            ms_log("key %s: builds %.16s (%s) and %.16s (%s) both provide paths with other bytes; each map serves the "
+                   "build it declares, and with no map open the newest (%.16s)", x->bundles[i].id, x->bundles[i].hash,
+                   x->bundles[i].version, x->bundles[superseded_by[i]].hash, x->bundles[superseded_by[i]].version,
+                   x->bundles[superseded_by[i]].hash);
     free(keys);
     free(superseded_by);
     return 1;
@@ -2054,24 +2206,36 @@ static void ms_mark_editor_closure(ms_index *x)
 
 /* ------------------------------------------------------------------ build and publish */
 
-/* Map scope: the file that serves winner `f`'s path for the current listing.
- * A shadow of a bundle the open map does not list is served by the first of
- * its other providers the map lists (scope_alt), else by nobody (-1: the
- * game's bytes answer). Read lock-free. */
+/* Map scope: the file that serves winner `f`'s path for the current listing
+ * (ms_scope_compute: a bundle the open map declares, else what the editor or
+ * the hub may serve, else nobody, -1, and the game's bytes answer). With map
+ * scope off the static winner serves. Read lock-free. */
 static int ms_scoped(const ms_index *x, int f)
 {
-    const ms_file *w = &x->files[f];
-    if (!w->is_shadow || w->is_restore ||
-        !InterlockedCompareExchange((volatile LONG *)&x->bundles[w->bundle].shadows_off, 0, 0))
-        return f;
-    return (int)InterlockedCompareExchange((volatile LONG *)&w->scope_alt, 0, 0);
+    if (!InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
+    return (int)InterlockedCompareExchange((volatile LONG *)&x->files[f].scope_alt, 0, 0);
+}
+
+/* The composed text a file serves instead of its own bytes, or NULL: the
+ * listing's composition from the declared providers with map scope on, the
+ * static composition from every provider with it off. */
+static const unsigned char *ms_body_of(const ms_file *f, size_t *len)
+{
+    if (InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) {
+        const ms_body *b = (const ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&f->scope_body, NULL, NULL);
+        *len = b ? b->len : 0;
+        return b ? b->p : NULL;
+    }
+    *len = f->body_len;
+    return f->body;
 }
 
 /* Two files of successive tables that serve the same bytes. */
 static int ms_same_bytes(const ms_file *a, const ms_file *b)
 {
-    if (a->body || b->body)
-        return a->body && b->body && a->body_len == b->body_len && !memcmp(a->body, b->body, a->body_len);
+    size_t la, lb;
+    const unsigned char *ba = ms_body_of(a, &la), *bb = ms_body_of(b, &lb);
+    if (ba || bb) return ba && bb && la == lb && !memcmp(ba, bb, la);
     return a->blob && b->blob && !strcmp(a->blob, b->blob);
 }
 
@@ -2206,93 +2370,335 @@ static void ms_diff(ms_index *x, const ms_index *old)
 
 /* ------------------------------------------------------------------ map scope */
 
-/* The current map's listing (bundle ids, lowercase), written by
- * sh_modserve_scope_set under g_build_lock and g_scope_lock and read by the
- * index build under the same build lock. The per-bundle flags it gives are
- * read lock-free by every lookup. */
-static volatile LONG g_scope_on;
+/* The current map's listing (DESIGN-additive 2.3, 2.5): the bundle hashes it
+ * declares, in the order of its rows, written by sh_modserve_scope_set under
+ * g_build_lock and g_scope_lock and read by the index build under the same
+ * build lock. The per-bundle and per-path results it gives are read
+ * lock-free by every lookup. */
 static SRWLOCK g_scope_lock = SRWLOCK_INIT;
-static char (*g_scope_ids)[SH_MB_ID_MAX + 1];
+static char (*g_scope_hashes)[SH_MODSERVE_HASH_HEX + 1];
 static int g_scope_n, g_scope_cap;
 static volatile LONG g_scope_open;
+static volatile LONG g_scope_play;     /* SH_MODSERVE_MODE_PLAY: Play, or a map launched outside the editor */
 static sh_modserve_scope_source_fn volatile g_scope_source;
 
-static int ms_scope_always(const ms_bundle *b) { return b->scope_declared == 2 || (!b->scope_declared && b->scope_editor); }
+/* Why a path is served as it is (sh_modserve_layer_report). */
+#define MS_WHY_ONE       0   /* the only provider the listing admits */
+#define MS_WHY_SAME      1   /* the declared providers carry the same bytes */
+#define MS_WHY_NEEDS     2   /* fewest needs the declared bundles do not provide */
+#define MS_WHY_SHARE     3   /* the bytes most declared providers carry */
+#define MS_WHY_ROWS      4   /* the order of the map's rows */
+#define MS_WHY_COMPOSED  5   /* the declared providers' list entries composed */
+#define MS_WHY_EDITOR    6   /* not declared: a name the editor or the hub serves for the Toybox */
+#define MS_WHY_ALWAYS    7   /* an editor-time bundle (editor tweaks, a grandfathered package) */
+#define MS_WHY_NONE      8   /* nothing serves it: the game's bytes answer */
+#define MS_WHY_SURFACE   9   /* not declared: a surface (the game's own bytes), served outside Play */
+static const char *const g_why_text[] = {
+    "the only provider", "identical bytes", "its needs resolve against the declared bundles",
+    "most declared providers carry these bytes", "the first of the map's rows", "composed from the declared providers",
+    "not declared; offered for the Toybox", "editor-time content, served in every map", "no declared bundle provides it",
+    "not declared; a surface (the game's own bytes)",
+};
 
-/* Caller holds g_scope_lock. */
-static int ms_scope_listed(const ms_bundle *b)
+/* Editor-time content: a bundle whose shadows include the editor's own decls
+ * or movies (my-overrides' editor tweaks, a grandfathered package's Toybox
+ * rows) serves them, and everything it carries, in every map, as before
+ * phase 2. A mod.json "scope" key no longer chooses (DESIGN-additive 2.9). */
+static int ms_scope_always(const ms_bundle *b) { return b->scope_editor != NULL; }
+
+/* The file class a bundle's serve flags admit. */
+static int ms_sv_class(const ms_file *f)
 {
-    int i;
-    if (!b->id) return 0;
-    for (i = 0; i < g_scope_n; ++i) if (!strcmp(g_scope_ids[i], b->id)) return 1;
-    return 0;
+    return f->is_restore ? MS_SV_RESTORE : f->is_shadow ? MS_SV_SHADOW : MS_SV_NEW;
 }
 
-/* Set every admitted bundle's scope flags from the listing (caller holds
- * g_scope_lock). With `mark`, each shadow decl, model and image of a bundle
- * whose shadows turned on or off is marked pending (generation 0) and the
- * inheritance closure is computed again. Returns the bundles that changed. */
+static int ms_sv_allows(const ms_index *x, int file)
+{
+    const ms_file *f = &x->files[file];
+    return (InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].sv, 0, 0) & ms_sv_class(f)) != 0;
+}
+
+/* The bytes a pick serves: two picks serve the same bytes when both are the
+ * game's (-1), or carry the same composed text, or the same file hash. */
+static int ms_pick_same(const ms_index *x, int a, const ms_body *ba, int b, const ms_body *bb)
+{
+    const ms_file *fa, *fb;
+    if (a < 0 || b < 0) return a == b;
+    if (ba || bb) return ba && bb && (ba == bb || (ba->len == bb->len && !memcmp(ba->p, bb->p, ba->len)));
+    fa = &x->files[a];
+    fb = &x->files[b];
+    return a == b || (fa->blob && fb->blob && !strcmp(fa->blob, fb->blob));
+}
+
+/* The admitted files of the declared bundles, as ms_avail_build lists them. */
+static int ms_avail_declared(ms_index *x, ms_avail *av)
+{
+    int i, n = 0;
+    av->n = 0;
+    av->keys = (char **)malloc(sizeof(char *) * (size_t)(x->nfiles * 2 + 1));
+    if (!av->keys) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        char buf[MS_NAME_MAX];
+        if (!x->bundles[f->bundle].admitted || InterlockedCompareExchange(&x->bundles[f->bundle].rank, 0, 0) < 0) continue;
+        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", f->ptype, f->pname);
+        ms_lower(buf);
+        av->keys[n] = ms_strdup(x, buf);
+        if (av->keys[n]) n++;
+        av->keys[n++] = (char *)f->request;
+    }
+    qsort(av->keys, (size_t)n, sizeof(char *), ms_pstr_cmp);
+    av->n = n;
+    return 1;
+}
+
+/* The text the declared providers `d[0..nd)` compose to (d[0] the pick),
+ * memoized on the winner by the set of candidates; NULL when they do not
+ * compose (not all decls, too large, a parse the list grammar refuses). */
+static ms_body *ms_scope_compose(ms_index *x, int winner, const int *cand, int ncand, const int *d, int nd)
+{
+    const unsigned char *texts[64];
+    size_t lens[64], len = 0;
+    unsigned char *owned[64];
+    uint64_t set = 0;
+    int nt = 0, ok = 1, q, k, added = 0;
+    ms_body *m;
+    char *text;
+    uint64_t order = 1469598103934665603ull;
+    for (k = 0; k < nd; ++k) {
+        for (q = 0; q < ncand && q < 64; ++q) if (cand[q] == d[k]) set |= 1ull << q;
+        order = (order ^ (uint64_t)(unsigned)d[k]) * 1099511628211ull;
+    }
+    for (m = (ms_body *)x->files[winner].scope_composed; m; m = m->next)
+        if (m->set == set && m->order == order) return m->p ? m : NULL;
+    memset(owned, 0, sizeof owned);
+    for (k = 0; k < nd && ok && nt < 64; ++k) {
+        const ms_file *f = &x->files[d[k]];
+        int dup = 0;
+        if (!f->is_decl || f->size > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
+        for (q = 0; q < k && !dup; ++q) {
+            const ms_file *g = &x->files[d[q]];
+            if (g->blob && f->blob && !strcmp(g->blob, f->blob)) dup = 1;
+        }
+        if (dup) continue;
+        owned[nt] = ms_file_raw(f, &lens[nt]);
+        if (!owned[nt] || lens[nt] > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
+        texts[nt] = owned[nt];
+        nt++;
+    }
+    text = ok && nt > 1 ? ms_compose(texts, lens, nt, &len, &added) : NULL;
+    for (q = 0; q < nt; ++q) if (owned[q]) HeapFree(GetProcessHeap(), 0, owned[q]);
+    m = (ms_body *)ms_alloc(x, sizeof *m);
+    if (!m) { free(text); return NULL; }
+    memset(m, 0, sizeof *m);
+    m->set = set;
+    m->order = order;
+    if (text) {
+        unsigned char *body = (unsigned char *)ms_alloc(x, len ? len : 1);
+        if (body) { memcpy(body, text, len); m->p = body; m->len = len; m->added = added; }
+        free(text);
+    }
+    m->next = (ms_body *)x->files[winner].scope_composed;
+    x->files[winner].scope_composed = m;
+    return m->p ? m : NULL;
+}
+
+/* Set every admitted bundle's serve flags from the listing and the mode, then
+ * choose the file serving each path (caller holds g_scope_lock and the build
+ * lock). Declared bundles serve everything they carry. A build of a key the
+ * map declares at another hash is inert. With no map open, or in the editor,
+ * an undeclared bundle serves the names under its key for the Toybox (only
+ * the newest build of a key) and its surfaces, never its shadows; in Play and
+ * in a map launched outside the editor it serves nothing. An editor-time
+ * bundle (ms_scope_always) serves as before. With `mark`, every path whose
+ * served bytes changed is marked pending as at a rescan (shadows: also when
+ * the game's bytes come back; names: only when another build's bytes replace
+ * the ones last served). Returns the bundles whose serving changed. */
 static int ms_scope_compute(ms_index *x, int mark)
 {
     int i, k, changed = 0, marked = 0, on = InterlockedCompareExchange(&g_scope_on, 0, 0) != 0;
     int open = InterlockedCompareExchange(&g_scope_open, 0, 0) != 0;
-    LONG *was_off;
+    int play = open && InterlockedCompareExchange(&g_scope_play, 0, 0) != 0, next = 0, av_built = 0;
+    ms_avail av = { NULL, 0 };
     if (!x) return 0;
-    was_off = (LONG *)calloc((size_t)x->nbundles + 1, sizeof *was_off);
-    for (i = 0; i < x->nbundles; ++i) {
-        ms_bundle *b = &x->bundles[i];
-        LONG soff, roff, was_s, was_r;
-        if (!b->admitted) continue;
-        soff = on && !ms_scope_always(b) && !ms_scope_listed(b);
-        /* In a map, a bundle with Toybox rows keeps its requirements: the
-         * palette registers its rows whatever map is open. */
-        roff = soff && !(open && b->has_rows);
-        was_s = InterlockedExchange(&b->shadows_off, soff);
-        was_r = InterlockedExchange(&b->req_off, roff);
-        if (was_off) was_off[i] = was_s;
-        if (was_s != soff || was_r != roff) changed++;
+    for (i = 0; i < x->nbundles; ++i) x->bundles[i].inert = 0;
+    /* The declared bundles, by hash, in row order; a later row (or placed
+     * closure) naming another build of a key already declared is not one. */
+    {
+        LONG *rank = (LONG *)malloc(sizeof(LONG) * ((size_t)x->nbundles + 1));
+        if (!rank) return 0;
+        for (i = 0; i < x->nbundles; ++i) rank[i] = -1;
+        for (k = 0; k < g_scope_n; ++k) {
+            int b = ms_bundle_by_hash(x, g_scope_hashes[k], 1), dup = 0;
+            if (b < 0 || rank[b] >= 0) continue;
+            for (i = 0; i < x->nbundles && !dup; ++i) dup = rank[i] >= 0 && !strcmp(x->bundles[i].id, x->bundles[b].id);
+            if (!dup) rank[b] = next++;
+        }
+        for (i = 0; i < x->nbundles; ++i) {
+            ms_bundle *b = &x->bundles[i];
+            LONG sv, roff, was_sv, was_r, was_rank;
+            int inert = 0;
+            if (!b->admitted) continue;
+            for (k = 0; k < x->nbundles && !inert; ++k)
+                inert = k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id);
+            if (!on || rank[i] >= 0) sv = MS_SV_ALL;
+            else if (inert) sv = 0;
+            else if (ms_scope_always(b)) sv = MS_SV_ALL;
+            else if (play) sv = 0;
+            else sv = (b->newest ? MS_SV_NEW : 0) | MS_SV_RESTORE;
+            /* Requirements are cvars: a declared bundle's apply; a bundle with
+             * Toybox rows keeps them, because the palette registers its rows
+             * in every map and with none open; an inert build never. */
+            roff = on && rank[i] < 0 && !ms_scope_always(b) && (inert || !(b->has_rows && b->newest));
+            b->inert = inert;
+            was_sv = InterlockedExchange(&b->sv, sv);
+            was_rank = InterlockedExchange(&b->rank, on ? rank[i] : -1);
+            (void)InterlockedExchange(&b->shadows_off, (sv & MS_SV_SHADOW) ? 0 : 1);
+            was_r = InterlockedExchange(&b->req_off, roff);
+            if (was_sv != sv || was_r != roff || was_rank != (on ? rank[i] : -1)) changed++;
+        }
+        free(rank);
     }
-    /* Each shadow path: which provider serves it now, and whether the bytes
-     * the engine should hold changed (pending, generation 0, with the
-     * inheritance closure computed again). A withdrawn winner's path is
-     * served by the first alternate the listing admits. */
+    /* Each path: the file that serves it now. */
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
-        LONG alt = -1, was_alt;
-        int before, after;
-        if (!f->served || !f->is_shadow || f->is_restore || !x->bundles[f->bundle].admitted) continue;
-        if (InterlockedCompareExchange(&x->bundles[f->bundle].shadows_off, 0, 0))
-            for (k = 0; k < f->alt_count && alt < 0; ++k) {
-                int a = x->alts[f->alt_first + k];
-                if (!InterlockedCompareExchange(&x->bundles[x->files[a].bundle].shadows_off, 0, 0)) alt = a;
+        int cand[64], nc = 0, d[64], nd = 0, best = -1, why = MS_WHY_NONE, q, declared = 0;
+        long ok[64];   /* per candidate: its row (declared), past every row (editor-time bundles), or -1 */
+        LONG was;
+        ms_body *body = NULL, *was_body;
+        if (!f->served || !x->bundles[f->bundle].admitted) continue;
+        cand[nc++] = i;
+        for (k = 0; k < f->alt_count && nc < 64; ++k) cand[nc++] = x->alts[f->alt_first + k];
+        if (!on) best = i, why = MS_WHY_ONE;
+        else {
+            /* The providers that serve for the listing: the declared ones,
+             * and editor-time bundles (grandfathered: they compose with the
+             * others as before, after every row). */
+            for (k = 0; k < nc; ++k) {
+                const ms_bundle *cb = &x->bundles[x->files[cand[k]].bundle];
+                ok[k] = -1;
+                if (!ms_sv_allows(x, cand[k])) continue;
+                if (cb->rank >= 0) ok[k] = cb->rank, declared++;
+                else if (ms_scope_always(cb)) ok[k] = 1000000L + k;
+                else continue;
+                d[nd] = cand[k];
+                ok[nd] = ok[k];
+                nd++;
             }
-        was_alt = InterlockedExchange(&f->scope_alt, alt);
-        if (!mark || !was_off) continue;
-        before = was_off[f->bundle] ? (int)was_alt : i;
-        after = ms_scoped(x, i);
-        if (before == after || (before >= 0 && after >= 0 && ms_same_bytes(&x->files[before], &x->files[after]))) continue;
-        if (!ms_kind(f) || !f->ptype || !f->pname) continue;
+            if (nd == 1) best = d[0], why = declared ? MS_WHY_ONE : MS_WHY_ALWAYS;
+            else if (nd > 1 && !declared) {
+                /* Only editor-time bundles: the static order and composition, as before phase 2. */
+                best = d[0];
+                why = MS_WHY_ALWAYS;
+                for (k = 1; k < nd; ++k) if (!ms_pick_same(x, d[0], NULL, d[k], NULL)) break;
+                if (k < nd) {
+                    body = ms_scope_compose(x, i, cand, nc, d, nd);
+                    if (body) why = MS_WHY_COMPOSED;
+                }
+            } else if (nd > 1) {
+                int same = 1, unres[64], share[64], tie_un = 1, tie_sh = 1, bk = 0;
+                for (k = 1; k < nd && same; ++k)
+                    same = ms_pick_same(x, d[0], NULL, d[k], NULL);
+                if (same) {
+                    for (k = 1; k < nd; ++k) if (ok[k] < ok[bk]) bk = k;
+                    best = d[bk], why = MS_WHY_SAME;
+                } else {
+                    if (!av_built) av_built = ms_avail_declared(x, &av);
+                    for (k = 0; k < nd; ++k) {
+                        unres[k] = av_built ? ms_unresolved(x, &av, &x->files[d[k]]) : 0;
+                        share[k] = 0;
+                        for (q = 0; q < nd; ++q) share[k] += ms_pick_same(x, d[k], NULL, d[q], NULL);
+                    }
+                    for (k = 1; k < nd; ++k) {
+                        if (unres[k] != unres[bk]) { if (unres[k] < unres[bk]) bk = k; continue; }
+                        if (share[k] != share[bk]) { if (share[k] > share[bk]) bk = k; continue; }
+                        if (ok[k] < ok[bk]) bk = k;
+                    }
+                    for (k = 0; k < nd; ++k) {
+                        if (unres[k] != unres[bk]) tie_un = 0;
+                        if (share[k] != share[bk]) tie_sh = 0;
+                    }
+                    best = d[bk];
+                    why = !tie_un ? MS_WHY_NEEDS : !tie_sh ? MS_WHY_SHARE : MS_WHY_ROWS;
+                    /* Lists and bags of the declared providers' texts compose
+                     * (never two builds of one key: only one is declared). */
+                    {
+                        int order[64], no = 0;
+                        long ook[64];
+                        order[no] = best; ook[no++] = ok[bk];
+                        for (k = 0; k < nd; ++k) if (d[k] != best) { order[no] = d[k]; ook[no++] = ok[k]; }
+                        for (k = 1; k < no; ++k)   /* the rest in row order */
+                            for (q = k; q > 1 && ook[q] < ook[q - 1]; --q) {
+                                int t = order[q]; long tk = ook[q];
+                                order[q] = order[q - 1]; ook[q] = ook[q - 1];
+                                order[q - 1] = t; ook[q - 1] = tk;
+                            }
+                        body = ms_scope_compose(x, i, cand, nc, order, no);
+                        if (body) why = MS_WHY_COMPOSED;
+                    }
+                }
+            } else {
+                for (k = 0; k < nc && best < 0; ++k) if (ms_sv_allows(x, cand[k])) best = cand[k];
+                if (best >= 0)
+                    why = ms_scope_always(&x->bundles[x->files[best].bundle]) ? MS_WHY_ALWAYS :
+                          x->files[best].is_restore ? MS_WHY_SURFACE : MS_WHY_EDITOR;
+            }
+        }
+        was = InterlockedCompareExchange(&f->scope_alt, 0, 0);
+        was_body = was >= 0 && was < x->nfiles ?
+            (ms_body *)InterlockedCompareExchangePointer((PVOID volatile *)&x->files[was].scope_body, NULL, NULL) : NULL;
+        /* The text first, then the pick: a reader sees the new pick with its own text. */
+        if (best >= 0) (void)InterlockedExchangePointer((PVOID volatile *)&x->files[best].scope_body, body);
+        if (was >= 0 && was < x->nfiles && was != best)
+            (void)InterlockedExchangePointer((PVOID volatile *)&x->files[was].scope_body, NULL);
+        (void)InterlockedExchange(&f->scope_alt, best);
+        f->scope_why = why;
+        if (!mark) {
+            if (best >= 0) (void)InterlockedExchange(&f->scope_last, best);
+            continue;
+        }
+        if (!ms_kind(f) || !f->ptype || !f->pname || f->is_restore) {
+            if (best >= 0) (void)InterlockedExchange(&f->scope_last, best);
+            continue;
+        }
+        if (f->is_shadow) {
+            if (ms_pick_same(x, (int)was, was_body, best, body)) continue;
+        } else {
+            /* A name: withdrawn, the engine keeps what it parsed; served again,
+             * it is read again only when other bytes than the last served
+             * ones serve it now (another build of its key). */
+            LONG last = InterlockedCompareExchange(&f->scope_last, 0, 0);
+            if (best < 0) continue;
+            (void)InterlockedExchange(&f->scope_last, best);
+            if (last < 0 || ms_pick_same(x, (int)last, last == was ? was_body : NULL, best, body)) continue;
+        }
+        if (best >= 0) (void)InterlockedExchange(&f->scope_last, best);
         InterlockedExchange(&f->refresh_gen, 0);
         InterlockedExchange(&f->refresh, 1);
         marked++;
     }
-    free(was_off);
+    if (av_built) free(av.keys);
     if (marked) InterlockedExchange(&x->expanded, 0);
     return changed;
 }
 
-/* Once per bundle and hash: a bundle without a "scope" key whose shadows the editor needs. */
+/* Once per bundle and hash: an editor-time bundle, and a mod.json "scope" key
+ * that no longer chooses. */
 static void ms_scope_log(const ms_index *x, const ms_index *old)
 {
     int i;
     for (i = 0; i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         int o;
-        if (!b->admitted || b->scope_declared || !b->scope_editor) continue;
+        if (!b->admitted || (!b->scope_editor && !b->scope_declared)) continue;
         o = old ? ms_bundle_by_hash(old, b->hash, 1) : -1;
-        if (o >= 0 && old->bundles[o].scope_editor && !old->bundles[o].scope_declared) continue;
-        ms_log("scope: %s@%s shadows editor-time content (%s); treated as \"scope\": \"always\" (its shadows and "
-               "requirements apply in every map; a \"scope\" key in its mod.json chooses)", b->id, b->version, b->scope_editor);
+        if (o >= 0) continue;
+        if (b->scope_editor)
+            ms_log("scope: %s@%s shadows editor-time content (%s); it serves in every map, as an editor tweak or a "
+                   "grandfathered package does until it is rebuilt under its key", b->id, b->version, b->scope_editor);
+        else
+            ms_log("scope: %s@%s: its mod.json \"scope\" is ignored; a map serves exactly the mods it declares", b->id,
+                   b->version);
     }
 }
 
@@ -2312,51 +2718,65 @@ int sh_modserve_scope_enabled(void) { return InterlockedCompareExchange(&g_scope
 int sh_modserve_scope_map_open(void) { return InterlockedCompareExchange(&g_scope_open, 0, 0) != 0; }
 
 /* Caller holds g_scope_lock exclusively. */
-static void ms_scope_add(const char *id)
+static void ms_scope_add_hash(const char *hash)
 {
-    char lower[SH_MB_ID_MAX + 1];
+    char lower[SH_MODSERVE_HASH_HEX + 1];
     int i;
-    if (!id || !id[0] || strlen(id) > SH_MB_ID_MAX) return;
-    strcpy_s(lower, sizeof lower, id);
-    ms_lower(lower);
-    for (i = 0; i < g_scope_n; ++i) if (!strcmp(g_scope_ids[i], lower)) return;
-    if (!ms_grow((void **)&g_scope_ids, &g_scope_cap, g_scope_n + 1, sizeof *g_scope_ids)) return;
-    strcpy_s(g_scope_ids[g_scope_n++], SH_MB_ID_MAX + 1, lower);
+    if (!hash || strlen(hash) != SH_MODSERVE_HASH_HEX) return;
+    strcpy_s(lower, sizeof lower, hash);
+    if (!ms_valid_hash(lower)) return;
+    for (i = 0; i < g_scope_n; ++i) if (!strcmp(g_scope_hashes[i], lower)) return;
+    if (!ms_grow((void **)&g_scope_hashes, &g_scope_cap, g_scope_n + 1, sizeof *g_scope_hashes)) return;
+    strcpy_s(g_scope_hashes[g_scope_n++], SH_MODSERVE_HASH_HEX + 1, lower);
 }
 
 int sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open)
 {
     ms_index *x;
     int i, changed;
+    (void)ids; (void)nids;   /* a row names its build by hash; a key alone declares nothing (DESIGN-additive 2.5) */
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)g_index;
     AcquireSRWLockExclusive(&g_scope_lock);
     g_scope_n = 0;
-    for (i = 0; x && hashes && i < nhashes; ++i) {
-        int b = hashes[i] ? ms_bundle_by_hash(x, hashes[i], 0) : -1;
-        if (b >= 0) ms_scope_add(x->bundles[b].id);
-    }
-    for (i = 0; ids && i < nids; ++i) ms_scope_add(ids[i]);
+    for (i = 0; hashes && i < nhashes; ++i) ms_scope_add_hash(hashes[i]);
     InterlockedExchange(&g_scope_open, map_open ? 1 : 0);
+    if (!map_open) InterlockedExchange(&g_scope_play, 0);
     changed = ms_scope_compute(x, 1);
     ReleaseSRWLockExclusive(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
     return changed;
 }
 
+int sh_modserve_scope_mode(int mode)
+{
+    ms_index *x;
+    int changed = 0;
+    LONG want = mode == SH_MODSERVE_MODE_PLAY ? 1 : 0;
+    AcquireSRWLockExclusive(&g_build_lock);
+    x = (ms_index *)g_index;
+    AcquireSRWLockShared(&g_scope_lock);
+    if (InterlockedExchange(&g_scope_play, want) != want) changed = ms_scope_compute(x, 1);
+    ReleaseSRWLockShared(&g_scope_lock);
+    ReleaseSRWLockExclusive(&g_build_lock);
+    return changed;
+}
+
+int sh_modserve_scope_mode_get(void)
+{
+    return InterlockedCompareExchange(&g_scope_play, 0, 0) ? SH_MODSERVE_MODE_PLAY : SH_MODSERVE_MODE_EDITOR;
+}
+
 int sh_modserve_scope_relevant(void)
 {
     const ms_index *x = g_index;
-    int i, any;
+    int any;
     if (!InterlockedCompareExchange(&g_scope_on, 0, 0)) return 0;
     AcquireSRWLockShared(&g_scope_lock);
     any = g_scope_n > 0;
     ReleaseSRWLockShared(&g_scope_lock);
-    for (i = 0; !any && x && i < x->nbundles; ++i) {
-        const ms_bundle *b = &x->bundles[i];
-        any = b->admitted && !ms_scope_always(b) && (b->has_shadows || b->req_ncvars || b->req_nact || b->req_ndeact);
-    }
-    return any;
+    /* Every admitted bundle is scoped now: a map serves only what it declares. */
+    return any || (x && x->admitted > 0);
 }
 
 int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out)
@@ -2364,21 +2784,30 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     const ms_index *x = g_index;
     const ms_bundle *b;
     int at, k;
+    LONG sv;
     if (out) memset(out, 0, sizeof *out);
     if (!x || !bundle_hash || (at = ms_bundle_by_hash(x, bundle_hash, 1)) < 0) return 0;
     b = &x->bundles[at];
     if (!out) return 1;
     out->scope = ms_scope_always(b) ? SH_MODSERVE_SCOPE_ALWAYS : SH_MODSERVE_SCOPE_MAP;
     out->declared = b->scope_declared;
-    out->automatic = !b->scope_declared && b->scope_editor != NULL;
-    AcquireSRWLockShared(&g_scope_lock);
-    out->listed = ms_scope_listed(b);
-    ReleaseSRWLockShared(&g_scope_lock);
+    out->automatic = b->scope_editor != NULL;
+    out->rank = (int)InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0);
+    out->listed = out->rank >= 0;
+    out->inert = InterlockedCompareExchange((volatile LONG *)&b->inert, 0, 0) != 0;
     out->map_open = sh_modserve_scope_map_open();
-    for (k = b->first_file; k < b->first_file + b->file_count; ++k)
-        if (x->files[k].is_shadow && !x->files[k].is_restore && (x->files[k].served || x->files[k].alt_of >= 0))
-            out->shadows++;
-    out->shadows_live = !InterlockedCompareExchange((volatile LONG *)&b->shadows_off, 0, 0);
+    out->play = out->map_open && sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY;
+    out->newest = b->newest;
+    for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
+        const ms_file *f = &x->files[k];
+        if (f->is_shadow && !f->is_restore && (f->served || f->alt_of >= 0)) out->shadows++;
+        if (!f->is_shadow && !f->is_restore) out->names++;
+        if (f->is_restore) out->surfaces++;
+    }
+    sv = InterlockedCompareExchange((volatile LONG *)&b->sv, 0, 0);
+    out->shadows_live = (sv & MS_SV_SHADOW) != 0;
+    out->names_live = (sv & MS_SV_NEW) != 0;
+    out->surfaces_live = (sv & MS_SV_RESTORE) != 0;
     out->requirements = b->req_text && (b->req_ncvars || b->req_nact || b->req_ndeact);
     out->requirements_live = out->requirements && !b->req_lost &&
                              !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
@@ -2386,43 +2815,157 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     return 1;
 }
 
+/* "key@version (hash16)", without a version the converter generated. */
+static void ms_who(const ms_bundle *b, char *out, size_t cap)
+{
+    if (b->version && b->version[0] && !sh_mb_version_generated(b->version))
+        _snprintf_s(out, cap, _TRUNCATE, "%s@%s (%.16s)", b->id, b->version, b->hash);
+    else _snprintf_s(out, cap, _TRUNCATE, "%s (%.16s)", b->id, b->hash);
+}
+
+/* 1 when the providers of winner `i`'s path carry more than one set of bytes. */
+static int ms_path_differs(const ms_index *x, int i)
+{
+    const ms_file *f = &x->files[i];
+    int k;
+    for (k = 0; k < f->alt_count; ++k) {
+        const ms_file *g = &x->files[x->alts[f->alt_first + k]];
+        if (!f->blob || !g->blob || strcmp(f->blob, g->blob)) return 1;
+    }
+    return 0;
+}
+
+/* Per path several bundles provide with different bytes: which layer serves
+ * it for the open map and why (at most 40 lines); paths several bundles carry
+ * with the same bytes are counted. */
+static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *context)
+{
+    char line[900];
+    int i, lines = 0, shown = 0, declared = 0, editor = 0, game = 0, multi = 0, same = 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        int p, k, why;
+        if (!f->served || !x->bundles[f->bundle].admitted) continue;
+        p = ms_scoped(x, i);
+        if (p < 0) game++;
+        else if (x->bundles[x->files[p].bundle].rank >= 0) declared++;
+        else editor++;
+        if (!f->alt_count) continue;
+        if (!ms_path_differs(x, i)) { same++; continue; }
+        multi++;
+        if (shown >= 40) continue;
+        why = InterlockedCompareExchange((volatile LONG *)&f->scope_alt, 0, 0) == -1 ? MS_WHY_NONE : f->scope_why;
+        if (!sh_modserve_scope_enabled()) why = -1;
+        {
+            char who[200], others[400], merged[400], tail[860];
+            size_t at = 0, mt = 0;
+            size_t blen = 0;
+            int composed = p >= 0 && ms_body_of(&x->files[p], &blen) != NULL;
+            others[0] = merged[0] = 0;
+            for (k = -1; k < f->alt_count; ++k) {
+                int c = k < 0 ? i : x->alts[f->alt_first + k], w;
+                const ms_bundle *cb = &x->bundles[x->files[c].bundle];
+                char one[200];
+                if (c == p) continue;
+                ms_who(cb, one, sizeof one);
+                /* A composed text carries the entries of the other providers that serve for the listing. */
+                if (composed && (why < 0 || ((cb->sv & ms_sv_class(&x->files[c])) && (cb->rank >= 0 || ms_scope_always(cb))))) {
+                    w = _snprintf_s(merged + mt, sizeof merged - mt, _TRUNCATE, "%s%s", mt ? ", " : "", one);
+                    if (w > 0) mt += (size_t)w;
+                    continue;
+                }
+                w = _snprintf_s(others + at, sizeof others - at, _TRUNCATE, "%s%s", at ? ", " : "", one);
+                if (w < 0) break;
+                at += (size_t)w;
+            }
+            _snprintf_s(tail, sizeof tail, _TRUNCATE, "%s%s%s%s", mt ? "; with the entries of: " : "", merged,
+                        at ? "; not served: " : "", others);
+            if (p >= 0) {
+                const ms_bundle *b = &x->bundles[x->files[p].bundle];
+                const char *text = why < 0 ? "map scope is off" :
+                                   composed && b->rank < 0 ? "editor-time content, composed with the other editor-time providers" :
+                                   g_why_text[why];
+                ms_who(b, who, sizeof who);
+                if (b->rank >= 0)
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s, declared (row %ld): %s%s",
+                                f->request, who, (long)b->rank + 1, text, tail);
+                else
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s%s", f->request, who, text, tail);
+            } else
+                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not served: %s", f->request,
+                            g_why_text[MS_WHY_NONE], others);
+        }
+        fn(context, line);
+        lines++;
+        shown++;
+    }
+    if (multi > shown) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several bundles provide with different bytes",
+                    multi - shown);
+        fn(context, line);
+        lines++;
+    }
+    if (same) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several bundles carry with the same bytes; one copy "
+                    "serves when any provider may", same);
+        fn(context, line);
+        lines++;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "serving: %d path(s) from bundles the open map declares, %d from undeclared bundles (Toybox names, "
+                "surfaces, editor-time content), %d left to the game", declared, editor, game);
+    fn(context, line);
+    return lines + 1;
+}
+
 int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
 {
     const ms_index *x = g_index;
-    char line[700];
-    int i, lines = 0, on = sh_modserve_scope_enabled();
+    char line[900];
+    int i, k, lines = 0, on = sh_modserve_scope_enabled();
     if (!fn) return 0;
     for (i = 0; x && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         sh_modserve_scope_info si;
-        char what[120], who[300];
+        char what[160], who[300], state[400];
+        int builds = 0, first = 1;
         if (!b->admitted || !sh_modserve_bundle_scope(b->hash, &si)) continue;
-        what[0] = 0;
-        /* A generated version (a delivered package's) is never shown. */
-        if (b->version && b->version[0] && !sh_mb_version_generated(b->version))
-            _snprintf_s(who, sizeof who, _TRUNCATE, "%s@%s", b->id, b->version);
-        else strncpy_s(who, sizeof who, b->id, _TRUNCATE);
-        if (si.shadows || si.requirements)
-            _snprintf_s(what, sizeof what, _TRUNCATE, " (%d shadow%s%s)", si.shadows, si.shadows == 1 ? "" : "s",
-                        si.requirements ? ", requirements" : "");
-        if (si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic)
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: always (shadows editor-time content: %s)%s", who, si.editor_path, what);
+        /* One row per hash under a key: a header once, before its first build. */
+        for (k = 0; k < x->nbundles; ++k) {
+            if (!x->bundles[k].admitted || strcmp(x->bundles[k].id, b->id)) continue;
+            builds++;
+            if (k < i) first = 0;
+        }
+        if (builds > 1 && first) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: key %s: %d builds installed; each map serves the build it "
+                        "was saved with, and with no map open the newest", b->id, builds);
+            fn(context, line);
+            lines++;
+        }
+        ms_who(b, who, sizeof who);
+        _snprintf_s(what, sizeof what, _TRUNCATE, " (%d name%s, %d shadow%s, %d surface%s%s)", si.names, si.names == 1 ? "" : "s",
+                    si.shadows, si.shadows == 1 ? "" : "s", si.surfaces, si.surfaces == 1 ? "" : "s",
+                    si.requirements ? ", requirements" : "");
+        if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
+        else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
+        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its key");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: always (mod.json)%s", who, what);
-        else if (!si.shadows && !si.requirements)
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: map: new names only, nothing to scope%s", who, si.listed ? "; the open map uses it" : "");
-        else if (!on)
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: map%s: active (map scope is off)", who, what);
-        else if (si.shadows_live)
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: map%s: active in the open map", who, what);
+            _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): serves in every map", si.editor_path);
+        else if (si.play) strcpy_s(state, sizeof state, "not declared by the map being played: serves nothing");
+        else if (!si.newest)
+            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older build of its key; only its surfaces serve",
+                        si.map_open ? " by the open map" : " (no map is open)");
         else
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s: map%s: not active (%s)%s", who, what,
-                        si.map_open ? "the open map does not use it" : "no map is open",
-                        si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "");
+            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: its names serve for the Toybox and its surfaces "
+                        "serve; its shadows do not", si.map_open ? " by the open map" : " (no map is open)");
+        _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s%s: %s%s%s", who, what, state,
+                    si.requirements && !si.listed && si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "",
+                    b->snapshot ? "; serving its last good build (the latest build failed)" : "");
         fn(context, line);
         lines++;
     }
-    if (!on) { fn(context, "scope: map scope is off; every shadow serves in every map"); lines++; }
+    if (!on) { fn(context, "scope: map scope is off; every bundle serves in every map"); lines++; }
+    if (x) lines += ms_layer_lines(x, fn, context);
     return lines;
 }
 
@@ -2431,7 +2974,23 @@ void sh_modserve_set_scope_source(sh_modserve_scope_source_fn fn) { g_scope_sour
 int sh_modserve_scope_source(int when)
 {
     sh_modserve_scope_source_fn fn = g_scope_source;
-    return fn ? fn(when) : 0;
+    int moved = 0, r;
+    /* The Play entry: from here undeclared bundles serve nothing. */
+    if (when == SH_MODSERVE_AT_PLAY && sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_PLAY) {
+        InterlockedExchange(&g_scope_play, 1);
+        moved = 1;
+    }
+    r = fn ? fn(when) : 0;
+    if (moved && r <= 0) {
+        ms_index *x;
+        AcquireSRWLockExclusive(&g_build_lock);
+        x = (ms_index *)g_index;
+        AcquireSRWLockShared(&g_scope_lock);
+        r = ms_scope_compute(x, 1);
+        ReleaseSRWLockShared(&g_scope_lock);
+        ReleaseSRWLockExclusive(&g_build_lock);
+    }
+    return r;
 }
 
 int sh_modserve_index_build(const char *mods_root)
@@ -2457,6 +3016,16 @@ int sh_modserve_index_build(const char *mods_root)
     ms_resolve_needs(x);
     ms_mark_editor_closure(x);
     for (i = 0; i < x->nbundles; ++i) x->admitted += x->bundles[i].admitted;
+    /* The newest admitted build of each key: what serves for the Toybox with
+     * no map declaring the key (built time, then folder name). */
+    for (i = 0; i < x->nbundles; ++i) {
+        ms_bundle *b = &x->bundles[i];
+        int k;
+        b->newest = b->admitted;
+        b->rank = -1;
+        for (k = 0; b->newest && k < x->nbundles; ++k)
+            if (k != i && x->bundles[k].admitted && !strcmp(x->bundles[k].id, b->id) && ms_newer(x, k, i)) b->newest = 0;
+    }
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
     old = g_index;
@@ -2597,7 +3166,8 @@ static int ms_lookup_hit(const char *request, sh_modserve_hit *out, int scoped)
     if (out) {
         out->request = f->request;
         out->disk_path = f->disk;
-        out->size = f->body ? (uint64_t)f->body_len : f->size;
+        size_t blen = 0;
+        out->size = ms_body_of(f, &blen) ? (uint64_t)blen : f->size;
         out->bundle_id = x->bundles[f->bundle].id;
         out->bundle_hash = x->bundles[f->bundle].hash;
         out->is_decl = f->is_decl;
@@ -2708,21 +3278,23 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     const ms_index *x = NULL;
     const ms_file *f;
     unsigned char *buf = NULL;
-    size_t len = 0;
+    const unsigned char *body;
+    size_t len = 0, body_len = 0;
     int first;
     if (bytes) *bytes = NULL;
     if (length) *length = 0;
     if (!bytes || !length) return 0;
     f = ms_lookup_file(&x, request);
     if (!f) return 0;
-    if (f->body) {
-        /* A composed text (ms_resolve): the index holds the bytes. */
-        len = f->body_len;
+    body = ms_body_of(f, &body_len);
+    if (body) {
+        /* A composed text (ms_resolve, ms_scope_compute): the index holds the bytes. */
+        len = body_len;
         buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len ? len : 1u);
         if (!buf) return -1;
-        memcpy(buf, f->body, len);
+        memcpy(buf, body, len);
     } else if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) buf = ms_cache_copy(f, &len);
-    if (buf && !f->body) InterlockedIncrement(&g_cache_hits);
+    if (buf && !body) InterlockedIncrement(&g_cache_hits);
     else if (!buf) {
         buf = ms_file_raw(f, &len);
         if (!buf) {
@@ -2758,7 +3330,7 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     InterlockedIncrement(&g_opens_served);
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
         ms_log("shadow '%s' served from %s@%s (%zu bytes%s)", f->request, x->bundles[f->bundle].id,
-               x->bundles[f->bundle].version, len, f->body ? ", composed with the other providers' list entries" : "");
+               x->bundles[f->bundle].version, len, body ? ", composed with the other providers' list entries" : "");
     *bytes = buf;
     *length = len;
     return 1;
@@ -2938,8 +3510,12 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
     if (!x) return 0;
     mark = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
     if (!mark) return -1;
+    /* With map scope on, the rows whose path the listing serves: the newest
+     * build of each undeclared key, the declared build of a declared one (an
+     * older build serves its names only in a map that declares it). */
     for (i = 0; i < x->nfiles; ++i)
-        mark[i] = (unsigned char)(x->files[i].served && x->files[i].is_sedef && ms_plannable(x, &x->files[i]));
+        mark[i] = (unsigned char)(x->files[i].served && x->files[i].is_sedef && ms_plannable(x, &x->files[i]) &&
+                                  ms_scoped(x, i) >= 0);
     r = ms_plan_from(x, mark, 1, out);
     free(mark);
     return r;
@@ -2972,25 +3548,22 @@ int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserv
     mark = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
     if (!mark) return -1;
     for (i = 0; i < n; ++i) {
-        int b = ms_bundle_by_hash(x, bundle_hashes[i], 1), k, superseded = 0;
+        int b = ms_bundle_by_hash(x, bundle_hashes[i], 1), k;
         if (b < 0) { missing++; continue; }
         for (k = x->bundles[b].first_file; k < x->bundles[b].first_file + x->bundles[b].file_count; ++k) {
             const ms_file *f = &x->files[k];
             int use = k;
             if (!f->served) {
-                /* Another installed build of the same mod serves this path:
-                 * the map gets the newer files (manager decision, lane M2). */
+                /* Another build of the same key is the path's static winner:
+                 * the step registers the name, and the provider serves it the
+                 * bytes of the build this map declares (ms_scope_compute). */
                 int w = ms_find(x->slots, x->mask, f->request);
                 if (w < 0 || strcmp(x->bundles[x->files[w].bundle].id, x->bundles[b].id)) continue;
                 use = w;
-                superseded = 1;
             }
             f = &x->files[use];
             if (f->served && ms_plannable(x, f) && !f->is_sedef) mark[use] = 1;
         }
-        if (superseded)
-            ms_log("map bundle %s@%s (%.16s) is superseded; its paths are served by the newest installed build",
-                   x->bundles[b].id, x->bundles[b].version, x->bundles[b].hash);
     }
     r = ms_plan_from(x, mark, 0, out);
     free(mark);
@@ -3069,10 +3642,12 @@ void sh_modserve_plan_free(sh_modserve_plan *plan)
 static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
 {
     unsigned char *b;
+    const unsigned char *body;
+    size_t blen = 0;
     *len = 0;
-    if (f->body) {
-        b = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, f->body_len ? f->body_len : 1u);
-        if (b) { memcpy(b, f->body, f->body_len); *len = f->body_len; }
+    if ((body = ms_body_of(f, &blen)) != NULL) {
+        b = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, blen ? blen : 1u);
+        if (b) { memcpy(b, body, blen); *len = blen; }
         return b;
     }
     return ms_file_raw(f, len);
@@ -3205,12 +3780,33 @@ static int ms_uptr_cmp(const void *a, const void *b)
 
 /* Visit every resource: fn(context, list, resource). 1 when the walk completed. */
 typedef void (*ms_res_fn)(void *context, const unsigned char *list, unsigned char *res);
+/* The engine's resource lock (report ADD-G3): list add, remove and find run
+ * under one CRITICAL_SECTION, and list add swap-removes and grows the entry
+ * array, so a walk takes it. `g_res_lock` is the address of the static struct
+ * whose first qword is the CRITICAL_SECTION pointer (VK RVA 0x5D79238, GL
+ * 0x467E8B8 on 13954591); the section is recursive on one thread. */
+static void *volatile g_res_lock;
+
+void sh_modserve_set_resource_lock(void *lock) { InterlockedExchangePointer((PVOID volatile *)&g_res_lock, lock); }
+
+static CRITICAL_SECTION *ms_res_lock(void)
+{
+    void *lk = InterlockedCompareExchangePointer((PVOID volatile *)&g_res_lock, NULL, NULL);
+    CRITICAL_SECTION *cs = NULL;
+    if (!lk) return NULL;
+    __try { cs = *(CRITICAL_SECTION *const *)lk; } __except (EXCEPTION_EXECUTE_HANDLER) { cs = NULL; }
+    return cs;
+}
+
 static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists)
 {
     int ok = 0;
     unsigned nl = 0;
+    CRITICAL_SECTION *cs;
     if (lists) *lists = 0;
     if (!head_slot) return 0;
+    cs = ms_res_lock();
+    if (cs) EnterCriticalSection(cs);
     __try {
         const unsigned char *l = *(const unsigned char *const *)head_slot;
         size_t total = 0;
@@ -3224,6 +3820,7 @@ static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsig
         }
         ok = !l;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (cs) LeaveCriticalSection(cs);
     if (lists) *lists = nl;
     return ok;
 }
@@ -3306,21 +3903,41 @@ int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_waterma
 }
 
 /* Every resource the engine's lists hold: fn(context, list class, resource, name). */
-typedef struct ms_each_res { sh_modserve_resource_fn fn; void *context; } ms_each_res;
+/* Collected under the lock; the callback (a reload, a re-parse) runs after it
+ * is released, since GenericLoad under the lock was not analysed (ADD-G3). */
+typedef struct ms_res_item { const char *list; void *res; const char *name; } ms_res_item;
+typedef struct ms_res_items { ms_res_item *v; size_t n, cap; int oom; } ms_res_items;
 static void ms_each_res_one(void *context, const unsigned char *list, unsigned char *res)
 {
-    ms_each_res *e = (ms_each_res *)context;
+    ms_res_items *c = (ms_res_items *)context;
     const char *ln = *(const char *const *)(list + MS_RL_NAME), *rn = *(const char *const *)(res + 8);
-    if (rn) e->fn(e->context, ln, res, rn);
+    if (!rn || c->oom) return;
+    if (c->n == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 1024;
+        ms_res_item *v = (ms_res_item *)realloc(c->v, cap * sizeof *v);
+        if (!v) { c->oom = 1; return; }
+        c->v = v;
+        c->cap = cap;
+    }
+    c->v[c->n].list = ln;
+    c->v[c->n].res = res;
+    c->v[c->n].name = rn;
+    c->n++;
 }
 
 int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context)
 {
-    ms_each_res e;
+    ms_res_items c;
+    size_t i;
+    int ok;
     if (!fn) return 0;
-    e.fn = fn;
-    e.context = context;
-    return ms_res_walk(head_slot, ms_each_res_one, &e, NULL);
+    memset(&c, 0, sizeof c);
+    ok = ms_res_walk(head_slot, ms_each_res_one, &c, NULL) && !c.oom;
+    __try {
+        for (i = 0; i < c.n; ++i) fn(context, c.v[i].list, c.v[i].res, c.v[i].name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    free(c.v);
+    return ok;
 }
 
 int sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource)
@@ -4233,14 +4850,20 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
     int i, at = -1;
     if (out) memset(out, 0, sizeof *out);
     if (!x) return 0;
-    if (bundle_hash && (at = ms_bundle_by_hash(x, bundle_hash, 1)) >= 0) id = x->bundles[at].id;
-    if (!id || strlen(id) > SH_MB_ID_MAX) return 0;
-    strcpy_s(lower, sizeof lower, id);
-    ms_lower(lower);
-    for (i = 0; i < x->nbundles; ++i) {
-        const ms_bundle *b = &x->bundles[i];
-        if (!b->admitted || !b->id || strcmp(b->id, lower)) continue;
-        if (at < 0 || ms_newer(x, i, at)) at = i;
+    /* A hash pins its build (DESIGN-additive 2.5): that bundle, or an alias
+     * of it, or nothing; another build of the key never answers for it. */
+    if (bundle_hash && bundle_hash[0]) {
+        at = ms_bundle_by_hash(x, bundle_hash, 1);
+        if (at < 0) return 0;
+    } else {
+        if (!id || strlen(id) > SH_MB_ID_MAX) return 0;
+        strcpy_s(lower, sizeof lower, id);
+        ms_lower(lower);
+        for (i = 0; i < x->nbundles; ++i) {
+            const ms_bundle *b = &x->bundles[i];
+            if (!b->admitted || !b->id || strcmp(b->id, lower)) continue;
+            if (at < 0 || ms_newer(x, i, at)) at = i;
+        }
     }
     if (at < 0) return 0;
     if (out) {
@@ -4289,15 +4912,45 @@ static int ms_row_name_resolves(const ms_index *x, const char *lower)
     return x->slots && ms_find(x->slots, x->mask, lower) >= 0;
 }
 
-/* The asset rule (modserve.h): a row is served when an admitted bundle
- * declares its id and every name it lists resolves to an admitted bundle,
- * whichever one provides it. The bundle hash is not consulted. */
+/* 1 when bundle `b` carries `lower` (a placed name or a request path). */
+static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
+{
+    int k;
+    char key[MS_NAME_MAX];
+    const ms_bundle *bd = &x->bundles[b];
+    int model = sh_mb_model_key(lower, key, sizeof key);
+    if (model) ms_lower(key);
+    for (k = bd->first_file; k < bd->first_file + bd->file_count; ++k) {
+        const ms_file *f = &x->files[k];
+        if ((f->pname && !strcmp(f->pname, lower)) || !strcmp(f->request, lower)) return 1;
+        if (model && !strcmp(f->request, key)) return 1;
+    }
+    return 0;
+}
+
+/* The newest admitted build of `id` (lowercase) other than `not`, or -1. */
+static int ms_other_build(const ms_index *x, const char *id, int not)
+{
+    int i, at = -1;
+    for (i = 0; x && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (i == not || !b->admitted || !b->id || strcmp(b->id, id)) continue;
+        if (at < 0 || ms_newer(x, i, at)) at = i;
+    }
+    return at;
+}
+
+/* The asset rule (modserve.h): a row is served by the installed folder at the
+ * row's hash (or an alias of it) when every name it lists resolves, in that
+ * build or through the serving index. A folder of the key at another hash is
+ * another build: the row is missing, worded "installed at another build", and
+ * the published-map hold fetches the row's own build by hash. */
 int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     const ms_index *x = g_index;
     char id[SH_MB_ID_MAX + 1], title[300], missing[600];
     const char *what = subject && subject[0] ? subject : "map";
-    int i, declared = -1, skipped = -1, absent = 0;
+    int i, declared = -1, skipped = -1, other = -1, absent = 0;
     size_t k, w = 0;
     if (cause && cap) cause[0] = 0;
     if (!row || !row->id[0] || strlen(row->id) > SH_MB_ID_MAX) return SH_MODSERVE_ROW_MISSING;
@@ -4306,21 +4959,29 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
     if (ms_editor_only_recorded(x, row->bundle)) return SH_MODSERVE_ROW_SERVED;
     strcpy_s(id, sizeof id, row->id);
     ms_lower(id);
-    for (i = 0; x && i < x->nbundles; ++i) {
+    if (x && row->bundle[0]) declared = ms_bundle_by_hash(x, row->bundle, 1);
+    if (x && declared < 0 && row->bundle[0]) skipped = ms_bundle_by_hash(x, row->bundle, 0);
+    for (i = 0; x && skipped < 0 && declared < 0 && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
-        if (!b->id || strcmp(b->id, id)) continue;
-        if (b->admitted) { if (declared < 0 || ms_newer(x, i, declared)) declared = i; }
-        else if (skipped < 0) skipped = i;
+        if (b->id && !strcmp(b->id, id) && !b->admitted) skipped = i;
     }
+    if (declared < 0) other = ms_other_build(x, id, -1);
     {
-        const ms_bundle *b = declared >= 0 ? &x->bundles[declared] : skipped >= 0 ? &x->bundles[skipped] : NULL;
+        const ms_bundle *b = declared >= 0 ? &x->bundles[declared] : other >= 0 ? &x->bundles[other] :
+                             skipped >= 0 ? &x->bundles[skipped] : NULL;
         if (b && b->name && b->name[0] && _stricmp(b->name, row->id))
             _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", b->name, row->id);
         else strncpy_s(title, sizeof title, row->id, _TRUNCATE);
     }
     if (declared < 0) {
         if (cause && cap) {
-            if (skipped >= 0)
+            if (skipped >= 0 && x->bundles[skipped].hash && !_stricmp(x->bundles[skipped].hash, row->bundle))
+                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
+                            title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
+            else if (other >= 0)
+                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s at build %.16s, which is not installed; %s is "
+                            "installed at another build (%.16s).", what, title, row->bundle, row->id, x->bundles[other].hash);
+            else if (skipped >= 0)
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
             else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
@@ -4333,7 +4994,7 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
         if (!row->names || !row->names[k] || !row->names[k][0] || strlen(row->names[k]) >= sizeof lower) continue;
         strcpy_s(lower, sizeof lower, row->names[k]);
         ms_lower(lower);
-        if (ms_row_name_resolves(x, lower)) continue;
+        if (ms_bundle_carries(x, declared, lower) || ms_row_name_resolves(x, lower)) continue;
         if (absent < 3) {
             int n = _snprintf_s(missing + w, sizeof missing - w, _TRUNCATE, "%s%s", absent ? ", " : "", row->names[k]);
             if (n > 0) w += (size_t)n;
@@ -4355,6 +5016,37 @@ int sh_modserve_row_served(const sh_modmanifest_row *row, char *cause, size_t ca
     return sh_modserve_row_served_for(row, "map", cause, cap);
 }
 
+int sh_modserve_row_other_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
+{
+    const ms_index *x = g_index;
+    char id[SH_MB_ID_MAX + 1];
+    int at;
+    if (out) memset(out, 0, sizeof *out);
+    if (!x || !row || !row->id[0] || strlen(row->id) > SH_MB_ID_MAX) return 0;
+    if (row->bundle[0] && ms_bundle_by_hash(x, row->bundle, 1) >= 0) return 0;
+    strcpy_s(id, sizeof id, row->id);
+    ms_lower(id);
+    if ((at = ms_other_build(x, id, -1)) < 0) return 0;
+    if (out) {
+        const ms_bundle *b = &x->bundles[at];
+        strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
+        strncpy_s(out->version, sizeof out->version, b->version ? b->version : "", _TRUNCATE);
+        strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
+        out->size = (unsigned long long)b->total;
+    }
+    return 1;
+}
+
+/* A served file, as the open map serves its path: the build the map declares
+ * among several of one key (ms_scope_compute), else the static winner. */
+static int ms_scoped_or(const ms_index *x, int f)
+{
+    int g;
+    if (f < 0) return f;
+    g = ms_scoped(x, f);
+    return g >= 0 ? g : f;
+}
+
 int modserve_bundles_for_names(const char *const *names, int n_names,
                                char (*out_hashes)[SH_MODSERVE_HASH_HEX + 1], int cap)
 {
@@ -4372,7 +5064,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
-        f = ms_name_file(x, lower);
+        f = ms_scoped_or(x, ms_name_file(x, lower));
         if (f >= 0 && ms_editor_shadow(&x->files[f])) continue;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
@@ -4384,7 +5076,7 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
             found++;
         }
         for (k = 0; k < f->need_count; ++k) {
-            int p = x->needs[f->need_first + k].file;
+            int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
             if (p >= 0 && !seen_file[p]) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
@@ -4412,7 +5104,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
-        f = ms_name_file(x, lower);
+        f = ms_scoped_or(x, ms_name_file(x, lower));
         if (f < 0 || ms_editor_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, names[i]);
@@ -4429,7 +5121,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
             visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, NULL);
         }
         for (k = 0; k < f->need_count; ++k) {
-            int p = x->needs[f->need_first + k].file;
+            int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
             if (p >= 0 && !seen_file[p]) { seen_file[p] = 1; queue[nq++] = p; }
         }
     }
@@ -4475,7 +5167,9 @@ int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out)
     c = (const ms_conflict *)bsearch(&k, x->conflict_list, (size_t)x->nconflict_list, sizeof *c, ms_conflict_cmp);
     if (!c) return 0;
     if (out) {
-        f = &x->files[c->winner];
+        int p = ms_scoped(x, c->winner);
+        f = &x->files[p >= 0 ? p : c->winner];
+        out->game = p < 0;
         out->request = c->request;
         out->providers = c->providers ? c->providers : "";
         out->reason = c->reason ? c->reason : "";
@@ -4483,7 +5177,11 @@ int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out)
         out->served_version = x->bundles[f->bundle].version;
         out->served_hash = x->bundles[f->bundle].hash;
         out->count = c->count;
-        out->composed = c->composed;
+        if (sh_modserve_scope_enabled()) {
+            size_t blen = 0;
+            out->composed = p >= 0 && ms_body_of(f, &blen) != NULL;
+            if (p >= 0) out->reason = g_why_text[x->files[c->winner].scope_why];
+        } else out->composed = c->composed;
         out->withdrawn = f->withdrawn != 0;
     }
     return 1;
@@ -4755,6 +5453,9 @@ static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_r
     sh_modserve_refresh_item it;
     int eff = ms_scoped(x, (int)(f - x->files));
     const ms_file *ef = eff >= 0 ? &x->files[eff] : f;   /* the provider serving the path for the open map */
+    /* A name no bundle serves for the open map has no game bytes to go back
+     * to: the engine keeps what it parsed until a map serves the name again. */
+    if (eff < 0 && !f->is_shadow) return 0;
     it.type = f->ptype; it.name = f->pname; it.request = f->request; it.bundle_id = x->bundles[ef->bundle].id;
     /* A shadow the map scope withdrew goes back to the game's bytes, which need no gate. */
     it.kind = kind; it.shadow = f->is_shadow;
@@ -4871,6 +5572,7 @@ int sh_modserve_refresh_editor_pending(void)
         /* An item waiting for its bundle's gates is not applied now either. */
         eff = ms_scoped(x, i);
         if (eff >= 0 && !ms_gates_ok(x, &x->files[eff])) continue;
+        if (eff < 0 && !f->is_shadow) continue;   /* a withdrawn name waits for a map that serves it */
         n++;
     }
     return n;
