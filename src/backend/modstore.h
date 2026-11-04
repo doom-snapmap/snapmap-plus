@@ -3,7 +3,9 @@
  *   <folder>\mod.json            the author block and the product block (modbundle.h)
  *   <folder>\assets\...          the mod's files, real files only (no links, no blob store)
  *   snapmap-plus.json            the product record (modbundle.h): claims, links,
- *                                the migration record, the build cache, aliases
+ *                                the migration record, the build cache, aliases,
+ *                                the last good build snapshots
+ *   .builds\<key>@<hash16>\      a folder's last good build (below): never a mod folder
  *
  * A folder is a mod when it holds mod.json (or, before its first build,
  * package.json). Folder names are the author's for a folder dropped in by
@@ -80,6 +82,12 @@ typedef struct sh_ms_entry {
      * cause. The bundle above, the last good build, keeps serving
      * (DESIGN-additive 2.8); "" when the latest build succeeded or none ran. */
     char  build_failed[SH_MB_CAUSE_MAX];
+    /* The snapshot of the bundle above (sh_ms_snapshot_of), absolute UTF-8,
+     * when one is complete; else NULL. While build_failed is set, the folder's
+     * own files may hold other bytes: the last good bytes are read from here
+     * (bundle.json and assets\ at each file's path), and sizes_ok was checked
+     * against it. */
+    char *snapshot;
     sh_mb_bundle bundle;
 } sh_ms_entry;
 
@@ -213,7 +221,8 @@ typedef struct sh_ms_sync_stats {
 int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
 
 /* The first cause of the last refused build of `folder` in this process, or
- * "" (sh_ms_sync and installs record it; enumeration reports it). */
+ * "" (sh_ms_sync and installs record it; enumeration reports it, with the
+ * snapshot that serves meanwhile in sh_ms_entry.snapshot). */
 void sh_ms_build_cause(const char *folder, char *out, size_t cap);
 
 /* Record a refused build of `folder` (absolute) that a caller ran itself
@@ -234,6 +243,30 @@ int  sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folde
 /* Record `folder` (absolute) as built from its current tree: cache[tree] =
  * bundle hash. Returns 1 on success. */
 int  sh_ms_cache_note(const char *folder, const char *bundle_hash);
+
+/* Last good build (DESIGN-additive 2.8). Every successful build of a store
+ * folder (sh_ms_note_build, an install, a sync that finds a current folder
+ * without one) keeps a snapshot of its carried files, never its stock
+ * pointers, each copy checked against the build:
+ *
+ *   mods\.builds\<key>@<first 16 hex of the bundle hash>\bundle.json
+ *       the folder's mod.json as that build wrote it (author and product
+ *       block; sh_mb_load_text gives the same bundle hash)
+ *   mods\.builds\<key>@<hash16>\assets\...
+ *       every carried file at its "path" from the product block
+ *
+ * The record's "snapshots" section maps each folder's name under mods\ to
+ * its one snapshot name. The next successful build replaces it, removing
+ * the previous one unless another folder's row names it; uninstall
+ * (sh_ms_delete_mod_folder, sh_ms_remove_folder) removes it; a sync removes
+ * rows of folders that are gone and snapshots no row names. ".builds" starts
+ * with '.', so no scan of the store enters it.
+ *
+ * sh_ms_snapshot_of: 1 with the absolute folder of `folder`'s complete
+ * snapshot (it holds bundle.json), else 0. sh_ms_entry.snapshot is the same
+ * path when the snapshot is of the entry's own bundle. */
+#define SH_MS_BUILDS_DIR ".builds"
+int  sh_ms_snapshot_of(const char *folder, char *out, size_t cap);
 
 typedef struct sh_ms_upgrade_stats {
     int ran;                    /* the retired layout was found */

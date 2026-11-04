@@ -6,7 +6,9 @@
  *   sh_mods palette rebuild        add editor rows of bundles indexed after the first palette build
  *   sh_mods build "<folder>"       build and validate a mod, write mod.json's product block
  *   sh_mods install "<folder>"     build, copy into the store as mods\<id>, verify, rescan
- *   sh_mods list                   mod folders in the store and their state
+ *   sh_mods list                   mod folders in the store and their state (a failed rebuild:
+ *                                  the cause and the last good build serving, from its snapshot)
+ *   sh_mods new "<name>"           make mods\<key>\ for a new mod under a generated key (modstore.h)
  *   sh_mods doctor [verify]        what the Mods tab does not show: every bundle's state and
  *                                  cause, duplicate ids, migration, conflicts with their
  *                                  winners, shadows; `verify` rehashes every build
@@ -62,7 +64,8 @@
                            "does it (one undo step), 'sh_mods uninstall \"<id>\"' prints what uninstalling does (the open map " \
                            "cleaned of it, its undo history cleared, its Toybox rows, its folder moved to the Windows Recycle Bin) and '--yes' " \
                            "does it, 'sh_mods rebuild \"<folder>\"' " \
-                           "builds a mod folder again and rescans."
+                           "builds a mod folder again and rescans, 'sh_mods new \"<name>\"' makes a new mod's folder " \
+                           "under a generated key (its files go under assets\\mods\\<key>\\)."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
                              "'sh_mods pull \"<bundle hash>\"' downloads and installs one, 'sh_mods release \"<ref>\"' drops " \

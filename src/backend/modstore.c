@@ -394,6 +394,7 @@ static BOOL ms_move_folder(const wchar_t *from, const wchar_t *to)
 
 static int ms_exists(const wchar_t *path);
 static int ms_is_dir(const wchar_t *path);
+static void ms_snapshot_drop(const char *folder);
 
 #if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
 static volatile LONG g_ms_recycle_refused;
@@ -468,6 +469,7 @@ int sh_ms_remove_folder(const char *folder)
     w = folder ? sh_mb_wpath(folder) : NULL;
     if (root && w) r = ms_retire(w, root, why, sizeof why);
     ms_log_discard(folder, r, why);
+    if (r) ms_snapshot_drop(folder);
     free(root);
     free(w);
     modstore_unlock();
@@ -491,6 +493,7 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
         ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_rel(folder), GetLastError());
     else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
     ms_log_discard(folder, r, why);
+    if (r) ms_snapshot_drop(folder);
     free(root);
     free(w);
     modstore_unlock();
@@ -764,6 +767,325 @@ void sh_ms_build_cause(const char *folder, char *out, size_t cap)
     modstore_unlock();
 }
 
+/* ------------------------------------------- last good build snapshot ---- */
+/* DESIGN-additive 2.8. An author edits files in place, so the product block
+ * alone cannot serve the last good build after a refused rebuild: the bytes
+ * it names may be gone. Each successful build of a store folder therefore
+ * keeps a copy of its carried files (never stock pointers) and of the
+ * mod.json it wrote:
+ *
+ *   mods\.builds\<key>@<hash16>\bundle.json      the folder's mod.json at that build
+ *   mods\.builds\<key>@<hash16>\assets\...       every carried file, at its path
+ *
+ * The record's "snapshots" section maps each folder (its name under mods\)
+ * to its one snapshot ("<key>@<hash16>"). The next successful build replaces
+ * it; uninstall removes it; a snapshot no row names is removed by the next
+ * sync. Two folders that build to one hash share one snapshot. */
+
+#define MS_BUILDS L"" SH_MS_BUILDS_DIR
+#define MS_SNAP_SECTION "snapshots"
+
+/* "<key>@<first 16 hex of the bundle hash>". */
+static int ms_snap_name(const sh_mb_bundle *b, char *out, size_t cap)
+{
+    if (!b || !b->id[0] || strlen(b->hash) < 16) return 0;
+    return _snprintf_s(out, cap, _TRUNCATE, "%s@%.16s", b->id, b->hash) > 0;
+}
+
+/* <root>\.builds\<name> (malloc'd), or NULL. */
+static wchar_t *ms_snap_dir(const wchar_t *root, const char *name)
+{
+    wchar_t *builds = ms_wjoin(root, MS_BUILDS), *dir;
+    if (!builds) return NULL;
+    dir = name ? ms_wjoin_utf8(builds, name) : NULL;
+    free(builds);
+    return dir;
+}
+
+static void ms_snap_read(sh_json_object *o)
+{
+    char root[MAX_PATH * 4], *text = NULL;
+    memset(o, 0, sizeof *o);
+    if (sh_ms_root(root, sizeof root) && sh_mb_record_get(root, MS_SNAP_SECTION, &text) == 1 && text)
+        sh_json_parse_object(text, strlen(text), 4, o);
+    free(text);
+}
+
+/* The snapshot name a row of `o` gives folder `rel` (case-insensitive), in out. */
+static int ms_snap_row(const sh_json_object *o, const char *rel, char *out, size_t cap)
+{
+    size_t i;
+    for (i = 0; i < o->count; i++) {
+        const char *v = o->members[i].value_json;
+        size_t n;
+        if (_stricmp(o->members[i].key, rel) || !v || v[0] != '"') continue;
+        n = strlen(v);
+        if (n < 3 || v[n - 1] != '"' || n - 2 >= cap) return 0;
+        memcpy(out, v + 1, n - 2);
+        out[n - 2] = 0;
+        return strchr(out, '\\') == NULL && strchr(out, '/') == NULL && strstr(out, "..") == NULL;
+    }
+    return 0;
+}
+
+/* Whether a row other than `except` names snapshot `name`. */
+static int ms_snap_named(const sh_json_object *o, const char *name, const char *except)
+{
+    char got[SH_MB_ID_MAX + 24];
+    size_t i;
+    for (i = 0; i < o->count; i++) {
+        if (except && !_stricmp(o->members[i].key, except)) continue;
+        if (ms_snap_row(o, o->members[i].key, got, sizeof got) && !_stricmp(got, name)) return 1;
+    }
+    return 0;
+}
+
+/* Write `o` with the row of `rel` set to `name` (NULL removes it). */
+static int ms_snap_write(const sh_json_object *o, const char *rel, const char *name)
+{
+    char root[MAX_PATH * 4], value[SH_MB_ID_MAX + 32], *out;
+    sh_json_object next;
+    size_t i;
+    int ok = 0;
+    if (!sh_ms_root(root, sizeof root)) return 0;
+    memset(&next, 0, sizeof next);
+    for (i = 0; i < o->count; i++) {
+        if (rel && !_stricmp(o->members[i].key, rel)) continue;
+        if (!sh_json_object_set(&next, o->members[i].key, o->members[i].value_json, 4)) goto done;
+    }
+    if (rel && name) {
+        _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", name);
+        if (!sh_json_object_set(&next, rel, value, 4)) goto done;
+    }
+    if (!next.count) ok = sh_mb_record_put(root, MS_SNAP_SECTION, NULL);
+    else if ((out = sh_json_serialize_object(&next, 0, NULL)) != NULL) {
+        ok = sh_mb_record_put(root, MS_SNAP_SECTION, out);
+        free(out);
+    }
+done:
+    sh_json_object_free(&next);
+    return ok;
+}
+
+/* Copy the carried files of `b` from `folder` into `staging` and its mod.json
+ * as bundle.json, each copy checked against the build (a file edited since
+ * the build fails the snapshot). Returns the files copied, -1 on failure. */
+static int ms_snap_fill(const wchar_t *folder, const wchar_t *staging, const sh_mb_bundle *b, char *why, size_t cap)
+{
+    wchar_t *from, *to;
+    char *text;
+    size_t i, len = 0;
+    int copied = 0;
+    sh_mb_bundle back;
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        char sha[SH_MB_HASH_HEX + 1];
+        unsigned long long size = 0;
+        int ok;
+        if (f->stock) continue;   /* a pointer carries nothing */
+        from = ms_wjoin_utf8(folder, f->path);
+        to = ms_wjoin_utf8(staging, f->path);
+        ok = from && to && sh_ms_copy_file(from, to) && ms_hash_wfile(to, &size, sha) && size == f->size &&
+             !_stricmp(sha, f->blob);
+        free(from);
+        free(to);
+        if (!ok) { ms_cause(why, cap, "%s changed since the build or could not be copied", f->path); return -1; }
+        copied++;
+    }
+    from = ms_wjoin(folder, L"mod.json");
+    text = from ? ms_read_text(from, 16u << 20, &len) : NULL;
+    free(from);
+    memset(&back, 0, sizeof back);
+    if (!text || !sh_mb_load_text(text, len, &back) || _stricmp(back.hash, b->hash)) {
+        free(text);
+        sh_mb_free(&back);
+        ms_cause(why, cap, "mod.json does not hold bundle %.16s", b->hash);
+        return -1;
+    }
+    sh_mb_free(&back);
+    to = ms_wjoin(staging, L"bundle.json");
+    if (!to || !ms_write_text(to, text, len)) { free(to); free(text); ms_cause(why, cap, "cannot write bundle.json"); return -1; }
+    free(to);
+    free(text);
+    return copied;
+}
+
+/* Keep `b` (just built and written to `folder`'s mod.json) as the folder's
+ * last good build. A folder outside the store keeps none. Returns 1 when the
+ * folder's row names a complete snapshot of `b`. */
+static int ms_snapshot_take(const char *folder, const sh_mb_bundle *b)
+{
+    char name[SH_MB_ID_MAX + 24], old[SH_MB_ID_MAX + 24], rel[SH_MS_NAME_MAX + 1], why[SH_MB_CAUSE_MAX] = "";
+    wchar_t *root = NULL, *wfolder = NULL, *dir = NULL, *staging = NULL;
+    sh_json_object rows;
+    int ok = 0, had_old, copied = 0;
+    const char *plain = ms_plain(folder);
+    rel[0] = 0;
+    if (!plain || !b || b->errors || !ms_snap_name(b, name, sizeof name)) return 0;
+    modstore_lock();
+    root = ms_wroot();
+    wfolder = sh_mb_wpath(plain);
+    if (!root || !wfolder || !ms_inside(wfolder, root)) goto out;
+    strncpy_s(rel, sizeof rel, ms_rel(plain), _TRUNCATE);
+    dir = ms_snap_dir(root, name);
+    if (!dir) goto out;
+    if (!ms_has_file(dir, L"bundle.json")) {
+        size_t n = wcslen(dir) + 32;
+        staging = (wchar_t *)malloc(sizeof(wchar_t) * n);
+        if (!staging) goto out;
+        _snwprintf_s(staging, n, _TRUNCATE, L"%s.staging-%lu", dir, GetCurrentProcessId());
+        if (ms_exists(staging)) ms_rmtree(staging, root);
+        if (ms_exists(dir)) ms_rmtree(dir, root);   /* an incomplete one */
+        if (!ms_mkdirs(staging)) { ms_cause(why, sizeof why, "cannot create it (error %lu)", GetLastError()); goto out; }
+        copied = ms_snap_fill(wfolder, staging, b, why, sizeof why);
+        if (copied < 0 || !ms_move_folder(staging, dir)) {
+            if (copied >= 0) ms_cause(why, sizeof why, "cannot place it (error %lu)", GetLastError());
+            ms_rmtree(staging, root);
+            goto out;
+        }
+    }
+    sh_mb_record_lock();
+    ms_snap_read(&rows);
+    had_old = ms_snap_row(&rows, rel, old, sizeof old);
+    if (had_old && !_stricmp(old, name)) ok = 1;
+    else if (ms_snap_write(&rows, rel, name)) {
+        ok = 1;
+        if (had_old && !ms_snap_named(&rows, old, rel)) {
+            wchar_t *prev = ms_snap_dir(root, old);
+            if (prev && ms_exists(prev)) ms_rmtree(prev, root);
+            free(prev);
+        }
+    }
+    sh_json_object_free(&rows);
+    sh_mb_record_unlock();
+    if (ok && staging)
+        ms_log("MODS: store: %s last good build kept as .builds\\%s (%d carried file(s))", rel, name, copied);
+out:
+    if (!ok && why[0]) ms_log("MODS: store: %s last good build not kept: %s", rel[0] ? rel : plain, why);
+    free(root);
+    free(wfolder);
+    free(dir);
+    free(staging);
+    modstore_unlock();
+    return ok;
+}
+
+/* Forget `folder`'s snapshot (uninstall, removal): its row goes, and the
+ * snapshot with it unless another folder's row names it. */
+static void ms_snapshot_drop(const char *folder)
+{
+    char rel[SH_MS_NAME_MAX + 1], old[SH_MB_ID_MAX + 24];
+    sh_json_object rows;
+    wchar_t *root;
+    const char *plain = ms_plain(folder);
+    if (!plain) return;
+    strncpy_s(rel, sizeof rel, ms_rel(plain), _TRUNCATE);
+    modstore_lock();
+    root = ms_wroot();
+    sh_mb_record_lock();
+    ms_snap_read(&rows);
+    if (root && ms_snap_row(&rows, rel, old, sizeof old) && ms_snap_write(&rows, rel, NULL) &&
+        !ms_snap_named(&rows, old, rel)) {
+        wchar_t *dir = ms_snap_dir(root, old);
+        if (dir && ms_exists(dir) && ms_rmtree(dir, root)) ms_log("MODS: store: %s last good build .builds\\%s removed", rel, old);
+        free(dir);
+    }
+    sh_json_object_free(&rows);
+    sh_mb_record_unlock();
+    free(root);
+    modstore_unlock();
+}
+
+/* After a sync: rows of folders that are gone, and snapshots (or staging
+ * copies) no row names, are removed. `present` holds every folder's name. */
+static void ms_snapshot_prune(const ms_found_list *present)
+{
+    sh_json_object rows, keep;
+    wchar_t *root, *builds, *pattern;
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t i, k;
+    modstore_lock();
+    root = ms_wroot();
+    builds = root ? ms_wjoin(root, MS_BUILDS) : NULL;
+    if (!builds || !ms_is_dir(builds)) { free(root); free(builds); modstore_unlock(); return; }
+    sh_mb_record_lock();
+    ms_snap_read(&rows);
+    memset(&keep, 0, sizeof keep);
+    for (i = 0; i < rows.count; i++) {
+        int found = 0;
+        for (k = 0; k < present->count && !found; k++) {
+            char *u = sh_mb_utf8(present->items[k].rel);
+            found = u && !_stricmp(u, rows.members[i].key);
+            free(u);
+        }
+        if (found) sh_json_object_set(&keep, rows.members[i].key, rows.members[i].value_json, 4);
+    }
+    if (keep.count != rows.count) {
+        char rootu[MAX_PATH * 4], *out = NULL;
+        if (sh_ms_root(rootu, sizeof rootu)) {
+            if (!keep.count) sh_mb_record_put(rootu, MS_SNAP_SECTION, NULL);
+            else if ((out = sh_json_serialize_object(&keep, 0, NULL)) != NULL) sh_mb_record_put(rootu, MS_SNAP_SECTION, out);
+        }
+        free(out);
+    }
+    pattern = ms_wjoin(builds, L"*");
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char *leaf;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            leaf = sh_mb_utf8(fd.cFileName);
+            if (leaf && !ms_snap_named(&keep, leaf, NULL)) {
+                wchar_t *child = ms_wjoin(builds, fd.cFileName);
+                if (child) {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ms_rmtree(child, root);
+                    else ms_delete_file(child);
+                    ms_log("MODS: store: last good build .builds\\%s removed (no folder names it)", leaf);
+                }
+                free(child);
+            }
+            free(leaf);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    sh_json_object_free(&rows);
+    sh_json_object_free(&keep);
+    sh_mb_record_unlock();
+    if (ms_is_dir(builds)) RemoveDirectoryW(builds);   /* only when empty */
+    free(root);
+    free(builds);
+    modstore_unlock();
+}
+
+int sh_ms_snapshot_of(const char *folder, char *out, size_t cap)
+{
+    char rel[SH_MS_NAME_MAX + 1], name[SH_MB_ID_MAX + 24];
+    sh_json_object rows;
+    wchar_t *root, *dir = NULL;
+    char *u = NULL;
+    int ok = 0;
+    const char *plain = ms_plain(folder);
+    if (out && cap) out[0] = 0;
+    if (!plain || !out || !cap) return 0;
+    strncpy_s(rel, sizeof rel, ms_rel(plain), _TRUNCATE);
+    root = ms_wroot();
+    sh_mb_record_lock();
+    ms_snap_read(&rows);
+    if (root && ms_snap_row(&rows, rel, name, sizeof name) && (dir = ms_snap_dir(root, name)) != NULL &&
+        ms_has_file(dir, L"bundle.json") && (u = sh_mb_utf8(dir)) != NULL) {
+        strncpy_s(out, cap, ms_plain(u), _TRUNCATE);
+        ok = 1;
+    }
+    sh_json_object_free(&rows);
+    sh_mb_record_unlock();
+    free(u);
+    free(dir);
+    free(root);
+    return ok;
+}
+
 /* ------------------------------------------------------- enumeration ---- */
 
 int sh_ms_entry_usable(const sh_ms_entry *e)
@@ -806,6 +1128,7 @@ void sh_ms_list_free(sh_ms_list *l)
     for (i = 0; i < l->count; i++) {
         sh_mb_free(&l->items[i].bundle);
         free(l->items[i].folder);
+        free(l->items[i].snapshot);
     }
     free(l->items);
     free(l->aliases);
@@ -821,10 +1144,12 @@ static int ms_has_descriptor(const wchar_t *folder)
     return has;
 }
 
-static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *leaf)
+static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *leaf, const sh_json_object *snaps)
 {
     sh_ms_entry *e;
-    char *u;
+    char *u, name[SH_MB_ID_MAX + 24], want[SH_MB_ID_MAX + 24];
+    const wchar_t *base = folder;
+    wchar_t *snapw = NULL;
     size_t i;
     if (!ms_has_descriptor(folder)) return;
     e = ms_add_entry(l);
@@ -851,6 +1176,20 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     _snprintf_s(e->key, sizeof e->key, _TRUNCATE, "%s@%s+%llu", e->bundle.id, e->bundle.version, e->bundle.build);
     /* A rebuild that failed leaves this (the last good) build serving. */
     sh_ms_build_cause(e->folder, e->build_failed, sizeof e->build_failed);
+    /* Its snapshot: the row of this folder naming this very build, complete. */
+    if (snaps && ms_snap_name(&e->bundle, want, sizeof want) && ms_snap_row(snaps, e->name, name, sizeof name) &&
+        !_stricmp(name, want)) {
+        wchar_t *root = ms_wroot();
+        snapw = root ? ms_snap_dir(root, name) : NULL;
+        free(root);
+        if (snapw && ms_has_file(snapw, L"bundle.json") && (u = sh_mb_utf8(snapw)) != NULL) {
+            e->snapshot = _strdup(ms_plain(u));
+            free(u);
+        }
+    }
+    /* While the folder's build is failed the snapshot serves, so its files
+     * are the ones checked. */
+    if (e->build_failed[0] && e->snapshot) base = snapw;
     e->delivered = e->bundle.delivered;
     e->validated = e->bundle.validated;
     e->installed_at = e->bundle.built;
@@ -860,7 +1199,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
         wchar_t *p;
         int present;
         if (e->bundle.files[i].stock) continue;   /* installed content: checked at install and verify */
-        p = ms_wjoin_utf8(folder, e->bundle.files[i].path);
+        p = ms_wjoin_utf8(base, e->bundle.files[i].path);
         present = p && ms_file_size(p, &size);
         free(p);
         if (!present || size != e->bundle.files[i].size) {
@@ -873,6 +1212,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     if (!e->validated && e->sizes_ok)
         strncpy_s(e->cause, sizeof e->cause, e->bundle.state_cause[0] ? e->bundle.state_cause : "failed verification",
                   _TRUNCATE);
+    free(snapw);
 }
 
 static int ms_is_hash(const char *h)
@@ -983,7 +1323,14 @@ int sh_ms_enumerate(sh_ms_list *out)
     if (!ms_exists(root)) { free(root); return 1; }
     memset(&found, 0, sizeof found);
     ms_find_mods(&found, root, L"", 0);
-    for (i = 0; i < found.count; i++) ms_load_entry(out, found.items[i].folder, found.items[i].rel);
+    {
+        sh_json_object snaps;
+        sh_mb_record_lock();
+        ms_snap_read(&snaps);
+        sh_mb_record_unlock();
+        for (i = 0; i < found.count; i++) ms_load_entry(out, found.items[i].folder, found.items[i].rel, &snaps);
+        sh_json_object_free(&snaps);
+    }
     ms_found_free(&found);
     free(root);
     if (out->count > 1) qsort(out->items, out->count, sizeof(sh_ms_entry), ms_entry_cmp);
@@ -1101,6 +1448,7 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
     ms_note_cause(folder, NULL);   /* a build succeeded: no earlier failure stands */
     ok = sh_ms_cache_note(folder, b->hash);
     if (b->prev_hash[0] && _stricmp(b->prev_hash, b->hash)) sh_ms_alias_note(b->prev_hash, b->hash);
+    ms_snapshot_take(folder, b);   /* the folder's last good build from now on */
     return ok;
 }
 
@@ -1597,7 +1945,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     }
     {
         char *fu = sh_mb_utf8(final);
-        if (fu) { sh_ms_cache_note(fu, b.hash); ms_note_cause(fu, NULL); free(fu); }
+        if (fu) { sh_ms_cache_note(fu, b.hash); ms_note_cause(fu, NULL); ms_snapshot_take(fu, &b); free(fu); }
     }
     ok = 1;
 done:
@@ -1645,11 +1993,19 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
             st->folders++;
             have[0] = 0;
             if (sh_mb_load_folder(folder, &b)) strcpy_s(have, sizeof have, b.hash);
-            sh_mb_free(&b);
-            if (!sh_mb_tree_hash(folder, tree)) { free(folder); continue; }
+            if (!sh_mb_tree_hash(folder, tree)) { sh_mb_free(&b); free(folder); continue; }
             cached = sh_json_object_get(&cache, tree);
             _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", have);
             current = have[0] && cached && !strcmp(cached, value);
+            /* A current folder built before snapshots existed (or whose
+             * snapshot went missing) gets one from its unchanged files. */
+            if (current) {
+                char snap[MAX_PATH * 4], want[SH_MB_ID_MAX + 24];
+                if (ms_snap_name(&b, want, sizeof want) &&
+                    (!sh_ms_snapshot_of(folder, snap, sizeof snap) || _stricmp(ms_leaf(snap), want)))
+                    ms_snapshot_take(folder, &b);
+            }
+            sh_mb_free(&b);
             if (!current) {
                 char cause[SH_MB_CAUSE_MAX];
                 ULONGLONG b0 = GetTickCount64();
@@ -1685,6 +2041,7 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
             free(folder);
         }
     }
+    ms_snapshot_prune(&found);
     ms_found_free(&found);
     if (next.count != cache.count) changed = 1;
     if (changed && (out = sh_json_serialize_object(&next, 0, NULL)) != NULL) {

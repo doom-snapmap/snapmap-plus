@@ -949,6 +949,26 @@ int main(int argc, char **argv)
     if (e) strcpy_s(d2, sizeof d2, e->bundle.hash);
     CHECK(strcmp(d1, d2) && alias_of(&list, d1) && !strcmp(alias_of(&list, d1), d2));
     CHECK(sh_ms_resolve(&list, d1) == e);
+    /* Snapshot: build 2's carried files and mod.json under .builds; build 1's
+     * snapshot was replaced; the entry names it. */
+    {
+        char s1[MAX_PATH * 2], s2[MAX_PATH * 2], got[MAX_PATH * 4];
+        char *t;
+        _snprintf_s(s1, sizeof s1, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d1);
+        _snprintf_s(s2, sizeof s2, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d2);
+        CHECK(!mt_exists(s1) && mt_has(s2, "bundle.json"));
+        t = slurp(s2, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl", NULL);
+        CHECK(t && strstr(t, "// edited"));
+        free(t);
+        t = slurp(s2, "bundle.json", NULL);
+        CHECK(t && strstr(t, d2));
+        free(t);
+        CHECK(sh_ms_snapshot_of(hand, got, sizeof got) && !_stricmp(got, s2));
+        CHECK(e && e->snapshot && !_stricmp(e->snapshot, s2));
+        t = slurp(root, "snapmap-plus.json", NULL);
+        CHECK(t && strstr(t, "\"snapshots\"") && strstr(t, "\"My Dropped Mod\""));
+        free(t);
+    }
     sh_ms_list_free(&list);
     /* Last good build: a refused rebuild leaves mod.json as it was, so build 2
      * keeps serving, and the failure with its cause is the folder's state. */
@@ -959,6 +979,9 @@ int main(int argc, char **argv)
         _snprintf_s(before, sizeof before, _TRUNCATE, "%s\\mod.json", hand);
         t1 = sh_mb_read_file(before, 1 << 20, &n1);
         mt_write(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl", "{\r\n}");
+        /* the author also edits a carried file in place, to another size */
+        mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
+                 "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// half-way through an edit\r\n}");
         g_logged = 0;
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
         CHECK(log_has("My Dropped Mod build failed: ") && log_has("; serving the last good build (bundle "));
@@ -971,10 +994,23 @@ int main(int argc, char **argv)
     e = find_entry(&list, "My Dropped Mod");
     CHECK(e && sh_ms_entry_usable(e) && e->bundle.build == 2 && !strcmp(e->bundle.hash, d2) && !e->cause[0]);
     CHECK(e && strstr(e->build_failed, "outside mods/alex.dropped/"));
+    /* The failed folder points at its snapshot, which still holds build 2's
+     * bytes (the sizes were checked there, not in the edited folder). */
+    {
+        char s2[MAX_PATH * 2];
+        char *t;
+        _snprintf_s(s2, sizeof s2, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d2);
+        CHECK(e && e->snapshot && !_stricmp(e->snapshot, s2));
+        t = slurp(s2, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl", NULL);
+        CHECK(t && strstr(t, "// edited") && !strstr(t, "half-way"));
+        free(t);
+    }
     sh_ms_list_free(&list);
     /* The failure is asked again at every rescan until a build succeeds. */
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1 && ss.rebuilt == 0);
     mt_delete(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl");
+    mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
+             "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited\r\n}");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "My Dropped Mod");
@@ -1010,6 +1046,13 @@ int main(int argc, char **argv)
         strcpy_s(d3, sizeof d3, e->bundle.hash);
     }
     sh_ms_list_free(&list);
+    /* Build 3 replaced build 2's snapshot. */
+    {
+        char s2[MAX_PATH * 2], s3[MAX_PATH * 2];
+        _snprintf_s(s2, sizeof s2, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d2);
+        _snprintf_s(s3, sizeof s3, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d3);
+        CHECK(!mt_exists(s2) && mt_has(s3, "bundle.json"));
+    }
     /* sh_mods install of a store folder builds it in place. */
     CHECK(sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     CHECK(st.in_place && !strcmp(key, "My Dropped Mod"));
@@ -1037,8 +1080,15 @@ int main(int argc, char **argv)
         CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.id, nk) && e->bundle.key_source == SH_MB_KEY_FROM_BLOCK &&
               !e->bundle.origin[0] && e->bundle.classes.adds == 1 && !strcmp(e->bundle.name, "Hell \"Guards\""));
         sh_ms_list_free(&list);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\%s", root, nk);
-        CHECK(sh_ms_remove_folder(rel));
+        {
+            char snap[MAX_PATH * 4];
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\%s", root, nk);
+            CHECK(sh_ms_snapshot_of(rel, snap, sizeof snap) && strstr(snap, "\\.builds\\") && mt_exists(snap));
+            CHECK(sh_ms_remove_folder(rel));
+            /* removal takes the snapshot with it */
+            CHECK(snap[0] && !mt_exists(snap));
+            CHECK(!sh_ms_snapshot_of(rel, snap, sizeof snap));
+        }
         CHECK(!sh_ms_new_mod("   ", nk, nf, sizeof nf, cause, sizeof cause) && strstr(cause, "needs a name"));
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     }

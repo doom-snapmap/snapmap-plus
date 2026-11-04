@@ -178,10 +178,15 @@ static void mc_build(const char *folder)
         if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
         mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
         /* The last good build stays in force: mod.json is not written. */
-        if (sh_mb_load_folder(folder, &last))
-            mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s)", folder, b.first_cause, last.build,
-                    last.hash);
-        else
+        if (sh_mb_load_folder(folder, &last)) {
+            char snap[MAX_PATH * 4];
+            if (mc_in_store(folder) && sh_ms_snapshot_of(folder, snap, sizeof snap))
+                mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s) from snapshot %s", folder,
+                        b.first_cause, last.build, last.hash, snap);
+            else
+                mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s)", folder, b.first_cause,
+                        last.build, last.hash);
+        } else
             mc_line("MODS: build %s: build failed: %s; no earlier build serves", folder, b.first_cause);
         sh_mb_free(&last);
         if (mc_in_store(folder)) sh_ms_note_build_failure(folder, b.first_cause);
@@ -290,7 +295,10 @@ static void mc_list(void)
                     e->delivered ? " (delivered by a map)" : "", e->bundle.hash, e->bundle.file_count,
                     e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
             mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (legacy)" : "", classes);
-            if (e->build_failed[0])
+            if (e->build_failed[0] && e->snapshot)
+                mc_line("MODS: list: mods\\%s  build failed: %s; serving build %llu from snapshot %s", e->name,
+                        e->build_failed, e->bundle.build, e->snapshot);
+            else if (e->build_failed[0])
                 mc_line("MODS: list: mods\\%s  build failed: %s; serving build %llu", e->name, e->build_failed,
                         e->bundle.build);
         } else

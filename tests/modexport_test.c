@@ -191,7 +191,7 @@ static int folder_count(const char *dir)
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..")) n++;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') n++;   /* mod folders: not ., .., .builds */
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return n;
