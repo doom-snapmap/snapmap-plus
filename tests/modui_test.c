@@ -1710,15 +1710,38 @@ int main(int argc, char **argv)
                 }
                 /* One that declares alex.req: exactly its row, whatever the editor shows. */
                 load_map_naming("alex.req", ref.hash);
+                /* The launch before reached its Play entry but never ran: this one replaces it. */
+                CHECK(!strcmp(sh_modui_test_launch_state(), "playing"));
                 (void)sh_modui_scope_launch("My Maps play");
                 CHECK(sh_modserve_scope_hashes(got, 8) == 1 && !_stricmp(got[0], ref.hash));
-                (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
-                CHECK(sh_modserve_scope_hashes(got, 8) == 1);
-                /* Its Play over, back at the hub: nothing is declared, in the editor mode. */
+                CHECK(!strcmp(sh_modui_test_launch_state(), "launched"));
+                /* The launch's rows hold until its Play has run and ended (ADD-V4a H2): an idle poll
+                 * between the gate and the level load is not the end of the Play. */
                 applies = g_scope_applies;
+                CHECK(sh_modui_poll_main(NULL) == 0);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1 && sh_modserve_scope_map_open() && g_scope_applies == applies);
+                CHECK(!strcmp(sh_modui_test_launch_state(), "launched"));
+                /* The level load. */
+                g_busy = "a map is loading (state 3); try again when it has loaded";
+                CHECK(sh_modui_poll_main(NULL) == 0 && !strcmp(sh_modui_test_launch_state(), "loading"));
+                g_busy = NULL;
+                CHECK(sh_modui_poll_main(NULL) == 0 && sh_modserve_scope_hashes(got, 8) == 1);
+                /* The Play-begin gate (SnapBuild): the launched Play is being built. */
+                (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1 && !strcmp(sh_modui_test_launch_state(), "playing"));
+                CHECK(sh_modui_poll_main(NULL) == 0 && sh_modserve_scope_hashes(got, 8) == 1);
+                /* Play runs. */
+                g_busy = "Play is running; return to the editor first";
+                CHECK(sh_modui_poll_main(NULL) == 0 && !strcmp(sh_modui_test_launch_state(), "running"));
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1 && g_scope_applies == applies);
+                g_busy = NULL;
+                /* The leave: its Play over, back at the hub: nothing is declared, in the editor mode. */
+                log_clear();
                 CHECK(sh_modui_poll_main(NULL) == 0);
                 CHECK(sh_modserve_scope_hashes(got, 8) == 0 && !sh_modserve_scope_map_open());
                 CHECK(!strcmp(g_scope_phase, "hub") && sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_EDITOR);
+                CHECK(has(g_logbuf, "scope: the launched map's Play is over; nothing is declared at the hub"));
+                CHECK(!strcmp(sh_modui_test_launch_state(), "none"));
                 CHECK(sh_modmanifest_current(&cur) == 0);
                 sh_modmanifest_list_free(&cur);
                 CHECK(sh_modui_poll_main(NULL) == 0 && g_scope_applies == applies + 1);   /* once */

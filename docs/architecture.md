@@ -1597,10 +1597,19 @@ launched map's rows and runs in PLAY mode: the launch boundary
 `sh_modui_scope_launch`, which lists the current manifest's rows (the launched
 map's parse made them current; the editor's exit cleared the editor map's),
 sets `SH_MODSERVE_MODE_PLAY` and applies it before the original launches, so
-an undeclared bundle serves nothing in the map. The tick waits out Play and
-loads, so its first pass at the hub after that Play clears the listing and the
-current rows and returns to EDITOR mode (`scope: the launched map's Play is
-over`); the editor's tick also sets EDITOR when the editor next shows a map,
+an undeclared bundle serves nothing in the map. The listing holds until that
+Play has run and ended, by a state machine in `modui.c` driven by the signals
+the product has: `launched` (the gate's `sh_modui_scope_launch`), `loading`
+(the tick's busy callback reported a load or Play), `playing` (the Play-begin
+gate, `sh_modserve_play_begin` from the SnapBuild detour, asked the scope
+source), `running` (busy again after that) and `ended` (the first idle tick
+after `running`). Only `ended` clears the listing and the current rows and
+returns to EDITOR mode (`scope: the launched map's Play is over`); an idle
+tick in any earlier state does nothing, since the gate runs at the launch's
+map parse and the level load starts frames later (ADD-V4a H2: a tick in that
+gap withdrew a boss's rows and its decl parsed empty). The editor's return
+ends the launch without that clear. The editor's tick also sets
+EDITOR when the editor next shows a map,
 and an editor palette pass does it first (a pass in PLAY would not register
 undeclared rows). A
 `mod.json` author key `"scope"` stays in the manifest's `extra`, so a mod with

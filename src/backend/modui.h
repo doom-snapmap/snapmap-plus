@@ -181,9 +181,12 @@ int  sh_modui_list(void);
  * current rows and the live placed names; at a hub launch the launched map's
  * rows alone (sh_modui_scope_launch). The tick (sh_modui_poll_main) clears
  * the listing and the current rows when the editor that had the map open is
- * gone (the hub) or a hub launch's Play is over, and sets the listing again
- * when an editor map is open without one. A load activates its rows and the
- * builds its placed names list beyond them (sh_modmanifest_set_listed).
+ * gone (the hub) or a hub launch's Play has run and is over (its Play began
+ * and the game was busy with it, then idle; an idle poll before that, such
+ * as the gap between the gate and the level load, keeps them), and sets the
+ * listing again when an editor map is open without one. A load activates
+ * its rows and the builds its placed names list beyond them
+ * (sh_modmanifest_set_listed).
  *
  * The uninstall's dry run reports, with the consequences, how many local
  * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a
@@ -218,8 +221,9 @@ int  sh_modui_poll_main(void *context);
  * scope declares exactly the launched map's rows (its parse made them the
  * current manifest; the editor's exit cleared the editor map's), and the
  * serving mode is Play. The Play entry then keeps this listing instead of
- * reading the editor, and the tick clears it once that Play is over. Main
- * thread. Returns the bundles whose serving changed. */
+ * reading the editor, and the tick clears it once that Play has run and is
+ * over (launched, loading, playing, running, ended: modui.c). Main thread.
+ * Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch(const char *why);
 
 /* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
@@ -245,6 +249,9 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
 #ifdef SH_MODUI_TESTING
 void sh_modui_test_reset(void);
+/* The hub launch state machine (modui.c): "none", "launched", "loading",
+ * "playing", "running" or "ended". */
+const char *sh_modui_test_launch_state(void);
 /* Where saved maps are read (SNAPMAPS<id>\game.details under each child
  * folder); NULL restores Saved Games\id Software\DOOM\base\savegame.user. */
 void sh_modui_test_set_saves_root(const char *path);

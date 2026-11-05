@@ -2812,13 +2812,72 @@ static int mu_saved_maps_using(const char *id)
 
 /* ---- map scope (modserve.h): what the open map lists */
 
-/* A save changed the listing (applied on the next editor tick), whether the
- * editor has shown the map loaded last (the tick clears the listing once that
- * editor is gone), and whether a hub launch set the listing (the tick clears
- * it once that Play is over: at the hub nothing is declared). */
+/* A save changed the listing (applied on the next editor tick), and whether
+ * the editor has shown the map loaded last (the tick clears the listing once
+ * that editor is gone). */
 static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
-static volatile LONG g_scope_launch;
+
+/* A hub launch's listing and what the product has seen of its Play
+ * (ADD-V4a H2). The gate's listing must hold through the level load: a
+ * poll that finds the game idle between the gate and the load is not the
+ * end of the Play. Driven by the signals the product has:
+ *
+ *   NONE      no hub launch listing (the editor's, or nothing, is in force)
+ *   LAUNCHED  sh_modui_scope_launch: the gate passed; the launched map's rows
+ *             are declared and nothing has run yet. An idle poll does nothing.
+ *   LOADING   the busy callback (a load state, the load screen, Play) was
+ *             seen after the launch. An idle poll does nothing.
+ *   PLAYING   the Play-begin gate ran for it (the SnapBuild detour's
+ *             sh_modserve_play_begin asks mu_scope_source at AT_PLAY). An
+ *             idle poll does nothing until the game was seen busy after it.
+ *   RUNNING   busy was seen after the Play began (the level load, Play).
+ *   ENDED     the first idle poll after RUNNING: the Play is over. The tick
+ *             clears the listing and the rows and returns to NONE.
+ *
+ * The editor's return (the tick with an editor map) ends the launch without
+ * the hub clear, since the editor's load lists its own map. */
+enum { MU_LAUNCH_NONE, MU_LAUNCH_LAUNCHED, MU_LAUNCH_LOADING, MU_LAUNCH_PLAYING, MU_LAUNCH_RUNNING, MU_LAUNCH_ENDED };
+static volatile LONG g_launch;
+
+#ifdef SH_MODUI_TESTING
+static const char *mu_launch_name(LONG state)
+{
+    switch (state) {
+    case MU_LAUNCH_LAUNCHED: return "launched";
+    case MU_LAUNCH_LOADING: return "loading";
+    case MU_LAUNCH_PLAYING: return "playing";
+    case MU_LAUNCH_RUNNING: return "running";
+    case MU_LAUNCH_ENDED: return "ended";
+    default: return "none";
+    }
+}
+const char *sh_modui_test_launch_state(void) { return mu_launch_name(InterlockedCompareExchange(&g_launch, 0, 0)); }
+#endif
+
+/* The busy callback answered 1 (Play or a load) while a launch listing holds. */
+static void mu_launch_busy(void)
+{
+    LONG at = InterlockedCompareExchange(&g_launch, 0, 0);
+    if (at == MU_LAUNCH_LAUNCHED) InterlockedCompareExchange(&g_launch, MU_LAUNCH_LOADING, MU_LAUNCH_LAUNCHED);
+    else if (at == MU_LAUNCH_PLAYING) InterlockedCompareExchange(&g_launch, MU_LAUNCH_RUNNING, MU_LAUNCH_PLAYING);
+}
+
+/* The Play-begin gate ran: the launched map's Play is being built. */
+static void mu_launch_play_begin(void)
+{
+    LONG at = InterlockedCompareExchange(&g_launch, 0, 0);
+    if ((at == MU_LAUNCH_LAUNCHED || at == MU_LAUNCH_LOADING) &&
+        InterlockedCompareExchange(&g_launch, MU_LAUNCH_PLAYING, at) == at)
+        mu_log("scope: the launched map's Play began; its rows hold until that Play is over");
+}
+
+/* An idle poll away from the editor: 1 when the launched Play ran and is
+ * over (RUNNING becomes ENDED); any earlier state stays as it is. */
+static int mu_launch_idle(void)
+{
+    return InterlockedCompareExchange(&g_launch, MU_LAUNCH_ENDED, MU_LAUNCH_RUNNING) == MU_LAUNCH_RUNNING;
+}
 
 typedef struct mu_listing {
     const char **hashes, **ids;
@@ -2996,8 +3055,8 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
  * entities and manifest are not the launched map's (ADD-L6 H). */
 static int mu_scope_source(int when)
 {
-    (void)when;
     if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
+    if (when == SH_MODSERVE_AT_PLAY) mu_launch_play_begin();
     if (!InterlockedCompareExchange(&g_scope_editor, 0, 0)) return 0;
     return mu_listing_live();
 }
@@ -3013,13 +3072,13 @@ int sh_modui_scope_launch(const char *why)
         return 0;
     }
     InterlockedExchange(&g_scope_editor, 0);
-    InterlockedExchange(&g_scope_launch, 1);
+    InterlockedExchange(&g_launch, MU_LAUNCH_LAUNCHED);
     (void)sh_modmanifest_current(&rows);
     /* The rows alone: a launched map declares what it carries rows for. */
     changed = mu_listing_set(&rows, NULL, 0, 1);
     moved = sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0;
-    mu_log("scope: %s: the launched map declares %zu row(s)%s", at, rows.count,
-           rows.count ? "; nothing else serves in its Play" : "; no mod serves in its Play");
+    mu_log("scope: %s: the launched map declares %zu row(s)%s; they hold until its Play has run and ended", at,
+           rows.count, rows.count ? "; nothing else serves in its Play" : "; no mod serves in its Play");
     sh_modmanifest_list_free(&rows);
     if (changed || moved) (void)mu_scope_apply(at);
     return changed;
@@ -3082,8 +3141,12 @@ static void mu_scope_tick(int editor_map)
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
             }
-        } else if (InterlockedExchange(&g_scope_launch, 0)) {
-            /* The tick waits out Play and loads, so a hub launch's Play is over. */
+        } else if (mu_launch_idle()) {
+            /* ENDED: the launched Play began, the game was busy with it, and
+             * it is idle again, so that Play is over. Never on an idle poll
+             * before its Play ran (the gap between the gate and the level
+             * load: ADD-V4a H2). */
+            InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
@@ -3092,7 +3155,7 @@ static void mu_scope_tick(int editor_map)
         }
         return;
     }
-    InterlockedExchange(&g_scope_launch, 0);
+    InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
     InterlockedExchange(&g_scope_editor, 1);
     /* Back in the editor (after Play): undeclared bundles offer their names again. */
     if (sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_EDITOR && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR))
@@ -3123,7 +3186,11 @@ int sh_modui_poll_main(void *context)
     sh_modui_map_info info;
     char cause[200];
     (void)context;
-    if (!mu_on_main() || mu_busy(cause, sizeof cause)) return 0;   /* Play or a load: later */
+    if (!mu_on_main()) return 0;
+    if (mu_busy(cause, sizeof cause)) {                             /* Play or a load: later */
+        mu_launch_busy();
+        return 0;
+    }
     if (!e->map_info || e->map_info(&info) != 1) {                  /* the editor, with a map */
         /* The map the clear was owed for is gone; so is its history. */
         if (InterlockedExchange(&g_undo_owed, 0)) mu_log("uninstall %s: the editor left the map before the clear", g_undo_owed_key);
@@ -4288,6 +4355,6 @@ void sh_modui_test_reset(void)
     InterlockedExchange(&g_undo_owed, 0);
     InterlockedExchange(&g_scope_owed, 0);
     InterlockedExchange(&g_scope_editor, 0);
-    InterlockedExchange(&g_scope_launch, 0);
+    InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
 }
 #endif
