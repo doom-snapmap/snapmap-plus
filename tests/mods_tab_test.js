@@ -864,6 +864,30 @@ test('additive: derived facts, the declared replacement marker, registry contrib
   h.ui.select('airlock');
   assert.equal(section(h, 'facts'), undefined, 'nothing derived: no section');
 });
+test('additive: stock banks a mod\'s borrowed sound events need, with this session\'s state', () => {
+  const doc = clone(v3);
+  const sp = doc.mods.find(m => m.key === 'local.spider-mastermind');
+  sp.facts.registries = Object.assign({}, sp.facts.registries, {banks: ['doom_weapon_sp.bnk']});
+  sp.facts.stockBanks = [{bank: 'doom_weapon_sp.bnk', state: 'loaded', ms: 201, result: 1}];
+  const n = modsTab.normalize(doc), m = n.mods.find(x => x.key === 'local.spider-mastermind');
+  assert.deepEqual(m.facts.stockBanks, [{bank: 'doom_weapon_sp.bnk', state: 'loaded', ms: 201, result: 1}]);
+  const line = modsTab.factLines(m).find(l => l.label === 'Game sounds');
+  assert.match(line.text, /^needs doom_weapon_sp\.bnk, single-player sounds SnapMap skips/);
+  assert.deepEqual(line.list, ['doom_weapon_sp.bnk: loaded (201 ms)']);
+  /* registries without a state: not loaded yet; a failure names its result */
+  delete sp.facts.stockBanks;
+  assert.deepEqual(modsTab.factLines(modsTab.normalize(doc).mods.find(x => x.key === 'local.spider-mastermind'))
+    .find(l => l.label === 'Game sounds').list, ['doom_weapon_sp.bnk: not loaded']);
+  sp.facts.stockBanks = [{bank: 'doom_weapon_sp.bnk', state: 'failed', ms: 0, result: 69}];
+  assert.deepEqual(modsTab.factLines(modsTab.normalize(doc).mods.find(x => x.key === 'local.spider-mastermind'))
+    .find(l => l.label === 'Game sounds').list, ['doom_weapon_sp.bnk: did not load (AKRESULT 69)']);
+  /* nothing needed: no line */
+  assert.equal(modsTab.factLines(modsTab.normalize(v3).mods.find(x => x.key === 'local.spider-mastermind'))
+    .find(l => l.label === 'Game sounds'), undefined);
+  const h = live(doc);
+  h.ui.select('local.spider-mastermind');
+  assert.match(section(h, 'facts').textContent, /Game sounds: needs doom_weapon_sp\.bnk/);
+});
 test('additive: one row per build of a key, the newest marked; a failed build', () => {
   const h = live();
   h.ui.select('local.cyberdemon@0.0.0');

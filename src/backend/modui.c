@@ -21,6 +21,7 @@
 #include <shlobj.h>
 #include <time.h>
 #include "raw_deflate.h"
+#include "modbankinfo.h"
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
 #include "modstock.h"
@@ -807,6 +808,50 @@ static void mu_strs_free(char **v, size_t n)
     free(v);
 }
 
+/* The stock banks the product block's registries "banks" names (DESIGN-
+ * additive 2.4, "Sound events"), each with this process's state: up to 8. */
+static int mu_stock_banks(const sh_mb_bundle *bd, char banks[8][SH_MBI_LEAF_MAX])
+{
+    mpj *x;
+    const mpj *v;
+    int k, n = 0;
+    if (!bd->registries || !strstr(bd->registries, "\"banks\"")) return 0;
+    x = mpj_parse(bd->registries, strlen(bd->registries));
+    v = x ? mpj_get(x, "banks") : NULL;
+    for (k = 0; v && v->type == MPJ_ARR && k < v->n && n < 8; k++) {
+        const mpj *s = v->items[k];
+        if (!s || s->type != MPJ_STR || !s->text || strchr(s->text, '\\') || strlen(s->text) >= SH_MBI_LEAF_MAX) continue;
+        strcpy_s(banks[n], SH_MBI_LEAF_MAX, s->text);
+        n++;
+    }
+    mpj_free(x);
+    return n;
+}
+
+/* payload facts.stockBanks: [{bank, state, ms, result}], only when the
+ * registries name a bank. */
+static void mu_put_stock_banks(mu_buf *b, const sh_mb_bundle *bd)
+{
+    char banks[8][SH_MBI_LEAF_MAX];
+    int n = mu_stock_banks(bd, banks), k;
+    if (!n) return;
+    mu_puts(b, ",\"stockBanks\":[");
+    for (k = 0; k < n; k++) {
+        int result = 0;
+        double ms = 0;
+        int st = sh_mbi_state_get(banks[k], &result, &ms, NULL, 0);
+        if (k) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "bank", banks[k], 1);
+        mu_kstr(b, "state", sh_mbi_state_word(st), 0);
+        mu_knum(b, "ms", ms > 0 ? (unsigned long long)(ms + 0.5) : 0, 0);
+        mu_key(b, "result", 0);
+        { char num[16]; _snprintf_s(num, sizeof num, _TRUNCATE, "%d", result); mu_puts(b, num); }
+        mu_putn(b, "}", 1);
+    }
+    mu_putn(b, "]", 1);
+}
+
 /* What the builder derived from the files (payload "facts"): the classes,
  * the editor tweaks, every replacement with whether the descriptor declares
  * it or it is a registry copy, and the registry contributions (the product
@@ -849,6 +894,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     }
     mu_puts(b, "],\"registries\":");
     mu_puts(b, bd->registries && bd->registries[0] == '{' ? bd->registries : "{}");
+    mu_put_stock_banks(b, bd);
     mu_putn(b, "}", 1);
     mu_strs_free(declared, nd);
 }
@@ -4189,6 +4235,27 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
     (void)sh_modserve_scope_report(mu_say_requirement, &o);
     mu_say_substitutions(&o, &m, "doctor: map row ");             /* rows served through another build */
     (void)sh_modserve_registry_report(mu_say_requirement, &o);   /* what the registries generate, every clash */
+    for (i = 0; i < m.list.count; i++) {                          /* stock banks borrowed sound events need */
+        char banks[8][SH_MBI_LEAF_MAX];
+        int nb, q;
+        if (!m.list.items[i].loaded) continue;
+        nb = mu_stock_banks(&m.list.items[i].bundle, banks);
+        for (q = 0; q < nb; q++) {
+            int result = 0;
+            double ms = 0;
+            int st = sh_mbi_state_get(banks[q], &result, &ms, NULL, 0);
+            char how[200];
+            switch (st) {
+            case SH_MBI_ST_LOADED: _snprintf_s(how, sizeof how, _TRUNCATE, "loaded in this session (%.0f ms)", ms); break;
+            case SH_MBI_ST_LOADING: strcpy_s(how, sizeof how, "loading (asked for at a map load; no answer yet)"); break;
+            case SH_MBI_ST_FAILED: _snprintf_s(how, sizeof how, _TRUNCATE, "did not load (AKRESULT %d); not retried this session", result); break;
+            case SH_MBI_ST_REFUSED: strcpy_s(how, sizeof how, "not loaded: the stock-bank route refused it (see the MODS: sound: lines)"); break;
+            default: strcpy_s(how, sizeof how, "not loaded yet; it loads at the first map load that declares the mod"); break;
+            }
+            mu_say(&o, "sound: mods\\%s (%s) needs stock bank %s, which SnapMap skips: %s", m.list.items[i].name,
+                   m.list.items[i].bundle.id, banks[q], how);
+        }
+    }
     (void)sh_modserve_requirements_report(mu_say_requirement, &o);
     for (i = 0; i < m.row_count; i++) {
         const char *id = m.list.items[m.rows[i].serving].bundle.id;

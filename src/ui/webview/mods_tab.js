@@ -136,7 +136,17 @@ var modsTab = (function () {
               .map(function (k) { return {field: k, value: str(player[k])}; }),
             weapons: Object.keys(weapons).sort().map(function (k) { return {slot: k, decl: str(weapons[k])}; }),
             extends: Object.keys(ext).sort().map(function (k) { return {target: k, partial: str(ext[k])}; }),
-            conductor: normNames(reg.conductor)};
+            conductor: normNames(reg.conductor),
+            stockBanks: normStockBanks(reg.banks, f.stockBanks)};
+  }
+  /* registries.banks (the builder's list) with facts.stockBanks (this session's state of each). */
+  function normStockBanks(names, states) {
+    var byName = {};
+    arr(states).forEach(function (s) { s = obj(s) || {}; if (str(s.bank)) byName[str(s.bank)] = s; });
+    return normNames(names).map(function (n) {
+      var s = byName[n] || {};
+      return {bank: n, state: str(s.state) || 'not loaded', ms: num(s.ms), result: num(s.result)};
+    });
   }
   function normBuild(v) {
     v = obj(v) || {};
@@ -374,6 +384,14 @@ var modsTab = (function () {
     f.extends.forEach(function (e) { reg.push('extends ' + e.target + ' with ' + e.partial); });
     f.conductor.forEach(function (c) { reg.push('encounter ' + c); });
     if (reg.length) out.push({label: 'Registries', text: plural(reg.length, 'entry', 'entries') + ' generated per map that declares it', list: reg});
+    if (f.stockBanks.length) {
+      out.push({label: 'Game sounds', text: 'needs ' + f.stockBanks.map(function (s) { return s.bank; }).join(', ') +
+                ', single-player sounds SnapMap skips; loaded once per session for a map that declares it',
+                list: f.stockBanks.map(function (s) {
+                  return s.bank + ': ' + (s.state === 'loaded' && s.ms ? 'loaded (' + s.ms + ' ms)' :
+                                          s.state === 'failed' ? 'did not load (AKRESULT ' + s.result + ')' : s.state);
+                })});
+    }
     return out;
   }
   function upgradeTitle(r) {
