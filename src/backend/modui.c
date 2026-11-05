@@ -114,6 +114,7 @@ static int mu_scope_source(int when);
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 static int mu_scope_now(const char *phase);
 static int mu_product_need(const sh_modmanifest_list *rows);
+static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 
 void sh_modui_bind(const sh_modui_engine *engine)
 {
@@ -147,6 +148,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
     sh_modmanifest_set_product_need(mu_product_need);
+    sh_modmanifest_set_listed(mu_scope_listed);
     sh_modserve_set_scope_source(mu_scope_source);
 }
 
@@ -2966,6 +2968,14 @@ static int mu_scope_now_declared(const char *phase)
 }
 
 static int mu_scope_armed(void) { return sh_modserve_scope_relevant(); }
+
+/* The listing a load's hook just set, for that load's activation
+ * (modmanifest.h sh_modmanifest_set_listed); with the scope off, none. */
+static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap)
+{
+    if (!sh_modserve_scope_enabled()) return 0;
+    return sh_modserve_scope_hashes(out, cap);
+}
 
 /* The manifest's hook: a load applies at once (before activation), a save on
  * the next editor tick. */

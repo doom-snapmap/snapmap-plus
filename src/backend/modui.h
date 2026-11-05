@@ -182,7 +182,8 @@ int  sh_modui_list(void);
  * rows alone (sh_modui_scope_launch). The tick (sh_modui_poll_main) clears
  * the listing and the current rows when the editor that had the map open is
  * gone (the hub) or a hub launch's Play is over, and sets the listing again
- * when an editor map is open without one.
+ * when an editor map is open without one. A load activates its rows and the
+ * builds its placed names list beyond them (sh_modmanifest_set_listed).
  *
  * The uninstall's dry run reports, with the consequences, how many local
  * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a

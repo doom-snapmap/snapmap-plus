@@ -61,10 +61,14 @@ static void log_clear(void) { g_logat = 0; g_logbuf[0] = 0; }
 /* The map manifest's load step activates bundles through the serving layer's
  * engine half; the tab only reads the record it keeps. */
 static int g_activations;
+static char g_act_last[8][65];   /* the last activation's builds */
+static int g_act_last_n;
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
-    (void)bundle_hashes;
+    int i;
     if (n > 0) g_activations++;
+    g_act_last_n = n;
+    for (i = 0; i < n && i < 8; i++) strcpy_s(g_act_last[i], sizeof g_act_last[i], bundle_hashes[i]);
     return 0;
 }
 
@@ -2102,13 +2106,20 @@ int main(int argc, char **argv)
             if (text) HeapFree(GetProcessHeap(), 0, text);
             n = sh_modserve_scope_hashes(got, 8);
             CHECK(n == 1 && !_stricmp(got[0], first.hash));
+            CHECK(g_act_last_n == 1 && !_stricmp(g_act_last[0], first.hash));   /* its row's build */
             /* The map opened over it carries no row and places the tile. */
+            log_clear();
             loaded = sh_modmanifest_prepare_load(TWIN_MAP, sizeof TWIN_MAP - 1, &ll);
             if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
             CHECK(sh_modmanifest_current(&cur) == 0);
             sh_modmanifest_list_free(&cur);
             n = sh_modserve_scope_hashes(got, 8);
             CHECK(n == 1 && !_stricmp(got[0], newest.hash));
+            /* The load activates the placed closure as a saved map's load activates its rows
+             * (ADD-V4a R): its decls, materials, models and registries register now, so Play from
+             * the unsaved map serves them. */
+            CHECK(g_act_last_n == 1 && !_stricmp(g_act_last[0], newest.hash));
+            CHECK(has(g_logbuf, "MODS: map: 1 bundle(s) its entities place without a row were activated with its rows"));
             /* Its first save records the newest build. */
             saved = sh_modmanifest_on_save(TWIN_MAP, sizeof TWIN_MAP - 1, &sl);
             CHECK(saved != NULL);

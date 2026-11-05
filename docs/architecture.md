@@ -1557,7 +1557,14 @@ at:
 
 - a map load: `modmanifest.c` calls the scope hook (`modui.c`) with the rows
   just read and, when `sh_modserve_scope_relevant`, the map's placed names,
-  before the bundles are activated, and applies at once;
+  before the bundles are activated, and applies at once. The load's
+  activation then runs for the rows and every build the listing declares
+  beyond them (`sh_modmanifest_set_listed`, bound to
+  `sh_modserve_scope_hashes`): the placed names' closure. A map that places a
+  mod without a row (a rawmap opened as a new map) therefore registers that
+  mod's decls, materials, models and registries as its saved copy's load
+  would (`map: N bundle(s) its entities place without a row were activated
+  with its rows`);
 - a save: the hook gets the rows written (placed closure and map-level rows);
   the change is applied on the next editor tick;
 - the Play entry: Play does not serialize the map, so `sh_modserve_play_begin`

@@ -183,8 +183,9 @@ void sh_modmanifest_set_product_need(sh_modmanifest_product_need_fn need);
 int sh_modmanifest_activate(const sh_modmanifest_list *rows);
 
 /* The DeserializeFromJson step: read and keep the rows as the current
- * manifest, strip them, then activate them (sh_modmanifest_activate; count 0
- * for a map without rows). Returns the stripped buffer (HeapFree), or
+ * manifest, strip them, then activate them with the builds the map scope
+ * lists beyond them (sh_modmanifest_set_listed; count 0 for a map without
+ * rows or placed mods). Returns the stripped buffer (HeapFree), or
  * NULL to parse `json` unchanged. Never throws for malformed input. */
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length);
 
@@ -206,6 +207,15 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 typedef void (*sh_modmanifest_scope_fn)(const sh_modmanifest_list *rows, const char *const *names, size_t name_count,
                                         int when);
 void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void));
+
+/* The builds the map scope lists after a load's hook (modui.c binds
+ * sh_modserve_scope_hashes): up to `cap` copied into `out` (NULL to count),
+ * returning the count. A load activates its rows and every listed build
+ * beyond them, the placed names' closure included, in one pass, so a map
+ * that places a mod without a row (a rawmap opened as a new map) registers
+ * it as a saved map's load would. NULL unbinds: rows alone. */
+typedef int (*sh_modmanifest_listed_fn)(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
+void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed);
 
 /* The build that serves a map-level row at save (modui.c binds the serving
  * index): `bundle_hash` (aliases resolve), else the installed build of `id`.

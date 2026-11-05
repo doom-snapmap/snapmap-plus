@@ -1254,31 +1254,80 @@ static void mm_describe(const sh_modmanifest_list *list, char *out, size_t cap)
     }
 }
 
-int sh_modmanifest_activate(const sh_modmanifest_list *rows)
+/* The rows' builds (as the asset rule serves them), then each of `extra`
+ * that none of them is: one activation pass for all of them. */
+static int mm_activate(const sh_modmanifest_list *rows, char (*extra)[SH_MODMANIFEST_HASH_CAP], int nextra,
+                       int *added, int *first)
 {
     const char **hashes;
     char (*served)[SH_MODMANIFEST_HASH_CAP];
-    size_t i;
-    int active;
-    if (!rows || !rows->count) return modserve_activate_bundles(NULL, 0);
-    hashes = (const char **)calloc(rows->count, sizeof *hashes);
-    served = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(rows->count, sizeof *served);
+    size_t i, nrows = rows ? rows->count : 0, n = 0, k;
+    int e, active;
+    if (added) *added = 0;
+    if (first) *first = -1;
+    if (nextra < 0) nextra = 0;
+    if (!nrows && !nextra) return modserve_activate_bundles(NULL, 0);
+    hashes = (const char **)calloc(nrows + (size_t)nextra, sizeof *hashes);
+    served = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc(nrows ? nrows : 1, sizeof *served);
     if (!hashes || !served) { free((void *)hashes); free(served); return -1; }
     /* The asset rule: a row is activated through the build that serves its
      * id now (its own hash or an alias of it, else the installed build of
      * the id), whatever hash the row pins. */
-    for (i = 0; i < rows->count; i++) {
+    for (i = 0; i < nrows; i++) {
         sh_modserve_bundle_ref ref;
         if (sh_modserve_bundle_serving(rows->rows[i].bundle, rows->rows[i].id, &ref) &&
             strlen(ref.hash) == SH_MOD_HASH_CHARS)
             strcpy_s(served[i], sizeof served[i], ref.hash);
         else if (!sh_modmanifest_substituted(rows->rows[i].bundle, served[i], sizeof served[i]))
             strcpy_s(served[i], sizeof served[i], rows->rows[i].bundle);
-        hashes[i] = served[i];
+        hashes[n++] = served[i];
     }
-    active = modserve_activate_bundles(hashes, (int)rows->count);
+    for (e = 0; e < nextra; e++) {
+        int seen = !extra[e][0];
+        for (k = 0; k < n && !seen; k++) seen = !_stricmp(hashes[k], extra[e]);
+        for (i = 0; i < nrows && !seen; i++) seen = !_stricmp(rows->rows[i].bundle, extra[e]);
+        if (seen) continue;
+        hashes[n++] = extra[e];
+        if (added) (*added)++;
+        if (first && *first < 0) *first = e;
+    }
+    active = modserve_activate_bundles(hashes, (int)n);
     free((void *)hashes);
     free(served);
+    return active;
+}
+
+int sh_modmanifest_activate(const sh_modmanifest_list *rows)
+{
+    return mm_activate(rows, NULL, 0, NULL, NULL);
+}
+
+/* The map scope's listing (sh_modmanifest_set_listed). */
+static sh_modmanifest_listed_fn volatile g_listed;
+void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed) { g_listed = listed; }
+
+/* A load's activation: its rows and every build its listing declares
+ * beyond them, which is the placed names' closure the scope hook just
+ * listed (a rawmap opened without rows places mods no row names: ADD-V4a
+ * defect R). A My Maps load of the same map, saved, has a row for each. */
+static int mm_activate_load(const sh_modmanifest_list *rows)
+{
+    sh_modmanifest_listed_fn listed = g_listed;
+    char (*extra)[SH_MODMANIFEST_HASH_CAP] = NULL;
+    char line[256];
+    int n = listed ? listed(NULL, 0) : 0, added = 0, first = -1, active;
+    if (n > 0 && (extra = (char (*)[SH_MODMANIFEST_HASH_CAP])calloc((size_t)n, sizeof *extra)) != NULL) {
+        int got = listed(extra, n);
+        n = got < 0 ? 0 : got < n ? got : n;
+    } else n = 0;
+    active = mm_activate(rows, extra, n, &added, &first);
+    if (added) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "MODS: map: %d bundle(s) its entities place without a row were activated with its rows (first %.16s)",
+            added, first >= 0 ? extra[first] : "");
+        backend_log(line);
+    }
+    free(extra);
     return active;
 }
 
@@ -1497,7 +1546,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         mm_subst_load(NULL);
         mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
-        modserve_activate_bundles(NULL, 0);
+        (void)mm_activate_load(NULL);
         return NULL;
     }
     sh_modmanifest_read(json, length, &list, &rejected);
@@ -1510,7 +1559,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     mm_subst_load(&list);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);
-    active = sh_modmanifest_activate(&list);
+    active = mm_activate_load(&list);
     /* `active` counts the registration steps the activation found ready (new
      * names; a bundle of shadows and requirements has none), not bundles. */
     {
