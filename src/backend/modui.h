@@ -226,6 +226,14 @@ int  sh_modui_poll_main(void *context);
  * Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch(const char *why);
 
+/* A hub launch the published-map gate refused (denied, or dropped from its
+ * hold): nothing was launched, so its parse's rows are not declared. With
+ * the editor still showing a map, that map's rows come back
+ * (sh_modmanifest_current_restore_previous); elsewhere the current manifest
+ * is closed and nothing is declared. The serving mode returns to EDITOR.
+ * Main thread. Returns the bundles whose serving changed. */
+int  sh_modui_scope_launch_refused(const char *why);
+
 /* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
 int  sh_modui_wait(unsigned ms);
 

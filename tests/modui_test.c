@@ -1745,6 +1745,54 @@ int main(int argc, char **argv)
                 CHECK(sh_modmanifest_current(&cur) == 0);
                 sh_modmanifest_list_free(&cur);
                 CHECK(sh_modui_poll_main(NULL) == 0 && g_scope_applies == applies + 1);   /* once */
+                /* A launch the gate refuses (ADD-V4a H3): its parse made the map's rows current and
+                 * the load's hook listed them; nothing was launched, so nothing stays declared at
+                 * the browser. */
+                load_map_naming("alex.req", ref.hash);
+                CHECK(sh_modserve_scope_hashes(got, 8) == 1 && sh_modmanifest_current(&cur) == 1);
+                sh_modmanifest_list_free(&cur);
+                applies = g_scope_applies;
+                log_clear();
+                (void)sh_modui_scope_launch_refused("My Maps play");
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0 && !sh_modserve_scope_map_open());
+                CHECK(sh_modmanifest_current(&cur) == 0);
+                sh_modmanifest_list_free(&cur);
+                CHECK(g_scope_applies == applies + 1 && !strcmp(g_scope_phase, "launch refused"));
+                CHECK(sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_EDITOR && !strcmp(sh_modui_test_launch_state(), "none"));
+                CHECK(has(g_logbuf, "scope: My Maps play was refused; nothing was launched, so nothing is declared"));
+                CHECK(sh_modui_poll_main(NULL) == 0 && sh_modserve_scope_hashes(got, 8) == 0 && g_scope_applies == applies + 1);
+                /* A published launch held at its boundary and then dropped, after the gate's
+                 * listing was set: the same. */
+                load_map_naming("alex.req", ref.hash);
+                (void)sh_modui_scope_launch("published launch");
+                (void)sh_modui_scope_launch_refused("published launch");
+                CHECK(sh_modserve_scope_hashes(got, 8) == 0 && sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_EDITOR);
+                CHECK(!strcmp(sh_modui_test_launch_state(), "none"));
+                /* Refused with the editor still showing its map: that map's rows come back. */
+                g_map_on = 1;
+                load_map_naming("alex.req", ref.hash);
+                CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open());
+                l = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll);   /* the launched map: no rows */
+                if (l) HeapFree(GetProcessHeap(), 0, l);
+                CHECK(sh_modmanifest_current(&cur) == 0);
+                sh_modmanifest_list_free(&cur);
+                log_clear();
+                (void)sh_modui_scope_launch_refused("My Maps play");
+                CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].id, "alex.req"));
+                sh_modmanifest_list_free(&cur);
+                CHECK(sh_modserve_scope_hashes(got, 8) >= 1 && sh_modserve_scope_map_open());
+                {
+                    int q, found = 0, nq = sh_modserve_scope_hashes(got, 8);
+                    for (q = 0; q < nq && q < 8; q++) found += !_stricmp(got[q], ref.hash);
+                    CHECK(found == 1);
+                }
+                CHECK(has(g_logbuf, "scope: My Maps play was refused; nothing was launched, so the editor map's rows are "
+                                    "declared again"));
+                CHECK(sh_modui_poll_main(NULL) == 1 && sh_modserve_scope_map_open());
+                /* Back to the hub for what follows. */
+                g_map_on = 0;
+                g_map_left = 1;
+                CHECK(sh_modui_poll_main(NULL) == 0 && !sh_modserve_scope_map_open());
                 g_placed[0] = placed0;
                 g_placed_count = placed_n;
             }

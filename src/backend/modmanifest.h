@@ -269,6 +269,11 @@ void sh_modmanifest_reset(void);
  * its rows, substitutions and registry choices go, so nothing reads them as
  * the next map's. */
 void sh_modmanifest_current_close(void);
+/* Put back the state the last load replaced (its rows, registry choices,
+ * substitutions and product version), once: a launch the gate refused ran
+ * nothing, so the map open before it is the open map again. Returns the
+ * rows restored, -1 when nothing is kept (no load since the last restore). */
+int    sh_modmanifest_current_restore_previous(void);
 
 /* The open map's registry choices (modregistry.h): read from the rows at
  * every load, written at every save on the row of the key each names (a

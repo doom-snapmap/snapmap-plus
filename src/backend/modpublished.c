@@ -337,6 +337,12 @@ static const char *pub_not_done(int hook) { return pub_is_prefab(hook) ? "The pr
 /* A hold the rawmap layer or a prefab started: no engine completion behind it. */
 static int pub_is_local(int hook) { return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE; }
 
+/* A refused launch leaves nothing declared (ADD-V4a H3). */
+static void pub_launch_refused(int hook)
+{
+    if (!pub_is_local(hook) && g_ops.launch_refused) g_ops.launch_refused(g_ops.context, hook);
+}
+
 /* One pending notice, raised with a single Accept button when the surface is
  * idle and no question is up. A later notice replaces an unraised one. */
 static char g_notice[PUB_TEXT_CAP];
@@ -696,11 +702,14 @@ static void pub_abandon(const char *why)
 /* Visible: the player's load is refused and told why. */
 static void pub_drop(const char *notice, const char *why)
 {
+    int hook;
     if (g_hold.state == HOLD_IDLE) return;
     pub_logf("MODS: the held %s of '%s' was dropped: %s", pub_hook_name(g_hold.hook),
              g_hold.id[0] ? g_hold.id : "local map", why);
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, g_hold.hook, g_hold.owner);
+    hook = g_hold.hook;
     pub_hold_free();
+    pub_launch_refused(hook);
     pub_notice(notice);
 }
 
@@ -895,6 +904,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (begun <= 0) {
             if (begun < 0) {
                 pub_log("MODS: the cached lobby map needs mods and could not be held; it is refused");
+                pub_launch_refused(hook);
                 pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
             }
             return begun == 0;
@@ -950,6 +960,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
          * palette miss that is fatal at START. Refuse instead. */
         if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
         if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, owner);
+        pub_launch_refused(hook);
         pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
         return 0;
     }
@@ -993,6 +1004,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
      * launch has no map object left to resume with, so it is refused. */
     pub_logf("MODS: the %s was refused: its mods are not installed and it cannot be held", pub_hook_name(hook));
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, manager);
+    pub_launch_refused(hook);
     pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
     return 0;
 }
@@ -2227,12 +2239,23 @@ static int eng_product_version(void *c, char *out, size_t cap)
     return 1;
 }
 
+/* The gate refused a launch: the map scope declares nothing of it. */
+static void eng_launch_refused(void *c, int hook)
+{
+    (void)c;
+    __try {
+        (void)sh_modui_scope_launch_refused(pub_hook_name(hook));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the refused launch's scope clear faulted");
+    }
+}
+
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_store_has, eng_print, eng_store_probe, eng_claimed, eng_other_build, eng_mod_name, eng_row_product,
-    eng_product_version, eng_fetch_detail
+    eng_product_version, eng_fetch_detail, eng_launch_refused
 };
 
 /* ------------------------------------------------------------ detours */

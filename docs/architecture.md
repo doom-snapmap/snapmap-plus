@@ -1608,7 +1608,12 @@ returns to EDITOR mode (`scope: the launched map's Play is over`); an idle
 tick in any earlier state does nothing, since the gate runs at the launch's
 map parse and the level load starts frames later (ADD-V4a H2: a tick in that
 gap withdrew a boss's rows and its decl parsed empty). The editor's return
-ends the launch without that clear. The editor's tick also sets
+ends the launch without that clear. A launch the gate refuses (denied,
+dropped from its hold, or refused at once) calls `sh_modui_scope_launch_refused`
+through the ops' `launch_refused`: nothing was launched, so the current
+manifest is closed and nothing is declared, or, with the editor still showing
+a map, the state the launched map's parse replaced comes back
+(`sh_modmanifest_current_restore_previous`). The editor's tick also sets
 EDITOR when the editor next shows a map,
 and an editor palette pass does it first (a pass in PLAY would not register
 undeclared rows). A

@@ -2836,7 +2836,8 @@ static volatile LONG g_scope_editor;
  *             clears the listing and the rows and returns to NONE.
  *
  * The editor's return (the tick with an editor map) ends the launch without
- * the hub clear, since the editor's load lists its own map. */
+ * the hub clear, since the editor's load lists its own map, and a refused
+ * launch (sh_modui_scope_launch_refused) clears or restores at once. */
 enum { MU_LAUNCH_NONE, MU_LAUNCH_LAUNCHED, MU_LAUNCH_LOADING, MU_LAUNCH_PLAYING, MU_LAUNCH_RUNNING, MU_LAUNCH_ENDED };
 static volatile LONG g_launch;
 
@@ -3081,6 +3082,38 @@ int sh_modui_scope_launch(const char *why)
            rows.count, rows.count ? "; nothing else serves in its Play" : "; no mod serves in its Play");
     sh_modmanifest_list_free(&rows);
     if (changed || moved) (void)mu_scope_apply(at);
+    return changed;
+}
+
+int sh_modui_scope_launch_refused(const char *why)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_modui_map_info info;
+    const char *at = why && why[0] ? why : "launch";
+    int editor, changed = 0, moved;
+    if (!mu_on_main()) return 0;
+    InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
+    moved = sh_modserve_scope_mode_get() != SH_MODSERVE_MODE_EDITOR && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0;
+    if (!sh_modserve_scope_enabled()) {
+        if (moved) (void)mu_scope_apply("launch refused");
+        return 0;
+    }
+    /* The editor still shows its map (the launch was asked over it): that
+     * map's rows, which the launched map's parse replaced, come back.
+     * Anywhere else (the browser, the hub) nothing was launched, so nothing
+     * is declared. */
+    editor = e->map_info && e->map_info(&info) == 1;
+    if (editor && sh_modmanifest_current_restore_previous() >= 0) {
+        InterlockedExchange(&g_scope_editor, 1);
+        changed = mu_listing_live();
+        mu_log("scope: %s was refused; nothing was launched, so the editor map's rows are declared again", at);
+    } else {
+        sh_modmanifest_current_close();
+        InterlockedExchange(&g_scope_editor, 0);
+        changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
+        mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
+    }
+    if (changed || moved) (void)mu_scope_apply("launch refused");
     return changed;
 }
 

@@ -290,6 +290,11 @@ typedef struct sh_modpub_ops {
     /* After a fetch that failed with game content this machine lacks: the
      * borrow's source path, else 0. */
     int  (*fetch_detail)(void *c, const char *hash, char *out, size_t cap);
+    /* A launch was refused (denied, dropped from its hold, or refused at
+     * once): nothing was launched, so the parse's rows must not stay
+     * declared (modui.h sh_modui_scope_launch_refused). Called after
+     * drop_ui for every hook but a rawmap load and a prefab placement. */
+    void (*launch_refused)(void *c, int hook);
 } sh_modpub_ops;
 
 /* The decision a hook detour asks for before calling its original. Returns 1

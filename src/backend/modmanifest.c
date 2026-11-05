@@ -1503,11 +1503,68 @@ int sh_modmanifest_product(char *out, size_t cap)
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
 
+/* The open map's state that the last load replaced: its rows, registry
+ * choices, substitutions and product version. A launch the gate refuses
+ * (sh_modmanifest_current_restore_previous) puts it back, so the editor's
+ * map keeps its rows when the map whose parse replaced them never ran. */
+static struct {
+    int valid;
+    sh_modmanifest_list rows;
+    char choices[SH_MODMANIFEST_CHOICES_CAP];
+    mm_subst subst[MM_SUBST_MAX];
+    int nsubst;
+    char product[SH_MODMANIFEST_VERSION_CAP];
+} g_prev;
+
+static void mm_prev_take(void)
+{
+    sh_modmanifest_list old;
+    size_t i;
+    AcquireSRWLockExclusive(&g_current_lock);
+    old = g_prev.rows;
+    memset(&g_prev.rows, 0, sizeof g_prev.rows);
+    for (i = 0; i < g_current.count; i++)
+        if (!sh_modmanifest_list_add(&g_prev.rows, &g_current.rows[i])) break;
+    memcpy(g_prev.choices, g_choices, sizeof g_prev.choices);
+    memcpy(g_prev.subst, g_subst, sizeof g_prev.subst);
+    g_prev.nsubst = g_nsubst;
+    g_prev.valid = 1;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    AcquireSRWLockShared(&g_product_lock);
+    strcpy_s(g_prev.product, sizeof g_prev.product, g_product_map);
+    ReleaseSRWLockShared(&g_product_lock);
+    sh_modmanifest_list_free(&old);
+}
+
+int sh_modmanifest_current_restore_previous(void)
+{
+    sh_modmanifest_list rows;
+    char product[SH_MODMANIFEST_VERSION_CAP];
+    int n;
+    AcquireSRWLockExclusive(&g_current_lock);
+    if (!g_prev.valid) { ReleaseSRWLockExclusive(&g_current_lock); return -1; }
+    rows = g_prev.rows;
+    memset(&g_prev.rows, 0, sizeof g_prev.rows);
+    memcpy(g_choices, g_prev.choices, sizeof g_choices);
+    memcpy(g_subst, g_prev.subst, sizeof g_subst);
+    g_nsubst = g_prev.nsubst;
+    strcpy_s(product, sizeof product, g_prev.product);
+    g_prev.valid = 0;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    n = (int)rows.count;
+    mm_set_current(&rows);
+    sh_modmanifest_list_free(&rows);
+    mm_product_set_map(product);
+    (void)mm_choices_push(0);
+    return n;
+}
+
 char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_length)
 {
     char v[SH_MODMANIFEST_VERSION_CAP], line[160];
     char *bare, *rows;
     size_t bare_len = 0, rows_len = 0;
+    mm_prev_take();
     if (out_length) *out_length = 0;
     if (!json || !length || !sh_shard_find(json, length, SH_MODMANIFEST_PRODUCT_MAGIC, SH_MODMANIFEST_PRODUCT_MAGIC_LEN)) {
         mm_product_set_map(NULL);

@@ -121,6 +121,7 @@ typedef struct fake {
     int fetch_detail_calls;
     char product_a[32];              /* alex.pink-imp's row asks for this product version */
     char running[32];                /* the running product's version, "" unknown */
+    int launch_refused, refused_hook; /* launch_refused: how often, and the last hook */
 } fake;
 
 static fake F;
@@ -268,6 +269,7 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     return 1;
 }
 static void f_log(void *c, const char *line) { (void)c; if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line); }
+static void f_launch_refused(void *c, int hook) { (void)c; F.launch_refused++; F.refused_hook = hook; }
 static int f_store_has(void *c, const char *hash, volatile int *cancel)
 {
     (void)c; (void)cancel;
@@ -338,7 +340,7 @@ static const sh_modpub_ops OPS = {
     f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_store_has, f_print, f_store_probe, f_claimed, f_other_build, f_mod_name, f_row_product,
-    f_product_version, f_fetch_detail
+    f_product_version, f_fetch_detail, f_launch_refused
 };
 
 static void reset(void)
@@ -1126,9 +1128,12 @@ static void gate_causes_through_the_hold(void)
     F.store_a = 0;
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    CHECK(F.launch_refused == 0);   /* held: not refused yet */
     tick(3);
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that is not installed and was never published. "
                               "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
+    /* The denial refused the launch: its parse's rows must not stay declared (ADD-V4a H3). */
+    CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_LOCAL_OFFLINE && F.drop_ui == 1);
     /* A prefab's placement: its own wording. */
     reset();
     F.store_a = 0;
@@ -1138,6 +1143,7 @@ static void gate_causes_through_the_hold(void)
     tick(3);
     CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp at a build that is not installed and was never "
                               "published. Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
+    CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a placement is not a launch */
 
     printf("-- cause 4: the store has it, but a borrow names a file this game does not hold\n");
     reset();
