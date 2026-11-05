@@ -36,7 +36,7 @@ typedef struct sig_result {
 } sig_result;
 
 /* Shared results capacity. Check database growth rather than silently omitting entries. */
-#define SIG_RESULTS_MAX 256
+#define SIG_RESULTS_MAX 320
 
 /* The shipped engine signature database. NULL-terminated
  * (the final entry has name==NULL). */

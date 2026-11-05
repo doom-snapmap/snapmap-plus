@@ -41,10 +41,33 @@
  * 13954591). A bank whose bundle is removed stays loaded until the game
  * restarts; nothing here unloads.
  *
+ * Stock banks on demand (DESIGN-additive 2.4, "Sound events"; snaphak-re
+ * lanes G4 and L8). A mod's sound decl at a stock event's name borrows the
+ * event; an event filed only by a bank SnapMap's game-mode filter skips
+ * (doom_weapon_sp.bnk on 13954591) fails to start until that bank is loaded.
+ * Per bundle, the banks needed are the product block's registries "banks"
+ * (the builder's list) together with what its served sound decls need now
+ * (modbankinfo.h), each checked against the game's own bank index. At the
+ * map pass (modserve_activate_bundles: main thread, before the level load),
+ * each bank a declared bundle needs and this process has not asked for is
+ * loaded through the call the per-bank wrapper makes once its filter passes:
+ * operator new(0x130), the wrapper's cookie ctor (the bank name), then the
+ * async LoadBank(name, callback, cookie, -1, &id). The callback is the
+ * product's, which records the outcome and hands the cookie to the engine's
+ * own (its "async load success id <id> : <name>" line, then the cookie's
+ * delete). The pass waits for the callback inside process heap 0 (Wwise
+ * allocates through the top of the main thread's heap stack), at most
+ * SH_MODSOUND_STOCK_WAIT_MS. Never the wrapper (its filter refuses the name
+ * and answers success), never s_loadBanks, and the game-mode global is not
+ * touched. A bank is asked for once per process; it stays loaded (about the
+ * bank file's size in memory, 85 MB for doom_weapon_sp.bnk) until the game
+ * exits. The outcome is recorded in modbankinfo's per-process states.
+ *
  * Logs (backend log; echoed to the console on the main thread):
  *   MODS: sound: bank routes installed (...)
  *   MODS: sound: submitted <file> (<bundle id>) ...
  *   MODS: sound: opened <file> for Wwise from <bundle id> (N bytes)    first 32
+ *   MODS: sound: loaded stock bank <name> (<ms> ms) for <key>
  */
 #ifndef SH_MODSOUND_H
 #define SH_MODSOUND_H
@@ -122,6 +145,43 @@ const sh_modsound_bank *sh_modsound_lookup(const sh_modsound_table *t, const wch
 /* Fill the descriptor as the engine's default hook does. */
 void sh_modsound_fill_desc(sh_modsound_file_desc *d, uint64_t size, void *handle, uint32_t device_id);
 
+/* ------------------------------------------------ stock banks on demand */
+
+#define SH_MODSOUND_STOCK_WAIT_MS   3000   /* the map pass waits this long for a stock bank's callback */
+#define SH_MODSOUND_COOKIE_SIZE     0x130u /* the wrapper's operator new for its cookie */
+#define SH_MODSOUND_NEED_BANKS      4      /* stock banks one bundle may need */
+#define SH_MODSOUND_NEED_BUNDLES    128
+
+/* Decode AudioBankCookieSite (the wrapper's post-filter sequence): 1 with the
+ * absolute targets of operator new, the cookie ctor, the callback LEA and the
+ * LoadBank call when the bytes have the expected shape. Pure. */
+int sh_modsound_decode_cookie_site(const uint8_t *site, uintptr_t *op_new, uintptr_t *cookie_ctor,
+                                   uintptr_t *callback, uintptr_t *load_bank);
+
+/* The stock banks each bundle needs (by bundle hash). */
+typedef struct sh_modsound_need {
+    char hash[65];
+    char key[80];
+    int  count;
+    char banks[SH_MODSOUND_NEED_BANKS][SH_MODSOUND_LEAF_MAX];
+} sh_modsound_need;
+typedef struct sh_modsound_needs {
+    int count;
+    sh_modsound_need bundles[SH_MODSOUND_NEED_BUNDLES];
+} sh_modsound_needs;
+
+/* Add that the bundle `hash` (key `key`) needs stock bank `bank`: 1 added, 0
+ * already there, -1 refused (not a bank the game's index lists as one
+ * SnapMap skips, or a full table). Uses modbankinfo. */
+int sh_modsound_needs_add(sh_modsound_needs *t, const char *hash, const char *key, const char *bank);
+/* Add every bank a registries object's "banks" array names. Returns the
+ * number added. */
+int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, const char *key, const char *registries);
+/* Add what a served request needs when it is a sound decl
+ * (generated/decls/sound/<name>.decl). Returns 1 when one was added. */
+int sh_modsound_needs_add_served(sh_modsound_needs *t, const char *hash, const char *key, const char *request);
+const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash);
+
 #ifndef SH_MODSOUND_PURE
 #include "signatures.h"
 /* Resolve the four signatures (SIG_OK only), decode the hardware pointer,
@@ -133,6 +193,10 @@ int  sh_modsound_install(const sig_result *results, size_t count, const uint8_t 
 void sh_modsound_before_pass(const char *phase);
 /* One status line for sh_mods status. */
 void sh_modsound_print_status(void);
+/* The map pass for stock banks: load each bank the declared bundles need
+ * (64-hex hashes; aliases resolve) and this process has not asked for. Main
+ * thread only, before the level load. Returns the number loaded. */
+int  sh_modsound_stock_before_map(const char *const *bundle_hashes, int n);
 #endif
 
 #ifdef SH_MODSOUND_TESTING
@@ -152,6 +216,23 @@ int  sh_modsound_test_pass(void);
 /* Stand-ins for entering and leaving process heap 0 (enter returns 1 when
  * entered). */
 void sh_modsound_test_heap(int (*enter)(void), void (*leave)(void));
+/* Stock banks: the engine's operator new, cookie ctor, LoadBank and callback
+ * as fakes, the needs table (copied), the wait, and a sink for MODS: lines. */
+typedef void *(*sh_modsound_opnew_fn)(size_t size);
+typedef void *(*sh_modsound_cookie_ctor_fn)(void *self, const char *name);
+typedef void (*sh_modsound_bank_cb_fn)(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie);
+typedef int32_t (*sh_modsound_loadbank_fn)(const char *name, sh_modsound_bank_cb_fn callback, void *cookie, int32_t pool,
+                                           uint32_t *bank_id);
+void sh_modsound_test_bind_stock(sh_modsound_opnew_fn op_new, sh_modsound_cookie_ctor_fn ctor,
+                                 sh_modsound_loadbank_fn load_bank, sh_modsound_bank_cb_fn engine_callback,
+                                 const sh_modsound_needs *needs, unsigned wait_ms);
+void sh_modsound_test_log(void (*sink)(const char *line));
+/* The product's callback, as Wwise would call it. */
+void sh_modsound_test_bank_callback(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie);
+/* The map pass over these hashes (no alias resolution). */
+int  sh_modsound_test_stock(const char *const *bundle_hashes, int n);
+/* Forget the stock-bank slots (the per-process set, for a fresh test). */
+void sh_modsound_test_stock_reset(void);
 #endif
 
 #ifdef __cplusplus

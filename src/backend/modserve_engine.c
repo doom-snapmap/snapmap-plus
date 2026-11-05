@@ -2076,6 +2076,8 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     if (!g_bound) { me_log("activation refused: decl registry unavailable"); return -1; }
     sh_modvt_before_pass("map");
     sh_modsound_before_pass("map");
+    /* Stock banks the declared bundles' borrowed sound events need (modsound.h). */
+    (void)sh_modsound_stock_before_map(bundle_hashes, n);
     (void)sh_strids_refresh_pending();
     me_ensure_probe();
     t0 = me_now_ms();

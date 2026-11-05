@@ -790,6 +790,13 @@ typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *
                                      const char *extra);
 int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
 
+/* Visit every admitted bundle in index order with its key, its hash and its
+ * product block's "registries" object (JSON text, NULL when the block has
+ * none). The strings stay valid for the process. Returns the number visited.
+ * Used by modsound.c for the stock banks a bundle needs ("banks"). */
+typedef void (*sh_modserve_registries_fn)(void *context, const char *id, const char *hash, const char *registries);
+int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *context);
+
 /* Visit every file the published table serves (admitted bundles, conflict
  * winners, not withdrawn), in index order. The strings stay valid for the
  * process. Used by modvt.c to find the bundles' virtual-texture members. */

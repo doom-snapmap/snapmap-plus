@@ -3893,6 +3893,47 @@ static void mb_extends_resolve(sh_mb_bundle *b, const wchar_t *root, const sh_mb
 
 static int mb_cstr_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
+static sh_mb_bank_need_fn volatile g_bank_need;
+void sh_mb_set_bank_need(sh_mb_bank_need_fn fn) { InterlockedExchangePointer((void *volatile *)&g_bank_need, (void *)fn); }
+
+/* registries "banks": the stock banks the mod's sound decls need loaded on
+ * demand (each once, byte order), with one note per bank naming the first
+ * decl that needs it. */
+static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
+{
+    enum { MB_BANKS_MAX = 16 };
+    sh_mb_bank_need_fn need = g_bank_need;
+    char banks[MB_BANKS_MAX][80], *ord[MB_BANKS_MAX];
+    const char *why[MB_BANKS_MAX];
+    size_t i, n = 0, k;
+    if (!need) return;
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        char bank[80];
+        if (!f->ptype || !f->pname || _stricmp(f->ptype, "sound") != 0) continue;
+        if (!need(f->pname, bank, sizeof bank) || !bank[0]) continue;
+        for (k = 0; k < n && strcmp(banks[k], bank); k++) {}
+        if (k < n || n == MB_BANKS_MAX) continue;
+        strcpy_s(banks[n], sizeof banks[n], bank);
+        why[n] = f->pname;
+        n++;
+    }
+    if (!n) return;
+    for (i = 0; i < n; i++) {
+        ord[i] = banks[i];
+        mb_note(b, "sound %s plays a game event only %s holds, a bank SnapMap skips; it is loaded once per session "
+                "for a map that declares this mod", why[i], banks[i]);
+    }
+    qsort(ord, n, sizeof ord[0], mb_cstr_cmp);
+    mb_puts(o, *first ? "\"banks\":[" : ",\"banks\":[");
+    for (i = 0; i < n; i++) {
+        if (i) mb_put(o, ",", 1);
+        mb_put_jcstr(o, ord[i]);
+    }
+    mb_put(o, "]", 1);
+    *first = 0;
+}
+
 /* The product block's "registries" object (DESIGN-additive 2.4): what the
  * product will generate from this bundle when a map declares it. Keys in
  * byte order; members only when not empty. */
@@ -3909,10 +3950,11 @@ static void mb_registries(sh_mb_bundle *b)
     char ns[SH_MB_ID_MAX + 8];
     _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
     mb_put(&o, "{", 1);
+    mb_registry_banks(b, &o, &first);   /* "banks" sorts first */
     for (i = 0, any = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         if (!f->ptype || !f->pname || _stricmp(f->ptype, "snapAIEncounter") != 0) continue;
-        mb_puts(&o, any ? "," : "\"conductor\":[");
+        mb_puts(&o, any ? "," : first ? "\"conductor\":[" : ",\"conductor\":[");
         mb_put_jcstr(&o, f->pname);
         any = 1;
     }

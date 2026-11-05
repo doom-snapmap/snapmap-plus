@@ -543,8 +543,9 @@ These backend files share the work:
 - `modmigrate.c` moves the retired `overrides\` tree into the store once (the
   store tool runs it, and `sh_mods migrate` by hand), as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
-- `modsound.c` delivers the Wwise sound banks bundles carry, as in
-  [Mod sounds](#mod-sounds).
+- `modsound.c` delivers the Wwise sound banks bundles carry, and loads the
+  stock banks SnapMap skips that a declared mod's sound events need, with
+  `modbankinfo.c` reading the game's bank index, as in [Mod sounds](#mod-sounds).
 - `modvt.c` registers each private virtual-texture family a bundle carries
   (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, the builder's only form of
   `.mega2`) as one page-source record, as in
@@ -963,6 +964,27 @@ refresh see a new name. A grandfathered package keeps its banks as they are. `sh
 submitted. The events file (`soundbanksinfo.events`) is not extended: a mod
 event needs no record to play (it only feeds the by-id lookup; without one
 the event is never distance-virtualized).
+
+A mod's sound decl at a stock event's name borrows that event, which plays
+only while a bank filing it is loaded. SnapMap's listed-bank filter skips
+every bank whose name holds `_sp`; on build 13954591 that is
+`doom_weapon_sp.bnk`, the only bank filing 4 of the game's 7,649 events (the
+plasma fly-by and whiz-by among them). `modbankinfo.c` reads the game's
+`base\sound\soundbanks\pc\soundbanksinfo.xml` once, on the first question,
+and answers which skipped bank a sound decl's event needs (its name, else
+`play_` plus its last path component). The builder lists those banks as the
+product block's registries `"banks"`; the serving index adds what each
+bundle's served sound decls need, each checked against the game's index. At
+the map pass `modsound.c` loads each bank a declared bundle needs, once per
+process: on the main thread inside process heap 0, through the call the
+per-bank wrapper makes once its filter passes (`operator new` and the cookie
+ctor, then the async `LoadBank` with the product's callback, which records
+the result and hands the cookie to the engine's own), waiting up to 3 s for
+the callback so the events exist before the level loads. It never goes
+through the wrapper, never through `s_loadBanks`, and never changes the game
+mode. The bank stays loaded until the game exits (about its file size, 85 MB
+for `doom_weapon_sp.bnk`). `sh_mods status`, `sh_mods doctor` and the Mods
+tab's facts show each needed bank and whether it loaded.
 
 ### Render programs
 

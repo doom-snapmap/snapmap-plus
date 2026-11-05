@@ -14,7 +14,16 @@
  * With build 13954591 executables as arguments: the four signatures resolve
  * at their recorded RVAs, the console function decodes to soundSystem and its
  * +0x140, and the read-only slots holding the open-by-name (two) and
- * LoadBanks (one) are the recorded vtable entries. Run via run-tests.ps1. */
+ * LoadBanks (one) are the recorded vtable entries.
+ * Stock banks on demand (lane L8): a synthetic soundbanksinfo.xml (an event
+ * in a loaded bank needs nothing, one only in an _sp bank needs it, one in
+ * both needs nothing; the decl-name alias), the per-bundle needs (registries
+ * "banks" and served sound decls, each checked against the index), the
+ * builder's registries "banks", and the map pass with fake engine calls
+ * (operator new, ctor, LoadBank inside heap 0, the product's callback handing
+ * the cookie to the engine's, once per process, the log line, Wwise not up,
+ * a refusal, a callback after the wait); on the images, the four stock-bank
+ * signatures and the cookie site decoding to them. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,6 +31,7 @@
 #include <string.h>
 #include <shlobj.h>
 #include "modsound.h"
+#include "modbankinfo.h"
 #include "modbundle.h"
 #include "signatures.h"
 #include "host_image.h"
@@ -205,6 +215,277 @@ static void test_routes(void)
     DeleteFileA(path);
 }
 
+/* ------------------------------------------------------------ stock banks */
+
+/* The shape of the installed soundbanksinfo.xml (13954591), cut down. */
+static const char XML[] =
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<SoundBanksInfo Platform=\"Windows\">\n\t<StreamedFiles>\n"
+    "\t\t<File Id=\"1\" Language=\"SFX\">\n\t\t\t<ShortName>x.wav</ShortName>\n\t\t\t<Path>SFX\\x.wem</Path>\n\t\t</File>\n"
+    "\t</StreamedFiles>\n\t<SoundBanks>\n"
+    "\t\t<SoundBank Id=\"332520835\" Language=\"SFX\">\n\t\t\t<ShortName>doom_weapon_mp</ShortName>\n"
+    "\t\t\t<Path>doom_weapon_mp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+    "\t\t\t\t<Event Id=\"10\" Name=\"Play_wpn_sp_shotgun_shelldrops\" DurationType=\"OneShot\"/>\n"
+    "\t\t\t\t<Event Id=\"11\" Name=\"Play_wpn_mp_plasma_flyby_lp\" MaxAttenuation=\"1600.000000\"/>\n"
+    "\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+    "\t\t<SoundBank Id=\"835849565\" Language=\"SFX\">\n\t\t\t<ShortName>doom_weapon_sp</ShortName>\n"
+    "\t\t\t<Path>doom_weapon_sp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+    "\t\t\t\t<Event Id=\"10\" Name=\"Play_wpn_sp_shotgun_shelldrops\" DurationType=\"OneShot\"/>\n"
+    "\t\t\t\t<Event Id=\"961946992\" Name=\"Play_wpn_sp_plasma_flyBy_LP\" DurationType=\"Infinite\"/>\n"
+    "\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+    "\t\t<SoundBank Id=\"2191464771\" Language=\"SFX\">\n\t\t\t<ShortName>doom_initial</ShortName>\n"
+    "\t\t\t<Path>doom_initial.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+    "\t\t\t\t<Event Id=\"12\" Name=\"play_sfx_spidermastermind_plasmaball_impact\"/>\n"
+    "\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+    "\t\t<SoundBank Id=\"836159848\" Language=\"English(US)\">\n\t\t\t<ShortName>doom_vo_sp</ShortName>\n"
+    "\t\t\t<Path>English(US)\\doom_vo_sp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+    "\t\t\t\t<Event Id=\"13\" Name=\"play_vo_line\"/>\n\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+    "\t\t<SoundBank Id=\"836159848\" Language=\"French(France)\">\n\t\t\t<ShortName>doom_vo_sp</ShortName>\n"
+    "\t\t\t<Path>French(France)\\doom_vo_sp.bnk</Path>\n\t\t\t<IncludedEvents>\n"
+    "\t\t\t\t<Event Id=\"13\" Name=\"play_vo_line\"/>\n\t\t\t</IncludedEvents>\n\t\t</SoundBank>\n"
+    "\t</SoundBanks>\n</SoundBanksInfo>\n";
+
+#define H_SPIDER "aa00000000000000000000000000000000000000000000000000000000000001"
+#define H_OTHER  "bb00000000000000000000000000000000000000000000000000000000000002"
+#define H_SERVED "cc00000000000000000000000000000000000000000000000000000000000003"
+
+static void test_bankinfo(void)
+{
+    char event[SH_MBI_EVENT_MAX], bank[SH_MBI_LEAF_MAX];
+    uint32_t id = 0;
+    sh_mbi_stats st;
+    sh_mbi_reset();
+    CHECK(sh_mbi_snapmap_loads("Init.bnk") && sh_mbi_snapmap_loads("doom_initial.bnk") && sh_mbi_snapmap_loads("doom_mp.bnk"));
+    CHECK(sh_mbi_snapmap_loads("doom_snapmaps.bnk"));
+    CHECK(!sh_mbi_snapmap_loads("doom_weapon_sp.bnk") && !sh_mbi_snapmap_loads("DOOM_WEAPON_SP.BNK"));
+    CHECK(!sh_mbi_snapmap_loads("English(US)\\doom_vo_sp.bnk") && !sh_mbi_snapmap_loads("x_initial.bnk"));
+
+    /* Not an index: unavailable, with a cause. */
+    CHECK(sh_mbi_load_text("<SoundBanksInfo/>", 17) == 0 && !sh_mbi_ready());
+    CHECK(sh_mbi_decl_needs("play_wpn_sp_plasma_flyby_lp", NULL, 0, NULL, 0, NULL) == -1);
+    sh_mbi_get_stats(&st);
+    CHECK(st.loaded == -1 && st.cause[0]);
+
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1 && sh_mbi_ready());
+    sh_mbi_get_stats(&st);
+    CHECK(st.loaded == 1 && st.banks == 4 && st.skipped == 2 && st.events == 5 && st.only_skipped == 2);
+
+    /* An event only in an _sp bank: needed, with the bank's id. */
+    bank[0] = 0;
+    CHECK(sh_mbi_decl_needs("play_wpn_sp_plasma_flyby_lp", event, sizeof event, bank, sizeof bank, &id) == 1);
+    CHECK(!strcmp(event, "play_wpn_sp_plasma_flyby_lp") && !strcmp(bank, "doom_weapon_sp.bnk") && id == 835849565u);
+    /* In both a loaded bank and the _sp bank: nothing. */
+    CHECK(sh_mbi_decl_needs("Play_WPN_sp_shotgun_shelldrops", event, sizeof event, bank, sizeof bank, NULL) == 0);
+    /* Only in a loaded bank: nothing. */
+    CHECK(sh_mbi_decl_needs("play_wpn_mp_plasma_flyby_lp", NULL, 0, NULL, 0, NULL) == 0);
+    CHECK(sh_mbi_decl_needs("play_sfx_spidermastermind_plasmaball_impact", NULL, 0, NULL, 0, NULL) == 0);
+    /* Not an event: nothing. */
+    CHECK(sh_mbi_decl_needs("play_shield_off", NULL, 0, NULL, 0, NULL) == 0);
+    CHECK(sh_mbi_decl_event("play_shield_off", event, sizeof event) == 0);
+    /* The engine's alias: "play_" + the last path component (C1f, V2c). */
+    CHECK(sh_mbi_decl_needs("mods/p6probe/wpn_sp_plasma_flyby_lp", event, sizeof event, bank, sizeof bank, NULL) == 1 &&
+          !strcmp(event, "play_wpn_sp_plasma_flyby_lp"));
+    CHECK(sh_mbi_decl_event("mods/local.x/play_wpn_mp_plasma_flyby_lp", event, sizeof event) == 0);
+    /* A language bank SnapMap skips is one bank, whatever its folder. */
+    CHECK(sh_mbi_decl_needs("play_vo_line", NULL, 0, bank, sizeof bank, &id) == 1 && !strcmp(bank, "doom_vo_sp.bnk") &&
+          id == 836159848u);
+    CHECK(sh_mbi_skipped_bank("DOOM_weapon_sp.bnk", &id) == 1 && id == 835849565u);
+    CHECK(sh_mbi_skipped_bank("doom_weapon_mp.bnk", NULL) == 0 && sh_mbi_skipped_bank("p6probe_sfx.bnk", NULL) == 0);
+    CHECK(sh_mbi_bundle_need("play_wpn_sp_plasma_flyby_lp", bank, sizeof bank) == 1);
+    CHECK(sh_mbi_bundle_need("play_wpn_mp_plasma_flyby_lp", bank, sizeof bank) == 0);
+
+    /* The per-process states. */
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_NONE);
+    CHECK(!strcmp(sh_mbi_state_word(SH_MBI_ST_NONE), "not loaded") && !strcmp(sh_mbi_state_word(SH_MBI_ST_LOADED), "loaded"));
+}
+
+static void test_needs(void)
+{
+    sh_modsound_needs *t = (sh_modsound_needs *)calloc(1, sizeof *t);
+    const sh_modsound_need *n;
+    CHECK(t != NULL);
+    if (!t) return;
+    CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "doom_weapon_sp.bnk") == 1);
+    CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "DOOM_WEAPON_SP.BNK") == 0);
+    /* A bank SnapMap loads, or one the game does not have: refused. */
+    CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "doom_weapon_mp.bnk") == -1);
+    CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "evil_sp.bnk") == -1);
+    CHECK(sh_modsound_needs_add_registries(t, H_OTHER, "local.other",
+                                           "{\"banks\":[\"doom_weapon_sp.bnk\",\"evil_sp.bnk\",\"doom_vo_sp.bnk\"],\"conductor\":[\"x\"]}") == 2);
+    CHECK(sh_modsound_needs_add_registries(t, H_OTHER, "local.other", "{\"conductor\":[\"x\"]}") == 0);
+    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/sound/play_wpn_sp_plasma_flyby_lp.decl") == 1);
+    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/sound/play_wpn_mp_plasma_flyby_lp.decl") == 0);
+    CHECK(sh_modsound_needs_add_served(t, H_SERVED, "local.served", "generated/decls/entitydef/play_wpn_sp_plasma_flyby_lp.decl") == 0);
+    n = sh_modsound_needs_find(t, H_SPIDER);
+    CHECK(n && n->count == 1 && !strcmp(n->banks[0], "doom_weapon_sp.bnk") && !strcmp(n->key, "local.spider-mastermind"));
+    n = sh_modsound_needs_find(t, H_OTHER);
+    CHECK(n && n->count == 2 && !strcmp(n->banks[1], "doom_vo_sp.bnk"));
+    n = sh_modsound_needs_find(t, H_SERVED);
+    CHECK(n && n->count == 1);
+    CHECK(t->count == 3 && !sh_modsound_needs_find(t, "dd"));
+    free(t);
+}
+
+/* Fake engine calls. */
+static uint8_t g_cookie_mem[SH_MODSOUND_COOKIE_SIZE];
+static int n_new, n_ctor, n_lb, n_ecb, lb_heap, lb_mode, lb_result_cb = 1;
+static char ctor_name[96], lb_name[96];
+static void *ecb_cookie;
+static sh_modsound_bank_cb_fn lb_cb;
+static void *lb_cookie;
+static char g_lines[16][768];
+static int g_nlines;
+static void sink(const char *line) { if (g_nlines < 16) strcpy_s(g_lines[g_nlines++], sizeof g_lines[0], line); }
+static int saw(const char *part)
+{
+    int i;
+    for (i = 0; i < g_nlines; i++) if (strstr(g_lines[i], part)) return 1;
+    return 0;
+}
+static void *fake_new(size_t size) { n_new++; CHECK(size == SH_MODSOUND_COOKIE_SIZE); return g_cookie_mem; }
+static void *fake_ctor(void *self, const char *name) { n_ctor++; strcpy_s(ctor_name, sizeof ctor_name, name); return self; }
+static void fake_ecb(uint32_t id, const void *mem, int32_t result, int32_t pool, void *cookie)
+{
+    (void)id; (void)mem; (void)result; (void)pool;
+    n_ecb++;
+    ecb_cookie = cookie;
+}
+static DWORD WINAPI late_cb(void *arg)
+{
+    (void)arg;
+    Sleep(30);
+    lb_cb(835849565u, NULL, lb_result_cb, -1, lb_cookie);
+    return 0;
+}
+/* lb_mode: 0 calls back at once, 1 from another thread, 2 refuses (AK_Fail), 3 never calls back. */
+static int32_t fake_lb(const char *name, sh_modsound_bank_cb_fn cb, void *cookie, int32_t pool, uint32_t *id)
+{
+    n_lb++;
+    lb_heap = heap_depth;
+    strcpy_s(lb_name, sizeof lb_name, name);
+    CHECK(pool == -1 && cookie == g_cookie_mem && cb != NULL);
+    lb_cb = cb;
+    lb_cookie = cookie;
+    if (lb_mode == 2) return 2;
+    *id = strstr(name, "_vo_") ? 836159848u : 835849565u;
+    if (lb_mode == 0) cb(*id, NULL, lb_result_cb, -1, cookie);
+    else if (lb_mode == 1) { HANDLE h = CreateThread(NULL, 0, late_cb, NULL, 0, NULL); if (h) CloseHandle(h); }
+    return 1;
+}
+
+static void test_stock(void)
+{
+    static uint8_t hardware[0x20];
+    static const char *const declared[] = { H_SPIDER };
+    static const char *const both[] = { H_OTHER, H_SPIDER };
+    static const char *const undeclared[] = { H_SERVED };
+    sh_modsound_needs *t = (sh_modsound_needs *)calloc(1, sizeof *t);
+    sh_modsound_table empty;
+    double ms = 0;
+    int result = 0;
+    char key[96];
+    if (!t) { CHECK(0); return; }
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "doom_weapon_sp.bnk") == 1);
+    CHECK(sh_modsound_needs_add(t, H_OTHER, "local.other", "doom_weapon_sp.bnk") == 1);
+    CHECK(sh_modsound_needs_add(t, H_OTHER, "local.other", "doom_vo_sp.bnk") == 1);
+    memset(&empty, 0, sizeof empty);
+    memset(hardware, 0, sizeof hardware);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &empty);
+    sh_modsound_test_heap(fake_enter, fake_leave);
+    sh_modsound_test_log(sink);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 2000);
+
+    /* Wwise not up: nothing asked; the bank waits for the next map load. */
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 0 && saw("waits: the sound system is not up yet"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_NONE);
+    hardware[8] = 2;
+    /* An undeclared bundle's bank is not loaded. */
+    CHECK(sh_modsound_test_stock(undeclared, 1) == 0 && n_lb == 0);
+    /* The declared one: operator new, the ctor with the name, LoadBank in heap 0 (waiting there for the
+     * callback from Wwise's thread), the engine's callback gets the cookie, one log line. */
+    g_nlines = 0;
+    lb_mode = 1;
+    CHECK(sh_modsound_test_stock(declared, 1) == 1);
+    CHECK(n_new == 1 && n_ctor == 1 && n_lb == 1 && !strcmp(ctor_name, "doom_weapon_sp.bnk") && !strcmp(lb_name, "doom_weapon_sp.bnk"));
+    CHECK(lb_heap == 1 && heap_depth == 0);
+    CHECK(n_ecb == 1 && ecb_cookie == g_cookie_mem);
+    CHECK(saw("MODS: sound: loaded stock bank doom_weapon_sp.bnk (") && saw(" ms) for local.spider-mastermind"));
+    if (!saw("loaded stock bank")) { int i; for (i = 0; i < g_nlines; i++) printf("  line: %s\n", g_lines[i]); }
+    else printf("  %s\n", g_lines[0]);
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, &ms, key, sizeof key) == SH_MBI_ST_LOADED && result == 1 &&
+          ms >= 20 && !strcmp(key, "local.spider-mastermind"));
+    /* Once per process: the same bank for another map, or for another bundle, is not asked again; the other
+     * bundle's second bank is (Wwise answers at once this time). */
+    lb_mode = 0;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 1);
+    CHECK(sh_modsound_test_stock(both, 2) == 1 && n_lb == 2 && !strcmp(lb_name, "doom_vo_sp.bnk") && n_ecb == 2);
+    CHECK(saw("loaded stock bank doom_vo_sp.bnk (") && saw("for local.other"));
+    if (!saw("loaded stock bank doom_vo_sp")) { int i; printf("  n_lb %d n_ecb %d lb %s\n", n_lb, n_ecb, lb_name); for (i = 0; i < g_nlines; i++) printf("  line: %s\n", g_lines[i]); }
+    CHECK(sh_modsound_test_stock(both, 2) == 0 && n_lb == 2);
+
+    /* A refusal, on fresh state: not retried. */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
+    lb_mode = 2;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 3 && saw("refused by Wwise (AKRESULT 2)"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, NULL, NULL, 0) == SH_MBI_ST_FAILED && result == 2);
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 3);
+    /* A callback after the pass stopped waiting. */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 40);
+    lb_mode = 3;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 4 && saw("is still loading after 40 ms"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADING);
+    sh_modsound_test_bank_callback(835849565u, NULL, 1, -1, lb_cookie);
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADED);
+    CHECK(saw("after the map pass stopped waiting") && n_ecb == 3);
+    /* A failed callback answer (69 is Wwise's answer for a bank already loaded). */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 2000);
+    lb_mode = 0;
+    lb_result_cb = 69;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && saw("did not load (AKRESULT 69)"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, NULL, NULL, 0) == SH_MBI_ST_FAILED && result == 69);
+    lb_result_cb = 1;
+    /* No route: nothing. */
+    sh_modsound_test_bind_stock(NULL, NULL, NULL, NULL, t, 2000);
+    CHECK(sh_modsound_test_stock(both, 2) == 0);
+    sh_modsound_test_log(NULL);
+    sh_modsound_test_stock_reset();
+    free(t);
+}
+
+/* The ms_submit_one refusal wording for a filtered name (G4's side note):
+ * the wrapper answers 1 and loads nothing. */
+static void test_filtered_submit(void)
+{
+    static uint8_t hardware[0x20];
+    sh_modsound_table t;
+    memset(&t, 0, sizeof t);
+    memset(hardware, 0, sizeof hardware);
+    hardware[8] = 2;
+    CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_sp.bnk", "C:\\nowhere.bnk", 24, "p6probe", 0) == 1);
+    sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    sh_modsound_test_log(sink);
+    g_nlines = 0;
+    submit_result = 1;
+    CHECK(sh_modsound_test_pass() == 1);
+    CHECK(saw("refused: the engine's listed-bank filter excludes the name") && !saw("queued"));
+    sh_modsound_test_log(NULL);
+    sh_modsound_table_free(&t);
+}
+
 /* ------------------------------------------------------------ builder */
 
 static char g_dir[MAX_PATH];
@@ -261,6 +542,7 @@ static int has_need(const sh_mb_file *f, const char *type, const char *name)
 
 #define BANK "assets/sound/soundbanks/pc/p6probe_sfx.bnk"
 #define SND  "assets/generated/decls/sound/mods/p6probe/p6probe_far.decl"
+#define SNDSP "assets/generated/decls/sound/mods/p6probe/wpn_sp_plasma_flyby_lp.decl"
 #define ENT  "assets/generated/decls/entitydef/mods/p6probe/speaker_far.decl"
 #define DESC "{\"id\": \"p6probe\", \"version\": \"1.0.0\", \"name\": \"Sound probe\"}"
 
@@ -339,7 +621,28 @@ static void test_builder(void)
     CHECK(f && !strcmp(f->ptype, "sound") && !strcmp(f->pname, "mods/p6probe/p6probe_far"));
     f = find_file(&b, "generated/decls/entitydef/mods/p6probe/speaker_far.decl");
     CHECK(f && has_need(f, "sound", "mods/p6probe/p6probe_far"));
+    CHECK(b.registries && !strstr(b.registries, "\"banks\""));
     sh_mb_free(&b);
+
+    /* registries "banks": a sound decl whose event (the alias of its last
+     * component) only the _sp bank files. */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_mb_set_bank_need(sh_mbi_bundle_need);
+    put(SNDSP, "{\n\tinherit = \"default\";\n}\n");
+    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    if (b.errors) printf("  build: %s\n", b.first_cause);
+    CHECK(b.registries && !strncmp(b.registries, "{\"banks\":[\"doom_weapon_sp.bnk\"]", 31));
+    if (b.registries) printf("  registries: %s\n", b.registries);
+    {
+        size_t i;
+        int noted = 0;
+        for (i = 0; i < b.note_count; i++) noted |= strstr(b.notes[i], "doom_weapon_sp.bnk") != NULL;
+        CHECK(noted);
+    }
+    sh_mb_free(&b);
+    sh_mb_set_bank_need(NULL);
+    drop(SNDSP);
 
     /* A stock sound name is not a need; a mods/ one nobody provides is an error. */
     put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"play_arcade_ui_17\";\n\t}\n}\n");
@@ -499,6 +802,44 @@ static void test_image(const char *path)
     CHECK(n == 1 && (uint8_t *)slots[0] - base == x->lb_slot);
     /* The per-bank wrapper is called, never held in a vtable. */
     CHECK(sh_modsound_find_slots(base, preferred + x->submit, slots, 4) == 0);
+    /* Stock banks (L8): the wrapper's post-filter site decodes to the three
+     * signatures and to the cookie ctor (VK 0x2AF680 / GL 0x2AF840). */
+    {
+        uint32_t lbk = resolve(base, "AudioLoadBankAsync", id->vulkan), nw = resolve(base, "AudioCookieNew", id->vulkan);
+        uint32_t cb = resolve(base, "AudioBankLoadCallback", id->vulkan), site = resolve(base, "AudioBankCookieSite", id->vulkan);
+        uintptr_t d_new = 0, d_ctor = 0, d_cb = 0, d_lb = 0;
+        CHECK(lbk == (id->vulkan ? 0x1D28A60u : 0x1D42FE0u) && nw == (id->vulkan ? 0x1B2BD1Cu : 0x1B4623Cu));
+        CHECK(cb == (id->vulkan ? 0x19F5B50u : 0x1A11C00u) && site == x->submit + 0xBFu);
+        CHECK(site && sh_modsound_decode_cookie_site(base + site, &d_new, &d_ctor, &d_cb, &d_lb));
+        CHECK(d_new - (uintptr_t)base == nw && d_cb - (uintptr_t)base == cb && d_lb - (uintptr_t)base == lbk);
+        CHECK(d_ctor - (uintptr_t)base == (id->vulkan ? 0x2AF680u : 0x2AF840u));
+        printf("%s %s: stock banks: LoadBank 0x%x, operator new 0x%x, cookie ctor 0x%llx, callback 0x%x, site 0x%x\n",
+               g_fail ? "BAD" : "OK ", id->vulkan ? "Vulkan" : "OpenGL", lbk, nw,
+               (unsigned long long)(d_ctor - (uintptr_t)base), cb, site);
+    }
+    /* The installed bank index beside the executable (G4's comparison): of
+     * 7,649 events only the 4 single-player-only ones need a bank SnapMap
+     * skips, and that bank is doom_weapon_sp.bnk. */
+    {
+        char root[MAX_PATH], bank[SH_MBI_LEAF_MAX];
+        uint32_t bid = 0;
+        sh_mbi_stats st;
+        strcpy_s(root, sizeof root, path);
+        if (strrchr(root, '\\')) *strrchr(root, '\\') = 0;
+        sh_mbi_reset();
+        sh_mbi_set_install(root);
+        CHECK(sh_mbi_ready());
+        sh_mbi_get_stats(&st);
+        CHECK(st.events == 7649 && st.only_skipped == 4 && st.skipped == 1);
+        CHECK(sh_mbi_decl_needs("play_wpn_sp_plasma_flyby_lp", NULL, 0, bank, sizeof bank, &bid) == 1 &&
+              !strcmp(bank, "doom_weapon_sp.bnk") && bid == 835849565u);
+        CHECK(sh_mbi_decl_needs("play_wpn_sp_plasma_hs_tracers", NULL, 0, NULL, 0, NULL) == 1);
+        CHECK(sh_mbi_decl_needs("play_wpn_sp_shotgun_shelldrops", NULL, 0, NULL, 0, NULL) == 0);
+        CHECK(sh_mbi_decl_needs("play_wpn_mp_plasma_flyby_lp", NULL, 0, NULL, 0, NULL) == 0);
+        printf("%s installed soundbanksinfo.xml: %u banks (%u skipped), %u events, %u only in skipped banks, read in %.0f ms\n",
+               g_fail ? "BAD" : "OK ", st.banks, st.skipped, st.events, st.only_skipped, st.load_ms);
+        sh_mbi_reset();
+    }
     printf("%s %s: LoadBanks 0x%x (slot 0x%x), submit 0x%x, open-by-name 0x%x (slots 0x%x, 0x%x), soundSystem 0x%x\n",
            g_fail ? "BAD" : "OK ", id->vulkan ? "Vulkan" : "OpenGL", x->loadbanks, x->lb_slot, x->submit, x->open,
            x->open_slot_a, x->open_slot_b, x->sound_system);
@@ -511,6 +852,10 @@ int main(int argc, char **argv)
     test_decode();
     test_table();
     test_routes();
+    test_bankinfo();
+    test_needs();
+    test_stock();
+    test_filtered_submit();
     test_builder();
     for (int i = 1; i < argc; i++) test_image(argv[i]);
     if (getenv("SH_MODSOUND_FIXTURE")) test_fixture(getenv("SH_MODSOUND_FIXTURE"));

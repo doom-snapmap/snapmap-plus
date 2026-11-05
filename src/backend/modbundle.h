@@ -20,7 +20,8 @@
  *     "legacy": {...},                 converted first-generation packages only
  *     "classes": {"adds", "borrows", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"player": {...}, "conductor": ["<encounter decl>", ...], "strings": ["<key>", ...]},
+ *     "registries": {"banks": ["<stock bank>", ...], "player": {...}, "conductor": ["<encounter decl>", ...],
+ *                    "strings": ["<key>", ...]},
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false}]
@@ -318,6 +319,15 @@ typedef struct sh_mb_stock_ops {
 void sh_mb_set_stock_ops(const sh_mb_stock_ops *ops);
 /* 1 when a reader is registered. */
 int  sh_mb_stock_available(void);
+
+/* The stock-bank question (modbankinfo.h sh_mbi_bundle_need): 1 with the stock
+ * Wwise bank a sound decl named `decl_name` needs loaded on demand (a bank
+ * SnapMap's game-mode filter skips, the only kind filing its event), else 0.
+ * With one registered, a build lists each such bank once, in byte order, as
+ * the product block's registries "banks" (DESIGN-additive 2.4, "Sound
+ * events") and notes which decl needs it. NULL (the default) lists none. */
+typedef int (*sh_mb_bank_need_fn)(const char *decl_name, char *bank, size_t cap);
+void sh_mb_set_bank_need(sh_mb_bank_need_fn fn);
 /* The registered operations, with a first cause naming `path` when not OK. */
 int  sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
                         const char *path, char *cause, size_t cause_cap);

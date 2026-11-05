@@ -6492,6 +6492,20 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     return n;
 }
 
+int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i, n = 0;
+    if (!x || !fn) return 0;
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->admitted || !b->hash) continue;
+        fn(context, b->id ? b->id : b->folder, b->hash, b->registries);
+        n++;
+    }
+    return n;
+}
+
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
 {
     const ms_index *x = g_index;

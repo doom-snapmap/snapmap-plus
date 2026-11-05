@@ -29,6 +29,7 @@
 #include "modserve.h"
 #include "modswf.h"
 #include "modsound.h"
+#include "modbankinfo.h"
 #include "modhud.h"
 #include "modhud_scene.h"
 #include "modscene_place.h"
@@ -349,6 +350,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Stock pointers read the installed game through the bridge (modstock.h);
          * registering it loads nothing until a pointer is built, verified or served. */
         sh_modstock_register();
+        /* Borrowed sound events: the game's bank index answers which stock bank
+         * a sound decl needs (modbankinfo.h); read on the first question. */
+        sh_mb_set_bank_need(sh_mbi_bundle_need);
         /* No store migration runs here: the installer runs snapmap-plus-store,
          * which upgrades the retired layout, retires removed-mods\ and moves
          * overrides\ into the store (modstore.h, modmigrate.h). */

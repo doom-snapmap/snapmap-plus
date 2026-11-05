@@ -1428,6 +1428,36 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * soundSystem+0x140 (the hardware) vtable +0x30. modsound decodes both addresses. */
       "48 83 EC 28 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 83 C4 28 48 FF 60 30",
       0x1689010u, 0x16895F0u },
+    /* Stock banks on demand (modsound.c; snaphak-re mod-system-reinstatement lanes G4 and L8): the
+     * load the per-bank wrapper makes once its listed-bank filter passes, called directly for a stock
+     * bank the filter skips in SnapMap (doom_weapon_sp.bnk). Called, never hooked. Evidence
+     * logs/shared-ghidra/mod-system-l8/ (disassembly jobs VK 0ba0cc09 29b90ccb 6d140627 6b5f9d60, GL
+     * 9b305e70 ddd84912 e72dd784 0826538a). */
+    { "AudioLoadBankAsync", /* AKRESULT AK::SoundEngine::LoadBank(const char *name, AkBankCallbackFunc, void *cookie,
+                             * AkMemPoolId, AkBankID *out): GetIDFromString, *out = id, then the bank manager's queue
+                             * (+0x18). */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 81 EC A0 00 00 00 41 8B F9 49 8B F0 48 8B DA E8 ?? ?? ?? ?? 48 8B 8C 24 D0 00 "
+      "00 00 48 8D 54 24 60 89 44 24 40 48 89 5C 24 28 48 89 74 24 30 89 01",
+      0x1D28A60u, 0x1D42FE0u },
+    { "AudioCookieNew",     /* void *operator new(size_t): the engine allocator with its new-handler retry; the
+                             * wrapper's cookie (0x130 bytes). */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F9 EB 20 48 8B 35 ?? ?? ?? ?? 48 85 F6 74 21 48 8B CE E8 ?? ?? "
+      "?? ?? 48 8B CF FF D6 85 C0 74 10 48 8B CF",
+      0x1B2BD1Cu, 0x1B4623Cu },
+    { "AudioBankLoadCallback", /* void(AkBankID, const void *, AKRESULT, AkMemPoolId, void *cookie): prints "async load
+                                * success id %6d : %s" (or the failure line) with the cookie's name, then deletes the
+                                * cookie through its vtable. */
+      "40 53 48 83 EC 20 48 8B 5C 24 50 41 8B C0 41 83 F8 01 4C 8B 43 10 75 0B 8B D1 48 8D 0D ?? ?? ?? ?? EB 09 8B D0 48 "
+      "8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB 48 83 C4 20 5B",
+      0x19F5B50u, 0x1A11C00u },
+    { "AudioBankCookieSite", /* inside AudioBankSubmit after its filter: CMP force-load flag; operator new(0x130);
+                              * the cookie ctor(cookie, name); LEA RDX,callback; CALL LoadBank. The cookie ctor (an
+                              * idStrStatic<256> ctor, VK 0x2AF680 / GL 0x2AF840) has 18 byte-identical template
+                              * twins on each image, so modsound takes it from this call and checks the other three
+                              * calls land on the entries above. */
+      "83 3D ?? ?? ?? ?? 00 75 4D B9 30 01 00 00 E8 ?? ?? ?? ?? 48 89 44 24 40 48 85 C0 74 0E 48 8B 54 24 60 48 8B C8 E8 "
+      "?? ?? ?? ?? 90 48 8D 4C 24 30 48 89 4C 24 20 41 83 C9 FF 4C 8B C0 48 8D 15 ?? ?? ?? ?? 48 8B 4C 24 60 E8",
+      0x19F6ADFu, 0x1A12B8Fu },
     { "WeaponHudModeCall", /* WeaponInfo::Update: CALL WeaponHudGameMode; TEST AL,AL; JZ; then the widget's weapon decl
                             * at RBX+0x1F8 and its +0x641 flag. The beta.19 pattern, unchanged on 13954591; modhud
                             * swaps the call's aligned rel32 (no steal). */
