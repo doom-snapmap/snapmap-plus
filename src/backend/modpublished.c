@@ -855,6 +855,14 @@ nomem:
 #define PUB_PRODUCT_SEEN 16
 static char g_product_seen[PUB_PRODUCT_SEEN][PUB_ID_CAP * 2 + 72];
 static unsigned g_product_next;
+static volatile LONG g_product_dev_said;   /* the one line for a development build's version */
+
+int sh_modpub_version_parseable(const char *v)
+{
+    if (!v) return 0;
+    if (*v == 'v' || *v == 'V') v++;
+    return *v >= '0' && *v <= '9';
+}
 
 static void pub_product_check(const sh_modmanifest_list *rows, const char *item, const char *revision)
 {
@@ -868,6 +876,14 @@ static void pub_product_check(const sh_modmanifest_list *rows, const char *item,
     if (!need[0]) return;
     if (!g_ops.product_version || !g_ops.product_version(g_ops.context, running, sizeof running) || !running[0]) {
         pub_logf("MODS: this map needs Snapmap+ %s; the running version is unknown, so nothing is said", need);
+        return;
+    }
+    if (!sh_modpub_version_parseable(running)) {
+        /* A development build ("local") or a version that does not read as
+         * one: it counts as the newest, so no map asks for a newer one. */
+        if (!InterlockedExchange(&g_product_dev_said, 1))
+            pub_logf("MODS: the running Snapmap+ reports version '%s', which is not a release version; it counts as "
+                     "the newest, so no map's product notice is shown", running);
         return;
     }
     if (sh_modpub_version_compare(running, need) >= 0) return;
@@ -1604,6 +1620,7 @@ void sh_modpub_test_reset(void)
     g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
     memset(g_product_seen, 0, sizeof g_product_seen);
     g_product_next = 0;
+    InterlockedExchange(&g_product_dev_said, 0);
     InterlockedExchange(&g_resuming, 0);
 }
 int sh_modpub_test_state(void) { return g_hold.state; }

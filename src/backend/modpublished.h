@@ -230,6 +230,10 @@ typedef struct sh_modpub_probe {
  * major.minor.patch, then a release after its pre-releases, pre-release
  * identifiers numerically or by text). A leading "v" is ignored. */
 int  sh_modpub_version_compare(const char *a, const char *b);
+/* 1 when `v` reads as a release version (a digit after an optional "v").
+ * A running version that does not ("local", the dev build's) counts as the
+ * newest: the product-version notice is never shown for it. */
+int  sh_modpub_version_parseable(const char *v);
 
 /* The product-version notice (DESIGN-additive 2.7): "This map needs Snapmap+
  * <version> or later." */

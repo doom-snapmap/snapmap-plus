@@ -2011,7 +2011,10 @@ The product version (DESIGN-additive 2.7). A gated completion, My Maps play and
 the launch boundary read the version each row asks for (its `product` member,
 which the save will write) and, when the running product (`install.json`'s
 `version`) is older, raise "This map needs Snapmap+ <version> or later." once
-per map and session, with a console line; the launch goes on. Until the save
+per map and session, with a console line; the launch goes on. A running
+version that does not read as a release (`sh_modpub_version_parseable`: a
+digit after an optional `v`; the development build's `local`) counts as the
+newest: no notice, and one log line per session. Until the save
 writes the member, `eng_row_product` answers nothing and no notice is shown.
 
 Yes starts one job on the modsync worker that fetches every missing bundle by

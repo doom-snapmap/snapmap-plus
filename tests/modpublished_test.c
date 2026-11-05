@@ -122,6 +122,7 @@ typedef struct fake {
     char product_a[32];              /* alex.pink-imp's row asks for this product version */
     char running[32];                /* the running product's version, "" unknown */
     int launch_refused, refused_hook; /* launch_refused: how often, and the last hook */
+    int dev_version_lines;           /* the one line for a running version that is not a release */
 } fake;
 
 static fake F;
@@ -268,7 +269,12 @@ static int f_resume(void *c, const sh_modpub_resume *r)
     }
     return 1;
 }
-static void f_log(void *c, const char *line) { (void)c; if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line); }
+static void f_log(void *c, const char *line)
+{
+    (void)c;
+    if (getenv("MODPUB_TEST_LOG")) printf("    %s\n", line);
+    if (line && strstr(line, "which is not a release version; it counts as the newest")) F.dev_version_lines++;
+}
 static void f_launch_refused(void *c, int hook) { (void)c; F.launch_refused++; F.refused_hook = hook; }
 static int f_store_has(void *c, const char *hash, volatile int *cancel)
 {
@@ -1270,6 +1276,25 @@ static void gate_product_version(void)
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
     CHECK(!strcmp(F.last_print, "This map needs Snapmap+ 0.3.0 or later."));
+
+    printf("-- a development build's version (\"local\") or one that does not read counts as the newest\n");
+    CHECK(sh_modpub_version_parseable("v0.2.1-beta.24") && sh_modpub_version_parseable("0.3.0"));
+    CHECK(!sh_modpub_version_parseable("local") && !sh_modpub_version_parseable("") && !sh_modpub_version_parseable(NULL) &&
+          !sh_modpub_version_parseable("v") && !sh_modpub_version_parseable("dev-1.0"));
+    reset();
+    F.installed_a = 1;
+    strcpy_s(F.product_a, sizeof F.product_a, "0.2.1-beta.24");
+    strcpy_s(F.running, sizeof F.running, "local");
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(F.prints == 0 && !sh_modpub_test_notice()[0] && F.dev_version_lines == 1);
+    tick(2);
+    CHECK(F.asks == 0);
+    /* Another map asking a newer one: still nothing, and the line is not repeated. */
+    strcpy_s(F.product_a, sizeof F.product_a, "9.0.0");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(F.prints == 0 && !sh_modpub_test_notice()[0] && F.dev_version_lines == 1);
 }
 
 static void the_refusal(void)
