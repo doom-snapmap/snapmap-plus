@@ -19,8 +19,7 @@
  * in a loaded bank needs nothing, one only in an _sp bank needs it, one in
  * both needs nothing; the decl-name alias), the per-bundle needs (registries
  * "banks" and served sound decls, each checked against the index), the
- * builder's registries "banks", the load decision (boot and idle load, the
- * map pass never), and the poll and the map pass with fake engine calls
+ * builder's registries "banks", and the map pass with fake engine calls
  * (operator new, ctor, LoadBank inside heap 0, the product's callback handing
  * the cookie to the engine's, once per process, the log line, Wwise not up,
  * a refusal, a callback after the wait); on the images, the four stock-bank
@@ -373,27 +372,11 @@ static int32_t fake_lb(const char *name, sh_modsound_bank_cb_fn cb, void *cookie
     return 1;
 }
 
-static int g_busy_answer = 1;
-static int fake_busy(char *cause, size_t cap)
-{
-    if (g_busy_answer) strcpy_s(cause, cap, "a map is loading");
-    return g_busy_answer;
-}
-
-static void stock_fresh(const sh_modsound_needs *t, unsigned wait_ms)
-{
-    sh_mbi_reset();
-    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
-    sh_modsound_test_stock_reset();
-    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, wait_ms);
-    sh_modsound_test_stock_due(1);
-    g_nlines = 0;
-}
-
 static void test_stock(void)
 {
     static uint8_t hardware[0x20];
     static const char *const declared[] = { H_SPIDER };
+    static const char *const both[] = { H_OTHER, H_SPIDER };
     static const char *const undeclared[] = { H_SERVED };
     sh_modsound_needs *t = (sh_modsound_needs *)calloc(1, sizeof *t);
     sh_modsound_table empty;
@@ -401,17 +384,6 @@ static void test_stock(void)
     int result = 0;
     char key[96];
     if (!t) { CHECK(0); return; }
-
-    /* The decision (ADD-V5 B2): boot and an idle poll load when the game is
-     * not busy; the map pass never loads. */
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_BOOT, 0) == 1);
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_BOOT, 1) == 0);
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_MAP_PASS, 0) == 0);
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_MAP_PASS, 1) == 0);
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_IDLE, 0) == 1);
-    CHECK(sh_modsound_stock_may_load(SH_MODSOUND_STOCK_IDLE, 1) == 0);
-    CHECK(sh_modsound_stock_may_load(7, 0) == 0);
-
     sh_mbi_reset();
     CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
     CHECK(sh_modsound_needs_add(t, H_SPIDER, "local.spider-mastermind", "doom_weapon_sp.bnk") == 1);
@@ -422,97 +394,73 @@ static void test_stock(void)
     sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &empty);
     sh_modsound_test_heap(fake_enter, fake_leave);
     sh_modsound_test_log(sink);
-    stock_fresh(t, 2000);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 2000);
 
-    /* Boot with Wwise not up: nothing asked; the poll stays due. */
-    CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_BOOT) == 0 && n_lb == 0 && sh_modsound_test_stock_is_due());
+    /* Wwise not up: nothing asked; the bank waits for the next map load. */
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 0 && saw("waits: the sound system is not up yet"));
     CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_NONE);
     hardware[8] = 2;
-
-    /* The map pass never loads: a bank still not loaded (a mod installed
-     * during the load) is deferred with one line, and the poll is due. An
-     * undeclared bundle says nothing. */
-    CHECK(sh_modsound_test_stock(undeclared, 1) == 0 && n_lb == 0 && g_nlines == 0);
-    sh_modsound_test_stock_due(0);
-    CHECK(sh_modsound_test_stock(declared, 1) == 1 && n_lb == 0 && n_new == 0);
-    CHECK(g_nlines == 1 && saw("map: stock bank doom_weapon_sp.bnk for local.spider-mastermind is not loaded and is deferred"));
-    CHECK(sh_modsound_test_stock_is_due() && sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_NONE);
-
-    /* The poll, while busy (a map loading) or with no probe: nothing. */
-    sh_modsound_set_busy(NULL);
-    CHECK(sh_modsound_stock_poll() == 0 && n_lb == 0);
-    sh_modsound_set_busy(fake_busy);
-    g_busy_answer = 1;
-    CHECK(sh_modsound_stock_poll() == 0 && n_lb == 0 && sh_modsound_test_stock_is_due());
-
-    /* Boot, idle: every installed bundle's banks, once each: operator new,
-     * the ctor with the name, LoadBank in heap 0 (waiting there for the
-     * callback from Wwise's thread), the engine's callback gets the cookie. */
-    g_busy_answer = 0;
+    /* An undeclared bundle's bank is not loaded. */
+    CHECK(sh_modsound_test_stock(undeclared, 1) == 0 && n_lb == 0);
+    /* The declared one: operator new, the ctor with the name, LoadBank in heap 0 (waiting there for the
+     * callback from Wwise's thread), the engine's callback gets the cookie, one log line. */
     g_nlines = 0;
     lb_mode = 1;
-    CHECK(sh_modsound_stock_poll() == 2);
-    CHECK(n_new == 2 && n_ctor == 2 && n_lb == 2 && !strcmp(lb_name, "doom_vo_sp.bnk"));
+    CHECK(sh_modsound_test_stock(declared, 1) == 1);
+    CHECK(n_new == 1 && n_ctor == 1 && n_lb == 1 && !strcmp(ctor_name, "doom_weapon_sp.bnk") && !strcmp(lb_name, "doom_weapon_sp.bnk"));
     CHECK(lb_heap == 1 && heap_depth == 0);
-    CHECK(n_ecb == 2 && ecb_cookie == g_cookie_mem);
+    CHECK(n_ecb == 1 && ecb_cookie == g_cookie_mem);
     CHECK(saw("MODS: sound: loaded stock bank doom_weapon_sp.bnk (") && saw(" ms) for local.spider-mastermind"));
-    CHECK(saw("MODS: sound: loaded stock bank doom_vo_sp.bnk (") && saw("for local.other"));
     if (!saw("loaded stock bank")) { int i; for (i = 0; i < g_nlines; i++) printf("  line: %s\n", g_lines[i]); }
     else printf("  %s\n", g_lines[0]);
     CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, &ms, key, sizeof key) == SH_MBI_ST_LOADED && result == 1 &&
           ms >= 20 && !strcmp(key, "local.spider-mastermind"));
-    CHECK(!sh_modsound_test_stock_is_due());
-    /* Nothing is due: the poll does nothing; a map pass says "already loaded". */
+    /* Once per process: the same bank for another map, or for another bundle, is not asked again; the other
+     * bundle's second bank is (Wwise answers at once this time). */
     lb_mode = 0;
     g_nlines = 0;
-    CHECK(sh_modsound_stock_poll() == 0 && n_lb == 2);
-    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 2);
-    CHECK(saw("map: stock bank doom_weapon_sp.bnk for local.spider-mastermind already loaded"));
-    /* A rescan with nothing new: due, but every bank was asked for. */
-    sh_modsound_test_stock_due(1);
-    CHECK(sh_modsound_stock_poll() == 0 && n_lb == 2 && !sh_modsound_test_stock_is_due());
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 1);
+    CHECK(sh_modsound_test_stock(both, 2) == 1 && n_lb == 2 && !strcmp(lb_name, "doom_vo_sp.bnk") && n_ecb == 2);
+    CHECK(saw("loaded stock bank doom_vo_sp.bnk (") && saw("for local.other"));
+    if (!saw("loaded stock bank doom_vo_sp")) { int i; printf("  n_lb %d n_ecb %d lb %s\n", n_lb, n_ecb, lb_name); for (i = 0; i < g_nlines; i++) printf("  line: %s\n", g_lines[i]); }
+    CHECK(sh_modsound_test_stock(both, 2) == 0 && n_lb == 2);
 
-    /* An idle rescan that brings a need (fresh state): loaded, the game idle. */
-    stock_fresh(t, 2000);
-    CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_IDLE) == 2 && n_lb == 4);
-
-    /* A refusal: not retried. */
-    stock_fresh(t, 2000);
+    /* A refusal, on fresh state: not retried. */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
     lb_mode = 2;
-    CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_IDLE) == 0 && n_lb == 6 && saw("idle: stock bank doom_weapon_sp.bnk"));
-    CHECK(saw("refused by Wwise (AKRESULT 2)"));
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 3 && saw("refused by Wwise (AKRESULT 2)"));
     CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, NULL, NULL, 0) == SH_MBI_ST_FAILED && result == 2);
-    CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_IDLE) == 0 && n_lb == 6);
-    /* A callback after the load stopped waiting. */
-    {
-        sh_modsound_needs *one = (sh_modsound_needs *)calloc(1, sizeof *one);
-        CHECK(one != NULL);
-        if (one) {
-            CHECK(sh_modsound_needs_add(one, H_SPIDER, "local.spider-mastermind", "doom_weapon_sp.bnk") == 1);
-            stock_fresh(one, 40);
-            lb_mode = 3;
-            CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_BOOT) == 0 && n_lb == 7 && saw("is still loading after 40 ms"));
-            CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADING);
-            sh_modsound_test_bank_callback(835849565u, NULL, 1, -1, lb_cookie);
-            CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADED);
-            CHECK(saw("after the load stopped waiting") && n_ecb == 5);
-            /* A failed callback answer (69 is Wwise's answer for a bank already loaded). */
-            stock_fresh(one, 2000);
-            lb_mode = 0;
-            lb_result_cb = 69;
-            CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_IDLE) == 0 && saw("did not load (AKRESULT 69)"));
-            CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, NULL, NULL, 0) == SH_MBI_ST_FAILED && result == 69);
-            lb_result_cb = 1;
-            free(one);
-        }
-    }
-    /* No route: nothing, at a poll or a map pass. */
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 3);
+    /* A callback after the pass stopped waiting. */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 40);
+    lb_mode = 3;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && n_lb == 4 && saw("is still loading after 40 ms"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADING);
+    sh_modsound_test_bank_callback(835849565u, NULL, 1, -1, lb_cookie);
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", NULL, NULL, NULL, 0) == SH_MBI_ST_LOADED);
+    CHECK(saw("after the map pass stopped waiting") && n_ecb == 3);
+    /* A failed callback answer (69 is Wwise's answer for a bank already loaded). */
+    sh_mbi_reset();
+    CHECK(sh_mbi_load_text(XML, sizeof XML - 1) == 1);
+    sh_modsound_test_stock_reset();
+    sh_modsound_test_bind_stock(fake_new, fake_ctor, fake_lb, fake_ecb, t, 2000);
+    lb_mode = 0;
+    lb_result_cb = 69;
+    g_nlines = 0;
+    CHECK(sh_modsound_test_stock(declared, 1) == 0 && saw("did not load (AKRESULT 69)"));
+    CHECK(sh_mbi_state_get("doom_weapon_sp.bnk", &result, NULL, NULL, 0) == SH_MBI_ST_FAILED && result == 69);
+    lb_result_cb = 1;
+    /* No route: nothing. */
     sh_modsound_test_bind_stock(NULL, NULL, NULL, NULL, t, 2000);
-    sh_modsound_test_stock_due(1);
-    CHECK(sh_modsound_test_stock_all(SH_MODSOUND_STOCK_IDLE) == 0 && sh_modsound_stock_poll() == 0);
-    CHECK(sh_modsound_test_stock(declared, 1) == 0);
-    sh_modsound_set_busy(NULL);
-    sh_modsound_test_stock_due(0);
+    CHECK(sh_modsound_test_stock(both, 2) == 0);
     sh_modsound_test_log(NULL);
     sh_modsound_test_stock_reset();
     free(t);

@@ -35,7 +35,6 @@
 #include "commands.h"
 #include "process_heap_scope.h"
 #include "modserve.h"
-#include "modsound.h"
 #include "modpublish.h"
 #include "engine_build.h"
 
@@ -1432,20 +1431,6 @@ static int ie_mods_busy(char *cause, size_t cap)
     return 0;
 }
 
-/* The stock-bank poll's probe (modsound.h): busy while a map loads, Play
- * runs (editor or hub launch: the busy test sees both), or a launched map's
- * Play holds (the serving mode is PLAY from the launch gate until the hub
- * clears it, which covers the gap before the level load). */
-static int ie_sound_busy(char *cause, size_t cap)
-{
-    if (ie_mods_busy(cause, cap)) return 1;
-    if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY) {
-        strncpy_s(cause, cap, "a launched or played map holds the serving mode", _TRUNCATE);
-        return 1;
-    }
-    return 0;
-}
-
 /* The map scope's exit test (modui.h map_left), asked while the editor
  * screen is down. Leaving the map for the hub or the browser stops the
  * editor's state machine (editor+0x23618 reads 0, the test editor_frame.c's
@@ -1557,7 +1542,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         mods.print           = ie_mods_print;
         mods.map_left        = ie_mods_map_left;
         sh_modui_bind(&mods);
-        sh_modsound_set_busy(ie_sound_busy);
         /* The rawmap save's "share the .zip" line and toast. */
         sh_rawmap_set_notify(ie_mods_toast, ie_mods_print);
         sh_rawmap_set_edit_id_reader(ie_mods_edit_id);

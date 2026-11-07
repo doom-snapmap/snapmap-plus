@@ -484,7 +484,7 @@ static void ms_bank_cb(uint32_t bank_id, const void *in_memory, int32_t result, 
         InterlockedExchange(&s->answered, 1);
         sh_mbi_state_set(s->leaf, result == 1 ? SH_MBI_ST_LOADED : SH_MBI_ST_FAILED, result, ms, s->key);
         if (InterlockedCompareExchange(&s->waited_out, 0, 0)) {
-            if (result == 1) ms_log("loaded stock bank %s (%.0f ms) for %s, after the load stopped waiting", s->leaf, ms, s->key);
+            if (result == 1) ms_log("loaded stock bank %s (%.0f ms) for %s, after the map pass stopped waiting", s->leaf, ms, s->key);
             else ms_log("stock bank %s did not load (AKRESULT %d) for %s; not retried this session", s->leaf, (int)result, s->key);
         }
         if (s->done) SetEvent(s->done);
@@ -583,29 +583,14 @@ static int ms_stock_load(const char *leaf, const char *key, const char *phase)
     return 1;
 }
 
-int sh_modsound_stock_may_load(int when, int busy)
-{
-    if (when == SH_MODSOUND_STOCK_MAP_PASS) return 0;
-    if (when != SH_MODSOUND_STOCK_BOOT && when != SH_MODSOUND_STOCK_IDLE) return 0;
-    return !busy;
-}
-
-/* A bank an installed bundle needs is not asked for yet: the poll loads it
- * once the game is idle. Set at every needs rebuild that leaves one, and by
- * a map pass that deferred one. */
-static volatile LONG g_stock_due;
-static volatile LONG g_stock_polled;   /* the boot poll has run */
-static int (*g_stock_busy)(char *cause, size_t cap);
-
-void sh_modsound_set_busy(int (*busy)(char *cause, size_t cap)) { g_stock_busy = busy; }
-
-/* The map pass: every bank the declared bundles need, said once; nothing
- * loads while the map loads (sh_modsound_stock_may_load). */
+/* The map pass: every bank the declared bundles need, once per process. */
 static int ms_stock_pass(const char *const *hashes, int n, int resolve)
 {
     const sh_modsound_needs *t = g_needs;
-    int i, k, deferred = 0;
+    int i, k, loaded = 0;
+    void *hw;
     if (!g_stock_live || !t || !t->count || !hashes || n <= 0) return 0;
+    hw = ms_hardware();
     for (i = 0; i < n; i++) {
         const sh_modsound_need *need;
         const char *h = hashes[i];
@@ -617,56 +602,15 @@ static int ms_stock_pass(const char *const *hashes, int n, int resolve)
 #endif
         need = sh_modsound_needs_find(t, h);
         for (k = 0; need && k < need->count; k++) {
-            int st = sh_mbi_state_get(need->banks[k], NULL, NULL, NULL, 0);
-            if (st == SH_MBI_ST_LOADED) {
-                ms_log("map: stock bank %s for %s already loaded", need->banks[k], need->key);
-            } else if (st == SH_MBI_ST_NONE && !sh_modsound_stock_may_load(SH_MODSOUND_STOCK_MAP_PASS, 1)) {
-                ms_log("map: stock bank %s for %s is not loaded and is deferred: nothing loads during a map load; it "
-                       "loads once the game is idle in the hub or the editor, so its sounds are silent in this load",
-                       need->banks[k], need->key);
-                InterlockedExchange(&g_stock_due, 1);
-                deferred++;
-            }
-        }
-    }
-    return deferred;
-}
-
-/* Every bank any bundle of the needs table needs and this process has not
- * asked for: the boot and idle loads. Main thread, the game idle. */
-static int ms_stock_all(int when)
-{
-    const sh_modsound_needs *t = g_needs;
-    const char *phase = when == SH_MODSOUND_STOCK_BOOT ? "boot" : "idle";
-    int i, k, loaded = 0, waiting = 0;
-    void *hw;
-    if (!g_stock_live || !t || !t->count) return 0;
-    hw = ms_hardware();
-    for (i = 0; i < t->count; i++) {
-        const sh_modsound_need *need = &t->bundles[i];
-        for (k = 0; k < need->count; k++) {
             if (sh_mbi_state_get(need->banks[k], NULL, NULL, NULL, 0) != SH_MBI_ST_NONE) continue;
-            if (!ms_hardware_ready(hw)) { waiting = 1; continue; }
-            loaded += ms_stock_load(need->banks[k], need->key, phase);
+            if (!ms_hardware_ready(hw)) {
+                ms_log("map: stock bank %s for %s waits: the sound system is not up yet", need->banks[k], need->key);
+                continue;
+            }
+            loaded += ms_stock_load(need->banks[k], need->key, "map");
         }
     }
-    /* Wwise not up yet: the next poll tries again. */
-    InterlockedExchange(&g_stock_due, waiting);
     return loaded;
-}
-
-int sh_modsound_stock_poll(void)
-{
-    char cause[160];
-    int busy, when;
-    if (!InterlockedCompareExchange(&g_stock_due, 0, 0) || !g_stock_live) return 0;
-    if (ms_on_main() != 1) return 0;
-    cause[0] = 0;
-    busy = g_stock_busy ? g_stock_busy(cause, sizeof cause) != 0 : 1;
-    when = InterlockedCompareExchange(&g_stock_polled, 0, 0) ? SH_MODSOUND_STOCK_IDLE : SH_MODSOUND_STOCK_BOOT;
-    if (!sh_modsound_stock_may_load(when, busy)) return 0;
-    InterlockedExchange(&g_stock_polled, 1);
-    return ms_stock_all(when);
 }
 
 /* Submit every bank of the current table not yet submitted in this
@@ -791,9 +735,6 @@ void sh_modsound_test_log(void (*sink)(const char *line)) { g_test_sink = sink; 
 void sh_modsound_test_bank_callback(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie)
 { ms_bank_cb(bank_id, in_memory, result, pool, cookie); }
 int sh_modsound_test_stock(const char *const *bundle_hashes, int n) { return ms_stock_pass(bundle_hashes, n, 0); }
-int sh_modsound_test_stock_all(int when) { return sh_modsound_stock_may_load(when, 0) ? ms_stock_all(when) : 0; }
-void sh_modsound_test_stock_due(int due) { InterlockedExchange(&g_stock_due, due); InterlockedExchange(&g_stock_polled, 0); }
-int sh_modsound_test_stock_is_due(void) { return (int)InterlockedCompareExchange(&g_stock_due, 0, 0); }
 void sh_modsound_test_stock_reset(void)
 {
     LONG i;
@@ -862,13 +803,7 @@ static void ms_rebuild_needs(void)
     (void)sh_modserve_each_bundle_registries(ms_need_registries, &c);
     if (c.sound_decls) sh_modserve_each_served(ms_need_served, &c);
     InterlockedExchangePointer((void *volatile *)&g_needs, t);   /* the old table is retired, never freed */
-    for (i = 0; i < t->count; i++) {
-        int k;
-        banks += t->bundles[i].count;
-        for (k = 0; k < t->bundles[i].count; k++)
-            if (sh_mbi_state_get(t->bundles[i].banks[k], NULL, NULL, NULL, 0) == SH_MBI_ST_NONE)
-                InterlockedExchange(&g_stock_due, 1);
-    }
+    for (i = 0; i < t->count; i++) banks += t->bundles[i].count;
     if (banks) {
         char list[400];
         size_t at = 0;
@@ -885,7 +820,7 @@ static void ms_rebuild_needs(void)
         static char last[400];
         if (strcmp(last, list)) {
             strcpy_s(last, sizeof last, list);
-            ms_log("stock banks needed by %d bundle(s): %s; each loads once the game is idle in the hub or the editor, never during a map load%s", t->count,
+            ms_log("stock banks needed by %d bundle(s): %s; each loads at the first map load that declares it%s", t->count,
                    list, g_stock_live ? "" : " (the stock-bank route is unavailable on this build)");
         }
     }
