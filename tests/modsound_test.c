@@ -694,7 +694,25 @@ static void test_builder(void)
     }
     sh_mb_free(&b);
     sh_mb_set_bank_need(NULL);
+    /* A build made without the seam (before L8, or by the store tool) lists
+     * no "banks"; its served sound decls still give the need (ADD-V5 B1:
+     * the doctor and the Mods tab read it this way). */
+    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    CHECK(b.registries && !strstr(b.registries, "\"banks\""));
+    {
+        char served[4][SH_MBI_LEAF_MAX];
+        CHECK(sh_mbi_served_banks(&b, served, 4) == 1 && !strcmp(served[0], "doom_weapon_sp.bnk"));
+        CHECK(sh_mbi_served_banks(&b, served, 0) == 0 && sh_mbi_served_banks(NULL, served, 4) == 0);
+    }
+    sh_mb_free(&b);
     drop(SNDSP);
+    /* Without the _sp sound decl, nothing. */
+    CHECK(sh_mb_build(g_dir, &resolver, &b));
+    {
+        char served[4][SH_MBI_LEAF_MAX];
+        CHECK(sh_mbi_served_banks(&b, served, 4) == 0);
+    }
+    sh_mb_free(&b);
 
     /* A stock sound name is not a need; a mods/ one nobody provides is an error. */
     put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"play_arcade_ui_17\";\n\t}\n}\n");

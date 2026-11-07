@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "modbankinfo.h"
+#include "modbundle.h"
 
 #define MBI_MAX_FILE (128u << 20)   /* the largest soundbanksinfo.xml read */
 
@@ -378,6 +379,30 @@ int sh_mbi_skipped_bank(const char *leaf, uint32_t *bank_id)
 int sh_mbi_bundle_need(const char *decl_name, char *bank, size_t cap)
 {
     return sh_mbi_decl_needs(decl_name, NULL, 0, bank, cap, NULL) == 1;
+}
+
+int sh_mbi_served_banks(const struct sh_mb_bundle *bd, char banks[][SH_MBI_LEAF_MAX], int max)
+{
+    static const char dir[] = "generated/decls/sound/";
+    size_t k;
+    int n = 0, q;
+    if (!bd || !banks || max <= 0) return 0;
+    for (k = 0; k < bd->file_count && n < max; k++) {
+        const char *rq = bd->files[k].request;
+        char name[SH_MBI_EVENT_MAX], bank[SH_MBI_LEAF_MAX];
+        size_t len;
+        int dup = 0;
+        if (!rq || _strnicmp(rq, dir, sizeof dir - 1)) continue;
+        rq += sizeof dir - 1;
+        len = strlen(rq);
+        if (len <= 5 || len - 5 >= sizeof name || _stricmp(rq + len - 5, ".decl")) continue;
+        memcpy(name, rq, len - 5);
+        name[len - 5] = 0;
+        if (sh_mbi_decl_needs(name, NULL, 0, bank, sizeof bank, NULL) != 1) continue;
+        for (q = 0; q < n && !dup; q++) dup = !_stricmp(banks[q], bank);
+        if (!dup) strcpy_s(banks[n++], SH_MBI_LEAF_MAX, bank);
+    }
+    return n;
 }
 
 void sh_mbi_get_stats(sh_mbi_stats *out)
