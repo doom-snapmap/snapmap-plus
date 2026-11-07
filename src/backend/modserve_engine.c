@@ -932,6 +932,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
 typedef struct me_reparse {
     sh_modledger_tally tally;   /* per type, for the log (copies the type: dependents pass a stack buffer) */
     int reparsed, through_provider, failed, faulted, pending, skipped, restored;
+    int surfaces;               /* surfaces offered and left alone (sh_modserve_is_surface) */
 } me_reparse;
 
 /* Every in-place load keeps the resource's lifetime: ResourceGenericLoad's
@@ -954,6 +955,9 @@ static int me_reparse_one(void *context, const char *type, const char *name, con
     me_reparse *r = (me_reparse *)context;
     char before[ERROR_TEXT_MAX];
     int result = 0;
+    /* A surface is the game's own decl under its own name: never re-parsed
+     * by any pass (ADD-L11); the game parses it from these same bytes. */
+    if (request && sh_modserve_is_surface(request)) { r->surfaces++; return 1; }
     me_error_text(before, sizeof before);
     __try {
         void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
@@ -1067,6 +1071,7 @@ static int me_raw_collect(void *context, const char *type, const char *name, con
 {
     me_raw *r = (me_raw *)context;
     (void)bundle_id;
+    if (request && sh_modserve_is_surface(request)) return 1;   /* the game's own model or image: never reloaded */
     if (r->n < r->cap) {
         r->names[r->n].name = name;
         r->names[r->n].request = request;
@@ -1170,6 +1175,7 @@ static void me_dep_visit(void *context, const char *request, uint64_t size, cons
     int i;
     (void)size; (void)version; (void)bundle_hash;
     if (strncmp(request, "generated/decls/md6def/", 23) && strncmp(request, "generated/decls/animweb/", 24)) return;
+    if (sh_modserve_is_surface(request)) return;
     for (i = 0; i < c->nseen; ++i) if (!strcmp(c->seen[i], request)) return;
     body = me_peek(request, &len);
     if (!body) return;
@@ -1203,6 +1209,8 @@ static void me_reload_ungated(const char *phase, int in_heap)
 {
     me_raw r;
     sh_process_heap_scope heap = { 0 };
+    me_closure keeper;
+    int own;
     double t0 = me_now_ms();
     if (!g_bound || !g_res_head || !sh_modserve_active() || me_on_main() != 1) return;
     memset(&r, 0, sizeof r);
@@ -1216,8 +1224,16 @@ static void me_reload_ungated(const char *phase, int in_heap)
         free(r.names);
         return;
     }
+    /* A reload in place of a held model resolves its materials and images
+     * again: whatever that creates must live as long as the held model, or
+     * the next purge frees images a permanent material still points at (the
+     * cold-launch crash, ADD-G6). Outside an editor pass's watermark this
+     * reload opens its own keeper (sh_modserve_inplace_keeper). */
+    own = sh_modserve_inplace_keeper(g_mark_depth, r.n);
+    if (own) me_closure_begin(&keeper);
     __try { (void)sh_modserve_resource_each(g_res_head, me_raw_one, &r); }
     __finally {
+        if (own) me_closure_end(&keeper, phase, "gated reload");
         if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: gated reload heap scope did not balance", phase);
     }
     (void)sh_modserve_each_ungated_raw(me_raw_settle, NULL);
@@ -1311,12 +1327,20 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
     return 0;
 }
 
+static int me_refresh_count(void *context, const sh_modserve_refresh_item *it)
+{
+    (void)it;
+    (*(int *)context)++;
+    return 0;   /* counted only: nothing is settled */
+}
+
 static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_refresh *out, int part)
 {
     me_refresh c;
     sh_process_heap_scope heap = { 0 };
+    me_closure keeper;
     double t0 = me_now_ms(), t1;
-    int i;
+    int i, items = 0, own;
     if (!g_bound || me_on_main() != 1) return;
     (void)sh_modserve_refresh_expand();
     memset(&c, 0, sizeof c);
@@ -1328,12 +1352,20 @@ static void me_refresh_apply_part(const char *phase, int in_heap, sh_modserve_re
         free(c.raw.names);
         return;
     }
+    /* A re-parse or reload in place of a held resource binds it to what it
+     * resolves now; outside a watermark (the rest of a refresh, a scope
+     * change) that is kept by a keeper of its own, as inside the editor's
+     * pass (ADD-G6). Only when there is something to apply. */
+    (void)sh_modserve_each_refresh_part(me_refresh_count, &items, part);
+    own = sh_modserve_inplace_keeper(g_mark_depth, items);
+    if (own) me_closure_begin(&keeper);
     __try {
         if (sh_modserve_each_refresh_part(me_refresh_visit, &c, part) && c.raw.n && g_res_head) {
             (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
             c.dependents = me_anim_dependents(&c.raw, &c.decls);
         }
     } __finally {
+        if (own) me_closure_end(&keeper, phase, "refresh");
         if (!in_heap && !sh_process_heap_leave(&heap)) me_rlog("refresh: heap scope did not balance at the %s", phase);
     }
     t1 = me_now_ms();
@@ -1992,7 +2024,8 @@ static void me_sweep_collect(void *context, const sh_modledger_rec *rec)
     me_sweep *s = (me_sweep *)context;
     sh_modledger_ident now;
     sh_modserve_hit hit;
-    if (!rec->request || !me_now_ident(rec->request, &now) || sh_modledger_same(&rec->id, &now)) return;
+    if (!rec->request || sh_modserve_is_surface(rec->request)) return;   /* the game's own bytes: never refreshed */
+    if (!me_now_ident(rec->request, &now) || sh_modledger_same(&rec->id, &now)) return;
     if (!sh_modserve_lookup(rec->request, &hit) || hit.is_shadow) return;
     if (s->n < ME_SWEEP_MAX) s->v[s->n++].request = rec->request;
     else s->over++;

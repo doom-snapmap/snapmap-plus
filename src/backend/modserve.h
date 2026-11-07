@@ -173,8 +173,9 @@ typedef struct sh_modserve_step {
                                 any other plan, a decl of the editor closure (modserve.c
                                 ms_mark_editor_closure), kept unless the engine already holds it
                                 permanently, which is left to the game as a map pass leaves it */
-    int         shadow;      /* a grandfathered bundle's shadow, or a restored stock decl (modbundle.h
-                                sh_mb_stock_restore): skipped as stock when the engine has its source */
+    int         shadow;      /* a grandfathered bundle's shadow: skipped as stock when the engine has its
+                                source. A surface (a stock pointer at the game's own path, modbundle.h
+                                sh_mb_stock_restore) is never a step of any plan. */
     const char *blocked;     /* NULL, or the first cause (static or index-owned text) */
     int         file;        /* index-internal file number */
     int         ready;       /* set by sh_modserve_plan_run: 1 ready, -1 not ready, 0 not run */
@@ -979,6 +980,22 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
  * sh_mb_stock_restore): the engine holds those bytes parsed already, so an
  * in-place re-parse changes nothing but what the decl points at. */
 int sh_modserve_is_restore(const char *request);
+
+/* 1 when any build in the index carries `request` as a surface (a stock
+ * pointer at the game's own path, whatever the open map serves now). No pass
+ * registers, re-parses, reloads or refreshes a surface: plans, refresh lists,
+ * the gated reload, the editor-row keeper and the ledger sweep all skip it,
+ * and the game parses it from the served (its own) bytes when it needs it. */
+int sh_modserve_is_surface(const char *request);
+
+/* Whether an in-place reload or re-parse (the gated reload, a refresh part)
+ * opens a keeper of its own (a resource watermark raised to the session's
+ * level when it ends): 1 when it has work and runs outside every other
+ * watermark (mark_depth 0, the engine side's nesting count). What a reload
+ * of a held resource creates (the images its materials resolve) must live as
+ * long as the held resource; a purge would otherwise free images a permanent
+ * material still points at (report ADD-G6). */
+int sh_modserve_inplace_keeper(int mark_depth, int work);
 
 /* Functions called after every table this layer publishes (boot, rescan),
  * on the thread that built it, outside the build lock, in the order they

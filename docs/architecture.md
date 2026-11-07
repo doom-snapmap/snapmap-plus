@@ -1380,6 +1380,30 @@ animWeb shadow whose models the engine cannot find is withdrawn before its
 re-parse, since the re-parse would free the stock web's nodes and rebuild
 nothing.
 
+What an in-place reload or re-parse of a held resource creates must live as
+long as that resource. Reloading a held model resolves its materials again, and
+a held material re-parsed binds to the images that exist at that moment; an
+image created at map level is freed by the next purge while the permanent
+material keeps the pointer, and the first draw reads freed memory. That was the
+cold My Maps launch crash on both renderers (snaphak-re ADD-G6): the map load's
+scope change reloaded the boot-held spider and Olivia meshes outside any
+watermark, while the editor-first flow ran the same reload inside the editor
+pass's watermark. The gated reload and every refresh part therefore run inside
+a keeper of their own (a resource watermark raised to the session's level when
+it ends, `me_closure_begin` and `me_closure_end`) whenever no other watermark
+covers them and they have work (`sh_modserve_inplace_keeper`).
+
+A surface (a stock pointer at the game's own path: the game's bytes under the
+game's name, `sh_mb_stock_restore`) is never registered, re-parsed, reloaded or
+refreshed by any pass. The provider serves it whenever the game parses or loads
+it, at the game's own time and level, so it is in no plan (editor, map, scope
+activation, refresh), no refresh list, no early-shadow or gated-reload list,
+no editor-row reference and no ledger sweep (`sh_modserve_is_surface`). The
+engine's own source lookup could not stand in for this: DeclSourceFind misses
+decls archived in the game's containers, so a stock-path material a pack
+carries as a surface was registered, and so re-parsed in place, by every map
+pass whose engine did not already hold it at level 4.
+
 A plan orders its steps by need, then by rank: renderParms first, then other
 decls, md6Defs, entityDefs and snapEditorEntityDefs (`SH_MODSERVE_RANK_*`).
 The engine gives a renderParm its parm-state slot and kind at its first parse
@@ -1390,7 +1414,10 @@ map with the campaign doors pack, `skull_key` was parsed before `skinsssmap`,
 and a render job later read two floats as a sampler pointer, on both
 renderers (snaphak-re ADD-G5). Every renderParm therefore registers and loads
 before any other step: in the map plan, in the part of a split plan that runs
-first, and in the editor part of a refresh, which runs before the rest.
+first, and in the editor part of a refresh, which runs before the rest. A
+renderParm a pack carries as a surface (`skinsssmap` in the doors pack) is in
+no plan at all: the game parses it from its own bytes when a material first
+names it.
 
 Registering a file is itself a parse. DeclRegisterFile's loader looks up every
 decl the file defines, and an existing resource of that name is re-parsed on

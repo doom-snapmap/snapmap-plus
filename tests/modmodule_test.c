@@ -404,16 +404,19 @@ static void test_serving(const char *tmp, const char *install)
     /* A saved map's moduleName names the bundle (save closure). */
     CHECK(modserve_bundles_for_names_visit(names, 1, visit, &v) == 1 && v.calls == 1 && !strcmp(v.id, ID));
 
-    /* The map plan: the info and the restored materials, the restores marked like shadows. */
+    /* The map plan: the info only. The restored materials are surfaces (the
+     * game's bytes at the game's names): no pass registers them; the provider
+     * serves them when the game parses them (ADD-L11). */
     hashes[0] = hash;
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &plan, NULL) == 3);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &plan, NULL) == 1);
     for (i = 0; i < plan.count; i++) {
         const sh_modserve_step *s = &plan.steps[i];
-        if (!strcmp(s->name, "textures/t_arena/wall")) mat = s->shadow && !strcmp(s->type, "material");
-        if (!strcmp(s->name, S_MEGA)) mega = s->shadow && !strcmp(s->reg_path, "material/" S_MEGA ".decl");
+        if (!strcmp(s->name, "textures/t_arena/wall")) mat = 1;
+        if (!strcmp(s->name, S_MEGA)) mega = 1;
         if (!strcmp(s->name, "mods/" ID "/arena")) info = !s->shadow && !strcmp(s->type, "snapModuleInfo");
     }
-    CHECK(mat && mega && info);
+    CHECK(!mat && !mega && info);
+    CHECK(sh_modserve_is_surface(S_MAT) && sh_modserve_is_surface(R_MEGA) && !sh_modserve_is_surface(R_INFO));
     sh_modserve_plan_free(&plan);
 }
 

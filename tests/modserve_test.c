@@ -2145,22 +2145,25 @@ static void test_editor_closure(void)
  * renderParms (one in the same bundle, one in another declared bundle) still
  * come first in the map plan, its run, the kept part of a split and a refresh. */
 #define RP_MAT   "generated/decls/material2/mods/rp.mat/skull_key.decl"
-#define RP_OWN   "generated/decls/renderparm/skinsssmap.decl"
-#define RP_OTHER "generated/decls/renderparm/rp_other_parm.decl"
+#define RP_OWN   "generated/decls/renderparm/mods/rp.mat/own_parm.decl"
+#define RP_OTHER "generated/decls/renderparm/mods/rp.parm/other_parm.decl"
+#define RP_SURF  "generated/decls/renderparm/skinsssmap.decl"
 static void test_renderparm_first(void)
 {
     static const fx_file m1[] = {
-        { RP_MAT, "{ skinsssmap textures/system/constant_color/white rp_other_parm 1 }", -1, "material2",
+        { RP_MAT, "{ mods/rp.mat/own_parm textures/system/constant_color/white mods/rp.parm/other_parm 1 skinsssmap x }", -1, "material2",
           "mods/rp.mat/skull_key", NULL, '1' },
-        { RP_OWN, "{ Tex2D textures/system/constant_color/white }", -1, "renderParm", "skinsssmap", NULL, '2' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/white }", -1, "renderParm", "mods/rp.mat/own_parm", NULL, '2' },
+        { RP_SURF, "{ Tex2D }", -1, "renderParm", "skinsssmap", NULL, '6' },
     };
     static const fx_file p1[] = {
-        { RP_OTHER, "{ Vec4 }", -1, "renderParm", "rp_other_parm", NULL, '3' },
+        { RP_OTHER, "{ Vec4 }", -1, "renderParm", "mods/rp.parm/other_parm", NULL, '3' },
     };
     static const fx_file m2[] = {
-        { RP_MAT, "{ skinsssmap textures/system/constant_color/black rp_other_parm 1 }", -1, "material2",
+        { RP_MAT, "{ mods/rp.mat/own_parm textures/system/constant_color/black mods/rp.parm/other_parm 1 skinsssmap x }", -1, "material2",
           "mods/rp.mat/skull_key", NULL, '4' },
-        { RP_OWN, "{ Tex2D textures/system/constant_color/black }", -1, "renderParm", "skinsssmap", NULL, '5' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/black }", -1, "renderParm", "mods/rp.mat/own_parm", NULL, '5' },
+        { RP_SURF, "{ Tex2D }", -1, "renderParm", "skinsssmap", NULL, '7' },
     };
     char top[MAX_PATH], root[MAX_PATH], ha[65], hb[65];
     char *slash;
@@ -2175,13 +2178,13 @@ static void test_renderparm_first(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\renderparm\\mods", top);
     mkdirs(root);
-    /* As the campaign packs carry them: each renderParm a stock pointer at
-     * its game path (a surface), which the engine does not know in SnapMap. */
-    g_fx_restore = RP_OWN;
-    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'a', NULL, m1, 2, NULL);
-    g_fx_restore = RP_OTHER;
-    make_bundle(root, "rp.parm", "rp.parm", "1.0.0", 'b', NULL, p1, 1, NULL);
+    /* The mod's own renderParms, and a stock renderParm the pack carries as a
+     * stock pointer at its game path (a surface): the game parses that one
+     * itself, so it is in no plan (ADD-L11). */
+    g_fx_restore = RP_SURF;
+    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'a', NULL, m1, 3, NULL);
     g_fx_restore = NULL;
+    make_bundle(root, "rp.parm", "rp.parm", "1.0.0", 'b', NULL, p1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 2);
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh(cl_visit, &seen);   /* what earlier tables left pending */
@@ -2190,43 +2193,209 @@ static void test_renderparm_first(void)
     h[1] = hash64('b', hb);
     CHECK(sh_modserve_plan_bundles(h, 2, &p, NULL) == 3);
     mat = step_index(&p, "material2", "mods/rp.mat/skull_key");
-    own = step_index(&p, "renderParm", "skinsssmap");
-    other = step_index(&p, "renderParm", "rp_other_parm");
+    own = step_index(&p, "renderParm", "mods/rp.mat/own_parm");
+    other = step_index(&p, "renderParm", "mods/rp.parm/other_parm");
     CHECK(mat >= 0 && own >= 0 && other >= 0);
+    CHECK(step_index(&p, "renderParm", "skinsssmap") < 0 && sh_modserve_is_surface(RP_SURF));
     CHECK(own < mat && other < mat);
     CHECK(p.steps[own].rank == SH_MODSERVE_RANK_RENDERPARM && p.steps[mat].rank == SH_MODSERVE_RANK_OTHER);
     /* A split runs every unregistered renderParm in the part that runs first. */
     CHECK(sh_modserve_plan_split(&p, &kept, &rest) >= 2);
-    CHECK(step_index(&kept, "renderParm", "skinsssmap") >= 0 && step_index(&kept, "renderParm", "rp_other_parm") >= 0);
-    CHECK(step_index(&rest, "renderParm", "skinsssmap") < 0 && step_index(&rest, "renderParm", "rp_other_parm") < 0);
+    CHECK(step_index(&kept, "renderParm", "mods/rp.mat/own_parm") >= 0 &&
+          step_index(&kept, "renderParm", "mods/rp.parm/other_parm") >= 0);
+    CHECK(step_index(&rest, "renderParm", "mods/rp.mat/own_parm") < 0 &&
+          step_index(&rest, "renderParm", "mods/rp.parm/other_parm") < 0);
     sh_modserve_plan_free(&kept);
     sh_modserve_plan_free(&rest);
     /* The run registers and loads them in that order. */
     g_calls[0] = 0;
     CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 3);
     lmat = strstr(g_calls, ":material2:mods/rp.mat/skull_key;");
-    lown = strstr(g_calls, ":renderParm:skinsssmap;");
-    lother = strstr(g_calls, ":renderParm:rp_other_parm;");
+    lown = strstr(g_calls, ":renderParm:mods/rp.mat/own_parm;");
+    lother = strstr(g_calls, ":renderParm:mods/rp.parm/other_parm;");
     CHECK(lmat && lown && lother && lown < lmat && lother < lmat);
+    CHECK(!strstr(g_calls, "skinsssmap"));
     if (!(lown && lmat && lown < lmat)) printf("  calls: %s\n", g_calls);
     sh_modserve_plan_free(&p);
     /* A refresh of both changed decls visits the renderParm first, and in the
      * editor part, which runs before the rest. */
-    g_fx_restore = RP_OWN;
-    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'c', NULL, m2, 2, NULL);
+    g_fx_restore = RP_SURF;
+    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'c', NULL, m2, 3, NULL);
     g_fx_restore = NULL;
     CHECK(sh_modserve_index_rescan() >= 1);
     memset(&seen, 0, sizeof seen);
     CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_EDITOR) >= 1);
-    CHECK(strstr(seen.order, "skinsssmap;") != NULL);
+    CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") != NULL);
     if (strstr(seen.order, "mods/rp.mat/skull_key;"))
-        CHECK(strstr(seen.order, "skinsssmap;") < strstr(seen.order, "mods/rp.mat/skull_key;"));
+        CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") < strstr(seen.order, "mods/rp.mat/skull_key;"));
+    CHECK(strstr(seen.order, "skinsssmap;") == NULL);   /* a surface is never refreshed */
     memset(&seen, 0, sizeof seen);
     (void)sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST);
-    CHECK(strstr(seen.order, "skinsssmap;") == NULL);
+    CHECK(strstr(seen.order, "mods/rp.mat/own_parm;") == NULL && strstr(seen.order, "skinsssmap;") == NULL);
     /* Leave the table the next test expects. */
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
     (void)sh_modserve_index_build(root);
+}
+
+/* ------------------------------------------------------------------ surfaces (ADD-L11) */
+
+#define SF_SURF  "generated/decls/material/models/monsters/sf/body.decl"     /* a surface */
+#define SF_SKIN  "generated/decls/material/mods/sf.mod/skin.decl"
+#define SF_ENT   "generated/decls/entitydef/mods/sf.mod/thing.decl"
+#define SF_GAME  "generated/decls/entitydef/mods/sf.mod/gameplay.decl"
+#define SF_ROW   "generated/decls/snapeditorentitydef/mods/sf.mod/thing.decl"
+#define SO_ENT   "generated/decls/entitydef/mods/sf.other/rock.decl"
+#define SO_ROW   "generated/decls/snapeditorentitydef/mods/sf.other/rock.decl"
+#define SF_NEEDS_SURF "[{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]"
+
+static void sf_fixture(char *root, size_t cap)
+{
+    static const fx_file m1[] = {
+        { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '1' },
+        { SF_SKIN, "{ skin }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '2' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+    };
+    static const fx_file m2[] = {   /* a rebuild: the surface's pointer and the skin's bytes change */
+        { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '6' },
+        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '7' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+    };
+    static const fx_file o1[] = {   /* a mod the launched map does not declare: its row serves for the Toybox */
+        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sf.other/rock", NULL, '8' },
+        { SO_ROW, "{ entityDef \"mods/sf.other/rock\" }", -1, "snapEditorEntityDef", "mods/sf.other/rock",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.other/rock\"}]", '9' },
+    };
+    char top[MAX_PATH];
+    char *slash;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, cap, _TRUNCATE, "%s\\surfaces\\mods", top);
+    mkdirs(root);
+    g_fx_restore = SF_SURF;
+    make_bundle(root, "sf.mod", "sf.mod", "1.0.0", 'a', NULL, m1, 5, NULL);
+    g_fx_restore = NULL;
+    make_bundle(root, "sf.other", "sf.other", "1.0.0", 'b', NULL, o1, 2, NULL);
+    (void)m2;
+}
+
+static void sf_rebuild(const char *root)
+{
+    static const fx_file m1[] = {
+        { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '1' },
+        { SF_SKIN, "{ skin }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '2' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+    };
+    static const fx_file m2[] = {   /* a rebuild: the surface's pointer and the skin's bytes change */
+        { SF_SURF, "{ diffusemap models/monsters/sf/body }", -1, "material", "models/monsters/sf/body", NULL, '6' },
+        { SF_SKIN, "{ skin v2 }", -1, "material", "mods/sf.mod/skin", SF_NEEDS_SURF, '7' },
+        { SF_ENT, "{ thing }", -1, "entityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"material\",\"name\":\"mods/sf.mod/skin\"},{\"type\":\"material\",\"name\":\"models/monsters/sf/body\"}]", '3' },
+        { SF_GAME, "{ gameplay }", -1, "entityDef", "mods/sf.mod/gameplay", SF_NEEDS_SURF, '4' },
+        { SF_ROW, "{\n\tedit = {\n\t\tentityDef = \"mods/sf.mod/thing\";\n"
+                  "\t\tpreviewImage = \"models/monsters/sf/body\";\n\t}\n}\n", -1, "snapEditorEntityDef", "mods/sf.mod/thing",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.mod/thing\"}]", '5' },
+    };
+    static const fx_file o1[] = {   /* a mod the launched map does not declare: its row serves for the Toybox */
+        { SO_ENT, "{ rock }", -1, "entityDef", "mods/sf.other/rock", NULL, '8' },
+        { SO_ROW, "{ entityDef \"mods/sf.other/rock\" }", -1, "snapEditorEntityDef", "mods/sf.other/rock",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/sf.other/rock\"}]", '9' },
+    };
+    (void)m1;
+    (void)o1;
+    g_fx_restore = SF_SURF;
+    make_bundle(root, "sf.mod", "sf.mod", "1.0.0", 'a', NULL, m2, 5, NULL);
+    g_fx_restore = NULL;
+}
+
+static void sf_leave(void)
+{
+    char top[MAX_PATH], root[MAX_PATH];
+    char *slash;
+    sh_modserve_test_reset_registration();
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
+/* A surface (a stock pointer at the game's own path: the game's bytes under
+ * the game's name) is served but in no plan (map, editor, refresh), no
+ * refresh list, no early-shadow or gated-reload list and no row reference;
+ * and an in-place reload or re-parse outside a watermark opens its own
+ * keeper (report ADD-G6). */
+static void test_surfaces_never_parsed(void)
+{
+    char root[MAX_PATH], h[65], seen_raw[1024];
+    const char *hashes[1];
+    sh_modserve_plan map, ed, rf;
+    rf_seen seen;
+    printf("-- surfaces: served, never planned, refreshed or reloaded; in-place work outside a watermark is kept\n");
+    CHECK(sh_modserve_inplace_keeper(0, 3) == 1);    /* a scope change's gated reload, a map pass's rest */
+    CHECK(sh_modserve_inplace_keeper(1, 3) == 0);    /* inside the editor pass's watermark: that keeper keeps it */
+    CHECK(sh_modserve_inplace_keeper(0, 0) == 0);    /* nothing to reload: no resource walk */
+    sf_fixture(root, sizeof root);
+    CHECK(sh_modserve_index_build(root) == 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_visit, &seen);   /* what earlier tables left pending */
+    sh_modserve_test_reset_registration();
+    CHECK(sh_modserve_is_surface(SF_SURF) == 1 && sh_modserve_is_surface("GENERATED\\decls\\material\\models\\monsters\\sf\\body.decl") == 1);
+    CHECK(sh_modserve_is_surface(SF_SKIN) == 0 && sh_modserve_is_surface("generated/decls/material/none.decl") == 0);
+    CHECK(sh_modserve_lookup(SF_SURF, NULL) == 1);     /* still served: the game parses it from these bytes */
+    hashes[0] = hash64('a', h);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 3);
+    CHECK(step_index(&map, "material", "models/monsters/sf/body") < 0);
+    CHECK(step_index(&map, "entityDef", "mods/sf.mod/gameplay") >= 0 && step_index(&map, "material", "mods/sf.mod/skin") >= 0);
+    g_calls[0] = 0;
+    g_already = NULL;
+    CHECK(sh_modserve_plan_run(&map, &g_fake, "map") == map.count);
+    CHECK(!strstr(g_calls, "models/monsters/sf/body") && strstr(g_calls, "R:entityDef:mods/sf.mod/gameplay;"));
+    sh_modserve_plan_free(&map);
+    CHECK(sh_modserve_plan_editor(&ed) == 5);
+    CHECK(step_index(&ed, "material", "models/monsters/sf/body") < 0);
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_run(&ed, &g_fake, "editor") == ed.count);
+    CHECK(!strstr(g_calls, "models/monsters/sf/body"));
+    /* The row's preview image is a surface: the keeper never holds or parses it. */
+    g_refs[0] = 0;
+    CHECK(sh_modserve_editor_refs(&ed, collect_ref, NULL) == 0 && !g_refs[0]);
+    sh_modserve_plan_free(&ed);
+    seen_raw[0] = 0;
+    (void)sh_modserve_each_unopened_shadow(raw_visit, seen_raw);
+    (void)sh_modserve_each_ungated_raw(raw_visit, seen_raw);
+    CHECK(!strstr(seen_raw, "models/monsters/sf/body"));
+    /* A rescan where the surface's pointer changed and the skin's bytes did:
+     * the skin is refreshed, the surface is not; no refresh plan holds it. */
+    sf_rebuild(root);
+    CHECK(sh_modserve_index_rescan() >= 1);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_refresh_expand();
+    CHECK(sh_modserve_each_refresh(rf_visit, &seen) >= 1);
+    CHECK(strstr(seen.order, ":mods/sf.mod/skin:") != NULL);
+    CHECK(strstr(seen.order, "models/monsters/sf/body") == NULL);
+    if (strstr(seen.order, "models/monsters/sf/body")) printf("  refresh: %s\n", seen.order);
+    CHECK(sh_modserve_plan_refresh(&rf) >= 0);
+    CHECK(step_index(&rf, "material", "models/monsters/sf/body") < 0);
+    sh_modserve_plan_free(&rf);
+    CHECK(sh_modserve_plan_editor(&ed) == 5 && step_index(&ed, "material", "models/monsters/sf/body") < 0);
+    sh_modserve_plan_free(&ed);
+    sf_leave();
 }
 
 /* ------------------------------------------------------------------ refusals (issue 132) */
@@ -2508,18 +2677,21 @@ static void test_permanent_first_parse(void)
         g_pf[1].type = "md6Def"; g_pf[1].name = "zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6";
         g_pf[1].level = 1; g_pf[1].state = 0x00; g_pf[1].parses = 0;
 
-        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2 && unknown == 0);
+        /* Round 1's unlockModel is a surface (the game's bytes at the game's
+         * name): no plan holds it at all (ADD-L11). */
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == (round ? 1 : 2) && unknown == 0);
+        CHECK((step_index(&p, "unlockModel", "spidermastermind") < 0) == round);
         log_clear();
         g_calls[0] = 0;
         ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
-        CHECK(ready == 2);
+        CHECK(ready == (round ? 1 : 2));
         /* The map pass never parses the permanent collectible... */
         CHECK(g_pf[0].parses == 0 && g_pf[0].state == before && g_pf[0].level == 4);
-        CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;"));
+        CHECK(!strstr(g_calls, "L:unlockModel:spidermastermind;") && (!round || !strstr(g_calls, "unlockModel")));
         _snprintf_s(line, sizeof line, _TRUNCATE, "map: unlockModel 'spidermastermind' (pf.spider) left to the game: "
                     "permanent, %s (state 0x%02x lifetime 4); the provider serves these bytes whenever the game parses it",
                     round ? "already parsed" : "not parsed yet", before);
-        CHECK(log_has(line));
+        CHECK(log_has(line) == !round);
         CHECK(!log_has("map: unlockModel 'spidermastermind' (pf.spider) READY"));
         /* ...while the map-scoped md6Def is still loaded with the bundle's bytes. */
         CHECK(g_pf[1].parses == 1 &&
@@ -2531,11 +2703,11 @@ static void test_permanent_first_parse(void)
         sh_modserve_plan_free(&p);
 
         /* The next map load skips both quietly. */
-        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 2);
+        CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == (round ? 1 : 2));
         log_clear();
         g_calls[0] = 0;
         ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
-        CHECK(ready == 2 && g_calls[0] == 0 && g_pf[0].parses == 0 && g_pf[1].parses == 1);
+        CHECK(ready == (round ? 1 : 2) && g_calls[0] == 0 && g_pf[0].parses == 0 && g_pf[1].parses == 1);
         CHECK(!log_has("left to the game"));
         sh_modserve_plan_free(&p);
     }
@@ -2657,7 +2829,9 @@ static void test_registration_reparse_of_held_permanent(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\heldreparse\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"legacy\": {},\n  ";
-    g_fx_restore = "generated/decls/unlockmodel/spidermastermind.decl";
+    /* The unlockModel as a grandfathered shadow carrying its own bytes: a
+     * surface (the game's bytes under its name) is never planned at all. */
+    g_fx_restore = NULL;
     make_bundle(root, "hr.spider@0.0.0+1", "hr.spider", "0.0.0", '6',
                 "\"generated/decls/unlockmodel/spidermastermind.decl\", "
                 "\"generated/decls/md6def/zion/characters/monsters/spider_mastermind/base/spider_mastermind.md6.decl\", "
@@ -3918,6 +4092,7 @@ int main(void)
     test_watermark();
     test_editor_closure();
     test_renderparm_first();
+    test_surfaces_never_parsed();
     test_refusals();
     test_permanent_first_parse();
     test_registration_reparse_of_held_permanent();

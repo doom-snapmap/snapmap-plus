@@ -283,6 +283,11 @@ static void ms_index_free(ms_index *x)
 
 /* ------------------------------------------------------------------ names */
 
+/* A surface: a stock pointer at the game's own path (the game's bytes
+ * under the game's name, modbundle.h sh_mb_stock_restore). No pass
+ * registers, re-parses, reloads or refreshes one (ADD-L11). */
+static int ms_surface(const ms_file *f) { return f->is_restore != 0; }
+
 static __inline char ms_fold(char c)
 {
     if (c == '\\') return '/';
@@ -2353,7 +2358,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
             if (f->is_decl && !f->is_shadow) {
                 d->added_decls++;
                 if (f->is_sedef) d->added_rows++;
-                else if (ms_id_registered(old, x->bundles[f->bundle].id)) { f->refresh_new = 1; d->added_active++; }
+                else if (!ms_surface(f) && ms_id_registered(old, x->bundles[f->bundle].id)) { f->refresh_new = 1; d->added_active++; }
             } else if (f->is_shadow && ms_scoped(x, i) >= 0) {
                 /* A shadow the previous table did not serve replaces a stock
                  * file the engine may already hold parsed from its own bytes
@@ -2362,7 +2367,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
                  * re-parses or reloads it now instead of at the next restart.
                  * A shadow the map scope withdraws changes nothing yet. */
                 kind = ms_kind(f);
-                if (kind && f->ptype && f->pname) f->refresh = 1;
+                if (kind && f->ptype && f->pname && !ms_surface(f)) f->refresh = 1;
                 if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
                 else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
                 else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
@@ -2380,7 +2385,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (f->is_sedef) d->changed_rows++;
         kind = ms_kind(f);
         /* A withdrawn shadow's new bytes are read when a map that uses it opens. */
-        if (kind && f->ptype && f->pname && !(f->is_shadow && ms_scoped(x, i) < 0)) f->refresh = 1;
+        if (kind && f->ptype && f->pname && !ms_surface(f) && !(f->is_shadow && ms_scoped(x, i) < 0)) f->refresh = 1;
         if (kind == SH_MODSERVE_RF_DECL) d->changed_decls++;
         else if (kind == SH_MODSERVE_RF_MODEL) d->changed_models++;
         else if (kind == SH_MODSERVE_RF_IMAGE) d->changed_images++;
@@ -2404,7 +2409,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
-        } else if (of->is_sedef && of->ptype && of->pname) {
+        } else if (of->is_sedef && !of->is_restore && of->ptype && of->pname) {
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
     }
@@ -4345,14 +4350,19 @@ static int ms_need_blocks(const char *name)
     return !strncmp(name, "mods/", 5) || strstr(name, "/mods/") != NULL;
 }
 
-/* A decl a plan may register: every decl a bundle provides except shadows.
- * A grandfathered bundle's shadows are planned too, because a converted
- * first-generation package lists every name it carries as a shadow, new
- * names included; plan_run tells the two apart by whether the engine already
- * has the source (a stock decl: served by the provider, never reloaded). */
+/* A decl a plan may register: every decl a bundle provides except shadows
+ * and surfaces. A grandfathered bundle's shadows are planned too, because a
+ * converted first-generation package lists every name it carries as a
+ * shadow, new names included; plan_run tells the two apart by whether the
+ * engine already has the source (a stock decl: served by the provider, never
+ * reloaded). A surface (a stock pointer at the game's own path: the game's
+ * bytes under the game's name, sh_mb_stock_restore) is never planned by any
+ * pass: the provider serves it whenever the game parses it, at the game's
+ * own time and level, so no pass registers or re-parses it (ADD-L11). */
 static int ms_plannable(const ms_index *x, const ms_file *f)
 {
-    return f->is_decl && !f->partial && !f->edit && (!f->is_shadow || x->bundles[f->bundle].grandfathered);
+    return f->is_decl && !f->partial && !f->edit && !ms_surface(f) &&
+           (!f->is_shadow || x->bundles[f->bundle].grandfathered);
 }
 
 /* Collect `roots` and the closure of bundle-provided decls they need into an
@@ -4458,9 +4468,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
          * first (a map pass, or a refresh after an in-session install), as
          * the boot editor pass would have kept it. */
         s->persist = persist_sedefs ? 1 : f->editor_closure ? 2 : 0;
-        /* A restored stock decl is planned like a shadow: left to the provider
-         * when the engine knows its source, registered when it does not. */
-        s->shadow = f->is_shadow || f->is_restore;
+        s->shadow = f->is_shadow;   /* surfaces are never planned (ms_plannable) */
         s->blocked = cause[order[i]];
         s->file = order[i];
         if (s->blocked) out->blocked++;
@@ -4939,6 +4947,11 @@ unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), un
     return after;
 }
 
+int sh_modserve_inplace_keeper(int mark_depth, int work)
+{
+    return mark_depth <= 0 && work > 0;
+}
+
 int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persist)
 {
     return persist != 1 && lifetime == 4 && !(state & 1);
@@ -4978,6 +4991,13 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
             name[v.n - 2] = 0;
             /* A render model that is not an md6 is not a decl. */
             if (!strcmp(type, "md6Def") && (strlen(name) < 4 || _stricmp(name + strlen(name) - 4, ".md6"))) continue;
+            /* A surface is the game's own decl: the game parses and keeps it. */
+            {
+                char rq[MS_NAME_MAX + 48];
+                if (_snprintf_s(rq, sizeof rq, _TRUNCATE, "generated/decls/%s/%s.decl", type, name) > 0 &&
+                    sh_modserve_is_surface(rq))
+                    continue;
+            }
             fn(context, type, name, s->name);
             calls++;
         }
@@ -6318,6 +6338,8 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
             (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")) || (eff = ms_scoped(x, i)) < 0)
             continue;
         ef = (ms_file *)&x->files[eff];
+        /* A surface is the game's own model or image: never reloaded. */
+        if (ms_surface(f) || ms_surface(ef)) continue;
         if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
             !ms_gates_live_for(x, ef))
             continue;
@@ -6411,7 +6433,7 @@ int sh_modserve_refresh_expand(void)
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
             int j;
-            if (!parent[i] || f->refresh) continue;
+            if (!parent[i] || f->refresh || ms_surface(f)) continue;
             for (j = 0; j < x->nfiles + x->ngone; ++j) {
                 const ms_file *p = j < x->nfiles ? &x->files[j] : &x->gone[j - x->nfiles].from->files[x->gone[j - x->nfiles].file];
                 if (j < x->nfiles) {
@@ -6443,6 +6465,8 @@ static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_r
     sh_modserve_refresh_item it;
     int eff = ms_scoped(x, (int)(f - x->files));
     const ms_file *ef = eff >= 0 ? &x->files[eff] : f;   /* the provider serving the path for the open map */
+    /* A surface holds the game's own bytes: nothing to refresh, ever. */
+    if (ms_surface(f) || (eff >= 0 && ms_surface(ef))) { InterlockedExchange(&f->refresh, 0); return 0; }
     /* A name no bundle serves for the open map has no game bytes to go back
      * to: the engine keeps what it parsed until a map serves the name again. */
     if (eff < 0 && !f->is_shadow) return 0;
@@ -6690,6 +6714,21 @@ int sh_modserve_is_restore(const char *request)
 {
     const ms_file *f = ms_lookup_file(NULL, request);
     return f && f->is_restore;
+}
+
+int sh_modserve_is_surface(const char *request)
+{
+    const ms_index *x = g_index;
+    char lower[MS_NAME_MAX];
+    size_t i;
+    int f;
+    if (!x || !x->nkeys || !request || strlen(request) >= sizeof lower) return 0;
+    for (i = 0; request[i]; ++i) lower[i] = ms_fold(request[i]);
+    lower[i] = 0;
+    __try { f = ms_find(x->slots, x->mask, lower); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
+    /* Any build at the path: a surface is the game's file whoever carries it. */
+    return f >= 0 && ms_surface(&x->files[f]);
 }
 
 long sh_modserve_open_count(const char *request)
