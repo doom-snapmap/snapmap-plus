@@ -2325,9 +2325,14 @@ installation asks once through `sh_engine_dialog_ask` (Yes sets
 `mods.upload_confirmed`); the ask site is one function, and an alternative
 route shows the explanation as `PublishFail`'s editor toast instead, cancels
 that publish, and treats the next one as the agreement. One worker job then
-uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
+uploads every bundle (`modsync_upload_bundles`: each bundle's canonical
+manifest with its blob list to `POST /mods/missing`, the missing blobs, the
 manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
-main tick resumes the original `PublishAfterSave`. A publish whose save
+main tick resumes the original `PublishAfterSave`. The store checks a manifest
+sent to `/mods/missing` as its bundle PUT would (`modnet_missing_bundle`), so a
+manifest it refuses stops the publish with the store's message in one request,
+before any blob is sent; a store that does not name the bundle back did not
+check it, and its bundle PUT still does. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the

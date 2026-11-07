@@ -660,6 +660,101 @@ int modnet_missing(const char *const *hashes, int n, char (**missing)[MODNET_HAS
     return mn_end(r, t0, MODNET_OK);
 }
 
+int modnet_missing_bundle(const char *bundle, const char *canonical, size_t len, const char *const *hashes, int n,
+                          char (**missing)[MODNET_HASH_HEX + 1], int *missing_count, int *checked,
+                          const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    mn_hashset all = {0}, out = {0};
+    mn_buf body = {0};
+    mn_req q;
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    double t0;
+    int i, code = MODNET_OK;
+    char actual[SH_MB_HASH_HEX + 1];
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (missing) *missing = NULL;
+    if (missing_count) *missing_count = 0;
+    if (checked) *checked = 0;
+    if (!missing || !missing_count || !modnet_valid_hash(bundle) || !canonical || n < 0 || (n && !hashes))
+        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    if (len > MODNET_MAX_BUNDLE || memchr(canonical, 0, len))
+        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "the manifest of %.16s is over 1 MiB", bundle));
+    sh_mb_sha256_hex(canonical, len, actual);
+    if (strcmp(actual, bundle) != 0)
+        return mn_end(r, t0, mn_fail(r, MODNET_E_HASH, "bundle %.16s: the manifest does not hash to its name", bundle));
+    for (i = 0; i < n; i++) {
+        if (!modnet_valid_hash(hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad blob hash")); }
+        if (!mn_set_has(&all, hashes[i]) && !mn_set_add(&all, hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    }
+    if (all.n > MODNET_MAX_QUERY) {
+        free(all.v);
+        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "bundle %.16s carries more than %d files", bundle, MODNET_MAX_QUERY));
+    }
+    /* {"blobs":[...],"bundle":"<hash>","manifest":"<canonical text>"}: the
+     * store checks the manifest as its bundle PUT would and answers that
+     * PUT's refusal here, before any blob is sent. */
+    mn_puts(&body, "{\"blobs\":[");
+    for (i = 0; i < all.n; i++) {
+        if (i) mn_puts(&body, ",");
+        mn_puts(&body, "\"");
+        mn_put(&body, all.v[i], MODNET_HASH_HEX);
+        mn_puts(&body, "\"");
+    }
+    mn_puts(&body, "],\"bundle\":\"");
+    mn_puts(&body, bundle);
+    mn_puts(&body, "\",\"manifest\":");
+    {
+        /* The manifest is NUL-free (checked above); copy it to terminate it. */
+        char *text = (char *)malloc(len + 1);
+        if (!text) body.bad = 1;
+        else {
+            memcpy(text, canonical, len);
+            text[len] = 0;
+            mn_put_json_string(&body, text);
+            free(text);
+        }
+    }
+    mn_puts(&body, "}");
+    if (body.bad) { free(body.p); free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = "/mods/missing";
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body.p;
+    q.body_len = body.n;
+    q.max_response = MN_MISSING_BODY;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    free(body.p);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "bundle");
+    else if (code == MODNET_OK) {
+        mpj *root = mpj_parse((const char *)resp, rlen);
+        const mpj *arr = root && root->type == MPJ_OBJ ? mpj_get(root, "missing") : NULL;
+        const mpj *echo = root && root->type == MPJ_OBJ ? mpj_get(root, "bundle") : NULL;
+        if (!arr || arr->type != MPJ_ARR) code = mn_fail(r, MODNET_E_PROTOCOL, "missing: no list in the answer");
+        for (i = 0; code == MODNET_OK && i < arr->n; i++) {
+            const mpj *h = arr->items[i];
+            int k, asked = 0;
+            if (h->type != MPJ_STR || !modnet_valid_hash(h->text)) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: bad hash in the answer"); break; }
+            for (k = 0; k < all.n && !asked; k++) asked = memcmp(all.v[k], h->text, MODNET_HASH_HEX) == 0;
+            if (!asked) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: the answer names a hash not asked about"); break; }
+            if (!mn_set_has(&out, h->text) && !mn_set_add(&out, h->text)) code = mn_fail(r, MODNET_E_NOMEM, NULL);
+        }
+        /* A store that checked the manifest names it back; an older one
+         * answers the blob list alone and checks at the bundle PUT. */
+        if (code == MODNET_OK && checked) *checked = echo && echo->type == MPJ_STR && !strcmp(echo->text, bundle);
+        mpj_free(root);
+    }
+    free(resp);
+    free(all.v);
+    if (code != MODNET_OK) { free(out.v); return mn_end(r, t0, code); }
+    *missing = out.v;
+    *missing_count = out.n;
+    return mn_end(r, t0, MODNET_OK);
+}
+
 int modnet_put_blob(const char *sha, const void *bytes, size_t len, const modnet_io *io, modnet_result *r)
 {
     modnet_result local;

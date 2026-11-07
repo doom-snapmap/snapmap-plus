@@ -10,7 +10,9 @@
  * the blob body hashes to its path (422), Content-Type on blob PUT (415),
  * Content-Length present (411), the bundle body hashes to its path (422),
  * unknown top-level manifest keys (422), blobs a manifest names exist (409),
- * claim secrets (403) and unknown claims (404). Validation of names and
+ * claim secrets (403) and unknown claims (404). A manifest sent with
+ * POST /mods/missing gets the bundle PUT's key and hash checks (422) and is
+ * named back as "bundle", as the Worker since W1 does. Validation of names and
  * paths is not repeated. Counters and fault switches let the tests observe
  * negotiation and inject failures.
  *
@@ -63,6 +65,9 @@ typedef struct stub_state {
     char corrupt_bundle[65];      /* GET bundle for this hash answers with altered text */
     int serve_bundle_member;      /* GET bundle answers with "bundle" inserted, as the Worker may store it */
     char drop_blob_before_bundle[65];  /* removed just before the next bundle PUT (a purge race) */
+    char refuse_manifest[200];    /* a manifest at /mods/missing is refused with 422 and this message */
+    int missing_ignores_manifest; /* /mods/missing answers as an older Worker: blobs only, no "bundle" */
+    int missing_manifests;        /* /mods/missing requests that carried a manifest the stub checked */
 } stub_state;
 
 static stub_state g_stub;
@@ -120,6 +125,49 @@ static int stub_str(const char *body, const char *key, char *out, size_t cap)
     memcpy(out, p, (size_t)(q - p));
     out[q - p] = 0;
     return 1;
+}
+
+/* The JSON string starting at p (just past its opening quote), unescaped
+ * (malloc'd), or NULL. \uXXXX is decoded to UTF-8. */
+static char *stub_unescape(const char *p)
+{
+    size_t cap = strlen(p) + 1, n = 0;
+    char *o = (char *)malloc(cap);
+    if (!o) return NULL;
+    for (; *p && *p != '"'; p++) {
+        unsigned c = (unsigned char)*p;
+        if (c == '\\') {
+            p++;
+            if (!*p) break;
+            switch (*p) {
+            case 'n': c = '\n'; break;
+            case 'r': c = '\r'; break;
+            case 't': c = '\t'; break;
+            case 'b': c = '\b'; break;
+            case 'f': c = '\f'; break;
+            case 'u': {
+                unsigned v = 0;
+                int k;
+                for (k = 1; k <= 4; k++) {
+                    char h = p[k];
+                    if (!h) { free(o); return NULL; }
+                    v = v * 16 + (unsigned)(h <= '9' ? h - '0' : (h | 32) - 'a' + 10);
+                }
+                p += 4;
+                if (v >= 0x80) {
+                    if (v < 0x800) { o[n++] = (char)(0xC0 | (v >> 6)); c = 0x80 | (v & 0x3F); }
+                    else { o[n++] = (char)(0xE0 | (v >> 12)); o[n++] = (char)(0x80 | ((v >> 6) & 0x3F)); c = 0x80 | (v & 0x3F); }
+                } else c = v;
+                break;
+            }
+            default: c = (unsigned char)*p; break;
+            }
+        }
+        o[n++] = (char)c;
+    }
+    if (*p != '"') { free(o); return NULL; }
+    o[n] = 0;
+    return o;
 }
 
 /* The Worker's TOP_KEYS check: the first top-level key it does not know, or NULL. */
@@ -201,12 +249,40 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
     if (!strcmp(method, "POST") && !strcmp(path, "/mods/missing")) {
         static char list[4096][65];
         int n = stub_hex_list((const char *)body, "blobs", list, 4096), i, w = 0;
-        char *big;
-        size_t cap = 64 + (size_t)(n > 0 ? n : 0) * 68;
+        char *big, bundle[65];
+        const char *man = body ? strstr((const char *)body, "\"manifest\":\"") : NULL;
+        size_t cap = 64 + (size_t)(n > 0 ? n : 0) * 68 + 80;
         g_stub.missing_calls++;
+        bundle[0] = 0;
+        if (man && !g_stub.missing_ignores_manifest) {
+            /* A manifest ahead of the blobs: the bundle PUT's checks and wording. */
+            char *text = stub_unescape(man + 12), actual[65], key[64];
+            const char *bad;
+            g_stub.missing_manifests++;
+            if (!text || !stub_str((const char *)body, "bundle", bundle, sizeof bundle) || strlen(bundle) != 64) {
+                free(text);
+                stub_json(s, 400, "{\"error\":\"bad bundle hash\"}");
+                return;
+            }
+            sh_mb_sha256_hex(text, strlen(text), actual);
+            bad = stub_unknown_top_key(text, key, sizeof key);
+            free(text);
+            if (g_stub.refuse_manifest[0]) {
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"%s\"}", g_stub.refuse_manifest);
+                stub_json(s, 422, out);
+                return;
+            }
+            if (bad) {
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown manifest key %s\"}", bad);
+                stub_json(s, 422, out);
+                return;
+            }
+            if (strcmp(actual, bundle) != 0) { stub_json(s, 422, "{\"error\":\"canonical manifest does not hash to the path\"}"); return; }
+        }
         if (n < 0) { stub_json(s, 400, "{\"error\":\"expected an array of SHA-256 hex strings\"}"); return; }
         big = (char *)malloc(cap);
-        w = _snprintf_s(big, cap, _TRUNCATE, "{\"missing\":[");
+        w = _snprintf_s(big, cap, _TRUNCATE, "{%s%s%s\"missing\":[", bundle[0] ? "\"bundle\":\"" : "", bundle,
+                        bundle[0] ? "\"," : "");
         for (i = 0; i < n; i++) {
             int k, dup = 0;
             for (k = 0; k < i; k++) dup |= strcmp(list[k], list[i]) == 0;

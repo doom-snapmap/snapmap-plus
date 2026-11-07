@@ -51,6 +51,7 @@ typedef struct modsync_stats {
     unsigned blobs_missing;         /* the store lacked (upload) or the local store lacked (download) */
     unsigned blobs_transferred;
     unsigned stock_files;           /* upload: stock pointers named, whose bytes are never sent */
+    unsigned manifests_checked;     /* upload: manifests the store checked at /mods/missing, before any blob */
     unsigned long long bytes_up, bytes_down;
     unsigned requests;
     double ms;

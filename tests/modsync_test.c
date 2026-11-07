@@ -280,10 +280,38 @@ int main(int argc, char **argv)
 
     /* ---- refusals and the retry queue ---- */
     {
+        /* The store refuses the manifest at /mods/missing, before any blob
+         * and without a bundle PUT, in the bundle PUT's wording. */
         const char *one[] = { hX };
+        int blobs = g_stub.blob_puts, bundles = g_stub.bundle_puts, checked = g_stub.missing_manifests;
         CHECK(!modsync_upload_bundles(one, 1, "map-x", NULL, &st));
         CHECK(st.code == MODNET_E_REFUSED && strstr(st.cause, "unknown manifest key extra") != NULL && !st.queued);
+        CHECK(strstr(st.cause, "bundle: HTTP 422") != NULL);
+        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_puts == bundles && g_stub.missing_manifests == checked + 1);
         CHECK(modsync_pending_count() == 0);
+    }
+    {
+        /* A 422 at missing (the Worker's namespace rule, say) stops the
+         * publish with its message: no blob PUT, nothing queued. */
+        const char *one[] = { hG };
+        int blobs = g_stub.blob_puts, bundles = g_stub.bundle_puts;
+        strcpy_s(g_stub.refuse_manifest, sizeof g_stub.refuse_manifest,
+                 "outside the mods/test.gamma/ namespace and not a declared shadow: cooked/x.bmodel");
+        CHECK(!modsync_upload_bundles(one, 1, "map-s", NULL, &st));
+        g_stub.refuse_manifest[0] = 0;
+        CHECK(st.code == MODNET_E_REFUSED && !st.queued && st.blobs_transferred == 0 && st.manifests_checked == 0);
+        CHECK(strstr(st.cause, "bundle: HTTP 422: outside the mods/test.gamma/ namespace and not a declared shadow") != NULL);
+        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_puts == bundles && !stub_has_bundle(hG));
+        CHECK(modsync_pending_count() == 0 && !modsync_claim_lookup("map-s", NULL, NULL));
+    }
+    {
+        /* A store that checked the manifest names it back; an older one
+         * answers the blob list alone and the bundle PUT checks. */
+        const char *one[] = { hA };
+        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st) && st.manifests_checked == 1);
+        g_stub.missing_ignores_manifest = 1;
+        CHECK(modsync_upload_bundles(one, 1, "map-1", NULL, &st) && st.manifests_checked == 0);
+        g_stub.missing_ignores_manifest = 0;
     }
     {
         const char *one[] = { hG };

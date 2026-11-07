@@ -997,12 +997,36 @@ static int msy_upload(const char *const *hashes, int n, const char *ref, const m
     memset(&prog, 0, sizeof prog);
     prog.outer = io;
 
+    /* Each bundle's manifest goes to the store with its blob list before any
+     * blob is sent: a manifest the store would refuse at the bundle PUT is
+     * refused here, in one request, instead of after every blob. */
+    missing = (char (*)[MODNET_HASH_HEX + 1])calloc(u.nblob ? u.nblob : 1, sizeof *missing);
     all = (const char **)malloc(sizeof(char *) * (u.nblob ? u.nblob : 1));
-    if (!all) { msy_stats_fail(st, MODNET_E_NOMEM, "out of memory"); goto done; }
-    for (k = 0; k < u.nblob; k++) all[k] = u.blobs[k].sha;
-    code = modnet_missing(all, (int)u.nblob, &missing, &nmissing, io, &r);
-    msy_absorb(st, &r);
-    if (code != MODNET_OK) { msy_stats_fail(st, code, "%s", r.message); goto done; }
+    if (!missing || !all) { msy_stats_fail(st, MODNET_E_NOMEM, "out of memory"); goto done; }
+    for (i = 0; i < u.nb; i++) {
+        msy_up_bundle *ub = &u.bundles[i];
+        char (*part)[MODNET_HASH_HEX + 1] = NULL;
+        int npart = 0, checked = 0, j;
+        if (msy_cancelled(io)) { msy_stats_fail(st, MODNET_E_CANCELLED, "cancelled"); goto done; }
+        for (k = 0; k < ub->nblobs; k++) all[k] = ub->blobs[k];
+        code = modnet_missing_bundle(ub->hash, ub->canonical, ub->len, all, (int)ub->nblobs, &part, &npart, &checked, io, &r);
+        msy_absorb(st, &r);
+        if (code == MODNET_E_TOO_LARGE && r.status == 413) {
+            /* An older store caps the query below a large manifest: ask for
+             * the blobs alone; the bundle PUT still checks the manifest. */
+            msy_log("MODS: push %s: the store took no manifest with the blob query (HTTP 413); it checks it at the bundle", ub->label);
+            code = modnet_missing(all, (int)ub->nblobs, &part, &npart, io, &r);
+            msy_absorb(st, &r);
+        }
+        if (code != MODNET_OK) { free(part); msy_stats_fail(st, code, "%s: %s", ub->label, r.message); goto done; }
+        if (checked) st->manifests_checked++;
+        for (j = 0; j < npart; j++) {
+            int seen = 0, m;
+            for (m = 0; m < nmissing && !seen; m++) seen = strcmp(missing[m], part[j]) == 0;
+            if (!seen && nmissing < (int)u.nblob) strcpy_s(missing[nmissing++], MODNET_HASH_HEX + 1, part[j]);
+        }
+        free(part);
+    }
     st->blobs_missing = (unsigned)nmissing;
     for (i = 0; i < nmissing; i++) { msy_up_blob *ob = msy_up_find_blob(&u, missing[i]); if (ob) prog.total += ob->size; }
     for (i = 0; i < u.nb; i++) prog.total += u.bundles[i].len;

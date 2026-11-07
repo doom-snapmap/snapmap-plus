@@ -120,6 +120,18 @@ int  modnet_valid_ref(const char *ref);
 int  modnet_missing(const char *const *hashes, int n, char (**missing)[MODNET_HASH_HEX + 1], int *missing_count,
                     const modnet_io *io, modnet_result *r);
 
+/* POST /mods/missing for one bundle's blobs (at most MODNET_MAX_QUERY) with
+ * its canonical manifest ahead of them: {"blobs":[...],"bundle":"<hash>",
+ * "manifest":"<canonical text>"}. The store checks the manifest as its bundle
+ * PUT would and answers that PUT's refusal (422 with the store's message,
+ * MODNET_E_REFUSED, "bundle: HTTP 422: <message>", the PUT's wording) before any blob is sent.
+ * *checked is 1 when the answer names the bundle back (the store checked the
+ * manifest), 0 when an older store answered the blob list alone. *missing as
+ * for modnet_missing. */
+int  modnet_missing_bundle(const char *bundle, const char *canonical, size_t len, const char *const *hashes, int n,
+                           char (**missing)[MODNET_HASH_HEX + 1], int *missing_count, int *checked,
+                           const modnet_io *io, modnet_result *r);
+
 /* PUT /mods/blob/<sha>. The bytes are hashed first and refused locally when
  * they do not match. 200 (already stored) and 201 (created) are success;
  * r->created tells them apart. */
