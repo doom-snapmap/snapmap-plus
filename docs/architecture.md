@@ -1396,11 +1396,19 @@ it ends, `me_closure_begin` and `me_closure_end`) whenever no other watermark
 covers them and they have work (`sh_modserve_inplace_keeper`).
 
 A surface (a stock pointer at the game's own path: the game's bytes under the
-game's name, `sh_mb_stock_restore`) is never registered, re-parsed, reloaded or
+game's name, `sh_mb_stock_restore`) is never registered, re-parsed or
 refreshed by any pass. The provider serves it whenever the game parses or loads
 it, at the game's own time and level, so it is in no plan (editor, map, scope
-activation, refresh), no refresh list, no early-shadow or gated-reload list,
-no editor-row reference and no ledger sweep (`sh_modserve_is_surface`). The
+activation, refresh), no refresh list, no early-shadow list, no editor-row
+reference and no ledger sweep (`sh_modserve_is_surface`). The one exception is
+the gated reload below: a surface model or image the game loaded before its
+bundle's requirements were live is loaded again, inside that reload's keeper,
+once they are. A cold process holds the stock spider mesh from boot, loaded
+with the blacklists on, and the requirements go live only at the first map
+load; without that reload the mesh's blacklisted materials are never created
+and the spider body is not drawn (snaphak-re ADD-V7a). The keeper raises the
+materials and images the reload creates to the session's level, as the editor
+pass's watermark does in the editor-first flow. The
 engine's own source lookup could not stand in for this: DeclSourceFind misses
 decls archived in the game's containers, so a stock-path material a pack
 carries as a surface was registered, and so re-parsed in place, by every map
@@ -2088,10 +2096,29 @@ obtained; see the console." when there are more) and every denied bundle gets
 one console line. A prefab's sentences say "prefab" and "the prefab's ZIP
 export". The title is the store manifest's name, else an installed build's,
 else the key alone. A key installed at another build (`sh_modserve_row_other_build`)
-is never a cause: it is the obtainable case, and with one such mod the question
-names both builds ("This map needs <title> at build <h16>; you have build <h16>.
-Download build <h16> (<size>) and install it beside yours?"); in a longer list
-the mod reads "<key> (build <h8>, you have <h8>)". A fetch that fails after Yes
+is never a cause. When the store holds the declared build it is the obtainable
+case, and with one such mod the question names both builds ("This map needs
+<title> at build <h16>; you have build <h16>. Download build <h16> (<size>) and
+install it beside yours?"); in a longer list the mod reads "<key> (build <h8>,
+you have <h8>)". When the declared build cannot be obtained, the player's own
+content substitutes (verdict `SH_MODPUB_GATE_SUBSTITUTE`, fact `own`): a My
+Maps play, a rawmap load or a prefab placement goes on with the installed build
+of the key, as an editor open does (DESIGN-additive 2.5). Each such row prints
+`<hold>: <key>: declared at build <X16> (not installed), serving build <Y16>`
+with the Mods tab's upgrade hint, leaves the hold's missing list, and is
+remembered for the session (`sh_modpub_row_substitute`, checked against the
+key's installed build on every use), so the hold's resume, a rawmap's reopen,
+the next launch of the same map and the Prefabs tab's second placement find
+the row served. When no row is left the hold resumes without a question;
+otherwise only the rest is offered. A fetch that fails after Yes for a row
+that can substitute substitutes it and fetches the others again. The launched
+map's listing declares the installed build through the manifest's
+substitution table, which the My Maps parse and the hold's resume parse fill
+as an editor parse does, so the Play's per-map pinning matches what serves it;
+a prefab adds its row to the map at the installed build. A map from the map
+service (browser, lobby, feed, launch boundary) keeps its author's build and is
+denied as before: substituting there would change what its author
+published. A fetch that fails after Yes
 is decided by the same function (404 and 451, a network failure, and
 `MODNET_E_GAME`, the download's own borrow refusal, whose source the fetch
 keeps). A placeholder system (phase 6) would plug in at `sh_modpub_gate_decide`
