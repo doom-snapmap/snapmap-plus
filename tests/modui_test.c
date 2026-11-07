@@ -701,7 +701,7 @@ int main(int argc, char **argv)
     dr = doctor(0);
     CHECK(has(dr, "MODS: doctor: store ") && has(dr, ": 0 mod folder(s), 0 of them delivered by maps; all listed in the Mods tab"));
     CHECK(has(dr, "MODS: doctor: migration: no overrides folder, or it is empty\n"));
-    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 grandfathered shadow(s)\nMODS: doctor: done\n"));
+    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\nMODS: doctor: done\n"));
 
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
@@ -1113,7 +1113,7 @@ int main(int argc, char **argv)
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: grandfathered shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a "
                       "(migrated); served by alex.shade-a\n"));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
@@ -1125,7 +1125,7 @@ int main(int argc, char **argv)
         CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-a serves it "
                       "(no rule separates them; the first key in name order (a map's rows decide while it is open)); "
                       "from alex.shade-a, alex.shade-b\n"));
-        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 grandfathered shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         /* Every section populated for the key comparison with the page's fixture. */
         load_map_naming("alex.r2-imp", hash2);
         g_placed[0] = "mods/alex.r2-imp/imp_copy";
@@ -1184,7 +1184,7 @@ int main(int argc, char **argv)
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: bundle mods\\alex.shade-b (alex.shade-b): skipped; "));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         /* Installed while the index is stale: unindexed until a rescan. */
         sh_modserve_index_build(g_root);
         {

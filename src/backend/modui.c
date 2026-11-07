@@ -1086,7 +1086,7 @@ static void mu_say(const mu_out *o, const char *fmt, ...)
 
 /* ------------------------------------------------------------------ shadows and conflicts */
 
-typedef struct mu_path { const char *request; int entry; int shadow; int conflict; } mu_path;
+typedef struct mu_path { const char *request; int entry; int shadow; int conflict; int edit; } mu_path;
 
 static int mu_path_cmp(const void *a, const void *b)
 {
@@ -1098,12 +1098,15 @@ static int mu_path_cmp(const void *a, const void *b)
 /* Every path an admitted bundle shadows, and every admitted path nobody serves
  * (two bundles provide it with different bytes), grouped by path: conflicts
  * first, with the copy that serves and why, then stock shadows, then the
- * grandfathered shadows of converted packages (migrated, or delivered by a map). */
+ * grandfathered shadows of converted packages (migrated, or delivered by a map),
+ * then the edited copies: an edit source is diffed at build and generated per
+ * map, never served, so it is neither a shadow nor a conflict (the registry
+ * report's "registry edits" lines name the same copies). */
 static void mu_print_shadows(const mu_out *o, const mu_model *m)
 {
     mu_path *paths = NULL;
     size_t n = 0, cap = 0, i, k, printed = 0, groups = 0;
-    unsigned stock = 0, grandfathered = 0, conflicts = 0;
+    unsigned stock = 0, grandfathered = 0, conflicts = 0, edit_sources = 0, edit_files = 0;
     int pass;
     for (i = 0; i < m->list.count; i++) {
         const mu_entry *u = &m->entries[i];
@@ -1116,8 +1119,9 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
              * it): nothing serves it by design. */
             int conflict;
             if (sh_modserve_is_partial(f->request)) continue;
-            conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL);
-            if (!f->shadowed && !conflict) continue;
+            conflict = !f->edited &&
+                       (sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL));
+            if (!f->shadowed && !conflict && !f->edited) continue;
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;
                 mu_path *np = (mu_path *)realloc(paths, nc * sizeof *np);
@@ -1129,24 +1133,50 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             paths[n].entry = (int)i;
             paths[n].shadow = f->shadowed;
             paths[n].conflict = conflict;
+            paths[n].edit = f->edited;
+            if (f->edited) edit_sources++;
             n++;
         }
     }
     if (n > 1) qsort(paths, n, sizeof *paths, mu_path_cmp);
-    for (pass = 0; pass < 2; pass++)
+    /* pass 0: conflicts; 1: shadows; 2: edit sources. A path one mod edits
+     * and another serves whole is both: the serving copy's group, and the
+     * edit source's. */
+    for (pass = 0; pass < 3; pass++)
         for (i = 0; i < n;) {
-            size_t j = i + 1, q, at = 0;
-            int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, served;
-            int any_delivered = m->entries[paths[i].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[i].entry]);
+            size_t j = i, q, at = 0;
+            int conflict = 0, any_legacy = 0, served, any_delivered = 0, members = 0;
             char who[700], here[200];
             sh_modserve_hit hit, open_hit;
             while (j < n && !strcmp(paths[j].request, paths[i].request)) {
-                conflict |= paths[j].conflict;
-                any_legacy |= m->entries[paths[j].entry].legacy;
-                any_delivered |= m->entries[paths[j].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[j].entry]);
+                if (paths[j].edit == (pass == 2)) {
+                    conflict |= paths[j].conflict;
+                    any_legacy |= m->entries[paths[j].entry].legacy;
+                    any_delivered |= m->entries[paths[j].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[j].entry]);
+                    members++;
+                }
                 j++;
             }
-            if (conflict != (pass == 0)) { i = j; continue; }
+            if (!members || (pass < 2 && conflict != (pass == 0))) { i = j; continue; }
+            if (pass == 2) {
+                edit_files++;
+                groups++;
+                if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
+                who[0] = 0;
+                for (q = i; q < j && at < sizeof who - 1; q++) {
+                    int w;
+                    if (!paths[q].edit) continue;
+                    w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", at ? ", " : "",
+                                    m->list.items[paths[q].entry].name);
+                    if (w < 0) break;
+                    at += (size_t)w;
+                }
+                mu_say(o, "edit source %s: from %s; diffed at build against the game's text, generated per map that "
+                       "declares it, the copy is never served", paths[i].request, who);
+                printed++;
+                i = j;
+                continue;
+            }
             if (conflict) conflicts++;
             else if (any_legacy) grandfathered++;
             else stock++;
@@ -1154,8 +1184,10 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
             who[0] = 0;
             for (q = i; q < j && at < sizeof who - 1; q++) {
-                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", q > i ? ", " : "",
-                                    m->list.items[paths[q].entry].name);
+                int w;
+                if (paths[q].edit) continue;
+                w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", at ? ", " : "",
+                                m->list.items[paths[q].entry].name);
                 if (w < 0) break;
                 at += (size_t)w;
             }
@@ -1193,7 +1225,8 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             i = j;
         }
     if (groups > printed) mu_say(o, "%zu more shadow or conflict path(s) not printed", groups - printed);
-    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s)", conflicts, stock, grandfathered);
+    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s), %u edit source(s) of %u game file(s) (never "
+              "served, so neither a shadow nor a conflict)", conflicts, stock, grandfathered, edit_sources, edit_files);
     free(paths);
 }
 
