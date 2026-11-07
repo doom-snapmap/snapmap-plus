@@ -835,7 +835,7 @@ var modsTab = (function () {
       if (m.product) field(det, 'Needs', 'Snapmap+ ' + m.product + ' or later');
       if (m.clashes.length) {
         var cs = section(body, 'clashes', 'Choices between mods');
-        cs.appendChild(el('div', 'mods-note', 'Several mods of this map edit the same field of a game file differently. Pick whose edit this map uses; the choice is saved with the map.'));
+        cs.appendChild(el('div', 'mods-note', 'Several mods of this map edit the same field of a game file differently. Pick whose edit this map uses; it applies now and is saved with the map\'s next save.'));
         m.clashes.forEach(function (c) {
           var sel = el('select', 'mods-clash');
           sel.setAttribute('data-slot', c.slot);
@@ -1171,7 +1171,7 @@ var modsTab = (function () {
         else {
           cl.chosen = pick;
           cl.serving = pick || (cl.providers[0] && cl.providers[0].id) || '';
-          msg = pick ? slot + ' now comes from ' + pick + ' in this map; the choice is saved with the map.'
+          msg = pick ? slot + ' now comes from ' + pick + ' in this map; applies now; saved with the map\'s next save.'
                      : slot + ": the map's choice is cleared; the first mod in the map's list serves it.";
         }
       } else if (a === 'mapUpgradeMod') {

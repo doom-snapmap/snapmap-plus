@@ -219,7 +219,7 @@ name". Mods you download or import are never refused on their files. A map whose
   packs never collide), the player body's clips (two packs that add rows to one clip both keep them), the
   player entity, weapons, AI FSM states, whitelists. Identical edits merge and additions combine. When two
   mods a map uses set one field to different values, the map's choice (`sh_mods choose "<game file>/<path>"
-  "<mod key>"`, saved with the map) decides, else the first in the map's list, with one log line.
+  "<mod key>"`, which applies now and is saved with the map's next save) decides, else the first in the map's list, with one log line.
 - A saved map records each mod a placed entity needs as one `smpmod1.` string variable, and the
   next load activates exactly those mods. A mod can also be used by the whole map without placing
   anything (the Mods tab's **Use in this map**, `sh_mods map add "<id>"`), for a mod that only replaces

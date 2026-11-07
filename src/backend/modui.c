@@ -3895,9 +3895,9 @@ static int mu_map_add(const char *key, const mu_out *o)
             InterlockedIncrement(&g_gen);
             mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.id, row.version, row.bundle,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply in this map, and "
-                        "the map lists it with its mods when you save: players are offered it when they open the map. "
-                        "Remove from map takes it out again.", title, where,
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply now; the map "
+                        "lists it with its mods at the map's next save, and players are then offered it when they open "
+                        "the map. Remove from map takes it out again.", title, where,
                         x && x->uid_count ? " as well as by its placed entities" : "");
         }
     }
@@ -3912,7 +3912,8 @@ static int mu_map_add(const char *key, const mu_out *o)
 /* ---- registry choice and upgrade (DESIGN-additive 2.4, 2.5) */
 
 /* The open map's registry choice for a slot several declared mods set
- * (`sh_mods choose`, the tab's clash select): saved with the map, applied at once. */
+ * (`sh_mods choose`, the tab's clash select): applied at once, written into
+ * the row of its key at the map's next save (modmanifest.c mm_choices_save). */
 static int mu_choose(const char *slot, const char *key, const mu_out *o)
 {
     const int action = SH_MODS_ACT_CHOOSE;
@@ -3929,7 +3930,7 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
     if (o && o->fn) o->fn(o->context, line);
     else mu_log("%s", line + (strncmp(line, "MODS: ", 6) ? 0 : 6));
     if (r < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s.", line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14));
-    else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; the choice is saved with the map.", slot, key);
+    else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; applies now; saved with the map's next save.", slot, key);
     else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s: the map's choice is cleared; the first mod in the map's list serves it.", slot);
     return mu_simple_result(action, r >= 0, msg);
 }

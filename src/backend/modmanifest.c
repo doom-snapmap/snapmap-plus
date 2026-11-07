@@ -1044,6 +1044,8 @@ void sh_modmanifest_reset(void)
     AcquireSRWLockExclusive(&g_current_lock);
     g_choices[0] = 0;
     ReleaseSRWLockExclusive(&g_current_lock);
+    /* The serving index forgets them too: a closed map's choice never applies to the next listing. */
+    (void)mm_choices_push(0);
     (void)sh_modmanifest_load_notes_flush(0);
 }
 

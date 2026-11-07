@@ -1767,10 +1767,20 @@ map's choices).
   one line per generated file, what each source's edits did, every clash, the
   merged body's totals (`player body: the merged body holds <clips> clips and
   <aliases> aliases`), and one `registry edits <path>` line per edited copy.
-- **Choices.** Each choice is written on the row of the key it names; a load
-  reads them from every row (first row per slot) and gives them to the index
-  (`sh_modserve_scope_set_choices`) before the listing; a choice naming a key
-  the save writes no row for is dropped with one line.
+  The doctor lists the same copies as `edit source <path>: from <folders>;
+  diffed at build against the game's text, generated per map that declares
+  it, the copy is never served`, never as a conflict or a shadow, and its
+  summary counts them apart: `N conflict(s), N shadow(s), N grandfathered
+  shadow(s), N edit source(s) of N game file(s)`, so its conflict count
+  agrees with the serving index's.
+- **Choices.** A choice applies at once and is kept with the open map's
+  manifest; the map's next save writes it on the row of the key it names; a
+  load reads them from every row (first row per slot) and gives them to the
+  index (`sh_modserve_scope_set_choices`) before the listing; a choice naming
+  a key the save writes no row for is dropped with one line, and closing the
+  map (`sh_modmanifest_reset`) clears the index's copy too. A choice does not
+  mark the editor's map modified, so the wording is "applies now; saved with
+  the map's next save".
 - **Rescans, gates and old builds.** A rescan that changes a generated text
   for the listing (a mod rebuilt with other edits) marks the path that serves
   it for refresh, as a changed decl is marked. A generated text is gated by the

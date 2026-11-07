@@ -487,6 +487,47 @@ static void test_generation(void)
     CHECK(sh_modregistry_choose_command("player.hands", "k.rival", line, sizeof line) == -1 && strstr(line, "is not a slot"));
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", line, sizeof line) >= 1);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "player/fp_hands.md6"));
+    /* The losing source's edit is counted: superseded by row order, then by the map's choice. */
+    CHECK(log_has("2 edit(s) from k.rival@1.0.0 (5555555555555555): 0 applied, 1 already held, 1 superseded by k.hands (row order)"));
+    CHECK(log_has("3 edit(s) from k.hands@1.0.0 (4444444444444444): 2 applied, 0 already held, 1 superseded by k.rival's choice"));
+
+    /* A choice persists: the save writes it into its key's row, a load reads
+     * it back, and the next listing applies it. */
+    {
+        static const char MAPJ[] = "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+        sh_modmanifest_row ra, rb;
+        char *saved, *loaded;
+        size_t slen = 0, llen = 0;
+        memset(&ra, 0, sizeof ra);
+        memset(&rb, 0, sizeof rb);
+        strcpy_s(ra.id, sizeof ra.id, "k.hands");
+        strcpy_s(ra.version, sizeof ra.version, "1.0.0");
+        strcpy_s(ra.bundle, sizeof ra.bundle, hh);
+        strcpy_s(rb.id, sizeof rb.id, "k.rival");
+        strcpy_s(rb.version, sizeof rb.version, "1.0.0");
+        strcpy_s(rb.bundle, sizeof rb.bundle, hr);
+        ra.size = rb.size = 10;
+        CHECK(sh_modmanifest_current_attach(&ra) >= 0 && sh_modmanifest_current_attach(&rb) >= 0);
+        CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "k.rival", line, sizeof line) >= 1 &&
+              strstr(line, "applies now; saved with the map's next save"));
+        saved = sh_modmanifest_on_save(MAPJ, sizeof MAPJ - 1, &slen);
+        CHECK(saved && strstr(saved, "k.rival") && strstr(saved, "choices") &&
+              strstr(saved, "entitydef/player/coop/edit/handsModelMPUseDoomHands"));
+        /* Another map in between: no choice; row order serves. */
+        sh_modmanifest_reset();
+        CHECK(!sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key));
+        CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
+        CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
+        /* The saved map loaded again: its choice is read back and applied. */
+        loaded = saved ? sh_modmanifest_prepare_load(saved, slen, &llen) : NULL;
+        CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) &&
+              !strcmp(key, "k.rival"));
+        CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
+        CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 &&
+              strstr(text, "handsModelMPUseDoomHands = \"mods/k.rival/hands.md6\";"));
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        if (saved) HeapFree(GetProcessHeap(), 0, saved);
+    }
 
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     sh_modmanifest_reset();
