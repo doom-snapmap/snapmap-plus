@@ -39,7 +39,7 @@ int sh_modregistry_choose_command(const char *slot, const char *key, char *out, 
     if (r < 0) _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: %s: refused (no map is open, or out of memory)", slot);
     else if (key && key[0])
         _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: %s is served from %s in this map when several of its mods set "
-                    "it; saved with the map (%d bundle(s) changed)", slot, key, r);
+                    "it; applies now; saved with the map's next save (%d bundle(s) changed)", slot, key, r);
     else
         _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: %s: the map's choice is cleared; row order decides (%d bundle(s) "
                     "changed)", slot, r);

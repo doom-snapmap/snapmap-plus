@@ -257,6 +257,12 @@ int  sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation);
 /* Bumped by every action that can change the store or the serving index. */
 unsigned sh_modui_generation(void);
 
+/* A change the tab did not make (a console verb: sh_mods build, rebuild,
+ * install, rescan): bumps the generation, so the window pushes a fresh
+ * document to an open Mods tab, as after the tab's own actions. The verbs
+ * the tab shares (map, uninstall, choose) bump it themselves. Any thread. */
+void sh_modui_note_changed(void);
+
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 

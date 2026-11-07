@@ -18,7 +18,7 @@
  *     "validated": true, "cause": "<first cause when not validated>",
  *     "origin": "install" | "download" | "migration" | "delivery" | "by-hand",
  *     "legacy": {...},                 converted first-generation packages only
- *     "classes": {"adds", "borrows", "replaces", "editor", "surfaces"},
+ *     "classes": {"adds", "borrows", "edits", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
  *     "registries": {"banks": ["<stock bank>", ...], "conductor": ["<encounter decl>", ...],
  *                    "strings": ["<key>", ...]},
@@ -162,6 +162,7 @@ typedef struct sh_mb_file {
     int absent;            /* a stock pointer with no file under assets/ ("inAssets": false) */
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
+    int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
 } sh_mb_file;
 
 /* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
@@ -187,8 +188,10 @@ typedef struct sh_mb_file {
 #define SH_MB_CLASS_EDITOR  4
 #define SH_MB_CLASS_SURFACE 5
 
+/* edits: the edited copies (REPLACE files the bundle's edits name), counted
+ * apart from replaces, which is only what a received folder replaces. */
 typedef struct sh_mb_classes {
-    unsigned adds, borrows, replaces, editor, surfaces;
+    unsigned adds, borrows, replaces, editor, surfaces, edits;
 } sh_mb_classes;
 
 /* Where a bundle's key came from (sh_mb_bundle.key_source). */
@@ -460,7 +463,7 @@ int  sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1]);
 /* "adds", "borrows", "replaces", "editor", "surfaces" for SH_MB_CLASS_*, else "". */
 const char *sh_mb_class_name(int cls);
 
-/* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 surfaces"). */
+/* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
 /* For the calling thread only: 1 accepts a binary at a game name in the

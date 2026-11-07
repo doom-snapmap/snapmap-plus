@@ -2865,11 +2865,22 @@ struct PocModsJob {
     int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled,
                               -4 a migration still running when the job stopped following it */
     int         list_rc;
+    unsigned    list_gen;  /* the backend's generation when the document was built */
+    bool        pushed;    /* a document the page did not ask for (poc_mods_push_tick) */
     std::string run_doc, list_doc;
 };
 static PocModsJob    g_mods_job;
 static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
+/* The pushed refresh: once the page has asked for the document, a change the window did not make
+ * (a console verb, `sh_mods map upgrade` or `uninstall`, the undo clear an Uninstall owes) moves the
+ * backend's generation past the one of the last document posted, and the think loop posts a fresh
+ * one, as each of the page's own actions ends with one. FETCH's size query (any thread, no main-
+ * thread call) reads the generation every POC_MODS_PUSH_MS. */
+#define POC_MODS_PUSH_MS 500
+static bool          g_mods_page_seen = false;
+static unsigned      g_mods_doc_gen = 0;
+static ULONGLONG     g_mods_push_next = 0;
 
 struct PocModsMain { sh_mods_call call; int rc; };
 
@@ -3018,6 +3029,7 @@ static DWORD WINAPI poc_mods_thread(LPVOID)
         m.call.op = SH_MODS_LIST;
         if (!poc_mods_on_main(&m)) job.list_rc = -1;
         else job.list_rc = (m.rc == 1 && poc_mods_fetch(job.list_doc)) ? 1 : 0;
+        job.list_gen = m.call.generation;
     }
     InterlockedExchange(&g_mods_done, 1);   /* last: publishes the job above */
     return 0;
@@ -3116,6 +3128,8 @@ static bool poc_mods_begin(int action, bool pick, const std::string &arg)
     g_mods_job.action = action;
     g_mods_job.pick = pick;
     g_mods_job.arg = arg;
+    g_mods_job.pushed = false;
+    g_mods_job.list_gen = 0;
     g_mods_job.run_doc.clear();
     g_mods_job.list_doc.clear();
     HANDLE h = CreateThread(nullptr, 0, poc_mods_thread, nullptr, 0, nullptr);
@@ -3161,8 +3175,14 @@ static void poc_mods_finish()
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
         poc_log(l);
     }
-    if (job.list_rc == 1) poc_mods_post(L"{\"kind\":\"mods\",\"data\":", job.list_doc, L"}");
-    else poc_post_json(job.list_rc == -1
+    if (job.list_rc == 1) {
+        g_mods_doc_gen = job.list_gen;
+        poc_mods_post(job.pushed ? L"{\"kind\":\"mods\",\"pushed\":true,\"data\":" : L"{\"kind\":\"mods\",\"data\":",
+                      job.list_doc, L"}");
+    } else if (job.pushed) {
+        /* A pushed refresh the game did not answer: the page keeps its document; asked again later. */
+        g_mods_push_next = GetTickCount64() + 2000;
+    } else poc_post_json(job.list_rc == -1
         ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
         : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
     job.run_doc.clear();
@@ -3302,6 +3322,27 @@ static void poc_watch_start()
     HANDLE h = CreateThread(nullptr, 0, poc_watch_thread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
     else poc_log("watch: the folder watcher could not start; the lists refresh only when asked");
+}
+
+/* The pushed refresh (g_mods_doc_gen above), on the UI thread: a document only, as the page's
+ * Refresh asks for, while no job of the window runs. */
+static void poc_mods_push_tick()
+{
+    ULONGLONG now = GetTickCount64();
+    if (!g_mods_page_seen || !g_mods_doc_gen || now < g_mods_push_next) return;
+    g_mods_push_next = now + POC_MODS_PUSH_MS;
+    if (InterlockedCompareExchange(&g_mods_busy, 0, 0) != 0 || g_watch_mods_running) return;
+    sh_mods_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_FETCH;   /* out NULL: the size query, which sets the generation */
+    if (poc_mods_slot(&call) == 0 && !call.generation) return;
+    if (!call.generation || call.generation == g_mods_doc_gen) return;
+    if (!poc_mods_begin(0, false, std::string())) return;
+    g_mods_job.pushed = true;   /* the worker reads only action, pick and arg; finish reads this */
+    char l[160];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "mods: the backend changed outside the window (generation %u, page has %u); "
+                "pushing a fresh document", call.generation, g_mods_doc_gen);
+    poc_log(l);
 }
 
 /* The think loop's part, on the UI thread. */
@@ -3896,6 +3937,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"budgetUsage") {
                 poc_send_budget_usage();
             } else if (cmd == L"modsList") {
+                g_mods_page_seen = true;
                 poc_mods_begin(0, false, std::string());
             } else if (cmd == L"modsAction") {
                 /* Install always asks for its folder here, in the native picker: the page never
@@ -4516,6 +4558,7 @@ static void poc_think_loop()
         LeaveCriticalSection(&g_loop->mtx);
         /* The folder watchers: the Prefabs list and the Mods tab follow the disk. */
         poc_watch_tick();
+        poc_mods_push_tick();
 
         if (did_save) {
             wchar_t m[80]; _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"saveResult\",\"result\":%d}", g_save_result);

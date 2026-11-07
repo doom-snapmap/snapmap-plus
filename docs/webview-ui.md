@@ -381,6 +381,14 @@ or, when the bin could not take it, "Its folder was deleted because the Recycle 
 (<why>)". The product keeps no bin of its own: the footer has no removed-mods line and the page sends
 no `removedEmpty`; a document's `removed` object, sent by an older backend, is not read.
 
+A pushed document: once the page has asked for the document, the host reads the backend's
+generation every 500 ms (the `mods` slot's FETCH size query, no main-thread call) and, when it has
+moved past the generation of the last document it posted while no job of its own runs, posts
+`{"kind": "mods", "pushed": true, "data": ...}`. That is how a console verb (`sh_mods map upgrade`,
+`sh_mods uninstall`, `sh_mods choose`, a build or rescan; `sh_modui_note_changed`) reaches an open
+tab without a rescan. The page renders it as any document, the open map modal included, and keeps
+its status line.
+
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
 `tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
@@ -404,7 +412,7 @@ Per entry of `mods`:
 | `"servedBy"` | string | The key of another folder whose build serves this mod's paths (superseded); "" when it serves its own. Drives the grey icon. |
 | `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
 | `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
-| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files, sound banks, movies, snapModule decls, virtual textures. |
+| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files (an edited copy of a game file is not one), sound banks, movies, snapModule decls, virtual textures. |
 | `"requirements"` | object | The builder's canonical requirements, `{commands?: {activate?: [line], deactivate?: [line]}, cvars: {name: "value"}}`; `{cvars: {}}` when none. Whether each is live is in `sh_mods status` and `sh_mods doctor`, not the payload. |
 | `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
@@ -413,7 +421,7 @@ Per entry of `mods`:
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
 | `"legacy"` | bool | A converted first-generation package (its `legacy` record): its names are campaign names until it is rebuilt under a key. |
-| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `edits` on a replacement says it is an edited copy whose edits the product applies; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
+| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
 | `"newest"` | bool | The newest installed build of its key (build number, then install time). |
 | `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |
 | `"buildFailed"` | object | `{cause, snapshot, servingBuild}` when the folder's latest build was refused: the last good build serves, from its snapshot when `snapshot`. |
@@ -459,7 +467,7 @@ again.
 | `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
 | `verify` | Rehash that one folder's build (`""` still checks every build). |
 | `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its decls are registered and its shadows, registries (the generated player entity, weapon slots, body events, conductor) and requirements apply at once, as a map load applies them, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |
-| `chooseRegistry` | `arg` is `"<slot>\t<key>"` (an empty key clears): the open map's choice of whose edit serves that slot of a game file, saved with the map and applied at once (`sh_mods choose`). |
+| `chooseRegistry` | `arg` is `"<slot>\t<key>"` (an empty key clears): the open map's choice of whose edit serves that slot of a game file, applied at once and saved with the map's next save (`sh_mods choose`). `registryClashes` resolves a row that pins a build that is not installed to the build that serves it, so its clash is listed. |
 | `mapUpgradeMod` | `arg` is a declared mod's id: the open map's row moves to the key's newest installed build, the listing follows at once and the next save writes the new hash; the message says how many files changed, were added and removed (`sh_mods map upgrade`). |
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |

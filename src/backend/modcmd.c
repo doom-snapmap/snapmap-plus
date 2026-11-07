@@ -120,6 +120,7 @@ static void mc_rescan(const char *why)
         (void)sh_modserve_refresh_after_rescan(&rf);
         sh_printf("sh_mods: refresh: %s\n", rf.note);
     }
+    sh_modui_note_changed();   /* an open Mods tab gets a fresh document (the window's pushed refresh) */
 }
 
 /* 1 when `folder` is inside the store root (a bundle the index will read). */

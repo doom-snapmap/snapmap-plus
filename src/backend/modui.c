@@ -273,6 +273,8 @@ int sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation)
 
 unsigned sh_modui_generation(void) { return (unsigned)g_gen; }
 
+void sh_modui_note_changed(void) { InterlockedIncrement(&g_gen); }
+
 /* ------------------------------------------------------------------ store model */
 
 /* What the document says about one store entry. */
@@ -591,7 +593,8 @@ static int mu_model_build(mu_model *m)
                 const sh_mb_file *f = &e->bundle.files[k];
                 /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
                 if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
-                if (f->shadowed) u->shadows++;
+                /* An edited copy is counted under edits, never as a replaced stock file. */
+                if (f->shadowed && !f->edited) u->shadows++;
             }
         if (!e->loaded) {
             u->state = "skipped";
@@ -866,7 +869,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     mu_knum(b, "borrows", bd->classes.borrows, 0);
     mu_knum(b, "surfaces", bd->classes.surfaces, 0);
     mu_knum(b, "editor", bd->classes.editor, 0);
-    mu_knum(b, "replaces", bd->classes.replaces, 0);
+    mu_knum(b, "replaces", bd->classes.replaces, 0);   /* edited copies are classes.edits, not here */
     mu_puts(b, ",\"editorTweaks\":[");
     for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;
@@ -881,7 +884,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
         const sh_mb_file *f = &bd->files[k];
         int edited = 0;
         if (f->cls != SH_MB_CLASS_REPLACE) continue;
-        edited = bd->edits && strstr(bd->edits, f->request) != NULL;
+        edited = f->edited;
         if (!first) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "path", f->request, 1);
@@ -1087,7 +1090,7 @@ static void mu_say(const mu_out *o, const char *fmt, ...)
 
 /* ------------------------------------------------------------------ shadows and conflicts */
 
-typedef struct mu_path { const char *request; int entry; int shadow; int conflict; } mu_path;
+typedef struct mu_path { const char *request; int entry; int shadow; int conflict; int edit; } mu_path;
 
 static int mu_path_cmp(const void *a, const void *b)
 {
@@ -1099,12 +1102,15 @@ static int mu_path_cmp(const void *a, const void *b)
 /* Every path an admitted bundle shadows, and every admitted path nobody serves
  * (two bundles provide it with different bytes), grouped by path: conflicts
  * first, with the copy that serves and why, then stock shadows, then the
- * grandfathered shadows of converted packages (migrated, or delivered by a map). */
+ * grandfathered shadows of converted packages (migrated, or delivered by a map),
+ * then the edited copies: an edit source is diffed at build and generated per
+ * map, never served, so it is neither a shadow nor a conflict (the registry
+ * report's "registry edits" lines name the same copies). */
 static void mu_print_shadows(const mu_out *o, const mu_model *m)
 {
     mu_path *paths = NULL;
     size_t n = 0, cap = 0, i, k, printed = 0, groups = 0;
-    unsigned stock = 0, grandfathered = 0, conflicts = 0;
+    unsigned stock = 0, grandfathered = 0, conflicts = 0, edit_sources = 0, edit_files = 0;
     int pass;
     for (i = 0; i < m->list.count; i++) {
         const mu_entry *u = &m->entries[i];
@@ -1117,8 +1123,9 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
              * it): nothing serves it by design. */
             int conflict;
             if (sh_modserve_is_partial(f->request)) continue;
-            conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL);
-            if (!f->shadowed && !conflict) continue;
+            conflict = !f->edited &&
+                       (sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup_indexed(f->request, NULL));
+            if (!f->shadowed && !conflict && !f->edited) continue;
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;
                 mu_path *np = (mu_path *)realloc(paths, nc * sizeof *np);
@@ -1130,24 +1137,50 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             paths[n].entry = (int)i;
             paths[n].shadow = f->shadowed;
             paths[n].conflict = conflict;
+            paths[n].edit = f->edited;
+            if (f->edited) edit_sources++;
             n++;
         }
     }
     if (n > 1) qsort(paths, n, sizeof *paths, mu_path_cmp);
-    for (pass = 0; pass < 2; pass++)
+    /* pass 0: conflicts; 1: shadows; 2: edit sources. A path one mod edits
+     * and another serves whole is both: the serving copy's group, and the
+     * edit source's. */
+    for (pass = 0; pass < 3; pass++)
         for (i = 0; i < n;) {
-            size_t j = i + 1, q, at = 0;
-            int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, served;
-            int any_delivered = m->entries[paths[i].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[i].entry]);
+            size_t j = i, q, at = 0;
+            int conflict = 0, any_legacy = 0, served, any_delivered = 0, members = 0;
             char who[700], here[200];
             sh_modserve_hit hit, open_hit;
             while (j < n && !strcmp(paths[j].request, paths[i].request)) {
-                conflict |= paths[j].conflict;
-                any_legacy |= m->entries[paths[j].entry].legacy;
-                any_delivered |= m->entries[paths[j].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[j].entry]);
+                if (paths[j].edit == (pass == 2)) {
+                    conflict |= paths[j].conflict;
+                    any_legacy |= m->entries[paths[j].entry].legacy;
+                    any_delivered |= m->entries[paths[j].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[j].entry]);
+                    members++;
+                }
                 j++;
             }
-            if (conflict != (pass == 0)) { i = j; continue; }
+            if (!members || (pass < 2 && conflict != (pass == 0))) { i = j; continue; }
+            if (pass == 2) {
+                edit_files++;
+                groups++;
+                if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
+                who[0] = 0;
+                for (q = i; q < j && at < sizeof who - 1; q++) {
+                    int w;
+                    if (!paths[q].edit) continue;
+                    w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", at ? ", " : "",
+                                    m->list.items[paths[q].entry].name);
+                    if (w < 0) break;
+                    at += (size_t)w;
+                }
+                mu_say(o, "edit source %s: from %s; diffed at build against the game's text, generated per map that "
+                       "declares it, the copy is never served", paths[i].request, who);
+                printed++;
+                i = j;
+                continue;
+            }
             if (conflict) conflicts++;
             else if (any_legacy) grandfathered++;
             else stock++;
@@ -1155,8 +1188,10 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
             who[0] = 0;
             for (q = i; q < j && at < sizeof who - 1; q++) {
-                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", q > i ? ", " : "",
-                                    m->list.items[paths[q].entry].name);
+                int w;
+                if (paths[q].edit) continue;
+                w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", at ? ", " : "",
+                                m->list.items[paths[q].entry].name);
                 if (w < 0) break;
                 at += (size_t)w;
             }
@@ -1194,7 +1229,8 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             i = j;
         }
     if (groups > printed) mu_say(o, "%zu more shadow or conflict path(s) not printed", groups - printed);
-    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s)", conflicts, stock, grandfathered);
+    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s), %u edit source(s) of %u game file(s) (never "
+              "served, so neither a shadow nor a conflict)", conflicts, stock, grandfathered, edit_sources, edit_files);
     free(paths);
 }
 
@@ -1752,6 +1788,21 @@ static void mu_slot_file(void *context, const char *file, const sh_dt_counts *co
     (void)sh_dt_edits_slots(file, c->bd->edits, strlen(c->bd->edits), mu_slot_add, c);
 }
 
+/* The entry that serves a declared row's edits, as serving resolves it: the
+ * row's own build, else the build the editor load substituted for it
+ * (sh_modmanifest_substituted), else the installed build of its key the
+ * index serves instead (sh_modserve_row_other_build, the newest), or -1. */
+static int mu_row_serving_entry(const mu_model *m, const sh_modmanifest_row *row)
+{
+    char sub[SH_MODMANIFEST_HASH_CAP];
+    sh_modserve_bundle_ref ob;
+    int at = mu_find_hash(m, row->bundle);
+    if (at >= 0) return at;
+    if (sh_modmanifest_substituted(row->bundle, sub, sizeof sub) && (at = mu_find_hash(m, sub)) >= 0) return at;
+    if (sh_modserve_row_other_build(row, &ob) == 1 && (at = mu_find_hash(m, ob.hash)) >= 0) return at;
+    return -1;
+}
+
 static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
     mu_slot_ctx c;
@@ -1762,7 +1813,7 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
     c.slots = (mu_slot *)calloc((size_t)c.cap, sizeof *c.slots);
     mu_puts(b, ",\"registryClashes\":[");
     for (r = 0; c.slots && r < mp->rows.count; r++) {
-        int at = mu_find_hash(m, mp->rows.rows[r].bundle);
+        int at = mu_row_serving_entry(m, &mp->rows.rows[r]);
         const sh_mb_bundle *bd;
         if (at < 0) continue;
         bd = &m->list.items[at].bundle;
@@ -3859,9 +3910,9 @@ static int mu_map_add(const char *key, const mu_out *o)
             InterlockedIncrement(&g_gen);
             mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.id, row.version, row.bundle,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply in this map, and "
-                        "the map lists it with its mods when you save: players are offered it when they open the map. "
-                        "Remove from map takes it out again.", title, where,
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply now; the map "
+                        "lists it with its mods at the map's next save, and players are then offered it when they open "
+                        "the map. Remove from map takes it out again.", title, where,
                         x && x->uid_count ? " as well as by its placed entities" : "");
         }
     }
@@ -3876,7 +3927,8 @@ static int mu_map_add(const char *key, const mu_out *o)
 /* ---- registry choice and upgrade (DESIGN-additive 2.4, 2.5) */
 
 /* The open map's registry choice for a slot several declared mods set
- * (`sh_mods choose`, the tab's clash select): saved with the map, applied at once. */
+ * (`sh_mods choose`, the tab's clash select): applied at once, written into
+ * the row of its key at the map's next save (modmanifest.c mm_choices_save). */
 static int mu_choose(const char *slot, const char *key, const mu_out *o)
 {
     const int action = SH_MODS_ACT_CHOOSE;
@@ -3893,7 +3945,7 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
     if (o && o->fn) o->fn(o->context, line);
     else mu_log("%s", line + (strncmp(line, "MODS: ", 6) ? 0 : 6));
     if (r < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s.", line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14));
-    else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; the choice is saved with the map.", slot, key);
+    else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; applies now; saved with the map's next save.", slot, key);
     else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s: the map's choice is cleared; the first mod in the map's list serves it.", slot);
     return mu_simple_result(action, r >= 0, msg);
 }

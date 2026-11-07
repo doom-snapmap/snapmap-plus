@@ -556,7 +556,9 @@ above), and
 `snapmap-plus` is the product's, the whole built manifest: format, key, build,
 bundle hash, built time, validated and cause, origin (`by-hand` for a folder
 the author made), a converted package's legacy record, the derived `classes`
-counts, `editor` (the editor tweaks' request paths), `registries` (banks,
+counts (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
+counts under `edits`, never `replaces`, which is only what a folder the product received replaces;
+the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
 conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"inAssets": false` when no file stands behind one). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
@@ -1742,7 +1744,9 @@ map's choices).
   the key word, the name, the statement) or `bag`/`unbag` (the container, the
   statement); a path is the member keys from the decl's top (`edit`,
   `item[4]`, `anim "clip"`). The copy stays in the bundle (hashed, uploaded,
-  its needs scanned) and in `shadows`, classified a replacement. Refused: a copy
+  its needs scanned) and in `shadows`; it is classified a replacement but marked
+  edited (`sh_mb_file.edited`, counted in `classes.edits`, never in
+  `classes.replaces`, the Mods tab's replaced stock files or a doctor conflict). Refused: a copy
   or a game text outside the grammar ("does not parse as a decl (line N: ...);
   the product derives the edits from the whole edited copy"); a game text the
   reader cannot supply; a binary at a game name with other bytes ("a binary at
@@ -1764,7 +1768,9 @@ map's choices).
   identical operation merges, additions union, a named entry two sources add
   becomes one block holding both texts' rows (identical rows once, a scalar
   both set otherwise keeps the earlier), and a field or keyed entry two
-  sources set to different values is a clash.
+  sources set to different values is a clash. Each source's line closes its
+  sum: `N edit(s) from X: A applied, M already held, C superseded by <key>'s
+  choice` (or `by <key> (row order)`) for the operations that lost a clash.
 - **The conductor.** The one rule per file: each `aiTypeList` item a source
   added whose `aiType` is a number that is not a stock `SPAWN_AI_TYPE_*` bit gets
   a bit assigned per map, the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
@@ -1779,7 +1785,11 @@ map's choices).
   different values: the map's choice (`"choices"` in the manifest rows,
   `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<key>"`),
   else the first in row order, with one line naming the slot and the command;
-  the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`).
+  the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`),
+  a row resolved as serving resolves it: its own build, else the build the
+  editor load substituted, else the installed build of its key
+  (`mu_row_serving_entry`), so a map pinning a build that is not installed
+  still offers the choice.
 - **Serving.** The synthetic files belong to a pseudo-bundle
   (`snapmap-plus.registries`, one past the bundle count, never admitted, so no
   bundle walk sees it), never served by name or need; an edited copy
@@ -1791,10 +1801,20 @@ map's choices).
   one line per generated file, what each source's edits did, every clash, the
   merged body's totals (`player body: the merged body holds <clips> clips and
   <aliases> aliases`), and one `registry edits <path>` line per edited copy.
-- **Choices.** Each choice is written on the row of the key it names; a load
-  reads them from every row (first row per slot) and gives them to the index
-  (`sh_modserve_scope_set_choices`) before the listing; a choice naming a key
-  the save writes no row for is dropped with one line.
+  The doctor lists the same copies as `edit source <path>: from <folders>;
+  diffed at build against the game's text, generated per map that declares
+  it, the copy is never served`, never as a conflict or a shadow, and its
+  summary counts them apart: `N conflict(s), N shadow(s), N grandfathered
+  shadow(s), N edit source(s) of N game file(s)`, so its conflict count
+  agrees with the serving index's.
+- **Choices.** A choice applies at once and is kept with the open map's
+  manifest; the map's next save writes it on the row of the key it names; a
+  load reads them from every row (first row per slot) and gives them to the
+  index (`sh_modserve_scope_set_choices`) before the listing; a choice naming
+  a key the save writes no row for is dropped with one line, and closing the
+  map (`sh_modmanifest_reset`) clears the index's copy too. A choice does not
+  mark the editor's map modified, so the wording is "applies now; saved with
+  the map's next save".
 - **Rescans, gates and old builds.** A rescan that changes a generated text
   for the listing (a mod rebuilt with other edits) marks the path that serves
   it for refresh, as a changed decl is marked. A generated text is gated by the
