@@ -379,15 +379,30 @@ static int me_reader_open(me_reader *r, const char *path, char *cause, size_t ca
         xl = me_get16(cd + pos + 30);
         cl = me_get16(cd + pos + 32);
         e->lho = me_get32(cd + pos + 42);
-        if (pos + 46 + nl + xl + cl > cd_size || !me_name_ok((const char *)cd + pos + 46, nl)) {
+        if (pos + 46 + nl + xl + cl > cd_size) {
             free(cd);
             me_reader_close(r);
-            return me_cause(cause, cap, "the export holds a file with an unsafe name");
+            return me_cause(cause, cap, "the export's file list is damaged");
         }
         e->name = (char *)malloc(nl + 1);
         if (!e->name) { free(cd); me_reader_close(r); return me_cause(cause, cap, "out of memory"); }
         memcpy(e->name, cd + pos + 46, nl);
         e->name[nl] = 0;
+        /* An export written before the entry names were fixed named a mod in
+         * an organizing folder mods/<group>\<folder>/...: under mods/ only, a
+         * backslash reads as the separator it stood for. Anywhere else, and
+         * after that, a backslash is refused. */
+        if (nl > 5 && !memcmp(e->name, "mods/", 5)) {
+            unsigned k;
+            for (k = 5; k < nl; k++) if (e->name[k] == '\\') e->name[k] = '/';
+        }
+        if (!me_name_ok(e->name, nl)) {
+            free(e->name);
+            e->name = NULL;
+            free(cd);
+            me_reader_close(r);
+            return me_cause(cause, cap, "the export holds a file with an unsafe name");
+        }
         r->n++;
         pos += 46 + nl + xl + cl;
     }
@@ -588,11 +603,16 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
 static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *b, const char *modjson_path,
                         const char *files_dir, const char *alt_dir, modexport_stats *st, char *cause, size_t cap)
 {
-    char name[ME_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
+    char name[ME_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], folder[ME_NAME_MAX + 1], *c;
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
     int same;
+    /* A ZIP entry name separates with '/' only: a mod in an organizing
+     * folder ("campaign-interactables\campaign-interactables-1") is carried
+     * as mods/campaign-interactables/campaign-interactables-1/. */
+    strcpy_s(folder, sizeof folder, zip_name);
+    for (c = folder; *c; c++) if (*c == '\\') *c = '/';
     bytes = sh_mb_read_file(modjson_path, ME_MODJSON_MAX, &blen);
     if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", zip_name);
     memset(&check, 0, sizeof check);
@@ -602,7 +622,7 @@ static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *
         free(bytes);
         return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; rescan and export again", zip_name);
     }
-    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", zip_name);
+    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", folder);
     me_add(w, name, bytes, blen);
     free(bytes);
     for (k = 0; k < b->file_count && !w->failed; k++) {
@@ -621,7 +641,7 @@ static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *
             }
         }
         if (!bytes) return me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", zip_name, f->path);
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", zip_name, f->path);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", folder, f->path);
         me_add(w, name, bytes, blen);
         free(bytes);
         st->files++;
@@ -1152,6 +1172,22 @@ static int me_carried(const me_import *im, const char *hash)
     return 0;
 }
 
+/* Whether a folder's path below mods/ lies inside another folder the export
+ * carries (an ancestor with its own mod.json), or deeper than the store
+ * enters organizing folders. */
+static int me_inside_carried(const me_reader *r, const char *seg, size_t sl)
+{
+    char probe[ME_NAME_MAX + 1];
+    size_t i, depth = 0;
+    for (i = 0; i < sl; i++) {
+        if (seg[i] != '/') continue;
+        if (++depth >= SH_MS_NEST_MAX) return 1;
+        _snprintf_s(probe, sizeof probe, _TRUNCATE, "mods/%.*s/mod.json", (int)i, seg);
+        if (me_find(r, probe) >= 0) return 1;
+    }
+    return 0;
+}
+
 /* The carried folders, each mods/<name>/mod.json, whose bundle a row names
  * (every one when `all`). A folder no row names is left out. */
 static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, char *cause, size_t cap)
@@ -1165,10 +1201,13 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         sh_mb_bundle b;
         if (strncmp(name, "mods/", 5)) continue;
         seg = name + 5;
-        slash = strchr(seg, '/');
+        /* mods/<folder>/mod.json, where <folder> may sit in organizing
+         * folders (mods/<group>/<folder>/mod.json, the store's nesting rule):
+         * a mod.json inside a carried folder is that folder's content. */
+        slash = strrchr(seg, '/');
         if (!slash || strcmp(slash, "/mod.json")) continue;
         sl = (size_t)(slash - seg);
-        if (!sl || sl > SH_MS_NAME_MAX) continue;
+        if (!sl || sl > SH_MS_NAME_MAX || me_inside_carried(&im->zr, seg, sl)) continue;
         text = (char *)me_read_entry(&im->zr, (long)i, ME_MODJSON_MAX, &len, cause, cap);
         if (!text) return 0;
         memset(&b, 0, sizeof b);

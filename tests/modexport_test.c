@@ -167,6 +167,26 @@ static int patch_entry(unsigned char *zip, size_t len, const char *name, const c
     return 0;
 }
 
+/* Rewrite one byte in every entry name (local headers and the central
+ * directory) that starts with `prefix`: the byte at offset `at` of the name
+ * becomes `to`. The data and CRCs are untouched. */
+static unsigned patch_names(unsigned char *zip, size_t len, const char *prefix, size_t at, char to)
+{
+    size_t i, pl = strlen(prefix);
+    unsigned n = 0;
+    for (i = 0; i + 46 <= len; i++) {
+        size_t nl, off;
+        if (zip[i] != 'P' || zip[i + 1] != 'K') continue;
+        if (zip[i + 2] == 3 && zip[i + 3] == 4) { nl = (size_t)(zip[i + 26] | (zip[i + 27] << 8)); off = i + 30; }
+        else if (zip[i + 2] == 1 && zip[i + 3] == 2) { nl = (size_t)(zip[i + 28] | (zip[i + 29] << 8)); off = i + 46; }
+        else continue;
+        if (off + nl > len || nl <= at || nl < pl || memcmp(zip + off, prefix, pl)) continue;
+        zip[off + at] = (unsigned char)to;
+        n++;
+    }
+    return n;
+}
+
 /* Entries whose name contains `part`. */
 static unsigned count_entries_with(const unsigned char *zip, size_t len, const char *part)
 {
@@ -634,6 +654,67 @@ int main(int argc, char **argv)
         CHECK(text && st.bundles_installed == 2 && has_folder(storeK, "test.base") && has_folder(storeK, "test.adep"));
         CHECK(sh_modserve_bundle_state(rdep.bundle, NULL, 0) == 1);
         free(text);
+    }
+
+    /* ---- a mod in an organizing folder (mods\group\test.nested): its
+     * entries name it mods/group/test.nested/ with '/' only, and it imports;
+     * an export from before that fix (mods/group\test.nested/...) imports
+     * too, while a backslash anywhere but under mods/ is still refused ---- */
+    {
+        static const char *const N_FILES[] = { "assets/generated/image/mods/test.nested/n.bimage", NULL };
+        static const char *const N_BYTES[] = { "nested bytes", NULL };
+        char storeN[MAX_PATH * 2], storeN2[MAX_PATH * 2], storeN3[MAX_PATH * 2], zipN[MAX_PATH * 2], zipO[MAX_PATH * 2];
+        char kn[SH_MS_KEY_MAX + 1], *mn, *text;
+        sh_modmanifest_row rn;
+        const sh_modmanifest_row *only_n[] = { &rn, NULL };
+        size_t ml = 0, len = 0, zl = 0;
+        unsigned char *z;
+        _snprintf_s(storeN, sizeof storeN, _TRUNCATE, "%s\\storeN", tmp);
+        _snprintf_s(storeN2, sizeof storeN2, _TRUNCATE, "%s\\storeN2", tmp);
+        _snprintf_s(storeN3, sizeof storeN3, _TRUNCATE, "%s\\storeN3", tmp);
+        _snprintf_s(zipN, sizeof zipN, _TRUNCATE, "%s\\nested.zip", tmp);
+        _snprintf_s(zipO, sizeof zipO, _TRUNCATE, "%s\\nested-old.zip", tmp);
+        CHECK(fresh_store(storeN));
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\group\\test.nested", storeN);
+        make_mod(dir, "test.nested", N_FILES, N_BYTES);
+        CHECK(install(dir, kn, &rn) && !strcmp(kn, "group\\test.nested"));
+        CHECK(sh_modserve_index_build(storeN) >= 0);
+        mn = map_naming(BASE_MAP, sizeof BASE_MAP - 1, only_n, &ml);
+        CHECK(mn && modexport_write(mn, ml, zipN, &st, cause, sizeof cause) && st.bundles == 1 && st.files == 1);
+        if (!mn || st.bundles != 1) fprintf(stderr, "nested export: %s\n", cause);
+        z = slurp(zipN, &zl);
+        CHECK(z && count_entries_with(z, zl, "\\") == 0);
+        CHECK(z && entry_data(z, zl, "mods/group/test.nested/mod.json") != 0);
+        CHECK(z && entry_data(z, zl, "mods/group/test.nested/assets/generated/image/mods/test.nested/n.bimage") != 0);
+        CHECK(z && count_entries_with(z, zl, "mods/group/test.nested/") == 2);
+        /* Imported on an empty store: the key's folder, not the author's group. */
+        CHECK(fresh_store(storeN2));
+        text = modexport_read(zipN, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "nested import: %s\n", cause);
+        CHECK(text && len == ml && st.bundles == 1 && st.bundles_installed == 1);
+        CHECK(has_folder(storeN2, "test.nested") && sh_modserve_bundle_state(rn.bundle, NULL, 0) == 1);
+        free(text);
+        /* The previous build's ZIP: the folder's separator was a backslash. */
+        CHECK(z && patch_names(z, zl, "mods/group/test.nested", 10, '\\') == 4);
+        CHECK(z && count_entries_with(z, zl, "mods/group\\test.nested/") == 2 && spit(zipO, z, zl));
+        CHECK(modexport_probe(zipO, cause, sizeof cause));
+        CHECK(fresh_store(storeN3));
+        text = modexport_read(zipO, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "old nested import: %s\n", cause);
+        CHECK(text && len == ml && st.bundles_installed == 1 && has_folder(storeN3, "test.nested"));
+        CHECK(sh_modserve_bundle_state(rn.bundle, NULL, 0) == 1);
+        free(text);
+        free(z);
+        if (mn) HeapFree(GetProcessHeap(), 0, mn);
+        /* A backslash outside mods/ is an unsafe name, as before. */
+        {
+            static const char *const BS_N[] = { "maps\\evil.json" };
+            static const char *const BS_D[] = { "{\"entities\":[],\"~type\":\"idSnapMap\"}" };
+            CHECK(mt_zip_stored(zipO, 1, BS_N, BS_D));
+            text = modexport_read(zipO, &len, &st, cause, sizeof cause);
+            CHECK(text == NULL && !strcmp(cause, "the export holds a file with an unsafe name"));
+            free(text);
+        }
     }
 
     /* ---- the rawmap hooks: ANSI paths, process-heap text ---- */

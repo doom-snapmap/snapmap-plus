@@ -2109,6 +2109,14 @@ mods/<folder>/mod.json     the store folder's own name (<key>, or <key>@<hash16>
 mods/<folder>/assets/...   later build of the key), byte for byte
 ```
 
+Entry names separate with `/` only, as the ZIP format requires: a mod in an
+organizing folder (`mods\campaign-interactables\campaign-interactables-1\`) is
+carried as `mods/campaign-interactables/campaign-interactables-1/`, and the
+importer takes a carried folder at any depth the store enters (one whose
+ancestors carry no `mod.json`). The importer refuses a backslash in an entry
+name, except under `mods/`, where an export written before this fix used one
+as that folder's separator and it reads as `/`.
+
 Each row's build is taken from the installed folder at exactly that hash (while
 that folder's latest build is failed, its carried files are read from its last
 good build snapshot, `mods\.builds\<key>@<hash16>\`, whose bytes the hash
