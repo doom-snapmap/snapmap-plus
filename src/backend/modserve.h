@@ -149,12 +149,26 @@ int sh_modserve_probe_claims(const char *path);
  * within that every step after the steps its needs name). A step whose need
  * names a mods/ identity that no admitted bundle provides is blocked, and so
  * is every step that needs a blocked step. */
+/* A step's rank, the order among steps no need orders. A renderParm comes
+ * first: the engine gives a renderParm its slot and kind at its first parse
+ * and keeps them on a reparse, so a material or program that resolves the
+ * parm before the renderParm's own parse binds a slot whose kind the parse
+ * then changes (snaphak-re ADD-G5: the render job read floats as a sampler
+ * pointer). A material's parm keys are bare names, so no need orders them. */
+#define SH_MODSERVE_RANK_RENDERPARM 0
+#define SH_MODSERVE_RANK_OTHER      1
+#define SH_MODSERVE_RANK_MD6        2
+#define SH_MODSERVE_RANK_ENTITYDEF  3
+#define SH_MODSERVE_RANK_SEDEF      4
+#define SH_MODSERVE_RANK_MAX        4
+
 typedef struct sh_modserve_step {
     const char *type;        /* engine spelling, e.g. "md6Def" */
     const char *name;        /* decl name, e.g. "mods/alex.pink-imp/imp.md6" */
     const char *reg_path;    /* DeclRegisterFile source, e.g. "md6def/mods/.../imp.md6.decl" */
     const char *bundle_id;
-    int         rank;        /* 0 other decls, 1 md6Def, 2 entityDef, 3 snapEditorEntityDef */
+    int         rank;        /* SH_MODSERVE_RANK_*: 0 renderParm, 1 other decls, 2 md6Def, 3 entityDef,
+                                4 snapEditorEntityDef */
     int         persist;     /* 1: keep through map purges (lifetime 4), every editor-plan step; 2: in
                                 any other plan, a decl of the editor closure (modserve.c
                                 ms_mark_editor_closure), kept unless the engine already holds it

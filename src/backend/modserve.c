@@ -548,10 +548,11 @@ static int ms_req_needs(const ms_bundle *b) { return b->req_ncvars > 0 || b->req
 
 static int ms_rank(const char *type)
 {
-    if (!_stricmp(type, "md6Def")) return 1;
-    if (!_stricmp(type, "entityDef")) return 2;
-    if (!_stricmp(type, "snapEditorEntityDef")) return 3;
-    return 0;
+    if (!_stricmp(type, "renderParm")) return SH_MODSERVE_RANK_RENDERPARM;
+    if (!_stricmp(type, "md6Def")) return SH_MODSERVE_RANK_MD6;
+    if (!_stricmp(type, "entityDef")) return SH_MODSERVE_RANK_ENTITYDEF;
+    if (!_stricmp(type, "snapEditorEntityDef")) return SH_MODSERVE_RANK_SEDEF;
+    return SH_MODSERVE_RANK_OTHER;
 }
 
 /* One files[] element. */
@@ -680,7 +681,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         f->is_decl = 1;
         f->reg = rest;
         f->rank = ms_rank(ptype);
-        f->is_sedef = f->rank == 3;
+        f->is_sedef = f->rank == SH_MODSERVE_RANK_SEDEF;
     } else {
         if (!ptype) ptype = ms_strdup(x, "file");
         if (pname) ms_lower(pname);
@@ -5233,7 +5234,7 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
         unsigned char *text;
         mc_lex l;
         mc_tok t;
-        if (s->rank != 3 || s->ready != 1 || s->file < 0 || s->file >= x->nfiles) continue;
+        if (s->rank != SH_MODSERVE_RANK_SEDEF || s->ready != 1 || s->file < 0 || s->file >= x->nfiles) continue;
         text = ms_file_bytes(&x->files[s->file], &len);
         if (!text) continue;
         l.t = (const char *)text;
@@ -6566,7 +6567,7 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
     const ms_index *x = g_index;
     int rank, i, visited = 0;
     if (!x || !fn) return 0;
-    for (rank = 0; rank <= 3; ++rank)
+    for (rank = 0; rank <= SH_MODSERVE_RANK_MAX; ++rank)
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = (ms_file *)&x->files[i], *ef;
             int eff;
@@ -6740,10 +6741,13 @@ static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_r
     return 1;
 }
 
-/* Whether a file belongs to the part of a refresh asked for. */
+/* Whether a file belongs to the part of a refresh asked for. A renderParm
+ * goes with the editor part, which runs first, so it is parsed before any
+ * material of either part resolves it (SH_MODSERVE_RANK_RENDERPARM). */
 static int ms_in_part(const ms_file *f, int part)
 {
-    return part == SH_MODSERVE_PART_ALL || (part == SH_MODSERVE_PART_EDITOR) == (f->editor_closure != 0);
+    int editor = f->editor_closure != 0 || (f->is_decl && f->rank == SH_MODSERVE_RANK_RENDERPARM);
+    return part == SH_MODSERVE_PART_ALL || (part == SH_MODSERVE_PART_EDITOR) == editor;
 }
 
 int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context)
@@ -6756,10 +6760,11 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
     const ms_index *x = g_index;
     int pass, i, visited = 0;
     if (!x || !fn) return 0;
-    /* Changed decls in plan rank order, then gone shadows, then the decls
-     * that inherit from them by generation and rank, then models and images. */
-    for (pass = 0; pass <= 6; ++pass) {
-        if (pass == 4) {
+    /* Changed decls in plan rank order (passes 0 to SH_MODSERVE_RANK_MAX, a
+     * renderParm first), then gone shadows, then the decls that inherit from
+     * them by generation and rank, then models and images. */
+    for (pass = 0; pass <= SH_MODSERVE_RANK_MAX + 3; ++pass) {
+        if (pass == SH_MODSERVE_RANK_MAX + 1) {
             /* Gone shadows return to the game's bytes: never the editor part. */
             if (part == SH_MODSERVE_PART_EDITOR) continue;
             for (i = 0; i < x->ngone; ++i) {
@@ -6775,10 +6780,10 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
             }
             continue;
         }
-        if (pass == 5) {
+        if (pass == SH_MODSERVE_RANK_MAX + 2) {
             int gen, rank;
             for (gen = 1; gen <= 8; ++gen)
-                for (rank = 0; rank <= 3; ++rank)
+                for (rank = 0; rank <= SH_MODSERVE_RANK_MAX; ++rank)
                     for (i = 0; i < x->nfiles; ++i) {
                         ms_file *f = (ms_file *)&x->files[i];
                         if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !ms_live(x, f) || f->withdrawn ||
@@ -6795,7 +6800,8 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
             if (!InterlockedCompareExchange(&f->refresh, 0, 0) || !ms_live(x, f) || f->withdrawn ||
                 !f->ptype || !f->pname || !ms_in_part(f, part))
                 continue;
-            if (pass < 4 ? (kind != SH_MODSERVE_RF_DECL || f->rank != pass || f->refresh_gen) : kind == SH_MODSERVE_RF_DECL)
+            if (pass <= SH_MODSERVE_RANK_MAX ? (kind != SH_MODSERVE_RF_DECL || f->rank != pass || f->refresh_gen)
+                                             : kind == SH_MODSERVE_RF_DECL)
                 continue;
             visited += ms_refresh_one(x, f, kind, fn, context);
         }
@@ -6861,6 +6867,15 @@ int sh_modserve_refresh_pending_anims(void)
     return n;
 }
 
+/* A step the kept part runs: one that keeps its decls, and every renderParm
+ * (the kept part runs first, and a renderParm is parsed before any material
+ * that resolves it: SH_MODSERVE_RANK_RENDERPARM); not one already registered. */
+static int ms_split_keeps(const ms_index *x, const sh_modserve_step *s)
+{
+    if (!s->persist && s->rank != SH_MODSERVE_RANK_RENDERPARM) return 0;
+    return !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1);
+}
+
 int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept, sh_modserve_plan *rest)
 {
     const ms_index *x = g_index;
@@ -6871,7 +6886,7 @@ int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept,
     for (i = 0; i < plan->count; ++i) {
         const sh_modserve_step *s = &plan->steps[i];
         /* A step already registered needs no watermark: plan_run skips it. */
-        if (s->persist && !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1)) nk++;
+        if (ms_split_keeps(x, s)) nk++;
     }
     if (!nk) return 0;
     kept->steps = (sh_modserve_step *)calloc((size_t)nk, sizeof(sh_modserve_step));
@@ -6879,7 +6894,7 @@ int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept,
     if (!kept->steps || !rest->steps) { sh_modserve_plan_free(kept); sh_modserve_plan_free(rest); return -1; }
     for (i = 0; i < plan->count; ++i) {
         const sh_modserve_step *s = &plan->steps[i];
-        int keep = s->persist && !(x && s->file >= 0 && s->file < x->nfiles && x->files[s->file].reg_state == 1);
+        int keep = ms_split_keeps(x, s);
         sh_modserve_plan *to = keep ? kept : rest;
         to->steps[to->count++] = *s;
         if (s->blocked) to->blocked++;

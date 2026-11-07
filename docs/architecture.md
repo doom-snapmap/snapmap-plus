@@ -1390,6 +1390,18 @@ animWeb shadow whose models the engine cannot find is withdrawn before its
 re-parse, since the re-parse would free the stock web's nodes and rebuild
 nothing.
 
+A plan orders its steps by need, then by rank: renderParms first, then other
+decls, md6Defs, entityDefs and snapEditorEntityDefs (`SH_MODSERVE_RANK_*`).
+The engine gives a renderParm its parm-state slot and kind at its first parse
+and keeps them on a reparse, and a material's parm keys are bare names that no
+need records, so a material parsed before the renderParm it assigns bound a
+slot the renderParm's own parse then retyped. On a cold My Maps launch of a
+map with the campaign doors pack, `skull_key` was parsed before `skinsssmap`,
+and a render job later read two floats as a sampler pointer, on both
+renderers (snaphak-re ADD-G5). Every renderParm therefore registers and loads
+before any other step: in the map plan, in the part of a split plan that runs
+first, and in the editor part of a refresh, which runs before the rest.
+
 Registering a file is itself a parse. DeclRegisterFile's loader looks up every
 decl the file defines, and an existing resource of that name is re-parsed on
 the spot (VK FUN_141559a30 -> FUN_141561af0 -> DeclParseSource), whatever its

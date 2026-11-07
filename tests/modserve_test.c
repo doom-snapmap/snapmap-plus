@@ -2135,6 +2135,97 @@ static void test_editor_closure(void)
     (void)sh_modserve_index_build(root);
 }
 
+/* A renderParm is registered and parsed before any material that names it
+ * (snaphak-re ADD-G5): a material's parm keys are bare names, so no need
+ * orders them, and the engine keeps a renderParm's slot and kind from its
+ * first parse. The material comes first in its bundle's file list; the
+ * renderParms (one in the same bundle, one in another declared bundle) still
+ * come first in the map plan, its run, the kept part of a split and a refresh. */
+#define RP_MAT   "generated/decls/material2/mods/rp.mat/skull_key.decl"
+#define RP_OWN   "generated/decls/renderparm/skinsssmap.decl"
+#define RP_OTHER "generated/decls/renderparm/rp_other_parm.decl"
+static void test_renderparm_first(void)
+{
+    static const fx_file m1[] = {
+        { RP_MAT, "{ skinsssmap textures/system/constant_color/white rp_other_parm 1 }", -1, "material2",
+          "mods/rp.mat/skull_key", NULL, '1' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/white }", -1, "renderParm", "skinsssmap", NULL, '2' },
+    };
+    static const fx_file p1[] = {
+        { RP_OTHER, "{ Vec4 }", -1, "renderParm", "rp_other_parm", NULL, '3' },
+    };
+    static const fx_file m2[] = {
+        { RP_MAT, "{ skinsssmap textures/system/constant_color/black rp_other_parm 1 }", -1, "material2",
+          "mods/rp.mat/skull_key", NULL, '4' },
+        { RP_OWN, "{ Tex2D textures/system/constant_color/black }", -1, "renderParm", "skinsssmap", NULL, '5' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], ha[65], hb[65];
+    char *slash;
+    const char *h[2];
+    sh_modserve_plan p, kept, rest;
+    cl_seen seen;
+    int mat, own, other;
+    const char *lmat, *lown, *lother;
+    printf("-- renderParms first: registered and parsed before a material that names them\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\renderparm\\mods", top);
+    mkdirs(root);
+    /* As the campaign packs carry them: each renderParm a stock pointer at
+     * its game path (a surface), which the engine does not know in SnapMap. */
+    g_fx_restore = RP_OWN;
+    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'a', NULL, m1, 2, NULL);
+    g_fx_restore = RP_OTHER;
+    make_bundle(root, "rp.parm", "rp.parm", "1.0.0", 'b', NULL, p1, 1, NULL);
+    g_fx_restore = NULL;
+    CHECK(sh_modserve_index_build(root) == 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(cl_visit, &seen);   /* what earlier tables left pending */
+    sh_modserve_test_reset_registration();
+    h[0] = hash64('a', ha);
+    h[1] = hash64('b', hb);
+    CHECK(sh_modserve_plan_bundles(h, 2, &p, NULL) == 3);
+    mat = step_index(&p, "material2", "mods/rp.mat/skull_key");
+    own = step_index(&p, "renderParm", "skinsssmap");
+    other = step_index(&p, "renderParm", "rp_other_parm");
+    CHECK(mat >= 0 && own >= 0 && other >= 0);
+    CHECK(own < mat && other < mat);
+    CHECK(p.steps[own].rank == SH_MODSERVE_RANK_RENDERPARM && p.steps[mat].rank == SH_MODSERVE_RANK_OTHER);
+    /* A split runs every unregistered renderParm in the part that runs first. */
+    CHECK(sh_modserve_plan_split(&p, &kept, &rest) >= 2);
+    CHECK(step_index(&kept, "renderParm", "skinsssmap") >= 0 && step_index(&kept, "renderParm", "rp_other_parm") >= 0);
+    CHECK(step_index(&rest, "renderParm", "skinsssmap") < 0 && step_index(&rest, "renderParm", "rp_other_parm") < 0);
+    sh_modserve_plan_free(&kept);
+    sh_modserve_plan_free(&rest);
+    /* The run registers and loads them in that order. */
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_run(&p, &g_fake, "map") == 3);
+    lmat = strstr(g_calls, ":material2:mods/rp.mat/skull_key;");
+    lown = strstr(g_calls, ":renderParm:skinsssmap;");
+    lother = strstr(g_calls, ":renderParm:rp_other_parm;");
+    CHECK(lmat && lown && lother && lown < lmat && lother < lmat);
+    if (!(lown && lmat && lown < lmat)) printf("  calls: %s\n", g_calls);
+    sh_modserve_plan_free(&p);
+    /* A refresh of both changed decls visits the renderParm first, and in the
+     * editor part, which runs before the rest. */
+    g_fx_restore = RP_OWN;
+    make_bundle(root, "rp.mat", "rp.mat", "1.0.0", 'c', NULL, m2, 2, NULL);
+    g_fx_restore = NULL;
+    CHECK(sh_modserve_index_rescan() >= 1);
+    memset(&seen, 0, sizeof seen);
+    CHECK(sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_EDITOR) >= 1);
+    CHECK(strstr(seen.order, "skinsssmap;") != NULL);
+    if (strstr(seen.order, "mods/rp.mat/skull_key;"))
+        CHECK(strstr(seen.order, "skinsssmap;") < strstr(seen.order, "mods/rp.mat/skull_key;"));
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh_part(cl_visit, &seen, SH_MODSERVE_PART_REST);
+    CHECK(strstr(seen.order, "skinsssmap;") == NULL);
+    /* Leave the table the next test expects. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
 /* ------------------------------------------------------------------ refusals (issue 132) */
 
 /* The engine side of the issue-132 pass: the archives hold the campaign md6Defs
@@ -3806,6 +3897,7 @@ int main(void)
     test_editor_refs();
     test_watermark();
     test_editor_closure();
+    test_renderparm_first();
     test_refusals();
     test_permanent_first_parse();
     test_registration_reparse_of_held_permanent();

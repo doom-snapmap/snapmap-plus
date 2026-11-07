@@ -1825,7 +1825,7 @@ void sh_modserve_palette_before_build(void)
     }
     sh_modserve_watermark_free(&mark);
     for (i = 0; i < plan.count; ++i) {
-        if (plan.steps[i].rank != 3) continue;
+        if (plan.steps[i].rank != SH_MODSERVE_RANK_SEDEF) continue;
         if (plan.steps[i].ready == 1) rows_ok++;
         else rows_failed++;
     }

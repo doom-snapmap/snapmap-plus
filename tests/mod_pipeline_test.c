@@ -187,7 +187,7 @@ static int pal_rebuild(void *c, int *before, int *after)
     if (sh_modserve_plan_editor(&plan) >= 0) {
         sh_modserve_plan_run_gated(&plan, &OPS, &GATES, "editor", NULL);
         for (i = 0; i < plan.count; i++)
-            if (plan.steps[i].rank == 3 && plan.steps[i].ready == 1 && !pal_has(NULL, plan.steps[i].name) &&
+            if (plan.steps[i].rank == SH_MODSERVE_RANK_SEDEF && plan.steps[i].ready == 1 && !pal_has(NULL, plan.steps[i].name) &&
                 g_pal_count < MAX_REC)
                 strncpy_s(g_pal_rows[g_pal_count++], 160, plan.steps[i].name, _TRUNCATE);
         sh_modserve_plan_free(&plan);
@@ -307,7 +307,7 @@ static void fresh_mod(const char *fixture, const char *root)
 
     /* Editor rows: both sedefs, after the decls they need. */
     CHECK(sh_modserve_plan_editor(&plan) > 0);
-    for (i = 0; i < plan.count; i++) if (plan.steps[i].rank == 3) sedefs++;
+    for (i = 0; i < plan.count; i++) if (plan.steps[i].rank == SH_MODSERVE_RANK_SEDEF) sedefs++;
     CHECK(sedefs == 2 && plan.blocked == 0);
     if (sedefs != 2 || plan.blocked)
         for (i = 0; i < plan.count; i++)
