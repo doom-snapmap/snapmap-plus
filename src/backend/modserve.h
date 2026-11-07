@@ -829,7 +829,10 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
  * game's own bytes under its own name, sh_modserve_is_surface) is offered
  * too: the stock spider mesh the game holds from boot is one, and it gets
  * its blacklisted materials only from this reload, which runs inside its own
- * keeper (sh_modserve_inplace_keeper). This is the one exception to "a
+ * keeper (sh_modserve_inplace_keeper). A surface model or image never
+ * opened through the provider (the game loaded it before an index served
+ * it, as on a boot that builds the mod folders) is offered once too, as the
+ * early-decl visit offers a never-opened decl. This is the one exception to "a
  * surface is never touched": no plan registers or re-parses a surface decl.
  * The early-decl visit above also offers decls first opened before then.
  * Returns the number visited. */

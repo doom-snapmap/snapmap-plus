@@ -6368,9 +6368,14 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
          * game loaded at boot with the blacklists on holds no materials for
          * its blacklisted names until it is loaded again with them off (the
          * stock spider mesh, ADD-V7a D1). This is the one pass that touches
-         * a surface; no plan registers or re-parses one (ADD-L11). */
-        if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
-            !ms_gates_live_for(x, ef))
+         * a surface; no plan registers or re-parses one (ADD-L11). A surface
+         * never opened through the provider is offered as well, as ms_stale
+         * offers a decl: on a boot that builds the mod folders the game loads
+         * the mesh while the index is still empty, so the open never reaches
+         * the provider and is never marked ungated (ADD-V7b D1). */
+        if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_gates_live_for(x, ef) ||
+            !(InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
+              (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ms_settled_before(x, ef))))
             continue;
         visited++;
         if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)

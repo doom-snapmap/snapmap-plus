@@ -1372,13 +1372,14 @@ static void test_ungated_raw(void)
 #define GS_MESH "generated/basemodel/md6/characters/monsters/gs/body.bmd6model"
 #define GS_MAT  "generated/decls/material/models/monsters/gs/body.decl"
 #define GS_ENT  "generated/decls/entitydef/mods/gs.mod/thing.decl"
+#define GL_MESH "generated/basemodel/md6/characters/monsters/gl/body.bmd6model"
 #define GS_MESH_BYTES "stock gs mesh"
 #define GS_MAT_BYTES "{ diffusemap models/monsters/gs/body }"
 static int gs_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
 {
     const char *body;
     (void)c; (void)sha;
-    if (!_stricmp(source, GS_MESH)) body = GS_MESH_BYTES;
+    if (!_stricmp(source, GS_MESH) || !_stricmp(source, GL_MESH)) body = GS_MESH_BYTES;
     else if (!_stricmp(source, GS_MAT)) body = GS_MAT_BYTES;
     else return SH_MB_STOCK_ABSENT;
     *len = strlen(body);
@@ -1453,6 +1454,73 @@ static void test_surface_gated_reload(void)
     seen[0] = 0;
     (void)sh_modserve_each_unopened_shadow(raw_visit, seen);
     CHECK(!strstr(seen, "models/monsters/gs/body"));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_mb_set_stock_ops(NULL);
+    sh_modserve_test_reset_registration();
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
+/* A boot that builds the mod folders (ADD-V7b D1): the game loads the stock
+ * surface mesh while the index is still empty, so the open never reaches the
+ * provider and the mesh is never marked ungated. The index built after it
+ * offers the never-opened surface once the gates are live, once, and not
+ * again after a rescan. Its own mesh path: the earlier tables stay chained
+ * (prev), and a mesh an earlier table settled counts as settled. */
+static void test_surface_built_after_boot(void)
+{
+    static const fx_file gs[] = {
+        { GL_MESH, GS_MESH_BYTES, -1, "baseModel", "md6/characters/monsters/gl/body.md6mesh",
+          "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '1' },
+        { GS_MAT, GS_MAT_BYTES, -1, "material", "models/monsters/gs/body", NULL, '2' },
+        { GS_ENT, "{ thing }", -1, "entityDef", "mods/gs.mod/thing",
+          "[{\"type\":\"material\",\"name\":\"models/monsters/gs/body\"}]", '3' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], empty[MAX_PATH], seen[1024];
+    char *slash;
+    int n;
+    sh_modserve_gates r;
+    sh_mb_stock_ops ops;
+    printf("-- a surface mesh the game loaded before the index served it is reloaded once the gates are live\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\gated-surface-late\\mods", top);
+    _snprintf_s(empty, sizeof empty, _TRUNCATE, "%s\\gated-surface-empty\\mods", top);
+    mkdirs(root);
+    mkdirs(empty);
+    memset(&ops, 0, sizeof ops);
+    ops.read = gs_read;
+    sh_mb_set_stock_ops(&ops);
+    /* Boot: the folders are not built yet; the index is empty while the game
+     * loads the mesh, so nothing is served (or marked) for it. */
+    gates_reset(1, 1, 0);
+    CHECK(sh_modserve_index_build(empty) == 0);
+    CHECK(sh_modserve_is_surface(GL_MESH) == 0);
+    /* The boot build finishes and the index is rebuilt with the bundle. */
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
+    g_fx_restore = GL_MESH;
+    g_fx_restore2 = GS_MAT;
+    make_bundle(root, "gs.mod", "gs.mod", "1.0.0", 'c', NULL, gs, 3, NULL);
+    g_fx_restore = g_fx_restore2 = NULL;
+    g_bundle_extra = NULL;
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_is_surface(GL_MESH) == 1);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == -1 && r.live == 0);
+    seen[0] = 0;
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
+    /* The map load turns the gates off: the never-opened mesh is offered. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "map load", &r) == 1 && r.live == 2);
+    seen[0] = 0;
+    n = sh_modserve_each_ungated_raw(raw_visit, seen);
+    CHECK(n == 1 && strstr(seen, "baseModel:md6/characters/monsters/gl/body.md6mesh:gs.mod;") != NULL);
+    if (n != 1) printf("  gated reload list (%d): %s\n", n, seen);
+    /* Repaired: not offered again, also after a rescan of the same bytes. */
+    seen[0] = 0;
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
+    CHECK(sh_modserve_index_rescan() == 1);
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     sh_mb_set_stock_ops(NULL);
     sh_modserve_test_reset_registration();
@@ -4241,6 +4309,7 @@ int main(void)
     test_requirements();
     test_ungated_raw();
     test_surface_gated_reload();
+    test_surface_built_after_boot();
     test_requirements_general();
     test_refresh();
     test_conflicts();
