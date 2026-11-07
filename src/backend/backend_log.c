@@ -64,7 +64,7 @@ void backend_log_close(void)
 
 void backend_log(const char *msg)
 {
-    char line[512];
+    char line[4096];
     SYSTEMTIME st;
     DWORD n;
     SH_PERF_BEGIN(t0);
@@ -73,7 +73,14 @@ void backend_log(const char *msg)
         "[snapmap+] %04d-%02d-%02d %02d:%02d:%02d.%03d %s\n",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         msg ? msg : "");
-    if ((int)n <= 0) n = (DWORD)strlen(line);
+    if ((int)n <= 0) {
+        /* Truncated: keep the line readable and end it, so the next line does
+         * not run on after it (a reload listing 90 files overran 512 bytes). */
+        n = (DWORD)strlen(line);
+        if (n + 5 > sizeof line) n = (DWORD)sizeof line - 5;
+        memcpy(line + n, "...\n", 5);
+        n += 4;
+    }
 
     OutputDebugStringA(line);   /* Debugger sink; installed output hooks may also forward this text. */
 
