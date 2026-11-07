@@ -106,6 +106,7 @@ static void mu_defaults(sh_modui_engine *e)
     e->scope_apply = sh_modserve_scope_apply;
     e->scope_activate = sh_modserve_scope_activate;
     e->clear_undo = sh_editor_undo_clear;
+    e->mark_modified = sh_editor_mark_modified;
     e->undo_pending = sh_editor_delete_native_pending;
     e->launch_preload = sh_modserve_launch_preload;
 #endif
@@ -118,6 +119,7 @@ static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifes
 static int mu_scope_now(const char *phase);
 static int mu_product_need(const sh_modmanifest_list *rows);
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
+static void mu_mark_modified(const char *label);
 
 void sh_modui_bind(const sh_modui_engine *engine)
 {
@@ -144,6 +146,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->scope_activate) g_engine.scope_activate = engine->scope_activate;
         if (engine->map_left) g_engine.map_left = engine->map_left;
         if (engine->clear_undo) g_engine.clear_undo = engine->clear_undo;
+        if (engine->mark_modified) g_engine.mark_modified = engine->mark_modified;
         if (engine->undo_pending) g_engine.undo_pending = engine->undo_pending;
         if (engine->launch_preload) g_engine.launch_preload = engine->launch_preload;
     }
@@ -3777,6 +3780,9 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                         mapmsg);
         } else if (!uninstall) {
             const mu_mapmod *x = &mp.mods[p.mod];
+            /* A delete of placed entities commits its own undo step; a row
+             * dropped alone changes nothing the editor sees. */
+            if (!x->uid_count) mu_mark_modified("Remove Mod From Map");
             if (!x->uid_count)
                 _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: no entity used it, so only its row was dropped%s.",
                             title, mp.name[0] ? mp.name : "the open map", p.vanilla_after ? "; the map now plays without Snapmap+" : "");
@@ -3836,6 +3842,17 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     mu_record_free(&rec);
     mu_model_free(&m);
     return mu_result_tail(&b);
+}
+
+/* The map's mod rows and choices live outside the edit map, so a change to
+ * them alone leaves the editor's map unmodified and leaving it without a Save
+ * writes nothing (ADD-V7b). Each change commits one undo step, as a placed
+ * entity does, so the editor asks to save. */
+static void mu_mark_modified(const char *label)
+{
+    const sh_modui_engine *e = mu_engine();
+    int r = e->mark_modified ? e->mark_modified(label) : -1;
+    if (r < 0) mu_log("%s: the open map could not be marked modified; save it from the editor's menu to keep the change", label);
 }
 
 /* ---- map add: a map-level row */
@@ -3908,6 +3925,7 @@ static int mu_map_add(const char *key, const mu_out *o)
             ok = 1;
             (void)mu_scope_now_declared("map add");
             InterlockedIncrement(&g_gen);
+            mu_mark_modified("Add Mod To Map");
             mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.id, row.version, row.bundle,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply now; the map "
@@ -3942,6 +3960,7 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
     r = sh_modregistry_choose_command(slot, key, line, sizeof line);
     if (r > 0) (void)mu_scope_apply("choose");
     if (r >= 0) InterlockedIncrement(&g_gen);
+    if (r >= 0) mu_mark_modified("Choose Mod");
     if (o && o->fn) o->fn(o->context, line);
     else mu_log("%s", line + (strncmp(line, "MODS: ", 6) ? 0 : 6));
     if (r < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s.", line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14));
@@ -4030,6 +4049,7 @@ static int mu_map_upgrade(const char *id, const mu_out *o)
             ok = 1;
             (void)mu_scope_now_declared("map upgrade");
             InterlockedIncrement(&g_gen);
+            mu_mark_modified("Upgrade Mod");
             if (from >= 0)
                 _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s: %u file(s) "
                             "changed, %u added, %u removed. Save the map to keep it; players are offered the new build.",

@@ -126,6 +126,12 @@ typedef struct sh_modui_engine {
      * probe 1: 1 possible, 0 no editor map, -1 unavailable; probe 0: 1
      * cleared, 0 no editor map, -1 failed. Main thread. */
     int (*clear_undo)(int probe);
+    /* Mark the open map modified, as a placed entity does: one undo step
+     * named `label` through the editor's own commit (editor_undo.h
+     * sh_editor_mark_modified; none in a SH_MODUI_PURE build), so leaving the
+     * editor asks to save and the map's next save writes the change. 1
+     * marked, 0 no editor map, -1 unavailable. Main thread. */
+    int (*mark_modified)(const char *label);
     /* 1 while a native editor action has not committed yet
      * (sh_editor_delete_native_pending): the Uninstall's undo clear waits for
      * the delete's own commit. */

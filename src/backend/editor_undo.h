@@ -55,4 +55,12 @@ int sh_editor_undo_install(const sig_result *results, size_t n, const uint8_t *m
  * -1 failed (logged). Main thread. */
 int sh_editor_undo_clear(int probe);
 
+/* Mark the open editor map modified, as a placed entity does: the editor's
+ * own commit (EditorCommitEdit(editor, idStr label), bound by
+ * sh_editor_undo_install with IdStrCtor and IdStrDtor) pushes one undo step
+ * named `label`. For a change the edit map does not hold (the map's mod rows
+ * and choices, modui.c). 1 marked, 0 no editor map, -1 unavailable (logged
+ * once). Main thread. */
+int sh_editor_mark_modified(const char *label);
+
 #endif /* BACKEND_EDITOR_UNDO_H */

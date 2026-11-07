@@ -1820,8 +1820,11 @@ map's choices).
   load reads them from every row (first row per slot) and gives them to the
   index (`sh_modserve_scope_set_choices`) before the listing; a choice naming
   a key the save writes no row for is dropped with one line, and closing the
-  map (`sh_modmanifest_reset`) clears the index's copy too. A choice does not
-  mark the editor's map modified, so the wording is "applies now; saved with
+  map (`sh_modmanifest_reset`) clears the index's copy too. A choice, like
+  `map add`, `map upgrade` and a `map remove` that drops only the row, marks
+  the editor's map modified through the editor's own commit
+  (`sh_editor_mark_modified`, one undo step, as a placed entity does), so
+  leaving the editor asks to save; the wording stays "applies now; saved with
   the map's next save".
 - **Rescans, gates and old builds.** A rescan that changes a generated text
   for the listing (a mod rebuilt with other edits) marks the path that serves

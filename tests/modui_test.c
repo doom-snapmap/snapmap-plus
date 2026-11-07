@@ -264,6 +264,16 @@ static int fake_clear_undo(int probe)
 }
 static int fake_undo_pending(void) { return g_undo_pending; }
 
+/* The editor's dirty mark (editor_undo.h sh_editor_mark_modified): how often, and the last label. */
+static int g_marks;
+static char g_mark_label[64];
+static int fake_mark_modified(const char *label)
+{
+    g_marks++;
+    strncpy_s(g_mark_label, sizeof g_mark_label, label ? label : "", _TRUNCATE);
+    return g_map_on ? 1 : 0;
+}
+
 /* The map scope's game-side apply (sh_modserve_scope_apply): how often, and the last phase. */
 static int g_scope_applies;
 static char g_scope_phase[64];
@@ -355,6 +365,7 @@ static void bind_fakes(void)
     e.scope_activate = fake_scope_activate;
     e.map_left = fake_map_left;
     e.clear_undo = fake_clear_undo;
+    e.mark_modified = fake_mark_modified;
     e.undo_pending = fake_undo_pending;
     e.launch_preload = fake_preload;
     sh_modui_bind(&e);
@@ -973,7 +984,9 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"upgrade\":{\"folder\":\"alex.r2-imp@1.0.1\",\"bundle\":\""));
     union_add(doc);   /* builds of one key, and the upgrade offer */
     free(doc);
+    g_marks = 0;
     doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
+    CHECK(g_marks == 1 && !strcmp(g_mark_label, "Upgrade Mod"));   /* the editor asks to save */
     if (!has(doc, "\"ok\":true")) fprintf(stderr, "  upgrade: %s\n", doc ? doc : "(none)");
     CHECK(has(doc, "\"ok\":true") && has(doc, "This map now uses R2 Imp copy build 1 (") &&
           has(doc, "1 file(s) changed, 0 added, 0 removed"));
@@ -986,10 +999,12 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
     CHECK(has(doc, "already uses the installed build"));
     free(doc);
+    CHECK(g_marks == 1);   /* nothing changed: not marked */
     /* A choice between mods' edits goes through the manifest; an invalid slot is refused. */
     doc = run_doc(SH_MODS_ACT_CHOOSE, "entitydef/player/coop/edit/handsModelMPUseDoomHands\talex.r2-imp");
     CHECK(has(doc, "\"ok\":true") && has(doc, "entitydef/player/coop/edit/handsModelMPUseDoomHands now comes from alex.r2-imp"));
     free(doc);
+    CHECK(g_marks == 2 && !strcmp(g_mark_label, "Choose Mod"));
     {
         char chosen[80];
         CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", chosen, sizeof chosen) && !strcmp(chosen, "alex.r2-imp"));
@@ -997,6 +1012,7 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_CHOOSE, "bad slot\talex.r2-imp");
     CHECK(has(doc, "\"ok\":false"));
     free(doc);
+    CHECK(g_marks == 2);   /* refused: not marked */
     sh_modmanifest_reset();
     g_placed_count = 0;
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
@@ -1680,9 +1696,11 @@ int main(int argc, char **argv)
             sh_modserve_scope_enable(1);
             applies = g_scope_applies;
             g_scope_activates = 0;
+            g_marks = 0;
             doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
             CHECK(has(doc, "\"action\":\"mapAddMod\",\"ok\":true,\"message\":\"Gates is now used by the whole of Imp Arena."));
             free(doc);
+            CHECK(g_marks == 1 && !strcmp(g_mark_label, "Add Mod To Map"));
             /* Its requirements were out of scope with no map listing it; now they apply at once, through the
              * activation a map load runs (its decls registered, its registries served). */
             CHECK(g_scope_applies == applies + 1 && g_scope_activates == 1 && !strcmp(g_scope_phase, "map add"));
@@ -1699,6 +1717,7 @@ int main(int argc, char **argv)
             doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.req");
             CHECK(has(doc, "\"ok\":true,\"message\":\"Gates is already used by the whole of Imp Arena.\""));
             free(doc);
+            CHECK(g_marks == 1);   /* already attached: not marked again */
             /* A rawmap opened in its place (sh_rawmaps load) is a new map until its first save:
              * the borrowed saved map's name and id are not the open map's. */
             g_opened_from = "v2b-empty.rawmap.json";
@@ -1736,9 +1755,11 @@ int main(int argc, char **argv)
             free(doc);
             applies = g_scope_applies;
             g_delete_calls = 0;
+            g_marks = 0;
             doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.req");
             CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Gates from Imp Arena: no entity used it, so only its row was dropped"));
             free(doc);
+            CHECK(g_marks == 1 && !strcmp(g_mark_label, "Remove Mod From Map"));   /* a row alone: marked */
             CHECK(g_delete_calls == 0 && sh_modmanifest_current_attached(&att) == 0 && g_scope_applies == applies + 1);
             sh_modmanifest_list_free(&att);
             /* Refusals. */

@@ -95,6 +95,13 @@ uintptr_t sh_editor_undo_decode_push(const uint8_t *commit, const uint8_t *image
 
 #ifndef SH_EDITOR_UNDO_TESTING
 static sh_editor_undo_push_fn g_push;
+typedef void (*eu_commit_fn)(void *editor, void *idstr);
+typedef void *(*eu_idstr_ctor_fn)(void *s, const char *text);
+typedef void (*eu_idstr_dtor_fn)(void *s);
+static eu_commit_fn g_commit;
+static eu_idstr_ctor_fn g_idstr_ctor;
+static eu_idstr_dtor_fn g_idstr_dtor;
+static volatile LONG g_mark_faulted, g_mark_logged;
 static sh_process_heap_api g_heap;
 static int g_heap_ok;
 static volatile LONG g_faulted;
@@ -112,6 +119,9 @@ int sh_editor_undo_install(const sig_result *results, size_t n, const uint8_t *m
         } __except (EXCEPTION_EXECUTE_HANDLER) { image_size = 0; }
     }
     g_push = (sh_editor_undo_push_fn)sh_editor_undo_decode_push(commit, module_base, image_size);
+    g_commit = (eu_commit_fn)commit;
+    g_idstr_ctor = (eu_idstr_ctor_fn)sig_addr_by_name(results, n, "IdStrCtor");
+    g_idstr_dtor = (eu_idstr_dtor_fn)sig_addr_by_name(results, n, "IdStrDtor");
     g_heap_ok = sh_process_heap_bind(&g_heap, results, n, module_base);
     _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: undo clear: push %s (rva 0x%llx)%s",
                 g_push ? "decoded from EditorCommitEdit" : "NOT decoded; Uninstall refuses while a map is open",
@@ -156,5 +166,36 @@ int sh_editor_undo_clear(int probe)
                 before, before == 1 ? "y" : "ies", after);
     backend_log(line);
     return r > 0 ? 1 : -1;
+}
+
+#define EU_IDSTR_BYTES 0x30
+
+int sh_editor_mark_modified(const char *label)
+{
+    sh_process_heap_scope scope;
+    unsigned char s[EU_IDSTR_BYTES + 16];
+    uint8_t *ed = eu_editor_map_open();
+    int ok = 1;
+    char line[200];
+    if (!ed) return 0;
+    if (!g_commit || !g_idstr_ctor || !g_idstr_dtor || !g_heap_ok || InterlockedCompareExchange(&g_mark_faulted, 0, 0)) {
+        if (!InterlockedExchange(&g_mark_logged, 1))
+            backend_log("MODS: mark modified: the editor's commit is not bound on this build; a mods change alone does not "
+                        "make the editor ask to save");
+        return -1;
+    }
+    if (!sh_process_heap_enter(&g_heap, &scope)) return -1;
+    __try {
+        memset(s, 0, sizeof s);
+        g_idstr_ctor(s, label ? label : "Mods");
+        g_commit(ed, s);
+        g_idstr_dtor(s);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (!sh_process_heap_leave(&scope)) ok = 0;
+    if (!ok) InterlockedExchange(&g_mark_faulted, 1);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: mark modified: %s (\"%s\")",
+                ok ? "the open map is marked modified, one undo step" : "FAILED; off for this session", label ? label : "Mods");
+    backend_log(line);
+    return ok ? 1 : -1;
 }
 #endif
