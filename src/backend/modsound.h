@@ -47,15 +47,17 @@
  * (doom_weapon_sp.bnk on 13954591) fails to start until that bank is loaded.
  * Per bundle, the banks needed are the product block's registries "banks"
  * (the builder's list) together with what its served sound decls need now
- * (modbankinfo.h), each checked against the game's own bank index. At the
- * map pass (modserve_activate_bundles: main thread, before the level load),
- * each bank a declared bundle needs and this process has not asked for is
- * loaded through the call the per-bank wrapper makes once its filter passes:
+ * (modbankinfo.h), each checked against the game's own bank index. On the
+ * main thread with the game idle in the hub or the editor (the first idle
+ * poll after the boot index, then after a rescan or install; never during a
+ * map load, see sh_modsound_stock_may_load), each bank an installed bundle
+ * needs and this process has not asked for is loaded through the call the
+ * per-bank wrapper makes once its filter passes:
  * operator new(0x130), the wrapper's cookie ctor (the bank name), then the
  * async LoadBank(name, callback, cookie, -1, &id). The callback is the
  * product's, which records the outcome and hands the cookie to the engine's
  * own (its "async load success id <id> : <name>" line, then the cookie's
- * delete). The pass waits for the callback inside process heap 0 (Wwise
+ * delete). The load waits for the callback inside process heap 0 (Wwise
  * allocates through the top of the main thread's heap stack), at most
  * SH_MODSOUND_STOCK_WAIT_MS. Never the wrapper (its filter refuses the name
  * and answers success), never s_loadBanks, and the game-mode global is not
@@ -182,6 +184,29 @@ int sh_modsound_needs_add_registries(sh_modsound_needs *t, const char *hash, con
 int sh_modsound_needs_add_served(sh_modsound_needs *t, const char *hash, const char *key, const char *request);
 const sh_modsound_need *sh_modsound_needs_find(const sh_modsound_needs *t, const char *hash);
 
+/* When a stock bank may be loaded (snaphak-re ADD-V5 B2: on Vulkan a load at
+ * a launch's own map pass crashed off-thread 9 to 10 s into Play; at an
+ * editor entry, or on OpenGL, it did not). Until the cause is known no stock
+ * bank loads while a map loads:
+ *   BOOT      the first idle poll after the boot index: every installed bundle's needed banks, awaited
+ *   MAP_PASS  never: the pass logs "already loaded", or defers a bank still not loaded
+ *   IDLE      a later poll after a rescan or install, the game in the hub or the editor
+ * `busy` is 1 while a map loads, Play runs or a launch holds (the probe
+ * below). Returns 1 to load now, 0 not. Pure. */
+#define SH_MODSOUND_STOCK_BOOT     0
+#define SH_MODSOUND_STOCK_MAP_PASS 1
+#define SH_MODSOUND_STOCK_IDLE     2
+int  sh_modsound_stock_may_load(int when, int busy);
+/* The game's busy probe for the stock-bank poll: 1 with the cause while a map
+ * loads, Play runs or a launched map's Play holds, else 0. Unset, the poll
+ * treats the game as busy and loads nothing. */
+void sh_modsound_set_busy(int (*busy)(char *cause, size_t cap));
+/* The stock-bank poll (every main-thread frame, menus included): when a
+ * bank an installed bundle needs is still not asked for and the game is not
+ * busy, load it (process heap 0, awaited). Cheap when nothing is due.
+ * Returns the number loaded. */
+int  sh_modsound_stock_poll(void);
+
 #ifndef SH_MODSOUND_PURE
 #include "signatures.h"
 /* Resolve the four signatures (SIG_OK only), decode the hardware pointer,
@@ -193,9 +218,11 @@ int  sh_modsound_install(const sig_result *results, size_t count, const uint8_t 
 void sh_modsound_before_pass(const char *phase);
 /* One status line for sh_mods status. */
 void sh_modsound_print_status(void);
-/* The map pass for stock banks: load each bank the declared bundles need
- * (64-hex hashes; aliases resolve) and this process has not asked for. Main
- * thread only, before the level load. Returns the number loaded. */
+/* The map pass for stock banks: for each bank the declared bundles need
+ * (64-hex hashes; aliases resolve), one line: already loaded, or not loaded
+ * and deferred to the next idle poll (a mod installed during the load). It
+ * never loads (sh_modsound_stock_may_load). Main thread only. Returns the
+ * number deferred. */
 int  sh_modsound_stock_before_map(const char *const *bundle_hashes, int n);
 #endif
 
@@ -229,8 +256,14 @@ void sh_modsound_test_bind_stock(sh_modsound_opnew_fn op_new, sh_modsound_cookie
 void sh_modsound_test_log(void (*sink)(const char *line));
 /* The product's callback, as Wwise would call it. */
 void sh_modsound_test_bank_callback(uint32_t bank_id, const void *in_memory, int32_t result, int32_t pool, void *cookie);
-/* The map pass over these hashes (no alias resolution). */
+/* The map pass over these hashes (no alias resolution). Returns the number deferred. */
 int  sh_modsound_test_stock(const char *const *bundle_hashes, int n);
+/* The poll's load over every bundle of the needs table, as at `when`
+ * (BOOT or IDLE), with "not busy". Returns the number loaded. */
+int  sh_modsound_test_stock_all(int when);
+/* Mark the poll due (as an index publish does), or read whether it is. */
+void sh_modsound_test_stock_due(int due);
+int  sh_modsound_test_stock_is_due(void);
 /* Forget the stock-bank slots (the per-process set, for a fresh test). */
 void sh_modsound_test_stock_reset(void);
 #endif

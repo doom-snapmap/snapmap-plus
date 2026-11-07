@@ -974,13 +974,21 @@ plasma fly-by and whiz-by among them). `modbankinfo.c` reads the game's
 and answers which skipped bank a sound decl's event needs (its name, else
 `play_` plus its last path component). The builder lists those banks as the
 product block's registries `"banks"`; the serving index adds what each
-bundle's served sound decls need, each checked against the game's index. At
-the map pass `modsound.c` loads each bank a declared bundle needs, once per
-process: on the main thread inside process heap 0, through the call the
+bundle's served sound decls need, each checked against the game's index.
+`modsound.c` loads each bank an installed bundle needs, once per process,
+only while the game sits idle in the hub or the editor (the main-thread poll
+after each frame, `sh_modsound_stock_poll`): the first idle poll after the
+boot index loads every needed bank, and a later one after a rescan or an
+install loads a new need. It never loads during a map load: on Vulkan a load
+at a My Maps launch's own map pass crashed off-thread 9 to 10 s into Play
+(snaphak-re ADD-V5 B2), so the map pass only logs each declared bank as
+already loaded, or as deferred to the next idle poll when a mod was installed
+during the load (its sounds stay silent in that load). The load runs on the
+main thread inside process heap 0, through the call the
 per-bank wrapper makes once its filter passes (`operator new` and the cookie
 ctor, then the async `LoadBank` with the product's callback, which records
 the result and hands the cookie to the engine's own), waiting up to 3 s for
-the callback so the events exist before the level loads. It never goes
+the callback. It never goes
 through the wrapper, never through `s_loadBanks`, and never changes the game
 mode. The bank stays loaded until the game exits (about its file size, 85 MB
 for `doom_weapon_sp.bnk`). `sh_mods status`, `sh_mods doctor` and the Mods
