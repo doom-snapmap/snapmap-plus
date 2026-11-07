@@ -258,6 +258,7 @@ test('show rescans once; the list waits for the answer', () => {
   h.ui.show();
   h.ui.show();
   assert.deepEqual(h.sent, [{cmd: 'modsAction', action: 'rescan'}], 'a second show while waiting does not ask again');
+  assert.ok(!h.sent.some(m => m.cmd === 'modsList'), 'the page asks with a modsAction, the message that arms the host push');
   assert.match(h.nodes.modsList.textContent, /Reading installed mods/);
   answer(h, v3);
   assert.equal(h.toasts.length, 0, 'a successful rescan on show says nothing');

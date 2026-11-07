@@ -2846,8 +2846,8 @@ static void poc_budget_poll()
 }
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
- * document (modsList) when the tab opens and on Refresh, and for an action (modsAction); nothing
- * polls. Every slot operation that reads or changes the store runs on DOOM's main thread, so it
+ * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
+ * mockup), and for an action (modsAction); nothing polls. Every slot operation that reads or changes the store runs on DOOM's main thread, so it
  * goes through run_on_main, from a short-lived worker thread rather than this one: an install
  * rehashes every file and can take seconds, and the window must keep painting meanwhile. While it
  * runs, run_on_main is occupied, so other edits from this window are refused as when the game is
@@ -2872,7 +2872,8 @@ struct PocModsJob {
 static PocModsJob    g_mods_job;
 static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
-/* The pushed refresh: once the page has asked for the document, a change the window did not make
+/* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
+ * is all the shipped page sends; ADD-V7b R4b), a change the window did not make
  * (a console verb, `sh_mods map upgrade` or `uninstall`, the undo clear an Uninstall owes) moves the
  * backend's generation past the one of the last document posted, and the think loop posts a fresh
  * one, as each of the page's own actions ends with one. FETCH's size query (any thread, no main-
@@ -3940,6 +3941,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 g_mods_page_seen = true;
                 poc_mods_begin(0, false, std::string());
             } else if (cmd == L"modsAction") {
+                g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
                 /* Install always asks for its folder here, in the native picker: the page never
                  * names a path to install. */
                 std::wstring act, arg;
