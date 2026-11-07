@@ -101,13 +101,14 @@ static void line_cb(void *c, const char *t)
 static char *apply_copies(const char *request, const char *stock, const char *const *copies, int n, const sh_dt_choice *ch,
                           int nch, sh_dt_report *rep_out)
 {
-    sh_dt_source src[8];
-    char *arr[8], who[8][16], *text = NULL;
+    sh_dt_source src[16];
+    char *arr[16], who[16][16], *text = NULL;
     sh_dt_report rep;
     sh_dt *t;
     int i;
     memset(src, 0, sizeof src);
-    for (i = 0; i < n && i < 8; ++i) {
+    if (n > 16) n = 16;   /* every source handed to the apply is one filled here */
+    for (i = 0; i < n; ++i) {
         char cause[300], *one = sh_dt_diff(request, stock, strlen(stock), copies[i], strlen(copies[i]), NULL, cause, sizeof cause);
         if (!one) fprintf(stderr, "  diff %d: %s\n", i, cause);
         arr[i] = one ? wrap(one) : NULL;
@@ -124,7 +125,7 @@ static char *apply_copies(const char *request, const char *stock, const char *co
     t = sh_dt_apply(request, stock, strlen(stock), src, n, ch, nch, &rep);
     if (t) text = sh_dt_text(t, NULL);
     sh_dt_free(t);
-    for (i = 0; i < n && i < 8; ++i) free(arr[i]);
+    for (i = 0; i < n; ++i) free(arr[i]);
     if (rep_out) *rep_out = rep;
     return text;
 }
