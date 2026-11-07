@@ -87,14 +87,16 @@ var modsTab = (function () {
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
   var LEGACY_TEXT = 'Legacy, rebuild to isolate';
   var UPGRADE_TEXT = 'Upgrade this map to the installed build';
-  var DECLARED_TEXT = 'declared: affects only maps that declare this mod';
-  var REGISTRY_COPY_TEXT = 'a copy of a registry: express it as intent';
-  /* The registry slots a clash names (modregistry.h). */
-  var SLOT_TEXT = {'player.hands': 'First-person hands', 'player.handsD1': 'First-person hands (classic)',
-                   'player.body': 'Third-person body', 'player.handsAnimWeb': 'Hands animations'};
+  var EDITED_COPY_TEXT = 'an edited copy: its edits apply in maps that declare this mod';
+  /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
+     path starts at the first top-level decl member the slot names. */
+  var TOP_MEMBERS = ['edit', 'editorVars', 'inherit', 'events', 'aliases', 'init', 'class'];
   function slotText(slot) {
-    if (has(SLOT_TEXT, slot)) return SLOT_TEXT[slot];
-    return slot.indexOf('weapons/') === 0 ? 'Weapon ' + slot.slice(8) : slot;
+    var parts = str(slot).split('/'), i;
+    for (i = 2; i < parts.length; i++) {
+      if (TOP_MEMBERS.indexOf(parts[i]) >= 0) return parts.slice(i).join('/') + ' in ' + parts.slice(0, i).join('/');
+    }
+    return str(slot);
   }
 
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
@@ -127,15 +129,16 @@ var modsTab = (function () {
   function normFacts(v) {
     var f = obj(v);
     if (!f) return null;
-    var reg = obj(f.registries) || {}, player = obj(reg.player) || {}, ext = obj(reg.extends) || {}, weapons = obj(player.weapons) || {};
+    var reg = obj(f.registries) || {};
     return {adds: num(f.adds), borrows: num(f.borrows), surfaces: num(f.surfaces), editor: num(f.editor), replaces: num(f.replaces),
             editorTweaks: normNames(f.editorTweaks),
-            replacements: arr(f.replacements).map(function (r) { r = obj(r) || {}; return {path: str(r.path), declared: bool(r.declared), registry: bool(r.registry)}; })
+            replacements: arr(f.replacements).map(function (r) { r = obj(r) || {}; return {path: str(r.path), edits: bool(r.edits)}; })
               .filter(function (r) { return r.path.length > 0; }),
-            player: Object.keys(player).filter(function (k) { return typeof player[k] === 'string'; }).sort()
-              .map(function (k) { return {field: k, value: str(player[k])}; }),
-            weapons: Object.keys(weapons).sort().map(function (k) { return {slot: k, decl: str(weapons[k])}; }),
-            extends: Object.keys(ext).sort().map(function (k) { return {target: k, partial: str(ext[k])}; }),
+            edits: arr(f.edits).map(function (e) {
+              e = obj(e) || {};
+              return {file: str(e.file), ops: num(e.ops), set: num(e.set), remove: num(e.remove), list: num(e.list),
+                      keyed: num(e.keyed), bag: num(e.bag), drop: num(e.drop)};
+            }).filter(function (e) { return e.file.length > 0; }),
             conductor: normNames(reg.conductor),
             stockBanks: normStockBanks(reg.banks, f.stockBanks)};
   }
@@ -364,6 +367,19 @@ var modsTab = (function () {
     return out;
   }
 
+  /* One edited game file: its name and what the edits do. */
+  function editLine(e) {
+    var parts = [];
+    if (e.set) parts.push(plural(e.set, 'field set', 'fields set'));
+    if (e.remove) parts.push(plural(e.remove, 'field removed', 'fields removed'));
+    if (e.list) parts.push(plural(e.list, 'list entry', 'list entries') + ' added');
+    if (e.keyed) parts.push(plural(e.keyed, 'named entry', 'named entries') + ' added or replaced');
+    if (e.bag) parts.push(plural(e.bag, 'entry', 'entries') + ' added');
+    if (e.drop) parts.push(plural(e.drop, 'entry', 'entries') + ' removed');
+    var f = e.file.replace(/^generated\/decls\//, '').replace(/\.decl$/, '');
+    return f + ': ' + (parts.length ? parts.join(', ') : 'no change from the game\'s text');
+  }
+
   /* The derived facts as {label, text, list?} lines, in the details pane's order. */
   function factLines(b) {
     var f = b.facts, out = [];
@@ -372,18 +388,18 @@ var modsTab = (function () {
     if (f.borrows) out.push({label: 'Borrows', text: plural(f.borrows, 'game file') + ' under its own names, read from your install'});
     if (f.surfaces) out.push({label: 'Surfaces', text: plural(f.surfaces, 'game file') + ' SnapMap cannot see, read from your install'});
     if (f.editor) out.push({label: 'Editor tweaks', text: plural(f.editor, 'file') + ', on this computer only; never in a map', list: f.editorTweaks});
-    if (f.replacements.length || f.replaces) {
-      var rl = f.replacements.map(function (r) {
-        return r.path + (r.declared ? ' (' + DECLARED_TEXT + ')' : r.registry ? ' (' + REGISTRY_COPY_TEXT + ')' : '');
-      });
-      out.push({label: 'Replaces', text: plural(Math.max(f.replaces, f.replacements.length), 'game file'), list: rl});
+    if (f.edits.length) {
+      out.push({label: 'Edits', text: 'edits ' + plural(f.edits.length, 'game file') + '; maps that declare it get the game\'s text with these edits',
+                list: f.edits.map(editLine)});
+    }
+    var other = f.replacements.filter(function (r) { return !r.edits; });
+    if (other.length || f.replaces > f.replacements.length) {
+      out.push({label: 'Replaces', text: plural(Math.max(other.length, f.replaces - f.edits.length), 'game file') + ' (a folder the product received)',
+                list: other.map(function (r) { return r.path; })});
     }
     var reg = [];
-    f.player.forEach(function (p) { reg.push('player.' + p.field + ': ' + p.value); });
-    f.weapons.forEach(function (w) { reg.push('weapon ' + w.slot + ': ' + w.decl); });
-    f.extends.forEach(function (e) { reg.push('extends ' + e.target + ' with ' + e.partial); });
     f.conductor.forEach(function (c) { reg.push('encounter ' + c); });
-    if (reg.length) out.push({label: 'Registries', text: plural(reg.length, 'entry', 'entries') + ' generated per map that declares it', list: reg});
+    if (reg.length) out.push({label: 'Encounters', text: plural(reg.length, 'encounter') + ' listed in the conductor of a map that declares it, its spawn bit assigned per map', list: reg});
     if (f.stockBanks.length) {
       out.push({label: 'Game sounds', text: 'needs ' + f.stockBanks.map(function (s) { return s.bank; }).join(', ') +
                 ', single-player sounds SnapMap skips; loaded once per session for a map that declares it',
@@ -818,7 +834,7 @@ var modsTab = (function () {
       if (m.product) field(det, 'Needs', 'Snapmap+ ' + m.product + ' or later');
       if (m.clashes.length) {
         var cs = section(body, 'clashes', 'Choices between mods');
-        cs.appendChild(el('div', 'mods-note', 'Several mods of this map set the same part of the player. Pick which one this map uses; the choice is saved with the map.'));
+        cs.appendChild(el('div', 'mods-note', 'Several mods of this map edit the same field of a game file differently. Pick whose edit this map uses; the choice is saved with the map.'));
         m.clashes.forEach(function (c) {
           var sel = el('select', 'mods-clash');
           sel.setAttribute('data-slot', c.slot);
@@ -1199,7 +1215,7 @@ var modsTab = (function () {
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, DECLARED_TEXT: DECLARED_TEXT,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITED_COPY_TEXT: EDITED_COPY_TEXT,
           factLines: factLines, slotText: slotText};
 })();
 

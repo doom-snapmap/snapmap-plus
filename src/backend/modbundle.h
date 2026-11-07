@@ -20,8 +20,10 @@
  *     "legacy": {...},                 converted first-generation packages only
  *     "classes": {"adds", "borrows", "replaces", "editor", "surfaces"},
  *     "editor": ["<request>", ...],    files classified as editor tweaks
- *     "registries": {"banks": ["<stock bank>", ...], "player": {...}, "conductor": ["<encounter decl>", ...],
+ *     "registries": {"banks": ["<stock bank>", ...], "conductor": ["<encounter decl>", ...],
  *                    "strings": ["<key>", ...]},
+ *     "edits": [{"file": "<request>", "stock": "<digest>", "counts": {...}, "ops": [...]}, ...],
+ *                                      derived edits of decls at game names (decl_tree.h)
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false}]
@@ -36,7 +38,7 @@
  * still builds a pointer ("inAssets": false) and is reported. The key is the
  * author "id" when present (deprecated), else the product block "key", else
  * the folder's own name; the canonical "id" is the key. "key", "classes",
- * "editor" and "registries" are derived facts outside the canonical text.
+ * "editor", "registries" and "edits" are derived facts outside the canonical text.
  * "origin" "by-hand" is "" in memory (a folder the author made). A grandfathered
  * bundle (a "legacy" record) keeps its declared shadows and every rule of
  * before; it is classified for reporting only.
@@ -159,6 +161,7 @@ typedef struct sh_mb_file {
     int declared;          /* builder: named by the descriptor's stock object */
     int absent;            /* a stock pointer with no file under assets/ ("inAssets": false) */
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
+    char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
 } sh_mb_file;
 
 /* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
@@ -171,9 +174,12 @@ typedef struct sh_mb_file {
  *   SURFACE  a stock pointer restoring installed content at its own name:
  *            served from the player's disk, never carried, never refused
  *            (SnapMap's own provider cannot see campaign-only content)
- *   REPLACE  any other file at a game name: served as a shadow. Accepted
- *            and reported while replacements are retired; refused when
- *            sh_mb_refuse_replacements is on. */
+ *   REPLACE  any other file at a game name. A decl is an edited copy: the
+ *            builder records its structural diff against the game's text
+ *            (sh_mb_bundle.edits) and the product generates the game file
+ *            per map; the copy itself is never served. A binary is refused
+ *            (put it under mods/<key>/), except in a folder the product
+ *            received (sh_mb_keep_replacements_here). */
 #define SH_MB_CLASS_NONE    0
 #define SH_MB_CLASS_ADD     1
 #define SH_MB_CLASS_BORROW  2
@@ -184,17 +190,6 @@ typedef struct sh_mb_file {
 typedef struct sh_mb_classes {
     unsigned adds, borrows, replaces, editor, surfaces;
 } sh_mb_classes;
-
-/* Registry intent (DESIGN-additive 2.4): the author block's "player" object.
- * Each member names a mod name under the key or a stock name that resolves. */
-#define SH_MB_PLAYER_HANDS       0
-#define SH_MB_PLAYER_HANDS_D1    1
-#define SH_MB_PLAYER_BODY        2
-#define SH_MB_PLAYER_BODY_EVENTS 3
-#define SH_MB_PLAYER_HANDS_ANIM_WEB 4   /* the first-person hands animWeb (player/mp handsAnimWeb) */
-#define SH_MB_PLAYER_FIELDS      5
-/* The member names, in SH_MB_PLAYER_* order. */
-extern const char *const sh_mb_player_fields[SH_MB_PLAYER_FIELDS];
 
 /* Where a bundle's key came from (sh_mb_bundle.key_source). */
 #define SH_MB_KEY_FROM_ID     1   /* the author block's "id" (deprecated, kept as the key) */
@@ -255,23 +250,17 @@ typedef struct sh_mb_bundle {
      * canonical "id". */
     int   key_source;      /* SH_MB_KEY_FROM_*, 0 when unknown (a manifest) */
     sh_mb_classes classes; /* counts of the files' classes */
-    char *player[SH_MB_PLAYER_FIELDS];   /* the "player" intent, NULL when unset */
-    /* player.weapons (the player kit, DESIGN-additive 2.9): weapon_slots[i] is
-     * a stock weapon decl name the game finds the weapon by, weapon_decls[i]
-     * the mod's own weapon decl (mods/<key>/...) served under it. */
-    char **weapon_slots, **weapon_decls;
-    size_t weapon_count;
     char *registries;      /* compact JSON of the product block's "registries" object, or NULL */
-    /* extends (DESIGN-additive 2.4): ext_targets[i] a list-shaped stock decl
-     * ("<type folder>/<name>", on sh_mb_extend_target's table), ext_partials[i]
-     * the mod's partial decl under mods/<key>/ whose entries the product
-     * appends to it in maps that declare the mod; as the author wrote them. */
-    char **ext_targets, **ext_partials;
-    size_t ext_count;
-    /* replaces: game request paths the author declares this mod replaces
-     * (the escape hatch for a file no registry can express), lower-cased. */
-    char **replaces;
-    size_t replace_count;
+    /* Derived edits (DESIGN-additive 2.4): the product block's "edits", a
+     * JSON array with one element per decl the mod carries at a game name
+     * with other bytes (decl_tree.h), or NULL; edit_files elements. */
+    char *edits;
+    unsigned edit_files;
+    /* A descriptor's retired intent keys (extends, player.bodyEvents): the
+     * partial decls they name and the game file each stood for, so a build
+     * refuses the partial with what to put instead. */
+    char **old_partials, **old_targets;
+    size_t old_partial_count;
     char **notes;          /* builder: report lines (old keys ignored, replacements, aliases, strings) */
     size_t note_count, note_cap;
 } sh_mb_bundle;
@@ -349,9 +338,9 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * the bundle hash is unchanged. Every file is classified (out->files[].cls,
  * out->classes); a file outside the namespace that is not a surface must be
  * a game name (resolver->stock), and is then a shadow: an editor tweak, or a
- * replacement (refused when sh_mb_refuse_replacements is on). The
- * key is resolved (out->key_source), the "player" intent checked against the
- * files and the game, out->registries filled, and out->notes holds the
+ * replacement: a decl's derived edits are recorded (out->edits), a binary
+ * is refused. The key is resolved (out->key_source), out->registries
+ * filled, and out->notes holds the
  * report lines the build log prints. */
 int  sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
@@ -474,26 +463,13 @@ const char *sh_mb_class_name(int cls);
 /* The classes counts as one line ("2 adds, 0 borrows, 1 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 
-/* The replacement refusal (DESIGN-additive 2.1, 7). On (the default since
- * phase 3): a file at a game name with other bytes fails the build with
- * "would replace <request>: put it under mods/<key>/ or declare the intent in
- * mod.json", unless the descriptor's "replaces" names it (the escape hatch,
- * reported as "replaces <path> (declared): affects only maps that declare
- * this mod"). Off: such a file is accepted, served as a shadow and reported.
- * Editor tweaks, surfaces, registry copies and grandfathered (legacy)
- * bundles are never refused, nor is a folder the product received
- * (origin download, delivery or migration: a bundle installed by hash is
- * never refused on its files). Process-wide; the default is
- * SH_MB_REFUSE_REPLACEMENTS_DEFAULT. */
-#ifndef SH_MB_REFUSE_REPLACEMENTS_DEFAULT
-#define SH_MB_REFUSE_REPLACEMENTS_DEFAULT 1
-#endif
-void sh_mb_set_refuse_replacements(int on);
-int  sh_mb_refuse_replacements(void);
-/* For the calling thread only: 1 keeps replacements in the builds it runs
- * whatever the switch says (an install of content the product received,
- * such as a rawmap or prefab import, is never refused on its files); 0 ends
- * it. Thread-local, so a worker's import never changes a rescan's rule. */
+/* For the calling thread only: 1 accepts a binary at a game name in the
+ * builds it runs (an install of content the product received, such as a
+ * rawmap or prefab import, is never refused on its files); 0 ends it. A
+ * folder whose product block origin is download, delivery or migration is
+ * accepted the same way. Every other build refuses such a file
+ * (DESIGN-additive 2.4). Thread-local, so a worker's import never changes a
+ * rescan's rule. */
 void sh_mb_keep_replacements_here(int on);
 
 /* Trim ASCII whitespace, lower-case, and validate a mod id: 1-64 characters of
@@ -560,32 +536,12 @@ int  sh_mb_model_key(const char *name, char *out, size_t cap);
  * is not a model reference); a .bmodel path is its own single request. */
 int  sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int max);
 
-/* Registries (DESIGN-additive 2.4): fixed-name game files the product
- * generates per map from the declared bundles' intent (modregistry.h). No
- * bundle should carry one; a carried copy is a replacement the refusal
- * switch exempts, with the note "replaces <request>: express it as player
- * intent ...", so packs built before the intent existed keep building. */
+/* Game files several mods commonly edit (DESIGN-additive 2.4): the product
+ * generates each per map from the game's text and the declared mods'
+ * derived edits (modregistry.h); the names are kept for readers. */
 #define SH_MB_REGISTRY_CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
 #define SH_MB_REGISTRY_BODY      "generated/decls/md6def/player/mp/tp_body_mp.md6.decl"
 #define SH_MB_REGISTRY_PLAYER    "generated/decls/entitydef/player/coop.decl"
-/* 1 conductor, 2 player body, 3 player entity, 0 not a registry file (case-insensitive). */
-int  sh_mb_registry_request(const char *request);
-
-/* The list-shaped stock decls a mod may extend (descriptor "extends",
- * DESIGN-additive 2.4), one table for the builder and the registry generator
- * (modregistry.c): 1 with the grammar kind (SH_MB_EXTEND_LIST: `num = N;
- * item[i]` lists; SH_MB_EXTEND_BAG: repeated or named blocks), its containers
- * ("edit/aiTypeList", ';' between several) and the fixed registry it is (0
- * conductor, 1 player body, as modregistry's SH_MR_*, or -1) when `target`
- * ("<type folder>/<name>", any case; '*' in the table matches one segment) is
- * on it; else 0 with "<target> is not a list the product extends". */
-#define SH_MB_EXTEND_LIST 1
-#define SH_MB_EXTEND_BAG  2
-int  sh_mb_extend_target(const char *target, int *kind, const char **containers, int *fixed, char *cause, size_t cap);
-/* 1 when `text` is a decl body ({ ... }, comments and strings allowed) whose
- * members all lie on or under one of `containers` ("a/b;c"): the structural
- * check of an extends partial. 0 with the first member outside in cause. */
-int  sh_mb_extend_partial_ok(const char *text, size_t len, const char *containers, char *cause, size_t cap);
 
 /* The canonical text of a mod.json "requirements" value (JSON text of the
  * member's value), as the builder writes it into the manifest:

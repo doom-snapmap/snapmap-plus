@@ -14,6 +14,7 @@
 #include "mp_json.h"
 #include "config_json.h"
 #include "decl_text.h"
+#include "decl_tree.h"
 #include "json_pretty.h"
 #include "backend_log.h"
 
@@ -1256,148 +1257,6 @@ int sh_mb_model_keys(const char *name, char out[][SH_MB_REQUEST_MAX + 1], int ma
     return k;
 }
 
-int sh_mb_registry_request(const char *request)
-{
-    static const char *const names[] = { SH_MB_REGISTRY_CONDUCTOR, SH_MB_REGISTRY_BODY, SH_MB_REGISTRY_PLAYER };
-    int i;
-    if (!request) return 0;
-    for (i = 0; i < 3; ++i) if (!_stricmp(request, names[i])) return i + 1;
-    return 0;
-}
-
-/* The list-shaped stock decls a mod extends (DESIGN-additive 2.4): a target
- * pattern ("<type folder>/<name>", '*' a trailing wildcard of one segment),
- * the grammar of its entries, their containers, and the fixed registry it is. */
-typedef struct mb_target { const char *pattern; int kind; const char *containers; int fixed; } mb_target;
-static const mb_target g_mb_targets[] = {
-    { "entitydef/ai/conductor/coop/snapmap_default", SH_MB_EXTEND_LIST, "edit/aiTypeList", 0 },
-    { "md6def/player/mp/tp_body_mp.md6", SH_MB_EXTEND_BAG, "events;aliases", 1 },
-    { "aifsmmanager/states/*", SH_MB_EXTEND_BAG, "edit/subGraphs", -1 },
-    { "snappropertyinspector_whitelistencounterdecl/*", SH_MB_EXTEND_LIST, "edit/validEncounters", -1 },
-    { "snappropertyinspector_whitelistencounterdecllist/*", SH_MB_EXTEND_LIST, "edit/validEncounters", -1 },
-};
-
-int sh_mb_extend_target(const char *target, int *kind, const char **containers, int *fixed, char *cause, size_t cap)
-{
-    size_t i, n = target ? strlen(target) : 0;
-    if (cause && cap) cause[0] = 0;
-    for (i = 0; n && !strpbrk(target, " \t\r\n\"\\") && i < sizeof g_mb_targets / sizeof g_mb_targets[0]; ++i) {
-        const char *p = g_mb_targets[i].pattern;
-        size_t pn = strlen(p);
-        int hit = p[pn - 1] == '*' ? n > pn - 1 && !_strnicmp(target, p, pn - 1) && !strchr(target + pn - 1, '/')
-                                   : !_stricmp(target, p);
-        if (!hit) continue;
-        if (kind) *kind = g_mb_targets[i].kind;
-        if (containers) *containers = g_mb_targets[i].containers;
-        if (fixed) *fixed = g_mb_targets[i].fixed;
-        return 1;
-    }
-    if (cause && cap) _snprintf_s(cause, cap, _TRUNCATE, "%s is not a list the product extends", target ? target : "");
-    return 0;
-}
-
-/* One token of decl text: 1 a word (identifier, number, item[0]), 2 a
- * string, 3 one of { } = ; and other punctuation, 0 the end, -1 malformed. */
-static int mb_ptok(const char *t, size_t len, size_t *pos, size_t *at, size_t *tl)
-{
-    size_t p = *pos;
-    for (;;) {
-        while (p < len && (t[p] == ' ' || t[p] == '\t' || t[p] == '\r' || t[p] == '\n')) p++;
-        if (p + 1 < len && t[p] == '/' && t[p + 1] == '/') { while (p < len && t[p] != '\n') p++; continue; }
-        if (p + 1 < len && t[p] == '/' && t[p + 1] == '*') {
-            p += 2;
-            while (p + 1 < len && !(t[p] == '*' && t[p + 1] == '/')) p++;
-            if (p + 1 >= len) return -1;
-            p += 2;
-            continue;
-        }
-        break;
-    }
-    *at = p;
-    if (p >= len) { *pos = p; *tl = 0; return 0; }
-    if (t[p] == '"') {
-        p++;
-        while (p < len && t[p] != '"') { if (t[p] == '\\' && p + 1 < len) p++; p++; }
-        if (p >= len) return -1;
-        p++;
-        *tl = p - *at;
-        *pos = p;
-        return 2;
-    }
-    if ((t[p] >= 'a' && t[p] <= 'z') || (t[p] >= 'A' && t[p] <= 'Z') || (t[p] >= '0' && t[p] <= '9') || t[p] == '_' ||
-        t[p] == '-' || t[p] == '.') {
-        while (p < len && ((t[p] >= 'a' && t[p] <= 'z') || (t[p] >= 'A' && t[p] <= 'Z') || (t[p] >= '0' && t[p] <= '9') ||
-                           t[p] == '_' || t[p] == '-' || t[p] == '.' || t[p] == '[' || t[p] == ']'))
-            p++;
-        *tl = p - *at;
-        *pos = p;
-        return 1;
-    }
-    *tl = 1;
-    *pos = p + 1;
-    return 3;
-}
-
-/* Whether the member path seg[0..n-1] lies on (a prefix of) or under one container. */
-static int mb_path_on(char seg[][64], int n, const char *containers)
-{
-    const char *c = containers;
-    while (c && *c) {
-        const char *end = strchr(c, ';');
-        size_t cl = end ? (size_t)(end - c) : strlen(c);
-        int k = 0, ok = 1;
-        const char *q = c, *qe = c + cl;
-        while (q < qe && k < n && ok) {
-            const char *sl = (const char *)memchr(q, '/', (size_t)(qe - q));
-            size_t sn = sl ? (size_t)(sl - q) : (size_t)(qe - q);
-            ok = strlen(seg[k]) == sn && !_strnicmp(seg[k], q, sn);
-            k++;
-            q = sl ? sl + 1 : qe;
-        }
-        if (ok) return 1;   /* every segment matched: on the container, or under it */
-        c = end ? end + 1 : NULL;
-    }
-    return 0;
-}
-
-int sh_mb_extend_partial_ok(const char *text, size_t len, const char *containers, char *cause, size_t cap)
-{
-    char seg[16][64];
-    size_t pos = 0, at, tl;
-    int depth = 0, closed = 0, expect = 0, r;
-    if (cause && cap) cause[0] = 0;
-    if (!text || !containers) return mb_cause(cause, cap, "no text");
-    while ((r = mb_ptok(text, len, &pos, &at, &tl)) > 0) {
-        if (closed) return mb_cause(cause, cap, "text after the decl's closing brace");
-        if (r == 3 && text[at] == '{') {
-            if (depth >= 15) return mb_cause(cause, cap, "blocks nested too deep");
-            if (depth > 0 && expect) return mb_cause(cause, cap, "a block without a name");
-            depth++;
-            expect = 1;
-            continue;
-        }
-        if (r == 3 && text[at] == '}') {
-            if (depth == 0) return mb_cause(cause, cap, "an unbalanced closing brace");
-            if (--depth == 0) closed = 1;
-            expect = 1;
-            continue;
-        }
-        if (depth == 0) return mb_cause(cause, cap, "the text must be one { ... } decl body");
-        if (r == 3 && text[at] == ';') { expect = 1; continue; }
-        if (r == 1 && expect) {
-            /* A member or block name (`num = 2;`, `events {`, `anim "x" {`,
-             * `item[0] = {`): it must lie on or under a container path. */
-            _snprintf_s(seg[depth - 1], sizeof seg[0], _TRUNCATE, "%.*s", (int)(tl < 63 ? tl : 63), text + at);
-            if (!mb_path_on(seg, depth, containers))
-                return mb_cause(cause, cap, "member %s is outside %s", seg[depth - 1], containers);
-            expect = 0;
-        }
-    }
-    if (r < 0) return mb_cause(cause, cap, "an unterminated string or comment");
-    if (!closed) return mb_cause(cause, cap, depth ? "an unclosed block" : "no decl body");
-    return 1;
-}
-
 int sh_mb_editor_time(const char *request)
 {
     static const char *const prefixes[] = {
@@ -1760,6 +1619,7 @@ static void mb_file_free(sh_mb_file *f)
     free(f->ptype);
     free(f->pname);
     free(f->stock_source);
+    free(f->edit);
     for (i = 0; i < f->need_count; i++) { free(f->needs[i].type); free(f->needs[i].name); }
     free(f->needs);
 }
@@ -1780,16 +1640,11 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->requirements);
     free(b->extra);
     free(b->canonical);
-    for (i = 0; i < SH_MB_PLAYER_FIELDS; i++) free(b->player[i]);
-    for (i = 0; i < b->weapon_count; i++) { free(b->weapon_slots[i]); free(b->weapon_decls[i]); }
-    free(b->weapon_slots);
-    free(b->weapon_decls);
     free(b->registries);
-    for (i = 0; i < b->ext_count; i++) { free(b->ext_targets[i]); free(b->ext_partials[i]); }
-    free(b->ext_targets);
-    free(b->ext_partials);
-    for (i = 0; i < b->replace_count; i++) free(b->replaces[i]);
-    free(b->replaces);
+    free(b->edits);
+    for (i = 0; i < b->old_partial_count; i++) { free(b->old_partials[i]); free(b->old_targets[i]); }
+    free(b->old_partials);
+    free(b->old_targets);
     for (i = 0; i < b->note_count; i++) free(b->notes[i]);
     free(b->notes);
     memset(b, 0, sizeof *b);
@@ -1815,7 +1670,6 @@ static void mb_note(sh_mb_bundle *b, const char *fmt, ...)
     if (copy) b->notes[b->note_count++] = copy;
 }
 
-const char *const sh_mb_player_fields[SH_MB_PLAYER_FIELDS] = { "hands", "handsD1", "body", "bodyEvents", "handsAnimWeb" };
 
 const char *sh_mb_class_name(int cls)
 {
@@ -1839,10 +1693,7 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap)
 
 /* Whether a non-legacy build refuses replacements (DESIGN-additive 2.1).
  * Off in phase 1: a replacement is accepted and reported. */
-static volatile LONG g_mb_refuse_replacements = SH_MB_REFUSE_REPLACEMENTS_DEFAULT;
 
-void sh_mb_set_refuse_replacements(int on) { InterlockedExchange(&g_mb_refuse_replacements, on ? 1 : 0); }
-int  sh_mb_refuse_replacements(void) { return g_mb_refuse_replacements != 0; }
 static __declspec(thread) int g_mb_keep_here;
 void sh_mb_keep_replacements_here(int on) { g_mb_keep_here = on ? 1 : 0; }
 
@@ -2494,179 +2345,52 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
     return 1;
 }
 
-/* A player intent name: non-empty, no space, quote or backslash. */
-static int mb_player_name_ok(const mbj *m)
+/* One retired intent key's partial (DESIGN-additive 2.4: the product derives
+ * edits from whole edited copies): the decl `partial` names and the game
+ * file it stood for, so the build refuses the partial with what to do. */
+static void mb_old_partial(sh_mb_bundle *b, const char *partial, size_t n, const char *target)
 {
-    return m && m->t == MBJ_STR && strlen(m->s) == m->n && m->n && !strpbrk(m->s, " \t\r\n\"\\");
+    char **gp, **gt;
+    if (!partial || !n || !target) return;
+    gp = (char **)realloc(b->old_partials, sizeof(char *) * (b->old_partial_count + 1));
+    if (!gp) { mb_error(b, "out of memory"); return; }
+    b->old_partials = gp;
+    gt = (char **)realloc(b->old_targets, sizeof(char *) * (b->old_partial_count + 1));
+    if (!gt) { mb_error(b, "out of memory"); return; }
+    b->old_targets = gt;
+    b->old_partials[b->old_partial_count] = mb_strndup(partial, n);
+    b->old_targets[b->old_partial_count] = mb_strdup(target);
+    if (!b->old_partials[b->old_partial_count] || !b->old_targets[b->old_partial_count]) {
+        free(b->old_partials[b->old_partial_count]);
+        free(b->old_targets[b->old_partial_count]);
+        mb_error(b, "out of memory");
+        return;
+    }
+    mb_lower(b->old_partials[b->old_partial_count]);
+    b->old_partial_count++;
 }
 
-/* player.weapons: {"<stock weapon decl>": "mods/<key>/<weapon decl>"}. */
-static int mb_weapons_parse(sh_mb_bundle *b, const mbj *v)
+/* The retired intent keys "player", "extends" and "replaces": ignored with
+ * one note each; the partials "extends" and player.bodyEvents name are
+ * remembered for the refusal (mb_old_partials_refuse). */
+static void mb_old_intent(sh_mb_bundle *b, const char *key, const mbj *v, int building)
 {
     size_t i;
-    if (v->t != MBJ_OBJ) {
-        mb_error(b, "%s player.weapons must be an object of {\"<stock weapon decl>\": \"mods/%s/<weapon decl>\"}",
-                 b->descriptor, b->id[0] ? b->id : "<key>");
-        return 0;
-    }
-    if (!v->count) return 1;
-    b->weapon_slots = (char **)calloc(v->count, sizeof(char *));
-    b->weapon_decls = (char **)calloc(v->count, sizeof(char *));
-    if (!b->weapon_slots || !b->weapon_decls) { mb_error(b, "out of memory"); return 0; }
-    for (i = 0; i < v->count; i++) {
-        const mbj *m = v->items[i];
-        char *slot = mb_strndup(v->keys[i], v->klen[i]);
-        if (!slot) { mb_error(b, "out of memory"); return 0; }
-        if (strlen(slot) != v->klen[i] || !slot[0] || strpbrk(slot, " \t\r\n\"\\")) {
-            mb_error(b, "%s player.weapons key %.64s must be a stock weapon decl name", b->descriptor, slot);
-            free(slot);
-            return 0;
+    if (building)
+        mb_note(b, "%s: ignored: the product derives the edits from the edited copy of a game file at its game name "
+                "(DESIGN-additive 2.4); nothing is declared", key);
+    if (!strcmp(key, "extends") && v->t == MBJ_OBJ)
+        for (i = 0; i < v->count; i++) {
+            char target[SH_MB_REQUEST_MAX + 32];
+            if (v->items[i]->t != MBJ_STR) continue;
+            _snprintf_s(target, sizeof target, _TRUNCATE, "generated/decls/%.*s.decl", (int)v->klen[i], v->keys[i]);
+            mb_lower(target);
+            mb_old_partial(b, v->items[i]->s, v->items[i]->n, target);
         }
-        if (!mb_player_name_ok(m)) {
-            mb_error(b, "%s player.weapons.%s must be a string naming a weapon decl under mods/<key>/", b->descriptor, slot);
-            free(slot);
-            return 0;
-        }
-        b->weapon_slots[b->weapon_count] = slot;
-        b->weapon_decls[b->weapon_count] = mb_strdup(m->s);
-        if (!b->weapon_decls[b->weapon_count]) { mb_error(b, "out of memory"); return 0; }
-        b->weapon_count++;
+    if (!strcmp(key, "player") && v->t == MBJ_OBJ) {
+        const mbj *ev = mbj_get(v, "bodyEvents");
+        if (ev && ev->t == MBJ_STR) mb_old_partial(b, ev->s, ev->n, SH_MB_REGISTRY_BODY);
     }
-    return 1;
-}
-
-/* The author block's "player" object: string members hands, handsD1, body,
- * bodyEvents and handsAnimWeb (sh_mb_player_fields), and the weapons object.
- * Resolved against the files once they are known (mb_player_resolve). */
-static int mb_player_parse(sh_mb_bundle *b, const mbj *v)
-{
-    size_t i;
-    int k;
-    if (v->t != MBJ_OBJ) {
-        mb_error(b, "%s player must be an object of hands, handsD1, handsAnimWeb, body and bodyEvents names and "
-                 "weapons", b->descriptor);
-        return 0;
-    }
-    for (i = 0; i < v->count; i++) {
-        const mbj *m = v->items[i];
-        int hit = -1;
-        if (v->klen[i] == 7 && memcmp(v->keys[i], "weapons", 7) == 0) {
-            if (b->weapon_count || b->weapon_slots) { mb_error(b, "%s player.weapons appears twice", b->descriptor); return 0; }
-            if (!mb_weapons_parse(b, m)) return 0;
-            continue;
-        }
-        for (k = 0; k < SH_MB_PLAYER_FIELDS; k++)
-            if (strlen(sh_mb_player_fields[k]) == v->klen[i] && memcmp(sh_mb_player_fields[k], v->keys[i], v->klen[i]) == 0)
-                hit = k;
-        if (hit < 0) {
-            mb_error(b, "%s player key %.64s is not supported (hands, handsD1, handsAnimWeb, body, bodyEvents, weapons)",
-                     b->descriptor, v->keys[i]);
-            return 0;
-        }
-        if (!mb_player_name_ok(m)) {
-            mb_error(b, "%s player.%s must be a string naming a mod name under mods/<key>/ or a stock name",
-                     b->descriptor, sh_mb_player_fields[hit]);
-            return 0;
-        }
-        free(b->player[hit]);
-        b->player[hit] = mb_strdup(m->s);
-        if (!b->player[hit]) { mb_error(b, "out of memory"); return 0; }
-    }
-    return 1;
-}
-
-/* The author block's "extends" object (DESIGN-additive 2.4): each key a
- * list-shaped stock decl "<type folder>/<name>", each value the mod's partial
- * decl. Checked against the table here, resolved against the files and the
- * game at the build (mb_extends_resolve). */
-static int mb_extends_parse(sh_mb_bundle *b, const mbj *v)
-{
-    size_t i, k;
-    if (v->t != MBJ_OBJ) {
-        mb_error(b, "%s extends must be an object of \"<type folder>/<stock decl name>\": \"mods/<key>/<partial decl>\"",
-                 b->descriptor);
-        return 0;
-    }
-    if (v->count) {
-        b->ext_targets = (char **)calloc(v->count, sizeof(char *));
-        b->ext_partials = (char **)calloc(v->count, sizeof(char *));
-        if (!b->ext_targets || !b->ext_partials) { mb_error(b, "out of memory"); return 0; }
-    }
-    for (i = 0; i < v->count; i++) {
-        const mbj *m = v->items[i];
-        char cause[SH_MB_CAUSE_MAX], *key = mb_strndup(v->keys[i], v->klen[i]);
-        if (!key) { mb_error(b, "out of memory"); return 0; }
-        if (!key[0] || strlen(key) != v->klen[i] || strpbrk(key, " \t\r\n\"\\") || key[0] == '/') {
-            mb_error(b, "%s extends key \"%.64s\" must be \"<type folder>/<stock decl name>\"", b->descriptor, key);
-            free(key);
-            return 0;
-        }
-        for (k = 0; k < b->ext_count; k++)
-            if (!_stricmp(b->ext_targets[k], key)) {
-                mb_error(b, "%s extends names %s twice", b->descriptor, key);
-                free(key);
-                return 0;
-            }
-        if (!sh_mb_extend_target(key, NULL, NULL, NULL, cause, sizeof cause)) {
-            mb_error(b, "%s extends: %s", b->descriptor, cause);
-            free(key);
-            return 0;
-        }
-        if (m->t != MBJ_STR || !m->n || strlen(m->s) != m->n || strpbrk(m->s, " \t\r\n\"\\")) {
-            mb_error(b, "%s extends.%s must be a string naming the mod's partial decl under mods/<key>/", b->descriptor, key);
-            free(key);
-            return 0;
-        }
-        b->ext_targets[b->ext_count] = key;
-        b->ext_partials[b->ext_count] = mb_strdup(m->s);
-        if (!b->ext_partials[b->ext_count]) { mb_error(b, "out of memory"); return 0; }
-        b->ext_count++;
-    }
-    return 1;
-}
-
-/* The author block's "replaces" array: game request paths the mod declares
- * it replaces (the one escape hatch, DESIGN-additive 2.4). Lower-cased;
- * checked against the files at the build. */
-static int mb_replaces_parse(sh_mb_bundle *b, const mbj *v)
-{
-    size_t i, k;
-    if (v->t != MBJ_ARR) {
-        mb_error(b, "%s replaces must be an array of game file request paths", b->descriptor);
-        return 0;
-    }
-    if (v->count) {
-        b->replaces = (char **)calloc(v->count, sizeof(char *));
-        if (!b->replaces) { mb_error(b, "out of memory"); return 0; }
-    }
-    for (i = 0; i < v->count; i++) {
-        const mbj *m = v->items[i];
-        char cause[SH_MB_CAUSE_MAX], *r;
-        if (m->t != MBJ_STR || !m->n || strlen(m->s) != m->n) {
-            mb_error(b, "%s replaces[%zu] must be a game file's request path", b->descriptor, i);
-            return 0;
-        }
-        r = mb_strdup(m->s);
-        if (!r) { mb_error(b, "out of memory"); return 0; }
-        mb_lower(r);
-        if (!sh_mb_check_request(r, cause, sizeof cause)) {
-            mb_error(b, "%s replaces: %s", b->descriptor, cause);
-            free(r);
-            return 0;
-        }
-        for (k = 0; k < b->replace_count; k++)
-            if (!strcmp(b->replaces[k], r)) { mb_error(b, "%s replaces names %s twice", b->descriptor, r); free(r); return 0; }
-        b->replaces[b->replace_count++] = r;
-    }
-    return 1;
-}
-
-/* 1 when the descriptor's "replaces" names `request` (lower-cased). */
-static int mb_replace_declared(const sh_mb_bundle *b, const char *request)
-{
-    size_t i;
-    for (i = 0; request && i < b->replace_count; i++) if (!_stricmp(b->replaces[i], request)) return 1;
-    return 0;
 }
 
 /* A folder the product received rather than one an author builds here: it
@@ -2780,24 +2504,15 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 return 0;
             }
-            /* "player" (registry intent) is the author's like any key and
-             * stays in extra; its members are checked here and resolved
-             * against the files at the build. */
-            if (root->klen[i] == 6 && memcmp(root->keys[i], "player", 6) == 0 && !mb_player_parse(b, root->items[i])) {
-                free(tmp.items); free(tmp.keys); free(tmp.klen);
-                return 0;
-            }
-            /* "extends" and "replaces" (registry intent and its escape
-             * hatch) stay in extra the same way. */
-            if (!b->legacy && root->klen[i] == 7 && memcmp(root->keys[i], "extends", 7) == 0 &&
-                !mb_extends_parse(b, root->items[i])) {
-                free(tmp.items); free(tmp.keys); free(tmp.klen);
-                return 0;
-            }
-            if (!b->legacy && root->klen[i] == 8 && memcmp(root->keys[i], "replaces", 8) == 0 &&
-                !mb_replaces_parse(b, root->items[i])) {
-                free(tmp.items); free(tmp.keys); free(tmp.klen);
-                return 0;
+            /* The retired intent keys (DESIGN-additive 2.4): ignored, not
+             * kept in extra; a partial they name is refused at the build. */
+            if (!b->legacy && ((root->klen[i] == 6 && memcmp(root->keys[i], "player", 6) == 0) ||
+                               (root->klen[i] == 7 && memcmp(root->keys[i], "extends", 7) == 0) ||
+                               (root->klen[i] == 8 && memcmp(root->keys[i], "replaces", 8) == 0))) {
+                char k[16];
+                _snprintf_s(k, sizeof k, _TRUNCATE, "%.*s", (int)root->klen[i], root->keys[i]);
+                mb_old_intent(b, k, root->items[i], building);
+                continue;
             }
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
@@ -3689,208 +3404,6 @@ static void mb_derive_shadows(sh_mb_bundle *b)
     qsort(b->shadows, b->shadow_count, sizeof(char *), mb_str_cmp);
 }
 
-/* The "player" intent (DESIGN-additive 2.4): each name is the mod's own
- * (under mods/<key>/, provided by one of its files, of the field's type) or
- * a stock name that resolves through the game, as needs do. hands and
- * handsD1 name md6Defs, handsAnimWeb an animWeb, body an entityDef,
- * bodyEvents a file of event rows (an md6Def when stock; a mod's own is
- * named by its decl name, md6Def names keep their ".md6":
- * mods/<key>/body_events.md6). weapons: every key a stock weapon decl the
- * game holds, every value a weapon decl of this mod under mods/<key>/. */
-static void mb_player_resolve(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_resolver *r)
-{
-    static const char *const types[SH_MB_PLAYER_FIELDS] = { "md6Def", "md6Def", "entityDef", "md6Def", "animWeb" };
-    char ns[SH_MB_ID_MAX + 8];
-    int k;
-    size_t w;
-    _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
-    for (w = 0; w < b->weapon_count; w++) {
-        const char *slot = b->weapon_slots[w], *v = b->weapon_decls[w];
-        char cand[2][SH_MB_REQUEST_MAX + 1];
-        const sh_mb_file *hit = NULL;
-        size_t j;
-        int n, i, got = 0, unknown = !r || !r->stock;
-        if (!_strnicmp(slot, ns, strlen(ns))) {
-            mb_error(b, "%s player.weapons key %s is under mods/%s/; a key is the stock weapon decl the mod's weapon "
-                     "is served as", b->descriptor, slot, b->id);
-            continue;
-        }
-        n = sh_mb_need_requests("weapon", slot, cand, 2);
-        for (i = 0; i < n && !got && r && r->stock; i++) {
-            int s = r->stock(r->stock_context, cand[i]);
-            if (s == 1) got = 1;
-            else if (s < 0) unknown = 1;
-        }
-        if (!got && n > 0 && unknown)
-            mb_error(b, "%s player.weapons key %s cannot be checked against the game (the game's resource reader is "
-                     "unavailable)", b->descriptor, slot);
-        else if (!got)
-            mb_error(b, "%s player.weapons key %s is not a stock weapon decl", b->descriptor, slot);
-        if (_strnicmp(v, ns, strlen(ns))) {
-            mb_error(b, "%s player.weapons.%s names %s, which is not under mods/%s/", b->descriptor, slot, v, b->id);
-            continue;
-        }
-        for (j = 0; j < b->file_count && !hit; j++) {
-            const sh_mb_file *f = &b->files[j];
-            if (f->is_decl && f->pname && !_stricmp(f->pname, v)) hit = f;
-        }
-        if (!hit)
-            mb_error(b, "%s player.weapons.%s names %s, which this mod does not provide", b->descriptor, slot, v);
-        else if (!hit->ptype || _stricmp(hit->ptype, "weapon") != 0)
-            mb_error(b, "%s player.weapons.%s names %s, which is a %s; it must name a weapon", b->descriptor, slot, v,
-                     hit->ptype ? hit->ptype : "file");
-    }
-    for (k = 0; k < SH_MB_PLAYER_FIELDS; k++) {
-        const char *v = b->player[k];
-        char cand[2][SH_MB_REQUEST_MAX + 1];
-        int n, i, got = 0, unknown = 0;
-        if (!v) continue;
-        if (!_strnicmp(v, ns, strlen(ns))) {
-            const sh_mb_file *hit = NULL;
-            size_t j;
-            /* One name may be several decl types (an entityDef and its Toybox
-             * row): a file of the field's type wins. */
-            for (j = 0; j < b->file_count; j++) {
-                const sh_mb_file *f = &b->files[j];
-                if (!(f->pname && !_stricmp(f->pname, v)) && _stricmp(f->request, v)) continue;
-                if (!hit || (f->ptype && !_stricmp(f->ptype, types[k]))) hit = f;
-                if (f->ptype && !_stricmp(f->ptype, types[k])) break;
-            }
-            if (!hit)
-                mb_error(b, "%s player.%s names %s, which this mod does not provide", b->descriptor,
-                         sh_mb_player_fields[k], v);
-            else if (!hit->ptype || _stricmp(hit->ptype, types[k]) != 0)
-                mb_error(b, "%s player.%s names %s, which is a %s; it must name an %s", b->descriptor,
-                         sh_mb_player_fields[k], v, hit->ptype ? hit->ptype : "file", types[k]);
-            continue;
-        }
-        n = sh_mb_need_requests(types[k], v, cand, 2);
-        for (i = 0; i < n && !got; i++) if (mb_req_has(own, cand[i])) got = 1;
-        if (!r || !r->stock) unknown = 1;
-        for (i = 0; i < n && !got && r && r->stock; i++) {
-            int s = r->stock(r->stock_context, cand[i]);
-            if (s == 1) got = 1;
-            else if (s < 0) unknown = 1;
-        }
-        if (got) continue;
-        if (n > 0 && unknown)
-            mb_error(b, "%s player.%s names %s, which cannot be checked against the game (the game's resource reader is "
-                     "unavailable)", b->descriptor, sh_mb_player_fields[k], v);
-        else
-            mb_error(b, "%s player.%s names %s, which is neither a name under mods/%s/ this mod provides nor a stock %s",
-                     b->descriptor, sh_mb_player_fields[k], v, b->id, types[k]);
-    }
-}
-
-/* extends: every target a stock decl the game holds, every partial a decl of
- * this mod under mods/<key>/ of the target's type folder whose members lie
- * on the target's containers. replaces: every path one this mod carries at a
- * game name that no registry or player intent expresses. */
-static void mb_extends_resolve(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
-{
-    char ns[SH_MB_ID_MAX + 8];
-    size_t q, j;
-    _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
-    for (q = 0; q < b->ext_count; q++) {
-        const char *target = b->ext_targets[q], *part = b->ext_partials[q], *slash = strchr(target, '/');
-        const char *containers = NULL;
-        const sh_mb_file *hit = NULL;
-        char request[SH_MB_REQUEST_MAX + 1], prefix[96], cause[SH_MB_CAUSE_MAX];
-        int got;
-        if (!sh_mb_extend_target(target, NULL, &containers, NULL, cause, sizeof cause)) { mb_error(b, "%s", cause); continue; }
-        if (!_strnicmp(target, ns, strlen(ns)) || !slash) {
-            mb_error(b, "%s extends key %s must be a stock decl, not a name under mods/%s/", b->descriptor, target, b->id);
-            continue;
-        }
-        _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/%s.decl", target);
-        mb_lower(request);
-        got = r && r->stock ? r->stock(r->stock_context, request) : -1;
-        if (got == 0) mb_error(b, "%s extends key %s is not a stock decl the game holds", b->descriptor, target);
-        else if (got < 0)
-            mb_error(b, "%s extends key %s cannot be checked against the game (the game's resource reader is unavailable)",
-                     b->descriptor, target);
-        if (_strnicmp(part, ns, strlen(ns))) {
-            mb_error(b, "%s extends.%s names %s, which is not under mods/%s/", b->descriptor, target, part, b->id);
-            continue;
-        }
-        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "generated/decls/%.*s/", (int)(slash - target), target);
-        for (j = 0; j < b->file_count && !hit; j++) {
-            const sh_mb_file *f = &b->files[j];
-            if (f->is_decl && f->pname && !_stricmp(f->pname, part) && !_strnicmp(f->request, prefix, strlen(prefix))) hit = f;
-        }
-        if (!hit) {
-            mb_error(b, "%s extends.%s names %s, which this mod does not provide as a %.*s decl", b->descriptor, target, part,
-                     (int)(slash - target), target);
-            continue;
-        }
-        if (hit->stock) {
-            mb_error(b, "%s extends.%s names %s, a pointer to installed content; a partial holds the mod's own entries",
-                     b->descriptor, target, part);
-            continue;
-        }
-        {
-            wchar_t *wrel = NULL, *full = NULL, *c;
-            unsigned char *text = NULL;
-            size_t len = 0;
-            int wn = MultiByteToWideChar(CP_UTF8, 0, hit->path, -1, NULL, 0);
-            if (wn > 0 && (wrel = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn)) != NULL)
-                MultiByteToWideChar(CP_UTF8, 0, hit->path, -1, wrel, wn);
-            if (wrel) {
-                for (c = wrel; *c; c++) if (*c == L'/') *c = L'\\';
-                full = mb_wjoin(root, wrel);
-            }
-            if (full) text = mb_read_wfile(full, 4u << 20, &len);
-            free(full);
-            free(wrel);
-            if (!text) mb_error(b, "%s: the extends partial cannot be read", hit->path);
-            else if (!sh_mb_extend_partial_ok((const char *)text, len, containers, cause, sizeof cause))
-                mb_error(b, "%s: the extends partial for %s: %s (a partial holds only the mod's own entries inside %s)",
-                         hit->path, target, cause, containers);
-            free(text);
-        }
-    }
-    for (q = 0; q < b->replace_count; q++) {
-        const char *req = b->replaces[q];
-        const sh_mb_file *hit = NULL;
-        size_t k;
-        int both = 0;
-        for (j = 0; j < b->file_count && !hit; j++) if (!strcmp(b->files[j].request, req)) hit = &b->files[j];
-        if (sh_mb_registry_request(req)) {
-            mb_error(b, "%s replaces %s, a registry the product generates per map; state the intent instead (player, "
-                     "extends or an encounter decl)", b->descriptor, req);
-            continue;
-        }
-        if (!_strnicmp(req, "generated/decls/weapon/", 23)) {
-            mb_error(b, "%s replaces %s, a weapon; name it in player.weapons instead (served under the stock name in maps "
-                     "that declare the mod)", b->descriptor, req);
-            continue;
-        }
-        if (!_strnicmp(req, ns, strlen(ns)) || strstr(req, "/mods/") || !strncmp(req, "mods/", 5)) {
-            mb_error(b, "%s replaces %s, a name under mods/; replaces names a game file", b->descriptor, req);
-            continue;
-        }
-        for (k = 0; k < b->ext_count && !both; k++) {
-            char er[SH_MB_REQUEST_MAX + 1];
-            _snprintf_s(er, sizeof er, _TRUNCATE, "generated/decls/%s.decl", b->ext_targets[k]);
-            mb_lower(er);
-            if (!strcmp(er, req)) {
-                mb_error(b, "%s both extends and replaces %s; an extends partial appends to the game's text, a replacement "
-                         "takes its place: keep one", b->descriptor, b->ext_targets[k]);
-                both = 1;
-            }
-        }
-        if (both) continue;
-        if (!hit) {
-            mb_error(b, "%s replaces %s, which this mod does not carry", b->descriptor, req);
-        } else if (hit->cls == SH_MB_CLASS_EDITOR) {
-            mb_note(b, "replaces %s: an editor tweak; it applies only on this machine and needs no declaration", req);
-        } else if (hit->cls != SH_MB_CLASS_REPLACE) {
-            mb_note(b, "replaces %s: the file %s; nothing is replaced", req,
-                    hit->cls == SH_MB_CLASS_SURFACE ? "has the game's own bytes" : "is not at a game name");
-        }
-    }
-}
-
 static int mb_cstr_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
 static sh_mb_bank_need_fn volatile g_bank_need;
@@ -3939,12 +3452,9 @@ static void mb_registry_banks(sh_mb_bundle *b, mb_buf *o, int *first)
  * byte order; members only when not empty. */
 static void mb_registries(sh_mb_bundle *b)
 {
-    /* byte order: body, bodyEvents, hands, handsAnimWeb, handsD1, then weapons */
-    static const int player_order[SH_MB_PLAYER_FIELDS] = {
-        SH_MB_PLAYER_BODY, SH_MB_PLAYER_BODY_EVENTS, SH_MB_PLAYER_HANDS, SH_MB_PLAYER_HANDS_ANIM_WEB, SH_MB_PLAYER_HANDS_D1 };
     mb_buf o = {0};
     size_t i;
-    int k, any, first = 1;
+    int any, first = 1;
     mbj *extra = NULL;
     const mbj *strings = NULL, *en = NULL;
     char ns[SH_MB_ID_MAX + 8];
@@ -3959,58 +3469,6 @@ static void mb_registries(sh_mb_bundle *b)
         any = 1;
     }
     if (any) { mb_put(&o, "]", 1); first = 0; }
-    if (b->ext_count) {
-        /* extends: keys in byte order, values as written */
-        size_t *ord = (size_t *)malloc(sizeof(size_t) * b->ext_count), x, y;
-        mb_puts(&o, first ? "\"extends\":{" : ",\"extends\":{");
-        if (!ord) o.oom = 1;
-        for (x = 0; ord && x < b->ext_count; x++) ord[x] = x;
-        for (x = 1; ord && x < b->ext_count; x++)
-            for (y = x; y > 0 && strcmp(b->ext_targets[ord[y - 1]], b->ext_targets[ord[y]]) > 0; y--) {
-                size_t t = ord[y]; ord[y] = ord[y - 1]; ord[y - 1] = t;
-            }
-        for (x = 0; ord && x < b->ext_count; x++) {
-            if (x) mb_put(&o, ",", 1);
-            mb_put_jcstr(&o, b->ext_targets[ord[x]]);
-            mb_put(&o, ":", 1);
-            mb_put_jcstr(&o, b->ext_partials[ord[x]]);
-        }
-        mb_put(&o, "}", 1);
-        free(ord);
-        first = 0;
-    }
-    for (k = 0, any = 0; k < SH_MB_PLAYER_FIELDS; k++) {
-        int f = player_order[k];
-        if (!b->player[f]) continue;
-        if (!any) mb_puts(&o, first ? "\"player\":{" : ",\"player\":{");
-        else mb_put(&o, ",", 1);
-        mb_put_jcstr(&o, sh_mb_player_fields[f]);
-        mb_put(&o, ":", 1);
-        mb_put_jcstr(&o, b->player[f]);
-        any = 1;
-    }
-    if (b->weapon_count) {
-        size_t *ord = (size_t *)malloc(sizeof(size_t) * b->weapon_count), x, y;
-        if (!any) mb_puts(&o, first ? "\"player\":{" : ",\"player\":{");
-        else mb_put(&o, ",", 1);
-        mb_puts(&o, "\"weapons\":{");
-        if (!ord) o.oom = 1;
-        for (x = 0; ord && x < b->weapon_count; x++) ord[x] = x;
-        for (x = 1; ord && x < b->weapon_count; x++)   /* insertion sort by slot, byte order */
-            for (y = x; y > 0 && strcmp(b->weapon_slots[ord[y - 1]], b->weapon_slots[ord[y]]) > 0; y--) {
-                size_t t = ord[y]; ord[y] = ord[y - 1]; ord[y - 1] = t;
-            }
-        for (x = 0; ord && x < b->weapon_count; x++) {
-            if (x) mb_put(&o, ",", 1);
-            mb_put_jcstr(&o, b->weapon_slots[ord[x]]);
-            mb_put(&o, ":", 1);
-            mb_put_jcstr(&o, b->weapon_decls[ord[x]]);
-        }
-        mb_put(&o, "}", 1);
-        free(ord);
-        any = 1;
-    }
-    if (any) { mb_put(&o, "}", 1); first = 0; }
     if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
     strings = extra ? mbj_get(extra, "strings") : NULL;
     en = strings && strings->t == MBJ_OBJ ? mbj_get(strings, "en") : NULL;
@@ -4047,6 +3505,101 @@ static void mb_registries(sh_mb_bundle *b)
     if (o.oom) { free(o.p); mb_error(b, "out of memory"); }
 }
 
+static void mb_counts_cb(void *context, const char *file, const sh_dt_counts *counts)
+{
+    (void)file;
+    *(sh_dt_counts *)context = *counts;
+}
+
+/* The wide path of a file under the folder. */
+static wchar_t *mb_file_wpath(const wchar_t *root, const char *path)
+{
+    wchar_t *w, *full, *q;
+    int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wn <= 0 || !(w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn))) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w, wn);
+    for (q = w; *q; q++) if (*q == L'/') *q = L'\\';
+    full = mb_wjoin(root, w);
+    free(w);
+    return full;
+}
+
+/* Derived edits (DESIGN-additive 2.4): every decl the mod carries at a game
+ * name with other bytes is an edited copy. Its structural diff against the
+ * game's text of the same decl is recorded (b->edits); the product applies
+ * it per map and never serves the copy. A copy or a game text outside the
+ * decl grammar is refused. Then a partial a retired intent key names. */
+static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
+{
+    mb_buf o = {0};
+    size_t i, k;
+    int received = mb_received(b) || g_mb_keep_here;
+    free(b->edits);
+    b->edits = NULL;
+    b->edit_files = 0;
+    if (b->legacy) return;   /* a grandfathered bundle keeps its shadows and the rules of before */
+    for (i = 0; i < b->file_count; i++) {
+        sh_mb_file *f = &b->files[i];
+        unsigned char *copy = NULL, *stock = NULL;
+        size_t clen = 0, slen = 0;
+        unsigned long long size = 0;
+        char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+        wchar_t *full;
+        sh_dt_counts counts;
+        char *json;
+        free(f->edit);
+        f->edit = NULL;
+        if (!f->shadowed || !f->is_decl || f->stock || f->is_module || sh_mb_editor_time(f->request)) continue;
+        full = mb_file_wpath(root, f->path);
+        copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
+        free(full);
+        if (!copy) { mb_error(b, "cannot read %s", f->path); continue; }
+        if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK ||
+            sh_mb_stock_read(f->request, sha, &stock, &slen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) {
+            if (received)
+                mb_note(b, "replaces %s: the game's text cannot be read here, so a folder the product received keeps it "
+                        "as a replacement", f->request);
+            else
+                mb_error(b, "%s: the game's %s cannot be read, so the edits this copy makes cannot be derived", f->path,
+                         f->request);
+            free(copy);
+            continue;
+        }
+        json = sh_dt_diff(f->request, (const char *)stock, slen, (const char *)copy, clen, &counts, cause, sizeof cause);
+        HeapFree(GetProcessHeap(), 0, stock);
+        free(copy);
+        if (!json && received) {
+            mb_note(b, "replaces %s: it does not parse as a decl (%s); a folder the product received keeps it as a "
+                    "replacement", f->request, cause);
+            continue;
+        }
+        if (!json) {
+            if (!strncmp(cause, "the game's text", 15))
+                mb_error(b, "%s: %s, so the edits this copy makes cannot be derived", f->path, cause);
+            else
+                mb_error(b, "%s does not parse as a decl (%s); the product derives the edits from the whole edited copy "
+                         "of %s, so the copy must be a whole decl", f->path, cause, f->request);
+            continue;
+        }
+        f->edit = json;
+        mb_put(&o, b->edit_files ? "," : "[", 1);
+        mb_puts(&o, json);
+        b->edit_files++;
+    }
+    if (b->edit_files) {
+        mb_put(&o, "]", 1);
+        if (o.oom) { free(o.p); mb_error(b, "out of memory"); }
+        else b->edits = o.p;
+    }
+    for (k = 0; k < b->old_partial_count; k++)
+        for (i = 0; i < b->file_count; i++) {
+            const sh_mb_file *f = &b->files[i];
+            if (!f->is_decl || !f->pname || _stricmp(f->pname, b->old_partials[k])) continue;
+            mb_error(b, "%s: this is a partial; put the whole edited copy of %s at its game name (assets/%s)", f->path,
+                     b->old_targets[k], b->old_targets[k]);
+        }
+}
+
 /* The build's report lines about the files (sh_mb_bundle.notes). */
 static void mb_report(sh_mb_bundle *b)
 {
@@ -4060,15 +3613,28 @@ static void mb_report(sh_mb_bundle *b)
     }
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
-        if (f->cls == SH_MB_CLASS_REPLACE && sh_mb_registry_request(f->request)) {
-            /* a registry copy: never refused, generated per map from intent */
-            mb_note(b, "replaces %s: express it as player intent (the product generates this registry per map)",
-                    f->request);
+        if (f->cls == SH_MB_CLASS_REPLACE && f->edit) {
+            /* an edited copy: its diff is applied per map, the copy never served */
+            sh_dt_counts c;
+            int ops;
+            size_t el = strlen(f->edit);
+            char *arr = (char *)malloc(el + 3);
+            memset(&c, 0, sizeof c);
+            if (arr) {
+                arr[0] = '[';
+                memcpy(arr + 1, f->edit, el);
+                arr[el + 1] = ']';
+                arr[el + 2] = 0;
+                (void)sh_dt_edits_files(arr, el + 2, mb_counts_cb, &c);
+                free(arr);
+            }
+            ops = sh_dt_counts_total(&c);
+            mb_note(b, "edits %s: %d operation%s (%d set, %d removed, %d list entr%s added, %d keyed, %d bag entr%s added, "
+                    "%d entr%s removed); generated per map from the game's text, the copy is never served", f->request, ops,
+                    ops == 1 ? "" : "s", c.set, c.remove, c.list, c.list == 1 ? "y" : "ies", c.keyed, c.bag,
+                    c.bag == 1 ? "y" : "ies", c.drop, c.drop == 1 ? "y" : "ies");
             declared++;
-        } else if (f->cls == SH_MB_CLASS_REPLACE && mb_replace_declared(b, f->request)) {
-            mb_note(b, "replaces %s (declared): affects only maps that declare this mod", f->request);
-            declared++;
-        } else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s", f->request);
+        } else if (f->cls == SH_MB_CLASS_REPLACE) mb_note(b, "replaces %s (a folder the product received)", f->request);
         if (f->absent && f->declared && !b->stock_decls[f->declared - 1].carried) {
             if (!first_alias) first_alias = f->request;
             aliases++;
@@ -4076,10 +3642,10 @@ static void mb_report(sh_mb_bundle *b)
         }
     }
     if (b->classes.surfaces) mb_note(b, "surfaces %u game file%s", b->classes.surfaces, b->classes.surfaces == 1 ? "" : "s");
-    if (b->classes.replaces > declared)
-        mb_note(b, "replacements are retired: %u file(s) replace game files without a \"replaces\" declaration; this "
-                "build keeps them (refusal off, or a folder the product received), a store build refuses them (put new "
-                "files under mods/%s/ or declare the intent in mod.json)", b->classes.replaces - declared, b->id);
+    if (b->edit_files)
+        mb_note(b, "edits %u game file%s: maps that declare this mod get the game's text with these edits", b->edit_files,
+                b->edit_files == 1 ? "" : "s");
+    (void)declared;
     if (aliases)
         mb_note(b, "stock alias without a file: copy the file into assets/ instead (%zu entr%s, %zu at the game's own "
                 "name, %zu under other names; first %s)", aliases, aliases == 1 ? "y" : "ies", at_game, aliases - at_game,
@@ -4279,8 +3845,8 @@ names:
              * game's own name surfaces it; a name under the key is an addition
              * or a borrow; any other name must be a game name, and the file
              * replaces it (a shadow, derived, never declared) or, for an
-             * editor type, is an editor tweak. With sh_mb_refuse_replacements
-             * on, a replacement fails the build. */
+             * editor type, is an editor tweak. A decl there is an edited copy
+             * whose edits are derived (mb_derive_edits); a binary is refused. */
             char why[SH_MB_CAUSE_MAX];
             int restore = f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source);
             int in_ns = !restore && mb_ns_test(b, f, why, sizeof why);
@@ -4307,14 +3873,15 @@ names:
                              f->path, b->id);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
-                /* A registry file (sh_mb_registry_request) is generated per map
-                 * from intent; a bundle still carrying one builds with it, so
-                 * the installed campaign packs and bare-hands keep building
-                 * until they are rebuilt with intent. */
-                if (got == 1 && sh_mb_refuse_replacements() && !sh_mb_editor_time(f->request) &&
-                    !sh_mb_registry_request(f->request) && !mb_replace_declared(b, f->request) && !mb_received(b) && !g_mb_keep_here) {
-                    mb_error(b, "would replace %s: put it under mods/%s/ or declare the intent in mod.json", f->request,
-                             b->id);
+                /* A decl at a game name is an edited copy (mb_derive_edits);
+                 * a binary has no structure to diff and the game loads it by
+                 * its fixed name, so it is refused, except in a folder the
+                 * product received. */
+                if (got == 1 && !f->is_decl && !f->is_module && !sh_mb_editor_time(f->request) && !mb_received(b) &&
+                    !g_mb_keep_here) {
+                    mb_error(b, "%s would replace the game's %s with other bytes; a binary at a game name cannot be "
+                             "merged with other mods: put it under mods/%s/ and point your decls at it", f->path,
+                             f->request, b->id);
                 } else if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {
@@ -4473,8 +4040,8 @@ names:
         mb_twin_reset(&twin);
     }
     mb_classify_all(b);
-    mb_player_resolve(b, &own, user);
-    mb_extends_resolve(b, root, user);
+    (void)user;
+    mb_derive_edits(b, root);
     mb_registries(b);
     mb_report(b);
     free(own.req);
@@ -4973,7 +4540,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
 /* A built mod.json: the author block, then the product block's manifest. */
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 {
-    static const char *const bkeys[] = { "build", "built", "bundle", "cause", "classes", "editor", "files", "format", "key",
+    static const char *const bkeys[] = { "build", "built", "bundle", "cause", "classes", "edits", "editor", "files", "format", "key",
                                          "legacy", "origin", "registries", "shadows", "stock", "validated", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i, total;
@@ -5005,6 +4572,17 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
             return 0;
         }
         out->registries = rb.p;
+    }
+    v = mbj_get(block, "edits");
+    if (v) {
+        mb_buf eb = {0};
+        if (v->t != MBJ_ARR || !mbj_canon(v, &eb, NULL, 0)) {
+            free(eb.p);
+            mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" edits must be an array");
+            return 0;
+        }
+        out->edits = eb.p;
+        out->edit_files = (unsigned)v->count;
     }
     v = mbj_get(block, "format");
     if (!v || v->t != MBJ_NUM || strcmp(v->s, "1") != 0) {
@@ -5354,6 +4932,7 @@ static char *mb_block_text(const sh_mb_bundle *b, const wchar_t *root, int with_
     mb_put(&o, "]", 1);
     mb_puts(&o, ",\"registries\":");
     mb_puts(&o, b->registries ? b->registries : "{}");
+    if (b->edits) { mb_puts(&o, ",\"edits\":"); mb_puts(&o, b->edits); }
     if (b->shadow_count) {
         mb_puts(&o, ",\"shadows\":[");
         for (i = 0; i < b->shadow_count; i++) {

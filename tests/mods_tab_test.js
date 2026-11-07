@@ -244,8 +244,8 @@ test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                                      'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                                      'mapUpgradeMod']);
-  assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'player.hands\tk.a'),
-                   {cmd: 'modsAction', action: 'chooseRegistry', arg: 'player.hands\tk.a'});
+  assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'),
+                   {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'});
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
   assert.deepEqual(modsTab.actionMessage('uninstall', 'a'), {cmd: 'modsAction', action: 'uninstall', arg: 'a'});
   for (const gone of ['remove', 'palette', 'pruneList', 'pruneApply', 'removedEmpty', 'format-c']) assert.equal(modsTab.actionMessage(gone), null);
@@ -832,31 +832,34 @@ test('scope: where a mod applies is in About only when the backend says so', () 
   assert.ok(!/Applies/.test(section(h, 'about').textContent));
 });
 /* ---- the additive model (DESIGN-additive 2.1 to 2.9) ------------------------------------------- */
-test('additive: derived facts, the declared replacement marker, registry contributions, legacy', () => {
+test('additive: derived facts, the game files a mod edits, encounters, legacy', () => {
   const n = modsTab.normalize(v3), m = k => n.mods.find(x => x.key === k);
   const r2 = m('alex.r2-imp');
   assert.equal(r2.facts.adds, 13);
-  assert.deepEqual(r2.facts.player, [{field: 'body', value: 'mods/alex.r2-imp/player_body'}, {field: 'hands', value: 'player/fp_hands.md6'}]);
-  assert.deepEqual(r2.facts.extends, [{target: 'aifsmmanager/states/imp', partial: 'mods/alex.r2-imp/imp_states'}]);
+  assert.deepEqual(r2.facts.edits.map(e => e.file), ['generated/decls/entitydef/player/coop.decl', 'generated/decls/aifsmmanager/states/imp.decl']);
   const lines = modsTab.factLines(r2);
-  assert.deepEqual(lines.map(l => l.label), ['Adds', 'Registries']);
-  assert.deepEqual(lines[1].list, ['player.body: mods/alex.r2-imp/player_body', 'player.hands: player/fp_hands.md6',
-                                   'extends aifsmmanager/states/imp with mods/alex.r2-imp/imp_states', 'encounter mods/alex.r2-imp/single_imp']);
+  assert.deepEqual(lines.map(l => l.label), ['Adds', 'Edits', 'Encounters']);
+  assert.match(lines[1].text, /^edits 2 game files; maps that declare it get the game's text with these edits$/);
+  assert.deepEqual(lines[1].list, ['entitydef/player/coop: 3 fields set', 'aifsmmanager/states/imp: 1 named entry added or replaced']);
+  assert.deepEqual(lines[2].list, ['encounter mods/alex.r2-imp/single_imp']);
   const mo = modsTab.factLines(m('local.my-overrides'));
   assert.equal(mo[0].label, 'Editor tweaks');
   assert.match(mo[0].text, /63 files, on this computer only; never in a map/);
-  const sp = modsTab.factLines(m('local.spider-mastermind')).find(l => l.label === 'Replaces');
-  assert.deepEqual(sp.list, ['generated/decls/aifsmmanager/states/spidermastermind.decl (' + modsTab.DECLARED_TEXT + ')']);
-  const hg = modsTab.factLines(m('local.hell-guard')).find(l => l.label === 'Replaces');
-  assert.match(hg.list[0], /snapmap_default\.decl \(a copy of a registry: express it as intent\)$/);
+  const sp = modsTab.factLines(m('local.spider-mastermind')).find(l => l.label === 'Edits');
+  assert.deepEqual(sp.list, ['aifsmmanager/states/spidermastermind: 2 named entries added or replaced']);
+  const hg = modsTab.factLines(m('local.hell-guard'));
+  assert.deepEqual(hg.find(l => l.label === 'Edits').list,
+                   ['entitydef/ai/conductor/coop/snapmap_default: 3 list entries added', 'aifsmmanager/states/hellguard: 1 field set, 1 field removed']);
+  assert.match(hg.find(l => l.label === 'Replaces').text, /^498 game files \(a folder the product received\)$/);
   assert.equal(m('local.hell-guard').legacy, true);
   assert.equal(modsTab.normalize(v2).mods[0].facts, null, 'a v2 document sends no facts');
   const h = live();
   h.ui.select('local.hell-guard');
   const fs = section(h, 'facts');
-  assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Replaces: 500 game files/.test(fs.textContent));
+  assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Edits: edits 2 game files/.test(fs.textContent));
   h.ui.select('alex.r2-imp');
-  assert.match(section(h, 'facts').textContent, /Registries: 4 entries generated per map that declares it/);
+  assert.match(section(h, 'facts').textContent, /Edits: edits 2 game files/);
+  assert.ok(!/Registries|player\.|extends/.test(section(h, 'facts').textContent), 'no intent keys shown');
   /* Editor tweaks are counted as editor tweaks, never as Toybox rows the mod adds. */
   h.ui.select('local.my-overrides');
   assert.match(section(h, 'adds').textContent, /^What it adds 63 editor tweaks/);
@@ -909,7 +912,7 @@ test('additive: the map modal: installed at another build, declared nothing plac
   doc.map.mods.push({key: 'airlock', id: 'airlock', version: '0.0.0', state: 'installed', placedEntities: [], placedCount: 0,
                      references: [], size: 0, attached: true, nothingPlaced: true});
   doc.map.mods.find(x => x.id === 'jo.lava-floor').state = 'otherBuild';
-  doc.map.registryClashes = [{slot: 'player.hands', providers: [{id: 'k.a', name: 'Bare Hands'}, {id: 'k.b', name: 'Gloves'}],
+  doc.map.registryClashes = [{slot: 'entitydef/player/coop/edit/handsModelMPUseDoomHands', providers: [{id: 'k.a', name: 'Bare Hands'}, {id: 'k.b', name: 'Gloves'}],
                               chosen: '', serving: 'k.a'}];
   const h = live(doc);
   h.ui.openMap();
@@ -927,13 +930,14 @@ test('additive: the map modal: installed at another build, declared nothing plac
   /* the clash: one select per slot, its change written through the backend */
   const sel = h.nodes.modsMapHost.tags('select');
   assert.equal(sel.length, 1);
-  assert.equal(sel[0].getAttribute('data-slot'), 'player.hands');
-  assert.match(modalText(h), /First-person hands/);
+  assert.equal(sel[0].getAttribute('data-slot'), 'entitydef/player/coop/edit/handsModelMPUseDoomHands');
+  assert.match(modalText(h), /edit\/handsModelMPUseDoomHands in entitydef\/player\/coop/);
   sel[0].value = 'k.b';
   sel[0].dispatch('change');
-  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'chooseRegistry', arg: 'player.hands\tk.b'});
+  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.b'});
   assert.equal(h.ui.state().model.map.clashes[0].serving, 'k.b', 'the page shows what the backend returned');
-  assert.equal(modsTab.slotText('weapons/zion/player/sp/pistol'), 'Weapon zion/player/sp/pistol');
+  assert.equal(modsTab.slotText('aifsmmanager/states/spidermastermind/edit/subGraphs/spiderMastermind'),
+               'edit/subGraphs/spiderMastermind in aifsmmanager/states/spidermastermind');
 });
 test('page contract', () => {
   assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));

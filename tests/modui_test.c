@@ -628,13 +628,35 @@ static void put_plain_mod(const char *folder, const char *id, const char *versio
     mt_write(folder, rel, body);
 }
 
+/* The game's text of the decl the edits case copies (a fake installed-content reader). */
+static const char IMP_STOCK[] = "{\r\n\tinherit = \"ai/demon/imp\";\r\n}";
+static int imp_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    (void)c;
+    if (_stricmp(source, "generated/decls/entitydef/monster/imp.decl")) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(IMP_STOCK, strlen(IMP_STOCK), sha);
+    *size = strlen(IMP_STOCK);
+    return SH_MB_STOCK_OK;
+}
+static int imp_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    (void)c; (void)sha;
+    if (_stricmp(source, "generated/decls/entitydef/monster/imp.decl")) return SH_MB_STOCK_ABSENT;
+    *len = strlen(IMP_STOCK);
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, IMP_STOCK, *len);
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops g_imp_ops = { NULL, NULL, imp_identify, NULL, imp_read };
+
 static void put_shadow_mod(const char *folder, const char *id, const char *body)
 {
     char desc[512];
     _snprintf_s(desc, sizeof desc, _TRUNCATE,
                 "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"Shade\",\"author\":\"tester\","
                 "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],"
-                "\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]}", id);   /* the escape hatch */
+                "\"legacy\":{\"source\":\"overrides\"}}", id);   /* a migrated package keeps its shadows */
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "mod.json", desc);
     mt_write(folder, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", body);
@@ -894,13 +916,13 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
     CHECK(has(doc, "already uses the installed build"));
     free(doc);
-    /* A registry choice goes through the manifest; an invalid slot is refused. */
-    doc = run_doc(SH_MODS_ACT_CHOOSE, "player.hands\talex.r2-imp");
-    CHECK(has(doc, "\"ok\":true") && has(doc, "player.hands now comes from alex.r2-imp"));
+    /* A choice between mods' edits goes through the manifest; an invalid slot is refused. */
+    doc = run_doc(SH_MODS_ACT_CHOOSE, "entitydef/player/coop/edit/handsModelMPUseDoomHands\talex.r2-imp");
+    CHECK(has(doc, "\"ok\":true") && has(doc, "entitydef/player/coop/edit/handsModelMPUseDoomHands now comes from alex.r2-imp"));
     free(doc);
     {
         char chosen[80];
-        CHECK(sh_modregistry_choices_get("player.hands", chosen, sizeof chosen) && !strcmp(chosen, "alex.r2-imp"));
+        CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", chosen, sizeof chosen) && !strcmp(chosen, "alex.r2-imp"));
     }
     doc = run_doc(SH_MODS_ACT_CHOOSE, "bad slot\talex.r2-imp");
     CHECK(has(doc, "\"ok\":false"));
@@ -1089,8 +1111,9 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a; served by alex.shade-a\n"));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 grandfathered shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: grandfathered shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a "
+                      "(migrated); served by alex.shade-a\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s)\n"));
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
@@ -1110,9 +1133,9 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
         CHECK(bundle_has(doc, "alex.shade-a", "\"state\":\"installed\""));   /* a conflict is the doctor's, not the tab's */
-        /* Derived facts: the declared replacement carries the escape-hatch marker. */
-        CHECK(has(doc, "\"replacements\":[{\"path\":\"generated/decls/entitydef/monster/imp.decl\",\"declared\":true,"
-                       "\"registry\":false}],\"registries\":{}}"));
+        /* Derived facts: a grandfathered replacement is no edited copy. */
+        CHECK(has(doc, "\"replacements\":[{\"path\":\"generated/decls/entitydef/monster/imp.decl\",\"edits\":false}],"
+                       "\"edits\":[],\"registries\":{}"));
         CHECK(has(doc, "\"facts\":{\"adds\":"));
         free(doc);
         dr = doctor(1);
@@ -1161,7 +1184,7 @@ int main(int argc, char **argv)
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: bundle mods\\alex.shade-b (alex.shade-b): skipped; "));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 grandfathered shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s)\n"));
         /* Installed while the index is stale: unindexed until a rescan. */
         sh_modserve_index_build(g_root);
         {
@@ -2036,11 +2059,9 @@ int main(int argc, char **argv)
         free(doc);
     }
 
-    printf("-- the doctor: an extends partial is the generator's input, listed by the registry report, never a conflict\n");
+    printf("-- an old descriptor's extends partial is refused with what to put instead\n");
     {
         char part[MAX_PATH];
-        const char *dr2, *first, *last;
-        int c_index = -1, c_list = -1;
         _snprintf_s(part, sizeof part, _TRUNCATE, "%s\\authoring\\alex.part", tmp);
         mt_write(part, "mod.json", "{\"id\":\"alex.part\",\"version\":\"1.0.0\",\"name\":\"Partial\",\"author\":\"t\","
                                    "\"extends\":{\"entitydef/ai/conductor/coop/snapmap_default\":\"mods/alex.part/conductor_entries\"}}");
@@ -2048,23 +2069,30 @@ int main(int argc, char **argv)
                  "{\r\n\tedit = {\r\n\t\taiTypeList = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"1048576\";\r\n"
                  "\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
         doc = run_doc(SH_MODS_ACT_INSTALL, part);
+        if (!has(doc, "this is a partial")) printf("    %s\n", doc);
+        CHECK(has(doc, "\"ok\":false") && has(doc, "this is a partial; put the whole edited copy of "
+                                                  "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl at its game name"));
+        free(doc);
+    }
+
+    printf("-- an edited copy of a game file: the tab's facts list the file and its operations\n");
+    {
+        char ed[MAX_PATH];
+        sh_mb_set_stock_ops(&g_imp_ops);
+        _snprintf_s(ed, sizeof ed, _TRUNCATE, "%s\\authoring\\alex.edits", tmp);
+        mt_write(ed, "mod.json", "{\"id\":\"alex.edits\",\"version\":\"1.0.0\",\"name\":\"Edits\",\"author\":\"t\"}");
+        mt_write(ed, "assets\\generated\\decls\\entitydef\\monster\\imp.decl",
+                 "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"3\";\r\n}");
+        doc = run_doc(SH_MODS_ACT_INSTALL, ed);
         if (!has(doc, "\"ok\":true")) printf("    %s\n", doc);
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
-        dr2 = doctor(0);
-        CHECK(dr2 && !has(dr2, "conflict generated/decls/entitydef/mods/alex.part/conductor_entries.decl"));
-        CHECK(has(dr2, "MODS: doctor: registry partial generated/decls/entitydef/mods/alex.part/conductor_entries.decl: partial, "
-                       "read by the generator (alex.part@1.0.0 ("));
-        /* The index line and the conflict list agree. */
-        first = dr2 ? strstr(dr2, "MODS: doctor: serving index: ") : NULL;
-        if (first && (first = strstr(first, " shadow(s), ")) != NULL) c_index = atoi(first + 12);
-        for (last = dr2; last && (first = strstr(last, " conflict(s), ")) != NULL; last = first + 1) {
-            const char *bol = first;
-            while (bol > dr2 && bol[-1] != '\n') bol--;
-            if (!strncmp(bol, "MODS: doctor: ", 14) && bol[14] >= '0' && bol[14] <= '9') c_list = atoi(bol + 14);
-        }
-        if (c_index != c_list) printf("    index %d, list %d\n%s\n", c_index, c_list, dr2 ? dr2 : "");
-        CHECK(c_index >= 0 && c_index == c_list);
+        doc = list_doc();
+        CHECK(has(doc, "\"replacements\":[{\"path\":\"generated/decls/entitydef/monster/imp.decl\",\"edits\":true}],"
+                                            "\"edits\":[{\"file\":\"generated/decls/entitydef/monster/imp.decl\",\"ops\":2,\"set\":2,"));
+        union_add(doc);
+        free(doc);
+        sh_mb_set_stock_ops(NULL);
     }
 
     /* A map that records the product version it needs: the document says which. */
