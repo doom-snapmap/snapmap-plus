@@ -33,7 +33,12 @@ static int g_failed, g_checks;
 
 /* ---- serving-layer doubles the real manifest calls ------------------------------------------ */
 
-void backend_log(const char *line) { (void)line; }
+/* The manifest's "MODS: map: <key>: <sentence>" lines (ADD-V5 B5). */
+static int g_map_notes;
+void backend_log(const char *line)
+{
+    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "was never published")) g_map_notes++;
+}
 int sh_modserve_active(void) { return 1; }
 /* The registry choices' input (modmanifest.c gives them at every load). */
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -1028,6 +1033,37 @@ static void gate_editor_substitutes(void)
     reset();
 }
 
+/* The cause sentence an editor-flagged parse finds for a row nothing serves
+ * is said only after the gate: a published play the parse detour did not
+ * recognise (the editor flag set) is gated, so it is never said; a parse no
+ * gate takes (an editor open) says it once, at the next tick. */
+static void gate_notes_after_the_decision(void)
+{
+    printf("-- the gate: a row's cause is logged after the gate's decision, once\n");
+    reset();
+    g_map_notes = 0;
+    sh_modmanifest_set_editor_load(1);
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    sh_modmanifest_set_editor_load(0);
+    CHECK(g_map_notes == 0 && sh_modmanifest_load_notes_pending() == 1);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(sh_modmanifest_load_notes_pending() == 0);
+    tick(3);
+    CHECK(g_map_notes == 0);
+    reset();
+    /* An editor open: no gate takes the parse. */
+    g_map_notes = 0;
+    sh_modmanifest_set_editor_load(1);
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    sh_modmanifest_set_editor_load(0);
+    CHECK(g_map_notes == 0);
+    tick(1);
+    CHECK(g_map_notes == 1 && sh_modmanifest_load_notes_pending() == 0);
+    tick(2);
+    CHECK(g_map_notes == 1);
+    reset();
+}
+
 static void gate_decision_and_wording(void)
 {
     sh_modpub_gate_facts f;
@@ -1339,6 +1375,7 @@ int main(void)
     gate_other_build_prompt();
     gate_product_version();
     gate_editor_substitutes();
+    gate_notes_after_the_decision();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

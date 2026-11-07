@@ -130,6 +130,17 @@ static pub_record g_record;
  * and the completion (and launch) it feeds run in one call chain, inside one
  * frame; a record from an earlier frame belongs to some other load. */
 static unsigned long g_frame;
+/* The parse whose cause sentences the manifest holds (ADD-V5 B5): a gate that
+ * takes it drops them; a later frame's poll logs them, since no gate did. */
+static int g_notes_held;
+static unsigned long g_notes_frame;
+
+static void pub_notes_gated(void)
+{
+    if (!g_notes_held) return;
+    g_notes_held = 0;
+    (void)sh_modmanifest_load_notes_flush(0);
+}
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
@@ -722,9 +733,11 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
 {
     sh_modmanifest_list rows;
     unsigned long sequence = (unsigned long)InterlockedIncrement(&g_parse_sequence);
-    if (InterlockedCompareExchange(&g_resuming, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_resuming, 0, 0)) { (void)sh_modmanifest_load_notes_flush(0); return; }
     if (!pub_on_main()) { g_record.valid = 0; return; }
     pub_record_clear(&g_record);
+    g_notes_held = sh_modmanifest_load_notes_pending() > 0;
+    g_notes_frame = g_frame;
     /* The same map launched again while its hold asks or downloads (the
      * player pressed Play once more, or the browser re-issued the request):
      * the hold goes on, and this launch is held with it rather than starting
@@ -943,6 +956,9 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
             pub_logf("MODS: %s received map %p, last parsed in an earlier frame; not gated", pub_hook_name(hook), map);
         return 1;
     }
+    /* This gate decides on the parse: the cause sentences the editor's
+     * substitution held for it are not said (the gate says its own). */
+    pub_notes_gated();
     if (pub_is_completion(hook) && record->kind == SH_MODPUB_PARSE_OTHER && record->rows.count)
         pub_logf("MODS: %s: the parse that filled its map was not recognized as a published read (another detour "
                  "on the parser changed its return address); the gate identifies it by its map object",
@@ -1001,6 +1017,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
      * relaunch from the map cache) has none. */
     if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
     if (map && record->map != map) return 1;
+    pub_notes_gated();
     pub_product_check(&record->rows, "", "");
     missing = pub_count_missing(&record->rows);
     if (!missing) { pub_record_clear(record); return 1; }
@@ -1520,6 +1537,12 @@ void sh_modpublished_poll(void)
     pub_hold *h = &g_hold;
     g_frame++;
     if (!g_ops_set) return;
+    /* A parse no gate took in its frame was the editor's: its held cause
+     * sentences are said now, once. */
+    if (g_notes_held && g_notes_frame != g_frame && pub_on_main()) {
+        g_notes_held = 0;
+        (void)sh_modmanifest_load_notes_flush(1);
+    }
     if (h->state == HOLD_IDLE && !g_notice[0] && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
     pub_orphans_retire();

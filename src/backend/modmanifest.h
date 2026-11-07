@@ -239,6 +239,14 @@ typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char 
                                             char *why, size_t why_cap);
 void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);
 void sh_modmanifest_set_editor_load(int editor);
+/* The cause sentences such a load found for rows nothing serves ("MODS: map:
+ * <key>: <sentence>") are held, not logged, until the gate has decided: a
+ * gate that takes the parse (a published or launched map the parse detour
+ * did not recognise as one) says its own cause, so it drops them (say 0); a
+ * parse no gate took was the editor's, and its notes are logged once (say 1).
+ * A new load replaces them. Returns the number logged or dropped. */
+int  sh_modmanifest_load_notes_flush(int say);
+int  sh_modmanifest_load_notes_pending(void);
 /* The build serving in place of a declared one in the open map: 1 with it in
  * out, 0 when `declared` is served as itself. */
 int  sh_modmanifest_substituted(const char *declared, char *out, size_t cap);

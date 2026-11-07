@@ -1044,6 +1044,7 @@ void sh_modmanifest_reset(void)
     AcquireSRWLockExclusive(&g_current_lock);
     g_choices[0] = 0;
     ReleaseSRWLockExclusive(&g_current_lock);
+    (void)sh_modmanifest_load_notes_flush(0);
 }
 
 static void mm_subst_load(const sh_modmanifest_list *list);
@@ -1160,6 +1161,39 @@ static void mm_subst_drop(const char *from)
     ReleaseSRWLockExclusive(&g_current_lock);
 }
 
+/* The held cause sentences of the last editor load (sh_modmanifest_load_notes_flush). */
+#define MM_NOTES_MAX 16
+static char g_notes[MM_NOTES_MAX][700];
+static int g_nnotes, g_notes_over;
+
+int sh_modmanifest_load_notes_pending(void)
+{
+    int n;
+    AcquireSRWLockShared(&g_current_lock);
+    n = g_nnotes;
+    ReleaseSRWLockShared(&g_current_lock);
+    return n;
+}
+
+int sh_modmanifest_load_notes_flush(int say)
+{
+    char lines[MM_NOTES_MAX][700];
+    int n, over, i;
+    AcquireSRWLockExclusive(&g_current_lock);
+    n = g_nnotes;
+    over = g_notes_over;
+    memcpy(lines, g_notes, sizeof lines[0] * (size_t)n);
+    g_nnotes = g_notes_over = 0;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    for (i = 0; say && i < n; i++) backend_log(lines[i]);
+    if (say && over) {
+        char line[96];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: map: %d more row(s) nothing serves", over);
+        backend_log(line);
+    }
+    return n + over;
+}
+
 /* At a load: which declared builds the editor serves through another build. */
 static void mm_subst_load(const sh_modmanifest_list *list)
 {
@@ -1168,6 +1202,7 @@ static void mm_subst_load(const sh_modmanifest_list *list)
     size_t i;
     AcquireSRWLockExclusive(&g_current_lock);
     g_nsubst = 0;
+    g_nnotes = g_notes_over = 0;
     ReleaseSRWLockExclusive(&g_current_lock);
     if (!list || !editor || !sub) return;
     for (i = 0; i < list->count; i++) {
@@ -1188,7 +1223,14 @@ static void mm_subst_load(const sh_modmanifest_list *list)
                         "'sh_mods map upgrade \"%s\"' (the Mods tab's Upgrade this map) moves the map to it",
                         r->id, r->bundle, to, r->id);
         } else if (why[0]) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: map: %s: %s", r->id, why);
+            /* Held until the gate decides (B5): for a published map this
+             * parse was not recognised as, the sentence is not the cause. */
+            AcquireSRWLockExclusive(&g_current_lock);
+            if (g_nnotes < MM_NOTES_MAX)
+                _snprintf_s(g_notes[g_nnotes++], sizeof g_notes[0], _TRUNCATE, "MODS: map: %s: %s", r->id, why);
+            else g_notes_over++;
+            ReleaseSRWLockExclusive(&g_current_lock);
+            continue;
         } else continue;
         backend_log(line);
     }
