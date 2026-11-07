@@ -1687,8 +1687,8 @@ void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap)
 {
     if (!out || !cap) return;
     if (!c) { out[0] = 0; return; }
-    _snprintf_s(out, cap, _TRUNCATE, "%u adds, %u borrows, %u replaces, %u editor, %u surfaces", c->adds, c->borrows,
-                c->replaces, c->editor, c->surfaces);
+    _snprintf_s(out, cap, _TRUNCATE, "%u adds, %u borrows, %u edits, %u replaces, %u editor, %u surfaces", c->adds,
+                c->borrows, c->edits, c->replaces, c->editor, c->surfaces);
 }
 
 /* Whether a non-legacy build refuses replacements (DESIGN-additive 2.1).
@@ -3370,6 +3370,7 @@ static void mb_classify_all(sh_mb_bundle *b)
     memset(&b->classes, 0, sizeof b->classes);
     for (i = 0; i < b->file_count; i++) {
         sh_mb_file *f = &b->files[i];
+        f->edited = 0;
         f->cls = mb_class_of(b, f);
         switch (f->cls) {
         case SH_MB_CLASS_ADD: b->classes.adds++; break;
@@ -3529,6 +3530,28 @@ static wchar_t *mb_file_wpath(const wchar_t *root, const char *path)
  * game's text of the same decl is recorded (b->edits); the product applies
  * it per map and never serves the copy. A copy or a game text outside the
  * decl grammar is refused. Then a partial a retired intent key names. */
+/* The edited copies (sh_mb_file.edited): each REPLACE file the bundle's edits
+ * name moves from classes.replaces to classes.edits. After mb_classify_all,
+ * once the edits are derived (a build) or read (a load). */
+static void mb_mark_edited_cb(void *context, const char *file, const sh_dt_counts *counts)
+{
+    sh_mb_bundle *b = (sh_mb_bundle *)context;
+    size_t i;
+    (void)counts;
+    for (i = 0; file && i < b->file_count; i++) {
+        sh_mb_file *f = &b->files[i];
+        if (f->cls != SH_MB_CLASS_REPLACE || f->edited || _stricmp(f->request, file)) continue;
+        f->edited = 1;
+        if (b->classes.replaces) b->classes.replaces--;
+        b->classes.edits++;
+    }
+}
+
+static void mb_mark_edited(sh_mb_bundle *b)
+{
+    if (b->edits) (void)sh_dt_edits_files(b->edits, strlen(b->edits), mb_mark_edited_cb, b);
+}
+
 static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
 {
     mb_buf o = {0};
@@ -3591,6 +3614,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         if (o.oom) { free(o.p); mb_error(b, "out of memory"); }
         else b->edits = o.p;
     }
+    mb_mark_edited(b);
     for (k = 0; k < b->old_partial_count; k++)
         for (i = 0; i < b->file_count; i++) {
             const sh_mb_file *f = &b->files[i];
@@ -4653,6 +4677,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "mod.json files exceed 256 MiB"); return 0; }
     for (i = 0; i < out->file_count; i++) out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
     mb_classify_all(out);
+    mb_mark_edited(out);
     mb_finish(out);
     if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
         mb_error(out, "mod.json changed since it was built (the author block or the product block was edited); "
@@ -4915,6 +4940,8 @@ static char *mb_block_text(const sh_mb_bundle *b, const wchar_t *root, int with_
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"classes\":{\"adds\":%u", b->classes.adds);
     mb_puts(&o, num);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"borrows\":%u", b->classes.borrows);
+    mb_puts(&o, num);
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"edits\":%u", b->classes.edits);
     mb_puts(&o, num);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"replaces\":%u", b->classes.replaces);
     mb_puts(&o, num);

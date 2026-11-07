@@ -120,7 +120,7 @@ test('normalize: the v3 fixture is the owner store', () => {
   assert.equal(hg.build, 2);
   assert.equal(hg.files - hg.pointers, 24);
   assert.equal(hg.pointers, 476);
-  assert.equal(hg.counts.shadows, 500);
+  assert.equal(hg.counts.shadows, 498);   /* its two edited copies are edits, not replaced stock files */
   assert.equal(hg.origin, 'migration');
   assert.equal(hg.migratedFrom, 'overrides\\hell-guards');
   assert.deepEqual(hg.cvars, [{name: 'g_useImageBlackList', value: '0'}, {name: 'g_useResourceBlackList', value: '0'}]);
@@ -451,7 +451,7 @@ test('details: every section for a v3 mod', () => {
   assert.ok(!/Author/.test(about), 'an empty author is left out');
   const adds = section(h, 'adds').textContent;
   assert.match(adds, /3 Toybox rows Hell Guard \(hammer\) Hell Guard \(shield\) Hell Guard \(fist\)/);
-  assert.match(adds, /Replaces 500 stock files/);
+  assert.match(adds, /Replaces 498 stock files/);
   assert.match(adds, /9 sounds/);
   assert.ok(!/movie|module|virtual/.test(adds), 'zero counts are left out');
   const files = section(h, 'files');

@@ -556,7 +556,9 @@ above), and
 `snapmap-plus` is the product's, the whole built manifest: format, key, build,
 bundle hash, built time, validated and cause, origin (`by-hand` for a folder
 the author made), a converted package's legacy record, the derived `classes`
-counts, `editor` (the editor tweaks' request paths), `registries` (banks,
+counts (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
+counts under `edits`, never `replaces`, which is only what a folder the product received replaces;
+the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
 conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"inAssets": false` when no file stands behind one). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
@@ -1708,7 +1710,9 @@ map's choices).
   the key word, the name, the statement) or `bag`/`unbag` (the container, the
   statement); a path is the member keys from the decl's top (`edit`,
   `item[4]`, `anim "clip"`). The copy stays in the bundle (hashed, uploaded,
-  its needs scanned) and in `shadows`, classified a replacement. Refused: a copy
+  its needs scanned) and in `shadows`; it is classified a replacement but marked
+  edited (`sh_mb_file.edited`, counted in `classes.edits`, never in
+  `classes.replaces`, the Mods tab's replaced stock files or a doctor conflict). Refused: a copy
   or a game text outside the grammar ("does not parse as a decl (line N: ...);
   the product derives the edits from the whole edited copy"); a game text the
   reader cannot supply; a binary at a game name with other bytes ("a binary at

@@ -392,9 +392,10 @@ var modsTab = (function () {
       out.push({label: 'Edits', text: 'edits ' + plural(f.edits.length, 'game file') + '; maps that declare it get the game\'s text with these edits',
                 list: f.edits.map(editLine)});
     }
+    /* An edited copy is an edit, never a replacement: facts.replaces and counts.shadows leave it out. */
     var other = f.replacements.filter(function (r) { return !r.edits; });
-    if (other.length || f.replaces > f.replacements.length) {
-      out.push({label: 'Replaces', text: plural(Math.max(other.length, f.replaces - f.edits.length), 'game file') + ' (a folder the product received)',
+    if (other.length || f.replaces > 0) {
+      out.push({label: 'Replaces', text: plural(Math.max(other.length, f.replaces), 'game file') + ' (a folder the product received)',
                 list: other.map(function (r) { return r.path; })});
     }
     var reg = [];

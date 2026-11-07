@@ -589,7 +589,8 @@ static int mu_model_build(mu_model *m)
                 const sh_mb_file *f = &e->bundle.files[k];
                 /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
                 if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
-                if (f->shadowed) u->shadows++;
+                /* An edited copy is counted under edits, never as a replaced stock file. */
+                if (f->shadowed && !f->edited) u->shadows++;
             }
         if (!e->loaded) {
             u->state = "skipped";
@@ -864,7 +865,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     mu_knum(b, "borrows", bd->classes.borrows, 0);
     mu_knum(b, "surfaces", bd->classes.surfaces, 0);
     mu_knum(b, "editor", bd->classes.editor, 0);
-    mu_knum(b, "replaces", bd->classes.replaces, 0);
+    mu_knum(b, "replaces", bd->classes.replaces, 0);   /* edited copies are classes.edits, not here */
     mu_puts(b, ",\"editorTweaks\":[");
     for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;
@@ -879,7 +880,7 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
         const sh_mb_file *f = &bd->files[k];
         int edited = 0;
         if (f->cls != SH_MB_CLASS_REPLACE) continue;
-        edited = bd->edits && strstr(bd->edits, f->request) != NULL;
+        edited = f->edited;
         if (!first) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "path", f->request, 1);

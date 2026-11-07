@@ -989,7 +989,8 @@ static void test_refusals(const char *fixture, const char *tmp)
     {
         const sh_mb_file *imp = find_file(&b, "generated/decls/entitydef/monster/imp.decl");
         CHECK(b.errors == 0 && b.edit_files == 1 && b.edits && imp && imp->edit && imp->shadowed &&
-              imp->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1 && b.shadow_count == 1);
+              imp->cls == SH_MB_CLASS_REPLACE && imp->edited && b.classes.replaces == 0 && b.classes.edits == 1 &&
+              b.shadow_count == 1);
         CHECK(b.edits && strstr(b.edits, "\"file\":\"generated/decls/entitydef/monster/imp.decl\"") &&
               strstr(b.edits, "\"op\":\"set\",\"path\":[\"inherit\"]") && strstr(b.edits, "\"op\":\"remove\",\"path\":[\"editorVars\"]"));
         if (b.edits && !strstr(b.edits, "\"op\":\"set\",\"path\":[\"inherit\"]")) fprintf(stderr, "  edits: %s\n", b.edits);
@@ -1500,13 +1501,13 @@ static void test_classes(const char *fixture, const char *tmp)
     CHECK(f && f->cls == SH_MB_CLASS_ADD && !f->shadowed);
     f = find_file(&b, "generated/decls/entitydef/mods/alex.r2-imp/imp_copy.decl");
     CHECK(f && f->cls == SH_MB_CLASS_ADD);
-    CHECK(b.classes.adds == 13 && b.classes.borrows == 1 && b.classes.surfaces == 1 && b.classes.replaces == 1 &&
-          b.classes.editor == 1);
+    CHECK(b.classes.adds == 13 && b.classes.borrows == 1 && b.classes.surfaces == 1 && b.classes.replaces == 0 &&
+          b.classes.edits == 1 && b.classes.editor == 1);
     CHECK(count_class(&b, SH_MB_CLASS_EDITOR) == 1 && count_class(&b, SH_MB_CLASS_NONE) == 0);
     {
         char line[160];
         sh_mb_classes_text(&b.classes, line, sizeof line);
-        CHECK(!strcmp(line, "13 adds, 1 borrows, 1 replaces, 1 editor, 1 surfaces"));
+        CHECK(!strcmp(line, "13 adds, 1 borrows, 1 edits, 0 replaces, 1 editor, 1 surfaces"));
     }
     CHECK(has_note(&b, "surfaces 1 game file") && !has_note(&b, "surfaces generated/"));
     /* The shadows are exactly the files at game names outside the namespace. */
@@ -1521,7 +1522,7 @@ static void test_classes(const char *fixture, const char *tmp)
     text = sh_mb_read_file(path, 1 << 20, NULL);
     CHECK(text && strstr((const char *)text, "\"key\": \"alex.r2-imp\"") &&
           strstr((const char *)text, "\"origin\": \"by-hand\"") &&
-          strstr((const char *)text, "\"classes\": {") && strstr((const char *)text, "\"replaces\": 1") &&
+          strstr((const char *)text, "\"classes\": {") && strstr((const char *)text, "\"edits\": 1") && strstr((const char *)text, "\"replaces\": 0") &&
           strstr((const char *)text, "\"editor\": [") && strstr((const char *)text, "\"registries\": {") &&
           strstr((const char *)text, "\"edits\": [") &&
           strstr((const char *)text, "\"surfaces\": 1") && !strstr((const char *)text, "noops") &&
@@ -1530,7 +1531,8 @@ static void test_classes(const char *fixture, const char *tmp)
     CHECK(sh_mb_load_folder(folder, &back));
     if (back.errors) fprintf(stderr, "  classes reload: %s\n", back.first_cause);
     CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 13 && back.classes.borrows == 1 &&
-          back.classes.surfaces == 1 && back.classes.replaces == 1 && back.classes.editor == 1 && back.edit_files == 1);
+          back.classes.surfaces == 1 && back.classes.replaces == 0 && back.classes.edits == 1 && back.classes.editor == 1 &&
+          back.edit_files == 1);
     sh_mb_free(&back);
     /* The player entity, a game file several mods edit: an edited copy's
      * field sets, removed blocks and added blocks are its edits; nothing is
@@ -1542,7 +1544,8 @@ static void test_classes(const char *fixture, const char *tmp)
         mt_write(reg, "assets\\generated\\decls\\entitydef\\player\\coop.decl",
                  "{\r\n\tinherit = \"player/mp\";\r\n\tedit = {\r\n\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n"
                  "\t\tdamageGroups = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdamageScale = 1.5;\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
-        CHECK(sh_mb_build(reg, &FAKE_RESOLVER, &back) && back.classes.replaces == 1 && back.edit_files == 1);
+        CHECK(sh_mb_build(reg, &FAKE_RESOLVER, &back) && back.classes.replaces == 0 && back.classes.edits == 1 &&
+              back.edit_files == 1);
         if (back.errors) fprintf(stderr, "  coop refused: %s\n", back.first_cause);
         CHECK(back.edits && strstr(back.edits, "\"op\":\"remove\",\"path\":[\"editorVars\"]") &&
               strstr(back.edits, "\"op\":\"remove\",\"path\":[\"edit\",\"masterWeaponList\"]") &&
