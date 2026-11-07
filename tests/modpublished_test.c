@@ -1264,6 +1264,172 @@ static void gate_other_build_prompt(void)
                               "(4.0 MB). Download and install now?"));
 }
 
+/* The player's own content (DESIGN-additive 2.8 as amended by ADD-L13): a My
+ * Maps play, a rawmap load or a prefab placement whose declared build cannot
+ * be obtained, while its key is installed at another build, goes on with that
+ * build, as the editor does; a community map from the browser still denies. */
+static int g_ready_calls;
+static char g_ready_name[96];
+static void f_prefab_ready(const char *name, const sh_modmanifest_list *rows)
+{
+    (void)rows;
+    g_ready_calls++;
+    strcpy_s(g_ready_name, sizeof g_ready_name, name ? name : "");
+}
+
+#define SUBST_LINE_A "alex.pink-imp: declared at build aaaaaaaaaaaaaaaa (not installed), serving build cccccccccccccccc"
+
+static void gate_own_substitutes(void)
+{
+    sh_modpub_gate_facts f;
+    sh_modmanifest_list rows;
+    sh_modmanifest_row row;
+    char hash[80];
+    printf("-- the gate: the player's own content substitutes the installed build of a key it cannot obtain\n");
+    memset(&f, 0, sizeof f);
+    f.own = 1;
+    f.other_build = 1;
+    f.store = SH_MODPUB_STORE_ABSENT;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
+    f.published = 1;                                                   /* published from here, then gone */
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
+    f.published = 0;
+    f.store = SH_MODPUB_STORE_UNREACHABLE;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);
+    f.store = SH_MODPUB_STORE_HAS;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_OBTAIN);         /* obtainable: fetched beside */
+    f.game_lacks = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_SUBSTITUTE);     /* listed but not installable here */
+    /* Nothing of the key installed: the four causes, as everywhere. */
+    memset(&f, 0, sizeof f);
+    f.own = 1;
+    f.store = SH_MODPUB_STORE_ABSENT;
+    f.published = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GONE);
+    f.published = 0;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_NEVER_PUBLISHED);
+    f.store = SH_MODPUB_STORE_UNREACHABLE;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_UNREACHABLE);
+    f.store = SH_MODPUB_STORE_HAS;
+    f.game_lacks = 1;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GAME_REVISION);
+    /* A community map (not own): the author's build or cause 1. */
+    memset(&f, 0, sizeof f);
+    f.other_build = 1;
+    f.published = 1;
+    f.store = SH_MODPUB_STORE_ABSENT;
+    CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_GONE);
+
+    printf("-- the gate: a My Maps play substitutes, says so, and the Play serves the installed build\n");
+    reset();
+    F.store_a = 0;
+    F.other_build_a = 1;
+    sh_modmanifest_set_editor_load(1);                 /* the parse detour: a read that is not a published map's */
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(!sh_modpublished_holding() && F.resumes == 1 && F.resume_hook == SH_MODPUB_LOCAL_OFFLINE);
+    CHECK(F.asks == 0 && F.fetch_calls == 0 && F.launch_refused == 0 && F.drop_ui == 0 && F.store_calls == 1);
+    CHECK(strstr(F.prints_all, "My Maps play: " SUBST_LINE_A "; 'sh_mods map upgrade \"alex.pink-imp\"' (the Mods "
+                               "tab's Upgrade this map) moves the map to it") != NULL);
+    if (getenv("MODPUB_TEST_WORDS")) printf("    substitute: %s", F.prints_all);
+    CHECK(F.activations == 1);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "alex.pink-imp");
+    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
+    CHECK(sh_modpub_row_substitute(&row, hash, sizeof hash) == 1 && !strcmp(hash, OTHER_A));
+    /* The launched map's listing declares the installed build (modui's
+     * mu_listing_set reads the manifest's substitution). */
+    CHECK(sh_modmanifest_substituted(HASH_A, hash, sizeof hash) == 1 && !strcmp(hash, OTHER_A));
+    /* The same map again this session: no hold, no store check. */
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.store_calls == 1);
+    /* The installed build changed: the substitution no longer holds. */
+    F.other_build_a = 0;
+    CHECK(sh_modpub_row_substitute(&row, hash, sizeof hash) == 0 && !hash[0]);
+    F.other_build_a = 1;
+    /* A community map naming the same build, from the browser: cause 1. */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(F.resumes == 1 && F.launch_refused == 1 && F.refused_hook == SH_MODPUB_BROWSER_PLAY);
+    CHECK(!strcmp(F.last_ask, "This map needs Pink Imp (alex.pink-imp) at a build that is no longer available: its "
+                              "author unpublished it, or it was removed. This is permanent on this machine."));
+    sh_modmanifest_set_editor_load(0);
+
+    /* The store did not answer: the player's own map still plays. */
+    reset();
+    F.store_a = -1;
+    F.other_build_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(F.resumes == 1 && F.asks == 0 && F.launch_refused == 0);
+    /* The store has the declared build: it is offered, naming both builds. */
+    reset();
+    F.other_build_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "you have build cccccccccccccccc. Download build") != NULL);
+    /* ...and when that fetch then fails (the build left the store), it substitutes. */
+    F.fetch_fails = -11;
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.launch_refused == 0 && strstr(F.prints_all, SUBST_LINE_A) != NULL);
+    /* Two mods: one substituted, the other offered alone and fetched. */
+    reset();
+    F.other_build_a = 1;
+    F.store_a = 0;
+    parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "bob.room") != NULL && !strstr(F.last_ask, "alex.pink-imp"));
+    if (getenv("MODPUB_TEST_WORDS")) printf("    mixed: %s\n", F.last_ask);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.installed_b && F.activated_count == 2);
+    /* A substitution with another mod nothing serves: denied for that one alone. */
+    reset();
+    F.other_build_a = 1;
+    F.store_a = 0;
+    F.store_b = 0;
+    parse(SH_MODPUB_PARSE_OTHER, TWO_MODS, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    tick(3);
+    CHECK(F.resumes == 0 && F.launch_refused == 1 && strstr(F.last_ask, "This map needs bob.room at a build that is not "
+                                                                        "installed and was never published.") == F.last_ask);
+    CHECK(!strstr(F.last_ask, "more mod"));
+
+    printf("-- the gate: a rawmap load and a prefab placement substitute the same way\n");
+    reset();
+    F.store_a = 0;
+    F.other_build_a = 1;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick(3);
+    CHECK(!sh_modpublished_holding() && F.resumes == 1 && F.resume_hook == SH_MODPUB_RAWMAP_LOAD && F.asks == 0);
+    CHECK(strstr(F.prints_all, "rawmap load: " SUBST_LINE_A) != NULL);
+    /* Its reopen finds the row served. */
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
+    sh_modmanifest_list_free(&rows);
+    reset();
+    g_ready_calls = 0;
+    sh_modpub_set_prefab_ready(f_prefab_ready);
+    F.store_a = 0;
+    F.other_build_a = 1;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
+    sh_modmanifest_list_free(&rows);
+    tick(3);
+    CHECK(!sh_modpublished_holding() && g_ready_calls == 1 && !strcmp(g_ready_name, "Door Kit") && F.resumes == 0);
+    CHECK(F.drop_ui == 0 && strstr(F.prints_all, "prefab placement 'Door Kit': " SUBST_LINE_A
+                                                 "; the placement adds that build to the map") != NULL);
+    reset();
+}
+
 static void gate_product_version(void)
 {
     printf("-- the product-version notice: once, by name, when the running product is older\n");
@@ -1375,6 +1541,7 @@ int main(void)
     gate_other_build_prompt();
     gate_product_version();
     gate_editor_substitutes();
+    gate_own_substitutes();
     gate_notes_after_the_decision();
     reset();
     sh_modpub_test_set_ops(NULL);

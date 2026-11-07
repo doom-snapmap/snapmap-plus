@@ -231,10 +231,14 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * the map (sh_mods map upgrade, the Mods tab) or a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
  * (why: the gate's sentence, may be empty). Bound by modpublished.c, which
- * asks its denial gate (sh_modpub_gate_decide, an editor open). Play, the hub,
- * rawmap loads and prefab placements keep their gate's denial; only a parse
+ * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
  * the engine makes for the editor (sh_modmanifest_set_editor_load 1, set by
- * the parse detour for a read that is not a published map's) substitutes. */
+ * the parse detour for a read that is not a published map's, which includes
+ * a My Maps play's and the hold's own resume) substitutes here. The holds
+ * decide on their own: a My Maps play, a rawmap load or a prefab placement
+ * whose declared build the store cannot supply substitutes too (the gate's
+ * SUBSTITUTE for the player's own content), and the launched map's listing
+ * declares the build this table names; a community map's Play denies. */
 typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap,
                                             char *why, size_t why_cap);
 void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);

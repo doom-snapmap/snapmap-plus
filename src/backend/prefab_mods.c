@@ -282,7 +282,12 @@ static int pm_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
     return o->row_state ? o->row_state(row, cause, cap) : SH_MODPUB_ROW_MISSING;
 }
 
-static int pm_installed(const sh_modmanifest_row *row) { return pm_row_state(row, NULL, 0) == SH_MODPUB_ROW_SERVED; }
+/* Served, or served by the installed build of its key that the gate
+ * substituted for it this session (modpublished.h, SUBSTITUTE). */
+static int pm_installed(const sh_modmanifest_row *row)
+{
+    return pm_row_state(row, NULL, 0) == SH_MODPUB_ROW_SERVED || sh_modpub_row_substitute(row, NULL, 0);
+}
 
 static const char *pm_state_word(int state)
 {
@@ -658,7 +663,17 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
         char label[SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 4], note[256] = "", line[PM_LINE_CAP];
+        char sub[SH_MODMANIFEST_HASH_CAP];
+        sh_modmanifest_row served;
         int a;
+        /* A row the gate substituted joins the map at the installed build, so
+         * the map pins what serves it (the next save fills its version and
+         * size from that build). */
+        if (pm_row_state(r, NULL, 0) != SH_MODPUB_ROW_SERVED && sh_modpub_row_substitute(r, sub, sizeof sub)) {
+            served = *r;
+            strcpy_s(served.bundle, sizeof served.bundle, sub);
+            r = &served;
+        }
         if (o->listed && o->listed(r) > 0) continue;
         if (!o->attach) continue;
         sh_prefab_mods_label(r, label, sizeof label);

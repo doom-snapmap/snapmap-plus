@@ -168,8 +168,19 @@ typedef struct sh_modpub_resume {
  *   4 GAME_REVISION    the store has it, but a borrow names game bytes this
  *                      machine lacks (a different game revision). Permanent.
  *
- * "Installed at another build" (sh_modserve_row_other_build) is never a cause:
- * it is the obtainable case, and the question names both builds.
+ * "Installed at another build" (sh_modserve_row_other_build) is never a cause.
+ * When the store has the declared build it is the obtainable case, and the
+ * question names both builds. When the declared build cannot be obtained
+ * (the store lacks it, did not answer, or it needs game bytes this machine
+ * lacks), the player's own content substitutes the installed build of the
+ * key (SUBSTITUTE): a My Maps play, a rawmap load or a prefab placement goes
+ * on with that build, said once per row on the console,
+ *   MODS: <hold>: <key>: declared at build <X16> (not installed), serving build <Y16>; ...
+ * and remembered for the session (sh_modpub_row_substitute), so the resumed
+ * load, the rawmap's reopen and the prefab's placement find the row served.
+ * A community map played from the browser, a lobby or the feed is the
+ * author's choice of build and still denies (cause 1 when the store lacks
+ * it): substituting there would change what its author published.
  *
  * Placeholders (phase 6) plug in here and nowhere else: a placeholder system
  * adds a verdict that sh_modpub_gate_decide returns instead of a denial, and
@@ -185,7 +196,7 @@ enum sh_modpub_verdict {
     SH_MODPUB_GATE_UNREACHABLE     = 2,
     SH_MODPUB_GATE_NEVER_PUBLISHED = 3,
     SH_MODPUB_GATE_GAME_REVISION   = 4,
-    SH_MODPUB_GATE_SUBSTITUTE      = 5    /* the editor opens the author's map: the installed build serves */
+    SH_MODPUB_GATE_SUBSTITUTE      = 5    /* the editor, or the player's own content: the installed build serves */
 };
 typedef struct sh_modpub_gate_facts {
     int store;          /* sh_modpub_store_answer for the bundle's hash */
@@ -195,14 +206,24 @@ typedef struct sh_modpub_gate_facts {
     int other_build;    /* the key is installed at another hash (informational: never a denial) */
     int editor;         /* the editor opens the map (a My Maps map or a map opened by the author), not
                            Play, the hub, a rawmap load or a prefab placement */
+    int own;            /* the player's own content: a My Maps play, a rawmap load, a prefab placement
+                           (not a map from the map service: a browser, lobby or feed play) */
 } sh_modpub_gate_facts;
 
 /* The one decision: a sh_modpub_verdict. In the editor, a build that is not
  * installed while another build of its key is never denies: the installed
  * build serves, reported "declared at build X, installed build Y", and the
- * Mods tab offers to upgrade the map (SUBSTITUTE, DESIGN-additive 2.5). With
- * no build of the key installed the editor gets the cause as everywhere. */
+ * Mods tab offers to upgrade the map (SUBSTITUTE, DESIGN-additive 2.5). The
+ * player's own content (own) substitutes the same way when the declared
+ * build cannot be obtained; when the store has it, it is obtainable. With no
+ * build of the key installed every path gets its cause. */
 int  sh_modpub_gate_decide(const sh_modpub_gate_facts *facts);
+
+/* A row of the player's own content whose declared build the gate
+ * substituted this session (SUBSTITUTE above): 1 with the installed build's
+ * hash in `hash` while that build is still the key's other build, else 0.
+ * Main thread. */
+int  sh_modpub_row_substitute(const sh_modmanifest_row *row, char *hash, size_t hash_cap);
 
 /* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
  * for an editor open: the gate with editor set, the row's other build from

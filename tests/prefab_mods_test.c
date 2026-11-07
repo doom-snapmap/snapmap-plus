@@ -1389,11 +1389,21 @@ static void gate_end_to_end(const char *tmp)
 
     /* Cause 2: the store setting points where nothing answers. */
     CHECK(modnet_set_base_url("http://127.0.0.1:1"));
-    e_hold(&twob2, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs test.twob at a build that could not be downloaded: the mod store did not "
+    e_hold(&never, 0);
+    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that could not be downloaded: the mod store did not "
                               "answer. Connect and try again."));
     printf("    cause 2: %s\n", F.last_ask);
+    /* The same with another build of the key installed: a rawmap is the
+     * player's own, so the installed build serves it (ADD-L13). */
+    g_e_resumes = 0;
+    e_hold(&twob2, 0);
+    CHECK(!sh_modpublished_holding() && g_e_resumes == 1 && F.asks == 0 && F.fetches == 0);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "rawmap load: test.twob: declared at build %.16s (not installed), serving "
+                "build %.16s", twob2.bundle, twob1.bundle);
+    CHECK(strstr(F.last_print, want) == F.last_print);
+    printf("    substituted: %s\n", F.last_print);
     CHECK(modnet_set_base_url(url));
+    g_e_resumes = 0;
 
     /* Installed at another build: obtainable. The question names both
      * builds; Yes downloads the map's build by hash and installs it beside. */
