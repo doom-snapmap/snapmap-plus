@@ -428,24 +428,14 @@ These backend files share the work:
   never refused; SnapMap's provider cannot see campaign-only content without
   it), or a replacement (any other file at a game name). Replacements and
   editor tweaks are the bundle's `shadows`, derived and never declared. A
-  replacement fails the build ("would replace <request>: put it under
-  mods/<key>/ or declare the intent in mod.json"): the refusal is on by
-  default (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT` 1; `sh_mb_set_refuse_replacements(0)`
-  is the refusal-off builder path the tests use). Exempt are legacy bundles,
-  registry copies, editor tweaks, folders the product received (origin
-  `download`, `delivery`, `migration`) and builds on a thread that called
-  `sh_mb_keep_replacements_here(1)` (an import of content the product
-  received). The one escape hatch is the descriptor's `"replaces": ["<game
-  request path>"]`, accepted only for a file the mod carries at a game name
-  that no registry or player intent expresses (a registry path, a weapon decl
-  or a name under `mods/` is refused): it builds as a replacement with the line
-  "replaces <path> (declared): affects only maps that declare this mod". The
-  descriptor's `"extends": {"<stock decl>": "mods/<key>/<partial>"}` is checked
-  against the one table of list-shaped targets (`sh_mb_extend_target`, which
-  modregistry.c shares): the target must be on it and a stock decl the game
-  holds, the partial a decl of the mod under its key of the target's type
-  folder whose members lie on the target's containers
-  (`sh_mb_extend_partial_ok`); it is recorded under `registries.extends`.
+  replacement that is a decl is an edited copy: its structural diff against
+  the game's text is the product block's `edits` and the game file is
+  generated per map (see [Derived edits](#derived-edits)); a binary
+  replacement fails the build, except in a folder the product received, and
+  so does a copy outside the decl grammar. The retired author keys `player`,
+  `extends` and `replaces` are ignored with one line each; a partial they name
+  is refused with "this is a partial; put the whole edited copy of <game file>
+  at its game name".
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -499,9 +489,9 @@ These backend files share the work:
   mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
   retired `smpkg.` carriers, as below. It also owns the product-version
   variable `smpprod1.<version>` (initialValue the same version), one per map,
-  appended last like the rows: a save writes it when the map uses a registry
-  choice, a declared mod with registry intent (player fields, weapons,
-  extends, conductor rows) or surfaced content (modui's hook), or a Grid Room
+  appended last like the rows: a save writes it when the map uses a choice
+  between mods' edits, a declared mod with derived edits or conductor
+  encounters, or surfaced content (modui's hook), or a Grid Room
   variant module (`maps/modules/smpgrid/`); the version is the build's
   `SH_PRODUCT_VERSION`, which `src/backend/build.ps1` writes to the generated
   header `build/obj/backend/product_version.gen.h` from the release tag
@@ -560,14 +550,14 @@ These backend files share the work:
 
 The store. A folder is `mod.json` plus `assets\`. `mod.json` has
 two blocks in one object: every key but `snapmap-plus` is the author's (id,
-name, version, description, author, strings, requirements, hud, player (the registry intent: hands, handsD1, handsAnimWeb, body,
-bodyEvents and the weapons kit), and any other key, kept and carried as the manifest's
-`extra`; the retired shadows, stock and scope are read as above), and
+name, version, description, author, strings, requirements, hud, and any other key, kept and carried as the manifest's
+`extra`; the retired shadows, stock and scope, and the retired intent keys player, extends and replaces, are read as
+above), and
 `snapmap-plus` is the product's, the whole built manifest: format, key, build,
 bundle hash, built time, validated and cause, origin (`by-hand` for a folder
 the author made), a converted package's legacy record, the derived `classes`
-counts, `editor` (the editor tweaks' request paths) and `registries` (player,
-conductor, strings), shadows, `files` (path, sha256, size, provides, needs) and
+counts, `editor` (the editor tweaks' request paths), `registries` (banks,
+conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
 `stock` (pointers; `"inAssets": false` when no file stands behind one). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
 serving, and the store records the failure on the folder (`sh_mods list`:
@@ -1663,99 +1653,111 @@ loads run after it is released. The map load's `MODS: map manifest names ...` li
 ends with the registration steps the activation found ready, or "no new decls
 to register" for bundles of shadows and requirements only.
 
-### Registries
+### Derived edits
 
-A registry is a fixed-name game file the product generates per map from the
-declared bundles' intent (DESIGN-additive 2.4); no bundle carries a file at
-its name (`modregistry.c` generates the texts, `modserve.c` serves them,
-`modregistry_choices.c` holds the map's choices).
+A mod that edits a game file carries the edited copy at the game's own name;
+`mod.json` says nothing about it (DESIGN-additive 2.4). The builder records the
+copy's structural diff against the game's text, the product generates the game
+file per map from the game's text and every declared mod's diff, and the copy
+itself is never served (`decl_tree.c` is the model, `modbundle.c` derives,
+`modregistry.c` applies, `modserve.c` serves, `modregistry_choices.c` holds the
+map's choices).
 
-- **Which.** The encounter conductor
-  (`entitydef/ai/conductor/coop/snapmap_default`), the player body
-  (`md6def/player/mp/tp_body_mp.md6`), the player entity (`entitydef/player/coop`),
-  one weapon slot per stock weapon decl a `player.weapons` names
-  (`generated/decls/weapon/<stock name>.decl`), and the targets of `extends`:
-  one table in `modregistry.c` (`sh_modregistry_extend_target`) with the
-  grammar of each target's entries. Lists (`num = N; item[i]`): the conductor's
-  `edit.aiTypeList`, the whitelist inspectors' `edit.validEncounters`. Bags
-  (blocks appended, identical text skipped, a named block the game's text holds
-  with other content refused): `aifsmmanager/states/<demon>` `edit.subGraphs`.
-  The body's `events` and `aliases` (spelled `player.bodyEvents`) are a bag
-  merged per entry: a clip (`anim "<clip>"`) that the game or an earlier source
-  already holds with other rows stays one block holding the union of the rows
-  (identical rows once; the game's first, then the declared bundles' in row
-  order), with one line per merged clip; an alias row once. Any other target is
-  "not a list the product extends". A partial (an `extends` value, a
-  `bodyEvents` file) is an input of the generator only: the index marks it from
-  the product block's `registries`, and it is never registered, planned,
-  refreshed, probed or served to the engine.
-- **Sources.** The bundles that serve for the listing and state registry
-  intent, in row order, then editor-time bundles by key. Intent is the author
-  block's `player` object and `extends` (the product block's
-  `registries.extends` first); a bundle built before the intent that still
-  carries a registry file contributes that copy: a conductor copy its
-  `aiTypeList` rows whose `aiType` is a number that is not a stock bit, a body
-  copy composed as shadows compose, a player entity copy as the base the
-  player fields edit.
-- **Texts.** The conductor is the game's text with one item per custom
-  encounter type, `{ aiType = "<bit>"; entityDef = "<ai>"; }`, appended to
-  `aiTypeList` (num raised, every other byte as the game's). The bit is
-  assigned per map: the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
-  (`1 << 19` up to `1 << 29`, eleven per map), in row order, then by the name
-  of the encounter decl whose `memberType` names the author's number, so two
-  packs never claim one bit; every `snapAiEncounter` `memberType` and
-  `snapAiScore` `aiType` of that bundle naming the author's number is served
-  rewritten to the assigned bit (the same synthetic body mechanism, on the
-  bundle's own file). The body and other extends targets are the game's text
-  with each source's partial merged into its containers by the composer
-  (`sh_modserve_compose_extend`; the partial may hold nothing else). The
-  player entity sets `handsModelMPUseDoomHands` (hands),
-  `handsModelMPUseDoomHands_D1` (handsD1), `thirdPersonBodyMPUseDoomHands`
-  (body) and `handsAnimWeb` inside `edit`, every other byte as the game's (the
-  coop loadout stays). A weapon slot serves the named mod decl's bytes under the
-  stock name, in maps that declare the mod only.
-- **Clashes.** Two sources setting one player field or weapon slot: the map's
-  choice (`"choices"` in the manifest rows, `sh_modregistry_choices_set`,
-  `sh_modregistry_choose_command` for `sh_mods choose "<slot>" "<key>"`), else
-  the first in row order, with one line naming the slot and the command.
-- **Serving.** The index carries one synthetic file per registry path,
-  belonging to a pseudo-bundle (`snapmap-plus.registries`, one past the bundle
-  count, never admitted, so no bundle walk sees it), never served by name or
-  need. Where a bundle file wins the path its winner points at the synthetic
-  file and the scope pick moves to it; elsewhere the synthetic file is the
-  path's key. Generated texts are memoized per serving set and choices in the
-  index arena and read through `scope_body` like a composed text. A text equal
-  to a serving bundle's own copy leaves that copy serving, gated by its own
-  bundle. With nothing generated the game's file answers. The game's texts
-  are read once per index through the installed-content reader; a registry it
-  cannot read serves the game's file, with one line. With map scope off
-  nothing is generated. `sh_modserve_registry_report` prints one line per
-  registry, what was generated and every clash, the merged body's totals
-  (`player body: the merged body holds <clips> clips and <aliases> aliases`,
-  an alias row not counted as a clip), and one `registry partial <path>:
-  partial, read by the generator` line per partial of an admitted bundle;
-  `MODS: registry: ...` lines log each generation. The doctor's shadow and
-  conflict pass skips partials (`sh_modserve_is_partial`): nothing serves one
-  by design, so it is never "a conflict nothing serves", and the doctor's
-  conflict count equals the index's.
+- **The model.** `decl_tree.c` parses the decl grammar into a tree: `key = value`
+  fields (a value may be several words, strings or `( ... )` groups on one
+  line), `key {` and `key = {` blocks, named blocks (`anim "<clip>" {`,
+  `painGroup "head" = ...`), the md6Def spelling without `=` (a statement ends
+  at its line), bare members (`LeftFoot` on its own line) and anonymous blocks
+  (a table's `{ { 0, 1 } }`). Comments are dropped; every other token, `=` and
+  `;` is kept, so a generated text lexes to the same tokens the engine would
+  read from the same tree. Of the 45,419 stock decl texts both archives hold,
+  45,243 parse and every one round-trips token for token; the rest are 158
+  render programs (shader code) and 18 malformed game files, which a mod that
+  edits one is refused.
+- **Kinds of member.** A key appearing at most once on both sides is a *field*
+  (set or removed; blocks on both sides compared member by member). A block of
+  `num = N;` and `item[0]` .. `item[n-1]` in order is an *ordered list*: its
+  items are entries matched by their text (a conductor `aiTypeList` item is its
+  `aiType` and `entityDef` pair), written back renumbered with `num` kept at N
+  plus the items added (`syncGroups { num = 3; }` keeps its 3); sparse
+  `item[i]` blocks (`damageGroups`) are fields. A block with a name
+  (`anim "<clip>"`) unique on each side is a *named entry*. Repeated blocks that
+  each carry a name field (a `name` member, or one under `object` or
+  `object/object`: the `subGraph` and `node` entries of `aifsmmanager` states)
+  are *keyed entries*, matched by that name without case and replaced whole.
+  Any other repeated statement, and what a mod puts in a block the game leaves
+  empty (the body's `aliases { }`), is a *bag entry* matched by its whole text.
+- **Derived at build.** For each carried decl at a game name whose bytes differ,
+  `mb_derive_edits` reads the game's text through the installed-content reader
+  and records `sh_dt_diff` in the product block's `"edits"`: one element per
+  file, `{"file", "stock" (a digest of the text diffed against), "counts",
+  "ops"}`, an op being `set`/`remove` (path to the field, the statement),
+  `list`/`unlist` (the list's path, the item), `keyed`/`unkey` (the container,
+  the key word, the name, the statement) or `bag`/`unbag` (the container, the
+  statement); a path is the member keys from the decl's top (`edit`,
+  `item[4]`, `anim "clip"`). The copy stays in the bundle (hashed, uploaded,
+  its needs scanned) and in `shadows`, classified a replacement. Refused: a copy
+  or a game text outside the grammar ("does not parse as a decl (line N: ...);
+  the product derives the edits from the whole edited copy"); a game text the
+  reader cannot supply; a binary at a game name with other bytes ("a binary at
+  a game name cannot be merged with other mods: put it under mods/<key>/"),
+  except in a folder the product received (origin `download`, `delivery`,
+  `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
+  where it stays a replacement, as does a decl whose game text cannot be read
+  there). A grandfathered bundle keeps its shadows and derives nothing. The
+  retired author keys `player`, `extends` and `replaces` are ignored with one
+  line each and kept out of `extra`; a partial they name (an `extends` value,
+  `player.bodyEvents`) is refused: "this is a partial; put the whole edited
+  copy of <game file> at its game name".
+- **Applied per map.** The index carries one synthetic file per game file an
+  admitted bundle's edits name. For the listing, the sources are the bundles
+  that serve and edit a game file (or carry one: a grandfathered package's own
+  served copy at that name is diffed on the fly and is that package's edits),
+  in row order, then editor-time bundles by key. `sh_dt_apply` takes the
+  game's text and applies every source's operations in that order: an
+  identical operation merges, additions union, a named entry two sources add
+  becomes one block holding both texts' rows (identical rows once, a scalar
+  both set otherwise keeps the earlier), and a field or keyed entry two
+  sources set to different values is a clash.
+- **The conductor.** The one rule per file: each `aiTypeList` item a source
+  added whose `aiType` is a number that is not a stock `SPAWN_AI_TYPE_*` bit gets
+  a bit assigned per map, the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
+  (`1 << 19` up to `1 << 29`, eleven per map), in row order then by the name of
+  the encounter decl whose `memberType` names the author's number, so two packs
+  never claim one bit; every `snapAiEncounter` `memberType` and `snapAiScore`
+  `aiType` of that bundle naming the author's number is served rewritten to the
+  assigned bit (the same synthetic body mechanism, on the bundle's own file).
+- **Clashes.** A slot is `<type>/<decl name>/<path>`
+  (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; a keyed entry adds its
+  name, a named block segment is `word:name`). Two sources setting one slot to
+  different values: the map's choice (`"choices"` in the manifest rows,
+  `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<key>"`),
+  else the first in row order, with one line naming the slot and the command;
+  the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`).
+- **Serving.** The synthetic files belong to a pseudo-bundle
+  (`snapmap-plus.registries`, one past the bundle count, never admitted, so no
+  bundle walk sees it), never served by name or need; an edited copy
+  (`ms_file.edit`) gets no key, so nothing looks it up, plans, refreshes or
+  probes it. Generated texts are memoized per serving set and choices in the
+  index arena and read through `scope_body` like a composed text. With nothing
+  generated the game's file answers; the game's texts are read once per index;
+  with map scope off nothing is generated. `sh_modserve_registry_report` prints
+  one line per generated file, what each source's edits did, every clash, the
+  merged body's totals (`player body: the merged body holds <clips> clips and
+  <aliases> aliases`), and one `registry edits <path>` line per edited copy.
 - **Choices.** Each choice is written on the row of the key it names; a load
   reads them from every row (first row per slot) and gives them to the index
   (`sh_modserve_scope_set_choices`) before the listing; a choice naming a key
   the save writes no row for is dropped with one line.
-- **The refusal switch.** The builder never refuses a registry file
-  (`sh_mb_registry_request`): "replaces <request>: express it as player
-  intent". The switch is on by default (`SH_MB_REFUSE_REPLACEMENTS_DEFAULT`);
-  `replaces` is the declared escape hatch (see the bundle builder above).
-- **Rescans, gates and carried copies.** A rescan that changes a registry's
-  generated text for the listing (an edited `bodyEvents` or extends partial,
-  a player field) marks the path that serves it for refresh, as a changed decl
-  is marked. A generated text is gated by the requirement gates of the first
-  source with requirements that contributed to it (bare-hands' cvar gates its
-  player entity text), as a bundle's own file is. A serving bundle that
-  carries its own copy of a non-fixed extends target (a pack built before
-  extends) makes that copy the base its and other bundles' partials extend;
-  with no partial the copy serves as it did, and a second copy is named in
-  one line.
+- **Rescans, gates and old builds.** A rescan that changes a generated text
+  for the listing (a mod rebuilt with other edits) marks the path that serves
+  it for refresh, as a changed decl is marked. A generated text is gated by the
+  requirement gates of the first source with requirements whose edits changed
+  it (bare-hands' cvar gates its player entity text), as a bundle's own file
+  is. A bundle built before derived edits keeps serving until it is rebuilt:
+  its partials (the product block's `registries.extends` values and
+  `player.bodyEvents`) are never registered, planned, refreshed, probed or
+  served to the engine, and its retired intent is not read.
 
 ### Migration of the retired overrides folder
 
