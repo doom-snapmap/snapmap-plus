@@ -1005,7 +1005,8 @@ var modsTab = (function () {
       } else {
         model = normalize(d.data);
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
-        if (!busy) setStatus('', '');
+        /* A pushed document (a console verb changed the store or the open map) keeps the status line. */
+        if (!busy && !d.pushed) setStatus('', '');
       }
       renderAll();
     }

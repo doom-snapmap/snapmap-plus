@@ -271,6 +271,8 @@ int sh_modui_fetch(char *out, int out_cap, int *needed, unsigned *generation)
 
 unsigned sh_modui_generation(void) { return (unsigned)g_gen; }
 
+void sh_modui_note_changed(void) { InterlockedIncrement(&g_gen); }
+
 /* ------------------------------------------------------------------ store model */
 
 /* What the document says about one store entry. */

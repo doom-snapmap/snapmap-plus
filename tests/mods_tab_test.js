@@ -867,6 +867,67 @@ test('additive: derived facts, the game files a mod edits, encounters, legacy', 
   h.ui.select('airlock');
   assert.equal(section(h, 'facts'), undefined, 'nothing derived: no section');
 });
+test('additive: an edited copy is an edit, never a replacement (facts, counts, the details pane)', () => {
+  const doc = clone(v3);
+  const r2 = doc.mods.find(m => m.key === 'alex.r2-imp');
+  /* as the backend writes a mod whose one game file is an edited copy: classes.edits, not replaces */
+  r2.counts.shadows = 0;
+  r2.facts.replaces = 0;
+  r2.facts.replacements = [{path: 'generated/decls/entitydef/player/coop.decl', edits: true}];
+  const m = modsTab.normalize(doc).mods.find(x => x.key === 'alex.r2-imp');
+  const lines = modsTab.factLines(m);
+  assert.deepEqual(lines.map(l => l.label), ['Adds', 'Edits', 'Encounters']);
+  assert.ok(!lines.some(l => l.label === 'Replaces' || /\breplaces\b/i.test(l.text)), 'no line says it replaces');
+  assert.deepEqual(modsTab.countLines(m.counts).filter(t => /Replaces/.test(t)), []);
+  const h = live(doc);
+  h.ui.select('alex.r2-imp');
+  assert.ok(!/Replaces/.test(section(h, 'facts').textContent) && !/Replaces/.test(section(h, 'adds').textContent));
+  /* a received folder's replacement still reads Replaces */
+  r2.facts.replaces = 1;
+  r2.facts.replacements.push({path: 'generated/decls/entitydef/monster/imp.decl', edits: false});
+  const again = modsTab.factLines(modsTab.normalize(doc).mods.find(x => x.key === 'alex.r2-imp')).find(l => l.label === 'Replaces');
+  assert.equal(again.text, '1 game file (a folder the product received)');
+  assert.deepEqual(again.list, ['generated/decls/entitydef/monster/imp.decl']);
+});
+test('additive: a pushed document (a console verb) refreshes the open map modal and keeps the status line', () => {
+  const doc = clone(v3);
+  const h = live(doc);
+  h.ui.openMap();
+  assert.equal(h.nodes.modsMapHost.tags('select').length, 0);
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: 'Mods folder reread.'}});
+  const status = h.nodes.modsStatus.textContent;
+  /* `sh_mods map upgrade` moved a row to its installed build: the clash it hid now has two providers */
+  const next = clone(v3);
+  next.gen = 13;
+  next.map.registryClashes = [{slot: 'entitydef/player/coop/edit/handsModelMPUseDoomHands',
+                               providers: [{id: 'bare-hands', name: 'Bare Hands'}, {id: 'v6-clash', name: 'V6 clash'}],
+                               chosen: '', serving: 'bare-hands'}];
+  h.ui.onMessage({kind: 'mods', pushed: true, data: next});
+  const sel = h.nodes.modsMapHost.tags('select');
+  assert.equal(sel.length, 1, 'the open modal shows the pushed document');
+  assert.equal(sel[0].getAttribute('data-slot'), 'entitydef/player/coop/edit/handsModelMPUseDoomHands');
+  assert.equal(h.nodes.modsStatus.textContent, status, 'a pushed document keeps the status line');
+  /* `sh_mods uninstall` removed a folder: the list follows */
+  const fewer = clone(next);
+  fewer.mods = fewer.mods.filter(m => m.key !== 'airlock');
+  h.ui.onMessage({kind: 'mods', pushed: true, data: fewer});
+  assert.ok(!keys(h).includes('airlock'));
+});
+test('additive: a row at another build still offers the clash choice its installed build makes', () => {
+  /* the backend resolves a row pinning a build that is not installed to the build that serves it
+     (modui.c mu_row_serving_entry), so the clash reaches the page with both providers */
+  const doc = clone(v3);
+  doc.map.mods.find(x => x.id === 'jo.lava-floor').state = 'otherBuild';
+  doc.map.registryClashes = [{slot: 'entitydef/monster/imp/size', providers: [{id: 'alex.edits', name: 'Edits'}, {id: 'alex.edits2', name: 'Edits Two'}],
+                              chosen: '', serving: 'alex.edits'}];
+  const h = live(doc);
+  h.ui.openMap();
+  assert.match(modalText(h), /installed at another build/);
+  const sel = h.nodes.modsMapHost.tags('select');
+  assert.equal(sel.length, 1);
+  assert.match(modalText(h), /entitydef\/monster\/imp\/size Edits \(alex\.edits\) Edits Two \(alex\.edits2\)/);
+  assert.match(modalText(h), /applies now and is saved with the map's next save/);
+});
 test('additive: stock banks a mod\'s borrowed sound events need, with this session\'s state', () => {
   const doc = clone(v3);
   const sp = doc.mods.find(m => m.key === 'local.spider-mastermind');

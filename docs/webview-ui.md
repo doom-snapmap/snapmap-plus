@@ -381,6 +381,14 @@ or, when the bin could not take it, "Its folder was deleted because the Recycle 
 (<why>)". The product keeps no bin of its own: the footer has no removed-mods line and the page sends
 no `removedEmpty`; a document's `removed` object, sent by an older backend, is not read.
 
+A pushed document: once the page has asked for the document, the host reads the backend's
+generation every 500 ms (the `mods` slot's FETCH size query, no main-thread call) and, when it has
+moved past the generation of the last document it posted while no job of its own runs, posts
+`{"kind": "mods", "pushed": true, "data": ...}`. That is how a console verb (`sh_mods map upgrade`,
+`sh_mods uninstall`, `sh_mods choose`, a build or rescan; `sh_modui_note_changed`) reaches an open
+tab without a rescan. The page renders it as any document, the open map modal included, and keeps
+its status line.
+
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
 `tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
