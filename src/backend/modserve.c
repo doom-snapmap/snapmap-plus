@@ -51,6 +51,7 @@ typedef struct ms_file {
     const char *stock;                    /* a stock pointer's installed source (blob is its SHA-256), or NULL */
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
+    volatile LONG plan_seen;              /* a plan run settled it ready (registered, or left to the game) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
     volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
@@ -3972,6 +3973,7 @@ int sh_modserve_index_build(const char *mods_root)
             if (!f->is_decl || !f->served) continue;
             o = ms_find(old->slots, old->mask, f->request);
             if (o >= 0 && old->files[o].reg_state) f->reg_state = old->files[o].reg_state;
+            if (o >= 0) f->plan_seen = old->files[o].plan_seen;
             /* A shadow a registration pass withdrew stays withdrawn while the
              * same bytes serve the path (the pass that withdrew it marked it
              * done and does not look at it again). */
@@ -4339,7 +4341,7 @@ void sh_modserve_test_reset_registration(void)
 {
     ms_index *x = g_index;
     int i;
-    if (x) for (i = 0; i < x->nfiles; ++i) x->files[i].reg_state = 0;
+    if (x) for (i = 0; i < x->nfiles; ++i) { x->files[i].reg_state = 0; x->files[i].plan_seen = 0; }
 }
 #endif
 
@@ -5171,9 +5173,30 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                    s->bundle_id, state & 0xff, lifetime);
         }
     }
+    /* What this run settled ready is not visited again by a later pass of
+     * the same steps (sh_modserve_plan_unvisited). */
+    for (i = 0; i < plan->count; ++i)
+        if (plan->steps[i].ready == 1) InterlockedExchange(&x->files[plan->steps[i].file].plan_seen, 1);
     free(failed);
     free(stock);
     return ready;
+}
+
+int sh_modserve_plan_unvisited(const sh_modserve_plan *plan)
+{
+    const ms_index *x = g_index;
+    int i, n = 0;
+    if (!plan || !x) return 0;
+    for (i = 0; i < plan->count; ++i) {
+        const ms_file *f;
+        if (plan->steps[i].file < 0 || plan->steps[i].file >= x->nfiles) continue;
+        f = &x->files[plan->steps[i].file];
+        if (InterlockedCompareExchange((volatile LONG *)&f->reg_state, 0, 0) == -1 ||
+            InterlockedCompareExchange((volatile LONG *)&f->withdrawn, 0, 0))
+            continue;   /* failed or withdrawn: no pass parses it again */
+        if (!InterlockedCompareExchange((volatile LONG *)&f->plan_seen, 0, 0)) n++;
+    }
+    return n;
 }
 
 

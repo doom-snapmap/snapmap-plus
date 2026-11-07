@@ -2398,6 +2398,63 @@ static void test_surfaces_never_parsed(void)
     sf_leave();
 }
 
+/* What a cold hub launch runs, with the engine faked: the parse's map pass,
+ * then the gate's pre-load pass (the editor rows and their closure, then
+ * what the declared builds still lack), then what the level load runs (its
+ * palette's editor pass and any map pass). Only the first two register, and
+ * the surface is in none of them. */
+static void test_launch_preload(void)
+{
+    char root[MAX_PATH], h[65];
+    const char *hashes[1];
+    sh_modserve_plan map, ed, map2, ed2;
+    rf_seen seen;
+    int n;
+    printf("-- a hub launch parses at its gate; its level load registers nothing new\n");
+    sf_fixture(root, sizeof root);
+    CHECK(sh_modserve_index_build(root) == 2);
+    memset(&seen, 0, sizeof seen);
+    (void)sh_modserve_each_refresh(rf_visit, &seen);
+    sh_modserve_test_reset_registration();             /* a cold session */
+    hashes[0] = hash64('a', h);
+
+    /* The parse's map pass (modserve_activate_bundles at the launched map's parse). */
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 3);
+    CHECK(sh_modserve_plan_unvisited(&map) == map.count);
+    g_calls[0] = 0;
+    g_already = NULL;
+    CHECK(sh_modserve_plan_run(&map, &g_fake, "map") == map.count);
+    CHECK(sh_modserve_plan_unvisited(&map) == 0);
+    sh_modserve_plan_free(&map);
+
+    /* The gate's pre-load pass (sh_modserve_launch_preload): the editor rows
+     * first, the declared row and the undeclared one, then the declared
+     * builds, which the parse's pass already settled. */
+    CHECK(sh_modserve_plan_editor(&ed) == 5);
+    n = sh_modserve_plan_unvisited(&ed);
+    CHECK(n == 3);   /* the rows and the other mod's entityDef; the declared closure was the map pass's */
+    g_calls[0] = 0;
+    CHECK(sh_modserve_plan_run(&ed, &g_fake, "launch") == ed.count);
+    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/sf.mod/thing;") && strstr(g_calls, "R:snapEditorEntityDef:mods/sf.other/rock;"));
+    CHECK(!strstr(g_calls, "models/monsters/sf/body"));
+    sh_modserve_plan_free(&ed);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &map, NULL) == 3 && sh_modserve_plan_unvisited(&map) == 0);
+    sh_modserve_plan_free(&map);
+
+    /* The level load: its palette's editor pass and a map pass register and load nothing. */
+    CHECK(sh_modserve_plan_editor(&ed2) == 5 && sh_modserve_plan_unvisited(&ed2) == 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &map2, NULL) == 3 && sh_modserve_plan_unvisited(&map2) == 0);
+    g_calls[0] = 0;
+    g_registered_count = 0;
+    CHECK(sh_modserve_plan_run(&ed2, &g_fake, "editor") == ed2.count);
+    CHECK(sh_modserve_plan_run(&map2, &g_fake, "map") == map2.count);
+    CHECK(g_calls[0] == 0 && g_registered_count == 0);
+    if (g_calls[0]) printf("  in-load calls: %s\n", g_calls);
+    sh_modserve_plan_free(&ed2);
+    sh_modserve_plan_free(&map2);
+    sf_leave();
+}
+
 /* ------------------------------------------------------------------ refusals (issue 132) */
 
 /* The engine side of the issue-132 pass: the archives hold the campaign md6Defs
@@ -2704,6 +2761,7 @@ static void test_permanent_first_parse(void)
 
         /* The next map load skips both quietly. */
         CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == (round ? 1 : 2));
+        CHECK(sh_modserve_plan_unvisited(&p) == 0);
         log_clear();
         g_calls[0] = 0;
         ready = sh_modserve_plan_run(&p, &g_pf_ops, "map");
@@ -4093,6 +4151,7 @@ int main(void)
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();
+    test_launch_preload();
     test_refusals();
     test_permanent_first_parse();
     test_registration_reparse_of_held_permanent();

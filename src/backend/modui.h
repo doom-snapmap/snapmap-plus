@@ -130,6 +130,11 @@ typedef struct sh_modui_engine {
      * (sh_editor_delete_native_pending): the Uninstall's undo clear waits for
      * the delete's own commit. */
     int (*undo_pending)(void);
+    /* A hub launch's pre-load pass (modserve.h sh_modserve_launch_preload):
+     * called once per launch by sh_modui_scope_launch, before the launched
+     * map's listing and the PLAY mode are set, while the game is still at
+     * the hub. Unbound: nothing (the level load's own passes parse). */
+    int (*launch_preload)(const char *why);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {

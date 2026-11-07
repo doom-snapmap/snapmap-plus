@@ -314,6 +314,12 @@ int sh_modserve_load_left_to_engine(unsigned lifetime, unsigned state, int persi
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
                          const char *phase);
 
+/* The plan's steps no earlier run settled ready (registered, or left to the
+ * game) and that have not failed or been withdrawn: what a pass of the same
+ * steps would still do. 0 when another pass already did all of it, as a hub
+ * launch's gate does before its level load (sh_modserve_launch_preload). */
+int sh_modserve_plan_unvisited(const sh_modserve_plan *plan);
+
 /* The decls an editor row points at directly, which must live as long as the
  * row does. A snapEditorEntityDef is kept for the session (lifetime 4) and its
  * parse stores pointers to the decls its edit block names; a decl the engine
@@ -1053,6 +1059,19 @@ int modserve_palette_rebuild_requested(void);
  * logged as one "MODS: map rows: ..." line. Returns the number of ready
  * steps, or -1 when refused (not the main thread, registry unavailable). */
 int modserve_activate_bundles(const char *const *bundle_hashes, int n);
+
+/* The pre-load pass of a hub launch (a published map or a My Maps play),
+ * called once per launch at its gate, after the gate let it go and before
+ * the launch's original runs (modui.c sh_modui_scope_launch, from
+ * modpublished.c): the game sits at the hub and no level load is in
+ * progress. Inside process heap 0 it does the decl work that would
+ * otherwise run inside the level load, as an editor entry does it: every
+ * editor row and its closure (the palette's pass, which the level load runs),
+ * then any step of the launched map's declared builds the parse's map pass
+ * did not settle, with their stock banks. The level load's palette pass and
+ * any map pass after it then register nothing new. Main thread, not in Play;
+ * returns the decl steps it ran, 0 when nothing was left, -1 refused. */
+int sh_modserve_launch_preload(const char *why);
 
 /* Called before the Play level load (the SnapBuild detour in nav_play.c),
  * on the main thread: re-checks the accepted bundles' requirements with

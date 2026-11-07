@@ -1648,7 +1648,14 @@ launched map's rows and runs in PLAY mode: the launch boundary
 `sh_modui_scope_launch`, which lists the current manifest's rows (the launched
 map's parse made them current; the editor's exit cleared the editor map's),
 sets `SH_MODSERVE_MODE_PLAY` and applies it before the original launches, so
-an undeclared bundle serves nothing in the map. The listing holds until that
+an undeclared bundle serves nothing in the map. Before it lists anything, once
+per launch (not again from `launched` or `loading`), it runs the pre-load pass
+(`sh_modserve_launch_preload`): at the hub, in the editor mode and process heap
+0, the editor rows and their closure are registered as an editor entry
+registers them, then any step of the declared builds the parse's map pass did
+not settle (`sh_modserve_plan_unvisited`). The palette pass the level load runs
+then registers nothing new; in a cold process it used to register every mod's
+rows there (161 rows, 645 steps with the campaign packs installed). The listing holds until that
 Play has run and ended, by a state machine in `modui.c` driven by the signals
 the product has: `launched` (the gate's `sh_modui_scope_launch`), `loading`
 (the tick's busy callback reported a load or Play), `playing` (the Play-begin

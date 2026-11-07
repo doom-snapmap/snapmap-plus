@@ -317,6 +317,19 @@ static void open_test_map(void)
     g_map_on = 1;
 }
 
+/* A hub launch's pre-load pass (modserve.h sh_modserve_launch_preload):
+ * when it ran, and what the launch had set by then. */
+static int g_preloads, g_preload_mode = -1;
+static char g_preload_state[16], g_preload_why[40];
+static int fake_preload(const char *why)
+{
+    g_preloads++;
+    g_preload_mode = sh_modserve_scope_mode_get();
+    strcpy_s(g_preload_state, sizeof g_preload_state, sh_modui_test_launch_state());
+    strncpy_s(g_preload_why, sizeof g_preload_why, why ? why : "", _TRUNCATE);
+    return 0;
+}
+
 static void bind_fakes(void)
 {
     sh_modui_engine e;
@@ -343,6 +356,7 @@ static void bind_fakes(void)
     e.map_left = fake_map_left;
     e.clear_undo = fake_clear_undo;
     e.undo_pending = fake_undo_pending;
+    e.launch_preload = fake_preload;
     sh_modui_bind(&e);
 }
 
@@ -1721,7 +1735,13 @@ int main(int argc, char **argv)
                 /* A My Maps play of a map that declares nothing: nothing is declared in its Play. */
                 l = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll);
                 if (l) HeapFree(GetProcessHeap(), 0, l);
+                g_preloads = 0;
                 (void)sh_modui_scope_launch("My Maps play");
+                /* The gate's pre-load pass ran once, first, before the launch
+                 * set its state (ADD-L11). (The Play entry above left the hub
+                 * in PLAY; the pass itself returns its rows to the editor's
+                 * mode, sh_modserve_launch_preload.) */
+                CHECK(g_preloads == 1 && !strcmp(g_preload_state, "none") && !strcmp(g_preload_why, "My Maps play"));
                 CHECK(sh_modserve_scope_hashes(got, 8) == 0 && sh_modserve_scope_map_open());
                 CHECK(sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY);
                 (void)sh_modserve_scope_source(SH_MODSERVE_AT_PLAY);
@@ -1738,6 +1758,11 @@ int main(int argc, char **argv)
                 (void)sh_modui_scope_launch("My Maps play");
                 CHECK(sh_modserve_scope_hashes(got, 8) == 1 && !_stricmp(got[0], ref.hash));
                 CHECK(!strcmp(sh_modui_test_launch_state(), "launched"));
+                /* A new launch: its own pre-load pass. */
+                CHECK(g_preloads == 2 && !strcmp(g_preload_state, "playing"));
+                /* A second boundary of the same launch (launched) does not run it again. */
+                (void)sh_modui_scope_launch("published launch");
+                CHECK(g_preloads == 2 && !strcmp(sh_modui_test_launch_state(), "launched"));
                 /* The launch's rows hold until its Play has run and ended (ADD-V4a H2): an idle poll
                  * between the gate and the level load is not the end of the Play. */
                 applies = g_scope_applies;

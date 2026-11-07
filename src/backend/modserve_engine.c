@@ -1787,42 +1787,35 @@ static void me_keep_rows(const char *phase)
     sh_modserve_plan_free(&plan);
 }
 
-void sh_modserve_palette_before_build(void)
+static void me_ledger_sweep(const char *phase);
+
+/* The editor rows' registration an editor entry runs (the palette's pass)
+ * and a hub launch's gate runs before its level load
+ * (sh_modserve_launch_preload): every row the scope serves and the closure
+ * of decls it needs, inside a watermark and process heap 0, kept for the
+ * session. `*todo` receives the steps no earlier pass had settled. Returns
+ * the plan's step count, or -1. */
+static int me_editor_rows(const char *phase, int first, int *todo)
 {
     sh_modserve_plan plan;
     sh_modserve_watermark mark = { NULL, 0, 0 };
     double t0;
-    int ready, i, rows_ok = 0, rows_failed = 0, first = !InterlockedExchange(&g_editor_pass_done, 1);
-    /* Mod virtual-texture families first: a material binds to its family only
-     * when the family's record exists when the material is parsed. */
-    sh_modvt_before_pass("editor");
-    /* Mod sound banks: submitted once the sound system is up (modsound.h). */
-    sh_modsound_before_pass("editor");
-    /* Bundle strings of an index published off the main thread. */
-    (void)sh_strids_refresh_pending();
-    if (!g_bound || !sh_modserve_active()) return;
-    me_ensure_probe();
-    (void)sh_companions_ensure("editor");
-    /* A palette pass is the editor's: the PLAY mode a hub launch set at its
-     * launch boundary (modpublished.c), which nothing ends, must not refuse
-     * undeclared rows' sources here (the editor's tick resets it too, but only
-     * once the editor shows a map). */
-    if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && me_in_play() != 1 && me_on_main() == 1 &&
-        sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
-        (void)sh_modserve_scope_apply("editor");
+    int ready, i, rows_ok = 0, rows_failed = 0, count, editor = !strcmp(phase, "editor");
+    if (todo) *todo = 0;
     t0 = me_now_ms();
-    if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
+    if (sh_modserve_plan_editor(&plan) < 0) { me_log("%s rows: plan refused (out of memory)", phase); return -1; }
     if (!plan.count) {
         sh_modserve_plan_free(&plan);
-        me_refresh_apply("editor", 0, NULL);
-        me_reparse_early("editor", 0);
-        me_reload_ungated("editor", 0);
-        if (first) me_log("editor rows registered in 0.0 ms (0 rows)");
-        return;
+        me_refresh_apply(phase, 0, NULL);
+        me_reparse_early(phase, 0);
+        me_reload_ungated(phase, 0);
+        if (first) me_log("%s%seditor rows registered in 0.0 ms (0 rows)", editor ? "" : phase, editor ? "" : ": ");
+        return 0;
     }
+    if (todo) *todo = sh_modserve_plan_unvisited(&plan);
     /* Everything the pass creates from here on is the rows' closure. */
     if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &mark))
-        me_log("editor: resource watermark unavailable (%s); only the decls rows name are kept",
+        me_log("%s: resource watermark unavailable (%s); only the decls rows name are kept", phase,
                g_res_head ? "the resource lists could not be walked" : "decl_resource_head unresolved");
     /* The pass's watermark covers its registration, the refresh its sources
      * publish, and the keeper (me_run neither splits nor nests another). */
@@ -1830,7 +1823,7 @@ void sh_modserve_palette_before_build(void)
         int part = g_refresh_part;
         g_mark_depth++;
         g_refresh_part = SH_MODSERVE_PART_ALL;
-        ready = me_run(&plan, "editor");
+        ready = me_run(&plan, phase);
         g_refresh_part = part;
     }
     {
@@ -1841,19 +1834,19 @@ void sh_modserve_palette_before_build(void)
         /* Inside process heap 0, as registration: an object created here outlives every map. */
         if (sh_process_heap_enter(&g_heap, &heap)) {
             __try { refs = sh_modserve_editor_refs(&plan, me_keep_ref, &keep); }
-            __finally { if (!sh_process_heap_leave(&heap)) me_log("editor: process heap scope did not balance"); }
+            __finally { if (!sh_process_heap_leave(&heap)) me_log("%s: process heap scope did not balance", phase); }
         }
         if (refs && (keep.kept || keep.missing))
-            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here, %d parsed here, %d older), %d already permanent, %d not found",
-                   keep.kept, keep.created, keep.loaded, keep.older, keep.permanent, keep.missing);
+            me_log("%s: %d decl(s) editor rows point at kept for the session (%d created here, %d parsed here, %d older), %d already permanent, %d not found",
+                   phase, keep.kept, keep.created, keep.loaded, keep.older, keep.permanent, keep.missing);
     }
     g_mark_depth--;
     if (mark.ok) {
         sh_modserve_raised raised;
         if (sh_modserve_watermark_raise(g_res_head, &mark, &raised) && raised.created)
-            me_log("editor: %u resource(s) the rows' closure created kept for the session (%u new, %u lists): %s",
-                   raised.raised, raised.created, raised.lists, raised.summary);
-        else if (!raised.lists) me_log("editor: resource lists could not be walked after the pass; closure not raised");
+            me_log("%s: %u resource(s) the rows' closure created kept for the session (%u new, %u lists): %s",
+                   phase, raised.raised, raised.created, raised.lists, raised.summary);
+        else if (!raised.lists) me_log("%s: resource lists could not be walked after the pass; closure not raised", phase);
     }
     sh_modserve_watermark_free(&mark);
     for (i = 0; i < plan.count; ++i) {
@@ -1863,9 +1856,99 @@ void sh_modserve_palette_before_build(void)
     }
     InterlockedExchange(&g_modserve_editor_ok, rows_ok);
     InterlockedExchange(&g_modserve_editor_failed, rows_failed);
-    me_log("editor rows registered in %.1f ms (%d rows; %d of %d steps ready, %d blocked)", me_now_ms() - t0,
-           rows_ok, ready < 0 ? 0 : ready, plan.count, plan.blocked);
+    me_log("%s%seditor rows registered in %.1f ms (%d rows; %d of %d steps ready, %d blocked; %d new to this pass)",
+           editor ? "" : phase, editor ? "" : ": ", me_now_ms() - t0, rows_ok, ready < 0 ? 0 : ready, plan.count,
+           plan.blocked, todo ? *todo : 0);
+    count = plan.count;
     sh_modserve_plan_free(&plan);
+    return count;
+}
+
+/* The passes' common start: mod virtual-texture families first (a material
+ * binds to its family only when the family's record exists when the
+ * material is parsed), mod sound banks once the sound system is up
+ * (modsound.h), bundle strings of an index published off the main thread. */
+static void me_pass_prelude(const char *phase)
+{
+    sh_modvt_before_pass(phase);
+    sh_modsound_before_pass(phase);
+    (void)sh_strids_refresh_pending();
+}
+
+void sh_modserve_palette_before_build(void)
+{
+    int first = !InterlockedExchange(&g_editor_pass_done, 1), todo = 0;
+    me_pass_prelude("editor");
+    if (!g_bound || !sh_modserve_active()) return;
+    me_ensure_probe();
+    (void)sh_companions_ensure("editor");
+    /* A palette pass is the editor's: the PLAY mode a hub launch set at its
+     * launch boundary (modpublished.c), which nothing ends, must not refuse
+     * undeclared rows' sources here (the editor's tick resets it too, but only
+     * once the editor shows a map). */
+    if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && me_in_play() != 1 && me_on_main() == 1 &&
+        sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
+        (void)sh_modserve_scope_apply("editor");
+    (void)me_editor_rows("editor", first, &todo);
+}
+
+int sh_modserve_launch_preload(const char *why)
+{
+    const char *phase = "launch";
+    char (*h)[SH_MODSERVE_HASH_HEX + 1] = NULL;
+    const char **list = NULL;
+    double t0 = me_now_ms();
+    int n, i, rows_todo = 0, map_todo = 0, map_steps = 0, unknown = 0;
+    if (!why || !why[0]) why = "hub launch";
+    if (!g_bound || !sh_modserve_active()) return 0;
+    if (me_on_main() != 1) {
+        me_log("%s: %s: decls not parsed at the gate (not on the main thread); the level load parses them", phase, why);
+        return -1;
+    }
+    if (me_in_play() == 1) return 0;
+    me_pass_prelude(phase);
+    me_ensure_probe();
+    (void)sh_companions_ensure(phase);
+    /* The hub's own mode, as the palette pass resets it: a PLAY mode left
+     * over from an earlier launch would refuse undeclared rows' sources, and
+     * the level load's palette pass would then register them after all. The
+     * launch sets PLAY right after this pass (sh_modui_scope_launch). */
+    if (sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY && sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0)
+        (void)sh_modserve_scope_apply(phase);
+    /* 1. The editor rows and their closure, as an editor entry registers
+     * them; otherwise the level load's palette pass is the first to. */
+    InterlockedExchange(&g_editor_pass_done, 1);
+    (void)me_editor_rows(phase, 0, &rows_todo);
+    /* 2. The launched map's declared builds (the listing its parse made):
+     * normally its parse's map pass settled all of it this frame. */
+    n = sh_modserve_scope_hashes(NULL, 0);
+    if (n > 0) {
+        h = (char (*)[SH_MODSERVE_HASH_HEX + 1])calloc((size_t)n, sizeof *h);
+        list = (const char **)calloc((size_t)n, sizeof *list);
+    }
+    if (n > 0 && h && list) {
+        sh_modserve_plan plan;
+        n = sh_modserve_scope_hashes(h, n);
+        for (i = 0; i < n; ++i) list[i] = h[i];
+        (void)sh_modsound_stock_before_map(list, n);
+        if (sh_modserve_plan_bundles(list, n, &plan, &unknown) >= 0) {
+            map_steps = plan.count;
+            map_todo = plan.count ? sh_modserve_plan_unvisited(&plan) : 0;
+            if (map_todo) {
+                g_anim_pass = 1;
+                (void)me_run(&plan, phase);
+                me_ledger_sweep(phase);
+                g_anim_pass = 0;
+            }
+            sh_modserve_plan_free(&plan);
+        }
+    } else if (n > 0) me_log("%s: %s: the declared builds were not checked (out of memory)", phase, why);
+    free(list);
+    free(h);
+    me_log("%s: %s: decls parsed at the gate, before the level load, in %.1f ms: %d editor-row step(s) and %d of the "
+           "map's %d declared step(s) were new (%d declared build(s), %d not installed); the level load's passes find "
+           "them parsed", phase, why, me_now_ms() - t0, rows_todo, map_todo, map_steps, n > 0 ? n : 0, unknown);
+    return rows_todo + map_todo;
 }
 
 static int me_rd_ptr(const void *p, void **v) { __try { *v = *(void *const *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }

@@ -107,6 +107,7 @@ static void mu_defaults(sh_modui_engine *e)
     e->scope_activate = sh_modserve_scope_activate;
     e->clear_undo = sh_editor_undo_clear;
     e->undo_pending = sh_editor_delete_native_pending;
+    e->launch_preload = sh_modserve_launch_preload;
 #endif
 }
 
@@ -144,6 +145,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->map_left) g_engine.map_left = engine->map_left;
         if (engine->clear_undo) g_engine.clear_undo = engine->clear_undo;
         if (engine->undo_pending) g_engine.undo_pending = engine->undo_pending;
+        if (engine->launch_preload) g_engine.launch_preload = engine->launch_preload;
     }
     g_engine_bound = 1;
     /* The map scope: what the open map lists, and the build a map-level row names. */
@@ -3120,10 +3122,21 @@ static int mu_scope_source(int when)
 
 int sh_modui_scope_launch(const char *why)
 {
+    const sh_modui_engine *e = mu_engine();
     sh_modmanifest_list rows;
     int changed = 0, moved;
     const char *at = why && why[0] ? why : "launch";
     if (!mu_on_main()) return 0;
+    /* Once per launch, at the gate, before anything of the launch is set:
+     * the decls the level load would parse are parsed here, at the hub, in
+     * the hub's (editor) mode, as an editor entry parses them (ADD-L11). A
+     * second boundary of the same launch (launched, or loading: its level
+     * load has not reached Play) does not run it again. */
+    if (e->launch_preload && InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LAUNCHED &&
+        InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LOADING) {
+        int r = e->launch_preload(at);
+        if (r < 0) mu_log("scope: %s: the pre-load pass was refused; the level load parses the mods' decls", at);
+    }
     if (!sh_modserve_scope_enabled()) {
         if (sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) > 0) (void)mu_scope_apply(at);
         return 0;
