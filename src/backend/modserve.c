@@ -286,7 +286,9 @@ static void ms_index_free(ms_index *x)
 
 /* A surface: a stock pointer at the game's own path (the game's bytes
  * under the game's name, modbundle.h sh_mb_stock_restore). No pass
- * registers, re-parses, reloads or refreshes one (ADD-L11). */
+ * registers, re-parses or refreshes one (ADD-L11); the gated reload alone
+ * loads a surface model or image again when the game loaded it before its
+ * bundle's requirements were live (ADD-L13). */
 static int ms_surface(const ms_file *f) { return f->is_restore != 0; }
 
 static __inline char ms_fold(char c)
@@ -6348,7 +6350,8 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
 }
 
 /* Raw resources first served before their bundle's gates were live: the
- * models and images whose load resolved names against the blacklists. */
+ * models and images whose load resolved names against the blacklists,
+ * surfaces included (ADD-L13). */
 int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -6361,8 +6364,11 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
             (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")) || (eff = ms_scoped(x, i)) < 0)
             continue;
         ef = (ms_file *)&x->files[eff];
-        /* A surface is the game's own model or image: never reloaded. */
-        if (ms_surface(f) || ms_surface(ef)) continue;
+        /* A surface (the game's own model or image) is offered too: one the
+         * game loaded at boot with the blacklists on holds no materials for
+         * its blacklisted names until it is loaded again with them off (the
+         * stock spider mesh, ADD-V7a D1). This is the one pass that touches
+         * a surface; no plan registers or re-parses one (ADD-L11). */
         if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
             !ms_gates_live_for(x, ef))
             continue;

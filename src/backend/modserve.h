@@ -825,8 +825,14 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
  * values (the Spider Mastermind mesh held no materials and drew nothing).
  * Visit every served baseModel and image first opened while its bundle's
  * cvar requirements were not live, once they are live; `fn` returns 1 when it
- * reloaded the resource (not offered again). The early-decl visit above also
- * offers decls first opened before then. Returns the number visited. */
+ * reloaded the resource (not offered again). A surface model or image (the
+ * game's own bytes under its own name, sh_modserve_is_surface) is offered
+ * too: the stock spider mesh the game holds from boot is one, and it gets
+ * its blacklisted materials only from this reload, which runs inside its own
+ * keeper (sh_modserve_inplace_keeper). This is the one exception to "a
+ * surface is never touched": no plan registers or re-parses a surface decl.
+ * The early-decl visit above also offers decls first opened before then.
+ * Returns the number visited. */
 int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
 
 /* Refresh. A rescan replaces the table while the engine keeps every decl it
@@ -989,9 +995,12 @@ int sh_modserve_is_restore(const char *request);
 
 /* 1 when any build in the index carries `request` as a surface (a stock
  * pointer at the game's own path, whatever the open map serves now). No pass
- * registers, re-parses, reloads or refreshes a surface: plans, refresh lists,
- * the gated reload, the editor-row keeper and the ledger sweep all skip it,
- * and the game parses it from the served (its own) bytes when it needs it. */
+ * registers, re-parses or refreshes a surface: plans, refresh lists, the
+ * editor-row keeper and the ledger sweep all skip it, and the game parses it
+ * from the served (its own) bytes when it needs it. The one exception is the
+ * gated reload (sh_modserve_each_ungated_raw): a surface model or image the
+ * game loaded before its bundle's requirements were live is loaded again,
+ * inside a keeper, once they are. */
 int sh_modserve_is_surface(const char *request);
 
 /* Whether an in-place reload or re-parse (the gated reload, a refresh part)

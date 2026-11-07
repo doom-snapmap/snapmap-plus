@@ -1071,7 +1071,10 @@ static int me_raw_collect(void *context, const char *type, const char *name, con
 {
     me_raw *r = (me_raw *)context;
     (void)bundle_id;
-    if (request && sh_modserve_is_surface(request)) return 1;   /* the game's own model or image: never reloaded */
+    /* A surface model or image is collected like any other: the gated reload
+     * is the one pass that loads the game's own bytes again, inside its
+     * keeper, so a boot-held stock mesh gets its blacklisted materials
+     * (ADD-L13). */
     if (r->n < r->cap) {
         r->names[r->n].name = name;
         r->names[r->n].request = request;
