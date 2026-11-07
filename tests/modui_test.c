@@ -391,6 +391,62 @@ static int load_gone_row(const char *id, const char *gone, int attached)
     return 1;
 }
 
+/* An editor load of the open test map with rows of `ids` at `hashes`; with
+ * `subst`, the manifest substitutes each row by `subst_to` of its id. */
+static const char *g_sub_ids[4], *g_sub_to[4];
+static int fake_substitute_by_id(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+{
+    int i;
+    if (why && why_cap) why[0] = 0;
+    for (i = 0; i < 4 && g_sub_ids[i]; i++)
+        if (!strcmp(row->id, g_sub_ids[i])) { strcpy_s(hash_out, hash_cap, g_sub_to[i]); return 1; }
+    return 0;
+}
+static int load_rows(const char *const *ids, const char *const *hashes, int n, int subst)
+{
+    sh_modmanifest_list rows;
+    char err[256], *text, *loaded;
+    size_t len = 0, tl = 0, ll = 0;
+    const char *map;
+    int i;
+    memset(&rows, 0, sizeof rows);
+    for (i = 0; i < n; i++) {
+        sh_modmanifest_row row;
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.id, sizeof row.id, ids[i]);
+        strcpy_s(row.version, sizeof row.version, "0.9.0");
+        strcpy_s(row.bundle, sizeof row.bundle, hashes[i]);
+        row.size = 10;
+        row.attached = 1;
+        if (!sh_modmanifest_list_add(&rows, &row)) return 0;
+    }
+    map = map_text(&len);
+    text = sh_modmanifest_write(map, len, &rows, &tl, err, sizeof err);
+    sh_modmanifest_list_free(&rows);
+    if (!text) { printf("    write: %s\n", err); return 0; }
+    if (subst) sh_modmanifest_set_substitute(fake_substitute_by_id);
+    sh_modmanifest_set_editor_load(subst);
+    loaded = sh_modmanifest_prepare_load(text, tl, &ll);
+    sh_modmanifest_set_editor_load(0);
+    sh_modmanifest_set_substitute(NULL);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    HeapFree(GetProcessHeap(), 0, text);
+    return 1;
+}
+
+/* The full "bundle" hash a result document names first, into `out`. */
+static int doc_bundle(const char *doc, char *out, size_t cap)
+{
+    const char *h = doc ? strstr(doc, "\"bundle\":\"") : NULL, *e;
+    if (!h) return 0;
+    h += 10;
+    e = strchr(h, '"');
+    if (!e || (size_t)(e - h) >= cap) return 0;
+    memcpy(out, h, (size_t)(e - h));
+    out[e - h] = 0;
+    return 1;
+}
+
 /* sh_modui_doctor's lines, one per line. */
 static char g_doctor[1 << 16];
 static void doctor_line(void *context, const char *line)
@@ -2092,6 +2148,71 @@ int main(int argc, char **argv)
                                             "\"edits\":[{\"file\":\"generated/decls/entitydef/monster/imp.decl\",\"ops\":2,\"set\":2,"));
         union_add(doc);
         free(doc);
+
+        printf("-- a clash between two mods' edits shows its choice when a row pins a build that is not installed\n");
+        {
+            char ed2[MAX_PATH], h_one[80] = "", h_two[80] = "";
+            static const char GONE_TWO[] = "00000000000000000000000000000000000000000000000000000000000000cd";
+            const char *ids[2] = { "alex.edits", "alex.edits2" }, *gone[2] = { GONE_REQ, GONE_TWO };
+            int pass, was_on = g_map_on, was_placed = g_placed_count;
+            doc = list_doc();
+            {
+                const char *at = doc ? strstr(doc, "\"key\":\"alex.edits\"") : NULL;
+                CHECK(at && doc_bundle(at, h_one, sizeof h_one));
+            }
+            free(doc);
+            _snprintf_s(ed2, sizeof ed2, _TRUNCATE, "%s\\authoring\\alex.edits2", tmp);
+            mt_write(ed2, "mod.json", "{\"id\":\"alex.edits2\",\"version\":\"1.0.0\",\"name\":\"Edits Two\",\"author\":\"t\"}");
+            mt_write(ed2, "assets\\generated\\decls\\entitydef\\monster\\imp.decl",
+                     "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"5\";\r\n}");
+            doc = run_doc(SH_MODS_ACT_INSTALL, ed2);
+            if (!doc_bundle(doc, h_two, sizeof h_two)) printf("    %s\n", doc);
+            CHECK(has(doc, "\"ok\":true") && doc_bundle(doc, h_two, sizeof h_two));
+            free(doc);
+            /* Two edited copies of one game file: edit sources, never a conflict, and never a
+             * replaced stock file (counts.shadows, facts.replaces). */
+            {
+                const char *dr = doctor(0);
+                CHECK(dr && strstr(dr, "MODS: doctor: edit source generated/decls/entitydef/monster/imp.decl: from alex.edits2, "
+                                       "alex.edits; diffed at build against the game's text, generated per map that declares "
+                                       "it, the copy is never served\n"));
+                CHECK(dr && !strstr(dr, "conflict generated/decls/entitydef/monster/imp.decl"));
+                CHECK(dr && strstr(dr, "MODS: doctor: 0 conflict(s), ") && strstr(dr, ", 2 edit source(s) of 1 game file(s) "));
+                if (getenv("MODUI_DEBUG")) printf("    doctor: %s\n", dr ? dr : "(refused)");
+            }
+            doc = list_doc();
+            {
+                /* the whole row of alex.edits2, up to the next row */
+                const char *row = doc ? strstr(doc, "{\"key\":\"alex.edits2\"") : NULL;
+                const char *next = row ? strstr(row + 1, "{\"key\":\"") : NULL;
+                size_t n = row ? (next ? (size_t)(next - row) : strlen(row)) : 0;
+                char *one = row ? (char *)malloc(n + 1) : NULL;
+                if (one) { memcpy(one, row, n); one[n] = 0; }
+                CHECK(one && strstr(one, "\"counts\":{\"shadows\":0,") && strstr(one, "\"replaces\":0,") &&
+                      strstr(one, "\"replacements\":[{\"path\":\"generated/decls/entitydef/monster/imp.decl\",\"edits\":true}]"));
+                free(one);
+            }
+            free(doc);
+            open_test_map();
+            g_placed_count = 0;
+            /* pass 0: both rows pin builds that are not installed and nothing
+             * substituted them (the index's other build of the key serves);
+             * pass 1: the editor load substituted each row's installed build. */
+            for (pass = 0; pass < 2; pass++) {
+                g_sub_ids[0] = ids[0]; g_sub_to[0] = h_one;
+                g_sub_ids[1] = ids[1]; g_sub_to[1] = h_two;
+                CHECK(load_rows(ids, gone, 2, pass));
+                doc = list_doc();
+                if (!has(doc, "\"registryClashes\":[{\"slot\":\"entitydef/monster/imp/size\"")) printf("    %s\n", doc ? strstr(doc, "\"map\":{") : "(no doc)");
+                CHECK(has(doc, "\"registryClashes\":[{\"slot\":\"entitydef/monster/imp/size\",\"providers\":"
+                               "[{\"id\":\"alex.edits\",\"name\":\"Edits\"},{\"id\":\"alex.edits2\",\"name\":\"Edits Two\"}],"
+                               "\"chosen\":\"\",\"serving\":\"alex.edits\"}]"));
+                free(doc);
+            }
+            memset(g_sub_ids, 0, sizeof g_sub_ids);
+            g_map_on = was_on;
+            g_placed_count = was_placed;
+        }
         sh_mb_set_stock_ops(NULL);
     }
 

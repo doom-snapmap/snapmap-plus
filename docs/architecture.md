@@ -1751,7 +1751,11 @@ map's choices).
   different values: the map's choice (`"choices"` in the manifest rows,
   `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<key>"`),
   else the first in row order, with one line naming the slot and the command;
-  the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`).
+  the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`),
+  a row resolved as serving resolves it: its own build, else the build the
+  editor load substituted, else the installed build of its key
+  (`mu_row_serving_entry`), so a map pinning a build that is not installed
+  still offers the choice.
 - **Serving.** The synthetic files belong to a pseudo-bundle
   (`snapmap-plus.registries`, one past the bundle count, never admitted, so no
   bundle walk sees it), never served by name or need; an edited copy

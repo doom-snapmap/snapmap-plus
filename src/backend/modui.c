@@ -1784,6 +1784,21 @@ static void mu_slot_file(void *context, const char *file, const sh_dt_counts *co
     (void)sh_dt_edits_slots(file, c->bd->edits, strlen(c->bd->edits), mu_slot_add, c);
 }
 
+/* The entry that serves a declared row's edits, as serving resolves it: the
+ * row's own build, else the build the editor load substituted for it
+ * (sh_modmanifest_substituted), else the installed build of its key the
+ * index serves instead (sh_modserve_row_other_build, the newest), or -1. */
+static int mu_row_serving_entry(const mu_model *m, const sh_modmanifest_row *row)
+{
+    char sub[SH_MODMANIFEST_HASH_CAP];
+    sh_modserve_bundle_ref ob;
+    int at = mu_find_hash(m, row->bundle);
+    if (at >= 0) return at;
+    if (sh_modmanifest_substituted(row->bundle, sub, sizeof sub) && (at = mu_find_hash(m, sub)) >= 0) return at;
+    if (sh_modserve_row_other_build(row, &ob) == 1 && (at = mu_find_hash(m, ob.hash)) >= 0) return at;
+    return -1;
+}
+
 static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
     mu_slot_ctx c;
@@ -1794,7 +1809,7 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
     c.slots = (mu_slot *)calloc((size_t)c.cap, sizeof *c.slots);
     mu_puts(b, ",\"registryClashes\":[");
     for (r = 0; c.slots && r < mp->rows.count; r++) {
-        int at = mu_find_hash(m, mp->rows.rows[r].bundle);
+        int at = mu_row_serving_entry(m, &mp->rows.rows[r]);
         const sh_mb_bundle *bd;
         if (at < 0) continue;
         bd = &m->list.items[at].bundle;
