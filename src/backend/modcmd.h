@@ -16,9 +16,11 @@
  *                                  every build
  *   sh_mods held [filter]          what the game was served under each name this session and
  *                                  what it holds (modserve_engine.c)
- *   sh_mods choose "<slot>" "<key>"   the open map's registry choice: which declared mod serves
- *                                  a player field or weapon slot several of them set
- *                                  (player.hands, weapons/<stock weapon>); an empty key clears
+ *   sh_mods choose "<slot>" "<key>"   the open map's choice between mods' edits: which declared
+ *                                  mod's value serves a field or keyed entry several of them
+ *                                  edit, slot "<game file>/<path>" as the doctor names it
+ *                                  (entitydef/player/coop/edit/handsModelMPUseDoomHands); an
+ *                                  empty key clears
  *   sh_mods verify "<folder|id|id@version>"  rehash installed mods and record the result
  *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
  *   sh_mods map                    the open map and each mod it uses: placed entities, and the
@@ -79,12 +81,11 @@
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP_TAB: authoring and the additive model's verbs. */
 #define SH_MODCMD_HELP_AUTHOR "Authoring: 'sh_mods new \"<name>\"' makes a mod folder under a generated key, " \
                               "'sh_mods held [filter]' prints what the game was served under each name this session and " \
-                              "what it still holds, 'sh_mods choose \"<slot>\" \"<key>\"' picks which declared mod serves " \
-                              "a player field or weapon slot several of the open map's mods set (player.hands, " \
-                              "player.handsD1, player.body, player.handsAnimWeb, weapons/<stock weapon>; an empty key " \
-                              "clears), 'sh_mods map upgrade \"<id>\"' moves the open map to a mod's newest installed " \
+                              "what it still holds, 'sh_mods choose \"<game file>/<path>\" \"<key>\"' picks which declared mod's " \
+                              "edit serves a field several of the open map's mods set to different values " \
+                              "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty key clears), 'sh_mods map upgrade \"<id>\"' moves the open map to a mod's newest installed " \
                               "build, and 'sh_mods doctor' prints one line per build of a key, which layer serves each " \
-                              "path several mods carry, and the registries with their clashes."
+                              "path several mods carry, and the game files generated from the mods' edits with their clashes."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
                              "'sh_mods pull \"<bundle hash>\"' downloads and installs one, 'sh_mods release \"<ref>\"' drops " \

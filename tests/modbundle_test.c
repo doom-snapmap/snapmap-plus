@@ -786,28 +786,78 @@ static void m_replaces_declared(const char *f)
     mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
-static void m_replaces_registry(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/player/coop.decl\"]"));
-}
-static void m_replaces_absent(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
-}
-static void m_replaces_weapon(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"replaces\":[\"generated/decls/weapon/zion/player/sp/pistol.decl\"]"));
-}
-static void m_replaces_not_array(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"replaces\":\"generated/decls/entitydef/monster/imp.decl\""));
-}
 /* An undeclared replacement in a folder the product downloaded. */
 static void m_shadow_downloaded(const char *f)
 {
     mt_write(f, "mod.json", DESC(",\"snapmap-plus\":{\"origin\":\"download\"}"));
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n}");
 }
+/* Old descriptors (DESIGN-additive 2.4): the retired intent keys. */
+static void m_old_player(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":\"player/fp_hands.md6\"}"));
+}
+static void m_old_extends(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"extends\":{\"entitydef/ai/conductor/coop/snapmap_default\":\"mods/alex.r2-imp/conductor_entries\"}"));
+    mt_write(f, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\conductor_entries.decl",
+             "{\r\n\tedit = {\r\n\t\taiTypeList = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"2097152\";\r\n"
+             "\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
+}
+static void m_old_body_events(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"bodyEvents\":\"mods/alex.r2-imp/body_events.md6\"}"));
+    mt_write(f, "assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\body_events.md6.decl",
+             "{\r\n\tevents {\r\n\t}\r\n}\r\n");
+}
+/* An edited copy outside the decl grammar. */
+static void m_copy_unparsed(const char *f)
+{
+    mt_write(f, "mod.json", DESC(""));
+    mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n\t= 3;\r\n}");
+}
+/* A binary at a game name with other bytes. */
+static void m_binary_replace(const char *f)
+{
+    mt_write(f, "mod.json", DESC(""));
+    mt_write(f, "assets\\cooked\\anim\\md6\\characters\\monsters\\imp\\base\\motion\\combat\\idle.bmd6anim", "not the game's bytes");
+}
+
+/* The game's texts of the decls the edits cases copy (a fake installed-content reader). */
+static const char *const g_texts[][2] = {
+    { "generated/decls/entitydef/monster/imp.decl",
+      "{\r\n\tinherit = \"ai/demon/imp\";\r\n\teditorVars {\r\n\t\tplaceable = false;\r\n\t}\r\n}\r\n" },
+    { "generated/decls/md6def/monster/imp.md6.decl", "{\r\n\tevents {\r\n\t}\r\n}\r\n" },
+    { NULL, NULL }
+};
+static const char *text_of(const char *source)
+{
+    int i;
+    for (i = 0; g_texts[i][0]; i++) if (!_stricmp(source, g_texts[i][0])) return g_texts[i][1];
+    return NULL;
+}
+static int tx_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    const char *t = text_of(source);
+    (void)c;
+    if (!t) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(t, strlen(t), sha);
+    *size = strlen(t);
+    return SH_MB_STOCK_OK;
+}
+static int tx_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
+{
+    const char *t = text_of(source);
+    (void)c; (void)sha;
+    if (!t) return SH_MB_STOCK_ABSENT;
+    *len = strlen(t);
+    *bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, *len + 1);
+    if (!*bytes) return SH_MB_STOCK_UNAVAILABLE;
+    memcpy(*bytes, t, *len);
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops g_text_ops = { NULL, NULL, tx_identify, NULL, tx_read };
+
 static void m_shadow_not_shipped(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]")); }
 static void m_shadow_traversal(const char *f) { mt_write(f, "mod.json", DESC(",\"shadows\":[\"generated/../decls/x.decl\"]")); }
 static void m_requirements(const char *f)
@@ -929,63 +979,93 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_scenes_missing, &RESOLVER, "needs entityDef mods/alex.r2-imp/gone, which resolves to nothing");
 
-    /* The refusal is on by default: a replacement of a stock decl fails the
-     * build, and the descriptor's "replaces" declares it instead. */
-    CHECK(sh_mb_refuse_replacements());
-    refused(fixture, tmp, m_shadow_ok, &RESOLVER,
-            "would replace generated/decls/entitydef/monster/imp.decl: put it under mods/alex.r2-imp/ or declare the intent");
-    accepted(fixture, tmp, m_replaces_declared, &b);
-    CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed &&
-          b.classes.replaces == 1 && b.replace_count == 1);
-    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl (declared): affects only maps that declare this mod") &&
-          !has_note(&b, "replacements are retired"));
-    CHECK(b.extra && strstr(b.extra, "\"replaces\":[\"generated/decls/entitydef/monster/imp.decl\"]"));
-    sh_mb_free(&b);
-    refused(fixture, tmp, m_replaces_registry, &RESOLVER, "a registry the product generates per map");
-    refused(fixture, tmp, m_replaces_absent, &RESOLVER, "which this mod does not carry");
-    refused(fixture, tmp, m_replaces_weapon, &RESOLVER, "name it in player.weapons instead");
-    refused(fixture, tmp, m_replaces_not_array, &RESOLVER, "replaces must be an array");
-    /* An install of received content (a rawmap import) keeps them on its own thread. */
-    sh_mb_keep_replacements_here(1);
+    /* Derived edits (DESIGN-additive 2.4): a decl at a game name is an edited
+     * copy. The builder records its structural diff against the game's text
+     * (the product block's "edits") and the product generates the game file
+     * per map; nothing is declared. The game's texts come from a fake
+     * installed-content reader. */
+    sh_mb_set_stock_ops(&g_text_ops);
     accepted(fixture, tmp, m_shadow_ok, &b);
-    CHECK(b.errors == 0 && b.shadow_count == 1);
-    sh_mb_free(&b);
-    sh_mb_keep_replacements_here(0);
-    /* A folder the product received (a download) is never refused on its files. */
-    accepted(fixture, tmp, m_shadow_downloaded, &b);
-    CHECK(b.errors == 0 && b.shadow_count == 1 && !strcmp(b.origin, SH_MB_ORIGIN_DOWNLOAD));
-    sh_mb_free(&b);
-
-    /* With the refusal off (the phase 1 builder path), a replacement of a
-     * stock decl is accepted, served as a shadow and reported; the canonical
-     * shadows are derived from the files, so the same mod with or without its
-     * old "shadows" key has one hash. */
-    sh_mb_set_refuse_replacements(0);
-    accepted(fixture, tmp, m_shadow_ok, &b);
-    CHECK(b.errors == 0 && b.shadow_count == 1 && find_file(&b, "generated/decls/entitydef/monster/imp.decl")->shadowed);
-    CHECK(find_file(&b, "generated/decls/entitydef/monster/imp.decl")->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1);
-    CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
-    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
-          has_note(&b, "replacements are retired: 1 file(s)") && has_note(&b, "shadows: ignored"));
     {
+        const sh_mb_file *imp = find_file(&b, "generated/decls/entitydef/monster/imp.decl");
+        CHECK(b.errors == 0 && b.edit_files == 1 && b.edits && imp && imp->edit && imp->shadowed &&
+              imp->cls == SH_MB_CLASS_REPLACE && b.classes.replaces == 1 && b.shadow_count == 1);
+        CHECK(b.edits && strstr(b.edits, "\"file\":\"generated/decls/entitydef/monster/imp.decl\"") &&
+              strstr(b.edits, "\"op\":\"set\",\"path\":[\"inherit\"]") && strstr(b.edits, "\"op\":\"remove\",\"path\":[\"editorVars\"]"));
+        if (b.edits && !strstr(b.edits, "\"op\":\"set\",\"path\":[\"inherit\"]")) fprintf(stderr, "  edits: %s\n", b.edits);
+    }
+    CHECK(has_note(&b, "edits generated/decls/entitydef/monster/imp.decl: 2 operations (1 set, 1 removed,") &&
+          has_note(&b, "edits 1 game file: maps that declare this mod get the game's text with these edits") &&
+          has_note(&b, "shadows: ignored"));
+    CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
+    {
+        /* The block's edits survive a write and a load. */
+        sh_mb_bundle back;
+        char folder[MAX_PATH], path[MAX_PATH], cause[256];
+        memset(&back, 0, sizeof back);
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\case%d", tmp, g_case);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+        CHECK(sh_mb_write(&b, folder, cause, sizeof cause) && sh_mb_load(path, &back) && back.edit_files == 1 && back.edits &&
+              strstr(back.edits, "generated/decls/entitydef/monster/imp.decl"));
+        sh_mb_free(&back);
+    }
+    {
+        /* The same copy without the retired "shadows" key: one hash. */
         sh_mb_bundle undeclared;
         char shadow_hash[65];
         strcpy_s(shadow_hash, sizeof shadow_hash, b.hash);
         accepted(fixture, tmp, m_shadow_undeclared, &undeclared);
-        CHECK(undeclared.errors == 0 && undeclared.shadow_count == 1 && !strcmp(undeclared.hash, shadow_hash));
+        CHECK(undeclared.errors == 0 && undeclared.edit_files == 1 && !strcmp(undeclared.hash, shadow_hash));
         CHECK(!has_note(&undeclared, "shadows: ignored"));
         sh_mb_free(&undeclared);
     }
     sh_mb_free(&b);
-    /* A shadow keeping a stock name the game lacks is reported, not refused;
+    /* The retired escape hatch is ignored with one line and kept out of extra. */
+    accepted(fixture, tmp, m_replaces_declared, &b);
+    CHECK(b.errors == 0 && b.edit_files == 1 && has_note(&b, "replaces: ignored: the product derives the edits") &&
+          (!b.extra || !strstr(b.extra, "replaces")));
+    sh_mb_free(&b);
+    accepted(fixture, tmp, m_old_player, &b);
+    CHECK(b.errors == 0 && has_note(&b, "player: ignored:") && (!b.extra || !strstr(b.extra, "\"player\"")));
+    sh_mb_free(&b);
+    /* A partial an old descriptor names is refused with what to put instead. */
+    refused(fixture, tmp, m_old_extends, &RESOLVER,
+            "conductor_entries.decl: this is a partial; put the whole edited copy of "
+            "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl at its game name");
+    refused(fixture, tmp, m_old_body_events, &RESOLVER,
+            "body_events.md6.decl: this is a partial; put the whole edited copy of "
+            "generated/decls/md6def/player/mp/tp_body_mp.md6.decl at its game name");
+    /* A copy outside the decl grammar cannot be diffed. */
+    refused(fixture, tmp, m_copy_unparsed, &RESOLVER,
+            "imp.decl does not parse as a decl (line 2: expected a key, found '='); the product derives the edits from the "
+            "whole edited copy of generated/decls/entitydef/monster/imp.decl");
+    /* A binary at a game name with other bytes is refused. */
+    refused(fixture, tmp, m_binary_replace, &RESOLVER,
+            "would replace the game's cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim with other "
+            "bytes; a binary at a game name cannot be merged with other mods: put it under mods/alex.r2-imp/");
+    /* Received content keeps a binary replacement: an import on its own thread, a downloaded folder. */
+    sh_mb_keep_replacements_here(1);
+    accepted(fixture, tmp, m_binary_replace, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1 && b.classes.replaces == 1 && !b.edits);
+    sh_mb_free(&b);
+    sh_mb_keep_replacements_here(0);
+    accepted(fixture, tmp, m_shadow_downloaded, &b);
+    CHECK(b.errors == 0 && b.shadow_count == 1 && b.edit_files == 1 && !strcmp(b.origin, SH_MB_ORIGIN_DOWNLOAD));
+    sh_mb_free(&b);
+    /* A copy keeping a stock name the game lacks is reported, not refused;
      * the same dangling name in a mod's own decl still refuses (m_missing_need). */
     accepted(fixture, tmp, m_shadow_dangling, &b);
     if (b.errors || b.warnings != 1) fprintf(stderr, "  dangling shadow: %s / %s\n", b.first_cause, b.first_warning);
     CHECK(b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1 &&
           strstr(b.first_warning, "resolves to nothing (a replaced stock file") != NULL &&
-          find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->shadowed);
+          find_file(&b, "generated/decls/md6def/monster/imp.md6.decl")->edit &&
+          b.edits && strstr(b.edits, "\"op\":\"bag\",\"path\":[\"events\"]"));
     sh_mb_free(&b);
-    sh_mb_set_refuse_replacements(1);
+    /* Without a reader the game's text cannot be read: the copy is refused. */
+    sh_mb_set_stock_ops(NULL);
+    refused(fixture, tmp, m_shadow_ok, &RESOLVER,
+            "imp.decl: the game's generated/decls/entitydef/monster/imp.decl cannot be read, so the edits this copy makes "
+            "cannot be derived");
     /* Values normalise to strings; unknown keys travel under extra. */
     accepted(fixture, tmp, m_requirements, &b);
     CHECK(b.requirements && !strcmp(b.requirements, GATES_CANONICAL));
@@ -1301,6 +1381,14 @@ typedef struct fake_entry { const char *source; const char *text; } fake_entry;
 static const fake_entry FAKE[] = {
     { "generated/image/stock/rock.bimage", "ROCK-BYTES-0123456789" },
     { "generated/decls/entitydef/stock/crate.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}" },
+    { "generated/decls/entitydef/monster/imp.decl", "{\r\n\tinherit = \"ai/demon/imp\";\r\n}" },
+    { "generated/decls/entitydef/player/coop.decl",
+      "{\r\n\tinherit = \"player/mp\";\r\n\teditorVars {\r\n\t\tplaceable = false;\r\n\t}\r\n\tedit = {\r\n"
+      "\t\tmasterWeaponList = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = \"weapon/a\";\r\n\t\t}\r\n\t}\r\n}" },
+    { "generated/decls/aifsmmanager/states/spidermastermind.decl",
+      "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind\";\r\n"
+      "\t\t\t\t\tisRoot = false;\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n"
+      "\t\t\t\t\tname = \"smm_wounded\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}" },
     { NULL, NULL }
 };
 static const fake_entry *fake_find(const char *source)
@@ -1361,9 +1449,7 @@ static int fake_read(void *ctx, const char *source, const char *sha, unsigned ch
 static int fake_stock_exists(void *ctx, const char *request)
 {
     if (!strcmp(request, STOCK_BANK)) return 1;
-    if (sh_mb_registry_request(request)) return 1;   /* the registries' game files */
-    if (!strcmp(request, "generated/decls/aifsmmanager/states/spidermastermind.decl")) return 1;   /* an extends target */
-    if (!strncmp(request, "generated/decls/aifsmmanager/states/", 36)) return 0;
+    if (!strncmp(request, "generated/decls/aifsmmanager/states/", 36) && !fake_find(request)) return 0;
     return fake_find(request) ? 1 : stock_exists(ctx, request);
 }
 static const sh_mb_resolver FAKE_RESOLVER = { NULL, NULL, fake_stock_exists, NULL };
@@ -1376,11 +1462,11 @@ static int count_class(const sh_mb_bundle *b, int cls)
     return n;
 }
 
-/* Every cell of the classification (DESIGN-additive 2.1, 2.6): add, borrow,
- * surface, replacement (accepted and reported in phase 1), an editor type
- * under the key (an addition) and at a game name (an editor tweak); the
- * shadows derived; the product block's derived facts written and read back;
- * the replacement refusal switched on. */
+/* Every cell of the classification (DESIGN-additive 2.1, 2.4, 2.6): add,
+ * borrow, surface, an edited copy at a game name (its edits derived), an
+ * editor type under the key (an addition) and at a game name (an editor
+ * tweak); the shadows derived; the product block's derived facts written and
+ * read back; the player entity and the FSM states as edits. */
 static void test_classes(const char *fixture, const char *tmp)
 {
     static const sh_mb_stock_ops ops = { NULL, fake_match, fake_identify, fake_verify, fake_read };
@@ -1397,9 +1483,6 @@ static void test_classes(const char *fixture, const char *tmp)
     mt_write(folder, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl",            /* editor, game name */
              "{\r\n\tedit = {\r\n\t\tsortPriority = 1;\r\n\t}\r\n}");
     sh_mb_set_stock_ops(&ops);
-    /* Every cell is built with the refusal off (the phase 1 builder path);
-     * the refusal itself is checked below. */
-    sh_mb_set_refuse_replacements(0);
     CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  classes refused: %s\n", b.first_cause);
     f = find_file(&b, "generated/image/mods/alex.r2_imp/rock_copy.bimage");
@@ -1407,9 +1490,9 @@ static void test_classes(const char *fixture, const char *tmp)
     f = find_file(&b, "generated/image/stock/rock.bimage");
     CHECK(f && f->cls == SH_MB_CLASS_SURFACE && f->stock && !f->shadowed);
     f = find_file(&b, "generated/decls/entitydef/monster/imp.decl");
-    CHECK(f && f->cls == SH_MB_CLASS_REPLACE && !f->stock && f->shadowed);
+    CHECK(f && f->cls == SH_MB_CLASS_REPLACE && !f->stock && f->shadowed && f->edit);
     f = find_file(&b, "generated/decls/snapeditorentitydef/demons/demon_base.decl");
-    CHECK(f && f->cls == SH_MB_CLASS_EDITOR && f->shadowed);
+    CHECK(f && f->cls == SH_MB_CLASS_EDITOR && f->shadowed && !f->edit);
     /* An editor type under the key is a Toybox row the mod adds: it travels. */
     f = find_file(&b, "generated/decls/snapeditorentitydef/mods/alex.r2-imp/imp_copy.decl");
     CHECK(f && f->cls == SH_MB_CLASS_ADD && !f->shadowed);
@@ -1429,8 +1512,8 @@ static void test_classes(const char *fixture, const char *tmp)
     /* The shadows are exactly the files at game names outside the namespace. */
     CHECK(b.shadow_count == 2 && !strcmp(b.shadows[0], "generated/decls/entitydef/monster/imp.decl") &&
           !strcmp(b.shadows[1], "generated/decls/snapeditorentitydef/demons/demon_base.decl"));
-    CHECK(has_note(&b, "replaces generated/decls/entitydef/monster/imp.decl") &&
-          !has_note(&b, "replaces generated/decls/snapeditorentitydef"));
+    CHECK(has_note(&b, "edits generated/decls/entitydef/monster/imp.decl: 1 operation (1 set,") &&
+          !has_note(&b, "edits generated/decls/snapeditorentitydef") && b.edit_files == 1);
     /* The product block carries the derived facts; loading reads the key and
      * recomputes the classes from the same files. */
     CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
@@ -1440,51 +1523,33 @@ static void test_classes(const char *fixture, const char *tmp)
           strstr((const char *)text, "\"origin\": \"by-hand\"") &&
           strstr((const char *)text, "\"classes\": {") && strstr((const char *)text, "\"replaces\": 1") &&
           strstr((const char *)text, "\"editor\": [") && strstr((const char *)text, "\"registries\": {") &&
+          strstr((const char *)text, "\"edits\": [") &&
           strstr((const char *)text, "\"surfaces\": 1") && !strstr((const char *)text, "noops") &&
           !strstr((const char *)text, "\"generated/decls/snapeditorentitydef/mods/"));
     free(text);
     CHECK(sh_mb_load_folder(folder, &back));
     if (back.errors) fprintf(stderr, "  classes reload: %s\n", back.first_cause);
     CHECK(!strcmp(back.hash, b.hash) && !back.origin[0] && back.classes.adds == 13 && back.classes.borrows == 1 &&
-          back.classes.surfaces == 1 && back.classes.replaces == 1 && back.classes.editor == 1);
+          back.classes.surfaces == 1 && back.classes.replaces == 1 && back.classes.editor == 1 && back.edit_files == 1);
     sh_mb_free(&back);
-    /* The refusal switch (on by default): the replacement fails the
-     * build with its cause; the editor tweak and the surface at game names do
-     * not. Off again, the same folder builds to the same hash. */
-    {
-        char h0[65];
-        strcpy_s(h0, sizeof h0, b.hash);
-        CHECK(!sh_mb_refuse_replacements());
-        sh_mb_set_refuse_replacements(1);
-        CHECK(sh_mb_refuse_replacements());
-        CHECK(!sh_mb_build(folder, &FAKE_RESOLVER, &back) && back.errors == 1 &&
-              strstr(back.first_cause, "would replace generated/decls/entitydef/monster/imp.decl: put it under "
-                                       "mods/alex.r2-imp/ or declare the intent in mod.json") != NULL);
-        if (back.errors != 1) fprintf(stderr, "  refusal: %u error(s), first %s\n", back.errors, back.first_cause);
-        sh_mb_free(&back);
-        sh_mb_set_refuse_replacements(0);
-        CHECK(sh_mb_build(folder, &FAKE_RESOLVER, &back) && !strcmp(back.hash, h0));
-        sh_mb_free(&back);
-    }
-    /* A registry file (the player entity, the body, the conductor) is never
-     * refused: the product generates it from intent, and packs built before
-     * the intent existed keep building, told to express it as intent. */
+    /* The player entity, a game file several mods edit: an edited copy's
+     * field sets, removed blocks and added blocks are its edits; nothing is
+     * declared and nothing at its name is served. */
     {
         char reg[MAX_PATH];
-        size_t k;
-        int noted = 0;
-        _snprintf_s(reg, sizeof reg, _TRUNCATE, "%s\\classes-registry", tmp);
+        _snprintf_s(reg, sizeof reg, _TRUNCATE, "%s\\classes-coop", tmp);
         CHECK(mt_copy_tree(fixture, reg));
-        mt_write(reg, "assets\\generated\\decls\\entitydef\\player\\coop.decl", "{\r\n\tinherit = \"player/mp\";\r\n}");
-        CHECK(sh_mb_registry_request("generated/decls/entitydef/player/coop.decl") == 3 &&
-              sh_mb_registry_request("GENERATED/decls/md6def/player/mp/tp_body_mp.md6.decl") == 2 &&
-              !sh_mb_registry_request("generated/decls/entitydef/player/mp.decl"));
-        sh_mb_set_refuse_replacements(1);
-        CHECK(sh_mb_build(reg, &FAKE_RESOLVER, &back) && back.classes.replaces == 1);
-        if (back.errors) fprintf(stderr, "  registry refused: %s\n", back.first_cause);
-        for (k = 0; k < back.note_count; k++)
-            noted |= strstr(back.notes[k], "replaces generated/decls/entitydef/player/coop.decl: express it as player intent") != NULL;
-        CHECK(noted);
+        mt_write(reg, "assets\\generated\\decls\\entitydef\\player\\coop.decl",
+                 "{\r\n\tinherit = \"player/mp\";\r\n\tedit = {\r\n\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n"
+                 "\t\tdamageGroups = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdamageScale = 1.5;\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
+        CHECK(sh_mb_build(reg, &FAKE_RESOLVER, &back) && back.classes.replaces == 1 && back.edit_files == 1);
+        if (back.errors) fprintf(stderr, "  coop refused: %s\n", back.first_cause);
+        CHECK(back.edits && strstr(back.edits, "\"op\":\"remove\",\"path\":[\"editorVars\"]") &&
+              strstr(back.edits, "\"op\":\"remove\",\"path\":[\"edit\",\"masterWeaponList\"]") &&
+              strstr(back.edits, "\"op\":\"set\",\"path\":[\"edit\",\"handsModelMPUseDoomHands\"]") &&
+              strstr(back.edits, "\"op\":\"set\",\"path\":[\"edit\",\"damageGroups\"]"));
+        CHECK(has_note(&back, "edits generated/decls/entitydef/player/coop.decl: 4 operations (2 set, 2 removed,"));
+        sh_mb_free(&back);
         {
             /* An md6 collision model is placed by a name the game ships under generated/model/. */
             char keys[2][SH_MB_REQUEST_MAX + 1];
@@ -1494,8 +1559,6 @@ static void test_classes(const char *fixture, const char *tmp)
             CHECK(sh_mb_model_keys("models/a/b.bmodel", keys, 2) == 1 && !strcmp(keys[0], "models/a/b.bmodel"));
             CHECK(sh_mb_model_keys("textures/a.tga", keys, 2) == 0);
         }
-        sh_mb_free(&back);
-        sh_mb_set_refuse_replacements(0);
     }
     /* A rebuild keeps the hash and the build number. */
     {
@@ -1542,46 +1605,27 @@ static void test_classes(const char *fixture, const char *tmp)
         CHECK_CAUSE(b, "a stock sound bank cannot be replaced");
         sh_mb_free(&b);
     }
-    sh_mb_set_refuse_replacements(1);   /* the default */
-    /* extends: a list-shaped stock decl on the product's table, a partial of
-     * the mod's own entries under the key, recorded under registries.extends. */
+    /* AI FSM states: the spider's new root graph takes the stock graph's
+     * name and the stock graph is renamed; keyed by each subGraph's
+     * object.name, that is one keyed replace and one keyed add. */
     {
-        static const char PART[] = "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n"
-                                   "\t\t\t\t\tname = \"smm_root\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n";
-        static const char *const PART_FILE = "assets\\generated\\decls\\aifsmmanager\\mods\\alex.r2-imp\\spider_fsm.decl";
-        char ext[MAX_PATH];
-        _snprintf_s(ext, sizeof ext, _TRUNCATE, "%s\\classes_extends", tmp);
-        CHECK(mt_copy_tree(fixture, ext));
-        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/spidermastermind\":\"mods/alex.r2-imp/spider_fsm\"}"));
-        mt_write(ext, PART_FILE, PART);
-        CHECK(sh_mb_build(ext, &FAKE_RESOLVER, &b) && b.ext_count == 1);
-        if (b.errors) fprintf(stderr, "  extends refused: %s\n", b.first_cause);
-        CHECK(b.registries && strstr(b.registries, "\"extends\":{\"aifsmmanager/states/spidermastermind\":"
-                                                   "\"mods/alex.r2-imp/spider_fsm\"}"));
-        CHECK(sh_mb_extend_partial_ok(PART, strlen(PART), "edit/subGraphs", cause, sizeof cause));
-        CHECK(!sh_mb_extend_partial_ok("{ init { mesh \"x\" } }", 21, "events;aliases", cause, sizeof cause) &&
-              strstr(cause, "member init is outside events;aliases"));
-        CHECK(sh_mb_extend_partial_ok("{ edit = { validEncounters = { num = 1; item[0] = \"a\"; } } }", 60,
-                                      "edit/validEncounters", cause, sizeof cause));
-        CHECK(!sh_mb_extend_partial_ok("{ edit = { x = 1; } }", 21, "edit/validEncounters", cause, sizeof cause));
-        CHECK(!sh_mb_extend_partial_ok("{ edit = { ", 11, "edit/validEncounters", cause, sizeof cause));
+        char fsm[MAX_PATH];
+        sh_mb_set_stock_ops(&ops);
+        _snprintf_s(fsm, sizeof fsm, _TRUNCATE, "%s\\classes_fsm", tmp);
+        CHECK(mt_copy_tree(fixture, fsm));
+        mt_write(fsm, "assets\\generated\\decls\\aifsmmanager\\states\\spidermastermind.decl",
+                 "{\r\n\tedit = {\r\n\t\tsubGraphs = {\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind\";\r\n"
+                 "\t\t\t\t\tisRoot = false;\r\n\t\t\t\t\tfsmType = \"idAIFSM\";\r\n\t\t\t\t}\r\n\t\t\t}\r\n\t\t\tsubGraph = {\r\n"
+                 "\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"spiderMastermind_attacks\";\r\n\t\t\t\t\tisRoot = false;\r\n\t\t\t\t}\r\n"
+                 "\t\t\t}\r\n\t\t\tsubGraph = {\r\n\t\t\t\tobject = {\r\n\t\t\t\t\tname = \"smm_wounded\";\r\n\t\t\t\t}\r\n"
+                 "\t\t\t}\r\n\t\t}\r\n\t}\r\n}");
+        CHECK(sh_mb_build(fsm, &FAKE_RESOLVER, &b) && b.edit_files == 1);
+        if (b.errors) fprintf(stderr, "  fsm refused: %s\n", b.first_cause);
+        CHECK(b.edits && strstr(b.edits, "\"op\":\"keyed\",\"path\":[\"edit\",\"subGraphs\"],\"word\":\"subGraph\",\"name\":\"spiderMastermind\"") &&
+              strstr(b.edits, "\"name\":\"spiderMastermind_attacks\"") && !strstr(b.edits, "smm_wounded") &&
+              !strstr(b.edits, "\"op\":\"unkey\""));
         sh_mb_free(&b);
-        mt_write(ext, PART_FILE, "{\r\n\tedit = {\r\n\t\tobject = {\r\n\t\t\tdebugFlags = 6;\r\n\t\t}\r\n\t}\r\n}\r\n");
-        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "the extends partial for aifsmmanager/states/spidermastermind: member object is outside edit/subGraphs");
-        sh_mb_free(&b);
-        mt_write(ext, "mod.json", DESC(",\"extends\":{\"entitydef/player/coop\":\"mods/alex.r2-imp/spider_fsm\"}"));
-        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "entitydef/player/coop is not a list the product extends");
-        sh_mb_free(&b);
-        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/spidermastermind\":\"mods/alex.r2-imp/gone\"}"));
-        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "names mods/alex.r2-imp/gone, which this mod does not provide as a aifsmmanager decl");
-        sh_mb_free(&b);
-        mt_write(ext, "mod.json", DESC(",\"extends\":{\"aifsmmanager/states/nobody\":\"mods/alex.r2-imp/spider_fsm\"}"));
-        CHECK(!sh_mb_build(ext, &FAKE_RESOLVER, &b));
-        CHECK_CAUSE(b, "aifsmmanager/states/nobody is not a stock decl the game holds");
-        sh_mb_free(&b);
+        sh_mb_set_stock_ops(NULL);
     }
 }
 
@@ -1647,82 +1691,6 @@ static void test_keys(const char *fixture, const char *tmp)
     }
 }
 
-/* The player intent: names under the key provided by the mod, stock names
- * that resolve, refusals for an unresolved name, a value of the wrong JSON
- * type, a name of the wrong decl type and an unknown member. Registries:
- * the conductor's encounter decls and the string keys. */
-static void m_player_ok(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":\"monster/imp.md6\",\"body\":\"mods/alex.r2-imp/imp_copy\","
-                                 "\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b.md6\"},"
-                                 "\"strings\":{\"en\":{\"mods/alex.r2-imp/row\":\"Row\",\"plain_key\":\"Plain\"}}"));
-    mt_write(f, "assets\\generated\\decls\\snapaiencounter\\mods\\alex.r2-imp\\imp_enc.decl", "{\r\n}");
-}
-static void m_player_unresolved(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"handsD1\":\"monster/none.md6\"}")); }
-static void m_player_missing(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"body\":\"mods/alex.r2-imp/nothing\"}")); }
-static void m_player_number(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":3}")); }
-static void m_player_array(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":[\"hands\"]")); }
-static void m_player_decltype(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy.md6\"}")); }
-static void m_player_member(const char *f) { mt_write(f, "mod.json", DESC(",\"player\":{\"feet\":\"monster/imp.md6\"}")); }
-/* handsAnimWeb and weapons (the player kit). */
-#define KIT_WEAPON "assets\\generated\\decls\\weapon\\mods\\alex.r2-imp\\weapon\\pistol.decl"
-#define KIT_WEB    "assets\\generated\\decls\\animweb\\mods\\alex.r2-imp\\hands_web.decl"
-static void m_kit_ok(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/hands_web\",\"weapons\":{"
-                                 "\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/pistol\","
-                                 "\"weapon/zion/player/sp/chainsaw\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
-    mt_write(f, KIT_WEAPON, "{\r\n}");
-    mt_write(f, KIT_WEB, "{\r\n}");
-}
-static void m_kit_stock_web(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"player/fp_hands_mp\"}"));
-}
-static void m_kit_web_unresolved(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"player/none\"}"));
-}
-static void m_kit_web_type(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/imp_copy\"}"));
-}
-static void m_kit_key_unresolved(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/nothing\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
-    mt_write(f, KIT_WEAPON, "{\r\n}");
-}
-static void m_kit_key_own(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"mods/alex.r2-imp/weapon/pistol\":\"mods/alex.r2-imp/weapon/pistol\"}}"));
-    mt_write(f, KIT_WEAPON, "{\r\n}");
-}
-static void m_kit_value_unresolved(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/none\"}}"));
-}
-static void m_kit_value_stock(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"weapon/zion/player/sp/chainsaw\"}}"));
-}
-static void m_kit_value_type(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/imp_copy\"}}"));
-}
-static void m_kit_value_number(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":{\"weapon/zion/player/sp/pistol\":4}}"));
-}
-static void m_kit_not_object(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"weapons\":[\"weapon/zion/player/sp/pistol\"]}"));
-}
-/* bodyEvents names the md6Def by its decl name, ".md6" included. */
-static void m_kit_events_bare(const char *f)
-{
-    mt_write(f, "mod.json", DESC(",\"player\":{\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b\"}"));
-}
-
 /* A bare word naming a mod resource with '-' in it: the engine's breakable
  * and material lexers split it at '-' (the spider's smm_damage_gibs line 35
  * and its materials' transmap stages). Quoted, the same name is fine. */
@@ -1767,50 +1735,21 @@ static void test_bare_hyphen(const char *fixture, const char *tmp)
     sh_mb_free(&b);
 }
 
+/* Registries: the conductor's encounter decls and the string keys; the
+ * retired player keys leave nothing behind. */
+static void m_registries(const char *f)
+{
+    mt_write(f, "mod.json", DESC(",\"player\":{\"hands\":\"monster/imp.md6\"}"));
+    mt_write(f, "assets\\generated\\decls\\snapaiencounter\\mods\\alex.r2-imp\\imp_enc.decl", "{\r\n\tedit = {\r\n\t}\r\n}");
+}
 static void test_player(const char *fixture, const char *tmp)
 {
     sh_mb_bundle b;
-    accepted(fixture, tmp, m_player_ok, &b);
-    CHECK(b.errors == 0 && b.player[SH_MB_PLAYER_HANDS] && !strcmp(b.player[SH_MB_PLAYER_HANDS], "monster/imp.md6"));
-    CHECK(b.registries && !strcmp(b.registries,
-          "{\"conductor\":[\"mods/alex.r2-imp/imp_enc\"],\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy\","
-          "\"bodyEvents\":\"mods/alex.r2-imp/imp_copy_b.md6\",\"hands\":\"monster/imp.md6\"},"
-          "\"strings\":[\"mods/alex.r2-imp/row\",\"plain_key\"]}"));
-    if (b.registries) printf("modbundle_test: registries %s\n", b.registries);
-    CHECK(has_note(&b, "string plain_key will need namespacing") && !has_note(&b, "string mods/alex.r2-imp/row"));
-    /* The intent stays in extra: part of the manifest, never rewritten. */
-    CHECK(b.extra && strstr(b.extra, "\"player\":{\"body\":\"mods/alex.r2-imp/imp_copy\""));
+    accepted(fixture, tmp, m_registries, &b);
+    CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"conductor\":[\"mods/alex.r2-imp/imp_enc\"]") &&
+          !strstr(b.registries, "\"player\"") && has_note(&b, "player: ignored:") && !b.edits);
+    if (b.errors || !b.registries) fprintf(stderr, "  registries: %s\n", b.registries ? b.registries : b.first_cause);
     sh_mb_free(&b);
-    refused(fixture, tmp, m_player_unresolved, &RESOLVER, "player.handsD1 names monster/none.md6, which is neither");
-    refused(fixture, tmp, m_player_missing, &RESOLVER, "player.body names mods/alex.r2-imp/nothing, which this mod does not provide");
-    refused(fixture, tmp, m_player_number, &RESOLVER, "player.hands must be a string");
-    refused(fixture, tmp, m_player_array, &RESOLVER, "player must be an object");
-    refused(fixture, tmp, m_player_decltype, &RESOLVER, "it must name an entityDef");
-    refused(fixture, tmp, m_player_member, &RESOLVER, "player key feet is not supported");
-    /* The player kit: handsAnimWeb like hands, weapons keyed by stock weapon
-     * decls, each value a weapon decl of the mod; both in registries.player. */
-    accepted(fixture, tmp, m_kit_ok, &b);
-    CHECK(b.errors == 0 && b.weapon_count == 2 && b.player[SH_MB_PLAYER_HANDS_ANIM_WEB] &&
-          !strcmp(b.player[SH_MB_PLAYER_HANDS_ANIM_WEB], "mods/alex.r2-imp/hands_web"));
-    CHECK(b.registries && !strcmp(b.registries,
-          "{\"player\":{\"handsAnimWeb\":\"mods/alex.r2-imp/hands_web\",\"weapons\":{"
-          "\"weapon/zion/player/sp/chainsaw\":\"mods/alex.r2-imp/weapon/pistol\","
-          "\"weapon/zion/player/sp/pistol\":\"mods/alex.r2-imp/weapon/pistol\"}}}"));
-    if (b.registries) printf("modbundle_test: kit registries %s\n", b.registries);
-    sh_mb_free(&b);
-    accepted(fixture, tmp, m_kit_stock_web, &b);
-    CHECK(b.errors == 0 && b.registries && strstr(b.registries, "\"handsAnimWeb\":\"player/fp_hands_mp\""));
-    sh_mb_free(&b);
-    refused(fixture, tmp, m_kit_web_unresolved, &RESOLVER, "player.handsAnimWeb names player/none, which is neither");
-    refused(fixture, tmp, m_kit_web_type, &RESOLVER, "player.handsAnimWeb names mods/alex.r2-imp/imp_copy, which is a entityDef; it must name an animWeb");
-    refused(fixture, tmp, m_kit_key_unresolved, &RESOLVER, "player.weapons key weapon/zion/player/sp/nothing is not a stock weapon decl");
-    refused(fixture, tmp, m_kit_key_own, &RESOLVER, "player.weapons key mods/alex.r2-imp/weapon/pistol is under mods/alex.r2-imp/");
-    refused(fixture, tmp, m_kit_value_unresolved, &RESOLVER, "player.weapons.weapon/zion/player/sp/pistol names mods/alex.r2-imp/weapon/none, which this mod does not provide");
-    refused(fixture, tmp, m_kit_value_stock, &RESOLVER, "names weapon/zion/player/sp/chainsaw, which is not under mods/alex.r2-imp/");
-    refused(fixture, tmp, m_kit_value_type, &RESOLVER, "names mods/alex.r2-imp/imp_copy, which is a entityDef; it must name a weapon");
-    refused(fixture, tmp, m_kit_value_number, &RESOLVER, "player.weapons.weapon/zion/player/sp/pistol must be a string");
-    refused(fixture, tmp, m_kit_not_object, &RESOLVER, "player.weapons must be an object");
-    refused(fixture, tmp, m_kit_events_bare, &RESOLVER, "player.bodyEvents names mods/alex.r2-imp/imp_copy_b, which is a snapEditorEntityDef; it must name an md6Def");
 }
 
 int main(int argc, char **argv)

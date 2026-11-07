@@ -6,9 +6,9 @@
  * compact JSON {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
  * where "bundle" is the bundle hash and "names" the placed logical names the
  * bundle provides (informational). "choices": {"<slot>": "<key>", ...} records
- * the map's registry choices (modregistry.h: which declared mod serves a
- * player field or weapon slot several of them set, "player.hands",
- * "weapons/<stock weapon decl>"); a save writes each choice on the row of the
+ * the map's choices between its mods' edits (modregistry.h: which declared
+ * mod's value serves a field or keyed entry several of them edit, slot
+ * "<game file>/<path>", "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each choice on the row of the
  * key it names, a load reads them from every row (the first row naming a
  * slot wins). Names are dropped before choices when a row would exceed its
  * budget. "attached": true marks a map-level row: the mod
@@ -27,8 +27,8 @@
  * Product version (DESIGN-additive 2.7): one more string variable,
  * "smpprod1.<version>" (its initialValue the same version), appended last the
  * same way, says the least Snapmap+ version the map needs. A save writes it
- * when the map uses a registry choice, a declared mod with registry intent
- * (player fields, weapons, extends, conductor rows) or surfaced content, or a
+ * when the map uses a choice, a declared mod with derived edits or
+ * conductor encounters, or surfaced content, or a
  * product-only feature (a Grid Room variant module); the version is the
  * running product's (SH_PRODUCT_VERSION, stamped at build time). A load reads
  * and strips it like the rows (sh_modmanifest_product); a product that

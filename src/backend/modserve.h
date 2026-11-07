@@ -636,37 +636,18 @@ int  sh_modserve_scope_report(sh_modserve_line_fn fn, void *context);
 int  sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute);
 /* One line per registry path ("registry <request>: generated, N bytes" or
  * "the game's own file"), then what was generated and every clash
- * ("registry: conductor: aiType 524288 -> ...", "registry: player.hands: set
+ * ("registry: conductor: aiType 524288 -> ...", "registry: <game file>/<path>: set
  * by ...; serving ..."), then the choices. Returns the lines. */
 int  sh_modserve_registry_report(sh_modserve_line_fn fn, void *context);
-/* 1 when `request` is a registry input of an admitted bundle (an extends
- * partial or a bodyEvents file its product block names): the generator reads
- * it, nothing serves it, and the doctor lists it under the registry report,
- * never as a conflict. */
+/* 1 when `request` is a partial an admitted bundle built before derived
+ * edits still carries (an extends partial or a bodyEvents file its product
+ * block names): nothing serves it, and the doctor lists it under the
+ * registry report, never as a conflict. */
 int  sh_modserve_is_partial(const char *request);
-/* The composer's entry points for the registries (malloc'd text, NULL when
- * the texts do not compose): texts[0] composed with the others' list and
- * bag entries (the rule of shadows several declared bundles carry); and an
- * extends partial appended to base: the partial may hold only blocks on the
- * ';'-separated container paths ("events;aliases", "edit/aiTypeList"), and
- * each container's entries are appended to base's (kind SH_MR_LIST: list
- * items matched by value or first member, renumbered; SH_MR_BAG: blocks,
- * identical text skipped, a named block the base holds with other text
- * refused). *added counts the entries appended. */
+/* The composer (malloc'd text, NULL when the texts do not compose): texts[0]
+ * composed with the others' list and bag entries, the rule of shadows
+ * several grandfathered bundles carry. *added counts the entries appended. */
 char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, int n, size_t *len, int *added);
-char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
-                                 const char *containers, int kind, size_t *len, int *added);
-/* The bag case merged per entry (the player body events): a named block
- * the base holds with other content (`anim "clip"` with other event rows)
- * is not refused but becomes one block with the union of both texts' rows,
- * the base's first, identical rows once; a scalar both set differently keeps
- * the base's (counted in kept). on_merge (may be NULL) is called once per
- * merged entry with its key text (`anim "<clip>"`, not NUL-terminated) and
- * the rows appended to it. *added counts the new entries only. */
-typedef void (*sh_modserve_merge_fn)(void *context, const char *key, size_t key_n, int rows, int kept);
-char *sh_modserve_compose_extend_rows(const char *base, size_t base_len, const char *part, size_t part_len,
-                                      const char *containers, size_t *len, int *added,
-                                      sh_modserve_merge_fn on_merge, void *context);
 
 /* The points that must read the open map itself (the Play entry: Play does
  * not serialize the map) ask the bound source (modui.c) to recompute the

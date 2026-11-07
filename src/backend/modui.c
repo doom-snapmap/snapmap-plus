@@ -13,6 +13,7 @@
 #include "modserve.h"
 #include "modmanifest.h"
 #include "modregistry.h"
+#include "decl_tree.h"
 #include "backend_log.h"
 #include "config_json.h"
 #include "modmap.h"
@@ -777,30 +778,6 @@ static const char *mu_entry_title(const sh_ms_entry *s);
 
 /* ---- additive facts (DESIGN-additive 2.1, 2.4, 2.6, 2.9) */
 
-/* The author block's "replaces" (the declared escape hatch), malloc'd
- * lower-cased paths; returns the count. */
-static size_t mu_declared_replaces(const sh_mb_bundle *bd, char ***out)
-{
-    mpj *x;
-    const mpj *v;
-    size_t n = 0;
-    int i;
-    *out = NULL;
-    if (!bd->extra) return 0;
-    x = mpj_parse(bd->extra, strlen(bd->extra));
-    v = x ? mpj_get(x, "replaces") : NULL;
-    if (v && v->type == MPJ_ARR && v->n > 0 && (*out = (char **)calloc((size_t)v->n, sizeof(char *))) != NULL)
-        for (i = 0; i < v->n; i++)
-            if (v->items[i] && v->items[i]->type == MPJ_STR) {
-                char *s = sh_mm_decode(v->items[i]->text), *c;
-                if (!s) continue;
-                for (c = s; *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
-                (*out)[n++] = s;
-            }
-    mpj_free(x);
-    return n;
-}
-
 static void mu_strs_free(char **v, size_t n)
 {
     size_t i;
@@ -853,15 +830,35 @@ static void mu_put_stock_banks(mu_buf *b, const sh_mb_bundle *bd)
 }
 
 /* What the builder derived from the files (payload "facts"): the classes,
- * the editor tweaks, every replacement with whether the descriptor declares
- * it or it is a registry copy, and the registry contributions (the product
- * block's "registries": player fields and weapons, extends targets,
- * conductor encounters, string keys). */
+ * the editor tweaks, every replacement with whether it is an edited copy,
+ * the game files the mod edits with their operation counts (the product
+ * block's "edits", DESIGN-additive 2.4), and the product block's
+ * "registries" (conductor encounters, string keys, stock banks). */
+typedef struct mu_edits_ctx { mu_buf *b; int first; unsigned files; } mu_edits_ctx;
+
+static void mu_put_edit_file(void *context, const char *file, const sh_dt_counts *c)
+{
+    mu_edits_ctx *e = (mu_edits_ctx *)context;
+    if (!e->first) mu_putn(e->b, ",", 1);
+    e->first = 0;
+    e->files++;
+    mu_putn(e->b, "{", 1);
+    mu_kstr(e->b, "file", file, 1);
+    mu_knum(e->b, "ops", (long long)sh_dt_counts_total(c), 0);
+    mu_knum(e->b, "set", c->set, 0);
+    mu_knum(e->b, "remove", c->remove, 0);
+    mu_knum(e->b, "list", c->list, 0);
+    mu_knum(e->b, "keyed", c->keyed, 0);
+    mu_knum(e->b, "bag", c->bag, 0);
+    mu_knum(e->b, "drop", c->drop, 0);
+    mu_putn(e->b, "}", 1);
+}
+
 static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
 {
-    char **declared = NULL;
-    size_t nd = mu_declared_replaces(bd, &declared), k, q, shown = 0;
+    size_t k, shown = 0;
     int first = 1;
+    mu_edits_ctx ec;
     mu_puts(b, ",\"facts\":{");
     mu_knum(b, "adds", bd->classes.adds, 1);
     mu_knum(b, "borrows", bd->classes.borrows, 0);
@@ -880,23 +877,26 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     first = 1;
     for (k = 0, shown = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         const sh_mb_file *f = &bd->files[k];
-        int dec = 0;
+        int edited = 0;
         if (f->cls != SH_MB_CLASS_REPLACE) continue;
-        for (q = 0; q < nd && !dec; q++) dec = !strcmp(declared[q], f->request);
+        edited = bd->edits && strstr(bd->edits, f->request) != NULL;
         if (!first) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "path", f->request, 1);
-        mu_kbool(b, "declared", dec, 0);
-        mu_kbool(b, "registry", sh_mb_registry_request(f->request) != 0, 0);
+        mu_kbool(b, "edits", edited, 0);
         mu_putn(b, "}", 1);
         first = 0;
         shown++;
     }
+    mu_puts(b, "],\"edits\":[");
+    ec.b = b;
+    ec.first = 1;
+    ec.files = 0;
+    if (bd->edits) (void)sh_dt_edits_files(bd->edits, strlen(bd->edits), mu_put_edit_file, &ec);
     mu_puts(b, "],\"registries\":");
     mu_puts(b, bd->registries && bd->registries[0] == '{' ? bd->registries : "{}");
     mu_put_stock_banks(b, bd);
     mu_putn(b, "}", 1);
-    mu_strs_free(declared, nd);
 }
 
 /* The newest build of a key: the one built most recently, then the later
@@ -1711,75 +1711,85 @@ static void mu_put_upgrade(mu_buf *b, const mu_model *m, const char *id, const c
     mu_putn(b, "}", 1);
 }
 
-/* The registry slots the open map's declared mods set (player fields and
- * weapon slots, modregistry.h): every slot two or more keys set, with its
- * providers in row order, the map's choice and the key that serves. */
-typedef struct mu_slot { char slot[SH_MR_SLOT_MAX]; char keys[8][SH_MB_ID_MAX + 1]; int n; } mu_slot;
+/* The slots the open map's declared mods set in their edits
+ * (modregistry.h, "<game file>/<path>"): every slot two or more keys set to
+ * different values, with its providers in row order, the map's choice and
+ * the key that serves. */
+#define MU_SLOT_KEYS 8
+typedef struct mu_slot {
+    char slot[SH_MR_SLOT_MAX];
+    char keys[MU_SLOT_KEYS][SH_MB_ID_MAX + 1];
+    unsigned long long digest[MU_SLOT_KEYS];
+    int n;
+} mu_slot;
 
-static void mu_slot_add(mu_slot *slots, int *ns, int cap, const char *slot, const char *key)
+typedef struct mu_slot_ctx { mu_slot *slots; int ns, cap; const char *key; const sh_mb_bundle *bd; } mu_slot_ctx;
+
+static void mu_slot_add(void *context, const char *slot, unsigned long long digest)
 {
+    mu_slot_ctx *c = (mu_slot_ctx *)context;
     int i, k;
-    for (i = 0; i < *ns; i++) if (!_stricmp(slots[i].slot, slot)) break;
-    if (i == *ns) {
-        if (*ns >= cap) return;
-        memset(&slots[i], 0, sizeof slots[i]);
-        strncpy_s(slots[i].slot, sizeof slots[i].slot, slot, _TRUNCATE);
-        (*ns)++;
+    for (i = 0; i < c->ns; i++) if (!_stricmp(c->slots[i].slot, slot)) break;
+    if (i == c->ns) {
+        if (c->ns >= c->cap) return;
+        memset(&c->slots[i], 0, sizeof c->slots[i]);
+        strncpy_s(c->slots[i].slot, sizeof c->slots[i].slot, slot, _TRUNCATE);
+        c->ns++;
     }
-    for (k = 0; k < slots[i].n; k++) if (!strcmp(slots[i].keys[k], key)) return;
-    if (slots[i].n < 8) strncpy_s(slots[i].keys[slots[i].n++], sizeof slots[i].keys[0], key, _TRUNCATE);
+    for (k = 0; k < c->slots[i].n; k++) if (!strcmp(c->slots[i].keys[k], c->key)) return;
+    if (c->slots[i].n < MU_SLOT_KEYS) {
+        strncpy_s(c->slots[i].keys[c->slots[i].n], sizeof c->slots[i].keys[0], c->key, _TRUNCATE);
+        c->slots[i].digest[c->slots[i].n++] = digest;
+    }
+}
+
+static void mu_slot_file(void *context, const char *file, const sh_dt_counts *counts)
+{
+    mu_slot_ctx *c = (mu_slot_ctx *)context;
+    (void)counts;
+    (void)sh_dt_edits_slots(file, c->bd->edits, strlen(c->bd->edits), mu_slot_add, c);
 }
 
 static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
-    static const char *const fields[] = { "hands", "handsD1", "body", "handsAnimWeb" };
-    mu_slot *slots = (mu_slot *)calloc(64, sizeof *slots);
-    int ns = 0, i, k, first = 1;
+    mu_slot_ctx c;
+    int i, k, first = 1;
     size_t r;
+    memset(&c, 0, sizeof c);
+    c.cap = 256;
+    c.slots = (mu_slot *)calloc((size_t)c.cap, sizeof *c.slots);
     mu_puts(b, ",\"registryClashes\":[");
-    for (r = 0; slots && r < mp->rows.count; r++) {
+    for (r = 0; c.slots && r < mp->rows.count; r++) {
         int at = mu_find_hash(m, mp->rows.rows[r].bundle);
         const sh_mb_bundle *bd;
-        mpj *x;
-        const mpj *pl, *w;
         if (at < 0) continue;
         bd = &m->list.items[at].bundle;
-        if (!bd->registries) continue;
-        x = mpj_parse(bd->registries, strlen(bd->registries));
-        pl = x ? mpj_get(x, "player") : NULL;
-        for (k = 0; pl && pl->type == MPJ_OBJ && k < 4; k++) {
-            char slot[64];
-            if (!mpj_get(pl, fields[k])) continue;
-            _snprintf_s(slot, sizeof slot, _TRUNCATE, "player.%s", fields[k]);
-            mu_slot_add(slots, &ns, 64, slot, bd->id);
-        }
-        w = pl && pl->type == MPJ_OBJ ? mpj_get(pl, "weapons") : NULL;
-        for (k = 0; w && w->type == MPJ_OBJ && k < w->n; k++) {
-            char slot[SH_MR_SLOT_MAX], *name = sh_mm_decode(w->keys[k]);
-            if (!name) continue;
-            _snprintf_s(slot, sizeof slot, _TRUNCATE, "weapons/%s", name);
-            free(name);
-            mu_slot_add(slots, &ns, 64, slot, bd->id);
-        }
-        mpj_free(x);
+        if (!bd->edits) continue;
+        c.key = bd->id;
+        c.bd = bd;
+        (void)sh_dt_edits_files(bd->edits, strlen(bd->edits), mu_slot_file, &c);
     }
-    for (i = 0; slots && i < ns; i++) {
+    for (i = 0; c.slots && i < c.ns; i++) {
         char chosen[SH_MB_ID_MAX + 1] = "";
         const char *serving;
-        if (slots[i].n < 2) continue;
-        (void)sh_modregistry_choices_get(slots[i].slot, chosen, sizeof chosen);
-        serving = slots[i].keys[0];
-        for (k = 0; k < slots[i].n; k++) if (chosen[0] && !strcmp(slots[i].keys[k], chosen)) serving = slots[i].keys[k];
+        int differ = 0;
+        mu_slot *s = &c.slots[i];
+        if (s->n < 2) continue;
+        for (k = 1; k < s->n; k++) differ |= s->digest[k] != s->digest[0];
+        if (!differ) continue;   /* identical edits merge */
+        (void)sh_modregistry_choices_get(s->slot, chosen, sizeof chosen);
+        serving = s->keys[0];
+        for (k = 0; k < s->n; k++) if (chosen[0] && !strcmp(s->keys[k], chosen)) serving = s->keys[k];
         if (!first) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
-        mu_kstr(b, "slot", slots[i].slot, 1);
+        mu_kstr(b, "slot", s->slot, 1);
         mu_puts(b, ",\"providers\":[");
-        for (k = 0; k < slots[i].n; k++) {
-            int at = mu_newest_of(m, slots[i].keys[k]);
+        for (k = 0; k < s->n; k++) {
+            int at = mu_newest_of(m, s->keys[k]);
             if (k) mu_putn(b, ",", 1);
             mu_putn(b, "{", 1);
-            mu_kstr(b, "id", slots[i].keys[k], 1);
-            mu_kstr(b, "name", at >= 0 ? mu_entry_title(&m->list.items[at]) : slots[i].keys[k], 0);
+            mu_kstr(b, "id", s->keys[k], 1);
+            mu_kstr(b, "name", at >= 0 ? mu_entry_title(&m->list.items[at]) : s->keys[k], 0);
             mu_putn(b, "}", 1);
         }
         mu_putn(b, "]", 1);
@@ -1789,7 +1799,7 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
         first = 0;
     }
     mu_putn(b, "]", 1);
-    free(slots);
+    free(c.slots);
 }
 
 /* The state a map entry shows: installed, superseded, incomplete, skipped,
@@ -3165,8 +3175,8 @@ int sh_modui_scope_launch_refused(const char *why)
 
 /* The build that serves a map-level row at save. */
 /* The product version a saved map records (modmanifest.h, "smpprod1."): a
- * declared mod whose intent the product generates (player fields, weapons,
- * extends, conductor rows) or that surfaces campaign content needs it. */
+ * declared mod that edits a game file (derived edits), lists encounters for
+ * the conductor, or surfaces campaign content needs it. */
 static int mu_product_need(const sh_modmanifest_list *rows)
 {
     sh_ms_list list;
@@ -3180,8 +3190,7 @@ static int mu_product_need(const sh_modmanifest_list *rows)
             const sh_mb_bundle *bd = &list.items[k].bundle;
             if (!list.items[k].loaded || (strcmp(bd->hash, rows->rows[i].bundle) && strcmp(bd->hash, sub))) continue;
             need = bd->classes.surfaces > 0 ||
-                   (bd->registries && (strstr(bd->registries, "\"player\"") || strstr(bd->registries, "\"extends\"") ||
-                                       strstr(bd->registries, "\"conductor\"")));
+                   bd->edits != NULL || (bd->registries && strstr(bd->registries, "\"conductor\""));
         }
     }
     sh_ms_list_free(&list);

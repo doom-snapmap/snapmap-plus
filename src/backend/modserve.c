@@ -23,6 +23,7 @@
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "modregistry.h"
+#include "decl_tree.h"
 #include "config_json.h"
 #include "backend_log.h"
 
@@ -74,12 +75,16 @@ typedef struct ms_file {
     int registry;                         /* a registry's synthetic file: 1 + its position among them, else 0 */
     int registry_keyed;                   /* that file is the key of its path */
     int registry_of;                      /* a winner at a registry's path: 1 + that registry's file, else 0 */
-    /* An input of the registries only: an extends partial or a bodyEvents
-     * file its bundle's product block names (registries.extends,
+    /* A partial of a bundle built before derived edits: an extends partial
+     * or a bodyEvents file its product block names (registries.extends,
      * registries.player.bodyEvents). It holds entries in a stock decl's
      * grammar, not a decl: never registered, planned, refreshed or answered
      * to the engine; the generator reads it from the bundle (ms_reg_text). */
     int partial;
+    /* A decl the bundle carries at a game name with other bytes: an edited
+     * copy whose derived edits the product block records ("edits"). Never
+     * served, keyed, planned or refreshed; the game file is generated. */
+    int edit;
 } ms_file;
 
 /* A text composed for one listing (arena; memoized per winner by the set of declared providers). */
@@ -138,6 +143,8 @@ typedef struct ms_bundle {
     const char *build_failed;             /* the failed build's cause, or NULL */
     int reg_relevant;                     /* registries: it states intent, carries a registry file or an encounter */
     const char *registries;               /* the product block's "registries" object (JSON), or NULL */
+    const char *edits;                    /* the product block's "edits" array (JSON, derived edits), or NULL */
+    size_t edits_len;
 } ms_bundle;
 
 #define MS_SV_NEW     1                   /* names under its key (and grandfathered new names) */
@@ -176,10 +183,7 @@ typedef struct ms_index {
      * game's texts of the fixed registries (read once), and the texts
      * generated per serving set (memo, arena) with the one the listing uses. */
     int reg_bundle, reg_first, reg_count;
-    const char *reg_stock[SH_MR_FIXED];
-    size_t reg_stock_len[SH_MR_FIXED];
-    int reg_stock_read;
-    const char **reg_xtext;               /* per registry file: the game's text of an extends target (read once) */
+    const char **reg_xtext;               /* per registry file: the game's text (read once) */
     size_t *reg_xlen;
     unsigned char *reg_xread;
     struct ms_reg_memo *reg_memo;
@@ -1032,6 +1036,10 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             else if (!strcmp(key, "cause")) state_cause = ms_jstr(x, v, ve, 160);
             else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
             else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
+            else if (!strcmp(key, "edits") && v < ve && *v == '[') {
+                b->edits = ms_strndup(x, v, (size_t)(ve - v));
+                b->edits_len = b->edits ? (size_t)(ve - v) : 0;
+            }
         }
     }
     if (author_legacy_v) {
@@ -1770,178 +1778,6 @@ char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, in
     return ms_compose((const unsigned char *const *)texts, lens, n, len, added);
 }
 
-/* extends (modregistry.h): the node at `path` ("edit/aiTypeList") below
- * `n`, matching each segment to the one block whose key word it is. */
-static mc_node *mc_at(mc_node *n, const char *path, size_t plen)
-{
-    size_t at = 0;
-    while (n && at < plen) {
-        size_t e = at, w;
-        int i, hits = 0;
-        mc_node *hit = NULL;
-        while (e < plen && path[e] != '/') e++;
-        w = e - at;
-        for (i = 0; i < n->nkids; ++i) {
-            mc_node *k = n->kids[i];
-            if (k->block && mc_word_n(k) == k->key_n && k->key_n == w && !_strnicmp(k->key, path + at, w)) { hit = k; hits++; }
-        }
-        n = hits == 1 ? hit : NULL;
-        at = e < plen ? e + 1 : e;
-    }
-    return n;
-}
-
-/* 1 when every member of `n` (at `path`, `plen` bytes) lies on one of the
- * ';'-separated container paths: the partial names its entries and nothing else. */
-static int mc_only_containers(const mc_node *n, const char *path, size_t plen, const char *containers)
-{
-    int i;
-    for (i = 0; i < n->nkids; ++i) {
-        const mc_node *k = n->kids[i];
-        char sub[512];
-        const char *c = containers;
-        int inside = 0, prefix = 0;
-        size_t sl;
-        if (!k->block || mc_word_n(k) != k->key_n) return 0;
-        sl = (size_t)_snprintf_s(sub, sizeof sub, _TRUNCATE, "%.*s%s%.*s", (int)plen, path, plen ? "/" : "", (int)k->key_n, k->key);
-        while (*c) {
-            const char *e = strchr(c, ';');
-            size_t cl = e ? (size_t)(e - c) : strlen(c);
-            if (cl == sl && !_strnicmp(c, sub, sl)) inside = 1;
-            else if (cl > sl && !_strnicmp(c, sub, sl) && c[sl] == '/') prefix = 1;
-            c += cl + (e ? 1 : 0);
-        }
-        if (inside) continue;
-        if (!prefix || !mc_only_containers(k, sub, sl, containers)) return 0;
-    }
-    return 1;
-}
-
-static void mc_merge_quiet(void *context, const char *key, size_t key_n, int rows, int kept)
-{
-    (void)context; (void)key; (void)key_n; (void)rows; (void)kept;
-}
-
-/* A named bag entry both texts hold with different content (`anim "clip"`
- * whose event rows differ): the union of the two, the base's members first.
- * A member the base holds with the same text is skipped; a block member or a
- * repeated key (`event "ae_sound"` rows, `alias { }` rows) the base lacks is
- * appended; a scalar the base sets otherwise keeps the base's value (*kept).
- * Returns the members appended, -1 when out of memory. */
-static int mc_union_rows(mc_ctx *c, mc_node *q, const mc_node *o, int *kept)
-{
-    int i, k, rows = 0;
-    for (i = 0; i < o->nkids; ++i) {
-        mc_node *m = o->kids[i];
-        char *t = mc_text(m, NULL);
-        int dup = 0, same_key = 0;
-        if (!t) return -1;
-        for (k = 0; k < q->nkids && !dup; ++k) {
-            const mc_node *b = q->kids[k];
-            char *bt;
-            if (b->key_n != m->key_n || _strnicmp(b->key, m->key, m->key_n) || b->block != m->block) continue;
-            same_key = 1;
-            bt = mc_text(b, NULL);
-            if (!bt) { free(t); return -1; }
-            if (!strcmp(t, bt)) dup = 1;
-            free(bt);
-        }
-        free(t);
-        if (dup) continue;
-        if (same_key && !m->block && mc_count_key(o, m) == 1 && mc_count_key(q, m) == 1) { (*kept)++; continue; }
-        if (!mc_add_kid(c, q, m)) return -1;
-        rows++;
-    }
-    return rows;
-}
-
-static char *mc_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
-                               const char *containers, int kind, size_t *len, int *added,
-                               sh_modserve_merge_fn on_merge, void *merge_ctx);
-
-char *sh_modserve_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
-                                 const char *containers, int kind, size_t *len, int *added)
-{
-    return mc_compose_extend(base, base_len, part, part_len, containers, kind, len, added, NULL, NULL);
-}
-
-char *sh_modserve_compose_extend_rows(const char *base, size_t base_len, const char *part, size_t part_len,
-                                      const char *containers, size_t *len, int *added,
-                                      sh_modserve_merge_fn on_merge, void *context)
-{
-    return mc_compose_extend(base, base_len, part, part_len, containers, SH_MR_BAG, len, added,
-                             on_merge ? on_merge : mc_merge_quiet, context);
-}
-
-static char *mc_compose_extend(const char *base, size_t base_len, const char *part, size_t part_len,
-                               const char *containers, int kind, size_t *len, int *added,
-                               sh_modserve_merge_fn on_merge, void *merge_ctx)
-{
-    mc_ctx c = { NULL, 0 };
-    mc_node *b, *p;
-    mc_buf out = { NULL, 0, 0, 0 };
-    const char *at;
-    int ok = 1;
-    if (!base || !part || !containers || !len || !added) return NULL;
-    *added = 0;
-    *len = 0;
-    b = mc_parse(&c, base, base_len);
-    p = b ? mc_parse(&c, part, part_len) : NULL;
-    if (!b || !p || !mc_only_containers(p, "", 0, containers)) { mc_free(&c); return NULL; }
-    for (at = containers; ok && *at;) {
-        const char *e = strchr(at, ';');
-        size_t cl = e ? (size_t)(e - at) : strlen(at);
-        mc_node *pc = mc_at(p, at, cl), *bc;
-        at += cl + (e ? 1 : 0);
-        if (!pc) continue;   /* the partial adds nothing there */
-        bc = mc_at(b, at - cl - (e ? 1 : 0), cl);
-        if (!bc) { ok = 0; break; }
-        if (kind == SH_MR_LIST) {
-            if (!mc_is_list(bc) || !mc_is_list(pc) || !mc_merge(&c, bc, pc, added)) ok = 0;
-            continue;
-        }
-        {
-            int i, k;
-            for (i = 0; ok && i < pc->nkids; ++i) {
-                const mc_node *o = pc->kids[i];
-                char *t = mc_text(o, NULL);
-                int dup = 0, clash = 0;
-                mc_node *held = NULL;
-                if (!t) { ok = 0; break; }
-                for (k = 0; k < bc->nkids && !dup; ++k) {
-                    mc_node *q = bc->kids[k];
-                    char *qt;
-                    if (q->key_n != o->key_n || _strnicmp(q->key, o->key, o->key_n) || q->block != o->block) continue;
-                    qt = mc_text(q, NULL);
-                    if (!qt) { ok = 0; break; }
-                    if (!strcmp(t, qt)) dup = 1;
-                    else if (mc_word_n(o) != o->key_n) { clash = 1; if (!held) held = q; }   /* a named entry (`anim "clip"`) the base says otherwise */
-                    free(qt);
-                }
-                free(t);
-                if (!ok || dup) continue;
-                if (clash && on_merge && held && held->block && o->block) {
-                    /* Per entry: the clip keeps one block holding both texts' rows. */
-                    int kept = 0, rows = mc_union_rows(&c, held, o, &kept);
-                    if (rows < 0) { ok = 0; break; }
-                    on_merge(merge_ctx, o->key, o->key_n, rows, kept);
-                    continue;
-                }
-                if (clash || !o->block || !mc_add_kid(&c, bc, (mc_node *)o)) { ok = 0; break; }
-                (*added)++;
-            }
-        }
-    }
-    if (!ok || c.failed) { mc_free(&c); return NULL; }
-    mc_put(&out, "{\n", 2);
-    mc_write_members(&out, b, 1);
-    mc_put(&out, "}\n", 2);
-    mc_free(&c);
-    if (out.failed) { free(out.p); return NULL; }
-    *len = out.n;
-    return out.p;
-}
-
 /* ------------------------------------------------------------------ conflict winner
  *
  * When several bundles provide one path with different bytes, which one
@@ -2107,7 +1943,7 @@ static int ms_resolve(ms_index *x)
         x->files[i].scope_body = NULL;
         x->files[i].scope_composed = NULL;
         x->files[i].scope_why = 0;
-        if (x->bundles[x->files[i].bundle].admitted) { keys[n].key = x->files[i].request; keys[n].file = i; keys[n].alias = 0; n++; }
+        if (x->bundles[x->files[i].bundle].admitted && !x->files[i].edit) { keys[n].key = x->files[i].request; keys[n].file = i; keys[n].alias = 0; n++; }
     }
     qsort(keys, (size_t)n, sizeof *keys, ms_key_cmp);
     for (i = 0; i < n;) {
@@ -2573,8 +2409,7 @@ static void ms_diff(ms_index *x, const ms_index *old)
         } else if (of->is_decl) d->gone_names++;
     }
     /* Registries (L2b deviation 7): a rescan that changes the text a registry
-     * generates for the listing (an edited bodyEvents partial, an extends
-     * partial, a player field) marks the path that serves it, as a changed
+     * generates for the listing (a mod rebuilt with other edits) marks the path that serves it, as a changed
      * decl is marked. */
     for (i = 0; i < x->reg_count; ++i) {
         int nf = x->reg_first + i, of = -1, j, target = -1;
@@ -2743,17 +2578,21 @@ static ms_body *ms_scope_compose(ms_index *x, int winner, const int *cand, int n
 
 /* ------------------------------------------------------------------ registries
  *
- * DESIGN-additive 2.4 (modregistry.h). The index carries one synthetic file
- * per registry path: the three fixed registries and every weapon slot an
- * admitted bundle's player.weapons names. Each belongs to the product's
- * pseudo-bundle (bundles[nbundles], never counted, never admitted), is never
- * "served" (no bundle walk, need, closure or name lookup sees it) and has no
- * disk file: its bytes are the text generated for the current listing
- * (ms_reg_memo.body, read through scope_body like a composed text). Where a
- * bundle file wins the path (a pack that still carries the registry file),
- * that winner points at the synthetic file (registry_of) and the scope pick
- * moves to it; elsewhere the synthetic file is the path's own key
- * (registry_keyed). With no text for the listing the game's file answers. */
+ * DESIGN-additive 2.4 (modregistry.h): derived edits. The index carries one
+ * synthetic file per game file an admitted bundle's product block "edits"
+ * names (the conductor, the player body and entity, weapons, FSM states,
+ * whitelists, ...). Each belongs to the product's pseudo-bundle
+ * (bundles[nbundles], never counted, never admitted), is never "served" (no
+ * bundle walk, need, closure or name lookup sees it) and has no disk file:
+ * its bytes are the text generated for the current listing (ms_reg_memo.body,
+ * read through scope_body like a composed text): the game's text with the
+ * serving bundles' edits applied. A bundle's edited copy itself (ms_file.edit)
+ * is never served. Where a grandfathered bundle still serves its own file at
+ * that name (a shadow), that winner points at the synthetic file
+ * (registry_of), the shadow's diff against the game's text is that bundle's
+ * edits, and the scope pick moves to the synthetic file; elsewhere the
+ * synthetic file is the path's own key (registry_keyed). With no text for the
+ * listing the game's file answers. */
 
 typedef struct ms_reg_memo {
     uint64_t sig;                         /* the serving set and the choices it was generated for */
@@ -2763,18 +2602,17 @@ typedef struct ms_reg_memo {
     ms_body **rw_body;
     const char **lines;                   /* sh_modserve_registry_report */
     int nlines, nsources;
-    unsigned char pass[SH_MR_FIXED];      /* the text equals a serving bundle's own copy: that copy serves, gated as its bundle */
     int *gate;                            /* per registry file: the source bundle whose requirement gates gate its text, or -1 */
     struct ms_reg_memo *next;
 } ms_reg_memo;
 
 #define MS_REG_SOURCE_MAX 256
 static struct { char slot[SH_MR_SLOT_MAX]; char key[SH_MR_KEY_MAX]; } g_scope_choice[SH_MR_CHOICES_MAX];
-static int g_scope_nchoice;           /* the open map's registry choices (g_scope_lock) */
+static int g_scope_nchoice;           /* the open map's choices between mods' edits (g_scope_lock) */
 
 /* The bundle whose requirement gates gate what `f` serves: its own, or, for
- * a registry's generated text, the first source with requirements that
- * contributed to it (L2b deviation 8). */
+ * a generated text, the first source with requirements whose edits changed
+ * it (L2b deviation 8). */
 static const ms_bundle *ms_gate_of(const ms_index *x, const ms_file *f)
 {
     if (f->registry) {
@@ -2787,50 +2625,58 @@ static const ms_bundle *ms_gate_of(const ms_index *x, const ms_file *f)
 
 static int ms_live(const ms_index *x, const ms_file *f)
 {
-    return ((f->served && x->bundles[f->bundle].admitted) || f->registry_keyed) && !f->partial;
+    return ((f->served && x->bundles[f->bundle].admitted) || f->registry_keyed) && !f->partial && !f->edit;
 }
 
 static int ms_is_type(const char *t, const char *want) { return t && !_stricmp(t, want); }
 
+typedef struct ms_req_list { char (*reqs)[SH_MB_REQUEST_MAX + 1]; int n, cap; int oom; } ms_req_list;
+
+static void ms_req_list_add(void *context, const char *file, const sh_dt_counts *counts)
+{
+    ms_req_list *l = (ms_req_list *)context;
+    char req[SH_MB_REQUEST_MAX + 1];
+    int k;
+    (void)counts;
+    if (!file || strlen(file) >= sizeof req) return;
+    strcpy_s(req, sizeof req, file);
+    ms_lower(req);
+    for (k = 0; k < l->n; ++k) if (!strcmp(l->reqs[k], req)) return;
+    if (!ms_grow((void **)&l->reqs, &l->cap, l->n + 1, sizeof *l->reqs)) { l->oom = 1; return; }
+    strcpy_s(l->reqs[l->n++], SH_MB_REQUEST_MAX + 1, req);
+}
+
+static int ms_req_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+/* The edited copies of each admitted bundle (ms_file.edit): never served. */
+static void ms_mark_edits(ms_index *x)
+{
+    int i, k, j;
+    for (i = 0; i < x->nbundles; ++i) {
+        ms_bundle *b = &x->bundles[i];
+        ms_req_list l = { NULL, 0, 0, 0 };
+        if (!b->edits || !b->edits_len) continue;
+        if (sh_dt_edits_files(b->edits, b->edits_len, ms_req_list_add, &l) < 0)
+            ms_log("bundle '%s': its product block's edits do not read; nothing it edits is generated", b->folder);
+        for (k = b->first_file; k < b->first_file + b->file_count; ++k)
+            for (j = 0; j < l.n; ++j)
+                if (!strcmp(x->files[k].request, l.reqs[j])) { x->files[k].edit = 1; break; }
+        free(l.reqs);
+    }
+}
+
 /* The synthetic files, after ms_resolve (winners known), before the tables. */
 static int ms_registry_files(ms_index *x)
 {
-    char (*reqs)[SH_MB_REQUEST_MAX + 1] = NULL;
-    int nreq = 0, creq = 0, i, k;
+    ms_req_list l = { NULL, 0, 0, 0 };
+    int i, k;
     ms_bundle *pb;
     x->reg_count = 0;
-    /* Requests: the fixed three, then each weapon slot once (bundle order). */
-    for (k = 0; k < SH_MR_FIXED; ++k) {
-        if (!ms_grow((void **)&reqs, &creq, nreq + 1, sizeof *reqs)) goto oom;
-        strcpy_s(reqs[nreq++], SH_MB_REQUEST_MAX + 1, sh_modregistry_request(k));
-    }
-    for (i = 0; i < x->nbundles; ++i) {
-        sh_mr_intent in;
-        size_t w;
-        if (!x->bundles[i].admitted || (!x->bundles[i].extra && !x->bundles[i].registries)) continue;
-        if (!sh_modregistry_intent(x->bundles[i].registries, x->bundles[i].extra, &in)) continue;
-        /* extends targets on the product's list other than the fixed registries */
-        for (w = 0; w < in.ext_count; ++w) {
-            char req[SH_MB_REQUEST_MAX + 1];
-            int fixed = -1, dup = 0;
-            if (!sh_modregistry_extend_target(in.ext_targets[w], NULL, NULL, &fixed, NULL, 0) || fixed >= 0) continue;
-            if (!sh_modregistry_extend_request(in.ext_targets[w], req, sizeof req)) continue;
-            for (k = 0; k < nreq && !dup; ++k) dup = !strcmp(reqs[k], req);
-            if (dup) continue;
-            if (!ms_grow((void **)&reqs, &creq, nreq + 1, sizeof *reqs)) { sh_modregistry_intent_free(&in); goto oom; }
-            strcpy_s(reqs[nreq++], SH_MB_REQUEST_MAX + 1, req);
-        }
-        for (w = 0; w < in.weapon_count; ++w) {
-            char req[SH_MB_REQUEST_MAX + 1];
-            int dup = 0;
-            if (!sh_modregistry_weapon_request(in.weapon_slots[w], req, sizeof req)) continue;
-            for (k = 0; k < nreq && !dup; ++k) dup = !strcmp(reqs[k], req);
-            if (dup) continue;
-            if (!ms_grow((void **)&reqs, &creq, nreq + 1, sizeof *reqs)) { sh_modregistry_intent_free(&in); goto oom; }
-            strcpy_s(reqs[nreq++], SH_MB_REQUEST_MAX + 1, req);
-        }
-        sh_modregistry_intent_free(&in);
-    }
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].admitted && x->bundles[i].edits)
+            (void)sh_dt_edits_files(x->bundles[i].edits, x->bundles[i].edits_len, ms_req_list_add, &l);
+    if (l.oom) goto oom;
+    if (l.n > 1) qsort(l.reqs, (size_t)l.n, sizeof *l.reqs, ms_req_cmp);
     /* The pseudo-bundle one past the count. */
     if (!ms_grow((void **)&x->bundles, &x->cbundles, x->nbundles + 1, sizeof(ms_bundle))) goto oom;
     pb = &x->bundles[x->nbundles];
@@ -2839,35 +2685,38 @@ static int ms_registry_files(ms_index *x)
     pb->id = "snapmap-plus.registries";
     pb->version = "generated";
     pb->hash = "";
-    pb->name = "registries generated by the product";
+    pb->name = "game files generated by the product from the declared mods' edits";
     pb->rank = -1;
-    strcpy_s(pb->cause, sizeof pb->cause, "the product's registries, generated per map");
+    strcpy_s(pb->cause, sizeof pb->cause, "the product's generated game files, per map");
     pb->first_file = x->nfiles;
     x->reg_bundle = x->nbundles;
     x->reg_first = x->nfiles;
-    for (k = 0; k < nreq; ++k) {
+    for (k = 0; k < l.n; ++k) {
         ms_file *f;
         int w = -1, j;
-        char *pname, *slash;
+        const char *rest, *slash, *type;
+        size_t n;
+        if (strncmp(l.reqs[k], "generated/decls/", 16)) continue;
+        rest = l.reqs[k] + 16;
+        slash = strchr(rest, '/');
+        n = strlen(rest);
+        if (!slash || n < 6 || strcmp(rest + n - 5, ".decl")) continue;
+        type = sh_mb_decl_type(rest, (size_t)(slash - rest));
         if (!ms_grow((void **)&x->files, &x->cfiles, x->nfiles + 1, sizeof(ms_file))) goto oom;
         f = &x->files[x->nfiles];
         memset(f, 0, sizeof *f);
         f->bundle = x->reg_bundle;
-        f->request = ms_strdup(x, reqs[k]);
+        f->request = ms_strdup(x, l.reqs[k]);
         f->disk = "";
         if (!f->request) goto oom;
-        /* generated/decls/<type>/<name>.decl */
-        slash = strchr(f->request + 16, '/');
-        f->ptype = k == SH_MR_BODY ? "md6Def" : k < SH_MR_FIXED ? "entityDef" :
-                   slash ? ms_strndup(x, f->request + 16, (size_t)(slash - (f->request + 16))) : NULL;
-        pname = slash ? ms_strndup(x, slash + 1, strlen(slash + 1) - 5) : NULL;
-        if (!pname || !f->ptype) goto oom;
-        f->pname = pname;
+        f->ptype = type ? type : ms_strndup(x, rest, (size_t)(slash - rest));
+        f->pname = ms_strndup(x, slash + 1, strlen(slash + 1) - 5);
+        if (!f->pname || !f->ptype) goto oom;
         f->reg = f->request + 16;
         f->is_decl = 1;
         f->is_shadow = 1;                 /* a game name: with nothing generated the game's bytes come back */
         f->rank = ms_rank(f->ptype);
-        f->registry = k + 1;
+        f->registry = x->reg_count + 1;
         f->alt_of = -1;
         f->scope_alt = -1;
         f->scope_last = -1;
@@ -2886,76 +2735,74 @@ static int ms_registry_files(ms_index *x)
     memset((void *)x->reg_xtext, 0, sizeof(char *) * (size_t)(x->reg_count + 1));
     memset(x->reg_xlen, 0, sizeof(size_t) * (size_t)(x->reg_count + 1));
     memset(x->reg_xread, 0, (size_t)(x->reg_count + 1));
-    free(reqs);
+    free(l.reqs);
     return 1;
 oom:
-    free(reqs);
+    free(l.reqs);
     return 0;
 }
 
-/* The bundle's files its intent names as registry inputs (ms_file.partial). */
-static void ms_mark_partials(ms_index *x, const ms_bundle *b, const sh_mr_intent *in)
+/* Transition (DESIGN-additive 7): a bundle built before derived edits may
+ * still carry the partials its retired intent keys named (the product
+ * block's registries.extends values and registries.player.bodyEvents). They
+ * hold entries, not decls: never registered, planned, refreshed or answered
+ * to the engine (ms_file.partial), until the folder is rebuilt, which
+ * refuses them. */
+static void ms_mark_partials(ms_index *x, const ms_bundle *b)
 {
-    char lower[SH_MB_REQUEST_MAX + 1];
-    int k, w;
-    for (w = -1; w < (int)in->ext_count; ++w) {
-        const char *name = w < 0 ? in->player[SH_MB_PLAYER_BODY_EVENTS] : in->ext_partials[w];
-        if (!name || strlen(name) >= sizeof lower) continue;
-        strcpy_s(lower, sizeof lower, name);
-        ms_lower(lower);
+    sh_json_object reg = { 0 }, ext = { 0 }, player = { 0 };
+    const char *names[64];
+    char *own[64];
+    int n = 0, i, k;
+    const char *p;
+    if (!b->registries || !sh_json_parse_object(b->registries, strlen(b->registries), 16, &reg)) return;
+    p = sh_json_object_get(&reg, "extends");
+    if (p && *p == '{' && sh_json_parse_object(p, strlen(p), 16, &ext)) {
+        for (i = 0; i < (int)ext.count && n < 63; ++i) names[n++] = ext.members[i].value_json;
+    }
+    p = sh_json_object_get(&reg, "player");
+    if (p && *p == '{' && sh_json_parse_object(p, strlen(p), 16, &player)) {
+        const char *ev = sh_json_object_get(&player, "bodyEvents");
+        if (ev && n < 63) names[n++] = ev;
+    }
+    for (i = 0; i < n; ++i) {
+        size_t len = names[i] ? strlen(names[i]) : 0, got = 0;
+        own[i] = NULL;
+        if (len < 2 || names[i][0] != '"') continue;
+        own[i] = (char *)malloc(len);
+        if (own[i] && (!sh_json_decode_string(names[i], len, own[i], len, &got) || !got)) { free(own[i]); own[i] = NULL; }
+        if (own[i]) ms_lower(own[i]);
+    }
+    for (i = 0; i < n; ++i) {
+        if (!own[i]) continue;
         for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
             ms_file *f = &x->files[k];
-            if (f->is_decl && f->pname && !strcmp(f->pname, lower) && !f->is_shadow) f->partial = 1;
+            if (f->is_decl && f->pname && !strcmp(f->pname, own[i]) && !f->is_shadow) f->partial = 1;
         }
+        free(own[i]);
     }
+    sh_json_object_free(&player);
+    sh_json_object_free(&ext);
+    sh_json_object_free(&reg);
 }
 
-/* Which bundles the registries read: intent, a registry file, an encounter. */
+/* Which bundles the generator reads: edits, a served file at a generated
+ * name (a grandfathered shadow), or an encounter (the conductor's bits). */
 static void ms_registry_relevant(ms_index *x)
 {
     int i, k, r;
     for (i = 0; i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
-        sh_mr_intent in;
         b->reg_relevant = 0;
         if (!b->admitted) continue;
-        if ((b->extra || b->registries) && sh_modregistry_intent(b->registries, b->extra, &in)) {
-            b->reg_relevant = sh_modregistry_intent_any(&in);
-            ms_mark_partials(x, b, &in);
-            sh_modregistry_intent_free(&in);
-        }
+        ms_mark_partials(x, b);
+        b->reg_relevant = b->edits != NULL;
         for (k = b->first_file; !b->reg_relevant && k < b->first_file + b->file_count; ++k) {
             const ms_file *f = &x->files[k];
-            b->reg_relevant = sh_mb_registry_request(f->request) || ms_is_type(f->ptype, "snapAiEncounter");
-            for (r = SH_MR_FIXED; r < x->reg_count && !b->reg_relevant; ++r)
-                b->reg_relevant = !strcmp(f->request, x->files[x->reg_first + r].request);
+            b->reg_relevant = ms_is_type(f->ptype, "snapAiEncounter");
+            for (r = 0; r < x->reg_count && !b->reg_relevant; ++r)
+                b->reg_relevant = f->served && !strcmp(f->request, x->files[x->reg_first + r].request);
         }
-    }
-}
-
-/* The game's texts of the fixed registries, read once per index through the
- * installed-content reader (nothing is generated for one it cannot read). */
-static void ms_registry_stock(ms_index *x)
-{
-    int k;
-    if (x->reg_stock_read) return;
-    x->reg_stock_read = 1;
-    for (k = 0; k < SH_MR_FIXED; ++k) {
-        char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
-        unsigned long long size = 0;
-        unsigned char *bytes = NULL;
-        size_t len = 0;
-        const char *req = sh_modregistry_request(k);
-        if (sh_mb_stock_identify(req, sha, &size) != SH_MB_STOCK_OK ||
-            sh_mb_stock_read(req, sha, &bytes, &len, req, cause, sizeof cause) != SH_MB_STOCK_OK) {
-            ms_log("registry: the game's %s could not be read; nothing is generated for it", req);
-            continue;
-        }
-        {
-            char *t = (char *)ms_alloc(x, len + 1);
-            if (t) { memcpy(t, bytes, len); t[len] = 0; x->reg_stock[k] = t; x->reg_stock_len[k] = len; }
-        }
-        HeapFree(GetProcessHeap(), 0, bytes);
     }
 }
 
@@ -2985,6 +2832,25 @@ static char *ms_reg_text(const ms_file *f, size_t *len)
     return (char *)t;
 }
 
+/* The game's text of registry file k, read once per index through the
+ * installed-content reader (nothing is generated for one it cannot read). */
+static void ms_registry_stock(ms_index *x, int k)
+{
+    const ms_file *f = &x->files[x->reg_first + k];
+    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    unsigned long long size = 0;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    if (x->reg_xread[k]) return;
+    x->reg_xread[k] = 1;
+    if (sh_mb_stock_identify(f->request, sha, &size) == SH_MB_STOCK_OK &&
+        sh_mb_stock_read(f->request, sha, &bytes, &len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) {
+        char *t = (char *)ms_alloc(x, len + 1);
+        if (t) { memcpy(t, bytes, len); t[len] = 0; x->reg_xtext[k] = t; x->reg_xlen[k] = len; }
+        HeapFree(GetProcessHeap(), 0, bytes);
+    } else ms_log("registry: the game's %s could not be read; nothing is generated for it", f->request);
+}
+
 static int ms_reg_order(const void *a, const void *b)
 {
     const ms_bundle *x = *(const ms_bundle *const *)a, *y = *(const ms_bundle *const *)b;
@@ -3006,84 +2872,69 @@ static int ms_reg_own(char ***owned, int *n, int *cap, char *text)
     return 1;
 }
 
-/* Generate the registries for the bundles in `set` (serving order). */
+/* Generate the registry files for the bundles in `set` (serving order). */
 static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, uint64_t sig)
 {
     sh_mr_source *src = (sh_mr_source *)calloc((size_t)(n ? n : 1), sizeof *src);
-    sh_mr_intent *in = (sh_mr_intent *)calloc((size_t)(n ? n : 1), sizeof *in);
     sh_mr_decl **decls = (sh_mr_decl **)calloc((size_t)(n ? n : 1), sizeof *decls);
-    int **wfiles = (int **)calloc((size_t)(n ? n : 1), sizeof *wfiles);
-    const char ***etexts = (const char ***)calloc((size_t)(n ? n : 1), sizeof *etexts);
-    size_t **elens = (size_t **)calloc((size_t)(n ? n : 1), sizeof *elens);
-    sh_mr_stock *ext = (sh_mr_stock *)calloc((size_t)(x->reg_count + 1), sizeof *ext);
-    int *ext_file = (int *)calloc((size_t)(x->reg_count + 1), sizeof *ext_file);
-    int *ext_carrier = (int *)malloc(sizeof(int) * (size_t)(x->reg_count + 1));
-    int next = 0;
+    char **derived = (char **)calloc((size_t)(n ? n : 1), sizeof *derived);   /* a shadow's edits (malloc'd) */
+    sh_mr_target *tg = (sh_mr_target *)calloc((size_t)(x->reg_count + 1), sizeof *tg);
     char **owned = NULL;
     int nowned = 0, cowned = 0, i, k;
     sh_mr_choice choices[SH_MR_CHOICES_MAX];
     sh_mr_result r;
     ms_reg_memo *m = NULL;
     memset(&r, 0, sizeof r);
-    if (!src || !in || !decls || !wfiles || !etexts || !elens || !ext || !ext_file || !ext_carrier) goto done;
-    for (i = 0; i < x->reg_count + 1; ++i) ext_carrier[i] = -1;
-    ms_registry_stock(x);
+    if (!src || !decls || !derived || !tg) goto done;
+    for (k = 0; k < x->reg_count; ++k) {
+        ms_registry_stock(x, k);
+        tg[k].request = x->files[x->reg_first + k].request;
+        tg[k].text = x->reg_xtext[k];
+        tg[k].len = x->reg_xlen[k];
+    }
     for (i = 0; i < g_scope_nchoice; ++i) { choices[i].slot = g_scope_choice[i].slot; choices[i].key = g_scope_choice[i].key; }
     for (i = 0; i < n; ++i) {
         ms_bundle *b = set[i];
         sh_mr_source *s = &src[i];
-        char who[200], lower[SH_MB_REQUEST_MAX + 1];
-        int nd = 0, want_decls;
+        char who[200];
+        int nd = 0, want_decls = b->edits && strstr(b->edits, SH_MB_REGISTRY_CONDUCTOR) != NULL;
         _snprintf_s(who, sizeof who, _TRUNCATE, "%s@%s (%.16s)", b->id, b->version, b->hash);
         s->key = b->id;
         s->who = ms_strdup(x, who);
-        (void)sh_modregistry_intent(b->registries, b->extra, &in[i]);
-        s->intent = &in[i];
-        if (in[i].ext_count) {
-            size_t e;
-            etexts[i] = (const char **)calloc(in[i].ext_count, sizeof(char *));
-            elens[i] = (size_t *)calloc(in[i].ext_count, sizeof(size_t));
-            if (!etexts[i] || !elens[i]) goto done;
-            for (e = 0; e < in[i].ext_count; ++e) {
-                /* The partial: the bundle's decl of that name, of the target's type first. */
-                const char *slash = strchr(in[i].ext_targets[e], '/');
-                size_t tl = slash ? (size_t)(slash - in[i].ext_targets[e]) : 0;
-                int hit = -1;
-                for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
-                    const ms_file *f = &x->files[k];
-                    if (!f->is_decl || !f->pname || strcmp(f->pname, in[i].ext_partials[e])) continue;
-                    if (hit < 0) hit = k;
-                    if (tl && f->ptype && strlen(f->ptype) == tl && !_strnicmp(f->ptype, in[i].ext_targets[e], tl)) { hit = k; break; }
-                }
-                if (hit >= 0) {
-                    size_t len = 0;
-                    char *t = ms_reg_text(&x->files[hit], &len);
-                    if (ms_reg_own(&owned, &nowned, &cowned, t)) { etexts[i][e] = t; elens[i][e] = len; }
-                }
-            }
-            s->ext_texts = etexts[i];
-            s->ext_lens = elens[i];
-        }
-        want_decls = 0;
-        {
-            size_t e;
-            for (e = 0; e < in[i].ext_count; ++e)
-                if (!strcmp(in[i].ext_targets[e], "entitydef/ai/conductor/coop/snapmap_default")) want_decls = 1;
-        }
+        s->edits = b->edits;
+        s->edits_len = b->edits_len;
+        /* A grandfathered shadow at a generated name: its diff against the
+         * game's text is its edits. */
         for (k = b->first_file; k < b->first_file + b->file_count; ++k) {
-            int reg = sh_mb_registry_request(x->files[k].request);
-            size_t len = 0;
-            char *t;
-            if (!reg) continue;
-            if (reg == SH_MR_CONDUCTOR + 1) want_decls = 1;
-            t = ms_reg_text(&x->files[k], &len);
-            if (!ms_reg_own(&owned, &nowned, &cowned, t)) {
-                ms_log("registry: %s's %s could not be read; it adds nothing", who, x->files[k].request);
-                continue;
+            const ms_file *f = &x->files[k];
+            int q;
+            if (!f->served || f->edit || !f->registry_of) continue;
+            q = f->registry_of - 1 - x->reg_first;
+            if (q < 0 || q >= x->reg_count || !tg[q].text) continue;
+            {
+                size_t len = 0;
+                char *t = ms_reg_text(f, &len), cause[300], *one;
+                if (!ms_reg_own(&owned, &nowned, &cowned, t)) continue;
+                one = sh_dt_diff(f->request, tg[q].text, tg[q].len, t, len, NULL, cause, sizeof cause);
+                if (!one) {
+                    ms_log("registry: %s: %s's copy of %s does not parse (%s); it adds nothing", who, b->id, f->request, cause);
+                    continue;
+                }
+                {
+                    size_t ol = derived[i] ? strlen(derived[i]) : 0, al = strlen(one);
+                    char *g = (char *)realloc(derived[i], ol + al + 3);
+                    if (g) {
+                        if (!ol) { g[0] = '['; memcpy(g + 1, one, al); g[al + 1] = ']'; g[al + 2] = 0; }
+                        else { g[ol - 1] = ','; memcpy(g + ol, one, al); g[ol + al] = ']'; g[ol + al + 1] = 0; }
+                        derived[i] = g;
+                    }
+                }
+                free(one);
+                if (!_stricmp(f->request, SH_MB_REGISTRY_CONDUCTOR)) want_decls = 1;
+                ms_log("registry: %s carries its own %s; its edits against the game's text are applied", who, f->request);
             }
-            s->carried[reg - 1] = t;
-            s->carried_len[reg - 1] = len;
         }
+        if (derived[i]) { s->edits = derived[i]; s->edits_len = strlen(derived[i]); }
         if (want_decls) {
             decls[i] = (sh_mr_decl *)calloc((size_t)(b->file_count ? b->file_count : 1), sizeof **decls);
             if (!decls[i]) goto done;
@@ -3105,149 +2956,23 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
             s->decls = decls[i];
             s->ndecls = nd;
         }
-        if (in[i].player[SH_MB_PLAYER_BODY_EVENTS]) {
-            strncpy_s(lower, sizeof lower, in[i].player[SH_MB_PLAYER_BODY_EVENTS], _TRUNCATE);
-            ms_lower(lower);
-            for (k = b->first_file; k < b->first_file + b->file_count && !s->body_events; ++k) {
-                const ms_file *f = &x->files[k];
-                size_t len = 0;
-                char *t;
-                if (!ms_is_type(f->ptype, "md6Def") || !f->pname || strcmp(f->pname, lower)) continue;
-                t = ms_reg_text(f, &len);
-                if (!ms_reg_own(&owned, &nowned, &cowned, t)) continue;
-                s->body_events = t;
-                s->body_events_len = len;
-            }
-        }
-        if (in[i].weapon_count) {
-            size_t w;
-            wfiles[i] = (int *)malloc(sizeof(int) * in[i].weapon_count);
-            if (!wfiles[i]) goto done;
-            for (w = 0; w < in[i].weapon_count; ++w) {
-                wfiles[i][w] = -1;
-                strncpy_s(lower, sizeof lower, in[i].weapon_decls[w], _TRUNCATE);
-                ms_lower(lower);
-                for (k = b->first_file; k < b->first_file + b->file_count && wfiles[i][w] < 0; ++k)
-                    if (ms_is_type(x->files[k].ptype, "weapon") && x->files[k].pname && !strcmp(x->files[k].pname, lower))
-                        wfiles[i][w] = k;
-            }
-            s->weapon_files = wfiles[i];
-        }
     }
-    /* The extends targets other than the fixed ones: their game text, read once per index. */
-    for (k = SH_MR_FIXED; k < x->reg_count; ++k) {
-        const ms_file *f = &x->files[x->reg_first + k];
-        const char *target = f->request + 16;
-        char tgt[SH_MB_REQUEST_MAX + 1];
-        size_t tn = strlen(target);
-        if (!strncmp(f->request, "generated/decls/weapon/", 23) || tn < 6) continue;
-        strncpy_s(tgt, sizeof tgt, target, tn - 5);
-        if (!x->reg_xread[k]) {
-            char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
-            unsigned long long size = 0;
-            unsigned char *bytes = NULL;
-            size_t len = 0;
-            x->reg_xread[k] = 1;
-            if (sh_mb_stock_identify(f->request, sha, &size) == SH_MB_STOCK_OK &&
-                sh_mb_stock_read(f->request, sha, &bytes, &len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) {
-                char *t = (char *)ms_alloc(x, len + 1);
-                if (t) { memcpy(t, bytes, len); t[len] = 0; x->reg_xtext[k] = t; x->reg_xlen[k] = len; }
-                HeapFree(GetProcessHeap(), 0, bytes);
-            } else ms_log("registry: the game's %s could not be read; nothing extends it", f->request);
-        }
-        ext[next].target = ms_strdup(x, tgt);
-        ext[next].text = x->reg_xtext[k];
-        ext[next].len = x->reg_xlen[k];
-        /* A serving bundle that carries its own copy of the target (a pack
-         * built before extends, L2b deviation 9): that copy is the base the
-         * partials extend, the first in serving order; later ones are named. */
-        for (i = 0; i < n; ++i) {
-            int q;
-            for (q = set[i]->first_file; q < set[i]->first_file + set[i]->file_count; ++q) {
-                size_t len = 0;
-                char *t;
-                if (strcmp(x->files[q].request, f->request)) continue;
-                if (ext_carrier[next] >= 0) {
-                    ms_log("registry: extends %s: %s@%s also carries a copy; the first copy (%s) is the base", tgt,
-                           set[i]->id, set[i]->version, set[ext_carrier[next]]->id);
-                    break;
-                }
-                t = ms_reg_text(&x->files[q], &len);
-                if (!ms_reg_own(&owned, &nowned, &cowned, t)) break;
-                ext[next].text = t;
-                ext[next].len = len;
-                ext_carrier[next] = i;
-                ms_log("registry: extends %s: %s@%s carries a copy of it; that copy is the base the partials extend", tgt,
-                       set[i]->id, set[i]->version);
-                break;
-            }
-        }
-        ext_file[next++] = k;
-    }
-    if (!sh_modregistry_generate(src, n, x->reg_stock, x->reg_stock_len, ext, next, choices, g_scope_nchoice, &r))
-        goto done;
+    if (!sh_modregistry_generate(src, n, tg, x->reg_count, choices, g_scope_nchoice, &r)) goto done;
     m = (ms_reg_memo *)ms_alloc(x, sizeof *m);
     if (!m) goto done;
     memset(m, 0, sizeof *m);
     m->sig = sig;
     m->nsources = n;
     m->body = (ms_body **)ms_alloc(x, sizeof(ms_body *) * (size_t)(x->reg_count ? x->reg_count : 1));
-    if (!m->body) { m = NULL; goto done; }
-    memset(m->body, 0, sizeof(ms_body *) * (size_t)(x->reg_count ? x->reg_count : 1));
-    for (k = 0; k < SH_MR_FIXED && k < x->reg_count; ++k) {
-        if (!r.text[k]) continue;
-        for (i = 0; i < n && !m->pass[k]; ++i)
-            m->pass[k] = src[i].carried[k] && src[i].carried_len[k] == r.len[k] && !memcmp(src[i].carried[k], r.text[k], r.len[k]);
-        if (!m->pass[k]) m->body[k] = ms_reg_body_new(x, r.text[k], r.len[k]);
-    }
-    for (i = 0; i < next; ++i) {
-        if (i < r.next && r.ext_text[i]) m->body[ext_file[i]] = ms_reg_body_new(x, r.ext_text[i], r.ext_len[i]);
-        else if (ext_carrier[i] >= 0 && ext[i].text) m->body[ext_file[i]] = ms_reg_body_new(x, ext[i].text, ext[i].len);
-    }
-    /* The gates of the generated texts: the first contributing source with requirements. */
     m->gate = (int *)ms_alloc(x, sizeof(int) * (size_t)(x->reg_count ? x->reg_count : 1));
-    if (m->gate) {
-        int f2;
-        for (k = 0; k < x->reg_count; ++k) m->gate[k] = -1;
-#define MS_GATE(K, S) do { if ((K) >= 0 && (K) < x->reg_count && m->gate[K] < 0 && (S) >= 0 && (S) < n && \
-                               ms_req_needs(set[S])) m->gate[K] = (int)(set[S] - x->bundles); } while (0)
-        for (i = 0; i < r.nentries; ++i) MS_GATE(SH_MR_CONDUCTOR, r.entries[i].source);
-        for (i = 0; i < n; ++i)
-            if (src[i].body_events || src[i].carried[SH_MR_BODY]) MS_GATE(SH_MR_BODY, i);
-        for (f2 = 0; f2 < SH_MB_PLAYER_FIELDS; ++f2) MS_GATE(SH_MR_PLAYER, r.player_from[f2]);
-        for (i = 0; i < next; ++i) {
-            int s2;
-            MS_GATE(ext_file[i], ext_carrier[i]);
-            for (s2 = 0; s2 < n; ++s2) {
-                size_t e;
-                for (e = 0; src[s2].intent && e < src[s2].intent->ext_count; ++e)
-                    if (src[s2].ext_texts && src[s2].ext_texts[e] && !_stricmp(src[s2].intent->ext_targets[e], ext[i].target))
-                        MS_GATE(ext_file[i], s2);
-            }
-        }
-        for (i = 0; i < r.nweapons; ++i) {
-            char req[SH_MB_REQUEST_MAX + 1];
-            if (!sh_modregistry_weapon_request(r.weapons[i].slot + 8, req, sizeof req)) continue;
-            for (k = SH_MR_FIXED; k < x->reg_count; ++k)
-                if (!strcmp(x->files[x->reg_first + k].request, req)) MS_GATE(k, r.weapons[i].source);
-        }
-#undef MS_GATE
-    }
-    for (i = 0; i < r.nweapons; ++i) {
-        char req[SH_MB_REQUEST_MAX + 1];
-        if (!sh_modregistry_weapon_request(r.weapons[i].slot + 8, req, sizeof req)) continue;
-        for (k = SH_MR_FIXED; k < x->reg_count; ++k)
-            if (!strcmp(x->files[x->reg_first + k].request, req)) {
-                size_t len = 0;
-                unsigned char *raw = ms_file_raw(&x->files[r.weapons[i].file], &len);
-                if (raw) {
-                    m->body[k] = ms_reg_body_new(x, (const char *)raw, len);
-                    HeapFree(GetProcessHeap(), 0, raw);
-                } else
-                    ms_log("registry: %s: the weapon decl %s could not be read; the game's serves", r.weapons[i].slot,
-                           x->files[r.weapons[i].file].request);
-                break;
-            }
+    if (!m->body || !m->gate) { m = NULL; goto done; }
+    memset(m->body, 0, sizeof(ms_body *) * (size_t)(x->reg_count ? x->reg_count : 1));
+    for (k = 0; k < x->reg_count; ++k) {
+        m->gate[k] = -1;
+        if (k < r.ntargets && r.text[k]) m->body[k] = ms_reg_body_new(x, r.text[k], r.len[k]);
+        /* The gates of the generated texts: the first contributing source with requirements. */
+        for (i = 0; k < r.ntargets && i < n && m->gate[k] < 0; ++i)
+            if (r.used[k][i] && ms_req_needs(set[i])) m->gate[k] = (int)(set[i] - x->bundles);
     }
     if (r.nrewrites) {
         m->rw_file = (int *)ms_alloc(x, sizeof(int) * (size_t)r.nrewrites);
@@ -3275,27 +3000,22 @@ done:
     for (i = 0; i < nowned; ++i) HeapFree(GetProcessHeap(), 0, owned[i]);
     free(owned);
     for (i = 0; i < n; ++i) {
-        if (in) sh_modregistry_intent_free(&in[i]);
         if (decls) free(decls[i]);
-        if (wfiles) free(wfiles[i]);
-        if (etexts) free((void *)etexts[i]);
-        if (elens) free(elens[i]);
+        if (derived) free(derived[i]);
     }
-    free(src); free(in); free(decls); free(wfiles); free((void *)etexts); free(elens); free(ext); free(ext_file);
-    free(ext_carrier);
+    free(src); free(decls); free(derived); free(tg);
     return m;
 }
 
 /* Two listings' registries serve the same bytes: per registry file the same
- * text (a pass-through copy counts as none: the bundle's own file serves),
- * and the same rewritten decls. */
+ * text, and the same rewritten decls. */
 static int ms_reg_same(const ms_index *x, const ms_reg_memo *a, const ms_reg_memo *b)
 {
     int k, i;
     if (a == b) return 1;
     for (k = 0; k < x->reg_count; ++k) {
-        const ms_body *ba = a && !(k < SH_MR_FIXED && a->pass[k]) ? a->body[k] : NULL;
-        const ms_body *bb = b && !(k < SH_MR_FIXED && b->pass[k]) ? b->body[k] : NULL;
+        const ms_body *ba = a ? a->body[k] : NULL;
+        const ms_body *bb = b ? b->body[k] : NULL;
         if (ba || bb) {
             if (!ba || !bb || ba->len != bb->len || memcmp(ba->p, bb->p, ba->len)) return 0;
         }
@@ -3308,9 +3028,9 @@ static int ms_reg_same(const ms_index *x, const ms_reg_memo *a, const ms_reg_mem
 }
 
 /* The registries of the current listing (caller holds the scope and build
- * locks): the bundles that serve and state registry intent, in row order
- * (editor-time bundles after the rows, by key), memoized. With map scope
- * off nothing is generated. Returns 1 when the generated texts changed. */
+ * locks): the bundles that serve and edit a game file, in row order
+ * (editor-time bundles after the rows, by key), memoized. With map scope off
+ * nothing is generated. Returns 1 when the generated texts changed. */
 static int ms_registry_compute(ms_index *x, int on)
 {
     ms_bundle **set;
@@ -3356,14 +3076,6 @@ static ms_body *ms_reg_body(const ms_index *x, int file)
     const ms_reg_memo *m = (const ms_reg_memo *)InterlockedCompareExchangePointer((PVOID volatile *)&x->reg_cur, NULL, NULL);
     int k = file - x->reg_first;
     return m && k >= 0 && k < x->reg_count ? m->body[k] : NULL;
-}
-
-/* 1 when the listing's text of registry file `file` is a serving bundle's own copy. */
-static int ms_reg_pass(const ms_index *x, int file)
-{
-    const ms_reg_memo *m = (const ms_reg_memo *)InterlockedCompareExchangePointer((PVOID volatile *)&x->reg_cur, NULL, NULL);
-    int k = file - x->reg_first;
-    return m && k >= 0 && k < SH_MR_FIXED && m->pass[k];
 }
 
 /* An encounter or score decl served with the assigned spawn-type bits, or NULL. */
@@ -3522,7 +3234,7 @@ static int ms_scope_compute(ms_index *x, int mark)
         /* A registry's path: the text generated for the listing, else the
          * game's; any other pick: a decl served with the spawn-type bits the
          * conductor assigned. */
-        if (on && f->registry_of && !ms_reg_pass(x, f->registry_of - 1)) {
+        if (on && f->registry_of) {
             body = ms_reg_body(x, f->registry_of - 1);
             best = body ? f->registry_of - 1 : -1;
             why = body ? MS_WHY_REGISTRY : MS_WHY_NONE;
@@ -3699,10 +3411,7 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
         for (i = 0; i < x->reg_count; ++i) {
             const ms_file *f = &x->files[x->reg_first + i];
             const ms_body *b = m ? m->body[i] : NULL;
-            if (m && i < SH_MR_FIXED && m->pass[i])
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry %s: a declared bundle's own copy serves (it is what "
-                            "the product would generate)", f->request);
-            else if (b)
+            if (b)
                 _snprintf_s(line, sizeof line, _TRUNCATE, "registry %s: generated, %zu bytes%s", f->request, b->len,
                             f->registry_keyed ? "" : " (a bundle still carries this file; the generated text serves)");
             else
@@ -3716,7 +3425,7 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
             n++;
         }
         {
-            /* The registries' inputs (extends partials, bodyEvents files):
+            /* Partials of bundles built before derived edits:
              * read by the generator, never served, so never a conflict. */
             int k, partials = 0;
             for (k = 0; k < x->nfiles; ++k) {
@@ -3724,14 +3433,25 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
                 const ms_bundle *b;
                 if (!f->partial || !x->bundles[f->bundle].admitted) continue;
                 b = &x->bundles[f->bundle];
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry partial %s: partial, read by the generator (%s@%s (%.16s)); "
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry partial %s: a partial of a retired intent key (%s@%s (%.16s)); "
                             "never served to the game", f->request, b->id, b->version, b->hash);
                 fn(context, line);
                 n++;
                 partials++;
             }
             if (partials) {
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry: %d partial file(s), read by the generator", partials);
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry: %d partial file(s) a rebuild refuses (put the whole "
+                            "edited copy at the game's name)", partials);
+                fn(context, line);
+                n++;
+            }
+            for (k = 0; k < x->nfiles; ++k) {
+                const ms_file *f = &x->files[k];
+                const ms_bundle *b;
+                if (!f->edit || !x->bundles[f->bundle].admitted) continue;
+                b = &x->bundles[f->bundle];
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry edits %s: %s@%s (%.16s) edits it; its copy is never "
+                            "served, its edits apply in maps that declare it", f->request, b->id, b->version, b->hash);
                 fn(context, line);
                 n++;
             }
@@ -4214,6 +3934,7 @@ int sh_modserve_index_build(const char *mods_root)
     ms_load_aliases(x, mods_root);
     ms_load_editor_only(x, mods_root);
     ms_bank_stems(x);
+    ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
@@ -4631,7 +4352,7 @@ static int ms_need_blocks(const char *name)
  * has the source (a stock decl: served by the provider, never reloaded). */
 static int ms_plannable(const ms_index *x, const ms_file *f)
 {
-    return f->is_decl && !f->partial && (!f->is_shadow || x->bundles[f->bundle].grandfathered);
+    return f->is_decl && !f->partial && !f->edit && (!f->is_shadow || x->bundles[f->bundle].grandfathered);
 }
 
 /* Collect `roots` and the closure of bundle-provided decls they need into an

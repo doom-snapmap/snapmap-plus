@@ -1,4 +1,4 @@
-/* modregistry_choices.c -- the open map's registry choices (modregistry.h):
+/* modregistry_choices.c -- the open map's choices between mods' edits (modregistry.h):
  * validated here, stored by the map manifest (modmanifest.c), which gives
  * them to the serving index. Apart from modregistry.c so that the binaries
  * and tests that link the serving index without the manifest stay as they are. */
@@ -27,8 +27,8 @@ int sh_modregistry_choose_command(const char *slot, const char *key, char *out, 
     int r;
     if (!out || !cap) return -1;
     if (!sh_modregistry_slot_valid(slot)) {
-        _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: '%s' is not a registry slot (player.hands, player.handsD1, "
-                    "player.body, player.handsAnimWeb or weapons/<stock weapon decl>)", slot ? slot : "");
+        _snprintf_s(out, cap, _TRUNCATE, "MODS: choose: '%s' is not a slot: <game file>/<path>, as the doctor and the Mods "
+                    "tab name a clash (entitydef/player/coop/edit/handsModelMPUseDoomHands)", slot ? slot : "");
         return -1;
     }
     if (key && key[0] && !sh_modmanifest_valid_id(key)) {
