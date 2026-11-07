@@ -1240,6 +1240,7 @@ typedef struct dt_op {
     char slot[512];
     unsigned long long digest;
     int skip;                          /* lost a clash */
+    int lost_to, lost_by_choice;       /* with skip: the source that serves the slot, and whether the map chose it */
 } dt_op;
 
 typedef struct dt_src_ops { dj *json; dt_op *ops; int n; } dt_src_ops;
@@ -1664,7 +1665,11 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
                     for (k2 = 0; k2 < so[who[w]].n; ++k2) {
                         dt_op *o2 = &so[who[w]].ops[k2];
                         if (!_stricmp(o2->slot, op->slot) && (o2->kind == OP_SET || o2->kind == OP_REMOVE ||
-                            o2->kind == OP_KEYED || o2->kind == OP_UNKEY) && o2->digest != win) o2->skip = 1;
+                            o2->kind == OP_KEYED || o2->kind == OP_UNKEY) && o2->digest != win) {
+                            o2->skip = 1;
+                            o2->lost_to = serving;
+                            o2->lost_by_choice = by_choice;
+                        }
                     }
             }
             for (w = 0; w < nwho && at + 2 < sizeof list; ++w) {
@@ -1684,12 +1689,20 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             if (report->clash) report->clash(report->context, op->slot, who, nwho, serving, by_choice);
         }
     for (s = 0; s < n; ++s) {
-        int changed = 0, merged = 0, skipped = 0, rows = 0;
+        int changed = 0, merged = 0, skipped = 0, rows = 0, lost = 0, lost_to = -1, lost_choice = 0, lost_mixed = 0;
+        char superseded[300] = "";
         for (k = 0; k < so[s].n; ++k) {
             const dt_op *op = &so[s].ops[k];
             const char *w = NULL;
             int r;
-            if (op->skip) continue;
+            if (op->skip) {
+                /* lost a clash: another source's value serves the slot */
+                if (lost && (op->lost_to != lost_to || op->lost_by_choice != lost_choice)) lost_mixed = 1;
+                lost_to = op->lost_to;
+                lost_choice = op->lost_by_choice;
+                lost++;
+                continue;
+            }
             r = dt_apply_op(t, op, s, &w);
             if (r == 1) changed++;
             else if (r == 2) { changed++; rows++; }
@@ -1705,9 +1718,15 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             }
         }
         if (skipped > 4) dt_line(report, "%s: %s: %d more operation(s) skipped", game, src[s].who, skipped - 4);
+        if (lost) {
+            const char *by = lost_to >= 0 && lost_to < n ? (src[lost_to].key ? src[lost_to].key : src[lost_to].who) : NULL;
+            if (lost_mixed || !by) _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by other mods' values", lost);
+            else if (lost_choice) _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by %s's choice", lost, by);
+            else _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by %s (row order)", lost, by);
+        }
         if (so[s].n)
-            dt_line(report, "%s: %d edit(s) from %s: %d applied%s%s, %d already held%s", game, so[s].n, src[s].who, changed,
-                    rows ? ", " : "", rows ? "some merged into an entry another mod adds" : "", merged,
+            dt_line(report, "%s: %d edit(s) from %s: %d applied%s%s, %d already held%s%s", game, so[s].n, src[s].who, changed,
+                    rows ? ", " : "", rows ? "some merged into an entry another mod adds" : "", merged, superseded,
                     skipped ? ", some skipped" : "");
         if (changed && report->used) report->used[s] = 1;
         report->applied += changed;

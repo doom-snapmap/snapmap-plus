@@ -1734,7 +1734,9 @@ map's choices).
   identical operation merges, additions union, a named entry two sources add
   becomes one block holding both texts' rows (identical rows once, a scalar
   both set otherwise keeps the earlier), and a field or keyed entry two
-  sources set to different values is a clash.
+  sources set to different values is a clash. Each source's line closes its
+  sum: `N edit(s) from X: A applied, M already held, C superseded by <key>'s
+  choice` (or `by <key> (row order)`) for the operations that lost a clash.
 - **The conductor.** The one rule per file: each `aiTypeList` item a source
   added whose `aiType` is a number that is not a stock `SPAWN_AI_TYPE_*` bit gets
   a bit assigned per map, the lowest free above `SPAWN_AI_TYPE_ZOMBIE_UNWILLING`
