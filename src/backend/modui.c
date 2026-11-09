@@ -117,7 +117,6 @@ static int mu_scope_armed(void);
 static int mu_scope_source(int when);
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 static int mu_scope_now(const char *phase);
-static int mu_product_need(const sh_modmanifest_list *rows);
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 static void mu_mark_modified(const char *label);
 
@@ -154,7 +153,6 @@ void sh_modui_bind(const sh_modui_engine *engine)
     /* The map scope: what the open map lists, and the build a map-level row names. */
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
-    sh_modmanifest_set_product_need(mu_product_need);
     sh_modmanifest_set_listed(mu_scope_listed);
     sh_modserve_set_scope_source(mu_scope_source);
 }
@@ -2049,10 +2047,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_putn(b, "]", 1);
         mu_kbool(b, "vanilla", mp->mod_count == 0, 0);
         mu_put_clashes(b, m, mp);
-        {
-            char pv[SH_MODMANIFEST_VERSION_CAP];
-            if (sh_modmanifest_product(pv, sizeof pv)) mu_kstr(b, "product", pv, 0);
-        }
     }
     mu_putn(b, "}", 1);
 }
@@ -3241,29 +3235,6 @@ int sh_modui_scope_launch_refused(const char *why)
 }
 
 /* The build that serves a map-level row at save. */
-/* The product version a saved map records (modmanifest.h, "smpprod1."): a
- * declared mod that edits a game file (derived edits), lists encounters for
- * the conductor, or surfaces campaign content needs it. */
-static int mu_product_need(const sh_modmanifest_list *rows)
-{
-    sh_ms_list list;
-    size_t i, k;
-    int need = 0;
-    if (!rows || !rows->count || !sh_ms_enumerate(&list)) return 0;
-    for (i = 0; i < rows->count && !need; i++) {
-        char sub[SH_MODMANIFEST_HASH_CAP];
-        if (!sh_modmanifest_substituted(rows->rows[i].bundle, sub, sizeof sub)) sub[0] = 0;
-        for (k = 0; k < list.count && !need; k++) {
-            const sh_mb_bundle *bd = &list.items[k].bundle;
-            if (!list.items[k].loaded || (strcmp(bd->hash, rows->rows[i].bundle) && strcmp(bd->hash, sub))) continue;
-            need = bd->classes.surfaces > 0 ||
-                   bd->edits != NULL || (bd->registries && strstr(bd->registries, "\"conductor\""));
-        }
-    }
-    sh_ms_list_free(&list);
-    return need;
-}
-
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
 {
     sh_modserve_bundle_ref ref;

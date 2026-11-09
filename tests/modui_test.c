@@ -2262,22 +2262,6 @@ int main(int argc, char **argv)
         sh_mb_set_stock_ops(NULL);
     }
 
-    /* A map that records the product version it needs: the document says which. */
-    {
-        char *text, *loaded;
-        size_t tl = 0, ll = 0;
-        text = sh_modmanifest_product_put(MAP, sizeof MAP - 1, "v0.2.1-beta.25", &tl);
-        CHECK(text != NULL);
-        if (text) {
-            loaded = sh_modmanifest_prepare_load(text, tl, &ll);
-            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
-            HeapFree(GetProcessHeap(), 0, text);
-        }
-        doc = list_doc();
-        CHECK(has(doc, "\"product\":\"v0.2.1-beta.25\""));
-        union_add(doc);
-        free(doc);
-    }
     keys_match_fixture(payload, g_union ? g_union : "");
     free(g_union);
     g_union = NULL;

@@ -239,8 +239,7 @@ var modsTab = (function () {
             tagged: typeof m.tagged === 'boolean' ? m.tagged : null,
             mods: Array.isArray(m.mods) ? m.mods.map(normMapMod) : null,
             vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null,
-            clashes: arr(m.registryClashes).map(normClash).filter(function (c) { return c.slot && c.providers.length > 1; }),
-            product: str(m.product)};
+            clashes: arr(m.registryClashes).map(normClash).filter(function (c) { return c.slot && c.providers.length > 1; })};
   }
   /* A dry run's consequence list (mapRemoveModPreview, uninstallPreview). */
   function normPreview(v) {
@@ -832,7 +831,6 @@ var modsTab = (function () {
         field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));
       }
       if (m.saved) field(det, 'Last saved', formatDate(m.saved));
-      if (m.product) field(det, 'Needs', 'Snapmap+ ' + m.product + ' or later');
       if (m.clashes.length) {
         var cs = section(body, 'clashes', 'Choices between mods');
         cs.appendChild(el('div', 'mods-note', 'Several mods of this map edit the same field of a game file differently. Pick whose edit this map uses; it applies now and is saved with the map\'s next save.'));

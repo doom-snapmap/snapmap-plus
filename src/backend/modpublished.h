@@ -246,20 +246,6 @@ typedef struct sh_modpub_probe {
     char name[128];     /* found: the bundle's display name */
 } sh_modpub_probe;
 
-/* Product versions ("v0.2.1-beta.24", "0.3.0"): negative, 0 or positive as a
- * is older than, equal to or newer than b (semantic-version order: numeric
- * major.minor.patch, then a release after its pre-releases, pre-release
- * identifiers numerically or by text). A leading "v" is ignored. */
-int  sh_modpub_version_compare(const char *a, const char *b);
-/* 1 when `v` reads as a release version (a digit after an optional "v").
- * A running version that does not ("local", the dev build's) counts as the
- * newest: the product-version notice is never shown for it. */
-int  sh_modpub_version_parseable(const char *v);
-
-/* The product-version notice (DESIGN-additive 2.7): "This map needs Snapmap+
- * <version> or later." */
-void sh_modpub_product_notice(char *out, size_t cap, const char *version);
-
 /* Everything the state machine asks of the engine and of the lanes it depends
  * on. Production binds these at install; tests supply fakes. */
 typedef struct sh_modpub_ops {
@@ -307,11 +293,6 @@ typedef struct sh_modpub_ops {
     int  (*other_build)(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name, size_t name_cap);
     /* A display name for the row's mod from what this machine knows, else 0. */
     int  (*mod_name)(void *c, const sh_modmanifest_row *row, char *out, size_t cap);
-    /* The product version the row asks for (its "product" member,
-     * DESIGN-additive 2.7), else 0. */
-    int  (*row_product)(void *c, const sh_modmanifest_row *row, char *out, size_t cap);
-    /* The running product's version, else 0 (unknown: no notice). */
-    int  (*product_version)(void *c, char *out, size_t cap);
     /* After a fetch that failed with game content this machine lacks: the
      * borrow's source path, else 0. */
     int  (*fetch_detail)(void *c, const char *hash, char *out, size_t cap);

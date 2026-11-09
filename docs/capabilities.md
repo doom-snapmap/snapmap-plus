@@ -311,10 +311,6 @@ name". Mods you download or import are never refused on their files. A map whose
   without asking, and a prefab placed this way adds the installed build to the map. A build the
   mod store has is still offered for download first. A community map you play from the browser, a
   lobby or the feed keeps its author's build and is refused as above when that build is gone.
-- A map that records the Snapmap+ version a product feature of it needs (a resized Grid Room, for
-  example; its manifest rows' `product` member) says so once per session when an older Snapmap+
-  plays it from the hub or My Maps: "This map needs Snapmap+ <version> or later." The map still
-  loads. Saves do not record the version yet, so no map shows it today.
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes an ordinary mod folder `mods\<id>\`
   (unless an installed mod already serves the same content) and the map gets a manifest row for it;

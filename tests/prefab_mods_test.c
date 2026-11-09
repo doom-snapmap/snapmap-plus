@@ -1194,7 +1194,7 @@ static int e_resume(void *c, const sh_modpub_resume *r) { (void)c; (void)r; g_e_
 static const sh_modpub_ops E_OPS = {
     NULL, p_on_main, e_row_state, e_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
     p_worker_run, e_fetch, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, e_resume, p_log,
-    NULL, p_print, e_store_probe, e_claimed, e_other_build, NULL, NULL, NULL, e_fetch_detail
+    NULL, p_print, e_store_probe, e_claimed, e_other_build, NULL, e_fetch_detail
 };
 
 /* A fake installed game: one file at ROCK_SRC, with the bytes a mod borrows,

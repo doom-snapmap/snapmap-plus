@@ -627,59 +627,6 @@ static int pub_fetch_answer(int code)
     }
 }
 
-int sh_modpub_version_compare(const char *a, const char *b)
-{
-    const char *pa = a ? a : "", *pb = b ? b : "";
-    int part;
-    if (*pa == 'v' || *pa == 'V') pa++;
-    if (*pb == 'v' || *pb == 'V') pb++;
-    /* major.minor.patch */
-    for (part = 0; part < 3; part++) {
-        unsigned long long x = 0, y = 0;
-        while (*pa >= '0' && *pa <= '9') x = x * 10 + (unsigned)(*pa++ - '0');
-        while (*pb >= '0' && *pb <= '9') y = y * 10 + (unsigned)(*pb++ - '0');
-        if (x != y) return x < y ? -1 : 1;
-        if (*pa == '.') pa++;
-        if (*pb == '.') pb++;
-    }
-    /* A release is newer than its pre-releases. */
-    if (*pa == '+') pa = "";
-    if (*pb == '+') pb = "";
-    if (!*pa || !*pb) return (!*pa && !*pb) ? 0 : (!*pa ? 1 : -1);
-    if (*pa == '-') pa++;
-    if (*pb == '-') pb++;
-    for (;;) {
-        char ia[64], ib[64];
-        size_t na = 0, nb = 0;
-        int numa = 1, numb = 1;
-        while (*pa && *pa != '.' && *pa != '+') { if (na < sizeof ia - 1) ia[na++] = *pa; if (*pa < '0' || *pa > '9') numa = 0; pa++; }
-        while (*pb && *pb != '.' && *pb != '+') { if (nb < sizeof ib - 1) ib[nb++] = *pb; if (*pb < '0' || *pb > '9') numb = 0; pb++; }
-        ia[na] = 0; ib[nb] = 0;
-        if (!na && !nb) return 0;
-        if (!na) return -1;           /* fewer identifiers: older */
-        if (!nb) return 1;
-        if (numa && numb) {
-            unsigned long long x = _strtoui64(ia, NULL, 10), y = _strtoui64(ib, NULL, 10);
-            if (x != y) return x < y ? -1 : 1;
-        } else if (numa != numb) {
-            return numa ? -1 : 1;     /* numeric identifiers sort before text */
-        } else {
-            int c = strcmp(ia, ib);
-            if (c) return c < 0 ? -1 : 1;
-        }
-        if (*pa == '.') pa++;
-        if (*pb == '.') pb++;
-        if (*pa == '+') pa = "";
-        if (*pb == '+') pb = "";
-    }
-}
-
-void sh_modpub_product_notice(char *out, size_t cap, const char *version)
-{
-    if (!out || !cap) return;
-    _snprintf_s(out, cap, _TRUNCATE, "This map needs Snapmap+ %s or later.", version && version[0] ? version : "?");
-}
-
 /* The missing bundles' display names (ids), malloc'd array of borrowed
  * pointers, or NULL. */
 static const char **pub_missing_names(const pub_hold *h)
@@ -918,57 +865,6 @@ nomem:
     return -1;
 }
 
-/* ------------------------------------------------------------ product version
- * DESIGN-additive 2.7: a map that needs product features (Grid Room
- * variants, navigation, map bounds, baked defaults) records the product
- * version it needs as a row member "product" (written by the save, lane L2b
- * or L3b). The hub says so once per map and session, by name, when the
- * running product is older. Informational: the launch goes on. */
-#define PUB_PRODUCT_SEEN 16
-static char g_product_seen[PUB_PRODUCT_SEEN][PUB_ID_CAP * 2 + 72];
-static unsigned g_product_next;
-static volatile LONG g_product_dev_said;   /* the one line for a development build's version */
-
-int sh_modpub_version_parseable(const char *v)
-{
-    if (!v) return 0;
-    if (*v == 'v' || *v == 'V') v++;
-    return *v >= '0' && *v <= '9';
-}
-
-static void pub_product_check(const sh_modmanifest_list *rows, const char *item, const char *revision)
-{
-    char need[64] = "", one[64], running[64] = "", key[sizeof g_product_seen[0]], notice[PUB_TEXT_CAP];
-    if (!rows || !g_ops.row_product) return;
-    for (size_t i = 0; i < rows->count; i++) {
-        one[0] = 0;
-        if (!g_ops.row_product(g_ops.context, &rows->rows[i], one, sizeof one) || !one[0]) continue;
-        if (!need[0] || sh_modpub_version_compare(one, need) > 0) strcpy_s(need, sizeof need, one);
-    }
-    if (!need[0]) return;
-    if (!g_ops.product_version || !g_ops.product_version(g_ops.context, running, sizeof running) || !running[0]) {
-        pub_logf("MODS: this map needs Snapmap+ %s; the running version is unknown, so nothing is said", need);
-        return;
-    }
-    if (!sh_modpub_version_parseable(running)) {
-        /* A development build ("local") or a version that does not read as
-         * one: it counts as the newest, so no map asks for a newer one. */
-        if (!InterlockedExchange(&g_product_dev_said, 1))
-            pub_logf("MODS: the running Snapmap+ reports version '%s', which is not a release version; it counts as "
-                     "the newest, so no map's product notice is shown", running);
-        return;
-    }
-    if (sh_modpub_version_compare(running, need) >= 0) return;
-    _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s@%s", item && item[0] ? item : "local", revision ? revision : "", need);
-    for (size_t i = 0; i < PUB_PRODUCT_SEEN; i++)
-        if (g_product_seen[i][0] && !strcmp(g_product_seen[i], key)) return;
-    strcpy_s(g_product_seen[g_product_next++ % PUB_PRODUCT_SEEN], sizeof g_product_seen[0], key);
-    sh_modpub_product_notice(notice, sizeof notice, need);
-    pub_print(notice);
-    pub_logf("MODS: %s (running %s)", notice, running);
-    pub_notice(notice);
-}
-
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision)
 {
@@ -986,7 +882,6 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
                      "so it is not gated", id ? id : "", revision ? revision : "");
             return 1;
         }
-        pub_product_check(&seen->rows, id, revision);
         if (!seen->rows.count || !pub_count_missing(&seen->rows)) return 1;
         begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, &seen->rows, NULL);
         if (begun <= 0) {
@@ -1031,7 +926,6 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     if (pub_is_completion(hook) && g_ops.metadata_ids)
         (void)g_ops.metadata_ids(g_ops.context, metadata, item, sizeof item, rev, sizeof rev);
     if (pub_is_completion(hook)) pub_seen_note(item, rev, &record->rows);
-    pub_product_check(&record->rows, item, rev);
     if (!record->rows.count || !record->missing) {
         pub_record_clear(record);   /* consumed */
         return 1;
@@ -1077,7 +971,6 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
     if (map && record->map != map) return 1;
     pub_notes_gated();
-    pub_product_check(&record->rows, "", "");
     missing = pub_count_missing(&record->rows);
     if (!missing) { pub_record_clear(record); return 1; }
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
@@ -1807,9 +1700,6 @@ void sh_modpub_test_reset(void)
     for (size_t i = 0; i < PUB_SEEN_MAX; i++) sh_modmanifest_list_free(&g_seen[i].rows);
     memset(g_seen, 0, sizeof g_seen);
     g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
-    memset(g_product_seen, 0, sizeof g_product_seen);
-    g_product_next = 0;
-    InterlockedExchange(&g_product_dev_said, 0);
     InterlockedExchange(&g_resuming, 0);
 }
 int sh_modpub_test_state(void) { return g_hold.state; }
@@ -2401,50 +2291,6 @@ static int eng_other_build(void *c, const sh_modmanifest_row *row, char *hash, s
     return 1;
 }
 
-/* DESIGN-additive 2.7, reading side: the map's own smpprod1 variable
- * (modmanifest.c), one per map, so every row answers the same version. */
-static int eng_row_product(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
-{
-    (void)c; (void)row;
-    return sh_modmanifest_product(out, cap);
-}
-
-/* The installed product version: install.json's "version" (the installer
- * writes it first; crash_report.c reads it the same way), read once. */
-static int eng_product_version(void *c, char *out, size_t cap)
-{
-    static char version[64];
-    static volatile LONG read_once;
-    (void)c;
-    if (!InterlockedCompareExchange(&read_once, 1, 0)) {
-        char la[MAX_PATH], path[MAX_PATH], data[4096];
-        DWORD got = 0;
-        HANDLE f;
-        if (GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH)) {
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus\\install.json", la);
-            f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-            if (f != INVALID_HANDLE_VALUE) {
-                if (ReadFile(f, data, sizeof data - 1, &got, NULL)) {
-                    const char *k, *q;
-                    data[got] = 0;
-                    k = strstr(data, "\"version\"");
-                    k = k ? strchr(k + 9, ':') : NULL;
-                    k = k ? strchr(k, '"') : NULL;
-                    q = k ? strchr(k + 1, '"') : NULL;
-                    if (k && q && (size_t)(q - k - 1) < sizeof version) {
-                        memcpy(version, k + 1, (size_t)(q - k - 1));
-                        version[q - k - 1] = 0;
-                    }
-                }
-                CloseHandle(f);
-            }
-        }
-    }
-    if (!version[0]) return 0;
-    strncpy_s(out, cap, version, _TRUNCATE);
-    return 1;
-}
-
 /* The gate refused a launch: the map scope declares nothing of it. */
 static void eng_launch_refused(void *c, int hook)
 {
@@ -2460,8 +2306,8 @@ static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
-    eng_store_has, eng_print, eng_store_probe, eng_claimed, eng_other_build, eng_mod_name, eng_row_product,
-    eng_product_version, eng_fetch_detail, eng_launch_refused
+    eng_store_has, eng_print, eng_store_probe, eng_claimed, eng_other_build, eng_mod_name,
+    eng_fetch_detail, eng_launch_refused
 };
 
 /* ------------------------------------------------------------ detours */

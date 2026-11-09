@@ -487,19 +487,9 @@ These backend files share the work:
   decision and `sh_mods held`.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows (a placed
   mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
-  retired `smpkg.` carriers, as below. It also owns the product-version
-  variable `smpprod1.<version>` (initialValue the same version), one per map,
-  appended last like the rows: a save writes it when the map uses a choice
-  between mods' edits, a declared mod with derived edits or conductor
-  encounters, or surfaced content (modui's hook), or a Grid Room
-  variant module (`maps/modules/smpgrid/`); the version is the build's
-  `SH_PRODUCT_VERSION`, which `src/backend/build.ps1` writes to the generated
-  header `build/obj/backend/product_version.gen.h` from the release tag
-  (`SNAPMAPPLUS_VERSION`) or else the newest `CHANGELOG.md` entry. A load reads
-  and strips it (`sh_modmanifest_product`); it is never a row, so a map that
-  needs the product but no mod is never counted as missing a mod, and an older
-  product keeps it as an inert string variable. `sh_modmanifest_version_compare`
-  orders versions (`v0.2.1-beta.24` before `v0.2.1-beta.25` before `v0.2.1`).
+  retired `smpkg.` carriers, as below. A load and a save also remove any
+  `smpprod1.<version>` string variable an earlier development build recorded
+  (one log line per map); nothing writes or reads one.
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
   folder (two folders declaring one id both flagged, a package a map delivered
   listed like any other) with what each carries, marks each installed or
@@ -2126,16 +2116,6 @@ is decided by the same function (404 and 451, a network failure, and
 `MODNET_E_GAME`, the download's own borrow refusal, whose source the fetch
 keeps). A placeholder system (phase 6) would plug in at `sh_modpub_gate_decide`
 with a verdict of its own and touch nothing else.
-
-The product version (DESIGN-additive 2.7). A gated completion, My Maps play and
-the launch boundary read the version each row asks for (its `product` member,
-which the save will write) and, when the running product (`install.json`'s
-`version`) is older, raise "This map needs Snapmap+ <version> or later." once
-per map and session, with a console line; the launch goes on. A running
-version that does not read as a release (`sh_modpub_version_parseable`: a
-digit after an optional `v`; the development build's `local`) counts as the
-newest: no notice, and one log line per session. Until the save
-writes the member, `eng_row_product` answers nothing and no notice is shown.
 
 Yes starts one job on the modsync worker that fetches every missing bundle by
 hash and logs a progress line every two seconds. When the job is done, on a main

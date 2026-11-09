@@ -969,7 +969,7 @@ test('additive: one row per build of a key, the newest marked; a failed build', 
   assert.equal(info.tone, 'warn');
   assert.equal(info.cause, 'its latest build failed: assets/x.decl: parse error; serving build 1 from its snapshot');
 });
-test('additive: the map modal: installed at another build, declared nothing placed, upgrade, clash choice, product', () => {
+test('additive: the map modal: installed at another build, declared nothing placed, upgrade, clash choice', () => {
   const doc = clone(v3);
   doc.map.mods.push({key: 'airlock', id: 'airlock', version: '0.0.0', state: 'installed', placedEntities: [], placedCount: 0,
                      references: [], size: 0, attached: true, nothingPlaced: true});
@@ -979,7 +979,7 @@ test('additive: the map modal: installed at another build, declared nothing plac
   const h = live(doc);
   h.ui.openMap();
   const text = modalText(h);
-  assert.match(text, /Needs Snapmap\+ v0\.2\.1-beta\.25 or later/);
+  assert.doesNotMatch(text, /Needs Snapmap\+/);
   assert.match(text, /Declared, nothing placed/);
   assert.match(text, /installed at another build/);
   assert.equal(modsTab.mapModStatus({state: 'otherBuild'}).cause, 'installed at another build');
