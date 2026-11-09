@@ -15,6 +15,8 @@ int sh_map_render_read(void *map,sh_map_render *s){*s=map==map_a?saved_a:saved_b
 int sh_map_render_write(void *map,const sh_map_render *s)
 {assert(map==map_a);if(fail_write)return 0;saved_a=*s;writes++;return 1;}
 void sh_map_render_select(const sh_map_render *s){selected=*s;selects++;}
+static int marks;
+int sh_editor_mark_modified(const char *label){assert(!strcmp(label,"Unlock View Distance"));marks++;return 1;}
 int sh_settings_tab_register_group(const sh_settings_group *g){group=*g;registered++;return 1;}
 int sh_settings_tab_add_bool(sh_settings_rows *rows,const sh_settings_bool *row,int *draft,int *base)
 {
@@ -44,6 +46,8 @@ int main(void)
     /* Apply on stores on and publishes it to the editor view at once. */
     *row_draft=1;apply();
     assert(writes==1&&saved_a.unlocked==1&&*row_base==1&&selects==1&&selected.unlocked==1);
+    /* The edit map does not change, so Apply marks the map modified. */
+    assert(marks==1);
     group.end(group.user);assert(open(map_a)&&*row_draft==1&&*row_base==1);
     /* A map saved on opens with the row on. */
     group.end(group.user);assert(open(map_b)&&*row_draft==1&&writes==1);
@@ -53,10 +57,10 @@ int main(void)
     *row_draft=0;apply();
     assert(writes==2&&saved_a.unlocked==0&&*row_base==0&&selects==2&&selected.unlocked==0);
     /* Apply with nothing changed neither writes nor republishes. */
-    apply();assert(writes==2&&selects==2);
+    apply();assert(writes==2&&selects==2&&marks==2);
     /* A failed write is not committed and is not published. */
     *row_draft=1;fail_write=1;apply();fail_write=0;
-    assert(writes==2&&selects==2&&*row_base==0);
+    assert(writes==2&&selects==2&&*row_base==0&&marks==2);
     *row_draft=*row_base;
     /* A failed row latches the fault: the group hides itself afterwards. */
     group.end(group.user);fail_add=1;assert(open(map_a));fail_add=0;

@@ -94,20 +94,23 @@ remain separate from relocated code for commit validation and restoration.
 
 Map rendering lives in the backend and DOOM's native Settings / Properties
 panel, in the Snapmap+ tab. The Unlock View Distance group owns an
-Apply/Cancel draft (one toggle) tied to the current editable map. On stores
-the versioned string `smp.render.v1` = `4;0` in native map variables, appending
-the row after every existing string and leaving `allocCount[4]` untouched; Off
-removes the row the way the native list removes an element. String variables
-are bound by index, so the row is removed only when every later row is one of
-Snapmap+'s own `smp.` settings (those move down one); otherwise it stays as
-`4;8192`, which reads as off. The native serializer carries the result through
-normal saves without a sidecar. Versions 1 to 4 stored a distance: 8192 and
-disabled version 2 read as off, any other distance as on. Deserialization
-normalizes the snapshot the editor builds its editable map from: an on value
-becomes `4;0` and an off value is removed. Malformed or duplicate metadata
-disables the override. Map deserialization clears the previous runtime
-selection and reads the loaded map's variables; editor-to-play conversion
-refreshes it from the build copy. A locked value copy crosses to rendering at
+Apply/Cancel draft (one toggle) tied to the map open in the editor. The two
+built-in map settings (`smp.render.v1`, `smp.bounds.v1`) are held by
+`map_settings.c` outside the engine's variable lists, like the mod rows and the
+navigation shards: every map parse reads both rows into the open map's settings
+and strips them before the engine parses, so the Toybox variables list never
+shows them, and every save writes them back after the author's own string
+variables and before the navigation shards and mod rows, `allocCount[4]` kept
+equal to the string count. On saves `smp.render.v1` = `4;0`; Off saves no row.
+A row an author's variable follows (an earlier build appended the row before
+the author added a variable) keeps its index: it stays in place, is still read,
+and is rewritten at save (`4;8192`, which reads as off, when off). Applying a
+change marks the map modified with one undo step; undo does not revert it.
+Versions 1 to 4 stored a distance: 8192 and disabled version 2 read as off, any
+other distance as on, and an on value saves as `4;0`. Malformed or duplicate
+metadata reads as off. Map deserialization clears the previous runtime
+selection and selects the parsed map's settings; editor-to-play conversion
+selects the open map's. A locked value copy crosses to rendering at
 the blended environment's single maxViewDistance read: off returns the native
 read, on returns 200000 (the engine raises the read to at least 256 before
 writing r_zfar) and rewrites the view's literal. Before that it reads the
@@ -130,7 +133,7 @@ populate dispatch are extended under the panel's own hooks, and groups register
 through `sh_settings_tab_register_group` with their own draft, commit and reset
 callbacks because native Apply and Reset are not category-scoped. It holds the
 Unlock View Distance group and the Unlock Map Bounds group (`map_bounds.c`), whose
-`smp.bounds.v1` map variable raises `snapEdit_environmentModuleBounds` and the
+`smp.bounds.v1` map setting (held like `smp.render.v1`, above) raises `snapEdit_environmentModuleBounds` and the
 camera distance limit for that map up to the 32671-unit ceiling imposed by the
 signed-short collision and navigation coordinates, restoring the native 16000
 when a stock map loads. Every client re-validates module placement against its

@@ -26,7 +26,7 @@ param(
                            "../fault_shield/serialized_entities_guard.c",
                            "../fault_shield/fault_shield.c",
                            # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
-                           "settings_tab.c", "map_bounds.c", "editor_zoom.c",
+                           "settings_tab.c", "map_bounds.c", "map_settings.c", "editor_zoom.c",
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.

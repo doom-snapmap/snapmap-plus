@@ -67,9 +67,11 @@ frame, so each Environment FX keeps its look while its fog saturates r times
 farther out; colour, maximum opacity and lighting parms are kept. A module on the Default Environment FX (snapmap/base) draws to
 60000 units in the editor, with dark fog from 32000, but only 8192 in Play;
 On gives the same whole-room view in both. The editor's own camera cvars are
-not touched. Apply commits the draft to the map: On stores the variable
-`smp.render.v1`, Off removes it, so a map turned off again saves exactly as
-the unmodified game writes it. Both editor playtests and direct saved-map loads
+not touched. Apply commits the draft to the map and marks it modified: On
+saves the string variable `smp.render.v1`, Off saves none, so a map turned off
+again saves exactly as the unmodified game writes it. Snapmap+ removes its
+settings rows before the engine parses a map and writes them back at save, so
+they never appear in the editor's Toybox variables list. Both editor playtests and direct saved-map loads
 use it, with bindings for OpenGL and Vulkan. Maps saved by earlier Snapmap+
 builds with a View Distance number read as On unless the distance was the old
 default 8192, whose variable is removed at load. Fog is not a map setting;
@@ -86,9 +88,9 @@ the groups appear first in category 0, or last if the row injection site is
 missing too.
 
 **Unlock Map Bounds** (`map_bounds.c`) is an on/off row (a native toggle row,
-`sh_settings_tab_add_bool`). It stores `smp.bounds.v1` in the map's native
-variables (`1;<units>`, 0 = native): on writes the 32671 ceiling, off writes
-`1;0`, and any stored value above 16000 (maps saved by the earlier numeric row)
+`sh_settings_tab_add_bool`). It saves `smp.bounds.v1` with the map
+(`1;<units>`), held out of the Toybox variables list like `smp.render.v1`: on
+writes the 32671 ceiling, off saves no row, and any stored value above 16000 (maps saved by the earlier numeric row)
 reads as on and keeps its value until changed. A map that sets it raises
 `snapEdit_environmentModuleBounds` and `snapEdit_cameraDistanceLimit` to that
 value and scales `snapEdit_minBlueprintFloor` / `snapEdit_maxBlueprintFloor` in

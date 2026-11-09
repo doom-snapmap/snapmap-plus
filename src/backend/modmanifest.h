@@ -24,6 +24,10 @@
  * which bundles provide them, adds the current manifest's map-level rows, and
  * appends one row per bundle.
  *
+ * Row order of a saved map's string variables: the author's own, then the
+ * map settings (smp.render.v1, smp.bounds.v1: map_settings.h), then the
+ * navigation shards (smnav1.: navmesh.h), then these rows, last.
+ *
  * Both also remove a stale "smpprod1.<version>" string variable that earlier
  * development builds recorded; nothing writes or reads it now.
  */

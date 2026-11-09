@@ -1,5 +1,6 @@
 #include "map_bounds.h"
 #include "map_render.h"
+#include "map_settings.h"
 #include "world_area_cell.h"
 /* DeserializeFromJson detour: optionally substitute a file-backed rawmap,
  * prepare the chosen JSON, then call the native parser. The temporary buffer
@@ -198,6 +199,20 @@ static char *manifest_prepare_guarded(const char *json, size_t len)
         return sh_modmanifest_prepare_load(json, len, &out_len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: map manifest read FAULTED; the map loads without mod activation");
+        return NULL;
+    }
+}
+
+/* Read the map's settings rows into the settings of the map being parsed and
+ * strip them (map_settings.h). Returns an owned process-heap buffer, or NULL
+ * to keep the input. */
+static char *settings_prepare_guarded(const char *json, size_t len)
+{
+    __try {
+        size_t out_len = 0;
+        return sh_map_settings_prepare_load(json, len, &out_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("SETTINGS: map settings read FAULTED; the map loads with both settings off");
         return NULL;
     }
 }
@@ -411,7 +426,7 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
  */
 static char *prepare_map_buffer(const char *json)
 {
-    char *legacy, *nav, *manifest, *current;
+    char *legacy, *nav, *manifest, *settings, *current;
     size_t len = json ? strlen(json) : 0;
     size_t nav_len = 0;
 
@@ -430,9 +445,16 @@ static char *prepare_map_buffer(const char *json)
     } else current = legacy;
     /* Last, so rows the legacy conversion wrote are read with the map's own. */
     manifest = manifest_prepare_guarded(current ? current : json, current ? strlen(current) : len);
-    if (!manifest) return current;
+    if (manifest) {
+        if (current) HeapFree(GetProcessHeap(), 0, current);
+        current = manifest;
+    }
+    /* The map's Snapmap+ settings rows (map_settings.h): held for the map and
+     * removed, so the editor's variables list never shows them. */
+    settings = settings_prepare_guarded(current ? current : json, current ? strlen(current) : len);
+    if (!settings) return current;
     if (current) HeapFree(GetProcessHeap(), 0, current);
-    return manifest;
+    return settings;
 }
 
 /* What kind of read the current parse is (modpublished.h), classified at the
@@ -600,6 +622,8 @@ static int deser_prepared(const char *json, void *out_map)
     prepared = prepare_map_buffer(json);
     sh_modmanifest_set_editor_load(0);
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
+    /* The parsed map's settings become the open map's before anything selects them. */
+    sh_map_settings_loaded(rc);
     /* Beside the manifest the preparation kept: which read this was, the map it
      * filled, and the text, for the published-map and offline-play gates. */
     sh_modpublished_parse_seen(g_parse_kind, json, out_map, rc);
@@ -1350,6 +1374,7 @@ int sh_rawmap_live_serialize_ready(void)
 
 /* Defined below, beside the save detour that is their other caller. Both writers put a
  * map through the same encoders, so a rawmap carries what an engine save carries. */
+static void settings_on_save(void *out_idstr);
 static void nav_embed_on_save(void *out_idstr);
 static void nav_regions_on_save(void *out_idstr);
 static void manifest_on_save(void *out_idstr);
@@ -1397,6 +1422,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
              * hands back map state with the shards already stripped at load, so writing
              * this buffer straight out drops the navigation its author baked. Each one
              * no-ops if its own dependencies are unresolved. */
+            settings_on_save(blk);
             nav_embed_on_save(blk);
             manifest_on_save(blk);
             nav_regions_on_save(blk);
@@ -1693,6 +1719,30 @@ static void nav_embed_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
+/* Write the open map's settings rows (map_settings.h), before the navigation
+ * shards and the manifest rows. */
+static void settings_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+    char *body = NULL;
+    size_t body_len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
+    __try {
+        body = sh_map_settings_on_save(data, (size_t)len, &body_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        body = NULL;
+        backend_log("SETTINGS: save FAULTED; the save carries the settings rows it had");
+    }
+    if (body == NULL) return;
+    if (!replace_out_idstr(out_idstr, body, body_len))
+        backend_log("SETTINGS: the saved map could not be written back; its settings rows are not in "
+                    "this save");
+    HeapFree(GetProcessHeap(), 0, body);
+}
+
 /* Append the map manifest: one smpmod1 row per bundle that provides a placed
  * name, last in variables.string[] (after any navigation shards). */
 static void manifest_on_save(void *out_idstr)
@@ -1736,6 +1786,9 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     if (!rc) return rc;
 
+    /* The map's settings rows first, right after the author's own string
+     * variables (map_settings.h gives the whole row order). */
+    settings_on_save(out_idstr);
     /* Restore retained navigation shards so ordinary saves preserve them. */
     nav_embed_on_save(out_idstr);
 

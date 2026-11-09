@@ -55,27 +55,23 @@ int sh_map_render_decode(const char *text, sh_map_render *settings);
  * variable's absence, so encoding it fails. */
 int sh_map_render_encode(const sh_map_render *settings, char *out, size_t cap);
 /* Whether a string variable named name is one of Snapmap+'s own map settings
- * ("smp." prefix). No logic node binds to them, so moving such a row to a
- * lower index changes nothing an author made. */
+ * ("smp." prefix). No logic node binds to them. */
 int sh_map_render_own_variable(const char *name, int length);
 
 int sh_map_render_install(const sig_result *results, size_t count, const uint8_t *base);
-/* Both adapters run on the engine thread. Storage belongs to this native map. */
+/* The open map's setting, held by map_settings.c (read from the map's row at
+ * every parse, written back at every save; the engine's variable lists never
+ * carry it). map names the map the caller means and must not be NULL. */
 int sh_map_render_read(void *map, sh_map_render *settings);
-/* On stores SH_RENDER_UNLOCKED_TEXT (appending the row when absent); off
- * removes the row so the map is what the unmodified game writes. */
+/* Set the open map's setting; its next save stores SH_RENDER_UNLOCKED_TEXT
+ * when on and no row when off. */
 int sh_map_render_write(void *map, const sh_map_render *settings);
-/* Publish from the build copy entering native SnapMap conversion (Play). */
+/* Publish the open map's setting for the build copy entering native SnapMap
+ * conversion (Play). */
 void sh_map_render_build(void *map);
-/* After DeserializeFromJson: select the map's settings. An older value that
- * reads as on is rewritten in place as SH_RENDER_UNLOCKED_TEXT and one that
- * reads as off is removed, so the editable map built from this snapshot saves
- * either the canonical text or nothing. NULL clears the selection silently
- * before a load. */
+/* After a successful DeserializeFromJson: select the parsed map's setting.
+ * NULL clears the selection silently before a load. */
 void sh_map_render_loaded(void *map);
-/* Retain serialized-map settings without changing the active environment.
- * Select them only when that map reaches its resource activation boundary. */
-int sh_map_render_capture(void *snapshot, sh_map_render *settings);
 void sh_map_render_select(const sh_map_render *settings);
 int sh_map_render_editor_install(const sig_result *results, size_t count);
 #endif

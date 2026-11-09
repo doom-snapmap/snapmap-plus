@@ -28,6 +28,7 @@
 #include "modstock.h"
 #include "modmigrate.h"
 #include "editor_undo.h"
+#include "map_settings.h"
 #endif
 
 /* A stock resource every 13954591 SnapMap install ships (as modcmd.c probes):
@@ -90,6 +91,24 @@ static int mu_default_stock(const char *request)
     HeapFree(GetProcessHeap(), 0, body);
     return 1;
 }
+#endif
+
+/* The open map's settings (map_settings.h) follow its manifest: they go when
+ * the map closes and come back when a launch over the editor is refused. */
+#ifndef SH_MODUI_PURE
+static void mu_settings_close(void) { sh_map_settings_reset(); }
+static void mu_settings_restore(void)
+{
+    sh_map_settings s;
+    if (!sh_map_settings_restore_previous()) return;
+    /* The refused map's parse selected its own; the editor map's come back. */
+    sh_map_settings_current(&s);
+    sh_map_render_select(&s.render);
+    sh_map_bounds_select(&s.bounds);
+}
+#else
+static void mu_settings_close(void) {}
+static void mu_settings_restore(void) {}
 #endif
 
 static void mu_defaults(sh_modui_engine *e)
@@ -3221,11 +3240,13 @@ int sh_modui_scope_launch_refused(const char *why)
      * is declared. */
     editor = e->map_info && e->map_info(&info) == 1;
     if (editor && sh_modmanifest_current_restore_previous() >= 0) {
+        mu_settings_restore();
         InterlockedExchange(&g_scope_editor, 1);
         changed = mu_listing_live();
         mu_log("scope: %s was refused; nothing was launched, so the editor map's rows are declared again", at);
     } else {
         sh_modmanifest_current_close();
+        mu_settings_close();
         InterlockedExchange(&g_scope_editor, 0);
         changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
         mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
@@ -3263,6 +3284,7 @@ static void mu_scope_tick(int editor_map)
              * not read the editor map's manifest as its own. */
             InterlockedExchange(&g_scope_editor, 0);
             sh_modmanifest_current_close();
+            mu_settings_close();
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
@@ -3274,6 +3296,7 @@ static void mu_scope_tick(int editor_map)
              * load: ADD-V4a H2). */
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
+            mu_settings_close();
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
                 (void)mu_scope_apply("hub");

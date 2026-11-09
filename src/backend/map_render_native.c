@@ -1,24 +1,20 @@
-/* Map-owned variables and the native blended-environment rendering boundary. */
+/* The open map's view distance setting and the native blended-environment
+ * rendering boundary. */
 #include "engine_build.h"
 #include "map_render.h"
+#include "map_settings.h"
 #include "editor_zoom.h"
 #include "engine_globals.h"
-#include "process_heap_scope.h"
 #include "patch.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
 void backend_log(const char *message);
-typedef unsigned char (*resize_fn)(void *,int);
-typedef void (*assign_fn)(void *,const char *);
 typedef float (*parm_float_fn)(void *,void *,uintptr_t);
 typedef void *(*parm_decl_fn)(void *);
-static resize_fn g_resize;
-static assign_fn g_assign;
 static parm_float_fn g_float;
 static parm_decl_fn g_decl;
-static sh_process_heap_api g_heap;
 static const int *g_game_type;
 static SRWLOCK g_lock=SRWLOCK_INIT;
 static sh_map_render g_runtime;
@@ -37,136 +33,29 @@ static const sig_result *binding(const sig_result *r,size_t n,const char *name)
     return NULL;
 }
 
-/* idSnapMapEdit owns idSnapVariables at +0x48. Its string list is +0x60
- * within that object, and allocCount[4] is +0x580. Native conversion copies
- * both fields into the serialized idSnapMap without an external sidecar. */
-static unsigned char *variable(unsigned char *list,int *index,int *count)
-{
-    unsigned char *rows;
-    int i,n=*(int*)(list+8),cap=*(int*)(list+12),found=-1;
-    if(n<0||n>4096||cap<n||cap>65536)return NULL;
-    rows=*(unsigned char**)list;if(n&&!rows)return NULL;
-    for(i=0;i<n;i++) {
-        unsigned char *row=rows+(size_t)i*104;
-        int len=*(int*)(row+8);const char *name=*(const char**)(row+16);
-        if(len==(int)strlen(SH_RENDER_VARIABLE)&&name&&!memcmp(name,SH_RENDER_VARIABLE,(size_t)len)) {
-            if(found>=0)return NULL;found=i;
-        }
-    }
-    *index=found;*count=n;return list;
-}
-static int read_list(unsigned char *source,sh_map_render *settings)
-{
-    int index,count;unsigned char *list,*row;const char *text;char copy[193];int len;
-    if(!source||!settings)return 0;
-    __try {
-        list=variable(source,&index,&count);if(!list)return 0;
-        if(index<0){sh_map_render_default(settings);return 1;}
-        row=*(unsigned char**)list+(size_t)index*104+56;
-        len=*(int*)(row+8);text=*(const char**)(row+16);
-        if(len<1||len>192||!text)return 0;
-        memcpy(copy,text,(size_t)len);copy[len]=0;
-        return sh_map_render_decode(copy,settings);
-    } __except(EXCEPTION_EXECUTE_HANDLER){return 0;}
-}
+/* The setting belongs to the open map and is held by map_settings.c: every
+ * map parse reads it from the map's smp.render.v1 row and removes the row
+ * before the engine sees it, and every save writes it back. The engine's own
+ * variable lists never carry it, so the map argument only names the map the
+ * caller means. */
 int sh_map_render_read(void *map,sh_map_render *settings)
 {
-    return map&&read_list((unsigned char*)map+0xa8,settings);
-}
-enum {STORE_FAILED=0,STORE_UNCHANGED=1,STORE_CHANGED=2,STORE_KEPT=3};
-/* Remove the row at index from a string list of count rows, the way the
- * native list removes an element: every later row moves down one and the
- * count drops. String variables are bound by index (variableType 4,
- * variableIndex), so a row an author made must never move: only Snapmap+'s
- * own "smp." rows may follow. Otherwise the row stays with the native
- * distance, which reads as off. The last row is removed without allocating;
- * moving rows assigns their strings on the persistent heap. */
-static int remove_row(unsigned char *list,int index,int count)
-{
-    unsigned char *rows=*(unsigned char**)list,*row;int j,result=STORE_FAILED;
-    sh_process_heap_scope scope={0};
-    for(j=index+1;j<count;j++) {
-        row=rows+(size_t)j*104;
-        if(!sh_map_render_own_variable(*(const char**)(row+16),*(int*)(row+8))) {
-            static const char native[]="4;8192";
-            row=rows+(size_t)index*104;
-            if(*(int*)(row+64)==(int)strlen(native)&&*(const char**)(row+72)&&
-               !memcmp(*(const char**)(row+72),native,strlen(native)))return STORE_KEPT;
-            if(!sh_process_heap_enter(&g_heap,&scope))return STORE_FAILED;
-            __try {g_assign(row+56,native);result=STORE_KEPT;}
-            __finally {if(!sh_process_heap_leave(&scope))result=STORE_FAILED;}
-            return result;
-        }
-    }
-    if(index==count-1){*(int*)(list+8)=count-1;return STORE_CHANGED;}
-    if(!sh_process_heap_enter(&g_heap,&scope))return STORE_FAILED;
-    __try {
-        for(j=index;j<count-1;j++) {
-            unsigned char *to=rows+(size_t)j*104,*from=to+104;
-            g_assign(to,*(const char**)(from+16));
-            g_assign(to+56,*(const char**)(from+72));
-            *(void**)(to+48)=*(void**)(from+48);
-        }
-        *(int*)(list+8)=count-1;result=STORE_CHANGED;
-    } __finally {if(!sh_process_heap_leave(&scope))result=STORE_FAILED;}
-    return result;
-}
-/* Make one string list carry this setting: on stores the canonical text,
- * appending the row when append is set; off removes the row. Every row an
- * author made keeps its index, and allocCount[4] (the engine's own string
- * counter) is never changed, so a map turned on and off again is the map it
- * was. Returns STORE_FAILED, STORE_UNCHANGED, STORE_CHANGED or STORE_KEPT
- * (off, but the row had to stay; it reads as off). */
-static int store_list(unsigned char *source,int append,const sh_map_render *settings)
-{
-    char text[193];int index,count,result=STORE_FAILED;unsigned char *list,*row;
-    sh_process_heap_scope scope={0};
-    if(!g_assign||!source||!sh_map_render_valid(settings))return STORE_FAILED;
-    __try {
-        list=variable(source,&index,&count);if(!list)return STORE_FAILED;
-        if(!sh_map_render_unlocked(settings)) {
-            if(index<0)return STORE_UNCHANGED;
-            result=remove_row(list,index,count);
-        } else {
-            if(!sh_map_render_encode(settings,text,sizeof text))return STORE_FAILED;
-            if(index>=0) {
-                row=*(unsigned char**)list+(size_t)index*104;
-                if(*(int*)(row+64)==(int)strlen(text)&&*(const char**)(row+72)&&
-                   !memcmp(*(const char**)(row+72),text,strlen(text)))return STORE_UNCHANGED;
-            } else if(!append||!g_resize)return append?STORE_FAILED:STORE_UNCHANGED;
-            if(!sh_process_heap_enter(&g_heap,&scope))return STORE_FAILED;
-            __try {
-                if(index<0) {
-                    if(count==4096)__leave;
-                    if(count==*(int*)(list+12)&&!g_resize(list,count+1))__leave;
-                    row=*(unsigned char**)list+(size_t)count*104;
-                    /* Resize constructs each idStr. Assign copies into native
-                     * storage before publishing the new variable's index. */
-                    g_assign(row,SH_RENDER_VARIABLE);
-                    g_assign(row+56,text);
-                    *(void**)(row+48)=NULL;
-                    *(int*)(list+8)=count+1;
-                } else {
-                    g_assign(row+56,text);
-                }
-                result=STORE_CHANGED;
-            } __finally {if(!sh_process_heap_leave(&scope))result=STORE_FAILED;}
-        }
-        if(result==STORE_CHANGED||result==STORE_KEPT) {
-            sh_map_render check;
-            if(!read_list(source,&check)||check.unlocked!=settings->unlocked)result=STORE_FAILED;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER){result=STORE_FAILED;}
-    return result;
+    sh_map_settings current;
+    if(!map||!settings)return 0;
+    sh_map_settings_current(&current);
+    *settings=current.render;
+    return sh_map_render_valid(settings);
 }
 int sh_map_render_write(void *map,const sh_map_render *settings)
 {
-    int result=map?store_list((unsigned char*)map+0xa8,1,settings):STORE_FAILED;
-    backend_log(result==STORE_FAILED?"RENDER: native map setting write failed":
-        sh_map_render_unlocked(settings)?"RENDER: Unlock View Distance stored in this map's variables":
-        result==STORE_KEPT?"RENDER: Unlock View Distance off; its variable stays as the native 4;8192 because later string variables follow it":
-        "RENDER: Unlock View Distance off; no Snapmap+ view variable in this map");
-    return result!=STORE_FAILED;
+    if(!map||!sh_map_render_valid(settings)) {
+        backend_log("RENDER: map setting write failed");return 0;
+    }
+    sh_map_settings_set_render(settings);
+    backend_log(sh_map_render_unlocked(settings)?
+        "RENDER: Unlock View Distance on for this map; its next save stores it":
+        "RENDER: Unlock View Distance off for this map; its next save stores no view variable");
+    return 1;
 }
 /* r_zfar is also left as it is in frames where no environment resolves (the
  * blend writes nothing then), so an unlocked map sets it once when selected.
@@ -196,44 +85,21 @@ static void publish(const sh_map_render *settings,int valid,int quiet)
         "RENDER: no valid map rendering metadata; native environment retained");
 }
 /* Native conversion (SnapMapEditToSnapBuild) serves Play only; its map is a
- * build copy, not the editable map, and Save does not pass through it. It
- * therefore only publishes the settings for the build being played. */
+ * build copy of the editable map. Play uses the open map's setting. */
 void sh_map_render_build(void *map)
 {
     sh_map_render settings;int valid=sh_map_render_read(map,&settings);
     publish(&settings,valid,0);
 }
-/* A freshly deserialized map is normalized in place: a value that reads as on
- * becomes SH_RENDER_UNLOCKED_TEXT and one that reads as off (the native 8192,
- * or a disabled version 2) is removed. The editor constructs its editable map
- * from this snapshot, so the next Save stores the canonical text or nothing
- * without the settings tab being opened. No row is ever added here. */
-static void migrate_snapshot(void *snapshot,const sh_map_render *settings)
-{
-    int result;
-    if(!g_assign)return;
-    result=store_list((unsigned char*)snapshot+0x1a0,0,settings);
-    if(result==STORE_CHANGED)backend_log(sh_map_render_unlocked(settings)?
-        "RENDER: older view distance read as Unlock View Distance on; stored as 4;0":
-        "RENDER: native view distance variable removed; the map saves as the unmodified game writes it");
-    else if(result==STORE_KEPT)backend_log("RENDER: native view distance variable kept; later string variables follow it");
-    else if(!result)backend_log("RENDER: older map rendering metadata kept; it is still read correctly");
-}
+/* After a successful parse: select the parsed map's setting, which
+ * map_settings.c has just made current. NULL clears the selection silently
+ * before every load, including failed loads. */
 void sh_map_render_loaded(void *map)
 {
-    /* Serialized idSnapMap owns its string list at +0x1a0. This path also
-     * covers playing a saved/downloaded map without first entering the editor.
-     * NULL clears the previous map before a load, including failed loads; that
-     * clear precedes every load and is not logged. */
     sh_map_render settings;int valid;
     if(!map){publish(NULL,0,1);return;}
-    valid=sh_map_render_capture(map,&settings)&&sh_map_render_valid(&settings);
-    if(valid)migrate_snapshot(map,&settings);
+    valid=sh_map_render_read(map,&settings);
     publish(&settings,valid,0);
-}
-int sh_map_render_capture(void *snapshot,sh_map_render *settings)
-{
-    return snapshot&&settings&&read_list((unsigned char*)snapshot+0x1a0,settings);
 }
 void sh_map_render_select(const sh_map_render *settings)
 {
@@ -357,13 +223,12 @@ static void *near_relay(uintptr_t call)
 }
 int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *base)
 {
-    const sig_result *resize,*assign,*read,*decl,*set;unsigned char before[5],after[5];int32_t relative;
+    const sig_result *read,*decl,*set;unsigned char before[5],after[5];int32_t relative;
     intptr_t distance;void **slot;unsigned char *system;void **vars;int i,n;
     if(g_patch.live)return g_relay!=NULL;
-    resize=binding(results,count,"RenderVariablesResize");assign=binding(results,count,"IdStrAssignCStr");
     read=binding(results,count,"RenderClipRead");decl=binding(results,count,"RenderParmFromOp");
     set=binding(results,count,"CvarSetString");
-    if(!resize||!assign||!read||!decl||!sh_process_heap_bind(&g_heap,results,count,base))return 0;
+    if(!read||!decl)return 0;
     __try {
         slot=(void**)glb_resolve(base,"cvar_system_slot",NULL);if(!slot||!*slot)return 0;
         system=(unsigned char*)*slot;vars=*(void***)(system+8);n=*(int*)(system+16);
@@ -380,7 +245,7 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
         else backend_log("RENDER: r_zfar setter unavailable; frames without an environment keep their previous far clip");
         memcpy(before,(void*)read->addr,5);if(before[0]!=0xe8)return 0;
         memcpy(&relative,before+1,4);g_float=(parm_float_fn)(read->addr+5+relative);
-        g_decl=(parm_decl_fn)decl->addr;g_resize=(resize_fn)resize->addr;g_assign=(assign_fn)assign->addr;
+        g_decl=(parm_decl_fn)decl->addr;
         g_relay=near_relay(read->addr);if(!g_relay)return 0;
         distance=(intptr_t)g_relay-(intptr_t)(read->addr+5);
         if(distance<INT32_MIN||distance>INT32_MAX)goto fail;

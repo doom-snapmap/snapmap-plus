@@ -1,9 +1,12 @@
 /* "Unlock View Distance" as an on/off row of the Snapmap+ settings tab
  * (settings_tab.c owns the native Settings / Properties hooks). The draft
  * belongs to the map open in the editor; native Apply commits it, Cancel /
- * Revert restores it. On stores the setting in the map; off removes it. */
+ * Revert restores it. The setting is the open map's (map_settings.h); on
+ * saves it with the map, off saves no row. Applying a change marks the map
+ * modified, since the edit map itself does not change. */
 #include "map_render.h"
 #include "settings_tab.h"
+#include "editor_undo.h"
 #include <windows.h>
 #include <string.h>
 
@@ -47,6 +50,7 @@ static int render_commit(void *user,void *map)
             ok=1;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);}
+    if(ok)(void)sh_editor_mark_modified("Unlock View Distance");
     return ok;
 }
 static void render_end(void *user){(void)user;g_map=NULL;}

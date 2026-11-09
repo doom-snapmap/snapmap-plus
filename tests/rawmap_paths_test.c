@@ -47,6 +47,11 @@ void backend_log(const char *line)
 }
 static int render_loaded_calls;
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
+char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len)
+{ (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
+void  sh_map_settings_loaded(int ok) { (void)ok; }
+char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
+{ (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
 
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 { (void)target; (void)detour; (void)stolen; return NULL; }
