@@ -1,32 +1,26 @@
-/* The open map's Snapmap+ settings: "Unlock View Distance" (smp.render.v1,
- * map_render.h) and "Unlock Map Bounds" (smp.bounds.v1, map_bounds.h).
+/* The open map's Snapmap+ settings: "Unlock View Distance" (map_render.h) and
+ * "Unlock Map Bounds" (map_bounds.h).
  *
- * The saved map carries each setting as a string variable, exactly as earlier
- * builds wrote it, so older builds and existing maps keep working. Those rows
- * are not the author's variables, so they are held here instead of in the
- * engine's variable list, the way the mod rows (modmanifest.h) and the
- * navigation shards (navmesh.h) are:
+ * The saved map carries them in the "settings" part of its "snapmap-plus"
+ * member (map_carrier.h describes the grammar): {"render":"<text>",
+ * "bounds":"<text>"} in the encodings map_render.h and map_bounds.h define;
+ * a setting that is off has no key, and with neither on there is no part.
+ * They are held here, never in the engine's variable list:
  *
  *  - every map parse (rawmap.c prepare_map_buffer: My Maps, a published map,
- *    a lobby joiner's replicated map, a rawmap) reads both rows into the
- *    current settings and removes them from the text the engine parses, so
- *    the Toybox variables list never shows them;
+ *    a lobby joiner's map, a rawmap) reads them into the current settings;
  *  - the editor's Settings tab, Play and the editor view read and write the
  *    current settings (map_render_native.c, map_bounds.c);
- *  - every save (rawmap.c sh_ser_detour and the rawmap export) writes the
- *    rows back from the current settings.
+ *  - every save (rawmap.c sh_ser_detour and the rawmap export) puts them into
+ *    the member.
  *
- * Row order at save: the author's string variables, then smp.render.v1, then
- * smp.bounds.v1, then the navigation shards (smnav1.), then the mod rows
- * (smpmod1.). A setting that is off has no row. variables.allocCount[4] is
- * kept equal to the string count, as the other carriers keep it.
- *
- * String variables are bound by index, so a row is only removed when nothing
- * but Snapmap+ rows follows it. A row an author's variable follows (possible
- * in a map an earlier build saved: the row was appended when the setting was
- * turned on and the author added a variable after it) stays where it is, is
- * still read, and is rewritten in place at save: the setting's text when on,
- * the native value ("4;8192", "1;0") that reads as off when off.
+ * Legacy: earlier builds wrote them as the string variables smp.render.v1 and
+ * smp.bounds.v1. A load reads those when the member has no settings part (the
+ * member wins when both exist) and removes them; a save removes them too. A
+ * variable is bound by index, so a row is only removed when nothing but
+ * Snapmap+ rows follows it; a row an author's variable follows stays where it
+ * is, is read as above, and is rewritten at save to the native value that
+ * reads as off ("4;8192", "1;0"), the member carrying the setting.
  *
  * The settings are the map's, not the undo history's: an undo leaves them as
  * they were applied, like the map's mod rows. Applying a change marks the map
@@ -50,17 +44,21 @@ typedef struct sh_map_settings_report {
     unsigned removed;  /* rows removed from the text */
     unsigned kept;     /* rows left in place because an author variable follows */
     unsigned refused;  /* rows that did not read (malformed or duplicated); the setting is off */
-    unsigned written;  /* save: rows appended or rewritten */
+    unsigned written;  /* save: settings written into the member */
+    int member;        /* load: the settings came from the member's "settings" part */
     int failed;        /* the map text did not read; nothing was changed */
 } sh_map_settings_report;
 
-/* Load: read both settings from map text (absent rows are off) and return the
- * text without the rows that may be removed (allocCount[4] rewritten), as a
- * process-heap buffer, or NULL when nothing was removed (keep the input). */
+/* Load: read both settings from map text (the member's part, else the legacy
+ * rows; absent is off) and return the text without the legacy rows that may
+ * be removed (allocCount[4] rewritten), as a process-heap buffer, or NULL when
+ * nothing was removed (keep the input). The member is left for the parse
+ * detour's final strip. */
 char *sh_map_settings_take(const char *json, size_t len, sh_map_settings *out, size_t *out_len,
                            sh_map_settings_report *report);
-/* Save: return the text carrying exactly `settings` (see the row order above),
- * as a process-heap buffer, or NULL when the input already does. */
+/* Save: return the text carrying exactly `settings` in the member, with no
+ * legacy row left that can be removed, as a process-heap buffer, or NULL when
+ * the input already does (or on failure, report.failed). */
 char *sh_map_settings_put(const char *json, size_t len, const sh_map_settings *settings,
                           size_t *out_len, sh_map_settings_report *report);
 

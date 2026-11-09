@@ -1,32 +1,36 @@
-/* The map manifest: one "smpmod1.<index>.<count>" string variable per bundle a
- * map needs (Contract 3).
+/* The map manifest: one row per bundle a map needs (Contract 3), carried in
+ * the "mods" part of the map's "snapmap-plus" member (map_carrier.h, which
+ * describes the member's grammar once).
  *
- * A row is an ordinary snapVarString_t in variables.string[], appended last so
- * existing variable bindings keep their (type, index). Its initialValue is the
- * compact JSON {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
+ * A row is the compact JSON
+ * {"id","version","bundle","size","attached"?,"choices"?,"names":[...]}
  * where "bundle" is the bundle hash and "names" the placed logical names the
- * bundle provides (informational). "choices": {"<slot>": "<key>", ...} records
- * the map's choices between its mods' edits (modregistry.h: which declared
- * mod's value serves a field or keyed entry several of them edit, slot
- * "<game file>/<path>", "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each choice on the row of the
- * key it names, a load reads them from every row (the first row naming a
- * slot wins). Names are dropped before choices when a row would exceed its
- * budget. "attached": true marks a map-level row: the mod
- * was attached to the map (the Mods tab's Use in this map, `sh_mods map add`)
- * without placing anything, so the map keeps the row whatever it places. A
- * reader that does not know the key treats the row as a placed mod's; an older
- * product drops the row at its next save. Rows never carry asset bytes.
+ * bundle provides (informational; every name is kept, there is no row
+ * budget). "choices": {"<slot>": "<key>", ...} records the map's choices
+ * between its mods' edits (modregistry.h: which declared mod's value serves a
+ * field or keyed entry several of them edit, slot "<game file>/<path>",
+ * "entitydef/player/coop/edit/handsModelMPUseDoomHands"); a save writes each
+ * choice on the row of the key it names, a load reads them from every row
+ * (the first row naming a slot wins). "attached": true marks a map-level row:
+ * the mod was attached to the map (the Mods tab's Use in this map, `sh_mods
+ * map add`) without placing anything, so the map keeps the row whatever it
+ * places. A reader that does not know the key treats the row as a placed
+ * mod's. Rows never carry asset bytes.
+ *
+ * Legacy: earlier builds wrote each row as a "smpmod1.<index>.<count>" string
+ * variable, appended last in variables.string[] with the row JSON escaped in
+ * its initialValue. Every reader here still reads them when the member has no
+ * "mods" part (the member wins when both exist); a load removes them
+ * (allocCount[4] rewritten) and a write never writes one: it removes them and
+ * puts the member's part.
  *
  * Load: every parse the DeserializeFromJson detour sees reads the rows, keeps
- * them as the current map's manifest, strips them (allocCount[4] rewritten)
- * and asks the serving layer to activate the named bundles. Save: the
- * SerializeToJson detour computes the placed names, asks the serving layer
- * which bundles provide them, adds the current manifest's map-level rows, and
- * appends one row per bundle.
- *
- * Row order of a saved map's string variables: the author's own, then the
- * map settings (smp.render.v1, smp.bounds.v1: map_settings.h), then the
- * navigation shards (smnav1.: navmesh.h), then these rows, last.
+ * them as the current map's manifest, removes the legacy rows and asks the
+ * serving layer to activate the named bundles; the member itself is stripped
+ * last by the parse detour (rawmap.c). Save: the SerializeToJson detour
+ * computes the placed names, asks the serving layer which bundles provide
+ * them, adds the current manifest's map-level rows, and puts one row per
+ * bundle into the member.
  *
  * Both also remove a stale "smpprod1.<version>" string variable that earlier
  * development builds recorded; nothing writes or reads it now.
@@ -43,10 +47,6 @@
 #define SH_MODMANIFEST_ID_CAP     65    /* Contract 1: at most 64 characters */
 #define SH_MODMANIFEST_VERSION_CAP 33   /* at most 32 */
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
-/* A row stays far below the 4,096-byte playtest message that a client without
- * the product would replicate it into; names beyond this budget are dropped
- * from the (informational) list, never the row itself. */
-#define SH_MODMANIFEST_ROW_MAX    1024
 #define SH_MODMANIFEST_NAME_MAX   512
 #define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */
 #define SH_MODMANIFEST_MAX_ROWS   4096
@@ -87,35 +87,36 @@ int sh_modmanifest_valid_id(const char *id);
 /* 1 when `text` is exactly 64 lowercase hex characters. */
 int sh_modmanifest_valid_hash(const char *text, size_t length);
 
-/* 1 when `header` (quotes excluded) is "smpmod1.<index>.<count>", 1-7 digits
- * each, count at least 1, index below count. */
+/* 1 when `header` (quotes excluded) is a legacy row's "smpmod1.<index>.<count>",
+ * 1-7 digits each, count at least 1, index below count. */
 int sh_modmanifest_header(const char *header, size_t length, unsigned *index, unsigned *count);
 
 /* Parse a decoded row value. 1 on success; 0 with the reason in err. */
 int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_row *out,
                                char *err, size_t err_cap);
-/* The compact row value, NUL-terminated, malloc'd (free). Names are dropped
- * from the end while the value would exceed SH_MODMANIFEST_ROW_MAX. */
+/* The compact row value, NUL-terminated, malloc'd (free). Every name is kept. */
 char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_length);
 
 /* ------------------------------------------------------------ map text --- */
 
 /* Read every well-formed row in `json` into `out` (appended, duplicates by
- * bundle hash merged). Returns the number of rows read; rows that do not
+ * bundle hash merged): the member's "mods" part when the map has one, else
+ * the legacy smpmod1 rows. Returns the number of rows read; rows that do not
  * parse are counted in *rejected. */
 size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list *out,
                            unsigned *rejected);
 
-/* Remove every smpmod1 row and rewrite allocCount[4]. Returns an owned
+/* Remove every legacy smpmod1 row and rewrite allocCount[4] (the member is
+ * left; sh_carrier_strip removes it). Returns an owned
  * NUL-terminated process-heap buffer (HeapFree), or NULL when there is none or
  * the structure cannot be read (*doc_failed set). */
 char *sh_modmanifest_strip(const char *json, size_t length, size_t *out_length,
                            unsigned *removed, int *doc_failed);
 
-/* Strip any existing rows, then append one row per entry of `rows`, last in
- * variables.string[], and set allocCount[4]. Returns an owned process-heap
- * buffer (HeapFree), or NULL with the reason in err. With count 0 this only
- * strips (NULL when there was nothing to strip). */
+/* Remove any legacy rows, then put one row per entry of `rows` as the member's
+ * "mods" part (map_carrier.h). Returns an owned process-heap buffer
+ * (HeapFree), or NULL with the reason in err. With count 0 this only removes
+ * the rows and the part (NULL when there was nothing to remove). */
 char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest_list *rows,
                            size_t *out_length, char *err, size_t err_cap);
 
@@ -156,8 +157,8 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
  * modserve_bundles_for_names for the bundles that provide them, add every
  * map-level row of the current manifest (renamed to the build that serves
  * when the bundle resolver knows one; a row of a mod that is not installed is
- * kept as it is), and return the text with one row per bundle appended (stale
- * rows removed). NULL when the text needs no change (no bundle and no stale
+ * kept as it is), and return the text with one row per bundle in the member
+ * (stale rows removed). NULL when the text needs no change (no bundle and no stale
  * row) or on failure, which is logged; the engine's bytes are then saved
  * unchanged. */
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length);

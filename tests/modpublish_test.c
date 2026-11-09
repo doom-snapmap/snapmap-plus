@@ -343,10 +343,52 @@ int main(int argc, char **argv)
         if (rows_text) HeapFree(GetProcessHeap(), 0, rows_text);
     }
 
+    printf("-- the bound counts the snapmap-plus member: a map with navigation or settings and no mods\n");
+    {
+        static const char head[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+                                   "\"snapmap-plus\":{\"format\":1,\"nav\":[{\"data\":[\"";
+        static const char tail[] = "\"]}]}}";
+        size_t big_len = (size_t)SH_MODPUBLISH_TEXT_BOUND + 100, fails = (size_t)F.fails;
+        char *big = malloc(big_len + 1);
+        CHECK(big != NULL);
+        if (big) {
+            memset(big, 'A', big_len);
+            memcpy(big, head, sizeof head - 1);
+            memcpy(big + big_len - (sizeof tail - 1), tail, sizeof tail - 1);
+            big[big_len] = 0;
+            sh_modpublish_save_seen(big, big_len);
+            CHECK(sh_modpublish_after_save(EDITOR) == 0);
+            CHECK(!sh_modpublish_holding() && (size_t)F.fails == fails + 1 && F.asks == 0);
+            CHECK(strstr(F.toast, "over the map service's 10.0 MB limit by 100 bytes") != NULL);
+            /* Under the bound it passes through as a map without mods. */
+            big_len = (size_t)SH_MODPUBLISH_TEXT_BOUND - 100;
+            memset(big, 'A', big_len);
+            memcpy(big, head, sizeof head - 1);
+            memcpy(big + big_len - (sizeof tail - 1), tail, sizeof tail - 1);
+            big[big_len] = 0;
+            sh_modpublish_save_seen(big, big_len);
+            CHECK(sh_modpublish_after_save(EDITOR) == 1 && (size_t)F.fails == fails + 1);
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa2", "r2");
+            PUMP_UNTIL(idle_all());
+            /* Without the member, the text is the engine's and so is the check. */
+            big_len = (size_t)SH_MODPUBLISH_TEXT_BOUND + 100;
+            memset(big, ' ', big_len);
+            memcpy(big, EMPTY_MAP, sizeof EMPTY_MAP - 2);
+            big[big_len - 1] = '}';
+            big[big_len] = 0;
+            sh_modpublish_save_seen(big, big_len);
+            CHECK(sh_modpublish_after_save(EDITOR) == 1 && (size_t)F.fails == fails + 1);
+            sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa3", "r3");
+            PUMP_UNTIL(idle_all());
+        }
+        free(big);
+        F.fails = (int)fails;   /* the counts below are this case's neighbours' */
+    }
+
     g_attach_second = 1;
     text = map_with(both_h, both_id, 2, &len);
     g_attach_second = 0;
-    CHECK(text && strstr(text, "\\\"attached\\\":true"));
+    CHECK(text && strstr(text, "\"attached\":true") && !strstr(text, "smpmod1."));
     CHECK(text != NULL);
 
     printf("-- first time: No cancels and leaves the setting\n");

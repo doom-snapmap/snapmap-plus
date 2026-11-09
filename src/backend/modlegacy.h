@@ -8,8 +8,9 @@
  * shaders/generated/{spirv,renderprogs}/ -> assets/generated/..., manifests,
  * requirements, strings and hud/weapons.json folded into the author block of
  * mod.json, the legacy record and the grandfathered shadows into its product
- * block), the bundle builder completes mod.json, and one smpmod1 row per
- * converted bundle is written into the text. A conversion whose content an
+ * block), the bundle builder completes mod.json, and one manifest row per
+ * converted bundle is written into the text (the member's "mods" part,
+ * map_carrier.h). A conversion whose content an
  * installed mod already serves (the same bundle hash, or the same id and
  * content) is not kept; that mod answers the carrier. Anything else is
  * CLEANED: stripped, with the key, digest and reason logged and kept for the
@@ -213,8 +214,8 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
 int sh_modlegacy_find_converted(const char *key, const char *digest, char *folder, size_t cap);
 
 /* The DeserializeFromJson step: convert or clean every legacy carrier, strip
- * smpkg./smpbind./smpref. rows, and write smpmod1 rows for the converted
- * bundles. Returns the new buffer (HeapFree), or NULL to keep `json` (no
+ * smpkg./smpbind./smpref. rows, and write manifest rows for the converted
+ * bundles into the member. Returns the new buffer (HeapFree), or NULL to keep `json` (no
  * legacy rows, or a structure that does not read; logged). */
 char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length);
 

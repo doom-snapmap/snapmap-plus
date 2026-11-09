@@ -1,17 +1,39 @@
-/* Read and serve the smnav1 embedded-navigation format. Live editor baking is
- * handled separately by nav_bake.
+/* Read and serve navigation baked into a map. Live editor baking is handled
+ * separately by nav_bake.
  *
- * Header:
- * smnav1.<category>/<module>.<class>.<idx>.<total>.<digest16>.<geom16>. Parse
- * the five trailing fields from the right. Resource aliases use
- * maps/modules/.../<module>.aas_<class> and
+ * Where it lives: the "nav" part of the map's "snapmap-plus" member
+ * (map_carrier.h describes the grammar): one object per (module, class) set,
+ * {"module":"<category>/<module>","class":"<class>","digest":"<16 hex>",
+ * "geom":"<16 hex>","data":["<base64 chunk>",...]}. A save writes it there
+ * (sh_navmesh_embed_all), never as variables.
+ *
+ * Legacy: earlier builds wrote each chunk as a string variable named
+ * smnav1.<category>/<module>.<class>.<idx>.<total>.<digest16>.<geom16> (parse
+ * the five trailing fields from the right). A load reads those when the
+ * member has no "nav" part (the member wins when both exist) and
+ * sh_navmesh_strip removes them; the next save carries them in the member.
+ *
+ * Resource aliases use maps/modules/.../<module>.aas_<class> and
  * generated/maps/modules/.../<module>.baas_<class>.
  *
  * Rebuild the serving table from empty on every map load. Verify delivery and
  * AAS structure, then admit all classes together per module; repeated module
  * placements cannot use this shared-name format. Retain verified payloads for
- * save re-embedding even if serving is refused. Table storage and served
- * copies use the process heap.
+ * save re-embedding even if serving is refused; with navmesh.enabled off the
+ * member's part is kept as text and written back unchanged. Table storage and
+ * served copies use the process heap.
+ *
+ * Chunk size (SH_SMNAV_CARRIER_CHUNK): the product strips the member before
+ * the engine parses, so only a machine without Snapmap+ ever lexes it. The
+ * old variable rows failed native deserialization at 16384 characters. The
+ * member was measured live on Vulkan (13954591, 2026-11-09, lane L17) with
+ * Snapmap+ leaving an unknown root member to the engine: a single string of
+ * 8192, 65536 and 1048576 characters and an array of 2048 strings of 4096
+ * characters (8 MiB; 2048 x 8192 would pass the 10 MiB map read bound) all
+ * loaded in the editor and played with no engine message above level 4, and
+ * a 1048576-character string in a declared member came back intact through
+ * an editor save. Chunks are therefore 1048576 characters, the largest size
+ * proven; a payload within SH_SMNAV_MAX_PAYLOAD needs at most 11.
  */
 #ifndef SNAPMAP_PLUS_NAVMESH_H
 #define SNAPMAP_PLUS_NAVMESH_H
@@ -33,6 +55,9 @@
 #define SH_SMNAV_HEADER_CAP     224
 #define SH_SMNAV_RESNAME_CAP    320
 #define SH_SMNAV_REASON_CAP     192
+/* Base64 characters per chunk of a set's "data" in the map's member
+ * (map_carrier.h). See the measurement note above. */
+#define SH_SMNAV_CARRIER_CHUNK  1048576u
 
 /* ---- budgets ----------------------------------------------------------- */
 

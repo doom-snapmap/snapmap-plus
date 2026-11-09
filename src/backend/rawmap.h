@@ -108,7 +108,7 @@ int sh_rawmap_save_set_dest(const char *path);
 unsigned long sh_rawmap_save_count(void);
 
 /* ---------------------------------------------------------------- a rawmap that names mods ------
- * A rawmap's smpmod1 rows name the mods it places. The .json alone loads only
+ * A rawmap's manifest rows (its snapmap-plus member, map_carrier.h) name the mods it places. The .json alone loads only
  * where those mods are installed, so every rawmap save of a map with at least
  * one row also writes the mods-carrying export (modexport.c) beside the JSON,
  * at the same path with .zip (rawmap.json -> rawmap.zip), and says so with one

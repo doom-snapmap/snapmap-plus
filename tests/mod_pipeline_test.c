@@ -321,15 +321,17 @@ static void fresh_mod(const char *fixture, const char *root)
     CHECK(v.calls == 1 && v.named == 1 && !strcmp(v.hash, b.hash) && !strcmp(v.id, "alex.r2-imp") &&
           v.size == b.total_size);
 
-    /* Save: one smpmod1 row naming the bundle. */
+    /* Save: one row naming the bundle, in the map's snapmap-plus member. */
     saved = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &saved_len);
     CHECK(saved != NULL);
     if (saved) {
+        CHECK(!strstr(saved, "smpmod1.") && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[") != NULL);
         CHECK(sh_modmanifest_read(saved, saved_len, &rows, NULL) == 1 && rows.count == 1 &&
               !strcmp(rows.rows[0].bundle, b.hash) && rows.rows[0].size == b.total_size &&
               rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alex.r2-imp/imp_copy"));
         sh_modmanifest_list_free(&rows);
-        /* Load: the row is stripped and exactly that bundle's gameplay decls
+        /* Load: the row is read (the member itself is stripped last, by the
+         * parse detour, so this step removes nothing) and exactly that bundle's gameplay decls
          * register. No palette has been built yet (the first editor entry's
          * build registers the rows), so no rebuild is asked for. */
         g_activations = 0;
@@ -337,7 +339,7 @@ static void fresh_mod(const char *fixture, const char *root)
         g_pal_built = 0;
         g_rebuilds = 0;
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded != NULL && !strstr(loaded, "smpmod1."));
+        CHECK(loaded == NULL);
         CHECK(g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
         CHECK(registered("mods/alex.r2-imp/imp_copy") && registered("mods/alex.r2-imp/imp_copy.md6") &&
               registered("mods/alex.r2-imp/imp_copy_b.md6"));
@@ -355,12 +357,12 @@ static void fresh_mod(const char *fixture, const char *root)
         g_pal_count = 0;
         g_rebuild_result = -1;
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded != NULL && g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
+        CHECK(loaded == NULL && g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
               g_last_sync.registered == 0 && g_rebuilds == 1);
         CHECK(!registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy"));
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded != NULL && g_last_sync_r == 1 && g_rebuilds == 2);
+        CHECK(loaded == NULL && g_last_sync_r == 1 && g_rebuilds == 2);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         g_rebuild_result = 1;
 
@@ -369,7 +371,7 @@ static void fresh_mod(const char *fixture, const char *root)
         g_activations = 0;
         g_rebuilds = 0;
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded != NULL && g_activations == 1);
+        CHECK(loaded == NULL && g_activations == 1);
         CHECK(g_last_sync_r == 1 && g_rebuilds == 1 && g_last_sync.rebuild == 1);
         CHECK(g_last_sync.rows == 2 && g_last_sync.missing == 2 && g_last_sync.registered == 2 &&
               g_last_sync.admitted == 2 && g_last_sync.rows_after == g_last_sync.rows_before + 2);
@@ -382,7 +384,7 @@ static void fresh_mod(const char *fixture, const char *root)
         printf("-- the same map again: the palette holds its rows, nothing is requested\n");
         g_rebuilds = 0;
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
-        CHECK(loaded != NULL && g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
+        CHECK(loaded == NULL && g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
 
         HeapFree(GetProcessHeap(), 0, saved);
@@ -560,7 +562,7 @@ static void carrier_conversion(const char *root)
             if (req) CHECK(g_gate_sets > 0 && g_registered_at_first_set == 0 && (g_gate[0] == 0) + (g_gate[1] == 0) == req);
             printf("  %s: requirements %s%s%s\n", maps[i].file, req ? "" : "none",
                    !g_gate[0] ? "g_useImageBlackList=0 " : "", !g_gate[1] ? "g_useResourceBlackList=0" : "");
-            CHECK(loaded != NULL && g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
+            CHECK(loaded == NULL && g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
             CHECK(g_rebuilds == (g_last_sync.missing ? 1 : 0) && g_last_sync.registered == g_last_sync.missing &&
                   g_last_sync.admitted == g_last_sync.missing);
             /* carrier-1 (acceptance.r137.mixed-rows) carries two editor rows (R-002 finding 4). */
@@ -686,7 +688,7 @@ static void beta19_conversion(const char *root)
     if (out) {
         size_t ln = 0;
         char *loaded;
-        CHECK(!strstr(out, "\"smpkg.") && strstr(out, "\"smpmod1.") != NULL);
+        CHECK(!strstr(out, "\"smpkg.") && !strstr(out, "smpmod1.") && strstr(out, "\"snapmap-plus\"") != NULL);
         g_activations = 0;
         g_nregistered = 0;
         g_pal_built = 0;
@@ -694,7 +696,7 @@ static void beta19_conversion(const char *root)
         loaded = sh_modmanifest_prepare_load(out, on, &ln);
         printf("  activation of the converted rows: %d step(s), %d ready, %d stock shadow(s), %llu ms\n", g_last_steps,
                g_last_ready, g_last_stock, (unsigned long long)(GetTickCount64() - t0));
-        CHECK(loaded != NULL && g_activations == 1);
+        CHECK(loaded == NULL && g_activations == 1);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
     }
     /* The same text again in this process: the memo answers. */

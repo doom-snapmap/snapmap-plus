@@ -487,7 +487,8 @@ static void full_pass(const char *root)
         map = carrier_map(key, &mn);
         out = map ? sh_modlegacy_process(map, mn, &on) : NULL;
         CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
-              !strcmp(v[0].id, "alex.door") && hash_c && !strcmp(v[0].bundle, hash_c) && strstr(out, "\"smpmod1.0.1\""));
+              !strcmp(v[0].id, "alex.door") && hash_c && !strcmp(v[0].bundle, hash_c) && !strstr(out, "smpmod1.") &&
+              strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"alex.door\""));
         if (out) HeapFree(GetProcessHeap(), 0, out);
         if (map) HeapFree(GetProcessHeap(), 0, map);
     }

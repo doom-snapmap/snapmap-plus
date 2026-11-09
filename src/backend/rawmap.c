@@ -19,6 +19,7 @@
 #include "hook.h"
 #include "backend_log.h"
 #include "modlegacy.h"
+#include "map_carrier.h"
 #include "modmanifest.h"
 #include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
 #include "modpublished.h"
@@ -174,7 +175,7 @@ static char *read_source_file(size_t *out_len)
 }
 
 /* Convert or clean first-generation package carriers (DESIGN.md section 11):
- * converted packages become installed legacy bundles named by smpmod1 rows,
+ * converted packages become installed legacy bundles named by manifest rows,
  * everything else is stripped. Returns an owned process-heap buffer, or NULL
  * to keep the original on no change or failure. */
 static char *legacy_strip_guarded(const char *json, size_t len)
@@ -419,18 +420,50 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
     return 1;
 }
 
+/* Remove the map's "snapmap-plus" member (map_carrier.h) once every part has
+ * been read from it. Returns an owned process-heap buffer, or NULL to keep
+ * the input. */
+static char *carrier_strip_guarded(const char *json, size_t len)
+{
+    __try {
+        size_t out_len = 0;
+        return sh_carrier_strip(json, len, &out_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("CARRIER: strip FAULTED; the engine parses the map with its member, which it ignores");
+        return NULL;
+    }
+}
+
+/* One load line naming the member's parts, or why it was refused. */
+static void carrier_describe_guarded(const char *json, size_t len)
+{
+    __try {
+        sh_carrier_view view;
+        char what[200], line[260];
+        if (!sh_carrier_view_read(json, len, &view) || view.state == SH_CARRIER_ABSENT) return;
+        sh_carrier_describe(&view, what, sizeof what);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "CARRIER: map read: %s", what);
+        backend_log(line);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("CARRIER: map read FAULTED");
+    }
+}
+
 /* Prepare the chosen JSON before native parsing: rebuild map-scoped
- * navigation state, then strip retired package and navigation envelopes.
- * Each failed strip retains the preceding buffer. Returns an owned process-
- * heap buffer or NULL to use the original.
+ * navigation state, read the map's Snapmap+ data (the "snapmap-plus" member,
+ * else the legacy rows of each family), strip the legacy rows and retired
+ * envelopes, and remove the member last. Each failed strip retains the
+ * preceding buffer. Returns an owned process-heap buffer or NULL to use the
+ * original.
  */
 static char *prepare_map_buffer(const char *json)
 {
-    char *legacy, *nav, *manifest, *settings, *current;
+    char *legacy, *nav, *manifest, *settings, *current, *bare;
     size_t len = json ? strlen(json) : 0;
     size_t nav_len = 0;
 
     if (len == 0) return NULL;
+    carrier_describe_guarded(json, len);
 
     sh_navmesh_build_from_map(json, len);
     /* The regions the author marked, read from the same bytes and cleared the
@@ -452,9 +485,15 @@ static char *prepare_map_buffer(const char *json)
     /* The map's Snapmap+ settings rows (map_settings.h): held for the map and
      * removed, so the editor's variables list never shows them. */
     settings = settings_prepare_guarded(current ? current : json, current ? strlen(current) : len);
-    if (!settings) return current;
+    if (settings) {
+        if (current) HeapFree(GetProcessHeap(), 0, current);
+        current = settings;
+    }
+    /* Last: every part has been read; the engine never sees the member. */
+    bare = carrier_strip_guarded(current ? current : json, current ? strlen(current) : len);
+    if (!bare) return current;
     if (current) HeapFree(GetProcessHeap(), 0, current);
-    return settings;
+    return bare;
 }
 
 /* What kind of read the current parse is (modpublished.h), classified at the
@@ -1719,8 +1758,7 @@ static void nav_embed_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* Write the open map's settings rows (map_settings.h), before the navigation
- * shards and the manifest rows. */
+/* Put the open map's settings into the map's member (map_settings.h). */
 static void settings_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -1738,13 +1776,13 @@ static void settings_on_save(void *out_idstr)
     }
     if (body == NULL) return;
     if (!replace_out_idstr(out_idstr, body, body_len))
-        backend_log("SETTINGS: the saved map could not be written back; its settings rows are not in "
+        backend_log("SETTINGS: the saved map could not be written back; its settings are not in "
                     "this save");
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* Append the map manifest: one smpmod1 row per bundle that provides a placed
- * name, last in variables.string[] (after any navigation shards). */
+/* Put the map manifest into the map's member: one row per bundle that
+ * provides a placed name, plus the map-level rows (modmanifest.h). */
 static void manifest_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -1786,13 +1824,12 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     if (!rc) return rc;
 
-    /* The map's settings rows first, right after the author's own string
-     * variables (map_settings.h gives the whole row order). */
+    /* Each puts its part into the one "snapmap-plus" member, appended last at
+     * the root (map_carrier.h); none writes a variable. Nothing to carry
+     * leaves the engine's bytes as they are. */
     settings_on_save(out_idstr);
-    /* Restore retained navigation shards so ordinary saves preserve them. */
+    /* Restore retained navigation so ordinary saves preserve it. */
     nav_embed_on_save(out_idstr);
-
-    /* The map manifest goes last so its rows are the final string variables. */
     manifest_on_save(out_idstr);
     /* A save of a map opened from a rawmap makes it a saved map of its own:
      * the edit's id and name are its from now on. */

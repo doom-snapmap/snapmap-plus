@@ -339,7 +339,8 @@ int main(int argc, char **argv)
     /* The path the map uses from test.alpha (the asset rule reads it at import). */
     CHECK(sh_modmanifest_row_add_name(&rows.rows[0], "generated/image/mods/test.alpha/a.bimage"));
     map = sh_modmanifest_write(BASE_MAP, sizeof BASE_MAP - 1, &rows, &map_len, err, sizeof err);
-    CHECK(map != NULL && strstr(map, "smpmod1.0.2") && strstr(map, "smpmod1.1.2"));
+    CHECK(map != NULL && !strstr(map, "smpmod1.") && strstr(map, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"id\":\"test.alpha\"") &&
+          strstr(map, "{\"id\":\"test.beta\""));
     sh_modmanifest_list_free(&rows);
 
     /* ---- write: <zip name>.json and each mod's installed folder ---- */

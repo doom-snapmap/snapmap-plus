@@ -76,7 +76,7 @@ typedef struct modexport_stats {
 int   modexport_is_zip_path(const char *path);
 
 /* Write the export of `map_json` to zip_path (replacing it atomically).
- * Every bundle the map's smpmod1 rows name must be installed and usable.
+ * Every bundle the map's manifest rows name must be installed and usable.
  * Returns 1 on success, else 0 with the cause. */
 int   modexport_write(const char *map_json, size_t len, const char *zip_path, modexport_stats *st,
                       char *cause, size_t cause_cap);

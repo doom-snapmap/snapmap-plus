@@ -90,21 +90,60 @@ executable. The ordinary hook helper performs no relocation; its explicit
 Callers still verify every other stolen instruction. Original target bytes
 remain separate from relocated code for commit validation and restoration.
 
+## The map carrier
+
+Snapmap+'s per-map data (the mods a map declares, its two built-in settings and
+any navigation an earlier build baked into it) lives in the map's own file, in
+one root member the engine does not declare, `"snapmap-plus"`, never in the
+author's variable table. The grammar is described once, in
+`src/backend/map_carrier.h`; `map_carrier.c` finds, reads, strips and writes it
+as text. The engine's typeinfo deserializer ignores an undeclared member with
+no log and its serializer cannot write one; every transport (cloud save,
+publish upload, download, Save to My Downloaded Maps, a lobby joiner's fetch)
+moves the saved bytes unchanged, and a vanilla editor save drops the member.
+
+Load: every parse the `DeserializeFromJson` detour sees (`rawmap.c`
+`prepare_map_buffer`: My Maps, a published read, a joiner's download, a rawmap)
+has each family read its part from the raw text -- the member's part when it
+has one, else that family's legacy string variables (`smpmod1.`,
+`smp.render.v1`, `smp.bounds.v1`, `smnav1.`), which are removed -- and the
+retired `smpprod1.`, `smpkg.`, `smpbind.` and `smpref.` rows are removed as
+before. The member is stripped last, so the engine never sees it; a member that
+does not read (not an object, a format other than 1, a part of the wrong type,
+two members) is logged as refused, read as absent and still removed, and the
+map loads. One `CARRIER: map read:` line names the parts a map carries.
+
+Save: after the engine serializes (`sh_ser_detour`, and the rawmap export), the
+settings, navigation and manifest steps each put their part with
+`sh_carrier_put`; the member is written compact and last at the root, with its
+parts in the order mods, settings, nav. No step writes a variable or touches
+`variables.allocCount`. A map with nothing to carry has no member and saves as
+exactly the engine's bytes. A legacy settings row an author's variable follows
+cannot be removed without moving that variable's index, so it stays and is
+rewritten to the value that reads as off; the member carries the setting.
+
+Navigation chunks: the engine's lexer sees the member only where Snapmap+ is
+not installed. Measured live on Vulkan, an undeclared root member holding one
+string of 8192, 65536 or 1048576 characters, or an array of 2048 strings of
+4096 characters, loads and plays with no engine message above level 4, so each
+set's base64 is cut into chunks of 1048576 characters (`SH_SMNAV_CARRIER_CHUNK`
+in `navmesh.h`, which records the measurement).
+
 ## DLL interface
 
 Map rendering lives in the backend and DOOM's native Settings / Properties
 panel, in the Snapmap+ tab. The Unlock View Distance group owns an
 Apply/Cancel draft (one toggle) tied to the map open in the editor. The two
-built-in map settings (`smp.render.v1`, `smp.bounds.v1`) are held by
-`map_settings.c` outside the engine's variable lists, like the mod rows and the
-navigation shards: every map parse reads both rows into the open map's settings
-and strips them before the engine parses, so the Toybox variables list never
-shows them, and every save writes them back after the author's own string
-variables and before the navigation shards and mod rows, `allocCount[4]` kept
-equal to the string count. On saves `smp.render.v1` = `4;0`; Off saves no row.
-A row an author's variable follows (an earlier build appended the row before
-the author added a variable) keeps its index: it stays in place, is still read,
-and is rewritten at save (`4;8192`, which reads as off, when off). Applying a
+built-in map settings are held by `map_settings.c` as the open map's state,
+never in the engine's variable lists: every map parse reads them from the map's
+member (`"settings":{"render":...,"bounds":...}`, see The map carrier) or, in a
+map an earlier build saved, from its `smp.render.v1` / `smp.bounds.v1` string
+variables, which are removed before the engine parses, so the Toybox variables
+list never shows them; every save writes them into the member. On saves
+`render` = `4;0`; Off saves nothing. A legacy row an author's variable follows
+keeps its index: it stays in place, is read when the member has no settings,
+and is rewritten at the first save to the value that reads as off (`4;8192`,
+`1;0`), the member carrying the setting. Applying a
 change marks the map modified with one undo step; undo does not revert it.
 Versions 1 to 4 stored a distance: 8192 and disabled version 2 read as off, any
 other distance as on, and an on value saves as `4;0`. Malformed or duplicate
@@ -133,7 +172,7 @@ populate dispatch are extended under the panel's own hooks, and groups register
 through `sh_settings_tab_register_group` with their own draft, commit and reset
 callbacks because native Apply and Reset are not category-scoped. It holds the
 Unlock View Distance group and the Unlock Map Bounds group (`map_bounds.c`), whose
-`smp.bounds.v1` map setting (held like `smp.render.v1`, above) raises `snapEdit_environmentModuleBounds` and the
+map setting (the member's `bounds`, held like the view distance, above) raises `snapEdit_environmentModuleBounds` and the
 camera distance limit for that map up to the 32671-unit ceiling imposed by the
 signed-short collision and navigation coordinates, restoring the native 16000
 when a stock map loads. Every client re-validates module placement against its
@@ -488,9 +527,11 @@ These backend files share the work:
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
   decision and `sh_mods held`.
-- `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows (a placed
-  mod's row and a map-level one, `"attached": true`), and `modlegacy.c` the
-  retired `smpkg.` carriers, as below. A load and a save also remove any
+- `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
+  one, `"attached": true`), carried in the map member's `mods` part (The map
+  carrier); it still reads and removes the legacy `smpmod1.<index>.<count>`
+  string variables earlier builds wrote, and the next save converts them.
+  `modlegacy.c` owns the retired `smpkg.` carriers, as below. A load and a save also remove any
   `smpprod1.<version>` string variable an earlier development build recorded
   (one log line per map); nothing writes or reads one.
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
@@ -1307,8 +1348,9 @@ bundle the overrides migration built from the same tree (the record's
 `migration` section, `trees`); either answers the carrier without a second
 copy. Any other carrier, and the unreleased `smpbind.` and
 `smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
-the navigation strip, `modmanifest.c` reads and strips the manifest rows before
-the engine replicates map variables and activates the bundles they name.
+the navigation strip, `modmanifest.c` reads the manifest rows (the member's
+`mods`, else the legacy `smpmod1.` rows, which it removes) before the engine
+parses the map, and activates the bundles they name.
 The editor palette is built once per process, and the map validator
 (`RepairAndMigrate`) looks every placed entity up in it, so after activation
 the same step checks the named bundles' editor rows against the built palette.
@@ -1323,11 +1365,11 @@ A now in the palette; palette rebuilt in N ms (B -> C rows)`. It is refused,
 with the reason on the same line, while the editor holds an entity or a wire;
 before the first palette build it does nothing, because that build registers
 every row. A map without manifest rows never reaches it. On
-save it appends one row per bundle that provides a placed name (a placed
+save it writes, into the member's `mods` part, one row per bundle that provides a placed name (a placed
 entity's def, module or a model its edit state names; never a shadow of
 editor-time content, see the asset rule) and each bundle their needs reach,
-and one per map-level row of the current manifest, after any
-navigation shards; with an empty table, no rows in the map and no map-level row
+and one per map-level row of the current manifest;
+with an empty table, no rows in the map and no map-level row
 it returns at once and the save is the engine's own bytes. A map-level row is
 written for the build that serves its mod (the bundle resolver modui.c binds,
 `sh_modserve_bundle_serving`), and the current manifest follows the rename; a
@@ -1997,7 +2039,7 @@ like a placed mod's.
 ### Published maps and missing mods
 
 A published map is native by default: the product touches its launch only when
-its text carries an `smpmod1.` row the asset rule does not find served (no
+its text carries a manifest row (in its member, or a legacy `smpmod1.` row) the asset rule does not find served (no
 installed folder at the row's hash, also when the key is installed at another
 build, or one that lacks a name the row lists). Everything else reaches the
 engine unchanged: vanilla maps, and maps whose rows the installed folders at
@@ -2141,7 +2183,7 @@ rule again.
 
 ### Rawmaps that name mods
 
-A rawmap carries the same `smpmod1.` rows as any saved map, and its JSON alone
+A rawmap carries the same manifest rows as any saved map (its `snapmap-plus` member), and its JSON alone
 loads only where those mods are installed: a placed entity whose mod is absent
 makes SnapMap's own validator throw the player out with "map corruption". So a
 rawmap is never handed to the engine while a mod it names is missing.
@@ -2185,7 +2227,7 @@ The ZIP (`modexport.h`) carries the map and each mod its rows name, at the
 bundle hash the row declares, as that build is installed:
 
 ```
-<name>.json                the map text, its smpmod1 rows included, named after the ZIP
+<name>.json                the map text, its snapmap-plus member included, named after the ZIP
 mods/<folder>/mod.json     the store folder's own name (<key>, or <key>@<hash16> for a
 mods/<folder>/assets/...   later build of the key), byte for byte
 ```
@@ -2393,7 +2435,7 @@ whether each is installed, with the asset rule's sentence for one that is not.
 
 ### Publishing a map with mods
 
-What is sent: the bundles the published map names in its `smpmod1.` rows, and
+What is sent: the bundles the published map names in its manifest rows, and
 only those, at publish time. The `SerializeToJson` detour reports each save's
 final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
 state's callback that runs before the first request to the map service, is

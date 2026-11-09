@@ -23,6 +23,7 @@
 extern int g_mod_stub_rescans;
 #include "../src/backend/map_legacy_payload.h"
 #include "../src/backend/map_shards.h"
+#include "../src/backend/map_carrier.h"
 #include "../src/backend/config_json.h"
 
 static int g_failed, g_checks;
@@ -385,6 +386,19 @@ static unsigned count_rows(const char *json, const char *quoted_prefix)
     return n;
 }
 
+/* Rows in the map's member (map_carrier.h); never a smpmod1 variable. */
+static unsigned member_rows(const char *json)
+{
+    sh_modmanifest_list l = {0};
+    size_t n = strlen(json), from = 0, to = 0;
+    unsigned rows;
+    if (strstr(json, "smpmod1.")) return 0xffffu;
+    if (sh_carrier_part(json, n, "mods", &from, &to) != 1) return 0;
+    rows = (unsigned)sh_modmanifest_read(json, n, &l, NULL);
+    sh_modmanifest_list_free(&l);
+    return rows;
+}
+
 static unsigned string_rows(const char *json)
 {
     sh_shard_doc doc;
@@ -716,9 +730,9 @@ static void convert_era_c(void)
     }
     if (out) {
         sh_modmanifest_list rows = {0};
-        CHECK(!strstr(out, "\"smpkg.") && count_rows(out, "\"smpmod1.") == 1);
-        CHECK(string_rows(out) == 2 && alloc4(out, &count) && count == 2);
-        CHECK(strstr(out, "door_label") < strstr(out, "\"smpmod1.0.1\""));
+        CHECK(!strstr(out, "\"smpkg.") && member_rows(out) == 1);
+        CHECK(string_rows(out) == 1 && alloc4(out, &count) && count == 1);
+        CHECK(strstr(out, "door_label") < strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":["));
         CHECK(sh_modmanifest_read(out, on, &rows, NULL) == 1 && rows.count == 1 && !strcmp(rows.rows[0].bundle, v[0].bundle));
         /* names: the placed inherit the bundle provides, nothing else */
         CHECK(rows.count == 1 && rows.rows[0].name_count == 1 &&
@@ -737,7 +751,7 @@ static void convert_era_c(void)
     sh_modlegacy_reset();
     reset_counts();
     out = sh_modlegacy_process(map, mn, &on);
-    CHECK(out && g_convert_lines == 1 && g_build_calls == 0 && count_rows(out, "\"smpmod1.") == 1);
+    CHECK(out && g_convert_lines == 1 && g_build_calls == 0 && member_rows(out) == 1);
     if (out) HeapFree(GetProcessHeap(), 0, out);
     /* A map that already names the bundle keeps one row for it. */
     {
@@ -746,7 +760,7 @@ static void convert_era_c(void)
         char *mixed = first ? carrier_map(first, "delivery.c6918a65f2ddbf6b25ebff1564fcf3bc26de6ade3bfc89ba2a472a6790a547ed",
                                           zip, zn, 8192, -1, -1, NULL, &n2) : NULL;
         char *again = mixed ? sh_modlegacy_process(mixed, n2, &on) : NULL;
-        CHECK(again && count_rows(again, "\"smpmod1.") == 1 && !strstr(again, "\"smpkg."));
+        CHECK(again && member_rows(again) == 1 && !strstr(again, "\"smpkg."));
         if (first) HeapFree(GetProcessHeap(), 0, first);
         if (mixed) HeapFree(GetProcessHeap(), 0, mixed);
         if (again) HeapFree(GetProcessHeap(), 0, again);
@@ -854,7 +868,7 @@ static void clean_verdicts(void)
     out = sh_modlegacy_process(map, mn, &on);
     CHECK(out && g_legacy_lines == 2 && g_clean_lines == 1 && g_convert_lines == 1 && strstr(g_last_clean, "incomplete"));
     CHECK(sh_modlegacy_last_report(v, 4) == 2);
-    CHECK(out && !strstr(out, "\"smpkg.") && count_rows(out, "\"smpmod1.") == 1);
+    CHECK(out && !strstr(out, "\"smpkg.") && member_rows(out) == 1);
     if (out) HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, map);
 
@@ -978,14 +992,17 @@ static void fixtures(void)
         CHECK(out != NULL);
         if (out) {
             CHECK(!strstr(out, "\"smpkg.") && !strstr(out, "\"smpbind.") && !strstr(out, "\"smpref."));
-            CHECK(count_rows(out, "\"smpmod1.") == converted);
+            CHECK(member_rows(out) == converted);
             CHECK(alloc4(out, &count) && count == string_rows(out));
             /* What the engine then parses: the manifest step keeps the rows and strips them. */
             {
                 size_t en = 0;
                 sh_modmanifest_list current = {0};
-                char *engine = sh_modmanifest_prepare_load(out, on, &en);
-                CHECK(engine && !strstr(engine, "smpmod1.") && alloc4(engine, &count) && count == string_rows(engine));
+                char *prepared = sh_modmanifest_prepare_load(out, on, &en);
+                char *engine = prepared ? sh_carrier_strip(prepared, en, &en) : sh_carrier_strip(out, on, &en);
+                CHECK(engine && !strstr(engine, "smpmod1.") && !strstr(engine, "snapmap-plus") && alloc4(engine, &count) &&
+                      count == string_rows(engine));
+                if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
                 CHECK(sh_modmanifest_current(&current) == converted);
                 sh_modmanifest_list_free(&current);
                 if (engine) HeapFree(GetProcessHeap(), 0, engine);

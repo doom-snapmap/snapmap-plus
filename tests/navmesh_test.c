@@ -11,6 +11,7 @@
 
 #include "navmesh.h"
 #include "map_shards.h"
+#include "map_carrier.h"
 
 static int g_failed;
 
@@ -63,12 +64,12 @@ static int log_contains(const char *needle)
 
 /* The config service is not linked in: the keys read as their registered
  * defaults, which is what a fresh install answers. */
+static int g_nav_on = 1;   /* "navmesh.enabled"; every other key reads on */
 int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
 {
-    (void)key;
     if (out_flags) *out_flags = 0;
     if (!out_value) return 0;
-    *out_value = 1;
+    *out_value = (key && !strcmp(key, "navmesh.enabled")) ? g_nav_on : 1;
     return 1;
 }
 
@@ -831,6 +832,148 @@ static void test_prose(void)
     CHECK(sh_navmesh_strip(map, strlen(map), NULL) == NULL);   /* and nothing is removed */
 }
 
+/* The map's "snapmap-plus" member (map_carrier.h): a save writes the
+ * navigation there, never as variables; a load reads it there first and the
+ * legacy smnav1 variables only when the member has no "nav" part. */
+static unsigned count_of(const char *hay, const char *needle)
+{
+    unsigned n = 0;
+    const char *p = hay;
+    while ((p = strstr(p, needle)) != NULL) { n++; p += strlen(needle); }
+    return n;
+}
+
+static int serves_exactly(const char *cls, const aas_build *b)
+{
+    char name[256];
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    int ok;
+    _snprintf_s(name, sizeof name, _TRUNCATE, "maps/modules/" BASE_MODULE "/ind_totally_blank_room_4x.aas_%s", cls);
+    ok = sh_navmesh_open(name, &bytes, &len) == 1 && len == b->len && !memcmp(bytes, b->p, len);
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    return ok;
+}
+
+static void test_carrier(void)
+{
+    aas_build big, small;
+    char *legacy, *stripped, *saved, *again;
+    size_t legacy_len = 0, stripped_len = 0, saved_len = 0, again_len = 0;
+    const char *base = base_map(BASE_MODULE);
+    size_t base_len = strlen(base);
+
+    CHECK(build_aas(&big, 60, NODES_TREE, 0));      /* more than one legacy 8192-character shard */
+    CHECK(build_aas(&small, 0, NODES_TREE, 0));
+    sh_navmesh_test_reset();
+    log_reset();
+
+    /* Legacy shards in, member out: the save writes no variable and leaves
+     * the variable list and allocCount as the engine wrote them. */
+    legacy = make_map(base, BASE_MODULE, "monster48", big.p, big.len, MAP_GOOD, &legacy_len);
+    CHECK(legacy != NULL && strstr(legacy, "\"smnav1.") != NULL);
+    if (!legacy) { free_aas(&big); free_aas(&small); return; }
+    sh_navmesh_build_from_map(legacy, legacy_len);
+    CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
+    stripped = sh_navmesh_strip(legacy, legacy_len, &stripped_len);
+    CHECK(stripped && !strcmp(stripped, base));
+    saved = stripped ? sh_navmesh_embed_all(stripped, stripped_len, &saved_len) : NULL;
+    CHECK(saved && saved_len == strlen(saved));
+    if (saved) {
+        CHECK(!strstr(saved, "smnav1.") && strstr(saved, "\"string\":[]") &&
+              strstr(saved, "\"allocCount\":[0,0,0,0,0,0,0,0,0,16]"));
+        CHECK(!memcmp(saved, base, base_len - 1));
+        {
+            static const char lead[] = ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE
+                                       "\",\"class\":\"monster48\",\"digest\":\"";
+            CHECK(!strncmp(saved + base_len - 1, lead, sizeof lead - 1));
+        }
+        CHECK(strstr(saved, "\"geom\":\"fedcba9876543210\",\"data\":[\"") != NULL);
+        /* One chunk: the payload is far below SH_SMNAV_CARRIER_CHUNK characters. */
+        CHECK(count_of(saved, "\"data\":[\"") == 1 && count_of(saved, "\"]}]}") == 1 &&
+              strlen(saved) - base_len < SH_SMNAV_CARRIER_CHUNK);
+        CHECK(saved_len > 6 && !strcmp(saved + saved_len - 6, "\"]}]}}"));     /* chunk, data, set, nav, member, root */
+
+        /* Reloaded from the member: the same bytes are served. */
+        sh_navmesh_test_reset();
+        sh_navmesh_build_from_map(saved, saved_len);
+        CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
+        /* The legacy strip has nothing to remove; a second save is byte-identical. */
+        CHECK(sh_navmesh_strip(saved, saved_len, NULL) == NULL);
+        {
+            char *bare = sh_carrier_strip(saved, saved_len, &again_len);
+            CHECK(bare && !strcmp(bare, base));
+            again = bare ? sh_navmesh_embed_all(bare, again_len, &again_len) : NULL;
+            CHECK(again && again_len == saved_len && !strcmp(again, saved));
+            if (again) HeapFree(GetProcessHeap(), 0, again);
+            if (bare) HeapFree(GetProcessHeap(), 0, bare);
+        }
+
+        /* Both forms: the member wins; the legacy shards are only removed. */
+        {
+            char *both = make_map(saved, BASE_MODULE, "monster128", small.p, small.len, MAP_GOOD, &again_len);
+            CHECK(both && strstr(both, "\"smnav1.") && strstr(both, "snapmap-plus"));
+            if (both) {
+                sh_navmesh_test_reset();
+                sh_navmesh_build_from_map(both, again_len);
+                CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
+                CHECK(!serves_exactly("monster128", &small));
+                free(both);
+            }
+        }
+
+        /* A set object in the member that does not read is refused, by
+         * itself; the map still loads and nothing else is affected. */
+        {
+            char bad[2048];
+            _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
+                        ",\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\","
+                        "\"data\":[\"QUJD\"]},{\"module\":\"" BASE_MODULE "\",\"class\":\"monster48\",\"digest\":"
+                        "\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":7}]}}");
+            sh_navmesh_test_reset();
+            log_reset();
+            sh_navmesh_build_from_map(bad, strlen(bad));
+            CHECK(sh_navmesh_test_served_count() == 0 && sh_navmesh_test_held_count() == 0);
+            CHECK(log_contains("does not read"));
+            /* A malformed member is no member at all: the legacy shards are read. */
+            {
+                char *legacy_bad;
+                _snprintf_s(bad, sizeof bad, _TRUNCATE, "%.*s%s", (int)(base_len - 1), base,
+                            ",\"snapmap-plus\":{\"format\":1,\"nav\":{\"not\":\"an array\"}}}");
+                legacy_bad = make_map(bad, BASE_MODULE, "monster128", small.p, small.len, MAP_GOOD, &again_len);
+                CHECK(legacy_bad != NULL);
+                if (legacy_bad) {
+                    sh_navmesh_test_reset();
+                    sh_navmesh_build_from_map(legacy_bad, again_len);
+                    CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster128", &small));
+                    free(legacy_bad);
+                }
+            }
+        }
+
+        /* Navigation off: nothing is served, and a save carries the member's
+         * part back exactly as it was read. */
+        g_nav_on = 0;
+        sh_navmesh_test_reset();
+        sh_navmesh_build_from_map(saved, saved_len);
+        CHECK(sh_navmesh_test_served_count() == 0);
+        again = sh_navmesh_embed_all(base, base_len, &again_len);
+        CHECK(again && !strcmp(again, saved));
+        if (again) HeapFree(GetProcessHeap(), 0, again);
+        g_nav_on = 1;
+
+        /* Nothing held: a save is the engine's bytes. */
+        sh_navmesh_test_reset();
+        sh_navmesh_build_from_map(base, base_len);
+        CHECK(sh_navmesh_embed_all(base, base_len, &again_len) == NULL);
+        HeapFree(GetProcessHeap(), 0, saved);
+    }
+    if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
+    free(legacy);
+    free_aas(&big);
+    free_aas(&small);
+}
+
 static void test_native_reachability_limit(void)
 {
     aas_build b;
@@ -880,6 +1023,7 @@ int main(void)
     test_report();
     test_reader();
     test_prose();
+    test_carrier();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) FAILED\n", g_failed);

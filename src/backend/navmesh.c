@@ -12,6 +12,7 @@
 
 #include "navmesh.h"
 #include "map_shards.h"
+#include "map_carrier.h"
 #include "config.h"
 #include "backend_log.h"
 
@@ -69,6 +70,11 @@ static volatile LONG g_serve_count;
 static volatile LONG g_build_count;
 static size_t     g_last_build_sets;
 static char       g_last_refusal[SH_SMNAV_REASON_CAP];
+
+/* With the feature off a map's member "nav" part is kept as it was read, so a
+ * save carries it back unchanged (process heap; NULL when none). */
+static char      *g_raw_nav;
+static size_t     g_raw_nav_len;
 
 /* Disable serving after the first fault to avoid repeated partial opens. */
 static volatile LONG g_faulted;
@@ -752,23 +758,16 @@ static int nav_build_names(nav_set *s)
     return 1;
 }
 
-/* Pass 1: group every shard in the buffer by (module, class). */
-static void nav_collect(const char *json, size_t len)
+/* Pass 1, one chunk: group it with its (module, class) set. Returns 0 when
+ * the table is full. */
+static int nav_collect_one(const nav_hdr *hp, const char *chunk, size_t chunk_len)
 {
-    size_t pos = 0;
-    const char *hdr, *chunk;
-    size_t hdr_len, chunk_len;
-    nav_hdr h;
-    int overflow = 0;
-
-    while (sh_shard_next(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN, &pos,
-                         &hdr, &hdr_len, &chunk, &chunk_len)) {
-        nav_set *s;
-        if (!nav_parse_header(hdr, hdr_len, &h)) continue;   /* prose, not a shard */
-
+    const nav_hdr h = *hp;
+    nav_set *s;
+    {
         s = nav_find_set(h.module, h.cls);
         if (!s) {
-            if (g_set_count >= SH_SMNAV_MAX_SETS) { overflow = 1; continue; }
+            if (g_set_count >= SH_SMNAV_MAX_SETS) return 0;
             s = &g_sets[g_set_count++];
             memset(s, 0, sizeof *s);
             strcpy_s(s->module, sizeof s->module, h.module);
@@ -782,41 +781,131 @@ static void nav_collect(const char *json, size_t len)
             if (!s->chunks) {
                 s->consistent = 0;
                 strcpy_s(s->reason, sizeof s->reason, "there was no memory to collect its shards");
-                continue;
+                return 1;
             }
         }
-        if (!s->chunks) continue;
+        if (!s->chunks) return 1;
 
         if (s->total != h.total || strcmp(s->digest, h.digest) != 0 ||
             strcmp(s->geom, h.geom) != 0) {
             s->consistent = 0;
             strcpy_s(s->reason, sizeof s->reason, "the map carries two different bakes for it");
-            continue;
+            return 1;
         }
         if (h.idx >= s->total) {
             s->consistent = 0;
             strcpy_s(s->reason, sizeof s->reason, "a shard index is out of range");
-            continue;
+            return 1;
         }
         if (!chunk) {
             s->consistent = 0;
             strcpy_s(s->reason, sizeof s->reason, "a shard's value could not be read");
-            continue;
+            return 1;
         }
         if (s->chunks[h.idx].filled) {
             s->consistent = 0;
             strcpy_s(s->reason, sizeof s->reason, "a shard index appears twice");
-            continue;
+            return 1;
         }
         s->chunks[h.idx].p = chunk;
         s->chunks[h.idx].n = chunk_len;
         s->chunks[h.idx].filled = 1;
         s->present++;
     }
+    return 1;
+}
 
-    if (overflow)
-        nav_refuse("the map carries more baked module/class sets than the %d this build vets; "
-                   "the surplus is ignored", (int)SH_SMNAV_MAX_SETS);
+static void nav_overflow(void)
+{
+    nav_refuse("the map carries more baked module/class sets than the %d this build vets; "
+               "the surplus is ignored", (int)SH_SMNAV_MAX_SETS);
+}
+
+/* Pass 1 from legacy smnav1 string variables. */
+static void nav_collect(const char *json, size_t len)
+{
+    size_t pos = 0;
+    const char *hdr, *chunk;
+    size_t hdr_len, chunk_len;
+    nav_hdr h;
+    int overflow = 0;
+
+    while (sh_shard_next(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN, &pos,
+                         &hdr, &hdr_len, &chunk, &chunk_len)) {
+        if (!nav_parse_header(hdr, hdr_len, &h)) continue;   /* prose, not a shard */
+        if (!nav_collect_one(&h, chunk, chunk_len)) overflow = 1;
+    }
+    if (overflow) nav_overflow();
+}
+
+/* One string member of a member set object, copied with the grammar's checks. */
+static int nav_member_field(const char *obj, const char *end, const char *key, char *out, size_t cap,
+                            int (*copy)(const char *, size_t, char *, size_t))
+{
+    const char *body;
+    size_t n;
+    if (sh_carrier_object_string(obj, end, key, &body, &n) != 1) return 0;
+    return copy(body, n, out, cap);
+}
+
+static int nav_copy_digest(const char *p, size_t n, char *out, size_t cap)
+{
+    (void)cap;
+    return nav_copy_hex(p, n, out, SH_SMNAV_DIGEST_CHARS);
+}
+
+static int nav_copy_geom(const char *p, size_t n, char *out, size_t cap)
+{
+    (void)cap;
+    return nav_copy_hex(p, n, out, SH_SMNAV_GEOM_CHARS);
+}
+
+/* Pass 1 from the member's "nav" part [from, to) (map_carrier.h): one object
+ * per set, its "data" the base64 chunks in order. A set object that does not
+ * read is refused by name when it has one. */
+static void nav_collect_member(const char *from, const char *to)
+{
+    const char *cursor = from, *set;
+    size_t set_len;
+    int overflow = 0, r;
+    while ((r = sh_carrier_array_next(&cursor, to, &set, &set_len)) == 1) {
+        const char *end = set + set_len, *data_cursor = NULL, *chunk;
+        size_t chunk_len;
+        unsigned total = 0, idx = 0;
+        nav_hdr h;
+        memset(&h, 0, sizeof h);
+        if (*set != '{' ||
+            !nav_member_field(set, end, "module", h.module, sizeof h.module, nav_copy_module) ||
+            !nav_member_field(set, end, "class", h.cls, sizeof h.cls, nav_copy_class) ||
+            !nav_member_field(set, end, "digest", h.digest, sizeof h.digest, nav_copy_digest) ||
+            !nav_member_field(set, end, "geom", h.geom, sizeof h.geom, nav_copy_geom)) {
+            nav_refuse("a navigation set in the map's member does not read; it is ignored");
+            continue;
+        }
+        /* The "data" array: find it, count it, then collect it. */
+        {
+            const char *v = NULL;
+            size_t vn = 0;
+            if (sh_carrier_object_member(set, end, "data", &v, &vn) == 1 && *v == '[') data_cursor = v;
+        }
+        if (data_cursor) {
+            const char *c = data_cursor;
+            while (sh_carrier_array_next(&c, end, &chunk, &chunk_len) == 1) total++;
+        }
+        if (!data_cursor || total == 0 || total > SH_SMNAV_MAX_SHARDS) {
+            nav_refuse("'%s' (%s) is not served -- its data in the map's member does not read", h.module, h.cls);
+            continue;
+        }
+        h.total = total;
+        while (sh_carrier_array_next(&data_cursor, end, &chunk, &chunk_len) == 1) {
+            h.idx = idx++;
+            if (*chunk == '"' && chunk_len >= 2) {
+                if (!nav_collect_one(&h, chunk + 1, chunk_len - 2)) overflow = 1;
+            } else if (!nav_collect_one(&h, NULL, 0)) overflow = 1;
+        }
+    }
+    if (r < 0) nav_refuse("the navigation list in the map's member does not read; what read is kept");
+    if (overflow) nav_overflow();
 }
 
 /* Pass 2: reassemble and verify the digest. A set that survives is HELD -- so a
@@ -938,12 +1027,18 @@ static void nav_accept(const char *json, size_t len)
     }
 }
 
-/* The scan itself, guarded, with the lock already held. */
+/* The scan itself, guarded, with the lock already held. The member's "nav"
+ * part wins; without one, the legacy smnav1 variables are read. */
 static void nav_build_locked(const char *json, size_t len)
 {
     __try {
-        /* Reset state even for shard-free maps; scanning then uses a cheap reject. */
-        if (json && len && sh_shard_find(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN)) {
+        size_t from = 0, to = 0;
+        if (json && len && sh_carrier_part(json, len, "nav", &from, &to) == 1) {
+            nav_collect_member(json + from, json + to);
+            nav_reassemble();
+            nav_accept(json, len);
+        } else if (json && len && sh_shard_find(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN)) {
+            /* Reset state even for shard-free maps; scanning then uses a cheap reject. */
             nav_collect(json, len);
             nav_reassemble();
             nav_accept(json, len);
@@ -965,9 +1060,22 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     AcquireSRWLockExclusive(&g_nav_lock);
     nav_clear_locked();
     g_last_refusal[0] = '\0';
+    if (g_raw_nav) { HeapFree(GetProcessHeap(), 0, g_raw_nav); g_raw_nav = NULL; g_raw_nav_len = 0; }
     /* Off means off, including the table: a map loaded while the feature is
-     * disabled must not leave the previous map's navigation live. */
+     * disabled must not leave the previous map's navigation live. Its member
+     * part is kept as text so a save does not drop the author's bake. */
     if (on) nav_build_locked(json, len);
+    else if (json && len) {
+        size_t from = 0, to = 0;
+        if (sh_carrier_part(json, len, "nav", &from, &to) == 1) {
+            g_raw_nav = (char *)HeapAlloc(GetProcessHeap(), 0, to - from + 1);
+            if (g_raw_nav) {
+                memcpy(g_raw_nav, json + from, to - from);
+                g_raw_nav[to - from] = 0;
+                g_raw_nav_len = to - from;
+            }
+        }
+    }
     for (i = 0; i < g_set_count; i++) {
         if (g_sets[i].chunks) {
             HeapFree(GetProcessHeap(), 0, g_sets[i].chunks);   /* they point into the map buffer */
@@ -1037,110 +1145,129 @@ char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
 /* embed                                                                 */
 /* ==================================================================== */
 
-/* Re-embed one held set, replacing its own shards and leaving every other
- * set's -- and every package's -- alone. */
-static char *nav_embed_set(const char *json, size_t len, nav_set *s,
-                           size_t *out_len, char *err, size_t err_cap)
+/* The member's "nav" value for every held set (map_carrier.h): an array of
+ * {"module","class","digest","geom","data":[chunks]} in table order. Process
+ * heap, or NULL with the reason in err. *sets_out counts the sets written; a
+ * set that cannot be written is logged and left out. */
+static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_t err_cap)
 {
-    char *base = NULL, *b64 = NULL, *headers = NULL, *out = NULL;
-    sh_shard_out *parts = NULL;
-    size_t b64_len, shards, i, w = 0, base_len = 0;
-    const char *src;
-    size_t src_len;
-
-    if (out_len) *out_len = 0;
-    if (err && err_cap) err[0] = '\0';
-
-    base = sh_shard_strip(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN,
-                          nav_shard_filter, s, SH_SMNAV_MAX_SHARDS,
-                          &base_len, NULL, NULL, NULL);
-    src = base ? base : json;
-    src_len = base ? base_len : len;
-
-    b64_len = ((s->payload_len + 2) / 3) * 4;
-    b64 = (char *)HeapAlloc(GetProcessHeap(), 0, b64_len + 1);
-    if (!b64) {
-        strncpy_s(err, err_cap, "there was no memory to encode the payload", _TRUNCATE);
-        goto done;
+    size_t i, need = 2, w = 0, sets = 0;
+    char *out;
+    for (i = 0; i < g_set_count; i++) {
+        const nav_set *s = &g_sets[i];
+        size_t b64 = ((s->payload_len + 2) / 3) * 4, chunks;
+        if (!s->payload) continue;
+        chunks = (b64 + SH_SMNAV_CARRIER_CHUNK - 1) / SH_SMNAV_CARRIER_CHUNK;
+        need += b64 + chunks * 3 + SH_SMNAV_MODULE_CAP + SH_SMNAV_CLASS_CAP + 128;
     }
-    b64_len = sh_shard_b64_encode(s->payload, s->payload_len, b64);
-
-    shards = (b64_len + SH_SHARD_CHARS - 1) / SH_SHARD_CHARS;
-    if (shards == 0) shards = 1;
-    if (shards > SH_SMNAV_MAX_SHARDS) {
-        strncpy_s(err, err_cap, "the payload needs more shards than the format allows", _TRUNCATE);
-        goto done;
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, need + 1);
+    if (!out) {
+        strncpy_s(err, err_cap, "there was no memory to encode the navigation", _TRUNCATE);
+        return NULL;
     }
-
-    parts = (sh_shard_out *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, shards * sizeof *parts);
-    headers = (char *)HeapAlloc(GetProcessHeap(), 0, shards * SH_SMNAV_HEADER_CAP);
-    if (!parts || !headers) {
-        strncpy_s(err, err_cap, "there was no memory to build the map", _TRUNCATE);
-        goto done;
-    }
-    for (i = 0; i < shards; i++) {
-        char *h = headers + i * SH_SMNAV_HEADER_CAP;
-        size_t chunk_len = b64_len - i * SH_SHARD_CHARS;
-        if (chunk_len > SH_SHARD_CHARS) chunk_len = SH_SHARD_CHARS;
-        if (_snprintf_s(h, SH_SMNAV_HEADER_CAP, _TRUNCATE, "%s%s.%s.%u.%u.%s.%s",
-                        SH_SMNAV_MAGIC, s->module, s->cls, (unsigned)i, (unsigned)shards,
-                        s->digest, s->geom) < 0) {
-            strncpy_s(err, err_cap, "its header does not fit the wire format", _TRUNCATE);
-            goto done;
+    out[w++] = '[';
+    for (i = 0; i < g_set_count; i++) {
+        const nav_set *s = &g_sets[i];
+        char *b64;
+        size_t b64_len, chunks, c;
+        int n;
+        if (!s->payload) continue;
+        b64 = (char *)HeapAlloc(GetProcessHeap(), 0, ((s->payload_len + 2) / 3) * 4 + 1);
+        if (!b64) {
+            char warn[SH_SMNAV_REASON_CAP + 160];
+            _snprintf_s(warn, sizeof warn, _TRUNCATE,
+                        "NAV: '%s' (%s) could NOT be written back into this save (no memory to encode it); "
+                        "the map is being saved WITHOUT it", s->module, s->cls);
+            backend_log(warn);
+            continue;
         }
-        parts[i].header = h;
-        parts[i].chunk = b64 + i * SH_SHARD_CHARS;
-        parts[i].chunk_len = chunk_len;
+        b64_len = sh_shard_b64_encode(s->payload, s->payload_len, b64);
+        chunks = (b64_len + SH_SMNAV_CARRIER_CHUNK - 1) / SH_SMNAV_CARRIER_CHUNK;
+        if (chunks == 0) chunks = 1;
+        if (chunks > SH_SMNAV_MAX_SHARDS) {
+            char warn[SH_SMNAV_REASON_CAP + 160];
+            _snprintf_s(warn, sizeof warn, _TRUNCATE,
+                        "NAV: '%s' (%s) could NOT be written back into this save (it needs more chunks than "
+                        "the format allows); the map is being saved WITHOUT it", s->module, s->cls);
+            backend_log(warn);
+            HeapFree(GetProcessHeap(), 0, b64);
+            continue;
+        }
+        n = _snprintf_s(out + w, need + 1 - w, _TRUNCATE,
+                        "%s{\"module\":\"%s\",\"class\":\"%s\",\"digest\":\"%s\",\"geom\":\"%s\",\"data\":[",
+                        sets ? "," : "", s->module, s->cls, s->digest, s->geom);
+        if (n < 0) {
+            HeapFree(GetProcessHeap(), 0, b64);
+            HeapFree(GetProcessHeap(), 0, out);
+            strncpy_s(err, err_cap, "the navigation did not fit its buffer", _TRUNCATE);
+            return NULL;
+        }
+        w += (size_t)n;
+        for (c = 0; c < chunks; c++) {
+            size_t at = c * SH_SMNAV_CARRIER_CHUNK, len = b64_len - at;
+            if (len > SH_SMNAV_CARRIER_CHUNK) len = SH_SMNAV_CARRIER_CHUNK;
+            if (c) out[w++] = ',';
+            out[w++] = '"';
+            memcpy(out + w, b64 + at, len);
+            w += len;
+            out[w++] = '"';
+        }
+        out[w++] = ']';
+        out[w++] = '}';
+        HeapFree(GetProcessHeap(), 0, b64);
+        sets++;
     }
-
-    out = sh_shard_insert(src, src_len, parts, shards, &w, err, err_cap);
-    if (out && out_len) *out_len = w;
-
-done:
-    if (parts)   HeapFree(GetProcessHeap(), 0, parts);
-    if (headers) HeapFree(GetProcessHeap(), 0, headers);
-    if (b64)     HeapFree(GetProcessHeap(), 0, b64);
-    if (base)    HeapFree(GetProcessHeap(), 0, base);
+    out[w++] = ']';
+    out[w] = 0;
+    *out_len = w;
+    *sets_out = sets;
     return out;
 }
 
-/* Guarded, with the lock already held. */
+/* Guarded, with the lock already held: the legacy shards removed, then the
+ * member's "nav" part put (removed when nothing is held). */
 static char *nav_embed_locked(const char *json, size_t len,
                               size_t *cur_len_out, size_t *embedded_out)
 {
-    char *cur = NULL;
-    size_t cur_len = len, i, embedded = 0;
+    char *base = NULL, *part = NULL, *out = NULL;
+    size_t base_len = 0, part_len = 0, out_len = 0, sets = 0;
+    char err[SH_SMNAV_REASON_CAP] = "";
 
+    *cur_len_out = len;
+    *embedded_out = 0;
     __try {
-        for (i = 0; i < g_set_count; i++) {
-            nav_set *s = &g_sets[i];
-            char err[SH_SMNAV_REASON_CAP];
-            size_t next_len = 0;
-            char *next;
-            if (!s->payload) continue;
-            next = nav_embed_set(cur ? cur : json, cur_len, s, &next_len, err, sizeof err);
-            if (!next) {
-                char warn[SH_SMNAV_REASON_CAP + 160];
+        base = sh_shard_strip(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN, nav_shard_filter, NULL,
+                              SH_SMNAV_MAX_SHARDS * SH_SMNAV_MAX_SETS, &base_len, NULL, NULL, NULL);
+        part = nav_part_locked(&part_len, &sets, err, sizeof err);
+        if (!part) {
+            char warn[SH_SMNAV_REASON_CAP + 96];
+            _snprintf_s(warn, sizeof warn, _TRUNCATE,
+                        "NAV: the navigation could NOT be written into this save (%s)", err);
+            backend_log(warn);
+        } else {
+            out = sh_carrier_put(base ? base : json, base ? base_len : len, "nav",
+                                 sets ? part : NULL, sets ? part_len : 0, &out_len, err, sizeof err);
+            if (!out && err[0]) {
+                char warn[SH_SMNAV_REASON_CAP + 96];
                 _snprintf_s(warn, sizeof warn, _TRUNCATE,
-                            "NAV: '%s' (%s) could NOT be written back into this save (%s); the "
-                            "map is being saved WITHOUT it", s->module, s->cls, err);
+                            "NAV: the navigation could NOT be written into this save (%s)", err);
                 backend_log(warn);
-                continue;
             }
-            if (cur) HeapFree(GetProcessHeap(), 0, cur);
-            cur = next;
-            cur_len = next_len;
-            embedded++;
         }
+        if (!out && base && !err[0]) { out = base; out_len = base_len; base = NULL; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         nav_fault("the save-time re-embed");
-        if (cur) HeapFree(GetProcessHeap(), 0, cur);
-        cur = NULL;
-        embedded = 0;
+        if (out) HeapFree(GetProcessHeap(), 0, out);
+        out = NULL;
+        sets = 0;
     }
-    *cur_len_out = cur_len;
-    *embedded_out = embedded;
-    return cur;
+    if (base) HeapFree(GetProcessHeap(), 0, base);
+    if (part) HeapFree(GetProcessHeap(), 0, part);
+    if (out) {
+        *cur_len_out = out_len;
+        *embedded_out = sets;
+    }
+    return out;
 }
 
 char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
@@ -1151,7 +1278,15 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
 
     if (out_len) *out_len = 0;
     if (!json || len == 0) return NULL;
-    if (!sh_navmesh_enabled()) return NULL;
+    if (!sh_navmesh_enabled()) {
+        /* Off: the member part the map arrived with goes back as it was read. */
+        char err[160] = "";
+        size_t w = 0;
+        if (!g_raw_nav) return NULL;
+        cur = sh_carrier_put(json, len, "nav", g_raw_nav, g_raw_nav_len, &w, err, sizeof err);
+        if (cur && out_len) *out_len = w;
+        return cur;
+    }
     if (!nav_config_on(NAV_CONFIG_EMBED)) return NULL;
     if (nav_held_count() == 0) return NULL;
 
@@ -1162,7 +1297,7 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
     if (!cur) return NULL;
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: the saved map CARRIES its baked navigation again -- %zu module/class "
-                "set(s), %zu -> %zu bytes", embedded, len, cur_len);
+                "set(s) in the snapmap-plus member, %zu -> %zu bytes", embedded, len, cur_len);
     backend_log(line);
     if (out_len) *out_len = cur_len;
     return cur;

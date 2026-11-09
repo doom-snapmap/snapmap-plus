@@ -1442,7 +1442,7 @@ int main(int argc, char **argv)
         {
             size_t len = 0, out_len = 0;
             char *t = map_text(&len), *saved = sh_modmanifest_on_save(t, len, &out_len);
-            CHECK(saved && strstr(saved, "smpmod1.0.1"));
+            CHECK(saved && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[{") && !strstr(saved, "smpmod1."));
             if (saved) HeapFree(GetProcessHeap(), 0, saved);
         }
         g_delete_calls = 0;
@@ -1747,7 +1747,8 @@ int main(int argc, char **argv)
             /* The save writes its row as a map-level row; nothing places it. */
             t = map_text(&len);
             saved = sh_modmanifest_on_save(t, len, &out_len);
-            CHECK(saved && strstr(saved, "smpmod1.") && strstr(saved, "alex.req") && strstr(saved, "\\\"attached\\\":true"));
+            CHECK(saved && strstr(saved, "\"snapmap-plus\":{\"format\":1,\"mods\":[{") && strstr(saved, "alex.req") &&
+                  strstr(saved, "\"attached\":true") && !strstr(saved, "smpmod1."));
             if (saved) HeapFree(GetProcessHeap(), 0, saved);
             /* The dry run and the removal: nothing to delete, the row goes. */
             doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, "alex.req");

@@ -10,6 +10,7 @@
 #include "modmanifest.h"
 #include "modserve.h"
 #include "map_shards.h"
+#include "map_carrier.h"
 #include "config_json.h"
 #include "backend_log.h"
 
@@ -455,56 +456,46 @@ done:
 
 char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_length)
 {
-    size_t keep, i, kc, nc;
+    size_t i, c;
+    mm_text t = {0};
+    char number[32];
+    const char *p;
     if (out_length) *out_length = 0;
     if (!row) return NULL;
-    nc = mm_choice_count(row->choices);
-    /* Drop names from the end until the row fits its budget, then choices. */
-    for (kc = nc + 1; kc-- > 0;)
-    for (keep = row->name_count + 1; keep-- > 0;) {
-        mm_text t = {0};
-        char number[32];
-        mm_put(&t, "{\"id\":", 6);
-        mm_put_quoted(&t, row->id);
-        mm_put(&t, ",\"version\":", 11);
-        mm_put_quoted(&t, row->version);
-        mm_put(&t, ",\"bundle\":", 10);
-        mm_put_quoted(&t, row->bundle);
-        _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
-        mm_put(&t, number, strlen(number));
-        if (row->attached) mm_put(&t, ",\"attached\":true", 16);
-        if (kc) {
-            const char *p = row->choices;
-            size_t c;
-            mm_put(&t, ",\"choices\":{", 12);
-            for (c = 0; c < kc && p && *p; c++) {
-                const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
-                char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
-                if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
-                memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
-                memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
-                if (c) mm_put(&t, ",", 1);
-                mm_put_quoted(&t, slot);
-                mm_put(&t, ":", 1);
-                mm_put_quoted(&t, key);
-                p = nl + 1;
-            }
-            mm_put(&t, "}", 1);
+    mm_put(&t, "{\"id\":", 6);
+    mm_put_quoted(&t, row->id);
+    mm_put(&t, ",\"version\":", 11);
+    mm_put_quoted(&t, row->version);
+    mm_put(&t, ",\"bundle\":", 10);
+    mm_put_quoted(&t, row->bundle);
+    _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
+    mm_put(&t, number, strlen(number));
+    if (row->attached) mm_put(&t, ",\"attached\":true", 16);
+    if (mm_choice_count(row->choices)) {
+        mm_put(&t, ",\"choices\":{", 12);
+        for (c = 0, p = row->choices; p && *p; c++) {
+            const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
+            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MODMANIFEST_ID_CAP];
+            if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
+            memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
+            memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
+            if (c) mm_put(&t, ",", 1);
+            mm_put_quoted(&t, slot);
+            mm_put(&t, ":", 1);
+            mm_put_quoted(&t, key);
+            p = nl + 1;
         }
-        mm_put(&t, ",\"names\":[", 10);
-        for (i = 0; i < keep; i++) {
-            if (i) mm_put(&t, ",", 1);
-            mm_put_quoted(&t, row->names[i]);
-        }
-        mm_put(&t, "]}", 2);
-        if (t.failed) { free(t.p); return NULL; }
-        if (t.n <= SH_MODMANIFEST_ROW_MAX) {
-            if (out_length) *out_length = t.n;
-            return t.p;
-        }
-        free(t.p);
+        mm_put(&t, "}", 1);
     }
-    return NULL;
+    mm_put(&t, ",\"names\":[", 10);
+    for (i = 0; i < row->name_count; i++) {
+        if (i) mm_put(&t, ",", 1);
+        mm_put_quoted(&t, row->names[i]);
+    }
+    mm_put(&t, "]}", 2);
+    if (t.failed) { free(t.p); return NULL; }
+    if (out_length) *out_length = t.n;
+    return t.p;
 }
 
 /* ==================================================================== */
@@ -534,6 +525,35 @@ static int mm_find_value(const char *after_header, const char *end, const char *
     return 1;
 }
 
+/* Add a parsed row to `out`, merging a bundle already there. */
+static int mm_merge_row(sh_modmanifest_list *out, sh_modmanifest_row *row)
+{
+    sh_modmanifest_row *existing = mm_list_find(out, row->bundle);
+    int ok = 1;
+    if (existing) {
+        size_t i;
+        if (row->attached) existing->attached = 1;
+        for (i = 0; i < row->name_count; i++) sh_modmanifest_row_add_name(existing, row->names[i]);
+    } else ok = sh_modmanifest_list_add(out, row);
+    sh_modmanifest_row_free(row);
+    return ok;
+}
+
+/* The member's "mods" array [from, to): one row object per element. */
+static size_t mm_read_member(const char *from, const char *to, sh_modmanifest_list *out, unsigned *bad)
+{
+    const char *cursor = from, *elem;
+    size_t elem_len, read = 0;
+    while (out->count < SH_MODMANIFEST_MAX_ROWS &&
+           sh_carrier_array_next(&cursor, to, &elem, &elem_len) == 1) {
+        sh_modmanifest_row row;
+        if (*elem != '{' || !sh_modmanifest_parse_value(elem, elem_len, &row, NULL, 0)) { (*bad)++; continue; }
+        if (!mm_merge_row(out, &row)) (*bad)++;
+        read++;
+    }
+    return read;
+}
+
 size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list *out,
                            unsigned *rejected)
 {
@@ -543,6 +563,15 @@ size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list 
     unsigned bad = 0;
     if (rejected) *rejected = 0;
     if (!json || !length || !out) return 0;
+    {
+        /* The map's member wins over any legacy row (map_carrier.h). */
+        size_t from = 0, to = 0;
+        if (sh_carrier_part(json, length, "mods", &from, &to) == 1) {
+            read = mm_read_member(json + from, json + to, out, &bad);
+            if (rejected) *rejected = bad;
+            return read;
+        }
+    }
     if (!sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return 0;
     while (out->count < SH_MODMANIFEST_MAX_ROWS &&
            sh_shard_next(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN, &pos,
@@ -551,7 +580,6 @@ size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list 
         size_t lit_len;
         char *value;
         sh_modmanifest_row row;
-        sh_modmanifest_row *existing;
         if (!sh_modmanifest_header(hdr, hdr_len, NULL, NULL)) continue;
         if (!mm_find_value(hdr + hdr_len + 1, json + length, &lit, &lit_len)) { bad++; continue; }
         value = mm_decode(lit, lit_len);
@@ -560,16 +588,7 @@ size_t sh_modmanifest_read(const char *json, size_t length, sh_modmanifest_list 
             free(value); bad++; continue;
         }
         free(value);
-        existing = mm_list_find(out, row.bundle);
-        if (existing) {
-            size_t i;
-            if (row.attached) existing->attached = 1;
-            for (i = 0; i < row.name_count; i++) sh_modmanifest_row_add_name(existing, row.names[i]);
-            sh_modmanifest_row_free(&row);
-        } else {
-            if (!sh_modmanifest_list_add(out, &row)) bad++;
-            sh_modmanifest_row_free(&row);
-        }
+        if (!mm_merge_row(out, &row)) bad++;
         read++;
     }
     if (rejected) *rejected = bad;
@@ -611,50 +630,52 @@ char *sh_modmanifest_write(const char *json, size_t length, const sh_modmanifest
     const char *src;
     size_t src_len = 0, i, count = rows ? rows->count : 0, w = 0;
     int failed = 0;
-    sh_shard_out *parts = NULL;
-    char *headers = NULL, **values = NULL;
+    mm_text value = {0};
     if (out_length) *out_length = 0;
     if (err && err_cap) err[0] = 0;
     if (!json || !length) { MM_ERR("no map text"); return NULL; }
 
+    /* Legacy rows never survive a write: the member carries the rows. */
     base = sh_modmanifest_strip(json, length, &src_len, NULL, &failed);
     if (failed) { MM_ERR("the map's existing manifest rows could not be removed"); return NULL; }
     src = base ? base : json;
     if (!base) src_len = length;
-    if (count == 0) {
-        if (!base) MM_ERR("nothing to write");
-        if (out_length && base) *out_length = src_len;
-        return base;
-    }
     if (count > SH_MODMANIFEST_MAX_ROWS) { MM_ERR("too many manifest rows"); goto done; }
-
-    parts = (sh_shard_out *)calloc(count, sizeof *parts);
-    headers = (char *)calloc(count, 32);
-    values = (char **)calloc(count, sizeof *values);
-    if (!parts || !headers || !values) { MM_ERR("out of memory building the manifest"); goto done; }
-    for (i = 0; i < count; i++) {
-        size_t vlen = 0, elen;
-        char *value = sh_modmanifest_format_value(&rows->rows[i], &vlen);
-        if (!value) { MM_ERR("manifest row for '%s' could not be formatted", rows->rows[i].id); goto done; }
-        elen = mm_escape(NULL, value, vlen);
-        values[i] = (char *)malloc(elen + 1);
-        if (!values[i]) { free(value); MM_ERR("out of memory building the manifest"); goto done; }
-        mm_escape(values[i], value, vlen);
-        values[i][elen] = 0;
-        free(value);
-        _snprintf_s(headers + i * 32, 32, _TRUNCATE, "%s%u.%u", SH_MODMANIFEST_MAGIC,
-                    (unsigned)i, (unsigned)count);
-        parts[i].header = headers + i * 32;
-        parts[i].chunk = values[i];
-        parts[i].chunk_len = elen;
+    if (count) {
+        mm_put(&value, "[", 1);
+        for (i = 0; i < count; i++) {
+            size_t vlen = 0;
+            char *row = sh_modmanifest_format_value(&rows->rows[i], &vlen);
+            if (!row) { MM_ERR("manifest row for '%s' could not be formatted", rows->rows[i].id); goto done; }
+            if (i) mm_put(&value, ",", 1);
+            mm_put(&value, row, vlen);
+            free(row);
+        }
+        mm_put(&value, "]", 1);
+        if (value.failed) { MM_ERR("out of memory building the manifest"); goto done; }
     }
-    out = sh_shard_insert(src, src_len, parts, count, &w, err, err_cap);
-    if (out && out_length) *out_length = w;
+    out = sh_carrier_put(src, src_len, "mods", count ? value.p : NULL, value.n, &w, err, err_cap);
+    if (out) {
+        if (out_length) *out_length = w;
+    } else if (err && err_cap && err[0]) {
+        /* failed; err says why */
+    } else if (base) {
+        /* The member already carried exactly these rows; the legacy rows went. */
+        out = base;
+        base = NULL;
+        if (out_length) *out_length = src_len;
+    } else if (count) {
+        /* Already exactly this: a copy, so a caller always gets the text it asked for. */
+        out = (char *)HeapAlloc(GetProcessHeap(), 0, src_len + 1);
+        if (!out) MM_ERR("out of memory building the manifest");
+        else {
+            memcpy(out, src, src_len);
+            out[src_len] = 0;
+            if (out_length) *out_length = src_len;
+        }
+    } else MM_ERR("nothing to write");
 done:
-    if (values) for (i = 0; i < count; i++) free(values[i]);
-    free(values);
-    free(headers);
-    free(parts);
+    free(value.p);
     if (base) HeapFree(GetProcessHeap(), 0, base);
     return out;
 }
@@ -1413,6 +1434,14 @@ static char *mm_product_strip(const char *json, size_t length, size_t *out_lengt
 
 static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length);
 
+/* 1 when the text carries rows: the member's "mods" part or a legacy row. */
+static int mm_carries_rows(const char *json, size_t length)
+{
+    if (!json || !length) return 0;
+    if (sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return 1;
+    return sh_carrier_part(json, length, "mods", NULL, NULL) == 1;
+}
+
 /* The open map's state that the last load replaced: its rows, registry
  * choices and substitutions. A launch the gate refuses
  * (sh_modmanifest_current_restore_previous) puts it back, so the editor's
@@ -1484,14 +1513,13 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
 {
     sh_modmanifest_list list = {0};
     unsigned rejected = 0, removed = 0;
-    int doc_failed = 0, active;
+    int doc_failed = 0, active, from_member;
     size_t stripped_len = 0;
     char *stripped = NULL;
     char line[512], names[320];
 
     if (out_length) *out_length = 0;
-    if (!json || !length ||
-        !sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) {
+    if (!mm_carries_rows(json, length)) {
         mm_set_current(NULL);
         mm_subst_load(NULL);
         mm_choices_load(NULL);
@@ -1499,6 +1527,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         (void)mm_activate_load(NULL);
         return NULL;
     }
+    from_member = sh_carrier_part(json, length, "mods", NULL, NULL) == 1;
     sh_modmanifest_read(json, length, &list, &rejected);
     stripped = sh_modmanifest_strip(json, length, &stripped_len, &removed, &doc_failed);
 
@@ -1518,8 +1547,9 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         else if (!active) strcpy_s(what, sizeof what, "no new decls to register");
         else _snprintf_s(what, sizeof what, _TRUNCATE, "%d registration step(s) ready", active);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "MODS: map manifest names %zu bundle(s)%s%s; %u row(s) removed before parse; %s",
-            list.count, list.count ? ": " : "", names, removed, what);
+            "MODS: map manifest names %zu bundle(s)%s%s; %s; %u legacy row(s) removed before parse; %s",
+            list.count, list.count ? ": " : "", names,
+            from_member ? "from the snapmap-plus member" : "from legacy smpmod1 rows", removed, what);
     }
     backend_log(line);
     if (rejected) {
@@ -1639,7 +1669,7 @@ static char *mm_save_rows(const char *json, size_t length, size_t *out_length)
     if (out_length) *out_length = 0;
     if (!json || !length) return NULL;
     memset(&ctx, 0, sizeof ctx);
-    stale = sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN) != NULL;
+    stale = mm_carries_rows(json, length);
     /* No installed bundle serves anything, the map carries no rows and no
      * map-level mod: the save is the engine's own bytes, without walking the
      * map. */
@@ -1677,7 +1707,7 @@ static char *mm_save_rows(const char *json, size_t length, size_t *out_length)
     mm_describe(&ctx.list, described, sizeof described);
     if (out) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "MODS: save manifest wrote %zu bundle row(s)%s%s%s; %zu -> %zu bytes",
+            "MODS: save manifest wrote %zu bundle row(s) into the snapmap-plus member%s%s%s; %zu -> %zu bytes",
             ctx.list.count, ctx.list.count ? ": " : "", described,
             stale ? " (stale rows replaced)" : "", length, written);
         if (out_length) *out_length = written;

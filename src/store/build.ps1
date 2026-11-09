@@ -10,7 +10,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c",
              "../backend/modstore.c", "../backend/modmigrate.c", "../backend/modlegacy.c", "../backend/modbundle.c", "../backend/companion.c",
              "../backend/modstock.c", "../backend/modmanifest.c", "../backend/map_legacy_payload.c",
-             "../backend/map_shards.c", "../backend/raw_deflate.c", "../backend/mp_json.c",
+             "../backend/map_shards.c", "../backend/map_carrier.c", "../backend/raw_deflate.c", "../backend/mp_json.c",
              "../backend/config_json.c", "../backend/decl_text.c", "../backend/decl_tree.c")
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"

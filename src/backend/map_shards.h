@@ -1,5 +1,7 @@
-/* Shared envelope for map-level navigation (smnav1) payloads, and the retired
- * package (smpkg) payloads that map_legacy_payload removes. Each variables.string entry carries a family header in info.name
+/* Shared envelope of the legacy string-variable carriers: navigation (smnav1)
+ * and settings rows a load still reads and removes, and the retired package
+ * (smpkg) payloads that map_legacy_payload removes. Nothing writes a variable
+ * row any more; the map's "snapmap-plus" member (map_carrier.h) carries it. Each variables.string entry carries a family header in info.name
  * and base64 in initialValue.
  *
  * This module provides digesting, base64, bounded scanning, container walks

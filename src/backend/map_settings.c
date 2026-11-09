@@ -5,6 +5,7 @@
 #include <string.h>
 #include "map_settings.h"
 #include "map_shards.h"
+#include "map_carrier.h"
 
 void backend_log(const char *message);
 
@@ -228,6 +229,38 @@ static char *ms_rebuild(const char *json, size_t len, const ms_list *l, const un
     return out;
 }
 
+/* The member's "settings" part (map_carrier.h): 1 with `s` holding it (an
+ * absent key is that setting off), 0 when the map has no such part. A value
+ * that does not read is off and counted in *refused. */
+static int ms_member(const char *json, size_t len, sh_map_settings *s, unsigned *refused)
+{
+    static const char *const keys[2] = {"render", "bounds"};
+    size_t from = 0, to = 0;
+    int i;
+    sh_map_settings_default(s);
+    if (sh_carrier_part(json, len, "settings", &from, &to) != 1) return 0;
+    for (i = 0; i < 2; i++) {
+        const char *body = NULL;
+        size_t n = 0;
+        char text[MS_VALUE_MAX + 1];
+        int got = sh_carrier_object_string(json + from, json + to, keys[i], &body, &n);
+        if (got == 0) continue;
+        if (got < 0 || n == 0 || n > MS_VALUE_MAX || memchr(body, '\\', n)) { (*refused)++; continue; }
+        memcpy(text, body, n);
+        text[n] = 0;
+        if (i == MS_RENDER) {
+            sh_map_render r;
+            if (sh_map_render_decode(text, &r) && sh_map_render_valid(&r)) s->render = r;
+            else (*refused)++;
+        } else {
+            sh_map_bounds b;
+            if (sh_map_bounds_decode(text, &b) && sh_map_bounds_valid(&b)) s->bounds = b;
+            else (*refused)++;
+        }
+    }
+    return 1;
+}
+
 static int ms_mentions(const char *json, size_t len)
 {
     return sh_shard_find(json, len, SH_RENDER_VARIABLE, strlen(SH_RENDER_VARIABLE)) ||
@@ -242,13 +275,16 @@ char *sh_map_settings_take(const char *json, size_t len, sh_map_settings *out, s
     ms_list l;
     unsigned char *drop = NULL;
     const char **value = NULL;
-    unsigned count[2] = {0, 0}, good[2] = {0, 0};
+    unsigned count[2] = {0, 0}, good[2] = {0, 0}, member_refused = 0;
+    sh_map_settings member;
     size_t k;
     char *result = NULL;
     memset(&r, 0, sizeof r);
     sh_map_settings_default(&s);
     if (out_len) *out_len = 0;
-    if (!json || !len || !ms_mentions(json, len)) goto done;
+    if (!json || !len) goto done;
+    r.member = ms_member(json, len, &member, &member_refused);
+    if (!ms_mentions(json, len)) goto done;
     if (!ms_list_read(json, len, &l)) { r.failed = 1; goto done; }
     if (l.n) {
         drop = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, l.n);
@@ -282,6 +318,11 @@ free_list:
     if (value) HeapFree(GetProcessHeap(), 0, (void *)value);
     ms_list_free(&l);
 done:
+    if (r.member) {
+        /* The member is what the newer build wrote; legacy rows are only removed. */
+        s = member;
+        r.refused = member_refused;
+    }
     if (out) *out = s;
     if (report) *report = r;
     return result;
@@ -300,26 +341,30 @@ char *sh_map_settings_put(const char *json, size_t len, const sh_map_settings *s
 {
     static const char *const off_text[2] = {"4;8192", "1;0"};
     sh_map_settings_report r;
-    char text[2][MS_VALUE_MAX + 1];
+    char text[2][MS_VALUE_MAX + 1], value[2 * MS_VALUE_MAX + 48], err[160];
     const char *want[2];
-    int placed[2] = {0, 0}, i;
+    int i;
     char *body = NULL, *result = NULL;
-    size_t body_len = len, k;
+    size_t body_len = len, k, vn = 0, put_len = 0;
     memset(&r, 0, sizeof r);
     if (out_len) *out_len = 0;
     if (!json || !len || !settings) { r.failed = 1; goto done; }
-    for (i = 0; i < 2; i++) want[i] = ms_text(i, settings, text[i], sizeof text[i]);
+    for (i = 0; i < 2; i++) {
+        want[i] = ms_text(i, settings, text[i], sizeof text[i]);
+        /* The encodings are digits and separators; anything else is not written. */
+        if (want[i] && (strchr(want[i], '"') || strchr(want[i], '\\'))) want[i] = NULL;
+    }
     if (ms_mentions(json, len)) {
         ms_list l;
         unsigned char *drop;
-        const char **value;
+        const char **rewrite;
         int changed = 0;
         if (!ms_list_read(json, len, &l)) { r.failed = 1; goto done; }
         drop = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, l.n ? l.n : 1);
-        value = (const char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (l.n ? l.n : 1) * sizeof *value);
-        if (!drop || !value) {
+        rewrite = (const char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (l.n ? l.n : 1) * sizeof *rewrite);
+        if (!drop || !rewrite) {
             if (drop) HeapFree(GetProcessHeap(), 0, drop);
-            if (value) HeapFree(GetProcessHeap(), 0, (void *)value);
+            if (rewrite) HeapFree(GetProcessHeap(), 0, (void *)rewrite);
             ms_list_free(&l);
             r.failed = 1;
             goto done;
@@ -331,53 +376,48 @@ char *sh_map_settings_put(const char *json, size_t len, const sh_map_settings *s
             if (which != MS_RENDER && which != MS_BOUNDS) continue;
             r.found++;
             if (ms_removable(&l, k)) { drop[k] = 1; r.removed++; changed = 1; continue; }
-            /* An author's variable follows: the row keeps its index. */
+            /* An author's variable follows: the row keeps its index and reads
+             * as off; the member carries the setting. */
             r.kept++;
-            placed[which] = 1;
-            t = want[which] ? want[which] : off_text[which];
+            t = off_text[which];
             n = l.e[k].vto - l.e[k].vfrom;
-            if (l.e[k].vto && n == strlen(t) && !memcmp(json + l.e[k].vfrom, t, n)) continue;
-            if (!l.e[k].vto) continue;    /* no initialValue to rewrite; left as it is */
-            value[k] = t;
-            r.written++;
+            if (!l.e[k].vto || (n == strlen(t) && !memcmp(json + l.e[k].vfrom, t, n))) continue;
+            rewrite[k] = t;
             changed = 1;
         }
         if (changed) {
-            body = ms_rebuild(json, len, &l, drop, value, &body_len);
+            body = ms_rebuild(json, len, &l, drop, rewrite, &body_len);
             if (!body) r.failed = 1;
         }
         HeapFree(GetProcessHeap(), 0, drop);
-        HeapFree(GetProcessHeap(), 0, (void *)value);
+        HeapFree(GetProcessHeap(), 0, (void *)rewrite);
         ms_list_free(&l);
         if (r.failed) goto done;
     }
-    {
-        sh_shard_out rows[2];
-        size_t n = 0;
-        char err[160];
-        for (i = 0; i < 2; i++) if (want[i] && !placed[i]) {
-            rows[n].header = ms_names[i];
-            rows[n].chunk = want[i];
-            rows[n].chunk_len = strlen(want[i]);
-            n++;
-        }
-        if (n) {
-            result = sh_shard_insert(body ? body : json, body ? body_len : len, rows, n, out_len, err, sizeof err);
-            if (!result) { r.failed = 1; goto done; }
-            r.written += (unsigned)n;
-            if (body) HeapFree(GetProcessHeap(), 0, body);
-            body = NULL;
-        } else if (body) {
-            result = body;
-            body = NULL;
-            if (out_len) *out_len = body_len;
-        }
+    if (want[0] || want[1]) {
+        vn = (size_t)_snprintf_s(value, sizeof value, _TRUNCATE, "{%s%s%s%s%s%s%s}",
+                                 want[0] ? "\"render\":\"" : "", want[0] ? want[0] : "", want[0] ? "\"" : "",
+                                 want[0] && want[1] ? "," : "",
+                                 want[1] ? "\"bounds\":\"" : "", want[1] ? want[1] : "", want[1] ? "\"" : "");
+        r.written = (want[0] ? 1u : 0u) + (want[1] ? 1u : 0u);
+    }
+    result = sh_carrier_put(body ? body : json, body ? body_len : len, "settings", vn ? value : NULL, vn,
+                            &put_len, err, sizeof err);
+    if (result) {
+        if (out_len) *out_len = put_len;
+    } else if (err[0]) {
+        r.failed = 1;
+    } else if (body) {
+        result = body;
+        body = NULL;
+        if (out_len) *out_len = body_len;
     }
 done:
     if (body) HeapFree(GetProcessHeap(), 0, body);
     if (r.failed && out_len) *out_len = 0;
     if (report) *report = r;
-    return r.failed ? NULL : result;
+    if (r.failed && result) { HeapFree(GetProcessHeap(), 0, result); result = NULL; }
+    return result;
 }
 
 /* ------------------------------------------------------------ the open map */
@@ -404,12 +444,12 @@ char *sh_map_settings_prepare_load(const char *json, size_t len, size_t *out_len
     AcquireSRWLockExclusive(&g_lock);
     g_pending = s;
     ReleaseSRWLockExclusive(&g_lock);
-    if (r.found || r.failed) {
+    if (r.found || r.failed || r.member) {
         ms_describe(&s, what, sizeof what);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "SETTINGS: map read: %s; %u settings row(s), %u removed before parse, %u kept in place "
+            "SETTINGS: map read: %s%s; %u legacy settings row(s), %u removed before parse, %u kept in place "
             "(an author variable follows), %u unreadable%s",
-            what, r.found, r.removed, r.kept, r.refused,
+            what, r.member ? " (from the snapmap-plus member)" : "", r.found, r.removed, r.kept, r.refused,
             r.failed ? "; the map text did not read, its rows stay as string variables" : "");
         backend_log(line);
     }
@@ -479,9 +519,10 @@ char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
     if (r.found || r.written || r.failed) {
         ms_describe(&s, what, sizeof what);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "SETTINGS: map saved: %s; %u row(s) written, %u stale row(s) removed, %u kept in place%s",
+            "SETTINGS: map saved: %s; %u setting(s) in the snapmap-plus member, %u legacy row(s) removed, "
+            "%u kept in place as off%s",
             what, r.written, r.removed, r.kept,
-            r.failed ? "; FAILED: the saved text did not read, it carries the rows it had" : "");
+            r.failed ? "; FAILED: the saved text did not read, it carries what it had" : "");
         backend_log(line);
     }
     return out;

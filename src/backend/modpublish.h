@@ -5,7 +5,8 @@
  * engine sends anything, and claims them under the published item:
  *
  *   save          the SerializeToJson detour (rawmap.c) reports the final
- *                 saved text: its length and its smpmod1 rows
+ *                 saved text: its length, its manifest rows and whether it
+ *                 carries the snapmap-plus member
  *   PublishAfterSave  (the Save state's callback, before the first request)
  *                 no rows: the engine continues unchanged. Rows: a text over
  *                 the service bound (10,485,760 bytes) is refused through

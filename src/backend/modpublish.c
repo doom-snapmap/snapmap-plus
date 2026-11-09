@@ -51,6 +51,7 @@
 #include "modstore.h"
 #include "mp_json.h"
 #include "map_shards.h"
+#include "map_carrier.h"
 #include "config.h"
 
 #define MP_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: the Yes/No shape modpublished.c uses */
@@ -144,6 +145,7 @@ typedef struct mp_save {
     size_t count;                              /* distinct bundles named */
     char (*hashes)[SH_MODMANIFEST_HASH_CAP];
     unsigned long long bytes;                  /* their sizes, summed */
+    int carrier;                               /* the text carries the snapmap-plus member */
 } mp_save;
 
 static mp_save g_save;
@@ -167,7 +169,16 @@ void sh_modpublish_save_seen(const char *text, size_t length)
     g_save.length = length;
     g_save.at = GetTickCount64();
     g_save.valid = 1;
-    if (!text || !length ||
+    if (!text || !length) return;
+    {
+        sh_carrier_view view;
+        __try {
+            g_save.carrier = sh_carrier_view_read(text, length, &view) && view.state != SH_CARRIER_ABSENT;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_save.carrier = 0;
+        }
+    }
+    if (!g_save.carrier &&
         !sh_shard_find(text, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN)) return;
     memset(&rows, 0, sizeof rows);
     __try {
@@ -628,12 +639,11 @@ int sh_modpublish_after_save(void *editor)
         mp_log("MODS: publish: the saved text was not seen; the publish continues without the mod check");
         return 1;
     }
-    if (!g_save.count) {
-        g_ctx.kind = CTX_NO_ROWS;
-        return 1;
-    }
-    memset(&g_ctx, 0, sizeof g_ctx);   /* a held publish builds its context at the resume */
-    if (g_save.length > SH_MODPUBLISH_TEXT_BOUND) {
+    /* The bound counts the whole saved text, the snapmap-plus member included:
+     * a map that carries the member or names mods is refused before anything
+     * is sent. A map without either is the engine's own text and the engine's
+     * own check. */
+    if (g_save.length > SH_MODPUBLISH_TEXT_BOUND && (g_save.count || g_save.carrier)) {
         sh_modpublish_size_text(size, sizeof size, g_save.length);
         sh_modpublish_size_text(over, sizeof over, g_save.length - SH_MODPUBLISH_TEXT_BOUND);
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -642,8 +652,14 @@ int sh_modpublish_after_save(void *editor)
                 SH_MODPUBLISH_TEXT_BOUND);
         if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
         mp_editor_notice(editor, line);
+        memset(&g_ctx, 0, sizeof g_ctx);
         return 0;
     }
+    if (!g_save.count) {
+        g_ctx.kind = CTX_NO_ROWS;
+        return 1;
+    }
+    memset(&g_ctx, 0, sizeof g_ctx);   /* a held publish builds its context at the resume */
     memset(h, 0, sizeof(*h));
     h->hashes = calloc(g_save.count, sizeof(*h->hashes));
     if (!h->hashes) {
