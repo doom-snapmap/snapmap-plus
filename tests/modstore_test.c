@@ -136,6 +136,271 @@ static void make_small_mod(const char *dir, const char *id)
     mt_write(dir, rel, text);
 }
 
+/* ------------------------------------------------------------ first-build keys */
+
+#define FB_BASE "assets\\generated\\decls\\entitydef\\mods\\%s\\probe_base.decl"
+#define FB_ROW  "assets\\generated\\decls\\entitydef\\mods\\%s\\probe.decl"
+
+/* A hand-made folder named `leaf`: two decls under mods/<leaf>/, one
+ * inheriting the other, and a mod.json of name, version and description
+ * with a string under the key. */
+static void fb_make(const char *dir, const char *leaf)
+{
+    char rel[MAX_PATH], text[600];
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\r\n  \"name\": \"Cyber probe\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"A probe.\",\r\n"
+                "  \"strings\": { \"en\": { \"mods/%s/probe_name\": \"Probe\" } }\r\n}\r\n", leaf);
+    mt_write(dir, "mod.json", text);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, leaf);
+    mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, leaf);
+    _snprintf_s(text, sizeof text, _TRUNCATE, "{\r\n\tinherit = \"mods/%s/probe_base\";\r\n}", leaf);
+    mt_write(dir, rel, text);
+}
+
+/* The one folder of `parent` whose name starts with `prefix`, else "". */
+static int fb_find(const char *parent, const char *prefix, char *out, size_t cap)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2];
+    HANDLE h;
+    int n = 0;
+    out[0] = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\%s*", parent, prefix);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!n) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", parent, fd.cFileName);
+        n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* Every entry of `parent` (files and folders, names only) as one line. */
+static void fb_names(const char *parent, char *out, size_t cap)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2];
+    HANDLE h;
+    size_t w = 0;
+    out[0] = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", parent);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        w += (size_t)_snprintf_s(out + w, cap - w, _TRUNCATE, "%s;", fd.cFileName);
+    } while (FindNextFileA(h, &fd) && w < cap);
+    FindClose(h);
+}
+
+static void test_first_build(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH], got[MAX_PATH * 2], got2[MAX_PATH * 2], rel[MAX_PATH], from[300], cause[600];
+    char key[SH_MS_NAME_MAX + 1], before[2048], after[2048];
+    const char *leaf;
+    sh_ms_sync_stats ss;
+    sh_ms_install_stats st;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    unsigned refs = 0;
+    char *t;
+    size_t n1 = 0, n2 = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\firstkey\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+
+    /* A hand-made folder: renamed to a generated key at its first build, its
+     * references rewritten once, the key and origin in its product block. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\cyberprobe", root);
+    fb_make(dir, "cyberprobe");
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    if (ss.failed) fprintf(stderr, "  first build: %s\n", g_log[(g_logged - 1) % 64]);
+    CHECK(!mt_exists(dir));
+    CHECK(fb_find(root, "cyberprobe_", got, sizeof got) == 1);
+    leaf = strrchr(got, '\\') ? strrchr(got, '\\') + 1 : got;
+    CHECK(strlen(leaf) == 15 && !strchr(leaf, '-'));
+    CHECK(log_has("MODS: store: cyberprobe renamed to cyberprobe_") && log_has("2 reference(s) rewritten in 2 file(s)"));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, leaf);
+    t = slurp(got, rel, NULL);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "inherit = \"mods/%s/probe_base\";", leaf);
+    CHECK(t && strstr(t, from));
+    free(t);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, leaf);
+    CHECK(mt_has(got, rel));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\cyberprobe");
+    CHECK(!mt_has(got, rel));
+    t = slurp(got, "mod.json", NULL);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "\"mods/%s/probe_name\": \"Probe\"", leaf);
+    CHECK(t && strstr(t, from) && strstr(t, "\"origin\": \"by-hand\"") && strstr(t, "\"description\": \"A probe.\""));
+    _snprintf_s(from, sizeof from, _TRUNCATE, "\"key\": \"%s\"", leaf);
+    CHECK(t && strstr(t, from) && !strstr(t, "\"id\""));
+    free(t);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, leaf);
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.id, leaf) && e->bundle.key_source == SH_MB_KEY_FROM_BLOCK &&
+          !e->bundle.origin[0] && e->bundle.build == 1);
+    sh_ms_list_free(&list);
+    CHECK(sh_ms_renamed_from(got, from, sizeof from, &refs) && !strcmp(from, "cyberprobe") && refs == 2);
+    /* Afterwards it is a folder like any other: nothing renamed again, the cache answers. */
+    CHECK(sh_ms_first_key(got, got2, sizeof got2, cause, sizeof cause) == 0 && !got2[0]);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+
+    /* A second hand-made "cyberprobe" gets its own salt; both serve. */
+    fb_make(dir, "cyberprobe");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(fb_find(root, "cyberprobe_", got2, sizeof got2) == 2 && !mt_exists(dir));
+    CHECK(sh_ms_enumerate(&list));
+    {
+        size_t i;
+        int usable = 0;
+        for (i = 0; i < list.count; i++)
+            if (!strncmp(list.items[i].name, "cyberprobe_", 11) && sh_ms_entry_usable(&list.items[i])) usable++;
+        CHECK(usable == 2);
+    }
+    sh_ms_list_free(&list);
+
+    /* Nested organizing folders: the leaf alone is renamed; a name that is
+     * already a generated key's shape gets a new salt. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\probe_ab12", root);
+    fb_make(dir, "probe_ab12");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\demon-mods", root);
+    CHECK(!mt_exists(dir) && fb_find(rel, "probe_", got2, sizeof got2) == 1 && !strstr(got2, "probe_ab12"));
+    CHECK(sh_ms_renamed_from(got2, from, sizeof from, &refs) && !strcmp(from, "probe_ab12") && refs == 2);
+
+    /* The cooked '_' spelling of a dashed folder name: raw paths and decl text. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\cyber-eye", root);
+    fb_make(dir, "cyber-eye");
+    mt_write(dir, "assets\\generated\\decls\\material2\\mods\\cyber-eye\\glow.decl",
+             "{\r\n\tstage { transmap mods/cyber_eye/glow_img }\r\n}");
+    mt_write(dir, "assets\\generated\\image\\mods\\cyber_eye\\glow_img.txt", "an image's stand-in, no reference");
+    t = NULL;
+    sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause);
+    CHECK(got2[0] && strstr(got2, "\\cyber_eye_") && !mt_exists(dir));
+    if (got2[0]) {
+        const char *l2 = strrchr(got2, '\\') + 1;
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\material2\\mods\\%s\\glow.decl", l2);
+        t = slurp(got2, rel, NULL);
+        _snprintf_s(from, sizeof from, _TRUNCATE, "transmap mods/%s/glow_img", l2);
+        CHECK(t && strstr(t, from));
+        free(t);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\glow_img.txt", l2);
+        CHECK(mt_has(got2, rel));
+        CHECK(sh_ms_renamed_from(got2, from, sizeof from, &refs) && refs == 3);
+        CHECK(sh_ms_remove_folder(got2));   /* its stand-in image would not build */
+    }
+
+    /* Refused: a binary file that names the folder. Nothing is touched, the
+     * cause is the folder's, and no staging folder is left. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\badprobe", root);
+    fb_make(dir, "badprobe");
+    {
+        static const char bin[] = "BIN\0\0\0mods/badprobe/skin\0\0";
+        char path[MAX_PATH * 2];
+        FILE *f;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\model\\mods\\badprobe\\probe.bmodel", dir);
+        mt_mkdirs_for(path);
+        if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bin, 1, sizeof bin - 1, f); fclose(f); }
+    }
+    t = slurp(dir, "mod.json", &n1);
+    fb_names(root, before, sizeof before);
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    CHECK(log_has("badprobe refused: ") && log_has("is a binary file that names mods/badprobe/"));
+    fb_names(root, after, sizeof after);
+    CHECK(!strcmp(before, after) && !strstr(after, ".staging-") && !strstr(after, ".old-"));
+    {
+        char *t2 = slurp(dir, "mod.json", &n2);
+        CHECK(t && t2 && n1 == n2 && !memcmp(t, t2, n1));
+        free(t2);
+    }
+    free(t);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "badprobe");
+    CHECK(mt_has(dir, rel));
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "badprobe");
+    CHECK(e && !e->loaded && strstr(e->cause, "binary file that names mods/badprobe/"));
+    sh_ms_list_free(&list);
+    CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == -1 && strstr(cause, "nothing was renamed"));
+    CHECK(sh_ms_remove_folder(dir));
+
+    /* Refused: Windows will not rename a folder with a file open in it. The
+     * folder stays whole; closing the file lets the next rescan do it. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\heldprobe", root);
+    fb_make(dir, "heldprobe");
+    {
+        char path[MAX_PATH * 2];
+        HANDLE h;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" FB_BASE, dir, "heldprobe");
+        h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        fb_names(root, before, sizeof before);
+        CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == -1 && strstr(cause, "Windows refused"));
+        fb_names(root, after, sizeof after);
+        CHECK(!strcmp(before, after) && mt_exists(dir));
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "heldprobe");
+        t = slurp(dir, rel, NULL);
+        CHECK(t && strstr(t, "\"mods/heldprobe/probe_base\""));
+        free(t);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && !mt_exists(dir) && fb_find(root, "heldprobe_", got2, sizeof got2) == 1);
+
+    /* Never renamed: a folder with an id, or with a key in its block. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\legacy-probe", root);
+    make_small_mod(dir, "alex.legacy-probe");
+    CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == 0 && !got2[0]);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\keyed", root);
+    mt_write(dir, "mod.json", "{\"name\":\"Keyed\",\"snapmap-plus\":{\"format\":1,\"key\":\"keyed_ab12\",\"origin\":\"by-hand\"}}");
+    mt_write(dir, "assets\\generated\\decls\\entitydef\\mods\\keyed_ab12\\k.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == 0);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\legacy-probe", root);
+    CHECK(mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\keyed", root);
+    CHECK(mt_exists(dir));
+    /* Outside the store nothing is renamed. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\firstkey\\elsewhere\\outprobe", tmp);
+    fb_make(dir, "outprobe");
+    CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == 0 && mt_exists(dir));
+
+    /* An install from elsewhere: copied in under a generated key with its
+     * references rewritten; the source is only read. */
+    t = slurp(dir, "mod.json", &n1);
+    CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    if (!key[0]) fprintf(stderr, "  install hand-made: %s\n", cause);
+    CHECK(!strncmp(key, "outprobe_", 9) && strlen(key) == 13 && !st.in_place && st.copied == 2);
+    {
+        char *t2 = slurp(dir, "mod.json", &n2);
+        CHECK(t && t2 && n1 == n2 && !memcmp(t, t2, n1));   /* the source is not written */
+        free(t2);
+    }
+    free(t);
+    _snprintf_s(got2, sizeof got2, _TRUNCATE, "%s\\%s", root, key);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, key);
+    t = slurp(got2, rel, NULL);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "\"mods/%s/probe_base\"", key);
+    CHECK(t && strstr(t, from));
+    free(t);
+    t = slurp(got2, "mod.json", NULL);
+    CHECK(t && strstr(t, "\"origin\": \"install\""));
+    free(t);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, key);
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.origin, "install"));
+    sh_ms_list_free(&list);
+    /* An uninstalled folder's record is pruned at the next rescan. */
+    CHECK(sh_ms_remove_folder(got));
+    CHECK(sh_ms_sync(&RESOLVER, &ss));
+    CHECK(!sh_ms_renamed_from(got, from, sizeof from, &refs));
+    t = slurp(root, "snapmap-plus.json", NULL);
+    CHECK(t && strstr(t, "\"renamed\"") && !strstr(t, leaf));
+    free(t);
+}
+
 /* ------------------------------------------------------------ aliases */
 
 static const char *alias_of(const sh_ms_list *l, const char *from)
@@ -1200,9 +1465,11 @@ int main(int argc, char **argv)
         mt_write(never, "mod.json", "{\"name\":\"Never\"}");
         mt_write(never, "assets\\generated\\decls\\entitydef\\other\\y.decl", "{\r\n}");
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+        /* Its first build gave it a generated key (never_built_xxxx) before refusing its files. */
+        CHECK(!mt_exists(never) && fb_find(root, "never_built_", never, sizeof never) == 1);
         CHECK(sh_ms_enumerate(&list));
-        e = find_entry(&list, "never-built");
-        CHECK(e && !e->loaded && !sh_ms_entry_usable(e) && strstr(e->cause, "outside mods/never-built/"));
+        e = find_entry(&list, strrchr(never, '\\') + 1);
+        CHECK(e && !e->loaded && !sh_ms_entry_usable(e) && strstr(e->cause, "outside mods/never_built_"));
         sh_ms_list_free(&list);
         CHECK(sh_ms_remove_folder(never));
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
@@ -1241,7 +1508,7 @@ int main(int argc, char **argv)
         unsigned char *text;
         CHECK(sh_ms_new_mod("Hell \"Guards\"", nk, nf, sizeof nf, cause, sizeof cause));
         if (!nk[0]) fprintf(stderr, "  new mod: %s\n", cause);
-        CHECK(!strncmp(nk, "hell-guards-", 12) && strlen(nk) == 16);
+        CHECK(!strncmp(nk, "hell_guards_", 12) && strlen(nk) == 16);
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\%s", nk);
         CHECK(mt_has(nf, "mod.json") && mt_has(nf, rel));
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\mod.json", nf);
@@ -1347,6 +1614,7 @@ int main(int argc, char **argv)
     test_bin_sweep(tmp);
     test_recycle(tmp);
     test_nested(tmp);
+    test_first_build(tmp);
 
     test_upgrade(fixture, tmp);
     test_boot_sync(fixture, tmp);

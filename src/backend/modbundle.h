@@ -37,7 +37,8 @@
  * its text and hash. An author "stock" entry without a file under assets/
  * still builds a pointer ("inAssets": false) and is reported. The key is the
  * author "id" when present (deprecated), else the product block "key", else
- * the folder's own name; the canonical "id" is the key. "key", "classes",
+ * the folder's own name (a folder of the store never reaches that: its first
+ * build gives it a generated key, sh_ms_first_key); the canonical "id" is the key. "key", "classes",
  * "editor", "registries" and "edits" are derived facts outside the canonical text.
  * "origin" "by-hand" is "" in memory (a folder the author made). A grandfathered
  * bundle (a "legacy" record) keeps its declared shadows and every rule of
@@ -455,10 +456,49 @@ int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 /* ----------------------------------------------------------- helpers ---- */
 
 /* A key for a new mod named `name`: a slug of the name (lower-case letters
- * and digits, other runs as one '-', at most 59 characters, "mod" when
- * nothing is left) plus '-' and SH_MB_KEY_SUFFIX random characters of
- * [a-z0-9] ("hell-guards-7f3k"). Returns 1 with a valid id in out. */
+ * and digits, other runs as one '_', at most 59 characters, "mod" when
+ * nothing is left) plus '_' and SH_MB_KEY_SUFFIX random characters of
+ * [a-z0-9] ("hell_guards_7f3k"). Never '-': a bare decl word ends at '-', and
+ * '_' is the engine's cooked spelling, so the key reads the same in decl
+ * text and binary paths. Returns 1 with a valid id in out. */
 int  sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1]);
+
+/* Hand-made folders (DESIGN-additive 2.2, OWNER-QUESTIONS 6 (b)). The first
+ * build of a store folder whose descriptor has neither an author "id" nor a
+ * product-block "key" gives it a generated key, renames the folder to it and
+ * rewrites the author's own references once (sh_ms_first_key, modstore.c);
+ * these are the pure parts. */
+
+/* The key for a folder named `leaf`: sh_mb_key_generate of the leaf, after
+ * dropping a trailing salt when the leaf already has a generated key's shape
+ * ("probe_7f3k" or "probe-7f3k", the tail not all digits), so a copied key
+ * gets a new salt instead of a second one. */
+int  sh_mb_key_for_folder(const char *leaf, char out[SH_MB_ID_MAX + 1]);
+
+/* SH_MB_KEY_FROM_ID when the descriptor (mod.json, else package.json) has an
+ * author "id", SH_MB_KEY_FROM_BLOCK when its product block has a "key" (or
+ * the block is not an object, which the build refuses), 0 when it has
+ * neither, -1 when there is no readable JSON-object descriptor with a string
+ * "name" (a damaged descriptor is refused by the build, never renamed). */
+int  sh_mb_descriptor_key_state(const char *folder);
+
+/* Every reference to mods/<folder> in `text` (n bytes), as written or in the
+ * engine's cooked spelling (mb_binary_name), in any case, not inside a longer
+ * name, rewritten to mods/<key>. Returns the count; with `out`, the rewritten
+ * text (malloc'd, NUL-terminated, NULL when the count is 0) and its length;
+ * (size_t)-1 when out of memory. Without `out` it only counts. */
+size_t sh_mb_rekey_text(const char *text, size_t n, const char *folder, const char *key, char **out, size_t *out_len);
+
+/* `rel` ('/'-separated) with every folder segment right after a "mods"
+ * segment that is `folder` (as written or cooked, any case) replaced by
+ * `key`. 1 when changed, 0 when not, -1 when out is too small. */
+int  sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char *out, size_t cap);
+
+/* A mod.json text (or package.json) with its product block replaced by the
+ * one New mod writes: {"format": 1, "key": <key>, "origin": <origin, NULL
+ * for "by-hand">}. The author's bytes are kept exactly. malloc'd, or NULL
+ * when not a JSON object. */
+char *sh_mb_rekey_modjson(const char *text, size_t n, const char *key, const char *origin, size_t *out_len);
 
 /* "adds", "borrows", "replaces", "editor", "surfaces" for SH_MB_CLASS_*, else "". */
 const char *sh_mb_class_name(int cls);

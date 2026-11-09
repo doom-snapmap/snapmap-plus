@@ -1676,21 +1676,123 @@ static void test_keys(const char *fixture, const char *tmp)
     CHECK(!sh_mb_build(renamed, &RESOLVER, &b));
     CHECK_CAUSE(b, "\"snapmap-plus\".key must be");
     sh_mb_free(&b);
-    /* Generated keys: slug plus four random characters. */
-    CHECK(sh_mb_key_generate("Hell Guards!", key) && !strncmp(key, "hell-guards-", 12) && strlen(key) == 16);
+    /* Generated keys: slug plus four random characters, '_' throughout. */
+    CHECK(sh_mb_key_generate("Hell Guards!", key) && !strncmp(key, "hell_guards_", 12) && strlen(key) == 16);
     {
         size_t i;
         int ok = 1;
         for (i = 12; i < 16; i++) ok &= (key[i] >= 'a' && key[i] <= 'z') || (key[i] >= '0' && key[i] <= '9');
         CHECK(ok);
     }
-    CHECK(sh_mb_key_generate("  ***  ", key) && !strncmp(key, "mod-", 4) && strlen(key) == 8);
+    CHECK(sh_mb_key_generate("  ***  ", key) && !strncmp(key, "mod_", 4) && strlen(key) == 8);
+    CHECK(!strchr(key, '-'));
     {
         char longname[200], k2[SH_MB_ID_MAX + 1];
         memset(longname, 'a', 150);
         longname[150] = 0;
         CHECK(sh_mb_key_generate(longname, key) && strlen(key) == SH_MB_ID_MAX);
         CHECK(sh_mb_key_generate("Same Name", key) && sh_mb_key_generate("Same Name", k2));
+    }
+}
+
+/* A hand-made folder's first build (OWNER-QUESTIONS 6 (b)): the key for its
+ * name, the descriptor's key state, and the rewrite of its references. */
+static void test_first_build_keys(const char *tmp)
+{
+    char key[SH_MB_ID_MAX + 1], out[512], folder[MAX_PATH], *t = NULL;
+    size_t n = 0, c;
+    /* The key for a folder: its slug plus a salt; a generated key's shape
+     * gets a new salt in place of its own; an all-digit tail is a name. */
+    CHECK(sh_mb_key_for_folder("cyberprobe", key) && !strncmp(key, "cyberprobe_", 11) && strlen(key) == 15);
+    CHECK(sh_mb_key_for_folder("Cyber-Probe", key) && !strncmp(key, "cyber_probe_", 12) && strlen(key) == 16);
+    CHECK(sh_mb_key_for_folder("local.spider", key) && !strncmp(key, "local_spider_", 13) && strlen(key) == 17);
+    CHECK(sh_mb_key_for_folder("cyberprobe_ab12", key) && !strncmp(key, "cyberprobe_", 11) && strlen(key) == 15 &&
+          strcmp(key, "cyberprobe_ab12"));
+    CHECK(sh_mb_key_for_folder("hell-guards-7f3k", key) && !strncmp(key, "hell_guards_", 12) && strlen(key) == 16);
+    CHECK(sh_mb_key_for_folder("level_2016", key) && !strncmp(key, "level_2016_", 11) && strlen(key) == 15);
+    CHECK(sh_mb_key_for_folder("My Probe!", key) && !strncmp(key, "my_probe_", 9));
+    {
+        /* Within the Worker's id grammar: 1-64 of [a-z0-9._-], first alnum. */
+        char longname[200];
+        size_t i;
+        int ok;
+        memset(longname, 'q', 150);
+        longname[150] = 0;
+        CHECK(sh_mb_key_for_folder(longname, key) && strlen(key) == SH_MB_ID_MAX);
+        ok = (key[0] >= 'a' && key[0] <= 'z') || (key[0] >= '0' && key[0] <= '9');
+        for (i = 0; key[i]; i++) ok &= (key[i] >= 'a' && key[i] <= 'z') || (key[i] >= '0' && key[i] <= '9') || key[i] == '_';
+        CHECK(ok);
+    }
+
+    /* Decl text: inherit, model, material, image and sound references, the
+     * cooked spelling, any case; nothing inside a longer name. */
+    {
+        static const char decl[] =
+            "entityDef mods/cyber-probe/probe {\n"
+            "\tinherit = \"mods/cyber-probe/base\";\n"
+            "\tmodel = \"mods/cyber_probe/models/probe.lwo\";\n"
+            "\tmaterial = \"MODS/Cyber-Probe/skin\";\n"
+            "\ttransmap generated/image/mods/cyber_probe/fx/glow\n"
+            "\tsnd_idle = \"mods/cyber-probe/sounds/hum\";\n"
+            "\tother = \"mods/cyber-probe2/x\"; again = \"xmods/cyber-probe/y\"; stock = \"mods/cyber-probes/z\";\n"
+            "\tbare = \"mods/cyber-probe\";\n"
+            "}\n";
+        c = sh_mb_rekey_text(decl, sizeof decl - 1, "cyber-probe", "cyber_probe_k3j9", &t, &n);
+        CHECK(c == 7 && t && n == strlen(t));
+        CHECK(t && strstr(t, "entityDef mods/cyber_probe_k3j9/probe {") && strstr(t, "\"mods/cyber_probe_k3j9/base\"") &&
+              strstr(t, "\"mods/cyber_probe_k3j9/models/probe.lwo\"") && strstr(t, "\"MODS/cyber_probe_k3j9/skin\"") &&
+              strstr(t, "generated/image/mods/cyber_probe_k3j9/fx/glow") && strstr(t, "\"mods/cyber_probe_k3j9/sounds/hum\"") &&
+              strstr(t, "\"mods/cyber_probe_k3j9\""));
+        CHECK(t && strstr(t, "\"mods/cyber-probe2/x\"") && strstr(t, "\"xmods/cyber-probe/y\"") && strstr(t, "\"mods/cyber-probes/z\""));
+        free(t);
+        t = NULL;
+        /* Counting only, and nothing to do. */
+        CHECK(sh_mb_rekey_text(decl, sizeof decl - 1, "cyber-probe", "k", NULL, NULL) == 7);
+        CHECK(sh_mb_rekey_text("{ inherit = \"mods/other/x\"; }", 29, "cyber-probe", "k", &t, &n) == 0 && !t && !n);
+    }
+    /* Paths: a folder segment right after "mods", written or cooked; never the leaf. */
+    CHECK(sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe/probe.decl", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 &&
+          !strcmp(out, "generated/decls/entitydef/mods/cp_k3j9/probe.decl"));
+    CHECK(sh_mb_rekey_path("generated/image/mods/cyber_probe/fx/glow.bimage", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 &&
+          !strcmp(out, "generated/image/mods/cp_k3j9/fx/glow.bimage"));
+    CHECK(sh_mb_rekey_path("mods/Cyber-Probe/", "cyber-probe", "cp_k3j9", out, sizeof out) == 1 && !strcmp(out, "mods/cp_k3j9/"));
+    CHECK(sh_mb_rekey_path("generated/decls/entitydef/mods/cyber-probe", "cyber-probe", "cp_k3j9", out, sizeof out) == 0);
+    CHECK(sh_mb_rekey_path("generated/decls/entitydef/cyber-probe/x.decl", "cyber-probe", "cp_k3j9", out, sizeof out) == 0 &&
+          !strcmp(out, "generated/decls/entitydef/cyber-probe/x.decl"));
+    CHECK(sh_mb_rekey_path("a/mods/cyber-probe/b", "cyber-probe", "cp_k3j9", out, 8) == -1);
+
+    /* The descriptor's key state: an id or a block key is never renamed. */
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\keystate", tmp);
+    CreateDirectoryA(folder, NULL);
+    mt_write(folder, "mod.json", "{\"name\":\"Probe\",\"version\":\"1.0.0\"}");
+    CHECK(sh_mb_descriptor_key_state(folder) == 0);
+    mt_write(folder, "mod.json", "{\"id\":\"alex.probe\",\"name\":\"Probe\"}");
+    CHECK(sh_mb_descriptor_key_state(folder) == SH_MB_KEY_FROM_ID);
+    mt_write(folder, "mod.json", "{\"name\":\"Probe\",\"snapmap-plus\":{\"format\":1,\"key\":\"probe_ab12\"}}");
+    CHECK(sh_mb_descriptor_key_state(folder) == SH_MB_KEY_FROM_BLOCK);
+    mt_write(folder, "mod.json", "{\"name\":\"Probe\",\"snapmap-plus\":{\"format\":1}}");
+    CHECK(sh_mb_descriptor_key_state(folder) == 0);
+    mt_write(folder, "mod.json", "[1, 2]");
+    CHECK(sh_mb_descriptor_key_state(folder) == -1);
+    /* The new mod.json: the author's bytes and New mod's block. */
+    {
+        static const char mj[] = "{\r\n  \"name\": \"Probe\",\r\n  \"strings\": { \"en\": { \"mods/cyberprobe/row\": \"Probe\" } }\r\n}\r\n";
+        char *w = NULL, *m;
+        size_t wl = 0, ml = 0;
+        CHECK(sh_mb_rekey_text(mj, sizeof mj - 1, "cyberprobe", "cyberprobe_k3j9", &w, &wl) == 1);
+        m = w ? sh_mb_rekey_modjson(w, wl, "cyberprobe_k3j9", NULL, &ml) : NULL;
+        CHECK(m && strstr(m, "\"mods/cyberprobe_k3j9/row\": \"Probe\"") && strstr(m, "\"key\": \"cyberprobe_k3j9\"") &&
+              strstr(m, "\"origin\": \"by-hand\"") && strstr(m, "\"format\": 1") && !strstr(m, "\"build\""));
+        if (m) {
+            sh_mb_bundle b;
+            mt_write(folder, "mod.json", m);
+            CHECK(sh_mb_descriptor_key_state(folder) == SH_MB_KEY_FROM_BLOCK);
+            memset(&b, 0, sizeof b);
+            CHECK(!sh_mb_load_folder(folder, &b));   /* not built yet: no bundle */
+            sh_mb_free(&b);
+        }
+        free(w);
+        free(m);
     }
 }
 
@@ -1777,6 +1879,7 @@ int main(int argc, char **argv)
     test_refusals(full, tmp);
     test_classes(full, tmp);
     test_keys(full, tmp);
+    test_first_build_keys(tmp);
     test_player(full, tmp);
     test_bare_hyphen(full, tmp);
     test_renderprogs(tmp);

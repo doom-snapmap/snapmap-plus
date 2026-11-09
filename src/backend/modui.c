@@ -994,6 +994,14 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
     mu_kstr(b, "servedBy", !strcmp(u->state, "superseded") && u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "", 0);
     mu_knum(b, "builtAt", e->loaded && bd->built > 0 ? (unsigned long long)bd->built : 0, 0);
     mu_kstr(b, "bundle", e->loaded ? bd->hash : "", 0);
+    {
+        /* A hand-made folder renamed to its generated key at its first build. */
+        char from[SH_MS_NAME_MAX + 1];
+        unsigned refs = 0;
+        int renamed = e->folder && sh_ms_renamed_from(e->folder, from, sizeof from, &refs);
+        mu_kstr(b, "renamedFrom", renamed ? from : "", 0);
+        mu_knum(b, "renamedReferences", renamed ? refs : 0, 0);
+    }
     if (e->loaded && bd->file_count) carried = (const char **)calloc(bd->file_count, sizeof *carried);
     for (k = 0; e->loaded && k < bd->file_count; k++) {
         const sh_mb_file *f = &bd->files[k];
@@ -4083,6 +4091,18 @@ static int mu_rebuild(const char *key)
     if (entry < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "That mod is no longer installed."); }
     strncpy_s(folder, sizeof folder, m.list.items[entry].folder, _TRUNCATE);
     if (m.list.items[entry].loaded) strncpy_s(before, sizeof before, m.list.items[entry].bundle.hash, _TRUNCATE);
+    {
+        /* A hand-made folder's first build renames it (sh_ms_first_key). */
+        char moved[MAX_PATH * 4];
+        int k = sh_ms_first_key(folder, moved, sizeof moved, cause, sizeof cause);
+        if (k < 0) {
+            mu_model_free(&m);
+            mu_log("rebuild %s: refused: %s", key, cause);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not rebuilt: %s", cause);
+            return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
+        }
+        if (k > 0) strncpy_s(folder, sizeof folder, moved, _TRUNCATE);
+    }
     r.installed = sh_ms_request_exists;
     r.installed_context = &m.list;
     r.stock = mu_stock_exists;

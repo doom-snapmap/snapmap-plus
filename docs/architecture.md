@@ -482,8 +482,22 @@ These backend files share the work:
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
   The key is the author `id` when present (deprecated), else the product
-  block's `key`, else the folder's own name; `sh_mods new "<name>"` makes a
-  folder under a generated key (a slug and four random characters). A bundle
+  block's `key`, else (a folder outside the store, built with `sh_mods
+  build`) the folder's own name. `sh_mods new "<name>"` makes a folder under
+  a generated key (`sh_mb_key_generate`: a slug with `_` and four random
+  characters, never `-`, so decl text and cooked paths spell it alike). A
+  store folder with neither an `id` nor a block `key` gets one the same way
+  at its first build (`sh_ms_first_key`, run before every in-place build: the
+  rescan, `sh_mods build` and `rebuild`, the tab's Rebuild): under the store
+  lock, its references to `mods/<folder>/` (decl text, `mod.json`, folder
+  segments after `mods` under `assets/`, written or cooked) are rewritten in
+  memory, the result is staged beside it with unchanged files hard-linked,
+  and two renames swap it in, the second undone on failure; any read or
+  rename failure, or a binary file naming the folder, leaves it untouched and
+  refuses that folder alone. The record's `renamed` section keeps the old
+  name and the count for the Mods tab. An unbuilt folder serves nothing, so
+  the rename never races a serve. An install from elsewhere of such a folder
+  copies it in under a generated key the same way. A bundle
   with a `legacy` record (a converted first-generation package) keeps its
   declared shadows and the rules of before, and its unresolved needs only warn.
   In any other bundle a need that resolves to nothing fails the build, with

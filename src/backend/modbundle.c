@@ -18,6 +18,8 @@
 #include "json_pretty.h"
 #include "backend_log.h"
 
+#define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
+
 #define MB_JSON_DEPTH   32u
 #define MB_WALK_DEPTH   48
 #define MB_SCAN_DEPTH   128
@@ -1702,24 +1704,27 @@ int sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1])
     static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
     char slug[SH_MB_ID_MAX + 1], key[SH_MB_ID_MAX + 1];
     size_t n = 0, i, limit = SH_MB_ID_MAX - 1 - SH_MB_KEY_SUFFIX;
-    int dash = 0;
+    int gap = 0;
+    /* '_', never '-': a bare decl word ends at '-', and '_' is the engine's
+     * cooked spelling too, so a generated key has one spelling everywhere
+     * (DESIGN-additive 2.2). */
     for (i = 0; name && name[i] && n < limit; i++) {
         unsigned char c = (unsigned char)name[i];
         if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
         if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-            if (dash && n) slug[n++] = '-';
+            if (gap && n) slug[n++] = '_';
             if (n < limit) slug[n++] = (char)c;
-            dash = 0;
+            gap = 0;
         } else {
-            dash = 1;
+            gap = 1;
         }
     }
-    while (n && slug[n - 1] == '-') n--;
+    while (n && slug[n - 1] == '_') n--;
     slug[n] = 0;
     if (!n) strcpy_s(slug, sizeof slug, "mod");
     strcpy_s(key, sizeof key, slug);
     n = strlen(key);
-    key[n++] = '-';
+    key[n++] = '_';
     for (i = 0; i < SH_MB_KEY_SUFFIX; i++) {
         unsigned int r = 0;
         if (rand_s(&r) != 0) r = (unsigned int)(GetTickCount64() * 2654435761u + i * 40503u);
@@ -1727,6 +1732,172 @@ int sh_mb_key_generate(const char *name, char out[SH_MB_ID_MAX + 1])
     }
     key[n] = 0;
     return sh_mb_id_normalize(key, n, out);
+}
+
+int sh_mb_key_for_folder(const char *leaf, char out[SH_MB_ID_MAX + 1])
+{
+    char base[SH_MB_ID_MAX * 4 + 1];
+    size_t n, i, cut;
+    int digits = 1, shaped = 1;
+    if (!leaf) return 0;
+    strncpy_s(base, sizeof base, leaf, _TRUNCATE);
+    for (i = 0; base[i]; i++) if (base[i] >= 'A' && base[i] <= 'Z') base[i] = (char)(base[i] - 'A' + 'a');
+    n = strlen(base);
+    /* A name that already has a generated key's shape ("probe_7f3k") gets a
+     * new salt in place of its own, not a second one: a key is trusted only
+     * from the product block. An all-digit tail ("level_2016") is a name. */
+    if (n > SH_MB_KEY_SUFFIX + 1) {
+        cut = n - SH_MB_KEY_SUFFIX - 1;
+        if (base[cut] != '_' && base[cut] != '-') shaped = 0;
+        for (i = cut + 1; shaped && i < n; i++) {
+            char c = base[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) shaped = 0;
+            if (!(c >= '0' && c <= '9')) digits = 0;
+        }
+        for (i = 0; shaped && i < cut; i++) {
+            char c = base[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) shaped = 0;
+        }
+        if (shaped && !digits) base[cut] = 0;
+    }
+    return sh_mb_key_generate(base, out);
+}
+
+/* The engine's cooked spelling of a name (mb_binary_name): every character
+ * outside [A-Za-z0-9$./\] becomes '_', lower-cased. */
+static void mb_cooked_key(const char *in, char *out, size_t cap)
+{
+    size_t i;
+    for (i = 0; in[i] && i + 1 < cap; i++) {
+        char c = in[i];
+        int keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '$' || c == '.' ||
+                   c == '/' || c == '\\';
+        c = keep ? c : '_';
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[i] = c;
+    }
+    out[i] = 0;
+}
+
+static int mb_name_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+           c == '.' || c == '$';
+}
+
+/* At t[i]: "mods/<f>" in any case, not inside a longer name on either side
+ * ('/' or any character that cannot continue a name follows). The matched
+ * length, or 0. */
+static size_t mb_rekey_at(const char *t, size_t n, size_t i, const char *f)
+{
+    size_t fl = strlen(f), end = i + 5 + fl;
+    if (!fl || end > n || _strnicmp(t + i, "mods/", 5) != 0 || _strnicmp(t + i + 5, f, fl) != 0) return 0;
+    if (i > 0 && mb_name_char((unsigned char)t[i - 1])) return 0;
+    if (end < n && t[end] != '/' && mb_name_char((unsigned char)t[end])) return 0;
+    return 5 + fl;
+}
+
+size_t sh_mb_rekey_text(const char *t, size_t n, const char *folder, const char *key, char **out, size_t *out_len)
+{
+    char cooked[SH_MB_ID_MAX * 4 + 1];
+    const char *forms[2];
+    size_t i, count = 0, kl;
+    int nf = 0, k;
+    mb_buf o = {0};
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!t || !folder || !folder[0] || !key) return 0;
+    kl = strlen(key);
+    mb_cooked_key(folder, cooked, sizeof cooked);
+    forms[nf++] = folder;
+    if (_stricmp(cooked, folder) != 0) forms[nf++] = cooked;
+    for (i = 0; i < n;) {
+        size_t m = 0;
+        for (k = 0; k < nf && !m; k++) m = mb_rekey_at(t, n, i, forms[k]);
+        if (!m) {
+            if (out) mb_put(&o, t + i, 1);
+            i++;
+            continue;
+        }
+        count++;
+        if (out) { mb_put(&o, t + i, 5); mb_put(&o, key, kl); }
+        i += m;
+    }
+    if (!out) return count;
+    if (!count) { free(o.p); return 0; }
+    mb_put(&o, "", 1);   /* the terminator, not counted in out_len */
+    if (o.oom) { free(o.p); return (size_t)-1; }
+    *out = o.p;
+    if (out_len) *out_len = o.n - 1;
+    return count;
+}
+
+int sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char *out, size_t cap)
+{
+    char cooked[SH_MB_ID_MAX * 4 + 1];
+    const char *seg = rel, *prev = NULL;
+    size_t prev_len = 0, w = 0, fl, cl;
+    int changed = 0;
+    if (!rel || !folder || !folder[0] || !key || !out || !cap) return -1;
+    mb_cooked_key(folder, cooked, sizeof cooked);
+    fl = strlen(folder);
+    cl = strlen(cooked);
+    out[0] = 0;
+    while (*seg) {
+        const char *slash = strchr(seg, '/');
+        size_t len = slash ? (size_t)(slash - seg) : strlen(seg);
+        const char *put = seg;
+        size_t plen = len;
+        /* A folder segment right after a "mods" segment. */
+        if (slash && prev && prev_len == 4 && _strnicmp(prev, "mods", 4) == 0 &&
+            ((len == fl && _strnicmp(seg, folder, len) == 0) || (len == cl && _strnicmp(seg, cooked, len) == 0))) {
+            put = key;
+            plen = strlen(key);
+            changed = 1;
+        }
+        if (w + plen + 2 > cap) return -1;
+        memcpy(out + w, put, plen);
+        w += plen;
+        if (slash) out[w++] = '/';
+        out[w] = 0;
+        prev = seg;
+        prev_len = len;
+        seg = slash ? slash + 1 : seg + len;
+    }
+    return changed;
+}
+
+int sh_mb_descriptor_key_state(const char *folder)
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *p;
+    unsigned char *text = NULL;
+    size_t len = 0;
+    mbj *j;
+    const mbj *block, *key, *name;
+    int state;
+    if (!root) return -1;
+    p = mb_wjoin(root, L"mod.json");
+    if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
+    free(p);
+    if (!text) {
+        p = mb_wjoin(root, L"package.json");
+        if (p) text = mb_read_wfile(p, SH_MB_DESCRIPTOR_MAX, &len);
+        free(p);
+    }
+    free(root);
+    if (!text) return -1;
+    j = mbj_parse((const char *)text, len, NULL, 0);
+    free(text);
+    if (!j || j->t != MBJ_OBJ) { mbj_free(j); return -1; }
+    block = mbj_get(j, SH_MB_BLOCK_KEY);
+    key = block && block->t == MBJ_OBJ ? mbj_get(block, "key") : NULL;
+    name = mbj_get(j, "name");
+    if (mbj_get(j, "id")) state = SH_MB_KEY_FROM_ID;
+    else if (!name || name->t != MBJ_STR) state = -1;   /* not an author descriptor yet: the build says why */
+    else if (key || (block && block->t != MBJ_OBJ)) state = SH_MB_KEY_FROM_BLOCK;   /* a bad block: the build says why */
+    else state = 0;
+    mbj_free(j);
+    return state;
 }
 
 static sh_mb_file *mb_add_file(sh_mb_bundle *b)
@@ -4707,8 +4878,6 @@ int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
     return mb_load_modjson(text, len, out, 1);
 }
 
-#define MB_MODJSON_MAX (16u * 1024u * 1024u)
-
 int sh_mb_load(const char *path, sh_mb_bundle *out)
 {
     size_t len = 0;
@@ -4877,6 +5046,27 @@ static char *mb_pretty(const char *compact, size_t n)
     json_pretty(compact, n, p, need);
     p[need] = 0;
     return p;
+}
+
+char *sh_mb_rekey_modjson(const char *text, size_t n, const char *key, const char *origin, size_t *out_len)
+{
+    char *own, *block, *out;
+    size_t own_len = 0;
+    mb_buf o = {0};
+    own = text ? sh_mb_author_bytes(text, n, &own_len, NULL) : NULL;
+    if (!own) return NULL;
+    /* The block New mod writes (sh_ms_new_mod): the key and where it came from. */
+    mb_puts(&o, "{\"format\":1,\"key\":");
+    mb_put_jcstr(&o, key);
+    mb_puts(&o, ",\"origin\":");
+    mb_put_jcstr(&o, origin && origin[0] ? origin : SH_MB_ORIGIN_BY_HAND);
+    mb_puts(&o, "}");
+    block = o.oom ? NULL : mb_pretty(o.p, o.n);
+    free(o.p);
+    out = block ? mb_splice(own, own_len, block, out_len) : NULL;
+    free(own);
+    free(block);
+    return out;
 }
 
 /* The canonical text of `key` in the bundle's extra, or NULL. */

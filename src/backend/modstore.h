@@ -294,6 +294,29 @@ void sh_ms_note_build_failure(const char *folder, const char *cause);
 int  sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                    char *cause, size_t cause_cap);
 
+/* A hand-made folder's first build (DESIGN-additive 2.2): when `folder` is a
+ * mod folder of the store whose descriptor has neither an author "id" nor a
+ * product-block "key", it is renamed to a key generated from its name
+ * (sh_mb_key_for_folder), the author's references to mods/<folder>/ are
+ * rewritten to mods/<key>/ (decl text, mod.json, the folder segments of the
+ * paths under assets/, in the written and the cooked '_' spelling), and its
+ * product block records the key with origin "by-hand", as New mod writes it.
+ * Organizing folders above it are left alone. Takes the store lock. Returns
+ * 1 with the new folder (absolute, plain) in `out`; 0 when there is nothing
+ * to do (an id, a key, not a store folder); -1 with the cause, the folder
+ * untouched (a file that cannot be read, a binary file naming the folder,
+ * two files landing on one path, a rename Windows refuses), which is also
+ * recorded as the folder's build cause. Every build of a store folder in
+ * place runs it first (rescan, install, sh_mods build and rebuild, the Mods
+ * tab's Rebuild). An install from elsewhere of such a folder copies it in
+ * under a generated key the same way; the source is only read. */
+int  sh_ms_first_key(const char *folder, char *out, size_t cap, char *cause, size_t cause_cap);
+
+/* What a first build renamed `folder` (absolute) from: 1 with the old folder
+ * name and the count of references rewritten, from the record's "renamed"
+ * section; 0 for any other folder. */
+int  sh_ms_renamed_from(const char *folder, char *from, size_t cap, unsigned *references);
+
 /* Record `folder` (absolute) as built from its current tree: cache[tree] =
  * bundle hash. Returns 1 on success. */
 int  sh_ms_cache_note(const char *folder, const char *bundle_hash);

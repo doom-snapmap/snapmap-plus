@@ -170,6 +170,7 @@ var modsTab = (function () {
             /* v3 */
             description: str(b.description), origin: typeof b.origin === 'string' && has(ORIGINS, b.origin) ? b.origin : '',
             migratedFrom: str(b.migratedFrom), servedBy: str(b.servedBy), builtAt: num(b.builtAt), bundle: str(b.bundle),
+            renamedFrom: str(b.renamedFrom), renamedReferences: num(b.renamedReferences),
             counts: normCounts(b.counts), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
@@ -348,6 +349,12 @@ var modsTab = (function () {
   function originText(b) {
     if (b.origin === 'migration' && b.migratedFrom) return ORIGINS.migration + ' (' + b.migratedFrom + ')';
     return ORIGINS[b.origin] || ORIGINS[''];
+  }
+
+  /* A hand-made folder renamed to its generated key at its first build. */
+  function renamedText(b) {
+    if (!b || !str(b.renamedFrom)) return '';
+    return 'Renamed from ' + str(b.renamedFrom) + '; ' + plural(num(b.renamedReferences), 'reference') + ' rewritten';
   }
 
   function filterMods(mods, query) {
@@ -652,6 +659,7 @@ var modsTab = (function () {
       link.addEventListener('click', function () { act('openFolder', b.folder || b.key); });
       field(about, 'Folder', link);
       about.appendChild(el('div', 'mods-line mods-origin', originText(b)));
+      if (renamedText(b)) about.appendChild(el('div', 'mods-line mods-origin', renamedText(b)));
       var applies = scopeText(b);
       if (applies) field(about, 'Applies', applies);
 
@@ -1211,7 +1219,7 @@ var modsTab = (function () {
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
           FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, compareMods: compareMods,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
-          originText: originText, countLines: countLines, idText: idText, subText: subText,
+          originText: originText, renamedText: renamedText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create,

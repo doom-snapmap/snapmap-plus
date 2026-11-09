@@ -154,14 +154,41 @@ static void mc_classes_line(const char *verb, const char *folder, const sh_mb_bu
     for (i = 0; i < b->note_count; i++) mc_line("MODS: %s %s: %s", verb, folder, b->notes[i]);
 }
 
-static void mc_build(const char *folder)
+/* A hand-made store folder's first build renames it (sh_ms_first_key):
+ * `folder` becomes the new path. 0 when the rename was refused. */
+static int mc_first_key(const char *verb, char *folder, size_t cap)
+{
+    char moved[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
+    switch (sh_ms_first_key(folder, moved, sizeof moved, cause, sizeof cause)) {
+    case -1:
+        mc_line("MODS: %s %s: refused: %s", verb, folder, cause);
+        return 0;
+    case 1:
+        {
+            char from[SH_MS_NAME_MAX + 1];
+            unsigned refs = 0;
+            sh_ms_renamed_from(moved, from, sizeof from, &refs);
+            mc_line("MODS: %s %s: renamed to %s at its first build (a generated key); %u reference(s) rewritten", verb,
+                    folder, moved, refs);
+            strncpy_s(folder, cap, moved, _TRUNCATE);
+        }
+        return 1;
+    default:
+        return 1;
+    }
+}
+
+static void mc_build(const char *folder_in)
 {
     sh_ms_list list;
     sh_mb_resolver r;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
-    char cause[SH_MB_CAUSE_MAX];
-    int listed = sh_ms_enumerate(&list);
+    char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
+    int listed;
+    strncpy_s(folder, sizeof folder, folder_in, _TRUNCATE);
+    if (!mc_first_key("build", folder, sizeof folder)) return;
+    listed = sh_ms_enumerate(&list);
     if (!listed) memset(&list, 0, sizeof list);
     mc_line("MODS: build %s: reading the descriptor and assets/ (%zu installed bundle(s) consulted)", folder, list.count);
     r.installed = sh_ms_request_exists;
@@ -783,6 +810,17 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
         !WideCharToMultiByte(CP_UTF8, 0, wide, -1, folder, (int)sizeof folder, NULL, NULL)) {
         if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
         return 0;
+    }
+    {
+        /* A converted package carries its id; a keyless store folder gets its key first. */
+        char moved[MAX_PATH * 4];
+        if (sh_ms_first_key(folder, moved, sizeof moved, cause, sizeof cause) < 0) {
+            if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
+            mc_line("MODS: build %s: refused: %s", folder, cause);
+            return 0;
+        } else if (moved[0]) {
+            strncpy_s(folder, sizeof folder, moved, _TRUNCATE);
+        }
     }
     listed = sh_ms_enumerate(&list);
     if (!listed) memset(&list, 0, sizeof list);

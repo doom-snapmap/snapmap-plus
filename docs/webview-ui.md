@@ -332,7 +332,8 @@ the note that every player needs Snapmap+) and Sharing. About carries, after Fol
 about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
 overrides folder" (`migration`, followed by `migratedFrom` in parentheses when the document names
 it), "Imported from an export" (`install`) and "Downloaded for a map you played" (`download`,
-`delivery`). About carries an Applies line when the
+`delivery`), and for a hand-made folder its first build renamed, a second line "Renamed from
+<renamedFrom>; N references rewritten". About carries an Applies line when the
 backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
 requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
 nothing for a mod that only adds new names. After What it adds, **What it is made of** shows the
@@ -409,6 +410,8 @@ Per entry of `mods`:
 | `"description"` | string | mod.json's description, "" when none. |
 | `"origin"` | string | The product block's origin: `install`, `download`, `migration`, `delivery`, or "" for a folder the author made. |
 | `"migratedFrom"` | string | For `migration`: the folder it was built from, as `mu_origin` writes it (`overrides\hell-guards`). |
+| `"renamedFrom"` | string | The folder name a hand-made folder had before its first build renamed it to its generated key (`sh_ms_renamed_from`); "" otherwise. |
+| `"renamedReferences"` | number | How many references to `mods/<renamedFrom>/` that rename rewrote; 0 otherwise. |
 | `"servedBy"` | string | The key of another folder whose build serves this mod's paths (superseded); "" when it serves its own. Drives the grey icon. |
 | `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
 | `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
