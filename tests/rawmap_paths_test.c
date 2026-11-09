@@ -416,6 +416,35 @@ static void looks_like_rawmap_tells_them_apart(void)
     CHECK(sh_rawmap_looks_like_rawmap(p) == 1);
     DeleteFileA(p);
 
+    /* a rawmap whose save carries the product's member after "~type" (map_carrier.h): a
+     * navigation bake pushes the root type tag far beyond the last 8 KiB */
+    {
+        static char big[12000 + 400];
+        size_t n = 0;
+        n += (size_t)sprintf_s(big + n, sizeof big - n,
+                               "{\"entities\":[],\"version\":111,\"~type\":\"idSnapMap\",\"~version\":111,"
+                               "\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
+        memset(big + n, 'A', 12000);
+        n += 12000;
+        n += (size_t)sprintf_s(big + n, sizeof big - n, "\"]}]}}");
+        CHECK(write_file("rawmap_sniff_carrier.json", big, p, sizeof p));
+        printf("   rawmap with a long carrier    -> %d\n", sh_rawmap_looks_like_rawmap(p));
+        CHECK(sh_rawmap_looks_like_rawmap(p) == 1);
+        DeleteFileA(p);
+        /* the same member on a prefab is still not a map */
+        n = 0;
+        n += (size_t)sprintf_s(big + n, sizeof big - n,
+                               "{\"entities\":[],\"~type\":\"idSnapEntityPrefab\",\"~version\":111,"
+                               "\"snapmap-plus\":{\"format\":1,\"nav\":[{\"module\":\"m\",\"class\":\"c\",\"data\":[\"");
+        memset(big + n, 'A', 12000);
+        n += 12000;
+        n += (size_t)sprintf_s(big + n, sizeof big - n, "\"]}]}}");
+        CHECK(write_file("rawmap_sniff_carrier_prefab.json", big, p, sizeof p));
+        printf("   prefab with a long carrier    -> %d\n", sh_rawmap_looks_like_rawmap(p));
+        CHECK(sh_rawmap_looks_like_rawmap(p) == 0);
+        DeleteFileA(p);
+    }
+
     /* and the real thing on this machine, if it is there -- the fixtures above are only as good as
      * their resemblance to it, so check one that the engine actually wrote */
     {

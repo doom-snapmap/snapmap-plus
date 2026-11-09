@@ -2051,6 +2051,10 @@ int sh_rawmap_looks_like_rawmap(const char *path)
 
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0) { CloseHandle(h); return 0; }
 
+    /* The engine writes the root "~type" last, so the tail is enough -- unless
+     * the product's "snapmap-plus" member follows it (map_carrier.h: appended
+     * after "~type", and a navigation bake makes it far longer than the tail).
+     * Read the whole file then, and look just before the member. */
     at.QuadPart = (sz.QuadPart > (LONGLONG)tail) ? (sz.QuadPart - (LONGLONG)tail) : 0;
     if (!SetFilePointerEx(h, at, NULL, FILE_BEGIN)) { CloseHandle(h); return 0; }
 
@@ -2060,6 +2064,29 @@ int sh_rawmap_looks_like_rawmap(const char *path)
     if (ReadFile(h, buf, tail, &rd, NULL) && rd > 0) {
         buf[rd] = '\0';                    /* strstr needs the terminator; the +1 above is for it */
         found = (strstr(buf, "\"idSnapMap\"") != NULL) ? 1 : 0;
+        /* The tail may sit wholly inside the member's data (a navigation
+         * chunk is 1 MiB), so nothing in it says a member is there. */
+        if (!found && sz.QuadPart > (LONGLONG)tail && sz.QuadPart <= (LONGLONG)INT_MAX) {
+            char *all = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)sz.QuadPart + 1);
+            LARGE_INTEGER zero;
+            DWORD got = 0;
+            zero.QuadPart = 0;
+            if (all && SetFilePointerEx(h, zero, NULL, FILE_BEGIN) &&
+                ReadFile(h, all, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart) {
+                sh_carrier_view view;
+                all[got] = '\0';
+                if (sh_carrier_view_read(all, (size_t)got, &view) && view.state != SH_CARRIER_ABSENT &&
+                    view.cut_from > 0 && view.cut_from <= (size_t)got) {
+                    /* The tail of the engine's own text: the bytes before the member. */
+                    size_t end = view.cut_from, start = end > (size_t)tail ? end - (size_t)tail : 0;
+                    char saved = all[end];
+                    all[end] = '\0';
+                    found = (strstr(all + start, "\"idSnapMap\"") != NULL) ? 1 : 0;
+                    all[end] = saved;
+                }
+            }
+            if (all) HeapFree(GetProcessHeap(), 0, all);
+        }
     }
     HeapFree(GetProcessHeap(), 0, buf);
     CloseHandle(h);
