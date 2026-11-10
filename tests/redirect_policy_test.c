@@ -1,5 +1,7 @@
 /* redirect_policy_test.c -- when the fault shield may redirect a fault into
- * Error(6) (src/fault_shield/redirect_policy.h). Pure; no game needed. */
+ * Error(6) (src/fault_shield/redirect_policy.h). Pure; no game needed.
+ * Argument order: on_main, load_screen_running, load_screen_stop_armed,
+ * redirected_this_frame, frame_on_stack. */
 #include <stdio.h>
 #include <string.h>
 #include "../src/fault_shield/redirect_policy.h"
@@ -9,35 +11,46 @@ static int g_fail = 0;
 
 int main(void)
 {
-    int a, b, c, d;
+    int a, b, s, c, d;
     /* An ordinary editor-frame fault: main thread, no loading screen, first
      * redirect of the frame, Frame on the stack. Redirected as before. */
-    CHECK(shield_redirect_policy(1, 0, 0, 1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(1, 0, 0, 0, 1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(1, 0, 1, 0, 1) == SHIELD_REDIRECT_OK);
     /* Unknown inputs never decline: the behaviour before each input existed. */
-    CHECK(shield_redirect_policy(-1, -1, -1, -1) == SHIELD_REDIRECT_OK);
-    CHECK(shield_redirect_policy(1, -1, 0, 1) == SHIELD_REDIRECT_OK);
-    CHECK(shield_redirect_policy(1, 0, -1, 1) == SHIELD_REDIRECT_OK);
-    CHECK(shield_redirect_policy(1, 0, 0, -1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(-1, -1, 0, -1, -1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(1, -1, 0, 0, 1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(1, 0, 0, -1, 1) == SHIELD_REDIRECT_OK);
+    CHECK(shield_redirect_policy(1, 0, 0, 0, -1) == SHIELD_REDIRECT_OK);
     /* issue 132: the shell-map load faulted in idMenuShellLocal::SetupModelList
-     * with the loading-screen thread running. */
-    CHECK(shield_redirect_policy(1, 1, 0, 1) == SHIELD_DECLINE_LOAD_SCREEN);
-    /* the loading-screen thread's own SWF flush fault is off the main thread */
-    CHECK(shield_redirect_policy(0, 1, 0, 0) == SHIELD_DECLINE_OFF_MAIN);
-    /* a second fault inside the first redirect's catch recovery */
-    CHECK(shield_redirect_policy(1, 0, 1, 1) == SHIELD_DECLINE_IN_RECOVERY);
+     * with the loading-screen thread running. Declined without the load-screen
+     * stop; recovered when it is armed, because CancelMapChange then stops the
+     * thread before the menu load. */
+    CHECK(shield_redirect_policy(1, 1, 0, 0, 1) == SHIELD_DECLINE_LOAD_SCREEN);
+    CHECK(shield_redirect_policy(1, 1, 1, 0, 1) == SHIELD_REDIRECT_OK);
+    /* the loading-screen thread's own SWF flush fault is off the main thread,
+     * declined whether or not the stop is armed */
+    CHECK(shield_redirect_policy(0, 1, 0, 0, 0) == SHIELD_DECLINE_OFF_MAIN);
+    CHECK(shield_redirect_policy(0, 1, 1, 0, 1) == SHIELD_DECLINE_OFF_MAIN);
+    /* a second fault inside the first redirect's catch recovery (also during a load) */
+    CHECK(shield_redirect_policy(1, 0, 0, 1, 1) == SHIELD_DECLINE_IN_RECOVERY);
+    CHECK(shield_redirect_policy(1, 1, 1, 1, 1) == SHIELD_DECLINE_IN_RECOVERY);
     /* a main-thread fault outside Frame (before it, in the Frame detour's own work) */
-    CHECK(shield_redirect_policy(1, 0, 0, 0) == SHIELD_DECLINE_NO_FRAME);
+    CHECK(shield_redirect_policy(1, 0, 0, 0, 0) == SHIELD_DECLINE_NO_FRAME);
+    CHECK(shield_redirect_policy(1, 1, 1, 0, 0) == SHIELD_DECLINE_NO_FRAME);
     /* precedence: off-main, then loading screen, then recovery, then no Frame */
-    CHECK(shield_redirect_policy(0, 1, 1, 0) == SHIELD_DECLINE_OFF_MAIN);
-    CHECK(shield_redirect_policy(1, 1, 1, 0) == SHIELD_DECLINE_LOAD_SCREEN);
-    CHECK(shield_redirect_policy(1, 0, 1, 0) == SHIELD_DECLINE_IN_RECOVERY);
-    /* exhaustive: OK exactly when no input is a definite blocker */
-    for (a = -1; a <= 1; a++) for (b = -1; b <= 1; b++) for (c = -1; c <= 1; c++) for (d = -1; d <= 1; d++) {
-        int blocked = a == 0 || b == 1 || c == 1 || d == 0;
-        shield_redirect_verdict v = shield_redirect_policy(a, b, c, d);
+    CHECK(shield_redirect_policy(0, 1, 0, 1, 0) == SHIELD_DECLINE_OFF_MAIN);
+    CHECK(shield_redirect_policy(1, 1, 0, 1, 0) == SHIELD_DECLINE_LOAD_SCREEN);
+    CHECK(shield_redirect_policy(1, 0, 0, 1, 0) == SHIELD_DECLINE_IN_RECOVERY);
+    /* exhaustive: OK exactly when no input is a definite blocker; a running
+     * loading screen blocks only while the stop is not armed */
+    for (a = -1; a <= 1; a++) for (b = -1; b <= 1; b++) for (s = 0; s <= 1; s++)
+    for (c = -1; c <= 1; c++) for (d = -1; d <= 1; d++) {
+        int blocked = a == 0 || (b == 1 && s != 1) || c == 1 || d == 0;
+        shield_redirect_verdict v = shield_redirect_policy(a, b, s, c, d);
         CHECK((v == SHIELD_REDIRECT_OK) == !blocked);
         CHECK(v == SHIELD_REDIRECT_OK ? shield_redirect_decline_reason(v)[0] == 0
                                       : strlen(shield_redirect_decline_reason(v)) > 20);
+        if (s == 1) CHECK(v != SHIELD_DECLINE_LOAD_SCREEN);
     }
     CHECK(strstr(shield_redirect_decline_reason(SHIELD_DECLINE_LOAD_SCREEN), "loading-screen thread") != NULL);
     if (g_fail) { printf("redirect_policy_test: FAILED\n"); return 1; }

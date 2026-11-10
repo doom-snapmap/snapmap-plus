@@ -24,6 +24,8 @@ param(
                            # Guards for event-link walks and interactable spawning.
                            "../fault_shield/mapload_guards.c",
                            "../fault_shield/serialized_entities_guard.c",
+                           # Stop a failed map load's loading screen at CancelMapChange.
+                           "../fault_shield/load_screen_stop.c",
                            "../fault_shield/fault_shield.c",
                            # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
                            "settings_tab.c", "map_bounds.c", "map_settings.c", "editor_zoom.c",

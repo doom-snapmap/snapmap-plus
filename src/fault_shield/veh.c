@@ -16,6 +16,7 @@
 #include "recovery.h"
 #include "shield_sigs.h"
 #include "redirect_policy.h"
+#include "load_screen_stop.h"
 #include "veh.h"
 #pragma comment(lib, "user32.lib")   /* ClipCursor/ShowCursor -- free the captured mouse on a Class-B fault */
 
@@ -736,6 +737,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * and minidump; nothing here changes the fault or the engine state. */
     {
         shield_redirect_verdict v = shield_redirect_policy(1, shield_load_screen_running(),
+                                                           sh_load_screen_stop_armed(),
                                                            recovery_redirected_this_frame(),
                                                            shield_frame_on_stack(ep->ContextRecord));
         if (v != SHIELD_REDIRECT_OK) {
