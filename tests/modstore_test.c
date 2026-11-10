@@ -541,8 +541,10 @@ static void boot_between(unsigned built)
     (void)built;
     if (InterlockedIncrement(&g_between_calls) != 1) return;
     SetEvent(g_between_seen);
-    /* Hold the first hand-over until the main thread is waiting for the store. */
-    for (i = 0; i < 3000 && modstore_lock_waits() == waits; i++) Sleep(1);
+    /* Hold the first hand-over until the main thread is waiting for the store. The main
+     * thread locks as soon as it sees the event, so this ends at once in practice; the bound
+     * only matters when the test runner is loaded, and must outlast its wait below. */
+    for (i = 0; i < 60000 && modstore_lock_waits() == waits; i++) Sleep(1);
 }
 
 static void test_boot_release(const char *tmp)
