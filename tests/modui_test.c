@@ -2814,7 +2814,8 @@ int main(int argc, char **argv)
          * renderInfo.renderModelName drew the model a second time in the editor, which logged
          * "modelMatrix invert failed" every frame). The stock texts are the game's own decls
          * snapeditorentitydef/prop/new/crate01.decl and entitydef/snapmaps/props/new/crate01.decl: the row differs only in its names, the
-         * entityDef only in leaving out the editorVars block, which only Radiant reads. */
+         * entityDef is the game's text whole, editorVars included (V14 saw the hover warning
+         * with the block left out). */
         {
             static const char stock_row[] =
                 "{\n\tinherit = \"prop/prop_base\";\n\tedit = {\n"
@@ -2827,6 +2828,10 @@ int main(int argc, char **argv)
                 "\t\teventInfo = {\n\t\t\tselectedEvent = {\n\t\t\t\tsound = \"play_pickup_heavy_crates\";\n\t\t\t}\n"
                 "\t\t\tplacedEvent = {\n\t\t\t\tsound = \"play_putdown_heavy_crates\";\n\t\t\t}\n\t\t}\n\t}\n}";
             static const char stock_def_edit[] =
+                "\teditorVars {\n\t\trotatable = false;\n\t\tshowOrientation = false;\n\t\tshowFixedBox = false;\n"
+                "\t\tshowInRenderMode = false;\n\t\tplaceable = false;\n\t\tplaceableInLayers = false;\n"
+                "\t\tcolor = ( 1, 1, 1, 1 );\n\t\toriginOffset = ( 0, 0, 0 );\n\t\tmaterial = \"\";\n"
+                "\t\teditorName = \"\";\n\t\tdescription = \"\";\n\t}\n"
                 "\tedit = {\n\t\trenderModelInfo = {\n\t\t\tmodel = \"models/snapmaps/props/new/crate01.lwo\";\n\t\t}\n"
                 "\t\tclipModelInfo = {\n\t\t\ttype = \"CLIPMODEL_AUTO\";\n\t\t}\n\t\tdynamicObstacle = true;\n\t}\n}";
             char path[MAX_PATH * 2], expect[4096], name[200], *got, *p, *q;

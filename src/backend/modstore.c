@@ -1581,7 +1581,10 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
  * model as the stock prop rows do; it names no renderInfo.renderModelName,
  * which only rows whose entity has no model of its own carry (pickups,
  * encounters, logic); the earlier example's flooded the editor log with
- * "modelMatrix invert failed on model .../crate01.lwo" every frame (V13). */
+ * "modelMatrix invert failed on model .../crate01.lwo" every frame (V13).
+ * The entityDef is the game's text whole, editorVars included: V14 saw the
+ * same line while the Toybox previewed or the crosshair hovered the crate
+ * with the block left out. */
 #define MS_EXAMPLE_DECL "example_crate"
 #define MS_EXAMPLE_DEF_DIR "assets\\generated\\decls\\entitydef\\mods\\"
 #define MS_EXAMPLE_ROW_DIR "assets\\generated\\decls\\snapeditorentitydef\\mods\\"
@@ -1589,6 +1592,19 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 static const char MS_EXAMPLE_DEF[] =
     "{\r\n"
     "\tclass = \"idProp_Coop\";\r\n"
+    "\teditorVars {\r\n"
+    "\t\trotatable = false;\r\n"
+    "\t\tshowOrientation = false;\r\n"
+    "\t\tshowFixedBox = false;\r\n"
+    "\t\tshowInRenderMode = false;\r\n"
+    "\t\tplaceable = false;\r\n"
+    "\t\tplaceableInLayers = false;\r\n"
+    "\t\tcolor = ( 1, 1, 1, 1 );\r\n"
+    "\t\toriginOffset = ( 0, 0, 0 );\r\n"
+    "\t\tmaterial = \"\";\r\n"
+    "\t\teditorName = \"\";\r\n"
+    "\t\tdescription = \"\";\r\n"
+    "\t}\r\n"
     "\tedit = {\r\n"
     "\t\trenderModelInfo = {\r\n"
     "\t\t\tmodel = \"models/snapmaps/props/new/crate01.lwo\";\r\n"
