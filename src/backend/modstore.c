@@ -2609,7 +2609,7 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
             if (!sh_mb_tree_hash(folder, tree)) { sh_mb_free(&b); free(folder); continue; }
             cached = sh_json_object_get(&cache, tree);
             _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", have);
-            current = have[0] && cached && !strcmp(cached, value);
+            current = have[0] && cached && !strcmp(cached, value) && b.rules == SH_MB_RULES;
             /* A current folder built before snapshots existed (or whose
              * snapshot went missing) gets one from its unchanged files. */
             if (current) {
@@ -2725,7 +2725,7 @@ int sh_ms_sync_pending(void)
         if (sh_mb_load_folder(folder, &b) && sh_mb_tree_hash(folder, tree)) {
             cached = sh_json_object_get(&cache, tree);
             _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", b.hash);
-            current = cached && !strcmp(cached, value);
+            current = cached && !strcmp(cached, value) && b.rules == SH_MB_RULES;
         }
         sh_mb_free(&b);
         if (!current) pending++;

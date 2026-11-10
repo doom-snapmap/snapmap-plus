@@ -247,6 +247,22 @@ static void test_first_build(const char *tmp)
     /* Afterwards it is a folder like any other: nothing renamed again, the cache answers. */
     CHECK(sh_ms_first_key(got, got2, sizeof got2, cause, sizeof cause) == 0 && !got2[0]);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    /* A folder built under an earlier product's rules (its block names another
+     * number, or none) is built again once, with the same author bytes. */
+    t = slurp(got, "mod.json", NULL);
+    {
+        char *r = t ? strstr(t, "\"rules\": ") : NULL;
+        CHECK(r && r[9] == '0' + SH_MB_RULES);
+        if (r) r[9] = '0' + SH_MB_RULES - 1;
+    }
+    if (t) mt_write(got, "mod.json", t);
+    free(t);
+    CHECK(sh_ms_sync_pending() == 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    t = slurp(got, "mod.json", NULL);
+    CHECK(t && strstr(t, "\"rules\": ") && strstr(t, "\"rules\": ")[9] == '0' + SH_MB_RULES);
+    free(t);
+    CHECK(sh_ms_sync_pending() == 0 && sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
 
     /* A second hand-made "cyberprobe" gets its own salt; both serve. */
     fb_make(dir, "cyberprobe");

@@ -109,6 +109,12 @@
 #include <stdint.h>
 
 #define SH_MB_FORMAT          1
+/* The builder's rules, written into the product block as "rules". A folder
+ * whose block carries another number (or none: built by an earlier product)
+ * is built again once by the rebuild rule, so a product update reclassifies
+ * every installed folder; aliases keep the maps pinned to its earlier hash
+ * working. Raise it when a build's classification, edits or manifest change. */
+#define SH_MB_RULES           2
 #define SH_MB_ID_MAX          64u
 #define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */
@@ -244,6 +250,7 @@ typedef struct sh_mb_bundle {
     int   delivered;       /* "legacy" without "source": "overrides" (the retired package folder): delivered by a map */
     long long built;       /* product block "built": when this bundle was first written in its folder */
     int   validated;       /* product block "validated" (1 after a build without errors) */
+    int   rules;           /* product block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */
     char  state_cause[SH_MB_CAUSE_MAX];   /* product block "cause" when not validated */
     char  origin[16];      /* product block "origin": SH_MB_ORIGIN_*, "" for a folder the author made */
     sh_mb_need_stats needs;

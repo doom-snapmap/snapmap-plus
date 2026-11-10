@@ -4724,7 +4724,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
 static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
 {
     static const char *const bkeys[] = { "build", "built", "bundle", "cause", "classes", "edits", "editor", "files", "format", "key",
-                                         "legacy", "origin", "registries", "shadows", "stock", "validated", NULL };
+                                         "legacy", "origin", "registries", "rules", "shadows", "stock", "validated", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
     size_t i, total;
     if (root->t != MBJ_OBJ) { mb_error(out, "mod.json must contain one JSON object"); return 0; }
@@ -4786,6 +4786,12 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         return 0;
     }
     out->built = v ? _strtoi64(v->s, NULL, 10) : 0;
+    v = mbj_get(block, "rules");
+    if (v && (v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-')) {
+        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" rules must be a number");
+        return 0;
+    }
+    out->rules = v ? atoi(v->s) : 0;
     v = mbj_get(block, "validated");
     if (v && v->t != MBJ_BOOL) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" validated must be true or false"); return 0; }
     out->validated = v ? v->b : 1;
@@ -5105,6 +5111,8 @@ static char *mb_block_text(const sh_mb_bundle *b, const wchar_t *root, int with_
     mb_puts(&o, ",\"bundle\":");
     mb_put_jcstr(&o, b->hash);
     _snprintf_s(num, sizeof num, _TRUNCATE, ",\"built\":%lld", b->built > 0 ? b->built : mb_now());
+    mb_puts(&o, num);
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"rules\":%d", SH_MB_RULES);
     mb_puts(&o, num);
     mb_puts(&o, b->validated ? ",\"validated\":true" : ",\"validated\":false");
     if (!b->validated && b->state_cause[0]) { mb_puts(&o, ",\"cause\":"); mb_put_jcstr(&o, b->state_cause); }
@@ -5500,6 +5508,7 @@ int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle
     }
     mb_finish(out);
     out->validated = out->errors == 0;
+    out->rules = SH_MB_RULES;
     out->built = (have_prev && !strcmp(prev.hash, out->hash) && prev.built > 0) ? prev.built : mb_now();
     if (have_prev) memcpy(out->prev_hash, prev.hash, SH_MB_HASH_HEX + 1);
 finish:
