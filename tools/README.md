@@ -9,6 +9,7 @@ Contains maintainer tools for release notes, frontend assets and portable engine
 - `changelog.py` parses and validates `CHANGELOG.md` and extracts a release's notes.
 - `draft_changelog.py` prepares release-note drafts for review.
 - `sync_release_notes.py` synchronizes reviewed notes to GitHub releases.
+- `cbuild.ps1` holds the shared MSVC build helpers the component build scripts and `tests/run-tests.ps1` dot-source: one vcvars import, incremental parallel compiles, the link step and a bounded process pool.
 - `update-avatar.ps1` deliberately refreshes the embedded organization avatar; normal builds use committed assets.
 - [signatures/](signatures/README.md) derives and checks engine patterns.
 - [tests/](tests/) tests changelog parsing and drafting.

@@ -87,9 +87,18 @@ sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It als
 `build/snapmap-plus-store.exe`, the store migration tool the installer runs, from the backend's store sources
 (`src/store/build.ps1`).
 
-`build.ps1` is the one top-level build script (used above and by CI). Pass `-BackendOnly` to skip the
-frontend when iterating on backend code alone; any extra args (e.g. `-Diag`) forward through to
+`build.ps1` is the one top-level build script (used above, by CI and by the release workflow); build
+the product only through it or the component scripts it calls. Pass `-BackendOnly` to skip the frontend
+when iterating on backend code alone; any extra args (e.g. `-Diag`) forward through to
 `src\backend\build.ps1`. Frontend sources are in `src/ui/webview/`.
+
+The build is incremental. Each component script compiles its sources to objects under `build/obj/`
+with `cl /c /MP` (one compiler process per core) and then links them, all through the shared helpers
+in `tools/cbuild.ps1`. A later build recompiles only a source whose object is missing or older than
+the source or any project file it includes (quoted `#include`, followed recursively), and relinks only
+when an object or the link command changed; a change of flags or MSVC toolset recompiles that
+component in full. Clean and incremental builds write byte-identical DLLs (`/Brepro`, and the previous
+PDB is removed before each link). To force a clean build, delete `build/obj/`.
 
 ## 5. Package the overlay
 
@@ -140,8 +149,13 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-The runner builds and executes the self-contained native suites, then runs the
-JavaScript suites with Node 22.13 or newer. No game is needed for these checks.
+The runner builds and executes the self-contained native suites and the
+JavaScript suites (Node 22.13 or newer). No game is needed for these checks.
+It compiles each source once per set of defines into `build/obj/tests/<flags-hash>/`
+(again only when the source or an included project file changed), links each suite
+from those objects, and runs the native and JavaScript suites in parallel, one per
+core, printing each suite's output in manifest order. `-Only` and `-Skip` select
+native suites by name.
 They cover patch ownership and rollback, edit dispatch, resource lifetimes,
 navigation, crash records, previews, frontend contracts and Worker
 request handling. The current test manifest is `tests/run-tests.ps1`.
@@ -275,10 +289,12 @@ that are merged but not yet tagged do not appear.
    [Writing the commit body](#writing-the-commit-body) below, which is a hard requirement, not a style
    preference. Do not add agent/tool attribution or generated-by trailers.
 7. **Push** to your fork and open a **pull request against `main`**.
-8. The **CI gate** runs automatically, as two parallel jobs: a security scan (no-new-binaries ·
-   capability-surface scan · gitleaks); and the build (`build.ps1` / `package.ps1`, a bundle guard that
-   asserts the overlay stays the lean 2-file set, XInput ordinal parity, the native unit tests, and the installer's
-   `gofmt` / `vet` / `test`). It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
+8. The **CI gate** runs automatically, as three parallel jobs: a security scan (no-new-binaries ·
+   capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, a bundle guard that
+   asserts the overlay stays the lean 2-file set, XInput ordinal parity, `tests/run-tests.ps1` and the
+   Worker runtime suite); and the installer's `gofmt` / `vet` / `test` / `build`. CI calls the same
+   scripts as a local build and caches only fetched dependencies (the WebView2 SDK, miniflare and the Go
+   caches). It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
    repo secrets.
 9. A **maintainer reviews** and merges (changes under `.github/`, `*.ps1`, and `installer/` are
    CODEOWNERS-gated). Releases are cut from reviewed, tagged commits — see the README's
