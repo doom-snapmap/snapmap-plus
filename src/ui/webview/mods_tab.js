@@ -387,18 +387,59 @@ var modsTab = (function () {
     return out;
   }
 
+  /* What the edits of one game file do, each part with its kind: 'set' (fields set, entries added
+     or replaced) or 'removed' (fields or entries removed). */
+  function editParts(e) {
+    var parts = [];
+    if (e.set) parts.push({text: plural(e.set, 'field set', 'fields set'), kind: 'set'});
+    if (e.remove) parts.push({text: plural(e.remove, 'field removed', 'fields removed'), kind: 'removed'});
+    if (e.list) parts.push({text: plural(e.list, 'list entry', 'list entries') + ' added', kind: 'set'});
+    if (e.keyed) parts.push({text: plural(e.keyed, 'named entry', 'named entries') + ' added or replaced', kind: 'set'});
+    if (e.bag) parts.push({text: plural(e.bag, 'entry', 'entries') + ' added', kind: 'set'});
+    if (e.drop) parts.push({text: plural(e.drop, 'entry', 'entries') + ' removed', kind: 'removed'});
+    return parts;
+  }
+  function editFile(e) { return e.file.replace(/^generated\/decls\//, '').replace(/\.decl$/, ''); }
+  var NO_EDIT_TEXT = 'no change from the game\'s text';
   /* One edited game file: its name and what the edits do. */
   function editLine(e) {
-    var parts = [];
-    if (e.set) parts.push(plural(e.set, 'field set', 'fields set'));
-    if (e.remove) parts.push(plural(e.remove, 'field removed', 'fields removed'));
-    if (e.list) parts.push(plural(e.list, 'list entry', 'list entries') + ' added');
-    if (e.keyed) parts.push(plural(e.keyed, 'named entry', 'named entries') + ' added or replaced');
-    if (e.bag) parts.push(plural(e.bag, 'entry', 'entries') + ' added');
-    if (e.drop) parts.push(plural(e.drop, 'entry', 'entries') + ' removed');
-    var f = e.file.replace(/^generated\/decls\//, '').replace(/\.decl$/, '');
-    return f + ': ' + (parts.length ? parts.join(', ') : 'no change from the game\'s text');
+    var parts = editParts(e);
+    return editFile(e) + ': ' + (parts.length ? parts.map(function (p) { return p.text; }).join(', ') : NO_EDIT_TEXT);
   }
+
+  /* Colour in the details pane (docs/webview-ui.md): the Decl Text editor's token hues, each naming
+     one kind, each with a hover title. A path splits into its folder (dimmed), the mod's own
+     namespace mods/<key>/ (the string hue) and the file name in the text colour; a path without that
+     namespace is the game's, its file name in the keyword hue. */
+  var PATH_TITLES = {own: 'the mod\'s own file', edit: 'a game file this mod edits', replace: 'a game file this mod replaces'};
+  function ownSpan(path, keys) {
+    var p = '/' + str(path);
+    for (var i = 0; i < keys.length; i++) {
+      if (!keys[i]) continue;
+      var at = p.indexOf('/mods/' + keys[i] + '/');
+      if (at >= 0) return {at: at, len: keys[i].length + 6};
+    }
+    return null;
+  }
+  /* [{text, cls}] for one path: cls is 'mk-dir', 'mk-own', 'mk-game' or '' (the text colour). */
+  function pathParts(path, keys) {
+    path = str(path);
+    var out = [], own = ownSpan(path, arr(keys));
+    function push(text, cls) { if (text) out.push({text: text, cls: cls}); }
+    var rest = own ? path.slice(own.at + own.len) : path, cut = rest.lastIndexOf('/') + 1;
+    if (own) { push(path.slice(0, own.at), 'mk-dir'); push(path.substr(own.at, own.len), 'mk-own'); }
+    push(rest.slice(0, cut), 'mk-dir');
+    push(rest.slice(cut), own ? '' : 'mk-game');
+    return out;
+  }
+  function modKeys(b) { return [b.key, b.id, b.folder]; }
+  function pathKind(path, b) {
+    if (ownSpan(path, modKeys(b))) return 'own';
+    var edited = b.facts && b.facts.edits.some(function (e) { return e.file === path; });
+    return edited ? 'edit' : 'replace';
+  }
+  /* A console value as the editor shows it: a number in the number hue, anything else a string. */
+  function valueClass(v) { return /^-?\d+(\.\d+)?$/.test(str(v).trim()) ? 'mk-num' : 'mk-str'; }
 
   /* The derived facts as {label, text, list?} lines, in the details pane's order. */
   function factLines(b) {
@@ -410,24 +451,25 @@ var modsTab = (function () {
     if (f.editor) out.push({label: 'Editor tweaks', text: plural(f.editor, 'file') + ', on this computer only: ' + EDITOR_TWEAKS_TEXT, list: f.editorTweaks});
     if (f.edits.length) {
       out.push({label: 'Edits', text: 'edits ' + plural(f.edits.length, 'game file') + '; maps that declare it get the game\'s text with these edits',
-                list: f.edits.map(editLine)});
+                list: f.edits.map(editLine), kind: 'edits', items: f.edits});
     }
     /* An edited copy is an edit, never a replacement: facts.replaces and counts.shadows leave it out. */
     var other = f.replacements.filter(function (r) { return !r.edits; });
     if (other.length || f.replaces > 0) {
       out.push({label: 'Replaces', text: plural(Math.max(other.length, f.replaces), 'game file') + ' (a folder the product received)',
-                list: other.map(function (r) { return r.path; })});
+                list: other.map(function (r) { return r.path; }), kind: 'replaces'});
     }
     var reg = [];
     f.conductor.forEach(function (c) { reg.push('encounter ' + c); });
-    if (reg.length) out.push({label: 'Encounters', text: plural(reg.length, 'encounter') + ' listed in the conductor of a map that declares it, its spawn bit assigned per map', list: reg});
+    if (reg.length) out.push({label: 'Encounters', text: plural(reg.length, 'encounter') + ' listed in the conductor of a map that declares it, its spawn bit assigned per map', list: reg,
+                         kind: 'encounters', items: f.conductor});
     if (f.stockBanks.length) {
       out.push({label: 'Game sounds', text: 'needs ' + f.stockBanks.map(function (s) { return s.bank; }).join(', ') +
                 ', single-player sounds SnapMap skips; loaded once per session for a map that declares it',
                 list: f.stockBanks.map(function (s) {
                   return s.bank + ': ' + (s.state === 'loaded' && s.ms ? 'loaded (' + s.ms + ' ms)' :
                                           s.state === 'failed' ? 'did not load (AKRESULT ' + s.result + ')' : s.state);
-                })});
+                }), kind: 'banks', items: f.stockBanks});
     }
     return out;
   }
@@ -553,6 +595,56 @@ var modsTab = (function () {
       return s;
     }
     function clear(n) { while (n && n.firstChild) n.removeChild(n.firstChild); }
+    function mark(box, text, cls, tip) {
+      var s = el('span', cls, text);
+      if (tip) s.title = tip;
+      box.appendChild(s);
+      return s;
+    }
+    function markPath(box, path, keys, noGame) {
+      pathParts(path, keys).forEach(function (p) { mark(box, p.text, noGame && p.cls === 'mk-game' ? '' : p.cls); });
+    }
+    /* One path line in the details pane; the line's hover names its kind. */
+    function pathLine(path, b, kind) {
+      var d = el('div', 'mods-path');
+      d.title = PATH_TITLES[kind || pathKind(path, b)];
+      markPath(d, path, modKeys(b));
+      return d;
+    }
+    /* One entry of a fact's list, coloured by the fact's kind. */
+    function factItem(l, i, b) {
+      var item = l.items ? l.items[i] : null, d;
+      if (l.kind === 'replaces') return pathLine(l.list[i], b, 'replace');
+      if (l.kind === 'edits') {
+        d = el('div', 'mods-path');
+        var name = d.appendChild(el('span', ''));
+        name.title = PATH_TITLES.edit;
+        markPath(name, editFile(item), []);
+        mark(d, ': ', '');
+        var parts = editParts(item);
+        if (!parts.length) mark(d, NO_EDIT_TEXT, '');
+        parts.forEach(function (p, j) {
+          if (j) mark(d, ', ', '');
+          if (p.kind === 'set') mark(d, p.text, 'mk-set', 'what this mod sets or adds in the game\'s text');
+          else mark(d, p.text, 'mk-removed', 'what this mod removes from the game\'s text');
+        });
+        return d;
+      }
+      if (l.kind === 'encounters') {
+        d = el('div', 'mods-path');
+        d.title = 'an encounter this mod adds';
+        mark(d, 'encounter ', '');
+        markPath(d, item, modKeys(b), true);
+        return d;
+      }
+      if (l.kind === 'banks') {
+        d = el('div', 'mods-path');
+        mark(d, item.bank, 'mk-game', 'a game sound bank, read from your install');
+        mark(d, l.list[i].slice(item.bank.length), '');
+        return d;
+      }
+      return el('div', '', l.list[i]);
+    }
 
     function setStatus(text, tone) {
       var s = byId('modsStatus');
@@ -810,7 +902,7 @@ var modsTab = (function () {
       var names = b.editorRowNames || [];
       if (names.length) {
         var list = el('div', 'mods-rows-list');
-        names.forEach(function (n) { list.appendChild(el('div', 'mods-rows-item', n)); });
+        names.forEach(function (n) { list.appendChild(el('div', 'mods-rows-item mk-str', n)).title = 'a Toybox row this mod adds'; });
         field(adds, plural(names.length, 'Toybox row'), list);
       } else if (b.editorRows > 0) {
         adds.appendChild(el('div', 'mods-line', plural(b.editorRows, 'Toybox row')));
@@ -828,7 +920,7 @@ var modsTab = (function () {
             var d = el('details', 'pc-limits-details mods-paths');
             d.appendChild(el('summary', '', l.label + ': ' + l.text));
             var dl = el('div', 'mods-paths-list');
-            l.list.forEach(function (n) { dl.appendChild(el('div', '', n)); });
+            l.list.forEach(function (n, i) { dl.appendChild(factItem(l, i, b)); });
             d.appendChild(dl);
             fs.appendChild(d);
           } else field(fs, l.label, l.text);
@@ -843,7 +935,7 @@ var modsTab = (function () {
         var det = el('details', 'pc-limits-details mods-paths');
         det.appendChild(el('summary', '', 'Carried paths (' + carried + ')'));
         var pl = el('div', 'mods-paths-list');
-        b.carriedPaths.forEach(function (p) { pl.appendChild(el('div', '', p)); });
+        b.carriedPaths.forEach(function (p) { pl.appendChild(pathLine(p, b)); });
         if (carried > b.carriedPaths.length) pl.appendChild(el('div', 'muted', 'and ' + (carried - b.carriedPaths.length) + ' more'));
         det.appendChild(pl);
         files.appendChild(det);
@@ -852,7 +944,11 @@ var modsTab = (function () {
       var req = section(box, 'requirements', 'Requirements');
       if (b.cvars && b.cvars.length) {
         var cl = el('div', 'mods-rows-list mono');
-        b.cvars.forEach(function (c) { cl.appendChild(el('div', '', c.name + ' ' + c.value)); });
+        b.cvars.forEach(function (c) {
+          var r = cl.appendChild(el('div', ''));
+          mark(r, c.name, 'mk-key', 'a console setting this mod needs');
+          mark(r, ' ' + c.value, valueClass(c.value), 'the value it is set to while a map uses this mod');
+        });
         field(req, 'Console settings', cl);
       } else if (b.cvars) {
         field(req, 'Console settings', 'None');
@@ -1823,7 +1919,8 @@ var modsTab = (function () {
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
           NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
-          factLines: factLines, slotText: slotText,
+          factLines: factLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass,
+          PATH_TITLES: PATH_TITLES,
           FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, NEW_MOD_HINT: NEW_MOD_HINT, normFiles: normFiles,
           fileTree: fileTree, fileMeta: fileMeta};
 })();
