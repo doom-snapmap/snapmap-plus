@@ -5,15 +5,15 @@
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread:
    one row per mod folder in mods\ (its key is the folder name; two folders holding one build, one key
    at one hash, are both rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
-   (the map modal and the "In this map" pill). Payload v3 adds, per mod, what the details pane describes:
+   (the map modal and the rows' in-this-map glyph). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
    editorRowNames, carriedPaths and publishedMaps, and the additive model's derived facts (facts:
    adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
    and a failed build (docs/webview-ui.md); the page shows no build numbers and no legacy state. Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
    after every action; showing the tab asks for a rescan. Nothing polls. The list is one flat list the
-   page scrolls natively; a row the open map uses carries an "In this map" pill (from the document's
-   map.mods, no read of its own). All text goes through textContent. */
+   page scrolls natively; each row carries one status glyph: needs attention, else in this map (from the
+   document's map.mods, no read of its own), else installed. All text goes through textContent. */
 var modsTab = (function () {
   var STATES = {
     installed: {label: 'Installed', tone: 'ok'},
@@ -38,6 +38,8 @@ var modsTab = (function () {
   };
   var IN_MAP_TEXT = 'In this map';
   var IN_MAP_TITLE = 'The open map uses this mod';
+  /* The row's one glyph for a mod the open map uses (installed and in this map). */
+  var IN_MAP_GLYPH = {tone: 'map', icon: 'map', label: IN_MAP_TEXT};
   var COUNT_LINES = [
     ['shadows', 'Replaces %s'], ['sounds', '%s'], ['movies', '%s'], ['modules', '%s'], ['vt', '%s']
   ];
@@ -174,7 +176,9 @@ var modsTab = (function () {
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
             /* additive */
             facts: normFacts(b.facts), newest: b.newest !== false,
-            builds: Array.isArray(b.builds) ? b.builds.map(normBuild) : [], buildFailed: normFailed(b.buildFailed)};
+            builds: Array.isArray(b.builds) ? b.builds.map(normBuild) : [], buildFailed: normFailed(b.buildFailed),
+            /* the builder's warnings (optional): every one, else the first; a warning is not attention */
+            warnings: Array.isArray(b.warnings) ? normNames(b.warnings) : (str(b.firstWarning) ? [str(b.firstWarning)] : [])};
   }
   function title(b) { return b.name || b.id || b.key; }
   function cmp(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
@@ -471,7 +475,12 @@ var modsTab = (function () {
         if (b) b.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn' || id === 'modsVerifyBtn'));
       });
       var mb = byId('modsMapBtn');
-      if (mb) mb.disabled = !loaded;
+      if (mb) {
+        var mm = model.map && model.map.open && model.map.mods ? model.map.mods.length : -1;
+        mb.disabled = !loaded;
+        mb.title = mm >= 0 ? 'This map: its details and the ' + plural(mm, 'mod') + ' it uses' : 'This map: its details and the mods it uses';
+        mb.setAttribute('aria-label', mb.title);
+      }
       renderUse();
       modalButtons.forEach(function (n) { n.disabled = !!busy; });
       var mg = byId('modsMigrateBtn');
@@ -535,22 +544,19 @@ var modsTab = (function () {
       shown.forEach(function (b) { box.appendChild(modRow(b)); });
     }
     function modRow(b) {
-      var info = statusInfo(b), on = b.key === selectedKey;
+      var info = statusInfo(b), on = b.key === selectedKey, used = inMap(b);
       var row = el('div', 'mods-row' + (on ? ' selected' : ''));
       row.setAttribute('role', 'option');
       row.setAttribute('data-key', b.key);
       row.setAttribute('aria-selected', on ? 'true' : 'false');
-      row.title = info.cause;
-      row.appendChild(statusIcon(info));
+      if (used) row.setAttribute('data-in-map', 'true');
+      /* One glyph: needs attention wins, then in this map, then installed; the cause is the hover. */
+      row.title = info.cause + (used ? '. ' + IN_MAP_TITLE + '.' : '');
+      row.appendChild(statusIcon(info.tone !== 'warn' && used ? IN_MAP_GLYPH : info));
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', title(b)));
       text.appendChild(el('div', 'mods-row-sub', subText(b)));
       row.appendChild(text);
-      if (inMap(b)) {
-        var pill = el('span', 'mods-pill', IN_MAP_TEXT);
-        pill.title = IN_MAP_TITLE;
-        row.appendChild(pill);
-      }
       row.addEventListener('click', function () { select(b.key); });
       rowNodes[b.key] = row;
       return row;
@@ -696,18 +702,21 @@ var modsTab = (function () {
       });
       req.appendChild(el('div', 'mods-note', NEEDS_NOTE));
 
-      var lines = [];
-      if (b.publishedMaps >= 0) lines.push(['Published maps', b.publishedMaps ? 'Used by ' + plural(b.publishedMaps, 'of your published maps', 'of your published maps') : 'Used by none of your published maps']);
       var when = formatDate(b.builtAt);
-      if (when) lines.push(['Last built', when]);
-      if (b.bundle) lines.push(['Bundle', b.bundle.slice(0, 16)]);
-      if (lines.length) {
+      if (when || b.bundle || b.warnings.length) {
+        var bl = section(box, 'build', 'Build');
+        if (when) field(bl, 'Last built', when);
+        if (b.bundle) {
+          var br = field(bl, 'Bundle', b.bundle.slice(0, 16));
+          br.title = 'Quote this when you ask for help with this mod';
+          br.className += ' mods-bundle';
+        }
+        b.warnings.forEach(function (w) { bl.appendChild(el('div', 'mods-line mods-warning', w)); });
+        if (b.bundle) bl.appendChild(el('div', 'mods-note', 'Quote the bundle number when you ask for help with this mod.'));
+      }
+      if (b.publishedMaps >= 0) {
         var share = section(box, 'sharing', 'Sharing');
-        lines.forEach(function (l) {
-          var r = field(share, l[0], l[1]);
-          if (l[0] === 'Bundle') { r.title = 'Quote this when you ask for help with this mod'; r.className += ' mods-bundle'; }
-        });
-        if (b.bundle) share.appendChild(el('div', 'mods-note', 'Quote the bundle number when you ask for help with this mod.'));
+        field(share, 'Published maps', b.publishedMaps ? 'Used by ' + plural(b.publishedMaps, 'of your published maps', 'of your published maps') : 'Used by none of your published maps');
       }
     }
 
@@ -913,12 +922,11 @@ var modsTab = (function () {
       if (at) {
         clear(at);
         at.appendChild(icon('triangle-alert'));
-        at.appendChild(el('span', '', String(n)));
         at.style.display = loaded && n > 0 ? '' : 'none';
         at.setAttribute('aria-pressed', attnOnly ? 'true' : 'false');
-        at.className = 'badge mods-attn' + (attnOnly ? ' on' : '');
+        at.className = 'btn icon icon-button mods-attn';
         at.title = plural(n, 'mod needs', 'mods need') + ' attention: ' + (attnOnly ? 'show every mod' : 'show only these');
-        at.setAttribute('aria-label', plural(n, 'mod needs', 'mods need') + ' attention; show only these');
+        at.setAttribute('aria-label', at.title);
       }
       var rootLine = byId('modsRoot');
       if (rootLine) { rootLine.textContent = model.root; rootLine.title = model.root; }
@@ -1169,7 +1177,7 @@ var modsTab = (function () {
   }
 
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
-          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, compareMods: compareMods,
+          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
           originText: originText, renamedText: renamedText, countLines: countLines, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,

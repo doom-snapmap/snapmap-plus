@@ -1,5 +1,5 @@
 /* The Mods tab (mods_tab.js): the payload model (v3, and v2 from a backend that predates it), the
-   three row states, the flat list's order and its "In this map" pill, the retired collapsed-groups
+   three row states, the flat list's order and its one glyph per row, the retired collapsed-groups
    setting left alone, the origin line, the attention filter, the details
    sections, the empty states, the map modal (the decl focus modal's mechanism), the dry-run-driven
    confirmations of Remove from map and Uninstall, the vanilla state, the stand-in host the browser
@@ -96,7 +96,8 @@ function harness(opts) {
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
 function keys(h) { return rows(h).map(n => n.getAttribute('data-key')); }
-function pills(h) { return rows(h).filter(n => n.all('mods-pill').length).map(n => n.getAttribute('data-key')); }
+/* The rows whose one glyph is "in this map" (the pill is gone, owner 2026-11-09). */
+function pills(h) { return rows(h).filter(n => iconOf(n) === 'map').map(n => n.getAttribute('data-key')); }
 function iconOf(n) { return n.all('mods-status-icon')[0].getAttribute('data-status'); }
 function section(h, name, box) { return (box || h.nodes.modsDetail).all('mods-section').find(n => n.getAttribute('data-section') === name); }
 function modalText(h) { return h.nodes.modsMapHost.textContent; }
@@ -279,7 +280,7 @@ test('show rescans once; the list waits for the answer', () => {
   assert.equal(h.sent.length, 2, 'showing the tab again rereads the folder');
   assert.equal(h.ui.onMessage({kind: 'other'}), false);
 });
-test('the list: one flat list, one status icon per row, two lines per row, the In this map pill', () => {
+test('the list: one flat list, one status glyph per row, two lines per row, no pills', () => {
   const h = harness();
   shown(h);
   assert.equal(h.nodes.modsBadge.textContent, '36');
@@ -293,22 +294,23 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   assert.equal(hg.all('mods-row-name')[0].textContent, 'Hell Guards');
   assert.equal(hg.all('mods-row-sub')[0].textContent, 'local.hell-guard \u00b7 0.0.0 \u00b7 1.2 MB');
   assert.ok(!/files|installed game/.test(hg.textContent), 'the file counts left the row');
-  /* the open map's mods (the document's map.mods) carry the pill, and only those */
+  /* the open map's mods (the document's map.mods) show the in-this-map glyph, and only those */
   const used = v3.map.mods.map(r => r.key).filter(k => v3.mods.some(b => b.key === k));
   assert.ok(used.length >= 2 && used.indexOf('local.hell-guard') >= 0);
   assert.deepEqual(pills(h).slice().sort(), used.slice().sort());
-  const pill = hg.all('mods-pill')[0];
-  assert.equal(pill.textContent, 'In this map');
-  assert.equal(pill.title, 'The open map uses this mod');
-  assert.equal(hg.children[hg.children.length - 1], pill, 'the pill closes the row');
-  assert.equal(rowOf(h, 'airlock').all('mods-pill').length, 0);
-  assert.equal(iconOf(hg), 'ok');
-  assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install');
-  const icon = hg.all('mods-status-icon')[0];
+  assert.ok(rows(h).every(n => n.all('mods-pill').length === 0 && n.all('mods-status-icon').length === 1), 'one glyph, no pill');
+  assert.equal(hg.all('mods-status-icon')[0].getAttribute('aria-label'), 'In this map');
+  assert.equal(hg.all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-map');
+  assert.match(hg.title, /The open map uses this mod/);
+  assert.equal(hg.getAttribute('data-in-map'), 'true');
+  assert.equal(hg.children.length, 2, 'glyph and text, nothing else');
+  assert.equal(iconOf(rowOf(h, 'airlock')), 'ok');
+  assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install. The open map uses this mod.');
+  const icon = rowOf(h, 'airlock').all('mods-status-icon')[0];
   assert.equal(icon.children[0].ns, 'http://www.w3.org/2000/svg');
   assert.equal(icon.children[0].children[0].getAttribute('href'), '#icon-check');
   for (const key of ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']) {
-    assert.equal(iconOf(rowOf(h, key)), 'warn');
+    assert.equal(iconOf(rowOf(h, key)), 'warn', 'needs attention wins over in this map');
     assert.equal(rowOf(h, key).title, modsTab.DUPLICATE_TEXT);
   }
   assert.equal(rowOf(h, 'local.cyberdemon@0.0.0').all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-triangle-alert');
@@ -320,7 +322,7 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   const grey = rowOf(h, 'local.cyberdemon@0.0.0');
   assert.equal(iconOf(grey), 'ok');
   assert.doesNotMatch(grey.title, /another build/);
-  /* the pill follows the document: no map open, no pill; a map that drops a mod drops its pill */
+  /* the glyph follows the document: no map open, none; a map that drops a mod drops its glyph */
   const closed = clone(v3);
   closed.map = {entities: -1, names: 0, rows: [], placed: []};
   h.ui.onMessage({kind: 'mods', data: closed});
@@ -330,7 +332,7 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   h.ui.onMessage({kind: 'mods', data: fewer});
   assert.deepEqual(pills(h), ['local.hell-guard']);
   rowOf(h, 'local.hell-guard').click();
-  assert.equal(rowOf(h, 'local.hell-guard').all('mods-pill').length, 1, 'selecting keeps the pill');
+  assert.equal(iconOf(rowOf(h, 'local.hell-guard')), 'map', 'selecting keeps the glyph');
 });
 test('the retired collapsed-groups setting is neither read nor written', () => {
   const h = harness();
@@ -372,19 +374,20 @@ test('the filter matches name, id and folder over the flat list', () => {
   h.nodes.modsFilter.dispatch('input');
   assert.match(h.nodes.modsList.textContent, /No installed mod matches/);
 });
-test('the attention badge filters to the rows that need attention', () => {
+test('the attention icon button filters to the rows that need attention; its count is its hover', () => {
   const h = harness();
   assert.equal(h.nodes.modsAttnBtn.style.display, 'none', 'hidden before the first answer');
   shown(h);
   const b = h.nodes.modsAttnBtn;
   assert.equal(b.tagName, 'button', 'a real button: focusable, Enter and Space work');
   assert.equal(b.style.display, '');
-  assert.match(b.textContent, /^2$/);
+  assert.equal(b.textContent, '', 'an icon, no number on the button');
+  assert.match(b.title, /^2 mods need attention: show only these$/);
   assert.equal(b.getAttribute('aria-pressed'), 'false');
-  assert.match(b.className, /badge mods-attn/);
+  assert.equal(b.className, 'btn icon icon-button mods-attn', 'the panel icon button');
   b.click();
-  assert.equal(b.getAttribute('aria-pressed'), 'true');
-  assert.match(b.className, / on$/, 'the pressed state shows');
+  assert.equal(b.getAttribute('aria-pressed'), 'true', 'the pressed state shows');
+  assert.match(b.title, /show every mod$/);
   assert.deepEqual(rows(h).map(n => n.getAttribute('data-key')), ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']);
   b.click();
   assert.equal(rows(h).length, 36);
@@ -446,7 +449,7 @@ test('details: every section for a v3 mod', () => {
   assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
   assert.equal(d.all('mods-detail-head')[0].all('mods-status-icon')[0].getAttribute('data-status'), 'ok');
   assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Installed and serving 24 files, 476 more read from your install');
-  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'facts', 'files', 'requirements', 'sharing']);
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'facts', 'files', 'requirements', 'build', 'sharing']);
   const about = section(h, 'about').textContent;
   assert.ok(!/Build 2/.test(section(h, 'about').textContent), 'no build number');
   for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Description The three Hell Guard brothers',
@@ -481,9 +484,10 @@ test('details: every section for a v3 mod', () => {
   assert.ok(req.indexOf(modsTab.NEEDS_NOTE) >= 0);
   const share = section(h, 'sharing').textContent;
   assert.match(share, /Used by 2 of your published maps/);
-  assert.match(share, /Last built \d{4}-\d\d-\d\d \d\d:\d\d/);
-  assert.ok(share.indexOf('Bundle ' + v3.mods.find(m => m.key === 'local.hell-guard').bundle.slice(0, 16)) >= 0);
-  assert.match(share, /when you ask for help/);
+  const built = section(h, 'build').textContent;
+  assert.match(built, /Last built \d{4}-\d\d-\d\d \d\d:\d\d/);
+  assert.ok(built.indexOf('Bundle ' + v3.mods.find(m => m.key === 'local.hell-guard').bundle.slice(0, 16)) >= 0);
+  assert.match(built, /when you ask for help/);
   /* the folder link opens that folder */
   section(h, 'about').all('mods-link')[0].click();
   assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'openFolder', arg: 'local.hell-guard'});
@@ -541,7 +545,33 @@ test('details: a v2 document renders with the v3 parts left out', () => {
   assert.equal(rowOf(h, 'unbuilt-folder').all('mods-row-sub')[0].textContent, 'unbuilt-folder');
   /* v2 has no origins and no map mods: every row is a plain row without a pill */
   assert.deepEqual(pills(h), []);
-  assert.equal(h.nodes.modsAttnBtn.textContent, '4');
+  assert.match(h.nodes.modsAttnBtn.title, /^4 mods need attention/);
+});
+test('builder warnings: one plain line each under Build; a warning is not attention', () => {
+  const doc = clone(v3);
+  const air = doc.mods.find(m => m.key === 'airlock');
+  air.warnings = ['mod.json "displayName" is not published to the store; use "name"', 'assets/x.decl names y, which no archive holds'];
+  air.firstWarning = air.warnings[0];
+  const h = live(doc);
+  h.ui.select('airlock');
+  const lines = section(h, 'build').all('mods-warning').map(n => n.textContent);
+  assert.deepEqual(lines, air.warnings);
+  assert.equal(iconOf(rowOf(h, 'airlock')), 'ok', 'installed, not needs attention');
+  assert.equal(modsTab.statusInfo(modsTab.normalize(doc).mods.find(m => m.key === 'airlock')).tone, 'ok');
+  /* only firstWarning: that one line; neither: no line */
+  delete air.warnings;
+  assert.deepEqual(modsTab.normalize(doc).mods.find(m => m.key === 'airlock').warnings, [air.firstWarning]);
+  delete air.firstWarning;
+  assert.deepEqual(modsTab.normalize(doc).mods.find(m => m.key === 'airlock').warnings, []);
+  /* the stand-in host carries the warning through an action's fresh document */
+  const doc2 = clone(v3);
+  doc2.mods.find(m => m.key === 'airlock').firstWarning = 'assets/x.decl names y, which no archive holds';
+  const host = modsTab.standIn(doc2);
+  const out = host({cmd: 'modsAction', action: 'rebuild', arg: 'airlock'});
+  const h2 = live(out[1].data);
+  h2.ui.select('airlock');
+  assert.deepEqual(section(h2, 'build').all('mods-warning').map(n => n.textContent), ['assets/x.decl names y, which no archive holds']);
+  assert.equal(iconOf(rowOf(h2, 'airlock')), 'ok');
 });
 test('empty states: How mods work, with and without mods', () => {
   const h = harness();
@@ -1019,12 +1049,20 @@ test('page contract', () => {
   GONE.forEach(id => assert.ok(!html.includes('id="' + id + '"'), 'mockup.html no longer has #' + id));
   const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<div class="statusbar">'));
   assert.ok(!/This map<|mods-pill/.test(panel), 'This map left the details pane');
-  const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar mods-toolbar">'), panel.indexOf('id="modsList"'));
-  for (const id of ['modsFilter', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn']) assert.ok(toolbar.includes('id="' + id + '"'), 'one toolbar row has ' + id);
+  /* the header's left side is icon buttons, as the Prefabs tab's (owner 2026-11-09); the toolbar holds the filter alone */
+  const head = panel.slice(panel.indexOf('<div class="panel-head">'), panel.indexOf('<div class="panel-toolbar">'));
+  const actions = head.slice(head.indexOf('<div class="panel-actions">'));
+  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn'])
+    assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
+  const pfHead = html.slice(html.indexOf('<span class="panel-title">Prefabs</span>'), html.indexOf('id="prefabFilter"'));
+  assert.match(pfHead, /<div class="panel-actions">\n\s*<button type="button" class="btn icon icon-button"/, 'the same primitives as the Prefabs header');
+  const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar">'), panel.indexOf('id="modsList"'));
+  assert.ok(toolbar.includes('id="modsFilter"') && !/<button/.test(toolbar), 'the toolbar is the filter alone');
+  assert.ok(!/class="badge mods-attn"|mods-toolbar/.test(panel), 'no pill-shaped attention badge');
   for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
   assert.match(panel, /id="modsMigrateBtn" style="display:none"/);
-  assert.match(panel, /<button type="button" class="badge mods-attn" id="modsAttnBtn" aria-pressed="false"/);
+  assert.match(panel, /<button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none"/);
   assert.ok(panel.indexOf('id="modsMapBtn"') < panel.indexOf('class="pane-splitter"'), 'the map button is in the left pane');
   for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<', '>Use in this map<']) assert.ok(panel.includes(label), 'head action ' + label);
   assert.match(panel, /id="modsUseBtn" disabled style="display:none"/);
@@ -1047,7 +1085,7 @@ test('page contract', () => {
   assert.ok(!/MODS_COLLAPSED_KEY|saveCollapsed|loadCollapsed/.test(html));
   assert.ok(!/mods\.collapsed_groups'/.test(html), 'no request names the key');
   assert.ok(!/\.mods-group/.test(css), 'the group styles are gone');
-  assert.match(css, /\.mods-pill \{/);
+  assert.ok(!/\.mods-pill/.test(css), 'no pill styles');
   assert.equal(html.split('localStorage').length - 1, 2, 'browser storage stays the preview theme only');
   assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
   assert.ok(!/innerHTML/.test(source), 'all text goes through textContent');
@@ -1055,8 +1093,7 @@ test('page contract', () => {
   /* the scrolling and layout contract */
   assert.match(css, /\.panel-body \{ flex: 1; overflow-y: auto; min-height: 0; \}/);
   assert.ok(/\.mods-row \{[^}]*\}/.test(css) && !/\.mods-row \{[^}]*(position: absolute|height:)/.test(css), 'rows are in flow, no fixed height');
-  assert.match(css, /\.mods-toolbar\.panel-toolbar \{ flex-direction: row; align-items: center; \}/);
-  assert.match(css, /\.mods-toolbar input\[type=text\] \{ flex: 1 1 auto; width: auto; min-width: 0; \}/);
+
   assert.match(css, /\.btn\.danger-solid \{ background: var\(--danger\);/);
   assert.ok(!/mods-sizer|mods-shadow/.test(css), 'the windowed list and the shadow list are gone');
   /* the payload spec */

@@ -632,16 +632,10 @@
   .menu-note b { font-weight: 600; opacity: .8; }
   /* Mods tab (mods_tab.js). One flat list sorted by name: every row shown is mounted and #modsList
      (a .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel,
-     the scrollbar and the keyboard. A row the open map uses carries the "In this map" pill. */
-  .mods-toolbar.panel-toolbar { flex-direction: row; align-items: center; }
-  .mods-toolbar input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
-  .mods-toolbar .btn { flex: none; }
-  .mods-attn { display: inline-flex; align-items: center; gap: 3px; border: 1px solid transparent; font-family: inherit; line-height: inherit; cursor: pointer;
-               background: var(--warnBg); color: var(--warnText); }
-  .mods-attn .ui-icon { width: 10px; height: 10px; }
-  .mods-attn:hover { border-color: var(--sqWarn); }
-  .mods-attn.on { background: var(--sqWarn); color: var(--panel); }
-  .mods-attn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+     the scrollbar and the keyboard. The header's actions are the panel's icon buttons, as the
+     Prefabs tab's; each row carries one status glyph (installed, in this map, needs attention). */
+  .btn.icon.mods-attn { color: var(--sqWarn); }
+  .btn.icon.mods-attn[aria-pressed="true"] { background: var(--sqWarn); border-color: var(--sqWarn); color: var(--panel); }
   .mods-list:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .mods-row { display: flex; align-items: flex-start; gap: 7px; padding: 4px 7px; border-radius: 4px; cursor: default; }
   .mods-row:hover { background: var(--panel2); }
@@ -650,14 +644,12 @@
   .mods-row-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-row.selected .mods-row-name { color: var(--selText); }
   .mods-row-sub { margin-top: 1px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mods-pill { flex: none; align-self: center; padding: 0 6px; border-radius: 9px; font-size: 10px; line-height: 15px; white-space: nowrap;
-               color: var(--muted); background: var(--panel2); border: 1px solid var(--border2); }
-  .mods-row.selected .mods-pill { color: var(--selText); border-color: transparent; background: rgba(255,255,255,0.14); }
   .mods-status-icon { flex: 0 0 14px; width: 14px; display: inline-grid; place-items: center; margin-top: 1px; }
   .mods-status-icon .ui-icon { width: 14px; height: 14px; }
   .mods-status-icon.ok { color: var(--ok); }
   .mods-status-icon.warn { color: var(--sqWarn); }
-  .mods-status-icon.info { color: var(--muted); }
+  .mods-status-icon.map { color: var(--accent); }
+  .mods-row.selected .mods-status-icon.map { color: var(--selText); }
   .mods-foot { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 5px var(--pane-inline, 10px) 6px; border-top: 1px solid var(--border); }
   .mods-status { color: var(--muted); overflow-wrap: anywhere; }
   .mods-status:empty { display: none; }
