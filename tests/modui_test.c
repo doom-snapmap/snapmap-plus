@@ -992,12 +992,12 @@ int main(int argc, char **argv)
     CHECK(count_of(doc, "\"otherBuilds\":") == 2);
     free(doc);
     dr = doctor(0);
-    CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp (alex.r2-imp@1.0.0+1): another build of its key, alex.r2-imp@1.0.1, "
-                  "serves 1 of its path(s) with no map open; a map saved with this build still serves this one; from an "
+    CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp (alex.r2-imp@1.0.0+1): another bundle of its key, alex.r2-imp@1.0.1, "
+                  "serves 1 of its path(s) with no map open; a map saved with this bundle still serves this one; from an "
                   "installed copy\n"));
     CHECK(has(dr, "MODS: doctor: bundle mods\\alex.r2-imp@1.0.1 (alex.r2-imp@1.0.1+1): active; from an installed copy\n"));
-    CHECK(has(dr, "MODS: doctor: key alex.r2-imp: installed at several builds: mods\\alex.r2-imp (an installed copy), "
-                  "mods\\alex.r2-imp@1.0.1 (an installed copy); each map serves the build it was saved with (one row per hash "
+    CHECK(has(dr, "MODS: doctor: key alex.r2-imp: installed as several bundles: mods\\alex.r2-imp (an installed copy), "
+                  "mods\\alex.r2-imp@1.0.1 (an installed copy); each map serves the bundle it was saved with (one row per hash "
                   "follows under scope)\n"));
     /* While the open map's record names the first it is kept. */
     load_map_naming("alex.r2-imp", hash1);
@@ -1093,10 +1093,10 @@ int main(int argc, char **argv)
               bundle_has(doc, "twin-b", "\"otherBuilds\":0,\"duplicateId\":false"));
         free(doc);
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: key alex.twin: installed at several builds: mods\\twin-a (your folder), mods\\twin-b "
-                      "(your folder); each map serves the build it was saved with (one row per hash follows under scope)\n"));
-        CHECK(has(dr, "MODS: doctor: bundle mods\\twin-a (alex.twin@1.0.0+1): another build of its key, twin-b, serves 1 of its "
-                      "path(s) with no map open; a map saved with this build still serves this one\n"));
+        CHECK(has(dr, "MODS: doctor: key alex.twin: installed as several bundles: mods\\twin-a (your folder), mods\\twin-b "
+                      "(your folder); each map serves the bundle it was saved with (one row per hash follows under scope)\n"));
+        CHECK(has(dr, "MODS: doctor: bundle mods\\twin-a (alex.twin@1.0.0+1): another bundle of its key, twin-b, serves 1 of its "
+                      "path(s) with no map open; a map saved with this bundle still serves this one\n"));
         /* Remove one: the author's own folder goes to the Recycle Bin too; the product keeps no bin. */
         doc = run_doc(SH_MODS_ACT_REMOVE, "twin-b");
         CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "Removed Twin. Its folder was moved to the Recycle Bin.") &&

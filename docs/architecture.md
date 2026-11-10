@@ -623,7 +623,11 @@ folder the last good bytes are read from, and the serving index reads that
 snapshot's `bundle.json` and carried files (`ms_parse_bundle`, from the cause
 `sh_ms_build_cause` reports), logging `bundle '<folder>': its latest build
 failed (<cause>); serving the last good build <key>@<hash16> from <snapshot>`;
-without a snapshot it serves the folder's last good block and says so. The
+without a snapshot it serves the folder's last good block and says so. A
+`mod.json` that does not parse is a refused build too (`sh_ms_descriptor_unparsable`,
+recorded by `sh_ms_sync`): the folder needs attention with the parse error as its cause,
+and the enumeration and the serving index find its snapshot through the record's
+`snapshots` row and serve it until the author fixes the file. The
 serving index takes a bundle's key from the author block's `id` when present,
 else from the product block's `key`, so a folder made by `sh_mods new` is
 served. The
@@ -944,7 +948,7 @@ played (see [Map scope](#map-scope)); a new name applies once it is registered: 
 gameplay decls when a map that names their bundle loads. Two builds of one key
 are never a conflict: each map serves the build its rows pin and the other is
 inert for it; with no map open the newest build (built time, then folder) serves
-its names for the Toybox, and the index build logs one `MODS: key <key>: builds
+its names for the Toybox, and the index build logs one `MODS: key <key>: bundles
 <hash16> (<version>) and <hash16> (<version>) both provide paths with other
 bytes; ...` line.
 
@@ -1793,8 +1797,8 @@ it keeps its canonical text and hash; it is ignored.
 `sh_modserve_index_boot` enables scope for the product's index; the native
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
-`sh_modserve_scope_report`: one header per key installed at several builds,
-one line per build (key, version, hash, its names, shadows and surfaces, and
+`sh_modserve_scope_report`: one header per key installed as several bundles
+("scope: key <key>: N bundles installed; ..."), one line per bundle (key, version, hash, its names, shadows and surfaces, and
 what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
 <key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or
@@ -2282,7 +2286,9 @@ When every missing bundle is obtainable, the player gets the question a My Maps
 launch asks, and Yes fetches and installs them; the resume does not activate
 anything (the rawmap's own parse does) but opens the rawmap again, through a
 reload when the editor can take one and otherwise staged for the next map open,
-with a notice saying so. Otherwise the load is denied with the gate's
+with a notice saying so. That reopened load parses the text the hold checked
+(`held_take` in `rawmap.c`), so a `.zip` is imported once, at the hold; any other
+read of the source drops it and reads the file again. Otherwise the load is denied with the gate's
 sentences; the asset rule's sentence for each row comes first on the console.
 No and a failed download behave as for a published map. The gate is bound with the published-map gates; on a
 build where they did not install, nothing is counted missing and rawmaps load as

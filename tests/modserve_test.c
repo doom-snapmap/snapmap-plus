@@ -509,7 +509,7 @@ static void test_index_and_isolation(void)
     CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
                   "alex.pink-imp@1.0.0 (no rule separates them; the first key in name order"));
     /* Two builds of one key are never a conflict. */
-    CHECK(log_has("MODS: key alex.pink-imp: builds ") && log_has("each map serves the build it declares"));
+    CHECK(log_has("MODS: key alex.pink-imp: bundles ") && log_has("each map serves the bundle it declares"));
     CHECK(!log_has("superseded"));
     CHECK(log_has("MODS: index built in ") && log_has("(7 bundles, "));
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivy.nested/thing.decl", NULL) != NULL);
@@ -3752,7 +3752,7 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("MODS: key k.fork: builds 6666666666666666 (1.0.0) and 7777777777777777 (1.0.0) both provide paths"));
+    CHECK(log_has("MODS: key k.fork: bundles 6666666666666666 (1.0.0) and 7777777777777777 (1.0.0) both provide paths"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     sh_modserve_scope_enable(1);
@@ -3771,10 +3771,10 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: key k.fork: 2 builds installed; each map serves the build it was saved with, and with no map "
+    CHECK(strstr(g_report, "scope: key k.fork: 2 bundles installed; each map serves the bundle it was saved with, and with no map "
                            "open the newest\n") != NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (6666666666666666) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
-                           "open): an older build of its key; only its surfaces serve\n") != NULL);
+                           "open): an older bundle of its key; only its surfaces serve\n") != NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
@@ -3794,7 +3794,7 @@ static void test_additive_same_key(void)
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
-                           "another build of its key\n") != NULL);
+                           "another bundle of its key\n") != NULL);
     CHECK(strstr(g_report, "serving: " AD_THING ": k.fork@1.0.0 (6666666666666666), declared (row 1): the only provider; not "
                            "served: k.fork@1.0.0 (7777777777777777)\n") != NULL);
     /* The registration plan of the map's bundle names its own paths. */
@@ -4061,6 +4061,39 @@ static void test_additive_key_and_snapshot(void)
                       "build s.snap@4444444444444444 from "));
         CHECK(!log_has("mod.json has no bundle hash"));
         CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
+    }
+    /* V12: a mod.json that does not parse. The record's snapshots row names
+     * the folder's last good build, which serves; the parse error is the
+     * failed build's cause when the store recorded none. */
+    {
+        char mj[MAX_PATH], keep[MAX_PATH];
+        size_t mlen = 0;
+        unsigned char *mtext;
+        static const char broken[] = "{\"id\": \"s.snap\", \"version\": \"1.0.0\",, }";
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\snap\\mod.json", root);
+        mtext = sh_mb_read_file(mj, 1u << 20, &mlen);
+        CHECK(mtext != NULL);
+        _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\snap\\mod.json.keep", root);
+        if (mtext) write_file(keep, (const char *)mtext, mlen);
+        write_file(mj, broken, strlen(broken));
+        sh_modserve_set_build_cause(NULL);
+        /* No row: skipped, as before. */
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 1 && log_has("bundle 'snap' skipped: mod.json is not a valid JSON object"));
+        CHECK(sh_mb_record_put(root, "snapshots", "{\"snap\": \"s.snap@4444444444444444\"}"));
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 2);
+        CHECK(log_has("bundle 'snap': its latest build failed (mod.json is not a valid JSON object (") &&
+              log_has("); serving the last good build s.snap@4444444444444444 from "));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
+        /* The store's recorded cause wins. */
+        sh_modserve_set_build_cause(ad_build_cause);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 2 && log_has("its latest build failed (assets/mods/s.snap/x.decl: parse error)"));
+        if (mtext) write_file(mj, (const char *)mtext, mlen);
+        free(mtext);
+        DeleteFileA(keep);
+        CHECK(sh_mb_record_put(root, "snapshots", NULL));
     }
     /* No snapshot: the folder's last good block, as phase 1 left it. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);

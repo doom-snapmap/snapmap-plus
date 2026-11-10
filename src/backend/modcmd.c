@@ -301,7 +301,8 @@ static void mc_sync(void)
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
     if (!sh_ms_sync(&r, &st)) { mc_line("MODS: rescan: the store cannot be read"); return; }
-    mc_line("MODS: rescan: %u folder(s) checked, %u built again, %u refused (%llu ms)", st.folders, st.rebuilt, st.failed, st.ms);
+    mc_line("MODS: rescan: %u folder(s) checked, %u have a new current bundle, %u refused (%llu ms)", st.folders, st.rebuilt,
+            st.failed, st.ms);
 }
 
 static void mc_list(void)

@@ -2185,7 +2185,7 @@ static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
     r.stock = mu_stock_exists;
     r.stock_context = &stock;
     if (sh_ms_sync(&r, &sync) && (sync.rebuilt || sync.failed))
-        mu_log("rescan: %u folder(s) built again, %u refused (%llu ms)", sync.rebuilt, sync.failed, sync.ms);
+        mu_log("rescan: %u folder(s) have a new current bundle, %u refused (%llu ms)", sync.rebuilt, sync.failed, sync.ms);
     n = e->rescan();
     InterlockedIncrement(&g_gen);
     {
@@ -4283,8 +4283,8 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
         _snprintf_s(key, sizeof key, _TRUNCATE, "%s+%llu", e->bundle.id, e->bundle.build);
     else strncpy_s(key, sizeof key, e->key, _TRUNCATE);
     if (!strcmp(u->state, "superseded"))
-        _snprintf_s(state, sizeof state, _TRUNCATE, "another build of its key, %s, serves %d of its path(s) with no map open; "
-                    "a map saved with this build still serves this one",
+        _snprintf_s(state, sizeof state, _TRUNCATE, "another bundle of its key, %s, serves %d of its path(s) with no map open; "
+                    "a map saved with this bundle still serves this one",
                     u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "a newer build", u->superseded_paths);
     else strncpy_s(state, sizeof state, u->state, _TRUNCATE);
     mu_say(o, "%s mods\\%s (%s): %s%s%s%s%s", e->delivered ? "bundle delivered by a map," : u->legacy ? "migrated bundle" : "bundle",
@@ -4363,7 +4363,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
             if (w < 0) break;
             at += (size_t)w;
         }
-        mu_say(&o, "key %s: installed at several builds: %s; each map serves the build it was saved with (one row per "
+        mu_say(&o, "key %s: installed as several bundles: %s; each map serves the bundle it was saved with (one row per "
                "hash follows under scope)", id, keys);
     }
     pending = e->migrate_pending ? e->migrate_pending(&entries) : -2;

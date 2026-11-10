@@ -917,6 +917,34 @@ static void ms_peek_identity(ms_index *x, const unsigned char *text, size_t len,
     if (*hash) ms_lower(*hash);
 }
 
+/* The record's "snapshots" row of `folder` (its name under the store root):
+ * the folder's last good build, mods\.builds\<key>@<hash16>\ (arena string),
+ * when it holds bundle.json; else NULL. */
+static char *ms_snapshot_by_record(ms_index *x, const char *folder)
+{
+    char *text = NULL, key[MS_PATH_MAX], *found = NULL;
+    ms_json o;
+    const char *v, *ve;
+    if (!folder || !x->root[0] || sh_mb_record_get(x->root, "snapshots", &text) != 1 || !text) { free(text); return NULL; }
+    o.p = text;
+    o.e = text + strlen(text);
+    if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
+        char *name;
+        if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
+        if (_stricmp(key, folder) || (name = ms_jstr(x, v, ve, 160)) == NULL) continue;
+        if (!name[0] || strchr(name, '\\') || strchr(name, '/') || strstr(name, "..")) break;
+        {
+            char snap[MS_PATH_MAX], bj[MS_PATH_MAX];
+            _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\%s", x->root, name);
+            _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\bundle.json", snap);
+            if (ms_file_size(bj) >= 0) found = ms_strdup(x, snap);
+        }
+        break;
+    }
+    free(text);
+    return found;
+}
+
 /* Parse <dir>\mod.json into the index; leaves b->cause set on failure. The
  * author block gives the identity, the requirements and "extra" (every key the
  * product does not read itself: strings, hud, description, ...); the product
@@ -943,6 +971,35 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     int manifest = 0;   /* the text is a snapshot's bundle.json (Contract 1 form), not a mod.json */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
+    if (text && (!sh_json_validate_ex((const char *)text, len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT)) {
+        /* A mod.json that does not parse is a refused build (sh_ms_sync
+         * records it): the last good build's snapshot serves until the author
+         * fixes the file. A folder that never built has none and is skipped. */
+        char *snap = ms_snapshot_by_record(x, b->folder), mpath[MS_PATH_MAX], *sk = NULL, *sh = NULL;
+        unsigned char *mtext = NULL;
+        size_t mlen = 0;
+        sh_json_error merr = { 0, NULL };
+        if (snap) {
+            _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\bundle.json", snap);
+            mtext = ms_read_whole(mpath, SH_MODSERVE_MAX_JSON, &mlen);
+        }
+        if (mtext && sh_json_validate_ex((const char *)mtext, mlen, MS_JSON_DEPTH, &kind, &merr) && kind == SH_JSON_OBJECT) {
+            sh_modserve_build_cause_fn cause_fn = g_build_cause;
+            if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
+            if (!last[0])
+                _snprintf_s(last, sizeof last, _TRUNCATE, "mod.json is not a valid JSON object (%s at byte %zu)",
+                            err.reason ? err.reason : "not an object", err.offset);
+            HeapFree(GetProcessHeap(), 0, text);
+            text = mtext;
+            len = mlen;
+            ms_peek_identity(x, text, len, &sk, &sh);
+            manifest = sh == NULL;
+            b->snapshot = b->files_dir = snap;
+            b->build_failed = ms_strdup(x, last);
+            goto parse;
+        }
+        if (mtext) HeapFree(GetProcessHeap(), 0, mtext);
+    }
     if (!text) {
         char pkg[MS_PATH_MAX];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
@@ -990,6 +1047,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             b->build_failed = ms_strdup(x, last);
         }
     }
+parse:
     c.p = (const char *)text;
     c.e = c.p + len;
     if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) c.p += 3;
@@ -2112,8 +2170,8 @@ static int ms_resolve(ms_index *x)
     if (logged > MS_CONFLICT_LOGS) ms_log("%d more conflicts not listed", logged - MS_CONFLICT_LOGS);
     for (i = 0; i < x->nbundles; ++i)
         if (superseded_by[i] >= 0)
-            ms_log("key %s: builds %.16s (%s) and %.16s (%s) both provide paths with other bytes; each map serves the "
-                   "build it declares, and with no map open the newest (%.16s)", x->bundles[i].id, x->bundles[i].hash,
+            ms_log("key %s: bundles %.16s (%s) and %.16s (%s) both provide paths with other bytes; each map serves the "
+                   "bundle it declares, and with no map open the newest (%.16s)", x->bundles[i].id, x->bundles[i].hash,
                    x->bundles[i].version, x->bundles[superseded_by[i]].hash, x->bundles[superseded_by[i]].version,
                    x->bundles[superseded_by[i]].hash);
     free(keys);
@@ -3699,7 +3757,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: key %s: %d builds installed; each map serves the build it "
+            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: key %s: %d bundles installed; each map serves the bundle it "
                         "was saved with, and with no map open the newest", b->id, builds);
             fn(context, line);
             lines++;
@@ -3710,20 +3768,20 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
                     si.requirements ? ", requirements" : "");
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
-        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its key");
+        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another bundle of its key");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
                         "the rest only in maps that declare it", si.editor_path);
         else if (si.play) strcpy_s(state, sizeof state, "not declared by the map being played: serves nothing");
         else if (!si.newest)
-            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older build of its key; only its surfaces serve",
+            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older bundle of its key; only its surfaces serve",
                         si.map_open ? " by the open map" : " (no map is open)");
         else
             _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: its names serve for the Toybox and its surfaces "
                         "serve; its shadows do not", si.map_open ? " by the open map" : " (no map is open)");
         _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s%s: %s%s%s", who, what, state,
                     si.requirements && !si.listed && si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "",
-                    b->snapshot ? "; serving its last good build (the latest build failed)" : "");
+                    b->snapshot ? "; serving its last good bundle (this folder's current bundle failed to build)" : "");
         fn(context, line);
         lines++;
     }

@@ -1617,6 +1617,54 @@ int main(int argc, char **argv)
         CHECK(sh_ms_remove_folder(never));
         CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     }
+    /* V12: a mod.json that does not parse is a refused build too. The folder
+     * needs attention with the parse error as its cause and its snapshot of
+     * build 2 serves; restoring the file ends it without a rebuild. */
+    {
+        char mj[MAX_PATH * 2], s2[MAX_PATH * 2], bad[SH_MB_CAUSE_MAX];
+        size_t n1 = 0;
+        unsigned char *t1;
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", hand);
+        _snprintf_s(s2, sizeof s2, _TRUNCATE, "%s\\.builds\\alex.dropped@%.16s", root, d2);
+        t1 = sh_mb_read_file(mj, 1 << 20, &n1);
+        CHECK(t1 != NULL);
+        CHECK(!sh_ms_descriptor_unparsable(hand, bad, sizeof bad) && !bad[0]);
+        mt_write(hand, "mod.json", "{\"id\": \"alex.dropped\", \"name\": \"Dropped\",, }");
+        CHECK(sh_ms_descriptor_unparsable(hand, bad, sizeof bad) &&
+              !strncmp(bad, "mod.json is not a valid JSON object (", 37) && strstr(bad, "; fix the file and it builds again"));
+        g_logged = 0;
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1 && ss.rebuilt == 0);
+        CHECK(log_has("My Dropped Mod build failed: mod.json is not a valid JSON object (") &&
+              log_has("; serving the last good build from "));
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, "My Dropped Mod");
+        CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, d2) && e->bundle.build == 2 && !e->cause[0]);
+        CHECK(e && !strncmp(e->build_failed, "mod.json is not a valid JSON object (", 37));
+        CHECK(e && e->snapshot && !_stricmp(e->snapshot, s2));
+        sh_ms_list_free(&list);
+        /* Without a snapshot the folder needs attention and nothing serves. */
+        {
+            char moved[MAX_PATH * 2];
+            _snprintf_s(moved, sizeof moved, _TRUNCATE, "%s.away", s2);
+            CHECK(MoveFileA(s2, moved));
+            CHECK(sh_ms_enumerate(&list));
+            e = find_entry(&list, "My Dropped Mod");
+            CHECK(e && !e->loaded && !sh_ms_entry_usable(e) && !strncmp(e->cause, "mod.json is not a valid JSON object (", 37));
+            sh_ms_list_free(&list);
+            CHECK(MoveFileA(moved, s2));
+        }
+        /* The author fixes the file: it builds again to the same bundle, and nothing failed. */
+        if (t1) {
+            mt_write(hand, "mod.json", (const char *)t1);
+            free(t1);
+        }
+        g_logged = 0;
+        CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.rebuilt == 1 && log_has("unchanged content"));
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, "My Dropped Mod");
+        CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, d2) && !e->build_failed[0] && !e->cause[0]);
+        sh_ms_list_free(&list);
+    }
     /* Another edit: build 3. Chained rebuilds stay one hop: builds 1 and 2
      * both name build 3, and no alias names an alias. */
     mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",

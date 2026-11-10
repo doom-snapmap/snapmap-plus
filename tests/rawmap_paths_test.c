@@ -873,6 +873,8 @@ extern unsigned long long g_mod_stub_export_result;
 extern int g_mod_stub_export_calls;
 extern char g_mod_stub_export_path[520];
 extern char g_mod_stub_import_cause[MODEXPORT_CAUSE_MAX];
+extern const char *g_mod_stub_import_text;
+extern int g_mod_stub_import_calls;
 
 static struct {
     int installed, store, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
@@ -1019,6 +1021,51 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
         CHECK(!g_in_reload);
     }
     DeleteFileA(staged);
+    mods_end();
+}
+
+/* V12: a held rawmap ZIP was imported at the hold and again at the resume, so
+ * every import line was printed twice. The resume parses the bytes the hold
+ * checked; a later load of the same file imports it again. */
+static void a_held_zip_is_imported_once(void)
+{
+    char staged[MAX_PATH], why[256];
+    printf("\n-- a rawmap ZIP held for its mods is imported once; the resumed load reuses that import\n");
+    mods_begin();
+    R.store = 1;
+    CHECK(temp_path("rawmap_held_once.zip", staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    g_mod_stub_import_text = MOD_MAP;
+    g_mod_stub_import_calls = 0;
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(strstr(why, "checking whether it can download them") != NULL);
+    CHECK(g_mod_stub_import_calls == 1);
+    ticks(3);
+    R.answer = 1;
+    ticks(3);
+    CHECK(R.fetches == 1 && R.installed && R.resumes == 1);
+    CHECK(g_mod_stub_import_calls == 1);   /* the resume itself reads nothing */
+    /* The reopened load: the hold's bytes, not a second import. */
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && strstr(g_prepared, "RAWMAP_MARK"));
+    CHECK(g_mod_stub_import_calls == 1);
+    sh_rawmap_reload_done();
+    /* The next load of the file is a new load: imported again. */
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_mod_stub_import_calls == 2);
+    sh_rawmap_reload_done();
+
+    printf("-- a hold that never resumed: the next load imports the file again\n");
+    R.installed = 0;
+    R.store = 0;
+    R.fetches = R.resumes = 0;
+    sh_modpub_test_reset();
+    sh_modpub_test_set_ops(&RAWMAP_OPS);
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 3);
+    ticks(4);
+    CHECK(R.resumes == 0);
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 4);
+    ticks(4);
+    g_mod_stub_import_text = NULL;
+    sh_rawmap_swap_set_source(NULL);
     mods_end();
 }
 
@@ -1237,6 +1284,7 @@ int main(void)
     a_rawmap_open_is_unsaved_until_its_first_save();
     a_rawmap_without_its_mods_never_reaches_the_engine();
     a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
+    a_held_zip_is_imported_once();
     a_rawmap_whose_mods_are_installed_loads();
     a_rawmap_open_takes_its_own_rows_and_then_its_own_id();
     a_save_with_mods_writes_the_zip_beside_the_json();

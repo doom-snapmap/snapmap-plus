@@ -289,6 +289,12 @@ extern void (*sh_ms_test_between_folders)(unsigned built);   /* the boot build, 
  * snapshot that serves meanwhile in sh_ms_entry.snapshot). */
 void sh_ms_build_cause(const char *folder, char *out, size_t cap);
 
+/* 1 when `folder` (absolute UTF-8) has a mod.json that is not a JSON object,
+ * with the parse error and the next step in `out`; 0 otherwise (no mod.json,
+ * or one that parses). sh_ms_sync records it as the folder's refused build,
+ * so its last good build keeps serving until the file is fixed. */
+int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap);
+
 /* Record a refused build of `folder` (absolute) that a caller ran itself
  * (`sh_mods build`): the same per-folder state sh_ms_sync records. The
  * folder's mod.json is not touched, so a previous build keeps serving. A
