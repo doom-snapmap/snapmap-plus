@@ -197,6 +197,12 @@ name". Mods you download or import are never refused on their files. A map whose
   (`{"<request path>": {"source": "<installed path>"}}`) names installed content under a mod's own
   name without copying it. A player whose game lacks that content, or holds a different revision
   of it, is told so and the mod is not installed.
+- A mod that borrows campaign content brings along everything that content needs. SnapMap loads
+  only its own archive, so when a mod's decls name a model, mesh, skeleton or clip that only the
+  campaign archive holds (an animWeb's models and clips, an md6Def's mesh, skeleton and clips, a
+  decl's model), the build adds it, and whatever it needs in turn, as a stock pointer from your
+  install. Nothing is copied or uploaded; the build notes "N game files borrowed for
+  completeness".
 - Installed mods are served after the product's own files and before the game's archives. A mod's
   new editor rows appear in the palette when the editor is first opened; a mod installed after that
   needs `sh_mods palette rebuild`. A mod that fails a check is skipped on its own with one logged

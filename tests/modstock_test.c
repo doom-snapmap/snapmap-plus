@@ -19,6 +19,10 @@
  *   the store client: an upload sends only carried blobs (loopback stub), a
  *     download fetches only carried blobs and is refused before any fetch on
  *     D2;
+ *   the campaign-only closure: a decl naming content only gameresources holds
+ *     gains it as a pointer, transitively (animWeb -> md6Def -> mesh and
+ *     skeleton), stable across a rebuild; snap_gameresources names gain
+ *     nothing; a name no archive holds still fails; the file cap fails by name;
  *   serving: a pointer is answered with the installed bytes, a carried copy of
  *     the same bytes in another bundle is not a conflict, and a pointer D2
  *     cannot answer falls through.
@@ -429,8 +433,11 @@ static void test_renamed_names_dead(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
     l1c_mod(dir, "assets\\generated\\decls\\entitydef\\mods\\t.l1c\\death.decl",
             "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.needs.stock == 1 && b.needs.unresolved == 0);
+    /* Only the campaign archive holds it here, so it is brought along. */
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
     if (b.errors) fprintf(stderr, "  collision model: %s\n", b.first_cause);
+    f = find(&b, D3_COLLISION);
+    CHECK(f && f->stock && f->closure && b.stock_count == 1);
     sh_mb_free(&b);
 
     /* A copied stock md6Def keeping a clip no archive holds: a warning naming
@@ -465,6 +472,148 @@ static void test_renamed_names_dead(const char *tmp)
     CHECK(!sh_mb_build(dir, &RESOLVER, &b));
     CHECK_CAUSE(b, "needs anim md6/m/dead.md6anim, which resolves to nothing");
     sh_mb_free(&b);
+}
+
+/* ------------------------------------------ campaign-only closure ---- */
+/* A fourth install (D4): an md6Def, its mesh and its skeleton only in
+ * gameresources (the campaign archive SnapMap never loads), an image only in
+ * snap_gameresources and one both archives hold. A mod's animWeb naming the
+ * md6Def brings the chain along as pointers; names SnapMap loads on its own
+ * add nothing; a name no archive holds still fails; the file cap fails with
+ * the first name past it. */
+
+#define K_MD6    "generated/decls/md6def/k/wall.md6.decl"
+#define K_MESH   "generated/basemodel/k/wall.bmd6model"
+#define K_SKL    "generated/skeleton/k/wall.bmd6skl"
+#define K_SNAP   "generated/image/k/snap.bimage"
+#define K_BOTH   "generated/image/k/both.bimage"
+#define K_WEB    "assets\\generated\\decls\\animweb\\mods\\t.close\\station.decl"
+static const char K_MD6_TEXT[] = "{\r\n\tmesh = \"k/wall.md6mesh\";\r\n\tskeleton = \"k/wall.md6skl\";\r\n"
+                                 "\tanim \"k/gone.md6anim\" {\r\n\t}\r\n}\r\n";
+/* The engine's own animWeb form, as designsystems/med_station_heal holds it. */
+static const char K_WEB_TEXT[] = "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k/wall.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n";
+static unsigned char K_MESH_B[90], K_SKL_B[70], K_SNAP_B[50], K_BOTH_S[60], K_BOTH_G[60];
+
+static void make_install4(const char *d4)
+{
+    size_t k;
+    for (k = 0; k < sizeof K_MESH_B; k++) K_MESH_B[k] = (unsigned char)(k * 3 + 1);
+    for (k = 0; k < sizeof K_SKL_B; k++) K_SKL_B[k] = (unsigned char)(k * 5 + 2);
+    for (k = 0; k < sizeof K_SNAP_B; k++) K_SNAP_B[k] = (unsigned char)(k * 7 + 3);
+    for (k = 0; k < sizeof K_BOTH_S; k++) { K_BOTH_S[k] = (unsigned char)(k * 9 + 4); K_BOTH_G[k] = (unsigned char)(k * 11 + 5); }
+    {
+        entry g[] = {
+            { K_MD6,  (const unsigned char *)K_MD6_TEXT, sizeof K_MD6_TEXT - 1, 0, 0 },
+            { K_MESH, K_MESH_B, sizeof K_MESH_B, 0, 0 },
+            { K_SKL,  K_SKL_B, sizeof K_SKL_B, 1, 1 },
+            { K_BOTH, K_BOTH_G, sizeof K_BOTH_G, 0, 0 },
+        };
+        entry s[] = {
+            { K_SNAP, K_SNAP_B, sizeof K_SNAP_B, 0, 0 },
+            { K_BOTH, K_BOTH_S, sizeof K_BOTH_S, 0, 0 },
+        };
+        write_container(d4, "gameresources", g, 4);
+        write_container(d4, "snap_gameresources", s, 2);
+    }
+}
+
+static int has_note(const sh_mb_bundle *b, const char *needle)
+{
+    size_t i;
+    for (i = 0; i < b->note_count; i++) if (strstr(b->notes[i], needle)) return 1;
+    return 0;
+}
+
+static void test_campaign_closure(const char *tmp)
+{
+    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], hash[65];
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+    const char *chain[] = { K_MD6, K_MESH, K_SKL };
+    int i;
+
+    _snprintf_s(d4, sizeof d4, _TRUNCATE, "%s\\d4", tmp);
+    make_install4(d4);
+    sh_modstock_set_install(d4);
+
+    /* animWeb -> md6Def -> mesh and skeleton: the whole chain becomes
+     * pointers at the game's own paths, surfaces carried by nothing; the
+     * md6Def's clip no archive holds is the game's own hole, not the mod's. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close1", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, K_WEB, K_WEB_TEXT);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    if (b.errors) fprintf(stderr, "  closure: %s\n", b.first_cause);
+    CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof K_WEB_TEXT - 1);
+    CHECK(b.stock_bytes == sizeof K_MD6_TEXT - 1 + sizeof K_MESH_B + sizeof K_SKL_B);
+    for (i = 0; i < 3; i++) {
+        f = find(&b, chain[i]);
+        CHECK(f && f->stock && f->absent && f->closure && f->stock_source && !strcmp(f->stock_source, chain[i]) &&
+              f->cls == SH_MB_CLASS_SURFACE);
+    }
+    f = find(&b, K_MD6);
+    CHECK(f && f->need_count == 3);
+    CHECK(has_note(&b, "3 game files borrowed for completeness") && has_note(&b, "(first " K_MD6 ")"));
+    CHECK(b.canonical && strstr(b.canonical, "\"source\":\"" K_SKL "\"") != NULL);
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    memcpy(hash, b.hash, sizeof hash);
+    sh_mb_free(&b);
+    /* The product block records them as pointers with no file; a rebuild
+     * carries them forward and keeps the hash and the note. */
+    {
+        size_t len = 0;
+        unsigned char *text;
+        char path[MAX_PATH * 2];
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+        text = sh_mb_read_file(path, 1 << 20, &len);
+        CHECK(text && strstr((const char *)text, "\"source\": \"" K_MESH "\"") && strstr((const char *)text, "\"inAssets\": false"));
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+    }
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0 && !strcmp(b.hash, hash) && b.stock_count == 3);
+    CHECK(has_note(&b, "3 game files borrowed for completeness"));
+    sh_mb_free(&b);
+
+    /* Names SnapMap loads on its own (snap_gameresources, or both archives)
+     * gain nothing. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close2", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, "assets\\generated\\decls\\material\\mods\\t.close\\m.decl",
+             "{\r\n\tdiffusemap = \"k/snap\";\r\n\tspecularmap = \"k/both\";\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 && b.needs.stock == 2);
+    CHECK(!has_note(&b, "borrowed for completeness"));
+    sh_mb_free(&b);
+
+    /* A name no archive holds still fails as before. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close3", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, K_WEB, "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k/none.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.file_count == 1);
+    CHECK_CAUSE(b, "needs md6Def k/none.md6, which resolves to nothing");
+    sh_mb_free(&b);
+
+    /* The file cap: 4095 declared pointers and the animWeb fill it, so the
+     * first name the closure would add fails the build, by name. */
+    {
+        size_t cap = 96u * 4096u + 256u, w;
+        char *desc = (char *)malloc(cap);
+        unsigned n;
+        CHECK(desc != NULL);
+        if (desc) {
+            w = (size_t)_snprintf_s(desc, cap, _TRUNCATE, "{\"id\":\"t.close\",\"name\":\"Closure test\",\"stock\":{");
+            for (n = 0; n < SH_MB_MAX_FILES - 1; n++)
+                w += (size_t)_snprintf_s(desc + w, cap - w, _TRUNCATE, "%s\"generated/image/mods/t.close/%04u.bimage\":"
+                                         "{\"source\":\"" K_SNAP "\"}", n ? "," : "", n);
+            _snprintf_s(desc + w, cap - w, _TRUNCATE, "}}");
+            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close4", tmp);
+            mt_write(dir, "mod.json", desc);
+            mt_write(dir, K_WEB, K_WEB_TEXT);
+            CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+            CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign archives hold; bringing it along would take "
+                           "the bundle past 4096 files");
+            sh_mb_free(&b);
+            free(desc);
+        }
+    }
 }
 
 /* ------------------------------------------------- store, sync, serve ---- */
@@ -713,6 +862,7 @@ int main(void)
     test_bridge(d1);
     test_builder(tmp);
     test_renamed_names_dead(tmp);
+    test_campaign_closure(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();

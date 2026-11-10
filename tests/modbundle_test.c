@@ -292,6 +292,18 @@ static void test_scan(void)
     CHECK(!strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"));
     if (strcmp(got, "image=mods/a/d.tga;image=mods/a/n.tga;renderProg=skinvmtr;image=mods/a/m.tga;"))
         fprintf(stderr, "  material scan gave %s\n", got);
+    /* An animWeb: its modelInfos pairs and models list name md6Defs (an alias
+     * is not one), a node's ".md6anim" name is an anim, other names are not. */
+    {
+        const char *web = "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k/a.md6\" \"\"\r\n\t\t\t\"k/b.md6\" \"alias.md6\"\r\n\t\t}\r\n"
+                          "\t\tmodels {\r\n\t\t\t\"k/c.md6\"\r\n\t\t\t\"k/d.md6\"\r\n\t\t\t\"k/e.md6\"\r\n\t\t}\r\n\t}\r\n"
+                          "\tnode {\r\n\t\tname \"md6/k/use.md6anim\"\r\n\t\tname \"use_node\"\r\n\t}\r\n}";
+        const char *want = "md6Def=k/a.md6;md6Def=k/b.md6;md6Def=k/c.md6;md6Def=k/d.md6;md6Def=k/e.md6;anim=md6/k/use.md6anim;";
+        got[0] = 0;
+        sh_mb_scan_needs("animWeb", (const unsigned char *)web, strlen(web), collect, got);
+        CHECK(!strcmp(got, want));
+        if (strcmp(got, want)) fprintf(stderr, "  animWeb scan gave %s\n", got);
+    }
 }
 
 /* The stock 13954591 names the fixture leans on, plus one shadowable decl. */

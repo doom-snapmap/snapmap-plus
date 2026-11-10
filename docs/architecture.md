@@ -479,7 +479,8 @@ These backend files share the work:
   so does a copy outside the decl grammar. The retired author keys `player`,
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
-  at its game name".
+  at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
+  below, so every installed folder is built again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -525,6 +526,26 @@ These backend files share the work:
   `generated/model/<stem>.bmodel`: the md6 collision models the
   death-collision entities name (`md6/.../collision/<x>.lwo`) ship only
   under `generated/model/md6/`, beside `generated/cm/md6/`.
+  Before the needs are resolved the builder closes the bundle over
+  campaign-only content (`mb_close_campaign`): SnapMap's session loads
+  `snap_gameresources`, never `gameresources`, so a served decl naming
+  content only `gameresources` holds would leave a hole (issue 132's
+  `designsystems/med_station_heal` naming `wallhealthstation.md6`). Each
+  such name a file needs, at any depth through the decls brought along, is
+  added as a pointer at the game's own path (a surface, `inAssets: false`,
+  nothing carried or uploaded), found with `sh_mb_stock_container` (a name
+  both archives hold is SnapMap's own and adds nothing; a name no archive
+  holds is resolved as before). A decl added this way is scanned for its own
+  needs; what it names and no archive holds is the game's own hole and is not
+  reported. The walk stops at the file cap or the 1 MiB manifest cap with an
+  error naming the first need past it, and the build notes "N game files
+  borrowed for completeness" (pointers an earlier build added are carried
+  forward and counted again). An animWeb's `modelInfos` pairs and `models`
+  list name md6Defs and its nodes' `.md6anim` names are anims; an animWeb
+  clip no archive holds is reported, not refused. Measured on build
+  13954591: the owner's SP doors folder gains 29 pointers (the
+  wallhealthstation, access panel and desk scanner md6Defs, 8 meshes and 18
+  clips); the six campaign-interactables families of fidelity85 gain none.
 - `modstore.c` owns the store: the mod folders, install, verification, the
   rebuild rule and the one-time upgrade of the retired layout, below, which the
   store tool runs. Files are hashed at install and on `sh_mods doctor verify`,

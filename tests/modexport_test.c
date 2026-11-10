@@ -1137,12 +1137,12 @@ int main(int argc, char **argv)
         CHECK(install(rdir, rkey, &rr) && !strcmp(rkey, "test.older"));
         _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older\\mod.json", storeR);
         modjson = (char *)slurp(mpath, &ml);
-        /* The earlier build's mod.json: OLD_HASH under rules 1. */
+        /* The earlier build's mod.json: OLD_HASH under the rules before today's. */
         at = modjson ? strstr(modjson, rr.bundle) : NULL;
         CHECK(at != NULL);
         if (at) memcpy(at, OLD_HASH, 64);
-        at = modjson ? strstr(modjson, "\"rules\": 2") : NULL;
-        CHECK(at != NULL);
+        at = modjson ? strstr(modjson, "\"rules\": ") : NULL;
+        CHECK(at != NULL && at[9] == '0' + SH_MB_RULES);
         old = rr;
         strcpy_s(old.bundle, sizeof old.bundle, OLD_HASH);
         rmap = map_naming(BASE_MAP, sizeof BASE_MAP - 1, r1, &rl);
@@ -1151,7 +1151,7 @@ int main(int argc, char **argv)
             const char *names[] = { "older rules.json", "mods/test.older/mod.json",
                                     "mods/test.older/assets/generated/image/mods/test.older/o.bimage" };
             const char *datas[] = { rmap, modjson, "older bytes" };
-            at[9] = pass ? '2' : '1';
+            at[9] = (char)(pass ? '0' + SH_MB_RULES : '0' + SH_MB_RULES - 1);
             CHECK(mt_zip_stored(zipR, 3, names, datas));
             CHECK(fresh_store(pass ? storeR3 : storeR2));
             text = modexport_read(zipR, &len, &st, cause, sizeof cause);
