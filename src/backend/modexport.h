@@ -37,7 +37,8 @@
  * refusal the folders this import installed are removed again. The serving
  * index is rebuilt after an install. A ZIP in the retired bundle form of
  * earlier releases (any bundle.canonical.json, or an export.json index) is
- * refused.
+ * refused, except beta.20's map export (map.rawmap.json beside its
+ * export.json), whose canonical manifests install as downloads do.
  *
  * File work only, no network. Paths are UTF-8 unless marked ACP.
  */

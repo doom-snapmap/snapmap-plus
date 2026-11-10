@@ -25,6 +25,9 @@
  * reads an extracted export folder and a lone .json, and refuses a map's
  * JSON, a non-prefab and two prefabs in one ZIP. Both importers refuse the
  * retired bundle form (a bundle.canonical.json or an export.json index).
+ * A hand-made folder installed under its generated key, named by a map in a
+ * legacy smpmod1 row, exports and imports under that key whatever the carried
+ * folder is called, and the load removes the legacy row.
  * Pure file work: no network.
  */
 #include <windows.h>
@@ -524,8 +527,12 @@ int main(int argc, char **argv)
         size_t len = 0;
         _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\retired.zip", tmp);
         CHECK(mt_zip_stored(old, 2, OLD_N, OLD_D));
-        CHECK(modexport_read(old, &len, &st, cause, sizeof cause) == NULL && !strcmp(cause, MODEXPORT_RETIRED_MAP));
-        CHECK(!modexport_probe(old, cause, sizeof cause) && !strcmp(cause, MODEXPORT_RETIRED_MAP));
+        /* beta.20's map export opens (its bundles: below); a prefab's import still refuses it. */
+        text = modexport_read(old, &len, &st, cause, sizeof cause);
+        CHECK(text && len == strlen(OLD_D[0]) && st.bundles == 0);
+        free(text);
+        text = NULL;
+        CHECK(modexport_probe(old, cause, sizeof cause));
         CHECK(!strcmp(MODEXPORT_RETIRED_MAP, "this export was made by an earlier release; save the rawmap again"));
         CHECK(!modexport_read_prefab(old, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
               !strcmp(cause, MODEXPORT_RETIRED_PREFAB));
@@ -1005,6 +1012,242 @@ int main(int argc, char **argv)
         CHECK(sh_ms_set_root(storeA));
     }
 
+    /* ---- a generated key and a map an earlier build saved travel in a ZIP ---- */
+    {
+        /* A hand-made folder (no id) is installed under its generated key; a
+         * map saved by beta.24 or earlier names it in a legacy smpmod1 string
+         * variable. The export carries the folder under its store name; the
+         * import installs it under the key whatever the carried folder is
+         * called, and hands the load the text with its legacy row, which the
+         * parse reads and removes (the next save writes the member). */
+        static const char *const S_FILES[] = { "assets/generated/image/mods/probe/p.bimage", NULL };
+        static const char *const S_BYTES[] = { "probe bytes", NULL };
+        char storeS[MAX_PATH * 2], storeS2[MAX_PATH * 2], storeS3[MAX_PATH * 2], zipS[MAX_PATH * 2], sdir[MAX_PATH * 2];
+        char skey[SH_MS_KEY_MAX + 1], entry[MAX_PATH], other[SH_MS_KEY_MAX + 1], esc[1024], legacy[4096];
+        sh_modmanifest_row rs;
+        char *value, *text, *loaded;
+        size_t vl = 0, len = 0, ll = 0, i, n = 0;
+        _snprintf_s(storeS, sizeof storeS, _TRUNCATE, "%s\\storeS", tmp);
+        _snprintf_s(storeS2, sizeof storeS2, _TRUNCATE, "%s\\storeS2", tmp);
+        _snprintf_s(storeS3, sizeof storeS3, _TRUNCATE, "%s\\storeS3", tmp);
+        _snprintf_s(zipS, sizeof zipS, _TRUNCATE, "%s\\legacy salted.zip", tmp);
+        _snprintf_s(sdir, sizeof sdir, _TRUNCATE, "%s\\probe", src);
+        CHECK(fresh_store(storeS));
+        mt_write(sdir, "mod.json", "{\"name\":\"Probe\",\"version\":\"1.0.0\"}");
+        mt_write(sdir, "assets\\generated\\image\\mods\\probe\\p.bimage", S_BYTES[0]);
+        (void)S_FILES;
+        CHECK(install(sdir, skey, &rs) && !strncmp(skey, "probe_", 6) && !strcmp(rs.id, skey));
+        CHECK(has_folder(storeS, skey) && sh_modmanifest_valid_id(rs.id));
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "generated/image/mods/%s/p.bimage", skey);
+        CHECK(sh_modmanifest_row_add_name(&rs, entry));
+        value = sh_modmanifest_format_value(&rs, &vl);
+        CHECK(value != NULL);
+        for (i = 0; value && i < vl && n + 3 < sizeof esc; i++) {
+            if (value[i] == '"' || value[i] == '\\') esc[n++] = '\\';
+            esc[n++] = value[i];
+        }
+        esc[n] = 0;
+        free(value);
+        _snprintf_s(legacy, sizeof legacy, _TRUNCATE,
+                    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/%s/thing\",\"name\":\"\"}}],"
+                    "\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":[" VAR("door_label", "Open") ","
+                    "{\"info\":{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"},"
+                    "\"name\":\"smpmod1.0.1\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"%s\",\"~type\":\"snapVarString_t\"}]},"
+                    "\"name\":\"idSnapMap\",\"~type\":\"idSnapMap\"}", skey, esc);
+        CHECK(modexport_write(legacy, strlen(legacy), zipS, &st, cause, sizeof cause) && st.bundles == 1);
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zipS, &zl);
+            _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/%s/mod.json", skey);
+            CHECK(z && entry_data(z, zl, entry) && entry_data(z, zl, "legacy salted.json"));
+            /* The map text travels as the earlier build wrote it. */
+            CHECK(z && entry_size(z, entry_data(z, zl, "legacy salted.json"), "legacy salted.json") == strlen(legacy));
+            free(z);
+        }
+        /* Import into an empty store: installed under the key, the row served. */
+        CHECK(fresh_store(storeS2));
+        text = modexport_read(zipS, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "legacy salted import: %s\n", cause);
+        CHECK(text && len == strlen(legacy) && !memcmp(text, legacy, len) && st.bundles_installed == 1);
+        CHECK(has_folder(storeS2, skey) && folder_count(storeS2) == 1 && sh_modserve_bundle_state(rs.bundle, NULL, 0) == 1);
+        {
+            sh_modmanifest_list got;
+            unsigned rej = 0;
+            char why[256] = "";
+            memset(&got, 0, sizeof got);
+            CHECK(text && sh_modmanifest_read(text, len, &got, &rej) == 1 && rej == 0 && !strcmp(got.rows[0].id, skey) &&
+                  !strcmp(got.rows[0].bundle, rs.bundle));
+            CHECK(got.count == 1 && sh_modserve_row_served(&got.rows[0], why, sizeof why) == 1);
+            sh_modmanifest_list_free(&got);
+        }
+        /* The load's parse reads and removes the legacy row. */
+        loaded = text ? sh_modmanifest_prepare_load(text, len, &ll) : NULL;
+        CHECK(loaded && !strstr(loaded, "smpmod1.") && strstr(loaded, "door_label"));
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        free(text);
+        /* The carried folder under another name of the same length still
+         * installs under the key. */
+        strcpy_s(other, sizeof other, skey);
+        other[0] = 'q';
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zipS, &zl);
+            char prefix[MAX_PATH];
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", skey);
+            CHECK(z && patch_names(z, zl, prefix, 5, 'q') == 4 && spit(zipS, z, zl));
+            free(z);
+        }
+        CHECK(fresh_store(storeS3));
+        text = modexport_read(zipS, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "renamed carried folder import: %s\n", cause);
+        CHECK(text && st.bundles_installed == 1 && has_folder(storeS3, skey) && !has_folder(storeS3, other) &&
+              folder_count(storeS3) == 1);
+        free(text);
+        sh_modmanifest_row_free(&rs);
+        CHECK(sh_ms_set_root(storeA));
+    }
+
+    /* ---- a carried folder built under an earlier builder's rules ---- */
+    {
+        /* Its block records the hash those rules gave (here: another one) and
+         * a lower "rules" number (or none). It is rebuilt under today's rules
+         * and installed under the hash they give; the map's row keeps naming
+         * the recorded hash, which the other-build rule then answers. The
+         * same block with today's "rules" is an edited mod.json: left out. */
+        static const char OLD_HASH[] = "3333333333333333333333333333333333333333333333333333333333333333";
+        char storeR[MAX_PATH * 2], storeR2[MAX_PATH * 2], storeR3[MAX_PATH * 2], zipR[MAX_PATH * 2];
+        char rdir[MAX_PATH * 2], rkey[SH_MS_KEY_MAX + 1], why[300], mpath[MAX_PATH * 2];
+        sh_modmanifest_row rr, old;
+        const sh_modmanifest_row *r1[] = { &old, NULL };
+        sh_modserve_bundle_ref other;
+        sh_mb_bundle nb;
+        size_t len = 0, rl = 0, ml = 0;
+        char *rmap = NULL, *text, *modjson, *at;
+        int pass;
+        _snprintf_s(storeR, sizeof storeR, _TRUNCATE, "%s\\storeR", tmp);
+        _snprintf_s(storeR2, sizeof storeR2, _TRUNCATE, "%s\\storeR2", tmp);
+        _snprintf_s(storeR3, sizeof storeR3, _TRUNCATE, "%s\\storeR3", tmp);
+        _snprintf_s(zipR, sizeof zipR, _TRUNCATE, "%s\\older rules.zip", tmp);
+        _snprintf_s(rdir, sizeof rdir, _TRUNCATE, "%s\\older", src);
+        CHECK(fresh_store(storeR));
+        mt_write(rdir, "mod.json", "{\"id\":\"test.older\",\"version\":\"1.0.0\",\"name\":\"test.older\"}");
+        mt_write(rdir, "assets\\generated\\image\\mods\\test.older\\o.bimage", "older bytes");
+        CHECK(install(rdir, rkey, &rr) && !strcmp(rkey, "test.older"));
+        _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older\\mod.json", storeR);
+        modjson = (char *)slurp(mpath, &ml);
+        /* The earlier build's mod.json: OLD_HASH under rules 1. */
+        at = modjson ? strstr(modjson, rr.bundle) : NULL;
+        CHECK(at != NULL);
+        if (at) memcpy(at, OLD_HASH, 64);
+        at = modjson ? strstr(modjson, "\"rules\": 2") : NULL;
+        CHECK(at != NULL);
+        old = rr;
+        strcpy_s(old.bundle, sizeof old.bundle, OLD_HASH);
+        rmap = map_naming(BASE_MAP, sizeof BASE_MAP - 1, r1, &rl);
+        CHECK(rmap != NULL);
+        for (pass = 0; pass < 2 && at && rmap; pass++) {
+            const char *names[] = { "older rules.json", "mods/test.older/mod.json",
+                                    "mods/test.older/assets/generated/image/mods/test.older/o.bimage" };
+            const char *datas[] = { rmap, modjson, "older bytes" };
+            at[9] = pass ? '2' : '1';
+            CHECK(mt_zip_stored(zipR, 3, names, datas));
+            CHECK(fresh_store(pass ? storeR3 : storeR2));
+            text = modexport_read(zipR, &len, &st, cause, sizeof cause);
+            if (!text) fprintf(stderr, "earlier rules import: %s\n", cause);
+            if (pass) {
+                /* Today's "rules" with another hash is a mod.json edited by hand. */
+                CHECK(text && st.bundles_installed == 0 && st.bundles_absent == 1 && folder_count(storeR3) == 0);
+                free(text);
+                break;
+            }
+            CHECK(text && st.bundles == 1 && st.bundles_installed == 1 && st.bundles_absent == 0);
+            /* Today's rules number it build 2 (the recorded build's hash is not
+             * theirs), as the author's own store does at its rules rebuild. */
+            _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older", storeR2);
+            memset(&nb, 0, sizeof nb);
+            CHECK(has_folder(storeR2, "test.older") && folder_count(storeR2) == 1 && sh_mb_load_folder(mpath, &nb) &&
+                  nb.build == 2 && strcmp(nb.hash, OLD_HASH) && sh_modserve_bundle_state(nb.hash, NULL, 0) == 1);
+            {
+                sh_modmanifest_list got;
+                unsigned rej = 0;
+                memset(&got, 0, sizeof got);
+                CHECK(text && sh_modmanifest_read(text, len, &got, &rej) == 1 && !strcmp(got.rows[0].bundle, OLD_HASH));
+                /* The pinned row is another build of an installed key. */
+                CHECK(got.count == 1 && sh_modserve_row_served(&got.rows[0], why, sizeof why) == 0 &&
+                      sh_modserve_row_other_build(&got.rows[0], &other) && !strcmp(other.hash, nb.hash));
+                sh_modmanifest_list_free(&got);
+            }
+            free(text);
+            /* Again into the same store: today's build is there, nothing is installed. */
+            text = modexport_read(zipR, &len, &st, cause, sizeof cause);
+            CHECK(text && st.bundles_installed == 0 && st.bundles_present == 1 && folder_count(storeR2) == 1);
+            free(text);
+            sh_mb_free(&nb);
+        }
+        free(modjson);
+        if (rmap) HeapFree(GetProcessHeap(), 0, rmap);
+        CHECK(sh_ms_set_root(storeA));
+    }
+
+    /* ---- beta.20's map export: export.json and each bundle's canonical manifest ---- */
+    {
+        /* The bundle is installed from its canonical manifest as a download
+         * is, so it keeps the hash the map pins; a file the ZIP stores once
+         * for two paths fills both; a damaged file installs nothing. */
+        static const char *const T_FILES[] = { "assets/generated/image/mods/test.twenty/a.bimage",
+                                               "assets/generated/image/mods/test.twenty/b.bimage", NULL };
+        static const char *const T_BYTES[] = { "twenty bytes", "twenty bytes", NULL };
+        char storeT[MAX_PATH * 2], storeT2[MAX_PATH * 2], storeT3[MAX_PATH * 2], zipT[MAX_PATH * 2], tdir[MAX_PATH * 2], tkey[SH_MS_KEY_MAX + 1];
+        char export_json[512], why[256];
+        sh_modmanifest_row rt;
+        const sh_modmanifest_row *t1[] = { &rt, NULL };
+        sh_mb_bundle tb;
+        size_t len = 0, tl = 0;
+        char *tmap, *text, *canon = NULL;
+        int round;
+        _snprintf_s(storeT, sizeof storeT, _TRUNCATE, "%s\\storeT", tmp);
+        _snprintf_s(storeT2, sizeof storeT2, _TRUNCATE, "%s\\storeT2", tmp);
+        _snprintf_s(storeT3, sizeof storeT3, _TRUNCATE, "%s\\storeT3", tmp);
+        _snprintf_s(zipT, sizeof zipT, _TRUNCATE, "%s\\beta20.zip", tmp);
+        _snprintf_s(tdir, sizeof tdir, _TRUNCATE, "%s\\twenty", src);
+        CHECK(fresh_store(storeT));
+        make_mod(tdir, "test.twenty", T_FILES, T_BYTES);
+        CHECK(install(tdir, tkey, &rt) && !strcmp(tkey, "test.twenty"));
+        _snprintf_s(tdir, sizeof tdir, _TRUNCATE, "%s\\test.twenty", storeT);
+        memset(&tb, 0, sizeof tb);
+        CHECK(sh_mb_load_folder(tdir, &tb) && tb.canonical && !strcmp(tb.hash, rt.bundle));
+        if (tb.canonical) canon = _strdup(tb.canonical);
+        sh_mb_free(&tb);
+        tmap = map_naming(BASE_MAP, sizeof BASE_MAP - 1, t1, &tl);
+        _snprintf_s(export_json, sizeof export_json, _TRUNCATE,
+                    "{\"bundles\":[{\"build\":1,\"bundle\":\"%s\",\"folder\":\"mods/test.twenty@1.0.0+1\",\"id\":\"test.twenty\","
+                    "\"version\":\"1.0.0\"}],\"format\":1,\"map\":\"map.rawmap.json\"}", rt.bundle);
+        for (round = 0; round < 2 && tmap && canon; round++) {
+            const char *names[] = { "map.rawmap.json", "export.json", "mods/test.twenty@1.0.0+1/bundle.canonical.json",
+                                    "mods/test.twenty@1.0.0+1/assets/generated/image/mods/test.twenty/a.bimage" };
+            const char *datas[] = { tmap, export_json, canon, round ? "twenty bytez" : "twenty bytes" };
+            CHECK(mt_zip_stored(zipT, 4, names, datas));
+            CHECK(fresh_store(round ? storeT3 : storeT2));
+            text = modexport_read(zipT, &len, &st, cause, sizeof cause);
+            if (round) {
+                CHECK(text == NULL && strstr(cause, "test.twenty@1.0.0+1 in the export does not install") && folder_count(storeT3) == 0);
+                free(text);
+                break;
+            }
+            if (!text) fprintf(stderr, "beta.20 import: %s\n", cause);
+            CHECK(text && len == tl && !memcmp(text, tmap, len) && st.bundles == 1 && st.bundles_installed == 1);
+            CHECK(folder_count(storeT2) == 1 && sh_modserve_bundle_state(rt.bundle, NULL, 0) == 1);
+            CHECK(sh_modserve_row_served(&rt, why, sizeof why) == 1);
+            free(text);
+            /* Again: installed already, nothing written. */
+            text = modexport_read(zipT, &len, &st, cause, sizeof cause);
+            CHECK(text && st.bundles_installed == 0 && st.bundles_present == 1 && folder_count(storeT2) == 1);
+            free(text);
+        }
+        free(canon);
+        if (tmap) HeapFree(GetProcessHeap(), 0, tmap);
+        CHECK(sh_ms_set_root(storeA));
+    }
     HeapFree(GetProcessHeap(), 0, map);
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);

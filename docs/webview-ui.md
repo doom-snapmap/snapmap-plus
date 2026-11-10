@@ -288,7 +288,10 @@ sends a fresh `prefabs` list 300 ms after the last change of a burst under
 page renders it as any list and keeps its selection while that prefab exists;
 otherwise Prefab Details is cleared. The
 pure helpers sit between `// --- prefab mods (pure) ---` markers in
-`mockup.html` and are tested by `tests/prefab_mods_test.js`.
+`mockup.html` and are tested by `tests/prefab_mods_test.js`. A list row's
+leading text node is the prefab's file name and its Blueprint and Mods pills
+follow it, so Rename takes the name with `pfItemName` and restores the row's
+markup when the field closes (`tests/prefab_rename_test.js`).
 
 ## Mods tab
 

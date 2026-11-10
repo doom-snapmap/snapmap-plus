@@ -2291,11 +2291,26 @@ carried folder no row names is left out):
   otherwise, and on any other refusal, exactly the folders this import
   installed are removed and the load is refused ("<id> <version> in the export
   does not build to the bundle the map names");
+- a carried `mod.json` whose block an earlier builder's rules wrote (its
+  `"rules"` absent or below `SH_MB_RULES`, and its recorded hash not the one
+  today's rules give: `sh_mb_load_text_earlier_rules`) is not left out: it is
+  rebuilt under today's rules, as the store rebuilds its own folders once
+  after a rules change, and installed (or found installed) under the hash
+  they give. The map's row keeps naming the recorded hash, so the hold then
+  treats it as another build of an installed key: the store's copy of the
+  recorded build is offered beside it, else the installed build substitutes.
+  A block with today's `"rules"` whose hash does not match was edited by hand
+  and is still left out;
 - after an install the serving index is rebuilt, as before.
 
-A ZIP in the bundle form of earlier releases (any `bundle.canonical.json`, or
-an `export.json` index) is refused: "this export was made by an earlier
-release; save the rawmap again". The map importer tells a map from a prefab by
+A map's ZIP in the bundle form beta.20 wrote (`map.rawmap.json`, an
+`export.json` index, and per bundle `mods/[legacy/]<id>@<version>+<build>/`
+with `bundle.canonical.json` and its files, each distinct file stored once)
+opens: each canonical manifest a row names is installed as a download is
+(`modsync_install_manifest`), its files taken from the ZIP by hash, so the
+bundle keeps the hash the map pins (`me_install_retired`). Any other ZIP in
+that form (no `map.rawmap.json`) is refused: "this export was made by an
+earlier release; save the rawmap again". The map importer tells a map from a prefab by
 the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
 `snapmapPlus` block is a map; a prefab's export is refused with "this is a
 prefab's export, not a map's". The published-map download path is not used.

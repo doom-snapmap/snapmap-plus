@@ -392,6 +392,11 @@ char *sh_mb_bundle_json(const sh_mb_bundle *bundle, size_t *out_len);
  * a mod.json without a product block fails with "not built yet". */
 int  sh_mb_load(const char *mod_json_path, sh_mb_bundle *out);
 int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
+/* A built mod.json that fails sh_mb_load_text's check only because an earlier
+ * builder's rules wrote its block ("rules" absent or below SH_MB_RULES): 1 with
+ * the bundle as today's rules read it (out->hash) and the hash its block
+ * records (out->prev_hash); 0 for anything else, with the cause. */
+int  sh_mb_load_text_earlier_rules(const char *text, size_t len, sh_mb_bundle *out);
 /* `<folder>\mod.json`. */
 int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
 

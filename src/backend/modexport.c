@@ -12,6 +12,7 @@
 #include "modbundle.h"
 #include "modmanifest.h"
 #include "modserve.h"
+#include "modsync.h"
 #include "mp_json.h"
 #include "prefab_block.h"
 #include "raw_deflate.h"
@@ -934,6 +935,8 @@ typedef struct me_carry {
     sh_mb_bundle b;                     /* its mod.json, loaded: the bundle hash it records */
     int present;                        /* the store serves that bundle already */
     int installed;                      /* this import installed it, as `stored` */
+    int earlier_rules;                  /* its block was written under an earlier builder's rules:
+                                           b.hash is the hash it records; the install rebuilds it */
     char stored[SH_MS_KEY_MAX + 1];
     char stage[MAX_PATH * 4];           /* its copy outside the store, which the install builds */
     char why[SH_MB_CAUSE_MAX];          /* the last install refusal */
@@ -944,6 +947,7 @@ typedef struct me_import {
     me_carry *c;
     size_t nc, cap;
     int kind;                           /* what the export holds */
+    int retired;                        /* a map's export in beta.20's bundle form (me_install_retired) */
 } me_import;
 
 static void me_import_free(me_import *im)
@@ -1018,6 +1022,8 @@ static int me_walk(me_reader *r, const wchar_t *abs, const char *rel, int depth,
     FindClose(h);
     return 1;
 }
+
+#define ME_RETIRED_MAP "map.rawmap.json"
 
 /* The retired bundle form of earlier releases: a bundle.canonical.json
  * anywhere, or an export.json that is an index rather than a prefab or map
@@ -1107,10 +1113,15 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
     } else {
         if (!me_reader_open(&im->zr, path, cause, cap)) return 0;
         if (me_retired(&im->zr)) {
-            me_import_free(im);
-            return me_cause(cause, cap, "%s", want == ME_KIND_PREFAB ? MODEXPORT_RETIRED_PREFAB : MODEXPORT_RETIRED_MAP);
+            /* beta.20's map export: its map is always map.rawmap.json. */
+            *idx = want == ME_KIND_MAP ? me_find(&im->zr, ME_RETIRED_MAP) : -1;
+            if (*idx < 0) {
+                me_import_free(im);
+                return me_cause(cause, cap, "%s", want == ME_KIND_PREFAB ? MODEXPORT_RETIRED_PREFAB : MODEXPORT_RETIRED_MAP);
+            }
+            im->retired = 1;
         }
-        for (i = 0; i < im->zr.n; i++) {
+        for (i = 0; i < im->zr.n && !im->retired; i++) {
             if (!me_top_json(im->zr.e[i].name)) continue;
             if (*idx >= 0) {
                 me_import_free(im);
@@ -1212,10 +1223,23 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         if (!text) return 0;
         memset(&b, 0, sizeof b);
         if (!sh_mb_load_text(text, len, &b)) {
-            me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
-            sh_mb_free(&b);
-            free(text);
-            continue;
+            /* A block an earlier builder's rules wrote is rebuilt under
+             * today's at the install, as the store rebuilds its own folders
+             * once after a rules change; it answers for the hash it records. */
+            sh_mb_bundle older;
+            if (sh_mb_load_text_earlier_rules(text, len, &older)) {
+                sh_mb_free(&b);
+                b = older;
+                strcpy_s(b.hash, sizeof b.hash, b.prev_hash);
+                b.prev_hash[0] = 0;
+                b.rules = -1;   /* marks the carry below */
+            } else {
+                sh_mb_free(&older);
+                me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
+                sh_mb_free(&b);
+                free(text);
+                continue;
+            }
         }
         free(text);
         if ((!all && !me_rows_name(rows, b.hash)) || me_carried(im, b.hash)) {
@@ -1236,6 +1260,7 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         memset(c, 0, sizeof *c);
         memcpy(c->name, seg, sl);
         c->name[sl] = 0;
+        c->earlier_rules = b.rules < 0;
         c->b = b;
     }
     return 1;
@@ -1518,19 +1543,35 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
                 goto rollback;
             }
             /* An imported folder is the author's build as it was: its
-             * replacements are kept, never refused (DESIGN-additive 2.8). */
+             * replacements are kept, never refused (DESIGN-additive 2.8). One
+             * built under earlier rules gets the hash today's rules give, so
+             * the store names it by that hash (and finds it if installed). */
             sh_mb_keep_replacements_here(1);
-            if (!sh_ms_install_with(c->stage, as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
+            if (!sh_ms_install_with(c->stage, c->earlier_rules ? NULL : as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
                                     c->why, sizeof c->why)) {
                 sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
             }
             sh_mb_keep_replacements_here(0);
-            c->installed = 1;
             left--;
             progress = 1;
-            if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
+            if (c->earlier_rules && built.validated && is.present) {
+                /* Today's rules build it to a bundle the store already holds. */
+                c->present = 1;
+                st->bundles_present++;
+                me_log("MODS: import: mods/%s (built under earlier rules as %.16s) builds to bundle %.16s, which mods\\%s "
+                       "already holds", c->name, c->b.hash, built.hash, c->stored);
+                sh_mb_free(&built);
+                continue;
+            }
+            c->installed = 1;
+            if (c->earlier_rules && built.validated) {
+                if (strcmp(built.hash, c->b.hash))
+                    me_log("MODS: import: mods/%s was built under earlier rules as bundle %.16s; today's rules build it to "
+                           "%.16s, installed as mods\\%s (the %s's row keeps naming %.16s)", c->name, c->b.hash, built.hash,
+                           c->stored, what, c->b.hash);
+            } else if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
                 me_log("MODS: import: mods/%s built to bundle %.16s, not %.16s as its mod.json records", c->name, built.hash,
                        c->b.hash);
                 me_cause(cause, cap, "%s %s in the export does not build to the bundle the %s names", c->b.id, c->b.version, what);
@@ -1592,6 +1633,73 @@ static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows
     modstore_unlock();
 }
 
+/* beta.20's map export (the only release that wrote it): map.rawmap.json,
+ * export.json, and per bundle mods/[legacy/]<id>@<version>+<build>/ with
+ * bundle.json, bundle.canonical.json and assets/, each distinct file stored
+ * once in the ZIP. Each canonical manifest a row names is installed as a
+ * download is (modsync_install_manifest), its files taken from the ZIP by
+ * hash, so the bundle keeps the hash the map pins. On a refusal the bundles
+ * this import installed are removed again. */
+static int me_retired_blob(void *ctx, const char *sha, unsigned long long size, unsigned char **bytes, size_t *len,
+                           char *cause, size_t cap)
+{
+    const me_reader *r = (const me_reader *)ctx;
+    char got[SH_MB_HASH_HEX + 1];
+    size_t i;
+    for (i = 0; i < r->n; i++) {
+        unsigned char *b;
+        size_t n = 0;
+        if (r->e[i].usize != size || strncmp(r->e[i].name, "mods/", 5) || !strstr(r->e[i].name, "/assets/")) continue;
+        b = me_read_entry(r, (long)i, (size_t)size + 1, &n, cause, cap);
+        if (!b) continue;
+        sh_mb_sha256_hex(b, n, got);
+        if (!strcmp(got, sha)) { *bytes = b; *len = n; return 1; }
+        free(b);
+    }
+    return me_cause(cause, cap, "the export does not carry it");
+}
+
+static int me_install_retired(me_import *im, const sh_modmanifest_list *rows, modexport_stats *st, char *cause, size_t cap)
+{
+    static const char LEAF[] = "/bundle.canonical.json";
+    char root[MAX_PATH * 4], done[ME_MAX_MODS][sizeof ((modsync_install_info *)0)->rel], hash[SH_MB_HASH_HEX + 1];
+    size_t i, nd = 0, ll = sizeof LEAF - 1;
+    int ok = 1;
+    if (!sh_ms_root(root, sizeof root)) return me_cause(cause, cap, "the mods folder cannot be resolved");
+    st->entries = (unsigned)im->zr.n;
+    st->zip_bytes = im->zr.size;
+    for (i = 0; i < im->zr.n && ok; i++) {
+        const char *name = im->zr.e[i].name;
+        size_t n = strlen(name), len = 0;
+        modsync_install_info info;
+        char why[SH_MB_CAUSE_MAX] = "";
+        unsigned char *text;
+        if (n <= ll || strcmp(name + n - ll, LEAF) || strncmp(name, "mods/", 5)) continue;
+        text = me_read_entry(&im->zr, (long)i, ME_INDEX_MAX, &len, cause, cap);
+        if (!text) { ok = 0; break; }
+        sh_mb_sha256_hex(text, len, hash);
+        if (!me_rows_name(rows, hash)) { free(text); continue; }
+        st->bundles++;
+        ok = modsync_install_manifest((const char *)text, len, hash, me_retired_blob, &im->zr, &info, why, sizeof why);
+        free(text);
+        if (!ok) { me_cause(cause, cap, "%.*s in the export does not install: %s", (int)(n - ll - 5), name + 5, why); break; }
+        if (info.already_installed) { st->bundles_present++; continue; }
+        if (nd < ME_MAX_MODS) strcpy_s(done[nd++], sizeof done[0], info.rel);
+        st->bundles_installed++;
+        st->files += info.blobs_present + info.blobs_fetched;
+        me_log("MODS: import: %.*s (beta.20 form, bundle %.16s) installed as mods\\%s", (int)(n - ll - 5), name + 5, hash, info.rel);
+    }
+    if (!ok)
+        for (i = 0; i < nd; i++) {
+            char path[MAX_PATH * 4];
+            me_join_native(path, sizeof path, root, done[i]);
+            if (!sh_ms_remove_folder(path)) me_log("MODS: import: mods\\%s could not be removed again; remove it by hand", done[i]);
+        }
+    if (st->bundles_installed && sh_modserve_index_rescan() < 0)
+        me_log("MODS: import: mods installed, but the serving index could not be rebuilt");
+    return ok;
+}
+
 int modexport_probe(const char *zip_path, char *cause, size_t cap)
 {
     me_import im;
@@ -1622,7 +1730,8 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     if (cause && cap) cause[0] = 0;
     if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
     sh_modmanifest_read(text, len, &rows, &rejected);
-    if (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, &rows, st, cause, cap)) {
+    if (im.retired ? !me_install_retired(&im, &rows, st, cause, cap)
+                   : (!me_collect(&im, &rows, 0, cause, cap) || !me_install(&im, &rows, st, cause, cap))) {
         free(text);
         text = NULL;
         len = 0;
