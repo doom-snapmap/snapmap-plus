@@ -817,7 +817,8 @@ two seconds later. The Mods tab re-renders from the document that follows. The
 product's own writes fire the watcher too: a change seen while the store lock
 is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
 hold ended, is dropped, so an install or export in progress never triggers a
-rescan mid-write, and the watcher re-arms with the next change. A rescan of
+rescan mid-write. An author's edit during a long hold looks the same, so when
+that second ends with a change dropped, one rescan follows (`sh_fw_store`). A rescan of
 unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
 UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
 opened again every five seconds.
