@@ -566,7 +566,7 @@ var modsTab = (function () {
        the filter, the folders opened or closed by hand, and the file and hint a new mod opens on. */
     var fm = {open: false, key: '', data: null, loading: false, error: '', sel: '', text: null, asked: '', filter: '',
               dirs: {}, want: '', hint: '', opener: null, closeBtn: null, list: null, pane: null, visible: [],
-              titleNode: null, stateNode: null};
+              titleNode: null, stateNode: null, selNode: null};
     var reveal = '';   /* a mod the last action made or installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
@@ -1209,7 +1209,6 @@ var modsTab = (function () {
       if (opener !== undefined) fm.opener = opener;
       filesOverlay(true);
       renderFiles();
-      if (fm.closeBtn && fm.closeBtn.focus) fm.closeBtn.focus();
       read('modFiles', key);
     }
     function closeFiles() {
@@ -1217,7 +1216,7 @@ var modsTab = (function () {
       fm.open = false;
       filesOverlay(false);
       clear(byId('modsFilesHost'));
-      fm.list = fm.pane = fm.closeBtn = fm.titleNode = fm.stateNode = null;
+      fm.list = fm.pane = fm.closeBtn = fm.titleNode = fm.stateNode = fm.selNode = null;
       if (fm.opener && fm.opener.focus) fm.opener.focus();
       fm.opener = null;
     }
@@ -1294,7 +1293,16 @@ var modsTab = (function () {
       host.appendChild(body);
       renderFileTree();
       renderFilePane();
+      if (!inside(byId('modsFilesModal'), doc.activeElement)) focusIn(fm.closeBtn);
     }
+    /* A render rebuilds the node that had focus, which then falls to the page's body, outside the
+       modal, where Escape and Tab no longer reach the modal's own listener. So focus is put back:
+       on the selected file when it was in the tree, else on the close button. */
+    function inside(node, n) {
+      for (; node && n; n = n.parentNode) if (n === node) return true;
+      return false;
+    }
+    function focusIn(n) { if (n && n.focus) n.focus(); }
     /* Folders on the selected file's path, and the first level, start open; a filter opens all. */
     function dirOpen(d, depth) {
       if (str(fm.filter).trim()) return true;
@@ -1322,6 +1330,7 @@ var modsTab = (function () {
       if (f.cause) r.appendChild(fileGlyph('attn', 'triangle-alert', f.cause));
       else if (gameFile(f)) r.appendChild(fileGlyph('', 'gamepad-2', gameTitle(f)));
       r.addEventListener('click', function () { selectFile(f.path); });
+      if (on) fm.selNode = r;
       fm.visible.push(f.path);
       return r;
     }
@@ -1351,8 +1360,14 @@ var modsTab = (function () {
     function renderFileTree() {
       var box = fm.list;
       if (!box) return;
+      var hadFocus = inside(box, doc.activeElement);
       clear(box);
       fm.visible = [];
+      fillFileTree(box);
+      if (hadFocus || !inside(byId('modsFilesModal'), doc.activeElement)) focusIn(fm.selNode || fm.closeBtn);
+    }
+    function fillFileTree(box) {
+      fm.selNode = null;
       if (fm.loading) { box.appendChild(el('div', 'list-empty', 'Reading the files...')); return; }
       if (fm.error) { box.appendChild(el('div', 'list-empty mods-error', fm.error)); return; }
       var root = fileTree(fm.data.files, fm.filter);
@@ -1526,8 +1541,8 @@ var modsTab = (function () {
         function (n) { return !n.disabled && n.offsetParent !== null; });
       if (!f.length) return;
       var first = f[0], last = f[f.length - 1], at = doc.activeElement;
-      if (e.shiftKey && (at === first || !host.contains(at))) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && (at === last || !host.contains(at))) { e.preventDefault(); first.focus(); }
+      if (e.shiftKey && (at === first || !inside(host, at))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (at === last || !inside(host, at))) { e.preventDefault(); first.focus(); }
     }
 
     function renderHead() {
@@ -1677,6 +1692,11 @@ var modsTab = (function () {
       on('modsRefreshBtn', 'click', function () { refresh(); });
       on('modsFilesBtn', 'click', function () { var b = selectedMod(); if (b) openFiles(b.key, byId('modsFilesBtn')); });
       on('modsFilesModal', 'keydown', onFilesKey);
+      /* While the Files modal is open, Escape and Tab from anywhere in the page are its own, as the
+         expanded Decl Text modal's Escape is (a key from inside reaches the modal's listener). */
+      if (doc.addEventListener) doc.addEventListener('keydown', function (e) {
+        if (fm.open && !inside(byId('modsFilesModal'), e.target)) onFilesKey(e);
+      });
       on('modsFilesModal', 'mousedown', function (e) { if (e.target === byId('modsFilesModal')) closeFiles(); });
       on('modsNewModal', 'keydown', onNewKey);
       on('modsNewModal', 'mousedown', function (e) { if (e.target === byId('modsNewModal')) closeNewMod(); });

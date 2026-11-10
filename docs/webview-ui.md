@@ -393,7 +393,10 @@ reads as vanilla.
 
 **Files modal (read-only).** Files opens the selected mod's folder in the standard modal at the
 expanded Decl Text editor's size (`.modal.decl-focus-modal.mods-files-modal` in `#modsFilesModal`;
-Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Its head is the
+Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Every render
+keeps focus inside the modal (the selected file's row when focus was in the tree, else the close
+button), and while it is open a document-level listener takes Escape and Tab from anywhere in the
+page, as the expanded Decl Text modal's Escape does. Its head is the
 mod's display name and the details pane's one-line state. On the left, a filter box and the folder
 as a tree with the Prefabs primitives: names only, folders with their file counts, a folder holding
 only one folder shown as one row (`cm/models/mapobjects/hell_terrain`, `mods/<key>/demons`; a folder

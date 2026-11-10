@@ -54,6 +54,14 @@ class FakeNode {
   click() { if (!this.disabled) this.dispatch('click'); }
   focus() { activeElement = this; }
   scrollIntoView() { this.scrolledIntoView++; }
+  /* The focusable controls a modal's Tab trap asks for (the one selector mods_tab.js uses). */
+  querySelectorAll(sel) {
+    const tags = sel.split(',').map(t => t.trim()).filter(t => /^[a-z]+$/.test(t));
+    const out = [];
+    const walk = n => { n.children.forEach(c => { if (tags.indexOf(c.tagName) >= 0 || c.attrs.tabindex === '0') out.push(c); walk(c); }); };
+    walk(this);
+    return out;
+  }
   all(cls) {
     const out = [];
     const walk = n => { n.children.forEach(c => { if ((' ' + c.className + ' ').indexOf(' ' + cls + ' ') >= 0) out.push(c); walk(c); }); };
@@ -87,7 +95,12 @@ function harness(opts) {
   nodes.modsNewModal.style.display = 'none';
   const sent = [], toasts = [], menus = [];
   const saved = [];   /* what a page that still wrote mods.collapsed_groups would have saved */
-  const doc = {createElement: tag => new FakeNode(tag), createElementNS: (ns, tag) => Object.assign(new FakeNode(tag), {ns})};
+  /* The document: the page's body, the element with focus, and its own keydown listeners. */
+  const doc = new FakeNode('#document');
+  doc.body = new FakeNode('body');
+  doc.createElement = tag => new FakeNode(tag);
+  doc.createElementNS = (ns, tag) => Object.assign(new FakeNode(tag), {ns});
+  Object.defineProperty(doc, 'activeElement', {get: () => activeElement});
   let ui = null;
   ui = modsTab.create({
     document: doc, byId: id => nodes[id] || null, saveCollapsed: list => saved.push(list),
@@ -96,8 +109,19 @@ function harness(opts) {
     tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items})
   });
   ui.bind();
-  return {ui, nodes, sent, toasts, saved, menus};
+  return {ui, nodes, sent, toasts, saved, menus, doc};
 }
+/* A key pressed where focus is: the focused node's listeners, then the document's (the bubble). */
+function press(h, key, extra) {
+  const at = activeElement || h.doc.body;
+  const e = at.dispatch('keydown', Object.assign({key}, extra || {}));
+  let n = at.parentNode;
+  for (; n; n = n.parentNode) (n.listeners.keydown || []).forEach(f => f.call(n, e));
+  if (at !== h.doc) (h.doc.listeners.keydown || []).forEach(f => f.call(h.doc, e));
+  return e;
+}
+/* A node removed from the page loses focus to the body, as a browser's does. */
+function attached(h, n) { for (; n; n = n.parentNode) if (n === h.nodes.modsFilesModal || n === h.doc.body) return true; return false; }
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
 function keys(h) { return rows(h).map(n => n.getAttribute('data-key')); }
@@ -1366,6 +1390,54 @@ test('the Files modal: the folder tree, one glyph per file, the file with its cl
   assert.equal(h.nodes.modsFilesModal.style.display, 'none');
   assert.equal(activeElement, h.nodes.modsFilesBtn);
   assert.equal(h.nodes.modsFilesHost.children.length, 0);
+});
+test('the Files modal keeps focus inside across its renders: Escape and Tab work after the data and a tree click', () => {
+  /* the browser preview's stand-in answers synchronously; the host answers later, so answer by hand */
+  const h = harness();
+  shown(h);
+  h.ui.select('local.hell-guard');
+  h.nodes.modsFilesBtn.focus();
+  h.nodes.modsFilesBtn.click();
+  const ov = h.nodes.modsFilesModal;
+  assert.ok(attached(h, activeElement) && activeElement !== h.nodes.modsFilesBtn, 'focus moved into the modal at open');
+  assert.equal(activeElement, h.nodes.modsFilesHost.all('mods-map-close')[0], 'the close button');
+  /* the data arrives: the host is rebuilt; focus stays inside (V13: it fell to the body) */
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFiles', ok: true, message: '', data: {key: 'local.hell-guard', name: 'Hell Guards', cause: '',
+    files: [{path: 'mod.json', kind: 'text', class: 'descriptor', inFolder: true},
+            {path: 'a.decl', kind: 'text', class: 'addition', inFolder: true},
+            {path: 'b.decl', kind: 'text', class: 'addition', inFolder: true}]}});
+  assert.ok(attached(h, activeElement), 'focus is inside the modal after the data');
+  assert.equal(activeElement, h.nodes.modsFilesHost.all('mods-map-close')[0]);
+  /* Tab from the last focusable wraps to the first; nothing escapes the modal */
+  /* a click on a file rebuilds the tree: focus goes to the selected file's new row */
+  const item = p => h.nodes.modsFilesHost.all('pf-item').find(n => n.getAttribute('data-path') === p);
+  const a = 'a.decl', b = 'b.decl';
+  item(a).focus();
+  item(a).click();
+  assert.equal(activeElement, item(a), 'the new row of the clicked file has focus');
+  assert.ok(attached(h, activeElement));
+  /* the arrows keep walking: each step rebuilds the tree, focus follows the selection */
+  press(h, 'ArrowDown');
+  assert.equal(h.ui.state().files.selected, b);
+  assert.equal(activeElement, item(b));
+  /* Escape from the tree closes, focus back on the Files button */
+  press(h, 'Escape');
+  assert.equal(ov.style.display, 'none');
+  assert.equal(activeElement, h.nodes.modsFilesBtn);
+  /* Escape with focus on the page's body (a click outside any control) closes it as well */
+  h.nodes.modsFilesBtn.click();
+  activeElement = h.doc.body;
+  const e = press(h, 'Escape');
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(ov.style.display, 'none', 'the document-level listener closes it');
+  /* closed: the document's Escape does nothing to the modal */
+  activeElement = h.doc.body;
+  assert.equal(press(h, 'Escape').defaultPrevented, false);
+  /* Tab with focus on the body goes to the modal's first control */
+  h.nodes.modsFilesBtn.click();
+  activeElement = h.doc.body;
+  const tab = press(h, 'Tab');
+  assert.ok(tab.defaultPrevented && attached(h, activeElement), 'Tab from outside lands inside the modal');
 });
 test('the Files modal: a refusal and a late answer stay in the modal; the status line is untouched', () => {
   const h = harness();
