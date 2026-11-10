@@ -2553,7 +2553,12 @@ builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
 such as `displayName` or `$schema`, a control character such as a tab in the
 name or author) are mirrored as build warnings in one table,
 `MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
-rather than at publish. A publish whose save
+rather than at publish. They are derived again whenever a built `mod.json` is
+read, so they also reach `sh_mods doctor` (one "warning i of n" line per
+bundle), each rescan (one line per mod with warnings), the Rebuild result
+(`warnings`, `firstWarning`) and each mod of the Mods tab's v3 payload
+(`warnings`: the first `SH_MB_WARNINGS_KEPT` as strings, `warningCount`,
+`firstWarning`). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the

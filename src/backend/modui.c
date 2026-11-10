@@ -1033,6 +1033,19 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
         mu_put_facts(b, bd);
         mu_put_builds(b, m, u);
     }
+    {
+        /* The builder's warnings (the mod store's rules for its keys, name and
+         * author among them): what the page shows beside the row. */
+        mu_key(b, "warnings", 0);
+        mu_putn(b, "[", 1);
+        for (k = 0; e->loaded && k < bd->warning_list_count; k++) {
+            if (k) mu_putn(b, ",", 1);
+            mu_str(b, bd->warning_list[k]);
+        }
+        mu_putn(b, "]", 1);
+        mu_knum(b, "warningCount", e->loaded ? bd->warnings : 0, 0);
+        mu_kstr(b, "firstWarning", e->loaded ? bd->first_warning : "", 0);
+    }
     if (e->loaded && e->build_failed[0]) {
         /* The latest build was refused; the last good build serves (DESIGN-additive 2.8). */
         mu_puts(b, ",\"buildFailed\":{");
@@ -2195,6 +2208,20 @@ static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
         mu_log("rescan: %u folder(s) built again, %u refused (%llu ms)", sync.rebuilt, sync.failed, sync.ms);
     n = e->rescan();
     InterlockedIncrement(&g_gen);
+    {
+        /* Each mod's builder warnings, one line per mod, as the build says them. */
+        sh_ms_list l;
+        size_t i;
+        if (sh_ms_enumerate(&l)) {
+            for (i = 0; i < l.count; i++) {
+                const sh_ms_entry *x = &l.items[i];
+                if (x->loaded && x->bundle.warnings)
+                    mu_log("rescan: mods\\%s (%s): %u warning(s), first: %s", x->name, x->bundle.id, x->bundle.warnings,
+                           x->bundle.first_warning);
+            }
+            sh_ms_list_free(&l);
+        }
+    }
     if (n < 0) strncpy_s(note, cap, "the serving index could not be rebuilt; try Rescan", _TRUNCATE);
     else _snprintf_s(note, cap, _TRUNCATE, "%d mod(s) active", n);
     if (n >= 0 && e->refresh) {
@@ -4176,6 +4203,7 @@ static int mu_rebuild(const char *key)
     } else {
         int same = !strcmp(before, bd.hash);
         mu_log("rebuild %s: %s@%s+%llu, bundle %s%s", key, bd.id, bd.version, bd.build, bd.hash, same ? " (unchanged)" : "");
+        if (bd.warnings) mu_log("rebuild %s: %u warning(s), first: %s", key, bd.warnings, bd.first_warning);
         mu_rescan(note, sizeof note);
         if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed (%zu files).", key, bd.file_count);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: build %llu, %zu files.", key, bd.build, bd.file_count);
@@ -4188,6 +4216,8 @@ static int mu_rebuild(const char *key)
         mu_kstr(&b, "key", key, 0);
         mu_kstr(&b, "bundle", ok ? bd.hash : "", 0);
         mu_kstr(&b, "cause", ok ? "" : cause, 0);
+        mu_knum(&b, "warnings", ok ? bd.warnings : 0, 0);
+        mu_kstr(&b, "firstWarning", ok ? bd.first_warning : "", 0);
         mu_kstr(&b, "index", note, 0);
         sh_mb_free(&bd);
         return mu_result_tail(&b);
@@ -4367,6 +4397,11 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
     mu_say(o, "%s mods\\%s (%s): %s%s%s%s%s", e->delivered ? "bundle delivered by a map," : u->legacy ? "migrated bundle" : "bundle",
            e->name, key, state, u->cause[0] ? "; " : "", u->cause, u->origin[0] && !e->delivered ? "; from " : "",
            e->delivered ? "" : u->origin);
+    if (e->loaded) {
+        size_t k;
+        for (k = 0; k < e->bundle.warning_list_count; k++)
+            mu_say(o, "bundle mods\\%s: warning %zu of %u: %s", e->name, k + 1, e->bundle.warnings, e->bundle.warning_list[k]);
+    }
 }
 
 static void mu_say_requirement(void *context, const char *line) { mu_say((const mu_out *)context, "%s", line); }
