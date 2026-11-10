@@ -186,8 +186,10 @@ test('three states: every backend state and cause maps onto check, triangle or i
   assert.equal(modsTab.servingText({files: 2, pointers: 1}), 'Installed and serving 1 file, 1 more read from your install');
   const dup = s({state: 'attention', duplicateId: true});
   assert.deepEqual([dup.tone, dup.icon], ['warn', 'triangle-alert']);
-  assert.equal(dup.sentence, 'Needs attention: another installed mod declares this id; change one id in its mod.json');
+  assert.equal(dup.sentence, 'Needs attention: ' + modsTab.DUPLICATE_TEXT);
   assert.equal(s({duplicateId: true, servedBy: 'x'}).tone, 'warn', 'attention wins over a superseded build');
+  assert.ok(!/change one id/.test(modsTab.DUPLICATE_TEXT), 'a key never changes (DESIGN-additive 2.2)');
+  assert.match(modsTab.DUPLICATE_TEXT, /identical copy/);
   for (const cause of ['not in the serving index yet; it is used after the next scan', 'skipped by the serving index',
                        'not built yet: bundle.json is missing', 'mod.json unreadable'])
     assert.equal(s({state: 'attention', cause}).cause, cause);
@@ -300,7 +302,7 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   assert.equal(icon.children[0].children[0].getAttribute('href'), '#icon-check');
   for (const key of ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']) {
     assert.equal(iconOf(rowOf(h, key)), 'warn');
-    assert.equal(rowOf(h, key).title, 'another installed mod declares this id; change one id in its mod.json');
+    assert.equal(rowOf(h, key).title, modsTab.DUPLICATE_TEXT);
   }
   assert.equal(rowOf(h, 'local.cyberdemon@0.0.0').all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-triangle-alert');
   /* the grey info state */
@@ -485,7 +487,7 @@ test('details: every section for a v3 mod', () => {
   /* attention */
   rowOf(h, 'local.cyberdemon@0.0.0-05238b2e').click();
   assert.equal(h.nodes.modsDetail.all('mods-detail-sentence')[0].textContent,
-    'Needs attention: another installed mod declares this id; change one id in its mod.json');
+    'Needs attention: ' + modsTab.DUPLICATE_TEXT);
   assert.match(h.nodes.modsDetail.all('mods-detail-sentence')[0].className, /warn/);
   /* Rebuild and Verify carry the key */
   h.nodes.modsRebuildBtn.click();

@@ -320,7 +320,8 @@ row is a status icon, the name, and `id · version · size`, and, when the open 
 "In this map" pill (hover: "The open map uses this mod") at its right end: the row's `key` is the
 `key` of an entry of the document's `map.mods`, read only while a map is open, so the pill costs no
 read of its own and follows each fresh document. The three icons cover every backend
-state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`; the hover
+state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`, an exact copy of one build in a second folder,
+"an identical copy of this build is installed in another folder; uninstall one of the two"; the hover
 title is the cause) and a grey info dot (`installed` with `servedBy` set). The list is a plain list
 scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
 

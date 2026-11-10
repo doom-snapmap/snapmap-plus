@@ -3,8 +3,8 @@
    verify a mod, migrate the old overrides folder). Browser global + CommonJS test export. Pure ASCII.
 
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread:
-   one row per mod folder in mods\ (its key is the folder name; two folders declaring one id are both
-   rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
+   one row per mod folder in mods\ (its key is the folder name; two folders holding one build, one key
+   at one hash, are both rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
    (which this tab no longer shows). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
    editorRowNames, carriedPaths and publishedMaps, and the additive model's derived facts (facts:
@@ -19,7 +19,9 @@ var modsTab = (function () {
     installed: {label: 'Installed', tone: 'ok'},
     attention: {label: 'Needs attention', tone: 'warn'}
   };
-  var DUPLICATE_TEXT = 'another installed mod declares this id; change one id in its mod.json';
+  /* duplicateId: another folder holds this key at this hash, an exact copy (modui.c mu_model_rows).
+     Two hashes of one key are two builds, never attention (DESIGN-additive 2.2), and a key never changes. */
+  var DUPLICATE_TEXT = 'an identical copy of this build is installed in another folder; uninstall one of the two';
   /* The three row states: each backend state and cause maps onto exactly one. */
   var STATUS = {
     ok:   {icon: 'check', label: 'Installed and serving'},

@@ -564,9 +564,9 @@ static const char *mu_row_name_for(const mu_model *m, const char *inherit)
     return NULL;
 }
 
-/* One row per folder. Identity is the id in mod.json: two folders declaring
- * one id are both rows, and both are duplicates ("another installed mod
- * declares this id"). */
+/* One row per folder. Two folders holding one build (one key at one hash)
+ * are both rows, and both are duplicates; two hashes of one key are two
+ * builds, never a duplicate. */
 static int mu_model_rows(mu_model *m)
 {
     size_t i, k, n = m->list.count;
