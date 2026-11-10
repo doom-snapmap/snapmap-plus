@@ -3279,8 +3279,8 @@ static void test_scope(void)
     sh_modserve_each_refresh(scope_refresh, &seen);
     /* Off (as every earlier test): everything serves. */
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL) && sh_modserve_lookup(SC_MAPED, NULL));
-    CHECK(log_has("MODS: scope: e.editor@1.0.0 shadows editor-time content (" SC_SET "); it serves in every map"));
-    CHECK(log_has("MODS: scope: m.editor@1.0.0 shadows editor-time content (" SC_MAPED "); it serves in every map"));
+    CHECK(log_has("MODS: scope: e.editor@1.0.0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
+    CHECK(log_has("MODS: scope: m.editor@1.0.0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
     CHECK(log_has("MODS: scope: d.declared@1.0.0: its mod.json \"scope\" is ignored; a map serves exactly the mods it declares"));
     CHECK(log_count("MODS: scope:") == 3);
     g_report[0] = 0;
@@ -3329,7 +3329,7 @@ static void test_scope(void)
     CHECK(strstr(g_report, "scope: a.hands@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not\n") != NULL);
     CHECK(strstr(g_report, "scope: e.editor@1.0.0 (2222222222222222) (0 names, 1 shadow, 0 surfaces): editor-time content ("
-                           SC_SET "): serves in every map\n") != NULL);
+                           SC_SET "): its editor tweaks serve in every map; the rest only in maps that declare it\n") != NULL);
     CHECK(strstr(g_report, "scope: n.names@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
     CHECK(strstr(g_report, "scope: r.rows@1.0.0 (5555555555555555) (1 name, 1 shadow, 0 surfaces, requirements): not declared "
@@ -4307,6 +4307,73 @@ static void test_bank_stems(void)
     }
 }
 
+/* An undeclared folder mixing an editor tweak with an addition and a cvar
+ * requirement (modbundle_test test_classes builds one): the tweak serves in
+ * every map, Play included; the addition and the requirement follow the
+ * declared rule, so in Play of a map that declares nothing they are off
+ * (DESIGN-additive 2.3 and 2.6). Declared, everything serves. */
+#define MX_SET  "generated/decls/snapeditorsettings/mixed.decl"
+#define MX_NEW  "generated/decls/entitydef/mods/x.mixed/thing.decl"
+#define PU_NEW  "generated/decls/entitydef/mods/y.pure/thing.decl"
+static void test_mixed_editor_bundle(void)
+{
+    static const fx_file mixed[] = {
+        { MX_SET, "settings {}", -1, "snapEditorSettings", "mixed", NULL, '1' },
+        { MX_NEW, "entityDef t {}", -1, "entityDef", "mods/x.mixed/thing", NULL, '2' },
+    };
+    static const fx_file pure[] = { { PU_NEW, "entityDef u {}", -1, "entityDef", "mods/y.pure/thing", NULL, '3' } };
+    char top[MAX_PATH], root[MAX_PATH], h_mixed[65];
+    const char *list[1];
+    char *slash;
+    sh_modserve_gates r;
+    sh_modserve_scope_info si;
+    scope_seen seen;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\mixed\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_label\": \"mixed\"}},\n  ";
+    make_bundle(root, "x.mixed", "x.mixed", "1.0.0", '7', "\"" MX_SET "\"", mixed, 2, "{\"installedAt\": 100}");
+    hash64('7', h_mixed);
+    g_bundle_extra = NULL;
+    make_bundle(root, "y.pure", "y.pure", "1.0.0", '8', NULL, pure, 1, "{\"installedAt\": 110}");
+    printf("-- editor tweaks: a mixed folder's tweak serves in every map, its addition only where declared\n");
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_scope_enable(0);
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 2);
+    memset(&seen, 0, sizeof seen);
+    sh_modserve_each_refresh(scope_refresh, &seen);
+    CHECK(log_has("MODS: scope: x.mixed@1.0.0 shadows editor-time content (" MX_SET "); its editor tweaks serve in every "
+                  "map this editor opens, the rest only in maps that declare it"));
+    sh_modserve_scope_enable(1);
+    /* No map: the tweak and the Toybox names serve; the cvar is not accepted. */
+    strcpy_s(g_text_val[3], sizeof g_text_val[3], "stock");
+    CHECK(sh_modserve_lookup(MX_SET, NULL) && sh_modserve_lookup(MX_NEW, NULL) && sh_modserve_lookup(PU_NEW, NULL));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) >= 0 && !strcmp(g_text_val[3], "stock"));
+    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic && !si.whole &&
+          si.shadows_live && si.names_live && !si.requirements_live);
+    /* Play of a map that declares nothing: only the tweak. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_scope_mode_get() == SH_MODSERVE_MODE_PLAY);
+    CHECK(sh_modserve_lookup(MX_SET, NULL));
+    CHECK(!sh_modserve_lookup(MX_NEW, NULL) && !sh_modserve_lookup(PU_NEW, NULL));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], "stock"));
+    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.play && si.shadows_live && !si.names_live && !si.requirements_live);
+    /* Declared: everything it carries, its cvar included. */
+    list[0] = h_mixed;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_lookup(MX_SET, NULL) && sh_modserve_lookup(MX_NEW, NULL) && !sh_modserve_lookup(PU_NEW, NULL));
+    CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], "mixed"));
+    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.listed && si.names_live && si.requirements_live);
+    (void)sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR);
+    (void)sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
+    (void)sh_modserve_requirements_apply(&g_gates, "hub", &r);
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -4343,6 +4410,7 @@ int main(void)
     test_registration_reparse_of_held_permanent();
     test_bundle_extra();
     test_scope();
+    test_mixed_editor_bundle();
     test_scope_providers();
     test_additive_determinism();
     test_additive_same_key();

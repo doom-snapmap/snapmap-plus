@@ -151,7 +151,8 @@ typedef struct ms_bundle {
 #define MS_SV_NEW     1                   /* names under its key (and grandfathered new names) */
 #define MS_SV_SHADOW  2                   /* files at game names that differ from the game's */
 #define MS_SV_RESTORE 4                   /* surfaces: the game's own bytes under the game's name */
-#define MS_SV_ALL     (MS_SV_NEW | MS_SV_SHADOW | MS_SV_RESTORE)
+#define MS_SV_EDITOR  8                   /* editor tweaks: editor-only types at game names (DESIGN-additive 2.6) */
+#define MS_SV_ALL     (MS_SV_NEW | MS_SV_SHADOW | MS_SV_RESTORE | MS_SV_EDITOR)
 
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
@@ -2494,15 +2495,22 @@ static const char *const g_why_text[] = {
 };
 
 /* Editor-time content: a bundle whose shadows include the editor's own decls
- * or movies (my-overrides' editor tweaks, a grandfathered package's Toybox
- * rows) serves them, and everything it carries, in every map, as before
- * phase 2. A mod.json "scope" key no longer chooses (DESIGN-additive 2.9). */
+ * or movies. Those files are editor tweaks (DESIGN-additive 2.6): client-side,
+ * they serve in every map this editor opens, a downloaded map included, and
+ * nothing else of the bundle follows them: its names, surfaces, other shadows,
+ * edits and requirements obey the declared rule like any bundle's. Only a
+ * grandfathered package (a converted first-generation package whose Toybox
+ * rows are shadows) still serves everything it carries in every map, until
+ * it is rebuilt under a key. A mod.json "scope" key no longer chooses. */
 static int ms_scope_always(const ms_bundle *b) { return b->scope_editor != NULL; }
+static int ms_scope_whole(const ms_bundle *b) { return b->scope_editor != NULL && b->grandfathered; }
 
 /* The file class a bundle's serve flags admit. */
 static int ms_sv_class(const ms_file *f)
 {
-    return f->is_restore ? MS_SV_RESTORE : f->is_shadow ? MS_SV_SHADOW : MS_SV_NEW;
+    if (f->is_restore) return MS_SV_RESTORE;
+    if (f->is_shadow) return ms_editor_time(f->request) ? MS_SV_EDITOR : MS_SV_SHADOW;
+    return MS_SV_NEW;
 }
 
 static int ms_sv_allows(const ms_index *x, int file)
@@ -3064,7 +3072,7 @@ static int ms_registry_compute(ms_index *x, int on)
         for (i = 0; i < x->nbundles; ++i) {
             ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->reg_relevant || b->inert) continue;
-            if (b->rank < 0 && !ms_scope_always(b)) continue;
+            if (b->rank < 0 && !ms_scope_whole(b)) continue;
             if (n < MS_REG_SOURCE_MAX) set[n++] = b;
         }
         qsort(set, (size_t)n, sizeof *set, ms_reg_order);
@@ -3147,18 +3155,18 @@ static int ms_scope_compute(ms_index *x, int mark)
                 inert = k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id);
             if (!on || rank[i] >= 0) sv = MS_SV_ALL;
             else if (inert) sv = 0;
-            else if (ms_scope_always(b)) sv = MS_SV_ALL;
-            else if (play) sv = 0;
-            else sv = (b->newest ? MS_SV_NEW : 0) | MS_SV_RESTORE;
+            else if (ms_scope_whole(b)) sv = MS_SV_ALL;
+            else if (play) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
+            else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | (b->newest ? MS_SV_NEW : 0) | MS_SV_RESTORE;
             /* Requirements are cvars: a declared bundle's apply; a bundle with
              * Toybox rows keeps them outside Play, because the palette
              * registers its rows in every editor map and with none open; in
              * Play no undeclared bundle's apply; an inert build never. */
-            roff = on && rank[i] < 0 && !ms_scope_always(b) && (inert || play || !(b->has_rows && b->newest));
+            roff = on && rank[i] < 0 && !ms_scope_whole(b) && (inert || play || !(b->has_rows && b->newest));
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
             was_rank = InterlockedExchange(&b->rank, on ? rank[i] : -1);
-            (void)InterlockedExchange(&b->shadows_off, (sv & MS_SV_SHADOW) ? 0 : 1);
+            (void)InterlockedExchange(&b->shadows_off, (sv & (MS_SV_SHADOW | MS_SV_EDITOR)) ? 0 : 1);
             was_r = InterlockedExchange(&b->req_off, roff);
             if (was_sv != sv || was_r != roff || was_rank != (on ? rank[i] : -1)) changed++;
         }
@@ -3331,9 +3339,12 @@ static void ms_scope_log(const ms_index *x, const ms_index *old)
         if (!b->admitted || (!b->scope_editor && !b->scope_declared)) continue;
         o = old ? ms_bundle_by_hash(old, b->hash, 1) : -1;
         if (o >= 0) continue;
-        if (b->scope_editor)
-            ms_log("scope: %s@%s shadows editor-time content (%s); it serves in every map, as an editor tweak or a "
-                   "grandfathered package does until it is rebuilt under its key", b->id, b->version, b->scope_editor);
+        if (b->scope_editor && b->grandfathered)
+            ms_log("scope: %s@%s shadows editor-time content (%s); it serves in every map, as a grandfathered "
+                   "package does until it is rebuilt under its key", b->id, b->version, b->scope_editor);
+        else if (b->scope_editor)
+            ms_log("scope: %s@%s shadows editor-time content (%s); its editor tweaks serve in every map this editor "
+                   "opens, the rest only in maps that declare it", b->id, b->version, b->scope_editor);
         else
             ms_log("scope: %s@%s: its mod.json \"scope\" is ignored; a map serves exactly the mods it declares", b->id,
                    b->version);
@@ -3531,6 +3542,7 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     out->scope = ms_scope_always(b) ? SH_MODSERVE_SCOPE_ALWAYS : SH_MODSERVE_SCOPE_MAP;
     out->declared = b->scope_declared;
     out->automatic = b->scope_editor != NULL;
+    out->whole = ms_scope_whole(b);
     out->rank = (int)InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0);
     out->listed = out->rank >= 0;
     out->inert = InterlockedCompareExchange((volatile LONG *)&b->inert, 0, 0) != 0;
@@ -3544,7 +3556,7 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
         if (f->is_restore) out->surfaces++;
     }
     sv = InterlockedCompareExchange((volatile LONG *)&b->sv, 0, 0);
-    out->shadows_live = (sv & MS_SV_SHADOW) != 0;
+    out->shadows_live = (sv & (MS_SV_SHADOW | MS_SV_EDITOR)) != 0;
     out->names_live = (sv & MS_SV_NEW) != 0;
     out->surfaces_live = (sv & MS_SV_RESTORE) != 0;
     out->requirements = b->req_text && (b->req_ncvars || b->req_nact || b->req_ndeact);
@@ -3688,8 +3700,11 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
         else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its key");
-        else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
+        else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.whole)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): serves in every map", si.editor_path);
+        else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
+            _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
+                        "the rest only in maps that declare it", si.editor_path);
         else if (si.play) strcpy_s(state, sizeof state, "not declared by the map being played: serves nothing");
         else if (!si.newest)
             _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older build of its key; only its surfaces serve",

@@ -599,6 +599,7 @@ typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
     int declared;            /* mod.json "scope": 0 absent, 1 "map", 2 "always" (ignored) */
     int automatic;           /* "always" because it shadows editor-time content */
+    int whole;               /* a grandfathered package: serves everything it carries in every map */
     int listed;              /* the current map declares it (this build) */
     int rank;                /* its position among the declared bundles (0 the first row), or -1 */
     int inert;               /* the current map declares another build of its key */
