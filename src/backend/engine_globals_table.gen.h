@@ -134,13 +134,13 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
       .disp_slot = 11, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F60A10u, .rva_gl = 0x2FA89A0u },
 
     { .name = "snap_editor_row_count",
-      /* int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc.
+      /* int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc; modtypeinfo.c reports it.
        * Build 13954591: Vulkan 0x5C3D228, OpenGL 0x45428A8. */
       .anchor = "8B 2D ?? ?? ?? ?? 81 FD DC 05 00 00 7C 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC 33 FF 85 ED 7E 3C",
       .disp_slot = 2, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C3D228u, .rva_gl = 0x45428A8u },
 
     { .name = "snap_typeinfo_cache",
-      /* idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in SnapTypeInfoCacheBuild.
+      /* idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in the game's cache-build wrapper (VK 0x141181c50, GL 0x141180db0).
        * Build 13954591: Vulkan 0x5C6F800, OpenGL 0x4574E80. */
       .anchor = "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 50 90 48 83 C4 38 C3",
       .disp_slot = 32, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C6F800u, .rva_gl = 0x4574E80u },

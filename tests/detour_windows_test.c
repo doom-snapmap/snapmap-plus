@@ -94,6 +94,8 @@ static const site SITES[] = {
     { "swf_textedit.c",       "SwfTextOnKeyCall",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "timeline_tile.c",      "SnapPaletteBuild",           SITE_SIG, 0, 18, REPLAYS, 0 },
     { "modserve_engine.c",    "DeclResourceProbe",          SITE_SIG, 0, 21, REPLAYS, 0 },
+    { "modtypeinfo.c",        "SnapTypeInfoCacheGet",       SITE_SIG, 0, 17, REPLAYS, 0 },
+    { "modtypeinfo.c",        "SnapTypeInfoCacheLookup",    SITE_SIG, 0, 16, REPLAYS, 0 },
     { "timeline_tile.c",      "SnapPaletteSortCall",        SITE_CALL_IN_SIG, 37, 16, RELOCATES_AT, 9 },
     { "modpublished.c",       "PublishedOnSnapPlayDone",    SITE_SIG, 0, 18, RELOCATES_AT, 11 },
     { "modpublished.c",       "PublishedBrowserPlayDone",   SITE_SIG, 0, 20, REPLAYS, 0 },
@@ -353,6 +355,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\timeline_tile.c", 2 }, { "backend\\modserve_engine.c", 1 },
     { "backend\\modpublished.c", 8 }, { "backend\\modpublish.c", 1 }, { "backend\\modaction.c", 1 },
     { "backend\\companion_engine.c", 1 }, { "backend\\modhud_scene.c", 1 }, { "backend\\modscene_place.c", 1 },
+    { "backend\\modtypeinfo.c", 2 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };

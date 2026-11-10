@@ -1,9 +1,8 @@
-/* typeinfo_cache_test.c -- sh_typeinfo_cache_sync against a buffer shaped
- * like idSnapTypeInfoCache: nothing to do while the game has not built it or
- * every mod row's key is cached; on a miss every cached tree is destroyed in
- * order, the count is zero when the builder runs, and the result is reported;
- * a row count at the game's limit refuses; a count that is not a cache count
- * touches nothing. Built with /DSH_MODTYPEINFO_PURE: no engine binding. */
+/* typeinfo_cache_test.c -- the pure part of modtypeinfo.c: the game cache's
+ * search on a buffer shaped like idSnapTypeInfoCache, the product's table
+ * (insert keeps key order, lookup, remove by key and by name, free) and the
+ * one-entry view Get runs on. Built with /DSH_MODTYPEINFO_PURE: no engine
+ * binding. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,117 +16,119 @@ static int g_failed;
     }                                                                           \
 } while (0)
 
-static unsigned char *g_cache;
 static const void *g_destroyed[8];
-static int g_ndestroyed, g_builds, g_count_at_build;
-static const void *g_build_keys[8];
-static int g_build_nkeys;
-
-static void fake_destroy(void *tree) { if (g_ndestroyed < 8) g_destroyed[g_ndestroyed] = tree; g_ndestroyed++; }
-
-/* The engine's builder as seen from outside: it fills an empty cache with the
- * keys of every registered row. */
-static void fake_build(void)
+static int g_ndestroyed;
+static void note_destroy(void *context, void *tree)
 {
-    const void **keys = (const void **)(g_cache + SH_TYPEINFO_KEYS_OFF);
-    int i;
-    g_builds++;
-    g_count_at_build = *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF);
-    for (i = 0; i < g_build_nkeys; i++) keys[i] = g_build_keys[i];
-    *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) = g_build_nkeys;
-}
-
-static void fill(const void *const *keys, int n)
-{
-    const void **k = (const void **)(g_cache + SH_TYPEINFO_KEYS_OFF);
-    int i;
-    memset(g_cache, 0, SH_TYPEINFO_CACHE_BYTES);
-    for (i = 0; i < n; i++) k[i] = keys[i];
-    *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) = n;
-    g_ndestroyed = g_builds = g_count_at_build = 0;
+    (void)context;
+    if (g_ndestroyed < 8) g_destroyed[g_ndestroyed] = tree;
+    g_ndestroyed++;
 }
 
 int main(void)
 {
-    static const char a[] = "a", b[] = "b", c[] = "c", m[] = "mods/x/one", m2[] = "mods/x/two";
-    const void *stock[3] = { a, b, c };
-    const void *want[2] = { m, m2 };
-    const void *want_stock[2] = { b, a };
-    sh_typeinfo_ops ops = { fake_destroy, fake_build };
-    sh_typeinfo_report rep;
-    int r;
+    /* Keys are pointers the game interned; sort order is pointer order. */
+    static char pool[8][32] = { "zeta", "alpha", "mods/x/one", "MODS/X/ONE", "beta", "mods/x/two", "gamma", "delta" };
+    const void *k0 = pool[0], *k1 = pool[1], *k2 = pool[2], *k3 = pool[3], *k4 = pool[4], *k5 = pool[5];
+    unsigned char *cache = (unsigned char *)calloc(1, SH_TYPEINFO_CACHE_BYTES);
+    unsigned char *view = (unsigned char *)malloc(SH_TYPEINFO_VIEW_BYTES);
+    unsigned char trees[6][SH_TYPEINFO_TREE_SIZE];
+    sh_typeinfo_table t;
+    const void **keys;
+    int i;
 
-    g_cache = (unsigned char *)malloc(SH_TYPEINFO_CACHE_BYTES);
-    CHECK(g_cache != NULL);
-    if (!g_cache) return 1;
+    CHECK(cache && view);
+    if (!cache || !view) return 1;
+    for (i = 0; i < 6; i++) memset(trees[i], 0x10 + i, SH_TYPEINFO_TREE_SIZE);
 
-    /* Not built yet: the game's own build will read the rows. */
-    fill(stock, 0);
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_EMPTY);
-    CHECK(g_ndestroyed == 0 && g_builds == 0);
-    CHECK(rep.entries == 0 && rep.wanted == 2);
+    /* The game's cache: keys sorted by value. Absent, present, out of range. */
+    keys = (const void **)(cache + SH_TYPEINFO_KEYS_OFF);
+    keys[0] = pool[1]; keys[1] = pool[4]; keys[2] = pool[7];   /* ascending addresses */
+    *(int *)(cache + SH_TYPEINFO_COUNT_OFF) = 3;
+    CHECK(sh_typeinfo_cache_index(cache, pool[1]) == 0);
+    CHECK(sh_typeinfo_cache_index(cache, pool[4]) == 1);
+    CHECK(sh_typeinfo_cache_index(cache, pool[7]) == 2);
+    CHECK(sh_typeinfo_cache_index(cache, pool[0]) == -1);
+    CHECK(sh_typeinfo_cache_index(cache, pool[2]) == -1);
+    CHECK(sh_typeinfo_cache_index(cache, NULL) == -1);
+    CHECK(sh_typeinfo_cache_index(NULL, pool[1]) == -1);
+    *(int *)(cache + SH_TYPEINFO_COUNT_OFF) = 0;
+    CHECK(sh_typeinfo_cache_index(cache, pool[1]) == -1);
+    *(int *)(cache + SH_TYPEINFO_COUNT_OFF) = SH_TYPEINFO_MAX_TYPES + 1;
+    CHECK(sh_typeinfo_cache_index(cache, pool[1]) == -1);
+    *(int *)(cache + SH_TYPEINFO_COUNT_OFF) = 1;
+    CHECK(sh_typeinfo_cache_index(cache, pool[1]) == 0 && sh_typeinfo_cache_index(cache, pool[4]) == -1);
 
-    /* Every key cached (order free): nothing to do. */
-    fill(stock, 3);
-    r = sh_typeinfo_cache_sync(g_cache, want_stock, 2, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_COMPLETE);
-    CHECK(g_ndestroyed == 0 && g_builds == 0);
-    CHECK(rep.entries == 3 && rep.wanted == 2 && rep.missing == 0);
+    /* The view: a one-entry cache the game's search hits at index 0. */
+    memset(view, 0xee, SH_TYPEINFO_VIEW_BYTES);
+    sh_typeinfo_view_fill(view, k2, trees[2]);
+    CHECK(*(int *)(view + SH_TYPEINFO_COUNT_OFF) == 1);
+    CHECK(sh_typeinfo_cache_index(view, k2) == 0);
+    CHECK(sh_typeinfo_cache_index(view, k1) == -1);
+    CHECK(!memcmp(view + SH_TYPEINFO_TREES_OFF, trees[2], SH_TYPEINFO_TREE_SIZE));
 
-    /* No keys wanted: complete. */
-    fill(stock, 3);
-    r = sh_typeinfo_cache_sync(g_cache, NULL, 0, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_COMPLETE);
-    CHECK(g_ndestroyed == 0 && g_builds == 0 && rep.wanted == 0);
+    /* The table: empty, insert out of order, kept in key order, no duplicates. */
+    memset(&t, 0, sizeof t);
+    CHECK(sh_typeinfo_table_find(&t, k2) == NULL);
+    CHECK(sh_typeinfo_table_remove(&t, k2) == NULL);
+    CHECK(sh_typeinfo_table_insert(&t, k5, trees[5]) == 1);
+    CHECK(sh_typeinfo_table_insert(&t, k2, trees[2]) == 1);
+    CHECK(sh_typeinfo_table_insert(&t, k3, trees[3]) == 1);
+    CHECK(sh_typeinfo_table_insert(&t, k0, trees[0]) == 1);
+    CHECK(sh_typeinfo_table_insert(&t, k2, trees[1]) == 0);   /* present already */
+    CHECK(sh_typeinfo_table_insert(&t, NULL, trees[1]) == 0);
+    CHECK(sh_typeinfo_table_insert(&t, k1, NULL) == 0);
+    CHECK(t.count == 4);
+    for (i = 1; i < t.count; i++) CHECK((const char *)t.entries[i - 1].key < (const char *)t.entries[i].key);
+    CHECK(sh_typeinfo_table_find(&t, k0) == trees[0]);
+    CHECK(sh_typeinfo_table_find(&t, k2) == trees[2]);
+    CHECK(sh_typeinfo_table_find(&t, k3) == trees[3]);
+    CHECK(sh_typeinfo_table_find(&t, k5) == trees[5]);
+    CHECK(sh_typeinfo_table_find(&t, k1) == NULL);
+    CHECK(sh_typeinfo_table_find(&t, k4) == NULL);
 
-    /* One mod row missing: every cached tree destroyed in order, the count
-     * zero when the builder runs, the rebuilt cache reported. */
-    fill(stock, 3);
-    g_build_keys[0] = a; g_build_keys[1] = b; g_build_keys[2] = c; g_build_keys[3] = m; g_build_keys[4] = m2;
-    g_build_nkeys = 5;
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, 1495, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_REBUILT);
-    CHECK(g_ndestroyed == 3);
-    CHECK(g_destroyed[0] == g_cache + SH_TYPEINFO_TREES_OFF);
-    CHECK(g_destroyed[1] == g_cache + SH_TYPEINFO_TREES_OFF + SH_TYPEINFO_TREE_SIZE);
-    CHECK(g_destroyed[2] == g_cache + SH_TYPEINFO_TREES_OFF + 2 * SH_TYPEINFO_TREE_SIZE);
-    CHECK(g_builds == 1 && g_count_at_build == 0);
-    CHECK(rep.entries == 3 && rep.missing == 2 && rep.entries_after == 5 && rep.missing_after == 0);
-    CHECK(*(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) == 5);
+    /* Growth past the first allocation keeps order and every entry. */
+    {
+        static char many[200][8];
+        int n;
+        for (n = 0; n < 200; n++) {
+            sprintf(many[199 - n], "k%d", n);
+            CHECK(sh_typeinfo_table_insert(&t, many[199 - n], trees[n % 6]) == 1);
+        }
+        CHECK(t.count == 204);
+        for (i = 1; i < t.count; i++) CHECK((const char *)t.entries[i - 1].key < (const char *)t.entries[i].key);
+        for (n = 0; n < 200; n++) CHECK(sh_typeinfo_table_find(&t, many[n]) == trees[(199 - n) % 6]);
+        for (n = 0; n < 200; n++) CHECK(sh_typeinfo_table_remove(&t, many[n]) == trees[(199 - n) % 6]);
+        CHECK(t.count == 4);
+    }
 
-    /* A builder that still lacks one key reports it. */
-    fill(stock, 3);
-    g_build_nkeys = 4;   /* a, b, c, m */
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_REBUILT);
-    CHECK(rep.entries_after == 4 && rep.missing_after == 1);
+    /* Remove by key hands the tree back and keeps the rest in order. */
+    CHECK(sh_typeinfo_table_remove(&t, k3) == trees[3]);
+    CHECK(sh_typeinfo_table_remove(&t, k3) == NULL);
+    CHECK(t.count == 3 && sh_typeinfo_table_find(&t, k3) == NULL);
+    CHECK(sh_typeinfo_table_find(&t, k0) == trees[0] && sh_typeinfo_table_find(&t, k5) == trees[5]);
 
-    /* At the game's limit the rebuild would stop the game: refused, untouched. */
-    fill(stock, 3);
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, SH_TYPEINFO_ROW_LIMIT, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_LIMIT);
-    CHECK(g_ndestroyed == 0 && g_builds == 0);
-    CHECK(rep.missing == 2 && *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) == 3);
-    fill(stock, 3);
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, SH_TYPEINFO_ROW_LIMIT - 1, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_REBUILT);
+    /* Remove by name: the decl-name rule ignores case; every match goes. */
+    CHECK(sh_typeinfo_table_insert(&t, k3, trees[3]) == 1);
+    g_ndestroyed = 0;
+    CHECK(sh_typeinfo_table_remove_name(&t, "Mods/X/One", note_destroy, NULL) == 2);
+    CHECK(g_ndestroyed == 2);
+    CHECK((g_destroyed[0] == trees[2] && g_destroyed[1] == trees[3]) || (g_destroyed[0] == trees[3] && g_destroyed[1] == trees[2]));
+    CHECK(t.count == 2 && sh_typeinfo_table_find(&t, k2) == NULL && sh_typeinfo_table_find(&t, k3) == NULL);
+    CHECK(sh_typeinfo_table_remove_name(&t, "nobody", note_destroy, NULL) == 0);
+    CHECK(sh_typeinfo_table_remove_name(&t, "", note_destroy, NULL) == 0);
+    CHECK(sh_typeinfo_table_remove_name(&t, NULL, note_destroy, NULL) == 0);
+    CHECK(g_ndestroyed == 2);
 
-    /* Not a cache count: nothing touched. */
-    fill(stock, 3);
-    *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) = SH_TYPEINFO_MAX_TYPES + 1;
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_BAD);
-    CHECK(g_ndestroyed == 0 && g_builds == 0);
-    *(int *)(g_cache + SH_TYPEINFO_COUNT_OFF) = -1;
-    r = sh_typeinfo_cache_sync(g_cache, want, 2, 10, &ops, &rep);
-    CHECK(r == SH_TYPEINFO_BAD);
+    /* Free destroys what is left. */
+    g_ndestroyed = 0;
+    sh_typeinfo_table_free(&t, note_destroy, NULL);
+    CHECK(g_ndestroyed == 2 && t.count == 0 && t.entries == NULL);
+    sh_typeinfo_table_free(&t, note_destroy, NULL);
+    CHECK(g_ndestroyed == 2);
 
-    /* No cache or no engine: refused. */
-    CHECK(sh_typeinfo_cache_sync(NULL, want, 2, 10, &ops, &rep) == SH_TYPEINFO_BAD);
-    CHECK(sh_typeinfo_cache_sync(g_cache, want, 2, 10, NULL, &rep) == SH_TYPEINFO_BAD);
-
-    free(g_cache);
+    free(cache);
+    free(view);
     if (g_failed) { fprintf(stderr, "typeinfo_cache_test: %d failure(s)\n", g_failed); return 1; }
     printf("typeinfo_cache_test: ok\n");
     return 0;
