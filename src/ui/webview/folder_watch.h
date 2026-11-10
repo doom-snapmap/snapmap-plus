@@ -16,7 +16,10 @@
  * trailing notifications of that write), is the product's own and is dropped,
  * so a rescan never runs mid-write. A change the player made during the hold
  * looks the same, so when a hold ends with a change dropped, one rescan
- * follows it (an unchanged tree is cheap to rescan). Pure C, no Windows
+ * follows it (an unchanged tree is cheap to rescan), unless a rescan of the
+ * window's own already read the folder after those changes: New mod, an
+ * install, a rebuild and Refresh end with one, so their writes are followed by
+ * that rescan alone (sh_fw_covered). Pure C, no Windows
  * calls: the caller passes the time and the store's state, so the native
  * tests run it with a fake clock. */
 #ifndef SNAPMAP_PLUS_FOLDER_WATCH_H
@@ -76,6 +79,15 @@ static __inline int sh_fw_note(sh_fw_debounce *d, unsigned long long now, int st
     d->events++;
     d->pending = 1;
     return 1;
+}
+
+/* A rescan the window ran (its own action's, or the watcher's) finished: it
+ * read the folder after every change dropped so far, so the rescan those
+ * changes owe is paid. A change dropped after this (the grace's trailing
+ * notifications, or an edit during a later hold) owes one again. */
+static __inline void sh_fw_covered(sh_fw_debounce *d)
+{
+    d->owed = 0;
 }
 
 /* 1 when the refresh is due at `now`: a change is pending, the quiet time

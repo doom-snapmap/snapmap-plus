@@ -2,7 +2,7 @@
  * clock: a burst of changes is one refresh after the quiet time, the mods folder waits longer,
  * a deferred refresh is asked again later, and changes the product's own store writes cause
  * (the store lock held, or the grace after a hold ended) are dropped, with one rescan after the
- * hold when anything was dropped. */
+ * hold when anything was dropped, unless the window's own rescan followed them. */
 #include <stdio.h>
 #include "folder_watch.h"
 
@@ -74,6 +74,42 @@ int main(void)
     sh_fw_store(&m, t + 41000, 0, 10);
     sh_fw_store(&m, t + 45000, 0, 10);
     CHECK(!sh_fw_due(&m, t + 60000));
+
+    printf("-- New mod: its writes and its own rescan's are followed by that rescan alone\n");
+    /* V13 (23:03:15-19): New mod writes its folder under the store lock, its rescan writes the
+     * record and the last good build under the lock again, and the job ends; 3.3 s later the
+     * owed rescan ran "the mods folder changed on disk" with no served file changed. */
+    t = 300000;
+    sh_fw_store(&m, t, 1, 10);
+    CHECK(!sh_fw_note(&m, t + 15, 1) && !sh_fw_note(&m, t + 20, 1));   /* mod.json, the example decls */
+    sh_fw_store(&m, t + 30, 0, 11);
+    sh_fw_store(&m, t + 100, 1, 11);                                   /* the action's rescan */
+    CHECK(!sh_fw_note(&m, t + 450, 1));                                /* the record, .builds */
+    sh_fw_store(&m, t + 560, 0, 12);
+    sh_fw_covered(&m);                                                 /* the job ended with that rescan */
+    sh_fw_store(&m, t + 1100, 1, 12);                                  /* the Files modal's reads */
+    sh_fw_store(&m, t + 1300, 0, 13);
+    sh_fw_store(&m, t + 2400, 0, 13);
+    sh_fw_store(&m, t + 2500, 0, 13);                                  /* the grace is over */
+    CHECK(!sh_fw_due(&m, t + 4000) && !sh_fw_due(&m, t + 10000));      /* no second rescan */
+    /* Without the window's rescan (a console verb, the boot build) the hold still owes one. */
+    t = 400000;
+    sh_fw_store(&m, t, 1, 13);
+    CHECK(!sh_fw_note(&m, t + 15, 1));
+    sh_fw_store(&m, t + 30, 0, 14);
+    sh_fw_store(&m, t + 1100, 0, 14);
+    CHECK(sh_fw_due(&m, t + 2600) && sh_fw_done(&m) == 1);
+    /* An edit dropped after the window's rescan finished (in the grace) is still rescanned once. */
+    t = 500000;
+    sh_fw_store(&m, t, 1, 14);
+    CHECK(!sh_fw_note(&m, t + 15, 1));
+    sh_fw_store(&m, t + 30, 0, 15);
+    sh_fw_covered(&m);
+    CHECK(!sh_fw_note(&m, t + 400, 0));                                /* the author's save, in the grace */
+    sh_fw_store(&m, t + 1100, 0, 15);
+    CHECK(sh_fw_due(&m, t + 2600) && sh_fw_done(&m) == 1);
+    sh_fw_store(&m, t + 20000, 0, 15);
+    CHECK(!sh_fw_due(&m, t + 30000));
 
     printf("folder_watch_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;

@@ -858,7 +858,11 @@ product's own writes fire the watcher too: a change seen while the store lock
 is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
 hold ended, is dropped, so an install or export in progress never triggers a
 rescan mid-write. An author's edit during a long hold looks the same, so when
-that second ends with a change dropped, one rescan follows (`sh_fw_store`). A rescan of
+that second ends with a change dropped, one rescan follows (`sh_fw_store`), unless the
+window's own rescan already read the folder after it: a New mod, an install, a rebuild or a
+Refresh that succeeded, and the watcher's own rescan, end with the backend's rescan, so the
+changes dropped before it owe nothing more (`sh_fw_covered`, `poc_mods_rescanned`) and one
+rescan follows a New mod. A change dropped after that rescan still owes one. A rescan of
 unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
 UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
 opened again every five seconds.
