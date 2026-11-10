@@ -1236,13 +1236,15 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     e->loaded = e->folder && sh_mb_load_folder(e->folder, &e->bundle);
     if (!e->loaded) {
         char built[SH_MB_CAUSE_MAX];
-        sh_ms_build_cause(e->folder, built, sizeof built);
-        if (!built[0] && e->folder) sh_ms_descriptor_unparsable(e->folder, built, sizeof built);
-        /* A refused build whose mod.json no longer loads (it does not parse,
-         * or was edited): the last good build's snapshot serves, as for a
-         * refused rebuild below. */
-        if (built[0] && snaps && ms_snap_row(snaps, e->name, name, sizeof name)) {
+        /* A mod.json that does not parse is a refused build: the last good
+         * build's snapshot serves, as for a refused rebuild below, and as the
+         * serving index does (modserve.c ms_parse_bundle). */
+        if (e->folder && sh_ms_descriptor_unparsable(e->folder, built, sizeof built) && snaps &&
+            ms_snap_row(snaps, e->name, name, sizeof name)) {
+            char recorded[SH_MB_CAUSE_MAX];
             wchar_t *root = ms_wroot();
+            sh_ms_build_cause(e->folder, recorded, sizeof recorded);
+            if (recorded[0]) strncpy_s(built, sizeof built, recorded, _TRUNCATE);
             snapw = root ? ms_snap_dir(root, name) : NULL;
             free(root);
             if (snapw && (u = sh_mb_utf8(snapw)) != NULL) {
