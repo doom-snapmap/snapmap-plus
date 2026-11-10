@@ -84,18 +84,24 @@ jobs:
 
   build:
     name: Build + test (Windows)
-    # Build both DLLs and run native, JavaScript and installer checks.
+    # Build both DLLs and run the native, JavaScript and Worker checks. The scripts are the
+    # local ones (build.ps1, run-tests.ps1); this job adds only caches and the guards.
     runs-on: windows-latest
+    env:
+      # Keep in step with tests/README.md.
+      MINIFLARE_VERSION: '4.20260730.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.21'
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+      - name: Cache the WebView2 SDK
+        # The pinned SDK version lives in src/ui/build.ps1, so that file keys the cache.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/webview2sdk
+          key: webview2sdk-${{ hashFiles('src/ui/build.ps1') }}
       - name: Build backend + frontend
         shell: pwsh
         run: |
@@ -147,13 +153,45 @@ jobs:
         run: |
           .\tests\run-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "C unit tests failed" }
+      - name: Cache the Worker test dependency
+        id: miniflare
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/worker-tests
+          key: miniflare-${{ runner.os }}-${{ env.MINIFLARE_VERSION }}
+      - name: Install the Worker test dependency
+        if: steps.miniflare.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock "miniflare@$env:MINIFLARE_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "Worker test dependency installation failed" }
       - name: Worker runtime tests
         shell: pwsh
         run: |
-          npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
-          if ($LASTEXITCODE -ne 0) { throw "Worker test dependency installation failed" }
           node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
           if ($LASTEXITCODE -ne 0) { throw "Worker runtime tests failed" }
+
+  installer:
+    name: Installer (Windows)
+    # gofmt, vet, test and build the installer, in parallel with the DLL build.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.21'
+          # The installer has no go.sum (stdlib only); the step below caches by go.mod and sources.
+          cache: false
+      - name: Cache the Go build and module caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/AppData/Local/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-1.21-${{ hashFiles('installer/go.mod', 'installer/go.sum', 'installer/**/*.go') }}
+          restore-keys: |
+            go-${{ runner.os }}-1.21-
       - name: Installer -- gofmt + vet + test + build
         shell: pwsh
         working-directory: installer
