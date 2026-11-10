@@ -1552,12 +1552,21 @@ static int mu_saves_root(char *out, size_t cap)
     return 1;
 }
 
+/* FindFirstFileW on a UTF-8 pattern (the saves root is UTF-8). */
+static HANDLE mu_find_first(const char *pattern, WIN32_FIND_DATAW *fd)
+{
+    wchar_t *w = sh_mb_wpath(pattern);
+    HANDLE h = w ? FindFirstFileW(w, fd) : INVALID_HANDLE_VALUE;
+    free(w);
+    return h;
+}
+
 /* The local save's game.details (savegame.user\<profile>\SNAPMAPS<id>\):
  * its metadata's name and its modified time. 1 when found. */
 static int mu_saved_details(const char *local_id, char *name, size_t name_cap, long long *saved)
 {
     char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 8], path[MAX_PATH * 4 + 128];
-    WIN32_FIND_DATAA fd;
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     char *text = NULL;
     const char *c;
@@ -1568,13 +1577,16 @@ static int mu_saved_details(const char *local_id, char *name, size_t name_cap, l
     for (c = local_id; *c; c++) if (!((*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z'))) return 0;
     if (!mu_saves_root(root, sizeof root)) return 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
-    h = FindFirstFileA(pattern, &fd);
+    h = mu_find_first(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\SNAPMAPS%s\\game.details", root, fd.cFileName, local_id);
+        char *leaf;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        if ((leaf = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\SNAPMAPS%s\\game.details", root, leaf, local_id);
+        free(leaf);
         text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
-    } while (!text && FindNextFileA(h, &fd));
+    } while (!text && FindNextFileW(h, &fd));
     FindClose(h);
     if (!text) return 0;
     /* Lines: checksum=, itemId=, metadata=<JSON>, modified=<epoch ms>. */
@@ -2218,13 +2230,28 @@ static int mu_absolute(const char *folder)
 }
 
 /* One mod folder, as the install button has always done it. */
+/* The record (mods\snapmap-plus.json) could not be read or written during the
+ * action: the player reads which file and what to do (modbundle.h
+ * sh_mb_record_why), not only the backend log. */
+static void mu_record_note(char *msg, size_t cap)
+{
+    char why[MAX_PATH * 4 + 240];
+    size_t n;
+    if (!sh_mb_record_why(why, sizeof why)) return;
+    n = strlen(msg);
+    if (n && msg[n - 1] != '.') strncat_s(msg, cap, ".", _TRUNCATE);
+    strncat_s(msg, cap, " Some of its bookkeeping was not saved: ", _TRUNCATE);
+    strncat_s(msg, cap, why, _TRUNCATE);
+    strncat_s(msg, cap, ".", _TRUNCATE);
+}
+
 static int mu_install_one(const char *folder)
 {
     sh_mb_resolver r;
     sh_ms_install_stats st;
     sh_mb_bundle bd;
     mu_stock stock = { 0 };
-    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 256], note[160];
+    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160];
     int ok, rows = 0;
     size_t k;
     mu_buf b;
@@ -2236,6 +2263,7 @@ static int mu_install_one(const char *folder)
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
     r.stock_context = &stock;
+    sh_mb_record_why_clear();
     ok = sh_ms_install_from_folder(folder, &r, key, sizeof key, &st, &bd, cause, sizeof cause);
     for (k = 0; k < bd.file_count; k++)
         if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") && bd.files[k].cls != SH_MB_CLASS_EDITOR)
@@ -2249,6 +2277,7 @@ static int mu_install_one(const char *folder)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", key,
                     rows ? "; its Toybox rows are in the palette" : "");
     }
+    mu_record_note(msg, sizeof msg);
     mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
     mu_kstr(&b, "key", ok ? key : "", 0);
     mu_kstr(&b, "id", bd.id, 0);
@@ -2299,12 +2328,14 @@ static int mu_install(const char *arg)
     mu_bulk_item *items = NULL;
     size_t n = 0, cap = 0, i, picked = 0;
     const char *p = arg ? arg : "";
-    char first_key[SH_MS_KEY_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + 256], note[160] = "", refused_first[SH_MB_CAUSE_MAX + 300] = "";
+    char first_key[SH_MS_KEY_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160] = "",
+         refused_first[SH_MB_CAUSE_MAX + 300] = "";
     unsigned installed = 0, refused = 0, rows = 0;
     int rc, single_mod = 0;
     mu_buf b, items_json;
     memset(&b, 0, sizeof b);
     memset(&items_json, 0, sizeof items_json);
+    sh_mb_record_why_clear();
 
     /* Expand the picked folders into mod folders. */
     while (*p) {
@@ -2401,6 +2432,7 @@ static int mu_install(const char *arg)
                     refused, refused_first, refused > 1 ? ", and more (see the log)" : "");
     else
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not installed: %s%s.", refused_first, refused > 1 ? ", and more (see the log)" : "");
+    mu_record_note(msg, sizeof msg);
     mu_result_head(&b, SH_MODS_ACT_INSTALL, installed > 0, msg);
     mu_kstr(&b, "key", first_key, 0);
     mu_knum(&b, "installedCount", installed, 0);
@@ -2885,25 +2917,29 @@ static char *mu_saved_map_text(const char *path, size_t *len)
 static int mu_saved_maps_using(const char *id)
 {
     char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 16], sub[MAX_PATH * 4 + 300], path[MAX_PATH * 4 + 340];
-    WIN32_FIND_DATAA fd, sd;
+    WIN32_FIND_DATAW fd, sd;
     HANDLE h, hs;
     int count = 0;
     if (!id || !id[0] || !mu_saves_root(root, sizeof root)) return -1;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
-    h = FindFirstFileA(pattern, &fd);
+    h = mu_find_first(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s\\SNAPMAPS*", root, fd.cFileName);
-        hs = FindFirstFileA(sub, &sd);
-        if (hs == INVALID_HANDLE_VALUE) continue;
+        char *profile;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        if ((profile = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s\\SNAPMAPS*", root, profile);
+        hs = mu_find_first(sub, &sd);
+        if (hs == INVALID_HANDLE_VALUE) { free(profile); continue; }
         do {
-            char *text;
+            char *text, *map;
             size_t len = 0, i;
             sh_modmanifest_list rows;
             int uses = 0;
             if (!(sd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s\\map.decl", root, fd.cFileName, sd.cFileName);
+            if ((map = sh_mb_utf8(sd.cFileName)) == NULL) continue;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s\\map.decl", root, profile, map);
+            free(map);
             text = mu_saved_map_text(path, &len);
             if (!text) continue;
             memset(&rows, 0, sizeof rows);
@@ -2912,9 +2948,10 @@ static int mu_saved_maps_using(const char *id)
             sh_modmanifest_list_free(&rows);
             free(text);
             count += uses;
-        } while (FindNextFileA(hs, &sd));
+        } while (FindNextFileW(hs, &sd));
         FindClose(hs);
-    } while (FindNextFileA(h, &fd));
+        free(profile);
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     return count;
 }
@@ -3624,7 +3661,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     mu_record rec;
     mu_plan p;
     mu_buf b;
-    char msg[MAX_PATH * 4 + 600], cause[300], title[300];
+    char msg[MAX_PATH * 8 + 900], cause[300], title[300];
     int entry = -1, ok = 1, builds = 0;
     unsigned char *targets = NULL;
     size_t i, t;
@@ -3638,6 +3675,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
         mu_line(o, "%s %s: refused: %s", verb, key, cause);
         return mu_simple_result(action, 0, msg);
     }
+    sh_mb_record_why_clear();   /* a record read or write this action cannot make is named in its message */
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     mu_record_load(&m, &rec);
     mu_map_build(&mp, &m, &rec);
@@ -3839,6 +3877,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                             removed_from_map ? " It was removed from the open map." : "");
             free(removing);
         }
+        mu_record_note(msg, sizeof msg);
         mu_line(o, "%s %s: %s", verb, key, msg);
         mu_result_head(&b, action, ok, msg);
     }

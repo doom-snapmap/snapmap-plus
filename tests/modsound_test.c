@@ -36,6 +36,9 @@
 #include "signatures.h"
 #include "host_image.h"
 
+/* The record layer (modbundle.c) logs through the backend log. */
+void backend_log(const char *message) { (void)message; }
+
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
 

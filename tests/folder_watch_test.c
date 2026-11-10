@@ -1,7 +1,8 @@
 /* folder_watch_test -- the folder watchers' debounce (src/ui/webview/folder_watch.h) on a fake
  * clock: a burst of changes is one refresh after the quiet time, the mods folder waits longer,
  * a deferred refresh is asked again later, and changes the product's own store writes cause
- * (the store lock held, or the grace after a hold ended) are dropped. */
+ * (the store lock held, or the grace after a hold ended) are dropped, with one rescan after the
+ * hold when anything was dropped. */
 #include <stdio.h>
 #include "folder_watch.h"
 
@@ -46,10 +47,33 @@ int main(void)
     /* After the grace a change is the player's: re-armed. */
     sh_fw_store(&m, t + 2000, 0, 8);
     CHECK(sh_fw_note(&m, t + 2000, 0) && sh_fw_due(&m, t + 3500));
-    (void)sh_fw_done(&m);
+    CHECK(sh_fw_done(&m) == 2);                                        /* the one owed by the hold, and this one */
     /* The generation is stable afterwards: later changes are kept however long ago the hold was. */
     sh_fw_store(&m, t + 60000, 0, 8);
     CHECK(sh_fw_note(&m, t + 60000, 0));
+    (void)sh_fw_done(&m);
+
+    printf("-- an edit made while the store is held is rescanned once after the hold\n");
+    /* A long build holds the store; the author saves a file meanwhile. The change is dropped
+     * with the product's own, and nothing else changes afterwards. */
+    t = 200000;
+    sh_fw_store(&m, t, 1, 8);
+    CHECK(!sh_fw_note(&m, t + 3000, 1));                               /* the author's save */
+    sh_fw_store(&m, t + 5000, 1, 8);
+    CHECK(!sh_fw_due(&m, t + 5000));
+    sh_fw_store(&m, t + 6000, 0, 9);                                   /* the hold ended */
+    CHECK(!sh_fw_due(&m, t + 6900));                                   /* still the grace */
+    sh_fw_store(&m, t + 6900, 0, 9);
+    sh_fw_store(&m, t + 7000, 0, 9);                                   /* the grace is over */
+    CHECK(!sh_fw_due(&m, t + 8499) && sh_fw_due(&m, t + 8500));        /* one rescan, after the quiet time */
+    CHECK(sh_fw_done(&m) == 1);
+    sh_fw_store(&m, t + 20000, 0, 9);
+    CHECK(!sh_fw_due(&m, t + 30000));                                  /* once */
+    /* A hold that drops nothing schedules nothing. */
+    sh_fw_store(&m, t + 40000, 1, 9);
+    sh_fw_store(&m, t + 41000, 0, 10);
+    sh_fw_store(&m, t + 45000, 0, 10);
+    CHECK(!sh_fw_due(&m, t + 60000));
 
     printf("folder_watch_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;

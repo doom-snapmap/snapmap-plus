@@ -59,6 +59,23 @@ static wchar_t *wide_of(const char *path)
     return sh_mb_wpath(path);
 }
 
+/* Fixture paths are UTF-8 (a root may hold a non-ASCII character). */
+static void make_dir(const char *dir)
+{
+    wchar_t *w = wide_of(dir);
+    if (w) CreateDirectoryW(w, NULL);
+    free(w);
+}
+
+static FILE *open_write(const char *path)
+{
+    wchar_t *w = wide_of(path);
+    FILE *f = NULL;
+    if (!w || _wfopen_s(&f, w, L"wb")) f = NULL;
+    free(w);
+    return f;
+}
+
 static void mkdirs_for(const char *file)
 {
     char dir[MAX_PATH * 2];
@@ -68,7 +85,7 @@ static void mkdirs_for(const char *file)
         if (dir[i] == '\\' || dir[i] == '/') {
             char keep = dir[i];
             dir[i] = 0;
-            CreateDirectoryA(dir, NULL);
+            make_dir(dir);
             dir[i] = keep;
         }
     }
@@ -82,7 +99,7 @@ static void put_file(const char *root, const char *rel, const char *text)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, rel);
     for (i = 0; path[i]; i++) if (path[i] == '/') path[i] = '\\';
     mkdirs_for(path);
-    if (fopen_s(&f, path, "wb") || !f) { fprintf(stderr, "cannot write %s\n", path); return; }
+    if ((f = open_write(path)) == NULL) { fprintf(stderr, "cannot write %s\n", path); return; }
     fwrite(text, 1, strlen(text), f);
     fclose(f);
 }
@@ -96,7 +113,11 @@ static void put_sparse(const char *root, const char *rel, unsigned long long byt
     LARGE_INTEGER at;
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, rel);
     mkdirs_for(path);
-    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    {
+        wchar_t *w = wide_of(path);
+        h = w ? CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+        free(w);
+    }
     if (h == INVALID_HANDLE_VALUE) return;
     DeviceIoControl(h, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &got, NULL);
     at.QuadPart = (LONGLONG)bytes;
@@ -117,7 +138,7 @@ static void put_bytes(const char *root, const char *rel, size_t bytes, unsigned 
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, rel);
     for (i = 0; path[i]; i++) if (path[i] == '/') path[i] = '\\';
     mkdirs_for(path);
-    if (!fopen_s(&f, path, "wb") && f) { fwrite(buf, 1, bytes, f); fclose(f); }
+    if ((f = open_write(path)) != NULL) { fwrite(buf, 1, bytes, f); fclose(f); }
     free(buf);
 }
 
@@ -200,16 +221,21 @@ static void snap_put(snap *s, const char *t)
 }
 static void snapshot_dir(const char *dir, const char *rel, snap *s)
 {
-    WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH * 2], child[MAX_PATH * 2], crel[MAX_PATH * 2], line[MAX_PATH * 3];
+    WIN32_FIND_DATAW fd;
+    char pattern[MAX_PATH * 2], child[MAX_PATH * 2], crel[MAX_PATH * 2], line[MAX_PATH * 3], *name;
+    wchar_t *w;
     HANDLE h;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    h = FindFirstFileA(pattern, &fd);
+    w = wide_of(pattern);
+    h = w ? FindFirstFileW(w, &fd) : INVALID_HANDLE_VALUE;
+    free(w);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-        _snprintf_s(crel, sizeof crel, _TRUNCATE, "%s/%s", rel, fd.cFileName);
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if ((name = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", dir, name);
+        _snprintf_s(crel, sizeof crel, _TRUNCATE, "%s/%s", rel, name);
+        free(name);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             /* No folder times: NTFS updates a folder's entry in its parent lazily. */
             _snprintf_s(line, sizeof line, _TRUNCATE, "d %s %08lx\n", crel, fd.dwFileAttributes);
@@ -223,7 +249,7 @@ static void snapshot_dir(const char *dir, const char *rel, snap *s)
                         fd.ftLastWriteTime.dwHighDateTime, fd.ftLastWriteTime.dwLowDateTime, fd.dwFileAttributes, hex);
             snap_put(s, line);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
 
@@ -377,10 +403,10 @@ static void full_pass(const char *root)
     printf("-- the synthetic overrides tree migrates into the store\n");
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     make_tree(ov);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\override-backups", root);
-    CreateDirectoryA(path, NULL);
+    make_dir(path);
     configure(root);
     snapshot_dir(ov, "", &before);
 
@@ -530,7 +556,7 @@ static void kept_backups(const char *root)
     char ov[MAX_PATH], path[MAX_PATH * 2];
     sh_modmigrate_stats st;
     printf("-- a non-empty override-backups folder is left alone\n");
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
@@ -549,7 +575,7 @@ static void worker_pass(const char *root)
     sh_modmigrate_stats st;
     int rescans;
     printf("-- sh_mods migrate: the pass on the worker, then the serving index\n");
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "small/package.json", "{\"id\": \"small\", \"name\": \"Small\"}");
     put_file(ov, "small/assets/generated/decls/entitydef/small/s.decl", DECL_A);
@@ -580,7 +606,7 @@ static void incomplete_record(const char *root)
     char path[MAX_PATH * 2], ov[MAX_PATH];
     sh_modmigrate_stats st;
     printf("-- an incomplete record (the worker did not finish) runs the pass again\n");
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
@@ -614,7 +640,7 @@ static void pending_entries(const char *root)
     sh_modmigrate_stats st;
     unsigned entries = 99;
     printf("-- pending: entries the record does not cover, and changed skipped ones\n");
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     configure(root);
     CHECK(sh_modmigrate_pending(&entries) == 0 && entries == 0);   /* no overrides folder */
@@ -637,7 +663,12 @@ static void pending_entries(const char *root)
         FILETIME ft;
         ULARGE_INTEGER t;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\packed.zip", ov);
-        h = CreateFileA(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        {
+            wchar_t *w = wide_of(path);
+            h = w ? CreateFileW(w, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+                  : INVALID_HANDLE_VALUE;
+            free(w);
+        }
         CHECK(h != INVALID_HANDLE_VALUE);
         GetSystemTimeAsFileTime(&ft);
         t.LowPart = ft.dwLowDateTime;
@@ -662,7 +693,7 @@ static void store_lock_contention(const char *root)
     ULONGLONG done;
     unsigned waits, installs = 0, failed = 0;
     printf("-- the store lock: the pass waits for a store step, an install during the pass waits for a folder\n");
-    CreateDirectoryA(root, NULL);
+    make_dir(root);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
@@ -706,6 +737,20 @@ int main(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_a", base, GetCurrentProcessId());
     full_pass(root);
     remove_tree(root);
+    {
+        /* The same pass under a data root whose name holds a non-ASCII character
+         * ("sme" with an acute accent): the overrides walk, the converter, the
+         * builder and the store all spell it in UTF-8. */
+        char *accent = sh_mb_utf8(L"sm\x00e9");
+        CHECK(accent && strlen(accent) == 4);
+        if (accent) {
+            printf("-- the same pass under a data root named with a non-ASCII character\n");
+            _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_%s", base, GetCurrentProcessId(), accent);
+            free(accent);
+            full_pass(root);
+            remove_tree(root);
+        }
+    }
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_b", base, GetCurrentProcessId());
     kept_backups(root);
     remove_tree(root);

@@ -13,8 +13,10 @@
  *
  * The product's own store writes fire the watcher too. A change seen while
  * the store lock is held, or within the grace after a hold ended (the
- * trailing notifications of that write), is the product's own and is dropped;
- * the watcher re-arms with the next change after it. Pure C, no Windows
+ * trailing notifications of that write), is the product's own and is dropped,
+ * so a rescan never runs mid-write. A change the player made during the hold
+ * looks the same, so when a hold ends with a change dropped, one rescan
+ * follows it (an unchanged tree is cheap to rescan). Pure C, no Windows
  * calls: the caller passes the time and the store's state, so the native
  * tests run it with a fake clock. */
 #ifndef SNAPMAP_PLUS_FOLDER_WATCH_H
@@ -34,6 +36,7 @@ typedef struct sh_fw_debounce {
     unsigned dropped;              /* changes dropped as the product's own */
     unsigned store_gen;            /* the store lock's released holds last seen */
     int pending;
+    int owed;                      /* a change was dropped: one rescan follows the hold */
     int store_seen;                /* store_gen holds a value */
 } sh_fw_debounce;
 
@@ -42,14 +45,22 @@ static __inline void sh_fw_init(sh_fw_debounce *d, unsigned long long quiet_ms)
     d->quiet_ms = quiet_ms;
     d->last = d->not_before = d->grace_until = 0;
     d->events = d->dropped = d->store_gen = 0;
-    d->pending = d->store_seen = 0;
+    d->pending = d->store_seen = d->owed = 0;
 }
 
 /* The store's state at `now` (the think loop asks every tick): while a hold
- * lasts, and for the grace after one ends, changes are the product's own. */
+ * lasts, and for the grace after one ends, changes are the product's own.
+ * Once the grace is over, a change dropped meanwhile schedules one rescan,
+ * due after the quiet time. */
 static __inline void sh_fw_store(sh_fw_debounce *d, unsigned long long now, int store_busy, unsigned store_gen)
 {
     if (store_busy || (d->store_seen && store_gen != d->store_gen)) d->grace_until = now + SH_FW_STORE_GRACE_MS;
+    else if (d->owed && now >= d->grace_until) {
+        d->owed = 0;
+        d->last = now;
+        d->events++;
+        d->pending = 1;
+    }
     d->store_gen = store_gen;
     d->store_seen = 1;
 }
@@ -60,7 +71,7 @@ static __inline void sh_fw_store(sh_fw_debounce *d, unsigned long long now, int 
 static __inline int sh_fw_note(sh_fw_debounce *d, unsigned long long now, int store_busy)
 {
     if (store_busy) d->grace_until = now + SH_FW_STORE_GRACE_MS;
-    if (store_busy || now < d->grace_until) { d->dropped++; return 0; }
+    if (store_busy || now < d->grace_until) { d->dropped++; d->owed = 1; return 0; }
     d->last = now;
     d->events++;
     d->pending = 1;

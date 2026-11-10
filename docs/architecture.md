@@ -728,6 +728,18 @@ download an author's editor overrides again.
 `claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
 `aliases` and `editorOnly` (bundle hash to id, name and when: bundles a map
 named that change only the editor), each section written whole under one lock.
+A record another program holds open is waited for, up to a second. A read
+that still fails logs `MODS: record: cannot read <file> (<why>)`, and that
+section is not written until a read of it succeeds again, so a
+read-modify-write never replaces what it holds with less; a write while the
+file cannot be read is refused with the same kind of line. A record that is
+not JSON is moved aside as `snapmap-plus.json.unreadable-<time>` when a
+section is written, and a new one started; the line names the aside file.
+The player reads the same failure where they acted: install and uninstall in
+the Mods tab (and their console verbs) add "Some of its bookkeeping was not
+saved: <file> could not be used (<why>); close the program holding it ... and
+try again" to their result, and a publish whose claim could not be saved
+shows that sentence as its upload cause (`sh_mb_record_why`).
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
 covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct
@@ -787,6 +799,17 @@ nothing and changes nothing. The installer runs it on install and update (see
 The rebuild rule is unchanged: a folder without a product block is built at the
 next rescan, or at the next boot (below).
 
+Crash leftovers. An install, a download and a first-build rename assemble a
+folder as `<name>.staging-<pid>` and move the folder they replace aside as
+`<name>.old-<pid>` before the swap; the listing and the serving scan skip both.
+At boot, before the serving index is read, `sh_ms_recover_work` walks the store
+(organizing folders included) and `.builds\`: a work folder whose process is
+still running is left; a `.old-<pid>` folder whose target is missing is the
+folder a session took away when it ended between the two renames, and is put
+back ("put <folder> back from <work folder>: an earlier session ended while it
+was being replaced"); every other one is removed ("removed <work folder>, a work
+folder an earlier session left when it ended mid-install").
+
 The folder watchers. The lists follow the disk. The window's host
 (`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
 `%LOCALAPPDATA%\snapmap-plus\prefabs\` and `mods\` with
@@ -801,7 +824,8 @@ two seconds later. The Mods tab re-renders from the document that follows. The
 product's own writes fire the watcher too: a change seen while the store lock
 is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
 hold ended, is dropped, so an install or export in progress never triggers a
-rescan mid-write, and the watcher re-arms with the next change. A rescan of
+rescan mid-write. An author's edit during a long hold looks the same, so when
+that second ends with a change dropped, one rescan follows (`sh_fw_store`). A rescan of
 unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
 UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
 opened again every five seconds.

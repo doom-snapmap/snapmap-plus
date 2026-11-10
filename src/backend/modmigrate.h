@@ -79,11 +79,11 @@ typedef struct sh_modmigrate_stats {
     int backups_removed;         /* an empty beta.15 backups folder was removed */
 } sh_modmigrate_stats;
 
-/* The data root (default %LOCALAPPDATA%\snapmap-plus, ANSI like the legacy
+/* The data root (default %LOCALAPPDATA%\snapmap-plus, UTF-8 like the legacy
  * converter's); NULL restores the default. Tests and measurements point it,
  * the legacy converter (sh_modlegacy_set_data_root) and the store
  * (sh_ms_set_root, "<root>\mods") at one scratch folder. */
-void sh_modmigrate_set_data_root(const char *root_acp);
+void sh_modmigrate_set_data_root(const char *root_utf8);
 
 /* The whole pass on the calling thread (the store tool, tests). `again` runs
  * it even when the record says it is complete. Returns 1 when a pass ran, 0 when

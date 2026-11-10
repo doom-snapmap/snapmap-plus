@@ -507,6 +507,32 @@ static char *list_doc(void)
     return fetch();
 }
 
+/* Another program holds the record open without read sharing for `ms`. */
+typedef struct ui_hold { char path[MAX_PATH]; DWORD ms; HANDLE taken; } ui_hold;
+static DWORD WINAPI ui_hold_thread(LPVOID p)
+{
+    ui_hold *r = (ui_hold *)p;
+    HANDLE h = CreateFileA(r->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    SetEvent(r->taken);
+    Sleep(r->ms);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    free(r);
+    return 0;
+}
+static HANDLE ui_hold_record(const char *path, DWORD ms)
+{
+    ui_hold *r = (ui_hold *)calloc(1, sizeof *r);
+    HANDLE t, taken;
+    if (!r) return NULL;
+    strncpy_s(r->path, sizeof r->path, path, _TRUNCATE);
+    r->ms = ms;
+    r->taken = taken = CreateEventA(NULL, TRUE, FALSE, NULL);
+    t = CreateThread(NULL, 0, ui_hold_thread, r, 0, NULL);
+    WaitForSingleObject(taken, 5000);
+    CloseHandle(taken);
+    return t;
+}
+
 static char *run_doc(int action, const char *arg)
 {
     if (sh_modui_run(action, arg) < 0) return NULL;
@@ -2214,6 +2240,37 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_INSTALL, two);
         CHECK(has(doc, "\"action\":\"install\",\"ok\":true") && has(doc, "\"key\":\"bulk.two\"") && !has(doc, "installedCount"));
         free(doc);
+    }
+
+    printf("-- the record held by another program: install and uninstall say which file and what to do\n");
+    {
+        char held[MAX_PATH], rec[MAX_PATH];
+        HANDLE t;
+        _snprintf_s(held, sizeof held, _TRUNCATE, "%s\\authoring\\held.one", tmp);
+        _snprintf_s(rec, sizeof rec, _TRUNCATE, "%s\\snapmap-plus.json", g_root);
+        mt_write(held, "mod.json", "{\"id\":\"held.one\",\"version\":\"1.0.0\",\"name\":\"Held one\",\"author\":\"t\"}");
+        mt_write(held, "assets\\generated\\image\\mods\\held.one\\a.bimage", "bytes of held");
+        CHECK(mt_exists(rec));
+        t = ui_hold_record(rec, 6000);
+        doc = run_doc(SH_MODS_ACT_INSTALL, held);
+        if (!has(doc, "close the program holding it")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "\"action\":\"install\""));
+        CHECK(has(doc, "Some of its bookkeeping was not saved: ") && has(doc, "snapmap-plus.json could not be used (") &&
+              has(doc, "close the program holding it (a backup, sync or antivirus tool, or an editor) and try again"));
+        free(doc);
+        WaitForSingleObject(t, 10000);
+        CloseHandle(t);
+        /* Released: the next action reads the record again and says nothing extra. */
+        doc = run_doc(SH_MODS_ACT_INSTALL, held);
+        CHECK(has(doc, "\"action\":\"install\"") && !has(doc, "bookkeeping was not saved"));
+        free(doc);
+        t = ui_hold_record(rec, 6000);
+        doc = run_doc(SH_MODS_ACT_UNINSTALL, "held.one");
+        if (!has(doc, "close the program holding it")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "snapmap-plus.json could not be used (") && has(doc, "close the program holding it"));
+        free(doc);
+        WaitForSingleObject(t, 10000);
+        CloseHandle(t);
     }
 
     printf("-- an old descriptor's extends partial is refused with what to put instead\n");

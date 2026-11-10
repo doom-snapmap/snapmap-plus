@@ -1139,6 +1139,79 @@ static void test_work_folder_names(const char *tmp)
     sh_ms_list_free(&list);
 }
 
+/* Crash leftovers (sh_ms_recover_work): a session that ended between the two
+ * renames of a replacement left the author's folder as <name>.old-<pid>; it
+ * is put back. Every other work folder of a process no longer running goes;
+ * a running process's (this one's) are left. */
+static void test_crash_leftovers(const char *tmp)
+{
+    /* No process has this id: ids are multiples of four, far below it. */
+    static const unsigned long DEAD = 4294967280ul;
+    char root[MAX_PATH], dir[MAX_PATH];
+    sh_ms_list list;
+    printf("-- crash leftovers: a folder taken away mid-replacement is put back, stale work folders go\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\leftovers\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    /* Between the renames: the folder moved aside, the new one still staged. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.gone.old-%lu", root, DEAD);
+    make_small_mod(dir, "alex.gone");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.gone-key.staging-%lu", root, DEAD);
+    make_small_mod(dir, "alex.gone");
+    /* The same in an organizing folder. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\group\\alex.nested.old-%lu", root, DEAD);
+    make_small_mod(dir, "alex.nested");
+    /* After the swap: the target is in place, the old copy was not removed. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.here", root);
+    make_small_mod(dir, "alex.here");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.here.old-%lu", root, DEAD);
+    make_small_mod(dir, "alex.here");
+    /* A snapshot staged by the store, and a running process's work folder. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.builds\\alex.here@0123456789abcdef.staging-%lu", root, DEAD);
+    make_small_mod(dir, "alex.here");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.live.staging-%lu", root, (unsigned long)GetCurrentProcessId());
+    make_small_mod(dir, "alex.live");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\doom.old-school", root);
+    make_small_mod(dir, "alex.oldschool");
+    CHECK(sh_ms_enumerate(&list) && list.count == 2);   /* alex.here and doom.old-school */
+    sh_ms_list_free(&list);
+
+    g_logged = 0;
+    CHECK(sh_ms_recover_work() == 2);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.gone", root);
+    CHECK(mt_has(dir, "mod.json"));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\group\\alex.nested", root);
+    CHECK(mt_has(dir, "mod.json"));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.gone.old-%lu", root, DEAD);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.gone-key.staging-%lu", root, DEAD);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.here.old-%lu", root, DEAD);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.here", root);
+    CHECK(mt_has(dir, "mod.json"));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.builds\\alex.here@0123456789abcdef.staging-%lu", root, DEAD);
+    CHECK(!mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.live.staging-%lu", root, (unsigned long)GetCurrentProcessId());
+    CHECK(mt_exists(dir));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\doom.old-school", root);
+    CHECK(mt_has(dir, "mod.json"));
+    CHECK(log_has("MODS: store: put alex.gone back from alex.gone.old-4294967280: an earlier session ended while it was "
+                  "being replaced"));
+    CHECK(log_has("MODS: store: put group\\alex.nested back from group\\alex.nested.old-4294967280"));
+    CHECK(log_has("MODS: store: removed alex.here.old-4294967280, a work folder an earlier session left"));
+    CHECK(log_has("MODS: store: removed alex.gone-key.staging-4294967280, a work folder"));
+    CHECK(log_has("MODS: store: removed .builds\\alex.here@0123456789abcdef.staging-4294967280, a work folder"));
+    CHECK(log_count("MODS: store: ") == 5);
+    CHECK(sh_ms_enumerate(&list) && list.count == 4);
+    CHECK(find_entry(&list, "alex.gone") && find_entry(&list, "group\\alex.nested") && find_entry(&list, "alex.here"));
+    sh_ms_list_free(&list);
+    /* Nothing left to do. */
+    g_logged = 0;
+    CHECK(sh_ms_recover_work() == 0 && log_count("MODS: store: ") == 0);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.live.staging-%lu", root, (unsigned long)GetCurrentProcessId());
+    mt_remove_tree(dir);
+}
+
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], key[SH_MS_NAME_MAX + 1];
@@ -1685,6 +1758,7 @@ int main(int argc, char **argv)
     test_recycle(tmp);
     test_nested(tmp);
     test_work_folder_names(tmp);
+    test_crash_leftovers(tmp);
     test_first_build(tmp);
 
     test_upgrade(fixture, tmp);

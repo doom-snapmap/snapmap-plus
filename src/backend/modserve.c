@@ -17,11 +17,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <shlobj.h>
 #include <ctype.h>
 #include "modserve.h"
 #include "modmanifest.h"
 #include "modbundle.h"
+#include "modstore.h"
 #include "modregistry.h"
 #include "decl_tree.h"
 #include "config_json.h"
@@ -156,6 +156,8 @@ typedef struct ms_bundle {
 
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
+#define MS_PATH_MAX 1024                  /* a UTF-8 store path (ms_wide) */
+
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
 /* A request the replaced table served and this one does not (refresh). */
@@ -163,7 +165,7 @@ struct ms_index;
 typedef struct ms_gone { const struct ms_index *from; int file; volatile LONG pending; } ms_gone;
 
 typedef struct ms_index {
-    char root[MAX_PATH];
+    char root[MS_PATH_MAX];
     ms_chunk *arena;
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
@@ -198,7 +200,7 @@ static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_o
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
 static void ms_req_index(ms_index *x, const ms_index *old);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
-static char g_last_root[MAX_PATH];
+static char g_last_root[MS_PATH_MAX];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
@@ -481,8 +483,9 @@ static int ms_jnum(const char *v, const char *ve, double *out)
 /* Bundle trees hold engine paths deep enough to pass MAX_PATH below
  * %LOCALAPPDATA% (a converted first-generation package does), so files are
  * opened through the wide API with the \\?\ prefix, as the legacy converter
- * writes them. `path` is ANSI, absolute, with '\' separators. */
-#define MS_PATH_MAX 1024
+ * writes them. `path` is UTF-8, absolute, with '\' separators: every store
+ * path in this file is, from the root sh_ms_root resolves (modstore.c) to
+ * the folder names the scan reads, as the store and the record spell them. */
 static int ms_wide(const char *path, wchar_t *out, size_t cap)
 {
     size_t at = 0;
@@ -491,7 +494,7 @@ static int ms_wide(const char *path, wchar_t *out, size_t cap)
         wcscpy_s(out, cap, L"\\\\?\\");
         at = 4;
     }
-    return MultiByteToWideChar(CP_ACP, 0, path, -1, out + at, (int)(cap - at)) > 0;
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out + at, (int)(cap - at)) > 0;
 }
 
 static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
@@ -920,7 +923,7 @@ static void ms_peek_identity(ms_index *x, const unsigned char *text, size_t len,
  * verification state. Sizes only: hashes were verified when it was built. */
 static void ms_parse_bundle(ms_index *x, ms_bundle *b)
 {
-    char path[MAX_PATH], key[64];
+    char path[MS_PATH_MAX], key[64];
     unsigned char *text;
     size_t len = 0;
     sh_json_kind kind;
@@ -940,7 +943,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
     if (!text) {
-        char pkg[MAX_PATH];
+        char pkg[MS_PATH_MAX];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
         if (ms_file_size(path) >= 0) ms_fail(b, "mod.json unreadable or over %u MiB", SH_MODSERVE_MAX_JSON >> 20);
         else if (ms_file_size(pkg) >= 0) ms_fail(b, "not built yet (package.json only; the boot builds it in the background, as a rescan of the Mods tab does)");
@@ -964,7 +967,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             char *pk = NULL, *ph = NULL;
             ms_peek_identity(x, text, len, &pk, &ph);
             if (pk && ph && ms_valid_hash(ph) && x->root[0]) {
-                char snap[MAX_PATH], mpath[MAX_PATH];
+                char snap[MS_PATH_MAX], mpath[MS_PATH_MAX];
                 unsigned char *mtext;
                 size_t mlen = 0;
                 _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\%s@%.16s", x->root, pk, ph);
@@ -1174,24 +1177,30 @@ static int ms_work_suffix(const char *name, const char *tag)
 
 static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int depth)
 {
-    char pattern[MAX_PATH];
-    WIN32_FIND_DATAA fd;
+    char pattern[MS_PATH_MAX];
+    wchar_t wpattern[MS_PATH_MAX + 8];
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    h = FindFirstFileA(pattern, &fd);
+    if (!ms_wide(pattern, wpattern, sizeof wpattern / sizeof wpattern[0])) return;
+    h = FindFirstFileW(wpattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         ms_bundle *b;
-        char sub[MAX_PATH], probe[MAX_PATH], subrel[MAX_PATH];
+        char name[MS_PATH_MAX], sub[MS_PATH_MAX], probe[MS_PATH_MAX], subrel[MS_PATH_MAX];
         int mark_files = x->nfiles, mark_needs = x->nneeds;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
             continue;
-        if (fd.cFileName[0] == '.') continue;
-        if (!_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
-        if (ms_work_suffix(fd.cFileName, ".staging-") || ms_work_suffix(fd.cFileName, ".old-")) continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-        if (rel && rel[0]) _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s\\%s", rel, fd.cFileName);
-        else strncpy_s(subrel, sizeof subrel, fd.cFileName, _TRUNCATE);
+        if (fd.cFileName[0] == L'.') continue;
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd.cFileName, -1, name, (int)sizeof name, NULL, NULL)) {
+            ms_log("a folder in %s skipped: its name is not valid Unicode; rename it", rel && rel[0] ? rel : "the store");
+            continue;
+        }
+        if (!_stricmp(name, "blobs") || !_stricmp(name, "legacy")) continue;
+        if (ms_work_suffix(name, ".staging-") || ms_work_suffix(name, ".old-")) continue;
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, name);
+        if (rel && rel[0]) _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s\\%s", rel, name);
+        else strncpy_s(subrel, sizeof subrel, name, _TRUNCATE);
         _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\mod.json", sub);
         if (ms_file_size(probe) < 0) {
             _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\package.json", sub);
@@ -1225,7 +1234,7 @@ static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int de
                 ms_log("bundle '%s': its latest build failed (%s); serving the last good build %s@%.16s from %s", subrel,
                        b->build_failed ? b->build_failed : "no cause recorded", b->id, b->hash, b->snapshot);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
 
@@ -4059,12 +4068,13 @@ void sh_modserve_set_index_listener(sh_modserve_index_fn fn)
 
 int sh_modserve_index_boot(void)
 {
-    char base[MAX_PATH], root[MAX_PATH];
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) {
+    char root[MS_PATH_MAX];
+    /* The store's own root (modstore.c), in UTF-8 as the store writes it:
+     * the ANSI code page cannot spell every profile path. */
+    if (!sh_ms_root(root, sizeof root)) {
         ms_log("index empty: the user-data folder is unavailable");
         return 0;
     }
-    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\snapmap-plus\\mods", base);
     /* The product's index is map-scoped from its first table: no map is open
      * at boot, so no map-scoped shadow serves before a map lists it. */
     InterlockedExchange(&g_scope_on, 1);
@@ -4073,7 +4083,7 @@ int sh_modserve_index_boot(void)
 
 int sh_modserve_index_rescan(void)
 {
-    char root[MAX_PATH];
+    char root[MS_PATH_MAX];
     AcquireSRWLockShared(&g_build_lock);
     strncpy_s(root, sizeof root, g_last_root, _TRUNCATE);
     ReleaseSRWLockShared(&g_build_lock);

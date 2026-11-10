@@ -209,7 +209,6 @@ static int st_doom_is_running(void)
 typedef struct st_store {
     wchar_t *dir;                       /* the data folder, absolute */
     char *u8;                           /* the same, UTF-8 */
-    char *acp;                          /* the same in the system code page, or NULL when it cannot be spelled there */
     char mods[ST_PATH_MAX];             /* <store>\mods, UTF-8 */
 } st_store;
 
@@ -253,7 +252,7 @@ static int st_scan_store(const st_store *s, st_scan *out)
         out->ov_due = !(sh_mb_record_get(s->mods, SH_MODMIGRATE_RECORD, &section) == 1 && section &&
                         strstr(section, "\"complete\":true"));
         free(section);
-        if (!out->ov_due && s->acp) {
+        if (!out->ov_due) {
             unsigned entries = 0;
             int pending = sh_modmigrate_pending(&entries);
             out->ov_changed = pending > 0 ? pending : 0;
@@ -330,12 +329,10 @@ static void st_store_free(st_store *s)
 {
     free(s->dir);
     free(s->u8);
-    free(s->acp);
 }
 
 static int st_store_open(const wchar_t *arg, st_store *s)
 {
-    int lossy = 0;
     memset(s, 0, sizeof *s);
     s->dir = st_full(arg);
     if (!s->dir || !st_is_dir(s->dir)) {
@@ -347,12 +344,10 @@ static int st_store_open(const wchar_t *arg, st_store *s)
     s->u8 = st_utf8(s->dir, CP_UTF8, NULL);
     if (!s->u8 || strlen(s->u8) + 6 >= sizeof s->mods) { st_say(1, "error: the store path is too long"); return 0; }
     _snprintf_s(s->mods, sizeof s->mods, _TRUNCATE, "%s\\mods", s->u8);
-    s->acp = st_utf8(s->dir, CP_ACP, &lossy);
-    if (s->acp && (lossy || strlen(s->acp) + 32 >= MAX_PATH)) { free(s->acp); s->acp = NULL; }
     sh_ms_set_root(s->mods);
-    /* The overrides migration and the legacy converter take the system code page. */
-    sh_modmigrate_set_data_root(s->acp ? s->acp : "");
-    sh_modlegacy_set_data_root(s->acp ? s->acp : "");
+    /* The overrides migration and the legacy converter take UTF-8 too. */
+    sh_modmigrate_set_data_root(s->u8);
+    sh_modlegacy_set_data_root(s->u8);
     return 1;
 }
 
@@ -430,9 +425,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
     /* 3. The retired overrides folder, with the game's archives as the stock bridge's install. A
      * folder migrated before whose entries were added to or changed since runs the pass again. */
     if (before.ov_due || before.ov_changed) {
-        if (!s->acp) {
-            st_say(0, "  overrides\\: not moved: the store's path cannot be spelled in this system's code page");
-        } else if (!doom) {
+        if (!doom) {
             need_doom = 1;
             st_say(0, "  overrides\\: not moved yet: it needs the DOOM folder to tell game files from mod files; "
                    "DOOM was not found through Steam");

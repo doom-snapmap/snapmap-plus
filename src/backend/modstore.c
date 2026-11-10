@@ -136,8 +136,7 @@ int sh_ms_set_root(const char *root)
 
 int sh_ms_root(char *out, size_t cap)
 {
-    PWSTR known = NULL;
-    char *base;
+    char base[MAX_PATH * 4];
     if (!out || !cap) return 0;
     out[0] = 0;
     if (g_ms_root_set) {
@@ -145,12 +144,8 @@ int sh_ms_root(char *out, size_t cap)
         strcpy_s(out, cap, g_ms_root);
         return 1;
     }
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return 0;
-    base = sh_mb_utf8(known);
-    CoTaskMemFree(known);
-    if (!base) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\mods", base);
-    free(base);
+    if (!sh_mb_user_root(base, sizeof base)) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\mods", base);
     return out[0] != 0;
 }
 
@@ -260,17 +255,20 @@ static const char *ms_rel(const char *folder)
 }
 
 /* A work folder of an install or a first-build rename: "<name>.staging-<pid>"
- * or "<name>.old-<pid>", the suffix last. A mod named "doom.old-school" is not one. */
-static int ms_work_suffix(const wchar_t *name, const wchar_t *tag)
+ * or "<name>.old-<pid>", the suffix last. A mod named "doom.old-school" is not one.
+ * ms_work_at: where the suffix starts, or NULL. */
+static const wchar_t *ms_work_at(const wchar_t *name, const wchar_t *tag)
 {
     const wchar_t *at = NULL, *p;
     for (p = wcsstr(name, tag); p; p = wcsstr(p + 1, tag)) at = p;
-    if (!at) return 0;
-    at += wcslen(tag);
-    if (!*at) return 0;
-    for (; *at; at++) if (*at < L'0' || *at > L'9') return 0;
-    return 1;
+    if (!at) return NULL;
+    p = at + wcslen(tag);
+    if (!*p) return NULL;
+    for (; *p; p++) if (*p < L'0' || *p > L'9') return NULL;
+    return at;
 }
+
+static int ms_work_suffix(const wchar_t *name, const wchar_t *tag) { return ms_work_at(name, tag) != NULL; }
 
 /* Folders of the store that can be mods: not hidden, not a staging or
  * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
@@ -2879,6 +2877,107 @@ int sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int 
     pending = sh_ms_sync_pending();
     if (pending > 0) ms_boot_run(pending, 0);
     return pending;
+}
+
+/* ------------------------------------------- crash leftovers ---- */
+/* Installs, downloads and first-build renames assemble a folder as
+ * "<name>.staging-<pid>" and move a replaced one aside as "<name>.old-<pid>"
+ * before the swap; a session that ends between the steps leaves them. */
+
+/* The process that named a work folder is still running (this one included;
+ * a process this one may not open is taken as running). */
+static int ms_pid_alive(DWORD pid)
+{
+    HANDLE h;
+    DWORD code = 0;
+    int alive;
+    if (pid == GetCurrentProcessId()) return 1;
+    h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+    alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+}
+
+static void ms_recover_dir(const wchar_t *dir, const wchar_t *rel, const wchar_t *root, int depth, int enter, int *put_back)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(dir, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const wchar_t *old_at, *at;
+        wchar_t *child, *crel;
+        char *what;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        old_at = ms_work_at(fd.cFileName, L".old-");
+        at = old_at ? old_at : ms_work_at(fd.cFileName, L".staging-");
+        if (!at) {
+            /* An organizing folder is looked into, as the listing does; a mod is not. */
+            if (!enter || !ms_candidate(&fd) || depth + 1 >= SH_MS_NEST_MAX) continue;
+            child = ms_wjoin(dir, fd.cFileName);
+            crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
+            if (child && crel && !ms_has_descriptor(child)) ms_recover_dir(child, crel, root, depth + 1, 1, put_back);
+            free(child);
+            free(crel);
+            continue;
+        }
+        if (ms_pid_alive((DWORD)wcstoul(wcschr(at + 1, L'-') + 1, NULL, 10))) continue;
+        child = ms_wjoin(dir, fd.cFileName);
+        crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
+        what = crel ? sh_mb_utf8(crel) : NULL;
+        if (child && what && old_at) {
+            wchar_t *target = _wcsdup(child);
+            if (target) target[wcslen(dir) + 1 + (size_t)(old_at - fd.cFileName)] = 0;
+            if (target && !ms_exists(target)) {
+                char *tu = sh_mb_utf8(target);
+                if (ms_move_folder(child, target)) {
+                    (*put_back)++;
+                    ms_log("MODS: store: put %s back from %s: an earlier session ended while it was being replaced",
+                           tu ? ms_rel(ms_plain(tu)) : "?", what);
+                } else {
+                    ms_log("MODS: store: %s holds the folder an earlier session was replacing, and it could not be put "
+                           "back (error %lu); rename it without its .old- suffix to use it again", what, GetLastError());
+                }
+                free(tu);
+                free(target);
+                free(child);
+                free(crel);
+                free(what);
+                continue;
+            }
+            free(target);
+        }
+        if (child && what) {
+            if (ms_rmtree(child, root))
+                ms_log("MODS: store: removed %s, a work folder an earlier session left when it ended mid-install", what);
+            else
+                ms_log("MODS: store: %s, a work folder an earlier session left, could not be removed completely; it is "
+                       "not a mod and is tried again at the next boot", what);
+        }
+        free(child);
+        free(crel);
+        free(what);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+int sh_ms_recover_work(void)
+{
+    wchar_t *root = ms_wroot(), *builds;
+    int put_back = 0;
+    if (!root) return -1;
+    if (!ms_exists(root)) { free(root); return 0; }
+    modstore_lock();
+    ms_recover_dir(root, L"", root, 0, 1, &put_back);
+    builds = ms_wjoin(root, MS_BUILDS);
+    if (builds && ms_exists(builds)) ms_recover_dir(builds, MS_BUILDS, root, 0, 0, &put_back);
+    free(builds);
+    modstore_unlock();
+    free(root);
+    return put_back;
 }
 
 /* ---------------------------------------------------------- upgrade ---- */

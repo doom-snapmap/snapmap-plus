@@ -18,7 +18,16 @@ static int failures;
 #define CHECK_CAUSE(b, needle) do { CHECK((b).errors > 0); \
     if (!strstr((b).first_cause, needle)) { fprintf(stderr, "FAIL %s:%d: cause \"%s\" lacks \"%s\"\n", __FILE__, __LINE__, (b).first_cause, needle); failures++; } } while (0)
 
-void backend_log(const char *message) { (void)message; }
+/* The last log lines, for the record's plain messages. */
+static char g_log[8][1400];
+static unsigned g_logged;
+void backend_log(const char *message) { strncpy_s(g_log[g_logged++ % 8], sizeof g_log[0], message, _TRUNCATE); }
+static int log_has(const char *needle)
+{
+    unsigned i, n = g_logged < 8 ? g_logged : 8;
+    for (i = 0; i < n; i++) if (strstr(g_log[i], needle)) return 1;
+    return 0;
+}
 
 /* The fixture's bundle hash. A change here is a change of the canonical form
  * or of the fixture, and the store's validator must agree with it. */
@@ -666,7 +675,10 @@ static void test_record(const char *tmp)
     free(text);
     mt_write(root, "snapmap-plus.json", "{broken");
     CHECK(sh_mb_record_get(root, "claims", &text) == -1);
+    g_logged = 0;
     CHECK(sh_mb_record_put(root, "links", "{}"));
+    CHECK(log_has("snapmap-plus.json is not valid JSON; it was kept as ") && log_has("snapmap-plus.json.unreadable-") &&
+          log_has("and a new record started"));
     CHECK(sh_mb_record_get(root, "links", &text) == 1);
     free(text);
     {
@@ -676,6 +688,94 @@ static void test_record(const char *tmp)
         _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\snapmap-plus.json.unreadable-*", root);
         h = FindFirstFileA(pattern, &fd);
         CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    }
+}
+
+/* Another program holds the record open without read sharing. */
+typedef struct rec_hold { const char *path; DWORD ms; HANDLE taken; } rec_hold;
+static DWORD WINAPI rec_hold_thread(LPVOID p)
+{
+    rec_hold *r = (rec_hold *)p;
+    HANDLE h = CreateFileA(r->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    SetEvent(r->taken);
+    Sleep(r->ms);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return 0;
+}
+static HANDLE rec_hold_start(rec_hold *r, const char *path, DWORD ms)
+{
+    HANDLE t;
+    r->path = path;
+    r->ms = ms;
+    r->taken = CreateEventA(NULL, TRUE, FALSE, NULL);
+    t = CreateThread(NULL, 0, rec_hold_thread, r, 0, NULL);
+    WaitForSingleObject(r->taken, 5000);
+    CloseHandle(r->taken);
+    return t;
+}
+
+/* A read that fails is never followed by a write of what it could not read
+ * (lane C, probes P3 and P4): a brief hold is waited for; a long one fails
+ * the read with a plain line naming the file, and that section is not
+ * written until it reads again. */
+static void test_record_read_failure(const char *tmp)
+{
+    char root[MAX_PATH], path[MAX_PATH], *text = NULL;
+    rec_hold r;
+    HANDLE t;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\recordheld", tmp);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", root);
+    CHECK(sh_mb_record_put(root, "claims", "{\"item-1\":{\"claim\":\"c1\"},\"item-2\":{\"claim\":\"c2\"}}"));
+    CHECK(sh_mb_record_put(root, "links", "{\"m\":\"l\"}"));
+    /* A brief hold: the read waits for it. */
+    t = rec_hold_start(&r, path, 300);
+    CHECK(sh_mb_record_get(root, "claims", &text) == 1 && text && strstr(text, "item-2"));
+    free(text);
+    text = NULL;
+    WaitForSingleObject(t, 5000);
+    CloseHandle(t);
+    /* A long hold: the read fails and says so; no write follows it. */
+    t = rec_hold_start(&r, path, 4000);
+    g_logged = 0;
+    CHECK(sh_mb_record_get(root, "claims", &text) == -1 && !text);
+    CHECK(log_has("MODS: record: cannot read ") && log_has("recordheld\\snapmap-plus.json (another program has it open); "
+                                                          "its \"claims\" section is not written"));
+    {
+        /* The sentence a caller shows the player: the file and the next step. */
+        char why[MAX_PATH * 4 + 240];
+        CHECK(sh_mb_record_why(why, sizeof why) && strstr(why, "recordheld\\snapmap-plus.json could not be used (another "
+              "program has it open); close the program holding it (a backup, sync or antivirus tool, or an editor) and try again"));
+        sh_mb_record_why_clear();
+        CHECK(!sh_mb_record_why(why, sizeof why));
+    }
+    g_logged = 0;
+    CHECK(!sh_mb_record_put(root, "cache", "{\"aa\":\"bb\"}"));
+    CHECK(log_has("the \"cache\" section of ") && log_has("was not written: the record cannot be read (another program"));
+    WaitForSingleObject(t, 5000);
+    CloseHandle(t);
+    /* Released: the read-modify-write that read nothing is still refused. */
+    g_logged = 0;
+    CHECK(!sh_mb_record_put(root, "claims", "{\"item-3\":{\"claim\":\"c3\"}}"));
+    CHECK(log_has("the \"claims\" section of ") && log_has("was not written: its last read failed, and the write would drop "
+                                                            "what it holds"));
+    text = (char *)sh_mb_read_file(path, 1 << 20, NULL);
+    CHECK(text && strstr(text, "item-1") && strstr(text, "item-2") && !strstr(text, "item-3") && strstr(text, "\"links\""));
+    free(text);
+    text = NULL;
+    /* Read again, the section is written as usual, and nothing was moved aside. */
+    CHECK(sh_mb_record_get(root, "claims", &text) == 1 && text && strstr(text, "item-1"));
+    free(text);
+    CHECK(sh_mb_record_put(root, "claims", "{\"item-1\":{\"claim\":\"c1\"},\"item-2\":{\"claim\":\"c2\"},\"item-3\":{\"claim\":\"c3\"}}"));
+    CHECK(sh_mb_record_get(root, "links", &text) == 1 && text && !strcmp(text, "{\"m\":\"l\"}"));
+    free(text);
+    {
+        WIN32_FIND_DATAA fd;
+        char pattern[MAX_PATH];
+        HANDLE h;
+        _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\snapmap-plus.json.unreadable-*", root);
+        h = FindFirstFileA(pattern, &fd);
+        CHECK(h == INVALID_HANDLE_VALUE);
         if (h != INVALID_HANDLE_VALUE) FindClose(h);
     }
 }
@@ -1897,6 +1997,7 @@ int main(int argc, char **argv)
     test_modjson(full, tmp);
     test_block_legacy(full, tmp);
     test_record(tmp);
+    test_record_read_failure(tmp);
     test_refusals(full, tmp);
     test_classes(full, tmp);
     test_keys(full, tmp);

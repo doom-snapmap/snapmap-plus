@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 
 #include "modmigrate.h"
 #include "modlegacy.h"
@@ -47,7 +46,7 @@ typedef struct mg_item {
 } mg_item;
 
 typedef struct mg_ctx {
-    char root[MAX_PATH];               /* data root, ANSI */
+    char root[MAX_PATH * 4];           /* data root, UTF-8 */
     char overrides_u8[MAX_PATH * 4];   /* UTF-8 */
     wchar_t *overrides_w;              /* long-path form */
     wchar_t *mods_w;
@@ -60,7 +59,7 @@ typedef struct mg_ctx {
 } mg_ctx;
 
 static SRWLOCK g_mg_lock = SRWLOCK_INIT;
-static char g_mg_root[MAX_PATH];
+static char g_mg_root[MAX_PATH * 4];
 static volatile LONG g_mg_busy;
 static HANDLE g_mg_thread;
 static sh_modmigrate_stats g_mg_last;
@@ -95,20 +94,17 @@ void sh_modmigrate_set_data_root(const char *root)
 
 static int mg_data_root(char *out, size_t cap)
 {
-    char base[MAX_PATH];
     AcquireSRWLockShared(&g_mg_lock);
     strncpy_s(out, cap, g_mg_root, _TRUNCATE);
     ReleaseSRWLockShared(&g_mg_lock);
     if (out[0]) return 1;
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus", base);
-    return 1;
+    return sh_mb_user_root(out, cap);
 }
 
-/* ANSI path (plus an optional UTF-8 tail) to the long wide form. */
+/* A UTF-8 path (plus an optional UTF-8 tail) to the long wide form. */
 static wchar_t *mg_wide(const char *acp, const char *tail_u8)
 {
-    int na = MultiByteToWideChar(CP_ACP, 0, acp, -1, NULL, 0);
+    int na = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, acp, -1, NULL, 0);
     int nt = tail_u8 ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, tail_u8, -1, NULL, 0) : 1;
     int prefix = (acp[0] && acp[1] == ':' && acp[2] == '\\') ? 4 : 0;
     wchar_t *w, *p;
@@ -116,7 +112,7 @@ static wchar_t *mg_wide(const char *acp, const char *tail_u8)
     w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(prefix + na + nt + 1));
     if (!w) return NULL;
     if (prefix) memcpy(w, L"\\\\?\\", 4 * sizeof(wchar_t));
-    MultiByteToWideChar(CP_ACP, 0, acp, -1, w + prefix, na);
+    MultiByteToWideChar(CP_UTF8, 0, acp, -1, w + prefix, na);
     if (tail_u8) {
         size_t at = (size_t)prefix + (size_t)na - 1;
         w[at++] = L'\\';
@@ -541,17 +537,15 @@ static unsigned long long g_mg_pointer_bytes;
  * runs without the engine; in the game the pass runs on a worker).
  * Copies of installed content still become stock pointers: the stock bridge
  * reads the installed archives from disk, not through the engine. */
-static int mg_build_legacy(const char *folder_acp, char *first_cause, size_t n)
+static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
 {
-    wchar_t wide[MAX_PATH * 2];
     char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
     sh_ms_list list;
     sh_mb_resolver r;
     sh_mb_bundle b;
     int ok = 0;
     if (first_cause && n) first_cause[0] = 0;
-    if (!MultiByteToWideChar(CP_ACP, 0, folder_acp, -1, wide, (int)(sizeof wide / sizeof wide[0])) ||
-        !WideCharToMultiByte(CP_UTF8, 0, wide, -1, folder, (int)sizeof folder, NULL, NULL)) {
+    if (!folder_utf8 || strlen(folder_utf8) >= sizeof folder || strncpy_s(folder, sizeof folder, folder_utf8, _TRUNCATE) != 0) {
         if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
         return 0;
     }
@@ -724,7 +718,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
             strncpy_s(it->store, sizeof it->store, leaf ? leaf + 1 : v.folder, _TRUNCATE);
         }
     } else {
-        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH], key[SH_MS_NAME_MAX + 1], target[SH_MS_NAME_MAX + 1];
+        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH * 4], key[SH_MS_NAME_MAX + 1], target[SH_MS_NAME_MAX + 1];
         char cause[SH_MB_CAUSE_MAX] = "";
         wchar_t *wstage, *wparent;
         sh_ms_install_stats st;
@@ -1230,7 +1224,7 @@ static unsigned long long mg_changed_at(const wchar_t *path, const WIN32_FIND_DA
 
 int sh_modmigrate_pending(unsigned *entries)
 {
-    char root[MAX_PATH];
+    char root[MAX_PATH * 4];
     wchar_t *overrides = NULL, *record = NULL, *pattern = NULL;
     char *text = NULL;
     unsigned long long migrated_at = 0;

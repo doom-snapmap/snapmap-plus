@@ -10,11 +10,13 @@
 #include <string.h>
 #include "modhud.h"
 #include "config_json.h"
+#include "modbundle.h"
 #ifndef SH_MODHUD_PURE
 #include "backend_log.h"
 #include "patch.h"
 #ifndef SH_MODHUD_TESTING
 #include "modserve.h"
+#include "modstore.h"
 #endif
 #endif
 
@@ -165,24 +167,11 @@ unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode)
 
 /* ------------------------------------------------------------------ bundles */
 
+/* Store paths are UTF-8 (modbundle.h sh_mb_wpath), as the store writes them. */
 static char *hud_read(const char *path, size_t cap, size_t *len)
 {
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    LARGE_INTEGER size;
-    char *buf = NULL;
-    DWORD got = 0;
-    if (h == INVALID_HANDLE_VALUE) return NULL;
-    if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && (unsigned long long)size.QuadPart <= cap &&
-        (buf = (char *)malloc((size_t)size.QuadPart + 1)) != NULL &&
-        ReadFile(h, buf, (DWORD)size.QuadPart, &got, NULL) && got == (DWORD)size.QuadPart) {
-        buf[got] = 0;
-        *len = got;
-    } else {
-        free(buf);
-        buf = NULL;
-    }
-    CloseHandle(h);
+    char *buf = (char *)sh_mb_read_file(path, cap, len);
+    if (buf && !*len) { free(buf); buf = NULL; }
     return buf;
 }
 
@@ -191,7 +180,7 @@ static char *hud_read(const char *path, size_t cap, size_t *len)
  * the author block's "hud" key; the bundle hash is the product block's. */
 static int hud_bundle(const char *dir, int (*admitted)(const char *))
 {
-    char path[MAX_PATH], hash[80], id[HUD_OWNER_CAP];
+    char path[MAX_PATH * 4], hash[80], id[HUD_OWNER_CAP];
     size_t len = 0;
     char *text;
     sh_json_object root = {0}, block = {0};
@@ -218,19 +207,25 @@ done:
 
 static int hud_scan(const char *folder, int (*admitted)(const char *))
 {
-    char pattern[MAX_PATH], sub[MAX_PATH];
-    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 4], sub[MAX_PATH * 4];
+    wchar_t *wpattern;
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     int ok = 1;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", folder);
-    h = FindFirstFileA(pattern, &fd);
+    wpattern = sh_mb_wpath(pattern);
+    h = wpattern ? FindFirstFileW(wpattern, &fd) : INVALID_HANDLE_VALUE;
+    free(wpattern);
     if (h == INVALID_HANDLE_VALUE) return 1;
     do {
+        char *name;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            fd.cFileName[0] == '.' || !_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", folder, fd.cFileName);
+            fd.cFileName[0] == L'.' || !_wcsicmp(fd.cFileName, L"blobs") || !_wcsicmp(fd.cFileName, L"legacy")) continue;
+        if ((name = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", folder, name);
+        free(name);
         if (!hud_bundle(sub, admitted)) ok = 0;
-    } while (ok && FindNextFileA(h, &fd));
+    } while (ok && FindNextFileW(h, &fd));
     FindClose(h);
     return ok;
 }
@@ -354,18 +349,10 @@ refused:
 #ifndef SH_MODHUD_TESTING
 static int hud_admitted(const char *hash) { return sh_modserve_bundle_state(hash, NULL, 0) == 1; }
 
-static int hud_root(char *out, size_t cap)
-{
-    char base[MAX_PATH];
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\mods", base);
-    return 1;
-}
-
 int sh_modhud_reload(void)
 {
-    char root[MAX_PATH];
-    if (!hud_root(root, sizeof root)) { sh_modhud_publish(0); return -1; }
+    char root[MAX_PATH * 4];
+    if (!sh_ms_root(root, sizeof root)) { sh_modhud_publish(0); return -1; }
     return sh_modhud_load_tree(root, hud_admitted);
 }
 
