@@ -18,32 +18,9 @@ $objDir = Join-Path $build "obj\uiwv"
 $sdkDir = Join-Path $build "webview2sdk"
 New-Item -ItemType Directory -Force $objDir | Out-Null
 
-# MSVC toolchain.
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) { throw "vswhere not found. Install VS 2022 Build Tools (C++ workload)." }
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
-$vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
-
-# Report a missing toolset pin before invoking vcvars64.bat.
-$vcvarsArgs = ""
-$toolsetDir = Join-Path $vs "VC\Tools\MSVC"
-if ($VcVarsVer) {
-    if (-not (Test-Path (Join-Path $toolsetDir $VcVarsVer))) {
-        $have = (Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ", "
-        throw ("pinned MSVC toolset $VcVarsVer is not installed (have: $have). Install it via the VS " +
-               "Installer, or update the pin in .github/workflows/release.yml (SNAPMAPPLUS_VCVARS_VER).")
-    }
-    $vcvarsArgs = " -vcvars_ver=$VcVarsVer"
-    $toolset = $VcVarsVer + " (pinned)"
-} else {
-# Without a pin, report the newest installed toolset.
-    $newest = Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue |
-              Sort-Object Name -Descending | Select-Object -First 1
-    if ($newest) { $toolset = $newest.Name + " (newest installed, NOT pinned)" }
-    else { $toolset = "unknown (NOT pinned)" }
-}
+# MSVC toolchain, imported once and shared with the backend build (tools\cbuild.ps1).
+. (Join-Path $repo "tools\cbuild.ps1")
+$toolset = Import-MsvcEnv $VcVarsVer
 Write-Host "[build] MSVC toolset $toolset"
 
 # WebView2 SDK. Update the stable version deliberately; NuGet's last entry may be a prerelease.
@@ -80,7 +57,9 @@ for ($i = 0; $i -lt $html.Length; $i += $chunkSize) {
 }
 [void]$sb.AppendLine(";")
 $hdrPath = Join-Path $objDir "mockup_html.h"
-Set-Content -Path $hdrPath -Value $sb.ToString() -Encoding ascii -NoNewline
+# Rewrite the header only when the page changed, so an unchanged page does not recompile the frontend.
+$hdrOld = if (Test-Path $hdrPath) { [System.IO.File]::ReadAllText($hdrPath) } else { $null }
+if ($hdrOld -ne $sb.ToString()) { Set-Content -Path $hdrPath -Value $sb.ToString() -Encoding ascii -NoNewline }
 Write-Host "generated $hdrPath ($([Math]::Round(($html.Length/1KB),1)) KB of HTML)"
 
 # Compile with the dynamic CRT required by the WebView2 static loader.
@@ -93,7 +72,9 @@ $incArgs = @(
     # prefab_grab.c so Create can check a saved frame when the backend has no guard.
     "/I`"$backend`""
 ) -join " "
-$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c ..\backend\prefab_grab.c ..\backend\prefab_block.c"
+$Sources = @("webview\snapmap_plus_ui_webview.cpp", "webview\config_message.cpp", "webview\webview_json.cpp",
+             "webview\theme_bootstrap.cpp", "sl_exports.cpp", "..\common\log_rotate.c", "..\backend\host_image.c",
+             "..\backend\prefab_grab.c", "..\backend\prefab_block.c")
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",
@@ -107,17 +88,16 @@ $implib = $Out -replace '\.dll$', '.lib'
 New-Item -ItemType Directory -Force (Join-Path $build "webview") | Out-Null
 # Emit crash symbols while keeping release optimization and reproducible linking.
 # PDB and map files are maintainer artifacts; packaging copies only the DLL.
-$cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro /DWIN32 /D_WINDOWS /Fo..\..\build\obj\uiwv\ " +
-       "$incArgs $srcArgs /Fe:..\..\build\webview\$Out " +
+# Sources compile to build\obj\uiwv (only those changed since the last build), then link.
+$buildLog = Join-Path $build "build-ui.log"
+$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro /DWIN32 /D_WINDOWS $incArgs" `
+    -ObjDir $objDir -ObjDirArg "..\..\build\obj\uiwv\" -IncludeDirs @($objDir, $common, $backend) -Log $buildLog
+$objArgs = ($objs | ForEach-Object { '"..\..\build\obj\uiwv\' + (Split-Path -Leaf $_) + '"' }) -join " "
+$cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro $objArgs /Fe:..\..\build\webview\$Out " +
        "/link /DEF:snapmap-plus-ui.def /IMPLIB:..\..\build\obj\uiwv\$implib $libArgs " +
        "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
-$cmd = "cd /d `"$here`" && `"$vcvars`"$vcvarsArgs && $cl"
-
-$buildLog = Join-Path $build "build-ui.log"
-cmd /c "$cmd > `"$buildLog`" 2>&1"
-$clExit = $LASTEXITCODE
-Get-Content $buildLog | Write-Host
-if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
+Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $build "webview\$Out") `
+    -Log (Join-Path $build "link-ui.log") -Remove @((Join-Path $build ("webview\" + ($Out -replace '\.dll$', '.pdb'))))
 Write-Host "built $(Join-Path $build "webview\$Out") (WebView2)"
 # Require both symbol artifacts for later crash diagnosis.
 foreach ($sym in @(($Out -replace '\.dll$', '.pdb'), ($Out -replace '\.dll$', '.map'))) {
