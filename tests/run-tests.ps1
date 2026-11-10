@@ -17,22 +17,10 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $obj  = Join-Path $here "obj"
 New-Item -ItemType Directory -Force $obj | Out-Null
 
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) { throw "vswhere not found. Install Build Tools for Visual Studio 2022 (C++ workload)." }
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
-$vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
-
-# Import the MSVC environment ONCE. vcvars64.bat costs seconds, so running it per
-# test spent minutes on setup alone. Names starting with "=" are cmd's per-drive
-# working directories and are skipped by the pattern.
-cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
-    if ($_ -match '^([^=]+)=(.*)$') {
-        [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
-    }
-}
-if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH after $vcvars" }
+# Import the MSVC environment once (tools\cbuild.ps1); every compile and link below inherits it.
+$repo = Split-Path -Parent $here
+. (Join-Path $repo "tools\cbuild.ps1")
+$null = Import-MsvcEnv $env:SNAPMAPPLUS_VCVARS_VER
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
@@ -220,33 +208,128 @@ if ($Only.Count) {
     $tests = @($tests | Where-Object { $_.name -in $Only })
 }
 
-$fail = 0
+# Each source compiles once per flag set into build\obj\tests\<flags-hash>\ (a suite whose defines
+# differ gets its own object set), only when it or a project file it includes changed. Suites then
+# link from those objects and run, all in parallel; output is captured per suite and printed in
+# manifest order.
+$cache = Join-Path $repo "build\obj\tests"
+$incDirs = @("src\backend", "src\common", "src\fault_shield", "src\ui\webview") | ForEach-Object { Join-Path $repo $_ }
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$units = [ordered]@{}
 foreach ($t in $tests) {
-    $exe = Join-Path $obj ($t.name + ".exe")
     $defs = if ($t.defs) { " $($t.defs)" } else { "" }
     $cxx  = if ($t.cxx)  { " /EHsc /std:c++17" } else { "" }
+    $flags = "/nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs"
+    $hash = (-join ($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($flags)) | ForEach-Object { $_.ToString("x2") })).Substring(0, 12)
+    $setDir = Join-Path $cache $hash
+    if (-not $units.Contains("set:$hash")) { Sync-CbFlagsRecord $setDir $flags; $units["set:$hash"] = $null }
+    $t.objs = @()
+    foreach ($src in @($t.src -split '\s+' | Where-Object { $_ })) {
+        # Name the object by its path so same-named files in different folders cannot collide.
+        $stem = ($src -replace '^(\.\.\\)+', '' -replace '[\\/:]', '_') -replace '\.(c|cpp)$', ''
+        $unit = Join-Path $setDir ($stem + ".obj")
+        $t.objs += $unit
+        if (-not $units.Contains($unit)) { $units[$unit] = @{ src = $src; flags = $flags; obj = $unit } }
+    }
+    $t.cxx = $cxx
+}
+$jobs = @()
+foreach ($u in @($units.Values | Where-Object { $_ })) {
+    $u.ok = $true
+    if ((Test-Path $u.obj) -and
+        (Get-CbNewestInput (Join-Path $here $u.src) $incDirs) -le [System.IO.File]::GetLastWriteTimeUtc($u.obj)) { continue }
+    Remove-Item $u.obj -Force -ErrorAction SilentlyContinue
+    $u.log = $u.obj -replace '\.obj$', '.log'
+    $jobs += @{ dir = $here; cmd = "cl /c $($u.flags) $($u.src) /Fo`"$($u.obj)`""; log = $u.log; unit = $u }
+}
+$codes = Invoke-CbParallel $jobs
+for ($i = 0; $i -lt $jobs.Count; $i++) { if ($codes[$i] -ne 0) { $jobs[$i].unit.ok = $false } }
+Write-Host ("[tests] compiled {0} of {1} objects" -f $jobs.Count, @($units.Values | Where-Object { $_ }).Count)
+
+# Link each suite whose objects compiled, unless its executable is newer than them and was linked
+# by the same command.
+$fail = 0
+$linkJobs = @()
+foreach ($t in $tests) {
+    $bad = @($t.objs | Where-Object { -not $units[$_].ok })
+    if ($bad.Count) {
+        foreach ($o in $bad) { Get-Content $units[$o].log | Write-Host }
+        Write-Host "[FAIL] compile $($t.name)"; $fail++; $t.skip = $true; continue
+    }
+    $exe = Join-Path $obj ($t.name + ".exe")
     $libs = if ($t.libs) { " /link $($t.libs)" } else { "" }
-    # Relative output paths avoid cl's quoted trailing-backslash parsing issue.
-    $cl  = "cl /nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs $($t.src) /Fe:obj\$($t.name).exe /Foobj\$libs"
-    $log = Join-Path $obj ($t.name + ".build.log")
-    # Judge the compiler exit code; vcvars may emit unrelated stderr diagnostics.
-    cmd /c "cd /d `"$here`" && $cl > `"$log`" 2>&1"
-    if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
-    if ($t.arg) { & $exe @($t.arg) } else { & $exe }
-    if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $($t.name) (exit $LASTEXITCODE)"; $fail++ }
-    else { Write-Host "[ok]   $($t.name)" }
+    $objArgs = ($t.objs | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $cmd = "cl /nologo /O2 /MT$($t.cxx) $objArgs /Fe:obj\$($t.name).exe$libs"
+    $record = Join-Path $obj ($t.name + ".link.txt")
+    $need = -not (Test-Path $exe)
+    if (-not $need) {
+        $exeTime = [System.IO.File]::GetLastWriteTimeUtc($exe)
+        $need = @($t.objs | Where-Object { [System.IO.File]::GetLastWriteTimeUtc($_) -gt $exeTime }).Count -gt 0
+    }
+    if (-not $need) { $need = -not (Test-Path $record) -or [System.IO.File]::ReadAllText($record) -ne $cmd }
+    if ($need) {
+        Remove-Item $exe, $record -Force -ErrorAction SilentlyContinue
+        $linkJobs += @{ dir = $here; cmd = $cmd; log = (Join-Path $obj ($t.name + ".build.log")); test = $t; record = $record }
+    }
+}
+$codes = Invoke-CbParallel $linkJobs
+for ($i = 0; $i -lt $linkJobs.Count; $i++) {
+    $j = $linkJobs[$i]
+    if ($codes[$i] -ne 0) {
+        Get-Content $j.log | Write-Host; Write-Host "[FAIL] compile $($j.test.name)"; $fail++; $j.test.skip = $true
+    } else { [System.IO.File]::WriteAllText($j.record, $j.cmd) }
+}
+
+# Run the native suites, and the JavaScript suites unless -Only selected native ones, side by side
+# from the caller's directory; output prints in manifest order. Each suite names its temporary
+# folders by process id, so suites running together do not share them. The longest suites of the
+# previous run start first.
+$cwd = (Get-Location).ProviderPath
+$timesPath = Join-Path $cache "durations.txt"
+$times = @{}
+if (Test-Path $timesPath) {
+    foreach ($line in [System.IO.File]::ReadAllLines($timesPath)) {
+        $f = $line.Split("`t"); if ($f.Count -eq 2) { $times[$f[0]] = [double]$f[1] }
+    }
+}
+$runJobs = @()
+foreach ($t in @($tests | Where-Object { -not $_.skip })) {
+    $exe = Join-Path $obj ($t.name + ".exe")
+    $argText = (@($t.arg) | Where-Object { $_ } | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $runJobs += @{ dir = $cwd; cmd = "`"$exe`" $argText"; log = (Join-Path $obj ($t.name + ".run.log")); name = $t.name }
+}
+$nativeCount = $runJobs.Count
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js")
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $Only.Count -and $node) {
+    foreach ($jsTest in $jsTests) {
+        $runJobs += @{ dir = $cwd; cmd = "`"$($node.Source)`" `"$(Join-Path $here $jsTest)`""; log = (Join-Path $obj ($jsTest + ".run.log")); name = $jsTest }
+    }
+}
+foreach ($j in $runJobs) { $j.weight = $times[$j.name] }
+$codes = Invoke-CbParallel $runJobs
+foreach ($j in $runJobs) { $times[$j.name] = $j.seconds }
+$lines = foreach ($k in $times.Keys) { "{0}`t{1:0.00}" -f $k, $times[$k] }
+[System.IO.File]::WriteAllLines($timesPath, [string[]]$lines)
+
+for ($i = 0; $i -lt $nativeCount; $i++) {
+    $j = $runJobs[$i]
+    Get-Content $j.log | Write-Host
+    if ($codes[$i] -ne 0) { Write-Host "[FAIL] $($j.name) (exit $($codes[$i]))"; $fail++ }
+    else { Write-Host "[ok]   $($j.name)" }
 }
 if ($fail -gt 0) { Write-Host ""; Write-Host "$fail native test(s) FAILED"; exit 1 }
 Write-Host ""; Write-Host "all native tests passed ($($tests.Count))"
 
 if ($Only.Count) { exit 0 }
 
-$node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js")
-foreach ($jsTest in $jsTests) {
-    & $node.Source (Join-Path $here $jsTest)
-    if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }
-    Write-Host "[ok]   $jsTest"
+$jsFail = 0
+for ($i = $nativeCount; $i -lt $runJobs.Count; $i++) {
+    $j = $runJobs[$i]
+    Get-Content $j.log | Write-Host
+    if ($codes[$i] -ne 0) { Write-Host "[FAIL] $($j.name) (exit $($codes[$i]))"; $jsFail++ }
+    else { Write-Host "[ok]   $($j.name)" }
 }
+if ($jsFail -gt 0) { exit 1 }
 Write-Host "all JavaScript tests passed ($($jsTests.Count))"
