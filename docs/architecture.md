@@ -726,6 +726,13 @@ download an author's editor overrides again.
 `claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
 `aliases` and `editorOnly` (bundle hash to id, name and when: bundles a map
 named that change only the editor), each section written whole under one lock.
+A record another program holds open is waited for, up to a second. A read
+that still fails logs `MODS: record: cannot read <file> (<why>)`, and that
+section is not written until a read of it succeeds again, so a
+read-modify-write never replaces what it holds with less; a write while the
+file cannot be read is refused with the same kind of line. A record that is
+not JSON is moved aside as `snapmap-plus.json.unreadable-<time>` when a
+section is written, and a new one started; the line names the aside file.
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
 covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct

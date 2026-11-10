@@ -440,15 +440,21 @@ int  sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part);
  * Each section is owned by one module and read and written whole. Writes are
  * a read, a replace of that section and a write-through rename, under one
  * recursive lock (sh_mb_record_lock) that a caller may also hold around its
- * own read-modify-write. An unreadable file is moved aside, logged, and a new
- * one started. */
+ * own read-modify-write. A file another program holds is waited for, up to a
+ * second. A file that is not JSON is moved aside when a section is written,
+ * logged with the aside file's name, and a new one started. A file that
+ * cannot be read is never replaced. */
 #define SH_MB_RECORD_FILE "snapmap-plus.json"
 void sh_mb_record_lock(void);
 void sh_mb_record_unlock(void);
 /* 1 with the section's JSON text (malloc'd, compact), 0 when absent, -1 when
- * the record cannot be read. */
+ * the record cannot be read (a "MODS: record:" line names the file when it
+ * could not be opened or read; that section is then not written until a get
+ * of it succeeds again, so a read-modify-write never drops what it holds). */
 int  sh_mb_record_get(const char *mods_root, const char *section, char **json_out);
-/* Replace (json != NULL) or remove (NULL) one section. 1 on success. */
+/* Replace (json != NULL) or remove (NULL) one section. 1 on success; 0 with a
+ * "MODS: record:" line naming the file when the record cannot be read or the
+ * section's last get failed. */
 int  sh_mb_record_put(const char *mods_root, const char *section, const char *json);
 
 void sh_mb_free(sh_mb_bundle *bundle);

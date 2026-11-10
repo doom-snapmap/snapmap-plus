@@ -275,8 +275,9 @@ static int msy_root(char *out, size_t cap)
 
 /* A section of the product record (mods\snapmap-plus.json) as the document
  * {"format":1,"<member>":{...}} the code below edits. A missing section is an
- * empty one; an unreadable record is moved aside by the record layer when
- * the section is written next (never silently lost). */
+ * empty one. A record that cannot be read loads as empty too, and the record
+ * layer then refuses the section's save until it reads again (modbundle.h),
+ * so the claims it holds are never replaced with fewer. */
 static mpj *msy_doc_load(const char *section, const char *member)
 {
     char root[MAX_PATH * 4], *text = NULL;

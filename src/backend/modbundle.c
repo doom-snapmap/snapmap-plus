@@ -5748,20 +5748,85 @@ static wchar_t *mb_record_path(const char *mods_root)
     return sh_mb_wpath(path);
 }
 
-/* The record's root object: *state 1 read, 0 absent, -1 unreadable. */
-static mbj *mb_record_read(const wchar_t *path, int *state)
+/* The record's root object: *state 1 read, 0 absent, -1 the file cannot be
+ * read (`why` says why), -2 it is not a JSON object. Another program holding
+ * the file without read sharing (a backup tool, an editor, a scanner) is
+ * waited for, up to a second. */
+static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t why_cap)
 {
-    unsigned char *text;
+    unsigned char *text = NULL;
     size_t len = 0;
     mbj *root;
+    DWORD err = 0;
+    int attempt;
     *state = 0;
+    if (why && why_cap) why[0] = 0;
     if (!path || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return NULL;
-    text = mb_read_wfile(path, 64u * 1024u * 1024u, &len);
-    root = text ? mbj_parse((const char *)text, len, NULL, 0) : NULL;
+    for (attempt = 0; attempt < 20; attempt++) {
+        SetLastError(ERROR_SUCCESS);
+        text = mb_read_wfile(path, 64u * 1024u * 1024u, &len);
+        if (text) break;
+        err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
+        Sleep(50);
+    }
+    if (!text) {
+        *state = -1;
+        if (why && why_cap) {
+            if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION)
+                _snprintf_s(why, why_cap, _TRUNCATE, "another program kept it open for over a second");
+            else if (err) _snprintf_s(why, why_cap, _TRUNCATE, "Windows error %lu", err);
+            else _snprintf_s(why, why_cap, _TRUNCATE, "it is larger than 64 MiB");
+        }
+        return NULL;
+    }
+    root = mbj_parse((const char *)text, len, NULL, 0);
     free(text);
-    if (!root || root->t != MBJ_OBJ) { mbj_free(root); *state = -1; return NULL; }
+    if (!root || root->t != MBJ_OBJ) { mbj_free(root); *state = -2; return NULL; }
     *state = 1;
     return root;
+}
+
+static void mb_rec_log(const char *fmt, ...)
+{
+    char line[1400];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    backend_log(line);
+}
+
+/* The record's path for a log line: UTF-8, without the \\?\ prefix. */
+static void mb_record_name(const wchar_t *path, char *out, size_t cap)
+{
+    char *u = sh_mb_utf8(path && !wcsncmp(path, L"\\\\?\\", 4) ? path + 4 : path);
+    strncpy_s(out, cap, u ? u : SH_MB_RECORD_FILE, _TRUNCATE);
+    free(u);
+}
+
+/* Sections whose last read failed (root and section): a section read as
+ * absent after a failure and written back would drop what it holds, so it
+ * is not written until a read of it succeeds again. Under the record lock. */
+#define MB_REC_FAILED_MAX 16
+static unsigned long long g_rec_failed[MB_REC_FAILED_MAX];
+static unsigned g_rec_failed_next;
+
+static unsigned long long mb_rec_key(const char *mods_root, const char *section)
+{
+    unsigned long long h = 1469598103934665603ull;
+    const char *p;
+    for (p = mods_root; *p; p++) { h ^= (unsigned char)tolower((unsigned char)*p); h *= 1099511628211ull; }
+    h ^= '|'; h *= 1099511628211ull;
+    for (p = section; *p; p++) { h ^= (unsigned char)*p; h *= 1099511628211ull; }
+    return h ? h : 1;
+}
+
+static int mb_rec_failed_at(unsigned long long key)
+{
+    int i;
+    for (i = 0; i < MB_REC_FAILED_MAX; i++) if (g_rec_failed[i] == key) return i;
+    return -1;
 }
 
 int sh_mb_record_get(const char *mods_root, const char *section, char **json_out)
@@ -5770,11 +5835,22 @@ int sh_mb_record_get(const char *mods_root, const char *section, char **json_out
     mbj *root;
     const mbj *v;
     mb_buf o = {0};
-    int state, r = 0;
+    int state, r = 0, at;
+    char why[96];
+    unsigned long long key;
     if (json_out) *json_out = NULL;
     if (!path || !section) { free(path); return -1; }
+    key = mb_rec_key(mods_root, section);
     sh_mb_record_lock();
-    root = mb_record_read(path, &state);
+    root = mb_record_read(path, &state, why, sizeof why);
+    at = mb_rec_failed_at(key);
+    if (state == -1) {
+        char name[MAX_PATH * 4];
+        mb_record_name(path, name, sizeof name);
+        if (at < 0) g_rec_failed[g_rec_failed_next++ % MB_REC_FAILED_MAX] = key;
+        mb_rec_log("MODS: record: cannot read %s (%s); its \"%s\" section is not written until it reads again",
+                        name, why, section);
+    } else if (at >= 0) g_rec_failed[at] = 0;
     sh_mb_record_unlock();
     free(path);
     if (state < 0) return -1;
@@ -5796,15 +5872,47 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     char *pretty = NULL;
     size_t i;
     int state, placed = 0, ok = 0;
+    char why[96], name[MAX_PATH * 4];
     if (!path || !section || !section[0] || !strcmp(section, "format")) { free(path); return 0; }
     if (json && !(value = mbj_parse(json, strlen(json), NULL, 0))) { free(path); return 0; }
     sh_mb_record_lock();
-    root = mb_record_read(path, &state);
+    mb_record_name(path, name, sizeof name);
+    if (mb_rec_failed_at(mb_rec_key(mods_root, section)) >= 0) {
+        /* The caller's text was built from a failed read: writing it would
+         * replace what the section holds with less. */
+        mb_rec_log("MODS: record: the \"%s\" section of %s was not written: its last read failed, and the write would "
+                   "drop what it holds; it is written once it reads again", section, name);
+        sh_mb_record_unlock();
+        mbj_free(value);
+        free(path);
+        return 0;
+    }
+    root = mb_record_read(path, &state, why, sizeof why);
+    if (state == -1) {
+        mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record cannot be read (%s)", section, name,
+                   why);
+        sh_mb_record_unlock();
+        mbj_free(value);
+        free(path);
+        return 0;
+    }
     if (state < 0) {
         /* Never silently lost: the unreadable record is kept beside it. */
         wchar_t aside[MAX_PATH * 4];
+        char aname[MAX_PATH * 4];
         _snwprintf_s(aside, MAX_PATH * 4, _TRUNCATE, L"%s.unreadable-%lld", path, mb_now());
-        MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING);
+        mb_record_name(aside, aname, sizeof aname);
+        if (MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING)) {
+            mb_rec_log("MODS: record: %s is not valid JSON; it was kept as %s and a new record started (the claims, links "
+                       "and aliases it held are in that file)", name, aname);
+        } else {
+            mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record is not valid JSON and could not "
+                       "be moved aside (Windows error %lu)", section, name, GetLastError());
+            sh_mb_record_unlock();
+            mbj_free(value);
+            free(path);
+            return 0;
+        }
     }
     mb_puts(&o, "{\"format\":1");
     for (i = 0; root && i < root->count; i++) {
