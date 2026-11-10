@@ -1778,7 +1778,12 @@ Toybox rows keeps them outside Play, because the palette registers its rows
 in every editor map and with none open; in Play (the editor's, or a hub
 launch) no undeclared bundle's are accepted, so their cvars are the game's
 from the Play entry and applied again when the editor shows a map; any other
-undeclared bundle's are not accepted (`req_off`).
+undeclared bundle's are not accepted (`req_off`). A registration step is
+gated by the requirements of the build that serves its path for the listing
+(`sh_modserve_plan_block_unmet` through `ms_scoped`), not by the path's static
+winner's: with two builds of one key installed the winner of a path both carry
+can be the build the open map, or the Toybox, does not use, whose requirements
+are off, and gating on it blocked every row of the key.
 A `mod.json` `"scope"` key no longer chooses (logged once). Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the
