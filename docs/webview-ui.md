@@ -362,8 +362,8 @@ removing it deletes nothing. A row whose key has a newer installed build (`upgra
 **Upgrade this map to the installed build** (`mapUpgradeMod`; its hover says which build the map uses
 and which is installed); the result says what changes (files changed, added, removed) and that the map
 must be saved to keep it. A row pinning a build that is not installed while its key is installed at
-another reads "installed at another build" (`otherBuild`). When the map records the Snapmap+ version
-it needs (`product`), the map details read "Needs Snapmap+ <version> or later". When several declared
+another reads "installed at another build" (`otherBuild`). A map records nothing about the Snapmap+
+version that saved it (DESIGN-additive 2.7, withdrawn). When several declared
 mods edit one field or named entry of a game file to different values (`registryClashes`), **Choices
 between mods** shows one select per slot ("<path> in <game file>") with its providers, the serving one
 selected; a change sends `chooseRegistry` with

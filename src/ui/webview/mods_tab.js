@@ -5,7 +5,7 @@
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread:
    one row per mod folder in mods\ (its key is the folder name; two folders holding one build, one key
    at one hash, are both rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
-   (which this tab no longer shows). Payload v3 adds, per mod, what the details pane describes:
+   (the map modal and the "In this map" pill). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
    editorRowNames, carriedPaths and publishedMaps, and the additive model's derived facts (facts:
    adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
@@ -56,9 +56,7 @@ var modsTab = (function () {
   var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'info'};
   /* A map needs the paths its rows list; a mod folder provides them (the asset rule). */
   var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
-                    otherBuild: 'installed at another build',
-                    unindexed: 'not scanned yet; reopen the Mods tab', skipped: 'installed but not in use',
-                    attention: 'needs attention'};
+                    otherBuild: 'installed at another build', skipped: 'installed but not in use'};
   /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
   var UNINSTALL_HEAD = {
     undo: 'Undo history is cleared. The folder can be restored from the Recycle Bin by hand. Uninstalling:',
@@ -86,7 +84,6 @@ var modsTab = (function () {
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
      records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
-  var EDITED_COPY_TEXT = 'an edited copy: its edits apply in maps that declare this mod';
   /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
      path starts at the first top-level decl member the slot names. */
   var TOP_MEMBERS = ['edit', 'editorVars', 'inherit', 'events', 'aliases', 'init', 'class'];
@@ -164,7 +161,7 @@ var modsTab = (function () {
     var state = has(STATES, b.state) ? b.state : 'attention';
     return {key: str(b.key), id: str(b.id), name: str(b.name), author: str(b.author), version: str(b.version),
             build: num(b.build), size: num(b.size), files: num(b.files), pointers: num(b.pointers), state: state,
-            cause: str(b.cause), otherBuilds: num(b.otherBuilds), duplicateId: bool(b.duplicateId),
+            cause: str(b.cause), duplicateId: bool(b.duplicateId),
             editorRows: num(b.editorRows), folder: str(b.folder),
             /* v3 */
             description: str(b.description), origin: typeof b.origin === 'string' && has(ORIGINS, b.origin) ? b.origin : '',
@@ -185,8 +182,7 @@ var modsTab = (function () {
     return cmp(title(a).toLowerCase(), title(b).toLowerCase()) || cmp(a.id, b.id) || cmp(a.key, b.key);
   }
 
-  /* The host's payload as the tab uses it. error is set for an unusable payload. The open map
-     (payload.map) is not this tab's any more and is not read. */
+  /* The host's payload as the tab uses it. error is set for an unusable payload. */
   function normalize(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload))
       return {ok: false, error: 'The mods list is unavailable.', mods: [], root: '', gen: 0, v: 0,
@@ -297,9 +293,6 @@ var modsTab = (function () {
     var d = new Date(s * 1000);
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
-  /* id@version, the name a map records (just the id when the page is given no version); the folder
-     for a mod that was never built. */
-  function idText(b) { return b.id ? (b.version ? b.id + '@' + b.version : b.id) : b.key; }
   /* The row's second line: id, version and size, each left out when there is none. */
   function subText(b) {
     if (!b.id) return b.key;
@@ -466,7 +459,7 @@ var modsTab = (function () {
       s.textContent = str(text);
       s.className = 'mods-status' + (tone ? ' ' + tone : '');
     }
-    var BUSY_TEXT = {install: 'Installing...', remove: 'Removing...', rescan: 'Reading the mods folder...',
+    var BUSY_TEXT = {install: 'Installing...', rescan: 'Reading the mods folder...',
                      rebuild: 'Building the mod again...', verify: 'Checking every file of the mod...',
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
@@ -1211,11 +1204,11 @@ var modsTab = (function () {
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
           FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, compareMods: compareMods,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
-          originText: originText, renamedText: renamedText, countLines: countLines, idText: idText, subText: subText,
+          originText: originText, renamedText: renamedText, countLines: countLines, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, EDITED_COPY_TEXT: EDITED_COPY_TEXT,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
           factLines: factLines, slotText: slotText};
 })();
 
