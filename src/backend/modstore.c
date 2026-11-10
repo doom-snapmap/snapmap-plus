@@ -1533,7 +1533,7 @@ int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder
      * the product block the key, which never changes afterwards. */
     _snprintf_s(text, sizeof text, _TRUNCATE,
                 "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n"
-                "  \"player\": {},\r\n\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": 1,\r\n    \"key\": \"%s\",\r\n"
+                "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": 1,\r\n    \"key\": \"%s\",\r\n"
                 "    \"origin\": \"" SH_MB_ORIGIN_BY_HAND "\"\r\n  }\r\n}\r\n", esc, key);
     if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", key); goto done; }
     u = sh_mb_utf8(dir);

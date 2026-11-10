@@ -841,7 +841,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"action\":\"install\",\"ok\":true"));
     CHECK(has(doc, "\"key\":\"alex.r2-imp\""));   /* the store folder: mods\<id> */
     CHECK(has(doc, "\"editorRows\":2"));
-    CHECK(has(doc, "its editor rows appear in the palette after the game restarts"));
+    CHECK(has(doc, "its Toybox rows are in the palette"));   /* the rescan's refresh rebuilt it in place */
     CHECK(has(doc, "\"stockUnchecked\":false"));
     CHECK(g_rescans == 1);
     {

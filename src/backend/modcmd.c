@@ -114,8 +114,7 @@ static void mc_rescan(const char *why)
     if (n < 0) mc_line("MODS: %s: the serving index could not be rebuilt; run 'sh_mods rescan'", why);
     else {
         sh_modserve_refresh rf;
-        mc_line("MODS: %s: serving index rebuilt (%d bundle(s) active); new editor rows need 'sh_mods palette rebuild'",
-                why, n);
+        mc_line("MODS: %s: serving index rebuilt (%d bundle(s) active)", why, n);
         /* What the build changed under the running game (modserve.h). */
         (void)sh_modserve_refresh_after_rescan(&rf);
         sh_printf("sh_mods: refresh: %s\n", rf.note);
@@ -754,7 +753,8 @@ void h_sh_mods(idCmdArgs *a)
             mc_line("MODS: new \"%s\": refused: %s", arg, cause);
             return;
         }
-        mc_line("MODS: new \"%s\": key %s, folder %s; put its files under assets\\mods\\%s\\ and rescan", arg, key, folder, key);
+        mc_line("MODS: new \"%s\": key %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
+                "(any other file under its engine path, with mods\\%s\\ in it) and rescan", arg, key, folder, key, key);
         return;
     }
     if (!_stricmp(verb, "verify")) {

@@ -2247,7 +2247,7 @@ static int mu_install_one(const char *folder)
         mu_log("install %s: installed and verified as %s (bundle %s)", folder, key, bd.hash);
         mu_rescan(note, sizeof note);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", key,
-                    rows ? "; its editor rows appear in the palette after the game restarts" : "");
+                    rows ? "; its Toybox rows are in the palette" : "");
     }
     mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
     mu_kstr(&b, "key", ok ? key : "", 0);
@@ -2395,7 +2395,7 @@ static int mu_install(const char *arg)
     if (installed) mu_rescan(note, sizeof note);
     if (installed && !refused)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s%s.", installed, installed == 1 ? "" : "s",
-                    rows ? "; editor rows appear in the palette after the game restarts" : "");
+                    rows ? "; their Toybox rows are in the palette" : "");
     else if (installed)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s; %u refused: %s%s.", installed, installed == 1 ? "" : "s",
                     refused, refused_first, refused > 1 ? ", and more (see the log)" : "");

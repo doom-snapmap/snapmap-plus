@@ -2367,7 +2367,7 @@ int sh_modserve_command(void *args, const char *verb)
         int n = sh_modserve_index_rescan();
         me_ensure_probe();
         if (me_on_main() == 1) (void)sh_companions_ensure("rescan");
-        sh_printf("sh_mods: rescan %s (%d bundles active); new editor rows need 'sh_mods palette rebuild'\n",
+        sh_printf("sh_mods: rescan %s (%d bundles active)\n",
                   n < 0 ? "refused" : "done", n < 0 ? 0 : n);
         if (n >= 0) {
             g_refresh_echo = 1;
