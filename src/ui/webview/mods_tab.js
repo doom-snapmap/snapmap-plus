@@ -686,7 +686,9 @@ var modsTab = (function () {
         var bs = section(box, 'builds', 'Builds of this mod');
         b.builds.forEach(function (x) {
           var line = 'Build ' + x.build + (x.version ? ' (' + x.version + ')' : '') + ' \u00b7 ' + x.bundle.slice(0, 16) +
-                     (x.newest ? ' \u00b7 newest' : '') + (x.failed ? ' \u00b7 its latest build failed' : '');
+                     (x.newest ? ' \u00b7 newest' : '') + (x.failed ? ' \u00b7 its latest build failed' : '') +
+                     (x.folder === b.key ? ' \u00b7 this folder' : '');
+          /* "current" has no style of its own: the text says which build is the selected folder's. */
           var row = el('div', 'mods-line mods-build' + (x.folder === b.key ? ' current' : ''), line);
           row.setAttribute('data-newest', x.newest ? 'true' : 'false');
           bs.appendChild(row);

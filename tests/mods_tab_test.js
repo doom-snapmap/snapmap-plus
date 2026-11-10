@@ -966,6 +966,8 @@ test('additive: one row per build of a key, the newest marked; a failed build', 
   assert.deepEqual(lines.map(l => l.getAttribute('data-newest')), ['false', 'true']);
   assert.match(lines[1].textContent, /Build 2 .* newest/);
   assert.ok(/current/.test(lines[0].className), 'the selected folder is marked');
+  assert.match(lines[0].textContent, / this folder$/, 'and says so in its text');
+  assert.ok(!/this folder/.test(lines[1].textContent));
   const doc = clone(v3);
   doc.mods.find(x => x.key === 'airlock').buildFailed = {cause: 'assets/x.decl: parse error', snapshot: true, servingBuild: 1};
   const info = modsTab.statusInfo(modsTab.normalize(doc).mods.find(x => x.key === 'airlock'));

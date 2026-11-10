@@ -345,7 +345,7 @@ with these edits", one line per edited game file with what its edits do: fields 
 entries added, named entries added or replaced, entries added and removed), Replaces (the files at game
 names a folder the product received keeps as they are) and Encounters (the encounter decls listed in a
 declaring map's conductor, their spawn bits assigned per map). **Builds of this mod** lists every build of the key (`builds`, one line per
-hash with its build number, the newest marked) when several are installed: each map uses the build it
+hash with its build number, the newest and the selected folder's marked) when several are installed: each map uses the build it
 was saved with. A failed latest build (`buildFailed`) is a yellow row whose cause reads "its latest
 build failed: <cause>; serving build N from its snapshot". The head actions are Use in this map, Verify, Rebuild
 and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
