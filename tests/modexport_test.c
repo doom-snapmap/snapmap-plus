@@ -25,6 +25,9 @@
  * reads an extracted export folder and a lone .json, and refuses a map's
  * JSON, a non-prefab and two prefabs in one ZIP. Both importers refuse the
  * retired bundle form (a bundle.canonical.json or an export.json index).
+ * A hand-made folder installed under its generated key, named by a map in a
+ * legacy smpmod1 row, exports and imports under that key whatever the carried
+ * folder is called, and the load removes the legacy row.
  * Pure file work: no network.
  */
 #include <windows.h>
@@ -1002,6 +1005,101 @@ int main(int argc, char **argv)
                   !strcmp(name, "export"));
             free(text); text = NULL;
         }
+        CHECK(sh_ms_set_root(storeA));
+    }
+
+    /* ---- a generated key and a map an earlier build saved travel in a ZIP ---- */
+    {
+        /* A hand-made folder (no id) is installed under its generated key; a
+         * map saved by beta.24 or earlier names it in a legacy smpmod1 string
+         * variable. The export carries the folder under its store name; the
+         * import installs it under the key whatever the carried folder is
+         * called, and hands the load the text with its legacy row, which the
+         * parse reads and removes (the next save writes the member). */
+        static const char *const S_FILES[] = { "assets/generated/image/mods/probe/p.bimage", NULL };
+        static const char *const S_BYTES[] = { "probe bytes", NULL };
+        char storeS[MAX_PATH * 2], storeS2[MAX_PATH * 2], storeS3[MAX_PATH * 2], zipS[MAX_PATH * 2], sdir[MAX_PATH * 2];
+        char skey[SH_MS_KEY_MAX + 1], entry[MAX_PATH], other[SH_MS_KEY_MAX + 1], esc[1024], legacy[4096];
+        sh_modmanifest_row rs;
+        char *value, *text, *loaded;
+        size_t vl = 0, len = 0, ll = 0, i, n = 0;
+        _snprintf_s(storeS, sizeof storeS, _TRUNCATE, "%s\\storeS", tmp);
+        _snprintf_s(storeS2, sizeof storeS2, _TRUNCATE, "%s\\storeS2", tmp);
+        _snprintf_s(storeS3, sizeof storeS3, _TRUNCATE, "%s\\storeS3", tmp);
+        _snprintf_s(zipS, sizeof zipS, _TRUNCATE, "%s\\legacy salted.zip", tmp);
+        _snprintf_s(sdir, sizeof sdir, _TRUNCATE, "%s\\probe", src);
+        CHECK(fresh_store(storeS));
+        mt_write(sdir, "mod.json", "{\"name\":\"Probe\",\"version\":\"1.0.0\"}");
+        mt_write(sdir, "assets\\generated\\image\\mods\\probe\\p.bimage", S_BYTES[0]);
+        (void)S_FILES;
+        CHECK(install(sdir, skey, &rs) && !strncmp(skey, "probe_", 6) && !strcmp(rs.id, skey));
+        CHECK(has_folder(storeS, skey) && sh_modmanifest_valid_id(rs.id));
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "generated/image/mods/%s/p.bimage", skey);
+        CHECK(sh_modmanifest_row_add_name(&rs, entry));
+        value = sh_modmanifest_format_value(&rs, &vl);
+        CHECK(value != NULL);
+        for (i = 0; value && i < vl && n + 3 < sizeof esc; i++) {
+            if (value[i] == '"' || value[i] == '\\') esc[n++] = '\\';
+            esc[n++] = value[i];
+        }
+        esc[n] = 0;
+        free(value);
+        _snprintf_s(legacy, sizeof legacy, _TRUNCATE,
+                    "{\"entities\":[{\"entityDef\":{\"className\":\"idSnapEntity\",\"inherit\":\"mods/%s/thing\",\"name\":\"\"}}],"
+                    "\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":[" VAR("door_label", "Open") ","
+                    "{\"info\":{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,\"~type\":\"|pointer\"},"
+                    "\"name\":\"smpmod1.0.1\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"%s\",\"~type\":\"snapVarString_t\"}]},"
+                    "\"name\":\"idSnapMap\",\"~type\":\"idSnapMap\"}", skey, esc);
+        CHECK(modexport_write(legacy, strlen(legacy), zipS, &st, cause, sizeof cause) && st.bundles == 1);
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zipS, &zl);
+            _snprintf_s(entry, sizeof entry, _TRUNCATE, "mods/%s/mod.json", skey);
+            CHECK(z && entry_data(z, zl, entry) && entry_data(z, zl, "legacy salted.json"));
+            /* The map text travels as the earlier build wrote it. */
+            CHECK(z && entry_size(z, entry_data(z, zl, "legacy salted.json"), "legacy salted.json") == strlen(legacy));
+            free(z);
+        }
+        /* Import into an empty store: installed under the key, the row served. */
+        CHECK(fresh_store(storeS2));
+        text = modexport_read(zipS, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "legacy salted import: %s\n", cause);
+        CHECK(text && len == strlen(legacy) && !memcmp(text, legacy, len) && st.bundles_installed == 1);
+        CHECK(has_folder(storeS2, skey) && folder_count(storeS2) == 1 && sh_modserve_bundle_state(rs.bundle, NULL, 0) == 1);
+        {
+            sh_modmanifest_list got;
+            unsigned rej = 0;
+            char why[256] = "";
+            memset(&got, 0, sizeof got);
+            CHECK(text && sh_modmanifest_read(text, len, &got, &rej) == 1 && rej == 0 && !strcmp(got.rows[0].id, skey) &&
+                  !strcmp(got.rows[0].bundle, rs.bundle));
+            CHECK(got.count == 1 && sh_modserve_row_served(&got.rows[0], why, sizeof why) == 1);
+            sh_modmanifest_list_free(&got);
+        }
+        /* The load's parse reads and removes the legacy row. */
+        loaded = text ? sh_modmanifest_prepare_load(text, len, &ll) : NULL;
+        CHECK(loaded && !strstr(loaded, "smpmod1.") && strstr(loaded, "door_label"));
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        free(text);
+        /* The carried folder under another name of the same length still
+         * installs under the key. */
+        strcpy_s(other, sizeof other, skey);
+        other[0] = 'q';
+        {
+            size_t zl = 0;
+            unsigned char *z = slurp(zipS, &zl);
+            char prefix[MAX_PATH];
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", skey);
+            CHECK(z && patch_names(z, zl, prefix, 5, 'q') == 4 && spit(zipS, z, zl));
+            free(z);
+        }
+        CHECK(fresh_store(storeS3));
+        text = modexport_read(zipS, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "renamed carried folder import: %s\n", cause);
+        CHECK(text && st.bundles_installed == 1 && has_folder(storeS3, skey) && !has_folder(storeS3, other) &&
+              folder_count(storeS3) == 1);
+        free(text);
+        sh_modmanifest_row_free(&rs);
         CHECK(sh_ms_set_root(storeA));
     }
 
