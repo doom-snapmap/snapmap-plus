@@ -785,6 +785,17 @@ nothing and changes nothing. The installer runs it on install and update (see
 The rebuild rule is unchanged: a folder without a product block is built at the
 next rescan, or at the next boot (below).
 
+Crash leftovers. An install, a download and a first-build rename assemble a
+folder as `<name>.staging-<pid>` and move the folder they replace aside as
+`<name>.old-<pid>` before the swap; the listing and the serving scan skip both.
+At boot, before the serving index is read, `sh_ms_recover_work` walks the store
+(organizing folders included) and `.builds\`: a work folder whose process is
+still running is left; a `.old-<pid>` folder whose target is missing is the
+folder a session took away when it ended between the two renames, and is put
+back ("put <folder> back from <work folder>: an earlier session ended while it
+was being replaced"); every other one is removed ("removed <work folder>, a work
+folder an earlier session left when it ended mid-install").
+
 The folder watchers. The lists follow the disk. The window's host
 (`snapmap_plus_ui_webview.cpp`, `folder_watch.h`) runs one thread that watches
 `%LOCALAPPDATA%\snapmap-plus\prefabs\` and `mods\` with

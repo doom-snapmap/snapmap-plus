@@ -261,6 +261,16 @@ int  sh_ms_sync_pending(void);
 typedef int (*sh_ms_rescan_fn)(void);
 int  sh_ms_boot_sync(const sh_mb_resolver *resolver, sh_ms_rescan_fn rescan, int background);
 
+/* The work folders an earlier session left when it ended mid-install, mid-
+ * download or mid-rename ("<name>.staging-<pid>", "<name>.old-<pid>" beside
+ * their target, and the snapshots' staging under .builds\), whose process is
+ * no longer running. A ".old-" folder whose target is missing is the folder a
+ * crash took away between the two renames: it is put back. Every other one is
+ * removed. One "MODS: store:" line per action. Run at boot before the serving
+ * index is read. Returns the folders put back, or -1 when the store cannot be
+ * read. */
+int  sh_ms_recover_work(void);
+
 /* The startup install is done with the store: the background boot build,
  * which waits for this (up to two minutes), may start. The install takes the
  * store itself (the publish launch reads the upload queue and the claims), so

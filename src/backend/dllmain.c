@@ -355,7 +355,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_mb_set_bank_need(sh_mbi_bundle_need);
         /* No store migration runs here: the installer runs snapmap-plus-store,
          * which upgrades the retired layout, retires removed-mods\ and moves
-         * overrides\ into the store (modstore.h, modmigrate.h). */
+         * overrides\ into the store (modstore.h, modmigrate.h). A folder a
+         * crash took away mid-replacement is put back first, so it serves on
+         * this boot, and the work folders a crash left are removed. */
+        (void)sh_ms_recover_work();
         (void)sh_modserve_index_boot();
         /* Folders not built yet (a first boot after a conversion, a folder
          * dropped in by hand) are built off this thread as a rescan builds
