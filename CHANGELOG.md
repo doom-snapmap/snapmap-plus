@@ -3,6 +3,27 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.26 -- 2026-11-10 (beta)
+
+**Mods keep their content loaded and load complete**
+
+Mod objects and everything they use now stay loaded for the whole session, so repeated Play runs and editing with a mod active stop crashing. Mods that borrow campaign content now bring along everything it needs, and your old overrides and custom strings move into a My overrides mod.
+
+### New
+- A mod that borrows campaign content now brings along the models, meshes, skeletons, animations, effects, screens and images that content needs, as pointers to your own game install, so it loads complete in SnapMap.
+- At install, your old loose overrides files and custom strings file become a mod called My overrides, and the old folders go to the Recycle Bin once everything in them has moved.
+
+### Improved
+- A mod's objects, including their models with mesh, skeleton and default animation, stay loaded for the whole session, so Play after Play no longer runs into freed content.
+
+### Fixed
+- Reloading a map, or adding a mod to it while the editor is open, no longer crashes the next Play.
+- Installing a newer version of a mod next to the one a map uses no longer hides that mod's objects from the editor.
+- Two mods that both carry the same door or character model file no longer produce a file the game refuses to read.
+- A crash while a map is loading now returns you to the menu with DOOM's error instead of leaving a loading screen that never finishes.
+
+_Plus 7 smaller fixes and internal changes._
+
 ## v0.2.1-beta.25 -- 2026-11-10 (beta)
 
 **Each map keeps playing the exact mods it was saved with**
