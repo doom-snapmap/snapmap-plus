@@ -389,6 +389,34 @@ int main(int argc, char **argv)
     }
 
     {
+        /* A release the store does not take is queued, not forgotten, and
+         * sent after the next store call that succeeds. */
+        const char *one[] = { hG };
+        int releases = g_stub.release_calls;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
+        CHECK(modsync_pending_count() == 0);
+        stub_fail_next("POST /mods/release", 503);
+        CHECK(!modsync_release("map-6", NULL, &st) && st.code == MODNET_E_UNAVAILABLE && st.queued);
+        CHECK(modsync_claim_lookup("map-6", NULL, NULL) && stub_claim_bundles("map-6", NULL) == 1);
+        CHECK(modsync_pending_count() == 1 && file_contains(path, "\"kind\": \"release\""));
+        CHECK(modsync_upload_bundles(one, 1, "map-3", NULL, &st));
+        CHECK(g_stub.release_calls == releases + 1 && stub_claim_bundles("map-6", NULL) == -1);
+        CHECK(!modsync_claim_lookup("map-6", NULL, NULL) && modsync_pending_count() == 0);
+        CHECK(strstr(g_log, "MODS: retry map-6: released the queued claim") != NULL);
+        /* The launch retry sends a queued release too, and a release replaces
+         * a queued upload of the same ref. */
+        stub_fail_next("POST /mods/missing", 503);
+        CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st) && st.queued && modsync_pending_count() == 1);
+        stub_fail_next("POST /mods/release", 503);
+        CHECK(!modsync_release("map-3", NULL, &st) && st.queued && modsync_pending_count() == 1);
+        CHECK(file_contains(path, "\"kind\": \"release\""));
+        {
+            unsigned done = 0, dropped = 0;
+            CHECK(modsync_retry_pending(NULL, &done, &dropped, NULL) == 0 && done == 1 && dropped == 0);
+        }
+        CHECK(stub_claim_bundles("map-3", NULL) == -1 && !modsync_claim_lookup("map-3", NULL, NULL));
+    }
+    {
         /* The editor overrides go up like any bundle an author's map names. */
         const char *one[] = { hE };
         CHECK(modsync_upload_bundles(one, 1, "map-e", NULL, &st) && stub_has_bundle(hE));

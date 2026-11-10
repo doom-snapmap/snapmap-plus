@@ -404,6 +404,11 @@ static int msy_claim_forget(const char *ref)
     return ok;
 }
 
+/* Queue ref in the pending section: an upload of hashes, or (n == 0) the
+ * release of its claim. A release replaces a queued upload of the same ref
+ * (the claim is no longer wanted). */
+static void msy_retry_releases(const modnet_io *io);
+
 static int msy_pending_put(const char *ref, const char *const *hashes, int n, const char *error)
 {
     mpj *doc, *pend, *e, *old;
@@ -420,7 +425,8 @@ static int msy_pending_put(const char *ref, const char *const *hashes, int n, co
     att = old ? mpj_get(old, "attempts") : NULL;
     if (att && mpj_is_num(att)) attempts = mpj_int(att) + 1;
     e = pend ? mpj_new(MPJ_OBJ) : NULL;
-    if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) && mpj_set(e, "bundles", msy_hash_array(hashes, n)) &&
+    if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) &&
+        (n > 0 ? mpj_set(e, "bundles", msy_hash_array(hashes, n)) : mpj_set(e, "kind", mpj_new_str("release"))) &&
         mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL)))) {
         if (mpj_set(pend, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc); }
     }
@@ -1097,6 +1103,7 @@ int modsync_upload_bundles(const char *const *bundle_hashes, int n, const char *
     if (ok) {
         st->code = MODNET_OK;
         msy_pending_drop(ref);
+        msy_retry_releases(io);
         return 1;
     }
     if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, bundle_hashes, n, st->cause);
@@ -1210,6 +1217,7 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     if (sh_modserve_index_rescan() < 0) msy_log("MODS: pull %.16s: installed, but the serving index could not be rebuilt", hash);
     st->ms = msy_now_ms() - t0;
     st->code = MODNET_OK;
+    msy_retry_releases(io);
     return 1;
 }
 
@@ -1291,10 +1299,11 @@ int modsync_claim_names(const char *hash)
 
 /* ------------------------------------------------------------ release --- */
 
-int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
+static __declspec(thread) int t_msy_retrying;   /* inside msy_retry_releases: no nested retry */
+
+/* The release itself: no queueing, no retry of others. */
+static int msy_release(const char *ref, const modnet_io *io, modsync_stats *st)
 {
-    modsync_stats local;
-    modsync_stats *st = stats ? stats : &local;
     char claim[MODNET_CLAIM_HEX + 1], secret[MODNET_HASH_HEX + 1];
     modnet_result r;
     double t0 = msy_now_ms();
@@ -1320,6 +1329,45 @@ int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
     return msy_stats_fail(st, code, "%s", r.message);
 }
 
+/* Retry the queued releases only (each one request). Run after a store call
+ * succeeded, when the store is known to answer. */
+static void msy_retry_releases(const modnet_io *io)
+{
+    mpj *doc, *pend;
+    int i;
+    if (t_msy_retrying) return;
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    modsync_store_unlock();
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    t_msy_retrying = 1;
+    for (i = 0; pend && i < pend->n; i++) {
+        const char *ref = pend->keys[i];
+        modsync_stats st;
+        if (msy_cancelled(io)) break;
+        if (!mpj_str_is(mpj_get(pend->items[i], "kind"), "release") || strchr(ref, '\\')) continue;
+        if (msy_release(ref, io, &st)) msy_log("MODS: retry %s: released the queued claim", ref);
+        else if (!modnet_transient(st.code)) { msy_pending_drop(ref); msy_log("MODS: retry %s: release dropped: %s", ref, st.cause); }
+    }
+    t_msy_retrying = 0;
+    mpj_free(doc);
+}
+
+int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
+{
+    modsync_stats local;
+    modsync_stats *st = stats ? stats : &local;
+    if (msy_release(ref, io, st)) {
+        msy_retry_releases(io);
+        return 1;
+    }
+    /* A release the store did not take is not forgotten: a leaked claim
+     * keeps its bundles on the store. Queued, retried at the next launch
+     * and after the next store call that succeeds. */
+    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, NULL, 0, st->cause);
+    return 0;
+}
+
 /* ------------------------------------------------------------ retry ----- */
 
 int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped, modsync_stats *last)
@@ -1343,6 +1391,20 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
         int n = 0, k, valid = 1;
         size_t rl = strlen(pend->keys[i]);
         if (msy_cancelled(io)) break;
+        if (mpj_str_is(mpj_get(e, "kind"), "release") && rl < sizeof ref && !strchr(pend->keys[i], '\\')) {
+            strcpy_s(ref, sizeof ref, pend->keys[i]);
+            t_msy_retrying = 1;
+            valid = msy_release(ref, io, &st);
+            t_msy_retrying = 0;
+            if (valid) { ok_n++; msy_log("MODS: retry %s: released the queued claim", ref); }
+            else if (!modnet_transient(st.code)) {
+                msy_pending_drop(ref);
+                drop_n++;
+                msy_log("MODS: retry %s: release dropped: %s", ref, st.cause);
+            } else msy_log("MODS: retry %s: the release is still failing: %s", ref, st.cause);
+            if (last) *last = st;
+            continue;
+        }
         /* Keys are written escaped; a ref that needed escapes is skipped
          * rather than decoded (refs are plain text in practice). */
         if (rl >= sizeof ref || strchr(pend->keys[i], '\\')) valid = 0;

@@ -490,7 +490,8 @@ static void mp_job_report(mp_job *job)
         if (!job->had_claim) mp_logf("MODS: publish: '%s' had no stored claim; nothing to release", job->ref);
         else if (job->ok) mp_logf("MODS: publish: released the claim for '%s'%s%s", job->ref,
                                   job->st.cause[0] ? ": " : "", job->st.cause);
-        else mp_logf("MODS: publish: the release of '%s' failed: %s", job->ref, cause);
+        else mp_logf("MODS: publish: the release of '%s' failed: %s%s", job->ref, cause,
+                     job->st.queued ? " (queued; retried at the next launch)" : "");
         if (job->ok || !job->had_claim) mp_link_forget(job->ref);
         break;
     case JOB_LAUNCH:

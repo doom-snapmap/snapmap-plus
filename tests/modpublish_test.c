@@ -779,6 +779,26 @@ int main(int argc, char **argv)
         CHECK(!sh_modpublish_test_background_busy());
     }
 
+    printf("-- an unpublish whose release fails is queued and sent at the next launch\n");
+    {
+        const char *item = "kkkkkkkkkkkkkkkkkkkkkk12";
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, item, "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(item) != NULL);
+        stub_fail_next("POST /mods/release", 503);
+        sh_modpublish_unpublished(item);
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(item) != NULL && modsync_claim_lookup(item, NULL, NULL));
+        CHECK(modsync_pending_count() == 1 && section_contains(store, "pending", "release"));
+        CHECK(strstr(g_log, "(queued; retried at the next launch)") != NULL);
+        sh_modpublish_launch();
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(item) == NULL && !modsync_claim_lookup(item, NULL, NULL) && modsync_pending_count() == 0);
+    }
+
     printf("-- secrets never reach the log\n");
     {
         int leaked = 0;

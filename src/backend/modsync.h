@@ -15,7 +15,9 @@
  * uploading for a ref that has a claim re-claims with the stored secret,
  * which replaces its bundle set. A failure after the first request that a
  * retry could fix is queued in its "pending" section and retried by
- * modsync_retry_pending.
+ * modsync_retry_pending. A release the store did not take is queued there
+ * too ("kind": "release") and retried at the next launch and after the next
+ * store call that succeeds.
  *
  * Download (install by hash, DESIGN-additive 4): the bundle manifest is
  * fetched and verified against its hash; a borrow the installed game lacks
@@ -57,7 +59,7 @@ typedef struct modsync_stats {
     double ms;
     char claim[MODNET_CLAIM_HEX + 1];   /* upload: the claim id */
     int reclaimed;                  /* upload: the stored secret replaced the ref's bundle set */
-    int queued;                     /* upload: the failure was queued for retry */
+    int queued;                     /* upload or release: the failure was queued for retry */
     int already_installed;          /* download: nothing was fetched */
     int editor_only;                /* download: the bundle changes only the editor; recorded, not installed */
     char key[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* download: the installed folder (relative) */
@@ -84,16 +86,18 @@ int  modsync_fetch_bundle(const char *bundle_hash, const modnet_io *io, modsync_
 
 /* Release the claim stored for ref and forget it (also when the store no
  * longer knows the claim). A pending upload for ref is dropped. Returns 1 on
- * success. */
+ * success, then retries the other queued releases; a transient failure is
+ * queued (stats->queued) in place of any queued upload for ref. */
 int  modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats);
 
-/* Retry every queued upload. Returns the number still queued afterwards;
+/* Retry every queued upload and release. Returns the number still queued afterwards;
  * *done (optional) receives how many succeeded and *dropped how many were
  * dropped as permanent refusals. */
 int  modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped, modsync_stats *last);
 
-/* The number of queued uploads, or -1 when the file cannot be read. */
+/* The number of queued uploads and releases, or -1 when the file cannot be read. */
 int  modsync_pending_count(void);
+
 
 /* The claim stored for ref: 1 and the id (secret_out optional), else 0. */
 int  modsync_claim_lookup(const char *ref, char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1]);
