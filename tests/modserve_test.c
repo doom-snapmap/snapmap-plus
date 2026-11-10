@@ -4970,6 +4970,193 @@ static void test_pass_lookups(void)
     CHECK(sh_modserve_lookups_close(&head, &out) == 1 && out.looked_up == 0 && later.level == 1);
 }
 
+/* ------------------------------------------------------------------ what kept objects load (triage F9) */
+
+/* The engine side's detours report the engine's load nesting (enter/leave
+ * around ResourceGenericLoad) and what ResourceLookup returns inside a load
+ * (found); the stand-ins here call them as the hooks do. A Play's spawn loads
+ * the chainsaw gore md6Def, whose load loads its mesh, whose load creates
+ * its material; nothing is kept then. A later pass keeps the md6Def by name,
+ * and the close follows the recorded pairs to the mesh and the material. */
+static void test_load_attribution(void)
+{
+    static kh_res def, mesh, mat, img, stock, perm, other, child, found, outside, gone, nest[70];
+    static kh_res *defs[2], *meshes[2], *mats[8], *imgs[2], *nests[70];
+    static kh_list ld, lmesh, lmat, limg, lnest, bad;
+    kh_list *head = &ld;
+    sh_modserve_attrib out;
+    int i, kept, depth, d0;
+    sh_modserve_attrib_reset();
+    def.name = "zion/gore/chainsaw1_scientist_right_bloody.md6"; def.level = 1;
+    mesh.name = "md6/gore/chainsaw1_scientist_right_bloody.md6mesh"; mesh.level = 1;
+    mat.name = "models/monsters/unwilling/unwilling_scientist_chainsaw"; mat.level = 1;
+    img.name = "models/monsters/unwilling/blood.tga"; img.level = 1;
+    stock.name = "models/stock/permanent"; stock.level = 4;
+    perm.name = "models/stock/engine_own"; perm.level = 4;
+    other.name = "models/map/unrelated"; other.level = 1;
+    child.name = "models/kept/child"; child.level = 1;
+    found.name = "models/kept/found"; found.level = 1;
+    outside.name = "models/outside"; outside.level = 1;
+    gone.name = "models/gone"; gone.level = 1;
+    ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &lmesh; ld.entries = defs; ld.count = 1;
+    lmesh.type = "baseModel"; lmesh.cls = "idMD6Model"; lmesh.next = &lmat; lmesh.entries = meshes; lmesh.count = 1;
+    lmat.type = "material"; lmat.cls = "idMaterial"; lmat.next = &limg; lmat.entries = mats; lmat.count = 6;
+    limg.type = "image"; limg.cls = "idImage"; limg.next = NULL; limg.entries = imgs; limg.count = 2;
+    defs[0] = &def; meshes[0] = &mesh; imgs[0] = &img; imgs[1] = &perm;
+    mats[0] = &mat; mats[1] = &stock; mats[2] = &other; mats[3] = &child; mats[4] = &found; mats[5] = &outside;
+
+    /* The Play: nested loads and a lookup inside the material's load are
+     * recorded; a lookup outside any load is not; nothing is kept. */
+    CHECK(sh_modserve_attrib_depth() == 0);
+    d0 = sh_modserve_attrib_enter(&def, 0, &kept);
+    CHECK(d0 == 0 && !kept && sh_modserve_attrib_depth() == 1);
+    depth = sh_modserve_attrib_enter(&mesh, 0, &kept);
+    CHECK(depth == 1 && !kept);
+    {
+        int dm = sh_modserve_attrib_enter(&mat, 0, &kept);
+        sh_modserve_attrib_found(&img);
+        sh_modserve_attrib_found(&stock);
+        sh_modserve_attrib_found(&mat);      /* itself: no pair */
+        sh_modserve_attrib_leave(dm);
+    }
+    sh_modserve_attrib_leave(depth);
+    sh_modserve_attrib_leave(d0);
+    CHECK(sh_modserve_attrib_depth() == 0);
+    sh_modserve_attrib_found(&other);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1);
+    CHECK(out.pairs == 4 && out.raised == 0 && out.followed == 0 && out.kept == 0 && out.lists == 4 && !out.overflow);
+    CHECK(def.level == 1 && mesh.level == 1 && mat.level == 1 && img.level == 1 && other.level == 1);
+
+    /* A pass keeps the md6Def by name: the close follows the pairs from it,
+     * transitively; the stock material stays as it is, the unrelated one at 1. */
+    def.level = 4;
+    sh_modserve_kept_add(&def);
+    CHECK(sh_modserve_kept_has(&def) && !sh_modserve_kept_has(&mesh));
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1);
+    CHECK(out.pairs == 4 && out.followed == 4 && out.raised == 3 && out.kept == 5);
+    CHECK(mesh.level == 4 && mat.level == 4 && img.level == 4 && stock.level == 4 && other.level == 1);
+    CHECK(strstr(out.first, "chainsaw1_scientist_right_bloody.md6mesh") && strstr(out.first, "unwilling_scientist_chainsaw") &&
+          !strstr(out.first, "stock") && !strstr(out.first, "unrelated"));
+    CHECK(sh_modserve_kept_has(&mat) && sh_modserve_kept_has(&img) && !sh_modserve_kept_has(&other));
+    /* A rerun raises nothing; the followed pairs are not kept. */
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.raised == 0 && out.followed == 0 && out.pairs == 0);
+    /* A permanent object's pairs are not kept past a close: the engine's own
+     * level-4 objects are never raised, so nothing could follow them. */
+    d0 = sh_modserve_attrib_enter(&perm, 0, &kept);
+    sh_modserve_attrib_found(&other);
+    sh_modserve_attrib_leave(d0);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.pairs == 1 && out.raised == 0);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.pairs == 0 && other.level == 1);
+
+    /* A kept object's load: what it loads and looks up is kept as it loads,
+     * the loaded child when its own load returns; a lookup outside is not. */
+    d0 = sh_modserve_attrib_enter(&def, 0, &kept);
+    CHECK(!kept);                            /* nothing open around it */
+    depth = sh_modserve_attrib_enter(&child, 0, &kept);
+    CHECK(kept && child.level == 1);         /* raised when its load returns */
+    sh_modserve_attrib_leave(depth);
+    CHECK(sh_modserve_attrib_keep(&child) == 1 && child.level == 4);
+    sh_modserve_attrib_found(&found);
+    CHECK(found.level == 4 && sh_modserve_kept_has(&found));
+    sh_modserve_attrib_leave(d0);
+    sh_modserve_attrib_found(&outside);
+    CHECK(outside.level == 1 && !sh_modserve_kept_has(&outside));
+    CHECK(sh_modserve_attrib_keep(&outside) == 0 && outside.level == 1);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.raised_at_load == 2 && out.raised == 0);
+
+    /* A load that allocates from a map heap is never raised, by any keep: the
+     * map's next load releases what it allocated (the gore skeleton's joints,
+     * G1). The keep names it; once it loads again in process heap 0 it is. */
+    {
+        static kh_res gore;
+        char left[300];
+        gore.name = "md6/gore/chainsaw1_scientist_right_bloody.md6skl"; gore.level = 1;
+        mats[6] = &gore; lmat.count = 7;
+        CHECK(sh_modserve_left_to_map(left, sizeof left) == 0);
+        d0 = sh_modserve_attrib_enter(&def, 0, &kept);
+        depth = sh_modserve_attrib_enter(&gore, 2, &kept);
+        CHECK(kept);
+        sh_modserve_attrib_leave(depth);
+        CHECK(sh_modserve_attrib_keep(&gore) == 0 && gore.level == 1);
+        sh_modserve_attrib_leave(d0);
+        CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.raised == 0 && gore.level == 1);
+        CHECK(sh_modserve_left_to_map(left, sizeof left) == 2 && strstr(left, "right_bloody.md6skl"));
+        CHECK(sh_modserve_left_to_map(left, sizeof left) == 0 && !left[0]);
+        /* The holds by name and a pass's lookups leave it too. */
+        sh_modserve_lookups_open();
+        sh_modserve_lookups_note(&gore);
+        CHECK(sh_modserve_lookups_close(&head, NULL) == 1 && gore.level == 1);
+        CHECK(sh_modserve_left_to_map(NULL, 0) == 1);
+        /* Loaded again in process heap 0 (a pass's scope): kept. */
+        d0 = sh_modserve_attrib_enter(&def, 0, &kept);
+        depth = sh_modserve_attrib_enter(&gore, 0, &kept);
+        sh_modserve_attrib_leave(depth);
+        CHECK(kept && sh_modserve_attrib_keep(&gore) == 1 && gore.level == 4);
+        sh_modserve_attrib_leave(d0);
+        /* An unknown heap (-1) neither marks nor clears. */
+        gore.level = 1;
+        depth = sh_modserve_attrib_enter(&gore, -1, &kept);
+        sh_modserve_attrib_leave(depth);
+        CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && gore.level == 4 && sh_modserve_left_to_map(NULL, 0) == 0);
+        lmat.count = 6;
+    }
+
+    /* Depth: 70 nested loads; past the bound nothing is attributed, the
+     * depth is still counted, and a leave restores it however deep the load
+     * that skipped its own leave was (the detour's __finally). */
+    for (i = 0; i < 70; ++i) { nest[i].name = "models/nest"; nest[i].level = 1; nests[i] = &nest[i]; }
+    lnest.type = "material"; lnest.cls = "idMaterial"; lnest.next = NULL; lnest.entries = nests; lnest.count = 70;
+    limg.next = &lnest;
+    d0 = sh_modserve_attrib_enter(&def, 0, &kept);
+    for (i = 0; i < 70; ++i) (void)sh_modserve_attrib_enter(&nest[i], 0, &kept);
+    CHECK(sh_modserve_attrib_depth() == 71);
+    sh_modserve_attrib_leave(d0 + 3);        /* a throw out of the fourth load */
+    CHECK(sh_modserve_attrib_depth() == 3);
+    sh_modserve_attrib_leave(d0);
+    CHECK(sh_modserve_attrib_depth() == 0);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1);
+    for (i = 0; i < SH_MODSERVE_NEST_MAX; ++i) CHECK(nest[i].level == 4);
+    for (i = SH_MODSERVE_NEST_MAX; i < 70; ++i) CHECK(nest[i].level == 1);
+    limg.next = NULL;
+
+    /* A kept address no list holds any longer is dropped: a resource the
+     * engine later creates there is not kept. */
+    sh_modserve_kept_add(&gone);
+    CHECK(sh_modserve_kept_has(&gone));
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && !sh_modserve_kept_has(&gone));
+    mats[6] = &gone; lmat.count = 7;
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && gone.level == 1);
+
+    /* Before the purge the pairs are forgotten: a parent kept after it does
+     * not reach what an earlier load of that address recorded. */
+    other.level = 1; outside.level = 1;
+    d0 = sh_modserve_attrib_enter(&other, 0, &kept);
+    sh_modserve_attrib_found(&outside);
+    sh_modserve_attrib_leave(d0);
+    CHECK(sh_modserve_attrib_close(&head, 1, &out) == 1 && out.pairs >= 1 && out.raised == 0 && outside.level == 1);
+    sh_modserve_kept_add(&other);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.pairs == 0 && out.followed == 0 && outside.level == 1);
+    other.level = 1;
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && other.level == 4);   /* kept itself: raised */
+
+    /* Bounds: past a million pairs recording stops and the close says so;
+     * the close then starts afresh. */
+    for (i = 0; i < (1 << 20) + 8; ++i)
+        (void)sh_modserve_attrib_note((const void *)(uintptr_t)(0x100000000ull + (uint64_t)i * 64),
+                                      (const void *)(uintptr_t)(0x900000000ull + (uint64_t)i * 64));
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.overflow && out.pairs == (1u << 20));
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && !out.overflow && out.pairs == 0);
+
+    /* Lists that do not read as lists: the close reports it and raises nothing. */
+    bad.type = "bad"; bad.cls = "bad"; bad.next = NULL; bad.entries = NULL; bad.count = 2;
+    limg.next = &bad;
+    outside.level = 1;
+    sh_modserve_kept_add(&outside);
+    CHECK(sh_modserve_attrib_close(&head, 0, &out) == 0 && outside.level == 1);
+    limg.next = NULL;
+    sh_modserve_attrib_reset();
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -4999,6 +5186,7 @@ int main(void)
     test_watermark();
     test_kept_holds();
     test_pass_lookups();
+    test_load_attribution();
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();

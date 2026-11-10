@@ -414,6 +414,61 @@ int  sh_modserve_lookups_recording(void);
 void sh_modserve_lookups_note(const void *resource);
 int  sh_modserve_lookups_close(const void *head_slot, sh_modserve_lookups *out);
 
+/* What the engine looks up on behalf of a kept object is kept with it. The
+ * kept set holds every resource the product keeps (a pass's watermark, the
+ * holds by name, a pass's lookups, an editor row's decl) by address. The
+ * engine side tracks the engine's load nesting on the main thread (a detour
+ * on ResourceGenericLoad) and reports each load it opens inside another and
+ * each resource ResourceLookup returns inside a load (`note`): the pair is
+ * recorded, and when the parent is kept the child joins the kept set at once
+ * (`keep` raises it from level 1 to 4 when its load returns). A Play's spawns
+ * load objects no kept decl held yet (the chainsaw gore md6Defs, their meshes
+ * and the meshes' materials, report F9); a later pass keeps the md6Defs by
+ * name, and `close` then follows the recorded pairs from every kept resource,
+ * transitively, so what they loaded is kept too. The close walks the lists
+ * once, drops kept and recorded addresses no list holds any longer, raises
+ * every listed kept resource still at level 1 to 4 under the resource lock,
+ * and keeps only the pairs a later keep can still follow (a parent neither
+ * kept nor at level 4); with `forget` set (before the Play level load's
+ * purge, which frees the level-1 parents they name) it forgets them all.
+ * Both sets are bounded; a full set stops recording and the close says so. */
+typedef struct sh_modserve_attrib {
+    unsigned kept;        /* kept resources still listed after the close */
+    unsigned pairs;       /* recorded (parent, child) pairs before the close */
+    unsigned followed;    /* resources the pairs added to the kept set in this close */
+    unsigned raised;      /* raised from level 1 to 4 by this close */
+    unsigned raised_at_load; /* raised by `keep` since the previous close */
+    unsigned lists;       /* lists walked */
+    int overflow;         /* a set reached its bound since the previous close */
+    char first[300];      /* the names this close raised, first ones */
+} sh_modserve_attrib;
+void sh_modserve_kept_add(const void *resource);
+int  sh_modserve_kept_has(const void *resource);
+int  sh_modserve_attrib_note(const void *parent, const void *child);
+int  sh_modserve_attrib_keep(void *resource);
+/* The load nesting the engine side's detour reports, main thread only:
+ * `enter` before a load (notes the pair with the innermost open load; *kept
+ * says whether the parent was kept) returns the depth to hand back to
+ * `leave`, which the detour calls however the load leaves; `found` notes a
+ * resource the lookup returned inside the innermost load and keeps it when
+ * that load is kept. The engine stops at 32 nested loads (ResourceMaterialize,
+ * "Maximum resource recursion level"); past SH_MODSERVE_NEST_MAX nothing is
+ * attributed and the depth is still counted. `heap` is the heap the load
+ * allocates from (the engine's heap stack top, 0 the process heap, -1
+ * unknown): a resource loaded with another heap selected is never raised by
+ * any keep (watermark, holds, lookups, attribution), since raising keeps its
+ * object but not what the map's heap held for it; `left_to_map` returns and
+ * clears how many keeps left one at level 1, with their first names. */
+#define SH_MODSERVE_NEST_MAX 64
+int  sh_modserve_attrib_enter(void *resource, int heap, int *kept);
+void sh_modserve_attrib_leave(int depth);
+int  sh_modserve_attrib_depth(void);
+void sh_modserve_attrib_found(void *resource);
+unsigned sh_modserve_left_to_map(char *names, size_t cap);
+int  sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attrib *out);
+/* Tests: forget everything. */
+void sh_modserve_attrib_reset(void);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

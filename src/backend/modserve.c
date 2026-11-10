@@ -4949,6 +4949,111 @@ static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsig
     return ok;
 }
 
+#define MS_KEPT_MAX  (1u << 20)
+#define MS_PAIRS_MAX (1u << 20)
+typedef struct ms_aset { uintptr_t *slot; size_t cap, n; } ms_aset;
+typedef struct ms_pair { uintptr_t parent, child; } ms_pair;
+static ms_aset g_kept;
+static ms_pair *g_pairs;
+static size_t g_pairs_cap, g_pairs_n;
+static int g_attrib_full;
+static unsigned g_attrib_raised_at_load;
+
+static size_t ms_aset_at(const uintptr_t *slot, size_t cap, uintptr_t key)
+{
+    size_t i = (size_t)((key >> 4) * 0x9E3779B97F4A7C15ull) & (cap - 1);
+    while (slot[i] && slot[i] != key) i = (i + 1) & (cap - 1);
+    return i;
+}
+
+static int ms_aset_has(const ms_aset *s, uintptr_t key)
+{
+    return key && s->cap && s->slot[ms_aset_at(s->slot, s->cap, key)] == key;
+}
+
+/* 1 added, 0 already there, -1 the bound or memory refused it. */
+static int ms_aset_add(ms_aset *s, uintptr_t key, size_t max)
+{
+    size_t i;
+    if (!key) return 0;
+    if ((s->n + 1) * 2 > s->cap) {
+        size_t cap = s->cap ? s->cap * 2 : 4096, j;
+        uintptr_t *slot;
+        if (s->n >= max) return ms_aset_has(s, key) ? 0 : -1;
+        slot = (uintptr_t *)calloc(cap, sizeof *slot);
+        if (!slot) return ms_aset_has(s, key) ? 0 : -1;
+        for (j = 0; j < s->cap; ++j)
+            if (s->slot[j]) slot[ms_aset_at(slot, cap, s->slot[j])] = s->slot[j];
+        free(s->slot);
+        s->slot = slot;
+        s->cap = cap;
+    }
+    i = ms_aset_at(s->slot, s->cap, key);
+    if (s->slot[i]) return 0;
+    s->slot[i] = key;
+    s->n++;
+    return 1;
+}
+
+static void ms_aset_free(ms_aset *s)
+{
+    free(s->slot);
+    memset(s, 0, sizeof *s);
+}
+
+/* Resources whose last load ran with a map heap selected (sh_modserve_attrib_enter
+ * with heap != 0): what the load allocated with the current heap (an MD6
+ * skeleton's joints, VK 0x1416d0770 at +0x40) belongs to that heap, which the
+ * next map load releases whatever the resource's level (report F9: the
+ * chainsaw gore skeleton raised by name kept its object and lost its joints,
+ * G1 at 0x16f7f0b). No keep raises one; the purge and the next load recreate
+ * it whole. A load in process heap 0 clears the mark. */
+static ms_aset g_mapheap;
+static unsigned g_left_n;
+static char g_left_first[300];
+
+/* Linear-probing delete: shift the run back over the hole. */
+static void ms_aset_del(ms_aset *s, uintptr_t key)
+{
+    size_t i, j, k;
+    if (!key || !s->cap) return;
+    i = ms_aset_at(s->slot, s->cap, key);
+    if (s->slot[i] != key) return;
+    s->slot[i] = 0;
+    s->n--;
+    for (j = (i + 1) & (s->cap - 1); s->slot[j]; j = (j + 1) & (s->cap - 1)) {
+        k = (size_t)((s->slot[j] >> 4) * 0x9E3779B97F4A7C15ull) & (s->cap - 1);
+        if ((j > i && (k <= i || k > j)) || (j < i && (k <= i && k > j))) {
+            s->slot[i] = s->slot[j];
+            s->slot[j] = 0;
+            i = j;
+        }
+    }
+}
+
+/* 1 when a keep may raise `res`; 0 (counted, named) when the map's heap owns it. */
+static int ms_keepable(const unsigned char *res)
+{
+    const char *name;
+    size_t at;
+    if (!ms_aset_has(&g_mapheap, (uintptr_t)res)) return 1;
+    g_left_n++;
+    name = *(const char *const *)(res + MS_RES_NAME);
+    at = strlen(g_left_first);
+    if (name && at + strlen(name) + 3 < sizeof g_left_first)
+        _snprintf_s(g_left_first + at, sizeof g_left_first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+    return 0;
+}
+
+unsigned sh_modserve_left_to_map(char *names, size_t cap)
+{
+    unsigned n = g_left_n;
+    if (names && cap) strncpy_s(names, cap, g_left_first, _TRUNCATE);
+    g_left_n = 0;
+    g_left_first[0] = 0;
+    return n;
+}
+
 typedef struct ms_take { sh_modserve_watermark *w; size_t cap; int oom; } ms_take;
 static void ms_take_one(void *context, const unsigned char *list, unsigned char *res)
 {
@@ -4987,8 +5092,10 @@ static void ms_raise_one(void *context, const unsigned char *list, unsigned char
     int c;
     if (r->w->n && bsearch(&key, r->w->res, r->w->n, sizeof(uintptr_t), ms_uptr_cmp)) return;
     r->out->created++;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1) return;
+    if (*(unsigned *)(res + MS_RES_LEVEL) == 4) sh_modserve_kept_add(res);
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
     *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    sh_modserve_kept_add(res);
     r->out->raised++;
     for (c = 0; c < r->ncls && r->cls[c].list != list; ++c) {}
     if (c == r->ncls && r->ncls < 64) { r->cls[c].list = list; r->cls[c].n = 0; r->ncls++; }
@@ -5141,8 +5248,9 @@ static void ms_lookups_raise_one(void *context, const unsigned char *list, unsig
     (void)list;
     if (g_lookups[ms_lookup_slot(g_lookups, g_lookups_cap, (uintptr_t)res)] != (uintptr_t)res) return;
     out->live++;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1) return;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
     *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    sh_modserve_kept_add(res);
     out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(out->first);
@@ -5173,6 +5281,244 @@ int sh_modserve_lookups_close(const void *head_slot, sh_modserve_lookups *out)
     g_lookups_full = 0;
     return ok;
 }
+
+/* What the engine looks up on behalf of a kept object (sh_modserve_attrib_*).
+ * Two open-addressing tables owned by the main thread: the kept set, by
+ * address, and the recorded (parent, child) pairs. */
+
+static size_t ms_pair_at(const ms_pair *t, size_t cap, uintptr_t parent, uintptr_t child)
+{
+    size_t i = (size_t)(((parent >> 4) * 0x9E3779B97F4A7C15ull) ^ ((child >> 4) * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+    while (t[i].parent && (t[i].parent != parent || t[i].child != child)) i = (i + 1) & (cap - 1);
+    return i;
+}
+
+/* 1 added, 0 already there, -1 the bound or memory refused it. */
+static int ms_pair_add(uintptr_t parent, uintptr_t child)
+{
+    size_t i;
+    if ((g_pairs_n + 1) * 2 > g_pairs_cap) {
+        size_t cap = g_pairs_cap ? g_pairs_cap * 2 : 8192, j;
+        ms_pair *t;
+        if (g_pairs_n >= MS_PAIRS_MAX) return -1;
+        t = (ms_pair *)calloc(cap, sizeof *t);
+        if (!t) return -1;
+        for (j = 0; j < g_pairs_cap; ++j)
+            if (g_pairs[j].parent) t[ms_pair_at(t, cap, g_pairs[j].parent, g_pairs[j].child)] = g_pairs[j];
+        free(g_pairs);
+        g_pairs = t;
+        g_pairs_cap = cap;
+    }
+    i = ms_pair_at(g_pairs, g_pairs_cap, parent, child);
+    if (g_pairs[i].parent) return 0;
+    g_pairs[i].parent = parent;
+    g_pairs[i].child = child;
+    g_pairs_n++;
+    return 1;
+}
+
+void sh_modserve_kept_add(const void *resource)
+{
+    if (ms_aset_add(&g_kept, (uintptr_t)resource, MS_KEPT_MAX) < 0) g_attrib_full = 1;
+}
+
+int sh_modserve_kept_has(const void *resource)
+{
+    return ms_aset_has(&g_kept, (uintptr_t)resource);
+}
+
+int sh_modserve_attrib_note(const void *parent, const void *child)
+{
+    uintptr_t p = (uintptr_t)parent, c = (uintptr_t)child;
+    if (!p || !c || p == c) return 0;
+    if (!g_attrib_full && ms_pair_add(p, c) < 0) g_attrib_full = 1;
+    if (!ms_aset_has(&g_kept, p)) return 0;
+    sh_modserve_kept_add(child);
+    return ms_aset_has(&g_kept, c);
+}
+
+int sh_modserve_attrib_keep(void *resource)
+{
+    unsigned char *r = (unsigned char *)resource;
+    int raised = 0;
+    if (!r || !ms_aset_has(&g_kept, (uintptr_t)r)) return 0;
+    __try {
+        if (*(unsigned *)(r + MS_RES_LEVEL) == 1 && ms_keepable(r)) { *(unsigned *)(r + MS_RES_LEVEL) = 4; raised = 1; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { raised = 0; }
+    g_attrib_raised_at_load += (unsigned)raised;
+    return raised;
+}
+
+static void *g_nest[SH_MODSERVE_NEST_MAX];
+static int g_nest_depth;
+
+int sh_modserve_attrib_enter(void *resource, int heap, int *kept)
+{
+    int depth = g_nest_depth, k = 0;
+    if (heap > 0) { if (ms_aset_add(&g_mapheap, (uintptr_t)resource, MS_KEPT_MAX) < 0) g_attrib_full = 1; }
+    else if (heap == 0) ms_aset_del(&g_mapheap, (uintptr_t)resource);
+    if (depth > 0 && depth <= SH_MODSERVE_NEST_MAX) k = sh_modserve_attrib_note(g_nest[depth - 1], resource);
+    if (depth < SH_MODSERVE_NEST_MAX) g_nest[depth] = resource;
+    g_nest_depth = depth + 1;
+    if (kept) *kept = k;
+    return depth;
+}
+
+void sh_modserve_attrib_leave(int depth)
+{
+    g_nest_depth = depth < 0 ? 0 : depth;
+}
+
+int sh_modserve_attrib_depth(void)
+{
+    return g_nest_depth;
+}
+
+void sh_modserve_attrib_found(void *resource)
+{
+    int depth = g_nest_depth;
+    if (resource && depth > 0 && depth <= SH_MODSERVE_NEST_MAX && sh_modserve_attrib_note(g_nest[depth - 1], resource))
+        (void)sh_modserve_attrib_keep(resource);
+}
+
+void sh_modserve_attrib_reset(void)
+{
+    g_nest_depth = 0;
+    ms_aset_free(&g_kept);
+    ms_aset_free(&g_mapheap);
+    g_left_n = 0;
+    g_left_first[0] = 0;
+    free(g_pairs);
+    g_pairs = NULL;
+    g_pairs_cap = g_pairs_n = 0;
+    g_attrib_full = 0;
+    g_attrib_raised_at_load = 0;
+}
+
+static int ms_pair_parent_cmp(const void *a, const void *b)
+{
+    uintptr_t x = ((const ms_pair *)a)->parent, y = ((const ms_pair *)b)->parent;
+    return x < y ? -1 : x > y;
+}
+
+typedef struct ms_attrib_walk { ms_aset live, permanent; int oom; sh_modserve_attrib *out; } ms_attrib_walk;
+static void ms_attrib_live_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_attrib_walk *w = (ms_attrib_walk *)context;
+    (void)list;
+    if (w->oom) return;
+    if (ms_aset_add(&w->live, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0) w->oom = 1;
+    else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4 && ms_aset_add(&w->permanent, (uintptr_t)res, MS_RL_MAX_ENTRIES) < 0)
+        w->oom = 1;
+}
+
+static void ms_attrib_raise_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    sh_modserve_attrib *out = ((ms_attrib_walk *)context)->out;
+    const char *name;
+    size_t at;
+    (void)list;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_aset_has(&g_kept, (uintptr_t)res) || !ms_keepable(res)) return;
+    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    out->raised++;
+    name = *(const char *const *)(res + MS_RES_NAME);
+    at = strlen(out->first);
+    if (name && at + strlen(name) + 3 < sizeof out->first)
+        _snprintf_s(out->first + at, sizeof out->first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+}
+
+int sh_modserve_attrib_close(const void *head_slot, int forget, sh_modserve_attrib *out)
+{
+    sh_modserve_attrib local;
+    ms_attrib_walk w;
+    ms_aset kept;
+    ms_pair *edges = NULL;
+    uintptr_t *queue = NULL;
+    size_t ne = 0, nq = 0, qcap = 0, i;
+    int ok;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    memset(&w, 0, sizeof w);
+    memset(&kept, 0, sizeof kept);
+    w.out = out;
+    out->pairs = (unsigned)g_pairs_n;
+    out->raised_at_load = g_attrib_raised_at_load;
+    out->overflow = g_attrib_full;
+    g_attrib_raised_at_load = 0;
+    ok = ms_res_walk(head_slot, ms_attrib_live_one, &w, &out->lists) && !w.oom;
+    if (!ok) goto done;
+    /* Only what a list still holds stays kept: an address the engine frees
+     * and reuses must not inherit the keep. */
+    for (i = 0; i < g_kept.cap; ++i)
+        if (g_kept.slot[i] && ms_aset_has(&w.live, g_kept.slot[i]) && ms_aset_add(&kept, g_kept.slot[i], MS_KEPT_MAX) < 0)
+            { ok = 0; goto done; }
+    ms_aset_free(&g_kept);
+    g_kept = kept;
+    memset(&kept, 0, sizeof kept);
+    for (i = 0; i < g_mapheap.cap; ++i)
+        if (g_mapheap.slot[i] && ms_aset_has(&w.live, g_mapheap.slot[i]) && ms_aset_add(&kept, g_mapheap.slot[i], MS_KEPT_MAX) < 0)
+            { ok = 0; goto done; }
+    ms_aset_free(&g_mapheap);
+    g_mapheap = kept;
+    memset(&kept, 0, sizeof kept);
+    /* The pairs whose ends are both listed, sorted by parent; then breadth
+     * first from every kept resource. */
+    if (g_pairs_n) {
+        edges = (ms_pair *)malloc(g_pairs_n * sizeof *edges);
+        if (!edges) { ok = 0; goto done; }
+        for (i = 0; i < g_pairs_cap; ++i)
+            if (g_pairs[i].parent && ms_aset_has(&w.live, g_pairs[i].parent) && ms_aset_has(&w.live, g_pairs[i].child))
+                edges[ne++] = g_pairs[i];
+        qsort(edges, ne, sizeof *edges, ms_pair_parent_cmp);
+    }
+    if (ne && g_kept.n) {
+        qcap = g_kept.n + 64;
+        queue = (uintptr_t *)malloc(qcap * sizeof *queue);
+        if (!queue) { ok = 0; goto done; }
+        for (i = 0; i < g_kept.cap; ++i) if (g_kept.slot[i]) queue[nq++] = g_kept.slot[i];
+        while (nq) {
+            uintptr_t parent = queue[--nq];
+            size_t lo = 0, hi = ne;
+            while (lo < hi) { size_t mid = (lo + hi) / 2; if (edges[mid].parent < parent) lo = mid + 1; else hi = mid; }
+            for (; lo < ne && edges[lo].parent == parent; ++lo) {
+                int added = ms_aset_add(&g_kept, edges[lo].child, MS_KEPT_MAX);
+                if (added < 0) { out->overflow = 1; continue; }
+                if (!added) continue;
+                out->followed++;
+                if (nq == qcap) {
+                    uintptr_t *g = (uintptr_t *)realloc(queue, qcap * 2 * sizeof *queue);
+                    if (!g) { ok = 0; goto done; }
+                    queue = g;
+                    qcap *= 2;
+                }
+                queue[nq++] = edges[lo].child;
+            }
+        }
+    }
+    ok = ms_res_walk(head_slot, ms_attrib_raise_one, &w, NULL);
+    /* The pairs: all forgotten before a purge. Otherwise only those a later
+     * keep can still follow stay: a parent not kept yet and not permanent
+     * (the engine's own level-4 objects, most of what the boot loads, are
+     * never raised, and a kept parent's pairs were followed just now). */
+    free(g_pairs);
+    g_pairs = NULL;
+    g_pairs_cap = g_pairs_n = 0;
+    g_attrib_full = 0;
+    if (!forget)
+        for (i = 0; i < ne; ++i) {
+            if (ms_aset_has(&g_kept, edges[i].parent) || ms_aset_has(&w.permanent, edges[i].parent)) continue;
+            if (ms_pair_add(edges[i].parent, edges[i].child) < 0) { g_attrib_full = 1; break; }
+        }
+done:
+    out->kept = (unsigned)g_kept.n;
+    free(edges);
+    free(queue);
+    ms_aset_free(&w.live);
+    ms_aset_free(&w.permanent);
+    ms_aset_free(&kept);
+    return ok;
+}
+
 
 /* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
  * type case-insensitive, the name folded as the raw-name match folds it
@@ -5220,7 +5566,7 @@ static void ms_holds_roots_one(void *context, const unsigned char *list, unsigne
     const ms_hold *h;
     if (*(const unsigned *)(res + MS_RES_LEVEL) != 4) return;
     h = ms_holds_find(w, list, res);
-    if (h) w->root[h->file] = 1;
+    if (h) { w->root[h->file] = 1; sh_modserve_kept_add(res); }
 }
 
 static void ms_holds_raise_one(void *context, const unsigned char *list, unsigned char *res)
@@ -5228,8 +5574,9 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
     ms_holds_walk *w = (ms_holds_walk *)context;
     const char *name;
     size_t at;
-    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res)) return;
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !ms_keepable(res)) return;
     *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    sh_modserve_kept_add(res);
     w->out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(w->out->first);

@@ -81,6 +81,7 @@
 #define PAL_MAX             100000
 #define PROBE_STOLEN        21
 #define LOOKUP_STOLEN       19
+#define LOAD_STOLEN         20
 #define ERROR_TEXT_MAX      200
 
 typedef void *(*str_ctor_fn)(void *, const char *);
@@ -115,6 +116,10 @@ static int g_probe_sig_ok;
 static lookup_fn g_lookup_orig;       /* ResourceLookup, detoured while the index holds a decl */
 static sig_result g_lookup_sig;
 static int g_lookup_sig_ok;
+static generic_load_fn g_load_orig;   /* ResourceGenericLoad, detoured with the lookup */
+static sig_result g_load_sig;
+static int g_load_sig_ok;
+static int g_attrib_checked;
 static volatile LONG g_editor_pass_done;
 static DWORD g_fault_code;
 static cvar_set_fn g_cvar_set;
@@ -403,6 +408,7 @@ static int op_load(void *context, const char *type, const char *name, int persis
                 /* A new identity with no consumers takes the native source load
                  * once, at the persistent level, as timeline_tile.c does. */
                 *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
+                sh_modserve_kept_add(d);
                 d[RES_STATE_OFF] = (unsigned char)(state & ~2);
                 g_generic_load(decl);
                 state = d[RES_STATE_OFF];
@@ -734,6 +740,42 @@ static void me_keep_holds(const char *phase)
                strlen(h.first) + 40 >= sizeof h.first ? ", ..." : "");
 }
 
+/* Keep what kept objects loaded or looked up (sh_modserve_attrib_close):
+ * after every keep by pass or by name, and before the Play level load's
+ * purge, which `forget` marks. */
+static void me_keep_attrib(const char *phase, int forget)
+{
+    sh_modserve_attrib a;
+    if (!g_res_head || !g_load_orig) return;
+    if (!sh_modserve_attrib_close(g_res_head, forget, &a)) {
+        me_log("%s: resource lists could not be walked; what kept objects load was not checked", phase);
+        return;
+    }
+    if (!g_attrib_checked) {
+        g_attrib_checked = 1;
+        if (!a.pairs)
+            me_log("%s: the resource load hook saw no load inside another since it was installed; what kept objects "
+                   "load is kept only by name", phase);
+        else me_log("%s: resource load attribution live (%u load(s) and lookup(s) inside another recorded, %u kept)",
+                    phase, a.pairs, a.kept);
+    }
+    if (a.overflow)
+        me_log("%s: more loads were recorded than the product keeps track of; some of what kept objects loaded may "
+               "not be kept", phase);
+    {
+        char left[300];
+        unsigned n = sh_modserve_left_to_map(left, sizeof left);
+        if (n)
+            me_log("%s: %u keep(s) left at level 1 because the map's heap holds what their load allocated (the next "
+                   "load recreates them): %s%s", phase, n, left, strlen(left) + 40 >= sizeof left ? ", ..." : "");
+    }
+    if (a.raised || a.raised_at_load)
+        me_log("%s: %u resource(s) kept objects loaded or looked up kept for the session with them (%u as they "
+               "loaded; %u followed from %u recorded pair(s), %u kept)%s%s%s", phase, a.raised + a.raised_at_load,
+               a.raised_at_load, a.followed, a.pairs, a.kept, a.first[0] ? ": " : "", a.first,
+               strlen(a.first) + 40 >= sizeof a.first ? ", ..." : "");
+}
+
 static void me_closure_end(me_closure *c, const char *phase, const char *what)
 {
     if (c->counted) g_mark_depth--;
@@ -748,6 +790,7 @@ static void me_closure_end(me_closure *c, const char *phase, const char *what)
     if (!g_mark_depth) {
         me_lookups_close(phase, what);
         me_keep_holds(phase);
+        me_keep_attrib(phase, 0);
     }
 }
 
@@ -841,6 +884,9 @@ void sh_modserve_play_begin(void)
     /* What the editor's spawns created for a kept decl since the last pass
      * is still level 1: kept before the level load's purge frees it. */
     if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
+    /* What kept objects loaded since then is kept the same way; the pairs
+     * are forgotten, since the purge frees the level-1 parents they name. */
+    if (on_main == 1 && g_bound) me_keep_attrib("play", 1);
     if (!sh_modserve_requirements_held()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
@@ -861,12 +907,74 @@ static unsigned char me_probe_hook(void *self, const char *path, void *a, void *
 }
 
 /* Every resource the engine's lookup returns on the main thread while a pass
- * is open is recorded; nothing else changes (sh_modserve_lookups_note). */
+ * is open is recorded (sh_modserve_lookups_note); one it returns inside a load
+ * is attributed to that load (sh_modserve_attrib_note) and kept at once when
+ * the load is a kept object's. */
 static void *me_lookup_hook(void *list, const char *name, uint64_t quiet)
 {
     void *r = g_lookup_orig(list, name, quiet);
-    if (r && sh_modserve_lookups_recording() && me_on_main() == 1) sh_modserve_lookups_note(r);
+    if (r && (sh_modserve_lookups_recording() || sh_modserve_attrib_depth()) && me_on_main() == 1) {
+        if (sh_modserve_lookups_recording()) sh_modserve_lookups_note(r);
+        sh_modserve_attrib_found(r);
+    }
     return r;
+}
+
+/* The engine's load nesting on the main thread: ResourceMaterialize creates a
+ * resource it does not find and loads it here, and that load materializes
+ * what the resource uses, so a load opened inside another is that one's
+ * (report F9: the chainsaw gore md6Def loads its mesh, whose load creates its
+ * material). The pair is recorded; a kept parent keeps the child, raised
+ * when its own load returns (the load's failure path reconstructs the object
+ * at level 1). The depth is restored however the load leaves. */
+/* The heap a load on the main thread allocates from with heap -1: the top of
+ * idMemLocal's 32-entry stack (ids at +0x44, depth at +0xC4), else 0, as
+ * the allocator decides (VK 0x140328530). -1 when it cannot be read. */
+static int me_heap_now(void)
+{
+    const unsigned char *self;
+    int depth, id = 0;
+    if (!g_heap.get) return -1;
+    __try {
+        self = (const unsigned char *)g_heap.get();
+        if (!self) return -1;
+        depth = *(const int *)(self + 0xc4);
+        if (depth >= 1 && depth <= 32) id = *(const int *)(self + 0x44 + (depth - 1) * 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return id;
+}
+
+static void me_load_hook(void *res)
+{
+    int depth, kept = 0;
+    if (me_on_main() != 1) { g_load_orig(res); return; }
+    depth = sh_modserve_attrib_enter(res, me_heap_now(), &kept);
+    __try { g_load_orig(res); }
+    __finally { sh_modserve_attrib_leave(depth); }
+    if (kept) (void)sh_modserve_attrib_keep(res);
+}
+
+static void me_ensure_load(void)
+{
+    void *tramp;
+    sh_modserve_stats st;
+    if (g_load_orig || !g_load_sig_ok) return;
+    sh_modserve_get_stats(&st);
+    if (!st.files) return;
+    tramp = sh_prepare_detour_sig(&g_load_sig, (void *)me_load_hook, LOAD_STOLEN);
+    if (!tramp) {
+        me_log("resource load detour refused; what kept objects load is kept only by name");
+        g_load_sig_ok = 0;
+        return;
+    }
+    g_load_orig = (generic_load_fn)tramp;
+    if (sh_commit_detour(tramp) != B2_PATCH_OK) {
+        if (sh_uninstall_detour(tramp)) g_load_orig = NULL;
+        g_load_sig_ok = 0;
+        me_log("resource load detour commit failed; what kept objects load is kept only by name");
+        return;
+    }
+    me_log("resource load hook installed (rva 0x%X, %d-byte window)", g_load_sig.rva, LOAD_STOLEN);
 }
 
 static void me_ensure_lookup(void)
@@ -893,12 +1001,13 @@ static void me_ensure_lookup(void)
 }
 
 /* The probe is detoured only once the index holds a decl, so an empty mods
- * folder leaves the engine's probe untouched; the lookup likewise. */
+ * folder leaves the engine's probe untouched; the lookup and load likewise. */
 static void me_ensure_probe(void)
 {
     void *tramp;
     sh_modserve_stats st;
     me_ensure_lookup();
+    me_ensure_load();
     if (g_probe_orig || !g_probe_sig_ok) return;
     sh_modserve_get_stats(&st);
     if (!st.files) return;
@@ -1000,6 +1109,11 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
         if (results[i].name && !strcmp(results[i].name, "ResourceLookup") && results[i].status == SIG_OK) {
             g_lookup_sig = results[i];
             g_lookup_sig_ok = 1;
+        }
+    for (i = 0; i < count; ++i)
+        if (results[i].name && !strcmp(results[i].name, "ResourceGenericLoad") && results[i].status == SIG_OK) {
+            g_load_sig = results[i];
+            g_load_sig_ok = 1;
         }
     if (!g_bound) me_log("decl registration unavailable on this build (registry, heap scope or main thread unresolved)");
     if (!g_probe_sig_ok) me_log("existence probe unavailable (DeclResourceProbe is not a clean match)");
@@ -1878,6 +1992,7 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
                 return;
             }
             *(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) = 4;
+            sh_modserve_kept_add(decl);
             k->kept++;
             if (older)
                 me_log("editor: %s '%s' kept for the session (editor row '%s' points at it); it was created at level 1 "
@@ -1978,6 +2093,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
     sh_modserve_watermark_free(&mark);
     if (!g_mark_depth) me_lookups_close(phase, "rows' closure");
     me_keep_holds(phase);
+    if (!g_mark_depth) me_keep_attrib(phase, 0);
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != SH_MODSERVE_RANK_SEDEF) continue;
         if (plan.steps[i].ready == 1) rows_ok++;
