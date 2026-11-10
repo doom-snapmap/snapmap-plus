@@ -46,6 +46,7 @@ $tests = @(
     @{ name = "fly_to_test"; src = 'fly_to_test.c'; arg = "" }
     @{ name = "module_prefab_test"; src = 'module_prefab_test.c ..\src\backend\module_prefab_map.c ..\src\backend\mp_json.c'; arg = "" }
     @{ name = "timeline_tile_test"; src = 'timeline_tile_test.c ..\src\backend\timeline_tile.c'; defs = '/DSH_TIMELINE_TILE_PURE'; arg = "" }
+    @{ name = "typeinfo_cache_test"; src = 'typeinfo_cache_test.c ..\src\backend\modtypeinfo.c'; defs = '/DSH_MODTYPEINFO_PURE'; arg = "" }
     @{ name = "modaction_test"; src = 'modaction_test.c ..\src\backend\modaction.c'; defs = '/DSH_MODACTION_PURE'; arg = "" }
     @{ name = "budget_table_test"; src = 'budget_table_test.c ..\src\backend\budget_table.c'; defs = '/DSH_BUDGET_TABLE_PURE'; arg = "" }
     @{ name = "settings_tab_test"; src = 'settings_tab_test.c ..\src\backend\settings_tab.c'; defs = '/DSH_SETTINGS_TAB_PURE'; arg = "" }

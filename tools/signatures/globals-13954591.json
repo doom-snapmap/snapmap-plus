@@ -150,6 +150,24 @@
   "vis_leaf_lo": {
    "vk_rva": "0x12aa950",
    "gl_rva": "0x12aa030"
+  },
+  "snap_typeinfo_cache": {
+   "anchor": "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 50 90 48 83 C4 38 C3",
+   "disp_slot": 32,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x5c6f800",
+   "gl_rva": "0x4574e80",
+   "note": "idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in SnapTypeInfoCacheBuild"
+  },
+  "snap_editor_row_count": {
+   "anchor": "8B 2D ?? ?? ?? ?? 81 FD DC 05 00 00 7C 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC 33 FF 85 ED 7E 3C",
+   "disp_slot": 2,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x5c3d228",
+   "gl_rva": "0x45428a8",
+   "note": "int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc"
   }
  }
 }

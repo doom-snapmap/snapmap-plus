@@ -553,6 +553,20 @@ These backend files share the work:
   already knowing the source marks a stock decl, which is left to the provider.
   It applies a refresh in place (re-parse, reload, the anims of a map pass) and
   arms the companions detour at its main-thread gates.
+- `modtypeinfo.c` keeps the editor's entity type-info cache
+  (`idSnapTypeInfoCache`) complete. The game builds that cache once per
+  process, one default property tree per `snapEditorEntityDef` registered at
+  that moment, keyed by entityDef name, and every placed entity's tree starts
+  as a copy of its type's. A row registered after the build (a mod's) has no
+  cached tree: the game logs `idSnapTypeInfoCache::Get parent tree not in
+  cache <name>` once, builds the entity's tree from the instance alone, reads
+  its model scale as zero (`modelMatrix invert failed on model <model>` every
+  frame the entity is drawn on its own) and draws the hidden badge over it.
+  After every palette build the keys of the mod rows are checked against the
+  cache; when one is missing, every cached tree is destroyed, the count zeroed
+  and the game's own builder run again (`SnapTypeInfoCacheBuild`), logged as
+  one `MODS: typeinfo cache:` line. The builder stops the game at 1500
+  registered rows, so a rebuild is refused with a plain line at that count.
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
   decision and `sh_mods held`.
