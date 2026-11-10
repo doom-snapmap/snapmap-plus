@@ -836,20 +836,24 @@ static void test_closure_effects(const char *tmp)
     sh_mb_free(&b);
 }
 
-/* ---------------------------------------------- closure, store path ---- */
-/* A sixth install (D6), the campaign archive: a door model (an md6Def
- * naming only its mesh, the mesh whose cooked header names its skeleton, the
- * skeleton and its default clip) and the door's animWeb, which a hand-made
- * folder carries as its only file (a surface). */
+/* ------------------------------------------- whole models, store path ---- */
+/* A sixth install (D6). SnapMap's archive: a mesh whose cooked header names
+ * its skeleton, the skeleton and its default clip. The campaign archive: a
+ * door model the same way (md6Def naming only the mesh), and the door's
+ * animWeb, which a hand-made folder carries as its only file (a surface). */
 
 #define M6_WEB  "generated/decls/animweb/k6/door_web.decl"
 #define M6_MD6  "generated/decls/md6def/k6/door.md6.decl"
 #define M6_MESH "generated/basemodel/k6/door.bmd6model"
 #define M6_SKL  "generated/skeleton/k6/door.bmd6skl"
 #define M6_DEF  "cooked/anim/k6/door.md6skl/_default.bmd6anim"
+#define S6_MESH "generated/basemodel/s6/card.bmd6model"
+#define S6_SKL  "generated/skeleton/s6/card.bmd6skl"
+#define S6_DEF  "cooked/anim/s6/card.md6skl/_default.bmd6anim"
 static const char M6_WEB_TEXT[] = "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k6/door.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n";
 static const char M6_MD6_TEXT[] = "{\r\n\tinit {\r\n\t\tmesh \"k6/door.md6mesh\"\r\n\t}\r\n}\r\n";
-static unsigned char M6_MESH_B[64], M6_SKL_B[40], M6_DEF_B[36], OTHER6_B[8];
+static unsigned char M6_MESH_B[64], M6_SKL_B[40], M6_DEF_B[36], S6_MESH_B[64], S6_SKL_B[44], S6_DEF_B[38], OWN6_MESH_B[64],
+                     NONE6_MESH_B[64];
 
 /* A cooked mesh header: magic and version, two timestamps, the skeleton name
  * as a little-endian u32 length and bytes, then geometry. */
@@ -866,9 +870,14 @@ static void make_install6(const char *d6)
 {
     size_t k;
     m6_mesh(M6_MESH_B, sizeof M6_MESH_B, "k6/door.md6skl");
+    m6_mesh(S6_MESH_B, sizeof S6_MESH_B, "s6/card.md6skl");
+    m6_mesh(OWN6_MESH_B, sizeof OWN6_MESH_B, "s6/card.md6skl");
+    m6_mesh(NONE6_MESH_B, sizeof NONE6_MESH_B, "s6/nothing.md6skl");
+    OWN6_MESH_B[sizeof OWN6_MESH_B - 1] ^= 0x5a;   /* the mod's own geometry */
     for (k = 0; k < sizeof M6_SKL_B; k++) M6_SKL_B[k] = (unsigned char)(k * 3 + 9);
     for (k = 0; k < sizeof M6_DEF_B; k++) M6_DEF_B[k] = (unsigned char)(k * 5 + 1);
-    for (k = 0; k < sizeof OTHER6_B; k++) OTHER6_B[k] = (unsigned char)(k * 7 + 2);
+    for (k = 0; k < sizeof S6_SKL_B; k++) S6_SKL_B[k] = (unsigned char)(k * 7 + 2);
+    for (k = 0; k < sizeof S6_DEF_B; k++) S6_DEF_B[k] = (unsigned char)(k * 11 + 3);
     {
         entry g[] = {
             { M6_WEB,  (const unsigned char *)M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1, 0, 0 },
@@ -877,9 +886,77 @@ static void make_install6(const char *d6)
             { M6_SKL,  M6_SKL_B, sizeof M6_SKL_B, 1, 0 },
             { M6_DEF,  M6_DEF_B, sizeof M6_DEF_B, 0, 1 },
         };
+        entry s[] = {
+            { S6_MESH, S6_MESH_B, sizeof S6_MESH_B, 0, 0 },
+            { S6_SKL,  S6_SKL_B, sizeof S6_SKL_B, 0, 0 },
+            { S6_DEF,  S6_DEF_B, sizeof S6_DEF_B, 0, 0 },
+        };
         write_container(d6, "gameresources", g, 5);
-        write_container(d6, "snap_gameresources", g, 0);
+        write_container(d6, "snap_gameresources", s, 3);
     }
+}
+
+static int has_need(const sh_mb_file *f, const char *type, const char *name)
+{
+    size_t k;
+    for (k = 0; f && k < f->need_count; k++)
+        if (!strcmp(f->needs[k].type, type) && !strcmp(f->needs[k].name, name)) return 1;
+    return 0;
+}
+
+/* A model is one unit: an md6Def's needs name its mesh, the skeleton the
+ * cooked mesh names, and that skeleton's default clip, whether the mesh is
+ * SnapMap's (names only, no pointer), the mod's own or campaign-only (the
+ * closure brings all three). */
+static void test_whole_models(const char *tmp)
+{
+    char d6[MAX_PATH * 2], dir[MAX_PATH * 2];
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+
+    _snprintf_s(d6, sizeof d6, _TRUNCATE, "%s\\d6", tmp);
+    make_install6(d6);
+    sh_modstock_set_install(d6);
+
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model1", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.model\",\"name\":\"Model test\"}");
+    /* A carried md6Def naming SnapMap's mesh. */
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\card.md6.decl",
+             "{\r\n\tinit {\r\n\t\tmesh \"s6/card.md6mesh\"\r\n\t}\r\n}\r\n");
+    /* One naming the mod's own mesh, whose header names SnapMap's skeleton. */
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\own.md6.decl",
+             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/t.model/own.md6mesh\"\r\n\t}\r\n}\r\n");
+    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\t.model\\own.bmd6model", OWN6_MESH_B, sizeof OWN6_MESH_B);
+    /* One whose mesh names a skeleton nothing holds: nothing is added for it. */
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\none.md6.decl",
+             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/t.model/none.md6mesh\"\r\n\t}\r\n}\r\n");
+    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\t.model\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    if (b.errors) fprintf(stderr, "  models: %s\n", b.first_cause);
+    CHECK(b.stock_count == 0 && b.file_count == 5);
+    f = find(&b, "generated/decls/md6def/mods/t.model/card.md6.decl");
+    CHECK(f && f->need_count == 3 && has_need(f, "baseModel", "s6/card.md6mesh") &&
+          has_need(f, "skeleton", "s6/card.md6skl") && has_need(f, "anim", "s6/card.md6skl/_default.md6anim"));
+    f = find(&b, "generated/decls/md6def/mods/t.model/own.md6.decl");
+    CHECK(f && f->need_count == 3 && has_need(f, "skeleton", "s6/card.md6skl") &&
+          has_need(f, "anim", "s6/card.md6skl/_default.md6anim"));
+    f = find(&b, "generated/decls/md6def/mods/t.model/none.md6.decl");
+    CHECK(f && f->need_count == 1);
+    CHECK(b.needs.stock == 5 && b.needs.local == 2 && b.needs.unresolved == 0);
+    CHECK(b.canonical && strstr(b.canonical, "s6/card.md6skl/_default.md6anim") != NULL);
+    sh_mb_free(&b);
+
+    /* A campaign-only md6Def naming only its mesh: the closure brings the
+     * mesh, the skeleton the mesh names and its default clip. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model2", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.model\",\"name\":\"Model test\"}");
+    mt_write(dir, "assets\\generated\\decls\\animweb\\mods\\t.model\\door.decl",
+             "// the mod's web\r\n{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k6/door.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 4);
+    f = find(&b, M6_MD6);
+    CHECK(f && f->closure && has_need(f, "skeleton", "k6/door.md6skl") && has_need(f, "anim", "k6/door.md6skl/_default.md6anim"));
+    CHECK(find(&b, M6_MESH) && find(&b, M6_SKL) && find(&b, M6_DEF) && find(&b, M6_DEF)->closure);
+    sh_mb_free(&b);
 }
 
 /* The store's own build (the rescan's, in place, with every installed bundle
@@ -893,7 +970,7 @@ static void test_closure_store_path(const char *tmp)
 {
     char d6[MAX_PATH * 2], store[MAX_PATH * 2], other[MAX_PATH * 2], surf[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1];
     char cause[SH_MB_CAUSE_MAX], hash[65];
-    const char *chain[] = { M6_MD6, M6_MESH };
+    const char *chain[] = { M6_MD6, M6_MESH, M6_SKL, M6_DEF };
     sh_ms_install_stats st;
     sh_ms_sync_stats ss;
     sh_mb_bundle b;
@@ -911,17 +988,17 @@ static void test_closure_store_path(const char *tmp)
     mt_write(other, "mod.json", "{\"id\":\"t.other6\",\"name\":\"Other\",\"stock\":{"
              "\"" M6_MD6 "\":{\"source\":\"" M6_MD6 "\"},\"" M6_MESH "\":{\"source\":\"" M6_MESH "\"},"
              "\"" M6_SKL "\":{\"source\":\"" M6_SKL "\"},\"" M6_DEF "\":{\"source\":\"" M6_DEF "\"}}}");
-    put_rel(other, "assets/generated/image/mods/t.other6/own.bimage", OTHER6_B, sizeof OTHER6_B);
+    put_rel(other, "assets/generated/image/mods/t.other6/own.bimage", S6_SKL_B, 8);
     CHECK(sh_ms_install_from_folder(other, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
     /* The hand-made folder: the game's animWeb, byte for byte. */
     mt_write(surf, "mod.json", "{\"id\":\"t.surf6\",\"name\":\"Surface\"}");
     put_rel(surf, "assets\\" M6_WEB, M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
-    CHECK(sh_mb_load_folder(surf, &b) && b.rules == SH_MB_RULES && b.file_count == 3 && b.stock_count == 3);
+    CHECK(sh_mb_load_folder(surf, &b) && b.rules == SH_MB_RULES && b.file_count == 5 && b.stock_count == 5);
     f = find(&b, M6_WEB);
     CHECK(f && f->stock && f->cls == SH_MB_CLASS_SURFACE && !f->closure);
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < 4; i++) {
         f = find(&b, chain[i]);
         CHECK(f && f->stock && f->closure && f->stock_source && !strcmp(f->stock_source, chain[i]));
     }
@@ -931,7 +1008,7 @@ static void test_closure_store_path(const char *tmp)
      * own earlier build installed, derives the same set and hash. */
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
     CHECK(sh_ms_install_from_folder(surf, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
-    CHECK(b.stock_count == 3 && !strcmp(b.hash, hash) && find(&b, M6_MESH) && find(&b, M6_MESH)->closure);
+    CHECK(b.stock_count == 5 && !strcmp(b.hash, hash) && find(&b, M6_SKL) && find(&b, M6_SKL)->closure);
     sh_mb_free(&b);
     sh_ms_set_root(NULL);
 }
@@ -1185,6 +1262,7 @@ int main(void)
     test_campaign_closure(tmp);
     test_closure_recomputed(tmp);
     test_closure_effects(tmp);
+    test_whole_models(tmp);
     test_closure_store_path(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);

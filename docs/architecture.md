@@ -481,9 +481,9 @@ These backend files share the work:
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
-  below, rules 4 its effects, movies and atlases, and rules 5 a closure no
-  other installed mod stands in for, so every installed folder is built
-  again once.
+  below, rules 4 its effects, movies and atlases, rules 5 a closure no
+  other installed mod stands in for, and rules 6 whole models, so every
+  installed folder is built again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -565,8 +565,19 @@ These backend files share the work:
   `colormaskmap`) needs nothing when the material has a row in the installed
   `virtualtextures/_vmtr*.vmtr`, whose baked pages the engine samples. A
   name of these kinds no archive holds is reported, not refused, like an
-  animWeb clip. The derived pointers are recomputed every build, never
-  carried forward: the product block lists them in `stock` with
+  animWeb clip. A model is one unit (`mb_model_needs`): the engine loads an
+  md6Def's mesh, then the skeleton whose name the cooked mesh carries (a
+  little-endian u32 length at 0x0C, then the name; "MM" at byte 2), then that
+  skeleton's default clip `<skeleton>/_default.md6anim`
+  (`cooked/anim/<skeleton>/_default.bmd6anim`). An md6Def usually names only
+  the mesh, so for every md6Def a bundle serves (carried, a pointer, a
+  surface or brought by the closure) the builder reads the mesh's skeleton
+  name from the bundle's own copy, else the installed one SnapMap loads
+  first, and records the skeleton and the default clip as needs beside the
+  mesh when something holds them. These are names: SnapMap's stock adds no
+  pointer, a campaign-only skeleton or clip becomes one. The derived
+  pointers are recomputed every build, never carried forward: the product
+  block lists them in `stock` with
   `"closure": true`, a rebuild drops them and derives the set again from its
   own needs (a pointer whose need is gone is gone, and the hash changes; an
   unchanged folder keeps its hash), while an author `stock` entry and a
@@ -575,8 +586,10 @@ These backend files share the work:
   `gameresources` holds to the closure the same way. Measured on build
   13954591: the owner's SP doors folder gains 29 pointers (the
   wallhealthstation, access panel and desk scanner md6Defs, 8 meshes and 18
-  clips), through the store's build as through a bare one; of the six campaign-interactables families of fidelity85, `-1`
-  gains `player/crucible_eyes` and `-2` the crucible particles, ribbon and
+  clips), 40 with whole models (the 8 meshes' skeletons and 3 default clips),
+  through the store's build as through a bare one; of the six
+  campaign-interactables families of fidelity85, `-1` gains
+  `player/crucible_eyes` and `-2` the crucible particles, ribbon and
   materials, the gauss_beam transparency atlas and the `switch2_up` and
   `automap_hell` movies with their atlases (11 names, the ones fidelity87
   added by hand); the other four gain none.
@@ -1485,8 +1498,12 @@ watermark, `me_editor_rows`) and before the Play level load
 editor spawn) is kept before the first purge that follows. A log line
 `<phase>: N resource(s) kept decls hold kept for the session with them` names
 what it raised. Nothing the product keeps is released in a session, and a
-name a kept decl no longer needs is not raised by later runs. What the needs
-do not name (a stock mesh's materials, a skeleton a cooked mesh or clip names
+name a kept decl no longer needs is not raised by later runs. Since rules 6
+an md6Def's needs name its mesh's skeleton and default clip too (read from the
+cooked mesh, see the builder), so a raised mesh never keeps a skeleton at 1
+that the Play purge frees (the keycard of
+`interact/yellow_key_tech_corpse`, VK 0x1a05687; snaphak-re triage V2, F7).
+What the needs do not name (a stock mesh's materials, a skeleton a clip names
 only in its bytes) is outside the rule.
 
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":

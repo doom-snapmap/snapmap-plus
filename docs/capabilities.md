@@ -210,6 +210,10 @@ name". Mods you download or import are never refused on their files. A map whose
   is copied or uploaded; the build notes "N game files borrowed for completeness". The set is
   worked out again on every build, so what nothing needs any more is dropped, and a mod brings its
   own even when another installed mod already points at the same files.
+- A mod's models are kept whole. For every model a mod serves, the build reads the skeleton name
+  from the model's mesh and records that skeleton and its default animation beside the mesh, so
+  the game keeps all three for the session together and never finds a model whose skeleton was
+  released.
 - Installed mods are served after the product's own files and before the game's archives. A mod's
   new editor rows appear in the palette when the editor is first opened; a mod installed after that
   needs `sh_mods palette rebuild`. A mod that fails a check is skipped on its own with one logged
