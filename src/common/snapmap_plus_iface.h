@@ -491,6 +491,9 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
                                                 a map loads or a store write holds the lock */
 #define SH_MODS_ACT_CHOOSE             18    /* arg: "<slot>\t<key>": the open map's registry choice (an empty key clears) */
 /* 19 is retired (the map upgrade action: an own map follows its folder at load and save). */
+#define SH_MODS_ACT_FILES              20    /* arg: key: the mod folder's files (read-only; no fresh list follows) */
+#define SH_MODS_ACT_FILE_TEXT          21    /* arg: "<key>\t<path below the folder>": one text file (read-only; no list) */
+#define SH_MODS_ACT_NEW_MOD            22    /* arg: a display name: a new mod folder with a working example, then the rescan */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

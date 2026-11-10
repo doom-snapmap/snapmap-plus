@@ -156,6 +156,20 @@ static void test_bridge(const char *d1)
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     sh_modstock_get_stats(&ss);
     CHECK(ss.loaded == 1 && ss.rows == 5 && ss.reads >= 3);
+    /* Which part of the install holds a source (the Files view's game files):
+     * one archive by name, a name both hold decided by the bytes, a loose file. */
+    {
+        char where[32];
+        CHECK(sh_modstock_container(P_ANIM, NULL, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, "gameresources"));
+        hex_of(IMG_B2, sizeof IMG_B2, h);
+        CHECK(sh_modstock_container(P_IMAGE, h, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, "snap_gameresources"));
+        hex_of(IMG_B, sizeof IMG_B, h);
+        CHECK(sh_modstock_container(P_IMAGE, h, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, "gameresources"));
+        CHECK(sh_modstock_container(P_LOOSE, NULL, where, sizeof where) == SH_MB_STOCK_OK && !strcmp(where, "loose"));
+        CHECK(sh_modstock_container("x/none.decl", NULL, where, sizeof where) == SH_MB_STOCK_ABSENT && !where[0]);
+        sh_modstock_register();
+        CHECK(sh_mb_stock_container(P_ANIM, NULL, where, sizeof where) && !strcmp(where, "gameresources"));
+    }
 
     /* No installed index: unavailable, never "absent". */
     {

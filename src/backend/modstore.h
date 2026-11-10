@@ -309,6 +309,14 @@ void sh_ms_note_build_failure(const char *folder, const char *cause);
  * the key and the absolute folder; 0 with the cause. */
 int  sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
                    char *cause, size_t cause_cap);
+/* New mod from the Mods tab: as sh_ms_new_mod, plus an example that places
+ * and plays untouched: an entityDef at mods/<key>/example_crate (the game's
+ * SnapMap crate01 model), its Toybox row (snapEditorEntityDef) and the row's
+ * strings in mod.json's author block (a category named after the mod, the
+ * row's name and description). Nothing binary. `example_out` receives the
+ * row's path below the folder, with '/'. */
+int  sh_ms_new_mod_example(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                           char *example_out, size_t example_cap, char *cause, size_t cause_cap);
 
 /* A hand-made folder's first build (DESIGN-additive 2.2): when `folder` is a
  * mod folder of the store whose descriptor has neither an author "id" nor a

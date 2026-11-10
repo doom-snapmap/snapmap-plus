@@ -202,7 +202,18 @@ int  sh_modui_list(void);
  * The uninstall's dry run reports, with the consequences, how many local
  * saves (My Maps, savegame.user\<profile>\SNAPMAPS<id>\map.decl) carry a
  * row of the mod ("savedMaps") and whether the undo history is cleared
- * ("undoCleared": a map is open). */
+ * ("undoCleared": a map is open).
+ *
+ * FILES (arg: a key) lists the mod folder's files and the pointers its last
+ * good build reads from the install: {key, name, cause, files: [{path, size,
+ * kind, class, game, container, inFolder, cause}], truncated}. FILE_TEXT
+ * (arg: "<key>\t<path below the folder>") answers one text file, at most
+ * 1 MiB of UTF-8 ({key, path, size, text, productBlock, cause}; mod.json
+ * without its product block); a path outside the folder, a binary kind and
+ * a file the folder does not hold are refused. Both read only and change
+ * nothing. NEW_MOD (arg: a display name) makes a mod folder with a working
+ * example (sh_ms_new_mod_example) and rescans, so its first build runs:
+ * {key, file: the example Toybox row's path}. */
 int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:

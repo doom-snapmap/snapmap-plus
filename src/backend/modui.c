@@ -1082,6 +1082,17 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     mu_kbool(b, "duplicateId", r->duplicate, 0);
     mu_knum(b, "editorRows", (unsigned)u->editor_rows, 0);
     mu_kstr(b, "folder", mu_leaf(e->folder), 0);
+    {
+        /* The organizing folder it sits in under mods\ ("" at the root): its
+         * key ("group\x", sh_ms_entry.name) without the last part. */
+        char group[SH_MS_NAME_MAX + 1];
+        char *cut;
+        strcpy_s(group, sizeof group, e->name);
+        cut = strrchr(group, '\\');
+        if (cut) *cut = 0;
+        else group[0] = 0;
+        mu_kstr(b, "group", group, 0);
+    }
     mu_put_row_v3(b, m, rec, u);
     mu_putn(b, "}", 1);
 }
@@ -2126,6 +2137,9 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN: return "watchRescan";
     case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
+    case SH_MODS_ACT_FILES: return "modFiles";
+    case SH_MODS_ACT_FILE_TEXT: return "modFileText";
+    case SH_MODS_ACT_NEW_MOD: return "newMod";
     default: return "unknown";
     }
 }
@@ -4122,6 +4136,347 @@ static int mu_rebuild(const char *key)
     }
 }
 
+/* ---- the Files view (read-only) and New mod */
+
+#define MU_FILES_MAX  8192u              /* files listed per mod folder; "truncated" says when there are more */
+#define MU_TEXT_MAX   (1024u * 1024u)    /* the largest text file the view shows */
+
+/* The kinds the view shows as text; every other file is binary. */
+static int mu_text_kind(const char *path)
+{
+    static const char *const ext[] = { ".decl", ".json", ".txt", ".md", ".cfg", ".entities", NULL };
+    int i;
+    for (i = 0; ext[i]; i++) if (mu_suffix(path, ext[i])) return 1;
+    return 0;
+}
+
+typedef struct mu_disk_file { char *path; unsigned long long size; } mu_disk_file;
+typedef struct mu_disk { mu_disk_file *v; size_t n, cap; int truncated; } mu_disk;
+
+/* Every file under `abs` (UTF-8), with its path below the mod folder ('/').
+ * Dot folders and files (.builds, .git) and reparse points are skipped. */
+static void mu_walk(const char *abs, const char *rel, mu_disk *d, int depth)
+{
+    char pattern[MAX_PATH * 4 + 8];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    if (depth > 32) return;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", abs);
+    h = mu_find_first(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char *name, *crel, *cabs;
+        size_t nl;
+        if (fd.cFileName[0] == L'.' || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        name = sh_mb_utf8(fd.cFileName);
+        if (!name) continue;
+        nl = strlen(rel) + strlen(name) + 2;
+        crel = (char *)malloc(nl);
+        cabs = (char *)malloc(strlen(abs) + strlen(name) + 2);
+        if (crel && cabs) {
+            _snprintf_s(crel, nl, _TRUNCATE, "%s%s%s", rel, rel[0] ? "/" : "", name);
+            _snprintf_s(cabs, strlen(abs) + strlen(name) + 2, _TRUNCATE, "%s\\%s", abs, name);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) mu_walk(cabs, crel, d, depth + 1);
+            else if (d->n >= MU_FILES_MAX) d->truncated = 1;
+            else {
+                if (d->n == d->cap) {
+                    size_t nc = d->cap ? d->cap * 2 : 64;
+                    mu_disk_file *nv = (mu_disk_file *)realloc(d->v, nc * sizeof *nv);
+                    if (nv) { d->v = nv; d->cap = nc; }
+                }
+                if (d->n < d->cap) {
+                    d->v[d->n].path = crel;
+                    d->v[d->n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                    d->n++;
+                    crel = NULL;
+                }
+            }
+        }
+        free(crel);
+        free(cabs);
+        free(name);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void mu_disk_free(mu_disk *d)
+{
+    size_t i;
+    for (i = 0; i < d->n; i++) free(d->v[i].path);
+    free(d->v);
+    memset(d, 0, sizeof *d);
+}
+
+/* Whether `cause` names `path` as a whole path (case-insensitive): the
+ * builder's causes start with the file's assets/ path, or name its request. */
+static int mu_cause_names(const char *cause, const char *path)
+{
+    size_t n = path ? strlen(path) : 0;
+    const char *p;
+    if (!cause || !n) return 0;
+    for (p = cause; *p; p++) {
+        char before = p > cause ? p[-1] : ' ', after;
+        if (_strnicmp(p, path, n)) continue;
+        after = p[n];
+        if (isalnum((unsigned char)before) || strchr("_./-\\", before)) continue;
+        /* the path ends there: the end, punctuation, or a full stop ending the sentence */
+        if (!after || strchr(" \t:,;)'\"", after) || (after == '.' && !isalnum((unsigned char)p[n + 1]))) return 1;
+    }
+    return 0;
+}
+
+/* The cause that belongs to one file of the folder, or "". */
+static const char *mu_file_cause(const char *cause, const char *path)
+{
+    if (mu_cause_names(cause, path)) return cause;
+    if (!_strnicmp(path, "assets/", 7) && mu_cause_names(cause, path + 7)) return cause;
+    return "";
+}
+
+/* The mod's standing cause: its latest build's refusal while the last good
+ * build serves, else why the folder serves nothing. */
+static const char *mu_entry_cause(const sh_ms_entry *e)
+{
+    if (e->build_failed[0]) return e->build_failed;
+    if (!sh_ms_entry_usable(e)) return e->cause;
+    return "";
+}
+
+static const char *mu_class_name(const sh_mb_file *f)
+{
+    switch (f->cls) {
+    case SH_MB_CLASS_ADD:     return "add";
+    case SH_MB_CLASS_BORROW:  return "borrow";
+    case SH_MB_CLASS_REPLACE: return f->edited || f->edit ? "edit" : "replace";
+    case SH_MB_CLASS_EDITOR:  return "editor";
+    case SH_MB_CLASS_SURFACE: return "surface";
+    default:                  return "";
+    }
+}
+
+static const sh_ms_entry *mu_entry_named(const sh_ms_list *l, const char *key)
+{
+    size_t i;
+    for (i = 0; key && key[0] && i < l->count; i++) if (!_stricmp(l->items[i].name, key)) return &l->items[i];
+    return NULL;
+}
+
+static void mu_put_file(mu_buf *b, int first, const char *path, unsigned long long size, int in_folder,
+                        const sh_mb_file *f, const char *cause)
+{
+    char where[32] = "";
+    int descriptor = !_stricmp(path, "mod.json") || !_stricmp(path, "package.json");
+    if (f && f->stock && f->stock_source) sh_mb_stock_container(f->stock_source, f->blob, where, sizeof where);
+    if (!first) mu_putn(b, ",", 1);
+    mu_putn(b, "{", 1);
+    mu_kstr(b, "path", path, 1);
+    mu_knum(b, "size", size, 0);
+    mu_kstr(b, "kind", mu_text_kind(path) ? "text" : "binary", 0);
+    mu_kstr(b, "class", descriptor ? "descriptor" : f ? mu_class_name(f) : "", 0);
+    mu_kbool(b, "game", f && f->stock, 0);
+    mu_kstr(b, "container", where, 0);
+    mu_kbool(b, "inFolder", in_folder, 0);
+    mu_kstr(b, "cause", cause, 0);
+    mu_putn(b, "}", 1);
+}
+
+/* modFiles: every file of the folder and every pointer its last good build
+ * reads from the install, each with its class, whether it is the game's own
+ * bytes and which archive holds them, and the cause that names it. */
+static int mu_files(const char *key)
+{
+    const int action = SH_MODS_ACT_FILES;
+    sh_ms_list l;
+    const sh_ms_entry *e;
+    mu_disk d;
+    mu_buf b;
+    size_t i, k;
+    int first = 1;
+    unsigned char *seen;
+    const char *cause;
+    if (!key || !key[0]) return mu_simple_result(action, 0, "Select a mod to see its files.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "The mods folder cannot be read.");
+    e = mu_entry_named(&l, key);
+    if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
+    memset(&d, 0, sizeof d);
+    mu_walk(e->folder, "", &d, 0);
+    seen = (unsigned char *)calloc(e->loaded && e->bundle.file_count ? e->bundle.file_count : 1, 1);
+    cause = mu_entry_cause(e);
+    memset(&b, 0, sizeof b);
+    mu_result_head(&b, action, 1, "");
+    mu_kstr(&b, "key", e->name, 0);
+    mu_kstr(&b, "name", e->loaded && e->bundle.name ? e->bundle.name : "", 0);
+    mu_kstr(&b, "cause", cause, 0);
+    mu_key(&b, "files", 0);
+    mu_putn(&b, "[", 1);
+    for (i = 0; i < d.n; i++) {
+        const sh_mb_file *f = NULL;
+        for (k = 0; e->loaded && k < e->bundle.file_count && !f; k++)
+            if (!_stricmp(e->bundle.files[k].path, d.v[i].path)) { f = &e->bundle.files[k]; if (seen) seen[k] = 1; }
+        mu_put_file(&b, first, d.v[i].path, d.v[i].size, 1, f, mu_file_cause(cause, d.v[i].path));
+        first = 0;
+    }
+    /* Pointers the folder does not hold ("inAssets": false): read from the install. */
+    for (k = 0; e->loaded && k < e->bundle.file_count; k++) {
+        const sh_mb_file *f = &e->bundle.files[k];
+        if (seen && seen[k]) continue;
+        mu_put_file(&b, first, f->path, f->size, 0, f, mu_file_cause(cause, f->path));
+        first = 0;
+    }
+    mu_putn(&b, "]", 1);
+    mu_kbool(&b, "truncated", d.truncated, 0);
+    free(seen);
+    mu_disk_free(&d);
+    sh_ms_list_free(&l);
+    return mu_result_tail(&b);
+}
+
+/* A path below a mod folder: relative, no drive, no empty, "." or ".." part. */
+static int mu_rel_ok(const char *rel)
+{
+    const char *s = rel;
+    if (!rel || !rel[0] || strchr(rel, ':') || rel[0] == '/' || rel[0] == '\\') return 0;
+    while (*s) {
+        size_t n = strcspn(s, "/\\");
+        if (n == 0 || (n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) return 0;
+        s += n;
+        if (*s) s++;
+        if (!*s && (s[-1] == '/' || s[-1] == '\\')) return 0;
+    }
+    return 1;
+}
+
+/* Well-formed UTF-8 without NUL bytes: what the page can show as text. */
+static int mu_utf8_text(const unsigned char *p, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = p[i];
+        size_t k, len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+        if (!c || !len || (len == 2 && c < 0xC2) || i + len > n) return 0;
+        for (k = 1; k < len; k++) if ((p[i + k] & 0xC0) != 0x80) return 0;
+        i += len;
+    }
+    return 1;
+}
+
+/* modFileText ("<key>\t<path>"): one text file of the folder, at most 1 MiB.
+ * mod.json comes without the product block, which Snapmap+ writes. */
+static int mu_file_text(const char *arg)
+{
+    const int action = SH_MODS_ACT_FILE_TEXT;
+    char key[SH_MS_NAME_MAX + 1], rel[MAX_PATH * 2], full[MAX_PATH * 6], msg[MAX_PATH * 2 + 160], *c;
+    const char *tab = arg ? strchr(arg, '\t') : NULL;
+    sh_ms_list l;
+    const sh_ms_entry *e;
+    unsigned char *text = NULL;
+    char *author = NULL;
+    size_t len = 0, alen = 0;
+    int had_block = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    wchar_t *w;
+    mu_buf b;
+    if (!tab || (size_t)(tab - arg) >= sizeof key || strlen(tab + 1) >= sizeof rel)
+        return mu_simple_result(action, 0, "Choose a file of a mod.");
+    memcpy(key, arg, (size_t)(tab - arg));
+    key[tab - arg] = 0;
+    strcpy_s(rel, sizeof rel, tab + 1);
+    if (!mu_rel_ok(rel)) return mu_simple_result(action, 0, "That file is not inside the mod's folder.");
+    if (!mu_text_kind(rel)) return mu_simple_result(action, 0, "This file is binary; it has no text to show.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "The mods folder cannot be read.");
+    e = mu_entry_named(&l, key);
+    if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
+    _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", e->folder, rel);
+    for (c = full; *c; c++) if (*c == '/') *c = '\\';
+    w = sh_mb_wpath(full);
+    if (!w || !GetFileAttributesExW(w, GetFileExInfoStandard, &fa) || (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        free(w);
+        sh_ms_list_free(&l);
+        return mu_simple_result(action, 0, "The mod's folder does not hold this file; it is read from your install.");
+    }
+    free(w);
+    if (fa.nFileSizeHigh || fa.nFileSizeLow > MU_TEXT_MAX) {
+        sh_ms_list_free(&l);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is larger than 1 MB; open it in a text editor from the mod's folder.", rel);
+        return mu_simple_result(action, 0, msg);
+    }
+    text = sh_mb_read_file(full, MU_TEXT_MAX, &len);
+    if (!text) {
+        sh_ms_list_free(&l);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be read; close any program that holds it and try again.", rel);
+        return mu_simple_result(action, 0, msg);
+    }
+    {
+        /* A UTF-8 byte order mark is not part of the text. */
+        size_t skip = len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF ? 3 : 0;
+        if (skip) { memmove(text, text + 3, len - 3); len -= 3; text[len] = 0; }
+    }
+    if (!mu_utf8_text(text, len)) {
+        free(text);
+        sh_ms_list_free(&l);
+        return mu_simple_result(action, 0, "This file is not plain text; it cannot be shown here.");
+    }
+    if (!strchr(rel, '/') && !strchr(rel, '\\') && !_stricmp(rel, "mod.json"))
+        author = sh_mb_author_bytes((const char *)text, len, &alen, &had_block);
+    memset(&b, 0, sizeof b);
+    mu_result_head(&b, action, 1, "");
+    mu_kstr(&b, "key", e->name, 0);
+    mu_kstr(&b, "path", rel, 0);
+    mu_knum(&b, "size", len, 0);
+    mu_key(&b, "text", 0);
+    if (author && had_block) {
+        char *t = (char *)malloc(alen + 1);
+        if (t) { memcpy(t, author, alen); t[alen] = 0; }
+        mu_str(&b, t ? t : "");
+        free(t);
+    } else mu_str(&b, (const char *)text);
+    mu_kbool(&b, "productBlock", author && had_block, 0);
+    mu_kstr(&b, "cause", mu_file_cause(mu_entry_cause(e), rel), 0);
+    free(author);
+    free(text);
+    sh_ms_list_free(&l);
+    return mu_result_tail(&b);
+}
+
+/* newMod: a mod folder under a generated key with a working example (an
+ * entityDef and its Toybox row), built at once by the rescan, so the list
+ * shows it installed and the Toybox has its row. */
+static int mu_new_mod(const char *name)
+{
+    const int action = SH_MODS_ACT_NEW_MOD;
+    char key[SH_MB_ID_MAX + 1], folder[MAX_PATH * 4], example[MAX_PATH], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 200], note[160];
+    sh_ms_list l;
+    const sh_ms_entry *e;
+    int ok;
+    mu_buf b;
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    if (!sh_ms_new_mod_example(name, key, folder, sizeof folder, example, sizeof example, cause, sizeof cause)) {
+        mu_log("new mod: refused: %s", cause);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No mod was created: %s.", cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    mu_log("new mod: mods\\%s with its example %s", key, example);
+    mu_rescan(note, sizeof note);
+    ok = sh_ms_enumerate(&l);
+    e = ok ? mu_entry_named(&l, key) : NULL;
+    if (e && sh_ms_entry_usable(e) && !e->build_failed[0])
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s. Its Example crate is in the Toybox.", name, key);
+    else
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s, but it does not serve yet: %s", name, key,
+                    e ? (mu_entry_cause(e)[0] ? mu_entry_cause(e) : "not read yet") : "the mods folder cannot be read");
+    InterlockedIncrement(&g_gen);
+    memset(&b, 0, sizeof b);
+    mu_result_head(&b, action, 1, msg);
+    mu_kstr(&b, "key", key, 0);
+    mu_kstr(&b, "file", example, 0);
+    mu_kstr(&b, "index", note, 0);
+    if (ok) sh_ms_list_free(&l);
+    return mu_result_tail(&b);
+}
+
 /* ---- the console verbs */
 
 static void mu_say_scope(void *context, const char *line) { mu_line((const mu_out *)context, "map: %s", line); }
@@ -4475,6 +4830,12 @@ int sh_modui_run(int action, const char *arg)
         slot[tab - arg] = 0;
         return mu_choose(slot, tab + 1, NULL);
     }
+    case SH_MODS_ACT_FILES:
+        return mu_files(arg);
+    case SH_MODS_ACT_FILE_TEXT:
+        return mu_file_text(arg);
+    case SH_MODS_ACT_NEW_MOD:
+        return mu_new_mod(arg);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

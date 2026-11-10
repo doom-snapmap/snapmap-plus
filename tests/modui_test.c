@@ -86,6 +86,10 @@ static const char *const STOCK[] = {
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/meleeforward02.bmd6anim",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim",
     "generated/decls/entitydef/monster/imp.decl",
+    /* what New mod's example crate names: the game's SnapMap crate */
+    "cooked/model/models/snapmaps/props/new/crate01.bmodel",
+    "generated/decls/material/textures/guis/snapmaps/entity_icons/prop/crate01.decl",
+    "generated/decls/snapeditorentitydef/prop/prop_base.decl",
     NULL
 };
 static int fake_stock(const char *request)
@@ -756,6 +760,26 @@ static int imp_read(void *c, const char *source, const char *sha, unsigned char 
     return SH_MB_STOCK_OK;
 }
 static const sh_mb_stock_ops g_imp_ops = { NULL, NULL, imp_identify, NULL, imp_read };
+
+/* The Files view's reader: the same game decl, verified, and the archive that holds it. */
+static int files_verify(void *c, const char *source, const char *sha, unsigned long long *size)
+{
+    char want[SH_MB_HASH_HEX + 1];
+    (void)c;
+    if (_stricmp(source, "generated/decls/entitydef/monster/imp.decl")) return SH_MB_STOCK_ABSENT;
+    sh_mb_sha256_hex(IMP_STOCK, strlen(IMP_STOCK), want);
+    if (_stricmp(sha, want)) return SH_MB_STOCK_MISMATCH;
+    if (size) *size = strlen(IMP_STOCK);
+    return SH_MB_STOCK_OK;
+}
+static int files_container(void *c, const char *source, const char *sha, char *out, size_t cap)
+{
+    (void)c; (void)sha;
+    if (_stricmp(source, "generated/decls/entitydef/monster/imp.decl")) return SH_MB_STOCK_ABSENT;
+    strcpy_s(out, cap, "gameresources");
+    return SH_MB_STOCK_OK;
+}
+static const sh_mb_stock_ops g_files_ops = { NULL, NULL, imp_identify, files_verify, imp_read, files_container };
 
 static void put_shadow_mod(const char *folder, const char *id, const char *body)
 {
@@ -2582,6 +2606,138 @@ int main(int argc, char **argv)
         g_doctor[0] = 0;
         CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);
         CHECK(has(g_doctor, "MODS: uninstall twin.key: twin.key is not installed.\n"));
+    }
+
+    printf("-- an organizing folder: its mods' rows name it as their group\n");
+    {
+        char nested[MAX_PATH * 2];
+        _snprintf_s(nested, sizeof nested, _TRUNCATE, "%s\\group1\\alex.nested", g_root);
+        put_plain_mod(nested, "alex.nested", "1.0.0", "{\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+        doc = list_doc();
+        CHECK(has(doc, "\"key\":\"group1\\\\alex.nested\",") && bundle_has(doc, "group1\\\\alex.nested", "\"folder\":\"alex.nested\",\"group\":\"group1\""));
+        free(doc);
+    }
+
+    printf("-- the Files view: every file with its class, a game file's archive, a refused file's cause\n");
+    {
+        char fm[MAX_PATH * 2], arg[MAX_PATH * 2];
+        sh_mb_set_stock_ops(&g_files_ops);
+        _snprintf_s(fm, sizeof fm, _TRUNCATE, "%s\\alex.files", g_root);
+        mt_write(fm, "mod.json", "{\"id\":\"alex.files\",\"version\":\"1.0.0\",\"name\":\"Files\",\"author\":\"t\","
+                                 "\"stock\":{\"generated/decls/entitydef/mods/alex.files/imp_copy.decl\":"
+                                 "{\"source\":\"generated/decls/entitydef/monster/imp.decl\"}}}");
+        mt_write(fm, "assets\\generated\\decls\\entitydef\\mods\\alex.files\\own.decl",
+                 "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "alex.files");
+        if (!has(doc, "\"class\":\"borrow\"")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "\"action\":\"modFiles\",\"ok\":true,\"message\":\"\",\"key\":\"alex.files\",\"name\":\"Files\",\"cause\":\"\""));
+        CHECK(has(doc, "{\"path\":\"mod.json\",\"size\":"));
+        CHECK(has(doc, "\"kind\":\"text\",\"class\":\"descriptor\",\"game\":false,\"container\":\"\",\"inFolder\":true,\"cause\":\"\"}"));
+        CHECK(has(doc, "{\"path\":\"assets/generated/decls/entitydef/mods/alex.files/own.decl\",\"size\":"));
+        CHECK(has(doc, "\"kind\":\"text\",\"class\":\"add\",\"game\":false,\"container\":\"\",\"inFolder\":true,\"cause\":\"\"}"));
+        /* the author's pointer: the folder does not hold it; the install's campaign and multiplayer archive does */
+        CHECK(has(doc, "{\"path\":\"assets/generated/decls/entitydef/mods/alex.files/imp_copy.decl\",\"size\":"));
+        CHECK(has(doc, "\"kind\":\"text\",\"class\":\"borrow\",\"game\":true,\"container\":\"gameresources\",\"inFolder\":false,\"cause\":\"\"}"));
+        CHECK(has(doc, "\"truncated\":false"));
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "alex.files", "\"folder\":\"alex.files\",\"group\":\"\""));   /* at the root */
+        free(doc);
+
+        printf("-- one file's text: bounded to the folder, text kinds only, mod.json without its product block\n");
+        _snprintf_s(arg, sizeof arg, _TRUNCATE, "alex.files\tassets/generated/decls/entitydef/mods/alex.files/own.decl");
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, arg);
+        CHECK(has(doc, "\"action\":\"modFileText\",\"ok\":true") &&
+              has(doc, "\"text\":\"{\\u000d\\u000a\\u0009inherit = \\\"ai/demon/imp_coop\\\";\\u000d\\u000a}\\u000d\\u000a\","
+                       "\"productBlock\":false,\"cause\":\"\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\tmod.json");
+        CHECK(has(doc, "\"ok\":true") && has(doc, "\"productBlock\":true") && has(doc, "\\\"name\\\":\\\"Files\\\"") &&
+              !has(doc, "snapmap-plus\\\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\tassets/generated/decls/entitydef/mods/alex.files/imp_copy.decl");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"The mod's folder does not hold this file; it is read from your install.\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\t..\\alex.req\\mod.json");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That file is not inside the mod's folder.\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\tC:\\Windows\\win.ini");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That file is not inside the mod's folder.\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\tassets/generated/image/x.bimage");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"This file is binary; it has no text to show.\""));
+        free(doc);
+        mt_put(fm, "assets\\notes.txt", "a\x01" "b\xff", "wb");
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "alex.files\tassets/notes.txt");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"This file is not plain text; it cannot be shown here.\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, "nobody\tmod.json");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
+        free(doc);
+
+        /* A refused file: the latest build's cause names it; the last good build keeps serving. */
+        mt_put(fm, "assets\\generated\\decls\\entitydef\\mods\\alex.files\\broken.decl", "", "wb");
+        doc = run_doc(SH_MODS_ACT_REBUILD, "alex.files");
+        CHECK(has(doc, "\"ok\":false"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "alex.files");
+        if (!has(doc, "\"cause\":\"empty file: assets/generated/decls/entitydef/mods/alex.files/broken.decl\"}")) printf("    %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, "\"key\":\"alex.files\",\"name\":\"Files\",\"cause\":\"empty file: assets/generated/decls/entitydef/mods/alex.files/broken.decl\""));
+        CHECK(has(doc, "{\"path\":\"assets/generated/decls/entitydef/mods/alex.files/broken.decl\",\"size\":0,\"kind\":\"text\",\"class\":\"\","
+                       "\"game\":false,\"container\":\"\",\"inFolder\":true,\"cause\":\"empty file: assets/generated/decls/entitydef/mods/alex.files/broken.decl\"}"));
+        CHECK(has(doc, "\"class\":\"add\",\"game\":false,\"container\":\"\",\"inFolder\":true,\"cause\":\"\"}"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "nobody");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
+        free(doc);
+        sh_mb_set_stock_ops(NULL);
+    }
+
+    printf("-- New mod: a folder with a working example, built at once, its Toybox row named\n");
+    {
+        char key[SH_MB_ID_MAX + 1] = "", row[MAX_PATH * 2], want[400];
+        const char *k, *f;
+        const sh_ms_entry *e = NULL;
+        size_t i;
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "My first mod");
+        if (!has(doc, "Toybox.\"")) printf("    %s\n", doc ? doc : "(null)");
+        k = doc ? strstr(doc, "\"key\":\"") : NULL;
+        if (k) { k += 7; f = strchr(k, '"'); if (f && (size_t)(f - k) < sizeof key) { memcpy(key, k, (size_t)(f - k)); key[f - k] = 0; } }
+        /* the salted key, recorded at creation and kept by the first build */
+        CHECK(!strncmp(key, "my_first_mod_", 13) && strlen(key) == 13 + SH_MB_KEY_SUFFIX);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"message\":\"Created My first mod in mods\\\\%s. Its Example crate is in the Toybox.\"", key);
+        CHECK(has(doc, want));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"file\":\"assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl\"", key);
+        CHECK(has(doc, want));
+        free(doc);
+        CHECK(sh_ms_enumerate(&list));
+        for (i = 0; i < list.count && !e; i++) if (!strcmp(list.items[i].name, key)) e = &list.items[i];
+        CHECK(e && sh_ms_entry_usable(e) && !e->build_failed[0] && e->bundle.errors == 0 && !strcmp(e->bundle.id, key) &&
+              e->bundle.key_source == SH_MB_KEY_FROM_BLOCK && e->bundle.classes.adds == 2 && e->bundle.file_count == 2);
+        if (e && e->bundle.warnings) printf("    new mod warning: %s\n", e->bundle.first_warning);
+        sh_ms_list_free(&list);
+        doc = list_doc();
+        CHECK(bundle_has(doc, key, "\"name\":\"My first mod\"") && bundle_has(doc, key, "\"state\":\"installed\"") &&
+              bundle_has(doc, key, "\"editorRows\":1"));
+        CHECK(has(doc, "\"editorRowNames\":[\"Example crate\"]"));   /* the row's name from the mod's strings */
+        free(doc);
+        _snprintf_s(row, sizeof row, _TRUNCATE, "%s\tassets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", key, key);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, row);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "entityDef = \\\"mods/%s/example_crate\\\";", key);
+        CHECK(has(doc, "\"ok\":true") && has(doc, want));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: a new mod needs a name.\""));
+        free(doc);
+        g_busy = "Play is running";
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "Later");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: Play is running.\""));
+        free(doc);
+        g_busy = NULL;
     }
 
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);

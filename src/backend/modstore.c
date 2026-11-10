@@ -1571,15 +1571,88 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 
 /* ---------------------------------------------------------- new mod ---- */
 
-int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                  char *cause, size_t cap)
+/* New mod's example (DESIGN-additive 2.2): a crate that places and plays
+ * untouched. Its entityDef is the game's SnapMap crate01 under the mod's key,
+ * its Toybox row names it, and mod.json's strings give the row its name, its
+ * description and a Toybox category named after the mod. Nothing binary: the
+ * model and the preview image are the game's. */
+#define MS_EXAMPLE_DECL "example_crate"
+#define MS_EXAMPLE_DEF_DIR "assets\\generated\\decls\\entitydef\\mods\\"
+#define MS_EXAMPLE_ROW_DIR "assets\\generated\\decls\\snapeditorentitydef\\mods\\"
+
+static const char MS_EXAMPLE_DEF[] =
+    "{\r\n"
+    "\tclass = \"idProp_Coop\";\r\n"
+    "\tedit = {\r\n"
+    "\t\trenderModelInfo = {\r\n"
+    "\t\t\tmodel = \"models/snapmaps/props/new/crate01.lwo\";\r\n"
+    "\t\t}\r\n"
+    "\t\tclipModelInfo = {\r\n"
+    "\t\t\ttype = \"CLIPMODEL_AUTO\";\r\n"
+    "\t\t}\r\n"
+    "\t\tdynamicObstacle = true;\r\n"
+    "\t}\r\n"
+    "}\r\n";
+
+/* Each %s is the key. */
+static const char MS_EXAMPLE_ROW[] =
+    "{\r\n"
+    "\tinherit = \"prop/prop_base\";\r\n"
+    "\tedit = {\r\n"
+    "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\r\n"
+    "\t\tmetaCategoryNameTag = \"#str_snapentity_metacategory_toybox\";\r\n"
+    "\t\tcategoryNameTag = \"#str_%s_category\";\r\n"
+    "\t\tdisplayNameTag = \"#str_%s_" MS_EXAMPLE_DECL "_name\";\r\n"
+    "\t\tdisplayDescriptionTag = \"#str_%s_" MS_EXAMPLE_DECL "_desc\";\r\n"
+    "\t\tentityDef = \"mods/%s/" MS_EXAMPLE_DECL "\";\r\n"
+    "\t\trenderInfo = {\r\n"
+    "\t\t\trenderModelName = \"models/snapmaps/props/new/crate01.lwo\";\r\n"
+    "\t\t\talwaysDrawBounds = false;\r\n"
+    "\t\t\tsize = {\r\n"
+    "\t\t\t\tx = 54;\r\n"
+    "\t\t\t\ty = 54;\r\n"
+    "\t\t\t\tz = 54;\r\n"
+    "\t\t\t}\r\n"
+    "\t\t}\r\n"
+    "\t\tflags = {\r\n"
+    "\t\t\tplaceable = true;\r\n"
+    "\t\t}\r\n"
+    "\t}\r\n"
+    "}\r\n";
+
+static int ms_write_example(const wchar_t *dir, const char *key, char *rel_out, size_t rel_cap)
 {
-    char key[SH_MB_ID_MAX + 1], esc[SH_MB_NAME_MAX * 6 + 1], text[SH_MB_NAME_MAX * 6 + 512], *u;
+    char rel[MAX_PATH], text[sizeof MS_EXAMPLE_ROW + 4 * SH_MB_ID_MAX];
+    wchar_t *path;
+    int ok;
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MS_EXAMPLE_DEF_DIR "%s\\" MS_EXAMPLE_DECL ".decl", key);
+    path = ms_wjoin_utf8(dir, rel);
+    ok = path && ms_mkdirs_parent(path) && ms_write_text(path, MS_EXAMPLE_DEF, sizeof MS_EXAMPLE_DEF - 1);
+    free(path);
+    if (!ok) return 0;
+    _snprintf_s(text, sizeof text, _TRUNCATE, MS_EXAMPLE_ROW, key, key, key, key);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MS_EXAMPLE_ROW_DIR "%s\\" MS_EXAMPLE_DECL ".decl", key);
+    path = ms_wjoin_utf8(dir, rel);
+    ok = path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
+    free(path);
+    if (ok && rel_out && rel_cap) {
+        char *c;
+        strncpy_s(rel_out, rel_cap, rel, _TRUNCATE);
+        for (c = rel_out; *c; c++) if (*c == '\\') *c = '/';
+    }
+    return ok;
+}
+
+static int ms_new_mod(const char *name, int example, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                      char *example_out, size_t example_cap, char *cause, size_t cap)
+{
+    char key[SH_MB_ID_MAX + 1], esc[SH_MB_NAME_MAX * 6 + 1], text[SH_MB_NAME_MAX * 12 + 4 * SH_MB_ID_MAX + 1024], strings[SH_MB_NAME_MAX * 6 + 4 * SH_MB_ID_MAX + 512], *u;
     wchar_t *root = NULL, *dir = NULL, *assets = NULL, *desc = NULL, wkey[SH_MB_ID_MAX + 1];
     size_t i, n = 0, points = 0;
     int tries, ok = 0;
     if (key_out) key_out[0] = 0;
     if (folder_out && folder_cap) folder_out[0] = 0;
+    if (example_out && example_cap) example_out[0] = 0;
     while (name && (*name == ' ' || *name == '\t')) name++;
     if (!name || !name[0]) return ms_cause(cause, cap, "a new mod needs a name");
     for (i = 0; name[i]; i++) {
@@ -1612,12 +1685,25 @@ int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) { ms_cause(cause, cap, "cannot create the folder for %s: %s", key, ms_why(GetLastError(), key, 1, 0)); goto done; }
     /* The author block holds what the files cannot say (DESIGN-additive 2.9);
-     * the product block the key, which never changes afterwards. */
+     * the product block the key, which never changes afterwards. The
+     * example's Toybox text is author text: its strings. */
+    strings[0] = 0;
+    if (example)
+        _snprintf_s(strings, sizeof strings, _TRUNCATE,
+                    "  \"strings\": {\r\n    \"en\": {\r\n"
+                    "      \"%s_category\": \"%s\",\r\n"
+                    "      \"%s_" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
+                    "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
+                    "    }\r\n  },\r\n", key, esc, key, key);
     _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n"
+                "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
                 "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": 1,\r\n    \"key\": \"%s\",\r\n"
-                "    \"origin\": \"" SH_MB_ORIGIN_BY_HAND "\"\r\n  }\r\n}\r\n", esc, key);
+                "    \"origin\": \"" SH_MB_ORIGIN_BY_HAND "\"\r\n  }\r\n}\r\n", esc, strings, key);
     if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", key); goto done; }
+    if (example && !ms_write_example(dir, key, example_out, example_cap)) {
+        ms_cause(cause, cap, "cannot write the example files of mods\\%s: %s", key, ms_why(GetLastError(), key, 1, 0));
+        goto done;
+    }
     u = sh_mb_utf8(dir);
     if (folder_out && folder_cap && u)   /* the plain spelling, without the long-path prefix */
         strncpy_s(folder_out, folder_cap, !strncmp(u, "\\\\?\\", 4) && strncmp(u, "\\\\?\\UNC\\", 8) ? u + 4 : u, _TRUNCATE);
@@ -1632,6 +1718,18 @@ done:
     free(assets);
     free(desc);
     return ok;
+}
+
+int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                  char *cause, size_t cap)
+{
+    return ms_new_mod(name, 0, key_out, folder_out, folder_cap, NULL, 0, cause, cap);
+}
+
+int sh_ms_new_mod_example(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
+                          char *example_out, size_t example_cap, char *cause, size_t cap)
+{
+    return ms_new_mod(name, 1, key_out, folder_out, folder_cap, example_out, example_cap, cause, cap);
 }
 
 /* ---------------------------------------------------------- resolve ---- */

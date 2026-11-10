@@ -765,6 +765,42 @@ int sh_modstock_exists(const char *path)
     return 0;
 }
 
+int sh_modstock_container(const char *source, const char *sha256, char *out, size_t cap)
+{
+    uint32_t first, count, i;
+    unsigned char want[32];
+    char loose[MAX_PATH * 4 + 64];
+    int seen[MST_CONTAINERS] = { 0 }, which, c, kinds = 0;
+    if (out && cap) out[0] = 0;
+    if (!source || !source[0] || !out || !cap) return SH_MB_STOCK_ABSENT;
+    if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
+    /* By name first: most names sit in one archive, so nothing is hashed.
+     * A name both archives hold (with other bytes) is decided by the hash. */
+    first = mst_name_range(source, &count);
+    for (i = first; i < first + count; i++) {
+        uint32_t r = g_by_name[i];
+        if (!mst_name_eq(g_names + g_rows[r].name, source) || seen[g_rows[r].container]) continue;
+        seen[g_rows[r].container] = 1;
+        kinds++;
+    }
+    for (i = first; kinds > 1 && sha256 && mst_unhex(sha256, want) && i < first + count; i++) {
+        uint32_t r = g_by_name[i];
+        unsigned char d[32];
+        if (mst_name_eq(g_names + g_rows[r].name, source) && mst_row_sha(r, d) && !memcmp(d, want, 32)) {
+            strncpy_s(out, cap, MST_CONTAINER[g_rows[r].container], _TRUNCATE);
+            return SH_MB_STOCK_OK;
+        }
+    }
+    for (c = 0; c < MST_CONTAINERS; c++)
+        if (seen[c]) { strncpy_s(out, cap, MST_CONTAINER[c], _TRUNCATE); return SH_MB_STOCK_OK; }
+    for (which = 0; which < 2; which++)
+        if (mst_loose_path(source, which, loose, sizeof loose) && mst_loose_size(loose) >= 0) {
+            strncpy_s(out, cap, "loose", _TRUNCATE);
+            return SH_MB_STOCK_OK;
+        }
+    return SH_MB_STOCK_ABSENT;
+}
+
 /* ------------------------------------------------------- registration ---- */
 
 static int op_match(void *c, const char *request, unsigned long long size, const char *sha, char *src, size_t cap)
@@ -775,6 +811,8 @@ static int op_verify(void *c, const char *source, const char *sha, unsigned long
 { (void)c; return sh_modstock_verify(source, sha, size); }
 static int op_read(void *c, const char *source, const char *sha, unsigned char **bytes, size_t *len)
 { (void)c; return sh_modstock_read(source, sha, bytes, len); }
+static int op_container(void *c, const char *source, const char *sha, char *out, size_t cap)
+{ (void)c; return sh_modstock_container(source, sha, out, cap); }
 
 void sh_modstock_register(void)
 {
@@ -784,6 +822,7 @@ void sh_modstock_register(void)
     ops.identify = op_identify;
     ops.verify = op_verify;
     ops.read = op_read;
+    ops.container = op_container;
     sh_mb_set_stock_ops(&ops);
 }
 
