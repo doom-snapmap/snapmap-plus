@@ -358,7 +358,7 @@ static void legacy_rows(void)
     g_activate_calls = 0;
     engine = engine_text(sh_modmanifest_prepare_load(LEGACY, sizeof LEGACY - 1, &en), LEGACY, sizeof LEGACY - 1, &en);
     CHECK(engine && !strcmp(engine, BARE) && g_activate_calls == 1 && g_activate_count == 1);
-    CHECK(strstr(g_last_log, "from legacy smpmod1 rows; 1 legacy row(s) removed") != NULL);
+    CHECK(strstr(g_last_log, "from older-format smpmod1 rows; 1 older-format row(s) migrated") != NULL);
     HeapFree(GetProcessHeap(), 0, engine);
     /* Both forms: the member (bob.room) is read; the legacy row is only removed. */
     if (out) {
@@ -372,7 +372,7 @@ static void legacy_rows(void)
         engine = engine_text(sh_modmanifest_prepare_load(both, strlen(both), &en), both, strlen(both), &en);
         CHECK(engine && !strcmp(engine, BARE));
         CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, HASH_B));
-        CHECK(strstr(g_last_log, "from the snapmap-plus member; 1 legacy row(s) removed") != NULL);
+        CHECK(strstr(g_last_log, "from the snapmap-plus member; 1 older-format row(s) migrated") != NULL);
         sh_modmanifest_list_free(&cur);
         HeapFree(GetProcessHeap(), 0, engine);
         HeapFree(GetProcessHeap(), 0, out);

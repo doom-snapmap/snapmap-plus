@@ -948,7 +948,7 @@ played (see [Map scope](#map-scope)); a new name applies once it is registered: 
 gameplay decls when a map that names their bundle loads. Two builds of one key
 are never a conflict: each map serves the build its rows pin and the other is
 inert for it; with no map open the newest build (built time, then folder) serves
-its names for the Toybox, and the index build logs one `MODS: key <key>: builds
+its names for the Toybox, and the index build logs one `MODS: key <key>: bundles
 <hash16> (<version>) and <hash16> (<version>) both provide paths with other
 bytes; ...` line.
 
@@ -1797,8 +1797,8 @@ it keeps its canonical text and hash; it is ignored.
 `sh_modserve_index_boot` enables scope for the product's index; the native
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
-`sh_modserve_scope_report`: one header per key installed at several builds,
-one line per build (key, version, hash, its names, shadows and surfaces, and
+`sh_modserve_scope_report`: one header per key installed as several bundles
+("scope: key <key>: N bundles installed; ..."), one line per bundle (key, version, hash, its names, shadows and surfaces, and
 what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
 <key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or

@@ -2170,8 +2170,8 @@ static int ms_resolve(ms_index *x)
     if (logged > MS_CONFLICT_LOGS) ms_log("%d more conflicts not listed", logged - MS_CONFLICT_LOGS);
     for (i = 0; i < x->nbundles; ++i)
         if (superseded_by[i] >= 0)
-            ms_log("key %s: builds %.16s (%s) and %.16s (%s) both provide paths with other bytes; each map serves the "
-                   "build it declares, and with no map open the newest (%.16s)", x->bundles[i].id, x->bundles[i].hash,
+            ms_log("key %s: bundles %.16s (%s) and %.16s (%s) both provide paths with other bytes; each map serves the "
+                   "bundle it declares, and with no map open the newest (%.16s)", x->bundles[i].id, x->bundles[i].hash,
                    x->bundles[i].version, x->bundles[superseded_by[i]].hash, x->bundles[superseded_by[i]].version,
                    x->bundles[superseded_by[i]].hash);
     free(keys);
@@ -3757,7 +3757,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: key %s: %d builds installed; each map serves the build it "
+            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: key %s: %d bundles installed; each map serves the bundle it "
                         "was saved with, and with no map open the newest", b->id, builds);
             fn(context, line);
             lines++;
@@ -3768,20 +3768,20 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
                     si.requirements ? ", requirements" : "");
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
-        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its key");
+        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another bundle of its key");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
                         "the rest only in maps that declare it", si.editor_path);
         else if (si.play) strcpy_s(state, sizeof state, "not declared by the map being played: serves nothing");
         else if (!si.newest)
-            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older build of its key; only its surfaces serve",
+            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: an older bundle of its key; only its surfaces serve",
                         si.map_open ? " by the open map" : " (no map is open)");
         else
             _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: its names serve for the Toybox and its surfaces "
                         "serve; its shadows do not", si.map_open ? " by the open map" : " (no map is open)");
         _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s%s: %s%s%s", who, what, state,
                     si.requirements && !si.listed && si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "",
-                    b->snapshot ? "; serving its last good build (the latest build failed)" : "");
+                    b->snapshot ? "; serving its last good bundle (this folder's current bundle failed to build)" : "");
         fn(context, line);
         lines++;
     }

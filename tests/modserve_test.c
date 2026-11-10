@@ -509,7 +509,7 @@ static void test_index_and_isolation(void)
     CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
                   "alex.pink-imp@1.0.0 (no rule separates them; the first key in name order"));
     /* Two builds of one key are never a conflict. */
-    CHECK(log_has("MODS: key alex.pink-imp: builds ") && log_has("each map serves the build it declares"));
+    CHECK(log_has("MODS: key alex.pink-imp: bundles ") && log_has("each map serves the bundle it declares"));
     CHECK(!log_has("superseded"));
     CHECK(log_has("MODS: index built in ") && log_has("(7 bundles, "));
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivy.nested/thing.decl", NULL) != NULL);
@@ -3752,7 +3752,7 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
     log_clear();
     CHECK(sh_modserve_index_build(root) == 2);
-    CHECK(log_has("MODS: key k.fork: builds 6666666666666666 (1.0.0) and 7777777777777777 (1.0.0) both provide paths"));
+    CHECK(log_has("MODS: key k.fork: bundles 6666666666666666 (1.0.0) and 7777777777777777 (1.0.0) both provide paths"));
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
     sh_modserve_scope_enable(1);
@@ -3771,10 +3771,10 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: key k.fork: 2 builds installed; each map serves the build it was saved with, and with no map "
+    CHECK(strstr(g_report, "scope: key k.fork: 2 bundles installed; each map serves the bundle it was saved with, and with no map "
                            "open the newest\n") != NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (6666666666666666) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
-                           "open): an older build of its key; only its surfaces serve\n") != NULL);
+                           "open): an older bundle of its key; only its surfaces serve\n") != NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
@@ -3794,7 +3794,7 @@ static void test_additive_same_key(void)
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
     CHECK(strstr(g_report, "scope: k.fork@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
-                           "another build of its key\n") != NULL);
+                           "another bundle of its key\n") != NULL);
     CHECK(strstr(g_report, "serving: " AD_THING ": k.fork@1.0.0 (6666666666666666), declared (row 1): the only provider; not "
                            "served: k.fork@1.0.0 (7777777777777777)\n") != NULL);
     /* The registration plan of the map's bundle names its own paths. */

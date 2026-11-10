@@ -621,10 +621,10 @@ int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *o
 /* For sh_mods status, doctor and map: one header per key installed at several
  * builds, then one line per admitted bundle (one per hash) with what it serves
  * for the open map,
- *   scope: key <key>: 2 builds installed; each map serves the build it was saved with, ...
+ *   scope: key <key>: 2 bundles installed; each map serves the bundle it was saved with, ...
  *   scope: <key>@<version> (<hash16>) (N names, N shadows, N surfaces[, requirements]): <state>
  * where the state is "declared by the open map (row N): serves everything it
- * carries", "inert: the open map declares another build of its key", "not
+ * carries", "inert: the open map declares another bundle of its key", "not
  * declared by the map being played: serves nothing", "not declared (no map is
  * open): its names serve for the Toybox ...", "editor-time content (...)" or
  * "map scope is off: ..."; then, per path several bundles provide, which

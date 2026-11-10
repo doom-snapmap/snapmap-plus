@@ -1448,7 +1448,7 @@ static char *mm_product_strip(const char *json, size_t length, size_t *out_lengt
         return NULL;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "MODS: %s: removed %u stale smpprod1 variable(s) an earlier build recorded", when, elements);
+                "MODS: %s: %u older-format row(s) migrated (stale smpprod1 variables removed)", when, elements);
     backend_log(line);
     if (out_length) *out_length = out_len;
     return out;
@@ -1570,9 +1570,9 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
         else if (!active) strcpy_s(what, sizeof what, "no new decls to register");
         else _snprintf_s(what, sizeof what, _TRUNCATE, "%d registration step(s) ready", active);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "MODS: map manifest names %zu bundle(s)%s%s; %s; %u legacy row(s) removed before parse; %s",
+            "MODS: map manifest names %zu bundle(s)%s%s; %s; %u older-format row(s) migrated before parse; %s",
             list.count, list.count ? ": " : "", names,
-            from_member ? "from the snapmap-plus member" : "from legacy smpmod1 rows", removed, what);
+            from_member ? "from the snapmap-plus member" : "from older-format smpmod1 rows", removed, what);
     }
     backend_log(line);
     if (rejected) {

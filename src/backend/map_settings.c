@@ -519,7 +519,7 @@ char *sh_map_settings_on_save(const char *json, size_t len, size_t *out_len)
     if (r.found || r.written || r.failed) {
         ms_describe(&s, what, sizeof what);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "SETTINGS: map saved: %s; %u setting(s) in the snapmap-plus member, %u legacy row(s) removed, "
+            "SETTINGS: map saved: %s; %u setting(s) in the snapmap-plus member, %u older-format row(s) migrated, "
             "%u kept in place as off%s",
             what, r.written, r.removed, r.kept,
             r.failed ? "; FAILED: the saved text did not read, it carries what it had" : "");
