@@ -2552,6 +2552,60 @@ static void mb_old_intent(sh_mb_bundle *b, const char *key, const mbj *v, int bu
     }
 }
 
+/* The mod store refuses some descriptors this builder admits. Its rules
+ * (snapmap-web api/mods_store.js, manifestError: EXTRA_KEY_RE for every key
+ * kept in "extra", displayText for name and author) are mirrored here as
+ * build warnings in one table, so the author hears it at the build rather
+ * than at publish. Keep the table in step with that file. */
+enum { MB_STORE_KEY, MB_STORE_NAME, MB_STORE_AUTHOR };
+static const struct mb_store_rule {
+    const char *field;
+    int key;                /* 1: EXTRA_KEY_RE, ^[a-z][a-z0-9_-]{0,63}$; 0: displayText, no control character */
+    const char *store_says;
+    const char *fix;
+} MB_STORE_RULES[] = {
+    { "key", 1, "bad extra key", "author keys must be 1-64 characters of a-z, 0-9, '_' or '-' and start with a "
+                                 "lowercase letter; rename or remove it" },
+    { "name", 0, "bad name", "remove it from the name" },
+    { "author", 0, "bad author", "remove it from the author" },
+};
+
+static void mb_store_check(sh_mb_bundle *b, int rule, const char *value, size_t n)
+{
+    const struct mb_store_rule *r = &MB_STORE_RULES[rule];
+    char shown[72], line[SH_MB_CAUSE_MAX];
+    size_t i, w = 0;
+    unsigned bad = 0x110000;
+    if (r->key) {
+        int ok = n >= 1 && n <= 64 && value[0] >= 'a' && value[0] <= 'z';
+        for (i = 1; ok && i < n; i++) {
+            char c = value[i];
+            ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }
+        if (ok) return;
+        for (i = 0; i < n && w + 1 < sizeof shown; i++)
+            shown[w++] = (unsigned char)value[i] >= 0x20 && (unsigned char)value[i] < 0x7f ? value[i] : '?';
+        shown[w] = 0;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s key \"%s\": the mod store refuses it at publish (\"%s\"); %s",
+                    b->descriptor, shown, r->store_says, r->fix);
+    } else {
+        /* U+0000-U+001F, U+007F and U+0080-U+009F (UTF-8 C2 80 to C2 9F). */
+        for (i = 0; i < n && bad == 0x110000; i++) {
+            unsigned char c = (unsigned char)value[i];
+            if (c < 0x20 || c == 0x7f) bad = c;
+            else if (c == 0xc2 && i + 1 < n && (unsigned char)value[i + 1] >= 0x80 && (unsigned char)value[i + 1] <= 0x9f)
+                bad = (unsigned char)value[i + 1];
+        }
+        if (bad == 0x110000) return;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s %s contains %s (U+%04X); the mod store refuses it at publish "
+                    "(\"%s\"): %s", b->descriptor, r->field,
+                    bad == 9 ? "a tab" : bad == 10 || bad == 13 ? "a line break" : "a control character", bad,
+                    r->store_says, r->fix);
+    }
+    mb_warn(b, "%s", line);
+    mb_note(b, "%s", line);
+}
+
 /* A folder the product received rather than one an author builds here: it
  * is never refused on its files (a bundle installed by hash keeps working). */
 static int mb_received(const sh_mb_bundle *b)
@@ -2580,6 +2634,10 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "%s \"" SH_MB_BLOCK_KEY "\" must be an object", b->descriptor); return 0; }
     if (!mb_common_fields(b, root, 0)) return 0;
+    if (building) {
+        mb_store_check(b, MB_STORE_NAME, b->name, strlen(b->name));
+        if (b->author) mb_store_check(b, MB_STORE_AUTHOR, b->author, strlen(b->author));
+    }
     {
         /* A converted first-generation package (modlegacy.c) carries a
          * "legacy" object; it stays in "extra" and grandfathers its names. */
@@ -2673,6 +2731,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
                 mb_old_intent(b, k, root->items[i], building);
                 continue;
             }
+            if (building) mb_store_check(b, MB_STORE_KEY, root->keys[i], root->klen[i]);
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 mb_error(b, "out of memory");

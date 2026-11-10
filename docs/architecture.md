@@ -2469,7 +2469,12 @@ main tick resumes the original `PublishAfterSave`. The store checks a manifest
 sent to `/mods/missing` as its bundle PUT would (`modnet_missing_bundle`), so a
 manifest it refuses stops the publish with the store's message in one request,
 before any blob is sent; a store that does not name the bundle back did not
-check it, and its bundle PUT still does. A publish whose save
+check it, and its bundle PUT still does. The rules of the store's that the
+builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
+such as `displayName` or `$schema`, a control character such as a tab in the
+name or author) are mirrored as build warnings in one table,
+`MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
+rather than at publish. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
