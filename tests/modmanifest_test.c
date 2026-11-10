@@ -509,8 +509,9 @@ static void placed_names(void)
 
 /* The substitute op as modpublished binds it: alex.gone is installed at HASH_A's build. */
 static int g_subst_calls;
-static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
+    (void)placed;
     g_subst_calls++;
     if (!strcmp(row->id, "alex.gone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
     strcpy_s(why, why_cap, "This map needs nobody.here, which is not installed and was never published.");

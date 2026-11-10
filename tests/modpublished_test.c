@@ -1006,16 +1006,66 @@ static void gate_editor_substitutes(void)
     strcpy_s(row.id, sizeof row.id, "alex.pink-imp");
     strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
     F.other_build_a = 1;
-    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
     F.other_build_a = 0;
     /* The store is not asked at an editor open: the note says what this
      * computer knows, never "permanent" or "never published". */
-    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 && !hash[0] &&
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 0 && !hash[0] &&
           !strcmp(why, "This map needs alex.pink-imp, which is not installed on this computer, so the editor "
                        "opens the map without it. Playing the map asks the mod store for it."));
     F.claimed_a = 1;
-    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 &&
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 0, why, sizeof why) == 0 &&
           strstr(why, "is not installed on this computer") && !strstr(why, "permanent") && !strstr(why, "Recycle Bin"));
+    /* The map places something of the mod: the engine's validator refuses it, so the
+     * sentence says the editor cannot open the map and what to do, and fits the notice. */
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 1, why, sizeof why) == 0 && !hash[0] &&
+          !strcmp(why, "This map needs alex.pink-imp, which is not installed on this computer, so the editor cannot "
+                       "open the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps to "
+                       "get it from the mod store.") && strlen(why) < 256);
+    /* A placed mod with an installed build of its key still substitutes. */
+    F.other_build_a = 1;
+    CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, 1, why, sizeof why) == 1 && !strcmp(hash, OTHER_A));
+    F.other_build_a = 0;
+    reset();
+}
+
+/* The editor opens a My Maps map whose mod is gone (V13's "V13 crate", live 7491a99): with
+ * an entity of the mod placed, the engine refused the map with its damaged-save dialog and
+ * the player was not told why. The parse no gate takes now raises one plain notice; a map
+ * that only declares the mod opens without it and raises none. */
+static void editor_open_missing_placed_mod(void)
+{
+    static const char PLACED[] =
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"mods/alex.pink-imp/imp\"}}],\"instances\":[],"
+        "\"variables\":{\"allocCount\":[0,0,0,0,2],\"string\":["
+        VAR("door_label", "Open") "," VAR("smpmod1.0.1", ROW("alex.pink-imp", HASH_A, "3145728")) "]}}";
+    printf("-- the editor cannot open a map that places a mod not installed: one plain notice\n");
+    reset();
+    g_map_notes = 0;
+    sh_modmanifest_set_editor_load(1);
+    parse(SH_MODPUB_PARSE_OTHER, PLACED, MAP);
+    sh_modmanifest_set_editor_load(0);
+    CHECK(!sh_modpub_test_notice()[0]);
+    tick(1);
+    CHECK(g_map_notes == 1);
+    tick(2);
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, "This map needs alex.pink-imp, which is not installed on this computer, so "
+                                             "the editor cannot open the map. Restore the mod's folder from the Recycle "
+                                             "Bin, or play the map from My Maps to get it from the mod store."));
+    reset();
+    /* Declared only (Use in this map): the editor opens it without the mod; no notice. */
+    sh_modmanifest_set_editor_load(1);
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    sh_modmanifest_set_editor_load(0);
+    tick(3);
+    CHECK(F.asks == 0 && !sh_modpub_test_notice()[0]);
+    reset();
+    /* A gate that takes the parse (a published play) says its own cause: no editor notice. */
+    sh_modmanifest_set_editor_load(1);
+    parse(SH_MODPUB_PARSE_OTHER, PLACED, MAP);
+    sh_modmanifest_set_editor_load(0);
+    CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    CHECK(!sh_modmanifest_load_refusal(NULL, 0));
     reset();
 }
 
@@ -1469,6 +1519,7 @@ int main(void)
     gate_editor_substitutes();
     gate_own_substitutes();
     gate_notes_after_the_decision();
+    editor_open_missing_placed_mod();
     reset();
     sh_modpub_test_set_ops(NULL);
     printf("modpublished_test: %d checks, %d failed\n", g_checks, g_failed);

@@ -1067,12 +1067,12 @@ void sh_modmanifest_reset(void)
     (void)sh_modmanifest_load_notes_flush(0);
 }
 
-static void mm_subst_load(const sh_modmanifest_list *list);
+static void mm_subst_load(const sh_modmanifest_list *list, const char *json, size_t length);
 
 void sh_modmanifest_current_close(void)
 {
     sh_modmanifest_reset();
-    mm_subst_load(NULL);
+    mm_subst_load(NULL, NULL, 0);
 }
 
 static void mm_subst_drop(const char *from);
@@ -1185,6 +1185,17 @@ static void mm_subst_drop(const char *from)
 #define MM_NOTES_MAX 16
 static char g_notes[MM_NOTES_MAX][700];
 static int g_nnotes, g_notes_over;
+static char g_refusal[700];   /* the first note whose row the placed entities name */
+
+int sh_modmanifest_load_refusal(char *out, size_t cap)
+{
+    int have;
+    AcquireSRWLockShared(&g_current_lock);
+    have = g_refusal[0] != 0;
+    if (out && cap) strncpy_s(out, cap, g_refusal, _TRUNCATE);
+    ReleaseSRWLockShared(&g_current_lock);
+    return have;
+}
 
 int sh_modmanifest_load_notes_pending(void)
 {
@@ -1204,6 +1215,7 @@ int sh_modmanifest_load_notes_flush(int say)
     over = g_notes_over;
     memcpy(lines, g_notes, sizeof lines[0] * (size_t)n);
     g_nnotes = g_notes_over = 0;
+    g_refusal[0] = 0;
     ReleaseSRWLockExclusive(&g_current_lock);
     for (i = 0; say && i < n; i++) backend_log(lines[i]);
     if (say && over) {
@@ -1251,23 +1263,51 @@ static int mm_follow_load(sh_modmanifest_list *list)
     return n;
 }
 
+/* 1 when a placed name lies in the row's namespace: "mods/<id>/", the id
+ * spelled as written or with '-' as '_' (the engine's binary names). */
+static int mm_row_placed(const sh_modmanifest_row *r, char **names, size_t count)
+{
+    char a[SH_MODMANIFEST_ID_CAP + 8], b[SH_MODMANIFEST_ID_CAP + 8], *c;
+    size_t i, n;
+    if (!r->id[0] || !names) return 0;
+    _snprintf_s(a, sizeof a, _TRUNCATE, "mods/%s/", r->id);
+    strcpy_s(b, sizeof b, a);
+    for (c = b; *c; c++) if (*c == '-') *c = '_';
+    n = strlen(a);
+    for (i = 0; i < count; i++)
+        if (names[i] && (!_strnicmp(names[i], a, n) || !_strnicmp(names[i], b, n))) return 1;
+    return 0;
+}
+
 /* At a load: which declared builds the editor serves through another build. */
-static void mm_subst_load(const sh_modmanifest_list *list)
+static void mm_subst_load(const sh_modmanifest_list *list, const char *json, size_t length)
 {
     sh_modmanifest_substitute_fn sub = g_substitute;
     int editor = InterlockedCompareExchange(&g_editor_load, 0, 0) != 0;
-    size_t i;
+    char **names = NULL;
+    size_t i, count = 0;
+    int named = 0;
     AcquireSRWLockExclusive(&g_current_lock);
     g_nsubst = 0;
     g_nnotes = g_notes_over = 0;
+    g_refusal[0] = 0;
     ReleaseSRWLockExclusive(&g_current_lock);
     if (!list || !editor || !sub) return;
     for (i = 0; i < list->count; i++) {
         const sh_modmanifest_row *r = &list->rows[i];
         sh_modserve_bundle_ref ref;
         char to[SH_MODMANIFEST_HASH_CAP] = "", why[400] = "", line[700];
+        int placed;
         if (sh_modserve_bundle_serving(r->bundle, NULL, &ref)) continue;   /* its own build serves */
-        if (sub(r, to, sizeof to, why, sizeof why) == 1 && sh_modmanifest_valid_hash(to, strlen(to)) && strcmp(to, r->bundle)) {
+        /* The placed names, read once, for the rows nothing serves. */
+        if (!named && json && length) {
+            int failed = 0;
+            named = 1;
+            count = sh_modmanifest_placed_names(json, length, &names, &failed);
+            if (failed) { names = NULL; count = 0; }
+        }
+        placed = mm_row_placed(r, names, count);
+        if (sub(r, to, sizeof to, placed, why, sizeof why) == 1 && sh_modmanifest_valid_hash(to, strlen(to)) && strcmp(to, r->bundle)) {
             AcquireSRWLockExclusive(&g_current_lock);
             if (g_nsubst < MM_SUBST_MAX) {
                 strcpy_s(g_subst[g_nsubst].from, sizeof g_subst[g_nsubst].from, r->bundle);
@@ -1285,11 +1325,13 @@ static void mm_subst_load(const sh_modmanifest_list *list)
             if (g_nnotes < MM_NOTES_MAX)
                 _snprintf_s(g_notes[g_nnotes++], sizeof g_notes[0], _TRUNCATE, "MODS: map: %s: %s", r->id, why);
             else g_notes_over++;
+            if (placed && !g_refusal[0]) strcpy_s(g_refusal, sizeof g_refusal, why);
             ReleaseSRWLockExclusive(&g_current_lock);
             continue;
         } else continue;
         backend_log(line);
     }
+    sh_modmanifest_names_free(names, count);
 }
 
 /* The map scope's hook and its arming (sh_modmanifest_set_scope). */
@@ -1543,7 +1585,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     if (out_length) *out_length = 0;
     if (!mm_carries_rows(json, length)) {
         mm_set_current(NULL);
-        mm_subst_load(NULL);
+        mm_subst_load(NULL, NULL, 0);
         mm_choices_load(NULL);
         mm_scope_load(json, length, NULL);
         (void)mm_activate_load(NULL);
@@ -1558,7 +1600,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
     (void)mm_follow_load(&list);
-    mm_subst_load(&list);
+    mm_subst_load(&list, json, length);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);
     active = mm_activate_load(&list);

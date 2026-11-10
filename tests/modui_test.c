@@ -378,8 +378,9 @@ static void bind_fakes(void)
 /* The manifest's substitute op (modpublished.c sh_modpub_editor_substitute):
  * the installed build of the row's key. */
 static char g_subst_to[80];
-static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
+    (void)placed;
     (void)row;
     if (why && why_cap) why[0] = 0;
     if (!g_subst_to[0]) return 0;
@@ -423,8 +424,9 @@ static int load_gone_row(const char *id, const char *gone, int attached)
 /* An editor load of the open test map with rows of `ids` at `hashes`; with
  * `subst`, the manifest substitutes each row by `subst_to` of its id. */
 static const char *g_sub_ids[4], *g_sub_to[4];
-static int fake_substitute_by_id(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+static int fake_substitute_by_id(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
+    (void)placed;
     int i;
     if (why && why_cap) why[0] = 0;
     for (i = 0; i < 4 && g_sub_ids[i]; i++)

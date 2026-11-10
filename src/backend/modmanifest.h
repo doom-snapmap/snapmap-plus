@@ -204,7 +204,9 @@ void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow);
  * same key serves in its place for this editor session, with the hashes on
  * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
- * (why: the gate's sentence, may be empty). Bound by modpublished.c, which
+ * (why: the gate's sentence, may be empty). `placed` says the map's placed
+ * entities name the row's namespace (`mods/<id>/`): with nothing to serve
+ * them, the engine's validator refuses the map, so the editor cannot open it. Bound by modpublished.c, which
  * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
  * the engine makes for the editor (sh_modmanifest_set_editor_load 1, set by
  * the parse detour for a read that is not a published map's, which includes
@@ -214,7 +216,7 @@ void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow);
  * SUBSTITUTE for the player's own content), and the launched map's listing
  * declares the build this table names; a community map's Play denies. */
 typedef int (*sh_modmanifest_substitute_fn)(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap,
-                                            char *why, size_t why_cap);
+                                            int placed, char *why, size_t why_cap);
 void sh_modmanifest_set_substitute(sh_modmanifest_substitute_fn substitute);
 void sh_modmanifest_set_editor_load(int editor);
 /* The cause sentences such a load found for rows nothing serves ("MODS: map:
@@ -225,6 +227,10 @@ void sh_modmanifest_set_editor_load(int editor);
  * A new load replaces them. Returns the number logged or dropped. */
 int  sh_modmanifest_load_notes_flush(int say);
 int  sh_modmanifest_load_notes_pending(void);
+/* Of those notes, the first whose row the map's placed entities name (the
+ * editor refuses such a map): its sentence in out (without the "MODS: map:"
+ * prefix), returning 1; 0 when there is none. Cleared with the notes. */
+int  sh_modmanifest_load_refusal(char *out, size_t cap);
 /* The build serving in place of a declared one in the open map: 1 with it in
  * out, 0 when `declared` is served as itself. */
 int  sh_modmanifest_substituted(const char *declared, char *out, size_t cap);

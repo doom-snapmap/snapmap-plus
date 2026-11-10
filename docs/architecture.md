@@ -2233,7 +2233,18 @@ An editor open asks no store, so its note for a key with no installed build
 (`sh_modpub_editor_substitute`) says only what this computer knows: "not
 installed on this computer, so the editor opens the map without it. Playing
 the map asks the mod store for it." The causes above, which depend on the
-store's answer, are said where the store is asked.
+store's answer, are said where the store is asked. When the map's placed
+entities name that mod's namespace (`mods/<id>/`, read by
+`sh_modmanifest_placed_names`), the engine's validator refuses the map
+(`GetLocalSavedMapEdit`'s RepairAndMigrate, then its damaged-save dialog,
+which the fault shield's save guard dismisses), so the editor cannot open it
+without the mod. The note then says so and is also the one-button notice
+raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
+map needs <name>, which is not installed on this computer, so the editor
+cannot open the map. Restore the mod's folder from the Recycle Bin, or play
+the map from My Maps to get it from the mod store." (My Maps Play holds and
+asks the store, above.) An editor open does not itself fetch: it has no hold
+point before the engine's load.
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be

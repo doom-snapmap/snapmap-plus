@@ -561,7 +561,8 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
     if (prefab && strlen(out) + 28 < cap) strcat_s(out, cap, " The prefab was not placed.");
 }
 
-int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
+                                char *why, size_t why_cap)
 {
     sh_modpub_gate_facts facts;
     char other[SH_MODMANIFEST_HASH_CAP] = "", name[128] = "", title[300];
@@ -585,9 +586,22 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
         else _snprintf_s(title, sizeof title, _TRUNCATE, "%s", key);
         /* The store was not asked, so the note says only what this computer
          * knows; the gate's words ("no longer available", "never published")
-         * are said where the store is asked, at Play. */
-        _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
-                    "the editor opens the map without it. Playing the map asks the mod store for it.", title);
+         * are said where the store is asked, at Play. A map whose placed
+         * entities use the mod is refused by the engine's validator (its
+         * damaged-save dialog, which the save guard dismisses), so the
+         * sentence says the editor cannot open it and is also the notice;
+         * it fits the dialog body, else the key alone names the mod. */
+        if (placed) {
+            int k;
+            for (k = 0; k < 2; k++) {
+                _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
+                            "the editor cannot open the map. Restore the mod's folder from the Recycle Bin, or play "
+                            "the map from My Maps to get it from the mod store.", k ? key : title);
+                if (strlen(why) < PUB_TEXT_CAP) break;
+            }
+        } else
+            _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
+                        "the editor opens the map without it. Playing the map asks the mod store for it.", title);
     }
     return 0;
 }
@@ -1563,8 +1577,12 @@ void sh_modpublished_poll(void)
     /* A parse no gate took in its frame was the editor's: its held cause
      * sentences are said now, once. */
     if (g_notes_held && g_notes_frame != g_frame && pub_on_main()) {
+        char refusal[700];
+        int refused = sh_modmanifest_load_refusal(refusal, sizeof refusal);
         g_notes_held = 0;
         (void)sh_modmanifest_load_notes_flush(1);
+        /* The editor cannot open the map: the player is told why, in words. */
+        if (refused && strlen(refusal) < PUB_TEXT_CAP) pub_notice(refusal);
     }
     if (h->state == HOLD_IDLE && !g_notice[0] && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
