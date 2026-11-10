@@ -2010,7 +2010,11 @@ Bin by hand." with a map open and "The folder can be restored from the Recycle
 Bin by hand." without, plus the Toybox rows, "Moves the folder mods\<folder> to
 the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
 mod, "N of your saved maps use it; they will not open until a mod folder
-provides its assets again"); the native delete
+provides its assets again"). The list is computed per key: when another build
+of the key stays installed (`install.keptBuild`), only the Toybox rows no
+staying build adds are listed, and the saved-maps line becomes "Another build
+of this mod stays installed (mods\<folder>); maps that use the mod open with
+it."; the native delete
 of the mod's entities from the open map, as Remove from map (a refusal, Play
 running, a load or a busy editor, deletes nothing and is reported); the open
 map's undo and redo history cleared so no snapshot older than the delete
@@ -2143,6 +2147,12 @@ causes, `sh_modpub_gate_wording`:
 | 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
 | 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
 | 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
+
+An editor open asks no store, so its note for a key with no installed build
+(`sh_modpub_editor_substitute`) says only what this computer knows: "not
+installed on this computer, so the editor opens the map without it. Playing
+the map asks the mod store for it." The causes above, which depend on the
+store's answer, are said where the store is asked.
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be

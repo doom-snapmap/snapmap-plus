@@ -243,7 +243,9 @@ var modsTab = (function () {
                savedMaps is -1 when the saves could not be read. */
             install: ins ? {folder: str(ins.folder), disposition: 'recycle',
                             savedMaps: ins.savedMaps === undefined || ins.savedMaps === null ? -1 : num(ins.savedMaps),
-                            undoCleared: bool(ins.undoCleared)} : null,
+                            undoCleared: bool(ins.undoCleared),
+                            /* another build of the key that stays installed: maps open with it */
+                            keptBuild: str(ins.keptBuild)} : null,
             /* uninstallPreview only: the Toybox rows uninstalling takes out of the editor */
             editorRows: normNames(v.editorRows)};
   }
@@ -272,7 +274,9 @@ var modsTab = (function () {
       out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
       out.push({text: 'Moves the folder mods\\' + pv.install.folder + ' to the Windows Recycle Bin.'});
-      if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
+      if (pv.install.keptBuild)
+        out.push({text: 'Another build of this mod stays installed (mods\\' + pv.install.keptBuild + '); maps that use the mod open with it.'});
+      else if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
     }
     return out;
   }

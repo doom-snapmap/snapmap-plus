@@ -627,8 +627,15 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
         if (!sh_rawmap_swap_set_source(arg)) { sh_printf("That path could not be used.\n"); return; }
-        sh_printf("Staged. Open any map -- or run 'sh_rawmaps load' with no path -- and it\n"
-                  "becomes a new map you name.\n");
+        if (sh_editor_frame_target())
+            /* A map is open: nothing changes on screen, so say what the next open will do. */
+            sh_printf("Staged for the next map load: %s\n"
+                      "  The map open now is unchanged. The next map you open from My Maps opens as this\n"
+                      "  rawmap instead. To open it now, use the File menu's Load or run 'sh_rawmaps load'\n"
+                      "  with no path.\n", arg);
+        else
+            sh_printf("Staged. Open any map -- or run 'sh_rawmaps load' with no path -- and it\n"
+                      "becomes a new map you name.\n");
         sh_rawmap_load_arm_once();
         rawmap_print_state();
         return;

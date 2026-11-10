@@ -2101,6 +2101,30 @@ static int ms_rekey(const wchar_t *src, const wchar_t *parent, const char *leaf,
             if (!_stricmp(r.f[i - 1].new_rel, r.f[i].new_rel) && !(r.f[i - 1].dir && r.f[i].dir))
                 ms_rk_fail(&r, "%s and %s would both become %s; nothing was renamed", r.f[i - 1].rel, r.f[i].rel, r.f[i].new_rel);
     }
+    if (!r.failed) {
+        /* Files under another mod's namespace (mods/<x>/, x neither this
+         * folder nor its new key) are refused by the build that follows the
+         * rename: refuse here, before anything is renamed or set aside. */
+        unsigned files = 0, foreign = 0;
+        const char *first = NULL;
+        char other[SH_MB_ID_MAX + 1] = "";
+        for (i = 0; i < r.n; i++) {
+            const char *p, *e;
+            if (r.f[i].dir) continue;
+            files++;
+            p = !_strnicmp(r.f[i].new_rel, "assets/", 7) ? strstr(r.f[i].new_rel, "/mods/") : NULL;
+            e = p ? strchr(p + 6, '/') : NULL;
+            if (!e || ((size_t)(e - (p + 6)) == strlen(key) && !_strnicmp(p + 6, key, strlen(key)))) continue;
+            if (!foreign++) {
+                first = r.f[i].rel;
+                _snprintf_s(other, sizeof other, _TRUNCATE, "%.*s", (int)(e - (p + 6)), p + 6);
+            }
+        }
+        if (foreign)
+            ms_rk_fail(&r, "%u of the folder's %u file(s) are under mods/%s/, another mod's namespace (the first: %s), "
+                       "which the build refuses; nothing was renamed. Move them under mods/%s/, or install that mod's "
+                       "own folder instead", foreign, files, other, first, leaf);
+    }
     if (r.failed) { ms_cause(cause, ccap, "%s", r.cause); goto done; }
     /* Assemble beside it, then swap. */
     if (ms_exists(staging)) ms_rmtree(staging, root);

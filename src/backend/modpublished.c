@@ -569,7 +569,6 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
     memset(&facts, 0, sizeof facts);
     facts.editor = 1;
     facts.store = SH_MODPUB_STORE_ABSENT;   /* not asked: an editor open holds nothing */
-    facts.published = g_ops.claimed && row->bundle[0] && g_ops.claimed(g_ops.context, row->bundle);
     facts.other_build = g_ops.other_build && g_ops.other_build(g_ops.context, row, other, sizeof other, name, sizeof name) &&
                         other[0];
     verdict = sh_modpub_gate_decide(&facts);
@@ -581,7 +580,11 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
         const char *key = row->id[0] ? row->id : row->bundle;
         if (name[0] && _stricmp(name, key)) _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", name, key);
         else _snprintf_s(title, sizeof title, _TRUNCATE, "%s", key);
-        sh_modpub_gate_wording(verdict, "map", title, NULL, 0, why, why_cap);
+        /* The store was not asked, so the note says only what this computer
+         * knows; the gate's words ("no longer available", "never published")
+         * are said where the store is asked, at Play. */
+        _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s at a build that is not installed on this computer, so "
+                    "the editor opens the map without it. Playing the map asks the mod store for it.", title);
     }
     return 0;
 }

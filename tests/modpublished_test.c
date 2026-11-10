@@ -38,7 +38,7 @@ static int g_failed, g_checks;
 static int g_map_notes;
 void backend_log(const char *line)
 {
-    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "was never published")) g_map_notes++;
+    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not installed on this computer")) g_map_notes++;
 }
 int sh_modserve_active(void) { return 1; }
 /* The registry choices' input (modmanifest.c gives them at every load). */
@@ -1008,11 +1008,14 @@ static void gate_editor_substitutes(void)
     F.other_build_a = 1;
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
     F.other_build_a = 0;
+    /* The store is not asked at an editor open: the note says what this
+     * computer knows, never "permanent" or "never published". */
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 && !hash[0] &&
-          strstr(why, "This map needs alex.pink-imp at a build that is not installed and was never published."));
+          !strcmp(why, "This map needs alex.pink-imp at a build that is not installed on this computer, so the editor "
+                       "opens the map without it. Playing the map asks the mod store for it."));
     F.claimed_a = 1;
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 &&
-          strstr(why, "at a build that is no longer available"));
+          strstr(why, "is not installed on this computer") && !strstr(why, "permanent") && !strstr(why, "Recycle Bin"));
     reset();
 }
 

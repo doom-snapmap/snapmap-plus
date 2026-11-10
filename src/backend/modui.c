@@ -3588,6 +3588,15 @@ static int mu_uninstall_targets(const mu_model *m, const char *key, int by_key, 
     return n;
 }
 
+/* Whether the entry at `at` adds a Toybox row of that display name. */
+static int mu_entry_has_row(const mu_model *m, size_t at, const char *name)
+{
+    int k;
+    for (k = 0; name && k < m->entries[at].row_count; k++)
+        if (m->entries[at].row_names[k] && !strcmp(m->entries[at].row_names[k], name)) return 1;
+    return 0;
+}
+
 /* One build an uninstall removes, for the dry run: its folder, its build and
  * the last good build kept for it. */
 static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *s)
@@ -3667,9 +3676,20 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
         mu_line(o, "%s %s: %s", verb, key, msg);
         mu_result_head(&b, action, 0, msg);
     } else if (!apply) {
-        /* The dry run: the consequence list the confirmation shows. */
+        /* The dry run: the consequence list the confirmation shows. It is
+         * computed per key: when another build of the key stays installed,
+         * the maps that use the key open with it, and only the Toybox rows
+         * no staying build adds leave the editor. */
         const sh_ms_entry *s = entry >= 0 ? &m.list.items[entry] : NULL;
-        int saved = uninstall && s && s->loaded ? mu_saved_maps_using(s->bundle.id) : -1;
+        const sh_ms_entry *stay = NULL;
+        size_t stay_at = 0;
+        int saved;
+        for (t = 0; uninstall && s && s->loaded && t < m.list.count && !stay; t++)
+            if (!targets[t] && m.list.items[t].loaded && !strcmp(m.list.items[t].bundle.id, s->bundle.id)) {
+                stay = &m.list.items[t];
+                stay_at = t;
+            }
+        saved = uninstall && s && s->loaded && !stay ? mu_saved_maps_using(s->bundle.id) : stay ? 0 : -1;
         mu_result_head(&b, action, 1, "");
         mu_puts(&b, ",\"preview\":{");
         mu_kstr(&b, "action", uninstall ? "uninstall" : "mapRemoveMod", 1);
@@ -3687,6 +3707,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             mu_kstr(&b, "disposition", "recycle", 0);
             mu_kint(&b, "savedMaps", saved, 0);
             mu_kbool(&b, "undoCleared", mp.entities >= 0, 0);
+            if (stay) mu_kstr(&b, "keptBuild", mu_leaf(stay->folder), 0);
             if (builds > 1) {
                 size_t k = 0;
                 mu_puts(&b, ",\"folders\":[");
@@ -3704,6 +3725,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                 for (t = 0; t < m.list.count; t++) {
                     if (!targets[t]) continue;
                     for (i = 0; i < (size_t)m.entries[t].row_count; i++) {
+                        if (stay && mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i])) continue;
                         if (k++) mu_putn(&b, ",", 1);
                         mu_str(&b, m.entries[t].row_names[i]);
                     }
@@ -3717,11 +3739,14 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             else if (uninstall) mu_line(o, "%s: the open map does not use it", verb);
             if (uninstall) {
                 int rows = 0;
-                for (t = 0; t < m.list.count; t++) if (targets[t]) rows += m.entries[t].row_count;
+                for (t = 0; t < m.list.count; t++)
+                    for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
+                        if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i])) rows++;
                 if (rows) mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, rows);
                 for (t = 0; t < m.list.count; t++)
                     for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
-                        mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
+                        if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i]))
+                            mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
                 if (builds > 1) {
                     mu_line(o, "%s: removes all %d builds of %s; to keep one, uninstall the others as \"%s@<build>\"",
                             verb, builds, key, key);
@@ -3736,7 +3761,10 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                         mu_line(o, "%s: removes its last good build .builds\\%s and its row in snapmap-plus.json", verb,
                                 mu_leaf(snap));
                 }
-                if (saved > 0)
+                if (stay)
+                    mu_line(o, "%s: another build of %s stays installed (mods\\%s); maps that use %s open with it", verb,
+                            s->bundle.id, mu_leaf(stay->folder), s->bundle.id);
+                else if (saved > 0)
                     mu_line(o, "%s: %d of your saved maps use it; they will not open until a mod folder provides its assets "
                             "again", verb, saved);
                 else if (saved == 0) mu_line(o, "%s: none of your saved maps use it", verb);

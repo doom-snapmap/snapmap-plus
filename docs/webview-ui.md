@@ -377,7 +377,9 @@ folder can be restored from the Recycle Bin by hand. Uninstalling:" (when `insta
 without it, "The folder can be restored from the Recycle Bin by hand. Uninstalling:") and lists,
 after the map part and the Toybox rows, "Moves the folder mods\<folder> to the Windows Recycle Bin."
 and "N of your saved maps use it; they will not open until a mod folder provides its assets again"
-(when `install.savedMaps` is above 0). The result reads "Its folder was moved to the Recycle Bin",
+(when `install.savedMaps` is above 0), or, when another build of the key stays installed
+(`install.keptBuild`), "Another build of this mod stays installed (mods\<folder>); maps that use the
+mod open with it." The result reads "Its folder was moved to the Recycle Bin",
 or, when the bin could not take it, "Its folder was deleted because the Recycle Bin could not take it
 (<why>)". The product keeps no bin of its own: the footer has no removed-mods line and the page sends
 no `removedEmpty`; a document's `removed` object, sent by an older backend, is not read.

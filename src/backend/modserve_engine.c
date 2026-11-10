@@ -1583,7 +1583,9 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     }
     r.pending = d.pending + (why ? d.added_active : 0) + (InterlockedCompareExchange(&g_palette_wanted, 0, 0) && why ? 1 : 0);
     r.needs_map_reload = d.changed_map + d.changed_anims + (r.palette < 0 ? rows : 0);
-    r.needs_restart = d.changed_restart + d.gone_names;
+    /* A removed decl name stays registered (the engine cannot unregister a
+     * name) but nothing serves it: said as such, not as a needed restart. */
+    r.needs_restart = d.changed_restart;
     r.state = why && r.pending ? 2 : 1;
     if (!why && r.palette < 0 && g_bound) {
         /* The editor refused the palette rebuild for now: retried when it is free. */
@@ -1613,15 +1615,22 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
                         r.palette < 0 ? " ('sh_mods palette rebuild' applies the editor rows)" : "");
     }
     if (r.needs_restart) {
-        me_rlog("refresh: needs a restart: %d changed file(s) nothing reloads in this process%s%s, %d removed decl name(s) "
-                "stay registered", d.changed_restart, d.restart_first[0] ? ": " : "", d.restart_first, d.gone_names);
+        me_rlog("refresh: needs a restart: %d changed file(s) nothing reloads in this process%s%s", d.changed_restart,
+                d.restart_first[0] ? ": " : "", d.restart_first);
         me_refresh_note(&r, "%d change(s) need a restart", r.needs_restart);
     }
+    if (d.gone_names) {
+        me_rlog("refresh: %d removed decl name(s) stay registered until the game restarts; nothing serves them",
+                d.gone_names);
+        me_refresh_note(&r, "%d removed name(s) stay registered until the game restarts; nothing serves them",
+                        d.gone_names);
+    }
     me_rlog("refresh: summary: %d changed, %d new, %d gone, %d inheriting decl(s) follow their parents; %d "
-            "re-parsed, %d reloaded, %d registered, palette %s, %d need a map reload, %d need a restart, %d pending",
+            "re-parsed, %d reloaded, %d registered, palette %s, %d need a map reload, %d need a restart, %d removed "
+            "name(s) stay registered until the game restarts, %d pending",
             d.changed, d.added, d.gone, d.dependents, r.reparsed, r.reloaded, r.registered,
             r.palette > 0 ? "rebuilt" : r.palette < 0 ? "refused" : rows ? "deferred" : "unchanged",
-            r.needs_map_reload, r.needs_restart, r.pending);
+            r.needs_map_reload, r.needs_restart, d.gone_names, r.pending);
     if (out) *out = r;
     return r.state;
 }
