@@ -371,6 +371,26 @@ void sh_modserve_watermark_free(sh_modserve_watermark *w);
 /* 1 when `resource` existed when `w` was taken. */
 int  sh_modserve_watermark_has(const sh_modserve_watermark *w, const void *resource);
 
+/* Every resource a level-4 decl of a served bundle holds is kept with it:
+ * from each decl of an admitted, non-surface file the engine holds at level
+ * 4, the needs the builder recorded (an animWeb's clips and md6Defs, an
+ * md6Def's mesh and clips, an entityDef's models and md6Defs), closed through
+ * every file of the index that provides one, are looked up by type (a list's
+ * +0x08) and name (folded) and raised from level 1 to 4. A watermark keeps
+ * only what a pass creates; a decl kept by a pass may have been parsed by
+ * the engine's own map load before it, and what that parse created is older
+ * than the watermark (report X1). Run after every serving pass and before
+ * the Play level load; a named resource the engine creates later is raised
+ * by the next run. Returns 1 when both walks completed. */
+typedef struct sh_modserve_holds {
+    unsigned roots;       /* decls of served bundles the engine holds at level 4 */
+    unsigned names;       /* distinct (type, name) needs of those */
+    unsigned raised;      /* resources raised from level 1 to 4 */
+    unsigned lists;       /* lists walked */
+    char first[300];      /* the raised names, first ones */
+} sh_modserve_holds;
+int  sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

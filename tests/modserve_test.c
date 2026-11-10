@@ -2284,6 +2284,115 @@ static void test_watermark(void)
     la.count = 5;
 }
 
+/* ------------------------------------------------------------------ what kept decls hold (triage F6) */
+
+/* The engine's lists with their type at +0x08 (the class at +0x10); a
+ * resource holds its name at +0x08 and its level at +0x28. */
+typedef struct kh_res { unsigned char pad[8]; const char *name; unsigned char pad2[0x18]; unsigned level; unsigned state; } kh_res;
+typedef struct kh_list {
+    unsigned char pad[8];
+    const char *type, *cls;
+    struct kh_list *next;
+    kh_res **entries;
+    int count, cap;
+} kh_list;
+
+#define KH_WEB   "generated/decls/animweb/mods/kh.mod/s/web.decl"
+#define KH_LOOSE "generated/decls/animweb/mods/kh.mod/s/loose.decl"
+#define KH_MD6   "generated/decls/md6def/mods/kh.mod/s/body.md6.decl"
+#define KH_MESH  "generated/basemodel/md6/mods/kh.mod/body.bmd6model"
+
+/* A pickup's web kept at level 4 by a pass after the map's own load parsed it
+ * at level 1, so the clip that parse created is older than the pass's
+ * watermark (report X1): everything a level-4 decl names is raised by name,
+ * through the files of the index that provide its needs, once it exists. */
+static void test_kept_holds(void)
+{
+    static const fx_file files[] = {
+        { KH_WEB, "animWeb web {}", -1, "animWeb", "mods/kh.mod/s/web",
+          "[{\"type\":\"anim\",\"name\":\"md6/stock/pickups-melee/chainsaw_pre_idle.md6anim\"},"
+          "{\"type\":\"md6Def\",\"name\":\"mods/kh.mod/s/body.md6\"}]", '1' },
+        { KH_MD6, "md6Def body {}", -1, "md6Def", "mods/kh.mod/s/body.md6",
+          "[{\"type\":\"baseModel\",\"name\":\"md6/mods/kh.mod/body.md6mesh\"},"
+          "{\"type\":\"skeleton\",\"name\":\"md6/stock/body.md6skl\"},"
+          "{\"type\":\"anim\",\"name\":\"md6/stock/body_idle.md6anim\"}]", '2' },
+        { KH_MESH, "MESH", -1, "baseModel", "md6/mods/kh.mod/body.md6mesh", NULL, '3' },
+        { KH_LOOSE, "animWeb loose {}", -1, "animWeb", "mods/kh.mod/s/loose",
+          "[{\"type\":\"anim\",\"name\":\"md6/stock/loose.md6anim\"}]", '4' },
+    };
+    static kh_res web, loose, body, mesh, skel, idle, clip, other, loose_clip, wrong_type, clip2;
+    static kh_res *webs[4], *md6s[4], *meshes[4], *skels[4], *anims[8], *images[4];
+    static kh_list lw, ld, lm, ls, la, li;
+    kh_list *head = &lw;
+    char top[MAX_PATH], root[MAX_PATH], *slash;
+    sh_modserve_holds h;
+    printf("-- kept decls: what a level-4 decl holds is kept with it, by name\n");
+    CHECK(offsetof(kh_list, type) == 0x08 && offsetof(kh_list, cls) == 0x10 && offsetof(kh_list, next) == 0x18 &&
+          offsetof(kh_list, entries) == 0x20 && offsetof(kh_list, count) == 0x28 &&
+          offsetof(kh_res, name) == 0x08 && offsetof(kh_res, level) == 0x28);
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\holds\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "kh.mod", "kh.mod", "1.0.0", '5', NULL, files, 4, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    lw.type = "animWeb"; lw.cls = "idDeclAnimWeb"; lw.next = &ld; lw.entries = webs;
+    ld.type = "md6Def"; ld.cls = "idDeclMD6"; ld.next = &lm; ld.entries = md6s;
+    lm.type = "baseModel"; lm.cls = "idMD6Model"; lm.next = &ls; lm.entries = meshes;
+    ls.type = "skeleton"; ls.cls = "idMD6Skel"; ls.next = &la; ls.entries = skels;
+    la.type = "anim"; la.cls = "idMD6Anim"; la.next = &li; la.entries = anims;
+    li.type = "image"; li.cls = "idImage"; li.next = NULL; li.entries = images;
+    /* After the map pass: the web and the md6Def kept (4), what the engine's
+     * own load created for them at 1, a web no pass kept and its clip at 1. */
+    web.name = "mods/kh.mod/s/web"; web.level = 4;
+    loose.name = "mods/kh.mod/s/loose"; loose.level = 1;
+    webs[0] = &web; webs[1] = &loose; lw.count = 2;
+    body.name = "mods/kh.mod/s/body.md6"; body.level = 4; md6s[0] = &body; ld.count = 1;
+    mesh.name = "md6/mods/kh.mod/body.md6mesh"; mesh.level = 1; meshes[0] = &mesh; lm.count = 1;
+    skel.name = "md6/stock/body.md6skl"; skel.level = 1; skels[0] = &skel; ls.count = 1;
+    idle.name = "md6/stock/body_idle.md6anim"; idle.level = 1;
+    other.name = "md6/stock/other.md6anim"; other.level = 1;
+    loose_clip.name = "md6/stock/loose.md6anim"; loose_clip.level = 1;
+    anims[0] = &idle; anims[1] = &other; anims[2] = &loose_clip; la.count = 3;
+    /* A resource of another type under a held name is not the one held. */
+    wrong_type.name = "md6/stock/pickups-melee/chainsaw_pre_idle.md6anim"; wrong_type.level = 1;
+    images[0] = &wrong_type; li.count = 1;
+
+    /* The md6Def's mesh, skeleton and clip are raised; the web's clip does
+     * not exist yet; what nothing kept names stays map-scoped. */
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1);
+    CHECK(h.roots == 2 && h.names == 5 && h.raised == 3 && h.lists == 6);
+    CHECK(mesh.level == 4 && skel.level == 4 && idle.level == 4);
+    CHECK(other.level == 1 && loose_clip.level == 1 && loose.level == 1 && wrong_type.level == 1);
+    CHECK(strstr(h.first, "md6/mods/kh.mod/body.md6mesh") && strstr(h.first, "md6/stock/body.md6skl") &&
+          strstr(h.first, "md6/stock/body_idle.md6anim"));
+
+    /* The web's clip, created after the keep (the editor's spawn, say), at 1,
+     * spelled as the engine folds it: the next run raises it. */
+    clip.name = "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"; clip.level = 1;
+    anims[3] = &clip; la.count = 4;
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.raised == 1 && clip.level == 4 &&
+          !strcmp(h.first, "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"));
+    CHECK(wrong_type.level == 1 && other.level == 1);
+    /* Nothing more to raise: a second run changes nothing. */
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.raised == 0 && h.first[0] == 0);
+
+    /* Released: a web no longer held at level 4 keeps nothing; a clip of its
+     * name created after that stays map-scoped. */
+    web.level = 1;
+    clip2.name = "md6/stock/pickups-melee/chainsaw_pre_idle.md6anim"; clip2.level = 1;
+    anims[4] = &clip2; la.count = 5;
+    CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.roots == 1 && h.raised == 0 && clip2.level == 1);
+    /* An unreadable list: the walk fails and nothing is raised. */
+    li.entries = NULL; li.count = 2;
+    web.level = 4;
+    CHECK(sh_modserve_holds_raise(&head, &h) == 0 && clip2.level == 1);
+    li.entries = images; li.count = 1;
+    CHECK(sh_modserve_holds_raise(NULL, &h) == 0);
+}
+
 /* ------------------------------------------------------------------ editor closure after an in-session install (R-315) */
 
 #define CL_ROW   "generated/decls/snapeditorentitydef/mods/cl.mod/tile.decl"
@@ -4808,6 +4917,7 @@ int main(void)
     test_conflicts();
     test_editor_refs();
     test_watermark();
+    test_kept_holds();
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();
