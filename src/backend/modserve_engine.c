@@ -1644,6 +1644,24 @@ int sh_modserve_scope_apply(const char *phase)
     memset(&g, 0, sizeof g);
     held = sh_modserve_requirements_held();
     if (held) (void)sh_modserve_requirements_apply(me_gate_ops(), phase, &g);
+    /* The stock banks the declared bundles' borrowed sound events need: a mod
+     * added to the open map (Use in this map) has its sounds at the next Play
+     * without a map load, as the map pass gives a loaded map (modsound.h). */
+    if (g_bound) {
+        int n = sh_modserve_scope_hashes(NULL, 0);
+        if (n > 0) {
+            char (*h)[SH_MODSERVE_HASH_HEX + 1] = (char (*)[SH_MODSERVE_HASH_HEX + 1])calloc((size_t)n, sizeof *h);
+            const char **list = (const char **)calloc((size_t)n, sizeof *list);
+            if (h && list) {
+                int i;
+                n = sh_modserve_scope_hashes(h, n);
+                for (i = 0; i < n; ++i) list[i] = h[i];
+                (void)sh_modsound_stock_before_map(list, n);
+            }
+            free(list);
+            free(h);
+        }
+    }
     sh_modserve_last_diff(&d);
     if (!d.pending && !held) return 0;
     if (g_bound && d.pending) {
