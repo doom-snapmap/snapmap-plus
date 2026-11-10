@@ -623,7 +623,11 @@ folder the last good bytes are read from, and the serving index reads that
 snapshot's `bundle.json` and carried files (`ms_parse_bundle`, from the cause
 `sh_ms_build_cause` reports), logging `bundle '<folder>': its latest build
 failed (<cause>); serving the last good build <key>@<hash16> from <snapshot>`;
-without a snapshot it serves the folder's last good block and says so. The
+without a snapshot it serves the folder's last good block and says so. A
+`mod.json` that does not parse is a refused build too (`sh_ms_descriptor_unparsable`,
+recorded by `sh_ms_sync`): the folder needs attention with the parse error as its cause,
+and the enumeration and the serving index find its snapshot through the record's
+`snapshots` row and serve it until the author fixes the file. The
 serving index takes a bundle's key from the author block's `id` when present,
 else from the product block's `key`, so a folder made by `sh_mods new` is
 served. The

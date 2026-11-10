@@ -4062,6 +4062,39 @@ static void test_additive_key_and_snapshot(void)
         CHECK(!log_has("mod.json has no bundle hash"));
         CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
     }
+    /* V12: a mod.json that does not parse. The record's snapshots row names
+     * the folder's last good build, which serves; the parse error is the
+     * failed build's cause when the store recorded none. */
+    {
+        char mj[MAX_PATH], keep[MAX_PATH];
+        size_t mlen = 0;
+        unsigned char *mtext;
+        static const char broken[] = "{\"id\": \"s.snap\", \"version\": \"1.0.0\",, }";
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\snap\\mod.json", root);
+        mtext = sh_mb_read_file(mj, 1u << 20, &mlen);
+        CHECK(mtext != NULL);
+        _snprintf_s(keep, sizeof keep, _TRUNCATE, "%s\\snap\\mod.json.keep", root);
+        if (mtext) write_file(keep, (const char *)mtext, mlen);
+        write_file(mj, broken, strlen(broken));
+        sh_modserve_set_build_cause(NULL);
+        /* No row: skipped, as before. */
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 1 && log_has("bundle 'snap' skipped: mod.json is not a valid JSON object"));
+        CHECK(sh_mb_record_put(root, "snapshots", "{\"snap\": \"s.snap@4444444444444444\"}"));
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 2);
+        CHECK(log_has("bundle 'snap': its latest build failed (mod.json is not a valid JSON object (") &&
+              log_has("); serving the last good build s.snap@4444444444444444 from "));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
+        /* The store's recorded cause wins. */
+        sh_modserve_set_build_cause(ad_build_cause);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 2 && log_has("its latest build failed (assets/mods/s.snap/x.decl: parse error)"));
+        if (mtext) write_file(mj, (const char *)mtext, mlen);
+        free(mtext);
+        DeleteFileA(keep);
+        CHECK(sh_mb_record_put(root, "snapshots", NULL));
+    }
     /* No snapshot: the folder's last good block, as phase 1 left it. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
     DeleteFileA(path);

@@ -818,6 +818,27 @@ void sh_ms_build_cause(const char *folder, char *out, size_t cap)
     modstore_unlock();
 }
 
+int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap)
+{
+    char path[MAX_PATH * 4];
+    unsigned char *text;
+    size_t len = 0;
+    sh_json_kind kind;
+    sh_json_error err = { 0, NULL };
+    int bad;
+    if (out && cap) out[0] = 0;
+    if (!folder) return 0;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+    text = sh_mb_read_file(path, 16u << 20, &len);
+    if (!text) return 0;   /* missing, or unreadable: the build says which */
+    bad = !sh_json_validate_ex((const char *)text, len, 16u, &kind, &err) || kind != SH_JSON_OBJECT;
+    free(text);
+    if (bad && out && cap)
+        _snprintf_s(out, cap, _TRUNCATE, "mod.json is not a valid JSON object (%s at byte %zu); fix the file and it "
+                    "builds again", err.reason ? err.reason : "not an object", err.offset);
+    return bad;
+}
+
 /* ------------------------------------------- last good build snapshot ---- */
 /* DESIGN-additive 2.8. An author edits files in place, so the product block
  * alone cannot serve the last good build after a refused rebuild: the bytes
@@ -1216,6 +1237,34 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     if (!e->loaded) {
         char built[SH_MB_CAUSE_MAX];
         sh_ms_build_cause(e->folder, built, sizeof built);
+        if (!built[0] && e->folder) sh_ms_descriptor_unparsable(e->folder, built, sizeof built);
+        /* A refused build whose mod.json no longer loads (it does not parse,
+         * or was edited): the last good build's snapshot serves, as for a
+         * refused rebuild below. */
+        if (built[0] && snaps && ms_snap_row(snaps, e->name, name, sizeof name)) {
+            wchar_t *root = ms_wroot();
+            snapw = root ? ms_snap_dir(root, name) : NULL;
+            free(root);
+            if (snapw && (u = sh_mb_utf8(snapw)) != NULL) {
+                char bj[MAX_PATH * 4];
+                sh_mb_bundle kept;
+                _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\bundle.json", u);
+                if (sh_mb_load(bj, &kept) && ms_snap_name(&kept, want, sizeof want) && !_stricmp(want, name)) {
+                    sh_mb_free(&e->bundle);
+                    e->bundle = kept;
+                    e->loaded = 1;
+                    e->snapshot = _strdup(ms_plain(u));
+                    strncpy_s(e->build_failed, sizeof e->build_failed, built, _TRUNCATE);
+                } else sh_mb_free(&kept);
+                free(u);
+            }
+            if (!e->loaded) { free(snapw); snapw = NULL; }
+        }
+    }
+    if (!e->loaded) {
+        char built[SH_MB_CAUSE_MAX];
+        sh_ms_build_cause(e->folder, built, sizeof built);
+        if (!built[0] && e->folder) sh_ms_descriptor_unparsable(e->folder, built, sizeof built);
         if (built[0]) strncpy_s(e->cause, sizeof e->cause, built, _TRUNCATE);
         else if (strstr(e->bundle.first_cause, "not been built") || !ms_has_file(folder, L"mod.json"))
             _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "not built yet (a rescan of the Mods tab or "
@@ -1226,9 +1275,9 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     }
     _snprintf_s(e->key, sizeof e->key, _TRUNCATE, "%s@%s+%llu", e->bundle.id, e->bundle.version, e->bundle.build);
     /* A rebuild that failed leaves this (the last good) build serving. */
-    sh_ms_build_cause(e->folder, e->build_failed, sizeof e->build_failed);
+    if (!e->snapshot) sh_ms_build_cause(e->folder, e->build_failed, sizeof e->build_failed);
     /* Its snapshot: the row of this folder naming this very build, complete. */
-    if (snaps && ms_snap_name(&e->bundle, want, sizeof want) && ms_snap_row(snaps, e->name, name, sizeof name) &&
+    if (!e->snapshot && snaps && ms_snap_name(&e->bundle, want, sizeof want) && ms_snap_row(snaps, e->name, name, sizeof name) &&
         !_stricmp(name, want)) {
         wchar_t *root = ms_wroot();
         snapw = root ? ms_snap_dir(root, name) : NULL;
@@ -2648,7 +2697,22 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
             st->folders++;
             have[0] = 0;
             if (sh_mb_load_folder(folder, &b)) strcpy_s(have, sizeof have, b.hash);
-            if (!sh_mb_tree_hash(folder, tree)) { sh_mb_free(&b); free(folder); continue; }
+            if (!sh_mb_tree_hash(folder, tree)) {
+                char bad[SH_MB_CAUSE_MAX], snap[MAX_PATH * 4];
+                /* A mod.json that does not parse cannot be built: that is the
+                 * folder's refused build, and its last good build serves. */
+                if (sh_ms_descriptor_unparsable(folder, bad, sizeof bad)) {
+                    st->failed++;
+                    ms_note_cause(folder, bad);
+                    if (sh_ms_snapshot_of(folder, snap, sizeof snap))
+                        ms_log("MODS: store: %s build failed: %s; serving the last good build from %s", ms_rel(folder),
+                               bad, snap);
+                    else ms_log("MODS: store: %s refused: %s", ms_rel(folder), bad);
+                }
+                sh_mb_free(&b);
+                free(folder);
+                continue;
+            }
             cached = sh_json_object_get(&cache, tree);
             _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", have);
             current = have[0] && cached && !strcmp(cached, value) && b.rules == SH_MB_RULES;
@@ -2656,6 +2720,7 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
              * snapshot went missing) gets one from its unchanged files. */
             if (current) {
                 char snap[MAX_PATH * 4], want[SH_MB_ID_MAX + 24];
+                ms_note_cause(folder, NULL);   /* its files are its last good build again */
                 if (ms_snap_name(&b, want, sizeof want) &&
                     (!sh_ms_snapshot_of(folder, snap, sizeof snap) || _stricmp(ms_leaf(snap), want)))
                     ms_snapshot_take(folder, &b);
