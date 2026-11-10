@@ -49,33 +49,8 @@ param(
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) {
-    throw "vswhere not found. Install Build Tools for Visual Studio 2022 (C++ workload)."
-}
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
-$vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
-
-# Resolve and verify the requested toolset before invoking vcvars64.bat.
-$vcvarsArgs = ""
-$toolsetDir = Join-Path $vs "VC\Tools\MSVC"
-if ($VcVarsVer) {
-    if (-not (Test-Path (Join-Path $toolsetDir $VcVarsVer))) {
-        $have = (Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ", "
-        throw ("pinned MSVC toolset $VcVarsVer is not installed (have: $have). Install it via the VS " +
-               "Installer, or update the pin in .github/workflows/release.yml (SNAPMAPPLUS_VCVARS_VER).")
-    }
-    $vcvarsArgs = " -vcvars_ver=$VcVarsVer"
-    $toolset = $VcVarsVer + " (pinned)"
-} else {
-    # Without a pin, report the newest installed toolset for build diagnostics.
-    $newest = Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue |
-              Sort-Object Name -Descending | Select-Object -First 1
-    if ($newest) { $toolset = $newest.Name + " (newest installed, NOT pinned)" }
-    else { $toolset = "unknown (NOT pinned)" }
-}
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "tools\cbuild.ps1")
+$toolset = Import-MsvcEnv $VcVarsVer
 Write-Host "[build] MSVC toolset $toolset"
 
 # Accept comma-separated source names as well as a PowerShell array.
@@ -92,7 +67,6 @@ if ($Diag) {
 # Compile from this directory with relative paths to avoid cmd quoting issues.
 # xinput1_4.def is the sole export source and fixes native XInput ordinals.
 # DOOM imports by ordinal; automatic alphabetical numbering calls wrong functions.
-$srcArgs = ($Sources | ForEach-Object { '"' + $_.Trim() + '"' }) -join " "
 $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp files under build/obj/backend.
 # Include the shared interface ABI used by the backend factory and paired UI DLL.
 # shell32 supplies known-folder APIs; ole32 frees their returned allocations.
@@ -103,20 +77,18 @@ $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp file
 # restore release layout defaults that debug linking otherwise changes.
 # /Brepro on compilation and linking removes timestamp-based output variation.
 # /PDBALTPATH:%_PDB% records only the PDB filename, omitting local build paths.
-$cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /Fo..\..\build\obj\backend\ /I..\common $srcArgs /Fe:..\..\build\$Out " +
+# Sources compile to build/obj/backend (only those changed since the last build), then link.
+$outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
+$objDir = Join-Path $outDir "obj\backend"
+$buildLog = Join-Path $outDir "build.log"
+$objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /I..\common" `
+    -ObjDir $objDir -ObjDirArg "..\..\build\obj\backend\" -IncludeDirs @((Join-Path $here "..\common")) -Log $buildLog
+$objArgs = ($objs | ForEach-Object { '"..\..\build\obj\backend\' + (Split-Path -Leaf $_) + '"' }) -join " "
+$cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $objArgs /Fe:..\..\build\$Out " +
       "/link /DEF:xinput1_4.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
       "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
-
-$cmd = "cd /d `"$here`" && `"$vcvars`"$vcvarsArgs && $cl"
-# Capture native stderr in the build log: PS 5.1 can otherwise treat harmless
-# vcvars diagnostics as terminating errors. Determine success from LASTEXITCODE.
-$outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
-New-Item -ItemType Directory -Force (Join-Path $outDir "obj\backend") | Out-Null
-$buildLog = Join-Path $outDir "build.log"
-cmd /c "$cmd > `"$buildLog`" 2>&1"
-$clExit = $LASTEXITCODE
-Get-Content $buildLog | Write-Host
-if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
+Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $outDir $Out) -Log (Join-Path $outDir "link.log") `
+    -Remove @((Join-Path $outDir ($Out -replace '\.dll$', '.pdb')))
 Write-Host "built $(Join-Path $outDir $Out)"
 # Require both symbol artifacts so reported crash offsets remain resolvable.
 foreach ($sym in @(($Out -replace '\.dll$', '.pdb'), ($Out -replace '\.dll$', '.map'))) {

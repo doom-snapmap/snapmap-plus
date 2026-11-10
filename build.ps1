@@ -9,6 +9,9 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Import the MSVC environment once; the three builds below inherit it.
+. "$here\tools\cbuild.ps1"
+$null = Import-MsvcEnv $env:SNAPMAPPLUS_VCVARS_VER
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\backend\build.ps1" @Rest
 if ($LASTEXITCODE -ne 0) { throw "backend build failed" }
 # The store migration tool the installer runs, from the backend's store sources.
