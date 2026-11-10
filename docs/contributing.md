@@ -94,10 +94,12 @@ when iterating on backend code alone; any extra args (e.g. `-Diag`) forward thro
 
 The build is incremental. Each component script compiles its sources to objects under `build/obj/`
 with `cl /c /MP` (one compiler process per core) and then links them, all through the shared helpers
-in `tools/cbuild.ps1`. A later build recompiles only a source whose object is missing or older than
-the source or any project file it includes (quoted `#include`, followed recursively), and relinks only
-when an object or the link command changed; a change of flags or MSVC toolset recompiles that
-component in full. Clean and incremental builds write byte-identical DLLs (`/Brepro`, and the previous
+in `tools/cbuild.ps1`. Staleness is decided by content, not file times: each object has a key beside
+it (`<obj>.key`, a SHA-256 over the flags, the MSVC toolset, and the path and text of the source and
+of every project file it includes, quoted `#include` followed recursively). A later build recompiles
+only a source whose object or key is missing or whose key changed, and relinks only when the link
+command or an object's key changed, so a fresh checkout over a kept or restored `build/obj/`
+recompiles nothing that did not change. Clean and incremental builds write byte-identical DLLs (`/Brepro`, and the previous
 PDB is removed before each link). To force a clean build, delete `build/obj/`.
 
 ## 5. Package the overlay
@@ -293,8 +295,8 @@ that are merged but not yet tagged do not appear.
    capability-surface scan · gitleaks); the build (`build.ps1` / `package.ps1`, a bundle guard that
    asserts the overlay stays the lean 2-file set, XInput ordinal parity, `tests/run-tests.ps1` and the
    Worker runtime suite); and the installer's `gofmt` / `vet` / `test` / `build`. CI calls the same
-   scripts as a local build and caches only fetched dependencies (the WebView2 SDK, miniflare and the Go
-   caches). It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
+   scripts as a local build and caches fetched dependencies (the WebView2 SDK, miniflare and the Go
+   caches) and `build/obj/`, whose content keys decide what a run recompiles. It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
    repo secrets.
 9. A **maintainer reviews** and merges (changes under `.github/`, `*.ps1`, and `installer/` are
    CODEOWNERS-gated). Releases are cut from reviewed, tagged commits — see the README's

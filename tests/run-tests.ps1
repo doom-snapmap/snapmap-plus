@@ -222,7 +222,6 @@ foreach ($t in $tests) {
     $flags = "/nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs"
     $hash = (-join ($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($flags)) | ForEach-Object { $_.ToString("x2") })).Substring(0, 12)
     $setDir = Join-Path $cache $hash
-    if (-not $units.Contains("set:$hash")) { Sync-CbFlagsRecord $setDir $flags; $units["set:$hash"] = $null }
     $t.objs = @()
     foreach ($src in @($t.src -split '\s+' | Where-Object { $_ })) {
         # Name the object by its path so same-named files in different folders cannot collide.
@@ -236,18 +235,22 @@ foreach ($t in $tests) {
 $jobs = @()
 foreach ($u in @($units.Values | Where-Object { $_ })) {
     $u.ok = $true
-    if ((Test-Path $u.obj) -and
-        (Get-CbNewestInput (Join-Path $here $u.src) $incDirs) -le [System.IO.File]::GetLastWriteTimeUtc($u.obj)) { continue }
-    Remove-Item $u.obj -Force -ErrorAction SilentlyContinue
+    $u.key = Get-CbInputKey (Join-Path $here $u.src) $incDirs $u.flags
+    if ((Get-CbObjectKey $u.obj) -eq $u.key) { continue }
+    New-Item -ItemType Directory -Force (Split-Path -Parent $u.obj) | Out-Null
+    Remove-Item $u.obj, "$($u.obj).key" -Force -ErrorAction SilentlyContinue
     $u.log = $u.obj -replace '\.obj$', '.log'
     $jobs += @{ dir = $here; cmd = "cl /c $($u.flags) $($u.src) /Fo`"$($u.obj)`""; log = $u.log; unit = $u }
 }
 $codes = Invoke-CbParallel $jobs
-for ($i = 0; $i -lt $jobs.Count; $i++) { if ($codes[$i] -ne 0) { $jobs[$i].unit.ok = $false } }
+for ($i = 0; $i -lt $jobs.Count; $i++) {
+    if ($codes[$i] -ne 0) { $jobs[$i].unit.ok = $false }
+    else { [System.IO.File]::WriteAllText("$($jobs[$i].unit.obj).key", $jobs[$i].unit.key) }
+}
 Write-Host ("[tests] compiled {0} of {1} objects" -f $jobs.Count, @($units.Values | Where-Object { $_ }).Count)
 
-# Link each suite whose objects compiled, unless its executable is newer than them and was linked
-# by the same command.
+# Link each suite whose objects compiled, unless its executable was linked by the same command
+# from objects with the same keys.
 $fail = 0
 $linkJobs = @()
 foreach ($t in $tests) {
@@ -261,15 +264,10 @@ foreach ($t in $tests) {
     $objArgs = ($t.objs | ForEach-Object { '"' + $_ + '"' }) -join " "
     $cmd = "cl /nologo /O2 /MT$($t.cxx) $objArgs /Fe:obj\$($t.name).exe$libs"
     $record = Join-Path $obj ($t.name + ".link.txt")
-    $need = -not (Test-Path $exe)
-    if (-not $need) {
-        $exeTime = [System.IO.File]::GetLastWriteTimeUtc($exe)
-        $need = @($t.objs | Where-Object { [System.IO.File]::GetLastWriteTimeUtc($_) -gt $exeTime }).Count -gt 0
-    }
-    if (-not $need) { $need = -not (Test-Path $record) -or [System.IO.File]::ReadAllText($record) -ne $cmd }
-    if ($need) {
+    $want = Get-CbLinkRecord $cmd $t.objs
+    if (-not (Test-Path $exe) -or -not (Test-Path $record) -or [System.IO.File]::ReadAllText($record) -ne $want) {
         Remove-Item $exe, $record -Force -ErrorAction SilentlyContinue
-        $linkJobs += @{ dir = $here; cmd = $cmd; log = (Join-Path $obj ($t.name + ".build.log")); test = $t; record = $record }
+        $linkJobs += @{ dir = $here; cmd = $cmd; log = (Join-Path $obj ($t.name + ".build.log")); test = $t; record = $record; want = $want }
     }
 }
 $codes = Invoke-CbParallel $linkJobs
@@ -277,7 +275,7 @@ for ($i = 0; $i -lt $linkJobs.Count; $i++) {
     $j = $linkJobs[$i]
     if ($codes[$i] -ne 0) {
         Get-Content $j.log | Write-Host; Write-Host "[FAIL] compile $($j.test.name)"; $fail++; $j.test.skip = $true
-    } else { [System.IO.File]::WriteAllText($j.record, $j.cmd) }
+    } else { [System.IO.File]::WriteAllText($j.record, $j.want) }
 }
 
 # Run the native suites, and the JavaScript suites unless -Only selected native ones, side by side

@@ -102,6 +102,17 @@ jobs:
         with:
           path: build/webview2sdk
           key: webview2sdk-${{ hashFiles('src/ui/build.ps1') }}
+      - name: Restore the build and test objects
+        # Objects are reused by content: each carries a key over its flags, toolset, and the
+        # path and text of its source and included files (tools/cbuild.ps1), so a restored
+        # object is used only when its inputs are unchanged. Each run saves a new entry and
+        # restores the newest one.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/obj
+          key: build-obj-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            build-obj-${{ runner.os }}-
       - name: Build backend + frontend
         shell: pwsh
         run: |

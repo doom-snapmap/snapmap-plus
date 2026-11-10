@@ -3,10 +3,12 @@
 # separate step links them, so a rebuild recompiles only what changed. Keep this script ASCII for
 # PowerShell 5.1.
 #
-# A source is rebuilt when its object is missing, when the source or any project file it includes
-# (quoted #include, followed recursively) is newer than the object, or when the compile flags or
-# the toolset changed. Angle-bracket includes are system or SDK headers; the toolset and the SDK
-# path are part of the flags record, so a change to either rebuilds everything.
+# Staleness is decided by content, never by file times (a fresh checkout dates every file at the
+# checkout). Each object has a key beside it (<obj>.key): a SHA-256 over the compile flags, the
+# toolset, and the path and text of the source and of every project file it includes (quoted
+# #include, followed recursively). A source recompiles when its object or key is missing or the key
+# differs, so build\obj can be restored from a cache. Angle-bracket includes are system or SDK
+# headers; the toolset and the SDK path (in the flags) are part of the key.
 
 # Import the vcvars64 environment into this process once. A child build started by this process
 # inherits it and skips the import (vcvars64.bat costs a few seconds per call).
@@ -52,23 +54,31 @@ function Import-MsvcEnv([string]$VcVarsVer) {
     return $toolset
 }
 
-# The newest write time over a source and every project file it includes, memoized per run.
-$script:CbIncludeMemo = @{}
-function Get-CbNewestInput([string]$Path, [string[]]$IncludeDirs) {
+# The SHA-256 of a file's bytes, and the quoted includes it names, memoized per run.
+$script:CbHashMemo = @{}
+$script:CbDepsMemo = @{}
+$script:CbSha = [System.Security.Cryptography.SHA256]::Create()
+function Get-CbHex([byte[]]$Bytes) {
+    return (-join ($script:CbSha.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") }))
+}
+
+# The content key of a source compiled with Flags: see the header of this file.
+function Get-CbInputKey([string]$Path, [string[]]$IncludeDirs, [string]$Flags) {
+    if (-not $script:CbCl) { $script:CbCl = (Get-Command cl).Source }
     $seen = @{}
     $stack = New-Object System.Collections.Stack
     $stack.Push([System.IO.Path]::GetFullPath($Path))
-    $newest = [DateTime]::MinValue
     while ($stack.Count) {
         $file = $stack.Pop()
         $k = $file.ToLowerInvariant()
         if ($seen.ContainsKey($k)) { continue }
-        $seen[$k] = $true
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
-        $t = [System.IO.File]::GetLastWriteTimeUtc($file)
-        if ($t -gt $newest) { $newest = $t }
+        if (-not $script:CbHashMemo.ContainsKey($k)) {
+            $script:CbHashMemo[$k] = Get-CbHex ([System.IO.File]::ReadAllBytes($file))
+        }
+        $seen[$k] = $script:CbHashMemo[$k]
         $memoKey = "$k|" + ($IncludeDirs -join ";")
-        $deps = $script:CbIncludeMemo[$memoKey]
+        $deps = $script:CbDepsMemo[$memoKey]
         if ($null -eq $deps) {
             $deps = @()
             $dir = Split-Path -Parent $file
@@ -81,23 +91,20 @@ function Get-CbNewestInput([string]$Path, [string[]]$IncludeDirs) {
                     }
                 }
             }
-            $script:CbIncludeMemo[$memoKey] = $deps
+            $script:CbDepsMemo[$memoKey] = $deps
         }
         foreach ($d in $deps) { $stack.Push($d) }
     }
-    return $newest
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("flags=$Flags`ntoolset=$env:VCToolsVersion`ncl=$($script:CbCl)`n")
+    foreach ($f in @($seen.Keys | Sort-Object)) { [void]$sb.Append("$f`t$($seen[$f])`n") }
+    return Get-CbHex ([System.Text.Encoding]::UTF8.GetBytes($sb.ToString()))
 }
 
-# Record the flags an object directory was built with; a change empties the directory's objects.
-function Sync-CbFlagsRecord([string]$ObjDir, [string]$Flags) {
-    New-Item -ItemType Directory -Force $ObjDir | Out-Null
-    $record = Join-Path $ObjDir "flags.txt"
-    $want = "$Flags`r`ntoolset=$env:VCToolsVersion cl=$((Get-Command cl).Source)"
-    $have = if (Test-Path $record) { [System.IO.File]::ReadAllText($record) } else { $null }
-    if ($have -ne $want) {
-        Get-ChildItem $ObjDir -Filter *.obj -File -ErrorAction SilentlyContinue | Remove-Item -Force
-        [System.IO.File]::WriteAllText($record, $want)
-    }
+# The key an object was compiled with, or $null when the object or its key is missing.
+function Get-CbObjectKey([string]$Obj) {
+    if (-not (Test-Path -LiteralPath $Obj) -or -not (Test-Path -LiteralPath "$Obj.key")) { return $null }
+    return [System.IO.File]::ReadAllText("$Obj.key")
 }
 
 # Compile the stale sources of one flag set into ObjDir with a single cl /c /MP call, run from
@@ -106,8 +113,8 @@ function Sync-CbFlagsRecord([string]$ObjDir, [string]$Flags) {
 function Invoke-CbCompile {
     param([string]$WorkDir, [string[]]$Sources, [string]$Flags, [string]$ObjDir, [string]$ObjDirArg,
           [string[]]$IncludeDirs, [string]$Log)
-    Sync-CbFlagsRecord $ObjDir $Flags
-    $objs = @(); $stale = @(); $names = @{}
+    New-Item -ItemType Directory -Force $ObjDir | Out-Null
+    $objs = @(); $stale = @(); $keys = @{}; $names = @{}
     foreach ($s in $Sources) {
         $s = $s.Trim()
         $base = [System.IO.Path]::GetFileNameWithoutExtension($s)
@@ -115,9 +122,11 @@ function Invoke-CbCompile {
         $names[$base.ToLowerInvariant()] = $true
         $obj = Join-Path $ObjDir ($base + ".obj")
         $objs += $obj
-        if (-not (Test-Path $obj) -or
-            (Get-CbNewestInput (Join-Path $WorkDir $s) $IncludeDirs) -gt [System.IO.File]::GetLastWriteTimeUtc($obj)) {
+        $key = Get-CbInputKey (Join-Path $WorkDir $s) $IncludeDirs $Flags
+        if ((Get-CbObjectKey $obj) -ne $key) {
             $stale += $s
+            $keys[$obj] = $key
+            Remove-Item -LiteralPath "$obj.key" -Force -ErrorAction SilentlyContinue
         }
     }
     if ($stale.Count) {
@@ -126,26 +135,24 @@ function Invoke-CbCompile {
         $exit = $LASTEXITCODE
         Get-Content $Log | Write-Host
         if ($exit -ne 0) { throw "cl failed (exit $exit) -- see $Log" }
+        foreach ($o in $keys.Keys) { [System.IO.File]::WriteAllText("$o.key", $keys[$o]) }
     }
     Write-Host ("[build] compiled {0} of {1} sources" -f $stale.Count, $Sources.Count)
     return ,$objs
 }
 
-# Link when the output is missing, older than an object, or was linked by a different command.
-# The previous PDB is removed first so a rebuild writes the same bytes as a clean build.
+# Link when the output is missing or the link command or an object's key changed (the record
+# beside the output holds both). The previous PDB is removed first so a rebuild writes the same
+# bytes as a clean build.
+function Get-CbLinkRecord([string]$Command, [string[]]$Objects) {
+    return $Command + "`n" + (($Objects | ForEach-Object { Get-CbObjectKey $_ }) -join "`n")
+}
 function Invoke-CbLink {
     param([string]$WorkDir, [string]$Command, [string[]]$Objects, [string]$Output, [string]$Log,
           [string[]]$Remove = @())
     $record = "$Output.link.txt"
-    $need = -not (Test-Path $Output)
-    if (-not $need) {
-        $outTime = [System.IO.File]::GetLastWriteTimeUtc($Output)
-        foreach ($o in $Objects) { if ([System.IO.File]::GetLastWriteTimeUtc($o) -gt $outTime) { $need = $true; break } }
-    }
-    if (-not $need) {
-        $have = if (Test-Path $record) { [System.IO.File]::ReadAllText($record) } else { $null }
-        if ($have -ne $Command) { $need = $true }
-    }
+    $want = Get-CbLinkRecord $Command $Objects
+    $need = -not (Test-Path $Output) -or -not (Test-Path $record) -or [System.IO.File]::ReadAllText($record) -ne $want
     if (-not $need) { Write-Host "[build] up to date: $Output"; return }
     foreach ($r in $Remove) { Remove-Item $r -Force -ErrorAction SilentlyContinue }
     Remove-Item $record -Force -ErrorAction SilentlyContinue
@@ -153,7 +160,7 @@ function Invoke-CbLink {
     $exit = $LASTEXITCODE
     Get-Content $Log | Write-Host
     if ($exit -ne 0) { throw "link failed (exit $exit) -- see $Log" }
-    [System.IO.File]::WriteAllText($record, $Command)
+    [System.IO.File]::WriteAllText($record, $want)
 }
 
 # Run command lines through cmd.exe, at most $Max at a time, each with its output in its own log.
