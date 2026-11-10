@@ -970,10 +970,15 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\bundle.json", snap);
                 mtext = ms_read_whole(mpath, SH_MODSERVE_MAX_JSON, &mlen);
                 if (mtext && sh_json_validate_ex((const char *)mtext, mlen, MS_JSON_DEPTH, &kind, &err) && kind == SH_JSON_OBJECT) {
+                    char *sk = NULL, *sh = NULL;
                     HeapFree(GetProcessHeap(), 0, text);
                     text = mtext;
                     len = mlen;
-                    manifest = 1;
+                    /* The store writes the folder's mod.json at that build
+                     * (ms_snap_fill): author block plus product block, read as
+                     * a mod.json is. A flat Contract 1 manifest has no block. */
+                    ms_peek_identity(x, text, len, &sk, &sh);
+                    manifest = sh == NULL;
                     b->snapshot = b->files_dir = ms_strdup(x, snap);
                 } else if (mtext) HeapFree(GetProcessHeap(), 0, mtext);
             }

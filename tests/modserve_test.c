@@ -3980,6 +3980,25 @@ static void test_additive_key_and_snapshot(void)
         CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/s.snap/x.decl", &hit) && strstr(hit.disk_path, ".builds") &&
               !strcmp(hit.bundle_hash, h));
     }
+    /* The store's own snapshot is the folder's mod.json at that build (author
+     * block plus product block, modstore.c ms_snap_fill), and serves the same. */
+    {
+        char mj[MAX_PATH];
+        size_t mlen = 0;
+        unsigned char *mtext;
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\snap\\mod.json", root);
+        mtext = sh_mb_read_file(mj, 1u << 20, &mlen);
+        CHECK(mtext && strstr((const char *)mtext, "\"" SH_MB_BLOCK_KEY "\""));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
+        if (mtext) write_file(path, (const char *)mtext, mlen);
+        free(mtext);
+        log_clear();
+        CHECK(sh_modserve_index_build(root) == 2);
+        CHECK(log_has("bundle 'snap': its latest build failed (assets/mods/s.snap/x.decl: parse error); serving the last good "
+                      "build s.snap@4444444444444444 from "));
+        CHECK(!log_has("mod.json has no bundle hash"));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/s.snap/x.decl"), "entityDef x { good }"));
+    }
     /* No snapshot: the folder's last good block, as phase 1 left it. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
     DeleteFileA(path);
