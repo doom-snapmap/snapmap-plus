@@ -773,21 +773,58 @@ int main(int argc, char **argv)
         CHECK(stub_live_claim("fffffffffffffffffffffff6") != NULL);
         left = modsync_pending_count();
         CHECK(left == 0);
-        CHECK(strstr(g_log, "MODS: launch: 2 provisional ref(s) settled; queued uploads: 1 retried, 0 dropped, 0 left") != NULL);
+        CHECK(strstr(g_log, "MODS: launch: queued uploads and releases: 1 retried, 0 dropped; 2 provisional ref(s) "
+                            "settled, 0 kept while their item claim is pending; 0 left") != NULL);
         /* Nothing to settle: no job. */
         sh_modpublish_launch();
         CHECK(!sh_modpublish_test_background_busy());
     }
 
+    printf("-- launch: the queue first; a provisional claim waits for its item's claim\n");
+    {
+        char prov2[MODNET_REF_MAX * 4 + 1], want_claim[96], want_release[96];
+        const char *claim_at, *release_at;
+        const char *item = "kkkkkkkkkkkkkkkkkkkkkk12";
+        int blobs, bundles;
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        strcpy_s(prov2, sizeof prov2, sh_modpublish_test_provisional());
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(stub_live_claim(prov2) != NULL);
+        /* The item claim fails after the publish: queued, the provisional claim kept and named. */
+        stub_fail_next("POST /mods/claim", 503);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, item, "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(item) == NULL && stub_live_claim(prov2) != NULL);
+        CHECK(modsync_pending_count() == 1 && section_contains(store, "pending", prov2));
+        CHECK(modsync_pending_waits_on(prov2));
+        /* A launch while the store still fails the claim keeps the provisional claim. */
+        stub_fail_next("POST /mods/claim", 503);
+        sh_modpublish_launch();
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(prov2) != NULL && stub_live_claim(item) == NULL && modsync_pending_count() == 1);
+        CHECK(strstr(g_log, "0 retried, 0 dropped; 0 provisional ref(s) settled, 1 kept while their item claim "
+                            "is pending; 1 left") != NULL);
+        /* The next launch claims the item first, while the bundles are still
+         * on the store, and only then releases the provisional claim. */
+        g_stub.trail[0] = 0;
+        blobs = g_stub.blob_puts;
+        bundles = g_stub.bundle_created;
+        sh_modpublish_launch();
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim(item) != NULL && stub_live_claim(prov2) == NULL && modsync_pending_count() == 0);
+        _snprintf_s(want_claim, sizeof want_claim, _TRUNCATE, "claim %s\n", item);
+        _snprintf_s(want_release, sizeof want_release, _TRUNCATE, "release %s\n", prov2);
+        claim_at = strstr(g_stub.trail, want_claim);
+        release_at = strstr(g_stub.trail, want_release);
+        CHECK(claim_at && release_at && claim_at < release_at);
+        CHECK(g_stub.blob_puts == blobs && g_stub.bundle_created == bundles);
+        CHECK(!modsync_pending_waits_on(prov2));
+    }
+
     printf("-- an unpublish whose release fails is queued and sent at the next launch\n");
     {
         const char *item = "kkkkkkkkkkkkkkkkkkkkkk12";
-        sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_after_save(EDITOR) == 0);
-        PUMP_UNTIL(!sh_modpublish_holding());
-        sh_modpublish_feed_post((void *)(uintptr_t)F.token, item, "rev1");
-        PUMP_UNTIL(idle_all());
-        CHECK(stub_live_claim(item) != NULL);
         stub_fail_next("POST /mods/release", 503);
         sh_modpublish_unpublished(item);
         PUMP_UNTIL(idle_all());

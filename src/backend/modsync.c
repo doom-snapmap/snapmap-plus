@@ -406,13 +406,14 @@ static int msy_claim_forget(const char *ref)
 
 /* Queue ref in the pending section: an upload of hashes, or (n == 0) the
  * release of its claim. A release replaces a queued upload of the same ref
- * (the claim is no longer wanted). */
+ * (the claim is no longer wanted); the provisional ref an item's upload
+ * waits on is kept across attempts. */
 static void msy_retry_releases(const modnet_io *io);
 
 static int msy_pending_put(const char *ref, const char *const *hashes, int n, const char *error)
 {
     mpj *doc, *pend, *e, *old;
-    const mpj *att;
+    const mpj *att, *prov;
     char *key = msy_escape(ref), plain[200];
     long long attempts = 1;
     int ok = 0;
@@ -424,10 +425,12 @@ static int msy_pending_put(const char *ref, const char *const *hashes, int n, co
     old = pend ? mpj_get(pend, key) : NULL;
     att = old ? mpj_get(old, "attempts") : NULL;
     if (att && mpj_is_num(att)) attempts = mpj_int(att) + 1;
+    prov = old && n > 0 ? mpj_get(old, "provisional") : NULL;
     e = pend ? mpj_new(MPJ_OBJ) : NULL;
     if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) &&
         (n > 0 ? mpj_set(e, "bundles", msy_hash_array(hashes, n)) : mpj_set(e, "kind", mpj_new_str("release"))) &&
-        mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL)))) {
+        mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL))) &&
+        (!prov || prov->type != MPJ_STR || mpj_set(e, "provisional", mpj_clone(prov)))) {
         if (mpj_set(pend, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc); }
     }
     mpj_free(e);
@@ -449,6 +452,46 @@ static void msy_pending_drop(const char *ref)
     mpj_free(doc);
     modsync_store_unlock();
     free(key);
+}
+
+void modsync_pending_drop(const char *ref)
+{
+    if (ref && ref[0]) msy_pending_drop(ref);
+}
+
+int modsync_pending_link(const char *ref, const char *provisional)
+{
+    mpj *doc, *pend, *e;
+    char *key = ref ? msy_escape(ref) : NULL;
+    int ok = 0;
+    if (!key || !provisional || !modnet_valid_ref(provisional)) { free(key); return 0; }
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    e = pend ? mpj_get(pend, key) : NULL;
+    if (e && e->type == MPJ_OBJ && mpj_get(e, "bundles") && mpj_set(e, "provisional", mpj_new_str(provisional)))
+        ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc);
+    mpj_free(doc);
+    modsync_store_unlock();
+    free(key);
+    return ok;
+}
+
+int modsync_pending_waits_on(const char *provisional)
+{
+    mpj *doc, *pend;
+    int i, waits = 0;
+    if (!provisional || !provisional[0]) return 0;
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    modsync_store_unlock();
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    for (i = 0; pend && i < pend->n && !waits; i++) {
+        const mpj *p = mpj_get(pend->items[i], "provisional");
+        waits = p && p->type == MPJ_STR && !strcmp(p->text, provisional);
+    }
+    mpj_free(doc);
+    return waits;
 }
 
 int modsync_pending_count(void)

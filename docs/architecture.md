@@ -2529,10 +2529,14 @@ section, an upload or a claim release alike. A release the store does not
 take (a busy store at unpublish, say) is queued under its ref rather than only
 logged, since a leaked claim keeps its bundles on the store; it replaces a
 queued upload of the same ref. Queued releases are retried after the next
-store call that succeeds and at startup. At startup the backend settles
-provisional refs left by a closed game (their claims are released and their
-queued uploads dropped, since their publish never completed), then retries
-the rest of the queue once on the worker and logs the counts.
+store call that succeeds and at startup. At startup the backend first forgets
+the queued work of provisional refs left by a closed game (their publish never
+completed), then retries the queue once on the worker, then releases each
+provisional claim, except one an item's queued claim still waits on: the item
+claim records its provisional ref when it is queued, and the provisional claim
+keeps the bundles on the store until that claim succeeds. Releasing it first
+would let the store delete a bundle the retry then has to upload again from
+whatever build serves now. The worker logs the counts.
 
 ## Module prefabs
 

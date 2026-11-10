@@ -98,6 +98,16 @@ int  modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *droppe
 /* The number of queued uploads and releases, or -1 when the file cannot be read. */
 int  modsync_pending_count(void);
 
+/* Forget a queued entry without a request. */
+void modsync_pending_drop(const char *ref);
+
+/* Record that the queued upload for ref holds a provisional claim that may
+ * be released only after ref's own claim succeeds (kept across attempts).
+ * Returns 1 when written. */
+int  modsync_pending_link(const char *ref, const char *provisional);
+
+/* 1 while a queued upload still waits on that provisional claim. */
+int  modsync_pending_waits_on(const char *provisional);
 
 /* The claim stored for ref: 1 and the id (secret_out optional), else 0. */
 int  modsync_claim_lookup(const char *ref, char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1]);
