@@ -1408,7 +1408,7 @@ static int ms_alias_rewrite(const char *old_hash, const char *new_hash, const ch
         if (new_hash && !_stricmp(m->key, new_hash)) { changed = 1; continue; }   /* a build returned to that content */
         if (old_hash && !_stricmp(m->key, old_hash)) { changed = 1; continue; }   /* set again below */
         if (forget && !_stricmp(v, forget_value)) { dropped++; changed = 1; continue; }
-        if (old_hash && !_stricmp(v, old_value)) { v = value; changed = 1; }    /* flat: one hop */
+        if (old_hash && new_hash && !_stricmp(v, old_value)) { v = value; changed = 1; }    /* flat: one hop */
         if (!sh_json_object_set(&next, m->key, v, 4)) goto done;
         if (new_hash && !_stricmp(v, value)) n++;
     }
@@ -1464,6 +1464,21 @@ int sh_ms_alias_prune(void)
     size_t i, k;
     int dropped = 0;
     if (!sh_ms_enumerate(&l)) return 0;
+    /* An alias whose source hash a folder still builds to is no alias: that
+     * build is installed and answers for itself. A copied folder whose product
+     * block still named the original folder's build records one at its first
+     * build (its prev_hash is the original's), and it must not stand. */
+    for (i = 0; i < l.alias_count; i++) {
+        int live = 0;
+        for (k = 0; k < l.count && !live; k++)
+            if (l.items[k].loaded && !_stricmp(l.items[k].bundle.hash, l.aliases[i].from)) live = 1;
+        if (!live) continue;
+        if (ms_alias_rewrite(l.aliases[i].from, NULL, NULL, NULL)) {
+            dropped++;
+            ms_log("MODS: store: alias %.16s -> %.16s dropped: a folder builds to %.16s itself", l.aliases[i].from,
+                   l.aliases[i].to, l.aliases[i].from);
+        }
+    }
     for (i = 0; i < l.alias_count; i++) {
         int kept = 0, n = 0;
         for (k = 0; k < l.count && !kept; k++)

@@ -255,10 +255,25 @@ static void test_first_build(const char *tmp)
     CHECK(sh_ms_enumerate(&list));
     {
         size_t i;
-        int usable = 0;
+        int usable = 0, alias_left = 0;
+        char live1[SH_MB_HASH_HEX + 1] = "", live2[SH_MB_HASH_HEX + 1] = "";
         for (i = 0; i < list.count; i++)
-            if (!strncmp(list.items[i].name, "cyberprobe_", 11) && sh_ms_entry_usable(&list.items[i])) usable++;
+            if (!strncmp(list.items[i].name, "cyberprobe_", 11) && sh_ms_entry_usable(&list.items[i])) {
+                strcpy_s(usable ? live2 : live1, SH_MB_HASH_HEX + 1, list.items[i].bundle.hash);
+                usable++;
+            }
         CHECK(usable == 2);
+        /* An alias from a build a folder still builds to (a copied folder whose
+         * product block named the original's build) does not stand: the prune
+         * after each pass drops it, and the original keeps answering for itself. */
+        CHECK(strcmp(live1, live2) != 0 && sh_ms_alias_note(live1, live2) == 1);
+        g_logged = 0;
+        CHECK(sh_ms_alias_prune() == 1);
+        CHECK(log_has("dropped: a folder builds to"));
+        sh_ms_list_free(&list);
+        CHECK(sh_ms_enumerate(&list));
+        for (i = 0; i < list.alias_count; i++) if (!strcmp(list.aliases[i].from, live1)) alias_left++;
+        CHECK(alias_left == 0);
     }
     sh_ms_list_free(&list);
 
