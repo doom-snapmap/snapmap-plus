@@ -18,6 +18,7 @@
 #include "decl_tree.h"
 #include "modmanifest.h"
 #include "modbundle.h"
+#include "modstore.h"
 #include "overrides.h"
 
 void sh_modserve_test_cache(int enabled);
@@ -105,25 +106,35 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t n, char *e, size_t ca
 
 static char g_root[MAX_PATH];   /* ...\mods */
 
+/* Fixture paths are UTF-8, as the store spells them (a root may hold a
+ * non-ASCII character: test_store_root_utf8). */
+static void fx_wide(const char *path, wchar_t *out, int cap)
+{
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, out, cap)) out[0] = 0;
+}
+
 static void mkdirs(const char *path)
 {
-    char tmp[MAX_PATH];
-    char *p;
-    strcpy_s(tmp, sizeof tmp, path);
+    wchar_t tmp[MAX_PATH];
+    wchar_t *p;
+    fx_wide(path, tmp, MAX_PATH);
+    if (!tmp[0]) return;
     for (p = tmp + 3; *p; ++p)
-        if (*p == '\\') { *p = 0; CreateDirectoryA(tmp, NULL); *p = '\\'; }
-    CreateDirectoryA(tmp, NULL);
+        if (*p == L'\\') { *p = 0; CreateDirectoryW(tmp, NULL); *p = L'\\'; }
+    CreateDirectoryW(tmp, NULL);
 }
 
 static void write_file(const char *path, const char *body, size_t len)
 {
     char dir[MAX_PATH];
+    wchar_t wpath[MAX_PATH];
     char *slash;
-    FILE *f;
+    FILE *f = NULL;
     strcpy_s(dir, sizeof dir, path);
     slash = strrchr(dir, '\\');
     if (slash) { *slash = 0; mkdirs(dir); }
-    f = fopen(path, "wb");
+    fx_wide(path, wpath, MAX_PATH);
+    if (wpath[0]) f = _wfopen(wpath, L"wb");
     if (!f) { fprintf(stderr, "cannot write %s\n", path); g_failed++; return; }
     fwrite(body, 1, len, f);
     fclose(f);
@@ -3181,23 +3192,30 @@ static void test_bundle_extra(void)
         fprintf(stderr, "bundle extra order: %s\n", g_extra_seen);
 }
 
-static void remove_tree(const char *dir)
+static void remove_tree_w(const wchar_t *dir)
 {
-    char pattern[MAX_PATH], path[MAX_PATH];
-    WIN32_FIND_DATAA fd;
+    wchar_t pattern[MAX_PATH], path[MAX_PATH];
+    WIN32_FIND_DATAW fd;
     HANDLE h;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    h = FindFirstFileA(pattern, &fd);
+    _snwprintf_s(pattern, MAX_PATH, _TRUNCATE, L"%s\\*", dir);
+    h = FindFirstFileW(pattern, &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
-            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(path);
-            else DeleteFileA(path);
-        } while (FindNextFileA(h, &fd));
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree_w(path);
+            else DeleteFileW(path);
+        } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    RemoveDirectoryA(dir);
+    RemoveDirectoryW(dir);
+}
+
+static void remove_tree(const char *dir)
+{
+    wchar_t w[MAX_PATH];
+    fx_wide(dir, w, MAX_PATH);
+    if (w[0]) remove_tree_w(w);
 }
 
 /* ------------------------------------------------------------------ map scope (lane P25, additive phase 2) */
@@ -4374,6 +4392,85 @@ static void test_mixed_editor_bundle(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* A store whose root holds a character outside ASCII (a profile folder named
+ * with an accent): the index boots from the store's own UTF-8 root and reads
+ * the record's aliases and editorOnly sections and the last good snapshot
+ * under it, as the store wrote them (lane C, probes E and G2). */
+static void test_store_root_utf8(void)
+{
+    static const char OLD[] = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    static const fx_file plain[] = {
+        { "generated/decls/entitydef/mods/u.plain/p.decl", "entityDef p {}", -1, "entityDef", "mods/u.plain/p", NULL, '6' },
+    };
+    static const fx_file snapf[] = {
+        { "generated/decls/entitydef/mods/u.snap/x.decl", "entityDef x { good }", -1, "entityDef", "mods/u.snap/x", NULL, '2' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], snap[MAX_PATH], h7[65], h8[65], hd[65], record[256];
+    char *slash, *accent;
+    unsigned char *mtext;
+    size_t mlen = 0;
+    printf("-- the store root holds a non-ASCII character: aliases, editorOnly and the last good snapshot are read\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    accent = sh_mb_utf8(L"sm\x00e9");   /* "sme" with an acute accent, in UTF-8 */
+    CHECK(accent && strlen(accent) == 4);
+    if (!accent) return;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\%s\\mods", top, accent);
+    free(accent);
+    mkdirs(root);
+    make_bundle(root, "plain", "u.plain", "1.0.0", '7', NULL, plain, 1, NULL);
+    make_bundle(root, "snap", "u.snap", "1.0.0", '8', NULL, snapf, 1, NULL);
+    hash64('7', h7); hash64('8', h8); hash64('d', hd);
+    /* The store's snapshot of the last good build: the folder's mod.json at
+     * that build and its carried file; then the author's edit in place. */
+    _snprintf_s(snap, sizeof snap, _TRUNCATE, "%s\\.builds\\u.snap@%.16s", root, h8);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\u.snap\\x.decl", snap);
+    write_file(path, "entityDef x { good }", strlen("entityDef x { good }"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snap\\mod.json", root);
+    mtext = sh_mb_read_file(path, 1u << 20, &mlen);
+    CHECK(mtext != NULL);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", snap);
+    if (mtext) write_file(path, (const char *)mtext, mlen);
+    free(mtext);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snap\\assets\\generated\\decls\\entitydef\\mods\\u.snap\\x.decl", root);
+    write_file(path, "entityDef x { BROKEN }", strlen("entityDef x { BROKEN }"));
+    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\":\"%s\"}", OLD, h7);
+    CHECK(sh_mb_record_put(root, "aliases", record));
+    _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zed.editor\", \"name\": \"Zed\", \"at\": 1}}", hd);
+    CHECK(sh_mb_record_put(root, "editorOnly", record));
+    _snprintf_s(g_fail_folder, sizeof g_fail_folder, _TRUNCATE, "%s\\snap", root);
+    sh_modserve_set_build_cause(ad_build_cause);
+
+    /* The boot resolves the store's root, as the product's boot does. */
+    CHECK(sh_ms_set_root(root));
+    log_clear();
+    CHECK(sh_modserve_index_boot() == 2);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_rescan() == 2);   /* the rescan reuses the boot's root */
+    {
+        sh_modserve_bundle_ref ref;
+        sh_modserve_hit hit;
+        CHECK(sh_modserve_bundle_serving(OLD, NULL, &ref) && !strcmp(ref.id, "u.plain"));
+        CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+        CHECK(sh_modserve_editor_only_recorded(hd));
+        CHECK(log_has("bundle 'snap': its latest build failed (assets/mods/s.snap/x.decl: parse error); serving the last good "
+                      "build u.snap@8888888888888888 from "));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/u.snap/x.decl"), "entityDef x { good }"));
+        CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/u.snap/x.decl", &hit) && strstr(hit.disk_path, ".builds") &&
+              !strcmp(hit.bundle_hash, h8));
+        CHECK(!strcmp(ad_served("generated/decls/entitydef/mods/u.plain/p.decl"), "entityDef p {}"));
+    }
+    sh_ms_set_root(NULL);
+    sh_modserve_set_build_cause(NULL);
+    g_fail_folder[0] = 0;
+    strcpy_s(path, sizeof path, root);
+    slash = strrchr(path, '\\');
+    if (slash) *slash = 0;
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 6);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -4420,6 +4517,7 @@ int main(void)
     test_row_served();
     test_dependency_names();
     test_bank_stems();
+    test_store_root_utf8();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

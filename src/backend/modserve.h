@@ -53,16 +53,17 @@ extern "C" {
 
 /* ------------------------------------------------------------------ index */
 
-/* Build the table from `mods_root` (the folder that holds the bundle folders)
- * and publish it, replacing any earlier table. Logs one MODS: line per
- * skipped bundle, per conflict and per superseded version, then
+/* Build the table from `mods_root` (the folder that holds the bundle folders,
+ * spelled in UTF-8 as sh_ms_root spells it) and publish it, replacing any
+ * earlier table. Logs one MODS: line per skipped bundle, per conflict and per
+ * superseded version, then
  * "MODS: index built in N ms (B bundles, F files)". Returns the number of
  * bundles admitted, or -1 when the table could not be allocated (the previous
  * table, if any, stays published). A missing folder is an empty index. */
 int sh_modserve_index_build(const char *mods_root);
 
-/* The same for %LOCALAPPDATA%\snapmap-plus\mods. Called once by the bootstrap
- * before the provider hook is installed. */
+/* The same for the store's root (sh_ms_root, modstore.h). Called once by the
+ * bootstrap before the provider hook is installed. */
 int sh_modserve_index_boot(void);
 
 /* Rebuild from the folder of the last build (after an install or a fetch).
