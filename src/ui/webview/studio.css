@@ -709,6 +709,8 @@
   .modal-actions.mods-map-foot { flex: none; margin-top: 0; padding-top: 10px; border-top: 1px solid var(--border); }
   /* Organizing folders in the Mods list: the Prefabs tab's folder rows. */
   .mods-folder > .pf-folder-head .mods-status-icon { margin: 0 0 0 auto; }
+  .mods-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+  .mods-empty .btn { font-style: normal; }
   /* The Files modal: the standard modal at the expanded Decl Text editor's size (.decl-focus-modal). */
   .modal.decl-focus-modal.mods-files-modal { padding: 14px 16px; }
   .mf-host { flex-direction: column; gap: 0; overflow: hidden; }

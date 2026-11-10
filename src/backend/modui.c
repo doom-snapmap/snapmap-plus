@@ -2139,6 +2139,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
     case SH_MODS_ACT_FILES: return "modFiles";
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
+    case SH_MODS_ACT_NEW_MOD: return "newMod";
     default: return "unknown";
     }
 }
@@ -4135,7 +4136,7 @@ static int mu_rebuild(const char *key)
     }
 }
 
-/* ---- the Files view (read-only) */
+/* ---- the Files view (read-only) and New mod */
 
 #define MU_FILES_MAX  8192u              /* files listed per mod folder; "truncated" says when there are more */
 #define MU_TEXT_MAX   (1024u * 1024u)    /* the largest text file the view shows */
@@ -4434,6 +4435,45 @@ static int mu_file_text(const char *arg)
     free(author);
     free(text);
     sh_ms_list_free(&l);
+    return mu_result_tail(&b);
+}
+
+/* newMod: a mod folder under a generated key with a working example (an
+ * entityDef and its Toybox row), built at once by the rescan, so the list
+ * shows it installed and the Toybox has its row. */
+static int mu_new_mod(const char *name)
+{
+    const int action = SH_MODS_ACT_NEW_MOD;
+    char key[SH_MB_ID_MAX + 1], folder[MAX_PATH * 4], example[MAX_PATH], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 200], note[160];
+    sh_ms_list l;
+    const sh_ms_entry *e;
+    int ok;
+    mu_buf b;
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    if (!sh_ms_new_mod_example(name, key, folder, sizeof folder, example, sizeof example, cause, sizeof cause)) {
+        mu_log("new mod: refused: %s", cause);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No mod was created: %s.", cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    mu_log("new mod: mods\\%s with its example %s", key, example);
+    mu_rescan(note, sizeof note);
+    ok = sh_ms_enumerate(&l);
+    e = ok ? mu_entry_named(&l, key) : NULL;
+    if (e && sh_ms_entry_usable(e) && !e->build_failed[0])
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s. Its Example crate is in the Toybox.", name, key);
+    else
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s, but it does not serve yet: %s", name, key,
+                    e ? (mu_entry_cause(e)[0] ? mu_entry_cause(e) : "not read yet") : "the mods folder cannot be read");
+    InterlockedIncrement(&g_gen);
+    memset(&b, 0, sizeof b);
+    mu_result_head(&b, action, 1, msg);
+    mu_kstr(&b, "key", key, 0);
+    mu_kstr(&b, "file", example, 0);
+    mu_kstr(&b, "index", note, 0);
+    if (ok) sh_ms_list_free(&l);
     return mu_result_tail(&b);
 }
 
@@ -4794,6 +4834,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_files(arg);
     case SH_MODS_ACT_FILE_TEXT:
         return mu_file_text(arg);
+    case SH_MODS_ACT_NEW_MOD:
+        return mu_new_mod(arg);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

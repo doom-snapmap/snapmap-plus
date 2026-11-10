@@ -487,7 +487,13 @@ These backend files share the work:
   block's `key`, else (a folder outside the store, built with `sh_mods
   build`) the folder's own name. `sh_mods new "<name>"` makes a folder under
   a generated key (`sh_mb_key_generate`: a slug with `_` and four random
-  characters, never `-`, so decl text and cooked paths spell it alike). A
+  characters, never `-`, so decl text and cooked paths spell it alike). The
+  Mods tab's New mod (`sh_ms_new_mod_example`) writes the same folder with an
+  example that places and plays untouched: an entityDef
+  `mods/<key>/example_crate` with the game's SnapMap `crate01` model, its
+  Toybox row (`snapEditorEntityDef`, nothing binary) and the row's strings in
+  the author block, then rescans, so its first build runs at once and keeps
+  the key its block records. A
   store folder with neither an `id` nor a block `key` gets one the same way
   at its first build (`sh_ms_first_key`, run before every in-place build: the
   rescan, `sh_mods build` and `rebuild`, the tab's Rebuild): under the store
@@ -570,7 +576,8 @@ These backend files share the work:
   (`f->cls`), whether it is the game's own bytes and their archive, and the
   mod's standing cause when that names the file; `modFileText` answers one
   text file of at most 1 MiB of UTF-8 inside the folder (`mod.json` without its
-  product block). Neither is followed by a fresh document.
+  product block). Neither is followed by a fresh document. New mod is
+  `newMod`.
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a

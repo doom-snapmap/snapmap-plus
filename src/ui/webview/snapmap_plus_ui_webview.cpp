@@ -3060,6 +3060,7 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
     case SH_MODS_ACT_FILES:              return L"modFiles";
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
+    case SH_MODS_ACT_NEW_MOD:            return L"newMod";
     default:                      return L"";
     }
 }
@@ -3090,6 +3091,7 @@ static int poc_mods_action_code(const std::wstring &name)
     if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
     if (name == L"modFiles")            return SH_MODS_ACT_FILES;
     if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
+    if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
     return 0;
 }
 

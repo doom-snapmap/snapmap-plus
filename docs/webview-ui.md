@@ -328,7 +328,7 @@ listed under that folder's row, the Prefabs tab's folder primitives: a caret, th
 the count of its mods, its rows indented below. Folders come first, sorted by name, then the mods at
 the root. Clicking a folder's row closes or opens it for the session; a closed folder with a mod
 that needs attention shows the yellow triangle on its row. A filter, the attention filter, and
-selecting a mod inside (an install) open it. The filter matches name, id and folder, and it
+selecting a mod inside (an install, New mod) open it. The filter matches name, id and folder, and it
 and the attention filter keep that order. The collapsed-groups setting of
 earlier builds, `mods.collapsed_groups`, is neither read nor written by the page: a value already in
 `config.json` stays there unused (`config.c` still knows the key). Each
@@ -417,6 +417,14 @@ else the first file a cause names, else `mod.json`. Its two reads (`modFiles`, `
 set the page's busy state or its status line, and no fresh document follows them; a refusal (another
 action still running) is shown in the modal.
 
+**New mod.** The empty list's card holds a New mod button, and the list's right-click menu (the
+page's `#ctxmenu`) a "New mod..." entry: the list's header has no room for a seventh icon button at
+its 220 px minimum. Both open a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
+creates, Escape cancels) that sends `newMod` with the name. Its answer selects the new mod (its
+key) and opens the Files modal on the example's Toybox row, with one quiet line above the editor:
+"Place Example crate from the Toybox in your map, change this file in the mod's folder, and save it:
+the mod follows your changes."
+
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
 folder can be restored from the Recycle Bin by hand. Uninstalling:" (when `install.undoCleared`;
 without it, "The folder can be restored from the Recycle Bin by hand. Uninstalling:") and lists,
@@ -442,7 +450,8 @@ result and a fresh document and changes its copy as the backend would, starting 
 `tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
 `PREVIEW_MODS` must equal it). Its Files answers come from the page's `PREVIEW_MOD_FILES`
 (`local.hell-guard`'s files as its folder holds them, 12 of its 260 cooked animations, the archives
-illustrative); another mod lists `mod.json` and its carried paths. `tests/modui_test.c` checks the v3 document against a temporary
+illustrative); another mod lists `mod.json` and its carried paths, and New mod adds the example as
+the backend writes it. `tests/modui_test.c` checks the v3 document against a temporary
 store and a fake editor, including that every key of `tests/fixtures/mods_tab_payload_v3.json` is
 one the backend writes; `tests/mods_tab_test.js` renders both fixtures (`mods_tab_payload.json` is
 the v2 document an older backend sends).
@@ -526,6 +535,7 @@ again.
 | `removedEmpty` | Retired with the product's own bin; the page no longer sends it and the backend answers "Uninstalled mods go to the Windows Recycle Bin." as a refusal. |
 | `modFiles` | Read only, no fresh document follows. `data` is `{key, name, cause, files, truncated}`: `cause` is the mod's standing cause (its latest build's refusal while the last good build serves, else why it serves nothing); `files` holds one `{path, size, kind, class, game, container, inFolder, cause}` per file under the folder (walked on disk; dot folders skipped; at most 8192, then `truncated`) and per stock pointer its last good build reads from the install (`inFolder` false). `kind` is `text` (`.decl`, `.json`, `.txt`, `.md`, `.cfg`, `.entities`) or `binary`; `class` is `descriptor` (`mod.json`), `add`, `borrow`, `edit` (an edited copy of a game file), `replace`, `editor`, `surface`, or "" for a file the last good build does not hold; `game` says the file is the game's own bytes (a pointer), `container` the archive the install bridge matched (`snap_gameresources`, `gameresources`, `loose`, "" unknown); `cause` is the standing cause when it names that file. |
 | `modFileText` | Read only, no fresh document follows. `arg` is `"<key>\t<path below the folder>"`. `data` is `{key, path, size, text, productBlock, cause}`: the file's UTF-8 text (a byte order mark dropped), `mod.json` without its product block (`productBlock` true). Refused: a path outside the folder (a drive, a leading separator, an empty, `.` or `..` part), a binary kind, a file the folder does not hold, one above 1 MiB, one that is not UTF-8 text. |
+| `newMod` | `arg` is a display name. Makes `mods\<generated key>\` with `mod.json` (name, version 0.1.0, the example's strings, the product block's key) and the example: `assets/generated/decls/entitydef/mods/<key>/example_crate.decl` (the game's SnapMap `crate01`) and its Toybox row at `assets/generated/decls/snapeditorentitydef/mods/<key>/example_crate.decl`, then rescans, so the folder builds at once under its key and the Toybox gets "Example crate". `data` adds `key` and `file` (the row's path). Refused while Play runs or a map loads, and for an empty name. |
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use
@@ -566,7 +576,7 @@ still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods
 | `sh_mods install "<folder>"` | the install button (`install`) |
 | `sh_mods rescan` | the refresh button (`rescan`) |
 | `sh_mods migrate` | Migrate (`migrate`) |
-| `sh_mods new "<name>"` | none (makes a mod folder under a generated key) |
+| `sh_mods new "<name>"` | New mod makes the same folder, with its example (`newMod`) |
 | `sh_mods doctor [verify]` | none (every bundle's state; one line per build of a key; per path the layer that serves it; the registries and their clashes) |
 | `sh_mods held [filter]` | none (what the game was served and holds this session) |
 | `sh_mods status`, `list`, `build`, `copystock`, `palette rebuild` | none |

@@ -445,6 +445,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 </div>
 
+<!-- New mod (mods_tab.js): its name; the backend makes the folder and a working example. -->
+<div class="modal-overlay" id="modsNewModal" style="display:none;" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modsNewTitle">
+    <div class="modal-title" id="modsNewTitle">New mod</div>
+    <div class="muted" id="modsNewNote" style="margin-bottom:4px;"></div>
+    <label for="modsNewName">Name</label><input type="text" id="modsNewName" maxlength="80" placeholder="e.g. Crates and barrels" autocomplete="off">
+    <div class="modal-actions"><button type="button" class="btn" id="modsNewCancel">Cancel</button><button type="button" class="btn primary" id="modsNewCreate">Create</button></div>
+  </div>
+</div>
 
 <!-- Asset browser opened from the Entities tab. Same browser as the Assets tab, mounted a second
      time into #abModalHost, plus a header/footer that name the entity it is scoped to. -->
@@ -4655,7 +4664,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // Organizing folders close for the session only: the retired mods.collapsed_groups setting is neither read nor written.
     post: post, toast: toast,
     // The Files view highlights a file's text with the Decl Text editor's tokens.
-    tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; }
+    tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; },
+    // New mod's right-click entry on the list, in the page's context menu.
+    menu: function(x, y, items){
+      ctx.innerHTML = '';
+      items.forEach(function(it){ addCtx(it.label, it.run); });
+      ctx.style.left = x + 'px'; ctx.style.top = y + 'px'; ctx.style.display = 'block';
+    }
   });
   modsUi.bind();
 

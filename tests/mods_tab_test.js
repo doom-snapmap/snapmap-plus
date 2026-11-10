@@ -69,7 +69,8 @@ class FakeNode {
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
              'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
-             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost'];
+             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
+             'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn'];
 /* store: a stand-in host (modsTab.standIn) that answers every modsAction synchronously, as the
@@ -83,6 +84,7 @@ function harness(opts) {
   nodes.modsMapModal.appendChild(nodes.modsMapHost);
   nodes.modsFilesModal.style.display = 'none';
   nodes.modsFilesModal.appendChild(nodes.modsFilesHost);
+  nodes.modsNewModal.style.display = 'none';
   const sent = [], toasts = [], menus = [];
   const saved = [];   /* what a page that still wrote mods.collapsed_groups would have saved */
   const doc = {createElement: tag => new FakeNode(tag), createElementNS: (ns, tag) => Object.assign(new FakeNode(tag), {ns})};
@@ -260,7 +262,7 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                                      'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                                     'modFiles', 'modFileText']);
+                                     'modFiles', 'modFileText', 'newMod']);
   assert.equal(modsTab.actionMessage('mapUpgradeMod', 'a'), null, 'no build management: the upgrade action is gone');
   assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'),
                    {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'});
@@ -1111,8 +1113,9 @@ test('page contract', () => {
   assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
   const hgFiles = JSON.parse(pf[1])['local.hell-guard'];
   assert.ok(hgFiles.files.length > 200 && hgFiles.files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
-  /* the Files modal is the decl focus modal's markup */
+  /* the Files modal is the decl focus modal's markup; New mod is the standard small modal */
   assert.match(html, /<div class="modal-overlay" id="modsFilesModal" style="display:none;" aria-hidden="true">\n  <div class="modal decl-focus-modal mods-files-modal" role="dialog" aria-modal="true" aria-labelledby="modsFilesTitle">\n    <div class="decl-focus-host mf-host" id="modsFilesHost"><\/div>/);
+  assert.match(html, /<div class="modal-overlay" id="modsNewModal" style="display:none;" aria-hidden="true">\n  <div class="modal" role="dialog"/);
   assert.match(panel, /id="modsFilesBtn"[^>]*><svg class="ui-icon"[^>]*><use href="#icon-folder-tree">/, 'Files is the folder-tree icon');
   assert.ok(panel.indexOf('id="modsFilesBtn"') < panel.indexOf('id="modsVerifyBtn"') &&
             panel.indexOf('id="modsFilesBtn"') > panel.indexOf('class="pane-splitter"'), 'Files sits in the details head beside Verify');
@@ -1165,7 +1168,7 @@ test('host and interface contract', () => {
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 
-/* ---- organizing folders and the Files modal (L28) -------- ------------------------------------ */
+/* ---- organizing folders, the Files modal and New mod (L28) ------------------------------------ */
 function grouped() {
   const d = clone(v3);
   for (const m of d.mods) if (['doors', 'elevators', 'tarps'].indexOf(m.key) >= 0) { m.group = 'campaign-interactables'; m.key = 'campaign-interactables\\' + m.key; }
@@ -1340,8 +1343,56 @@ test('the Files view model: classes, sources and the tree', () => {
   assert.deepEqual(t.dirs[0].dirs.map(x => [x.name, x.count, x.attn]), [['entitydef', 2, 1], ['material', 1, 0]]);
   assert.equal(t.dirs[0].dirs[0].dirs[0].name, 'mods/k');
   assert.equal(modsTab.fileTree([{path: 'a/b.decl'}], 'zzz').count, 0);
-  for (const v of Object.values(modsTab.FILE_CLASSES).concat(Object.values(modsTab.FILE_SOURCES)))
+  for (const v of Object.values(modsTab.FILE_CLASSES).concat(Object.values(modsTab.FILE_SOURCES), [modsTab.NEW_MOD_HINT]))
     assert.ok(!/\bbuild|legacy|bundle\b/i.test(v), 'no build or legacy vocabulary: ' + v);
+});
+test('New mod: a name, the folder made with its example, the mod selected, Files open on its Toybox row', () => {
+  const h = harness({store: modsTab.standIn(v3)});
+  h.ui.show();
+  /* the list's right-click entry: the header has no room for a seventh button at 220 px */
+  const e = h.nodes.modsList.dispatch('contextmenu', {pageX: 40, pageY: 90});
+  assert.equal(e.defaultPrevented, true);
+  assert.deepEqual(h.menus.map(m => m.items.map(i => i.label)), [['New mod...']]);
+  h.menus[0].items[0].run();
+  assert.equal(h.nodes.modsNewModal.style.display, 'flex');
+  assert.equal(h.nodes.modsNewNote.textContent, "Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.");
+  assert.equal(activeElement, h.nodes.modsNewName);
+  /* an empty name is not sent */
+  h.nodes.modsNewName.value = '   ';
+  h.nodes.modsNewCreate.click();
+  assert.ok(!h.sent.some(m => m.action === 'newMod'));
+  assert.equal(h.toasts.pop().text, 'Give the new mod a name.');
+  h.nodes.modsNewName.value = 'My first mod';
+  h.nodes.modsNewModal.dispatch('keydown', {key: 'Enter'});
+  assert.deepEqual(h.sent.filter(m => m.action === 'newMod'), [{cmd: 'modsAction', action: 'newMod', arg: 'My first mod'}]);
+  assert.equal(h.nodes.modsNewModal.style.display, 'none');
+  const st = h.ui.state();
+  assert.equal(st.selectedKey, 'my_first_mod_k3x9', 'the list selects the new mod');
+  assert.ok(rowOf(h, 'my_first_mod_k3x9'), 'the fresh document lists it');
+  assert.equal(st.files.open, true);
+  const row = 'assets/generated/decls/snapeditorentitydef/mods/my_first_mod_k3x9/example_crate.decl';
+  assert.equal(st.files.selected, row, 'Files opens on the example Toybox row');
+  const pane = h.nodes.modsFilesHost.all('mf-file')[0];
+  assert.equal(pane.all('mf-hint')[0].textContent, modsTab.NEW_MOD_HINT, 'one quiet line naming the three steps');
+  assert.match(pane.tags('textarea')[0].value, /entityDef = "mods\/my_first_mod_k3x9\/example_crate";/);
+  assert.equal(h.nodes.modsFilesHost.all('modal-title')[0].textContent, 'My first mod');
+  /* the hint is the new mod's only: another file has none */
+  h.ui.selectFile('mod.json');
+  assert.equal(h.nodes.modsFilesHost.all('mf-file')[0].all('mf-hint').length, 1, 'only the product-block note');
+  assert.ok(!/Place Example crate/.test(h.nodes.modsFilesHost.textContent));
+});
+test('New mod from the empty list: the card holds the button', () => {
+  const h = harness({store: modsTab.standIn(Object.assign(clone(v3), {mods: []}))});
+  h.ui.show();
+  const card = h.nodes.modsList.all('mods-empty')[0];
+  assert.match(card.textContent, /No mods installed/);
+  const b = card.all('mods-new-btn')[0];
+  assert.equal(b.textContent, 'New mod');
+  b.click();
+  assert.equal(h.nodes.modsNewModal.style.display, 'flex');
+  h.nodes.modsNewCancel.click();
+  assert.equal(h.nodes.modsNewModal.style.display, 'none');
+  assert.equal(activeElement, b, 'focus returns to the button');
 });
 test('the Files modal highlights with the decl tokens when the page supplies them', () => {
   const tokens = text => [{type: 'punc', start: 0, end: 1}, {type: 'ident', isKey: true, start: 3, end: 10}, {type: 'str', start: 13, end: 32}];

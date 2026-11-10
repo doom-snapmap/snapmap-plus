@@ -14,8 +14,8 @@
    after every action; showing the tab asks for a rescan. Nothing polls. The list is plain rows the
    page scrolls natively, a mod in an organizing folder of mods\ under that folder's row; each row
    carries one status glyph: needs attention, else in this map (from the document's map.mods, no read
-   of its own), else installed. The Files modal shows a mod folder read-only (modFiles, modFileText).
-   All text goes through textContent. */
+   of its own), else installed. The Files modal shows a mod folder read-only (modFiles, modFileText),
+   and New mod makes a folder with a working example (newMod). All text goes through textContent. */
 var modsTab = (function () {
   var STATES = {
     installed: {label: 'Installed', tone: 'ok'},
@@ -54,7 +54,7 @@ var modsTab = (function () {
      of its own to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                 'modFiles', 'modFileText'];
+                 'modFiles', 'modFileText', 'newMod'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
   var READS = {modFiles: true, modFileText: true};
   /* What each file of a mod is to the game, as one phrase (the backend's "class"). */
@@ -76,6 +76,9 @@ var modsTab = (function () {
     loose: 'from a file in your install',
     '': 'from your install'
   };
+  /* The quiet line above a new mod's example: its three first steps. */
+  var NEW_MOD_HINT = "Place Example crate from the Toybox in your map, change this file in the mod's folder, and save it: the mod follows your changes.";
+  var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.';
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
@@ -506,8 +509,9 @@ var modsTab = (function () {
 
   /* ------------------------------------------------------------------------------------------ DOM */
 
-  /* env: {document, byId(id), post(message), toast(text, kind), tokens(text)?}.
-     tokens returns the decl language's tokens for the Files view's highlighting. The retired collapsed-groups setting (mods.collapsed_groups) is neither
+  /* env: {document, byId(id), post(message), toast(text, kind), tokens(text)?, menu(x, y, items)?}.
+     tokens returns the decl language's tokens for the Files view's highlighting; menu shows the
+     page's context menu. The retired collapsed-groups setting (mods.collapsed_groups) is neither
      read nor written: which organizing folders are closed lasts for the session only. */
   function create(env) {
     var doc = env.document, byId = env.byId;
@@ -561,6 +565,7 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
+                     newMod: 'Making the new mod...',
                      migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
     function selectedMod() {
@@ -656,6 +661,13 @@ var modsTab = (function () {
       f.appendChild(body);
       return f;
     }
+    function newModButton() {
+      var b = el('button', 'btn mods-new-btn', 'New mod');
+      b.type = 'button';
+      b.title = 'Make a mod of your own, with an example to start from';
+      b.addEventListener('click', function () { openNewMod(b); });
+      return b;
+    }
     /* The open map uses the mod: the document's map.mods names its folder. */
     function inMap(b) { return !!(model.map && model.map.open && mapUses(b)); }
     function renderList() {
@@ -667,7 +679,11 @@ var modsTab = (function () {
       if (!loaded) { box.appendChild(el('div', 'list-empty', waiting ? 'Reading installed mods...' : 'Open this tab to list installed mods.')); return; }
       if (lastError) { box.appendChild(el('div', 'list-empty mods-error', lastError)); return; }
       if (!model.mods.length) {
-        box.appendChild(el('div', 'list-empty', 'No mods installed. Drop a mod folder into mods\\ or use the download button to install one.'));
+        var card = el('div', 'list-empty mods-empty');
+        card.appendChild(el('div', '', 'No mods installed. Drop a mod folder into mods\\ or use the download button to install one.'));
+        card.appendChild(el('div', '', 'Or make your own, starting from a working example.'));
+        card.appendChild(newModButton());
+        box.appendChild(card);
         return;
       }
       if (!shown.length) {
@@ -1373,6 +1389,38 @@ var modsTab = (function () {
       trapTab(e, byId('modsFilesHost'));
     }
 
+    /* ---- New mod: a name, then the backend makes the folder and its example; the list selects
+       it and the Files modal opens on the example's Toybox row. */
+    var nm = {opener: null};
+    function openNewMod(opener) {
+      var ov = byId('modsNewModal'), input = byId('modsNewName');
+      if (!ov || busy) return;
+      nm.opener = opener || null;
+      if (input) input.value = '';
+      var note = byId('modsNewNote');
+      if (note) note.textContent = NEW_MOD_NOTE;
+      ov.style.display = 'flex';
+      ov.setAttribute('aria-hidden', 'false');
+      if (input && input.focus) input.focus();
+    }
+    function closeNewMod() {
+      var ov = byId('modsNewModal');
+      if (!ov || ov.style.display === 'none') return;
+      ov.style.display = 'none';
+      ov.setAttribute('aria-hidden', 'true');
+      if (nm.opener && nm.opener.focus) nm.opener.focus();
+      nm.opener = null;
+    }
+    function createNewMod() {
+      var input = byId('modsNewName'), name = str(input && input.value).trim();
+      if (!name) { env.toast('Give the new mod a name.', 'warn'); if (input && input.focus) input.focus(); return; }
+      if (act('newMod', name)) closeNewMod();
+    }
+    function onNewKey(e) {
+      if (e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); closeNewMod(); }
+      else if (e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); createNewMod(); }
+      else trapTab(e, byId('modsNewModal'));
+    }
     function trapTab(e, host) {
       if (e.key !== 'Tab' || !host || !host.querySelectorAll) return;
       var f = Array.prototype.filter.call(host.querySelectorAll('button, input, textarea, summary, [tabindex="0"]'),
@@ -1487,6 +1535,11 @@ var modsTab = (function () {
       setStatus(message, ok ? 'ok' : 'err');
       if (message) env.toast(message, ok ? 'ok' : 'err');
       if (action === 'install' && ok && data.key) reveal = selectedKey = str(data.key);
+      /* A new mod: selected, and the Files modal opens on its example's Toybox row. */
+      if (action === 'newMod' && ok && data.key) {
+        reveal = selectedKey = str(data.key);
+        openFiles(selectedKey, byId('modsFilesBtn'), str(data.file), NEW_MOD_HINT);
+      }
       if ((action === 'uninstall' || action === 'remove') && ok) selectedKey = '';
       /* After the real action the modal shows the next document: the list, or nothing after an
          uninstall started from the details pane. A refusal goes back the same way. */
@@ -1526,6 +1579,17 @@ var modsTab = (function () {
       on('modsFilesBtn', 'click', function () { var b = selectedMod(); if (b) openFiles(b.key, byId('modsFilesBtn')); });
       on('modsFilesModal', 'keydown', onFilesKey);
       on('modsFilesModal', 'mousedown', function (e) { if (e.target === byId('modsFilesModal')) closeFiles(); });
+      on('modsNewModal', 'keydown', onNewKey);
+      on('modsNewModal', 'mousedown', function (e) { if (e.target === byId('modsNewModal')) closeNewMod(); });
+      on('modsNewCancel', 'click', closeNewMod);
+      on('modsNewCreate', 'click', createNewMod);
+      /* New mod has no room in the list's header at its minimum width (six icon buttons fill it):
+         it is the empty list's button and the list's right-click entry. */
+      on('modsList', 'contextmenu', function (e) {
+        if (!env.menu) return;
+        if (e.preventDefault) e.preventDefault();
+        env.menu(e.pageX, e.pageY, [{label: 'New mod...', run: function () { openNewMod(byId('modsList')); }}]);
+      });
       on('modsAttnBtn', 'click', function () { setAttnOnly(!attnOnly); });
       on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); renderList(); });
       on('modsList', 'keydown', onListKey);
@@ -1546,6 +1610,7 @@ var modsTab = (function () {
       openFiles: function (key, want, hint) { openFiles(key, undefined, want, hint); },
       closeFiles: closeFiles,
       selectFile: selectFile,
+      openNewMod: function () { openNewMod(); },
       onMessage: function (d) {
         if (!d || typeof d !== 'object') return false;
         if (d.kind === 'mods') { onMods(d); return true; }
@@ -1584,6 +1649,30 @@ var modsTab = (function () {
       var files = [fileEntry('mod.json', 400, 'descriptor')];
       arr(b.carriedPaths).forEach(function (p) { files.push(fileEntry('assets/' + p, 0, 'add')); });
       return {files: files, texts: {}};
+    }
+    /* New mod's example, as the backend writes it (modstore.c ms_write_example). */
+    function exampleFolder(key, name) {
+      var def = 'assets/generated/decls/entitydef/mods/' + key + '/example_crate.decl';
+      var row = 'assets/generated/decls/snapeditorentitydef/mods/' + key + '/example_crate.decl';
+      var texts = {};
+      texts['mod.json'] = '{\r\n  "name": ' + JSON.stringify(name) + ',\r\n  "version": "0.1.0",\r\n  "description": "",\r\n  "author": "",\r\n' +
+        '  "strings": {\r\n    "en": {\r\n      "' + key + '_category": ' + JSON.stringify(name) + ',\r\n' +
+        '      "' + key + '_example_crate_name": "Example crate",\r\n' +
+        '      "' + key + '_example_crate_desc": "A crate your new mod adds. Change it in the mod\'s files."\r\n    }\r\n  }\r\n}\r\n';
+      texts[def] = '{\r\n\tclass = "idProp_Coop";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = "models/snapmaps/props/new/crate01.lwo";\r\n' +
+        '\t\t}\r\n\t\tclipModelInfo = {\r\n\t\t\ttype = "CLIPMODEL_AUTO";\r\n\t\t}\r\n\t\tdynamicObstacle = true;\r\n\t}\r\n}\r\n';
+      texts[row] = '{\r\n\tinherit = "prop/prop_base";\r\n\tedit = {\r\n' +
+        '\t\tpreviewImage = "textures/guis/snapmaps/entity_icons/prop/crate01";\r\n' +
+        '\t\tmetaCategoryNameTag = "#str_snapentity_metacategory_toybox";\r\n' +
+        '\t\tcategoryNameTag = "#str_' + key + '_category";\r\n' +
+        '\t\tdisplayNameTag = "#str_' + key + '_example_crate_name";\r\n' +
+        '\t\tdisplayDescriptionTag = "#str_' + key + '_example_crate_desc";\r\n' +
+        '\t\tentityDef = "mods/' + key + '/example_crate";\r\n' +
+        '\t\trenderInfo = {\r\n\t\t\trenderModelName = "models/snapmaps/props/new/crate01.lwo";\r\n\t\t\talwaysDrawBounds = false;\r\n' +
+        '\t\t\tsize = {\r\n\t\t\t\tx = 54;\r\n\t\t\t\ty = 54;\r\n\t\t\t\tz = 54;\r\n\t\t\t}\r\n\t\t}\r\n' +
+        '\t\tflags = {\r\n\t\t\tplaceable = true;\r\n\t\t}\r\n\t}\r\n}\r\n';
+      return {row: row, folder: {files: [fileEntry('mod.json', texts['mod.json'].length, 'descriptor'),
+                                          fileEntry(def, texts[def].length, 'add'), fileEntry(row, texts[row].length, 'add')], texts: texts}};
     }
     function clone() { return JSON.parse(JSON.stringify(docu)); }
     function mods() { return Array.isArray(docu.mods) ? docu.mods : (docu.mods = []); }
@@ -1650,6 +1739,29 @@ var modsTab = (function () {
         data.message = msg;
         return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}];
       }
+      if (a === 'newMod') {
+        var nmName = key.trim(), slug = nmName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'mod';
+        if (!nmName) { ok = false; msg = 'No mod was created: a new mod needs a name.'; }
+        else {
+          var nk = slug + '_k3x9', ex;
+          for (var salt = 0; modOf(nk); salt++) nk = slug + '_k3x' + salt;
+          ex = exampleFolder(nk, nmName);
+          disk[nk] = ex.folder;
+          mods().push({key: nk, id: nk, name: nmName, author: '', version: '0.1.0', build: 1, size: 1530, files: 2, pointers: 0,
+                       state: 'installed', cause: '', otherBuilds: 0, duplicateId: false, editorRows: 1, folder: nk, group: '',
+                       description: '', origin: '', migratedFrom: '', servedBy: '', builtAt: Math.floor(Date.now() / 1000), bundle: '',
+                       counts: {shadows: 0, sounds: 0, movies: 0, modules: 0, vt: 0}, requirements: {cvars: {}},
+                       editorRowNames: ['Example crate'], carriedPaths: ex.folder.files.slice(1).map(function (f) { return f.path.slice(7); }),
+                       publishedMaps: 0, newest: true});
+          data.key = nk;
+          data.file = ex.row;
+          msg = 'Created ' + nmName + ' in mods\\' + nk + '. Its Example crate is in the Toybox.';
+        }
+        recount();
+        data.ok = ok;
+        data.message = msg;
+        return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}, {kind: 'mods', data: clone()}];
+      }
       var r = mapModOf(key), b = modOf(key);
       if (a === 'rescan') msg = '';
       else if (a === 'rebuild') msg = 'Browser preview: ' + key + ' was built again; nothing changed.';
@@ -1712,7 +1824,7 @@ var modsTab = (function () {
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
           NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
           factLines: factLines, slotText: slotText,
-          FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, normFiles: normFiles,
+          FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, NEW_MOD_HINT: NEW_MOD_HINT, normFiles: normFiles,
           fileTree: fileTree, fileMeta: fileMeta};
 })();
 

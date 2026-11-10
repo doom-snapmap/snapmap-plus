@@ -86,6 +86,10 @@ static const char *const STOCK[] = {
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/meleeforward02.bmd6anim",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim",
     "generated/decls/entitydef/monster/imp.decl",
+    /* what New mod's example crate names: the game's SnapMap crate */
+    "cooked/model/models/snapmaps/props/new/crate01.bmodel",
+    "generated/decls/material/textures/guis/snapmaps/entity_icons/prop/crate01.decl",
+    "generated/decls/snapeditorentitydef/prop/prop_base.decl",
     NULL
 };
 static int fake_stock(const char *request)
@@ -2691,6 +2695,49 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
         free(doc);
         sh_mb_set_stock_ops(NULL);
+    }
+
+    printf("-- New mod: a folder with a working example, built at once, its Toybox row named\n");
+    {
+        char key[SH_MB_ID_MAX + 1] = "", row[MAX_PATH * 2], want[400];
+        const char *k, *f;
+        const sh_ms_entry *e = NULL;
+        size_t i;
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "My first mod");
+        if (!has(doc, "Toybox.\"")) printf("    %s\n", doc ? doc : "(null)");
+        k = doc ? strstr(doc, "\"key\":\"") : NULL;
+        if (k) { k += 7; f = strchr(k, '"'); if (f && (size_t)(f - k) < sizeof key) { memcpy(key, k, (size_t)(f - k)); key[f - k] = 0; } }
+        /* the salted key, recorded at creation and kept by the first build */
+        CHECK(!strncmp(key, "my_first_mod_", 13) && strlen(key) == 13 + SH_MB_KEY_SUFFIX);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"message\":\"Created My first mod in mods\\\\%s. Its Example crate is in the Toybox.\"", key);
+        CHECK(has(doc, want));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"file\":\"assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl\"", key);
+        CHECK(has(doc, want));
+        free(doc);
+        CHECK(sh_ms_enumerate(&list));
+        for (i = 0; i < list.count && !e; i++) if (!strcmp(list.items[i].name, key)) e = &list.items[i];
+        CHECK(e && sh_ms_entry_usable(e) && !e->build_failed[0] && e->bundle.errors == 0 && !strcmp(e->bundle.id, key) &&
+              e->bundle.key_source == SH_MB_KEY_FROM_BLOCK && e->bundle.classes.adds == 2 && e->bundle.file_count == 2);
+        if (e && e->bundle.warnings) printf("    new mod warning: %s\n", e->bundle.first_warning);
+        sh_ms_list_free(&list);
+        doc = list_doc();
+        CHECK(bundle_has(doc, key, "\"name\":\"My first mod\"") && bundle_has(doc, key, "\"state\":\"installed\"") &&
+              bundle_has(doc, key, "\"editorRows\":1"));
+        CHECK(has(doc, "\"editorRowNames\":[\"Example crate\"]"));   /* the row's name from the mod's strings */
+        free(doc);
+        _snprintf_s(row, sizeof row, _TRUNCATE, "%s\tassets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", key, key);
+        doc = run_doc(SH_MODS_ACT_FILE_TEXT, row);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "entityDef = \\\"mods/%s/example_crate\\\";", key);
+        CHECK(has(doc, "\"ok\":true") && has(doc, want));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: a new mod needs a name.\""));
+        free(doc);
+        g_busy = "Play is running";
+        doc = run_doc(SH_MODS_ACT_NEW_MOD, "Later");
+        CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: Play is running.\""));
+        free(doc);
+        g_busy = NULL;
     }
 
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);

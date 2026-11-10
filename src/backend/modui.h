@@ -211,7 +211,9 @@ int  sh_modui_list(void);
  * 1 MiB of UTF-8 ({key, path, size, text, productBlock, cause}; mod.json
  * without its product block); a path outside the folder, a binary kind and
  * a file the folder does not hold are refused. Both read only and change
- * nothing. */
+ * nothing. NEW_MOD (arg: a display name) makes a mod folder with a working
+ * example (sh_ms_new_mod_example) and rescans, so its first build runs:
+ * {key, file: the example Toybox row's path}. */
 int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:
