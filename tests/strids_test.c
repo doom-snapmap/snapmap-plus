@@ -1,7 +1,8 @@
-/* Tests #str_ injection from the user's strids.json, the admitted bundles'
- * strings and the baked defaults, with user-over-bundle-over-default
- * precedence, cross-bundle conflicts, rearm, retirement and native-table
- * refusal. Engine string-pool and list operations and the serving index's
+/* Tests #str_ injection from the admitted bundles' strings and the baked
+ * defaults, with bundle-over-default precedence, cross-bundle conflicts,
+ * rearm, retirement and native-table refusal. The user document of earlier
+ * releases (strings\strids.json) is not read: the store tool moves it into a
+ * mod, which user_doc stands in for. Engine string-pool and list operations and the serving index's
  * bundle accessor are doubled to inspect appended key/value pairs. */
 #include <stdio.h>
 #include <string.h>
@@ -100,6 +101,17 @@ static void set_bundles(const fake_bundle *list, int n)
     int i;
     g_nbundles = n;
     for (i = 0; i < n; i++) g_bundles[i] = list[i];
+}
+
+/* One installed mod whose strings.en is `pairs`, where earlier releases read
+ * the user's strids.json (the store tool moves that document into a mod). */
+static char g_user_extra[4096];
+static int user_doc(const char *pairs)
+{
+    fake_bundle user = { "user.mod", "1.0.0", 0, 1, g_user_extra };
+    _snprintf_s(g_user_extra, sizeof g_user_extra, _TRUNCATE, "{\"strings\":{\"en\":%s}}", pairs);
+    set_bundles(&user, 1);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ engine doubles */
@@ -212,16 +224,6 @@ static void remove_tree(const char *path)
 
 static int make_dir(const char *p) { return CreateDirectoryA(p, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; }
 
-static int write_text(const char *path, const char *body)
-{
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    DWORD wrote = 0;
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    WriteFile(h, body, (DWORD)strlen(body), &wrote, NULL);
-    CloseHandle(h);
-    return wrote == (DWORD)strlen(body);
-}
-
 static void run_inject(void)
 {
     reset_doubles();
@@ -258,10 +260,10 @@ static unsigned char *dictionary_row(const char *id)
     return NULL;
 }
 
-/* A key the user document stops supplying is retired: a replaced vanilla row
+/* A key the mod stops supplying is retired: a replaced vanilla row
  * gets its original record back and an introduced row disappears, while engine
  * pool text is never freed. */
-static void test_dictionary_retirement(const char *user_path)
+static void test_dictionary_retirement(void)
 {
     unsigned char stock[32] = {0}, collision[32] = {0};
     unsigned int baseline;
@@ -278,25 +280,25 @@ static void test_dictionary_retirement(const char *user_path)
     *(unsigned int *)(collision + 24) = *(unsigned int *)(collision + 28) = 9;
     fake_insert(&g_dictionary, collision);
     baseline = g_dictionary.count;
-    CHECK(write_text(user_path, "{\"stock_label\":\"Modded\",\"temporary_label\":\"Temporary\"}"));
+    CHECK(user_doc("{\"stock_label\":\"Modded\",\"temporary_label\":\"Temporary\"}"));
     CHECK(rearm_strings());
     CHECK(g_dictionary.count == baseline + 1 && count_key("stock_label") == 1);
     CHECK(value_for("stock_label") && !strcmp(value_for("stock_label"), "Modded"));
     CHECK(dictionary_row("unrelated_collision") && !memcmp(dictionary_row("unrelated_collision"), collision, 32));
     retired_text = value_for("temporary_label"); CHECK(retired_text);
-    CHECK(write_text(user_path, "{\"stock_label\":\"Local\"}"));
+    CHECK(user_doc("{\"stock_label\":\"Local\"}"));
     CHECK(rearm_strings());
     CHECK(!count_key("temporary_label") && count_key("stock_label") == 1);
     CHECK(value_for("stock_label") && !strcmp(value_for("stock_label"), "Local"));
     CHECK(retired_text && !strcmp(retired_text, "Temporary")); /* Engine pool text was not freed. */
-    CHECK(write_text(user_path, "{}"));
+    CHECK(user_doc("{}"));
     CHECK(rearm_strings());
     CHECK(g_dictionary.count == baseline);
     CHECK(dictionary_row("stock_label") && !memcmp(dictionary_row("stock_label"), stock, 32));
     for (int cycle = 0; cycle < 4; cycle++) {
-        CHECK(write_text(user_path, "{\"stock_label\":\"Again\",\"temporary_label\":\"Again\"}"));
+        CHECK(user_doc("{\"stock_label\":\"Again\",\"temporary_label\":\"Again\"}"));
         CHECK(rearm_strings() && count_key("stock_label") == 1 && count_key("temporary_label") == 1);
-        CHECK(write_text(user_path, "{}"));
+        CHECK(user_doc("{}"));
         CHECK(rearm_strings() && g_dictionary.count == baseline && !count_key("temporary_label"));
         CHECK(dictionary_row("stock_label") && !memcmp(dictionary_row("stock_label"), stock, 32));
     }
@@ -356,11 +358,11 @@ static const char *row_owner(const char *id)
     return NULL;
 }
 
-/* The bundle layer sits under the user document and over the baked defaults;
+/* The bundle layer sits over the baked defaults;
  * two bundles disagreeing log once and the first in the accessor's order
  * stands; a rearm after an index rebuild adds the new bundles' keys and
  * retires the keys of one that left. */
-static void test_bundle_layer(const char *user_path)
+static void test_bundle_layer(void)
 {
     static const fake_bundle first[] = {
         { "alpha.mod", "1.0.0", 0, 1,
@@ -385,19 +387,18 @@ static void test_bundle_layer(const char *user_path)
     const char *baked_nav;
     unsigned int before;
 
-    CHECK(write_text(user_path, "{}"));
+    CHECK(user_doc("{}"));
     set_bundles(NULL, 0);
     CHECK(rearm_strings() == 1);
     baked_nav = value_for("sh_bv_navigation_desc");
     CHECK(baked_nav != NULL && strcmp(baked_nav, "Alpha nav") != 0);
     before = g_dictionary.count;
 
-    CHECK(write_text(user_path, "{\"shared_user_key\":\"User text\"}"));
     set_bundles(first, (int)(sizeof first / sizeof first[0]));
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
-    /* User over bundle, bundle over baked. */
-    CHECK(value_for("shared_user_key") && !strcmp(value_for("shared_user_key"), "User text"));
+    /* Bundle over baked. */
+    CHECK(value_for("shared_user_key") && !strcmp(value_for("shared_user_key"), "Alpha text"));
     CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), "Alpha nav"));
     CHECK(count_key("sh_bv_navigation_desc") == 1);
     CHECK(value_for("alpha_name") && !strcmp(value_for("alpha_name"), "Alpha"));
@@ -405,27 +406,27 @@ static void test_bundle_layer(const char *user_path)
     CHECK(value_for("legacy_name") && !strcmp(value_for("legacy_name"), "Legacy"));
     CHECK(row_owner("alpha_name") && !strcmp(row_owner("alpha_name"), "alpha.mod@1.0.0"));
     CHECK(row_owner("legacy_name") && !strcmp(row_owner("legacy_name"), "old.map@0123456789abcdef"));
-    CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "<user>"));
+    CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "alpha.mod@1.0.0"));
     /* First writer wins across bundles; one line per disagreeing bundle. */
     CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
     CHECK(log_count("B1: strids REFUSED '#str_CLASH_KEY' from bundle beta.mod@1.0.0 -- bundle alpha.mod@1.0.0 "
                     "already defines it with different text; the first definition stands") == 1);
     CHECK(log_count("B1: strids REFUSED '#str_clash_key' from bundle old.map@0123456789abcdef -- bundle "
                     "alpha.mod@1.0.0 already defines it") == 1);
-    CHECK(log_count("REFUSED '#str_") == 2);   /* equal text and user/baked precedence are not conflicts */
+    CHECK(log_count("REFUSED '#str_") == 2);   /* equal text and baked precedence are not conflicts */
     CHECK(count_key("same_key") == 1);
     /* Only en; only admitted bundles. */
     CHECK(count_key("fr_only") == 0 && count_key("gamma_name") == 0);
     CHECK(strstr(g_log, "B1: strids runtime refresh complete: ") != NULL);
-    CHECK(strstr(g_log, " #str_ entries (user 1, bundles 6, baked ") != NULL);
+    CHECK(strstr(g_log, " #str_ entries (bundles 7, baked ") != NULL);
     CHECK(strstr(g_log, "supplied") == NULL);   /* quiet without the debug flag */
-    CHECK(g_dictionary.count == before + 6);    /* the user key and five new bundle keys */
+    CHECK(g_dictionary.count == before + 6);    /* six new bundle keys */
 
     /* The per-bundle line, once per bundle per pass, only with the flag. */
     SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", "1");
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
-    CHECK(log_count("B1: strids: bundle alpha.mod@1.0.0 supplied 4 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle alpha.mod@1.0.0 supplied 5 string(s)") == 1);
     CHECK(log_count("B1: strids: bundle beta.mod@1.0.0 supplied 1 string(s)") == 1);
     CHECK(log_count("B1: strids: bundle old.map@0123456789abcdef supplied 1 string(s)") == 1);
     CHECK(log_count("supplied") == 3);
@@ -459,7 +460,7 @@ static void test_bundle_layer(const char *user_path)
 
     /* Every bundle gone: their keys retire, the baked default returns. */
     set_bundles(NULL, 0);
-    CHECK(write_text(user_path, "{}"));
+    CHECK(user_doc("{}"));
     CHECK(rearm_strings() == 1);
     CHECK(count_key("alpha_name") == 0 && count_key("delta_name") == 0 && count_key("legacy_name") == 0);
     CHECK(count_key("clash_key") == 0 && count_key("shared_user_key") == 0);
@@ -470,7 +471,7 @@ static void test_bundle_layer(const char *user_path)
 /* Keys under each mod's key (DESIGN-additive 2.4): six packs each carry
  * mods/<key>/ci_tab with the same text. Identical text under different keys
  * is two rows and no conflict; one key with two texts is still one. */
-static void test_namespaced_keys(const char *user_path)
+static void test_namespaced_keys(void)
 {
     static const fake_bundle packs[] = {
         { "campaign-interactables", "0.1.0", 0, 1,
@@ -480,7 +481,7 @@ static void test_namespaced_keys(const char *user_path)
         { "campaign-interactables-doors", "0.1.0", 0, 1,
           "{\"strings\":{\"en\":{\"mods/campaign-interactables-doors/ci_tab\":\"Campaign Interactables\"}}}" },
     };
-    CHECK(write_text(user_path, "{}"));
+    CHECK(user_doc("{}"));
     set_bundles(packs, (int)(sizeof packs / sizeof packs[0]));
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
@@ -503,7 +504,7 @@ static void invoke_sort_hook(void)
     CHECK(g_sorts == before + 1);
 }
 
-static void test_sort_hook_recovery(const char *user_path)
+static void test_sort_hook_recovery(void)
 {
     static unsigned char table_lea[64];
     intptr_t distance = (unsigned char *)&g_dictionary - (table_lea + 7);
@@ -536,7 +537,7 @@ static void test_sort_hook_recovery(const char *user_path)
                            fake_hash, fake_idstr_ctor) == 0);
     CHECK(g_hook_prepares == 3 && g_hook_commits == 2 && g_hook_unpatches == 2);
     CHECK(g_hook_owned != NULL && !hook_is_installed(g_hook_owned));
-    CHECK(write_text(user_path, "{ \"hook_recovery_key\" : \"Recovery\" }"));
+    CHECK(user_doc("{ \"hook_recovery_key\" : \"Recovery\" }"));
     rows = g_dictionary.count;
     invoke_sort_hook();
     CHECK(g_dictionary.count == rows && count_key("hook_recovery_key") == 0);
@@ -551,7 +552,8 @@ static void test_sort_hook_recovery(const char *user_path)
     {
         /* An index published before the first injection: that pass reads it. */
         static const fake_bundle boot[] = {
-            { "boot.mod", "1.0.0", 0, 1, "{\"strings\":{\"en\":{\"boot_name\":\"Boot\"}}}" },
+            { "boot.mod", "1.0.0", 0, 1,
+              "{\"strings\":{\"en\":{\"boot_name\":\"Boot\",\"hook_recovery_key\":\"Recovery\"}}}" },
         };
         set_bundles(boot, 1);
     }
@@ -561,7 +563,7 @@ static void test_sort_hook_recovery(const char *user_path)
     CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
     CHECK(count_key("hook_recovery_key") == 1);
     CHECK(count_key("boot_name") == 1 && !strcmp(value_for("boot_name"), "Boot"));
-    CHECK(strstr(g_log, "B1: strids injected ") != NULL && strstr(g_log, "(user 1, bundles 1, baked ") != NULL);
+    CHECK(strstr(g_log, "B1: strids injected ") != NULL && strstr(g_log, "(bundles 2, baked ") != NULL);
     CHECK(rearm_strings() == 1);
     CHECK(count_key("hook_recovery_key") == 1);
     /* After it, a published index asks for one refresh, which rearms once. */
@@ -592,28 +594,24 @@ static void test_sort_hook_recovery(const char *user_path)
 
 int main(void)
 {
-    char temp[MAX_PATH], root[MAX_PATH], path[MAX_PATH];
+    char temp[MAX_PATH], root[MAX_PATH];
     DWORD pid = GetCurrentProcessId();
 
     GetTempPathA(sizeof temp, temp);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssnapmap-plus-strids-%lu", temp, (unsigned long)pid);
     remove_tree(root);
     CHECK(make_dir(root));
-    /* Point the user document inside the fixture so the real one is never read. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\user_strids.json", root);
-    sh_strids_set_source(path);
-
-    /* Without a user document the baked defaults still apply. */
+    /* Without a mod the baked defaults still apply. */
     run_inject();
     CHECK(g_appended > 0);
-    CHECK(strstr(g_log, "no user strids.json") != NULL);
+    CHECK(strstr(g_log, "user") == NULL);
     {
         const char *id = NULL, *owner = NULL;
-        CHECK(sh_strids_test_row(0, &id, &owner) && owner && !strcmp(owner, "<user>"));
+        CHECK(sh_strids_test_row(0, &id, &owner) && owner && !strcmp(owner, "<baked>"));
     }
 
-    /* The user document supplies new keys and outranks a baked default. */
-    CHECK(write_text(path, "{ \"ai_cyberdemon_name\" : \"Cyberdemon\","
+    /* A mod supplies new keys and outranks a baked default. */
+    CHECK(user_doc("{ \"ai_cyberdemon_name\" : \"Cyberdemon\","
                            "  \"sh_bv_navigation_desc\" : \"MY OWN TEXT\" }"));
     run_inject();
     CHECK(value_for("ai_cyberdemon_name") && !strcmp(value_for("ai_cyberdemon_name"), "Cyberdemon"));
@@ -621,8 +619,7 @@ int main(void)
     CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), "MY OWN TEXT"));
 
     /* JSON escapes are decoded before native interning. */
-    CHECK(write_text(path, "\xef\xbb\xbf"
-                     "{\"ai_cyberdemon_name\":\"MY OWN NAME\","
+    CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\","
                      "\"escaped\\u005fkey\":\"Pilot\\u0027s caf\\u00e9 \\ud834\\udd1e\","
                      "\"controls\":\"line\\r\\n\\t\\b\\f\\/\\\\\\\"\"}"));
     run_inject();
@@ -639,22 +636,21 @@ int main(void)
         };
         size_t i;
         for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
-            CHECK(write_text(path, invalid[i]));
+            CHECK(user_doc(invalid[i]));
             run_inject();
             CHECK(count_key("partial_user_key") == 0);
-            CHECK(strstr(g_log, "strids REFUSED") != NULL);
         }
     }
 
     /* Rearm appends new keys and updates owned keys after native sorting moved
      * their rows. Repeated refresh never duplicates. */
-    CHECK(write_text(path, "{\"ai_cyberdemon_name\":\"MY OWN NAME\"}"));
+    CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\"}"));
     run_inject();
     sh_strids_test_set_sort((void *)fake_sort);
-    CHECK(write_text(path, "{\"ai_cyberdemon_name\":\"MY OWN NAME\",\"runtime_key\":\"First value\"}"));
+    CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\",\"runtime_key\":\"First value\"}"));
     CHECK(rearm_strings() == 1);
     CHECK(count_key("runtime_key") == 1 && !strcmp(value_for("runtime_key"), "First value"));
-    CHECK(write_text(path, "{\"ai_cyberdemon_name\":\"MY OWN NAME\",\"runtime_key\":\"Updated value\"}"));
+    CHECK(user_doc("{\"ai_cyberdemon_name\":\"MY OWN NAME\",\"runtime_key\":\"Updated value\"}"));
     CHECK(rearm_strings() == 1);
     CHECK(count_key("runtime_key") == 1 && !strcmp(value_for("runtime_key"), "Updated value"));
     CHECK(rearm_strings() == 1);
@@ -666,43 +662,23 @@ int main(void)
     CHECK(rearm_strings() == 0);
     g_sort_fault = 0;
     CHECK(rearm_strings() == 1);
-    CHECK(write_text(path, "{\"runtime_key\":\"Updated value\",\"append_refusal\":\"try again\"}"));
+    CHECK(user_doc("{\"runtime_key\":\"Updated value\",\"append_refusal\":\"try again\"}"));
     g_insert_refused = 1;
     CHECK(rearm_strings() == 0);
     CHECK(count_key("append_refusal") == 0);
     g_insert_refused = 0;
     CHECK(rearm_strings() == 1);
     CHECK(count_key("append_refusal") == 1);
-    CHECK(write_text(path, "{}"));
+    CHECK(user_doc("{}"));
     CHECK(rearm_strings() == 1);
-    test_bundle_layer(path);
-    test_namespaced_keys(path);
-    test_dictionary_retirement(path);
-    test_sort_hook_recovery(path);
-    /* A malformed suffix after NUL is still part of the input document. */
-    {
-        static const char document[] = "{\"nul_prefix_key\":\"never\"}\0trailing invalid bytes";
-        FILE *file = NULL;
-        CHECK(!fopen_s(&file, path, "wb") && file);
-        if (file) {
-            CHECK(fwrite(document, 1, sizeof(document) - 1, file) == sizeof(document) - 1);
-            CHECK(fclose(file) == 0);
-        }
-        CHECK(!rearm_strings() && !count_key("nul_prefix_key"));
-        CHECK(write_text(path, "{}"));
-        HANDLE locked = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        CHECK(locked != INVALID_HANDLE_VALUE);
-        if (locked != INVALID_HANDLE_VALUE) {
-            CHECK(!rearm_strings());
-            CloseHandle(locked);
-        }
-        CHECK(rearm_strings());
-    }
+    test_bundle_layer();
+    test_namespaced_keys();
+    test_dictionary_retirement();
+    test_sort_hook_recovery();
     test_native_table_extent();
     g_hook_installed = 0; /* simulate a removal that still owns its record */
     CHECK(sh_strids_install(NULL, 0, NULL, NULL, NULL, NULL) == 0);
     CHECK(g_hook_owned == NULL && rearm_strings() == 0);
-    sh_strids_set_source(NULL);
 
     remove_tree(root);
     reset_doubles();

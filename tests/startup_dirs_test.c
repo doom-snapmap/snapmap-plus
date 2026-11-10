@@ -1,6 +1,7 @@
-/* R-021: the backend's startup path creates only the user-data root, strings
- * and prefabs -- never overrides\ or package-cache\, which belonged to the
- * retired package system.
+/* R-021: the backend's startup path creates only the user-data root and
+ * prefabs -- never overrides\ or package-cache\, which belonged to the
+ * retired package system, nor strings\, whose document the store tool moves
+ * into a mod.
  *
  *   startup_dirs_test <repository root>
  *
@@ -61,15 +62,15 @@ static void startup_creates_only_the_kept_folders(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\snapmap-plus", base);
 
     /* The startup order of dllmain.c's bootstrap: folders, then settings. */
-    CHECK(sh_user_dirs_ensure_under(base) == 3);
+    CHECK(sh_user_dirs_ensure_under(base) == 2);
     CHECK(MultiByteToWideChar(CP_ACP, 0, base, -1, wide, MAX_PATH) > 0);
     sh_config_test_set_local_appdata(wide);
     sh_config_init();
     /* A second boot over an existing tree is the same. */
-    CHECK(sh_user_dirs_ensure_under(base) == 3);
+    CHECK(sh_user_dirs_ensure_under(base) == 2);
 
     CHECK(is_dir(root));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\strings", root); CHECK(is_dir(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\strings", root); CHECK(!is_dir(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\prefabs", root); CHECK(is_dir(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\overrides", root); CHECK(!is_dir(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\package-cache", root); CHECK(!is_dir(path));
@@ -84,14 +85,14 @@ static void startup_creates_only_the_kept_folders(void)
             if (!strcmp(found.cFileName, ".") || !strcmp(found.cFileName, "..")) continue;
             if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             dirs++;
-            if (_stricmp(found.cFileName, "strings") && _stricmp(found.cFileName, "prefabs")) {
+            if (_stricmp(found.cFileName, "prefabs")) {
                 fprintf(stderr, "unexpected folder created at startup: %s\n", found.cFileName);
                 CHECK(0);
             }
         } while (FindNextFileA(search, &found));
         FindClose(search);
     }
-    CHECK(dirs == 2);
+    CHECK(dirs == 1);
     for (int i = 0; sh_user_dirs_subfolders[i]; i++) {
         CHECK(!strstr(sh_user_dirs_subfolders[i], "overrides"));
         CHECK(!strstr(sh_user_dirs_subfolders[i], "package"));
@@ -191,6 +192,6 @@ int main(int argc, char **argv)
     }
     CHECK(g_files > 100);
     if (g_failed) { fprintf(stderr, "startup_dirs_test: %d check(s) failed\n", g_failed); return 1; }
-    printf("startup_dirs_test: startup creates root, strings and prefabs only; %d source files name no retired folder\n", g_files);
+    printf("startup_dirs_test: startup creates root and prefabs only; %d source files name no retired folder\n", g_files);
     return 0;
 }

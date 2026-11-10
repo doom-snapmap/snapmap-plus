@@ -1034,14 +1034,18 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
 
 Display text reaches the engine's `#str_` table through `strids.c`, which reads
-three layers and keeps the first writer of each key (case-insensitive): the
-user's `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, then the
+two layers and keeps the first writer of each key (case-insensitive): the
 `strings.en` object of every admitted bundle's author block (installed mods
-before bundles a map delivered, then by id and version, through
-`sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
+before bundles a map delivered, then by id case-insensitively, then version,
+through `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
 `#str_` prefix decls use, and only `en` is read. When two bundles give one key
 different text the first stands and one `B1: strids REFUSED` line names both;
-identical text is not a conflict. The first injection runs after the boot index
+identical text is not a conflict. The pass summary reads `N #str_ entries
+(bundles B, baked D)`. The player's own document of earlier releases,
+`%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, is not read: the store
+tool's loose step moves its keys into the mod My overrides (see [Migration of
+the retired overrides folder](#migration-of-the-retired-overrides-folder)), so
+they are ordinary bundle strings and outrank no other mod. The first injection runs after the boot index
 is built, so it already carries bundle strings. Every later index build
 (`sh_mods rescan`, an install, a migration, a fetched bundle) requests a
 refresh that re-reads the layers and re-sorts the table on the main thread: at

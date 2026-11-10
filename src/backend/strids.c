@@ -1,4 +1,4 @@
-/* Inject user, bundle and baked #str_ mappings, then sort the live
+/* Inject bundle and baked #str_ mappings, then sort the live
  * dictionary by hash. Installation performs the usual injection; the sort
  * hook is a fallback.
  *
@@ -12,8 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <shlobj.h>
-#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #include "strids.h"
 #include "strids_baked.h"   /* the compiled-in canonical #str_ set (baked strids) */
 #include "hook.h"
@@ -56,20 +54,6 @@ static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet in
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
 
-/* User document path; default %LOCALAPPDATA%\snapmap-
- * plus\strings\strids.json.
- */
-static char g_src_path[MAX_PATH] = {0};
-
-static void default_source_path(char *out, size_t cap)
-{
-    char base[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base)))
-        _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\strings\\strids.json", base);
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "snapmap-plus\\strings\\strids.json");
-}
-
 /* Decode the first LEA RCX,[rip+disp32] in StridsTableLea to find the
  * dictionary descriptor. A later matching LEA references the error string, so
  * it must not be selected.
@@ -97,62 +81,18 @@ static void *decode_table_global(const uint8_t *table_lea_fn)
     return NULL;
 }
 
-/* Read the local document in chunks. Only a missing optional file is ignored;
- * allocation, size and I/O failures must not masquerade as an absent override. */
-static char *read_file(const char *path, size_t *out_len)
-{
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        DWORD error = GetLastError();
-        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
-            g_pass_failed = 1;
-        return NULL;
-    }
-    LARGE_INTEGER sz;
-    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || (uint64_t)sz.QuadPart >= SIZE_MAX) {
-        g_pass_failed = 1;
-        CloseHandle(h);
-        return NULL;
-    }
-    size_t n = (size_t)sz.QuadPart;
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
-    if (!buf) { g_pass_failed = 1; CloseHandle(h); return NULL; }
-    size_t got = 0;
-    while (got < n) {
-        DWORD rd = 0;
-        DWORD chunk = n - got > 1024u * 1024u ? 1024u * 1024u : (DWORD)(n - got);
-        if (!ReadFile(h, buf + got, chunk, &rd, NULL) || rd == 0) break;
-        got += rd;
-    }
-    CloseHandle(h);
-    if (got != n) { g_pass_failed = 1; HeapFree(GetProcessHeap(), 0, buf); return NULL; }
-    buf[n] = '\0';
-    *out_len = n;
-    return buf;
-}
-
-/* The user's own document: %LOCALAPPDATA%\snapmap-plus\strings\strids.json unless redirected. */
-static char *read_source_file(size_t *out_len)
-{
-    char path[MAX_PATH];
-    if (g_src_path[0]) strncpy_s(path, sizeof path, g_src_path, _TRUNCATE);
-    else default_source_path(path, sizeof path);
-    return read_file(path, out_len);
-}
-
 /* Deduplicate case-insensitively within an injection pass because the native
- * hash lowercases keys. First writer wins: user document, then admitted
- * bundles in modserve's order, then baked defaults. Duplicate native rows
- * would make hash lookup ambiguous.
+ * hash lowercases keys. First writer wins: admitted bundles in modserve's
+ * order, then baked defaults. Duplicate native rows would make hash lookup
+ * ambiguous. (The user document of earlier releases, strings\strids.json, is
+ * the store tool's to move into the mod My overrides; it is not read here.)
  */
-/* Who supplied a row. The user's file and the baked defaults are not bundles
- * and never conflict-report: the user outranks a bundle by design and the
- * baked set is only a backstop. A bundle owner is its index in this pass's
+/* Who supplied a row. The baked defaults are not a bundle and never
+ * conflict-report: the baked set is only a backstop. A bundle owner is its index in this pass's
  * g_bundle_names, so a cross-bundle disagreement can name both sides. */
 #define STRIDS_OWNER_NONE (-1)
 
-enum { STRIDS_LAYER_USER, STRIDS_LAYER_BUNDLE, STRIDS_LAYER_BAKED, STRIDS_LAYERS };
+enum { STRIDS_LAYER_BUNDLE, STRIDS_LAYER_BAKED, STRIDS_LAYERS };
 
 typedef struct strids_row {
     const char  *id;          /* borrows the stable owned ID allocation */
@@ -337,7 +277,7 @@ static strids_row *find_injected(const char *id)
 static const char *strids_owner_name(int owner)
 {
     if (owner >= 0 && (size_t)owner < g_bundle_names_n) return g_bundle_names[owner];
-    return "<user>";
+    return "<baked>";
 }
 
 /* Append one #str_<id> row through native helpers unless this pass already
@@ -348,8 +288,8 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
     strids_row *seen = find_injected(id);
     if (seen != NULL) {
         /* Two bundles with different text: the first stands and one line
-         * names both. Equal text composes silently; the user and baked
-         * layers never produce a bundle conflict. */
+         * names both. Equal text composes silently; the baked layer
+         * never produces a bundle conflict. */
         if (owner != STRIDS_OWNER_NONE && seen->owner != STRIDS_OWNER_NONE && owner != seen->owner &&
             seen->text_hash != strids_text_hash(text)) {
             char line[400];
@@ -547,18 +487,6 @@ static void inject_decoded(const sh_json_object *pairs, int owner, int layer)
                          strlen(pairs->members[i].value_json), owner, layer);
 }
 
-static void inject_pairs(const char *buf, size_t length)
-{
-    sh_json_object pairs = {0};
-    if (!decode_pairs(buf, length, &pairs)) {
-        g_pass_failed = 1;
-        backend_log("B1: strids REFUSED: expected a JSON object of valid text strings and nonempty IDs");
-        return;
-    }
-    inject_decoded(&pairs, STRIDS_OWNER_NONE, STRIDS_LAYER_USER);
-    sh_json_object_free(&pairs);
-}
-
 /* ------------------------------------------------------------------ bundle layer */
 
 /* mod.json is validated at this depth by the serving index (modserve.c). */
@@ -587,7 +515,7 @@ typedef struct strids_bundle_pass {
 } strids_bundle_pass;
 
 /* One admitted bundle: extra.strings.en is a flat object of key -> text, keys
- * without the #str_ prefix (the user document's convention). Other languages
+ * without the #str_ prefix. Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
 static void inject_bundle(void *context, const char *id, const char *version, int legacy, const char *extra)
@@ -656,16 +584,16 @@ static void inject_bundles(void)
     }
 }
 
-/* "N #str_ entries (user U, bundles B, baked D)": the keys each layer won in
- * the last pass. */
+/* "N #str_ entries (bundles B, baked D)": the keys each layer won in the last
+ * pass. */
 static void layer_summary(char *out, size_t cap)
 {
-    _snprintf_s(out, cap, _TRUNCATE, "%zu #str_ entries (user %zu, bundles %zu, baked %zu)",
-                g_layer_rows[STRIDS_LAYER_USER] + g_layer_rows[STRIDS_LAYER_BUNDLE] + g_layer_rows[STRIDS_LAYER_BAKED],
-                g_layer_rows[STRIDS_LAYER_USER], g_layer_rows[STRIDS_LAYER_BUNDLE], g_layer_rows[STRIDS_LAYER_BAKED]);
+    _snprintf_s(out, cap, _TRUNCATE, "%zu #str_ entries (bundles %zu, baked %zu)",
+                g_layer_rows[STRIDS_LAYER_BUNDLE] + g_layer_rows[STRIDS_LAYER_BAKED],
+                g_layer_rows[STRIDS_LAYER_BUNDLE], g_layer_rows[STRIDS_LAYER_BAKED]);
 }
 
-/* Inject the user, bundle and baked layers. Return the appended row count. */
+/* Inject the bundle and baked layers. Return the appended row count. */
 static long inject_layers(void)
 {
     if (g_table_desc == NULL || g_insert == NULL || g_hash == NULL || g_idstr_ctor == NULL)
@@ -675,18 +603,7 @@ static long inject_layers(void)
     free_bundle_names();
     memset(g_layer_rows, 0, sizeof g_layer_rows);
 
-    /* User values have highest precedence. */
-    size_t len = 0;
-    char *buf = read_source_file(&len);
-    if (buf != NULL) {
-        inject_pairs(buf, len);
-        HeapFree(GetProcessHeap(), 0, buf);
-    } else {
-        backend_log(g_pass_failed ? "B1: strids REFUSED: could not read the local string document" :
-                    "B1: strids -- no user strids.json (optional); bundle strings and baked defaults still apply");
-    }
-
-    /* Admitted bundles fill keys the user did not supply. */
+    /* Admitted bundles first. */
     inject_bundles();
 
     /* Baked defaults fill remaining keys. */
@@ -833,7 +750,6 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
     }
     g_sort_orig = (sort_fn_t)tramp;
 
-    if (!g_src_path[0]) default_source_path(g_src_path, sizeof g_src_path);
     InterlockedExchange(&g_injected, 0);
     if (hook_commit(tramp) != B2_PATCH_OK) {
         InterlockedExchange(&g_injected, 1);
@@ -845,8 +761,8 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         return 0;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B1: strids injector installed at %p (trampoline %p, stolen %d); table=%p; source=%s",
-        sort_body_fn, tramp, SORT_STOLEN, g_table_desc, g_src_path);
+        "B1: strids injector installed at %p (trampoline %p, stolen %d); table=%p",
+        sort_body_fn, tramp, SORT_STOLEN, g_table_desc);
     backend_log(line);
 
     /* Built-in declarations can load at any time. Supply their text now. */
@@ -893,16 +809,6 @@ int sh_strids_refresh_pending(void)
     return sh_strids_rearm();
 }
 
-int sh_strids_set_source(const char *path)
-{
-    if (path == NULL || path[0] == '\0') {
-        default_source_path(g_src_path, sizeof g_src_path);
-        return 1;
-    }
-    strncpy_s(g_src_path, sizeof g_src_path, path, _TRUNCATE);
-    return g_src_path[0] != '\0';
-}
-
 #ifdef SH_STRIDS_TESTING
 /* Bind doubles for the four native helpers and inspect the rows requested by
  * one injection pass.
@@ -932,8 +838,8 @@ void sh_strids_test_set_sort(void *sort)
     g_sort_orig = (sort_fn_t)sort;
 }
 
-/* How the injector attributed each row this pass: the id, and its owner ("<user>" for the user's
- * own document and for the baked defaults, "<id>@<version>" for a bundle). Returns 0 past the end. */
+/* How the injector attributed each row this pass: the id, and its owner ("<baked>" for the baked
+ * defaults, "<id>@<version>" for a bundle). Returns 0 past the end. */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
 {
     if (index < 0 || (size_t)index >= g_injected_n) return 0;

@@ -254,10 +254,11 @@ the first; uninstall the first folder before installing into another.
 
 Migration of player data compares file contents before retiring a source and removes
 only empty directories; read errors and links prevent retirement. Unknown files in
-the old metadata directory also remain there. The installer scaffolds `strings\` and
-`prefabs\` only; this migration never copies or creates the retired package folders
+the old metadata directory also remain there. The installer scaffolds `prefabs\`
+only (a `strings\` folder copied from `%USERPROFILE%\snaphak` is the store tool's to
+move into a mod); this migration never copies or creates the retired package folders
 (`overrides`, `package-cache`, `package-staging`, `override-backups`). The store tool
-below handles `overrides\`.
+below handles `overrides\` and `strings\`.
 
 `config.json` belongs to the backend. Install, update, uninstall and reinstall
 do not create, parse or rewrite it. Prefabs, strings and rawmaps also remain
