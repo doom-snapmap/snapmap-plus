@@ -450,6 +450,15 @@ int  sh_ms_upgrade_scan(sh_ms_upgrade_check *out);
 typedef int (*sh_ms_discard_fn)(void *context, const wchar_t *path);
 void sh_ms_set_discard(sh_ms_discard_fn fn, void *context, const char *verb);
 
+/* Retire `leaf`, a folder beside the store root in the data folder (the
+ * retired overrides\ and strings\ of earlier releases), through the discard
+ * set with sh_ms_set_discard. Without one it is left where it is: the game
+ * never deletes a player's folder outright. 1 when it is gone (or was never
+ * there), 0 when it could not be retired, -1 when no discard is set. */
+int  sh_ms_retire_sibling(const wchar_t *leaf);
+/* The discard's verb ("moved to the Recycle Bin"; "deleted" without one). */
+const char *sh_ms_discard_verb(void);
+
 #ifdef SH_MODSTORE_TESTING
 /* > 0: that many hard-link copies of the upgrade fail after the copy (tests). */
 extern int sh_ms_test_fail_unlink_copy;

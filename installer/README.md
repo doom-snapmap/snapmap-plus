@@ -153,10 +153,11 @@ After any install, update or migration:
   moved into `cache\installer\backup\` and recorded when it is not.
 - **The data folder**, `%LOCALAPPDATA%\snapmap-plus`, holds `snapmap-plus.exe`,
   `snapmap-plus-store.exe`, `install.json` and the player's own data (`config.json`,
-  `prefabs\`, `strings\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
-  `token` and `pinned.json` files when present). The retired `overrides\` folder of a
-  release that had one stays: the store tool moves its packages and leaves it as it
-  was. Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
+  `prefabs\`, `mods\`, `rawmap.json`, `test-maps\`, `cache\`, and the
+  `token` and `pinned.json` files when present). The retired `overrides\` and
+  `strings\` folders of a release that had them go to the Recycle Bin once the store
+  tool has moved everything in them into `mods\` (below); an `overrides\` entry it
+  skips keeps that folder. Empty `override-backups\`, `package-cache\` and `package-staging\` folders are
   removed; one that holds files is kept and listed.
 - **Uninstall** removes every file of ours from DOOM, restores any backup from
   `cache\installer\backup\`, removes the runtime log and crash folders, the store
@@ -253,10 +254,11 @@ the first; uninstall the first folder before installing into another.
 
 Migration of player data compares file contents before retiring a source and removes
 only empty directories; read errors and links prevent retirement. Unknown files in
-the old metadata directory also remain there. The installer scaffolds `strings\` and
-`prefabs\` only; this migration never copies or creates the retired package folders
+the old metadata directory also remain there. The installer scaffolds `prefabs\`
+only (a `strings\` folder copied from `%USERPROFILE%\snaphak` is the store tool's to
+move into a mod); this migration never copies or creates the retired package folders
 (`overrides`, `package-cache`, `package-staging`, `override-backups`). The store tool
-below handles `overrides\`.
+below handles `overrides\` and `strings\`.
 
 `config.json` belongs to the backend. Install, update, uninstall and reinstall
 do not create, parse or rewrite it. Prefabs, strings and rawmaps also remain
@@ -288,10 +290,15 @@ converts `mods\` folders of the retired layout to one folder per mod with a
 `mod.json` (`bundle.json`, `.state.json`, `blobs\` and `legacy\` go, hard-linked
 files get their own copies, the old record files are folded into
 `mods\snapmap-plus.json`), sends the retired recycle bin `removed-mods\` to the
-Windows Recycle Bin, and moves the packages in `overrides\` into `mods\`, leaving
-`overrides\` unchanged and removing only an empty `override-backups\`; a package
-added to `overrides\` after that first move is moved by the next check and
-migrate, so running `update` again (or `migrate`) picks it up.
+Windows Recycle Bin, moves the packages in `overrides\` into `mods\` (removing an
+empty `override-backups\`), and moves the loose files of `overrides\` and the old
+custom strings file `strings\strids.json` into one mod, My overrides
+(`mods\my-overrides\`; when that folder exists only what it lacks is added, and a
+`kept my-overrides'` line names each file or string it already had). Once
+everything in `overrides\` is in `mods\` that folder goes to the Recycle Bin, and
+`strings\` once its strings are moved; a skipped entry (a ZIP) keeps `overrides\`.
+A package added to `overrides\` after that first move is moved by the next check
+and migrate, so running `update` again (or `migrate`) picks it up.
 Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
 check or migrate that does not finish is a warning, never a failed install; the
 warning gives the command to run by hand with DOOM closed,

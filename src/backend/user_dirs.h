@@ -5,7 +5,9 @@
 #include <stddef.h>
 
 /* The subfolders of the user-data root (%LOCALAPPDATA%\snapmap-plus) that
- * startup creates, NULL-terminated: the root itself (""), strings and prefabs.
+ * startup creates, NULL-terminated: the root itself ("") and prefabs (the
+ * strings folder of earlier releases is retired: the store tool moves its
+ * document into the mod My overrides).
  * Keep the installer's userContentSubdirs aligned with this list. */
 extern const char *const sh_user_dirs_subfolders[];
 

@@ -13,8 +13,9 @@ import (
 // Keep userContentSubdirs aligned with the backend startup folders in dllmain.c.
 
 // userContentSubdirs is the content tree the installer scaffolds and the backend reads. Mirrors
-// sh_user_dirs_subfolders in src/backend/user_dirs.c.
-var userContentSubdirs = []string{"strings", "prefabs"}
+// sh_user_dirs_subfolders in src/backend/user_dirs.c. The strings folder of earlier releases is not
+// scaffolded: the store tool moves its document into the mod My overrides and retires the folder.
+var userContentSubdirs = []string{"prefabs"}
 
 // retiredContent reports whether a path relative to a content root belongs to the retired
 // first-generation package system. It is never copied, scaffolded or removed: the package system

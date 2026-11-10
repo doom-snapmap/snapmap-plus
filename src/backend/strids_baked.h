@@ -5,11 +5,12 @@
  * %LOCALAPPDATA%\snapmap-plus\strings\strids.json -- a runtime file in the user's data folder that is empty on a
  * fresh install and trivially missing, so even a correct override decl showed raw "#str_..." tokens (or
  * no category). Baking the canonical set INTO the DLL removes that fragility: sh_strids injects these
- * rows UNCONDITIONALLY at startup (the same engine append+resort path the user file uses). The user's
- * strids.json is still honored afterward as an OPTIONAL add/override layer for end-user extensibility.
+ * rows UNCONDITIONALLY at startup (the same engine append+resort path the bundle strings use), under every
+ * admitted mod's strings.en. The user's strids.json is no longer read: the store tool moves it into the
+ * mod My overrides (modmigrate.h, the loose step).
  *
  * FORMAT: each entry is { id, text } where `id` is the #str_ id WITHOUT the leading "#str_" prefix
- * (inject_row prepends it, exactly as it does for the user-file keys). Keep this list to strings the
+ * (inject_row prepends it, exactly as it does for the bundle keys). Keep this list to strings the
  * SHIPPED pack actually needs and that are NOT stock engine strings (to avoid duplicate-hash rows).
  *
  * Clean-room: our own strings; zero OG SnapHak bytes.

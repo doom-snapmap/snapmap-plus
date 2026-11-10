@@ -218,6 +218,7 @@ typedef struct st_scan {
     int ov_present, ov_due;
     unsigned ov_entries;
     int ov_changed;                     /* entries added or changed since a completed migration */
+    sh_modmigrate_loose_check lc;       /* the loose layer, the strings document, the retirements */
     int kinds;
 } st_scan;
 
@@ -247,9 +248,12 @@ static int st_scan_store(const st_store *s, st_scan *out)
     out->bin_work = out->uc.bin_present || out->uc.bin_section;
     ov = st_join(s->dir, L"overrides");
     out->ov_present = st_is_dir(ov);
+    if (sh_modmigrate_loose_scan(&out->lc) < 0) memset(&out->lc, 0, sizeof out->lc);
     if (out->ov_present) {
+        /* The loose layer is the loose step's; the package pass is due for the other entries. */
         out->ov_entries = st_count(ov);
-        out->ov_due = !(sh_mb_record_get(s->mods, SH_MODMIGRATE_RECORD, &section) == 1 && section &&
+        out->ov_entries -= out->lc.loose_entries < out->ov_entries ? out->lc.loose_entries : out->ov_entries;
+        out->ov_due = out->ov_entries && !(sh_mb_record_get(s->mods, SH_MODMIGRATE_RECORD, &section) == 1 && section &&
                         strstr(section, "\"complete\":true"));
         free(section);
         if (!out->ov_due) {
@@ -259,8 +263,11 @@ static int st_scan_store(const st_store *s, st_scan *out)
         }
     }
     free(ov);
+    /* overrides\ goes only after the passes leave nothing in it. */
+    if (out->ov_due || out->ov_changed > 0) out->lc.overrides_done = 0;
     g_log_on = saved;
-    out->kinds = (out->uc.layout_folders > 0) + out->uc.blobs_present + out->uc.legacy_present + (out->uc.record_files > 0) +
+    out->kinds = (out->lc.loose > 0 || out->lc.strings_due) + out->lc.strings_bad + out->lc.overrides_done +
+                 out->lc.strings_done + (out->uc.layout_folders > 0) + out->uc.blobs_present + out->uc.legacy_present + (out->uc.record_files > 0) +
                  (out->uc.tidy_drops + out->uc.tidy_renames > 0 || out->uc.tidy_migration) + out->uc.bin_present +
                  (out->uc.bin_section && !out->uc.bin_present) + (out->ov_due || out->ov_changed > 0);
     return 1;
@@ -306,6 +313,15 @@ static void st_list(const st_scan *sc)
     if (sc->ov_changed)
         st_say(0, "  overrides\\: %d entr%s added or changed since it was migrated", sc->ov_changed,
                sc->ov_changed == 1 ? "y" : "ies");
+    if (sc->lc.loose)
+        st_say(0, "  overrides\\: %u loose file(s) or folder(s) of engine paths to move into mods\\my-overrides\\",
+               sc->lc.loose);
+    if (sc->lc.strings_due)
+        st_say(0, "  strings\\strids.json: %u string(s) to move into mods\\my-overrides\\", sc->lc.strings);
+    if (sc->lc.strings_bad)
+        st_say(0, "  strings\\strids.json: %s; fix it (a JSON object of \"id\": \"text\" pairs) or remove it", sc->lc.why);
+    if (sc->lc.overrides_done) st_say(0, "  overrides\\: every entry is in mods\\; the folder goes to the Recycle Bin");
+    if (sc->lc.strings_done) st_say(0, "  strings\\: nothing left to move; the folder goes to the Recycle Bin");
 }
 
 /* ---------------------------------------------------------- commands ---- */
@@ -322,7 +338,9 @@ static void st_usage(int err)
     st_emit(err, "check lists what needs migrating and changes nothing (exit 0 nothing to do, 1 work to do, 2 error).");
     st_emit(err, "migrate does that work; everything it deletes goes to the Recycle Bin (exit 0 done, 1 partly done,");
     st_emit(err, "2 error). It needs the DOOM folder to move overrides\\ (found through Steam when --doom is not");
-    st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. Close DOOM first.");
+    st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. The loose files of");
+    st_emit(err, "overrides\\ and strings\\strids.json become the mod My overrides (mods\\my-overrides), and overrides\\ and");
+    st_emit(err, "strings\\ go to the Recycle Bin once everything in them is in mods\\. Close DOOM first.");
 }
 
 static void st_store_free(st_store *s)
@@ -400,7 +418,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && (before.ov_due || before.ov_changed) && g_steam) doom = st_steam_doom();
+    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
@@ -441,6 +459,30 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
                 st_part(done, sizeof done, "overrides\\ moved into mods\\ (%u built, %u delivered converted, %u reused, %u skipped, "
                         "%u refused)", ms.built, ms.converted, ms.reused, ms.skipped, ms.refused);
         }
+    }
+    /* 4. The loose layer of overrides\ and the strings document, into mods\my-overrides. Loose
+     * files need the game's archives for their stock pointers; the document alone does not. */
+    if (before.lc.loose || before.lc.strings_due) {
+        if (before.lc.loose && !doom) {
+            need_doom = 1;
+            st_say(0, "  overrides\\: its loose files are not moved yet: they need the DOOM folder to tell game files "
+                   "from mod files; DOOM was not found through Steam");
+        } else {
+            sh_modmigrate_loose_stats ls;
+            if (doom && !doom_u8) {
+                doom_u8 = st_utf8(doom, CP_UTF8, NULL);
+                sh_modstock_set_install(doom_u8);
+                sh_modstock_register();
+            }
+            if (sh_modmigrate_loose_run(&ls) > 0)
+                st_part(done, sizeof done, "%u file(s) and %u string(s) %s mods\\my-overrides", ls.files_added,
+                        ls.strings_added, ls.created ? "moved into" : "added to");
+        }
+    }
+    /* 5. overrides\ and strings\ once everything in them is in mods\. */
+    {
+        int r = sh_modmigrate_retire();
+        if (r > 0) st_part(done, sizeof done, "%d retired folder(s) %s", r, sh_ms_discard_verb());
     }
     g_log_on = 0;
     sh_ms_set_discard(NULL, NULL, NULL);

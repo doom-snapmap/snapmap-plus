@@ -313,6 +313,32 @@ static void mg_measure_item(mg_item *it, const wchar_t *path)
                 it->files, it->bytes >> 20);
 }
 
+/* The retired loose-file layer (SnapHak and early releases served
+ * overrides\<engine path> directly): a file directly in overrides\ that is
+ * not a ZIP, and a folder that is not a delivered-package group, has no
+ * descriptor and holds no package folder one level down (a tree of engine
+ * paths, such as generated\decls\...). The loose step moves them, with the
+ * strings document, into mods\my-overrides\. */
+static int mg_loose_entry(const wchar_t *dir, const WIN32_FIND_DATAW *fd)
+{
+    char first[MAX_PATH], *name;
+    wchar_t *path;
+    int loose;
+    if (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return 0;
+    name = sh_mb_utf8(fd->cFileName);
+    if (!name) return 0;
+    if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        loose = !mg_ends_with(name, ".zip");
+        free(name);
+        return loose;
+    }
+    path = mg_wjoin(dir, fd->cFileName);
+    loose = path && !mg_is_group(name) && !mg_has_descriptor(path) && mg_nested_packages(path, first, sizeof first) == 0;
+    free(path);
+    free(name);
+    return loose;
+}
+
 /* List overrides\ and classify every entry. */
 static int mg_scan(mg_ctx *c)
 {
@@ -328,9 +354,10 @@ static int mg_scan(mg_ctx *c)
         wchar_t *path;
         mg_item *it;
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        c->entries++;
+        if (mg_loose_entry(c->overrides_w, &fd)) continue;   /* the loose step's (sh_modmigrate_loose_run) */
         name = sh_mb_utf8(fd.cFileName);
         path = mg_wjoin(c->overrides_w, fd.cFileName);
-        c->entries++;
         if (!name || !path) {
             free(name); free(path);
             it = mg_add(c, "?", MG_FILE);
@@ -341,13 +368,11 @@ static int mg_scan(mg_ctx *c)
             it = mg_add(c, name, MG_LINK);
             if (it) mg_skip(it, "a link or junction; links are not followed");
         } else if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            it = mg_add(c, name, mg_ends_with(name, ".zip") ? MG_ZIP : MG_FILE);
-            if (it && it->kind == MG_ZIP)
+            /* Every other loose file is the loose step's. */
+            it = mg_add(c, name, MG_ZIP);
+            if (it)
                 mg_skip(it, "a ZIP archive; unpack it into its own folder (package.json at the top) and run "
                             "sh_mods migrate --again");
-            else if (it)
-                mg_skip(it, "a loose file directly in the " MG_OVERRIDES " folder (the retired loose-file layer); put it in a mod "
-                            "folder under its engine path");
         } else if (mg_is_group(name)) {
             /* beta.16-19 delivered packages: overrides\map-<16 hex>\<package>. */
             WIN32_FIND_DATAW gd;
@@ -413,13 +438,11 @@ static int mg_scan(mg_ctx *c)
                 free(path);
                 continue;
             }
-            it = mg_add(c, name, MG_UNMARKED);
-            if (it && nested)
+            it = mg_add(c, name, MG_UNMARKED);   /* none one level down is the loose layer */
+            if (it)
                 mg_skip(it, "no package.json or mod.json at its top; it holds %u package folders one level down "
                             "(first: %s\\%s); move each directly under " MG_OVERRIDES " and run sh_mods migrate --again",
                         nested, name, first);
-            else if (it)
-                mg_skip(it, "no package.json or mod.json at its top, and none one level down");
         }
         free(name);
         free(path);
@@ -1253,6 +1276,7 @@ int sh_modmigrate_pending(unsigned *entries)
             int status;
             if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
             seen++;
+            if (mg_loose_entry(overrides, &fd)) continue;   /* the loose step's (sh_modmigrate_loose_scan) */
             name = sh_mb_utf8(fd.cFileName);
             path = mg_wjoin(overrides, fd.cFileName);
             status = name ? mg_record_status(text, name) : 0;
@@ -1271,4 +1295,655 @@ int sh_modmigrate_pending(unsigned *entries)
     free(record);
     if (entries) *entries = seen;
     return (int)pending;
+}
+
+/* ------------------------------------------------------------ loose step ---- */
+
+#define MG_LOOSE_RECORD "loose"            /* the section of mods\snapmap-plus.json */
+#define MG_LOOSE_FOLDER "my-overrides"     /* the mod the loose layer and the strings document become */
+#define MG_STRINGS      "strings"          /* retired: the strings document's folder */
+#define MG_STRINGS_DOC  "strids.json"
+
+typedef struct mg_loose {
+    char root[MAX_PATH * 4];
+    char mods_u8[MAX_PATH * 4];
+    char overrides_u8[MAX_PATH * 4];
+    wchar_t *overrides_w, *mods_w, *strings_w, *doc_w;
+    unsigned long long migrated_at;    /* the loose record's, 0 without one */
+    int recorded;                      /* the record says the step completed */
+    unsigned entries, due;             /* loose entries of overrides\, and those added or changed since */
+    int doc;                           /* the document: 1 read, 0 absent, -1 not a strings document */
+    int doc_due;                       /* read, and added or changed since the step */
+    char doc_why[200];
+    sh_json_object pairs;              /* its keys */
+} mg_loose;
+
+static void mg_loose_close(mg_loose *l)
+{
+    free(l->overrides_w);
+    free(l->mods_w);
+    free(l->strings_w);
+    free(l->doc_w);
+    sh_json_object_free(&l->pairs);
+    memset(l, 0, sizeof *l);
+}
+
+/* The decoded text of a JSON string, or NULL. */
+static char *mg_decode(const char *raw)
+{
+    size_t n, got = 0;
+    char *out;
+    if (!raw || raw[0] != '"') return NULL;
+    n = strlen(raw);
+    out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    if (!sh_json_decode_string(raw, n, out, n + 1, &got) || strlen(out) != got) { free(out); return NULL; }
+    return out;
+}
+
+/* strings\strids.json: a flat object of "id": "text" (no #str_ prefix), UTF-8
+ * with or without a BOM, as strids.c read it. 1 read, 0 absent, -1 not such a
+ * document (the reason in `why`). */
+static int mg_doc_read(const wchar_t *path, sh_json_object *pairs, char *why, size_t cap)
+{
+    char *u, *t;
+    const char *p;
+    size_t n = 0, i;
+    if (mg_attr(path) == INVALID_FILE_ATTRIBUTES) return 0;
+    u = sh_mb_utf8(path);
+    t = u ? (char *)sh_mb_read_file(u, 16u << 20, &n) : NULL;
+    free(u);
+    if (!t) { mg_cause(why, cap, "it cannot be read (or is over 16 MiB)"); return -1; }
+    p = t;
+    if (n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) { p += 3; n -= 3; }
+    if (!sh_json_parse_object(p, n, 1, pairs)) {
+        free(t);
+        mg_cause(why, cap, "it is not a JSON object of \"id\": \"text\" pairs");
+        return -1;
+    }
+    free(t);
+    for (i = 0; i < pairs->count; i++) {
+        char *text = mg_decode(pairs->members[i].value_json);
+        int ok = text && pairs->members[i].key_length && strlen(pairs->members[i].key) == pairs->members[i].key_length;
+        free(text);
+        if (!ok) {
+            mg_cause(why, cap, "its entry \"%.80s\" is not a text string with a name", pairs->members[i].key);
+            sh_json_object_free(pairs);
+            return -1;
+        }
+    }
+    return 1;
+}
+
+/* Resolve the folders, read the loose record and the document, and count the
+ * loose entries that are due. 0 when the data folder cannot be resolved. */
+static int mg_loose_open(mg_loose *l)
+{
+    char *rec = NULL;
+    memset(l, 0, sizeof *l);
+    if (!mg_data_root(l->root, sizeof l->root)) return 0;
+    l->overrides_w = mg_wide(l->root, MG_OVERRIDES);
+    l->mods_w = mg_wide(l->root, "mods");
+    l->strings_w = mg_wide(l->root, MG_STRINGS);
+    l->doc_w = mg_wide(l->root, MG_STRINGS "\\" MG_STRINGS_DOC);
+    if (!l->overrides_w || !l->mods_w || !l->strings_w || !l->doc_w || !mg_mods_u8(l->mods_w, l->mods_u8, sizeof l->mods_u8))
+        return 0;
+    {
+        char *u = sh_mb_utf8(l->overrides_w);
+        if (!u) return 0;
+        strncpy_s(l->overrides_u8, sizeof l->overrides_u8, strncmp(u, "\\\\?\\", 4) ? u : u + 4, _TRUNCATE);
+        free(u);
+    }
+    if (sh_mb_record_get(l->mods_u8, MG_LOOSE_RECORD, &rec) == 1 && rec) {
+        const char *m = strstr(rec, "\"migratedAt\":");
+        if (m) l->migrated_at = _strtoui64(m + 13, NULL, 10);
+        l->recorded = strstr(rec, "\"complete\":true") != NULL;
+    }
+    free(rec);
+    if (mg_is_dir(l->overrides_w)) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern = mg_wjoin(l->overrides_w, L"*");
+        HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+        free(pattern);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                wchar_t *path;
+                if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || !mg_loose_entry(l->overrides_w, &fd)) continue;
+                l->entries++;
+                path = mg_wjoin(l->overrides_w, fd.cFileName);
+                if (!l->recorded || !path || mg_changed_at(path, &fd) > l->migrated_at) l->due++;
+                free(path);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    l->doc = mg_doc_read(l->doc_w, &l->pairs, l->doc_why, sizeof l->doc_why);
+    if (l->doc == 1) {
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        unsigned long long at = 0;
+        if (GetFileAttributesExW(l->doc_w, GetFileExInfoStandard, &a)) {
+            unsigned long long made = mg_unix_time(&a.ftCreationTime);
+            at = mg_unix_time(&a.ftLastWriteTime);
+            if (made > at) at = made;
+        }
+        l->doc_due = !l->recorded || at > l->migrated_at;
+    }
+    return 1;
+}
+
+/* Entries of overrides\ not in mods\: a package entry the record does not
+ * count as done (built, converted or reused, or not listed by a completed
+ * record and unchanged since), or a loose entry the loose step has not moved.
+ * `first` receives the first one's name. */
+static unsigned mg_overrides_left(const mg_loose *l, char *first, size_t cap)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern;
+    HANDLE h;
+    char *text = mg_record_text(l->mods_w);
+    unsigned long long migrated_at = 0;
+    unsigned left = 0;
+    int complete = text && strstr(text, "\"complete\":true") != NULL;
+    if (first && cap) first[0] = 0;
+    if (text) {
+        const char *m = strstr(text, "\"migratedAt\":");
+        if (m) migrated_at = _strtoui64(m + 13, NULL, 10);
+    }
+    pattern = mg_wjoin(l->overrides_w, L"*");
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            wchar_t *path;
+            char *name;
+            int done;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            path = mg_wjoin(l->overrides_w, fd.cFileName);
+            name = sh_mb_utf8(fd.cFileName);
+            if (!path || !name) done = 0;
+            else if (mg_loose_entry(l->overrides_w, &fd))
+                done = l->recorded && mg_changed_at(path, &fd) <= l->migrated_at;
+            else {
+                int status = complete ? mg_record_status(text, name) : 0;
+                if (status == 0 && complete && mg_changed_at(path, &fd) <= migrated_at) status = 1;
+                done = status == 1;
+            }
+            if (!done && !left++ && first && cap) strncpy_s(first, cap, name ? name : "?", _TRUNCATE);
+            free(path);
+            free(name);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    } else if (mg_is_dir(l->overrides_w)) left = 1;   /* it cannot be listed: keep it */
+    free(text);
+    return left;
+}
+
+int sh_modmigrate_loose_scan(sh_modmigrate_loose_check *out)
+{
+    mg_loose l;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!mg_loose_open(&l)) { mg_loose_close(&l); return -1; }
+    out->loose_entries = l.entries;
+    out->loose = l.due;
+    out->strings_due = l.doc == 1 && l.doc_due;
+    out->strings = out->strings_due ? (unsigned)l.pairs.count : 0;
+    out->strings_bad = l.doc < 0;
+    if (out->strings_bad) strncpy_s(out->why, sizeof out->why, l.doc_why, _TRUNCATE);
+    if (mg_is_dir(l.overrides_w)) {
+        out->left = mg_overrides_left(&l, out->first_left, sizeof out->first_left);
+        out->overrides_done = !out->left;
+    }
+    out->strings_done = mg_is_dir(l.strings_w) && (l.doc == 0 || (l.doc == 1 && !l.doc_due));
+    mg_loose_close(&l);
+    return (out->loose || out->strings_due || out->strings_bad) + out->overrides_done + out->strings_done;
+}
+
+/* One entry of the loose layer's tree, read where it lies. Takes `name` and `source`. */
+static int mg_zip_push(sh_modlegacy_zip *z, size_t *cap, char *name, wchar_t *source, unsigned long long size)
+{
+    sh_modlegacy_zip_entry *e;
+    if (!name || !source) { free(name); free(source); return 0; }
+    if (z->count == *cap) {
+        size_t next = *cap ? *cap * 2 : 64;
+        sh_modlegacy_zip_entry *grown = (sh_modlegacy_zip_entry *)realloc(z->entries, next * sizeof *grown);
+        if (!grown) { free(name); free(source); return 0; }
+        z->entries = grown;
+        *cap = next;
+    }
+    e = &z->entries[z->count++];
+    memset(e, 0, sizeof *e);
+    e->name = name;
+    e->source = source;
+    e->size = e->packed = size;
+    z->files++;
+    z->expanded += size;
+    return 1;
+}
+
+static char *mg_strcat3(const char *a, const char *b, const char *c)
+{
+    size_t n = strlen(a) + strlen(b) + strlen(c) + 1;
+    char *s = (char *)malloc(n);
+    if (s) _snprintf_s(s, n, _TRUNCATE, "%s%s%s", a, b, c);
+    return s;
+}
+
+static int mg_entry_cmp(const void *a, const void *b)
+{
+    const sh_modlegacy_zip_entry *x = (const sh_modlegacy_zip_entry *)a, *y = (const sh_modlegacy_zip_entry *)b;
+    int c = _stricmp(x->name, y->name);
+    return c ? c : strcmp(x->name, y->name);
+}
+
+/* Every loose entry as assets/<its path below overrides\>. 1, or 0 with why. */
+static int mg_loose_gather(const mg_loose *l, sh_modlegacy_zip *z, size_t *zcap, char *why, size_t cap)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = mg_wjoin(l->overrides_w, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    int ok = 1;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) { mg_cause(why, cap, "the " MG_OVERRIDES " folder cannot be listed"); return 0; }
+    do {
+        char *name;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || !mg_loose_entry(l->overrides_w, &fd)) continue;
+        name = sh_mb_utf8(fd.cFileName);
+        if (!name) { mg_cause(why, cap, "a name in the " MG_OVERRIDES " folder is not valid Unicode"); ok = 0; break; }
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            unsigned long long size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+            ok = mg_zip_push(z, zcap, mg_strcat3("assets/", name, ""), mg_wjoin(l->overrides_w, fd.cFileName), size);
+            if (!ok) mg_cause(why, cap, "out of memory");
+        } else {
+            sh_modlegacy_zip sub;
+            char folder[MAX_PATH * 4], err[MG_CAUSE_MAX] = "";
+            unsigned files = 0;
+            unsigned long long bytes = 0;
+            wchar_t *path = mg_wjoin(l->overrides_w, fd.cFileName);
+            size_t i;
+            if (path) mg_measure(path, &files, &bytes, 0);
+            free(path);
+            if (!files) { free(name); continue; }   /* an empty tree carries nothing */
+            _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", l->overrides_u8, name);
+            memset(&sub, 0, sizeof sub);
+            if (!sh_modlegacy_zip_from_folder(folder, SH_MODMIGRATE_MAX_FILES, SH_MODMIGRATE_MAX_BYTES, &sub, NULL, err, sizeof err)) {
+                mg_cause(why, cap, MG_OVERRIDES "\\%s cannot be read: %s", name, err);
+                ok = 0;
+            }
+            for (i = 0; ok && i < sub.count; i++) {
+                sh_modlegacy_zip_entry *e = &sub.entries[i];
+                char prefix[MAX_PATH * 4];
+                if (e->directory) continue;
+                _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "assets/%s/", name);
+                ok = mg_zip_push(z, zcap, mg_strcat3(prefix, e->name, ""), e->source, e->size);
+                e->source = NULL;
+                if (!ok) mg_cause(why, cap, "out of memory");
+            }
+            sh_modlegacy_zip_free(&sub);
+        }
+        free(name);
+        if (ok && (z->files > SH_MODMIGRATE_MAX_FILES || z->expanded > SH_MODMIGRATE_MAX_BYTES)) {
+            mg_cause(why, cap, "the loose files of the " MG_OVERRIDES " folder are over the migration cap of %u files or "
+                     "%llu MiB; move some of them into mod folders of their own first", SH_MODMIGRATE_MAX_FILES,
+                     SH_MODMIGRATE_MAX_BYTES >> 20);
+            ok = 0;
+        }
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* The same bytes? Sizes, then SHA-256. */
+static int mg_same_file(const wchar_t *a, const wchar_t *b)
+{
+    char *ua = sh_mb_utf8(a), *ub = sh_mb_utf8(b), ha[SH_MB_HASH_HEX + 1], hb[SH_MB_HASH_HEX + 1];
+    unsigned long long sa = 0, sb = 0;
+    int same = ua && ub && sh_mb_sha256_file(ua, &sa, ha) && sh_mb_sha256_file(ub, &sb, hb) && sa == sb && !strcmp(ha, hb);
+    free(ua);
+    free(ub);
+    return same;
+}
+
+/* Copy every file of the staged assets\ tree that mods\my-overrides\ lacks; a
+ * file it has with other bytes is kept and named. */
+static void mg_merge_files(const wchar_t *from, const wchar_t *to, const char *rel, sh_modmigrate_loose_stats *st)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = mg_wjoin(from, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        wchar_t *src, *dst;
+        char *leaf, sub[MAX_PATH * 4];
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        src = mg_wjoin(from, fd.cFileName);
+        dst = mg_wjoin(to, fd.cFileName);
+        leaf = sh_mb_utf8(fd.cFileName);
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s/%s", rel, leaf ? leaf : "?");
+        if (!src || !dst || !leaf) st->files_failed++;
+        else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) mg_merge_files(src, dst, sub, st);
+        else if (mg_attr(dst) != INVALID_FILE_ATTRIBUTES) {
+            if (mg_same_file(src, dst)) st->files_same++;
+            else {
+                st->files_kept++;
+                mg_log("MODS: migration: kept my-overrides' %s; the copy in " MG_OVERRIDES "\\ differs and was not taken", sub);
+            }
+        } else if (sh_ms_copy_file(src, dst)) st->files_added++;
+        else {
+            st->files_failed++;
+            mg_log("MODS: migration: %s could not be copied into mods\\" MG_LOOSE_FOLDER "\\ (error %lu); it is tried again "
+                   "at the next run", sub, GetLastError());
+        }
+        free(src);
+        free(dst);
+        free(leaf);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static int mg_write_whole(const wchar_t *path, const char *text, size_t n)
+{
+    size_t len = wcslen(path);
+    wchar_t *tmp = (wchar_t *)malloc(sizeof(wchar_t) * (len + 24));
+    HANDLE h;
+    DWORD wrote = 0;
+    int ok;
+    if (!tmp) return 0;
+    _snwprintf_s(tmp, len + 24, _TRUNCATE, L"%s.tmp-%lu", path, GetCurrentProcessId());
+    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok = h != INVALID_HANDLE_VALUE && WriteFile(h, text, (DWORD)n, &wrote, NULL) && wrote == (DWORD)n && FlushFileBuffers(h);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    ok = ok && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok) DeleteFileW(tmp);
+    free(tmp);
+    return ok;
+}
+
+/* Add the document's keys that mods\my-overrides\mod.json lacks to its author
+ * block's strings.en; a key it has (in any case) with other text is kept and
+ * named. The file is rewritten only when a key is added. */
+static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs, sh_modmigrate_loose_stats *st)
+{
+    sh_json_object root = {0}, strings = {0}, en = {0};
+    char *u = sh_mb_utf8(modjson), *text, *s = NULL, *e = NULL, *out = NULL;
+    const char *p, *raw;
+    size_t n = 0, i, k, outn = 0;
+    unsigned added = 0;
+    int ok = 0;
+    text = u ? (char *)sh_mb_read_file(u, 64u << 20, &n) : NULL;
+    free(u);
+    p = text;
+    if (p && n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) { p += 3; n -= 3; }
+    if (!p || !sh_json_parse_object(p, n, 64, &root)) {
+        mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json cannot be read as a JSON object; the strings of "
+               MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run this again)");
+        goto done;
+    }
+    raw = sh_json_object_get(&root, "strings");
+    if (raw && (raw[0] != '{' || !sh_json_parse_object(raw, strlen(raw), 63, &strings))) goto bad;
+    raw = sh_json_object_get(&strings, "en");
+    if (raw && (raw[0] != '{' || !sh_json_parse_object(raw, strlen(raw), 62, &en))) goto bad;
+    for (i = 0; i < pairs->count; i++) {
+        const sh_json_member *m = &pairs->members[i];
+        for (k = 0; k < en.count && _stricmp(en.members[k].key, m->key); k++) {}
+        if (k < en.count) {
+            char *have = mg_decode(en.members[k].value_json), *want = mg_decode(m->value_json);
+            if (have && want && !strcmp(have, want)) st->strings_same++;
+            else {
+                st->strings_kept++;
+                /* The text as JSON, so a line break in it stays on the line. */
+                mg_log("MODS: migration: kept my-overrides' %s; " MG_STRINGS "\\" MG_STRINGS_DOC " said %.160s", m->key,
+                       m->value_json);
+            }
+            free(have);
+            free(want);
+        } else if (sh_json_object_set_n(&en, m->key, m->key_length, m->value_json, 1)) added++;
+        else goto oom;
+    }
+    if (added) {
+        if (!(e = sh_json_serialize_object(&en, 4, NULL)) || !sh_json_object_set(&strings, "en", e, 62)) goto oom;
+        if (!(s = sh_json_serialize_object(&strings, 2, NULL)) || !sh_json_object_set(&root, "strings", s, 63)) goto oom;
+        if (!(out = sh_json_serialize_object(&root, 0, &outn))) goto oom;
+        if (!mg_write_whole(modjson, out, outn)) {
+            mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json could not be written (error %lu); the strings of "
+                   MG_STRINGS "\\" MG_STRINGS_DOC " were not added (close the program holding it and run this again)",
+                   GetLastError());
+            goto done;
+        }
+    }
+    st->strings_added += added;
+    ok = 1;
+    goto done;
+bad:
+    mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\mod.json has a \"strings\" value that is not an object of languages; "
+           "the strings of " MG_STRINGS "\\" MG_STRINGS_DOC " were not added (fix mod.json and run this again)");
+    goto done;
+oom:
+    mg_log("MODS: migration: out of memory adding the strings of " MG_STRINGS "\\" MG_STRINGS_DOC);
+done:
+    free(text);
+    free(s);
+    free(e);
+    free(out);
+    sh_json_object_free(&en);
+    sh_json_object_free(&strings);
+    sh_json_object_free(&root);
+    return ok;
+}
+
+/* The package.json the converter reads for the loose layer: the mod's id and
+ * name and, when the document is due, its keys as strings.en. With `block`,
+ * the mod.json of a folder with no loose files: the migration's origin in a
+ * product block the build completes. */
+static char *mg_loose_descriptor(const mg_loose *l, int with_strings, int block, size_t *n)
+{
+    sh_json_object d = {0}, strings = {0};
+    char *en = NULL, *s = NULL, *out = NULL;
+    if (sh_json_object_set(&d, "id", "\"" MG_LOOSE_FOLDER "\"", 1) && sh_json_object_set(&d, "name", "\"My overrides\"", 1) &&
+        (!with_strings ||
+         ((en = sh_json_serialize_object(&l->pairs, 4, NULL)) != NULL && sh_json_object_set(&strings, "en", en, 2) &&
+          (s = sh_json_serialize_object(&strings, 2, NULL)) != NULL && sh_json_object_set(&d, "strings", s, 3))) &&
+        (!block || sh_json_object_set(&d, SH_MB_BLOCK_KEY, "{\"format\": 1, \"origin\": \"" SH_MB_ORIGIN_MIGRATION "\"}", 2)))
+        out = sh_json_serialize_object(&d, 0, n);
+    free(en);
+    free(s);
+    sh_json_object_free(&strings);
+    sh_json_object_free(&d);
+    return out;
+}
+
+static void mg_loose_record(const mg_loose *l)
+{
+    char text[256];
+    FILETIME ft;
+    unsigned long long now;
+    GetSystemTimeAsFileTime(&ft);
+    now = mg_unix_time(&ft);
+    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"complete\": true, \"migratedAt\": %llu, \"folder\": \"" MG_LOOSE_FOLDER "\"}",
+                now);
+    CreateDirectoryW(l->mods_w, NULL);
+    if (!sh_mb_record_put(l->mods_u8, MG_LOOSE_RECORD, text))
+        mg_log("MODS: migration: the record (mods\\snapmap-plus.json, loose) could not be written; the next run looks again");
+}
+
+int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
+{
+    mg_loose l;
+    sh_modmigrate_loose_stats local;
+    sh_modlegacy_zip z;
+    sh_modlegacy_verdict v;
+    sh_modlegacy_origin origin;
+    size_t zcap = 0, dn = 0;
+    char why[MG_CAUSE_MAX] = "", tree[SH_MB_HASH_HEX + 1] = "", staging[MAX_PATH * 4], descpath[MAX_PATH * 4];
+    char *desc = NULL, *stage_u8 = NULL;
+    wchar_t *wparent = NULL, *wstage = NULL, *wdesc = NULL, *target = NULL;
+    int with_strings, loose_files = 0, result = -1;
+    if (!st) st = &local;
+    memset(st, 0, sizeof *st);
+    memset(&z, 0, sizeof z);
+    if (!mg_loose_open(&l)) {
+        mg_log("MODS: migration: the data folder cannot be resolved");
+        mg_loose_close(&l);
+        return -1;
+    }
+    st->strings_bad = l.doc < 0;
+    if (l.doc < 0)
+        mg_log("MODS: migration: " MG_STRINGS "\\" MG_STRINGS_DOC " left as it is: %s; fix it or remove it and run this again",
+               l.doc_why);
+    with_strings = l.doc == 1 && l.doc_due;
+    if (!l.due && !with_strings) { mg_loose_close(&l); return 0; }
+    modstore_lock();
+    if (l.due && !mg_loose_gather(&l, &z, &zcap, why, sizeof why)) {
+        mg_log("MODS: migration: the loose files of " MG_OVERRIDES "\\ were not moved: %s", why);
+        goto out;
+    }
+    st->entries = l.due ? l.entries : 0;
+    if (!z.count && (!with_strings || !l.pairs.count)) {
+        /* Empty folders and an empty document carry nothing. */
+        mg_loose_record(&l);
+        result = 1;
+        goto out;
+    }
+    /* The descriptor, read where it lies like every other entry. */
+    _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\loose-%lu", l.root, GetCurrentProcessId());
+    _snprintf_s(descpath, sizeof descpath, _TRUNCATE, "%s\\mods-migrate.tmp\\loose-%lu.json", l.root, GetCurrentProcessId());
+    wparent = mg_wide(l.root, "mods-migrate.tmp");
+    wstage = mg_wide(staging, NULL);
+    wdesc = mg_wide(descpath, NULL);
+    target = mg_wide(l.mods_u8, MG_LOOSE_FOLDER);
+    if (!wparent || !wstage || !wdesc || !target) { mg_log("MODS: migration: out of memory"); goto out; }
+    CreateDirectoryW(wparent, NULL);
+    if (mg_attr(wstage) != INVALID_FILE_ATTRIBUTES) mg_rmtree(wstage);
+    loose_files = z.count != 0;
+    if (loose_files) {
+        /* The loose files are converted as a package is, with the descriptor read where it lies. */
+        desc = mg_loose_descriptor(&l, with_strings, 0, &dn);
+        if (!desc || !mg_write_whole(wdesc, desc, dn) ||
+            !mg_zip_push(&z, &zcap, mg_strcat3("package.json", "", ""), _wcsdup(wdesc), dn)) {
+            mg_log("MODS: migration: the loose step cannot write its work file in %s\\mods-migrate.tmp (error %lu)", l.root,
+                   GetLastError());
+            goto out;
+        }
+        qsort(z.entries, z.count, sizeof *z.entries, mg_entry_cmp);
+        if (!sh_modlegacy_zip_tree(&z, tree, why, sizeof why)) {
+            mg_log("MODS: migration: the loose files of " MG_OVERRIDES "\\ were not moved: %s", why);
+            goto out;
+        }
+        memset(&origin, 0, sizeof origin);
+        origin.version = "0.0.0";
+        origin.source = MG_OVERRIDES;
+        origin.folder = "";
+        origin.tree = tree;
+        origin.fallback_id = MG_LOOSE_FOLDER;
+        if (!sh_modlegacy_stage_folder(&z, &origin, staging, &v)) {
+            mg_log("MODS: migration: the loose files of " MG_OVERRIDES "\\ were not moved: %s",
+                   v.reason[0] ? v.reason : "they could not be staged");
+            goto out;
+        }
+        st->left_out = v.skipped;
+        if (v.skipped)
+            mg_log("MODS: migration: %u loose file(s) a mod cannot carry were left out (%u of them .bswf movies), first: %s; "
+                   "they go with " MG_OVERRIDES "\\ to the Recycle Bin", v.skipped, v.movies, v.first_skipped);
+    } else if (!mg_is_dir(target)) {
+        /* The document alone: a mod folder of mod.json and an empty assets\. */
+        wchar_t *modjson = mg_wjoin(wstage, L"mod.json");
+        desc = mg_loose_descriptor(&l, with_strings, 1, &dn);
+        wchar_t *assets = mg_wjoin(wstage, L"assets");
+        if (!modjson || !assets || !desc || !CreateDirectoryW(wstage, NULL) || !CreateDirectoryW(assets, NULL) ||
+            !mg_write_whole(modjson, desc, dn)) {
+            mg_log("MODS: migration: the loose step cannot write its work folder in %s\\mods-migrate.tmp (error %lu)", l.root,
+                   GetLastError());
+            free(modjson);
+            free(assets);
+            goto out;
+        }
+        free(modjson);
+        free(assets);
+    }
+    {
+        wchar_t *assets = mg_wjoin(wstage, L"assets");
+        if (mg_is_dir(target)) {
+            /* The player's own my-overrides: add what it lacks, keep what it has. */
+            wchar_t *have = mg_wjoin(target, L"assets"), *modjson = mg_wjoin(target, L"mod.json");
+            if (loose_files && assets && have) mg_merge_files(assets, have, "assets", st);
+            if (with_strings && modjson && !mg_merge_strings(modjson, &l.pairs, st)) st->files_failed++;
+            free(have);
+            free(modjson);
+            mg_log("MODS: migration: %s%s%s added to mods\\" MG_LOOSE_FOLDER "\\: %u file(s) added, %u kept, %u already there; "
+                   "%u string(s) added, %u kept, %u already there; it is built again at the next start or rescan",
+                   loose_files ? "the loose files of " MG_OVERRIDES "\\" : "", loose_files && with_strings ? " and " : "",
+                   with_strings ? MG_STRINGS "\\" MG_STRINGS_DOC : "", st->files_added, st->files_kept, st->files_same,
+                   st->strings_added, st->strings_kept, st->strings_same);
+        } else {
+            char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX] = "";
+            sh_ms_install_stats ist;
+            sh_mb_bundle b;
+            memset(&b, 0, sizeof b);
+            memset(&ist, 0, sizeof ist);
+            stage_u8 = sh_mb_utf8(wstage);
+            if (!stage_u8 || !sh_ms_install_as(stage_u8, MG_LOOSE_FOLDER, NULL, key, sizeof key, &ist, &b, cause, sizeof cause)) {
+                mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\ was not made: %s", cause[0] ? cause : "the store refused it");
+                st->files_failed++;
+            } else {
+                st->created = 1;
+                st->files_added = (unsigned)b.file_count;
+                st->pointers = ist.stock_files;
+                st->strings_added = with_strings ? (unsigned)l.pairs.count : 0;
+                mg_log("MODS: migration: %s%s%s moved into mods\\%s\\ (the mod My overrides), bundle %.16s, %u file(s), %u of "
+                       "them stock pointer(s) to installed content, %u string(s)",
+                       loose_files ? "the loose files of " MG_OVERRIDES "\\" : "", loose_files && with_strings ? " and " : "",
+                       with_strings ? MG_STRINGS "\\" MG_STRINGS_DOC : "", key, b.hash, st->files_added, st->pointers,
+                       st->strings_added);
+            }
+            sh_mb_free(&b);
+        }
+        free(assets);
+    }
+    if (!st->files_failed) {
+        mg_loose_record(&l);
+        result = 1;
+    }
+out:
+    sh_modlegacy_zip_free(&z);
+    if (wstage && mg_attr(wstage) != INVALID_FILE_ATTRIBUTES) mg_rmtree(wstage);
+    if (wdesc) DeleteFileW(wdesc);
+    if (wparent) RemoveDirectoryW(wparent);   /* only when nothing else is staged */
+    free(wparent);
+    free(wstage);
+    free(wdesc);
+    free(target);
+    free(desc);
+    free(stage_u8);
+    modstore_unlock();
+    mg_loose_close(&l);
+    return result;
+}
+
+int sh_modmigrate_retire(void)
+{
+    sh_modmigrate_loose_check c;
+    int retired = 0, r;
+    if (sh_modmigrate_loose_scan(&c) < 0) return -1;
+    if (c.overrides_done) {
+        r = sh_ms_retire_sibling(L"" MG_OVERRIDES);
+        if (r == 1) {
+            retired++;
+            mg_log("MODS: migration: " MG_OVERRIDES "\\ %s: every entry of it is in mods\\", sh_ms_discard_verb());
+        } else if (r == 0)
+            mg_log("MODS: migration: " MG_OVERRIDES "\\ could not be retired (error %lu); it is tried again at the next run",
+                   GetLastError());
+    } else if (c.left)
+        mg_log("MODS: migration: " MG_OVERRIDES "\\ kept: %u entr%s not moved into mods\\ (first: %s)", c.left,
+               c.left == 1 ? "y is" : "ies are", c.first_left);
+    if (c.strings_done) {
+        r = sh_ms_retire_sibling(L"" MG_STRINGS);
+        if (r == 1) {
+            retired++;
+            mg_log("MODS: migration: " MG_STRINGS "\\ %s: its strings are in mods\\" MG_LOOSE_FOLDER "\\", sh_ms_discard_verb());
+        } else if (r == 0)
+            mg_log("MODS: migration: " MG_STRINGS "\\ could not be retired (error %lu); it is tried again at the next run",
+                   GetLastError());
+    }
+    return retired;
 }

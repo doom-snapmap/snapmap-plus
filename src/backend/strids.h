@@ -1,6 +1,5 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
- * user strings/strids.json, then the extra.strings.en object of every
- * admitted mod bundle (sh_modserve_each_bundle_extra: installed before
+ * extra.strings.en object of every admitted mod bundle (sh_modserve_each_bundle_extra: installed before
  * map-delivered, then id, then version), then baked defaults. Keys are
  * case-insensitive and first-writer-wins; two bundles giving one key
  * different text log one REFUSED line naming both. Use the native
@@ -44,17 +43,12 @@ void sh_strids_request_refresh(void);
  * else what sh_strids_rearm returned. */
 int sh_strids_refresh_pending(void);
 
-/* Set the user document path; NULL restores %LOCALAPPDATA%\snapmap-
- * plus\strings\strids.json. Returns 1 when set.
- */
-int sh_strids_set_source(const char *path);
-
 #ifdef SH_STRIDS_TESTING
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
-/* Read back how row `index` was attributed: its id and its owner ("<user>" for
- * the user document and baked defaults, "<id>@<version>" for a bundle). */
+/* Read back how row `index` was attributed: its id and its owner ("<baked>"
+ * for the baked defaults, "<id>@<version>" for a bundle). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 

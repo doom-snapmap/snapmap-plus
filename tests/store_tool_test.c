@@ -272,7 +272,9 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("  overrides\\: moving into mods\\, reading game files from "));
     CHECK(said("2 file(s), 1 of them stock pointer(s) to installed content"));
-    CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused)."));
+    CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused), "
+               "1 retired folder(s) moved to the stand-in bin."));
+    CHECK(said("  migration: overrides\\ moved to the stand-in bin: every entry of it is in mods\\"));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\mod.json", data);
     CHECK(mt_exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\assets\\generated\\image\\stock\\b.bimage", data);
@@ -281,7 +283,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     CHECK(sh_mb_record_get(path, "migration", &record) == 1 && record && strstr(record, "\"complete\":true"));
     free(record);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" STOCK_REL, data);
-    CHECK(mt_exists(path));   /* overrides\ is never changed */
+    CHECK(!mt_exists(path) && in_bin("overrides"));   /* every entry is in mods\: the folder went to the bin */
 
     CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
 
@@ -310,8 +312,9 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
         CHECK(said("  overrides\\: 1 entry added or changed since it was migrated") && said("1 kind(s) of work found"));
         CHECK(!said("not yet moved into mods"));
         CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
-        /* The again pass rebuilds every entry, the ones done before included. */
-        CHECK(said("Done: overrides\\ moved into mods\\ (2 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused)"));
+        /* The again pass rebuilds every entry there is (the first went to the bin with the folder). */
+        CHECK(said("Done: overrides\\ moved into mods\\ (1 built, 0 delivered converted, 0 reused, 0 skipped, 0 refused)"));
+        CHECK(!mt_exists(ov2));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack2\\mod.json", data);
         CHECK(mt_exists(path));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\mod.json", data);
@@ -320,6 +323,164 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     }
     free(before);
     free(after);
+    sh_modstock_reset();
+}
+
+#define MO_DECL "assets\\generated\\decls\\entitydef\\mods\\my-overrides\\x.decl"
+#define MO_DECL2 "assets\\generated\\decls\\entitydef\\mods\\my-overrides\\y.decl"
+#define DECL_X "{\n\tsize = \"7\";\n}\n"
+#define DECL_MINE "{\n\tsize = \"8\";\n}\n"
+
+static char *text_of(const char *dir, const char *rel)
+{
+    char path[MAX_PATH * 2];
+    size_t n = 0;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, rel);
+    return (char *)sh_mb_read_file(path, 1 << 20, &n);
+}
+
+/* A store of an early release: no mods\, the loose-file layer in overrides\ (a tree of engine paths
+ * and a file the store cannot carry directly in it) and strings\strids.json. */
+static void make_loose_store(const char *fixture, const char *data)
+{
+    char from[MAX_PATH * 2], to[MAX_PATH * 2];
+    mt_remove_tree(data);
+    CreateDirectoryA(data, NULL);
+    mt_write(data, "overrides\\generated\\decls\\entitydef\\mods\\my-overrides\\x.decl", DECL_X);
+    mt_write(data, "overrides\\notes.txt", "my notes\n");
+    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\" STOCK_REL, fixture);
+    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\overrides\\generated\\image\\stock\\b.bimage", data);
+    mt_mkdirs_for(to);
+    CHECK(CopyFileA(from, to, FALSE));   /* a copy of installed content: a stock pointer, never stored */
+    mt_write(data, "strings\\strids.json", "\xef\xbb\xbf{\r\n    \"sh_a\": \"Alpha\",\r\n    \"sh_b\": \"Caf\\u00e9\"\r\n}\r\n");
+}
+
+static void test_loose_layer(const char *fixture, const char *tmp)
+{
+    char data[MAX_PATH], doom[MAX_PATH], mods[MAX_PATH * 2], folder[MAX_PATH * 2], path[MAX_PATH * 2], *t, *record = NULL;
+    sh_mb_bundle b;
+    printf("-- the loose-file layer and strings\\strids.json become mods\\my-overrides; the folders go to the bin\n");
+    _snprintf_s(data, sizeof data, _TRUNCATE, "%s\\loose", tmp);
+    _snprintf_s(doom, sizeof doom, _TRUNCATE, "%s\\doom", tmp);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", data);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\my-overrides", mods);
+    make_doom(fixture, doom);
+
+    /* 1. A fresh my-overrides. */
+    make_loose_store(fixture, data);
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
+    CHECK(said("  overrides\\: 2 loose file(s) or folder(s) of engine paths to move into mods\\my-overrides\\"));
+    CHECK(said("  strings\\strids.json: 2 string(s) to move into mods\\my-overrides\\"));
+    CHECK(!said("not yet moved into mods"));
+    /* Without the game folder the loose files wait; nothing is half moved. */
+    CHECK(run("migrate", data, NULL, NULL) == SH_STORE_PARTIAL);
+    CHECK(said("its loose files are not moved yet: they need the DOOM folder") && said("--doom \"<DOOM folder>\""));
+    CHECK(!mt_exists(folder));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("migration: the loose files of overrides\\ and strings\\strids.json moved into mods\\my-overrides\\ (the mod "
+               "My overrides)"));
+    CHECK(said("1 of them stock pointer(s) to installed content, 2 string(s)"));
+    CHECK(said("1 loose file(s) a mod cannot carry were left out") && said("notes.txt"));
+    CHECK(said("migration: overrides\\ moved to the stand-in bin: every entry of it is in mods\\"));
+    CHECK(said("migration: strings\\ moved to the stand-in bin: its strings are in mods\\my-overrides\\"));
+    CHECK(said("Done: ") && said("string(s) moved into mods\\my-overrides, 2 retired folder(s) moved to the stand-in bin."));
+    t = text_of(folder, MO_DECL);
+    CHECK(t && !strcmp(t, DECL_X));
+    free(t);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\image\\stock\\b.bimage", folder);
+    CHECK(!mt_exists(path));   /* a pointer: the store never receives installed content */
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(folder, &b));
+    CHECK(!strcmp(b.id, "my-overrides") && b.name && !strcmp(b.name, "My overrides"));
+    CHECK(!strcmp(b.origin, SH_MB_ORIGIN_MIGRATION));   /* the Mods tab: Moved from the old overrides folder */
+    CHECK(b.extra && strstr(b.extra, "\"sh_a\":\"Alpha\"") && strstr(b.extra, "\"sh_b\":\"Caf\xc3\xa9\""));
+    sh_mb_free(&b);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\overrides", data);
+    CHECK(!mt_exists(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\strings", data);
+    CHECK(!mt_exists(path));
+    CHECK(sh_mb_record_get(mods, "loose", &record) == 1 && record && strstr(record, "\"complete\":true"));
+    free(record);
+    record = NULL;
+    /* A second run finds nothing. */
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK && said("Nothing to migrate."));
+
+    /* 2. The player's own my-overrides: what it lacks is added, what it has is kept. */
+    make_loose_store(fixture, data);
+    /* (A binary at a game name is refused by a folder the player made, so the merge is shown with decls.) */
+    mt_delete(data, "overrides\\generated\\image\\stock\\b.bimage");
+    mt_write(data, "overrides\\generated\\decls\\entitydef\\mods\\my-overrides\\y.decl", DECL_X);
+    mt_write(data, "strings\\strids.json", "{\"sh_a\": \"Other\", \"SH_MINE\": \"Mine\", \"sh_c\": \"Gamma\"}");
+    mt_write(folder, "mod.json", "{\n  \"id\": \"my-overrides\",\n  \"name\": \"Mine\",\n  \"note\": [1, 2],\n"
+                                 "  \"strings\": {\"en\": {\"sh_a\": \"Mine A\", \"sh_mine\": \"Mine\"}}\n}\n");
+    mt_write(folder, MO_DECL, DECL_MINE);
+    {
+        sh_ms_sync_stats ss;
+        memset(&ss, 0, sizeof ss);
+        sh_ms_set_root(mods);
+        CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 1 && !ss.failed);   /* built and serving before the migration */
+        CHECK(sh_ms_sync_pending() == 0);
+    }
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("migration: kept my-overrides' assets/generated/decls/entitydef/mods/my-overrides/x.decl; the copy in "
+               "overrides\\ differs and was not taken"));
+    CHECK(said("migration: kept my-overrides' sh_a; strings\\strids.json said \"Other\""));
+    CHECK(!said("kept my-overrides' SH_MINE"));   /* the same text in another case is already there */
+    CHECK(said("added to mods\\my-overrides\\: 1 file(s) added, 1 kept, 0 already there; 1 string(s) added, 1 kept, "
+               "1 already there"));
+    t = text_of(folder, MO_DECL);
+    CHECK(t && !strcmp(t, DECL_MINE));
+    free(t);
+    t = text_of(folder, MO_DECL2);
+    CHECK(t && !strcmp(t, DECL_X));
+    free(t);
+    t = text_of(folder, "mod.json");
+    CHECK(t && strstr(t, "\"name\": \"Mine\"") && strstr(t, "\"note\": [1, 2]") && strstr(t, "\"Mine A\"") &&
+          strstr(t, "\"sh_c\": \"Gamma\"") && !strstr(t, "Other") && strstr(t, "\"snapmap-plus\""));
+    free(t);
+    /* The tree changed, so the next start or rescan builds it again, and its strings serve from it. */
+    CHECK(sh_ms_sync_pending() == 1);
+    {
+        sh_ms_sync_stats ss;
+        memset(&ss, 0, sizeof ss);
+        CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 1 && !ss.failed);
+    }
+    memset(&b, 0, sizeof b);
+    CHECK(sh_mb_load_folder(folder, &b) && b.extra && strstr(b.extra, "\"sh_c\":\"Gamma\"") && b.file_count == 2);
+    sh_mb_free(&b);
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
+
+    /* 3. A ZIP the migration skips keeps overrides\; a malformed document keeps strings\. */
+    mt_remove_tree(data);
+    CreateDirectoryA(data, NULL);
+    mt_write(data, "overrides\\generated\\decls\\entitydef\\mods\\my-overrides\\x.decl", DECL_X);
+    mt_write(data, "overrides\\packed.zip", "PK");
+    mt_write(data, "strings\\strids.json", "{\"sh_a\": {\"nested\": 1}}");
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_WORK);
+    CHECK(said("  strings\\strids.json: it is not a JSON object of \"id\": \"text\" pairs; fix it"));
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_PARTIAL);
+    CHECK(said("overrides\\packed.zip: skipped -- a ZIP archive"));
+    CHECK(said("migration: strings\\strids.json left as it is: it is not a JSON object"));
+    CHECK(said("migration: the loose files of overrides\\ moved into mods\\my-overrides\\"));
+    CHECK(said("migration: overrides\\ kept: 1 entry is not moved into mods\\ (first: packed.zip)"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\overrides\\packed.zip", data);
+    CHECK(mt_exists(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\strings\\strids.json", data);
+    CHECK(mt_exists(path));
+    t = text_of(folder, MO_DECL);
+    CHECK(t && !strcmp(t, DECL_X));
+    free(t);
+    /* The ZIP alone is no work for a second run; the document still is, until it is fixed. */
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_PARTIAL && !said("moved into mods\\my-overrides") &&
+          !said("added to mods\\my-overrides") && said("1 kind(s) of work are left"));
+    Sleep(1100);   /* the record's migratedAt has one-second resolution; the fixed document must be newer */
+    mt_write(data, "strings\\strids.json", "{\"sh_a\": \"Fixed\"}");
+    CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
+    CHECK(said("strings\\strids.json added to mods\\my-overrides\\: 0 file(s) added, 0 kept, 0 already there; 1 string(s) "
+               "added"));
+    CHECK(said("migration: strings\\ moved to the stand-in bin"));
+    CHECK(run("check", data, NULL, NULL) == SH_STORE_OK && said("Nothing to migrate."));
     sh_modstock_reset();
 }
 
@@ -435,6 +596,7 @@ int main(int argc, char **argv)
     sh_store_tool_set_steam(0);
 
     test_check_and_migrate(fixture, tmp);
+    test_loose_layer(fixture, tmp);
     test_link_failures(fixture, tmp);
     test_errors(fixture, tmp);
     test_recycle_refusals();

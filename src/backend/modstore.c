@@ -585,6 +585,25 @@ static int ms_discard(const wchar_t *path, const wchar_t *within)
     return ms_delete_file(path);
 }
 
+int sh_ms_retire_sibling(const wchar_t *leaf)
+{
+    wchar_t *root = ms_wroot(), *slash, *path = NULL;
+    int ok = 0;
+    if (!root || !leaf || !leaf[0] || wcschr(leaf, L'\\') || wcschr(leaf, L'/')) { free(root); return 0; }
+    if (!g_ms_discard) { free(root); return -1; }
+    slash = wcsrchr(root, L'\\');
+    if (slash && slash > root) {
+        *slash = 0;
+        path = ms_wjoin(root, leaf);
+        ok = path ? ms_discard(path, root) : 0;
+    }
+    free(path);
+    free(root);
+    return ok;
+}
+
+const char *sh_ms_discard_verb(void) { return g_ms_discard_verb; }
+
 int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
 {
     wchar_t *root = ms_wroot(), *bin = NULL, *pattern = NULL, *slash;

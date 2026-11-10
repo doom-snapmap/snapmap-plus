@@ -1,11 +1,11 @@
-/* Startup creation of the user-data folders: the root, strings and prefabs. */
+/* Startup creation of the user-data folders: the root and prefabs. */
 #include <windows.h>
 #include <stdio.h>
 #include <shlobj.h>
 #include "user_dirs.h"
 #include "backend_log.h"
 
-const char *const sh_user_dirs_subfolders[] = { "", "\\strings", "\\prefabs", NULL };
+const char *const sh_user_dirs_subfolders[] = { "", "\\prefabs", NULL };
 
 int sh_user_dirs_ensure_under(const char *base)
 {
@@ -34,5 +34,5 @@ void sh_user_dirs_ensure(void)
         return;
     }
     sh_user_dirs_ensure_under(base);
-    backend_log("snapmap-plus user-data dirs ensured (root + strings/prefabs)");
+    backend_log("snapmap-plus user-data dirs ensured (root + prefabs)");
 }
