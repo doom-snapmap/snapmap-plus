@@ -50,7 +50,7 @@ $tests = @(
     @{ name = "object_entry_test"; src = 'object_entry_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "place_anywhere_test"; src = 'place_anywhere_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "cvar_unlock_test"; src = 'cvar_unlock_test.c'; arg = "" }
-    @{ name = "boot_pacing_test"; src = 'boot_pacing_test.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "boot_pacing_test"; serial = $true; src = 'boot_pacing_test.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "grid_room_native_test"; src = 'grid_room_native_test.c ..\src\backend\grid_room_areas.c ..\src\backend\grid_room.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\grid_room_edit.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_snap_test"; src = 'grid_room_snap_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
@@ -62,7 +62,7 @@ $tests = @(
     @{ name = "engine_cvar_read_test"; src = 'engine_cvar_read_test.c'; arg = "" }
     @{ name = "modhud_scene_test"; src = 'modhud_scene_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = "" }
     @{ name = "modscene_place_test"; src = 'modscene_place_test.c ..\src\backend\modscene_place.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING /DSH_MODSCENE_PLACE_PURE'; arg = "" }
-    @{ name = "apply_dispatch_test"; src = 'apply_dispatch_test.c ..\src\backend\prefab_grab.c ..\src\backend\perf.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c'; defs = '/Gy'; arg = "" }
+    @{ name = "apply_dispatch_test"; serial = $true; src = 'apply_dispatch_test.c ..\src\backend\prefab_grab.c ..\src\backend\perf.c ..\src\backend\nav_snapshot.c ..\src\backend\nav_entitydef.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c'; defs = '/Gy'; arg = "" }
     @{ name = "snapstack_pair_test"; src = 'snapstack_pair_test.c'; defs = '/Gy'; arg = "" }
     @{ name = "crash_report_test"; src = 'crash_report_test.c ..\src\fault_shield\crash_record_format.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "recovery_dialog_test"; src = 'recovery_dialog_test.c'; defs = '/Gy'; arg = "" }
@@ -142,7 +142,7 @@ $tests = @(
     @{ name = "modnet_test"; src = 'modnet_test.c ..\src\backend\modnet.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modstock_test"; src = 'modstock_test.c ..\src\backend\modstock.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\raw_deflate.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modmodule_test"; src = 'modmodule_test.c ..\src\backend\module_prefab_map.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\modstock.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\raw_deflate.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
-    @{ name = "modsync_test"; src = 'modsync_test.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
+    @{ name = "modsync_test"; serial = $true; src = 'modsync_test.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modpublish_test"; src = 'modpublish_test.c ..\src\backend\modpublish.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_MODPUBLISH_PURE /DSH_MODPUBLISH_TESTING /DSH_CONFIG_TESTING'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modexport_test"; src = 'modexport_test.c ..\src\backend\modexport.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\prefab_block.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\raw_deflate.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "prefab_mods_test"; src = 'prefab_mods_test.c ..\src\backend\prefab_mods.c ..\src\backend\prefab_block.c ..\src\backend\modpublished.c ..\src\backend\module_prefab_map.c ..\src\backend\modexport.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modregistry.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\map_carrier.c ..\src\backend\raw_deflate.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_PREFAB_MODS_PURE /DSH_PREFAB_MODS_TESTING /DSH_MODPUBLISHED_PURE /DSH_MODPUBLISHED_TESTING'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
@@ -172,7 +172,7 @@ $tests += @{ name = "x64_len_test"; src = 'x64_len_test.c ..\src\backend\x64_len
 # Cooked movies (FileResource Load slot) and bundle ammo displays; with images,
 # their signatures, decoded engine calls, vtable slot and HUD call site.
 $tests += @{ name = "modswf_test"; src = 'modswf_test.c ..\src\backend\modswf.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODSWF_PURE /DSH_MODSWF_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
-$tests += @{ name = "modsound_test"; src = 'modsound_test.c ..\src\backend\modsound.c ..\src\backend\modbankinfo.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODSOUND_PURE /DSH_MODSOUND_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
+$tests += @{ name = "modsound_test"; serial = $true; src = 'modsound_test.c ..\src\backend\modsound.c ..\src\backend\modbankinfo.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODSOUND_PURE /DSH_MODSOUND_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
 $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODHUD_TESTING /DSH_PATCH_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
@@ -283,7 +283,8 @@ for ($i = 0; $i -lt $linkJobs.Count; $i++) {
 # Run the native suites, and the JavaScript suites unless -Only selected native ones, side by side
 # from the caller's directory; output prints in manifest order. Each suite names its temporary
 # folders by process id, so suites running together do not share them. The longest suites of the
-# previous run start first.
+# previous run start first. A suite marked serial asserts on wall-clock timing (a file held for a
+# fixed time, a thread expected inside a short sleep) and runs alone after the others.
 $cwd = (Get-Location).ProviderPath
 $timesPath = Join-Path $cache "durations.txt"
 $times = @{}
@@ -296,7 +297,7 @@ $runJobs = @()
 foreach ($t in @($tests | Where-Object { -not $_.skip })) {
     $exe = Join-Path $obj ($t.name + ".exe")
     $argText = (@($t.arg) | Where-Object { $_ } | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $runJobs += @{ dir = $cwd; cmd = "`"$exe`" $argText"; log = (Join-Path $obj ($t.name + ".run.log")); name = $t.name }
+    $runJobs += @{ dir = $cwd; cmd = "`"$exe`" $argText"; log = (Join-Path $obj ($t.name + ".run.log")); name = $t.name; serial = $t.serial }
 }
 $nativeCount = $runJobs.Count
 $jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "timeline_eventcall_test.js", "prefab_budget_test.js", "mods_tab_test.js", "prefab_mods_test.js", "prefab_details_test.js", "prefab_rename_test.js")
@@ -307,7 +308,12 @@ if (-not $Only.Count -and $node) {
     }
 }
 foreach ($j in $runJobs) { $j.weight = $times[$j.name] }
-$codes = Invoke-CbParallel $runJobs
+$codes = New-Object int[] $runJobs.Count
+$together = @(0..($runJobs.Count - 1) | Where-Object { $runJobs.Count -and -not $runJobs[$_].serial })
+$alone = @(0..($runJobs.Count - 1) | Where-Object { $runJobs.Count -and $runJobs[$_].serial })
+$c = Invoke-CbParallel @($together | ForEach-Object { $runJobs[$_] })
+for ($k = 0; $k -lt $together.Count; $k++) { $codes[$together[$k]] = $c[$k] }
+foreach ($i in $alone) { $codes[$i] = (Invoke-CbParallel @($runJobs[$i]) 1)[0] }
 foreach ($j in $runJobs) { $times[$j.name] = $j.seconds }
 $lines = foreach ($k in $times.Keys) { "{0}`t{1:0.00}" -f $k, $times[$k] }
 [System.IO.File]::WriteAllLines($timesPath, [string[]]$lines)
