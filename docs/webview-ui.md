@@ -340,8 +340,8 @@ it), "Imported from an export" (`install`) and "Downloaded for a map you played"
 <renamedFrom>; N references rewritten". About has no Applies line: what a mod adds applies only
 in the maps that declare it, and its editor tweaks say under What it is made of where they apply.
 After What it adds, **What it is made of** shows the
-builder's derived facts (`facts`) when the backend sends them: "Legacy, rebuild to isolate" for a
-converted first-generation package (`legacy`), then Adds, Borrows (game files under its own names),
+builder's derived facts (`facts`) when the backend sends them (a converted first-generation package
+is shown like any mod, with no legacy state): Adds, Borrows (game files under its own names),
 Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only: they apply in your editor whatever map is open and are never saved with a map or used at Play, with
 the paths in a `details` list), Edits ("edits N game files; maps that declare it get the game's text
 with these edits", one line per edited game file with what its edits do: fields set and removed, list
@@ -428,7 +428,6 @@ Per entry of `mods`:
 | `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always` (it carries editor tweaks); absent when the serving index does not hold it. The page reads neither it, `scopeAuto` nor `scoped`. |
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
-| `"legacy"` | bool | A converted first-generation package (its `legacy` record): its names are campaign names until it is rebuilt under a key. |
 | `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
 | `"newest"` | bool | The newest installed build of its key (build number, then install time). |
 | `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |

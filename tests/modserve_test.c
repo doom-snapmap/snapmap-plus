@@ -3930,8 +3930,10 @@ static void test_additive_compose(void)
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/hammer") && !strstr(text, "spider_mastermind"));
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
-    /* Grandfathered packages (their Toybox rows shadow editor decls) keep
-     * composing with each other in every map, as before phase 2. */
+    /* Converted first-generation packages (their Toybox rows shadow editor
+     * decls) follow the declared rule like any mod (owner 2026-11-09): in
+     * Play of a map that declares neither, nothing of them serves; a map
+     * that declares both composes them. */
     {
         static const fx_file lg1[] = {
             { CONDUCTOR, CONDUCTOR_GUARD, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'd' },
@@ -3950,9 +3952,17 @@ static void test_additive_compose(void)
         make_bundle(groot, "local.spider", "local.spider", "0.0.0", '5',
                     "\"" CONDUCTOR "\", \"generated/decls/snapeditorentitydef/demons/spider_enc.decl\"", lg2, 2, NULL);
         g_bundle_extra = NULL;
+        char h4[65], h5[65];
+        const char *both[2];
+        sh_modserve_scope_info gi;
         CHECK(sh_modserve_index_build(groot) == 2);
-        CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/staff") && strstr(text, "spider_mastermind_base"));
+        hash64('4', h4); hash64('5', h5);
+        CHECK(sh_modserve_bundle_scope(h4, &gi) && gi.scope == SH_MODSERVE_SCOPE_ALWAYS);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+        CHECK(open_text(CONDUCTOR, text, sizeof text) != 1 || (!strstr(text, "talismanguard/staff") && !strstr(text, "spider_mastermind_base")));
+        CHECK(sh_modserve_bundle_scope(h4, &gi) && !gi.names_live);
+        both[0] = h4; both[1] = h5;
+        CHECK(sh_modserve_scope_set(both, 2, NULL, 0, 1) >= 1);
         CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/staff") && strstr(text, "spider_mastermind_base"));
         CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     }
@@ -4404,7 +4414,7 @@ static void test_mixed_editor_bundle(void)
     strcpy_s(g_text_val[3], sizeof g_text_val[3], "stock");
     CHECK(sh_modserve_lookup(MX_SET, NULL) && sh_modserve_lookup(MX_NEW, NULL) && sh_modserve_lookup(PU_NEW, NULL));
     CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) >= 0 && !strcmp(g_text_val[3], "stock"));
-    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic && !si.whole &&
+    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic &&
           si.shadows_live && si.names_live && !si.requirements_live);
     /* Play of a map that declares nothing: only the tweak. */
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);

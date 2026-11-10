@@ -9,7 +9,7 @@
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
    editorRowNames, carriedPaths and publishedMaps, and the additive model's derived facts (facts:
    adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
-   legacy, builds per key (newest marked) and a failed build (docs/webview-ui.md). Every v3 field is optional:
+   and a failed build (docs/webview-ui.md); the page shows no build numbers and no legacy state. Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
    after every action; showing the tab asks for a rescan. Nothing polls. The list is one flat list the
    page scrolls natively; a row the open map uses carries an "In this map" pill (from the document's
@@ -82,7 +82,6 @@ var modsTab = (function () {
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
-  var LEGACY_TEXT = 'Legacy, rebuild to isolate';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
      records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
@@ -174,7 +173,7 @@ var modsTab = (function () {
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
             /* additive */
-            facts: normFacts(b.facts), legacy: bool(b.legacy), newest: b.newest !== false,
+            facts: normFacts(b.facts), newest: b.newest !== false,
             builds: Array.isArray(b.builds) ? b.builds.map(normBuild) : [], buildFailed: normFailed(b.buildFailed)};
   }
   function title(b) { return b.name || b.id || b.key; }
@@ -652,9 +651,8 @@ var modsTab = (function () {
       if (adds.children.length === 1) adds.appendChild(el('div', 'mods-line muted', 'Adds no Toybox rows.'));
 
       var facts = factLines(b);
-      if (facts.length || b.legacy) {
+      if (facts.length) {
         var fs = section(box, 'facts', 'What it is made of');
-        if (b.legacy) fs.appendChild(el('div', 'mods-line mods-legacy', LEGACY_TEXT));
         facts.forEach(function (l) {
           if (l.list && l.list.length) {
             var d = el('details', 'pc-limits-details mods-paths');
@@ -1177,7 +1175,7 @@ var modsTab = (function () {
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
           factLines: factLines, slotText: slotText};
 })();
 

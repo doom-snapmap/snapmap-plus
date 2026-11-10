@@ -1668,10 +1668,16 @@ the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
 - another build of a declared key: nothing;
 - an editor-time bundle (its shadows include a `generated/decls/snapeditor*`,
   `snappropertyinspector*` or `snappalette*` decl, or the editor's own movies
-  under `generated/swf/snapmaps/`): everything, in every map, as before phase
-  2; that is `my-overrides`' editor tweaks and the grandfathered packages whose
-  Toybox rows are shadows (hell guard, spider mastermind, rocks, Olivia), until
-  they are rebuilt under a key;
+  under `generated/swf/snapmaps/`): its editor tweaks, in every map this
+  editor opens; the rest of it follows the other rules. That is
+  `my-overrides`' editor tweaks and the Toybox rows of converted
+  first-generation packages (hell guard, spider mastermind, rocks, Olivia):
+  their other files serve only where a map's row declares them, as every
+  mod's do (owner 2026-11-09: the grandfathered serving rule is gone, and
+  nothing a player reads says legacy; a package converts at install or map
+  load through `modlegacy.c` and `modmigrate.c`, a folder built under earlier
+  builder rules rebuilds at boot, and a map with string-variable rows
+  migrates at its next save);
 - otherwise, in the editor and with no map open: the names under its key, for
   the newest build of the key only (the Toybox offers its rows; placing one
   declares it at the next save), and its surfaces; never its shadows. In Play:

@@ -321,7 +321,7 @@ static void mc_list(void)
             mc_line("MODS: list: mods\\%s  %s%s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->key,
                     e->delivered ? " (delivered by a map)" : "", e->bundle.hash, e->bundle.file_count,
                     e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
-            mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (legacy)" : "", classes);
+            mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (converted package)" : "", classes);
             if (e->build_failed[0] && e->snapshot)
                 mc_line("MODS: list: mods\\%s  build failed: %s; the last working version keeps serving (kept in %s)",
                         e->name, e->build_failed, e->snapshot);

@@ -1031,7 +1031,6 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
         }
     }
     if (e->loaded) {
-        mu_kbool(b, "legacy", u->legacy, 0);
         mu_put_facts(b, bd);
         mu_put_builds(b, m, u);
     }
@@ -1236,7 +1235,7 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                     mu_say(o, "conflict %s: %s serves it (%s); from %s%s", paths[i].request, m->list.items[served].name,
                            ci.reason, who, here);
             } else
-                mu_say(o, "%s %s: by %s%s; served by %s%s%s", any_legacy ? "grandfathered shadow" : "shadow", paths[i].request,
+                mu_say(o, "%s %s: by %s%s; served by %s%s%s", any_legacy ? "declared shadow" : "shadow", paths[i].request,
                        who, !any_legacy ? "" : any_delivered ? " (delivered by a map)" : " (migrated)",
                        served >= 0 ? m->list.items[served].name : "nothing",
                        served >= 0 && hit.is_stock ? " (the installed game's own copy)" : "", here);
@@ -1244,7 +1243,7 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
             i = j;
         }
     if (groups > printed) mu_say(o, "%zu more shadow or conflict path(s) not printed", groups - printed);
-    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s), %u edit source(s) of %u game file(s) (never "
+    mu_say(o, "%u conflict(s), %u shadow(s), %u declared shadow(s), %u edit source(s) of %u game file(s) (never "
               "served, so neither a shadow nor a conflict)", conflicts, stock, grandfathered, edit_sources, edit_files);
     free(paths);
 }

@@ -846,7 +846,7 @@ test('scope: About has no Applies line; a mod applies in the maps that declare i
   assert.equal(modsTab.scopeText, undefined);
 });
 /* ---- the additive model (DESIGN-additive 2.1 to 2.9) ------------------------------------------- */
-test('additive: derived facts, the game files a mod edits, encounters, legacy', () => {
+test('additive: derived facts, the game files a mod edits, encounters; no legacy state', () => {
   const n = modsTab.normalize(v3), m = k => n.mods.find(x => x.key === k);
   const r2 = m('alex.r2-imp');
   assert.equal(r2.facts.adds, 13);
@@ -867,12 +867,15 @@ test('additive: derived facts, the game files a mod edits, encounters, legacy', 
   assert.deepEqual(hg.find(l => l.label === 'Edits').list,
                    ['entitydef/ai/conductor/coop/snapmap_default: 3 list entries added', 'aifsmmanager/states/hellguard: 1 field set, 1 field removed']);
   assert.match(hg.find(l => l.label === 'Replaces').text, /^498 game files \(a folder the product received\)$/);
-  assert.equal(m('local.hell-guard').legacy, true);
+  assert.equal(m('local.hell-guard').legacy, undefined, 'a converted package is a mod like any other');
   assert.equal(modsTab.normalize(v2).mods[0].facts, null, 'a v2 document sends no facts');
   const h = live();
   h.ui.select('local.hell-guard');
   const fs = section(h, 'facts');
-  assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Edits: edits 2 game files/.test(fs.textContent));
+  assert.ok(fs && /Edits: edits 2 game files/.test(fs.textContent));
+  assert.doesNotMatch(h.nodes.modsDetail.textContent, /legacy|grandfather|first-generation|rebuild to isolate/i);
+  assert.ok(!/legacy|grandfather/i.test(source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')),
+    'no legacy vocabulary in the page outside comments');
   h.ui.select('alex.r2-imp');
   assert.match(section(h, 'facts').textContent, /Edits: edits 2 game files/);
   assert.ok(!/Registries|player\.|extends/.test(section(h, 'facts').textContent), 'no intent keys shown');
