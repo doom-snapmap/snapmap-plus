@@ -1103,6 +1103,88 @@ int main(int argc, char **argv)
         CHECK(sh_ms_set_root(storeA));
     }
 
+    /* ---- a carried folder built under an earlier builder's rules ---- */
+    {
+        /* Its block records the hash those rules gave (here: another one) and
+         * a lower "rules" number (or none). It is rebuilt under today's rules
+         * and installed under the hash they give; the map's row keeps naming
+         * the recorded hash, which the other-build rule then answers. The
+         * same block with today's "rules" is an edited mod.json: left out. */
+        static const char OLD_HASH[] = "3333333333333333333333333333333333333333333333333333333333333333";
+        char storeR[MAX_PATH * 2], storeR2[MAX_PATH * 2], storeR3[MAX_PATH * 2], zipR[MAX_PATH * 2];
+        char rdir[MAX_PATH * 2], rkey[SH_MS_KEY_MAX + 1], why[300], mpath[MAX_PATH * 2];
+        sh_modmanifest_row rr, old;
+        const sh_modmanifest_row *r1[] = { &old, NULL };
+        sh_modserve_bundle_ref other;
+        sh_mb_bundle nb;
+        size_t len = 0, rl = 0, ml = 0;
+        char *rmap = NULL, *text, *modjson, *at;
+        int pass;
+        _snprintf_s(storeR, sizeof storeR, _TRUNCATE, "%s\\storeR", tmp);
+        _snprintf_s(storeR2, sizeof storeR2, _TRUNCATE, "%s\\storeR2", tmp);
+        _snprintf_s(storeR3, sizeof storeR3, _TRUNCATE, "%s\\storeR3", tmp);
+        _snprintf_s(zipR, sizeof zipR, _TRUNCATE, "%s\\older rules.zip", tmp);
+        _snprintf_s(rdir, sizeof rdir, _TRUNCATE, "%s\\older", src);
+        CHECK(fresh_store(storeR));
+        mt_write(rdir, "mod.json", "{\"id\":\"test.older\",\"version\":\"1.0.0\",\"name\":\"test.older\"}");
+        mt_write(rdir, "assets\\generated\\image\\mods\\test.older\\o.bimage", "older bytes");
+        CHECK(install(rdir, rkey, &rr) && !strcmp(rkey, "test.older"));
+        _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older\\mod.json", storeR);
+        modjson = (char *)slurp(mpath, &ml);
+        /* The earlier build's mod.json: OLD_HASH under rules 1. */
+        at = modjson ? strstr(modjson, rr.bundle) : NULL;
+        CHECK(at != NULL);
+        if (at) memcpy(at, OLD_HASH, 64);
+        at = modjson ? strstr(modjson, "\"rules\": 2") : NULL;
+        CHECK(at != NULL);
+        old = rr;
+        strcpy_s(old.bundle, sizeof old.bundle, OLD_HASH);
+        rmap = map_naming(BASE_MAP, sizeof BASE_MAP - 1, r1, &rl);
+        CHECK(rmap != NULL);
+        for (pass = 0; pass < 2 && at && rmap; pass++) {
+            const char *names[] = { "older rules.json", "mods/test.older/mod.json",
+                                    "mods/test.older/assets/generated/image/mods/test.older/o.bimage" };
+            const char *datas[] = { rmap, modjson, "older bytes" };
+            at[9] = pass ? '2' : '1';
+            CHECK(mt_zip_stored(zipR, 3, names, datas));
+            CHECK(fresh_store(pass ? storeR3 : storeR2));
+            text = modexport_read(zipR, &len, &st, cause, sizeof cause);
+            if (!text) fprintf(stderr, "earlier rules import: %s\n", cause);
+            if (pass) {
+                /* Today's "rules" with another hash is a mod.json edited by hand. */
+                CHECK(text && st.bundles_installed == 0 && st.bundles_absent == 1 && folder_count(storeR3) == 0);
+                free(text);
+                break;
+            }
+            CHECK(text && st.bundles == 1 && st.bundles_installed == 1 && st.bundles_absent == 0);
+            /* Today's rules number it build 2 (the recorded build's hash is not
+             * theirs), as the author's own store does at its rules rebuild. */
+            _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older", storeR2);
+            memset(&nb, 0, sizeof nb);
+            CHECK(has_folder(storeR2, "test.older") && folder_count(storeR2) == 1 && sh_mb_load_folder(mpath, &nb) &&
+                  nb.build == 2 && strcmp(nb.hash, OLD_HASH) && sh_modserve_bundle_state(nb.hash, NULL, 0) == 1);
+            {
+                sh_modmanifest_list got;
+                unsigned rej = 0;
+                memset(&got, 0, sizeof got);
+                CHECK(text && sh_modmanifest_read(text, len, &got, &rej) == 1 && !strcmp(got.rows[0].bundle, OLD_HASH));
+                /* The pinned row is another build of an installed key. */
+                CHECK(got.count == 1 && sh_modserve_row_served(&got.rows[0], why, sizeof why) == 0 &&
+                      sh_modserve_row_other_build(&got.rows[0], &other) && !strcmp(other.hash, nb.hash));
+                sh_modmanifest_list_free(&got);
+            }
+            free(text);
+            /* Again into the same store: today's build is there, nothing is installed. */
+            text = modexport_read(zipR, &len, &st, cause, sizeof cause);
+            CHECK(text && st.bundles_installed == 0 && st.bundles_present == 1 && folder_count(storeR2) == 1);
+            free(text);
+            sh_mb_free(&nb);
+        }
+        free(modjson);
+        if (rmap) HeapFree(GetProcessHeap(), 0, rmap);
+        CHECK(sh_ms_set_root(storeA));
+    }
+
     HeapFree(GetProcessHeap(), 0, map);
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);

@@ -2291,6 +2291,16 @@ carried folder no row names is left out):
   otherwise, and on any other refusal, exactly the folders this import
   installed are removed and the load is refused ("<id> <version> in the export
   does not build to the bundle the map names");
+- a carried `mod.json` whose block an earlier builder's rules wrote (its
+  `"rules"` absent or below `SH_MB_RULES`, and its recorded hash not the one
+  today's rules give: `sh_mb_load_text_earlier_rules`) is not left out: it is
+  rebuilt under today's rules, as the store rebuilds its own folders once
+  after a rules change, and installed (or found installed) under the hash
+  they give. The map's row keeps naming the recorded hash, so the hold then
+  treats it as another build of an installed key: the store's copy of the
+  recorded build is offered beside it, else the installed build substitutes.
+  A block with today's `"rules"` whose hash does not match was edited by hand
+  and is still left out;
 - after an install the serving index is rebuilt, as before.
 
 A ZIP in the bundle form of earlier releases (any `bundle.canonical.json`, or

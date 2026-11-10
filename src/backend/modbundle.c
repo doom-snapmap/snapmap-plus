@@ -4844,6 +4844,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     mb_classify_all(out);
     mb_mark_edited(out);
     mb_finish(out);
+    if (!check) memcpy(out->prev_hash, bundle->s, SH_MB_HASH_HEX + 1);   /* the hash its block records */
     if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
         mb_error(out, "mod.json changed since it was built (the author block or the product block was edited); "
                  "a rescan of the Mods tab or 'sh_mods build' rebuilds it");
@@ -4870,6 +4871,14 @@ static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int 
 int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
 {
     return mb_load_modjson(text, len, out, 1);
+}
+
+int sh_mb_load_text_earlier_rules(const char *text, size_t len, sh_mb_bundle *out)
+{
+    if (!mb_load_modjson(text, len, out, 0)) return 0;
+    if (out->rules < SH_MB_RULES && strcmp(out->hash, out->prev_hash)) return 1;
+    mb_error(out, "mod.json changed since it was built (the author block or the product block was edited)");
+    return 0;
 }
 
 int sh_mb_load(const char *path, sh_mb_bundle *out)

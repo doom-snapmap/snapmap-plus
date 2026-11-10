@@ -934,6 +934,8 @@ typedef struct me_carry {
     sh_mb_bundle b;                     /* its mod.json, loaded: the bundle hash it records */
     int present;                        /* the store serves that bundle already */
     int installed;                      /* this import installed it, as `stored` */
+    int earlier_rules;                  /* its block was written under an earlier builder's rules:
+                                           b.hash is the hash it records; the install rebuilds it */
     char stored[SH_MS_KEY_MAX + 1];
     char stage[MAX_PATH * 4];           /* its copy outside the store, which the install builds */
     char why[SH_MB_CAUSE_MAX];          /* the last install refusal */
@@ -1212,10 +1214,23 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         if (!text) return 0;
         memset(&b, 0, sizeof b);
         if (!sh_mb_load_text(text, len, &b)) {
-            me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
-            sh_mb_free(&b);
-            free(text);
-            continue;
+            /* A block an earlier builder's rules wrote is rebuilt under
+             * today's at the install, as the store rebuilds its own folders
+             * once after a rules change; it answers for the hash it records. */
+            sh_mb_bundle older;
+            if (sh_mb_load_text_earlier_rules(text, len, &older)) {
+                sh_mb_free(&b);
+                b = older;
+                strcpy_s(b.hash, sizeof b.hash, b.prev_hash);
+                b.prev_hash[0] = 0;
+                b.rules = -1;   /* marks the carry below */
+            } else {
+                sh_mb_free(&older);
+                me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
+                sh_mb_free(&b);
+                free(text);
+                continue;
+            }
         }
         free(text);
         if ((!all && !me_rows_name(rows, b.hash)) || me_carried(im, b.hash)) {
@@ -1236,6 +1251,7 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         memset(c, 0, sizeof *c);
         memcpy(c->name, seg, sl);
         c->name[sl] = 0;
+        c->earlier_rules = b.rules < 0;
         c->b = b;
     }
     return 1;
@@ -1518,19 +1534,35 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
                 goto rollback;
             }
             /* An imported folder is the author's build as it was: its
-             * replacements are kept, never refused (DESIGN-additive 2.8). */
+             * replacements are kept, never refused (DESIGN-additive 2.8). One
+             * built under earlier rules gets the hash today's rules give, so
+             * the store names it by that hash (and finds it if installed). */
             sh_mb_keep_replacements_here(1);
-            if (!sh_ms_install_with(c->stage, as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
+            if (!sh_ms_install_with(c->stage, c->earlier_rules ? NULL : as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
                                     c->why, sizeof c->why)) {
                 sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
             }
             sh_mb_keep_replacements_here(0);
-            c->installed = 1;
             left--;
             progress = 1;
-            if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
+            if (c->earlier_rules && built.validated && is.present) {
+                /* Today's rules build it to a bundle the store already holds. */
+                c->present = 1;
+                st->bundles_present++;
+                me_log("MODS: import: mods/%s (built under earlier rules as %.16s) builds to bundle %.16s, which mods\\%s "
+                       "already holds", c->name, c->b.hash, built.hash, c->stored);
+                sh_mb_free(&built);
+                continue;
+            }
+            c->installed = 1;
+            if (c->earlier_rules && built.validated) {
+                if (strcmp(built.hash, c->b.hash))
+                    me_log("MODS: import: mods/%s was built under earlier rules as bundle %.16s; today's rules build it to "
+                           "%.16s, installed as mods\\%s (the %s's row keeps naming %.16s)", c->name, c->b.hash, built.hash,
+                           c->stored, what, c->b.hash);
+            } else if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
                 me_log("MODS: import: mods/%s built to bundle %.16s, not %.16s as its mod.json records", c->name, built.hash,
                        c->b.hash);
                 me_cause(cause, cap, "%s %s in the export does not build to the bundle the %s names", c->b.id, c->b.version, what);
