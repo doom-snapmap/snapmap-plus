@@ -85,6 +85,9 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
 int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id_cap)
 { if (out && cap) out[0] = '\0'; if (out_id && id_cap) out_id[0] = '\0'; return 0; }
 
+/* The console line a staged rawmap prints when it opens in place of a chosen map. */
+void sh_printf(const char *fmt, ...) { (void)fmt; }
+
 static int g_pretty_on;   /* sh_pretty_on is the only cvar rawmap.c reads */
 int sh_cvar_value_int(int index, int def) { (void)index; return g_pretty_on ? 1 : def; }
 

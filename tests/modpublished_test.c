@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "../src/backend/modpublished.h"
+#include "../src/backend/modnet.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modserve.h"
 
@@ -37,7 +38,7 @@ static int g_failed, g_checks;
 static int g_map_notes;
 void backend_log(const char *line)
 {
-    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "was never published")) g_map_notes++;
+    if (line && !strncmp(line, "MODS: map: ", 11) && strstr(line, "is not installed on this computer")) g_map_notes++;
 }
 int sh_modserve_active(void) { return 1; }
 /* The registry choices' input (modmanifest.c gives them at every load). */
@@ -930,7 +931,7 @@ static void rawmap_store_lacks_refuses(void)
     tick(2);
     CHECK(F.fetch_calls == 0 && F.resumes == 0 && !sh_modpublished_holding());
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that could not be downloaded: the mod store did "
-                              "not answer. Connect and try again."));
+                              "not answer; try again in a few minutes."));
     CHECK(!strcmp(F.last_print, F.last_ask));
 }
 
@@ -1007,11 +1008,14 @@ static void gate_editor_substitutes(void)
     F.other_build_a = 1;
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 1 && !strcmp(hash, OTHER_A) && !why[0]);
     F.other_build_a = 0;
+    /* The store is not asked at an editor open: the note says what this
+     * computer knows, never "permanent" or "never published". */
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 && !hash[0] &&
-          strstr(why, "This map needs alex.pink-imp at a build that is not installed and was never published."));
+          !strcmp(why, "This map needs alex.pink-imp at a build that is not installed on this computer, so the editor "
+                       "opens the map without it. Playing the map asks the mod store for it."));
     F.claimed_a = 1;
     CHECK(sh_modpub_editor_substitute(&row, hash, sizeof hash, why, sizeof why) == 0 &&
-          strstr(why, "at a build that is no longer available"));
+          strstr(why, "is not installed on this computer") && !strstr(why, "permanent") && !strstr(why, "Recycle Bin"));
     reset();
 }
 
@@ -1070,28 +1074,39 @@ static void gate_decision_and_wording(void)
     CHECK(sh_modpub_gate_decide(&f) == SH_MODPUB_GATE_UNREACHABLE);
     CHECK(sh_modpub_gate_decide(NULL) == SH_MODPUB_GATE_UNREACHABLE);
 
-    sh_modpub_gate_wording(SH_MODPUB_GATE_GONE, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_GONE, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0, text, sizeof text);
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that is no longer available: its "
                         "author unpublished it, or it was removed. This is permanent on this machine."));
-    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0, text, sizeof text);
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that could not be downloaded: the mod "
-                        "store did not answer. Connect and try again."));
-    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "map", "Hell Guards (hell-guards-7f3k)", NULL, text, sizeof text);
+                        "store did not answer; try again in a few minutes."));
+    /* Worded by the store's failure (plain_reason.h), not one sentence for all. */
+    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, MODNET_E_UNAVAILABLE,
+                           text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that could not be downloaded: the mod "
+                        "store is busy; try again in a few minutes."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "Hell Guards (hell-guards-7f3k)", NULL, MODNET_E_NET,
+                           text, sizeof text);
+    CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that could not be downloaded: the mod "
+                        "store could not be reached; check the internet connection and try again."));
+    sh_modpub_gate_wording(SH_MODPUB_GATE_UNREACHABLE, "map", "x", NULL, MODNET_E_HTTP, text, sizeof text);
+    CHECK(strstr(text, "the address in mods.store answered, but not as the mod store; check the mods.store setting") != NULL);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "map", "Hell Guards (hell-guards-7f3k)", NULL, 0, text, sizeof text);
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that is not installed and was never "
                         "published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
-    sh_modpub_gate_wording(SH_MODPUB_GATE_GAME_REVISION, "map", "Hell Guards (hell-guards-7f3k)", ROCK, text, sizeof text);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_GAME_REVISION, "map", "Hell Guards (hell-guards-7f3k)", ROCK, 0, text, sizeof text);
     CHECK(!strcmp(text, "This map needs Hell Guards (hell-guards-7f3k) at a build that needs a file this game does not "
                         "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent on "
                         "this machine."));
-    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "prefab", "door-kit", NULL, text, sizeof text);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "prefab", "door-kit", NULL, 0, text, sizeof text);
     CHECK(!strcmp(text, "This prefab needs door-kit at a build that is not installed and was never published. Restore "
                         "its folder from the Recycle Bin or load the prefab's ZIP export."));
-    sh_modpub_gate_wording(SH_MODPUB_GATE_OBTAIN, "map", "x", NULL, text, sizeof text);
+    sh_modpub_gate_wording(SH_MODPUB_GATE_OBTAIN, "map", "x", NULL, 0, text, sizeof text);
     CHECK(!text[0]);
     if (getenv("MODPUB_TEST_WORDS")) {
         int v;
         for (v = 1; v <= 4; v++) {
-            sh_modpub_gate_wording(v, "map", "Hell Guards (hell-guards-7f3k)", ROCK, text, sizeof text);
+            sh_modpub_gate_wording(v, "map", "Hell Guards (hell-guards-7f3k)", ROCK, 0, text, sizeof text);
             printf("    cause %d: %s\n", v, text);
         }
     }
@@ -1141,11 +1156,11 @@ static void gate_causes_through_the_hold(void)
     published_denial(SH_MODPUB_BROWSER_PLAY);
     CHECK(F.fetch_calls == 0 && !sh_modpublished_holding());
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp at a build that could not be downloaded: the mod store did "
-                              "not answer. Connect and try again."));
+                              "not answer; try again in a few minutes."));
     reset();
     F.store_a = -1;
     published_denial(SH_MODPUB_CACHE_READY);   /* a joiner: the same sentence */
-    CHECK(strstr(F.last_ask, "could not be downloaded: the mod store did not answer. Connect and try again.") != NULL);
+    CHECK(strstr(F.last_ask, "could not be downloaded: the mod store did not answer; try again in a few minutes.") != NULL);
 
     printf("-- cause 3: a My Maps map never published whose folder is gone\n");
     reset();
@@ -1207,7 +1222,7 @@ static void gate_causes_through_the_hold(void)
     F.answer = 1;
     tick_until_idle();
     tick(2);
-    CHECK(strstr(F.last_ask, "the mod store did not answer. Connect and try again.") != NULL);
+    CHECK(strstr(F.last_ask, "the mod store could not be reached; check the internet connection and try again.") != NULL);
 
     printf("-- several denied: the first in the dialog, one console line each\n");
     reset();

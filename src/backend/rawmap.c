@@ -30,6 +30,7 @@
 #include "nav_regions.h"
 #include "map_shards.h"
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
+#include "commands.h"       /* sh_printf: the staged rawmap that opened in place of a chosen map */
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -754,6 +755,13 @@ static int sh_deser_detour(const char *json, void *out_map)
                 oneshot ? " [one-shot]" : "");
             backend_log(line);
             rc = deser_prepared(ours, out_map);
+            if (oneshot && !InterlockedCompareExchange(&g_in_reload, 0, 0)) {
+                /* The player opened another map; the staged file opened in its place. */
+                char src[MAX_PATH];
+                resolve_source_path(src, sizeof src);
+                sh_printf("Opened the staged rawmap %s in place of the map you chose; it opens as a new map that "
+                          "Save asks you to name.\n", src);
+            }
             /* The open map came from a rawmap, which is what the branch answer keys off. */
             open_borrow_reset();
             InterlockedExchange(&g_open_is_rawmap, 1);

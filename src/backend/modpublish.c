@@ -279,7 +279,7 @@ typedef struct mp_job {
     int count;
     volatile LONG done;
     int ok, ok2, had_claim;
-    unsigned retried, dropped, released;
+    unsigned retried, dropped, released, kept;
     int left;
     modsync_stats st, st2;
 } mp_job;
@@ -383,6 +383,8 @@ static int mp_job_run(void *context, const modnet_io *io)
         job->ok = modsync_upload_bundles(list, n, job->ref, io, &job->st);
         if (job->ok && job->provisional[0] && strcmp(job->provisional, job->ref))
             job->ok2 = modsync_release(job->provisional, io, &job->st2);
+        else if (!job->ok && job->st.queued && job->provisional[0])
+            (void)modsync_pending_link(job->ref, job->provisional);   /* released only after this claim */
         break;
     case JOB_RELEASE: {
         char claim[MODNET_CLAIM_HEX + 1];
@@ -393,16 +395,23 @@ static int mp_job_run(void *context, const modnet_io *io)
     case JOB_LAUNCH: {
         int count = 0;
         char (*refs)[MP_REF_CAP] = mp_provisional_refs(&count);
+        /* A provisional ref's own queued upload or release belongs to a
+         * publish that never completed: forgotten here, settled below. */
+        for (int i = 0; i < count; i++) modsync_pending_drop(refs[i]);
+        /* The queue first: an item claim that succeeds now still finds its
+         * bundles on the store, which the provisional claim keeps there. */
+        job->left = modsync_pending_count();
+        if (job->left > 0) job->left = modsync_retry_pending(io, &job->retried, &job->dropped, &job->st);
         for (int i = 0; i < count; i++) {
             modsync_stats st;
             if (io && io->cancel && *io->cancel) break;
-            /* A claim is released; a queued upload without one is dropped. */
+            if (modsync_pending_waits_on(refs[i])) { job->kept++; continue; }
+            /* A claim is released (queued again when the store is busy). */
             (void)modsync_release(refs[i], io, &st);
             job->released++;
         }
         free(refs);
         job->left = modsync_pending_count();
-        if (job->left > 0) job->left = modsync_retry_pending(io, &job->retried, &job->dropped, &job->st);
         job->ok = 1;
         break;
     }
@@ -490,12 +499,14 @@ static void mp_job_report(mp_job *job)
         if (!job->had_claim) mp_logf("MODS: publish: '%s' had no stored claim; nothing to release", job->ref);
         else if (job->ok) mp_logf("MODS: publish: released the claim for '%s'%s%s", job->ref,
                                   job->st.cause[0] ? ": " : "", job->st.cause);
-        else mp_logf("MODS: publish: the release of '%s' failed: %s", job->ref, cause);
+        else mp_logf("MODS: publish: the release of '%s' failed: %s%s", job->ref, cause,
+                     job->st.queued ? " (queued; retried at the next launch)" : "");
         if (job->ok || !job->had_claim) mp_link_forget(job->ref);
         break;
     case JOB_LAUNCH:
-        mp_logf("MODS: launch: %u provisional ref(s) settled; queued uploads: %u retried, %u dropped, %d left",
-                job->released, job->retried, job->dropped, job->left < 0 ? 0 : job->left);
+        mp_logf("MODS: launch: queued uploads and releases: %u retried, %u dropped; %u provisional ref(s) "
+                "settled, %u kept while their item claim is pending; %d left", job->retried, job->dropped,
+                job->released, job->kept, job->left < 0 ? 0 : job->left);
         break;
     default:
         break;

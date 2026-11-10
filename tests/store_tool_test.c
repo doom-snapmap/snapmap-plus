@@ -344,7 +344,8 @@ static void test_link_failures(const char *fixture, const char *tmp)
     sh_ms_test_fail_unlink_copy = 1;
     CHECK(run("migrate", data, NULL, NULL) == SH_STORE_PARTIAL);
     CHECK(sh_ms_test_fail_unlink_copy == 0);
-    CHECK(said("a.decl is a hard link that could not be replaced by a copy (error 112); the original was put back"));
+    CHECK(said("a.decl is a hard link that could not be replaced by a copy (the drive ") && said(" is full (writing ") &&
+          said("a.decl); free some space on it and try again); the original was put back"));
     CHECK(said("  store: alex.tiny@1.0.0+1: left as it was"));
     CHECK(said("  store: blobs\\ kept: 1 folder(s) of the retired layout still need it"));
     CHECK(said("Partly done: the store layout partly upgraded (1 folder(s) left as they were)"));
@@ -362,7 +363,8 @@ static void test_link_failures(const char *fixture, const char *tmp)
     g_fail_suffix = L".snapmap-plus-unlink";
     CHECK(run("migrate", data, NULL, NULL) == SH_STORE_PARTIAL);
     g_fail_suffix = NULL;
-    CHECK(said("could not be replaced by a copy (error 5); the original was put back"));
+    CHECK(said("could not be replaced by a copy (Windows refused to write ") &&
+          said("; close the program holding it or run the game once as the same user); the original was put back"));
     CHECK(mt_exists(path) && !mt_exists(aside) && links_of(path) == 2);
 
     /* 3. An interrupted run left the original aside and a partial copy: put back first, then converted. */

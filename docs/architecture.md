@@ -35,7 +35,9 @@ set (named and unnamed), with the backend's private exports at 200 and up.
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
 executable, the 2018 build included, is unsupported: the backend logs one line
-naming the supported build and the final 2018 release, then only forwards XInput.
+naming the supported build and the final 2018 release, shows the same once in a
+message box from its bootstrap thread (a DOOM update is otherwise silent), then
+only forwards XInput.
 Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
@@ -2008,7 +2010,11 @@ Bin by hand." with a map open and "The folder can be restored from the Recycle
 Bin by hand." without, plus the Toybox rows, "Moves the folder mods\<folder> to
 the Windows Recycle Bin.", how many local saves in My Maps carry a row of the
 mod, "N of your saved maps use it; they will not open until a mod folder
-provides its assets again"); the native delete
+provides its assets again"). The list is computed per key: when another build
+of the key stays installed (`install.keptBuild`), only the Toybox rows no
+staying build adds are listed, and the saved-maps line becomes "Another build
+of this mod stays installed (mods\<folder>); maps that use the mod open with
+it."; the native delete
 of the mod's entities from the open map, as Remove from map (a refusal, Play
 running, a load or a busy editor, deletes nothing and is reported); the open
 map's undo and redo history cleared so no snapshot older than the delete
@@ -2138,9 +2144,15 @@ causes, `sh_modpub_gate_wording`:
 | cause | when | sentence (after "This map needs <name> (<key>) at a build that ") |
 |---|---|---|
 | 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
-| 2 unreachable | the store did not answer | "could not be downloaded: the mod store did not answer. Connect and try again." |
+| 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
 | 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
 | 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
+
+An editor open asks no store, so its note for a key with no installed build
+(`sh_modpub_editor_substitute`) says only what this computer knows: "not
+installed on this computer, so the editor opens the map without it. Playing
+the map asks the mod store for it." The causes above, which depend on the
+store's answer, are said where the store is asked.
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be
@@ -2484,7 +2496,12 @@ main tick resumes the original `PublishAfterSave`. The store checks a manifest
 sent to `/mods/missing` as its bundle PUT would (`modnet_missing_bundle`), so a
 manifest it refuses stops the publish with the store's message in one request,
 before any blob is sent; a store that does not name the bundle back did not
-check it, and its bundle PUT still does. A publish whose save
+check it, and its bundle PUT still does. The rules of the store's that the
+builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
+such as `displayName` or `$schema`, a control character such as a tab in the
+name or author) are mirrored as build warnings in one table,
+`MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
+rather than at publish. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
@@ -2540,10 +2557,18 @@ is over the bound is refused at the MapInfo and browser entries, before the
 engine creates the saved item, with a one-button notice.
 
 The retry queue: a failure modsync can retry stays in the record's `pending`
-section. At startup the backend settles provisional refs
-left by a closed game (their claims are released and their queued uploads
-dropped, since their publish never completed), then retries the rest of the
-queue once on the worker and logs the counts.
+section, an upload or a claim release alike. A release the store does not
+take (a busy store at unpublish, say) is queued under its ref rather than only
+logged, since a leaked claim keeps its bundles on the store; it replaces a
+queued upload of the same ref. Queued releases are retried after the next
+store call that succeeds and at startup. At startup the backend first forgets
+the queued work of provisional refs left by a closed game (their publish never
+completed), then retries the queue once on the worker, then releases each
+provisional claim, except one an item's queued claim still waits on: the item
+claim records its provisional ref when it is queued, and the provisional claim
+keeps the bundles on the store until that claim succeeds. Releasing it first
+would let the store delete a bundle the retry then has to upload again from
+whatever build serves now. The worker logs the counts.
 
 ## Module prefabs
 
@@ -2658,6 +2683,14 @@ The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves
 the engine's list reduction and removed-entity reset. Startup requires a unique
 instruction signature and exact-byte verification on both supported renderers.
+
+Failures the player or author reads are worded by one table, `plain_reason.h`
+(`sh_reason`): a Windows error code becomes what happened to which file and
+what to do (access denied, a file open elsewhere, a full disk naming the drive
+and the bytes needed), a mod store status becomes the store's state and the
+next step, and a file-name character the game cannot read is named with its
+code point. The store, builder, importer and download messages route through
+it; none carries a bare "error <n>".
 
 Crash formatting produces complete JSON or an empty failure. Capture uses bounded
 storage and nonblocking guards so nested faults cannot wait on a faulting thread.

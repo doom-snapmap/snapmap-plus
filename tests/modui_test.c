@@ -2354,7 +2354,17 @@ int main(int argc, char **argv)
         g_doctor[0] = 0;
         CHECK(sh_modui_command(2, by_build, doctor_line, NULL) == 1);
         CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\twin.key to the Windows Recycle Bin"));
-        CHECK(!has(g_doctor, "builds of twin.key") && !has(g_doctor, beside));
+        CHECK(!has(g_doctor, "builds of twin.key"));
+        /* Its consequences are the key's: the other build stays and serves the maps. */
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall: another build of twin.key stays installed (mods\\%s); "
+                    "maps that use twin.key open with it\n", beside);
+        CHECK(has(g_doctor, line));
+        CHECK(!has(g_doctor, "saved maps use it") && !has(g_doctor, "will not open"));
+        doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "twin.key");   /* the tab names the folder */
+        _snprintf_s(line, sizeof line, _TRUNCATE, "\"keptBuild\":\"%s\"", beside);
+        if (!has(doc, line)) fprintf(stderr, "  twin preview: %s\n", doc ? doc : "(null)");
+        CHECK(has(doc, line));
+        free(doc);
         /* The key: every build, each folder named, in the dry run. */
         g_doctor[0] = 0;
         CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);

@@ -11,6 +11,7 @@
 #include "modserve.h"
 #include "mp_json.h"
 #include "backend_log.h"
+#include "plain_reason.h"
 
 #define MSY_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8)
 #define MSY_DOC_MAX (4u * 1024u * 1024u)
@@ -404,10 +405,16 @@ static int msy_claim_forget(const char *ref)
     return ok;
 }
 
+/* Queue ref in the pending section: an upload of hashes, or (n == 0) the
+ * release of its claim. A release replaces a queued upload of the same ref
+ * (the claim is no longer wanted); the provisional ref an item's upload
+ * waits on is kept across attempts. */
+static void msy_retry_releases(const modnet_io *io);
+
 static int msy_pending_put(const char *ref, const char *const *hashes, int n, const char *error)
 {
     mpj *doc, *pend, *e, *old;
-    const mpj *att;
+    const mpj *att, *prov;
     char *key = msy_escape(ref), plain[200];
     long long attempts = 1;
     int ok = 0;
@@ -419,9 +426,12 @@ static int msy_pending_put(const char *ref, const char *const *hashes, int n, co
     old = pend ? mpj_get(pend, key) : NULL;
     att = old ? mpj_get(old, "attempts") : NULL;
     if (att && mpj_is_num(att)) attempts = mpj_int(att) + 1;
+    prov = old && n > 0 ? mpj_get(old, "provisional") : NULL;
     e = pend ? mpj_new(MPJ_OBJ) : NULL;
-    if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) && mpj_set(e, "bundles", msy_hash_array(hashes, n)) &&
-        mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL)))) {
+    if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) &&
+        (n > 0 ? mpj_set(e, "bundles", msy_hash_array(hashes, n)) : mpj_set(e, "kind", mpj_new_str("release"))) &&
+        mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL))) &&
+        (!prov || prov->type != MPJ_STR || mpj_set(e, "provisional", mpj_clone(prov)))) {
         if (mpj_set(pend, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc); }
     }
     mpj_free(e);
@@ -443,6 +453,46 @@ static void msy_pending_drop(const char *ref)
     mpj_free(doc);
     modsync_store_unlock();
     free(key);
+}
+
+void modsync_pending_drop(const char *ref)
+{
+    if (ref && ref[0]) msy_pending_drop(ref);
+}
+
+int modsync_pending_link(const char *ref, const char *provisional)
+{
+    mpj *doc, *pend, *e;
+    char *key = ref ? msy_escape(ref) : NULL;
+    int ok = 0;
+    if (!key || !provisional || !modnet_valid_ref(provisional)) { free(key); return 0; }
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    e = pend ? mpj_get(pend, key) : NULL;
+    if (e && e->type == MPJ_OBJ && mpj_get(e, "bundles") && mpj_set(e, "provisional", mpj_new_str(provisional)))
+        ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc);
+    mpj_free(doc);
+    modsync_store_unlock();
+    free(key);
+    return ok;
+}
+
+int modsync_pending_waits_on(const char *provisional)
+{
+    mpj *doc, *pend;
+    int i, waits = 0;
+    if (!provisional || !provisional[0]) return 0;
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    modsync_store_unlock();
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    for (i = 0; pend && i < pend->n && !waits; i++) {
+        const mpj *p = mpj_get(pend->items[i], "provisional");
+        waits = p && p->type == MPJ_STR && !strcmp(p->text, provisional);
+    }
+    mpj_free(doc);
+    return waits;
 }
 
 int modsync_pending_count(void)
@@ -570,7 +620,7 @@ static int msy_place_file(const char *dst, const sh_mb_file *f, const msy_local 
     }
     ok = msy_write_file(dst, bytes, len, 0);
     free(bytes);
-    if (!ok) return msy_cause(cause, cap, "cannot write %s (error %lu)", f->path, GetLastError());
+    if (!ok) return msy_cause(cause, cap, "cannot write %s: %s", f->path, sh_reason_win32(GetLastError(), dst, len));
     if (fetched) { info->blobs_fetched++; info->bytes_fetched += len; }
     else info->blobs_present++;
     return 1;
@@ -678,9 +728,9 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     wstaging = sh_mb_wpath(staging);
     wold = sh_mb_wpath(old);
     if (!wroot || !wfinal || !wstaging || !wold) { msy_cause(cause, cap, "out of memory"); goto done; }
-    if (!msy_mkdirs(root)) { msy_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
+    if (!msy_mkdirs(root)) { msy_cause(cause, cap, "cannot create the store folder: %s", sh_reason_win32(GetLastError(), root, 0)); goto done; }
     if (msy_exists_w(wstaging, NULL, NULL)) msy_rmtree_w(wstaging, wroot, 1);
-    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s (error %lu)", name, GetLastError()); goto done; }
+    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s: %s", name, sh_reason_win32(GetLastError(), name, 0)); goto done; }
     locals = listed ? msy_locals(&list, &b, &nlocals) : NULL;
     sh_ms_list_free(&list);
     listed = 0;
@@ -724,7 +774,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         if (!MoveFileExW(wfinal, wold, 0)) {
             DWORD e = GetLastError();
             msy_rmtree_w(wstaging, wroot, 1);
-            msy_cause(cause, cap, "cannot replace the damaged %s; is a file in it open? (error %lu)", name, e);
+            msy_cause(cause, cap, "cannot replace the damaged %s: %s", name, sh_reason_win32(e, name, 0));
             goto done;
         }
         replace = 1;
@@ -733,7 +783,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         DWORD e = GetLastError();
         if (replace) MoveFileExW(wold, wfinal, 0);
         msy_rmtree_w(wstaging, wroot, 1);
-        msy_cause(cause, cap, "cannot place %s (error %lu)", name, e);
+        msy_cause(cause, cap, "cannot place %s: %s", name, sh_reason_win32(e, name, 0));
         goto done;
     }
     if (replace) msy_rmtree_w(wold, wroot, 1);
@@ -1097,6 +1147,7 @@ int modsync_upload_bundles(const char *const *bundle_hashes, int n, const char *
     if (ok) {
         st->code = MODNET_OK;
         msy_pending_drop(ref);
+        msy_retry_releases(io);
         return 1;
     }
     if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, bundle_hashes, n, st->cause);
@@ -1210,6 +1261,7 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     if (sh_modserve_index_rescan() < 0) msy_log("MODS: pull %.16s: installed, but the serving index could not be rebuilt", hash);
     st->ms = msy_now_ms() - t0;
     st->code = MODNET_OK;
+    msy_retry_releases(io);
     return 1;
 }
 
@@ -1291,10 +1343,11 @@ int modsync_claim_names(const char *hash)
 
 /* ------------------------------------------------------------ release --- */
 
-int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
+static __declspec(thread) int t_msy_retrying;   /* inside msy_retry_releases: no nested retry */
+
+/* The release itself: no queueing, no retry of others. */
+static int msy_release(const char *ref, const modnet_io *io, modsync_stats *st)
 {
-    modsync_stats local;
-    modsync_stats *st = stats ? stats : &local;
     char claim[MODNET_CLAIM_HEX + 1], secret[MODNET_HASH_HEX + 1];
     modnet_result r;
     double t0 = msy_now_ms();
@@ -1320,6 +1373,45 @@ int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
     return msy_stats_fail(st, code, "%s", r.message);
 }
 
+/* Retry the queued releases only (each one request). Run after a store call
+ * succeeded, when the store is known to answer. */
+static void msy_retry_releases(const modnet_io *io)
+{
+    mpj *doc, *pend;
+    int i;
+    if (t_msy_retrying) return;
+    modsync_store_lock();
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
+    modsync_store_unlock();
+    pend = doc ? mpj_get(doc, "pending") : NULL;
+    t_msy_retrying = 1;
+    for (i = 0; pend && i < pend->n; i++) {
+        const char *ref = pend->keys[i];
+        modsync_stats st;
+        if (msy_cancelled(io)) break;
+        if (!mpj_str_is(mpj_get(pend->items[i], "kind"), "release") || strchr(ref, '\\')) continue;
+        if (msy_release(ref, io, &st)) msy_log("MODS: retry %s: released the queued claim", ref);
+        else if (!modnet_transient(st.code)) { msy_pending_drop(ref); msy_log("MODS: retry %s: release dropped: %s", ref, st.cause); }
+    }
+    t_msy_retrying = 0;
+    mpj_free(doc);
+}
+
+int modsync_release(const char *ref, const modnet_io *io, modsync_stats *stats)
+{
+    modsync_stats local;
+    modsync_stats *st = stats ? stats : &local;
+    if (msy_release(ref, io, st)) {
+        msy_retry_releases(io);
+        return 1;
+    }
+    /* A release the store did not take is not forgotten: a leaked claim
+     * keeps its bundles on the store. Queued, retried at the next launch
+     * and after the next store call that succeeds. */
+    if (modnet_transient(st->code)) st->queued = msy_pending_put(ref, NULL, 0, st->cause);
+    return 0;
+}
+
 /* ------------------------------------------------------------ retry ----- */
 
 int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped, modsync_stats *last)
@@ -1343,6 +1435,20 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
         int n = 0, k, valid = 1;
         size_t rl = strlen(pend->keys[i]);
         if (msy_cancelled(io)) break;
+        if (mpj_str_is(mpj_get(e, "kind"), "release") && rl < sizeof ref && !strchr(pend->keys[i], '\\')) {
+            strcpy_s(ref, sizeof ref, pend->keys[i]);
+            t_msy_retrying = 1;
+            valid = msy_release(ref, io, &st);
+            t_msy_retrying = 0;
+            if (valid) { ok_n++; msy_log("MODS: retry %s: released the queued claim", ref); }
+            else if (!modnet_transient(st.code)) {
+                msy_pending_drop(ref);
+                drop_n++;
+                msy_log("MODS: retry %s: release dropped: %s", ref, st.cause);
+            } else msy_log("MODS: retry %s: the release is still failing: %s", ref, st.cause);
+            if (last) *last = st;
+            continue;
+        }
         /* Keys are written escaped; a ref that needed escapes is skipped
          * rather than decoded (refs are plain text in practice). */
         if (rl >= sizeof ref || strchr(pend->keys[i], '\\')) valid = 0;

@@ -47,6 +47,7 @@
 #include <string.h>
 
 #include "modpublished.h"
+#include "plain_reason.h"
 #include "modmanifest.h"
 
 /* The fetch and the worker come from modsync.c and modnet.c: the fetch
@@ -524,8 +525,9 @@ int sh_modpub_gate_decide(const sh_modpub_gate_facts *f)
 }
 
 void sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
-                            char *out, size_t cap)
+                            int store_code, char *out, size_t cap)
 {
+    char reason[200];
     const int prefab = subject && !strcmp(subject, "prefab");
     const char *what = subject && subject[0] ? subject : "map";
     const char *t = title && title[0] ? title : "a mod";
@@ -536,8 +538,9 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
                     "unpublished it, or it was removed. This is permanent on this machine.", what, t);
         break;
     case SH_MODPUB_GATE_UNREACHABLE:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that could not be downloaded: the mod store "
-                    "did not answer. Connect and try again.", what, t);
+        (void)sh_reason(SH_REASON_STORE, store_code, NULL, 0, reason, sizeof reason);
+        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that could not be downloaded: %s.", what, t,
+                    reason);
         break;
     case SH_MODPUB_GATE_NEVER_PUBLISHED:
         _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that is not installed and was never "
@@ -566,7 +569,6 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
     memset(&facts, 0, sizeof facts);
     facts.editor = 1;
     facts.store = SH_MODPUB_STORE_ABSENT;   /* not asked: an editor open holds nothing */
-    facts.published = g_ops.claimed && row->bundle[0] && g_ops.claimed(g_ops.context, row->bundle);
     facts.other_build = g_ops.other_build && g_ops.other_build(g_ops.context, row, other, sizeof other, name, sizeof name) &&
                         other[0];
     verdict = sh_modpub_gate_decide(&facts);
@@ -578,7 +580,11 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
         const char *key = row->id[0] ? row->id : row->bundle;
         if (name[0] && _stricmp(name, key)) _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", name, key);
         else _snprintf_s(title, sizeof title, _TRUNCATE, "%s", key);
-        sh_modpub_gate_wording(verdict, "map", title, NULL, why, why_cap);
+        /* The store was not asked, so the note says only what this computer
+         * knows; the gate's words ("no longer available", "never published")
+         * are said where the store is asked, at Play. */
+        _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s at a build that is not installed on this computer, so "
+                    "the editor opens the map without it. Playing the map asks the mod store for it.", title);
     }
     return 0;
 }
@@ -1163,6 +1169,7 @@ static void pub_finish(void)
                 return;
             }
             if (verdicts && verdicts[at] != SH_MODPUB_GATE_OBTAIN) {
+                if (h->probes) h->probes[at].code = job->failed_code;
                 pub_deny(verdicts, h->probes, detail, cause);
                 free(verdicts);
                 return;
@@ -1519,7 +1526,8 @@ static void pub_deny(const int *verdicts, const sh_modpub_probe *probes, const c
         if (verdicts[i] == SH_MODPUB_GATE_OBTAIN || verdicts[i] == SH_MODPUB_GATE_SUBSTITUTE) continue;
         pub_title(title, sizeof title, row, probes && probes[i].name[0] ? probes[i].name : h->other_name[i]);
         source = probes && probes[i].source[0] ? probes[i].source : detail;
-        sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), title, source, line, sizeof line);
+        sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), title, source, probes ? probes[i].code : 0, line,
+                               sizeof line);
         pub_print(line);
         pub_logf("MODS: denied (cause %d, bundle %.16s): %s", verdicts[i], row->bundle, line);
         if (!denied++) strncpy_s(notice, sizeof notice, line, _TRUNCATE);
@@ -2244,6 +2252,7 @@ static int eng_store_probe(void *c, const char *hash, volatile int *cancel, sh_m
     (void)modsync_probe_bundle(hash, &io, &p);
     memset(out, 0, sizeof *out);
     out->found = p.found > 0 ? SH_MODPUB_STORE_HAS : p.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
+    out->code = p.found < 0 ? p.code : 0;
     out->game_lacks = p.game_lacks;
     strncpy_s(out->source, sizeof out->source, p.source, _TRUNCATE);
     strncpy_s(out->name, sizeof out->name, p.name, _TRUNCATE);

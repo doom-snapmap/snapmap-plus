@@ -17,6 +17,7 @@
 #include "prefab_block.h"
 #include "raw_deflate.h"
 #include "backend_log.h"
+#include "plain_reason.h"
 
 #define ME_NAME_MAX        1024u
 #define ME_MAX_ENTRIES     65535u
@@ -127,7 +128,7 @@ static int me_wraw(me_writer *w, const void *p, size_t n)
         DWORD chunk = (DWORD)((n - off) > (1u << 24) ? (1u << 24) : (n - off)), put = 0;
         if (!WriteFile(w->h, (const unsigned char *)p + off, chunk, &put, NULL) || put != chunk) {
             w->failed = 1;
-            me_cause(w->cause, sizeof w->cause, "writing the ZIP failed (error %lu)", GetLastError());
+            me_cause(w->cause, sizeof w->cause, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), "the ZIP", chunk));
             return 0;
         }
         off += put;
@@ -398,11 +399,18 @@ static int me_reader_open(me_reader *r, const char *path, char *cause, size_t ca
             for (k = 5; k < nl; k++) if (e->name[k] == '\\') e->name[k] = '/';
         }
         if (!me_name_ok(e->name, nl)) {
+            char shown[120];
+            unsigned k, w = 0;
+            for (k = 0; k < nl && w + 1 < sizeof shown; k++)
+                shown[w++] = (unsigned char)e->name[k] < 0x20 || (unsigned char)e->name[k] == 0x7f ? '?' : e->name[k];
+            shown[w] = 0;
             free(e->name);
             e->name = NULL;
             free(cd);
             me_reader_close(r);
-            return me_cause(cause, cap, "the export holds a file with an unsafe name");
+            return me_cause(cause, cap, "the export holds a file with an unsafe name, \"%s%s\" (an absolute path, a "
+                            "'..' step, a backslash, a colon or a control character); it was not imported. Export it "
+                            "again with Snapmap+, or remove that entry from the ZIP", shown, nl >= sizeof shown ? "..." : "");
         }
         r->n++;
         pos += 46 + nl + xl + cl;
@@ -878,7 +886,7 @@ rows_done:
     wtmp = sh_mb_wpath(tmp);
     if (!wfinal || !wtmp) { me_cause(cause, cap, "the destination path is not usable"); goto done; }
     w.h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (w.h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot create %s (error %lu)", zip_path, GetLastError()); goto done; }
+    if (w.h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot create %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
 
     me_add(&w, pl->entry, map_json, len);
     for (i = 0; i < rows.count && !w.failed; i++) {
@@ -889,11 +897,11 @@ rows_done:
     }
     me_finish(&w);
     if (w.failed) { me_cause(cause, cap, "%s", w.cause); goto done; }
-    if (!FlushFileBuffers(w.h)) { me_cause(cause, cap, "writing the ZIP failed (error %lu)", GetLastError()); goto done; }
+    if (!FlushFileBuffers(w.h)) { me_cause(cause, cap, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
     CloseHandle(w.h);
     w.h = INVALID_HANDLE_VALUE;
     if (!MoveFileExW(wtmp, wfinal, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        me_cause(cause, cap, "cannot replace %s (error %lu)", zip_path, GetLastError());
+        me_cause(cause, cap, "cannot replace %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0));
         goto done;
     }
     st->entries = (unsigned)w.n;
@@ -1388,7 +1396,7 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
         if (!bytes) return 0;
         put = me_put_file(c->stage, rel, bytes, len);
         free(bytes);
-        if (!put) return me_cause(cause, cap, "cannot copy %s out of the export (error %lu)", name, GetLastError());
+        if (!put) return me_cause(cause, cap, "cannot copy %s out of the export: %s", name, sh_reason_win32(GetLastError(), name, len));
         st->files++;
     }
     for (i = 0; i < c->b.file_count; i++) {
@@ -1409,7 +1417,7 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
         }
         put = me_put_file(c->stage, f->path, bytes, len);
         HeapFree(GetProcessHeap(), 0, bytes);
-        if (!put) return me_cause(cause, cap, "cannot copy %s out of the game (error %lu)", f->path, GetLastError());
+        if (!put) return me_cause(cause, cap, "cannot copy %s out of the game: %s", f->path, sh_reason_win32(GetLastError(), f->path, len));
     }
     return 1;
 }

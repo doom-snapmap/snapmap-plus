@@ -12,6 +12,7 @@
 #include "modbundle.h"
 #include "companion.h"
 #include "mp_json.h"
+#include "plain_reason.h"
 #include "config_json.h"
 #include "decl_text.h"
 #include "decl_tree.h"
@@ -916,7 +917,18 @@ int sh_mb_check_request(const char *r, char *cause, size_t cap)
             continue;
         }
         if (c == '\\') return mb_cause(cause, cap, "backslash in path: %s", r);
-        if (!mb_path_char(c)) return mb_cause(cause, cap, "character 0x%02x not allowed in path: %s", (unsigned char)c, r);
+        if (!mb_path_char(c)) {
+            /* The character itself (a UTF-8 sequence decoded), named in plain words. */
+            const unsigned char *u = (const unsigned char *)r + i;
+            unsigned long cp = u[0];
+            char why[400];
+            if (u[0] >= 0xc2 && u[0] < 0xe0 && (u[1] & 0xc0) == 0x80) cp = ((u[0] & 0x1fu) << 6) | (u[1] & 0x3fu);
+            else if (u[0] >= 0xe0 && u[0] < 0xf0 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80)
+                cp = ((u[0] & 0x0fu) << 12) | ((u[1] & 0x3fu) << 6) | (u[2] & 0x3fu);
+            else if (u[0] >= 0xf0 && u[0] < 0xf5 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80 && (u[3] & 0xc0) == 0x80)
+                cp = ((u[0] & 0x07ul) << 18) | ((u[1] & 0x3ful) << 12) | ((u[2] & 0x3ful) << 6) | (u[3] & 0x3ful);
+            return mb_cause(cause, cap, "%s", sh_reason(SH_REASON_NAME, (long)cp, r, 0, why, sizeof why));
+        }
     }
     return 1;
 }
@@ -2552,6 +2564,60 @@ static void mb_old_intent(sh_mb_bundle *b, const char *key, const mbj *v, int bu
     }
 }
 
+/* The mod store refuses some descriptors this builder admits. Its rules
+ * (snapmap-web api/mods_store.js, manifestError: EXTRA_KEY_RE for every key
+ * kept in "extra", displayText for name and author) are mirrored here as
+ * build warnings in one table, so the author hears it at the build rather
+ * than at publish. Keep the table in step with that file. */
+enum { MB_STORE_KEY, MB_STORE_NAME, MB_STORE_AUTHOR };
+static const struct mb_store_rule {
+    const char *field;
+    int key;                /* 1: EXTRA_KEY_RE, ^[a-z][a-z0-9_-]{0,63}$; 0: displayText, no control character */
+    const char *store_says;
+    const char *fix;
+} MB_STORE_RULES[] = {
+    { "key", 1, "bad extra key", "author keys must be 1-64 characters of a-z, 0-9, '_' or '-' and start with a "
+                                 "lowercase letter; rename or remove it" },
+    { "name", 0, "bad name", "remove it from the name" },
+    { "author", 0, "bad author", "remove it from the author" },
+};
+
+static void mb_store_check(sh_mb_bundle *b, int rule, const char *value, size_t n)
+{
+    const struct mb_store_rule *r = &MB_STORE_RULES[rule];
+    char shown[72], line[SH_MB_CAUSE_MAX];
+    size_t i, w = 0;
+    unsigned bad = 0x110000;
+    if (r->key) {
+        int ok = n >= 1 && n <= 64 && value[0] >= 'a' && value[0] <= 'z';
+        for (i = 1; ok && i < n; i++) {
+            char c = value[i];
+            ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }
+        if (ok) return;
+        for (i = 0; i < n && w + 1 < sizeof shown; i++)
+            shown[w++] = (unsigned char)value[i] >= 0x20 && (unsigned char)value[i] < 0x7f ? value[i] : '?';
+        shown[w] = 0;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s key \"%s\": the mod store refuses it at publish (\"%s\"); %s",
+                    b->descriptor, shown, r->store_says, r->fix);
+    } else {
+        /* U+0000-U+001F, U+007F and U+0080-U+009F (UTF-8 C2 80 to C2 9F). */
+        for (i = 0; i < n && bad == 0x110000; i++) {
+            unsigned char c = (unsigned char)value[i];
+            if (c < 0x20 || c == 0x7f) bad = c;
+            else if (c == 0xc2 && i + 1 < n && (unsigned char)value[i + 1] >= 0x80 && (unsigned char)value[i + 1] <= 0x9f)
+                bad = (unsigned char)value[i + 1];
+        }
+        if (bad == 0x110000) return;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s %s contains %s (U+%04X); the mod store refuses it at publish "
+                    "(\"%s\"): %s", b->descriptor, r->field,
+                    bad == 9 ? "a tab" : bad == 10 || bad == 13 ? "a line break" : "a control character", bad,
+                    r->store_says, r->fix);
+    }
+    mb_warn(b, "%s", line);
+    mb_note(b, "%s", line);
+}
+
 /* A folder the product received rather than one an author builds here: it
  * is never refused on its files (a bundle installed by hash keeps working). */
 static int mb_received(const sh_mb_bundle *b)
@@ -2580,6 +2646,10 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "%s \"" SH_MB_BLOCK_KEY "\" must be an object", b->descriptor); return 0; }
     if (!mb_common_fields(b, root, 0)) return 0;
+    if (building) {
+        mb_store_check(b, MB_STORE_NAME, b->name, strlen(b->name));
+        if (b->author) mb_store_check(b, MB_STORE_AUTHOR, b->author, strlen(b->author));
+    }
     {
         /* A converted first-generation package (modlegacy.c) carries a
          * "legacy" object; it stays in "extra" and grandfathers its names. */
@@ -2673,6 +2743,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
                 mb_old_intent(b, k, root->items[i], building);
                 continue;
             }
+            if (building) mb_store_check(b, MB_STORE_KEY, root->keys[i], root->klen[i]);
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 mb_error(b, "out of memory");
@@ -2734,7 +2805,7 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
     free(pattern);
     if (h == INVALID_HANDLE_VALUE) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) mb_error(w->b, "cannot list %s (error %lu)", rel, GetLastError());
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) mb_error(w->b, "cannot list %s: %s", rel, sh_reason_win32(GetLastError(), rel, 0));
         return;
     }
     do {
@@ -2814,7 +2885,7 @@ static void mb_walk_top(mb_walk *w)
     if (!pattern) { mb_error(w->b, "out of memory"); return; }
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
     free(pattern);
-    if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder (error %lu)", GetLastError()); return; }
+    if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder: %s", sh_reason_win32(GetLastError(), "the mod folder", 0)); return; }
     do {
         char *name;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
@@ -5313,8 +5384,8 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t c
     }
     text = mb_modjson(b, (const char *)existing, elen, root, &len);
     ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok) mb_cause(cause, cap, text ? "cannot write mod.json (error %lu)" : "mod.json could not be composed (is it a JSON object?)",
-                      GetLastError());
+    if (!ok && text) mb_cause(cause, cap, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
+    else if (!ok) mb_cause(cause, cap, "mod.json could not be composed (is it a JSON object?)");
     if (ok && from_pkg) {
         /* package.json became mod.json, with the same author keys and bytes. */
         SetFileAttributesW(pkg_path, FILE_ATTRIBUTE_NORMAL);

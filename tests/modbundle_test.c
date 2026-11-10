@@ -105,6 +105,11 @@ static void test_names(void)
     CHECK(!sh_mb_check_request("generated/../x.decl", cause, sizeof cause) && strstr(cause, "traversal"));
     CHECK(!sh_mb_check_request("./x.decl", cause, sizeof cause));
     CHECK(!sh_mb_check_request("/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
+    /* A non-ASCII file name: the file and its character, in words (plain_reason.h). */
+    CHECK(!sh_mb_check_request("generated/image/mods/a/caf\xc3\xa9.bimage", cause, sizeof cause) &&
+          strstr(cause, "generated/image/mods/a/caf\xc3\xa9.bimage has the character '\xc3\xa9' (U+00E9) in its name; "
+                        "the game reads only ASCII file names") != NULL);
+    CHECK(!sh_mb_check_request("a/b*c.decl", cause, sizeof cause) && strstr(cause, "has the character '*' (U+002A)") != NULL);
     CHECK(!sh_mb_check_request("c:/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
     CHECK(!sh_mb_check_request("a\\x.decl", cause, sizeof cause) && strstr(cause, "backslash"));
     CHECK(!sh_mb_check_request("a./x.decl", cause, sizeof cause));
@@ -774,6 +779,12 @@ static void m_shadow_not_stock(const char *f)
     mt_write(f, "assets\\generated\\decls\\entitydef\\monster\\not_stock.decl", "{\r\n}");
 }
 static void m_desc_plain(const char *f) { mt_write(f, "mod.json", DESC("")); }
+/* Keys and a name the mod store refuses at publish (mods_store.js): built, with warnings. */
+static void m_store_refuses(const char *f)
+{
+    mt_write(f, "mod.json", "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2\\tImp\","
+                            "\"displayName\":\"x\",\"$schema\":\"y\",\"tags\":[\"a\"]}");
+}
 /* The same replacement without the retired "shadows" key. */
 static void m_shadow_undeclared(const char *f)
 {
@@ -940,6 +951,16 @@ static void test_refusals(const char *fixture, const char *tmp)
         accepted(fixture, tmp, m_desc_plain, &b);
         strcpy_s(plain, sizeof plain, b.hash);
         CHECK(b.errors == 0 && b.note_count == 1 && has_note(&b, "id: \"alex.r2-imp\" is kept as the key"));
+        CHECK(b.warnings == 0);
+        sh_mb_free(&b);
+        /* The store's key and name rules, heard at the build. */
+        accepted(fixture, tmp, m_store_refuses, &b);
+        CHECK(b.errors == 0 && b.warnings == 3);
+        CHECK(has_note(&b, "mod.json key \"displayName\": the mod store refuses it at publish (\"bad extra key\")"));
+        CHECK(has_note(&b, "mod.json key \"$schema\": the mod store refuses it at publish (\"bad extra key\")"));
+        CHECK(has_note(&b, "mod.json name contains a tab (U+0009); the mod store refuses it at publish (\"bad name\")"));
+        CHECK(!has_note(&b, "key \"tags\""));
+        CHECK(strstr(b.first_warning, "the mod store refuses it at publish") != NULL);
         sh_mb_free(&b);
         accepted(fixture, tmp, m_shadow_not_shipped, &b);
         CHECK(b.errors == 0 && b.shadow_count == 0 && has_note(&b, "shadows: ignored: derived from the files"));

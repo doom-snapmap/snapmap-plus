@@ -745,7 +745,7 @@ test('Uninstall: with the open map using the mod, and without', () => {
 test('Uninstall goes to the Recycle Bin: saved maps that use it, the undo history, no bin of its own', () => {
   /* the dry run's savedMaps and undoCleared become the confirmation's lines */
   const pv = modsTab.normPreview({action: 'uninstall', install: {folder: 'hell-guards', disposition: 'move', savedMaps: 3, undoCleared: true}});
-  assert.deepEqual(pv.install, {folder: 'hell-guards', disposition: 'recycle', savedMaps: 3, undoCleared: true});
+  assert.deepEqual(pv.install, {folder: 'hell-guards', disposition: 'recycle', savedMaps: 3, undoCleared: true, keptBuild: ''});
   assert.deepEqual(modsTab.consequenceLines(pv).map(c => c.text), [
     'Moves the folder mods\\hell-guards to the Windows Recycle Bin.',
     '3 of your saved maps use it; they will not open until a mod folder provides its assets again.']);
@@ -753,6 +753,11 @@ test('Uninstall goes to the Recycle Bin: saved maps that use it, the undo histor
   /* none of them, or the saves could not be read: no line; no map open: the history is left alone */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 0}})).map(c => c.text),
     ['Moves the folder mods\\a to the Windows Recycle Bin.']);
+  /* another build of the key stays: the maps open with it, nothing says they will not open */
+  assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall',
+    install: {folder: 'hell-guards@1a2b', savedMaps: 0, keptBuild: 'hell-guards'}})).map(c => c.text),
+    ['Moves the folder mods\\hell-guards@1a2b to the Windows Recycle Bin.',
+     'Another build of this mod stays installed (mods\\hell-guards); maps that use the mod open with it.']);
   assert.equal(modsTab.uninstallHead(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}})), modsTab.UNINSTALL_HEAD.plain,
     'no map open: the head says nothing about undo');
   assert.equal(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}}).install.savedMaps, -1);

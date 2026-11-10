@@ -358,6 +358,22 @@ static void test_first_build(const char *tmp)
     CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == -1 && strstr(cause, "nothing was renamed"));
     CHECK(sh_ms_remove_folder(dir));
 
+    /* Refused before any rename: a hand-made copy of another mod's files.
+     * The build would refuse them under the new key; the folder stays as it
+     * is, with no .old- or .staging- folder beside it, and the count is said. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\foreignprobe", root);
+    fb_make(dir, "foreignprobe");
+    mt_write(dir, "assets\\generated\\image\\mods\\other.mod\\a.bimage", "another mod's bytes");
+    mt_write(dir, "assets\\generated\\image\\mods\\other.mod\\b.bimage", "more of them");
+    fb_names(root, before, sizeof before);
+    CHECK(sh_ms_first_key(dir, got2, sizeof got2, cause, sizeof cause) == -1 && !got2[0]);
+    if (!strstr(cause, "2 of the folder's 4 file(s) are under mods/other.mod/")) fprintf(stderr, "  foreign: %s\n", cause);
+    CHECK(strstr(cause, "2 of the folder's 4 file(s) are under mods/other.mod/, another mod's namespace") != NULL);
+    CHECK(strstr(cause, "nothing was renamed. Move them under mods/foreignprobe/") != NULL);
+    fb_names(root, after, sizeof after);
+    CHECK(!strcmp(before, after) && !strstr(after, ".staging-") && !strstr(after, ".old-") && mt_exists(dir));
+    CHECK(sh_ms_remove_folder(dir));
+
     /* Refused: Windows will not rename a folder with a file open in it. The
      * folder stays whole; closing the file lets the next rescan do it. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\heldprobe", root);

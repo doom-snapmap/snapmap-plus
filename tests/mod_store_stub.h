@@ -68,9 +68,18 @@ typedef struct stub_state {
     char refuse_manifest[200];    /* a manifest at /mods/missing is refused with 422 and this message */
     int missing_ignores_manifest; /* /mods/missing answers as an older Worker: blobs only, no "bundle" */
     int missing_manifests;        /* /mods/missing requests that carried a manifest the stub checked */
+    char trail[8192];             /* "claim <ref>" and "release <ref>" lines, in the order the stub took them */
 } stub_state;
 
 static stub_state g_stub;
+
+/* One trail line; a full trail keeps its last lines out (tests clear it first). */
+static void stub_trail(const char *verb, const char *ref)
+{
+    size_t used = strlen(g_stub.trail);
+    if (used + strlen(verb) + strlen(ref) + 3 < sizeof g_stub.trail)
+        _snprintf_s(g_stub.trail + used, sizeof g_stub.trail - used, _TRUNCATE, "%s %s\n", verb, ref);
+}
 
 static stub_obj *stub_find(stub_obj *v, int n, const char *hash)
 {
@@ -452,6 +461,7 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
         }
         c->nb = n < 32 ? n : 32;
         for (i = 0; i < c->nb; i++) strcpy_s(c->bundles[i], 65, list[i]);
+        stub_trail("claim", ref);
         _snprintf_s(out, sizeof out, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", c->id, c->secret);
         stub_json(s, has_secret ? 200 : 201, out);
         return;
@@ -467,6 +477,7 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             if (!c->live || strcmp(c->id, id) != 0) continue;
             if (strcmp(c->secret, secret) != 0) { stub_json(s, 403, "{\"error\":\"wrong secret\"}"); return; }
             c->live = 0;
+            stub_trail("release", c->ref);
             stub_send(s, 204, "application/json", "", 0);
             return;
         }

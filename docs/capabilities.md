@@ -170,7 +170,9 @@ name". Mods you download or import are never refused on their files. A map whose
   movie applies at the next map load, and a changed animation is reloaded in place at the next map
   load (with the md6Defs and animWebs that name it). A sound bank whose bytes changed under a name
   the game already loaded, a changed skeleton and other raw files besides models, images and
-  animations, or a stock decl no mod serves that inherits a changed one, need a restart. Two builds
+  animations, or a stock decl no mod serves that inherits a changed one, need a restart. A decl
+  name a mod no longer carries stays registered until the game restarts, since the engine cannot
+  unregister a name, but nothing serves it. Two builds
   of one mod played in one session each get their own animations, models, images and decls at
   their map load, with no restart. `sh_mods held` lists what the game was served under each name
   this session and which of those names it holds for the session. A shadow a newly installed mod adds for a decl, model or image the game already holds is
@@ -300,8 +302,9 @@ name". Mods you download or import are never refused on their files. A map whose
   - the map is published and the build left the mod store: "This map needs Hell Guards
     (hell-guards-7f3k) at a build that is no longer available: its author unpublished it, or it was
     removed. This is permanent on this machine.";
-  - the mod store did not answer: "... at a build that could not be downloaded: the mod store did
-    not answer. Connect and try again.";
+  - the mod store did not answer: "... at a build that could not be downloaded: " and the store's
+    failure in words, for example "the mod store is busy; try again in a few minutes." or "the mod
+    store could not be reached; check the internet connection and try again.";
   - the map was never published (a My Maps save, a rawmap, a prefab) and the mod's folder is gone:
     "... at a build that is not installed and was never published. Restore its folder from the
     Recycle Bin or load the map's rawmap ZIP." (for a prefab, "the prefab's ZIP export");
@@ -526,7 +529,7 @@ Registered with the engine command system; run from the DOOM console.
 
 | Command | What it does |
 |---|---|
-| `sh_rawmaps` | Raw map files: state, paths, load, save. Run it bare (or `sh_rawmaps status`) to see what is set and what the last save wrote, including the `.zip` beside it for a map with mods, or `sh_rawmaps help` (or `?`) for every verb. `load` takes a `.json` or a `.zip`, `list` shows both, `savepath` chooses where saves go, `overwrite` chooses whether a rawmap you open may replace the map it opened over. |
+| `sh_rawmaps` | Raw map files: state, paths, load, save. Run it bare (or `sh_rawmaps status`) to see what is set and what the last save wrote, including the `.zip` beside it for a map with mods, or `sh_rawmaps help` (or `?`) for every verb. `load` takes a `.json` or a `.zip`; with a map open it is staged for the next map load and says so, and the next map opened from My Maps reports that the staged file opened in its place (`load` with no path, or the File menu's Load, opens it now); `list` shows both, `savepath` chooses where saves go, `overwrite` chooses whether a rawmap you open may replace the map it opened over. |
 | `sh_rawmaps_on` | Enable raw map save/load (the `rawmap.json` substitution). Same as `sh_rawmaps on`. |
 | `sh_rawmaps_off` | Disable raw map save/load. Same as `sh_rawmaps off`. |
 | `sh` | The SnapStack dispatcher — routes the 20 SnapStack subcommands (below). |
