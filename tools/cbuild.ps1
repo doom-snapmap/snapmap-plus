@@ -1,5 +1,5 @@
-# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1 and src\store\build.ps1.
-# Dot-source this file. Sources compile to objects (in parallel), and a
+# Shared MSVC build helpers for src\backend\build.ps1, src\ui\build.ps1, src\store\build.ps1 and
+# tests\run-tests.ps1. Dot-source this file. Sources compile to objects (once, in parallel), and a
 # separate step links them, so a rebuild recompiles only what changed. Keep this script ASCII for
 # PowerShell 5.1.
 #
@@ -154,4 +154,40 @@ function Invoke-CbLink {
     Get-Content $Log | Write-Host
     if ($exit -ne 0) { throw "link failed (exit $exit) -- see $Log" }
     [System.IO.File]::WriteAllText($record, $Command)
+}
+
+# Run command lines through cmd.exe, at most $Max at a time, each with its output in its own log.
+# A job is @{ dir; cmd; log } with an optional weight (higher starts first, for example the job's
+# previous duration). Each job gets .seconds, its run time. Returns the exit codes in job order.
+function Invoke-CbParallel([object[]]$Jobs, [int]$Max = [Environment]::ProcessorCount) {
+    $codes = New-Object int[] $Jobs.Count
+    $order = @(0..($Jobs.Count - 1) | Where-Object { $Jobs.Count } |
+               Sort-Object @{ Expression = { -[double]$Jobs[$_].weight } }, @{ Expression = { $_ } })
+    $running = @{}
+    $next = 0
+    while ($next -lt $order.Count -or $running.Count) {
+        while ($next -lt $order.Count -and $running.Count -lt $Max) {
+            $i = $order[$next]
+            $j = $Jobs[$i]
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $env:ComSpec
+            $psi.Arguments = "/s /c `"$($j.cmd) > `"$($j.log)`" 2>&1`""
+            $psi.WorkingDirectory = $j.dir
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $running[$i] = @{ p = [System.Diagnostics.Process]::Start($psi); t = [Diagnostics.Stopwatch]::StartNew() }
+            $next++
+        }
+        $done = @($running.Keys | Where-Object { $running[$_].p.HasExited })
+        if (-not $done.Count) { [System.Threading.Thread]::Sleep(10); continue }
+        foreach ($i in $done) {
+            $r = $running[$i]
+            $r.p.WaitForExit()
+            $codes[$i] = $r.p.ExitCode
+            $Jobs[$i].seconds = $r.t.Elapsed.TotalSeconds
+            $r.p.Dispose()
+            $running.Remove($i)
+        }
+    }
+    return ,$codes
 }
