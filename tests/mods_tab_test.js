@@ -486,7 +486,7 @@ test('details: every section for a v3 mod', () => {
   assert.equal(det.tags('summary')[0].textContent, 'Carried paths (24)');
   assert.equal(det.all('mods-paths-list')[0].children.length, 24);
   const req = section(h, 'requirements').textContent;
-  assert.match(req, /g_useImageBlackList 0 g_useResourceBlackList 0/);
+  assert.match(req, /g_useImageBlackList +0 g_useResourceBlackList +0/);
   assert.ok(req.indexOf(modsTab.NEEDS_NOTE) >= 0);
   const share = section(h, 'sharing').textContent;
   assert.match(share, /Used by 2 of your published maps/);
@@ -514,6 +514,58 @@ test('details: every section for a v3 mod', () => {
   h.nodes.modsVerifyBtn.click();
   assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'verify', arg: 'local.cyberdemon@0.0.0-05238b2e'});
 });
+/* Colour in the details pane: the Decl Text editor's token hues, one kind each, each with a hover title. */
+test('details colour: the editor\'s token hues mark own paths, game files, edit counts, settings and Toybox rows', () => {
+  assert.deepEqual(modsTab.pathParts('generated/decls/entitydef/mods/bare-hands/sub/x.decl', ['bare-hands']),
+    [{text: 'generated/decls/entitydef/', cls: 'mk-dir'}, {text: 'mods/bare-hands/', cls: 'mk-own'},
+     {text: 'sub/', cls: 'mk-dir'}, {text: 'x.decl', cls: ''}]);
+  assert.deepEqual(modsTab.pathParts('generated/decls/entitydef/player/coop.decl', ['bare-hands']),
+    [{text: 'generated/decls/entitydef/player/', cls: 'mk-dir'}, {text: 'coop.decl', cls: 'mk-game'}]);
+  assert.equal(modsTab.pathParts('a/mods/other/x.decl', ['bare-hands']).pop().cls, 'mk-game', 'another mod\'s namespace is not this mod\'s');
+  assert.equal(modsTab.pathParts('a/mods/bare-hands-2/x.decl', ['bare-hands']).pop().cls, 'mk-game', 'the namespace matches whole');
+  assert.deepEqual(modsTab.editParts({set: 4, remove: 6, list: 0, keyed: 0, bag: 0, drop: 2}).map(p => p.kind), ['set', 'removed', 'removed']);
+  assert.equal(modsTab.valueClass('1'), 'mk-num');
+  assert.equal(modsTab.valueClass('-0.5'), 'mk-num');
+  assert.equal(modsTab.valueClass('on'), 'mk-str');
+  const doc = clone(v3);
+  const hg = doc.mods.find(m => m.key === 'local.hell-guard');
+  hg.carriedPaths = ['generated/decls/entitydef/mods/local.hell-guard/hammer.decl',
+                     'generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl', 'generated/decls/strings/hellguard.decl'];
+  const h = harness();
+  shown(h, doc);
+  rowOf(h, 'local.hell-guard').click();
+  const T = modsTab.PATH_TITLES;
+  const carried = section(h, 'files').all('mods-path');
+  assert.deepEqual(carried.map(n => n.title), [T.own, T.edit, T.replace]);
+  assert.equal(carried[0].all('mk-own')[0].textContent, 'mods/local.hell-guard/');
+  assert.equal(carried[0].all('mk-game').length, 0);
+  assert.equal(carried[1].all('mk-game')[0].textContent, 'snapmap_default.decl');
+  assert.equal(carried[1].all('mk-dir')[0].textContent, 'generated/decls/entitydef/ai/conductor/coop/');
+  /* Toybox rows as strings */
+  const toybox = section(h, 'adds').all('mods-rows-item');
+  assert.equal(toybox.length, 3);
+  toybox.forEach(n => { assert.match(n.className, /\bmk-str\b/); assert.equal(n.title, 'a Toybox row this mod adds'); });
+  /* the Edits line: the game file's name in the game's hue, what is set and what is removed */
+  const facts = section(h, 'facts');
+  assert.deepEqual(facts.all('mk-set').map(n => n.textContent), ['3 list entries added', '1 field set']);
+  assert.deepEqual(facts.all('mk-removed').map(n => n.textContent), ['1 field removed']);
+  assert.deepEqual(facts.all('mods-path').filter(n => n.all('mk-set').length).map(n => n.all('mk-game')[0].textContent),
+                   ['snapmap_default', 'hellguard']);
+  /* the console settings: the name as a key, the value as a number */
+  const req = section(h, 'requirements');
+  assert.deepEqual(req.all('mk-key').map(n => n.textContent), ['g_useImageBlackList', 'g_useResourceBlackList']);
+  assert.equal(req.all('mk-num').length, 2);
+  /* colour is never the only carrier: every coloured part, or the line holding it, has a hover title */
+  const titled = n => { for (let p = n; p; p = p.parentNode) if (p.title) return true; return false; };
+  ['mk-own', 'mk-game', 'mk-set', 'mk-removed', 'mk-key', 'mk-num', 'mk-str'].forEach(cls =>
+    h.nodes.modsDetail.all(cls).forEach(n => assert.ok(titled(n), cls + ' ' + n.textContent + ' has a title')));
+  /* the CSS uses the editor's tokens only, and the docs carry the mapping */
+  const rules = css.split('\n').filter(l => /\.mods-side \.mk-/.test(l));
+  assert.equal(rules.length, 6);
+  rules.forEach(l => assert.match(l, /color: var\(--(tkStr|tkBool|tkKey|tkNum|muted)\); \}$/, l));
+  assert.ok(docs.indexOf('### Colour in the details pane') >= 0);
+  ['mk-own', 'mk-game', 'mk-set', 'mk-removed', 'mk-key', 'mk-num', 'mk-str', 'mk-dir'].forEach(c => assert.ok(docs.indexOf('`' + c + '`') >= 0, c));
+});
 test('details: requirement commands are listed with the console settings', () => {
   const doc = clone(v3);
   const hg = doc.mods.find(m => m.key === 'local.hell-guard');
@@ -527,7 +579,7 @@ test('details: requirement commands are listed with the console settings', () =>
   shown(h, doc);
   rowOf(h, 'local.hell-guard').click();
   const req = section(h, 'requirements').textContent;
-  assert.match(req, /Console settings com_maxFps 120/);
+  assert.match(req, /Console settings com_maxFps +120/);
   assert.match(req, /Commands when active bind x "say hi" echo on/);
   assert.match(req, /Commands when removed echo off/);
   rowOf(h, 'doors').click();
@@ -1161,6 +1213,7 @@ test('host and interface contract', () => {
   for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
   assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('poc_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
   assert.match(iface, /#define SH_MODS_ACT_REMOVED_EMPTY      14/);
   assert.match(iface, /#define SH_MODS_ACT_MAP_ADD            16/);
@@ -1215,6 +1268,11 @@ test('organizing folders: a caret row with a count, its mods indented, closed fo
   h.nodes.modsFilter.dispatch('input');
   h.ui.select('campaign-interactables\\doors');
   assert.equal(h.nodes.modsList.all('mods-folder')[0].all('mods-row').length, 3, 'selecting a mod inside opens its folder');
+  /* the About Folder link names the folder under mods\ with its organizing folder, so Explorer opens the right one */
+  section(h, 'about').all('mods-link')[0].click();
+  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'openFolder', arg: 'campaign-interactables\\doors'});
+  assert.equal(modsTab.folderArg({group: 'a\\b', folder: 'c', key: 'a\\b\\c'}), 'a\\b\\c', 'a nested organizing folder');
+  assert.equal(modsTab.folderArg({group: '', folder: 'bare-hands', key: 'bare-hands'}), 'bare-hands', 'a mod at the root');
   /* the v2 document and the v3 fixture have no group: one flat list */
   assert.equal(modsTab.normalize(v3).mods.every(b => b.group === ''), true);
 });

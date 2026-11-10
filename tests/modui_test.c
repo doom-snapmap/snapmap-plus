@@ -571,6 +571,25 @@ static const char *K2(const char *lit)
 }
 static int has(const char *doc, const char *needle) { needle = K2(needle); return doc && strstr(doc, needle) != NULL; }
 
+/* A string field of the row whose key is `key`, the JSON escapes undone. */
+static int row_str(const char *doc, const char *key, const char *field, char *out, size_t cap)
+{
+    char k[256], f[64];
+    const char *at;
+    size_t n = 0;
+    if (!doc || !cap) return 0;
+    _snprintf_s(k, sizeof k, _TRUNCATE, "{\"key\":\"%s\"", key);
+    _snprintf_s(f, sizeof f, _TRUNCATE, "\"%s\":\"", field);
+    at = strstr(doc, k);
+    if (!at || !(at = strstr(at, f))) return 0;
+    for (at += strlen(f); *at && *at != '"' && n + 1 < cap; at++) {
+        if (*at == '\\' && at[1]) at++;
+        out[n++] = *at;
+    }
+    out[n] = 0;
+    return *at == '"';
+}
+
 /* The JSON object of the row whose key is `key` inside doc's "mods". */
 static int bundle_has(const char *doc, const char *key, const char *needle)
 {
@@ -2617,6 +2636,16 @@ int main(int argc, char **argv)
         free(doc);
         doc = list_doc();
         CHECK(has(doc, "\"key\":\"group1\\\\alex.nested\",") && bundle_has(doc, "group1\\\\alex.nested", "\"folder\":\"alex.nested\",\"group\":\"group1\""));
+        {
+            /* About's Folder link sends group\folder: under mods\ that names this mod's folder */
+            char group[MAX_PATH], folder[MAX_PATH], joined[MAX_PATH * 3];
+            DWORD at;
+            CHECK(row_str(doc, "group1\\\\alex.nested", "group", group, sizeof group) &&
+                  row_str(doc, "group1\\\\alex.nested", "folder", folder, sizeof folder));
+            _snprintf_s(joined, sizeof joined, _TRUNCATE, "%s\\%s\\%s", g_root, group, folder);
+            at = GetFileAttributesA(joined);
+            CHECK(at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY) && _stricmp(joined, nested) == 0);
+        }
         free(doc);
     }
 
