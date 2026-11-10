@@ -312,7 +312,9 @@ Import, New Folder and Create are there; owner 2026-11-09): the attention filter
 shown only when a mod needs attention; its hover and label carry the count, "2 mods need attention:
 show only these", and pressing it sets `aria-pressed` and shows only those rows), This map (its hover
 names how many mods the open map uses), refresh, Open mods folder, Migrate (only while
-`migrate.pending > 0`) and install (primary). The toolbar under it holds the filter alone. The
+`migrate.pending > 0`) and install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
+at the pane's 220 px minimum all six buttons stay inside the pane and the label is clipped. The toolbar
+under it holds the filter alone. The
 install dialog allows several folders (`FOS_ALLOWMULTISELECT`), joined with newlines in the action's
 argument; a picked folder without `mod.json` stands for every mod folder below it. One picked mod
 answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:

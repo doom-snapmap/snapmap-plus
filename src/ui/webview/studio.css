@@ -634,6 +634,12 @@
      (a .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel,
      the scrollbar and the keyboard. The header's actions are the panel's icon buttons, as the
      Prefabs tab's; each row carries one status glyph (installed, in this map, needs attention). */
+  /* The header keeps every icon button inside the pane down to its 220 px minimum: the label area
+     (title and count) gives up its room first and is clipped, the buttons never shrink. */
+  .mods-head-label { display: flex; align-items: center; gap: 8px; flex: 1 1 0; min-width: 0; overflow: hidden; }
+  .mods-head-label > .panel-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .mods-head-label > .badge { flex: none; }
+  #panel-mods .panel-head > .panel-actions { flex: none; }
   .btn.icon.mods-attn { color: var(--sqWarn); }
   .btn.icon.mods-attn[aria-pressed="true"] { background: var(--sqWarn); border-color: var(--sqWarn); color: var(--panel); }
   .mods-list:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }

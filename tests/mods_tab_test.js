@@ -1042,6 +1042,29 @@ test('additive: the map modal: installed at another build, declared nothing plac
   assert.equal(modsTab.slotText('aifsmmanager/states/spidermastermind/edit/subGraphs/spiderMastermind'),
                'edit/subGraphs/spiderMastermind in aifsmmanager/states/spidermastermind');
 });
+/* V12: at the pane's 220 px minimum the Install button sat past the pane edge. The stand-in DOM
+   cannot lay out, so the contract is the arithmetic the CSS promises: the label area (title and
+   count) shrinks to nothing and is clipped, the buttons never shrink, and every button the header
+   can show fits inside the pane's inset (measured in Chromium: work\fix2\L25\item1-header-geometry.txt). */
+test('the header fits at the minimum pane width', () => {
+  const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<div class="statusbar">'));
+  const head = panel.slice(panel.indexOf('<div class="panel-head">'), panel.indexOf('<div class="panel-toolbar">'));
+  assert.match(head, /<span class="mods-head-label"><span class="panel-title">Mods<\/span><span class="badge" id="modsBadge"[^>]*>0<\/span><\/span>/);
+  const rule = sel => { const at = css.indexOf('\n  ' + sel + ' {'); assert.ok(at >= 0, sel); return css.slice(at, css.indexOf('}', at)); };
+  assert.match(rule('.mods-head-label'), /flex: 1 1 0; min-width: 0; overflow: hidden;/);
+  assert.match(rule('.mods-head-label > .panel-title'), /min-width: 0; overflow: hidden; text-overflow: ellipsis;/);
+  assert.match(rule('#panel-mods .panel-head > .panel-actions'), /flex: none;/);
+  const px = (text, re) => Number(text.match(re)[1]);
+  const button = px(rule('.btn.icon'), /width: (\d+)px/);
+  const gap = px(rule('.panel-actions'), /gap: (\d+)px/);
+  const headGap = px(rule('.panel-head'), /gap: (\d+)px/);
+  const inset = px(css, /--pane-inline: (\d+)px/);
+  const min = Number(panel.match(/data-min-before="(\d+)"[^>]*data-split-label="Mods"/)[1]);
+  const buttons = (head.match(/<button /g) || []).length;
+  assert.equal(buttons, 6, 'every header button counted, the hidden ones too');
+  assert.ok(2 * inset + headGap + buttons * button + (buttons - 1) * gap <= min,
+            'six buttons fit in a ' + min + ' px pane');
+});
 test('page contract', () => {
   assert.ok(html.includes('<div class="tab" data-tab="mods">Mods</div>'));
   assert.ok(html.includes('<div class="content" id="panel-mods" style="display:none;">'));
