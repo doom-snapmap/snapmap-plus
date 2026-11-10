@@ -3,6 +3,49 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.25 -- 2026-11-10 (beta)
+
+**Each map keeps playing the exact mods it was saved with**
+
+A map remembers the exact version of each mod it was saved with, so changing a mod later never changes a finished map, and several versions of one mod can live side by side. You can edit a game file by putting your edited copy at the game's own name, and the edits of the mods a map uses are combined, with a choice when two of them set the same field. The Mods tab also gains New mod, a read-only Files view and rows for organizing folders. Maps saved by this release do not open in beta.24 or earlier.
+
+### New
+- **Versions:** A map keeps playing the exact version of each mod it was saved with; a newer version of the same mod installs beside it instead of replacing it.
+- **Edits:** Edit a game file by putting your edited copy at the game's own name; the build records what it changes instead of replacing the file.
+- **Edits:** A map gets the game's text with the edits of every mod it uses, so two mods adding to one list or one body both apply.
+- **Choices:** When several of a map's mods set one field to different values, you pick whose edit the map uses; the choice applies now and is saved with the map's next save.
+- **New mod:** Create a mod folder from the Mods list; it comes with a working example crate you can build on.
+- **Files:** A mod's Files button opens a read-only view of its folder, with each file's path and text.
+- **Folders:** Organizing folders inside your mods folder now show as collapsible rows with the number of mods inside.
+- **Substitution:** Your own maps, rawmaps and prefabs play with the version of a mod you have installed when the saved one cannot be obtained; community maps still stop.
+- **Denials:** When a map needs a mod that cannot be obtained, you get one plain reason and what to do next instead of a damaged-save dialog.
+- **Map data:** A map's mods, settings and navigation live in their own section of the map file, so the Toybox variables list shows only your own variables.
+- **Sounds:** A mod that borrows stock sound events loads the game sound bank it needs, so those sounds work on the first Play.
+- **Warnings:** Mod details list the build warnings about names the mod store would refuse, naming the field and the fix.
+
+### Improved
+- **Mods tab:** The header is now icon buttons like the Prefabs tab, and each row shows one status glyph that stays inside the pane at its smallest width.
+- **Mods tab:** Paths, counts, console settings and row names in the details pane are coloured by kind, each with a hover note explaining it.
+- **Mods tab:** A change made from the console reaches an open Mods tab within about half a second instead of waiting for a rescan.
+- **Editor tweaks:** Tweaks to the editor itself apply in every map you open here, while a mod's other files only serve in maps that use it.
+- **Editor tweaks:** A folder of editor tweaks alone is no longer offered for use in a map, and says it changes only this computer's editor.
+- **Rebuilds:** When an edit to a mod fails to build, the last working version keeps serving and the row shows the cause.
+- **Folders:** A mod folder you copy in by hand gets its own identity at its first build, so two folders with the same name never clash.
+- **Maps:** Your map follows your own rebuilt mod folder when you open and save it, with nothing to confirm.
+- **Maps:** Adding, removing or choosing mods marks the map as modified, so the editor asks you to save.
+- **Startup:** Mod folders that were never built, or were built by an earlier release, are built again at the first start, so maps are not refused after an update.
+- **Reloading:** Changed animations come back at the next map load, and a mod with companions works without restarting the game.
+- **Imports:** Rawmap and prefab ZIPs install the mods they carry beside yours, and ZIPs made by earlier Snapmap+ releases back to beta.20 open again.
+
+### Fixed
+- **Crashes:** A cold My Maps launch no longer crashes a few seconds into Play with certain mods installed, and a rare crash when pressing Play after installing or removing mods is prevented.
+- **Mod objects:** Objects from a mod no longer show a hidden icon above them or log a warning every frame while the cursor is on them in the editor.
+- **Maps:** Opening a map whose mod folder was removed now names the missing mod and how to get it back.
+- **Folders:** A profile folder with accented characters no longer makes the mods folder go missing, and a mod named like doom.old-school builds again.
+- **Prefabs:** Renaming a prefab that shows a Mods or Blueprint pill no longer fails.
+
+_Plus 108 smaller fixes and internal changes._
+
 ## v0.2.1-beta.24 -- 2026-11-04 (beta)
 
 **Mod scenes play at the player and spawn demons**
