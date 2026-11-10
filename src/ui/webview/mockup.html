@@ -7269,8 +7269,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('confirmOk').addEventListener('click', function(){ confirmModal.style.display='none'; var cb=confirmCb; confirmCb=null; if (cb) cb(); });
   }
   // Rename only on a changed, noncolliding name; the successful host refresh owns the final DOM.
+  // The row's text node is the file name; its Blueprint and Mods pills are not, and stay on revert.
   function renamePrefabItem(item){
-    var old = item.textContent;
+    var old = pfItemName(item), row = item.innerHTML;
     var folder = item.getAttribute('data-folder') || '';
     item.setAttribute('draggable','false');
     item.innerHTML = '<input class="pf-item-name" value="">';
@@ -7279,7 +7280,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     function finish(commit){
       if (done) return; done = true;
       var txt = (inp.value || '').trim();
-      item.textContent = old; item.setAttribute('draggable','true');   // revert DOM; disk is the source of truth
+      item.innerHTML = row; item.setAttribute('draggable','true');   // revert DOM; disk is the source of truth
       if (!commit || !txt || txt === old) return;
       if (allPrefabNamesInFolder(folder).indexOf(txt) !== -1) { toast('A prefab named "' + txt + '" already exists', 'warn'); return; }
       post({cmd:'renamePrefab', oldName: old, newName: txt, folder: folder});
