@@ -1019,6 +1019,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
       0x1695FE0u, 0x1696E60u },
+    { "ResourceLookup",     /* idResourceList find: resource*(list, name, quiet). The find-only
+                             * lookup ResourceMaterialize asks first, before it creates. Detoured
+                             * over its 19-byte head (three pushes, LEA RBP and SUB RSP; no relative
+                             * operand) to record what a kept mod pass looks up. Vulkan 0x1571D50,
+                             * OpenGL 0x1572EE0: same 68 callers, called at the same offsets from
+                             * ResourceMaterialize (+0x77, +0x273) and from itself (+0x225). */
+      "40 55 56 57 48 8D AC 24 60 FE FF FF 48 81 EC A0 02 00 00 48 C7 44 24 28 FE FF FF FF "
+      "48 89 9C 24 D0 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 90 01 00 00 48 8B F2 "
+      "48 8B F9 48 89 4C 24 20 48 8D 4D 60 E8 ?? ?? ?? ?? 90 C6 85 90 00 00 00 00",
+      0x1571D50u, 0x1572EE0u },
     /* Native module properties and XYZ inspector. Independently matched on
      * Vulkan/OpenGL at D0BCA0/D0B3B0, D0A0B0/D09980, D071F0/D06B70 and
      * D306F0/D2FDB0. No pinned-image RVA fallback is authorized. */

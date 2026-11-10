@@ -80,6 +80,7 @@
 #define PAL_STRIDE          0x6f0
 #define PAL_MAX             100000
 #define PROBE_STOLEN        21
+#define LOOKUP_STOLEN       19
 #define ERROR_TEXT_MAX      200
 
 typedef void *(*str_ctor_fn)(void *, const char *);
@@ -92,6 +93,7 @@ typedef void (*generic_load_fn)(void *);
 typedef unsigned char (*cvar_set_fn)(void *, const char *, unsigned char);
 typedef void (*buffer_cmd_fn)(void *, const char *);
 typedef unsigned char (*probe_fn)(void *, const char *, void *, void *, void *, void *, uint64_t);
+typedef void *(*lookup_fn)(void *, const char *, uint64_t);
 typedef union ms_string { void *align; unsigned char bytes[48]; } ms_string;
 
 static str_ctor_fn g_ctor;
@@ -110,6 +112,9 @@ static const void *g_res_head;        /* decl_resource_head: the resource list-o
 static probe_fn g_probe_orig;
 static sig_result g_probe_sig;
 static int g_probe_sig_ok;
+static lookup_fn g_lookup_orig;       /* ResourceLookup, detoured while the index holds a decl */
+static sig_result g_lookup_sig;
+static int g_lookup_sig_ok;
 static volatile LONG g_editor_pass_done;
 static DWORD g_fault_code;
 static cvar_set_fn g_cvar_set;
@@ -680,13 +685,36 @@ static int g_refresh_part = SH_MODSERVE_PART_ALL;
 
 typedef struct me_closure { sh_modserve_watermark mark; int counted; } me_closure;
 
+/* What the pass looks up (sh_modserve_lookups_*): recorded from the outermost
+ * watermark's start to its end by the ResourceLookup detour, so a kept decl
+ * never binds to an object that outlives it by less (report F8b). */
+static void me_lookups_open(void)
+{
+    if (g_lookup_orig) sh_modserve_lookups_open();
+}
+
+static void me_lookups_close(const char *phase, const char *what)
+{
+    sh_modserve_lookups lk;
+    if (!sh_modserve_lookups_recording()) return;
+    if (!sh_modserve_lookups_close(g_res_head, &lk)) {
+        me_log("%s: resource lists could not be walked after the %s; what it looked up was not kept", phase, what);
+        return;
+    }
+    if (lk.overflow)
+        me_log("%s: the %s looked up more than the product records; the rest were not kept", phase, what);
+    if (lk.raised)
+        me_log("%s: %u resource(s) the %s looked up kept for the session with it (%u looked up, %u live): %s%s", phase,
+               lk.raised, what, lk.looked_up, lk.live, lk.first, strlen(lk.first) + 40 >= sizeof lk.first ? ", ..." : "");
+}
+
 static void me_closure_begin(me_closure *c)
 {
     memset(c, 0, sizeof *c);
     if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &c->mark))
         me_log("editor closure: resource watermark unavailable (%s); what the editor rows' decls create now is not kept",
                g_res_head ? "the resource lists could not be walked" : "decl_resource_head unresolved");
-    g_mark_depth++;
+    if (!g_mark_depth++) me_lookups_open();
     c->counted = 1;
 }
 
@@ -717,7 +745,10 @@ static void me_closure_end(me_closure *c, const char *phase, const char *what)
         else if (!raised.lists) me_log("%s: resource lists could not be walked after the %s; not kept", phase, what);
     }
     sh_modserve_watermark_free(&c->mark);
-    if (!g_mark_depth) me_keep_holds(phase);
+    if (!g_mark_depth) {
+        me_lookups_close(phase, what);
+        me_keep_holds(phase);
+    }
 }
 
 static void me_reparse_early(const char *phase, int in_heap);
@@ -829,12 +860,45 @@ static unsigned char me_probe_hook(void *self, const char *path, void *a, void *
     return r ? r : (unsigned char)(ours ? 1 : 0);
 }
 
+/* Every resource the engine's lookup returns on the main thread while a pass
+ * is open is recorded; nothing else changes (sh_modserve_lookups_note). */
+static void *me_lookup_hook(void *list, const char *name, uint64_t quiet)
+{
+    void *r = g_lookup_orig(list, name, quiet);
+    if (r && sh_modserve_lookups_recording() && me_on_main() == 1) sh_modserve_lookups_note(r);
+    return r;
+}
+
+static void me_ensure_lookup(void)
+{
+    void *tramp;
+    sh_modserve_stats st;
+    if (g_lookup_orig || !g_lookup_sig_ok) return;
+    sh_modserve_get_stats(&st);
+    if (!st.files) return;
+    tramp = sh_prepare_detour_sig(&g_lookup_sig, (void *)me_lookup_hook, LOOKUP_STOLEN);
+    if (!tramp) {
+        me_log("resource lookup detour refused; what a mod pass looks up is kept only by name");
+        g_lookup_sig_ok = 0;
+        return;
+    }
+    g_lookup_orig = (lookup_fn)tramp;
+    if (sh_commit_detour(tramp) != B2_PATCH_OK) {
+        if (sh_uninstall_detour(tramp)) g_lookup_orig = NULL;
+        g_lookup_sig_ok = 0;
+        me_log("resource lookup detour commit failed; what a mod pass looks up is kept only by name");
+        return;
+    }
+    me_log("resource lookup hook installed (rva 0x%X, %d-byte window)", g_lookup_sig.rva, LOOKUP_STOLEN);
+}
+
 /* The probe is detoured only once the index holds a decl, so an empty mods
- * folder leaves the engine's probe untouched. */
+ * folder leaves the engine's probe untouched; the lookup likewise. */
 static void me_ensure_probe(void)
 {
     void *tramp;
     sh_modserve_stats st;
+    me_ensure_lookup();
     if (g_probe_orig || !g_probe_sig_ok) return;
     sh_modserve_get_stats(&st);
     if (!st.files) return;
@@ -932,8 +996,16 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
             g_probe_sig = results[i];
             g_probe_sig_ok = 1;
         }
+    for (i = 0; i < count; ++i)
+        if (results[i].name && !strcmp(results[i].name, "ResourceLookup") && results[i].status == SIG_OK) {
+            g_lookup_sig = results[i];
+            g_lookup_sig_ok = 1;
+        }
     if (!g_bound) me_log("decl registration unavailable on this build (registry, heap scope or main thread unresolved)");
     if (!g_probe_sig_ok) me_log("existence probe unavailable (DeclResourceProbe is not a clean match)");
+    if (!g_lookup_sig_ok)
+        me_log("resource lookup unavailable (ResourceLookup is not a clean match); what a mod pass looks up is kept "
+               "only by name");
     if (!g_cvar_set || !g_cvar_slot)
         me_log("bundle cvar requirements unavailable (%s unresolved); bundles that set a cvar are blocked",
                !g_cvar_set ? "CvarSetString" : "the cvar system");
@@ -1876,7 +1948,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
      * publish, and the keeper (me_run neither splits nor nests another). */
     {
         int part = g_refresh_part;
-        g_mark_depth++;
+        if (!g_mark_depth++) me_lookups_open();
         g_refresh_part = SH_MODSERVE_PART_ALL;
         ready = me_run(&plan, phase);
         g_refresh_part = part;
@@ -1904,6 +1976,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
         else if (!raised.lists) me_log("%s: resource lists could not be walked after the pass; closure not raised", phase);
     }
     sh_modserve_watermark_free(&mark);
+    if (!g_mark_depth) me_lookups_close(phase, "rows' closure");
     me_keep_holds(phase);
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != SH_MODSERVE_RANK_SEDEF) continue;

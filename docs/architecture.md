@@ -1504,7 +1504,29 @@ cooked mesh, see the builder), so a raised mesh never keeps a skeleton at 1
 that the Play purge frees (the keycard of
 `interact/yellow_key_tech_corpse`, VK 0x1a05687; snaphak-re triage V2, F7).
 What the needs do not name (a stock mesh's materials, a skeleton a clip names
-only in its bytes) is outside the rule.
+only in its bytes) is outside that rule, and the next one covers it.
+
+A pass the editor runs while a map is open (an in-editor rawmap reload, Open
+map in the editor, `sh_mods map add`) registers while the previous map's
+level-1 objects are still alive, since the in-editor load runs no purge
+(DoLoadMap, VK 0x1405253e0, calls neither the purge driver nor the purge). A
+decl the pass keeps then binds to those objects: they are older than its
+watermark, and no recorded need names them (an entityDef records its own
+md6Def, not its attachments), so the Play purge freed them under the kept
+decl (3 of 4 such Plays faulted, fresh opens 0 of 18; snaphak-re triage V3,
+F8, F8b). The engine finds every existing resource through one find-only
+lookup, `ResourceLookup` (VK 0x141571d50 / GL 0x141572ee0), which
+`ResourceMaterialize` asks before it creates one; while a watermark is open
+the product records, on the main thread, every resource that lookup returns
+(a 19-byte detour, installed once the index holds a decl), and the outermost
+watermark's close raises each one still listed at level 1 to 4 under the
+resource lock (`sh_modserve_lookups_*`, from `me_closure_begin` and
+`me_editor_rows` to `me_closure_end`). The set is deduplicated by address and
+emptied at the close; a stock object already at 4 costs nothing. A log line
+`<phase>: N resource(s) the <part> looked up kept for the session with it`
+names what it raised. So a kept decl never holds an object that outlives it
+by less, whether the pass created the object (the watermark), parsed it
+earlier (the needs by name) or found it already loaded (the lookups).
 
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
 {"activate": [...], "deactivate": [...]}}`) are read only through the builder's

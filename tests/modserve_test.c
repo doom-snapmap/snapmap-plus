@@ -4894,6 +4894,82 @@ static void test_store_root_utf8(void)
     CHECK(sh_modserve_index_build(g_root) >= 6);
 }
 
+/* ------------------------------------------------------------------ what a kept pass looks up (triage F8b) */
+
+/* An in-editor pass registers while the previous map's level-1 objects are
+ * alive; a decl it keeps binds to them through the engine's lookup. The
+ * engine side's ResourceLookup detour notes each return while a pass is
+ * open (the stand-in here calls note as the hook does); the close raises
+ * what is still listed at level 1, and the set is emptied. */
+static void test_pass_lookups(void)
+{
+    static kh_res old_skel, old_mat, stock, freed, later;
+    static kh_res *skels[4], *mats[4];
+    static kh_list ls, lm, bad;
+    kh_list *head = &ls;
+    sh_modserve_lookups out;
+    int i;
+    old_skel.name = "md6/old/body.md6skl"; old_skel.level = 1;
+    old_mat.name = "models/old/body"; old_mat.level = 1;
+    stock.name = "models/stock/permanent"; stock.level = 4;
+    freed.name = "models/old/freed"; freed.level = 1;
+    later.name = "models/old/later"; later.level = 1;
+    ls.type = "md6skl"; ls.cls = "idMD6Skel"; ls.next = &lm; ls.entries = skels; ls.count = 1;
+    lm.type = "material"; lm.cls = "idMaterial"; lm.next = NULL; lm.entries = mats; lm.count = 3;
+    skels[0] = &old_skel;
+    mats[0] = &old_mat; mats[1] = &stock; mats[2] = &later;
+    /* Outside a pass: nothing is recorded and a close raises nothing. */
+    CHECK(!sh_modserve_lookups_recording());
+    sh_modserve_lookups_note(&old_skel);
+    CHECK(sh_modserve_lookups_close(&head, &out) == 0 && out.raised == 0 && old_skel.level == 1);
+    /* A pass: what it looks up is raised with it, once each; a stock object
+     * already at 4 costs nothing; an object no longer listed is left alone. */
+    sh_modserve_lookups_open();
+    CHECK(sh_modserve_lookups_recording());
+    for (i = 0; i < 3; ++i) { sh_modserve_lookups_note(&old_skel); sh_modserve_lookups_note(&old_mat); }
+    sh_modserve_lookups_note(&stock);
+    sh_modserve_lookups_note(&freed);
+    sh_modserve_lookups_note(NULL);
+    CHECK(sh_modserve_lookups_close(&head, &out) == 1);
+    CHECK(out.looked_up == 4 && out.live == 3 && out.raised == 2 && out.lists == 2 && !out.overflow);
+    CHECK(old_skel.level == 4 && old_mat.level == 4 && stock.level == 4 && freed.level == 1 && later.level == 1);
+    CHECK(strstr(out.first, "md6/old/body.md6skl") && strstr(out.first, "models/old/body") && !strstr(out.first, "stock"));
+    CHECK(!sh_modserve_lookups_recording());
+    /* The set cleared: the next pass starts empty, and a lookup after the
+     * close is not carried into it. */
+    sh_modserve_lookups_note(&later);
+    sh_modserve_lookups_open();
+    CHECK(sh_modserve_lookups_close(&head, &out) == 1 && out.looked_up == 0 && out.raised == 0 && later.level == 1);
+    /* Many distinct lookups grow the set; each is raised once. */
+    {
+        static kh_res many[5000];
+        static kh_res *many_e[5000];
+        static kh_list lmany;
+        for (i = 0; i < 5000; ++i) { many[i].name = "models/many"; many[i].level = 1; many_e[i] = &many[i]; }
+        lmany.type = "material"; lmany.cls = "idMaterial"; lmany.next = NULL; lmany.entries = many_e; lmany.count = 5000;
+        lm.next = &lmany;
+        sh_modserve_lookups_open();
+        for (i = 0; i < 5000; ++i) { sh_modserve_lookups_note(&many[i]); sh_modserve_lookups_note(&many[4999 - i]); }
+        CHECK(sh_modserve_lookups_close(&head, &out) == 1 && out.looked_up == 5000 && out.raised == 5000);
+        for (i = 0; i < 5000 && many[i].level == 4; ++i) {}
+        CHECK(i == 5000);
+        lm.next = NULL;
+    }
+    /* Lists that do not read as lists: the close reports it, nothing more is
+     * raised, and the set still clears. */
+    bad.type = "bad"; bad.cls = "bad"; bad.next = NULL; bad.entries = NULL; bad.count = 2;
+    lm.next = &bad;
+    later.level = 1;
+    sh_modserve_lookups_open();
+    sh_modserve_lookups_note(&later);
+    (void)sh_modserve_lookups_close(&head, &out);
+    CHECK(out.looked_up == 1 && !sh_modserve_lookups_recording());
+    lm.next = NULL;
+    later.level = 1;
+    sh_modserve_lookups_open();
+    CHECK(sh_modserve_lookups_close(&head, &out) == 1 && out.looked_up == 0 && later.level == 1);
+}
+
 int main(void)
 {
     char top[MAX_PATH];
@@ -4922,6 +4998,7 @@ int main(void)
     test_editor_refs();
     test_watermark();
     test_kept_holds();
+    test_pass_lookups();
     test_editor_closure();
     test_renderparm_first();
     test_surfaces_never_parsed();
