@@ -5790,7 +5790,7 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
         *state = -1;
         if (why && why_cap) {
             if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION)
-                _snprintf_s(why, why_cap, _TRUNCATE, "another program kept it open for over a second");
+                _snprintf_s(why, why_cap, _TRUNCATE, "another program has it open");
             else if (err) _snprintf_s(why, why_cap, _TRUNCATE, "Windows error %lu", err);
             else _snprintf_s(why, why_cap, _TRUNCATE, "it is larger than 64 MiB");
         }
@@ -5811,6 +5811,26 @@ static void mb_rec_log(const char *fmt, ...)
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
     va_end(ap);
     backend_log(line);
+}
+
+/* The sentence a caller shows the player about the last record read or write
+ * this thread could not make: the file and the next step. */
+static __declspec(thread) char g_rec_why[MAX_PATH * 4 + 240];
+
+static void mb_rec_why(const char *name, const char *why)
+{
+    _snprintf_s(g_rec_why, sizeof g_rec_why, _TRUNCATE,
+                "%s could not be used (%s); close the program holding it (a backup, sync or antivirus tool, or an "
+                "editor) and try again", name, why && why[0] ? why : "it could not be read");
+}
+
+void sh_mb_record_why_clear(void) { g_rec_why[0] = 0; }
+
+int sh_mb_record_why(char *out, size_t cap)
+{
+    if (!g_rec_why[0]) return 0;
+    if (out && cap) strncpy_s(out, cap, g_rec_why, _TRUNCATE);
+    return 1;
 }
 
 /* The record's path for a log line: UTF-8, without the \\?\ prefix. */
@@ -5866,6 +5886,7 @@ int sh_mb_record_get(const char *mods_root, const char *section, char **json_out
         if (at < 0) g_rec_failed[g_rec_failed_next++ % MB_REC_FAILED_MAX] = key;
         mb_rec_log("MODS: record: cannot read %s (%s); its \"%s\" section is not written until it reads again",
                         name, why, section);
+        mb_rec_why(name, why);
     } else if (at >= 0) g_rec_failed[at] = 0;
     sh_mb_record_unlock();
     free(path);
@@ -5898,6 +5919,7 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
          * replace what the section holds with less. */
         mb_rec_log("MODS: record: the \"%s\" section of %s was not written: its last read failed, and the write would "
                    "drop what it holds; it is written once it reads again", section, name);
+        if (!g_rec_why[0]) mb_rec_why(name, "it could not be read a moment ago");
         sh_mb_record_unlock();
         mbj_free(value);
         free(path);
@@ -5907,6 +5929,7 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
     if (state == -1) {
         mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record cannot be read (%s)", section, name,
                    why);
+        mb_rec_why(name, why);
         sh_mb_record_unlock();
         mbj_free(value);
         free(path);
@@ -5924,6 +5947,7 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
         } else {
             mb_rec_log("MODS: record: the \"%s\" section of %s was not written: the record is not valid JSON and could not "
                        "be moved aside (Windows error %lu)", section, name, GetLastError());
+            mb_rec_why(name, "it is not valid JSON and could not be moved aside");
             sh_mb_record_unlock();
             mbj_free(value);
             free(path);
@@ -5963,6 +5987,13 @@ int sh_mb_record_put(const char *mods_root, const char *section, const char *jso
             free(dir);
         }
         ok = mb_write_wfile(path, pretty, strlen(pretty));
+        if (!ok) {
+            DWORD err = GetLastError();
+            _snprintf_s(why, sizeof why, _TRUNCATE, err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED
+                        ? "another program has it open" : "Windows error %lu", err);
+            mb_rec_log("MODS: record: the \"%s\" section of %s was not written (%s)", section, name, why);
+            mb_rec_why(name, why);
+        }
     }
     sh_mb_record_unlock();
     free(pretty);

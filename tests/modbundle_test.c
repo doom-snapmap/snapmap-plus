@@ -734,8 +734,16 @@ static void test_record_read_failure(const char *tmp)
     t = rec_hold_start(&r, path, 4000);
     g_logged = 0;
     CHECK(sh_mb_record_get(root, "claims", &text) == -1 && !text);
-    CHECK(log_has("MODS: record: cannot read ") && log_has("recordheld\\snapmap-plus.json (another program kept it open for "
-                                                          "over a second); its \"claims\" section is not written"));
+    CHECK(log_has("MODS: record: cannot read ") && log_has("recordheld\\snapmap-plus.json (another program has it open); "
+                                                          "its \"claims\" section is not written"));
+    {
+        /* The sentence a caller shows the player: the file and the next step. */
+        char why[MAX_PATH * 4 + 240];
+        CHECK(sh_mb_record_why(why, sizeof why) && strstr(why, "recordheld\\snapmap-plus.json could not be used (another "
+              "program has it open); close the program holding it (a backup, sync or antivirus tool, or an editor) and try again"));
+        sh_mb_record_why_clear();
+        CHECK(!sh_mb_record_why(why, sizeof why));
+    }
     g_logged = 0;
     CHECK(!sh_mb_record_put(root, "cache", "{\"aa\":\"bb\"}"));
     CHECK(log_has("the \"cache\" section of ") && log_has("was not written: the record cannot be read (another program"));

@@ -1059,11 +1059,17 @@ static int msy_upload(const char *const *hashes, int n, const char *ref, const m
         if (code == MODNET_OK) {
             st->reclaimed = have_secret && strcmp(claim, stored_claim) == 0;
             strcpy_s(st->claim, sizeof st->claim, claim);
+            sh_mb_record_why_clear();
             if (!msy_claim_store(ref, claim, secret, bh, u.nb)) {
+                char why[MAX_PATH * 4 + 240];
                 free(bh);
                 SecureZeroMemory(secret, sizeof secret);
-                msy_stats_fail(st, MODNET_E_ARG, "claimed as %s, but the claims section of mods\\snapmap-plus.json could not "
-                               "be written; the claim cannot be released later", claim);
+                if (!sh_mb_record_why(why, sizeof why))
+                    strcpy_s(why, sizeof why, "mods\\snapmap-plus.json could not be written");
+                msy_log("MODS: push: claimed as %s, but the claim was not saved, so it cannot be released later: %s", claim,
+                        why);
+                /* The publish dialog shows this cause: the file and the next step first. */
+                msy_stats_fail(st, MODNET_E_ARG, "%s", why);
                 goto done;
             }
         }

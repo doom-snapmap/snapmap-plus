@@ -733,6 +733,11 @@ read-modify-write never replaces what it holds with less; a write while the
 file cannot be read is refused with the same kind of line. A record that is
 not JSON is moved aside as `snapmap-plus.json.unreadable-<time>` when a
 section is written, and a new one started; the line names the aside file.
+The player reads the same failure where they acted: install and uninstall in
+the Mods tab (and their console verbs) add "Some of its bookkeeping was not
+saved: <file> could not be used (<why>); close the program holding it ... and
+try again" to their result, and a publish whose claim could not be saved
+shows that sentence as its upload cause (`sh_mb_record_why`).
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
 covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct

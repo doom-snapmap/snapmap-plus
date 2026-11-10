@@ -178,6 +178,32 @@ static const sh_mb_stock_ops GAME_LACKS_ROCK = { NULL, rock_match, rock_identify
 /* The builder's stock resolver: every shadow names a stock resource. */
 static int stock_yes(void *context, const char *request) { (void)context; (void)request; return 1; }
 
+/* Another program holds the record open without read sharing for `ms`. */
+typedef struct sync_hold { char path[MAX_PATH * 2]; DWORD ms; HANDLE taken; } sync_hold;
+static DWORD WINAPI sync_hold_thread(LPVOID p)
+{
+    sync_hold *r = (sync_hold *)p;
+    HANDLE h = CreateFileA(r->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    SetEvent(r->taken);
+    Sleep(r->ms);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    free(r);
+    return 0;
+}
+static HANDLE sync_hold_record(const char *path, DWORD ms)
+{
+    sync_hold *r = (sync_hold *)calloc(1, sizeof *r);
+    HANDLE t, taken;
+    if (!r) return NULL;
+    strncpy_s(r->path, sizeof r->path, path, _TRUNCATE);
+    r->ms = ms;
+    r->taken = taken = CreateEventA(NULL, TRUE, FALSE, NULL);
+    t = CreateThread(NULL, 0, sync_hold_thread, r, 0, NULL);
+    WaitForSingleObject(taken, 5000);
+    CloseHandle(taken);
+    return t;
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], src[MAX_PATH * 2], storeA[MAX_PATH * 2], storeB[MAX_PATH * 2], storeC[MAX_PATH * 2], dir[MAX_PATH * 2];
@@ -351,6 +377,23 @@ int main(int argc, char **argv)
         CHECK(!modsync_upload_bundles(one, 1, "map-5", NULL, &st) && st.code == MODNET_E_ARG && !st.queued);
         CHECK(g_stub.requests == before);
         CHECK(!modsync_upload_bundles(one, 1, "", NULL, &st) && st.code == MODNET_E_ARG);
+    }
+
+    {
+        /* The record held by another program: the publish's claim is not saved,
+         * and the cause the publish dialog shows names the file and what to do. */
+        const char *one[] = { hA };
+        char rec[MAX_PATH * 2];
+        HANDLE t;
+        _snprintf_s(rec, sizeof rec, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
+        t = sync_hold_record(rec, 6000);
+        CHECK(!modsync_upload_bundles(one, 1, "map-held", NULL, &st));
+        if (!strstr(st.cause, "close the program holding it")) fprintf(stderr, "held-record cause: %s\n", st.cause);
+        CHECK(strstr(st.cause, "snapmap-plus.json could not be used (another program has it open); close the program "
+                               "holding it (a backup, sync or antivirus tool, or an editor) and try again") != NULL);
+        WaitForSingleObject(t, 10000);
+        CloseHandle(t);
+        CHECK(!modsync_claim_lookup("map-held", NULL, NULL));
     }
 
     /* ---- a map pinning an earlier build: the current build is uploaded ---- */

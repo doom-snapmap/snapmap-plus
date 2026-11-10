@@ -456,6 +456,12 @@ int  sh_mb_record_get(const char *mods_root, const char *section, char **json_ou
  * "MODS: record:" line naming the file when the record cannot be read or the
  * section's last get failed. */
 int  sh_mb_record_put(const char *mods_root, const char *section, const char *json);
+/* The player-facing sentence for the last record read or write this thread
+ * could not make: the file's full path, why, and the next step (close the
+ * program holding it). A flow that writes the record clears it when it starts
+ * and adds it to its result message when sh_mb_record_why returns 1. */
+void sh_mb_record_why_clear(void);
+int  sh_mb_record_why(char *out, size_t cap);
 
 void sh_mb_free(sh_mb_bundle *bundle);
 

@@ -2230,13 +2230,28 @@ static int mu_absolute(const char *folder)
 }
 
 /* One mod folder, as the install button has always done it. */
+/* The record (mods\snapmap-plus.json) could not be read or written during the
+ * action: the player reads which file and what to do (modbundle.h
+ * sh_mb_record_why), not only the backend log. */
+static void mu_record_note(char *msg, size_t cap)
+{
+    char why[MAX_PATH * 4 + 240];
+    size_t n;
+    if (!sh_mb_record_why(why, sizeof why)) return;
+    n = strlen(msg);
+    if (n && msg[n - 1] != '.') strncat_s(msg, cap, ".", _TRUNCATE);
+    strncat_s(msg, cap, " Some of its bookkeeping was not saved: ", _TRUNCATE);
+    strncat_s(msg, cap, why, _TRUNCATE);
+    strncat_s(msg, cap, ".", _TRUNCATE);
+}
+
 static int mu_install_one(const char *folder)
 {
     sh_mb_resolver r;
     sh_ms_install_stats st;
     sh_mb_bundle bd;
     mu_stock stock = { 0 };
-    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 256], note[160];
+    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160];
     int ok, rows = 0;
     size_t k;
     mu_buf b;
@@ -2248,6 +2263,7 @@ static int mu_install_one(const char *folder)
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
     r.stock_context = &stock;
+    sh_mb_record_why_clear();
     ok = sh_ms_install_from_folder(folder, &r, key, sizeof key, &st, &bd, cause, sizeof cause);
     for (k = 0; k < bd.file_count; k++)
         if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") && bd.files[k].cls != SH_MB_CLASS_EDITOR)
@@ -2261,6 +2277,7 @@ static int mu_install_one(const char *folder)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", key,
                     rows ? "; its Toybox rows are in the palette" : "");
     }
+    mu_record_note(msg, sizeof msg);
     mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
     mu_kstr(&b, "key", ok ? key : "", 0);
     mu_kstr(&b, "id", bd.id, 0);
@@ -2311,12 +2328,14 @@ static int mu_install(const char *arg)
     mu_bulk_item *items = NULL;
     size_t n = 0, cap = 0, i, picked = 0;
     const char *p = arg ? arg : "";
-    char first_key[SH_MS_KEY_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + 256], note[160] = "", refused_first[SH_MB_CAUSE_MAX + 300] = "";
+    char first_key[SH_MS_KEY_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160] = "",
+         refused_first[SH_MB_CAUSE_MAX + 300] = "";
     unsigned installed = 0, refused = 0, rows = 0;
     int rc, single_mod = 0;
     mu_buf b, items_json;
     memset(&b, 0, sizeof b);
     memset(&items_json, 0, sizeof items_json);
+    sh_mb_record_why_clear();
 
     /* Expand the picked folders into mod folders. */
     while (*p) {
@@ -2413,6 +2432,7 @@ static int mu_install(const char *arg)
                     refused, refused_first, refused > 1 ? ", and more (see the log)" : "");
     else
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not installed: %s%s.", refused_first, refused > 1 ? ", and more (see the log)" : "");
+    mu_record_note(msg, sizeof msg);
     mu_result_head(&b, SH_MODS_ACT_INSTALL, installed > 0, msg);
     mu_kstr(&b, "key", first_key, 0);
     mu_knum(&b, "installedCount", installed, 0);
@@ -3632,7 +3652,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     mu_record rec;
     mu_plan p;
     mu_buf b;
-    char msg[MAX_PATH * 4 + 600], cause[300], title[300];
+    char msg[MAX_PATH * 8 + 900], cause[300], title[300];
     int entry = -1, ok = 1, builds = 0;
     unsigned char *targets = NULL;
     size_t i, t;
@@ -3646,6 +3666,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
         mu_line(o, "%s %s: refused: %s", verb, key, cause);
         return mu_simple_result(action, 0, msg);
     }
+    sh_mb_record_why_clear();   /* a record read or write this action cannot make is named in its message */
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     mu_record_load(&m, &rec);
     mu_map_build(&mp, &m, &rec);
@@ -3828,6 +3849,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                             removed_from_map ? " It was removed from the open map." : "");
             free(removing);
         }
+        mu_record_note(msg, sizeof msg);
         mu_line(o, "%s %s: %s", verb, key, msg);
         mu_result_head(&b, action, ok, msg);
     }

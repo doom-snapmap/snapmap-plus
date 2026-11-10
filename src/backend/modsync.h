@@ -62,7 +62,7 @@ typedef struct modsync_stats {
     int editor_only;                /* download: the bundle changes only the editor; recorded, not installed */
     char key[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* download: the installed folder (relative) */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
-    char cause[256];
+    char cause[1024];               /* room for a record path and its next step (sh_mb_record_why) */
     int game_lacks;                 /* download: refused because a borrow names game bytes this machine lacks */
     char game_source[260];          /* that borrow's installed source path */
 } modsync_stats;
