@@ -893,8 +893,8 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_res_lock = (void *)glb_resolve(module_base, "resource_lock", NULL);
     sh_modserve_set_resource_lock(g_res_lock);
     if (!g_res_lock) me_log("resource lock unresolved; the resource lists are walked without it");
-    /* The editor's type-info cache: rows registered after the game built it
-     * are added by a rebuild after each palette build (modtypeinfo.c). */
+    /* The editor's type-info cache: the default trees of the rows a mod
+     * registers after the game built it come from the product (modtypeinfo.c). */
     sh_modtypeinfo_install(results, count, module_base);
     /* The served-bytes ledger: complete only when nothing was served before this point. */
     {
@@ -1317,6 +1317,7 @@ static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
     if (it->kind == SH_MODSERVE_RF_ANIM && !g_anim_pass) { if (!c->stage) c->anims_waiting++; return 0; }
     if (it->kind == SH_MODSERVE_RF_DECL) {
         int before = c->decls.reparsed + c->decls.faulted;
+        sh_modtypeinfo_decl_changed(it->type, it->name);   /* its default tree follows the new bytes */
         (void)me_reparse_one(&c->decls, it->type, it->name, it->request, it->bundle_id);
         if (c->decls.reparsed + c->decls.faulted == before) c->not_held++;   /* its next parse reads the current bytes */
         return 1;
@@ -2137,9 +2138,9 @@ void sh_modserve_palette_after_build(void *palette)
     if (!sh_modserve_active()) return;
     mods = me_count_mod_rows(palette, &rows);
     me_log("palette built: %d rows, %d from installed bundles", rows, mods);
-    /* A mod row the game's type-info cache lacks draws its entity with a zero
-     * scale and a hidden badge; the cache is rebuilt when one is missing. */
-    if (mods > 0) sh_modtypeinfo_sync(palette, "palette build");
+    /* A mod row the game's type-info cache lacks is served its default tree
+     * by the product; one line says how many rows that is. */
+    if (mods > 0) sh_modtypeinfo_after_palette(palette);
 }
 
 int modserve_palette_rebuild_requested(void)

@@ -1292,22 +1292,61 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 44 8B 51 0C 48 8B DA 41 83 EA 01 74 2B 41 83 FA 01 74 11 33 C9 48 8B 01 FF 50 38 48 8B C3 48 83 C4 20", 0x1257640u, 0x1256B40u },
     { "EditorBudgetUpdate", /* void(editor): recompute the editor budget; writes the limits-reached byte editor+0x236d0. VK 118b070, GL 118a1d0. */
       "40 55 B8 50 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 40 00 00 83 3D ?? ?? ?? ?? 00", 0x118B070u, 0x118A1D0u },
-    { "SnapTypeInfoCacheBuild", /* void(): build the editor's entity type-info cache (idSnapTypeInfoCache,
-                             * engine global snap_typeinfo_cache) from every snapEditorEntityDef decl
-                             * registered now, one default property tree per entityDef, between the game's
-                             * begin and end calls (game vtable +0x48 and +0x50). Builds only while the
-                             * cache count is 0; stops the game at 0x5dc registered rows. The game runs it
-                             * once per process; modtypeinfo.c runs it again after destroying every cached
-                             * tree when a mod's row is missing. Ignores its argument. VK 0x141181c50,
-                             * GL 0x141180db0. */
-      "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 "
-      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 50 90 "
-      "48 83 C4 38 C3", 0x1181C50u, 0x1180DB0u },
+    /* The editor's entity type-info cache (idSnapTypeInfoCache, engine global
+     * snap_typeinfo_cache): one default property tree per entityDef the game
+     * registered before it built the cache. modtypeinfo.c detours Get and its
+     * lookup and builds the trees of the types the cache lacks with the same
+     * engine calls the game's builder uses. */
+    { "SnapTypeInfoCacheGet", /* tree **(cache [rcx], tree **out [rdx], idSnapEntityEdit *entity [r8]):
+                             * idSnapTypeInfoCache::Get. Searches the cache for the entity's pooled
+                             * entityDef name (+0x58); a hit hands out a copy of the cached tree with the
+                             * instance's text applied, a miss a tree from the instance alone. Detoured
+                             * (17 bytes: seven pushes and mov eax,0x1290; the stack probe call follows).
+                             * VK 0x141244dd0, GL 0x141244400. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 B8 90 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 50 FE FF FF FF "
+      "48 89 9C 24 E8 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 12 00 00 49 8B E8 4C",
+      0x1244DD0u, 0x1244400u },
+    { "SnapTypeInfoCacheLookup", /* tree *(cache [rcx], const char **key [rdx]): the lookup-only sibling of
+                             * Get, the cached tree itself or NULL; the two entity refresh paths read it.
+                             * Detoured (16 bytes, up to the call of the search). VK 0x141245000,
+                             * GL 0x141244630. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
+      "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05",
+      0x1245000u, 0x1244630u },
+    { "TreeTextCtor",      /* ctx *(ctx [rcx], int): construct the 0x1210-byte text context the game
+                             * writes an entity's state into and parses a tree from (state header
+                             * +0, memory writer +0x1018, text +0x1020). VK 0x140342bc0, GL 0x140342810. */
+      "48 89 5C 24 08 57 48 83 EC 20 33 C0 C7 41 04 01 00 00 00 89 01 8B DA 88 41 12 48 8B F9 C7 41 08 02 00 00 00 "
+      "33 D2 C7 41 0C 01 01 00 00 66 C7 41 10 00 01 48 89 81 18 10 00 00 48 81 C1 20 10 00 00 E8 ?? ?? ?? ?? "
+      "89 9F 08 12 00 00 48 8B C7", 0x342BC0u, 0x342810u },
+    { "TreeTextDefaultState", /* state *(state [rcx], byte, byte): the 0x14-byte default edit state the
+                             * builder passes to the game's entity create and copies over the text
+                             * context's header. VK 0x140342c90, GL 0x1403428e0. */
+      "C7 01 00 00 00 00 48 8B C1 C7 41 04 01 00 00 00 C7 41 08 02 00 00 00 88 51 0C 44 88 41 0D C7 41 0E 00 00 00 01 "
+      "C6 41 12 00 C3", 0x342C90u, 0x3428E0u },
+    { "TreeTextOpenWriter", /* bool(ctx [rcx]): open the context's memory writer on its inline buffer
+                             * before the game writes an entity's state. VK 0x140346560, GL 0x140346140. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B F9 48 8B 89 18 10 00 00 33 DB 48 85 C9 74 0F "
+      "48 8B 01 8D 53 01 FF 10 48 89 9F 18 10 00 00 48 8D 8F 20 10 00 00 E8 ?? ?? ?? ?? B9 80 01 00 00 E8 ?? ?? ?? ?? "
+      "48 89 44 24 40 48 85 C0 74 0B 48 8B C8 E8 ?? ?? ?? ?? 48 8B D8", 0x346560u, 0x346140u },
+    { "TreeTextFinish",    /* bool(ctx [rcx]): close the writer and make what it wrote the context's
+                             * text for parsing. VK 0x140345070, GL 0x140344c10. */
+      "40 55 48 83 EC 20 48 8B E9 48 8B 89 18 10 00 00 48 85 C9 0F 84 93 00 00 00 48 8B 01 FF 50 08 84 C0 "
+      "0F 84 85 00 00 00 48 89 5C 24 30 48 8B 9D 18 10 00 00 48 8B CB 48 89 74 24 38 48 89 7C 24 40 E8 ?? ?? ?? ?? "
+      "48 8B 03 48 8B CB 48 8B B3 68 01 00 00 FF 50 28", 0x345070u, 0x344C10u },
+    { "TreeTextDtor",      /* void(ctx [rcx]): release the writer and the text. VK 0x140342cc0, GL 0x140342910. */
+      "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 8B D9 48 8B 89 18 10 00 00 48 85 C9 74 16 48 8B 01 "
+      "BA 01 00 00 00 FF 10 90 48 C7 83 18 10 00 00 00 00 00 00 48 8D 8B 20 10 00 00 E8 ?? ?? ?? ??",
+      0x342CC0u, 0x342910u },
+    { "GridTreeFromText",  /* void(tree [rcx], ctx [rdx]): free the tree's nodes and parse the context's
+                             * text into it; what Build runs on each cache slot. VK 0x140356770, GL 0x140356100. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 8B 11 E8 ?? ?? ?? ?? 45 33 C9 48 C7 07 00 00 00 00 "
+      "45 33 C0 48 8B D3 48 8B CF E8 ?? ?? ?? ?? 48 8B 5C 24 30 48 89 07 48 83 C4 20 5F C3", 0x356770u, 0x356100u },
     { "GridTreeDestroy",    /* void(tree [rcx]): the property tree destructor the engine runs on every tree
                              * idSnapTypeInfoCache::Get hands out (then frees the 0x48 bytes); frees the
                              * tree's node storage (+0x28, by its state byte +0x3b) and releases the entities
                              * on its list (+0x8, linked at +0x2200) through the game. modtypeinfo.c runs it
-                             * on each cached tree before a rebuild. VK 0x1403723a0, GL 0x140371d80. */
+                             * on a product-built tree it drops. VK 0x1403723a0, GL 0x140371d80. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 E8 ?? ?? ?? ?? 90 "
       "0F B6 43 3B 33 FF 84 C0 74 06 2C 03 3C 01 77 19 48 8B 4B 28", 0x3723A0u, 0x371D80u },
     { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuild the editor entity palette at

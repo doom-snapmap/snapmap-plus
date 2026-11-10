@@ -158,7 +158,7 @@
    "delta": 0,
    "vk_rva": "0x5c6f800",
    "gl_rva": "0x4574e80",
-   "note": "idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in SnapTypeInfoCacheBuild"
+   "note": "idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in the game's cache-build wrapper (VK 0x141181c50, GL 0x141180db0)"
   },
   "snap_editor_row_count": {
    "anchor": "8B 2D ?? ?? ?? ?? 81 FD DC 05 00 00 7C 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC 33 FF 85 ED 7E 3C",
@@ -167,7 +167,7 @@
    "delta": 0,
    "vk_rva": "0x5c3d228",
    "gl_rva": "0x45428a8",
-   "note": "int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc"
+   "note": "int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc; modtypeinfo.c reports it"
   }
  }
 }

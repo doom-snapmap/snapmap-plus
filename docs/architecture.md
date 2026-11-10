@@ -553,20 +553,30 @@ These backend files share the work:
   already knowing the source marks a stock decl, which is left to the provider.
   It applies a refresh in place (re-parse, reload, the anims of a map pass) and
   arms the companions detour at its main-thread gates.
-- `modtypeinfo.c` keeps the editor's entity type-info cache
-  (`idSnapTypeInfoCache`) complete. The game builds that cache once per
-  process, one default property tree per `snapEditorEntityDef` registered at
-  that moment, keyed by entityDef name, and every placed entity's tree starts
-  as a copy of its type's. A row registered after the build (a mod's) has no
-  cached tree: the game logs `idSnapTypeInfoCache::Get parent tree not in
-  cache <name>` once, builds the entity's tree from the instance alone, reads
-  its model scale as zero (`modelMatrix invert failed on model <model>` every
-  frame the entity is drawn on its own) and draws the hidden badge over it.
-  After every palette build the keys of the mod rows are checked against the
-  cache; when one is missing, every cached tree is destroyed, the count zeroed
-  and the game's own builder run again (`SnapTypeInfoCacheBuild`), logged as
-  one `MODS: typeinfo cache:` line. The builder stops the game at 1500
-  registered rows, so a rebuild is refused with a plain line at that count.
+- `modtypeinfo.c` serves the default property trees of the entity types the
+  editor's type-info cache (`idSnapTypeInfoCache`) lacks. The game builds
+  that cache once per process, one default property tree per
+  `snapEditorEntityDef` registered at that moment, keyed by entityDef name,
+  with room for 1,499 types (its builder stops the game at 1,500 registered
+  rows, so it can never run again on an installation with many mods), and
+  every placed entity's tree starts as a copy of its type's
+  (`idSnapTypeInfoCache::Get`). A row registered after the build (a mod's)
+  has no cached tree: the game builds the entity's tree from the instance
+  alone, reads its model scale as zero (`modelMatrix invert failed on model
+  <model>` every frame the entity is drawn on its own) and draws the hidden
+  badge over it. The product detours `Get` and its lookup-only sibling: a
+  name the game's cache holds is served by the game untouched; a name it
+  lacks is served from the product's table, where the tree is built on first
+  use the way the game's builder builds each entry (the type's default entity
+  created through the game, its state written to text, the entity destroyed,
+  the text parsed into a tree) inside process heap 0 for the life of the
+  process. `Get` runs on a one-entry view of the table so the game's own
+  copy-and-apply path makes the result; the lookup returns the tree itself.
+  The table serves only after a boot self-check that builds three of the
+  game's own cached types the product's way and finds them equal node for
+  node; one `MODS: typeinfo:` line per boot says how many mod rows resolve
+  through the table. An entityDef whose served bytes change at a refresh
+  loses its entry and is rebuilt at its next use.
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
   decision and `sh_mods held`.
