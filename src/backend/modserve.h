@@ -391,6 +391,29 @@ typedef struct sh_modserve_holds {
 } sh_modserve_holds;
 int  sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out);
 
+/* What a kept pass looks up. A pass that registers while the previous map's
+ * level-1 objects are still alive (an in-editor rawmap reload, `sh_mods map
+ * add`) parses decls that bind to those objects: they are older than its
+ * watermark and no recorded need names them (an entityDef records its own
+ * md6Def, not its attachments), so the Play purge freed them under the kept
+ * decl (report F8b). While a watermark is open the engine side records every
+ * resource the engine's ResourceLookup returns on the main thread
+ * (`note`); `close` raises each one the lists still hold at level 1 to 4,
+ * under the resource lock, and empties the set. Opened at the outermost
+ * watermark, closed at its end; `note` outside an open pass does nothing. */
+typedef struct sh_modserve_lookups {
+    unsigned looked_up;   /* distinct resources the pass looked up */
+    unsigned live;        /* of those, still on a list at the close */
+    unsigned raised;      /* raised from level 1 to 4 */
+    unsigned lists;       /* lists walked */
+    int overflow;         /* the set reached its bound; later lookups were not recorded */
+    char first[300];      /* the raised names, first ones */
+} sh_modserve_lookups;
+void sh_modserve_lookups_open(void);
+int  sh_modserve_lookups_recording(void);
+void sh_modserve_lookups_note(const void *resource);
+int  sh_modserve_lookups_close(const void *head_slot, sh_modserve_lookups *out);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

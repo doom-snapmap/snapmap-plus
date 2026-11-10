@@ -5077,6 +5077,103 @@ void sh_modserve_watermark_free(sh_modserve_watermark *w)
     memset(w, 0, sizeof *w);
 }
 
+/* What a kept pass looks up (sh_modserve_lookups_*). An open-addressing set
+ * of resource addresses, filled by the engine side's ResourceLookup detour
+ * while a pass is open and emptied when it closes. */
+#define MS_LOOKUPS_MAX (1u << 20)
+static uintptr_t *g_lookups;
+static size_t g_lookups_cap, g_lookups_n;
+static int g_lookups_open, g_lookups_full;
+
+static size_t ms_lookup_slot(const uintptr_t *set, size_t cap, uintptr_t key)
+{
+    size_t i = (size_t)((key >> 4) * 0x9E3779B97F4A7C15ull) & (cap - 1);
+    while (set[i] && set[i] != key) i = (i + 1) & (cap - 1);
+    return i;
+}
+
+static int ms_lookups_grow(void)
+{
+    size_t cap = g_lookups_cap ? g_lookups_cap * 2 : 4096, i;
+    uintptr_t *set;
+    if (cap > MS_LOOKUPS_MAX * 2) return 0;
+    set = (uintptr_t *)calloc(cap, sizeof *set);
+    if (!set) return 0;
+    for (i = 0; i < g_lookups_cap; ++i)
+        if (g_lookups[i]) set[ms_lookup_slot(set, cap, g_lookups[i])] = g_lookups[i];
+    free(g_lookups);
+    g_lookups = set;
+    g_lookups_cap = cap;
+    return 1;
+}
+
+void sh_modserve_lookups_open(void)
+{
+    if (g_lookups && g_lookups_cap) memset(g_lookups, 0, g_lookups_cap * sizeof *g_lookups);
+    g_lookups_n = 0;
+    g_lookups_full = 0;
+    g_lookups_open = 1;
+}
+
+int sh_modserve_lookups_recording(void)
+{
+    return g_lookups_open;
+}
+
+void sh_modserve_lookups_note(const void *resource)
+{
+    uintptr_t key = (uintptr_t)resource;
+    size_t i;
+    if (!g_lookups_open || !key || g_lookups_full) return;
+    if ((g_lookups_n + 1) * 2 > g_lookups_cap && !ms_lookups_grow()) { g_lookups_full = 1; return; }
+    i = ms_lookup_slot(g_lookups, g_lookups_cap, key);
+    if (g_lookups[i]) return;
+    g_lookups[i] = key;
+    g_lookups_n++;
+}
+
+typedef struct ms_lookups_raise { sh_modserve_lookups *out; } ms_lookups_raise;
+static void ms_lookups_raise_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    sh_modserve_lookups *out = ((ms_lookups_raise *)context)->out;
+    const char *name;
+    size_t at;
+    (void)list;
+    if (g_lookups[ms_lookup_slot(g_lookups, g_lookups_cap, (uintptr_t)res)] != (uintptr_t)res) return;
+    out->live++;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1) return;
+    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    out->raised++;
+    name = *(const char *const *)(res + MS_RES_NAME);
+    at = strlen(out->first);
+    if (name && at + strlen(name) + 3 < sizeof out->first)
+        _snprintf_s(out->first + at, sizeof out->first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+}
+
+/* Close the pass: every resource it looked up that the lists still hold at
+ * level 1 is raised to 4, under the resource lock as the watermark raise
+ * does. The set is emptied whether or not the walk completes. */
+int sh_modserve_lookups_close(const void *head_slot, sh_modserve_lookups *out)
+{
+    sh_modserve_lookups local;
+    ms_lookups_raise r;
+    int ok = 1;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    if (!g_lookups_open) return 0;
+    g_lookups_open = 0;
+    out->looked_up = (unsigned)g_lookups_n;
+    out->overflow = g_lookups_full;
+    if (g_lookups_n) {
+        r.out = out;
+        ok = ms_res_walk(head_slot, ms_lookups_raise_one, &r, &out->lists);
+        memset(g_lookups, 0, g_lookups_cap * sizeof *g_lookups);
+    }
+    g_lookups_n = 0;
+    g_lookups_full = 0;
+    return ok;
+}
+
 /* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
  * type case-insensitive, the name folded as the raw-name match folds it
  * (case, a backslash as '/', '-' as '_'). */
