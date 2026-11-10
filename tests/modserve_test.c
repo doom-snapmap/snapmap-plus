@@ -2315,12 +2315,13 @@ static void test_kept_holds(void)
         { KH_MD6, "md6Def body {}", -1, "md6Def", "mods/kh.mod/s/body.md6",
           "[{\"type\":\"baseModel\",\"name\":\"md6/mods/kh.mod/body.md6mesh\"},"
           "{\"type\":\"skeleton\",\"name\":\"md6/stock/body.md6skl\"},"
-          "{\"type\":\"anim\",\"name\":\"md6/stock/body_idle.md6anim\"}]", '2' },
+          "{\"type\":\"anim\",\"name\":\"md6/stock/body_idle.md6anim\"},"
+          "{\"type\":\"anim\",\"name\":\"md6/stock/body.md6skl/_default.md6anim\"}]", '2' },
         { KH_MESH, "MESH", -1, "baseModel", "md6/mods/kh.mod/body.md6mesh", NULL, '3' },
         { KH_LOOSE, "animWeb loose {}", -1, "animWeb", "mods/kh.mod/s/loose",
           "[{\"type\":\"anim\",\"name\":\"md6/stock/loose.md6anim\"}]", '4' },
     };
-    static kh_res web, loose, body, mesh, skel, idle, clip, other, loose_clip, wrong_type, clip2;
+    static kh_res web, loose, body, mesh, skel, idle, bind, clip, other, loose_clip, wrong_type, clip2;
     static kh_res *webs[4], *md6s[4], *meshes[4], *skels[4], *anims[8], *images[4];
     static kh_list lw, ld, lm, ls, la, li;
     kh_list *head = &lw;
@@ -2355,7 +2356,10 @@ static void test_kept_holds(void)
     idle.name = "md6/stock/body_idle.md6anim"; idle.level = 1;
     other.name = "md6/stock/other.md6anim"; other.level = 1;
     loose_clip.name = "md6/stock/loose.md6anim"; loose_clip.level = 1;
-    anims[0] = &idle; anims[1] = &other; anims[2] = &loose_clip; la.count = 3;
+    /* The model's default clip, which the builder records beside the mesh
+     * and the skeleton the cooked mesh names (triage F7). */
+    bind.name = "md6/stock/body.md6skl/_default.md6anim"; bind.level = 1;
+    anims[0] = &idle; anims[1] = &other; anims[2] = &loose_clip; anims[3] = &bind; la.count = 4;
     /* A resource of another type under a held name is not the one held. */
     wrong_type.name = "md6/stock/pickups-melee/chainsaw_pre_idle.md6anim"; wrong_type.level = 1;
     images[0] = &wrong_type; li.count = 1;
@@ -2363,16 +2367,16 @@ static void test_kept_holds(void)
     /* The md6Def's mesh, skeleton and clip are raised; the web's clip does
      * not exist yet; what nothing kept names stays map-scoped. */
     CHECK(sh_modserve_holds_raise(&head, &h) == 1);
-    CHECK(h.roots == 2 && h.names == 5 && h.raised == 3 && h.lists == 6);
-    CHECK(mesh.level == 4 && skel.level == 4 && idle.level == 4);
+    CHECK(h.roots == 2 && h.names == 6 && h.raised == 4 && h.lists == 6);
+    CHECK(mesh.level == 4 && skel.level == 4 && idle.level == 4 && bind.level == 4);
     CHECK(other.level == 1 && loose_clip.level == 1 && loose.level == 1 && wrong_type.level == 1);
     CHECK(strstr(h.first, "md6/mods/kh.mod/body.md6mesh") && strstr(h.first, "md6/stock/body.md6skl") &&
-          strstr(h.first, "md6/stock/body_idle.md6anim"));
+          strstr(h.first, "md6/stock/body_idle.md6anim") && strstr(h.first, "md6/stock/body.md6skl/_default.md6anim"));
 
     /* The web's clip, created after the keep (the editor's spawn, say), at 1,
      * spelled as the engine folds it: the next run raises it. */
     clip.name = "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"; clip.level = 1;
-    anims[3] = &clip; la.count = 4;
+    anims[4] = &clip; la.count = 5;
     CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.raised == 1 && clip.level == 4 &&
           !strcmp(h.first, "MD6/Stock/pickups_melee/chainsaw_pre_idle.md6anim"));
     CHECK(wrong_type.level == 1 && other.level == 1);
@@ -2383,7 +2387,7 @@ static void test_kept_holds(void)
      * name created after that stays map-scoped. */
     web.level = 1;
     clip2.name = "md6/stock/pickups-melee/chainsaw_pre_idle.md6anim"; clip2.level = 1;
-    anims[4] = &clip2; la.count = 5;
+    anims[5] = &clip2; la.count = 6;
     CHECK(sh_modserve_holds_raise(&head, &h) == 1 && h.roots == 1 && h.raised == 0 && clip2.level == 1);
     /* An unreadable list: the walk fails and nothing is raised. */
     li.entries = NULL; li.count = 2;

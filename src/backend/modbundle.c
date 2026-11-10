@@ -4155,6 +4155,148 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
     return hit;
 }
 
+/* ----------------------------------------------------- whole models ---- */
+/* A model is one unit: the engine loads an md6Def's mesh, then the skeleton
+ * whose name the cooked mesh carries (a little-endian u32 length at 0x0C and
+ * the name, "MM" at 2), then that skeleton's default clip
+ * <skeleton>/_default.md6anim. An md6Def names only the mesh, so the builder
+ * reads the skeleton's name from the mesh bytes (the bundle's own copy, else
+ * the installed one SnapMap loads first) and records the skeleton and the
+ * default clip as needs of the md6Def beside the mesh. Needs are names: a
+ * kept md6Def keeps all three for the session (sh_modserve_holds_raise), and
+ * only a name only the campaign archives hold becomes a pointer. A name
+ * nothing holds is not recorded (the engine's own hole, as before). */
+
+#define MB_MESH_PREFIX 4096u
+
+/* The first bytes of a carried file of the bundle (malloc'd). */
+static unsigned char *mb_read_prefix(const wchar_t *root, const char *path, size_t max, size_t *len)
+{
+    char *rel = mb_strdup(path), *p;
+    wchar_t *wrel = NULL, *full = NULL;
+    unsigned char *buf = NULL;
+    HANDLE h;
+    DWORD got = 0;
+    int wn;
+    *len = 0;
+    if (!rel || !root) { free(rel); return NULL; }
+    for (p = rel; *p; p++) if (*p == '/') *p = '\\';
+    wn = MultiByteToWideChar(CP_UTF8, 0, rel, -1, NULL, 0);
+    if (wn > 0 && (wrel = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn)) != NULL)
+        MultiByteToWideChar(CP_UTF8, 0, rel, -1, wrel, wn);
+    free(rel);
+    if (wrel) full = mb_wjoin(root, wrel);
+    free(wrel);
+    if (!full) return NULL;
+    h = CreateFileW(full, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(full);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    buf = (unsigned char *)malloc(max);
+    if (buf && (!ReadFile(h, buf, (DWORD)max, &got, NULL) || !got)) { free(buf); buf = NULL; }
+    CloseHandle(h);
+    if (buf) *len = got;
+    return buf;
+}
+
+/* The skeleton name a cooked mesh carries, or 0. */
+static int mb_mesh_skeleton(const unsigned char *d, size_t len, char *out, size_t cap)
+{
+    uint32_t n, i;
+    if (len < 16 || d[2] != 'M' || d[3] != 'M') return 0;
+    n = (uint32_t)d[12] | ((uint32_t)d[13] << 8) | ((uint32_t)d[14] << 16) | ((uint32_t)d[15] << 24);
+    if (n < 8 || n >= cap || n > len - 16) return 0;
+    for (i = 0; i < n; i++)
+        if (d[16 + i] < 0x21 || d[16 + i] > 0x7e) return 0;
+    memcpy(out, d + 16, n);
+    out[n] = 0;
+    mb_lower(out);
+    return mb_ends(out, ".md6skl");
+}
+
+static const sh_mb_file *mb_file_at(const sh_mb_bundle *b, const char *request)
+{
+    size_t i;
+    for (i = 0; i < b->file_count; i++)
+        if (b->files[i].request && strcmp(b->files[i].request, request) == 0) return &b->files[i];
+    return NULL;
+}
+
+/* 1 when a need of (type, name) names something: a file of the bundle,
+ * another installed bundle's, or an installed archive's. */
+static int mb_need_held(const sh_mb_bundle *b, const sh_mb_resolver *r, const char *type, const char *name)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    char cand[2][SH_MB_REQUEST_MAX + 1], where[32];
+    int n = sh_mb_need_requests(type, name, cand, 2), i;
+    for (i = 0; i < n; i++) {
+        if (mb_file_at(b, cand[i])) return 1;
+        if (r && r->installed && r->installed(r->installed_context, cand[i]) == 1) return 1;
+        if (ops && ops->container && ops->container(ops->context, cand[i], NULL, where, sizeof where) == SH_MB_STOCK_OK)
+            return 1;
+    }
+    return 0;
+}
+
+static int mb_has_need(const sh_mb_file *f, const char *type, const char *name)
+{
+    size_t i;
+    for (i = 0; i < f->need_count; i++)
+        if (strcmp(f->needs[i].type, type) == 0 && _stricmp(f->needs[i].name, name) == 0) return 1;
+    return 0;
+}
+
+/* Record the skeleton and the default clip of each mesh md6Def `file`
+ * names. Returns 0 only when memory ran out. */
+static int mb_model_needs(sh_mb_bundle *b, size_t file, const sh_mb_resolver *r, const wchar_t *root)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    size_t k, count;
+    int added = 0;
+    if (!b->files[file].ptype || strcmp(b->files[file].ptype, "md6Def") != 0) return 1;
+    count = b->files[file].need_count;
+    for (k = 0; k < count; k++) {
+        char mesh[SH_MB_REQUEST_MAX + 1], skl[SH_MB_REQUEST_MAX + 1], clip[SH_MB_REQUEST_MAX + 32];
+        char cand[1][SH_MB_REQUEST_MAX + 1];
+        const sh_mb_need *need = &b->files[file].needs[k];
+        const sh_mb_file *own;
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        int heap = 0, got;
+        if (strcmp(need->type, "baseModel") != 0 || sh_mb_need_requests("baseModel", need->name, cand, 1) != 1) continue;
+        strcpy_s(mesh, sizeof mesh, cand[0]);
+        own = mb_file_at(b, mesh);
+        if (own && own->stock) {
+            char cause[SH_MB_CAUSE_MAX];
+            if (own->stock_source &&
+                sh_mb_stock_read(own->stock_source, own->blob, &bytes, &len, own->path, cause, sizeof cause) == SH_MB_STOCK_OK)
+                heap = 1;
+        } else if (own) {
+            bytes = mb_read_prefix(root, own->path, MB_MESH_PREFIX, &len);
+        } else if (ops && ops->identify && ops->read) {
+            char sha[SH_MB_HASH_HEX + 1];
+            unsigned long long size = 0;
+            if (ops->identify(ops->context, mesh, sha, &size) == SH_MB_STOCK_OK &&
+                ops->read(ops->context, mesh, sha, &bytes, &len) == SH_MB_STOCK_OK)
+                heap = 1;
+        }
+        if (!bytes) continue;
+        got = mb_mesh_skeleton(bytes, len, skl, sizeof skl);
+        if (heap) HeapFree(GetProcessHeap(), 0, bytes); else free(bytes);
+        if (!got) continue;
+        _snprintf_s(clip, sizeof clip, _TRUNCATE, "%s/_default.md6anim", skl);
+        if (!mb_has_need(&b->files[file], "skeleton", skl) && mb_need_held(b, r, "skeleton", skl)) {
+            if (!mb_add_need(&b->files[file], "skeleton", skl, strlen(skl))) return 0;
+            added = 1;
+        }
+        if (!mb_has_need(&b->files[file], "anim", clip) && mb_need_held(b, r, "anim", clip)) {
+            if (!mb_add_need(&b->files[file], "anim", clip, strlen(clip))) return 0;
+            added = 1;
+        }
+    }
+    if (added) qsort(b->files[file].needs, b->files[file].need_count, sizeof(sh_mb_need), mb_need_cmp);
+    return 1;
+}
+
 /* Add `request` (installed only in gameresources) as a surface pointer at
  * sorted position `at`; returns 0 when the walk must stop. */
 static int mb_closure_add(mb_closure *c, size_t at, const char *request, const sh_mb_need *need, const char *by)
@@ -4201,6 +4343,8 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
             }
             HeapFree(GetProcessHeap(), 0, text);
         }
+        if (!mb_model_needs(b, idx, c->r, c->root)) { mb_error(b, "out of memory"); return 0; }
+        f = &b->files[idx];
     }
     mb_emit_file(&one, f);
     if (one.oom) { free(one.p); mb_error(b, "out of memory"); return 0; }
@@ -4220,9 +4364,11 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
 }
 
 /* One need of file `file`, met by any of the `n` (at most 2) candidate
- * requests. Returns 1 when it is settled (in the bundle, installed by another
- * mod, loaded by SnapMap on its own, or added now), 0 when no archive holds
- * any candidate. */
+ * requests. Returns 1 when it is settled (in the bundle, loaded by SnapMap on
+ * its own, or added now), 0 when no archive holds any candidate. Another
+ * installed mod pointing at the same campaign file does not settle it: that
+ * mod is served only where a map declares it, so this bundle carries its own
+ * pointer. */
 static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
                             char cand[][SH_MB_REQUEST_MAX + 1], int n)
 {
@@ -4235,8 +4381,6 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
         if (found) return 1;
         at[i] = pos;
     }
-    if (c->r && c->r->installed)
-        for (i = 0; i < n; i++) if (c->r->installed(c->r->installed_context, cand[i]) == 1) return 1;
     for (i = 0; i < n; i++) {
         char where[32];
         if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;
@@ -4640,6 +4784,10 @@ names:
         else if (got < 0) mb_error(b, "cannot confirm that shadow %s is a stock resource (the game's resource reader is unavailable)",
                                    b->shadows[k]);
     }
+
+    /* Each md6Def's model is whole: its mesh's skeleton and default clip. */
+    for (i = 0; !b->legacy && i < b->file_count; i++)
+        if (b->files[i].is_decl && !mb_model_needs(b, i, r, root)) mb_error(b, "out of memory");
 
     /* Campaign-only content the served decls need joins the bundle as
      * pointers before the needs are resolved. */
