@@ -25,17 +25,23 @@
  *     stored twice;
  *   - a folder without a descriptor whose one package is a direct child
  *     folder has that child migrated under the child's id (beta.19 read such
- *     folders as groups); with none or several, it is skipped, and a ZIP and
- *     any other file are listed as skipped with the reason; two folders with one id are both built (in
+ *     folders as groups); with several, it is skipped, and a ZIP is listed as
+ *     skipped with the reason; two folders with one id are both built (in
  *     their own folders) and the duplicate is reported;
+ *   - the retired loose-file layer is not this pass's: every other file
+ *     directly in overrides\ and every folder with no descriptor and no
+ *     package folder one level down (overrides\<engine path>, as SnapHak and
+ *     the first releases served it); the loose step below moves it;
  *   - a folder over 512 MiB or 8192 files is skipped with its size;
  *   - a file byte-identical to installed game content (any archive, the
  *     .patch store included, or a loose install file) becomes a stock
  *     pointer: the store never receives it, and each folder's line and the
  *     summary say how many files became pointers and how many bytes were not
  *     stored;
- *   - nothing under overrides\ is created, changed or deleted; an empty
- *     backups folder (beta.15) is removed and a non-empty one is left alone.
+ *   - nothing under overrides\ is created or changed; an empty backups
+ *     folder (beta.15) is removed and a non-empty one is left alone. The
+ *     store tool retires overrides\ itself (sh_modmigrate_retire) once every
+ *     entry of it is in mods\.
  *
  * The outcome per folder goes to the "migration" section of
  * mods\snapmap-plus.json (modbundle.h) and to one "MODS:
@@ -110,5 +116,53 @@ int sh_modmigrate_pending(unsigned *entries);
 
 /* The statistics of the last pass (or the running one). */
 void sh_modmigrate_last(sh_modmigrate_stats *out);
+
+/* The loose step. The retired loose-file layer of overrides\ and the strings
+ * document of earlier releases (<data>\strings\strids.json, a flat object of
+ * "id": "text" pairs that strids.c no longer reads) become one mod,
+ * mods\my-overrides\: the loose files under assets\ at their paths below
+ * overrides\, converted as a package is (files a mod cannot carry left out;
+ * copies of installed content become stock pointers), and the document's keys
+ * as the author block's strings.en, with the id "my-overrides", the name "My
+ * overrides" and the migration's origin and legacy record. When
+ * mods\my-overrides\ already exists, only the files and keys it lacks are
+ * added: one "kept my-overrides' <path or key>" line for each it has with
+ * other bytes or text, nothing for an identical one; its tree changes, so the
+ * next start or rescan builds it again. A document that is not such an object
+ * is left with one line. The "loose" section of mods\snapmap-plus.json
+ * records the step; an entry or document added or changed after it is due
+ * again. Takes the store lock. Returns 1 when it ran, 0 when there was nothing
+ * to do, -1 when it could not finish (a later run tries again). */
+typedef struct sh_modmigrate_loose_stats {
+    int created;                 /* this step made mods\my-overrides\ */
+    unsigned entries;            /* loose entries of overrides\ moved */
+    unsigned files_added, files_kept, files_same, files_failed, left_out, pointers;
+    unsigned strings_added, strings_kept, strings_same;
+    int strings_bad;             /* the document is not a strings document; left */
+} sh_modmigrate_loose_stats;
+int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *stats);
+
+/* What the loose step and the retirement would do (file reads only). Returns
+ * the kinds of work found, -1 when the data folder cannot be resolved. */
+typedef struct sh_modmigrate_loose_check {
+    unsigned loose_entries;      /* loose entries of overrides\ */
+    unsigned loose;              /* loose entries of overrides\ added or changed since the loose step */
+    int strings_due;             /* the document is there and not yet moved */
+    unsigned strings;            /* its keys */
+    int strings_bad;             /* it is not a strings document: `why` */
+    char why[200];
+    unsigned left;               /* entries of overrides\ not in mods\ (skipped, refused or not yet moved) */
+    char first_left[260];
+    int overrides_done;          /* overrides\ exists and every entry of it is in mods\ */
+    int strings_done;            /* strings\ exists and holds no document left to move */
+} sh_modmigrate_loose_check;
+int sh_modmigrate_loose_scan(sh_modmigrate_loose_check *out);
+
+/* Retire overrides\ when every entry of it is in mods\, and strings\ when its
+ * document was moved (or it has none), through the store's discard
+ * (sh_ms_retire_sibling: the store tool's Recycle Bin; without a discard both
+ * stay). One line each, and one naming the first entry that keeps overrides\.
+ * Returns the folders retired, -1 when the data folder cannot be resolved. */
+int sh_modmigrate_retire(void);
 
 #endif /* SNAPMAP_PLUS_MODMIGRATE_H */

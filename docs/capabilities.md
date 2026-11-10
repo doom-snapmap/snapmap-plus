@@ -493,11 +493,22 @@ name". Mods you download or import are never refused on their files. A map whose
   strings and hud kept; a pack without an id is named after its folder); each package a map
   delivered (`overrides\map-<16 hex>\<package>`) becomes `mods\<id>\`, which a later load of that
   map reuses. A folder without a descriptor that holds exactly one package folder becomes that
-  package's mod; other folders without a descriptor, ZIP files and loose files are listed as skipped
-  with the reason, and `.bswf` movies outside `generated/swf/` are counted when left out; two folders with the same id are both
+  package's mod; a folder without a descriptor that holds several and a ZIP file are listed as
+  skipped with the reason, and `.bswf` movies outside `generated/swf/` are counted when left out; two folders with the same id are both
   kept, each in its own folder. A folder over 512 MiB or 8192 files is skipped, and one
-  larger than a mod can be (4096 files, 256 MiB) is refused. Nothing in `overrides\` is changed or
-  deleted, and you can keep or delete it afterwards; an empty `override-backups\` folder is removed.
+  larger than a mod can be (4096 files, 256 MiB) is refused. An empty `override-backups\` folder is
+  removed.
+- It moves the loose files of `overrides\` (files directly in it, and folders of engine paths such
+  as `overrides\generated\...` that hold no package) and your old custom strings file,
+  `strings\strids.json`, into one mod, **My overrides** (`mods\my-overrides\`): the files under
+  `assets\` at their engine paths (game files kept as pointers, files a mod cannot carry left out
+  and counted), the strings as its `strings.en`. When `mods\my-overrides\` already exists, only
+  the files and strings it lacks are added, and one `kept my-overrides' <path or string>` line
+  names each one it already had with other content.
+- Once every entry of `overrides\` is in `mods\` it moves `overrides\` to the Recycle Bin, and
+  `strings\` once its strings are moved; a skipped entry (a ZIP, an over-cap folder) keeps
+  `overrides\` where it is, and a strings file that is not a JSON object of `"id": "text"` pairs
+  keeps `strings\`, each with a line saying why.
   The outcome is in the tool's `migration:` lines; once the move completes, `mods\snapmap-plus.json`
   keeps only when it ran, from where, and the folders it skipped or refused. An `overrides\` entry
   added or changed afterwards shows the **Migrate** button again; `sh_mods migrate --again` repeats

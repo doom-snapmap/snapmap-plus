@@ -454,7 +454,8 @@ that names mods writes that ZIP beside the JSON (see
 [Rawmaps that name mods](#rawmaps-that-name-mods) and
 [Prefabs that name mods](#prefabs-that-name-mods)). Plain saves never upload. The retired
 `%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the store tool's
-migration below, and never served or written; no `package-cache` or `package-staging`
+migration below, never served or written, and moved to the Recycle Bin once
+everything in it is in `mods\`; no `package-cache` or `package-staging`
 folder is created.
 
 These backend files share the work:
@@ -625,8 +626,9 @@ These backend files share the work:
   plain JSON), reads an older prefab's sidecar read-only, resolves
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
-- `modmigrate.c` moves the retired `overrides\` tree into the store once (the
-  store tool runs it, and `sh_mods migrate` by hand), as in
+- `modmigrate.c` moves the retired `overrides\` tree and `strings\strids.json`
+  into the store once (the store tool runs it, and `sh_mods migrate` by hand
+  for the packages), as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, and loads the
   stock banks SnapMap skips that a declared mod's sound events need, with
@@ -842,16 +844,21 @@ The store migration tool. The game runs no store migration at boot.
 with a stand-in for the serving layer (`store_seam.c`), and no engine, DLL or
 WebView code. `check <store>` lists the work it finds, one line per kind
 (folders of the retired layout, `blobs\`, `legacy\`, the old record files, the
-second upgrade step, `removed-mods\` or its record section, an `overrides\`
-folder the record does not mark as migrated) and exits 0 when there is none, 1
-when there is, 2 on an error; it changes nothing (`sh_ms_upgrade_scan`).
+second upgrade step, `removed-mods\` or its record section, package entries of
+`overrides\` the record does not mark as migrated, the loose files of
+`overrides\` and a `strings\strids.json` not yet moved, a document that is not
+a strings document, and an `overrides\` or `strings\` folder left to retire)
+and exits 0 when there is none, 1 when there is, 2 on an error; it changes
+nothing (`sh_ms_upgrade_scan`, `sh_modmigrate_loose_scan`).
 `migrate <store> [--doom <folder>]` refuses while DOOM runs, then runs the
-layout upgrade, the bin sweep and the overrides migration, each only when
-`check` finds its work, with every delete through `sh_ms_set_discard` to the
-Recycle Bin (`store_recycle.c`: `SHFileOperationW` with `FOF_ALLOWUNDO`, on a
-fixed local disk only, links removed first). The overrides migration needs the
-game's archives for its stock pointers: the `--doom` folder, else the one Steam
-names; without either it is reported and left. It prints the store's own log
+layout upgrade, the bin sweep, the overrides migration, the loose step and the
+retirement of `overrides\` and `strings\` (`sh_modmigrate_retire`), each only
+when `check` finds its work, with every delete through `sh_ms_set_discard` to
+the Recycle Bin (`store_recycle.c`: `SHFileOperationW` with `FOF_ALLOWUNDO`, on
+a fixed local disk only, links removed first). The overrides migration and the
+loose step's loose files need the game's archives for their stock pointers: the
+`--doom` folder, else the one Steam names; without either they are reported and
+left (a strings document alone needs neither). It prints the store's own log
 lines as its action lines and a summary, and exits 0 when nothing is left to do,
 1 when a later run could still do something, 2 on an error; a second run finds
 nothing and changes nothing. The installer runs it on install and update (see
@@ -2020,8 +2027,9 @@ bridge's install (`sh_modstock_set_install`):
 - a folder without a descriptor whose only package is one direct child folder
   (beta.19 read unmarked folders as groups) has that child migrated under the
   child's own id, and its line says so; a folder without a descriptor and with
-  none or several such children, a ZIP and any other file are skipped with the
-  reason; a folder over
+  several such children and a ZIP are skipped with the reason (every other
+  file, and a folder with no descriptor and no package child, is the loose
+  layer below); a folder over
   512 MiB or 8192 files is skipped before it is read, and one whose carried part
   is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
 - a file byte-identical to installed game content becomes a stock pointer (see
@@ -2031,8 +2039,43 @@ bridge's install (`sh_modstock_set_install`):
   carries `stockPointers` and `stockBytes`. Measured on the owner's packs:
   453 of 472 files of the cyberdemon pack (9.1 of 9.7 MB), 306 of 388 of the
   doors pack (8.1 of 8.3 MB), and 6 of the Imp's 11 (renamed copies, 1.8 MB);
-- nothing under `overrides\` is created, changed or deleted; an empty
+- the pass itself creates and changes nothing under `overrides\`; an empty
   `override-backups\` folder is removed and a non-empty one is left alone.
+
+The loose step (`sh_modmigrate_loose_run`, after the pass) moves what SnapHak
+and the first releases served without a package, with the strings document,
+into one mod, `mods\my-overrides\`. The loose layer is every file directly in
+`overrides\` that is not a ZIP and every folder with no descriptor and no
+package folder one level down (`overrides\generated\...`, a tree of engine
+paths); `strings\strids.json` is the flat `"id": "text"` object `strids.c` read
+before (UTF-8, with or without a BOM). The loose files are converted as a
+package is: placed under `assets\` at their paths below `overrides\`, files a
+mod cannot carry left out and counted, copies of installed content made stock
+pointers, with a descriptor of id `my-overrides`, name `My overrides` and the
+document's keys as `strings.en`, and installed by `modstore.c` as
+`mods\my-overrides\` with the migration's origin and legacy record (the Mods tab
+says "Moved from the old overrides folder"). With the document alone the folder
+is `mod.json` (the same author block, origin `migration`) and an empty
+`assets\`. When `mods\my-overrides\` already exists only what it lacks is added
+(files compared by path, keys case-insensitively) and one `MODS: migration:
+kept my-overrides' <path or key>` line names each it has with other bytes or
+text; an identical one is counted, not named. The changed tree is built again at
+the next start or rescan by the rebuild rule, and its strings serve from that
+build. A file merged into a folder the player made is built under that folder's
+rules: a binary at a game name with other bytes than the game's is refused
+there, and the last good build keeps serving. A document that is not a strings
+document is left with one line naming why. The record's `loose` section
+(`complete`, `migratedAt`, `folder`) marks the step done; a loose entry or a
+document created or written after `migratedAt` is due again. The step holds the
+store lock throughout.
+
+Then `sh_modmigrate_retire` moves `overrides\` to the Recycle Bin once every
+entry of it is in `mods\` (a package entry the record marks done, a loose entry
+the loose step moved), and `strings\` once it holds no document left to move,
+both through `sh_ms_retire_sibling`, which acts only when a discard is set: the
+store tool's Recycle Bin. An entry still skipped (a ZIP, an over-cap folder)
+keeps `overrides\`, and one line names the first. In the game, `sh_mods migrate`
+runs neither the loose step nor the retirement.
 
 The tool runs the pass on its own thread, folder by folder. In the game,
 `sh_mods migrate [--again]` (and the Mods tab's **Migrate**) runs it on a worker

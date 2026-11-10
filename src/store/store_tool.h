@@ -12,16 +12,21 @@
  *
  * check lists what it finds, one line per kind of work: folders of the retired
  * layout, blobs\, legacy\, the old record files, the second upgrade step,
- * removed-mods\ and its record section, and an overrides\ folder the record
- * does not mark as migrated. It changes nothing. Exit 0 clean, 1 work to do,
- * 2 error.
+ * removed-mods\ and its record section, package entries of overrides\ the
+ * record does not mark as migrated, the loose files of overrides\ and
+ * strings\strids.json not yet moved (or a document that cannot be), and an
+ * overrides\ or strings\ folder ready to retire. It changes nothing. Exit 0
+ * clean, 1 work to do, 2 error.
  *
  * migrate runs, in order, the layout upgrade (sh_ms_upgrade), the bin sweep
- * (sh_ms_bin_sweep) and the overrides migration (sh_modmigrate_run), each only
- * when check finds its work, with every delete going to the Windows Recycle
- * Bin (store_recycle.h). The overrides migration reads the game's archives for
- * stock pointers (modstock.h): the folder given with --doom, else the one Steam
- * names; without either it is reported and left for a later run. One line per
+ * (sh_ms_bin_sweep), the overrides migration (sh_modmigrate_run), the loose
+ * step into mods\my-overrides (sh_modmigrate_loose_run) and the retirement of
+ * overrides\ and strings\ (sh_modmigrate_retire), each only when check finds
+ * its work, with every delete going to the Windows Recycle Bin
+ * (store_recycle.h). The overrides migration and the loose files read the
+ * game's archives for stock pointers (modstock.h): the folder given with
+ * --doom, else the one Steam names; without either they are reported and left
+ * for a later run. One line per
  * action and a summary. Exit 0 done (or nothing to do), 1 partial (work is
  * left that a later run can do), 2 error. Idempotent: a second run finds
  * nothing and changes nothing. It refuses to run while DOOM is running.
