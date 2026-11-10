@@ -1393,6 +1393,10 @@ int sh_mb_strip_key(const char *in, char *out, size_t cap)
  *   mesh               md6Def            -> baseModel
  *   skeleton           md6Def            -> skeleton
  *   anim               md6Def, any depth -> anim (events and aliases blocks)
+ *   modelInfos, models animWeb: each quoted ".md6" name in the block (the
+ *                      engine's `"<md6>" "<alias>"` pairs, or a list)
+ *                                        -> md6Def
+ *   name               animWeb, any depth, a ".md6anim" value -> anim
  *   model, renderModelName  any decl     -> md6Def for ".md6", model for
  *                                           .lwo/.ase/.ma/.obj/.fbx/.bmodel
  *   md6Def             any decl          -> md6Def
@@ -1467,7 +1471,7 @@ static mb_tok mb_next_tok(const unsigned char *t, size_t len, size_t *pos)
 
 typedef struct mb_scan {
     const char *decl_type;
-    int is_md6, is_sedef, is_material;
+    int is_md6, is_sedef, is_material, is_animweb;
     sh_mb_need_fn fn;
     void *ctx;
     const char *block[MB_SCAN_DEPTH];
@@ -1482,6 +1486,13 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     int quoted = val->kind == TK_STR;
     const char *parent = sc->depth > 0 && sc->depth <= MB_SCAN_DEPTH ? sc->block[sc->depth - 1] : NULL;
     size_t parent_n = sc->depth > 0 && sc->depth <= MB_SCAN_DEPTH ? sc->block_n[sc->depth - 1] : 0;
+    if (sc->is_animweb && key->kind == TK_STR && parent &&
+        (mb_ieq_n(parent, parent_n, "modelInfos") || mb_ieq_n(parent, parent_n, "models"))) {
+        /* modelInfos { "<md6>" "<alias>" ... } pairs; models { "<md6>" ... } a list. */
+        if (mb_iends(k, kn, ".md6")) sc->fn(sc->ctx, "md6Def", k, kn);
+        if (quoted && vn && mb_ieq_n(parent, parent_n, "models") && mb_iends(v, vn, ".md6")) sc->fn(sc->ctx, "md6Def", v, vn);
+        return;
+    }
     if (vn == 0 || v[0] == '_') return;
     if (sc->is_material && mb_iends(k, kn, "program") && (quoted || val->kind == TK_WORD)) {
         sc->fn(sc->ctx, "renderProg", v, vn);
@@ -1491,6 +1502,10 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
     if (sc->depth == 1 && mb_ieq_n(k, kn, "inherit")) {
         /* A mod parent orders registration; a stock parent is always present. */
         if (vn > 5 && mb_ieq_n(v, 5, "mods/")) sc->fn(sc->ctx, sc->decl_type, v, vn);
+        return;
+    }
+    if (sc->is_animweb && mb_ieq_n(k, kn, "name") && mb_iends(v, vn, ".md6anim")) {
+        sc->fn(sc->ctx, "anim", v, vn);
         return;
     }
     if (sc->is_md6) {
@@ -1540,6 +1555,7 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
     sc.is_md6 = strcmp(decl_type, "md6Def") == 0;
     sc.is_sedef = strcmp(decl_type, "snapEditorEntityDef") == 0;
     sc.is_material = strcmp(decl_type, "material") == 0 || strcmp(decl_type, "material2") == 0;
+    sc.is_animweb = strcmp(decl_type, "animWeb") == 0;
     sc.fn = fn;
     sc.ctx = ctx;
     for (;;) {
@@ -1557,6 +1573,10 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
             key.p = NULL;
             break;
         case TK_RBRACE:
+            if (state == AFTER_KEY && key.p) {
+                mb_tok none = { TK_STR, key.p + key.n, 0 };
+                mb_scan_value(&sc, &key, &none);
+            }
             if (sc.depth > 0) sc.depth--;
             state = EXPECT_KEY;
             key.p = NULL;
@@ -3942,6 +3962,191 @@ static void mb_report(sh_mb_bundle *b)
                 first_alias);
 }
 
+/* -------------------------------------------- campaign-only closure ---- */
+/* SnapMap's session loads snap_gameresources, never the campaign's
+ * gameresources, so a served decl naming content only the campaign archive
+ * holds leaves a hole the engine logs and plays on with (a med_station animWeb
+ * whose wallhealthstation.md6 is missing, a model whose skeleton is not
+ * there). Every such name becomes a pointer of the bundle at the game's own
+ * path (a surface: served from the player's disk, never carried or
+ * uploaded), and a decl brought along this way is scanned for its own needs
+ * until nothing campaign-only is left. Bounded by the file count and the
+ * manifest size; the first name past either fails the build. */
+
+static void mb_emit_file(mb_buf *o, const sh_mb_file *f);
+static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, size_t *out_len);
+
+typedef struct mb_closure {
+    sh_mb_bundle *b;
+    const sh_mb_resolver *r;
+    const sh_mb_stock_ops *ops;
+    size_t *by_req;        /* file indices sorted by request */
+    size_t n;
+    size_t manifest;       /* canonical bytes so far (estimated before the hash and number) */
+    unsigned borrowed;     /* files the closure reached: added now or carried from an earlier build */
+    const char *first;     /* the first of them, for the build note */
+    int stopped;
+} mb_closure;
+
+static size_t mb_closure_find(const mb_closure *c, const char *request, int *found)
+{
+    size_t lo = 0, hi = c->n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int d = strcmp(c->b->files[c->by_req[mid]].request, request);
+        if (d == 0) { *found = 1; return mid; }
+        if (d < 0) lo = mid + 1; else hi = mid;
+    }
+    *found = 0;
+    return lo;
+}
+
+/* 1 when the installed game holds `request` in gameresources and not in
+ * snap_gameresources (the container query names snap_gameresources first
+ * when both hold a name and no hash is given). */
+static int mb_campaign_only(const mb_closure *c, const char *request)
+{
+    char where[32];
+    return c->ops->container(c->ops->context, request, NULL, where, sizeof where) == SH_MB_STOCK_OK &&
+           strcmp(where, "gameresources") == 0;
+}
+
+static void mb_closure_reached(mb_closure *c, sh_mb_file *f)
+{
+    if (f->closure) return;
+    f->closure = 1;
+    c->borrowed++;
+    if (!c->first) c->first = f->request;
+}
+
+/* Add `request` (installed only in gameresources) as a surface pointer at
+ * sorted position `at`; returns 0 when the walk must stop. */
+static int mb_closure_add(mb_closure *c, size_t at, const char *request, const sh_mb_need *need, const char *by)
+{
+    sh_mb_bundle *b = c->b;
+    sh_mb_file *f;
+    char sha[SH_MB_HASH_HEX + 1], type[64], name[SH_MB_REQUEST_MAX + 16], cause[SH_MB_CAUSE_MAX];
+    unsigned long long size = 0;
+    size_t idx, n = strlen(request) + 8;
+    mb_buf one = {0};
+    if (c->ops->identify(c->ops->context, request, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX ||
+        !sh_mb_logical_name(request, type, sizeof type, name, sizeof name))
+        return 1;   /* left to the need check, which reports it as before */
+    if (b->file_count >= SH_MB_MAX_FILES) {
+        mb_error(b, "%s needs %s %s, which only the campaign archives hold; bringing it along would take the bundle past "
+                 "%u files", by, need->type, need->name, SH_MB_MAX_FILES);
+        return 0;
+    }
+    f = mb_add_file(b);
+    if (!f) { mb_error(b, "out of memory"); return 0; }
+    idx = b->file_count - 1;
+    f->path = (char *)malloc(n);
+    f->request = mb_strdup(request);
+    f->stock_source = mb_strdup(request);
+    f->ptype = mb_strdup(type);
+    f->pname = mb_strdup(name);
+    if (!f->path || !f->request || !f->stock_source || !f->ptype || !f->pname) { mb_error(b, "out of memory"); return 0; }
+    _snprintf_s(f->path, n, _TRUNCATE, "assets/%s", request);
+    memcpy(f->blob, sha, sizeof sha);
+    f->size = size;
+    f->stock = 1;
+    f->absent = 1;
+    f->is_decl = mb_starts(request, "generated/decls/");
+    if (f->is_decl) {
+        unsigned char *text = NULL;
+        size_t len = 0;
+        if (sh_mb_stock_read(request, sha, &text, &len, f->path, cause, sizeof cause) == SH_MB_STOCK_OK) {
+            if (sh_decl_text_well_formed(text, len)) {
+                mb_need_ctx nc = { f, 0 };
+                sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
+                if (nc.oom) { HeapFree(GetProcessHeap(), 0, text); mb_error(b, "out of memory"); return 0; }
+                qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+            }
+            HeapFree(GetProcessHeap(), 0, text);
+        }
+    }
+    mb_emit_file(&one, f);
+    if (one.oom) { free(one.p); mb_error(b, "out of memory"); return 0; }
+    c->manifest += one.n + 1;
+    free(one.p);
+    if (c->manifest > SH_MB_MANIFEST_MAX) {
+        mb_error(b, "%s needs %s %s, which only the campaign archives hold; bringing it along would make the bundle "
+                 "manifest larger than 1 MiB", by, need->type, need->name);
+        return 0;
+    }
+    memmove(c->by_req + at + 1, c->by_req + at, sizeof(size_t) * (c->n - at));
+    c->by_req[at] = idx;
+    c->n++;
+    mb_closure_reached(c, f);
+    return 1;
+}
+
+static void mb_closure_need(mb_closure *c, size_t file, size_t k)
+{
+    sh_mb_bundle *b = c->b;
+    char cand[2][SH_MB_REQUEST_MAX + 1], by[SH_MB_REQUEST_MAX + 16];
+    sh_mb_need need;
+    size_t at[2] = { 0, 0 };
+    int n, i, found, campaign = -1;
+    need = b->files[file].needs[k];
+    n = sh_mb_need_requests(need.type, need.name, cand, 2);
+    for (i = 0; i < n; i++) {
+        size_t pos = mb_closure_find(c, cand[i], &found);
+        if (found) {
+            /* Already in the bundle: a pointer an earlier build brought along
+             * (carried forward) still counts as borrowed for completeness. */
+            sh_mb_file *g = &b->files[c->by_req[pos]];
+            if (g->stock && g->absent && g->stock_source && sh_mb_stock_restore(g->request, g->stock_source) &&
+                (!g->declared || b->stock_decls[g->declared - 1].carried) && mb_campaign_only(c, g->request))
+                mb_closure_reached(c, g);
+            return;
+        }
+        at[i] = pos;
+    }
+    if (c->r && c->r->installed)
+        for (i = 0; i < n; i++) if (c->r->installed(c->r->installed_context, cand[i]) == 1) return;
+    for (i = 0; i < n; i++) {
+        char where[32];
+        if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;
+        if (strcmp(where, "gameresources") != 0) return;   /* SnapMap loads it on its own */
+        if (campaign < 0) campaign = i;
+    }
+    if (campaign < 0) return;
+    strncpy_s(by, sizeof by, b->files[file].path, _TRUNCATE);
+    if (!mb_closure_add(c, at[campaign], cand[campaign], &need, by)) c->stopped = 1;
+}
+
+static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r)
+{
+    mb_closure c;
+    size_t i, k, len = 0;
+    char *text;
+    memset(&c, 0, sizeof c);
+    c.b = b;
+    c.r = r;
+    c.ops = mb_stock();
+    if (b->legacy || !c.ops || !c.ops->container || !c.ops->identify || !c.ops->read) return;
+    c.by_req = (size_t *)malloc(sizeof(size_t) * (SH_MB_MAX_FILES + 1));
+    if (!c.by_req) { mb_error(b, "out of memory"); return; }
+    for (i = 0; i < b->file_count && i < SH_MB_MAX_FILES; i++) c.by_req[c.n++] = i;
+    for (i = 1; i < c.n; i++) {
+        size_t v = c.by_req[i], j = i;
+        while (j > 0 && strcmp(b->files[c.by_req[j - 1]].request, b->files[v].request) > 0) { c.by_req[j] = c.by_req[j - 1]; j--; }
+        c.by_req[j] = v;
+    }
+    text = mb_emit(b, 1, 1, &len);
+    c.manifest = len + SH_MB_HASH_HEX + 20;
+    free(text);
+    /* The bundle grows while it is walked: every file added is walked too. */
+    for (i = 0; i < b->file_count && !c.stopped; i++)
+        for (k = 0; k < b->files[i].need_count && !c.stopped; k++) mb_closure_need(&c, i, k);
+    free(c.by_req);
+    if (c.borrowed)
+        mb_note(b, "%u game file%s borrowed for completeness: campaign content a served decl needs, which SnapMap does "
+                "not load on its own (first %s)", c.borrowed, c.borrowed == 1 ? "" : "s", c.first);
+    qsort(b->files, b->file_count, sizeof(sh_mb_file), mb_file_cmp);
+}
+
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
     char sanitized[SH_MB_ID_MAX + 1], ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8],
@@ -4276,6 +4481,27 @@ names:
                                    b->shadows[k]);
     }
 
+    /* Campaign-only content the served decls need joins the bundle as
+     * pointers before the needs are resolved. */
+    if (!b->legacy && !b->errors) {
+        size_t before = b->file_count;
+        mb_close_campaign(b, r);
+        if (b->file_count != before) {
+            for (i = 0; i < b->file_count; i++)
+                if (b->files[i].closure && !b->files[i].declared) {
+                    b->stock_count++;
+                    b->stock_bytes += b->files[i].size;
+                }
+            free(own.req);
+            own.req = (const char **)malloc(sizeof(char *) * b->file_count);
+            own.n = 0;
+            if (!own.req) { mb_error(b, "out of memory"); return; }
+            for (i = 0; i < b->file_count; i++) own.req[i] = b->files[i].request;
+            own.n = b->file_count;
+            qsort(own.req, own.n, sizeof(char *), mb_req_cmp);
+        }
+    }
+
     /* Needs: own files, then installed bundles, then the game. A legacy
      * bundle is built while its map loads and its unresolved needs only warn,
      * so the game's archives are not read for it. */
@@ -4293,6 +4519,9 @@ names:
             b->needs.total++;
             if (got == 1) continue;
             b->needs.unresolved++;
+            /* Game text brought along for completeness: what it names and no
+             * archive holds, the game already plays without. */
+            if (f->closure) continue;
             /* Stock materials name virtual-texture source images that have no
              * standalone image resource, so an unresolved image is reported,
              * not refused. */
@@ -4321,6 +4550,12 @@ names:
             else if (got == 0 && (also = mb_stock_names_too(&twin, f, &f->needs[k])) != NULL)
                 mb_warn(b, "%s names %s %s, which no archive holds; the game's own %s names it too", f->path,
                         f->needs[k].type, f->needs[k].name, also);
+            /* An animWeb's clip names were not checked before rules 3: a clip
+             * no archive holds is reported, not refused, so a mod that built
+             * before keeps building. */
+            else if (got == 0 && f->ptype && strcmp(f->ptype, "animWeb") == 0 && strcmp(f->needs[k].type, "anim") == 0)
+                mb_warn(b, "%s names anim %s, which no archive holds (an animWeb clip: reported, not refused)", f->path,
+                        f->needs[k].name);
             else if (got < 0)
                 mb_error(b, "%s needs %s %s, which is not in the bundle and cannot be checked against the game (resource reader unavailable)",
                          f->path, f->needs[k].type, f->needs[k].name);
@@ -4352,11 +4587,50 @@ static void mb_key(mb_buf *o, int *first, const char *key)
  * requirements shadows version; file keys: blob needs path provides request size,
  * or for a stock pointer needs path provides request stock{sha256 source}.
  * with_build 0 gives the content compared to decide whether build advances. */
+/* One file element of the canonical manifest's "files" array. */
+static void mb_emit_file(mb_buf *o, const sh_mb_file *f)
+{
+    size_t k;
+    if (f->stock) mb_puts(o, "{\"needs\":[");
+    else {
+        mb_puts(o, "{\"blob\":");
+        mb_put_jcstr(o, f->blob);
+        mb_puts(o, ",\"needs\":[");
+    }
+    for (k = 0; k < f->need_count; k++) {
+        if (k) mb_put(o, ",", 1);
+        mb_puts(o, "{\"name\":");
+        mb_put_jcstr(o, f->needs[k].name);
+        mb_puts(o, ",\"type\":");
+        mb_put_jcstr(o, f->needs[k].type);
+        mb_put(o, "}", 1);
+    }
+    mb_puts(o, "],\"path\":");
+    mb_put_jcstr(o, f->path);
+    mb_puts(o, ",\"provides\":{\"name\":");
+    mb_put_jcstr(o, f->pname ? f->pname : "");
+    mb_puts(o, ",\"type\":");
+    mb_put_jcstr(o, f->ptype ? f->ptype : "");
+    mb_puts(o, "},\"request\":");
+    mb_put_jcstr(o, f->request);
+    if (f->stock) {
+        mb_puts(o, ",\"stock\":{\"sha256\":");
+        mb_put_jcstr(o, f->blob);
+        mb_puts(o, ",\"source\":");
+        mb_put_jcstr(o, f->stock_source ? f->stock_source : "");
+        mb_put(o, "}", 1);
+    } else {
+        mb_puts(o, ",\"size\":");
+        mb_put_u64(o, f->size);
+    }
+    mb_put(o, "}", 1);
+}
+
 static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, size_t *out_len)
 {
     mb_buf o = {0};
     int first = 1;
-    size_t i, k;
+    size_t i;
     mb_put(&o, "{", 1);
     if (b->author) { mb_key(&o, &first, "author"); mb_put_jcstr(&o, b->author); }
     if (with_build) { mb_key(&o, &first, "build"); mb_put_u64(&o, b->build); }
@@ -4365,41 +4639,8 @@ static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, siz
     mb_key(&o, &first, "files");
     mb_put(&o, "[", 1);
     for (i = 0; i < b->file_count; i++) {
-        const sh_mb_file *f = &b->files[i];
         if (i) mb_put(&o, ",", 1);
-        if (f->stock) mb_puts(&o, "{\"needs\":[");
-        else {
-            mb_puts(&o, "{\"blob\":");
-            mb_put_jcstr(&o, f->blob);
-            mb_puts(&o, ",\"needs\":[");
-        }
-        for (k = 0; k < f->need_count; k++) {
-            if (k) mb_put(&o, ",", 1);
-            mb_puts(&o, "{\"name\":");
-            mb_put_jcstr(&o, f->needs[k].name);
-            mb_puts(&o, ",\"type\":");
-            mb_put_jcstr(&o, f->needs[k].type);
-            mb_put(&o, "}", 1);
-        }
-        mb_puts(&o, "],\"path\":");
-        mb_put_jcstr(&o, f->path);
-        mb_puts(&o, ",\"provides\":{\"name\":");
-        mb_put_jcstr(&o, f->pname ? f->pname : "");
-        mb_puts(&o, ",\"type\":");
-        mb_put_jcstr(&o, f->ptype ? f->ptype : "");
-        mb_puts(&o, "},\"request\":");
-        mb_put_jcstr(&o, f->request);
-        if (f->stock) {
-            mb_puts(&o, ",\"stock\":{\"sha256\":");
-            mb_put_jcstr(&o, f->blob);
-            mb_puts(&o, ",\"source\":");
-            mb_put_jcstr(&o, f->stock_source ? f->stock_source : "");
-            mb_put(&o, "}", 1);
-        } else {
-            mb_puts(&o, ",\"size\":");
-            mb_put_u64(&o, f->size);
-        }
-        mb_put(&o, "}", 1);
+        mb_emit_file(&o, &b->files[i]);
     }
     mb_put(&o, "]", 1);
     mb_key(&o, &first, "format");
