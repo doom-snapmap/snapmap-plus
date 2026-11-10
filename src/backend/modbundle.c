@@ -4220,9 +4220,11 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
 }
 
 /* One need of file `file`, met by any of the `n` (at most 2) candidate
- * requests. Returns 1 when it is settled (in the bundle, installed by another
- * mod, loaded by SnapMap on its own, or added now), 0 when no archive holds
- * any candidate. */
+ * requests. Returns 1 when it is settled (in the bundle, loaded by SnapMap on
+ * its own, or added now), 0 when no archive holds any candidate. Another
+ * installed mod pointing at the same campaign file does not settle it: that
+ * mod is served only where a map declares it, so this bundle carries its own
+ * pointer. */
 static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
                             char cand[][SH_MB_REQUEST_MAX + 1], int n)
 {
@@ -4235,8 +4237,6 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
         if (found) return 1;
         at[i] = pos;
     }
-    if (c->r && c->r->installed)
-        for (i = 0; i < n; i++) if (c->r->installed(c->r->installed_context, cand[i]) == 1) return 1;
     for (i = 0; i < n; i++) {
         char where[32];
         if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;

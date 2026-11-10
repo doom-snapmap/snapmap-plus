@@ -684,8 +684,10 @@ static void test_closure_recomputed(const char *tmp)
             t3[n3++] = (char)text[j];
         }
         if (t3) {
+            char rules[32];
             t3[n3] = 0;
-            q = strstr(t3, "\"rules\": 4");
+            _snprintf_s(rules, sizeof rules, _TRUNCATE, "\"rules\": %d", SH_MB_RULES);
+            q = strstr(t3, rules);
             CHECK(q && !strstr(t3, "closure"));
             if (q) q[9] = '3';
             mt_write(dir, "mod.json", t3);
@@ -832,6 +834,106 @@ static void test_closure_effects(const char *tmp)
     CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 0);
     CHECK(strstr(b.first_warning, "names particle k/none, which no archive holds") != NULL);
     sh_mb_free(&b);
+}
+
+/* ---------------------------------------------- closure, store path ---- */
+/* A sixth install (D6), the campaign archive: a door model (an md6Def
+ * naming only its mesh, the mesh whose cooked header names its skeleton, the
+ * skeleton and its default clip) and the door's animWeb, which a hand-made
+ * folder carries as its only file (a surface). */
+
+#define M6_WEB  "generated/decls/animweb/k6/door_web.decl"
+#define M6_MD6  "generated/decls/md6def/k6/door.md6.decl"
+#define M6_MESH "generated/basemodel/k6/door.bmd6model"
+#define M6_SKL  "generated/skeleton/k6/door.bmd6skl"
+#define M6_DEF  "cooked/anim/k6/door.md6skl/_default.bmd6anim"
+static const char M6_WEB_TEXT[] = "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k6/door.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n";
+static const char M6_MD6_TEXT[] = "{\r\n\tinit {\r\n\t\tmesh \"k6/door.md6mesh\"\r\n\t}\r\n}\r\n";
+static unsigned char M6_MESH_B[64], M6_SKL_B[40], M6_DEF_B[36], OTHER6_B[8];
+
+/* A cooked mesh header: magic and version, two timestamps, the skeleton name
+ * as a little-endian u32 length and bytes, then geometry. */
+static void m6_mesh(unsigned char *d, size_t n, const char *skeleton)
+{
+    size_t k, s = strlen(skeleton);
+    for (k = 0; k < n; k++) d[k] = (unsigned char)(k * 13 + 7);
+    d[0] = 0x2b; d[1] = 0x02; d[2] = 'M'; d[3] = 'M';
+    d[12] = (unsigned char)s; d[13] = d[14] = d[15] = 0;
+    memcpy(d + 16, skeleton, s);
+}
+
+static void make_install6(const char *d6)
+{
+    size_t k;
+    m6_mesh(M6_MESH_B, sizeof M6_MESH_B, "k6/door.md6skl");
+    for (k = 0; k < sizeof M6_SKL_B; k++) M6_SKL_B[k] = (unsigned char)(k * 3 + 9);
+    for (k = 0; k < sizeof M6_DEF_B; k++) M6_DEF_B[k] = (unsigned char)(k * 5 + 1);
+    for (k = 0; k < sizeof OTHER6_B; k++) OTHER6_B[k] = (unsigned char)(k * 7 + 2);
+    {
+        entry g[] = {
+            { M6_WEB,  (const unsigned char *)M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1, 0, 0 },
+            { M6_MD6,  (const unsigned char *)M6_MD6_TEXT, sizeof M6_MD6_TEXT - 1, 0, 0 },
+            { M6_MESH, M6_MESH_B, sizeof M6_MESH_B, 0, 0 },
+            { M6_SKL,  M6_SKL_B, sizeof M6_SKL_B, 1, 0 },
+            { M6_DEF,  M6_DEF_B, sizeof M6_DEF_B, 0, 1 },
+        };
+        write_container(d6, "gameresources", g, 5);
+        write_container(d6, "snap_gameresources", g, 0);
+    }
+}
+
+/* The store's own build (the rescan's, in place, with every installed bundle
+ * in its resolver) derives the same closure as a bare build: another mod
+ * pointing at the same campaign files is served only where a map declares
+ * it, so it does not stand in for this one's pointers (V2: the SP doors
+ * folder's live rebuild wrote none). A hand-made folder whose only file is a
+ * surface (the game's own animWeb) is built by the rescan with its pointers,
+ * and an unchanged rebuild, with its own earlier build installed, keeps them. */
+static void test_closure_store_path(const char *tmp)
+{
+    char d6[MAX_PATH * 2], store[MAX_PATH * 2], other[MAX_PATH * 2], surf[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1];
+    char cause[SH_MB_CAUSE_MAX], hash[65];
+    const char *chain[] = { M6_MD6, M6_MESH };
+    sh_ms_install_stats st;
+    sh_ms_sync_stats ss;
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+    int i;
+
+    _snprintf_s(d6, sizeof d6, _TRUNCATE, "%s\\d6", tmp);
+    make_install6(d6);
+    sh_modstock_set_install(d6);
+    _snprintf_s(store, sizeof store, _TRUNCATE, "%s\\store6", tmp);
+    _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\other", store);
+    _snprintf_s(surf, sizeof surf, _TRUNCATE, "%s\\surf", store);
+    CHECK(sh_ms_set_root(store));
+    /* An installed mod that already points at the door's model. */
+    mt_write(other, "mod.json", "{\"id\":\"t.other6\",\"name\":\"Other\",\"stock\":{"
+             "\"" M6_MD6 "\":{\"source\":\"" M6_MD6 "\"},\"" M6_MESH "\":{\"source\":\"" M6_MESH "\"},"
+             "\"" M6_SKL "\":{\"source\":\"" M6_SKL "\"},\"" M6_DEF "\":{\"source\":\"" M6_DEF "\"}}}");
+    put_rel(other, "assets/generated/image/mods/t.other6/own.bimage", OTHER6_B, sizeof OTHER6_B);
+    CHECK(sh_ms_install_from_folder(other, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
+    /* The hand-made folder: the game's animWeb, byte for byte. */
+    mt_write(surf, "mod.json", "{\"id\":\"t.surf6\",\"name\":\"Surface\"}");
+    put_rel(surf, "assets\\" M6_WEB, M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(sh_mb_load_folder(surf, &b) && b.rules == SH_MB_RULES && b.file_count == 3 && b.stock_count == 3);
+    f = find(&b, M6_WEB);
+    CHECK(f && f->stock && f->cls == SH_MB_CLASS_SURFACE && !f->closure);
+    for (i = 0; i < 2; i++) {
+        f = find(&b, chain[i]);
+        CHECK(f && f->stock && f->closure && f->stock_source && !strcmp(f->stock_source, chain[i]));
+    }
+    memcpy(hash, b.hash, sizeof hash);
+    sh_mb_free(&b);
+    /* A second rescan finds it current; a forced rebuild in place, with its
+     * own earlier build installed, derives the same set and hash. */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    CHECK(sh_ms_install_from_folder(surf, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(b.stock_count == 3 && !strcmp(b.hash, hash) && find(&b, M6_MESH) && find(&b, M6_MESH)->closure);
+    sh_mb_free(&b);
+    sh_ms_set_root(NULL);
 }
 
 /* ------------------------------------------------- store, sync, serve ---- */
@@ -1083,6 +1185,7 @@ int main(void)
     test_campaign_closure(tmp);
     test_closure_recomputed(tmp);
     test_closure_effects(tmp);
+    test_closure_store_path(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();

@@ -115,7 +115,7 @@
  * is built again once by the rebuild rule, so a product update reclassifies
  * every installed folder; aliases keep the maps pinned to its earlier hash
  * working. Raise it when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           4
+#define SH_MB_RULES           5
 #define SH_MB_ID_MAX          64u
 #define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */

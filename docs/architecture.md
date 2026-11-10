@@ -481,8 +481,9 @@ These backend files share the work:
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
-  below and rules 4 its effects, movies and atlases, so every installed
-  folder is built again once.
+  below, rules 4 its effects, movies and atlases, and rules 5 a closure no
+  other installed mod stands in for, so every installed folder is built
+  again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -541,7 +542,13 @@ These backend files share the work:
   needs; what it names and no archive holds is the game's own hole and is not
   reported. The walk stops at the file cap or the 1 MiB manifest cap with an
   error naming the first need past it, and the build notes "N game files
-  borrowed for completeness". The closure follows models, effects, movies
+  borrowed for completeness". Another installed mod pointing at the same
+  campaign file does not settle a need: that mod is served only where a map
+  declares it, so each bundle carries its own pointers. (Until rules 5 the
+  store's build, whose resolver includes every installed bundle, let one
+  stand in, so the SP doors folder rebuilt in the game derived no pointers
+  while a bare build of the same folder derived 29; snaphak-re triage V2,
+  F7.) The closure follows models, effects, movies
   and images: an animWeb's `modelInfos` pairs and `models` list name
   md6Defs and its nodes' `.md6anim` names are anims; an effect (`fx`) names
   particles (`declPrt`), ribbons (`declRibbon`) and materials (`lightMtr`,
@@ -568,7 +575,7 @@ These backend files share the work:
   `gameresources` holds to the closure the same way. Measured on build
   13954591: the owner's SP doors folder gains 29 pointers (the
   wallhealthstation, access panel and desk scanner md6Defs, 8 meshes and 18
-  clips); of the six campaign-interactables families of fidelity85, `-1`
+  clips), through the store's build as through a bare one; of the six campaign-interactables families of fidelity85, `-1`
   gains `player/crucible_eyes` and `-2` the crucible particles, ribbon and
   materials, the gauss_beam transparency atlas and the `switch2_up` and
   `automap_hell` movies with their atlases (11 names, the ones fidelity87
