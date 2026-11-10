@@ -481,7 +481,8 @@ These backend files share the work:
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
-  below, so every installed folder is built again once.
+  below and rules 4 its effects, movies and atlases, so every installed
+  folder is built again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -540,13 +541,38 @@ These backend files share the work:
   needs; what it names and no archive holds is the game's own hole and is not
   reported. The walk stops at the file cap or the 1 MiB manifest cap with an
   error naming the first need past it, and the build notes "N game files
-  borrowed for completeness" (pointers an earlier build added are carried
-  forward and counted again). An animWeb's `modelInfos` pairs and `models`
-  list name md6Defs and its nodes' `.md6anim` names are anims; an animWeb
-  clip no archive holds is reported, not refused. Measured on build
+  borrowed for completeness". The closure follows models, effects, movies
+  and images: an animWeb's `modelInfos` pairs and `models` list name
+  md6Defs and its nodes' `.md6anim` names are anims; an effect (`fx`) names
+  particles (`declPrt`), ribbons (`declRibbon`) and materials (`lightMtr`,
+  `decalMtr`); a particle or ribbon names materials (`material`); an
+  entityDef names movies (any `.swf` value, `guiData` `swfFile` and
+  `guiFile`), a movie `swf/<stem>.swf` being `generated/swf/<stem>.bswf`
+  and its atlas `generated/swf/<stem>.bimage` coming along with it. A
+  material's image is added only where SnapMap would not serve it: an image
+  no archive holds standalone may be a transparency or decal atlas of that
+  name (`generated/transsortatlas/` or `generated/decalatlas/`, nothing
+  when SnapMap mounts it), and an image a virtual-textured material
+  (`usevirtualmapping` set) names in a source field (`diffusemap`,
+  `bumpmap`, `powermap`, `specularmap`, `bloommask`, `sssmap`,
+  `colormaskmap`) needs nothing when the material has a row in the installed
+  `virtualtextures/_vmtr*.vmtr`, whose baked pages the engine samples. A
+  name of these kinds no archive holds is reported, not refused, like an
+  animWeb clip. The derived pointers are recomputed every build, never
+  carried forward: the product block lists them in `stock` with
+  `"closure": true`, a rebuild drops them and derives the set again from its
+  own needs (a pointer whose need is gone is gone, and the hash changes; an
+  unchanged folder keeps its hash), while an author `stock` entry and a
+  pointer a download or migration brought stay. A block of rules 3, which
+  had no mark, hands its pointers at the game's own path to content only
+  `gameresources` holds to the closure the same way. Measured on build
   13954591: the owner's SP doors folder gains 29 pointers (the
   wallhealthstation, access panel and desk scanner md6Defs, 8 meshes and 18
-  clips); the six campaign-interactables families of fidelity85 gain none.
+  clips); of the six campaign-interactables families of fidelity85, `-1`
+  gains `player/crucible_eyes` and `-2` the crucible particles, ribbon and
+  materials, the gauss_beam transparency atlas and the `switch2_up` and
+  `automap_hell` movies with their atlases (11 names, the ones fidelity87
+  added by hand); the other four gain none.
 - `modstore.c` owns the store: the mod folders, install, verification, the
   rebuild rule and the one-time upgrade of the retired layout, below, which the
   store tool runs. Files are hashed at install and on `sh_mods doctor verify`,

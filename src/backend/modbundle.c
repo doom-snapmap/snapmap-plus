@@ -1346,6 +1346,18 @@ int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQ
         if (k < max && mb_binary_name("generated", "model", name, "bmodel", out[k], SH_MB_REQUEST_MAX + 1)) k++;
         return k;
     }
+    if (mb_ieq_n(type, tl, "swf")) {
+        /* A movie named swf/<stem>.swf is served as generated/swf/<stem>.bswf,
+         * the inverse of sh_mb_logical_name (no character is replaced). */
+        const char *slash = strrchr(name, '/'), *dot = strrchr(slash ? slash : name, '.');
+        size_t stem = dot ? (size_t)(dot - name) : nl;
+        int w;
+        if (stem > 4 && mb_ieq_n(name, 4, "swf/")) { name += 4; stem -= 4; }
+        w = _snprintf_s(out[0], SH_MB_REQUEST_MAX + 1, _TRUNCATE, "generated/swf/%.*s.bswf", (int)stem, name);
+        if (w < 0) return 0;
+        mb_lower(out[0]);
+        return 1;
+    }
     if (sh_mb_decl_type(type, tl)) {
         int w = _snprintf_s(out[0], SH_MB_REQUEST_MAX + 1, _TRUNCATE, "generated/decls/%s/%s.decl", type, name);
         if (w < 0) return 0;
@@ -1397,6 +1409,10 @@ int sh_mb_strip_key(const char *in, char *out, size_t cap)
  *                      engine's `"<md6>" "<alias>"` pairs, or a list)
  *                                        -> md6Def
  *   name               animWeb, any depth, a ".md6anim" value -> anim
+ *   declPrt, declRibbon fx           -> particle, ribbon
+ *   lightMtr, decalMtr fx            -> material
+ *   material           particle, ribbon -> material
+ *   any key, a ".swf" value  entityDef (guiData swfFile, guiFile) -> swf
  *   model, renderModelName  any decl     -> md6Def for ".md6", model for
  *                                           .lwo/.ase/.ma/.obj/.fbx/.bmodel
  *   md6Def             any decl          -> md6Def
@@ -1408,9 +1424,9 @@ int sh_mb_strip_key(const char *in, char *out, size_t cap)
  * Values that are empty or start with '_' (engine-internal names) are skipped.
  *   soundShader, sound any decl, only a "mods/..." name -> sound
  * Not scanned: animWebDecl, fxDecl, stock sounds and sound events, aiVoiceOver,
- * damage and projectile decls, inventory items, particles, skins, ".break"
- * models, table references inside material expressions, md6Def meshKits, and
- * every other reference key. */
+ * damage and projectile decls, inventory items, an effect's flares, models,
+ * sounds and tables, skins, ".break" models, table references inside material
+ * expressions, md6Def meshKits, and every other reference key. */
 
 typedef struct mb_tok { int kind; const char *p; size_t n; } mb_tok;
 enum { TK_END, TK_WORD, TK_STR, TK_LBRACE, TK_RBRACE, TK_EQ, TK_SEMI, TK_COMMA, TK_GROUP };
@@ -1471,7 +1487,7 @@ static mb_tok mb_next_tok(const unsigned char *t, size_t len, size_t *pos)
 
 typedef struct mb_scan {
     const char *decl_type;
-    int is_md6, is_sedef, is_material, is_animweb;
+    int is_md6, is_sedef, is_material, is_animweb, is_fx, is_emitter, is_entitydef;
     sh_mb_need_fn fn;
     void *ctx;
     const char *block[MB_SCAN_DEPTH];
@@ -1508,6 +1524,14 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         sc->fn(sc->ctx, "anim", v, vn);
         return;
     }
+    if (sc->is_fx) {
+        /* An effect spawns its particles and ribbons by decl name. */
+        if (mb_ieq_n(k, kn, "declPrt")) { sc->fn(sc->ctx, "particle", v, vn); return; }
+        if (mb_ieq_n(k, kn, "declRibbon")) { sc->fn(sc->ctx, "ribbon", v, vn); return; }
+        if (mb_ieq_n(k, kn, "lightMtr") || mb_ieq_n(k, kn, "decalMtr")) { sc->fn(sc->ctx, "material", v, vn); return; }
+    }
+    if (sc->is_emitter && mb_ieq_n(k, kn, "material")) { sc->fn(sc->ctx, "material", v, vn); return; }
+    if (sc->is_entitydef && mb_iends(v, vn, ".swf")) { sc->fn(sc->ctx, "swf", v, vn); return; }
     if (sc->is_md6) {
         if (mb_ieq_n(k, kn, "mesh")) { sc->fn(sc->ctx, "baseModel", v, vn); return; }
         if (mb_ieq_n(k, kn, "skeleton")) { sc->fn(sc->ctx, "skeleton", v, vn); return; }
@@ -1556,6 +1580,9 @@ void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t l
     sc.is_sedef = strcmp(decl_type, "snapEditorEntityDef") == 0;
     sc.is_material = strcmp(decl_type, "material") == 0 || strcmp(decl_type, "material2") == 0;
     sc.is_animweb = strcmp(decl_type, "animWeb") == 0;
+    sc.is_fx = strcmp(decl_type, "fx") == 0;
+    sc.is_emitter = strcmp(decl_type, "particle") == 0 || strcmp(decl_type, "ribbon") == 0;
+    sc.is_entitydef = strcmp(decl_type, "entityDef") == 0;
     sc.fn = fn;
     sc.ctx = ctx;
     for (;;) {
@@ -3967,11 +3994,19 @@ static void mb_report(sh_mb_bundle *b)
  * gameresources, so a served decl naming content only the campaign archive
  * holds leaves a hole the engine logs and plays on with (a med_station animWeb
  * whose wallhealthstation.md6 is missing, a model whose skeleton is not
- * there). Every such name becomes a pointer of the bundle at the game's own
- * path (a surface: served from the player's disk, never carried or
- * uploaded), and a decl brought along this way is scanned for its own needs
- * until nothing campaign-only is left. Bounded by the file count and the
- * manifest size; the first name past either fails the build. */
+ * there, an effect whose particle is not there, a panel without its movie).
+ * Every such name becomes a pointer of the bundle at the game's own path (a
+ * surface: served from the player's disk, never carried or uploaded), and a
+ * decl brought along this way is scanned for its own needs until nothing
+ * campaign-only is left. A movie brings its atlas (generated/swf/<stem>.bimage)
+ * with it; an image no archive holds as a standalone image may be a
+ * transparency or decal atlas of that name; an image a virtual-textured
+ * material names in a source field is sampled from the installed
+ * virtual-texture pages when the material has a row there, so it needs
+ * nothing. The set is derived from this build's needs alone: the product
+ * block marks these pointers ("closure": true) and the next build drops them
+ * and derives them again. Bounded by the file count and the manifest size;
+ * the first name past either fails the build. */
 
 static void mb_emit_file(mb_buf *o, const sh_mb_file *f);
 static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, size_t *out_len);
@@ -3980,12 +4015,16 @@ typedef struct mb_closure {
     sh_mb_bundle *b;
     const sh_mb_resolver *r;
     const sh_mb_stock_ops *ops;
+    const wchar_t *root;
     size_t *by_req;        /* file indices sorted by request */
     size_t n;
     size_t manifest;       /* canonical bytes so far (estimated before the hash and number) */
-    unsigned borrowed;     /* files the closure reached: added now or carried from an earlier build */
+    unsigned borrowed;     /* files this build added */
     const char *first;     /* the first of them, for the build note */
     int stopped;
+    char **vt_rows;        /* material names of the installed virtual-texture rows, sorted */
+    size_t vt_n;
+    int vt_state;          /* 0 not read, 1 read */
 } mb_closure;
 
 static size_t mb_closure_find(const mb_closure *c, const char *request, int *found)
@@ -4001,22 +4040,119 @@ static size_t mb_closure_find(const mb_closure *c, const char *request, int *fou
     return lo;
 }
 
-/* 1 when the installed game holds `request` in gameresources and not in
- * snap_gameresources (the container query names snap_gameresources first
- * when both hold a name and no hash is given). */
-static int mb_campaign_only(const mb_closure *c, const char *request)
+/* The installed virtual-texture tables (virtualtextures/_vmtr.vmtr and
+ * _vmtr_dlc<N>.vmtr, loose files at the install root): every quoted string
+ * of a table is the material name of one row. Read once per build, and only
+ * when a virtual-textured material's image would otherwise be added. */
+static void mb_closure_vt_load(mb_closure *c)
 {
-    char where[32];
-    return c->ops->container(c->ops->context, request, NULL, where, sizeof where) == SH_MB_STOCK_OK &&
-           strcmp(where, "gameresources") == 0;
+    unsigned u;
+    c->vt_state = 1;
+    for (u = 0; u < 16; u++) {
+        char src[64], sha[SH_MB_HASH_HEX + 1];
+        unsigned long long size = 0;
+        unsigned char *text = NULL;
+        size_t len = 0, i;
+        if (u == 0) strcpy_s(src, sizeof src, "virtualtextures/_vmtr.vmtr");
+        else _snprintf_s(src, sizeof src, _TRUNCATE, "virtualtextures/_vmtr_dlc%u.vmtr", u);
+        if (c->ops->identify(c->ops->context, src, sha, &size) != SH_MB_STOCK_OK) {
+            if (u == 0) continue;
+            break;
+        }
+        if (c->ops->read(c->ops->context, src, sha, &text, &len) != SH_MB_STOCK_OK) continue;
+        for (i = 0; i < len; i++) {
+            size_t s, n;
+            char **grown, *name;
+            if (text[i] != '"') continue;
+            s = ++i;
+            while (i < len && text[i] != '"' && text[i] != '\n') i++;
+            n = i - s;
+            if (!n || i >= len || text[i] != '"') continue;
+            grown = (char **)realloc(c->vt_rows, sizeof(char *) * (c->vt_n + 1));
+            if (grown) c->vt_rows = grown;
+            name = grown ? (char *)malloc(n + 1) : NULL;
+            if (!name) break;
+            memcpy(name, text + s, n);
+            name[n] = 0;
+            mb_lower(name);
+            c->vt_rows[c->vt_n++] = name;
+        }
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    if (c->vt_n > 1) qsort(c->vt_rows, c->vt_n, sizeof(char *), mb_str_cmp);
 }
 
-static void mb_closure_reached(mb_closure *c, sh_mb_file *f)
+/* 1 when material `f` sets usevirtualmapping, names `image` in a
+ * virtual-texture source field and has an installed virtual-texture row: the
+ * engine samples the baked pages, not a standalone image. */
+static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *image)
 {
-    if (f->closure) return;
-    f->closure = 1;
-    c->borrowed++;
-    if (!c->first) c->first = f->request;
+    static const char *const fields[] = { "diffusemap", "bumpmap", "powermap", "specularmap", "bloommask", "sssmap",
+                                          "colormaskmap", NULL };
+    unsigned char *text = NULL;
+    size_t len = 0, pos = 0, in = strlen(image);
+    int heap = 0, virt = 0, named = 0, after = 0, hit = 0;
+    mb_tok t;
+    if (!f->ptype || (strcmp(f->ptype, "material") && strcmp(f->ptype, "material2")) || !f->pname) return 0;
+    if (f->stock) {
+        char cause[SH_MB_CAUSE_MAX];
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &text, &len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK)
+            return 0;
+        heap = 1;
+    } else {
+        char *rel = mb_strdup(f->path), *p;
+        wchar_t *wrel = NULL, *full = NULL;
+        int wn;
+        if (!rel || !c->root) { free(rel); return 0; }
+        for (p = rel; *p; p++) if (*p == '/') *p = '\\';
+        wn = MultiByteToWideChar(CP_UTF8, 0, rel, -1, NULL, 0);
+        if (wn > 0 && (wrel = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn)) != NULL)
+            MultiByteToWideChar(CP_UTF8, 0, rel, -1, wrel, wn);
+        free(rel);
+        if (wrel) full = mb_wjoin(c->root, wrel);
+        free(wrel);
+        if (full) text = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
+        free(full);
+        if (!text) return 0;
+    }
+    /* `key [=] value` at any depth: a source field naming the image, and
+     * usevirtualmapping with a non-zero value. */
+    for (;;) {
+        t = mb_next_tok(text, len, &pos);
+        if (t.kind == TK_END) break;
+        if (t.kind == TK_EQ) continue;
+        if (after == 1) {
+            if ((t.kind == TK_WORD || t.kind == TK_STR) && t.n) {
+                char num[32];
+                _snprintf_s(num, sizeof num, _TRUNCATE, "%.*s", (int)t.n, t.p);
+                virt = atof(num) != 0.0;
+            }
+            after = 0;
+            continue;
+        }
+        if (after == 2) {
+            if ((t.kind == TK_WORD || t.kind == TK_STR) && t.n == in && mb_ieq_n(t.p, t.n, image)) named = 1;
+            after = 0;
+            continue;
+        }
+        if (t.kind == TK_WORD && mb_ieq_n(t.p, t.n, "usevirtualmapping")) { after = 1; continue; }
+        if (t.kind == TK_WORD) {
+            int k;
+            for (k = 0; fields[k]; k++)
+                if (mb_ieq_n(t.p, t.n, fields[k])) { after = 2; break; }
+        }
+    }
+    if (heap) HeapFree(GetProcessHeap(), 0, text); else free(text);
+    if (!virt || !named) return 0;
+    if (!c->vt_state) mb_closure_vt_load(c);
+    if (c->vt_n) {
+        char *name = mb_strdup(f->pname);
+        if (!name) return 0;
+        mb_lower(name);
+        hit = bsearch(&name, c->vt_rows, c->vt_n, sizeof(char *), mb_str_cmp) != NULL;
+        free(name);
+    }
+    return hit;
 }
 
 /* Add `request` (installed only in gameresources) as a surface pointer at
@@ -4051,6 +4187,7 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     f->size = size;
     f->stock = 1;
     f->absent = 1;
+    f->closure = 1;
     f->is_decl = mb_starts(request, "generated/decls/");
     if (f->is_decl) {
         unsigned char *text = NULL;
@@ -4077,46 +4214,66 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     memmove(c->by_req + at + 1, c->by_req + at, sizeof(size_t) * (c->n - at));
     c->by_req[at] = idx;
     c->n++;
-    mb_closure_reached(c, f);
+    c->borrowed++;
+    if (!c->first) c->first = f->request;
+    return 1;
+}
+
+/* One need of file `file`, met by any of the `n` (at most 2) candidate
+ * requests. Returns 1 when it is settled (in the bundle, installed by another
+ * mod, loaded by SnapMap on its own, or added now), 0 when no archive holds
+ * any candidate. */
+static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
+                            char cand[][SH_MB_REQUEST_MAX + 1], int n)
+{
+    sh_mb_bundle *b = c->b;
+    char by[SH_MB_REQUEST_MAX + 16];
+    size_t at[2] = { 0, 0 };
+    int i, found, campaign = -1;
+    for (i = 0; i < n; i++) {
+        size_t pos = mb_closure_find(c, cand[i], &found);
+        if (found) return 1;
+        at[i] = pos;
+    }
+    if (c->r && c->r->installed)
+        for (i = 0; i < n; i++) if (c->r->installed(c->r->installed_context, cand[i]) == 1) return 1;
+    for (i = 0; i < n; i++) {
+        char where[32];
+        if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;
+        if (strcmp(where, "gameresources") != 0) return 1;   /* SnapMap loads it on its own */
+        if (campaign < 0) campaign = i;
+    }
+    if (campaign < 0) return 0;
+    if (strcmp(need->type, "image") == 0 && mb_closure_vt_served(c, &b->files[file], need->name)) return 1;
+    strncpy_s(by, sizeof by, b->files[file].path, _TRUNCATE);
+    if (!mb_closure_add(c, at[campaign], cand[campaign], need, by)) c->stopped = 1;
     return 1;
 }
 
 static void mb_closure_need(mb_closure *c, size_t file, size_t k)
 {
-    sh_mb_bundle *b = c->b;
-    char cand[2][SH_MB_REQUEST_MAX + 1], by[SH_MB_REQUEST_MAX + 16];
-    sh_mb_need need;
-    size_t at[2] = { 0, 0 };
-    int n, i, found, campaign = -1;
-    need = b->files[file].needs[k];
-    n = sh_mb_need_requests(need.type, need.name, cand, 2);
-    for (i = 0; i < n; i++) {
-        size_t pos = mb_closure_find(c, cand[i], &found);
-        if (found) {
-            /* Already in the bundle: a pointer an earlier build brought along
-             * (carried forward) still counts as borrowed for completeness. */
-            sh_mb_file *g = &b->files[c->by_req[pos]];
-            if (g->stock && g->absent && g->stock_source && sh_mb_stock_restore(g->request, g->stock_source) &&
-                (!g->declared || b->stock_decls[g->declared - 1].carried) && mb_campaign_only(c, g->request))
-                mb_closure_reached(c, g);
-            return;
+    char cand[2][SH_MB_REQUEST_MAX + 1];
+    sh_mb_need need = c->b->files[file].needs[k];
+    int n = sh_mb_need_requests(need.type, need.name, cand, 2), held;
+    if (n <= 0) return;
+    held = mb_closure_offer(c, file, &need, cand, n);
+    if (c->stopped) return;
+    if (strcmp(need.type, "swf") == 0) {
+        /* The movie's atlas is its sibling: generated/swf/<stem>.bimage. */
+        size_t m = strlen(cand[0]);
+        if (m > 5 && m + 3 <= SH_MB_REQUEST_MAX && !strcmp(cand[0] + m - 5, ".bswf")) {
+            memcpy(cand[0] + m - 5, ".bimage", 8);
+            mb_closure_offer(c, file, &need, cand, 1);
         }
-        at[i] = pos;
+    } else if (!held && strcmp(need.type, "image") == 0) {
+        /* No standalone image: a transparency or decal atlas of that name. */
+        if (mb_binary_name("generated", "transsortatlas", need.name, "bimage", cand[0], SH_MB_REQUEST_MAX + 1) &&
+            mb_binary_name("generated", "decalatlas", need.name, "bimage", cand[1], SH_MB_REQUEST_MAX + 1))
+            mb_closure_offer(c, file, &need, cand, 2);
     }
-    if (c->r && c->r->installed)
-        for (i = 0; i < n; i++) if (c->r->installed(c->r->installed_context, cand[i]) == 1) return;
-    for (i = 0; i < n; i++) {
-        char where[32];
-        if (c->ops->container(c->ops->context, cand[i], NULL, where, sizeof where) != SH_MB_STOCK_OK) continue;
-        if (strcmp(where, "gameresources") != 0) return;   /* SnapMap loads it on its own */
-        if (campaign < 0) campaign = i;
-    }
-    if (campaign < 0) return;
-    strncpy_s(by, sizeof by, b->files[file].path, _TRUNCATE);
-    if (!mb_closure_add(c, at[campaign], cand[campaign], &need, by)) c->stopped = 1;
 }
 
-static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r)
+static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wchar_t *root)
 {
     mb_closure c;
     size_t i, k, len = 0;
@@ -4124,6 +4281,7 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r)
     memset(&c, 0, sizeof c);
     c.b = b;
     c.r = r;
+    c.root = root;
     c.ops = mb_stock();
     if (b->legacy || !c.ops || !c.ops->container || !c.ops->identify || !c.ops->read) return;
     c.by_req = (size_t *)malloc(sizeof(size_t) * (SH_MB_MAX_FILES + 1));
@@ -4141,6 +4299,8 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r)
     for (i = 0; i < b->file_count && !c.stopped; i++)
         for (k = 0; k < b->files[i].need_count && !c.stopped; k++) mb_closure_need(&c, i, k);
     free(c.by_req);
+    for (i = 0; i < c.vt_n; i++) free(c.vt_rows[i]);
+    free(c.vt_rows);
     if (c.borrowed)
         mb_note(b, "%u game file%s borrowed for completeness: campaign content a served decl needs, which SnapMap does "
                 "not load on its own (first %s)", c.borrowed, c.borrowed == 1 ? "" : "s", c.first);
@@ -4485,7 +4645,7 @@ names:
      * pointers before the needs are resolved. */
     if (!b->legacy && !b->errors) {
         size_t before = b->file_count;
-        mb_close_campaign(b, r);
+        mb_close_campaign(b, r, root);
         if (b->file_count != before) {
             for (i = 0; i < b->file_count; i++)
                 if (b->files[i].closure && !b->files[i].declared) {
@@ -4556,6 +4716,14 @@ names:
             else if (got == 0 && f->ptype && strcmp(f->ptype, "animWeb") == 0 && strcmp(f->needs[k].type, "anim") == 0)
                 mb_warn(b, "%s names anim %s, which no archive holds (an animWeb clip: reported, not refused)", f->path,
                         f->needs[k].name);
+            /* Effects, particles, ribbons and movies were not checked before
+             * rules 4: the same, so a mod that built before keeps building. */
+            else if (got == 0 && (!strcmp(f->needs[k].type, "particle") || !strcmp(f->needs[k].type, "ribbon") ||
+                                  !strcmp(f->needs[k].type, "swf") ||
+                                  (f->ptype && (!strcmp(f->ptype, "fx") || !strcmp(f->ptype, "particle") ||
+                                                !strcmp(f->ptype, "ribbon")))))
+                mb_warn(b, "%s names %s %s, which no archive holds (an effect's or a movie's reference: reported, not "
+                        "refused)", f->path, f->needs[k].type, f->needs[k].name);
             else if (got < 0)
                 mb_error(b, "%s needs %s %s, which is not in the bundle and cannot be checked against the game (resource reader unavailable)",
                          f->path, f->needs[k].type, f->needs[k].name);
@@ -4966,16 +5134,16 @@ static void mb_mark_delivered(sh_mb_bundle *b)
 static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int pointer)
 {
     static const char *const keys[] = { "needs", "path", "provides", "sha256", "size", NULL };
-    static const char *const pkeys[] = { "inAssets", "needs", "path", "provides", "sha256", "source", NULL };
+    static const char *const pkeys[] = { "closure", "inAssets", "needs", "path", "provides", "sha256", "source", NULL };
     const char *list = pointer ? "stock" : "files";
-    const mbj *sha, *needs, *path, *prov, *size, *src, *in_assets, *pt, *pn;
+    const mbj *sha, *needs, *path, *prov, *size, *src, *in_assets, *closure, *pt, *pn;
     char cause[SH_MB_CAUSE_MAX], type[64], name[SH_MB_REQUEST_MAX + 16], *expect;
     sh_mb_file *f;
     size_t k;
     unsigned long long sz = 0;
     if (e->t != MBJ_OBJ || !mb_only_keys(e, pointer ? pkeys : keys)) {
         mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] must have exactly %s", list, index,
-                 pointer ? "path, sha256, source, provides, needs and inAssets (optional)"
+                 pointer ? "path, sha256, source, provides, needs, and inAssets and closure (optional)"
                          : "path, sha256, size, provides and needs");
         return 0;
     }
@@ -4986,6 +5154,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
     size = mbj_get(e, "size");
     src = mbj_get(e, "source");
     in_assets = mbj_get(e, "inAssets");
+    closure = mbj_get(e, "closure");
     if (!sha || !needs || !path || !prov || (pointer ? !src : !size)) {
         mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] is missing a member", list, index);
         return 0;
@@ -5021,6 +5190,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         free(lower);
         if (!same) { mb_error(b, "mod.json %s: source must be lower-case with '/' separators", path->s); free(expect); return 0; }
         if (in_assets && in_assets->t != MBJ_BOOL) { mb_error(b, "mod.json %s: inAssets must be true or false", path->s); free(expect); return 0; }
+        if (closure && closure->t != MBJ_BOOL) { mb_error(b, "mod.json %s: closure must be true or false", path->s); free(expect); return 0; }
     } else if (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
                (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE) {
         mb_error(b, "mod.json %s: size must be 1 to 64 MiB", path->s);
@@ -5042,6 +5212,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         f->stock = 1;
         f->stock_source = mb_strdup(src->s);
         f->absent = in_assets && !in_assets->b;
+        f->closure = closure && closure->b;
         b->stock_count++;
         if (!f->stock_source) { mb_error(b, "out of memory"); return 0; }
     }
@@ -5557,6 +5728,7 @@ static char *mb_block_text(const sh_mb_bundle *b, const wchar_t *root, int with_
             mb_put_jcstr(&o, f->stock_source ? f->stock_source : "");
             mb_put_needs(&o, f);
             if (absent) mb_puts(&o, ",\"inAssets\":false");
+            if (f->closure) mb_puts(&o, ",\"closure\":true");
             mb_put(&o, "}", 1);
         }
         mb_put(&o, "]", 1);
@@ -5800,13 +5972,20 @@ int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle
                 }
                 /* Pointers the block holds without a file under assets/ (a
                  * download, a migration) stay pointers unless a file now takes
-                 * their place. */
+                 * their place. A pointer the campaign-only closure derived
+                 * ("closure": true) is not carried: this build derives the set
+                 * again from its own needs. Rules 3 wrote no mark, so a block
+                 * of rules 3 hands its pointers at the game's own path to
+                 * content only gameresources holds to the closure the same way. */
+                const mbj *pr = mbj_get(block, "rules");
+                int rules3 = pr && pr->t == MBJ_NUM && pr->n == 1 && pr->s[0] == '3';
                 if (st && st->t == MBJ_ARR && st->count)
                     carry = (sh_mb_stock_decl *)calloc(st->count, sizeof *carry);
                 for (i = 0; carry && i < st->count; i++) {
                     const mbj *e = st->items[i], *in = mbj_get(e, "inAssets"), *p = mbj_get(e, "path"),
-                              *src = mbj_get(e, "source"), *sha = mbj_get(e, "sha256");
+                              *src = mbj_get(e, "source"), *sha = mbj_get(e, "sha256"), *cl = mbj_get(e, "closure");
                     sh_mb_stock_decl *d = &carry[ncarry];
+                    if (cl && cl->t == MBJ_BOOL && cl->b) continue;
                     if (!(in && in->t == MBJ_BOOL && !in->b) || !p || p->t != MBJ_STR || !mb_starts(p->s, "assets/") ||
                         !src || src->t != MBJ_STR || !mb_is_hex64(sha)) continue;
                     d->request = mb_path_dup(p->s + 7, p->n - 7);
@@ -5814,6 +5993,14 @@ int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle
                     memcpy(d->sha256, sha->s, SH_MB_HASH_HEX + 1);
                     d->carried = 1;
                     if (!d->request || !d->source) { free(d->request); free(d->source); continue; }
+                    if (rules3 && !strcmp(d->request, d->source)) {
+                        char where[32];
+                        if (sh_mb_stock_container(d->source, NULL, where, sizeof where) && !strcmp(where, "gameresources")) {
+                            free(d->request);
+                            free(d->source);
+                            continue;
+                        }
+                    }
                     ncarry++;
                 }
             }

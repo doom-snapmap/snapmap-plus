@@ -26,7 +26,7 @@
  *                                      derived edits of decls at game names (decl_tree.h)
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
- *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false}]
+ *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false, "closure": true}]
  *   }
  *
  * Additive mods (phase 1). The builder classifies every file from its path
@@ -55,7 +55,8 @@
  * build inputs as if the author had written them (a converted package keeps
  * its own author keys). A stock pointer with "inAssets": false has no file
  * under assets/ (product-created folders never hold pointer bytes); a rebuild
- * keeps it from the block.
+ * keeps it from the block, except one marked "closure": true, which the
+ * campaign-only closure derived and every build derives again.
  *
  * The canonical manifest (below) is derived in memory, never stored: it is
  * the text uploaded to the store and the input of the bundle hash, unchanged
@@ -114,7 +115,7 @@
  * is built again once by the rebuild rule, so a product update reclassifies
  * every installed folder; aliases keep the maps pinned to its earlier hash
  * working. Raise it when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           3
+#define SH_MB_RULES           4
 #define SH_MB_ID_MAX          64u
 #define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */
@@ -171,7 +172,7 @@ typedef struct sh_mb_file {
     int cls;               /* SH_MB_CLASS_*: what the file is to the game (sh_mb_classify) */
     char *edit;            /* builder: a decl at a game name, its derived edits element (JSON), or NULL */
     int edited;            /* an edited copy: a REPLACE file the bundle's edits name (built or loaded); never served */
-    int closure;           /* builder: campaign-only content a served decl needs, borrowed for completeness */
+    int closure;           /* builder: campaign-only content a served decl needs, derived by this build ("closure": true) */
 } sh_mb_file;
 
 /* Per-file classification (DESIGN-additive 2.1, 2.6). Decided from the
@@ -374,7 +375,8 @@ int  sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundl
  * its product block, else its package.json, which is then deleted, else a
  * synthesized one) and the product block from `bundle`, including its
  * validated, cause and built fields. A pointer whose file is absent from
- * `<folder>\assets\` is written "inAssets": false. Write-through temporary
+ * `<folder>\assets\` is written "inAssets": false, and one the
+ * campaign-only closure derived "closure": true. Write-through temporary
  * and rename. Refuses a bundle with errors. Returns 1 on success. */
 int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char *cause, size_t cause_cap);
 
