@@ -2882,14 +2882,27 @@ teardown run inside the catch funclet, outside Frame's try: it syncs the rendere
 and calls CancelMapChange, which unloads the game and loads `game/shell_map`.
 `redirect_policy.h` therefore declines the redirect, and leaves the fault to the
 fatal handlers and their crash report, when the fault is off the engine main
-thread; when the loading-screen thread is running (the `load_screen` global,
-thread byte +0x4b2), because only `idLoadScreen::LevelLoadCompleted` stops that
-thread and the throw skips it, so the thread keeps rendering the menu while the
-main thread recovers; when an earlier redirect is still being recovered in the
-same Frame call, where a second throw reaches the game-loop catch that ends the
-process; and when the faulting stack does not unwind to Frame. An input the
-shield cannot read keeps the earlier behaviour. The decision is logged as a
-`declined` shield line with its stack.
+thread; when an earlier redirect is still being recovered in the same Frame
+call, where a second throw reaches the game-loop catch that ends the process;
+and when the faulting stack does not unwind to Frame. An input the shield
+cannot read keeps the earlier behaviour. The decision is logged as a `declined`
+shield line with its stack.
+
+A fault during a map load is recovered through the same redirect.
+`idLoadScreen::LevelLoadCompleted` is the only code that stops the
+loading-screen thread (the `load_screen` global, thread byte +0x4b2), and an
+error thrown out of a load skips it, the engine's own recoverable errors
+included. CancelMapChange's renderer sync and menu load then run while that
+thread still draws the load GUI: a deadlock in a Play load, or a race on the
+shared menu GUI (issue 132). `load_screen_stop.c` detours CancelMapChange
+(common vtable +0x28): on the engine main thread with the loading-screen thread
+still running it calls `LevelLoadCompleted` first, the engine's own order on a
+load that completes (stop the thread with no lock held, sync the renderer, free
+the load GUI), then runs the original. Both functions are signature-resolved and
+the stolen prologue is verified at startup on both renderers
+(`tests/load_screen_stop_test.c`). Only while that detour is armed does the
+policy redirect a fault with the loading-screen thread running; otherwise it
+declines it as before.
 
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves

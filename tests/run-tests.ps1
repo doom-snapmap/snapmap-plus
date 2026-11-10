@@ -169,6 +169,8 @@ $identityImages = @(@($da, $alt) | Where-Object { $_ })
 $tests += @{ name = "build_identity_test"; src = 'build_identity_test.c ..\src\backend\host_image.c ..\src\backend\signatures.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Prologue length decoding; with images, the cs_dontuse stolen boundaries.
 $tests += @{ name = "x64_len_test"; src = 'x64_len_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# The load-screen stop's engine sites: signatures, stolen window, vtable slot, call argument.
+$tests += @{ name = "load_screen_stop_test"; src = 'load_screen_stop_test.c ..\src\backend\x64_len.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Cooked movies (FileResource Load slot) and bundle ammo displays; with images,
 # their signatures, decoded engine calls, vtable slot and HUD call site.
 $tests += @{ name = "modswf_test"; src = 'modswf_test.c ..\src\backend\modswf.c ..\src\backend\modbundle.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODSWF_PURE /DSH_MODSWF_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }

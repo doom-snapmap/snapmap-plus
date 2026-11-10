@@ -32,7 +32,8 @@ same path.
 
 Play divides the map into world areas, culling cells at most 512 units wide
 on X and Y, and DOOM refuses to load a map with more than 8192 areas or 8192
-area nodes (its loading screen then never returns). A single modern room
+area nodes (on its own, its loading screen then never returns; Snapmap+ stops
+the loading screen and returns to the menu with DOOM's error). A single modern room
 reaches that at about 32768 x 32768. Snapmap+ counts the areas when Play
 builds the map: a map that fits keeps DOOM's 512-unit areas exactly, and a
 larger one is built with the smallest coarser size (1024, 2048 and so on)

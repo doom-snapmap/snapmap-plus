@@ -1570,5 +1570,23 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 5E 5E C3 0F B6 89 71 09 00 00 4C 8D 05 ?? ?? ?? ?? 48 89 5C 24 50 48 8D 15 ?? ?? ?? ?? 48 89 7C 24 58 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "49 8B BE 88 03 00 00 48 8B 9D 88 03 00 00"
       , 0x6BEE80u, 0x6BE150u },
+    /* Load-time fault recovery (fault_shield/load_screen_stop.c; snaphak-re
+     * campaign-interactables-triage F3b). idCommonLocal::CancelMapChange(common, arg),
+     * common vtable +0x28, reached from idCommonLocal::Frame's idException catch: its
+     * 16 KB stack buffer, then the MOV R8B,1 / MOVZX EBP,DL / MOV RDI,RCX setup.
+     * The first 15 bytes are the stolen window. */
+    { "CancelMapChange",
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 B8 30 40 00 00 E8 ?? ?? ?? ?? "
+      "48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 20 40 00 00 41 B0 01 0F B6 EA "
+      "48 8B F9 41 0F B6 D0 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
+      "48 8B 01 FF 50 38 0F B6 F0"
+      , 0x1586720u, 0x15877B0u },
+    /* idLoadScreen::LevelLoadCompleted(idLoadScreen *): sets the loading-screen thread's
+     * stop byte (+0x4B1), waits for the thread, then renderer vtable +0xF0 and +0xB8. */
+    { "LevelLoadCompleted",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B D9 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "83 3D ?? ?? ?? ?? 00 7E 12 48 8B 03 C6 80 B1 04 00 00 01 48 8B 0B E8 ?? ?? ?? ?? "
+      "48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 F0 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 B8 00 00 00"
+      , 0x1676770u, 0x16774B0u },
     { NULL, NULL, 0 }   /* terminator */
 };

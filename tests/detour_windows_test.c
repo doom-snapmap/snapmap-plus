@@ -120,6 +120,7 @@ static const site SITES[] = {
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/mapload_guards.c", "EventLink",         SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/mapload_guards.c", "InteractableSpawn", SITE_SIG, 0, 19, REPLAYS, 0 },
+    { "fault_shield/load_screen_stop.c", "CancelMapChange", SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/recovery.c", "Frame (RVA_FRAME)",       SITE_FRAME_RVA, 0, 15, REPLAYS, 0 },
     /* Decoded at install since 88f7a5b; listed so the table is complete. */
     { "algo.c",               "AlgoMatMul",                 SITE_DECODED, 0, 0, NEVER_REPLAYED, 0 },
@@ -358,6 +359,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\modtypeinfo.c", 2 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
+    { "fault_shield\\load_screen_stop.c", 1 },
 };
 
 static int count_calls(const char *text)

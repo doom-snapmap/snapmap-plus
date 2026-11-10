@@ -20,6 +20,7 @@
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
 #include "../fault_shield/serialized_entities_guard.h"
+#include "../fault_shield/load_screen_stop.h"
 #include "strids.h"
 #include "overrides.h"
 #include "grid_room_native.h"
@@ -312,6 +313,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_evwire_guard_install(g_doom_base, results, db);
         sh_interactable_guard_install(g_doom_base, results, db);
         sh_serialized_entities_guard_install(results, db);
+        /* Stop a failed map load's loading screen before the engine returns to the menu;
+         * while it is armed the shield recovers faults during a load (redirect_policy.h). */
+        sh_load_screen_stop_install(g_doom_base, results, db);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
 
