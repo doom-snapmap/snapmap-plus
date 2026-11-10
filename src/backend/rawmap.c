@@ -141,15 +141,72 @@ int sh_rawmap_load_oneshot_pending(void)
 
 static void rawmap_tell(const char *text);
 
+/* A held load's text: the bytes the hold checked (for a .zip, the map its
+ * import returned), kept so the load the hold's resume starts parses them
+ * instead of reading the source again. A ZIP is imported once, at the hold,
+ * not again at the resume. It is ready only once the hold resumed
+ * (sh_rawmap_reopen_after_mods); any other read of the source drops it. */
+static SRWLOCK g_held_lock = SRWLOCK_INIT;
+static char *g_held;                   /* process heap */
+static size_t g_held_len;
+static char g_held_path[MAX_PATH];
+static int g_held_ready;
+
+static void held_keep(char *text, size_t len, const char *path)
+{
+    char *old;
+    AcquireSRWLockExclusive(&g_held_lock);
+    old = g_held;
+    g_held = text;
+    g_held_len = len;
+    strncpy_s(g_held_path, sizeof g_held_path, path, _TRUNCATE);
+    g_held_ready = 0;
+    ReleaseSRWLockExclusive(&g_held_lock);
+    if (old) HeapFree(GetProcessHeap(), 0, old);
+}
+
+static void held_mark_ready(const char *path)
+{
+    AcquireSRWLockExclusive(&g_held_lock);
+    if (g_held && !_stricmp(g_held_path, path)) g_held_ready = 1;
+    ReleaseSRWLockExclusive(&g_held_lock);
+}
+
+/* The held text of `path` once its hold resumed (owned by the caller); any
+ * other held text is dropped: this read is a new load. */
+static char *held_take(const char *path, size_t *out_len)
+{
+    char *p, *drop = NULL;
+    AcquireSRWLockExclusive(&g_held_lock);
+    p = g_held;
+    if (p && g_held_ready && !_stricmp(g_held_path, path)) *out_len = g_held_len;
+    else { drop = p; p = NULL; }
+    g_held = NULL;
+    g_held_len = 0;
+    g_held_path[0] = '\0';
+    g_held_ready = 0;
+    ReleaseSRWLockExclusive(&g_held_lock);
+    if (drop) HeapFree(GetProcessHeap(), 0, drop);
+    return p;
+}
+
 /* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
  * failure, with the reason and next step in `why` when one is given.
  */
 static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap)
 {
     char buf_path[MAX_PATH];
+    char *held;
     resolve_source_path(buf_path, sizeof buf_path);
     const char *path = buf_path;
     if (why && why_cap) why[0] = '\0';
+    held = held_take(path, out_len);
+    if (held) {
+        char line[MAX_PATH + 96];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap %s: the resumed load uses the map its hold read; not read again", path);
+        backend_log(line);
+        return held;
+    }
     if (modexport_is_zip_path(path)) return modexport_read_text_report(path, out_len, why, why_cap);
 
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -625,7 +682,6 @@ int sh_rawmap_prepare_reload(char *why, int cap)
     missing = rawmap_missing_guarded(text, len, &rows);
     if (missing) {
         char line[MAX_PATH + 128];
-        HeapFree(GetProcessHeap(), 0, text);
         /* The one-shot belongs to this load; the hold re-arms it if it reopens. */
         InterlockedExchange(&g_swap_oneshot, 0);
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -634,6 +690,9 @@ int sh_rawmap_prepare_reload(char *why, int cap)
         backend_log(line);
         held = rawmap_hold_guarded(&rows, name);
         sh_modmanifest_list_free(&rows);
+        /* Its resume parses these bytes (a ZIP is not imported again). */
+        if (held > 0) held_keep(text, len, path);
+        else HeapFree(GetProcessHeap(), 0, text);
         if (why && cap > 0)
             _snprintf_s(why, (size_t)cap, _TRUNCATE, held > 0
                         ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
@@ -660,6 +719,7 @@ int sh_rawmap_reopen_after_mods(char *note, size_t cap)
     if (note && cap) note[0] = '\0';
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
+    held_mark_ready(path);   /* the load below parses the bytes the hold checked */
     /* Staged as well, so a reload the editor cannot take now still opens it
      * at the next map open (the reload itself spends it on substitution). */
     sh_rawmap_load_arm_once();
@@ -740,9 +800,9 @@ static int sh_deser_detour(const char *json, void *out_map)
                 int rc;
                 resolve_source_path(src, sizeof src);
                 rawmap_base_name(src, name, sizeof name);
-                HeapFree(GetProcessHeap(), 0, ours);
                 if (oneshot) InterlockedExchange(&g_swap_oneshot, 0);
                 if (InterlockedCompareExchange(&g_in_reload, 0, 0)) {
+                    HeapFree(GetProcessHeap(), 0, ours);
                     /* The reload borrowed another saved map's id: its own text must
                      * not open in its place either. */
                     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -760,7 +820,8 @@ static int sh_deser_detour(const char *json, void *out_map)
                 open_identity_set(NULL);
                 rc = deser_prepared(json, out_map);
                 /* After the parse: the parse record abandons any hold begun before it. */
-                (void)rawmap_hold_guarded(&rows, name);
+                if (rawmap_hold_guarded(&rows, name) > 0) held_keep(ours, len, src);
+                else HeapFree(GetProcessHeap(), 0, ours);
                 sh_modmanifest_list_free(&rows);
                 return rc;
             }

@@ -2282,7 +2282,9 @@ When every missing bundle is obtainable, the player gets the question a My Maps
 launch asks, and Yes fetches and installs them; the resume does not activate
 anything (the rawmap's own parse does) but opens the rawmap again, through a
 reload when the editor can take one and otherwise staged for the next map open,
-with a notice saying so. Otherwise the load is denied with the gate's
+with a notice saying so. That reopened load parses the text the hold checked
+(`held_take` in `rawmap.c`), so a `.zip` is imported once, at the hold; any other
+read of the source drops it and reads the file again. Otherwise the load is denied with the gate's
 sentences; the asset rule's sentence for each row comes first on the console.
 No and a failed download behave as for a published map. The gate is bound with the published-map gates; on a
 build where they did not install, nothing is counted missing and rawmaps load as

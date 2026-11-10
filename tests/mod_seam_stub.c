@@ -100,10 +100,22 @@ char *modexport_read_text(const char *path_acp, size_t *out_len)
  * export is not linked, so every import is refused). */
 char g_mod_stub_import_cause[MODEXPORT_CAUSE_MAX] = "the rawmap export is not linked into this test";
 
+/* g_mod_stub_import_text, when set, is the map every import returns; the
+ * imports are counted either way. */
+const char *g_mod_stub_import_text;
+int g_mod_stub_import_calls;
+
 char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause, size_t cause_cap)
 {
     (void)path_acp;
+    g_mod_stub_import_calls++;
     if (out_len) *out_len = 0;
+    if (g_mod_stub_import_text) {
+        size_t n = strlen(g_mod_stub_import_text);
+        char *heap = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
+        if (heap) { memcpy(heap, g_mod_stub_import_text, n + 1); if (out_len) *out_len = n; }
+        return heap;
+    }
     if (cause && cause_cap) strncpy_s(cause, cause_cap, g_mod_stub_import_cause, _TRUNCATE);
     return NULL;
 }
