@@ -491,7 +491,10 @@ These backend files share the work:
   Mods tab's New mod (`sh_ms_new_mod_example`) writes the same folder with an
   example that places and plays untouched: an entityDef
   `mods/<key>/example_crate` with the game's SnapMap `crate01` model, its
-  Toybox row (`snapEditorEntityDef`, nothing binary) and the row's strings in
+  Toybox row (`snapEditorEntityDef`, nothing binary: the game's
+  `prop/new/crate01` row field for field but its names and its `entityDef`,
+  so it names no `renderInfo.renderModelName`, which only rows whose entity
+  has no model of its own carry) and the row's strings in
   the author block, then rescans, so its first build runs at once and keeps
   the key its block records. A
   store folder with neither an `id` nor a block `key` gets one the same way

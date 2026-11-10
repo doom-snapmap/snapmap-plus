@@ -2759,6 +2759,50 @@ int main(int argc, char **argv)
         _snprintf_s(want, sizeof want, _TRUNCATE, "entityDef = \\\"mods/%s/example_crate\\\";", key);
         CHECK(has(doc, "\"ok\":true") && has(doc, want));
         free(doc);
+        /* The example is the game's crate01, field for field (V13: the earlier row's
+         * renderInfo.renderModelName drew the model a second time in the editor, which logged
+         * "modelMatrix invert failed" every frame). The stock texts are the game's own decls
+         * snapeditorentitydef/prop/new/crate01.decl and entitydef/snapmaps/props/new/crate01.decl: the row differs only in its names, the
+         * entityDef only in leaving out the editorVars block, which only Radiant reads. */
+        {
+            static const char stock_row[] =
+                "{\n\tinherit = \"prop/prop_base\";\n\tedit = {\n"
+                "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\n"
+                "\t\tdisplayNameTag = \"#str_snapentity_prop_crate01\";\n"
+                "\t\tdisplayDescriptionTag = \"#str_snapentity_prop_crate01_disp_desc\";\n"
+                "\t\tentityDef = \"snapmaps/props/new/crate01\";\n"
+                "\t\trenderInfo = {\n\t\t\tsize = {\n\t\t\t\tx = 54.3767967224;\n\t\t\t\ty = 54.3779754639;\n\t\t\t\tz = 53.595500946;\n\t\t\t}\n"
+                "\t\t\tarrowSize = {\n\t\t\t\tx = 2;\n\t\t\t\ty = 2;\n\t\t\t\tz = 1;\n\t\t\t}\n\t\t}\n"
+                "\t\teventInfo = {\n\t\t\tselectedEvent = {\n\t\t\t\tsound = \"play_pickup_heavy_crates\";\n\t\t\t}\n"
+                "\t\t\tplacedEvent = {\n\t\t\t\tsound = \"play_putdown_heavy_crates\";\n\t\t\t}\n\t\t}\n\t}\n}";
+            static const char stock_def_edit[] =
+                "\tedit = {\n\t\trenderModelInfo = {\n\t\t\tmodel = \"models/snapmaps/props/new/crate01.lwo\";\n\t\t}\n"
+                "\t\tclipModelInfo = {\n\t\t\ttype = \"CLIPMODEL_AUTO\";\n\t\t}\n\t\tdynamicObstacle = true;\n\t}\n}";
+            char path[MAX_PATH * 2], expect[4096], name[200], *got, *p, *q;
+            /* the stock row with the example's names, and the mod's category line after previewImage */
+            _snprintf_s(name, sizeof name, _TRUNCATE, "\t\tcategoryNameTag = \"#str_%s_category\";\n", key);
+            p = strstr(stock_row, "\t\tdisplayNameTag");
+            _snprintf_s(expect, sizeof expect, _TRUNCATE, "%.*s%s", (int)(p - stock_row), stock_row, name);
+            q = (char *)p;
+            _snprintf_s(expect + strlen(expect), sizeof expect - strlen(expect), _TRUNCATE,
+                        "\t\tdisplayNameTag = \"#str_%s_example_crate_name\";\n"
+                        "\t\tdisplayDescriptionTag = \"#str_%s_example_crate_desc\";\n"
+                        "\t\tentityDef = \"mods/%s/example_crate\";\n%s", key, key, key, strstr(q, "\t\trenderInfo"));
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/%s/assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", g_root, key, key);
+            got = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+            if (!got) printf("    cannot read %s\n", path);
+            if (got) { char *w = got, *r = got; for (; *r; r++) if (*r != '\r') *w++ = *r; *w = 0; while (w > got && w[-1] == '\n') *--w = 0; }
+            CHECK(got && !strcmp(got, expect));
+            if (got && strcmp(got, expect)) printf("    example row:\n%s\n    expected:\n%s\n", got, expect);
+            CHECK(got && !strstr(got, "renderModelName"));
+            free(got);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/%s/assets/generated/decls/entitydef/mods/%s/example_crate.decl", g_root, key, key);
+            got = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+            if (!got) printf("    cannot read %s\n", path);
+            if (got) { char *w = got, *r = got; for (; *r; r++) if (*r != '\r') *w++ = *r; *w = 0; while (w > got && w[-1] == '\n') *--w = 0; }
+            CHECK(got && !strncmp(got, "{\n\tclass = \"idProp_Coop\";\n", 26) && !strcmp(got + 26, stock_def_edit));
+            free(got);
+        }
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
         CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: a new mod needs a name.\""));
         free(doc);
