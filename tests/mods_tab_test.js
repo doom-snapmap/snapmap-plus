@@ -76,7 +76,7 @@ class FakeNode {
   }
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
-             'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
+             'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
@@ -465,6 +465,42 @@ test('Migrate shows only while overrides holds entries the record does not cover
   done.migrate = {entries: 34, pending: 0, running: false};
   h.ui.onMessage({kind: 'mods', data: done});
   assert.equal(h.nodes.modsMigrateBtn.style.display, 'none');
+});
+test('New mod in the header: shown whenever Migrate is hidden, never beside it; the right-click entry stays', () => {
+  const h = harness({store: modsTab.standIn(Object.assign(clone(v3), {migrate: {entries: 34, pending: 0, running: false}}))});
+  h.ui.show();
+  /* the normal case: nothing to migrate, New mod in Migrate's place */
+  assert.equal(h.nodes.modsMigrateBtn.style.display, 'none');
+  assert.equal(h.nodes.modsNewBtn.style.display, '');
+  assert.equal(h.nodes.modsNewBtn.disabled, false);
+  h.nodes.modsNewBtn.click();
+  assert.equal(h.nodes.modsNewModal.style.display, 'flex');
+  assert.equal(activeElement, h.nodes.modsNewName);
+  h.nodes.modsNewCancel.click();
+  assert.equal(activeElement, h.nodes.modsNewBtn, 'focus returns to the header button');
+  h.nodes.modsNewBtn.click();
+  h.nodes.modsNewName.value = 'Header mod';
+  h.nodes.modsNewCreate.click();
+  assert.deepEqual(h.sent.filter(m => m.action === 'newMod'), [{cmd: 'modsAction', action: 'newMod', arg: 'Header mod'}]);
+  /* the right-click entry is still there */
+  h.nodes.modsList.dispatch('contextmenu', {pageX: 1, pageY: 1});
+  assert.deepEqual(h.menus.pop().items.map(i => i.label), ['New mod...']);
+  /* something to migrate: Migrate shows and New mod leaves the header (six buttons at most) */
+  const g = harness();
+  shown(g);
+  assert.equal(g.nodes.modsMigrateBtn.style.display, '');
+  assert.equal(g.nodes.modsNewBtn.style.display, 'none');
+  g.nodes.modsList.dispatch('contextmenu', {pageX: 1, pageY: 1});
+  assert.equal(g.menus.length, 1, 'New mod stays reachable by right-click');
+  /* while the migration runs Migrate stays and New mod stays hidden; afterwards New mod is back */
+  g.nodes.modsMigrateBtn.click();
+  assert.equal(g.nodes.modsNewBtn.style.display, 'none');
+  assert.equal(g.nodes.modsNewBtn.disabled, true, 'held while an action runs');
+  g.ui.onMessage({kind: 'modsActionResult', action: 'migrate', data: {action: 'migrate', ok: true, message: 'Moved your mods.'}});
+  g.ui.onMessage({kind: 'mods', data: Object.assign(clone(v3), {migrate: {entries: 34, pending: 0, running: false}})});
+  assert.equal(g.nodes.modsMigrateBtn.style.display, 'none');
+  assert.equal(g.nodes.modsNewBtn.style.display, '');
+  assert.equal(g.nodes.modsNewBtn.disabled, false);
 });
 
 /* ---- the details pane ------------------------------------------------------------------------- */
@@ -1143,8 +1179,10 @@ test('the header fits at the minimum pane width', () => {
   const inset = px(css, /--pane-inline: (\d+)px/);
   const min = Number(panel.match(/data-min-before="(\d+)"[^>]*data-split-label="Mods"/)[1]);
   const buttons = (head.match(/<button /g) || []).length;
-  assert.equal(buttons, 6, 'every header button counted, the hidden ones too');
-  assert.ok(2 * inset + headGap + buttons * button + (buttons - 1) * gap <= min,
+  assert.equal(buttons, 7, 'every header button counted, the hidden ones too');
+  /* Migrate and New mod never show together, so at most six are visible */
+  const visible = buttons - 1;
+  assert.ok(2 * inset + headGap + visible * button + (visible - 1) * gap <= min,
             'six buttons fit in a ' + min + ' px pane');
 });
 test('page contract', () => {
@@ -1157,14 +1195,14 @@ test('page contract', () => {
   /* the header's left side is icon buttons, as the Prefabs tab's (owner 2026-11-09); the toolbar holds the filter alone */
   const head = panel.slice(panel.indexOf('<div class="panel-head">'), panel.indexOf('<div class="panel-toolbar">'));
   const actions = head.slice(head.indexOf('<div class="panel-actions">'));
-  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn'])
+  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsInstallBtn'])
     assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
   const pfHead = html.slice(html.indexOf('<span class="panel-title">Prefabs</span>'), html.indexOf('id="prefabFilter"'));
   assert.match(pfHead, /<div class="panel-actions">\n\s*<button type="button" class="btn icon icon-button"/, 'the same primitives as the Prefabs header');
   const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar">'), panel.indexOf('id="modsList"'));
   assert.ok(toolbar.includes('id="modsFilter"') && !/<button/.test(toolbar), 'the toolbar is the filter alone');
   assert.ok(!/class="badge mods-attn"|mods-toolbar/.test(panel), 'no pill-shaped attention badge');
-  for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
+  for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsNewBtn', 'folder-plus'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
   assert.match(panel, /id="modsMigrateBtn" style="display:none"/);
   assert.match(panel, /<button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none"/);
@@ -1479,7 +1517,7 @@ test('the Files view model: classes, sources and the tree', () => {
 test('New mod: a name, the folder made with its example, the mod selected, Files open on its Toybox row', () => {
   const h = harness({store: modsTab.standIn(v3)});
   h.ui.show();
-  /* the list's right-click entry: the header has no room for a seventh button at 220 px */
+  /* the list's right-click entry (the header's button is tested above) */
   const e = h.nodes.modsList.dispatch('contextmenu', {pageX: 40, pageY: 90});
   assert.equal(e.defaultPrevented, true);
   assert.deepEqual(h.menus.map(m => m.items.map(i => i.label)), [['New mod...']]);

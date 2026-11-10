@@ -313,8 +313,9 @@ Import, New Folder and Create are there; owner 2026-11-09): the attention filter
 shown only when a mod needs attention; its hover and label carry the count, "2 mods need attention:
 show only these", and pressing it sets `aria-pressed` and shows only those rows), This map (its hover
 names how many mods the open map uses), refresh, Open mods folder, Migrate (only while
-`migrate.pending > 0`) and install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
-at the pane's 220 px minimum all six buttons stay inside the pane and the label is clipped. The toolbar
+`migrate.pending > 0`) or, in its place whenever Migrate is hidden, New mod (`folder-plus`), and
+install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
+at the pane's 220 px minimum all six visible buttons stay inside the pane and the label is clipped. The toolbar
 under it holds the filter alone. The
 install dialog allows several folders (`FOS_ALLOWMULTISELECT`), joined with newlines in the action's
 argument; a picked folder without `mod.json` stands for every mod folder below it. One picked mod
@@ -420,9 +421,10 @@ else the first file a cause names, else `mod.json`. Its two reads (`modFiles`, `
 set the page's busy state or its status line, and no fresh document follows them; a refusal (another
 action still running) is shown in the modal.
 
-**New mod.** The empty list's card holds a New mod button, and the list's right-click menu (the
-page's `#ctxmenu`) a "New mod..." entry: the list's header has no room for a seventh icon button at
-its 220 px minimum. Both open a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
+**New mod.** The list's header holds a New mod icon button whenever Migrate is hidden (the two
+never show together: the header has room for six icon buttons at its 220 px minimum), the empty
+list's card a New mod button, and the list's right-click menu (the page's `#ctxmenu`) a "New mod..."
+entry, so it stays reachable while Migrate shows. Each opens a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
 creates, Escape cancels) that sends `newMod` with the name. Its answer selects the new mod (its
 key) and opens the Files modal on the example's Toybox row, with one quiet line above the editor:
 "Place Example crate from the Toybox in your map, change this file in the mod's folder, and save it:

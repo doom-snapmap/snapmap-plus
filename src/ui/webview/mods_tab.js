@@ -671,7 +671,7 @@ var modsTab = (function () {
 
     function renderButtons() {
       var sel = !!selectedMod();
-      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn'].forEach(function (id) {
         var b = byId(id);
         if (b) b.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn' || id === 'modsVerifyBtn'));
       });
@@ -686,13 +686,18 @@ var modsTab = (function () {
       }
       renderUse();
       modalButtons.forEach(function (n) { n.disabled = !!busy; });
-      var mg = byId('modsMigrateBtn');
+      var mg = byId('modsMigrateBtn'), migrating = false;
       if (mg) {
         var show = loaded && model.migrate.pending > 0 && !model.migrate.running;
-        mg.style.display = show || busy === 'migrate' ? '' : 'none';
+        migrating = show || busy === 'migrate';
+        mg.style.display = migrating ? '' : 'none';
         mg.title = 'Migrate: move ' + plural(model.migrate.pending, 'entry', 'entries') +
                    ' of the old overrides folder into the mods folder';
       }
+      /* New mod takes Migrate's place in the header: six icon buttons fit at the pane's 220 px
+         minimum, and Migrate shows only while the old overrides folder holds something to move. */
+      var nb = byId('modsNewBtn');
+      if (nb) nb.style.display = migrating ? 'none' : '';
     }
     /* The details head's map action: Use in this map, or Remove from map once the open map uses the
        selected mod. Shown only while a map is open in the editor. */
@@ -1702,8 +1707,9 @@ var modsTab = (function () {
       on('modsNewModal', 'mousedown', function (e) { if (e.target === byId('modsNewModal')) closeNewMod(); });
       on('modsNewCancel', 'click', closeNewMod);
       on('modsNewCreate', 'click', createNewMod);
-      /* New mod has no room in the list's header at its minimum width (six icon buttons fill it):
-         it is the empty list's button and the list's right-click entry. */
+      /* New mod: the header's button (while Migrate is hidden), the empty list's button and the
+         list's right-click entry. */
+      on('modsNewBtn', 'click', function () { openNewMod(byId('modsNewBtn')); });
       on('modsList', 'contextmenu', function (e) {
         if (!env.menu) return;
         if (e.preventDefault) e.preventDefault();
