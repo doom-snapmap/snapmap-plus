@@ -1300,6 +1300,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
       "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
       "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
+    { "SnapPaletteSortCall", /* inside PasteInstantiate (VK 0x1411af070, GL 0x1411ae270): the editor's
+                             * reads of +0x204c8 and +0x204d0, the end-pointer refresh of the palette at
+                             * editor+0x20660, then at offset 37 the E8 to SnapPaletteSort (VK 0x1411ab0a0,
+                             * GL 0x1411aa1b0), the sort of the palette's rows in place. The sort wrapper's
+                             * own bytes are a template shared with other row lists, so it is reached
+                             * through this call. timeline_tile.c verifies the target's prologue before
+                             * detouring it. VK 0x1411af0f3, GL 0x1411ae2f3. */
+      "4C 8B F1 48 8B B2 C8 04 02 00 48 8B BA D0 04 02 00 48 8D 8A 60 06 02 00 E8 ?? ?? ?? ?? "
+      "49 8D 8C 24 60 06 02 00 E8 ?? ?? ?? ?? 8B 46 50", 0x11AF0F3u, 0x11AE2F3u },
     /* Published-map and offline-play gates (modpublished.c; snaphak-re
      * mod-system-reinstatement lane N1a section 5). Unique on both build
      * 13954591 executables; steal windows audited by detour_windows_test. */

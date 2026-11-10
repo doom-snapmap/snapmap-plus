@@ -72,6 +72,11 @@ int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after);
  * once this process, else NULL. */
 void *sh_timeline_tile_palette(void);
 
+/* Palette sorts seen by the sort guard this session, how many of them ran
+ * outside process heap 0 (the scope could not be entered), and whether the
+ * guard is installed. */
+void sh_timeline_tile_sorts(int *sorts, int *unscoped, int *guarded);
+
 /* The +0x368 slot body (see snapmap_plus_iface.h). */
 int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call);
 #endif

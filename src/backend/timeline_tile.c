@@ -43,6 +43,7 @@ int sh_tl_substate_blocks_rebind(int substate)
 #include "apply_engine.h"
 #include "backend_log.h"
 #include "patch.h"
+#include "hook.h"
 #include "process_heap_scope.h"
 #include "engine_globals.h"
 #include "budget_table.h"
@@ -277,6 +278,62 @@ static void tl_register(void)
     }
 }
 
+/* The engine sorts the palette's rows in place from four places, and the
+ * Play build does it twice: once inside its own process-heap scope (the
+ * validator) and once right after that scope is popped, in the map heap (the
+ * Play map's structure). A sort swaps rows through a temporary and gives a
+ * row's string a new buffer, in the current heap, when the value moving into
+ * it is longer than the slot's old one; a row that grows during the second
+ * sort keeps a map-heap string, the return to the editor frees it, and the
+ * next Play's first sort reads it (review A-D3: DOOM+0x339c40 reading a
+ * row's clipModelName in released memory). Every sort runs on process heap 0
+ * here, as the builder does. */
+typedef void (*palette_sort_fn)(void *);
+static palette_sort_fn g_sort_orig;
+static volatile LONG g_sorts, g_sorts_unscoped;
+#define PALETTE_SORT_STOLEN 16    /* sub rsp,0x48; movzx eax,[rsp+0x28]; lea rdx,[rip+comparator] */
+#define PALETTE_SORT_LEA_OFF 9    /* the lea the trampoline relocates */
+#define PALETTE_SORT_CALL_OFF 37  /* the E8 to the sort inside SnapPaletteSortCall */
+
+/* The sort reached through the E8 at call_site, when its first 16 bytes are
+ * the wrapper's (the comparator's displacement differs per renderer). */
+static const unsigned char *tl_sort_target(const unsigned char *call_site)
+{
+    static const unsigned char prologue[PALETTE_SORT_STOLEN] =
+        { 0x48, 0x83, 0xEC, 0x48, 0x0F, 0xB6, 0x44, 0x24, 0x28, 0x48, 0x8D, 0x15, 0, 0, 0, 0 };
+    const unsigned char *target;
+    int32_t rel;
+    __try {
+        if (call_site[0] != 0xE8) return NULL;
+        memcpy(&rel, call_site + 1, 4);
+        target = call_site + 5 + rel;
+        if (memcmp(target, prologue, 12)) return NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    return target;
+}
+
+static void tl_palette_sort(void *palette)
+{
+    sh_process_heap_scope heap = {0};
+    int scoped = g_heap_ok && sh_process_heap_enter(&g_heap, &heap);
+    InterlockedIncrement(&g_sorts);
+    if (!scoped && InterlockedIncrement(&g_sorts_unscoped) == 1)
+        backend_log("TL tile: a palette sort ran outside process heap 0 (the scope could not be entered); "
+                    "rows it grows do not survive the next map transition");
+    __try { g_sort_orig(palette); }
+    __finally {
+        if (scoped && !sh_process_heap_leave(&heap))
+            backend_log("TL tile: the palette sort's heap scope did not balance");
+    }
+}
+
+void sh_timeline_tile_sorts(int *sorts, int *unscoped, int *guarded)
+{
+    if (sorts) *sorts = (int)InterlockedCompareExchange(&g_sorts, 0, 0);
+    if (unscoped) *unscoped = (int)InterlockedCompareExchange(&g_sorts_unscoped, 0, 0);
+    if (guarded) *guarded = g_sort_orig != NULL;
+}
+
 static void tl_palette_build(void *palette, void *progress)
 {
     /* The palette enumerates the decl manager, so register before it runs. */
@@ -482,6 +539,26 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
         return 0;
     }
     backend_log("TL tile: palette build hook installed");
+    {
+        /* The sort guard (tl_palette_sort). Its absence costs the fix for A-D3
+         * only; the build hook above stands either way. */
+        const sig_result *site = clean_result(results, count, "SnapPaletteSortCall");
+        const unsigned char *target = site ? tl_sort_target((const unsigned char *)site->addr + PALETTE_SORT_CALL_OFF) : NULL;
+        void *st = target ? hook_prepare_rip_lea((void *)target, (void *)tl_palette_sort, PALETTE_SORT_STOLEN,
+                                                 PALETTE_SORT_LEA_OFF)
+                          : NULL;
+        if (!st) {
+            backend_log(target ? "TL tile: palette sort detour refused; palette sorts stay on the engine's heap"
+                        : site ? "TL tile: the palette sort's prologue is not the known one; palette sorts stay on the engine's heap"
+                               : "TL tile: palette sort signature refused; palette sorts stay on the engine's heap");
+        } else if (sh_commit_detour(st) != B2_PATCH_OK) {
+            (void)sh_uninstall_detour(st);
+            backend_log("TL tile: palette sort detour commit failed; palette sorts stay on the engine's heap");
+        } else {
+            g_sort_orig = (palette_sort_fn)st;
+            backend_log("TL tile: palette sort hook installed (every sort runs on process heap 0)");
+        }
+    }
     return 1;
 }
 

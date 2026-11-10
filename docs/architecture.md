@@ -1561,7 +1561,18 @@ removed row is re-parsed without a source, resolves no entityDef and is left
 out by the rebuild; the strids layer re-reads bundle strings on every
 published table, so a new row shows its `#str_` name. Without a palette yet,
 the first editor entry builds it with every row; a refused rebuild (an entity
-or wire held) is retried by `sh_mods palette rebuild`. What stays reported
+or wire held) is retried by `sh_mods palette rebuild`. The engine sorts the
+palette's rows in place (`SnapPaletteSort`) from four places, and the Play
+build does it twice: once inside its own process-heap scope (the validator)
+and once after that scope is popped, in the map heap (the Play map's
+structure). A sort swaps rows through a temporary and gives a row string a
+new buffer, in the current heap, when the value moving into the slot is
+longer than its old one; a row grown by the second sort kept a map-heap
+string, the return to the editor freed it, and the next Play's first sort
+read it (the review's A-D3 fault at DOOM+0x339c40, a row's clipModelName).
+The Timeline tile's sort detour (`tl_palette_sort`) runs every sort inside
+a verified process-heap scope; `sh_mods palette check` reports where each
+row's strings live and how many sorts ran. What stays reported
 rather than applied: new names of a mod no map has used this session (they
 register when a map that names the mod loads), a changed movie (read at the
 next map load), a changed anim (reloaded in place at the next map load), and
