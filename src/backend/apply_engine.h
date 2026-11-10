@@ -52,6 +52,11 @@ int sh_apply_engine_deshare_bound(void);
  * returns 1 when committed. */
 int sh_apply_engine_commit_record(void *record, const char *json);
 
+/* The allocator header's heap class of a block start: "PROCESS (survives)",
+ * "PERSIST (survives)", "MAP (dies at map teardown)", or a "?(...)" /
+ * "not-a-heap-block" text when the header is not a live block's. */
+const char *sh_apply_engine_block_heap_name(const void *p);
+
 /* Export the main-thread call slot. Calls drain in sh_apply_prefab_poll_play,
  * so they time out unrun while the frame hook is missing or suppressed. */
 void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main);
