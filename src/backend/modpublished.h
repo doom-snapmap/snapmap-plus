@@ -233,10 +233,12 @@ int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, 
 /* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
  * line say it: "This <subject> needs <title> at a build that ...". `subject`
  * is "map" or "prefab" (NULL: "map"), `title` "<name> (<key>)" or the key,
- * `source` the borrow's installed path (verdict 4). The dialog shows it
- * truncated to the native body (255 bytes); the console line is whole. */
+ * `source` the borrow's installed path (verdict 4), `store_code` the
+ * MODNET_E_ code of the store's failure (verdict 2; 0 when unknown), worded
+ * by plain_reason.h. The dialog shows it truncated to the native body (255
+ * bytes); the console line is whole. */
 void sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
-                            char *out, size_t cap);
+                            int store_code, char *out, size_t cap);
 
 /* What the probe learned about one bundle (modsync.h modsync_probe). */
 typedef struct sh_modpub_probe {
@@ -244,6 +246,7 @@ typedef struct sh_modpub_probe {
     int game_lacks;
     char source[260];   /* game_lacks: the borrow's installed source path */
     char name[128];     /* found: the bundle's display name */
+    int code;           /* unreachable: the MODNET_E_ code of the failure, 0 when unknown */
 } sh_modpub_probe;
 
 /* Everything the state machine asks of the engine and of the lanes it depends

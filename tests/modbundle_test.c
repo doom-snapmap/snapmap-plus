@@ -105,6 +105,11 @@ static void test_names(void)
     CHECK(!sh_mb_check_request("generated/../x.decl", cause, sizeof cause) && strstr(cause, "traversal"));
     CHECK(!sh_mb_check_request("./x.decl", cause, sizeof cause));
     CHECK(!sh_mb_check_request("/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
+    /* A non-ASCII file name: the file and its character, in words (plain_reason.h). */
+    CHECK(!sh_mb_check_request("generated/image/mods/a/caf\xc3\xa9.bimage", cause, sizeof cause) &&
+          strstr(cause, "generated/image/mods/a/caf\xc3\xa9.bimage has the character '\xc3\xa9' (U+00E9) in its name; "
+                        "the game reads only ASCII file names") != NULL);
+    CHECK(!sh_mb_check_request("a/b*c.decl", cause, sizeof cause) && strstr(cause, "has the character '*' (U+002A)") != NULL);
     CHECK(!sh_mb_check_request("c:/x.decl", cause, sizeof cause) && strstr(cause, "absolute"));
     CHECK(!sh_mb_check_request("a\\x.decl", cause, sizeof cause) && strstr(cause, "backslash"));
     CHECK(!sh_mb_check_request("a./x.decl", cause, sizeof cause));

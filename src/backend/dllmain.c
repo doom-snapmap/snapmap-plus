@@ -8,6 +8,7 @@
 #include <string.h>
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "user32.lib")   /* MessageBoxW: the unsupported-build notice */
 #include "signatures.h"
 #include "startup_bindings.h"
 #include "hook.h"
@@ -168,6 +169,14 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         backend_log("UNSUPPORTED: this DOOM executable is not the April 2024 update (Steam build "
                     "13954591), the only build this Snapmap+ supports; Snapmap+ is off and only "
                     "forwards controller input. For the 2018 build install Snapmap+ v0.2.1-beta.19.");
+        /* The player hears it too, once at boot, on this thread (the game is
+         * not waiting on it): a log line alone left a DOOM update silent. */
+        MessageBoxW(NULL,
+                    L"This DOOM executable is not the build this Snapmap+ supports (the April 2024 update, Steam "
+                    L"build 13954591), so Snapmap+ is off for this session and the game runs without it.\n\n"
+                    L"DOOM was probably updated. Install a Snapmap+ release that supports this build; for the 2018 "
+                    L"build, Snapmap+ v0.2.1-beta.19.",
+                    L"Snapmap+ is off", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
         return 0;
     }
     {

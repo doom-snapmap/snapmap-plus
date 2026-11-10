@@ -11,6 +11,7 @@
 #include "modserve.h"
 #include "mp_json.h"
 #include "backend_log.h"
+#include "plain_reason.h"
 
 #define MSY_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8)
 #define MSY_DOC_MAX (4u * 1024u * 1024u)
@@ -619,7 +620,7 @@ static int msy_place_file(const char *dst, const sh_mb_file *f, const msy_local 
     }
     ok = msy_write_file(dst, bytes, len, 0);
     free(bytes);
-    if (!ok) return msy_cause(cause, cap, "cannot write %s (error %lu)", f->path, GetLastError());
+    if (!ok) return msy_cause(cause, cap, "cannot write %s: %s", f->path, sh_reason_win32(GetLastError(), dst, len));
     if (fetched) { info->blobs_fetched++; info->bytes_fetched += len; }
     else info->blobs_present++;
     return 1;
@@ -727,9 +728,9 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     wstaging = sh_mb_wpath(staging);
     wold = sh_mb_wpath(old);
     if (!wroot || !wfinal || !wstaging || !wold) { msy_cause(cause, cap, "out of memory"); goto done; }
-    if (!msy_mkdirs(root)) { msy_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
+    if (!msy_mkdirs(root)) { msy_cause(cause, cap, "cannot create the store folder: %s", sh_reason_win32(GetLastError(), root, 0)); goto done; }
     if (msy_exists_w(wstaging, NULL, NULL)) msy_rmtree_w(wstaging, wroot, 1);
-    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s (error %lu)", name, GetLastError()); goto done; }
+    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s: %s", name, sh_reason_win32(GetLastError(), name, 0)); goto done; }
     locals = listed ? msy_locals(&list, &b, &nlocals) : NULL;
     sh_ms_list_free(&list);
     listed = 0;
@@ -773,7 +774,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         if (!MoveFileExW(wfinal, wold, 0)) {
             DWORD e = GetLastError();
             msy_rmtree_w(wstaging, wroot, 1);
-            msy_cause(cause, cap, "cannot replace the damaged %s; is a file in it open? (error %lu)", name, e);
+            msy_cause(cause, cap, "cannot replace the damaged %s: %s", name, sh_reason_win32(e, name, 0));
             goto done;
         }
         replace = 1;
@@ -782,7 +783,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         DWORD e = GetLastError();
         if (replace) MoveFileExW(wold, wfinal, 0);
         msy_rmtree_w(wstaging, wroot, 1);
-        msy_cause(cause, cap, "cannot place %s (error %lu)", name, e);
+        msy_cause(cause, cap, "cannot place %s: %s", name, sh_reason_win32(e, name, 0));
         goto done;
     }
     if (replace) msy_rmtree_w(wold, wroot, 1);

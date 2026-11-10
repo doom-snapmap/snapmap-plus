@@ -713,7 +713,7 @@ int main(int argc, char **argv)
             static const char *const BS_D[] = { "{\"entities\":[],\"~type\":\"idSnapMap\"}" };
             CHECK(mt_zip_stored(zipO, 1, BS_N, BS_D));
             text = modexport_read(zipO, &len, &st, cause, sizeof cause);
-            CHECK(text == NULL && !strcmp(cause, "the export holds a file with an unsafe name"));
+            CHECK(text == NULL && strstr(cause, "the export holds a file with an unsafe name, \"maps\\evil.json\"") != NULL);
             free(text);
         }
     }

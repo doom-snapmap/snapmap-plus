@@ -300,8 +300,9 @@ name". Mods you download or import are never refused on their files. A map whose
   - the map is published and the build left the mod store: "This map needs Hell Guards
     (hell-guards-7f3k) at a build that is no longer available: its author unpublished it, or it was
     removed. This is permanent on this machine.";
-  - the mod store did not answer: "... at a build that could not be downloaded: the mod store did
-    not answer. Connect and try again.";
+  - the mod store did not answer: "... at a build that could not be downloaded: " and the store's
+    failure in words, for example "the mod store is busy; try again in a few minutes." or "the mod
+    store could not be reached; check the internet connection and try again.";
   - the map was never published (a My Maps save, a rawmap, a prefab) and the mod's folder is gone:
     "... at a build that is not installed and was never published. Restore its folder from the
     Recycle Bin or load the map's rawmap ZIP." (for a prefab, "the prefab's ZIP export");

@@ -12,6 +12,7 @@
 #include "config_json.h"
 #include "mp_json.h"
 #include "backend_log.h"
+#include "plain_reason.h"
 
 /* ------------------------------------------------------------ lock ----- */
 
@@ -95,6 +96,23 @@ static int ms_cause(char *cause, size_t cap, const char *fmt, ...)
         va_end(ap);
     }
     return 0;
+}
+
+/* A Win32 failure as a plain reason with the next step (plain_reason.h).
+ * `name` is the file or folder; `in_store` names it relative to the store
+ * root, which is then prefixed; NULL names the store folder. A full disk
+ * names the store's drive and the bytes needed (0: unknown). The text lives
+ * in a per-thread buffer: one call per message. */
+static const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes)
+{
+    char root[MAX_PATH * 4], path[MAX_PATH * 4 + 300];
+    int have_root = sh_ms_root(root, sizeof root);
+    if (!name || !name[0]) strcpy_s(path, sizeof path, have_root ? root : "the mods folder");
+    else if (in_store && have_root) _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, name);
+    else if ((err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) && have_root && name[1] != ':')
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, name);
+    else strcpy_s(path, sizeof path, name);
+    return sh_reason_win32(err, path, bytes);
 }
 
 static void ms_log(const char *fmt, ...)
@@ -525,7 +543,7 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
     else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_rel(folder));
     else if (!ms_store_mod_folder(w, root)) ms_cause(cause, cap, "%s is not a mod folder of the store", ms_rel(folder));
     else if ((r = ms_retire(w, root, why, sizeof why)) == 0)
-        ms_cause(cause, cap, "%s could not be deleted completely (error %lu)", ms_rel(folder), GetLastError());
+        ms_cause(cause, cap, "%s could not be deleted completely: %s", ms_rel(folder), ms_why(GetLastError(), ms_rel(folder), 1, 0));
     else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
     ms_log_discard(folder, r, why);
     if (r) ms_snapshot_drop(folder);
@@ -603,8 +621,8 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
                 _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s %s", leaf, g_ms_discard_verb);
             } else {
                 failed++;
-                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be removed (error %lu); it stays "
-                            "for the next run", leaf, GetLastError());
+                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be removed (%s); it stays "
+                            "for the next run", leaf, ms_why(GetLastError(), leaf, 0, 0));
             }
             backend_log(text);
             if (line) line(context, text);
@@ -971,10 +989,10 @@ static int ms_snapshot_take(const char *folder, const sh_mb_bundle *b)
         _snwprintf_s(staging, n, _TRUNCATE, L"%s.staging-%lu", dir, GetCurrentProcessId());
         if (ms_exists(staging)) ms_rmtree(staging, root);
         if (ms_exists(dir)) ms_rmtree(dir, root);   /* an incomplete one */
-        if (!ms_mkdirs(staging)) { ms_cause(why, sizeof why, "cannot create it (error %lu)", GetLastError()); goto out; }
+        if (!ms_mkdirs(staging)) { ms_cause(why, sizeof why, "cannot create it: %s", ms_why(GetLastError(), NULL, 0, 0)); goto out; }
         copied = ms_snap_fill(wfolder, staging, b, why, sizeof why);
         if (copied < 0 || !ms_move_folder(staging, dir)) {
-            if (copied >= 0) ms_cause(why, sizeof why, "cannot place it (error %lu)", GetLastError());
+            if (copied >= 0) ms_cause(why, sizeof why, "cannot place it: %s", ms_why(GetLastError(), NULL, 0, 0));
             ms_rmtree(staging, root);
             goto out;
         }
@@ -1543,7 +1561,7 @@ int sh_ms_new_mod(const char *name, char key_out[SH_MB_ID_MAX + 1], char *folder
         assets = k;
     }
     desc = ms_wjoin(dir, L"mod.json");
-    if (!assets || !desc || !ms_mkdirs(assets)) { ms_cause(cause, cap, "cannot create the folder for %s (error %lu)", key, GetLastError()); goto done; }
+    if (!assets || !desc || !ms_mkdirs(assets)) { ms_cause(cause, cap, "cannot create the folder for %s: %s", key, ms_why(GetLastError(), key, 1, 0)); goto done; }
     /* The author block holds what the files cannot say (DESIGN-additive 2.9);
      * the product block the key, which never changes afterwards. */
     _snprintf_s(text, sizeof text, _TRUNCATE,
@@ -1838,7 +1856,8 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
     HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
     free(pattern);
     if (h == INVALID_HANDLE_VALUE) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) ms_rk_fail(r, "cannot list %s (error %lu)", rel[0] ? rel : "the folder", GetLastError());
+        if (GetLastError() != ERROR_FILE_NOT_FOUND)
+            ms_rk_fail(r, "cannot list %s: %s", rel[0] ? rel : "the folder", ms_why(GetLastError(), rel[0] ? rel : "the folder", 0, 0));
         return;
     }
     if (depth > 48) { FindClose(h); ms_rk_fail(r, "folder nesting deeper than 48: %s", rel); return; }
@@ -1887,7 +1906,7 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
             size_t len = 0;
             char *t = size <= MS_RK_TEXT_MAX ? ms_read_text(path, MS_RK_TEXT_MAX, &len) : NULL;
             if (size <= MS_RK_TEXT_MAX && !t) {
-                ms_rk_fail(r, "cannot read %s (error %lu); nothing was renamed", child, GetLastError());
+                ms_rk_fail(r, "cannot read %s (%s); nothing was renamed", child, ms_why(GetLastError(), child, 0, 0));
             } else if (t && !memchr(t, 0, len)) {
                 /* A text: decl text and anything else without a NUL byte. */
                 char *out = NULL;
@@ -1896,7 +1915,7 @@ static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
                 else if (c) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
             } else {
                 int hit = t ? (sh_mb_rekey_text(t, len, r->leaf, r->key, NULL, NULL) > 0) : ms_rk_binary_names(path, r->leaf);
-                if (hit < 0) ms_rk_fail(r, "cannot read %s (error %lu); nothing was renamed", child, GetLastError());
+                if (hit < 0) ms_rk_fail(r, "cannot read %s (%s); nothing was renamed", child, ms_why(GetLastError(), child, 0, 0));
                 else if (hit)
                     ms_rk_fail(r, "%s is a binary file that names mods/%s/, which cannot be rewritten; nothing was renamed. "
                                "Make the mod with New mod, or rename the folder and its references yourself and give mod.json "
@@ -1920,7 +1939,7 @@ static int ms_rk_stage(ms_rk *r, const wchar_t *src, const wchar_t *staging, int
 {
     size_t i;
     wchar_t *mj;
-    if (!ms_mkdirs(staging)) { ms_rk_fail(r, "cannot create the staging folder (error %lu)", GetLastError()); return 0; }
+    if (!ms_mkdirs(staging)) { ms_rk_fail(r, "cannot create the staging folder: %s", ms_why(GetLastError(), NULL, 0, 0)); return 0; }
     for (i = 0; i < r->n && !r->failed; i++) {
         const ms_rk_file *f = &r->f[i];
         wchar_t *from = ms_wjoin_utf8(src, f->rel), *to = ms_wjoin_utf8(staging, f->new_rel);
@@ -1930,13 +1949,14 @@ static int ms_rk_stage(ms_rk *r, const wchar_t *src, const wchar_t *staging, int
         else if (f->text) ok = ms_mkdirs_parent(to) && ms_write_text(to, f->text, f->text_len);
         else if (link) ok = ms_mkdirs_parent(to) && (CreateHardLinkW(to, from, NULL) || sh_ms_copy_file(from, to));
         else ok = sh_ms_copy_file(from, to);
-        if (!ok) ms_rk_fail(r, "cannot stage %s (error %lu); nothing was renamed", f->rel, GetLastError());
+        if (!ok) ms_rk_fail(r, "cannot stage %s (%s); nothing was renamed", f->rel, ms_why(GetLastError(), f->rel, 0, 0));
         free(from);
         free(to);
     }
     if (r->failed) return 0;
     mj = ms_wjoin(staging, L"mod.json");
-    if (!mj || !ms_write_text(mj, modjson, mlen)) ms_rk_fail(r, "cannot write the new mod.json (error %lu); nothing was renamed", GetLastError());
+    if (!mj || !ms_write_text(mj, modjson, mlen))
+        ms_rk_fail(r, "cannot write the new mod.json (%s); nothing was renamed", ms_why(GetLastError(), "mod.json", 0, 0));
     free(mj);
     return !r->failed;
 }
@@ -2068,7 +2088,7 @@ static int ms_rekey(const wchar_t *src, const wchar_t *parent, const char *leaf,
         author = ms_read_text(mj, SH_MB_DESCRIPTOR_MAX, &alen);
         free(mj);
     }
-    if (!author) { ms_cause(cause, ccap, "cannot read mod.json (error %lu); nothing was renamed", GetLastError()); goto done; }
+    if (!author) { ms_cause(cause, ccap, "cannot read mod.json (%s); nothing was renamed", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
     drefs = sh_mb_rekey_text(author, alen, leaf, key, &rewritten, &rlen);
     if (drefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
     modjson = rewritten ? sh_mb_rekey_modjson(rewritten, rlen, key, origin, &mlen) : sh_mb_rekey_modjson(author, alen, key, origin, &mlen);
@@ -2098,17 +2118,17 @@ static int ms_rekey(const wchar_t *src, const wchar_t *parent, const char *leaf,
         if (!ms_move_folder(src, old)) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            ms_cause(cause, ccap, "Windows refused to rename the folder to %s (error %lu; is a file in it open?); nothing was renamed",
-                     key, err);
+            ms_cause(cause, ccap, "the folder could not be renamed to %s (%s); nothing was renamed", key,
+                     ms_why(err, leaf, 1, 0));
             goto done;
         }
     }
     if (!ms_move_folder(staging, final)) {
         DWORD err = GetLastError();
         if (in_place && !ms_move_folder(old, src))
-            ms_log("MODS: store: %s: the folder could not be put back from %ls (error %lu)", leaf, old, GetLastError());
+            ms_log("MODS: store: %s: the folder could not be put back from %ls (%s)", leaf, old, ms_why(GetLastError(), leaf, 1, 0));
         ms_rmtree(staging, root);
-        ms_cause(cause, ccap, "Windows refused to place the folder as %s (error %lu); nothing was renamed", key, err);
+        ms_cause(cause, ccap, "the folder could not be placed as %s (%s); nothing was renamed", key, ms_why(err, key, 1, 0));
         goto done;
     }
     if (in_place && !ms_rmtree(old, root))
@@ -2342,7 +2362,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
         goto done;
     }
     if (_wcsicmp(src, root) == 0) { ms_cause(cause, cap, "that folder is the store itself, not a mod"); goto done; }
-    if (!ms_mkdirs(root)) { ms_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
+    if (!ms_mkdirs(root)) { ms_cause(cause, cap, "cannot create the store folder: %s", ms_why(GetLastError(), NULL, 0, 0)); goto done; }
 
     if (ms_store_mod_folder(src, root)) {
         /* A folder of the store, at any depth: built in place. */
@@ -2466,7 +2486,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
         _snwprintf_s(old, n, _TRUNCATE, L"%s.old-%lu", final, GetCurrentProcessId());
     }
     if (ms_exists(staging)) ms_rmtree(staging, root);
-    if (!ms_mkdirs(staging)) { ms_cause(cause, cap, "cannot create %s (error %lu)", name, GetLastError()); goto done; }
+    if (!ms_mkdirs(staging)) { ms_cause(cause, cap, "cannot create %s: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
@@ -2479,7 +2499,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
         if (!copied) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            ms_cause(cause, cap, "cannot copy %s into the store (error %lu)", b.files[i].path, err);
+            ms_cause(cause, cap, "cannot copy %s into the store: %s", b.files[i].path, ms_why(err, name, 1, b.files[i].size));
             goto done;
         }
         st->copied++;
@@ -2503,7 +2523,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
         if (!ms_move_folder(final, old)) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            ms_cause(cause, cap, "cannot replace the installed %s; is a file in it open? (error %lu)", name, err);
+            ms_cause(cause, cap, "cannot replace the installed %s: %s", name, ms_why(err, name, 1, 0));
             goto done;
         }
         st->replaced = 1;
@@ -2512,7 +2532,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
         DWORD err = GetLastError();
         if (st->replaced) ms_move_folder(old, final);
         ms_rmtree(staging, root);
-        ms_cause(cause, cap, "cannot place %s (error %lu)", name, err);
+        ms_cause(cause, cap, "cannot place %s: %s", name, ms_why(err, name, 1, 0));
         goto done;
     }
     if (st->replaced) {
@@ -2915,8 +2935,8 @@ static int ms_up_unlink(const wchar_t *p, const wchar_t *dir, const sh_mb_file *
     if (!MoveFileExW(p, aside, 0)) {
         err = GetLastError();
         free(aside);
-        return ms_cause(cause, cap, "%s is a hard link that could not be set aside for copying (error %lu); it is unchanged",
-                        f->path, err);
+        return ms_cause(cause, cap, "%s is a hard link that could not be set aside for copying (%s); it is unchanged",
+                        f->path, ms_why(err, f->path, 0, 0));
     }
     copied = CopyFileW(aside, p, TRUE);
 #ifdef SH_MODSTORE_TESTING
@@ -2932,10 +2952,10 @@ static int ms_up_unlink(const wchar_t *p, const wchar_t *dir, const sh_mb_file *
         /* The copy goes (a duplicate of the original, or partial) and the original returns. */
         ms_delete_file(p);
         if (!MoveFileExW(aside, p, 0))
-            ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu); the original is kept "
-                     "beside it as %s.snapmap-plus-unlink", f->path, err, f->path);
-        else ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu); the original was put "
-                      "back", f->path, err);
+            ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (%s); the original is kept "
+                     "beside it as %s.snapmap-plus-unlink", f->path, ms_why(err, f->path, 0, 0), f->path);
+        else ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (%s); the original was put "
+                      "back", f->path, ms_why(err, f->path, 0, 0));
         free(aside);
         return 0;
     }
@@ -3479,7 +3499,7 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
                     _snprintf_s(to, sizeof to, _TRUNCATE, "%s-%.16s", e->bundle.id, e->bundle.hash);
                     if (!ms_tidy_move(e->folder, rootu, to)) {
                         st->tidy_failed++;
-                        ms_log("MODS: store: %s could not be renamed (error %lu); it keeps its name", e->name, GetLastError());
+                        ms_log("MODS: store: %s could not be renamed (%s); it keeps its name", e->name, ms_why(GetLastError(), e->name, 1, 0));
                         continue;
                     }
                 }
@@ -3568,8 +3588,8 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
                        strcmp(o->b.hash, it->b.hash) ? " -> " : "", strcmp(o->b.hash, it->b.hash) ? o->b.hash : "", ")");
                 if (!ms_discard(it->dir, c.root)) {
                     /* Served by the kept one; the next run drops it again. */
-                    ms_log("MODS: store: %s could not be removed (error %lu); it stays for the next run", it->from,
-                           GetLastError());
+                    ms_log("MODS: store: %s could not be removed (%s); it stays for the next run", it->from,
+                           ms_why(GetLastError(), it->from, 1, 0));
                     stats->failed++;
                 }
                 stats->dropped++;
@@ -3597,7 +3617,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
             DWORD err = GetLastError();
             free(to);
             strcpy_s(it->name, sizeof it->name, before);
-            ms_log("MODS: store: %s could not be renamed to its new folder (error %lu); it keeps its name", it->from, err);
+            ms_log("MODS: store: %s could not be renamed to its new folder (%s); it keeps its name", it->from, ms_why(err, it->from, 1, 0));
             if (it->legacy) stats->failed++;
         }
     }

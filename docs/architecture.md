@@ -35,7 +35,9 @@ set (named and unnamed), with the backend's private exports at 200 and up.
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
 executable, the 2018 build included, is unsupported: the backend logs one line
-naming the supported build and the final 2018 release, then only forwards XInput.
+naming the supported build and the final 2018 release, shows the same once in a
+message box from its bootstrap thread (a DOOM update is otherwise silent), then
+only forwards XInput.
 Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
@@ -2138,7 +2140,7 @@ causes, `sh_modpub_gate_wording`:
 | cause | when | sentence (after "This map needs <name> (<key>) at a build that ") |
 |---|---|---|
 | 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
-| 2 unreachable | the store did not answer | "could not be downloaded: the mod store did not answer. Connect and try again." |
+| 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
 | 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
 | 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
 
@@ -2656,6 +2658,14 @@ The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves
 the engine's list reduction and removed-entity reset. Startup requires a unique
 instruction signature and exact-byte verification on both supported renderers.
+
+Failures the player or author reads are worded by one table, `plain_reason.h`
+(`sh_reason`): a Windows error code becomes what happened to which file and
+what to do (access denied, a file open elsewhere, a full disk naming the drive
+and the bytes needed), a mod store status becomes the store's state and the
+next step, and a file-name character the game cannot read is named with its
+code point. The store, builder, importer and download messages route through
+it; none carries a bare "error <n>".
 
 Crash formatting produces complete JSON or an empty failure. Capture uses bounded
 storage and nonblocking guards so nested faults cannot wait on a faulting thread.

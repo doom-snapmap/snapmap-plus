@@ -705,7 +705,7 @@ static void resolving(const sh_modmanifest_row *door)
     tick(3);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
     CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that could not be downloaded: the mod store did "
-                                "not answer. Connect and try again."));
+                                "not answer; try again in a few minutes."));
     CHECK(!strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
 
@@ -1173,6 +1173,7 @@ static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_mod
     (void)modsync_probe_bundle(hash, &io, &pr);
     memset(out, 0, sizeof *out);
     out->found = pr.found > 0 ? SH_MODPUB_STORE_HAS : pr.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
+    out->code = pr.found < 0 ? pr.code : 0;   /* as eng_store_probe */
     out->game_lacks = pr.game_lacks;
     strcpy_s(out->source, sizeof out->source, pr.source);
     strcpy_s(out->name, sizeof out->name, pr.name);
@@ -1390,8 +1391,8 @@ static void gate_end_to_end(const char *tmp)
     /* Cause 2: the store setting points where nothing answers. */
     CHECK(modnet_set_base_url("http://127.0.0.1:1"));
     e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that could not be downloaded: the mod store did not "
-                              "answer. Connect and try again."));
+    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that could not be downloaded: the mod store could "
+                              "not be reached; check the internet connection and try again."));
     printf("    cause 2: %s\n", F.last_ask);
     /* The same with another build of the key installed: a rawmap is the
      * player's own, so the installed build serves it (ADD-L13). */

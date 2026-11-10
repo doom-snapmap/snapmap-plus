@@ -12,6 +12,7 @@
 #include "modbundle.h"
 #include "companion.h"
 #include "mp_json.h"
+#include "plain_reason.h"
 #include "config_json.h"
 #include "decl_text.h"
 #include "decl_tree.h"
@@ -916,7 +917,18 @@ int sh_mb_check_request(const char *r, char *cause, size_t cap)
             continue;
         }
         if (c == '\\') return mb_cause(cause, cap, "backslash in path: %s", r);
-        if (!mb_path_char(c)) return mb_cause(cause, cap, "character 0x%02x not allowed in path: %s", (unsigned char)c, r);
+        if (!mb_path_char(c)) {
+            /* The character itself (a UTF-8 sequence decoded), named in plain words. */
+            const unsigned char *u = (const unsigned char *)r + i;
+            unsigned long cp = u[0];
+            char why[400];
+            if (u[0] >= 0xc2 && u[0] < 0xe0 && (u[1] & 0xc0) == 0x80) cp = ((u[0] & 0x1fu) << 6) | (u[1] & 0x3fu);
+            else if (u[0] >= 0xe0 && u[0] < 0xf0 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80)
+                cp = ((u[0] & 0x0fu) << 12) | ((u[1] & 0x3fu) << 6) | (u[2] & 0x3fu);
+            else if (u[0] >= 0xf0 && u[0] < 0xf5 && (u[1] & 0xc0) == 0x80 && (u[2] & 0xc0) == 0x80 && (u[3] & 0xc0) == 0x80)
+                cp = ((u[0] & 0x07ul) << 18) | ((u[1] & 0x3ful) << 12) | ((u[2] & 0x3ful) << 6) | (u[3] & 0x3ful);
+            return mb_cause(cause, cap, "%s", sh_reason(SH_REASON_NAME, (long)cp, r, 0, why, sizeof why));
+        }
     }
     return 1;
 }
@@ -2793,7 +2805,7 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
     free(pattern);
     if (h == INVALID_HANDLE_VALUE) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) mb_error(w->b, "cannot list %s (error %lu)", rel, GetLastError());
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) mb_error(w->b, "cannot list %s: %s", rel, sh_reason_win32(GetLastError(), rel, 0));
         return;
     }
     do {
@@ -2873,7 +2885,7 @@ static void mb_walk_top(mb_walk *w)
     if (!pattern) { mb_error(w->b, "out of memory"); return; }
     h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
     free(pattern);
-    if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder (error %lu)", GetLastError()); return; }
+    if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder: %s", sh_reason_win32(GetLastError(), "the mod folder", 0)); return; }
     do {
         char *name;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
@@ -5363,8 +5375,8 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t c
     }
     text = mb_modjson(b, (const char *)existing, elen, root, &len);
     ok = text && mb_write_wfile(mod_path, text, len);
-    if (!ok) mb_cause(cause, cap, text ? "cannot write mod.json (error %lu)" : "mod.json could not be composed (is it a JSON object?)",
-                      GetLastError());
+    if (!ok && text) mb_cause(cause, cap, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
+    else if (!ok) mb_cause(cause, cap, "mod.json could not be composed (is it a JSON object?)");
     if (ok && from_pkg) {
         /* package.json became mod.json, with the same author keys and bytes. */
         SetFileAttributesW(pkg_path, FILE_ATTRIBUTE_NORMAL);

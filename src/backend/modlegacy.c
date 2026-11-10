@@ -19,6 +19,7 @@
 #include "raw_deflate.h"
 #include "config_json.h"
 #include "backend_log.h"
+#include "plain_reason.h"
 
 #define LG_ERR(buf, cap, ...) do { if ((buf) && (cap)) _snprintf_s((buf), (cap), _TRUNCATE, __VA_ARGS__); } while (0)
 
@@ -701,7 +702,7 @@ static int lg_walk_dir(lg_walk *w, const wchar_t *dir, const char *prefix, unsig
     free(pattern);
     if (h == INVALID_HANDLE_VALUE) {
         if (GetLastError() == ERROR_FILE_NOT_FOUND) return 1;
-        LG_ERR(w->err, w->err_cap, "cannot list '%s' (error %lu)", prefix[0] ? prefix : ".", GetLastError());
+        LG_ERR(w->err, w->err_cap, "cannot list '%s': %s", prefix[0] ? prefix : ".", sh_reason_win32(GetLastError(), prefix[0] ? prefix : "the folder", 0));
         return 0;
     }
     do {
@@ -944,7 +945,7 @@ static int lg_write_member(lg_written *w, const char *folder, const char *relati
     }
     h = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        LG_ERR(err, err_cap, "cannot create '%s' (error %lu)", relative, GetLastError());
+        LG_ERR(err, err_cap, "cannot create '%s': %s", relative, sh_reason_win32(GetLastError(), relative, 0));
         free(full);
         return 0;
     }
@@ -1737,7 +1738,7 @@ static int lg_unpack(const sh_modlegacy_zip *zip, const lg_plan *plan, const cha
         DWORD error = GetLastError();
         lg_undo(&written);
         if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) {
-            LG_ERR(v->reason, sizeof v->reason, "cannot move the unpacked tree into place (error %lu)", error);
+            LG_ERR(v->reason, sizeof v->reason, "cannot move the unpacked tree into place: %s", sh_reason_win32(error, folder, 0));
             return 0;
         }
         /* Another load installed the same digest meanwhile: use it. */
