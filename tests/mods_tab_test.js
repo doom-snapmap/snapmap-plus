@@ -941,6 +941,27 @@ test('the stand-in host answers as the host does', () => {
 });
 
 /* ---- the page and host contract --------------------------------------------------------------- */
+test('a folder of editor tweaks only: no map action, and the editor-only line instead of "every player needs"', () => {
+  const h = live();
+  /* facts.editorOnly comes from the backend (sh_mb_editor_only); the tab adds no rule of its own */
+  assert.equal(h.ui.state().model.mods.find(b => b.key === 'local.my-overrides').facts.editorOnly, true);
+  h.ui.select('local.my-overrides');
+  assert.equal(h.nodes.modsUseBtn.style.display, 'none', 'no Use in this map while a map is open');
+  const req = section(h, 'requirements');
+  assert.ok(req.textContent.includes(modsTab.EDITOR_ONLY_NOTE));
+  assert.ok(!req.textContent.includes(modsTab.NEEDS_NOTE));
+  assert.equal(modsTab.EDITOR_ONLY_NOTE, "Changes only this computer's editor; maps made with it need nothing.");
+  /* a mod that adds content keeps both */
+  h.ui.select('local.hell-guard');
+  assert.equal(h.nodes.modsUseBtn.style.display, '');
+  assert.ok(section(h, 'requirements').textContent.includes(modsTab.NEEDS_NOTE));
+  /* the same mod with facts.editorOnly false (an older backend, or adds): the button shows */
+  const d = clone(v3);
+  d.mods.find(b => b.key === 'local.my-overrides').facts.editorOnly = false;
+  const g = live(d);
+  g.ui.select('local.my-overrides');
+  assert.equal(g.nodes.modsUseBtn.style.display, '');
+});
 test('Use in this map: a map-level mod is listed, marked, and removed again from the details pane', () => {
   const h = live();
   const use = h.nodes.modsUseBtn;

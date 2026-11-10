@@ -901,6 +901,9 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     mu_knum(b, "surfaces", bd->classes.surfaces, 0);
     mu_knum(b, "editor", bd->classes.editor, 0);
     mu_knum(b, "replaces", bd->classes.replaces, 0);   /* edited copies are classes.edits, not here */
+    /* Editor tweaks and nothing else (sh_mb_editor_only, the rule mapAddMod refuses by): a map
+     * never records such a folder, so the tab offers no map action and no player needs it. */
+    mu_kbool(b, "editorOnly", sh_mb_editor_only(bd), 0);
     mu_puts(b, ",\"editorTweaks\":[");
     for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;

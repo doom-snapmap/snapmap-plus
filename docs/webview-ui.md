@@ -348,7 +348,8 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+), Build (Last built, the Bundle number to quote when asking
+the note that every player needs Snapmap+; for a folder of editor tweaks only, `facts.editorOnly`,
+"Changes only this computer's editor; maps made with it need nothing." instead), Build (Last built, the Bundle number to quote when asking
 for help, and one plain line per builder warning: `warnings`, else `firstWarning`; a warning never
 makes the mod need attention) and Sharing (how many of your published maps use it). About carries, after Folder, one plain line
 about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
@@ -369,8 +370,8 @@ declaring map's conductor, their spawn bits assigned per map). The pane shows no
 no list of builds: the player manages no builds (owner 2026-11-09). A failed latest build
 (`buildFailed`) is a yellow row whose cause reads "its latest build failed: <cause>; the last working
 version keeps serving until it builds". The head actions are, left to right, Files (the
-`folder-tree` icon, left-most, owner 2026-11-09), Use in this map (Remove from map), Verify,
-Rebuild and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
+`folder-tree` icon, left-most, owner 2026-11-09), Use in this map (Remove from map; never for a
+folder of editor tweaks only, `facts.editorOnly`), Verify, Rebuild and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
 for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
 from map and opens the same confirmation as the modal's row, which closes after the action. With
 nothing selected the pane explains how mods work.
@@ -514,7 +515,7 @@ Per entry of `mods`:
 | `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always` (it carries editor tweaks); absent when the serving index does not hold it. The page reads neither it, `scopeAuto` nor `scoped`. |
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
-| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
+| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, editorOnly, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `editorOnly` is `sh_mb_editor_only`, the rule `mapAddMod` refuses by (every file editor-time, no requirements): the page then shows no Use in this map or Remove from map. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
 | `"newest"` | bool | The newest installed build of its key (build number, then install time). |
 | `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |
 | `"buildFailed"` | object | `{cause, snapshot, servingBuild}` when the folder's latest build was refused: the last good build serves, from its snapshot when `snapshot`. |

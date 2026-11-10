@@ -616,6 +616,19 @@ static int bundle_has(const char *doc, const char *key, const char *needle)
     }
 }
 
+/* `needle` anywhere in the row of `key`, nested objects included (up to the next row). */
+static int row_has(const char *doc, const char *key, const char *needle)
+{
+    char k[256];
+    const char *at, *next, *hit;
+    if (!doc) return 0;
+    _snprintf_s(k, sizeof k, _TRUNCATE, "{\"key\":\"%s\"", key);
+    if (!(at = strstr(doc, k))) return 0;
+    next = strstr(at + 1, "{\"key\":\"");
+    hit = strstr(at, needle);
+    return hit && (!next || hit < next);
+}
+
 static unsigned count_of(const char *doc, const char *needle)
 {
     unsigned n = 0;
@@ -1803,6 +1816,12 @@ int main(int argc, char **argv)
                                "editor (1 editor tweak); every map you open here already has them, and a map never lists them.\""));
                 free(doc);
                 CHECK(g_marks == 1);   /* refused: not marked */
+                /* The list says so (facts.editorOnly, by the same rule), so the tab offers no
+                 * map action and no "every player needs" line; a mod with a new decl is not one. */
+                doc = list_doc();
+                CHECK(row_has(doc, "alex.tweakonly", "\"editor\":1,\"replaces\":0,\"editorOnly\":true,"));
+                CHECK(row_has(doc, "alex.req", "\"editorOnly\":false,"));
+                free(doc);
                 doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.tweakonly");
                 free(doc);
             }

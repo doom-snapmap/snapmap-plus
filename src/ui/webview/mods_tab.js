@@ -108,6 +108,8 @@ var modsTab = (function () {
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
+  /* A folder of editor tweaks only (facts.editorOnly): a map never records it (DESIGN-additive 2.6). */
+  var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
@@ -157,7 +159,7 @@ var modsTab = (function () {
     if (!f) return null;
     var reg = obj(f.registries) || {};
     return {adds: num(f.adds), borrows: num(f.borrows), surfaces: num(f.surfaces), editor: num(f.editor), replaces: num(f.replaces),
-            editorTweaks: normNames(f.editorTweaks),
+            editorOnly: bool(f.editorOnly), editorTweaks: normNames(f.editorTweaks),
             replacements: arr(f.replacements).map(function (r) { r = obj(r) || {}; return {path: str(r.path), edits: bool(r.edits)}; })
               .filter(function (r) { return r.path.length > 0; }),
             edits: arr(f.edits).map(function (e) {
@@ -708,11 +710,13 @@ var modsTab = (function () {
       for (var i = 0; i < m.mods.length; i++) if (m.mods[i].key && m.mods[i].key === b.key) return m.mods[i];
       return null;
     }
+    function editorOnly(b) { return !!(b && b.facts && b.facts.editorOnly); }
     function renderUse() {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
-      u.style.display = open ? '' : 'none';
+      /* A folder of editor tweaks only has no map action: a map never records it. */
+      u.style.display = open && !editorOnly(b) ? '' : 'none';
       var used = mapUses(b);
       u.textContent = used ? 'Remove from map' : 'Use in this map';
       u.className = 'btn' + (used ? ' danger' : '');
@@ -969,7 +973,7 @@ var modsTab = (function () {
         lines.forEach(function (line) { ll.appendChild(el('div', '', line)); });
         field(req, k[1], ll);
       });
-      req.appendChild(el('div', 'mods-note', NEEDS_NOTE));
+      req.appendChild(el('div', 'mods-note', editorOnly(b) ? EDITOR_ONLY_NOTE : NEEDS_NOTE));
 
       var when = formatDate(b.builtAt);
       if (when || b.bundle || b.warnings.length) {
@@ -1942,7 +1946,7 @@ var modsTab = (function () {
   }
 
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
-          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
+          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
           originText: originText, renamedText: renamedText, countLines: countLines, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
