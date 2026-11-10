@@ -115,6 +115,7 @@ typedef struct ms_bundle {
     const char *extra;                    /* the author block's other keys (and a product-block legacy) as JSON, or NULL */
     int legacy, admitted, first_file, file_count;   /* legacy: a package a map delivered */
     int grandfathered;                    /* a "legacy" object (author or product block): shadows may be new names */
+    int own;                              /* this machine's own folder: origin by-hand (or none), install or migration */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
     const char *req_text;                 /* canonical requirements (sh_mb_requirements_canonical), or NULL */
     ms_req_cvar *req_cvars; int req_ncvars;
@@ -938,7 +939,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     int nshadows = 0, cshadows = 0, i, validated = 1, members = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
-    char last[SH_MB_CAUSE_MAX] = "", *block_key = NULL;
+    char last[SH_MB_CAUSE_MAX] = "", *block_key = NULL, *origin = NULL;
     int manifest = 0;   /* the text is a snapshot's bundle.json (Contract 1 form), not a mod.json */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
@@ -1044,6 +1045,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
             if (!strcmp(key, "format")) { if (!manifest && !ms_jnum(v, ve, &format)) format = -1; }
             else if (!strcmp(key, "key")) block_key = ms_jstr(x, v, ve, 96);
+            else if (!strcmp(key, "origin")) origin = ms_jstr(x, v, ve, 16);
             else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
             else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
             else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
@@ -1059,6 +1061,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             }
         }
     }
+    /* The author's iteration path (DESIGN-additive A.4): a folder the author
+     * made or installed from a folder of their own, or their overrides moved
+     * in; never one the product received with a map (a rawmap or prefab
+     * import, a download, a delivered package). */
+    b->own = !origin || !origin[0] || !strcmp(origin, SH_MB_ORIGIN_BY_HAND) || !strcmp(origin, SH_MB_ORIGIN_MIGRATION) ||
+             !strcmp(origin, SH_MB_ORIGIN_INSTALL);
     if (author_legacy_v) {
         b->grandfathered = 1;
         b->legacy = ms_delivered(author_legacy_v, author_legacy_e);
@@ -6072,6 +6080,30 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
 int sh_modserve_row_served(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
     return sh_modserve_row_served_for(row, "map", cause, cap);
+}
+
+int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out)
+{
+    const ms_index *x = g_index;
+    int i, at;
+    if (out) memset(out, 0, sizeof *out);
+    if (!x || !bundle_hash || strlen(bundle_hash) != 64) return 0;
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].hash && !_stricmp(x->bundles[i].hash, bundle_hash)) return 0;   /* installed as itself */
+    for (i = 0; i < x->naliases; ++i)
+        if (!_stricmp(x->aliases[i].from, bundle_hash)) break;
+    if (i == x->naliases) return 0;
+    for (at = 0; at < x->nbundles; ++at)
+        if (x->bundles[at].hash && !_stricmp(x->bundles[at].hash, x->aliases[i].to)) break;
+    if (at == x->nbundles || !x->bundles[at].admitted || !x->bundles[at].own || x->bundles[at].legacy) return 0;
+    if (out) {
+        const ms_bundle *b = &x->bundles[at];
+        strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
+        strncpy_s(out->version, sizeof out->version, b->version ? b->version : "", _TRUNCATE);
+        strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
+        out->size = (unsigned long long)b->total;
+    }
+    return 1;
 }
 
 int sh_modserve_row_other_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)

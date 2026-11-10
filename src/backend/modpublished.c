@@ -1096,8 +1096,7 @@ static size_t pub_substitute(const int *verdicts)
                         row->bundle, h->other[i]);
         else
             _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s: declared at build %.16s (not installed), serving build "
-                        "%.16s; 'sh_mods map upgrade \"%s\"' (the Mods tab's Upgrade this map) moves the map to it",
-                        pub_hook_name(h->hook), key, row->bundle, h->other[i], key);
+                        "%.16s; the next save of the map records it", pub_hook_name(h->hook), key, row->bundle, h->other[i]);
         pub_print(line);
         pub_logf("MODS: %s", line);
         drop[i] = 1;

@@ -2874,7 +2874,7 @@ static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
 /* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
  * is all the shipped page sends; ADD-V7b R4b), a change the window did not make
- * (a console verb, `sh_mods map upgrade` or `uninstall`, the undo clear an Uninstall owes) moves the
+ * (a console verb, `sh_mods map add` or `uninstall`, the undo clear an Uninstall owes) moves the
  * backend's generation past the one of the last document posted, and the think loop posts a fresh
  * one, as each of the page's own actions ends with one. FETCH's size query (any thread, no main-
  * thread call) reads the generation every POC_MODS_PUSH_MS. */
@@ -3056,7 +3056,6 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN:       return L"watchRescan";
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
-    case SH_MODS_ACT_MAP_UPGRADE:        return L"mapUpgradeMod";
     default:                      return L"";
     }
 }
@@ -3079,7 +3078,6 @@ static int poc_mods_action_code(const std::wstring &name)
     if (name == L"removedEmpty")        return SH_MODS_ACT_REMOVED_EMPTY;
     if (name == L"mapAddMod")           return SH_MODS_ACT_MAP_ADD;
     if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
-    if (name == L"mapUpgradeMod")       return SH_MODS_ACT_MAP_UPGRADE;
     return 0;
 }
 

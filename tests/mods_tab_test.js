@@ -248,8 +248,8 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                                     'mapUpgradeMod']);
+                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry']);
+  assert.equal(modsTab.actionMessage('mapUpgradeMod', 'a'), null, 'no build management: the upgrade action is gone');
   assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'),
                    {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'});
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
@@ -905,7 +905,7 @@ test('additive: a pushed document (a console verb) refreshes the open map modal 
   assert.equal(h.nodes.modsMapHost.tags('select').length, 0);
   h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: 'Mods folder reread.'}});
   const status = h.nodes.modsStatus.textContent;
-  /* `sh_mods map upgrade` moved a row to its installed build: the clash it hid now has two providers */
+  /* `sh_mods map add` attached a mod: the clash it brings now has two providers */
   const next = clone(v3);
   next.gen = 13;
   next.map.registryClashes = [{slot: 'entitydef/player/coop/edit/handsModelMPUseDoomHands',
@@ -979,7 +979,7 @@ test('additive: one row per build of a key, the newest marked; a failed build', 
   assert.equal(info.tone, 'warn');
   assert.equal(info.cause, 'its latest build failed: assets/x.decl: parse error; serving build 1 from its snapshot');
 });
-test('additive: the map modal: installed at another build, declared nothing placed, upgrade, clash choice', () => {
+test('additive: the map modal: installed at another build, declared nothing placed, no upgrade, clash choice', () => {
   const doc = clone(v3);
   doc.map.mods.push({key: 'airlock', id: 'airlock', version: '0.0.0', state: 'installed', placedEntities: [], placedCount: 0,
                      references: [], size: 0, attached: true, nothingPlaced: true});
@@ -993,12 +993,9 @@ test('additive: the map modal: installed at another build, declared nothing plac
   assert.match(text, /Declared, nothing placed/);
   assert.match(text, /installed at another build/);
   assert.equal(modsTab.mapModStatus({state: 'otherBuild'}).cause, 'installed at another build');
-  /* the upgrade */
-  const up = modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT);
-  assert.ok(up && /build 2 is installed/.test(up.title));
-  up.click();
-  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'mapUpgradeMod', arg: 'alex.r2-imp'});
-  assert.ok(!modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT), 'the next document has no upgrade left');
+  /* an own map follows its folder in the backend: no row offers to move the map, whatever the document says */
+  assert.ok(!modalButtons(h).find(b => /upgrade/i.test(b.textContent + ' ' + (b.title || ''))));
+  assert.doesNotMatch(text, /upgrade|map uses build/i);
   /* the clash: one select per slot, its change written through the backend */
   const sel = h.nodes.modsMapHost.tags('select');
   assert.equal(sel.length, 1);

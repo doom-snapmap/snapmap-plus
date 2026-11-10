@@ -361,10 +361,9 @@ nothing selected the pane explains how mods work.
 focus returns to the opener) with the open map's details and one row per mod the map is linked to,
 each with Remove from map. A map-level mod (`attached`) reads "Used by the whole map" instead of its
 placed-entity count, and "Declared, nothing placed" when nothing of it is placed (`nothingPlaced`);
-removing it deletes nothing. A row whose key has a newer installed build (`upgrade`) carries
-**Upgrade this map to the installed build** (`mapUpgradeMod`; its hover says which build the map uses
-and which is installed); the result says what changes (files changed, added, removed) and that the map
-must be saved to keep it. A row pinning a build that is not installed while its key is installed at
+removing it deletes nothing. Nothing in the tab moves a map between builds: an author's own map
+follows their own rebuilt folder in the backend when it opens in the editor and at save (see
+[architecture](architecture.md#mods)), and a downloaded map keeps what it pins. A row pinning a build that is not installed while its key is installed at
 another reads "installed at another build" (`otherBuild`). A map records nothing about the Snapmap+
 version that saved it (DESIGN-additive 2.7, withdrawn). When several declared
 mods edit one field or named entry of a game file to different values (`registryClashes`), **Choices
@@ -390,7 +389,7 @@ no `removedEmpty`; a document's `removed` object, sent by an older backend, is n
 A pushed document: once the page has asked for the document, the host reads the backend's
 generation every 500 ms (the `mods` slot's FETCH size query, no main-thread call) and, when it has
 moved past the generation of the last document it posted while no job of its own runs, posts
-`{"kind": "mods", "pushed": true, "data": ...}`. That is how a console verb (`sh_mods map upgrade`,
+`{"kind": "mods", "pushed": true, "data": ...}`. That is how a console verb (`sh_mods map add`,
 `sh_mods uninstall`, `sh_mods choose`, a build or rescan; `sh_modui_note_changed`) reaches an open
 tab without a rescan. The page renders it as any document, the open map modal included, and keeps
 its status line.
@@ -452,8 +451,7 @@ and `size` is the carried bytes.
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
 | `"registryClashes"` | array | One `{slot, "providers": [{id, name}], chosen, serving}` per slot `<game file>/<path>` (`entitydef/player/coop/edit/handsModelMPUseDoomHands`) two or more declared mods' edits set to different values, in row order; `chosen` is the map's choice ("" none), `serving` the key that serves. |
 
-Each entry of `mods` and `rows` may also carry `"upgrade": {folder, bundle, version, build, fromBuild}`
-(the key's newest installed build when the map pins another), `mods` entries `"nothingPlaced"` (a
+Each entry of `mods` may also carry `"nothingPlaced"` (a
 map-level row with nothing placed) and `"bundle"` (the hash the map uses), and `state` may be
 `otherBuild` (the row's build is not installed; its key is, at another hash).
 
@@ -475,7 +473,6 @@ again.
 | `verify` | Rehash that one folder's build (`""` still checks every build). |
 | `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its decls are registered and its shadows, registries (the generated player entity, weapon slots, body events, conductor) and requirements apply at once, as a map load applies them, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |
 | `chooseRegistry` | `arg` is `"<slot>\t<key>"` (an empty key clears): the open map's choice of whose edit serves that slot of a game file, applied at once and saved with the map's next save (`sh_mods choose`). `registryClashes` resolves a row that pins a build that is not installed to the build that serves it, so its clash is listed. |
-| `mapUpgradeMod` | `arg` is a declared mod's id: the open map's row moves to the key's newest installed build, the listing follows at once and the next save writes the new hash; the message says how many files changed, were added and removed (`sh_mods map upgrade`). |
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
@@ -506,14 +503,13 @@ the open map first, then clears the undo history (`editor_undo.c`, see
 the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
 still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
 [--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
-`sh_mods map add "<id>"` runs `mapAddMod`, `sh_mods map upgrade "<id>"` runs `mapUpgradeMod` and
+`sh_mods map add "<id>"` runs `mapAddMod` and
 `sh_mods choose "<slot>" "<key>"` runs `chooseRegistry`.
 
 | Console verb | Tab equivalent |
 |---|---|
 | `sh_mods map` | the map modal |
 | `sh_mods map add "<id>"` | Use in this map (`mapAddMod`) |
-| `sh_mods map upgrade "<id>"` | Upgrade this map to the installed build (`mapUpgradeMod`) |
 | `sh_mods map remove "<id>" [--yes]` | Remove from map (`mapRemoveModPreview`, `mapRemoveMod`) |
 | `sh_mods uninstall "<id>" [--yes]` | Uninstall (`uninstallPreview`, `uninstall`) |
 | `sh_mods choose "<slot>" "<key>"` | Choices between mods (`chooseRegistry`) |

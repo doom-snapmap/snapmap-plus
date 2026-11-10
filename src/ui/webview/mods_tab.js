@@ -49,7 +49,7 @@ var modsTab = (function () {
      so it has no dry run. Uninstall moves the folder to the Windows Recycle Bin; the page has no bin
      of its own to empty or restore from. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry', 'mapUpgradeMod'];
+                 'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry'];
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
@@ -80,7 +80,6 @@ var modsTab = (function () {
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
   var LEGACY_TEXT = 'Legacy, rebuild to isolate';
-  var UPGRADE_TEXT = 'Upgrade this map to the installed build';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
      records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
@@ -203,13 +202,10 @@ var modsTab = (function () {
   function normMapMod(m) {
     m = obj(m) || {};
     var names = normNames(m.placedEntities);
-    var up = obj(m.upgrade);
     return {key: str(m.key), id: str(m.id), version: str(m.version), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
             references: normRefs(m.references), size: num(m.size), attached: bool(m.attached),
-            nothingPlaced: bool(m.nothingPlaced),
-            upgrade: up ? {folder: str(up.folder), bundle: str(up.bundle), version: str(up.version), build: num(up.build),
-                           fromBuild: num(up.fromBuild)} : null};
+            nothingPlaced: bool(m.nothingPlaced)};
   }
   function normClash(c) {
     c = obj(c) || {};
@@ -406,10 +402,6 @@ var modsTab = (function () {
     }
     return out;
   }
-  function upgradeTitle(r) {
-    var u = r.upgrade;
-    return u ? 'This map uses build ' + (u.fromBuild || '?') + '; build ' + u.build + ' is installed. Upgrading changes the map\'s row; save the map to keep it.' : '';
-  }
 
   function actionMessage(action, arg) {
     if (ACTIONS.indexOf(action) < 0) return null;
@@ -468,7 +460,6 @@ var modsTab = (function () {
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
-                     mapUpgradeMod: 'Moving the map to the installed build...',
                      migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
     function selectedMod() {
@@ -873,7 +864,6 @@ var modsTab = (function () {
       if (r.references.length) text.appendChild(el('div', 'mods-map-uses', 'Also used by ' + r.references.map(refText).join(', ')));
       row.appendChild(text);
       var name = modName(r.key, r.id);
-      if (r.upgrade) row.appendChild(modalButton(UPGRADE_TEXT, '', function () { act('mapUpgradeMod', r.id); }, upgradeTitle(r)));
       row.appendChild(modalButton('Remove from map', 'danger', function () {
         modal.from = 'map';
         act('mapRemoveModPreview', r.key || r.id);
@@ -1170,13 +1160,6 @@ var modsTab = (function () {
           msg = pick ? slot + ' now comes from ' + pick + ' in this map; applies now; saved with the map\'s next save.'
                      : slot + ": the map's choice is cleared; the first mod in the map's list serves it.";
         }
-      } else if (a === 'mapUpgradeMod') {
-        var um = mapMods().filter(function (x) { return x.id === key; })[0];
-        if (!um || !um.upgrade) { ok = false; msg = 'The map already uses the installed build of ' + key + '.'; }
-        else {
-          msg = 'This map now uses ' + nameOf(um.key, um.id) + ' build ' + um.upgrade.build + ' instead of build ' + um.upgrade.fromBuild + '. Save the map to keep it.';
-          um.upgrade = null;
-        }
       } else if (a === 'mapRemoveModPreview') {
         if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
         else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.id), map: mapPart(r), install: null};
@@ -1212,7 +1195,7 @@ var modsTab = (function () {
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
           factLines: factLines, slotText: slotText};
 })();
 

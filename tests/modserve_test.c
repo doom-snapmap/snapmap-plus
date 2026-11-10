@@ -710,6 +710,42 @@ static void test_plan_alias(void)
     CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
     sh_modserve_plan_free(&p);
     CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+    /* The author's own folder (no origin: made by hand): a row pinning the
+     * earlier hash follows it; a hash installed as itself is no alias. */
+    {
+        sh_modserve_bundle_ref ref;
+        char path[MAX_PATH], *text = NULL, *edited;
+        size_t len = 0;
+        const char *at;
+        CHECK(sh_modserve_row_follow(OLD, &ref) == 1 && !strcmp(ref.hash, g_hash_a) && !strcmp(ref.id, "alex.pink-imp") &&
+              !strcmp(ref.version, "1.0.0"));
+        CHECK(sh_modserve_row_follow(g_hash_a, &ref) == 0 && sh_modserve_row_follow(g_hash_a2, &ref) == 0);
+        CHECK(sh_modserve_row_follow("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", &ref) == 0);
+        /* The same folder downloaded for a map (origin download): the alias
+         * still serves the pin, but the row is never rewritten. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.pink-imp@1.0.0\\mod.json", g_root);
+        text = (char *)sh_mb_read_file(path, 1u << 20, &len);
+        at = text ? strstr(text, "\"snapmap-plus\": {\"format\": 1,") : NULL;
+        CHECK(at != NULL);
+        if (at) {
+            size_t head = (size_t)(at - text) + strlen("\"snapmap-plus\": {\"format\": 1,");
+            static const char ins[] = " \"origin\": \"download\",";
+            const size_t il = sizeof ins - 1;
+            edited = (char *)malloc(len + il + 1);
+            memcpy(edited, text, head);
+            memcpy(edited + head, ins, il);
+            memcpy(edited + head + il, text + head, len - head);
+            write_file(path, edited, len + il);
+            CHECK(sh_modserve_index_build(g_root) == n);
+            CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+            CHECK(sh_modserve_row_follow(OLD, &ref) == 0);
+            write_file(path, text, len);
+            CHECK(sh_modserve_index_build(g_root) == n);
+            CHECK(sh_modserve_row_follow(OLD, &ref) == 1);
+            free(edited);
+        }
+        free(text);
+    }
     /* Without the alias the pinned hash is unknown. */
     CHECK(sh_mb_record_put(g_root, "aliases", NULL));
     CHECK(sh_modserve_index_build(g_root) == n);

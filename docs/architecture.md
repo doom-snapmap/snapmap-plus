@@ -665,7 +665,19 @@ the copy's hash as an alias of it. A folder built again in place with new
 content (the rebuild rule, `sh_mods build`, an install of a folder of the store
 itself or a migration's target) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
-current one. The aliases stay flat: an alias naming the old hash is re-pointed
+current one. An author's own map follows their own folder with no prompt
+(owner 2026-11-09; `sh_modserve_row_follow`, bound through
+`sh_modmanifest_set_follow`): at every editor load (a map opened in the
+editor, a My Maps play) a row whose hash is an alias of a folder of this
+machine's own (product block origin by-hand or none, `install` or
+`migration`) is rewritten to that folder's current build before the
+listing, with one `MODS: map: <key>: follows its own folder` line; the Mods
+tab then shows it and the next save writes it, as the save already writes
+rows from the serving index. An alias of a folder the product received with
+a map (`imported`, `download`, `delivery`) still serves the pin but never
+rewrites it, and a build installed beside another of its key (no alias) is
+never moved: a downloaded map keeps exactly what it pins. There is no
+upgrade action. The aliases stay flat: an alias naming the old hash is re-pointed
 at the new one, so one hop always resolves. After each pass of the rebuild rule
 the store drops every alias whose target no folder builds to any more (a
 folder deleted or replaced by hand), with one `MODS: store:` line. Aliases are a lookup aid for
@@ -1907,7 +1919,7 @@ map's choices).
   index (`sh_modserve_scope_set_choices`) before the listing; a choice naming
   a key the save writes no row for is dropped with one line, and closing the
   map (`sh_modmanifest_reset`) clears the index's copy too. A choice, like
-  `map add`, `map upgrade` and a `map remove` that drops only the row, marks
+  `map add` and a `map remove` that drops only the row, marks
   the editor's map modified through the editor's own commit
   (`sh_editor_mark_modified`, one undo step, as a placed entity does), so
   leaving the editor asks to save; the wording stays "applies now; saved with
@@ -2203,8 +2215,8 @@ you have <h8>)". When the declared build cannot be obtained, the player's own
 content substitutes (verdict `SH_MODPUB_GATE_SUBSTITUTE`, fact `own`): a My
 Maps play, a rawmap load or a prefab placement goes on with the installed build
 of the key, as an editor open does (DESIGN-additive 2.5). Each such row prints
-`<hold>: <key>: declared at build <X16> (not installed), serving build <Y16>`
-with the Mods tab's upgrade hint, leaves the hold's missing list, and is
+`<hold>: <key>: declared at build <X16> (not installed), serving build <Y16>;
+the next save of the map records it`, leaves the hold's missing list, and is
 remembered for the session (`sh_modpub_row_substitute`, checked against the
 key's installed build on every use), so the hold's resume, a rawmap's reopen,
 the next launch of the same map and the Prefabs tab's second placement find

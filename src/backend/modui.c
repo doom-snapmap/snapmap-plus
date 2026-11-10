@@ -135,6 +135,7 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
 static int mu_scope_armed(void);
 static int mu_scope_source(int when);
 static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
+static int mu_follow_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 static int mu_scope_now(const char *phase);
 static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap);
 static void mu_mark_modified(const char *label);
@@ -172,6 +173,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
     /* The map scope: what the open map lists, and the build a map-level row names. */
     sh_modmanifest_set_scope(mu_scope_hook, mu_scope_armed);
     sh_modmanifest_set_resolver(mu_resolve_row);
+    sh_modmanifest_set_follow(mu_follow_row);
     sh_modmanifest_set_listed(mu_scope_listed);
     sh_modserve_set_scope_source(mu_scope_source);
 }
@@ -1756,24 +1758,6 @@ static const char *mu_row_state(const mu_model *m, const sh_modmanifest_row *r, 
     return at >= 0 ? "skipped" : "missing";
 }
 
-/* "upgrade": the key's newest installed build when it is not the one `hash`
- * names (the map pins an older build; DESIGN-additive 2.5). */
-static void mu_put_upgrade(mu_buf *b, const mu_model *m, const char *id, const char *hash)
-{
-    int at = mu_newest_of(m, id), from = mu_find_hash(m, hash);
-    const sh_ms_entry *e;
-    if (at < 0 || mu_same_bundle(m, hash, m->list.items[at].bundle.hash)) return;
-    e = &m->list.items[at];
-    if (sh_modserve_bundle_state(e->bundle.hash, NULL, 0) != 1) return;
-    mu_puts(b, ",\"upgrade\":{");
-    mu_kstr(b, "folder", e->name, 1);
-    mu_kstr(b, "bundle", e->bundle.hash, 0);
-    mu_kstr(b, "version", mu_version(e->bundle.version), 0);
-    mu_knum(b, "build", e->bundle.build, 0);
-    mu_knum(b, "fromBuild", from >= 0 ? m->list.items[from].bundle.build : 0, 0);
-    mu_putn(b, "}", 1);
-}
-
 /* The slots the open map's declared mods set in their edits
  * (modregistry.h, "<game file>/<path>"): every slot two or more keys set to
  * different values, with its providers in row order, the map's choice and
@@ -1990,7 +1974,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         }
         mu_putn(b, "]", 1);
         mu_kbool(b, "attached", r->attached, 0);
-        mu_put_upgrade(b, m, r->id, r->bundle);
         mu_putn(b, "}", 1);
     }
     mu_puts(b, "],\"placed\":[");
@@ -2058,7 +2041,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             /* A map-level row and nothing of it placed: "declared, nothing placed". */
             mu_kbool(b, "nothingPlaced", x->attached && !x->uid_count && !x->modules, 0);
             mu_kstr(b, "bundle", x->hash, 0);
-            mu_put_upgrade(b, m, x->id, x->hash);
             {
                 sh_modserve_scope_info si;
                 if (sh_modserve_bundle_scope(x->hash, &si)) {
@@ -2132,7 +2114,6 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_MAP_ADD: return "mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN: return "watchRescan";
     case SH_MODS_ACT_CHOOSE: return "chooseRegistry";
-    case SH_MODS_ACT_MAP_UPGRADE: return "mapUpgradeMod";
     default: return "unknown";
     }
 }
@@ -2801,16 +2782,16 @@ static void mu_line(const mu_out *o, const char *fmt, ...)
     o->fn(o->context, line);
 }
 
-/* A row the editor serves through another build of its key (a SUBSTITUTE
- * load): why remove and upgrade act on the key, not on the declared build. */
+/* A row the editor serves through the installed folder of its key (a
+ * SUBSTITUTE load): the next save records that folder, and Remove from map
+ * acts on the key, not on the declared hash. */
 static void mu_say_substituted(const mu_out *o, const mu_model *m, const char *prefix, const char *id,
                                const char *declared, const char *serving)
 {
     int at = mu_find_hash(m, serving);
-    mu_line(o, "%s%s: declared at build %.16s (%s), serving build %.16s (%s) in the editor; 'sh_mods map upgrade "
-               "\"%s\"' moves the map to it, and Remove from map drops the row by its key", prefix, id, declared,
-            mu_find_hash(m, declared) >= 0 ? "installed" : "not installed", serving,
-            at >= 0 ? m->list.items[at].name : "not installed", id);
+    (void)declared;
+    mu_line(o, "%s%s: served in the editor by mods\\%s; the next save records it, and Remove from map drops the row "
+               "by its key", prefix, id, at >= 0 ? m->list.items[at].name : serving);
 }
 
 /* Each row of the open map the editor serves through another build. */
@@ -3158,7 +3139,7 @@ static int mu_scope_now(const char *phase)
     return changed;
 }
 
-/* A mod the author added to the open map (or upgraded): its decls are
+/* A mod the author added to the open map: its decls are
  * registered and its registries served at once, as a load would. */
 static int mu_scope_now_declared(const char *phase)
 {
@@ -3281,6 +3262,21 @@ static int mu_resolve_row(const char *bundle_hash, const char *id, sh_modmanifes
 {
     sh_modserve_bundle_ref ref;
     if (!out || !sh_modserve_bundle_serving(bundle_hash, id, &ref)) return 0;
+    if (strlen(ref.id) >= sizeof out->id || strlen(ref.version) >= sizeof out->version) return 0;
+    strcpy_s(out->id, sizeof out->id, ref.id);
+    strcpy_s(out->version, sizeof out->version, ref.version);
+    strcpy_s(out->bundle, sizeof out->bundle, ref.hash);
+    out->size = ref.size;
+    return 1;
+}
+
+/* An own folder's current build for a row pinning an earlier one
+ * (sh_modmanifest_set_follow). */
+static int mu_follow_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    sh_modserve_bundle_ref ref;
+    (void)id;
+    if (!out || !sh_modserve_row_follow(bundle_hash, &ref)) return 0;
     if (strlen(ref.id) >= sizeof out->id || strlen(ref.version) >= sizeof out->version) return 0;
     strcpy_s(out->id, sizeof out->id, ref.id);
     strcpy_s(out->version, sizeof out->version, ref.version);
@@ -3993,7 +3989,7 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
-/* ---- registry choice and upgrade (DESIGN-additive 2.4, 2.5) */
+/* ---- registry choice (DESIGN-additive 2.4) */
 
 /* The open map's registry choice for a slot several declared mods set
  * (`sh_mods choose`, the tab's clash select): applied at once, written into
@@ -4018,103 +4014,6 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
     else if (key && key[0]) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s now comes from %s in this map; applies now; saved with the map's next save.", slot, key);
     else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s: the map's choice is cleared; the first mod in the map's list serves it.", slot);
     return mu_simple_result(action, r >= 0, msg);
-}
-
-/* How two builds of one key differ, in carried paths. */
-static void mu_build_diff(const sh_mb_bundle *a, const sh_mb_bundle *b, unsigned *changed, unsigned *added,
-                          unsigned *removed)
-{
-    size_t i, k;
-    *changed = *added = *removed = 0;
-    for (i = 0; i < b->file_count; i++) {
-        const sh_mb_file *f = &b->files[i], *g = NULL;
-        for (k = 0; k < a->file_count && !g; k++) if (!strcmp(a->files[k].request, f->request)) g = &a->files[k];
-        if (!g) (*added)++;
-        else if (strcmp(g->blob, f->blob)) (*changed)++;
-    }
-    for (i = 0; i < a->file_count; i++) {
-        int found = 0;
-        for (k = 0; k < b->file_count && !found; k++) found = !strcmp(a->files[i].request, b->files[k].request);
-        if (!found) (*removed)++;
-    }
-}
-
-/* "Upgrade this map to the installed build": the open map's row of `id`
- * moves to the key's newest installed build; the listing follows at once and
- * the next save writes the new hash. */
-static int mu_map_upgrade(const char *id, const mu_out *o)
-{
-    const int action = SH_MODS_ACT_MAP_UPGRADE;
-    mu_model m;
-    sh_modmanifest_list rows;
-    sh_modmanifest_row to;
-    char msg[900], cause[SH_MB_CAUSE_MAX], title[300], from_text[80];
-    int newest, from = -1, ok = 0;
-    size_t i, at = (size_t)-1;
-    if (!id || !id[0]) return mu_simple_result(action, 0, "Name a mod the map declares.");
-    if (mu_busy(cause, sizeof cause)) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
-        mu_line(o, "map upgrade %s: refused: %s", id, cause);
-        return mu_simple_result(action, 0, msg);
-    }
-    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    (void)sh_modmanifest_current(&rows);
-    newest = mu_newest_of(&m, id);
-    if (newest < 0) {
-        /* A folder name: its key. */
-        for (i = 0; i < m.list.count && newest < 0; i++)
-            if (m.list.items[i].loaded && !strcmp(m.list.items[i].name, id)) newest = mu_newest_of(&m, m.list.items[i].bundle.id);
-    }
-    for (i = 0; newest >= 0 && i < rows.count && at == (size_t)-1; i++)
-        if (!strcmp(rows.rows[i].id, m.list.items[newest].bundle.id)) at = i;
-    strncpy_s(title, sizeof title, newest >= 0 ? mu_entry_title(&m.list.items[newest]) : id, _TRUNCATE);
-    if (!rows.count)
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No map that declares mods is open in the editor.");
-    else if (newest < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", id);
-    else if (at == (size_t)-1) _snprintf_s(msg, sizeof msg, _TRUNCATE, "The open map does not declare %s.", title);
-    else if (mu_same_bundle(&m, rows.rows[at].bundle, m.list.items[newest].bundle.hash)) {
-        ok = 1;
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "The map already uses the installed build of %s.", title);
-    } else if (sh_modserve_bundle_state(m.list.items[newest].bundle.hash, cause, sizeof cause) != 1) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "The installed build of %s is not in use: %s.", title,
-                    cause[0] ? cause : "refresh the Mods tab");
-    } else {
-        const sh_mb_bundle *nb = &m.list.items[newest].bundle;
-        unsigned changed = 0, added = 0, removed = 0;
-        from = mu_find_hash(&m, rows.rows[at].bundle);
-        memset(&to, 0, sizeof to);
-        strncpy_s(to.id, sizeof to.id, nb->id, _TRUNCATE);
-        strncpy_s(to.version, sizeof to.version, nb->version, _TRUNCATE);
-        strcpy_s(to.bundle, sizeof to.bundle, nb->hash);
-        to.size = nb->total_size;
-        if (from >= 0) {
-            mu_build_diff(&m.list.items[from].bundle, nb, &changed, &added, &removed);
-            _snprintf_s(from_text, sizeof from_text, _TRUNCATE, "build %llu (%.16s)", m.list.items[from].bundle.build,
-                        rows.rows[at].bundle);
-        } else {
-            _snprintf_s(from_text, sizeof from_text, _TRUNCATE, "build %.16s, which is not installed here", rows.rows[at].bundle);
-        }
-        if (!sh_modmanifest_current_rename(rows.rows[at].bundle, &to)) {
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "The map's row of %s could not be moved to the installed build.", title);
-        } else {
-            ok = 1;
-            (void)mu_scope_now_declared("map upgrade");
-            InterlockedIncrement(&g_gen);
-            mu_mark_modified("Upgrade Mod");
-            if (from >= 0)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s: %u file(s) "
-                            "changed, %u added, %u removed. Save the map to keep it; players are offered the new build.",
-                            title, nb->build, nb->hash, from_text, changed, added, removed);
-            else
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s build %llu (%.16s) instead of %s. Save the map "
-                            "to keep it; players are offered the new build.", title, nb->build, nb->hash, from_text);
-            mu_log("map upgrade %s: %.16s -> %.16s", nb->id, rows.rows[at].bundle, nb->hash);
-        }
-    }
-    mu_line(o, "map upgrade %s: %s", id, msg);
-    sh_modmanifest_list_free(&rows);
-    mu_model_free(&m);
-    return mu_simple_result(action, ok, msg);
 }
 
 /* ---- rebuild */
@@ -4285,11 +4184,6 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
         return 1;
     }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
-    if (!_stricmp(verb, "map") && !_stricmp(argv[1], "upgrade")) {
-        if (argc != 3 || !argv[2][0]) { mu_line(&o, "map: usage: sh_mods map upgrade \"<id>\""); return 1; }
-        (void)mu_map_upgrade(argv[2], &o);
-        return 1;
-    }
     first = !_stricmp(verb, "map") ? 2 : 1;
     if (!_stricmp(verb, "map") && !_stricmp(argv[1], "add")) {
         if (argc != 3 || !argv[2][0]) { mu_line(&o, "map: usage: sh_mods map add \"<id>\""); return 1; }
@@ -4297,7 +4191,7 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
         return 1;
     }
     if (!_stricmp(verb, "map") && _stricmp(argv[1], "remove")) {
-        mu_line(&o, "map: usage: sh_mods map, sh_mods map add \"<id>\", sh_mods map upgrade \"<id>\", or sh_mods map "
+        mu_line(&o, "map: usage: sh_mods map, sh_mods map add \"<id>\", or sh_mods map "
                     "remove \"<id>\" [--yes]");
         return 1;
     }
@@ -4547,8 +4441,6 @@ int sh_modui_run(int action, const char *arg)
         slot[tab - arg] = 0;
         return mu_choose(slot, tab + 1, NULL);
     }
-    case SH_MODS_ACT_MAP_UPGRADE:
-        return mu_map_upgrade(arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }

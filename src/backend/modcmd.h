@@ -28,8 +28,6 @@
  *                                  where each mod applies (modui.c, modserve.h map scope)
  *   sh_mods map add "<id>"         use that mod in the whole open map without placing anything
  *                                  (a map-level manifest row; the next save writes it)
- *   sh_mods map upgrade "<id>"     move the open map's row of that mod to its newest installed
- *                                  build (the map pins the build it was saved with)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
  *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, its undo history cleared,
  *                                       then the folder moved to the Windows Recycle Bin); --yes does it;
@@ -83,8 +81,8 @@
                               "'sh_mods held [filter]' prints what the game was served under each name this session and " \
                               "what it still holds, 'sh_mods choose \"<game file>/<path>\" \"<key>\"' picks which declared mod's " \
                               "edit serves a field several of the open map's mods set to different values " \
-                              "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty key clears), 'sh_mods map upgrade \"<id>\"' moves the open map to a mod's newest installed " \
-                              "build, and 'sh_mods doctor' prints one line per build of a key, which layer serves each " \
+                              "(entitydef/player/coop/edit/handsModelMPUseDoomHands; an empty key clears), and 'sh_mods doctor' prints one line per build of a key, " \
+                              "which layer serves each " \
                               "path several mods carry, and the game files generated from the mods' edits with their clashes."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \

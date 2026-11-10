@@ -1327,8 +1327,7 @@ static void gate_own_substitutes(void)
     tick(3);
     CHECK(!sh_modpublished_holding() && F.resumes == 1 && F.resume_hook == SH_MODPUB_LOCAL_OFFLINE);
     CHECK(F.asks == 0 && F.fetch_calls == 0 && F.launch_refused == 0 && F.drop_ui == 0 && F.store_calls == 1);
-    CHECK(strstr(F.prints_all, "My Maps play: " SUBST_LINE_A "; 'sh_mods map upgrade \"alex.pink-imp\"' (the Mods "
-                               "tab's Upgrade this map) moves the map to it") != NULL);
+    CHECK(strstr(F.prints_all, "My Maps play: " SUBST_LINE_A "; the next save of the map records it") != NULL);
     if (getenv("MODPUB_TEST_WORDS")) printf("    substitute: %s", F.prints_all);
     CHECK(F.activations == 1);
     memset(&row, 0, sizeof row);
