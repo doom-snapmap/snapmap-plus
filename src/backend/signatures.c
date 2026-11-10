@@ -1292,6 +1292,24 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 44 8B 51 0C 48 8B DA 41 83 EA 01 74 2B 41 83 FA 01 74 11 33 C9 48 8B 01 FF 50 38 48 8B C3 48 83 C4 20", 0x1257640u, 0x1256B40u },
     { "EditorBudgetUpdate", /* void(editor): recompute the editor budget; writes the limits-reached byte editor+0x236d0. VK 118b070, GL 118a1d0. */
       "40 55 B8 50 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 40 00 00 83 3D ?? ?? ?? ?? 00", 0x118B070u, 0x118A1D0u },
+    { "SnapTypeInfoCacheBuild", /* void(): build the editor's entity type-info cache (idSnapTypeInfoCache,
+                             * engine global snap_typeinfo_cache) from every snapEditorEntityDef decl
+                             * registered now, one default property tree per entityDef, between the game's
+                             * begin and end calls (game vtable +0x48 and +0x50). Builds only while the
+                             * cache count is 0; stops the game at 0x5dc registered rows. The game runs it
+                             * once per process; modtypeinfo.c runs it again after destroying every cached
+                             * tree when a mod's row is missing. Ignores its argument. VK 0x141181c50,
+                             * GL 0x141180db0. */
+      "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 50 90 "
+      "48 83 C4 38 C3", 0x1181C50u, 0x1180DB0u },
+    { "GridTreeDestroy",    /* void(tree [rcx]): the property tree destructor the engine runs on every tree
+                             * idSnapTypeInfoCache::Get hands out (then frees the 0x48 bytes); frees the
+                             * tree's node storage (+0x28, by its state byte +0x3b) and releases the entities
+                             * on its list (+0x8, linked at +0x2200) through the game. modtypeinfo.c runs it
+                             * on each cached tree before a rebuild. VK 0x1403723a0, GL 0x140371d80. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 E8 ?? ?? ?? ?? 90 "
+      "0F B6 43 3B 33 FF 84 C0 74 06 2C 03 3C 01 77 19 48 8B 4B 28", 0x3723A0u, 0x371D80u },
     { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuild the editor entity palette at
                              * editor+0x20660 from every snapEditorEntityDef decl. Called once, from editor
                              * initialization. The tail anchors on its first writes: selected index +0x08 = 0

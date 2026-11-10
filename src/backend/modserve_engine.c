@@ -68,6 +68,7 @@
 #include "strids.h"
 #include "editor_delete.h"
 #include "modledger.h"
+#include "modtypeinfo.h"
 #include "companion_engine.h"
 
 #define RES_LIFETIME_OFF    0x28
@@ -892,6 +893,9 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_res_lock = (void *)glb_resolve(module_base, "resource_lock", NULL);
     sh_modserve_set_resource_lock(g_res_lock);
     if (!g_res_lock) me_log("resource lock unresolved; the resource lists are walked without it");
+    /* The editor's type-info cache: rows registered after the game built it
+     * are added by a rebuild after each palette build (modtypeinfo.c). */
+    sh_modtypeinfo_install(results, count, module_base);
     /* The served-bytes ledger: complete only when nothing was served before this point. */
     {
         sh_modserve_stats st;
@@ -2133,6 +2137,9 @@ void sh_modserve_palette_after_build(void *palette)
     if (!sh_modserve_active()) return;
     mods = me_count_mod_rows(palette, &rows);
     me_log("palette built: %d rows, %d from installed bundles", rows, mods);
+    /* A mod row the game's type-info cache lacks draws its entity with a zero
+     * scale and a hidden badge; the cache is rebuilt when one is missing. */
+    if (mods > 0) sh_modtypeinfo_sync(palette, "palette build");
 }
 
 int modserve_palette_rebuild_requested(void)
