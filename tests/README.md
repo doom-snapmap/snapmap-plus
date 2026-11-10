@@ -272,7 +272,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 
 ## Working here
 
-From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1` with Node 22.13 or newer installed. Objects are cached per set of defines in ignored `build/obj/tests/`; suite executables and their build and run logs go to ignored `tests/obj/`. Suites run in parallel, so a suite must name any temporary folder it creates uniquely (the process id, as `mod_test_util.h` does).
+From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1` with Node 22.13 or newer installed. Objects are cached per set of defines in ignored `build/obj/tests/`; suite executables and their build and run logs go to ignored `tests/obj/`. Suites run in parallel, so a suite must name any temporary folder it creates uniquely (the process id, as `mod_test_util.h` does). A suite that asserts on wall-clock timing is marked `serial = $true` in the manifest and runs alone after the others.
 
 The Worker runtime suite runs the feedback relay under Miniflare against a GitHub mock. Install its pinned
 dependency with `npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0`, then run
