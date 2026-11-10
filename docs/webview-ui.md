@@ -368,9 +368,9 @@ names a folder the product received keeps as they are) and Encounters (the encou
 declaring map's conductor, their spawn bits assigned per map). The pane shows no build numbers and
 no list of builds: the player manages no builds (owner 2026-11-09). A failed latest build
 (`buildFailed`) is a yellow row whose cause reads "its latest build failed: <cause>; the last working
-version keeps serving until it builds". The head actions are Use in this map, Files (the
-`folder-tree` icon), Verify, Rebuild
-and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
+version keeps serving until it builds". The head actions are, left to right, Files (the
+`folder-tree` icon, left-most, owner 2026-11-09), Use in this map (Remove from map), Verify,
+Rebuild and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
 for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
 from map and opens the same confirmation as the modal's row, which closes after the action. With
 nothing selected the pane explains how mods work.

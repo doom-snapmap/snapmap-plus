@@ -675,6 +675,7 @@ var modsTab = (function () {
         var b = byId(id);
         if (b) b.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn' || id === 'modsVerifyBtn'));
       });
+      /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
       if (fb) fb.disabled = !sel;
       var mb = byId('modsMapBtn');

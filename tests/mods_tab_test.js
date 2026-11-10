@@ -1209,6 +1209,10 @@ test('page contract', () => {
   assert.ok(panel.indexOf('id="modsMapBtn"') < panel.indexOf('class="pane-splitter"'), 'the map button is in the left pane');
   for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<', '>Use in this map<']) assert.ok(panel.includes(label), 'head action ' + label);
   assert.match(panel, /id="modsUseBtn" disabled style="display:none"/);
+  /* the details head: Files left-most, then Use in this map, Verify, Rebuild, Uninstall (owner 2026-11-09) */
+  const detailHead = panel.slice(panel.indexOf('<span class="panel-title">Mod Details</span>'), panel.indexOf('id="modsDetail"'));
+  assert.deepEqual((detailHead.match(/<button [^>]*id="(\w+)"/g) || []).map(t => t.match(/id="(\w+)"/)[1]),
+                   ['modsFilesBtn', 'modsUseBtn', 'modsVerifyBtn', 'modsRebuildBtn', 'modsUninstallBtn']);
   for (const ic of ['check', 'triangle-alert', 'circle-info', 'folder-open', 'folder-input', 'map', 'chevron-down', 'x'])
     assert.ok(html.includes('<symbol id="icon-' + ic + '"'), 'icon ' + ic);
   /* the modal is the decl focus modal's markup */
