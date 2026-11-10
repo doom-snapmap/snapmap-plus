@@ -438,6 +438,9 @@ var modsTab = (function () {
     var edited = b.facts && b.facts.edits.some(function (e) { return e.file === path; });
     return edited ? 'edit' : 'replace';
   }
+  /* A mod folder's path under mods\ for Open in Explorer: its organizing folder (the row's group),
+     then its own folder. */
+  function folderArg(b) { var f = b.folder || b.key; return b.group ? b.group + '\\' + f : f; }
   /* A console value as the editor shows it: a number in the number hue, anything else a string. */
   function valueClass(v) { return /^-?\d+(\.\d+)?$/.test(str(v).trim()) ? 'mk-num' : 'mk-str'; }
 
@@ -893,7 +896,7 @@ var modsTab = (function () {
       var link = el('button', 'mods-link', b.folder || b.key);
       link.type = 'button';
       link.title = 'Open this folder in Explorer';
-      link.addEventListener('click', function () { act('openFolder', b.folder || b.key); });
+      link.addEventListener('click', function () { act('openFolder', folderArg(b)); });
       field(about, 'Folder', link);
       about.appendChild(el('div', 'mods-line mods-origin', originText(b)));
       if (renamedText(b)) about.appendChild(el('div', 'mods-line mods-origin', renamedText(b)));
@@ -1919,7 +1922,7 @@ var modsTab = (function () {
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
           NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT,
-          factLines: factLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass,
+          factLines: factLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass, folderArg: folderArg,
           PATH_TITLES: PATH_TITLES,
           FILE_CLASSES: FILE_CLASSES, FILE_SOURCES: FILE_SOURCES, NEW_MOD_HINT: NEW_MOD_HINT, normFiles: normFiles,
           fileTree: fileTree, fileMeta: fileMeta};

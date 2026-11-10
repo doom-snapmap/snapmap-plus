@@ -3426,14 +3426,28 @@ static bool poc_mods_plain_folder(const std::wstring &name)
     return true;
 }
 
+/* A mod folder's path under mods\: its organizing folders and its own folder joined with '\', each
+ * part a plain folder name (the page sends the row's group and folder). */
+static bool poc_mods_relative_folder(const std::wstring &path)
+{
+    if (path.size() > 400) return false;
+    size_t at = 0;
+    for (;;) {
+        size_t cut = path.find(L'\\', at);
+        if (!poc_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
+        if (cut == std::wstring::npos) return true;
+        at = cut + 1;
+    }
+}
+
 /* Open the store folder in Explorer, creating it when it is not there yet; with `folder`, that mod
- * folder inside it instead (it must exist). */
+ * folder inside it instead (it must exist), named by its path under mods\. */
 static void poc_mods_open_folder(const std::wstring &folder)
 {
     sh_mods_call call;
     char root[MAX_PATH * 4];
     bool ok = false;
-    if (!folder.empty() && !poc_mods_plain_folder(folder)) {
+    if (!folder.empty() && !poc_mods_relative_folder(folder)) {
         poc_mods_post_result(L"openFolder", false, L"That folder is not a mod folder.", nullptr);
         return;
     }

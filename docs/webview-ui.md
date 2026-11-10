@@ -547,7 +547,7 @@ again.
 
 | Action | Meaning |
 |---|---|
-| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may carry `arg`, a folder name under `mods\` (no separators) that the host opens instead of the mods folder. |
+| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may carry `arg`, a mod folder's path under `mods\` that the host opens instead of the mods folder: About's Folder link sends the row's `group`, a `\`, then its `folder` (only `folder` at the root), each part a plain folder name with no drive and no `.` or `..`. |
 | `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
 | `verify` | Rehash that one folder's build (`""` still checks every build). |
 | `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its decls are registered and its shadows, registries (the generated player entity, weapon slots, body events, conductor) and requirements apply at once, as a map load applies them, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |

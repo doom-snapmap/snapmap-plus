@@ -1213,6 +1213,7 @@ test('host and interface contract', () => {
   for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
   assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('poc_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
   assert.match(iface, /#define SH_MODS_ACT_REMOVED_EMPTY      14/);
   assert.match(iface, /#define SH_MODS_ACT_MAP_ADD            16/);
@@ -1267,6 +1268,11 @@ test('organizing folders: a caret row with a count, its mods indented, closed fo
   h.nodes.modsFilter.dispatch('input');
   h.ui.select('campaign-interactables\\doors');
   assert.equal(h.nodes.modsList.all('mods-folder')[0].all('mods-row').length, 3, 'selecting a mod inside opens its folder');
+  /* the About Folder link names the folder under mods\ with its organizing folder, so Explorer opens the right one */
+  section(h, 'about').all('mods-link')[0].click();
+  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'openFolder', arg: 'campaign-interactables\\doors'});
+  assert.equal(modsTab.folderArg({group: 'a\\b', folder: 'c', key: 'a\\b\\c'}), 'a\\b\\c', 'a nested organizing folder');
+  assert.equal(modsTab.folderArg({group: '', folder: 'bare-hands', key: 'bare-hands'}), 'bare-hands', 'a mod at the root');
   /* the v2 document and the v3 fixture have no group: one flat list */
   assert.equal(modsTab.normalize(v3).mods.every(b => b.group === ''), true);
 });
