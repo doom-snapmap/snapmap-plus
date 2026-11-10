@@ -66,7 +66,7 @@ typedef struct sh_modlegacy_verdict {
     unsigned skipped;                  /* files under assets/ a bundle cannot carry, left out */
     char first_skipped[256];           /* the first of them and why */
     unsigned movies;                   /* of them, .bswf movies */
-    char folder[MAX_PATH];             /* the converted bundle's folder */
+    char folder[MAX_PATH * 4];         /* the converted bundle's folder (UTF-8) */
 } sh_modlegacy_verdict;
 
 /* --------------------------------------------------------- carriers ----- */
@@ -179,7 +179,7 @@ typedef struct sh_modlegacy_origin {
     const char *tree;                  /* 64 hex tree fingerprint, or NULL */
     const char *fallback_id;           /* the id when the descriptor names none (era B) */
     /* The builder for sh_modlegacy_convert_folder; NULL: modbundle_build_folder. */
-    int (*build)(const char *folder_acp, char *first_cause, size_t n);
+    int (*build)(const char *folder_utf8, char *first_cause, size_t n);
 } sh_modlegacy_origin;
 
 /* Convert a delivered beta.16-19 package folder, read with
@@ -211,7 +211,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length);
 size_t sh_modlegacy_last_report(sh_modlegacy_verdict *out, size_t cap);
 
 /* The data root (default %LOCALAPPDATA%\snapmap-plus); NULL restores the
- * default. Paths are in the ANSI code page like every backend path. */
+ * default. Paths are UTF-8, as the store spells them (sh_mb_user_root). */
 void sh_modlegacy_set_data_root(const char *root);
 /* Forget the per-process conversion memo (tests). */
 void sh_modlegacy_reset(void);

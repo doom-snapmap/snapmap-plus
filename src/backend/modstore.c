@@ -118,8 +118,7 @@ int sh_ms_set_root(const char *root)
 
 int sh_ms_root(char *out, size_t cap)
 {
-    PWSTR known = NULL;
-    char *base;
+    char base[MAX_PATH * 4];
     if (!out || !cap) return 0;
     out[0] = 0;
     if (g_ms_root_set) {
@@ -127,12 +126,8 @@ int sh_ms_root(char *out, size_t cap)
         strcpy_s(out, cap, g_ms_root);
         return 1;
     }
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return 0;
-    base = sh_mb_utf8(known);
-    CoTaskMemFree(known);
-    if (!base) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\mods", base);
-    free(base);
+    if (!sh_mb_user_root(base, sizeof base)) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\mods", base);
     return out[0] != 0;
 }
 

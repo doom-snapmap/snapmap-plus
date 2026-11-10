@@ -793,21 +793,18 @@ void h_sh_mods(idCmdArgs *a)
     }
 }
 
-int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
 {
     sh_ms_list list;
     sh_mb_resolver r;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
     char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
-    wchar_t wide[MAX_PATH * 2];
     int listed, ok = 0;
     if (first_cause && n) first_cause[0] = 0;
-    /* The legacy converter's paths are ANSI (SHGetFolderPathA); the builder
-     * takes UTF-8. */
-    if (!folder_acp || !folder_acp[0] ||
-        !MultiByteToWideChar(CP_ACP, 0, folder_acp, -1, wide, (int)(sizeof wide / sizeof wide[0])) ||
-        !WideCharToMultiByte(CP_UTF8, 0, wide, -1, folder, (int)sizeof folder, NULL, NULL)) {
+    /* The legacy converter's paths are UTF-8, as the builder's are (sh_mb_user_root). */
+    if (!folder_utf8 || !folder_utf8[0] || strlen(folder_utf8) >= sizeof folder ||
+        strncpy_s(folder, sizeof folder, folder_utf8, _TRUNCATE) != 0) {
         if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
         return 0;
     }

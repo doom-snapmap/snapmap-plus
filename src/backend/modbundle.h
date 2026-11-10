@@ -714,4 +714,10 @@ char    *sh_mb_utf8(const wchar_t *wide);
 unsigned char *sh_mb_read_file(const char *path, size_t max, size_t *out_len);
 #endif
 
+/* The product's user-data folder, %LOCALAPPDATA%\snapmap-plus, in UTF-8
+ * (resolved through the wide API: the ANSI code page cannot spell every
+ * profile path). Every store, prefab and conversion root derives from it;
+ * modstore.h sh_ms_root is its mods\ folder. 1 on success. */
+int sh_mb_user_root(char *out, size_t cap);
+
 #endif /* SNAPMAP_PLUS_MODBUNDLE_H */

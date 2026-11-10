@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 
 #include "modlegacy.h"
 #include "modmanifest.h"
@@ -533,8 +532,9 @@ int sh_modlegacy_normalize_id(const char *text, char *out, size_t cap)
 /* data root                                                             */
 /* ==================================================================== */
 
+#define LG_PATH (MAX_PATH * 4)   /* a UTF-8 path */
 static SRWLOCK g_lg_lock = SRWLOCK_INIT;
-static char g_root_override[MAX_PATH];
+static char g_root_override[LG_PATH];
 
 void sh_modlegacy_set_data_root(const char *root)
 {
@@ -546,20 +546,18 @@ void sh_modlegacy_set_data_root(const char *root)
 
 static int lg_data_root(char *out, size_t cap)
 {
-    char base[MAX_PATH];
     AcquireSRWLockShared(&g_lg_lock);
     strncpy_s(out, cap, g_root_override, _TRUNCATE);
     ReleaseSRWLockShared(&g_lg_lock);
     if (out[0]) return 1;
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus", base);
-    return 1;
+    return sh_mb_user_root(out, cap);
 }
 
-/* An ANSI path to a wide one, with the long-path prefix for absolute drive paths. */
+/* A UTF-8 path (every path in this file is, as the store spells them) to a
+ * wide one, with the long-path prefix for absolute drive paths. */
 static wchar_t *lg_wide_path(const char *ansi, const char *utf8_tail)
 {
-    int na = MultiByteToWideChar(CP_ACP, 0, ansi, -1, NULL, 0);
+    int na = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ansi, -1, NULL, 0);
     int nt = utf8_tail ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_tail, -1, NULL, 0) : 1;
     int prefix = (ansi[0] && ansi[1] == ':' && ansi[2] == '\\') ? 4 : 0;
     wchar_t *w, *p;
@@ -567,7 +565,7 @@ static wchar_t *lg_wide_path(const char *ansi, const char *utf8_tail)
     w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(prefix + na + nt + 1));
     if (!w) return NULL;
     if (prefix) memcpy(w, L"\\\\?\\", 4 * sizeof(wchar_t));
-    MultiByteToWideChar(CP_ACP, 0, ansi, -1, w + prefix, na);
+    MultiByteToWideChar(CP_UTF8, 0, ansi, -1, w + prefix, na);
     if (utf8_tail) {
         size_t at = (size_t)prefix + (size_t)na - 1;
         w[at++] = L'\\';
@@ -610,25 +608,54 @@ static int lg_file_exists(const char *folder, const char *leaf)
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+/* GetFileAttributes of a UTF-8 path. */
+static DWORD lg_attr(const char *path)
+{
+    wchar_t *w = lg_wide_path(path, NULL);
+    DWORD a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+    free(w);
+    return a;
+}
+
 /* Create `dir` and its parents; existing folders are fine. */
 static int lg_ensure_dir(const char *dir)
 {
-    char path[MAX_PATH];
+    char path[LG_PATH];
     size_t i, n;
     strncpy_s(path, sizeof path, dir, _TRUNCATE);
     n = strlen(path);
     for (i = 3; i <= n; i++) {
         if (path[i] == '\\' || path[i] == 0) {
             char keep = path[i];
+            wchar_t *w;
+            BOOL made;
             path[i] = 0;
-            if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-                DWORD a = GetFileAttributesA(path);
+            w = lg_wide_path(path, NULL);
+            made = w && CreateDirectoryW(w, NULL);
+            free(w);
+            if (!made && GetLastError() != ERROR_ALREADY_EXISTS) {
+                DWORD a = lg_attr(path);
                 if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return 0;
             }
             path[i] = keep;
         }
     }
     return 1;
+}
+
+/* A directory listing of a UTF-8 folder: FindFirstFileW on <dir>\*, each
+ * name handed back in UTF-8 through lg_find_name. */
+static HANDLE lg_find_first(const char *dir, WIN32_FIND_DATAW *fd)
+{
+    wchar_t *w = lg_wide_path(dir, "*");
+    HANDLE h = w ? FindFirstFileW(w, fd) : INVALID_HANDLE_VALUE;
+    free(w);
+    return h;
+}
+
+static int lg_find_name(const WIN32_FIND_DATAW *fd, char *out, size_t cap)
+{
+    return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd->cFileName, -1, out, (int)cap, NULL, NULL) > 0;
 }
 
 /* ==================================================================== */
@@ -1345,7 +1372,7 @@ typedef struct lg_origin {
     const char *source;      /* the migration source: an authored or a delivered package */
     const char *folder;      /* overrides-relative folder, '/'-separated */
     const char *tree;        /* the beta.16-19 tree fingerprint (64 hex), or NULL */
-    int (*build)(const char *folder_acp, char *first_cause, size_t n);   /* NULL: modbundle_build_folder */
+    int (*build)(const char *folder_utf8, char *first_cause, size_t n);   /* NULL: modbundle_build_folder */
 } lg_origin;
 
 /* Descriptor keys the converter writes itself; any other key of an
@@ -1532,23 +1559,22 @@ static int lg_folder_record(const char *folder, char *key, size_t kcap, char *di
  * under its ZIP digest, or migrated from overrides\ under its tree). */
 static int lg_find_keyed(const char *mods, const char *key, const char *digest, char *folder, size_t cap)
 {
-    char pattern[MAX_PATH], found_key[SH_LEGACY_KEY_CAP], found_digest[32];
-    WIN32_FIND_DATAA fd;
+    char name[LG_PATH], found_key[SH_LEGACY_KEY_CAP], found_digest[32];
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     int hit = 0;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", mods);
-    h = FindFirstFileA(pattern, &fd);
+    h = lg_find_first(mods, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.' ||
-            !_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
-        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, fd.cFileName);
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.' ||
+            !_stricmp(name, "blobs") || !_stricmp(name, "legacy")) continue;
+        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, name);
         if (!lg_folder_record(folder, found_key, sizeof found_key, found_digest, sizeof found_digest)) continue;
         if ((digest && digest[0] && !strcmp(found_digest, digest)) || (key && key[0] && !strcmp(found_key, key))) {
             hit = 1;
             break;
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     return hit;
 }
@@ -1558,15 +1584,12 @@ static int lg_find_keyed(const char *mods, const char *key, const char *digest, 
  * under mods\>"}) lists it. */
 static int lg_find_migrated(const char *root, const char *tree, char *folder, size_t cap)
 {
-    char mods[MAX_PATH], mods_u8[MAX_PATH * 4];
-    wchar_t wide[MAX_PATH];
+    char mods[LG_PATH];
     char *text = NULL, *relative = NULL;
     sh_json_object record = {0}, trees = {0};
     int hit = 0;
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    if (!MultiByteToWideChar(CP_ACP, 0, mods, -1, wide, MAX_PATH) ||
-        !WideCharToMultiByte(CP_UTF8, 0, wide, -1, mods_u8, (int)sizeof mods_u8, NULL, NULL)) return 0;
-    if (sh_mb_record_get(mods_u8, "migration", &text) != 1 || !text) { free(text); return 0; }
+    if (sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
     if (sh_json_parse_object(text, strlen(text), 24, &record) && lg_section(&record, "trees", &trees) &&
         (relative = lg_text_of(sh_json_object_get(&trees, tree))) != NULL &&
         sh_modlegacy_safe_path(relative)) {
@@ -1599,27 +1622,40 @@ static int lg_find_converted(const char *root, const char *mods, const char *key
     return delivery && lg_find_migrated(root, key + 9, folder, cap);
 }
 
-/* Remove a folder tree this conversion created (ANSI path). */
-static void lg_rmtree(const char *dir)
+/* Remove a folder tree this conversion created (a \\?\ path). */
+static void lg_rmtree_w(const wchar_t *dir)
 {
-    char pattern[MAX_PATH], child[MAX_PATH];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    h = FindFirstFileA(pattern, &fd);
+    size_t n = wcslen(dir) + MAX_PATH + 4;
+    wchar_t *pattern = (wchar_t *)malloc(sizeof(wchar_t) * n), *child = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if (pattern && child) {
+        _snwprintf_s(pattern, n, _TRUNCATE, L"%s\\*", dir);
+        h = FindFirstFileW(pattern, &fd);
+    }
     if (h != INVALID_HANDLE_VALUE) {
         do {
-            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-            _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-            SetFileAttributesA(child, FILE_ATTRIBUTE_NORMAL);
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            _snwprintf_s(child, n, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+            SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
             if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                lg_rmtree(child);
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(child);
-            else DeleteFileA(child);
-        } while (FindNextFileA(h, &fd));
+                lg_rmtree_w(child);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(child);
+            else DeleteFileW(child);
+        } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    RemoveDirectoryA(dir);
+    free(pattern);
+    free(child);
+    RemoveDirectoryW(dir);
+}
+
+/* The same for a UTF-8 path. */
+static void lg_rmtree(const char *dir)
+{
+    wchar_t *w = lg_wide_path(dir, NULL);
+    if (w) lg_rmtree_w(w);
+    free(w);
 }
 
 /* An installed mod that already serves what the folder just built serves:
@@ -1631,30 +1667,25 @@ static void lg_rmtree(const char *dir)
  * installed one answers the carrier. Returns 1 with that folder. */
 static int lg_installed_copy(const char *mods, const char *built, char *out, size_t cap)
 {
-    char pattern[MAX_PATH], other[MAX_PATH], u8[MAX_PATH * 4], key[SH_MB_HASH_HEX + 1], okey[SH_MB_HASH_HEX + 1];
-    wchar_t wide[MAX_PATH];
-    WIN32_FIND_DATAA fd;
+    char name[LG_PATH], other[LG_PATH], key[SH_MB_HASH_HEX + 1], okey[SH_MB_HASH_HEX + 1];
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     sh_mb_bundle b;
-    char cover[MAX_PATH] = "";
+    char cover[LG_PATH] = "";
     size_t cover_files = 0;
     int hit = 0, delivered;
-    if (!MultiByteToWideChar(CP_ACP, 0, built, -1, wide, MAX_PATH) ||
-        !WideCharToMultiByte(CP_UTF8, 0, wide, -1, u8, (int)sizeof u8, NULL, NULL)) return 0;
-    if (!sh_mb_load_folder(u8, &b)) { sh_mb_free(&b); return 0; }
+    if (!sh_mb_load_folder(built, &b)) { sh_mb_free(&b); return 0; }
     sh_mb_content_key(&b, key);
     delivered = sh_mb_is_delivered(&b);
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", mods);
-    h = FindFirstFileA(pattern, &fd);
+    h = lg_find_first(mods, &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
             sh_mb_bundle o;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-            _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\%s", mods, fd.cFileName);
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.')
+                continue;
+            _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\%s", mods, name);
             if (!_stricmp(other, built)) continue;
-            if (!MultiByteToWideChar(CP_ACP, 0, other, -1, wide, MAX_PATH) ||
-                !WideCharToMultiByte(CP_UTF8, 0, wide, -1, u8, (int)sizeof u8, NULL, NULL)) continue;
-            if (sh_mb_load_folder(u8, &o) && o.validated) {
+            if (sh_mb_load_folder(other, &o) && o.validated) {
                 if (!strcmp(o.hash, b.hash) || (!strcmp(o.id, b.id) && (sh_mb_content_key(&o, okey), !strcmp(okey, key)))) {
                     strncpy_s(out, cap, other, _TRUNCATE);
                     hit = 1;
@@ -1671,7 +1702,7 @@ static int lg_installed_copy(const char *mods, const char *built, char *out, siz
                 }
             }
             sh_mb_free(&o);
-        } while (!hit && FindNextFileA(h, &fd));
+        } while (!hit && FindNextFileW(h, &fd));
         FindClose(h);
     }
     if (!hit && cover[0]) {
@@ -1698,7 +1729,7 @@ static int lg_pick_folder(const char *mods, const char *id, const char *version,
         }
         else if (round == 1) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s", mods, id, version);
         else _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s-%s", mods, id, version, digest);
-        a = GetFileAttributesA(out);
+        a = lg_attr(out);
         if (a == INVALID_FILE_ATTRIBUTES) return 1;
     }
     return 0;
@@ -1732,16 +1763,25 @@ static int lg_unpack(const sh_modlegacy_zip *zip, const lg_plan *plan, const cha
         lg_undo(&written);
         return 0;
     }
-    if (!MoveFileExA(tmp, folder, 0)) {
-        DWORD a = GetFileAttributesA(folder);
+    {
+        wchar_t *wfrom = lg_wide_path(tmp, NULL), *wto = lg_wide_path(folder, NULL);
+        BOOL moved = wfrom && wto && MoveFileExW(wfrom, wto, 0);
         DWORD error = GetLastError();
+        free(wfrom);
+        free(wto);
+        if (moved) { lg_forget(&written); return 1; }
+        SetLastError(error);
+    }
+    {
+        DWORD error = GetLastError();
+        DWORD a = lg_attr(folder);
         lg_undo(&written);
         if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) {
             LG_ERR(v->reason, sizeof v->reason, "cannot move the unpacked tree into place (error %lu)", error);
             return 0;
         }
         /* Another load installed the same digest meanwhile: use it. */
-    } else lg_forget(&written);
+    }
     return 1;
 }
 
@@ -1790,7 +1830,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
                            const char *fallback_id, sh_modlegacy_verdict *v, sh_modmanifest_row *info)
 {
     lg_plan plan;
-    char root[MAX_PATH], mods[MAX_PATH], folder[MAX_PATH], tmp[MAX_PATH], kept[MAX_PATH];
+    char root[LG_PATH], mods[LG_PATH], folder[LG_PATH], tmp[LG_PATH], kept[LG_PATH];
     char err[200] = "", cause[SH_MB_CAUSE_MAX] = "", id[SH_MODMANIFEST_ID_CAP], version[SH_MODMANIFEST_VERSION_CAP];
     char *descriptor = NULL;
     size_t descriptor_len = 0;
@@ -1814,7 +1854,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     }
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s\\.tmp-%s-%lu-%llu", mods, h->digest,
                 GetCurrentProcessId(), (unsigned long long)GetTickCount64());
-    if (strlen(folder) + 32 >= MAX_PATH || strlen(tmp) + 32 >= MAX_PATH) {
+    if (strlen(folder) + 32 >= LG_PATH || strlen(tmp) + 32 >= LG_PATH) {
         LG_ERR(v->reason, sizeof v->reason, "the data folder path is too long"); goto done;
     }
 
@@ -1832,7 +1872,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
         goto done;
     }
     if (lg_installed_copy(mods, folder, kept, sizeof kept)) {
-        char line[2 * MAX_PATH + 160];
+        char line[2 * LG_PATH + 160];
         _snprintf_s(line, sizeof line, _TRUNCATE, "LEGACY: the installed %s serves this package; the converted copy is not kept", kept);
         backend_log(line);
         lg_rmtree(folder);
@@ -1858,7 +1898,7 @@ static int lg_convert(const unsigned char *zipbytes, size_t length, const sh_leg
                       sh_modlegacy_verdict *v, sh_modmanifest_row *info)
 {
     sh_modlegacy_zip zip;
-    char root[MAX_PATH], mods[MAX_PATH], folder[MAX_PATH], err[200] = "";
+    char root[LG_PATH], mods[LG_PATH], folder[LG_PATH], err[200] = "";
     int ok;
 
     memset(&zip, 0, sizeof zip);
@@ -1895,7 +1935,7 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
     sh_legacy_header h;
     sh_modmanifest_row info;
     lg_origin o;
-    char root[MAX_PATH], mods[MAX_PATH], folder[MAX_PATH];
+    char root[LG_PATH], mods[LG_PATH], folder[LG_PATH];
     int ok;
     if (!v) return 0;
     memset(v, 0, sizeof *v);
@@ -1931,7 +1971,7 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     sh_legacy_header h;
     lg_plan plan;
     lg_origin o;
-    char err[200] = "", id[SH_MODMANIFEST_ID_CAP], tmp[MAX_PATH];
+    char err[200] = "", id[SH_MODMANIFEST_ID_CAP], tmp[LG_PATH];
     char *descriptor = NULL;
     size_t descriptor_len = 0;
     unsigned shadows = 0;
@@ -1940,7 +1980,7 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     if (!v) return 0;
     memset(v, 0, sizeof *v);
     v->verdict = SH_MODLEGACY_CLEAN;
-    if (!zip || !dest || strlen(dest) + 40 >= MAX_PATH) { LG_ERR(v->reason, sizeof v->reason, "no destination"); return 0; }
+    if (!zip || !dest || strlen(dest) + 40 >= LG_PATH) { LG_ERR(v->reason, sizeof v->reason, "no destination"); return 0; }
     memset(&h, 0, sizeof h);
     memset(&plan, 0, sizeof plan);
     lg_origin_of(origin, &o);

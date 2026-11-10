@@ -1552,12 +1552,21 @@ static int mu_saves_root(char *out, size_t cap)
     return 1;
 }
 
+/* FindFirstFileW on a UTF-8 pattern (the saves root is UTF-8). */
+static HANDLE mu_find_first(const char *pattern, WIN32_FIND_DATAW *fd)
+{
+    wchar_t *w = sh_mb_wpath(pattern);
+    HANDLE h = w ? FindFirstFileW(w, fd) : INVALID_HANDLE_VALUE;
+    free(w);
+    return h;
+}
+
 /* The local save's game.details (savegame.user\<profile>\SNAPMAPS<id>\):
  * its metadata's name and its modified time. 1 when found. */
 static int mu_saved_details(const char *local_id, char *name, size_t name_cap, long long *saved)
 {
     char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 8], path[MAX_PATH * 4 + 128];
-    WIN32_FIND_DATAA fd;
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     char *text = NULL;
     const char *c;
@@ -1568,13 +1577,16 @@ static int mu_saved_details(const char *local_id, char *name, size_t name_cap, l
     for (c = local_id; *c; c++) if (!((*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z'))) return 0;
     if (!mu_saves_root(root, sizeof root)) return 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
-    h = FindFirstFileA(pattern, &fd);
+    h = mu_find_first(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\SNAPMAPS%s\\game.details", root, fd.cFileName, local_id);
+        char *leaf;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        if ((leaf = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\SNAPMAPS%s\\game.details", root, leaf, local_id);
+        free(leaf);
         text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
-    } while (!text && FindNextFileA(h, &fd));
+    } while (!text && FindNextFileW(h, &fd));
     FindClose(h);
     if (!text) return 0;
     /* Lines: checksum=, itemId=, metadata=<JSON>, modified=<epoch ms>. */
@@ -2885,25 +2897,29 @@ static char *mu_saved_map_text(const char *path, size_t *len)
 static int mu_saved_maps_using(const char *id)
 {
     char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 16], sub[MAX_PATH * 4 + 300], path[MAX_PATH * 4 + 340];
-    WIN32_FIND_DATAA fd, sd;
+    WIN32_FIND_DATAW fd, sd;
     HANDLE h, hs;
     int count = 0;
     if (!id || !id[0] || !mu_saves_root(root, sizeof root)) return -1;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
-    h = FindFirstFileA(pattern, &fd);
+    h = mu_find_first(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s\\SNAPMAPS*", root, fd.cFileName);
-        hs = FindFirstFileA(sub, &sd);
-        if (hs == INVALID_HANDLE_VALUE) continue;
+        char *profile;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        if ((profile = sh_mb_utf8(fd.cFileName)) == NULL) continue;
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s\\SNAPMAPS*", root, profile);
+        hs = mu_find_first(sub, &sd);
+        if (hs == INVALID_HANDLE_VALUE) { free(profile); continue; }
         do {
-            char *text;
+            char *text, *map;
             size_t len = 0, i;
             sh_modmanifest_list rows;
             int uses = 0;
             if (!(sd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s\\map.decl", root, fd.cFileName, sd.cFileName);
+            if ((map = sh_mb_utf8(sd.cFileName)) == NULL) continue;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s\\map.decl", root, profile, map);
+            free(map);
             text = mu_saved_map_text(path, &len);
             if (!text) continue;
             memset(&rows, 0, sizeof rows);
@@ -2912,9 +2928,10 @@ static int mu_saved_maps_using(const char *id)
             sh_modmanifest_list_free(&rows);
             free(text);
             count += uses;
-        } while (FindNextFileA(hs, &sd));
+        } while (FindNextFileW(hs, &sd));
         FindClose(hs);
-    } while (FindNextFileA(h, &fd));
+        free(profile);
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     return count;
 }

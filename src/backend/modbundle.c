@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <shlobj.h>
+#pragma comment(lib, "shell32.lib")   /* SHGetFolderPathW */
 
 #include "modbundle.h"
 #include "companion.h"
@@ -290,6 +292,20 @@ wchar_t *sh_mb_wpath(const char *utf8)
     }
     free(full);
     return out;
+}
+
+int sh_mb_user_root(char *out, size_t cap)
+{
+    wchar_t base[MAX_PATH];
+    char *u;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return 0;
+    u = sh_mb_utf8(base);
+    if (!u) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus", u);
+    free(u);
+    return out[0] != 0 && strlen(out) + 1 < cap;
 }
 
 static wchar_t *mb_wjoin(const wchar_t *dir, const wchar_t *name)

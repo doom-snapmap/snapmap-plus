@@ -14,6 +14,7 @@
 #include <string.h>
 #include <shlobj.h>
 #include "modhud.h"
+#include "modbundle.h"
 #include "signatures.h"
 #include "host_image.h"
 
@@ -70,22 +71,31 @@ static void test_grammar(void)
 
 /* ------------------------------------------------------------ tree */
 
-static char g_root[MAX_PATH];
+static char g_root[MAX_PATH * 4];   /* UTF-8, as the store spells it */
 static const char H_PISTOL[] = "7259ac447432f2a95e4d98e53710f6c8ebe6d122938c55c9b4326cd2a85a7907";
 static const char H_OTHER[]  = "1111111111111111111111111111111111111111111111111111111111111111";
 static const char H_GONE[]   = "2222222222222222222222222222222222222222222222222222222222222222";
 static int admitted(const char *hash) { return !strcmp(hash, H_PISTOL) || !strcmp(hash, H_OTHER); }
 
+/* A UTF-8 path in wide form (no long-path prefix: SHCreateDirectoryExW refuses it). */
+static void wide(const char *path, wchar_t *out, int cap)
+{
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, out, cap)) out[0] = 0;
+}
+
 static void put(const char *rel, const char *text)
 {
-    char path[MAX_PATH], dir[MAX_PATH], *slash;
-    FILE *f;
+    char path[MAX_PATH * 4], dir[MAX_PATH * 4], *slash;
+    wchar_t w[MAX_PATH];
+    FILE *f = NULL;
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, rel);
     strcpy_s(dir, sizeof dir, path);
     slash = strrchr(dir, '\\');
     *slash = 0;
-    SHCreateDirectoryExA(NULL, dir, NULL);
-    f = fopen(path, "wb");
+    wide(dir, w, MAX_PATH);
+    SHCreateDirectoryExW(NULL, w, NULL);
+    wide(path, w, MAX_PATH);
+    if (_wfopen_s(&f, w, L"wb") || !f) { fprintf(stderr, "cannot write %s\n", path); return; }
     fputs(text, f);
     fclose(f);
 }
@@ -102,11 +112,13 @@ static void bundle(const char *rel, const char *id, const char *hash, const char
     put(rel, text);
 }
 
-static void test_tree(void)
+/* `top` names the folder above mods\ (a non-ASCII one too: the scan reads
+ * the store through UTF-8 paths). */
+static void test_tree(const char *top)
 {
     char tmp[MAX_PATH];
     GetTempPathA(sizeof tmp, tmp);
-    _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%ssh_modhud_test_%lu\\mods", tmp, GetCurrentProcessId());
+    _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%s%s_%lu\\mods", tmp, top, GetCurrentProcessId());
     /* The owner's converted sp-pistol, as the migration wrote it: a delivered
      * package is an ordinary folder now. */
     bundle("local.sp-pistol\\mod.json", "local.sp-pistol", H_PISTOL,
@@ -137,12 +149,23 @@ static void test_tree(void)
         static const char *const files[] = { "local.sp-pistol\\mod.json",
             "alex.other\\mod.json", "alex.gone\\mod.json", "notes\\readme.txt", NULL };
         static const char *const dirs[] = { "local.sp-pistol", "alex.other", "alex.gone", "notes", NULL };
-        char path[MAX_PATH];
-        for (int i = 0; files[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, files[i]); DeleteFileA(path); }
-        for (int i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, dirs[i]); RemoveDirectoryA(path); }
-        RemoveDirectoryA(g_root);
+        char path[MAX_PATH * 4];
+        wchar_t w[MAX_PATH];
+        for (int i = 0; files[i]; i++) {
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, files[i]);
+            wide(path, w, MAX_PATH);
+            DeleteFileW(w);
+        }
+        for (int i = 0; dirs[i]; i++) {
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, dirs[i]);
+            wide(path, w, MAX_PATH);
+            RemoveDirectoryW(w);
+        }
+        wide(g_root, w, MAX_PATH);
+        RemoveDirectoryW(w);
         *strrchr(g_root, '\\') = 0;
-        RemoveDirectoryA(g_root);
+        wide(g_root, w, MAX_PATH);
+        RemoveDirectoryW(w);
     }
 }
 
@@ -213,7 +236,13 @@ static void test_image(const char *path)
 int main(int argc, char **argv)
 {
     test_grammar();
-    test_tree();
+    test_tree("sh_modhud_test");
+    {
+        /* "sh_modhud_sme" with an acute accent, in UTF-8. */
+        char *accent = sh_mb_utf8(L"sh_modhud_sm\x00e9");
+        CHECK(accent != NULL);
+        if (accent) { test_tree(accent); free(accent); }
+    }
     /* The relay reads the live table: weapon/test/unlimited is a weapon rule. */
     CHECK(parse_one("{\"weapons\": {\"weapon/test/unlimited\": {\"ammo_display\": \"weapon\"}}}", "test"));
     CHECK(sh_modhud_test_relay());
