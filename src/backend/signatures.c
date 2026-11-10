@@ -477,7 +477,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;
                             * the decl server can use it when the pending bit survives lookup.
-                            * Anchor: 0x900-byte frame and owner-vtable access. */
+                            * Anchor: 0x900-byte frame and owner-vtable access. Detoured over
+                            * its 20-byte head (MOV RAX,RSP; PUSH RDI; SUB RSP,0x900; MOV
+                            * [RSP+0x40],-2; no relative operand) to attribute nested loads to
+                            * the load that opens them (modserve_engine.c). Vulkan 0x16C6050,
+                            * OpenGL 0x16C6D30: 12 direct callers each, ResourceMaterialize's
+                            * call at +0x249 on both (VK 0x1415728A9, GL 0x141573A39). */
       "48 8B C4 57 48 81 EC 00 09 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 10 "
       "48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 08 00 00 48 8B F9 "
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "

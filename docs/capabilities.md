@@ -185,7 +185,10 @@ name". Mods you download or import are never refused on their files. A map whose
   it, also when the map's own load created it before the mod was activated, so the first Play
   after a map was opened in the editor no longer frees it. The same holds for what the mod's
   objects found already loaded from the map open before: reloading a map or adding a mod to it
-  while the editor is open no longer crashes the next Play. The rescan's result
+  while the editor is open no longer crashes the next Play. Everything a mod's objects use is kept
+  with them for the session, whenever the game loads it, so Play after Play never finds a freed
+  model or material; what the map's own memory holds is left for the next load to recreate whole.
+  The rescan's result
   and the backend log's `MODS: refresh:` lines say which applied.
   `sh_mods build "<folder>"` does it at once; `sh_mods install "<folder>"` copies a folder from
   elsewhere into `mods\<id>\`, verifies it and makes it available at once (a folder without an

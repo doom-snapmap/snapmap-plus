@@ -1528,6 +1528,44 @@ names what it raised. So a kept decl never holds an object that outlives it
 by less, whether the pass created the object (the watermark), parsed it
 earlier (the needs by name) or found it already loaded (the lookups).
 
+What the engine loads on behalf of a kept object is kept with it, whenever
+it loads (`sh_modserve_attrib_*`, `sh_modserve_kept_*`). The kept set holds,
+by address, every resource a keep raised or a pass created at level 4. A
+second detour, on `ResourceGenericLoad` (VK 0x1416c6050 / GL 0x1416c6d30,
+20-byte head; `ResourceMaterialize` calls it at +0x249 for every resource it
+creates), tracks the engine's load nesting on the main thread: each load
+opened inside another, and each resource `ResourceLookup` returns inside a
+load, is recorded as a (parent, child) pair, and a child of a kept parent is
+kept at once (raised when its own load returns, since the load's failure
+path reconstructs the object at level 1). A Play's spawns load objects no
+kept decl held yet, nested (the chainsaw gore md6Def loads its mesh, whose
+load creates its material; snaphak-re triage F9 census); when a later keep
+lifts one of them, every close (`me_keep_attrib`: after each outermost
+watermark, after the editor rows, and before the Play level load) follows
+the recorded pairs from every kept resource, transitively. The close drops
+kept addresses no list holds any longer, keeps only pairs a later keep can
+still follow (a parent neither kept nor at level 4), and forgets all pairs
+before the Play purge. Both sets are bounded at 2^20 entries; a full set
+stops recording and the close says so. The first close logs whether the
+hook recorded anything, so a build whose loads it never sees says what is
+kept only by name.
+
+Raising a level keeps a resource's object, not what its load allocated from
+the current heap. The engine's allocator (VK 0x140328530) takes heap -1 as
+the top of idMemLocal's heap stack (ids at +0x44, depth at +0xC4), else
+process heap 0; an MD6 skeleton's joints (`+0x40`, VK 0x1416d0770,
+`TAG_MD6`) come from it. The editor's reload after a Play exit loads the
+gore md6Defs, meshes and skeletons with a map heap selected, and the next
+Play load releases that heap: the skeleton the holds-by-name raise had
+lifted to level 4 kept its object and lost its joints, and the chainsaw
+pickup's attachment animator read them (G1, VK 0x16f7f0b; 2 of 2 before
+this rule). So the load hook records the heap each load runs with, and no
+keep (watermark, holds, lookups, attribution) raises a resource whose last
+load ran with a heap other than 0: it stays at level 1, the purge frees it
+whole and the next load recreates it. A load in heap 0 clears the mark. A
+log line `<phase>: N keep(s) left at level 1 because the map's heap holds
+what their load allocated` names them.
+
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
 {"activate": [...], "deactivate": [...]}}`) are read only through the builder's
 canonical form (`sh_mb_requirements_canonical`): sorted cvar names with string
