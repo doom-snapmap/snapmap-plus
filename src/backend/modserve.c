@@ -1415,7 +1415,14 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
  * to the count. Any other difference, a provider that lists an existing item
  * with different content, or a text outside the grammar leaves the winner's
  * bytes as they are. Removal cannot be expressed (no stock text is read
- * here), so composition is a union. */
+ * here), so composition is a union.
+ *
+ * A `key = value` statement keeps its `;` terminator only when its source
+ * statement had one: an md6Def's meshKits pairs (`"doors" = ""`) have none,
+ * and the engine's md6Def parser refuses the text when one is added
+ * (snapmap-plus #160). An appended item takes the terminator convention of
+ * the block it joins, and a renumbered list's `num` keeps the winner's. The
+ * canonical text used for equality and identity ignores terminators. */
 
 #define MC_DEPTH 32
 
@@ -1424,10 +1431,11 @@ typedef struct mc_node {
     const char *val; size_t val_n;        /* scalar value text, quotes included; NULL for a block */
     struct mc_node **kids; int nkids, ckids;
     int block, eq;
+    int semi;                             /* the source statement ended in ';' */
 } mc_node;
 
 typedef struct mc_arena { struct mc_arena *next; size_t used; char data[16384]; } mc_arena;
-typedef struct mc_ctx { mc_arena *arena; int failed; } mc_ctx;
+typedef struct mc_ctx { mc_arena *arena; int failed; int conv; } mc_ctx;   /* conv: the winner's ';' convention */
 
 static void *mc_alloc(mc_ctx *c, size_t n)
 {
@@ -1562,7 +1570,7 @@ static int mc_parse_block(mc_ctx *c, mc_lex *l, mc_node *parent, int depth)
             n->val_n = 0;
             l->pos = (size_t)(t.p - l->t);
         } else return 0;
-        if (mc_peek(l).kind == MC_SEMI) mc_next(l);
+        if (mc_peek(l).kind == MC_SEMI) { mc_next(l); n->semi = 1; }
         if (!mc_add_kid(c, parent, n)) return 0;
     }
 }
@@ -1626,16 +1634,19 @@ static int mc_is_list(const mc_node *n)
 
 static void mc_indent(mc_buf *b, int depth) { int i; for (i = 0; i < depth; ++i) mc_put(b, "\t", 1); }
 
-/* Serialise `n`'s members at `depth`; lists are renumbered. */
-static void mc_write_members(mc_buf *b, const mc_node *n, int depth)
+/* Serialise `n`'s members at `depth`; lists are renumbered. A `key = value`
+ * statement ends in ';' when its source did, and always in the canonical text. */
+static void mc_write_members(mc_buf *b, const mc_node *n, int depth, int canon)
 {
     int i, item = 0, list = mc_is_list(n);
     char tmp[48];
     if (list) {
-        int count = 0;
-        for (i = 0; i < n->nkids; ++i) if (!mc_key_is(n->kids[i], "num")) count++;
+        int count = 0, semi = canon;
+        for (i = 0; i < n->nkids; ++i)
+            if (!mc_key_is(n->kids[i], "num")) count++;
+            else semi |= n->kids[i]->semi;
         mc_indent(b, depth);
-        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "num = %d;\n", count);
+        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "num = %d%s\n", count, semi ? ";" : "");
         mc_put(b, tmp, strlen(tmp));
     }
     for (i = 0; i < n->nkids; ++i) {
@@ -1648,13 +1659,14 @@ static void mc_write_members(mc_buf *b, const mc_node *n, int depth)
         } else mc_put(b, k->key, k->key_n);
         if (k->block) {
             mc_put(b, k->eq ? " = {\n" : " {\n", k->eq ? 5 : 3);
-            mc_write_members(b, k, depth + 1);
+            mc_write_members(b, k, depth + 1, canon);
             mc_indent(b, depth);
             mc_put(b, "}\n", 2);
         } else if (k->eq) {
             mc_put(b, " = ", 3);
             mc_put(b, k->val, k->val_n);
-            mc_put(b, ";\n", 2);
+            if (canon || k->semi) mc_put(b, ";\n", 2);
+            else mc_put(b, "\n", 1);
         } else {
             if (k->val_n) { mc_put(b, " ", 1); mc_put(b, k->val, k->val_n); }
             mc_put(b, "\n", 1);
@@ -1666,7 +1678,7 @@ static void mc_write_members(mc_buf *b, const mc_node *n, int depth)
 static char *mc_text(const mc_node *n, size_t *len)
 {
     mc_buf b = { NULL, 0, 0, 0 };
-    if (n->block) { mc_put(&b, "{\n", 2); mc_write_members(&b, n, 1); mc_put(&b, "}", 1); }
+    if (n->block) { mc_put(&b, "{\n", 2); mc_write_members(&b, n, 1, 1); mc_put(&b, "}", 1); }
     else mc_put(&b, n->val, n->val_n);
     if (b.failed) { free(b.p); return NULL; }
     if (len) *len = b.n;
@@ -1738,6 +1750,34 @@ static int mc_count_key(const mc_node *n, const mc_node *like)
     return c;
 }
 
+/* The ';' convention of the first `key = value` statement under `n`: 1 with
+ * a terminator, 0 without, -1 when `n` holds none. */
+static int mc_find_conv(const mc_node *n)
+{
+    int i, v;
+    for (i = 0; i < n->nkids; ++i)
+        if (!n->kids[i]->block && n->kids[i]->eq) return n->kids[i]->semi;
+    for (i = 0; i < n->nkids; ++i)
+        if (n->kids[i]->block && (v = mc_find_conv(n->kids[i])) >= 0) return v;
+    return -1;
+}
+
+static void mc_set_conv(mc_node *n, int conv)
+{
+    int i;
+    if (!n->block) { if (n->eq) n->semi = conv; return; }
+    for (i = 0; i < n->nkids; ++i) mc_set_conv(n->kids[i], conv);
+}
+
+/* Append `item` to `parent` in the terminator convention of the block it
+ * joins, or the winner's when that block holds no `key = value`. */
+static int mc_append(mc_ctx *c, mc_node *parent, mc_node *item)
+{
+    int conv = mc_find_conv(parent);
+    mc_set_conv(item, conv >= 0 ? conv : c->conv);
+    return mc_add_kid(c, parent, item);
+}
+
 /* Merge `other` into `base`; 0 when they disagree outside lists. *added
  * counts the list items appended. */
 static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
@@ -1764,7 +1804,7 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
                 if (!mc_equal(base->kids[found], it)) return 0;   /* one entry, two meanings */
                 continue;
             }
-            if (!mc_add_kid(c, base, (mc_node *)it)) return 0;
+            if (!mc_append(c, base, (mc_node *)it)) return 0;
             (*added)++;
         }
         return 1;
@@ -1804,7 +1844,7 @@ static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
                 continue;
             }
             if (!same_word && base->nkids) return 0;   /* nothing of this kind in the winner: not a bag it holds */
-            if (!mc_add_kid(c, base, (mc_node *)o)) return 0;
+            if (!mc_append(c, base, (mc_node *)o)) return 0;
             (*added)++;
             continue;
         }
@@ -1847,13 +1887,14 @@ static char *ms_compose(const unsigned char *const *texts, const size_t *lens, i
     *added = 0;
     *len = 0;
     base = mc_parse(&c, (const char *)texts[0], lens[0]);
+    if (base && (c.conv = mc_find_conv(base)) < 0) c.conv = 0;
     for (i = 1; base && i < n; ++i) {
         mc_node *o = mc_parse(&c, (const char *)texts[i], lens[i]);
         if (!o || !mc_merge(&c, base, o, added)) base = NULL;
     }
     if (base && !c.failed) {
         mc_put(&out, "{\n", 2);
-        mc_write_members(&out, base, 1);
+        mc_write_members(&out, base, 1, 0);
         mc_put(&out, "}\n", 2);
     }
     mc_free(&c);

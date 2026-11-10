@@ -1322,7 +1322,12 @@ rows), the winner's text is served with the other declared providers' entries
 appended (composed per listing and memoized on the path, `ms_scope_compose`),
 so several boss packs a map declares work together and several mods may each
 add event rows to the player body; an undeclared mod's entries are never
-composed in. Editor-time bundles (below) compose with each other in every map,
+composed in. The composed text keeps each `key = value` statement's `;`
+terminator as its source wrote it: an md6Def's meshKits pairs (`"doors" = ""`)
+have none, and the engine's md6Def parser refuses the decl (`expected '=' but
+found '}'`, issue #160) when one is added. An appended entry takes the
+convention of the block it joins, a renumbered list's `num` keeps the
+winner's, and texts that differ only by terminators compare equal. Editor-time bundles (below) compose with each other in every map,
 as before. One `MODS: conflict:` line at the index build names the
 providers, the static winner and the reason; `sh_mods doctor` prints, per path,
 which layer serves it for the open map and why. A

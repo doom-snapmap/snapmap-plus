@@ -1328,6 +1328,92 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
 #define MD6_TAIL(extra) "\t}\n\taliases {\n" extra "\t}\n\tuserChannelWeightGroupOverride {\n\t\t\"MD6_WEIGHTGROUP_ALL\"\n\t}\n}\n"
 #define AW_TEXT(extra) "{\n\tprops {\n\t\tgridSize 32\n\t\tmodelInfos {\n\t\t\t\"zion/characters/monsters/cyberdemon/base/cyberdemon.md6\" \"\"\n\t\t}\n\t}\n" extra "}\n"
 
+/* The stock module_lift_door md6Def (bare statement grammar; its meshKits pair
+ * `"doors" = ""` has no terminator), split where its events block closes. */
+#define LIFT_HEAD \
+    "{\r\n" \
+    "\tinit {\r\n" \
+    "\t\tmesh \"md6/objects/props_set/doors/module_lift_door/assets/mesh/module_lift_door.md6mesh\"\r\n" \
+    "\t\toffset ( 0 0 0 )\r\n" \
+    "\t\tcalcRefBoundsFromJoints 0\r\n" \
+    "\t}\r\n" \
+    "\tuserProps {\r\n" \
+    "\t}\r\n" \
+    "\tjointGroups {\r\n" \
+    "\t}\r\n" \
+    "\tevents {\r\n" \
+    "\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdemon_intro_door.md6anim\" {\r\n" \
+    "\t\t\tevent \"ae_startFX\" {\r\n" \
+    "\t\t\t\tframe 26\r\n" \
+    "\t\t\t\trow 0\r\n" \
+    "\t\t\t\tlocked 0\r\n" \
+    "\t\t\t\tfxCondition_t FX_CINEMATIC_1\r\n" \
+    "\t\t\t}\r\n" \
+    "\t\t\tevent \"ae_startFX\" {\r\n" \
+    "\t\t\t\tframe 158\r\n" \
+    "\t\t\t\trow 1\r\n" \
+    "\t\t\t\tlocked 0\r\n" \
+    "\t\t\t\tfxCondition_t FX_CINEMATIC_2\r\n" \
+    "\t\t\t}\r\n" \
+    "\t\t}\r\n"
+#define LIFT_TAIL \
+    "\t}\r\n" \
+    "\taliases {\r\n" \
+    "\t\talias {\r\n" \
+    "\t\t\tname \"open_ico/closed\"\r\n" \
+    "\t\t\tanim \"md6/objects/props_set/doors/module_lift_door/motion/closed.md6anim\"\r\n" \
+    "\t\t}\r\n" \
+    "\t\talias {\r\n" \
+    "\t\t\tname \"open_ico/open\"\r\n" \
+    "\t\t\tanim \"md6/objects/props_set/doors/module_lift_door/motion/open.md6anim\"\r\n" \
+    "\t\t}\r\n" \
+    "\t\talias {\r\n" \
+    "\t\t\tname \"open_ico/open_into\"\r\n" \
+    "\t\t\tanim \"md6/objects/props_set/doors/module_lift_door/motion/open_into.md6anim\"\r\n" \
+    "\t\t}\r\n" \
+    "\t\talias {\r\n" \
+    "\t\t\tname \"open_ico/open_out\"\r\n" \
+    "\t\t\tanim \"md6/objects/props_set/doors/module_lift_door/motion/open_out.md6anim\"\r\n" \
+    "\t\t}\r\n" \
+    "\t\talias {\r\n" \
+    "\t\t\tname \"cyber_intro/cyberdemon_intro_door\"\r\n" \
+    "\t\t\tanim \"md6/cineractive/maps/lazarus_labs/cyberdrome/cyber_intro/cyberdemon_intro_door.md6anim\"\r\n" \
+    "\t\t}\r\n" \
+    "\t}\r\n" \
+    "\tprops {\r\n" \
+    "\t\tprop \"_info\" {\r\n" \
+    "\t\t\ttag \"fx_panel\" {\r\n" \
+    "\t\t\t\ttrans ( 13.5252 7.7636 76.9484 )\r\n" \
+    "\t\t\t\trot ( 0 0 0 1 )\r\n" \
+    "\t\t\t\tparent \"base\"\r\n" \
+    "\t\t\t}\r\n" \
+    "\t\t\ttag \"fx_door_upper\" {\r\n" \
+    "\t\t\t\ttrans ( 1 0 100 )\r\n" \
+    "\t\t\t\trot ( 0 0 0 1 )\r\n" \
+    "\t\t\t\tparent \"origin\"\r\n" \
+    "\t\t\t}\r\n" \
+    "\t\t}\r\n" \
+    "\t}\r\n" \
+    "\teyeInfoCollection 0 {\r\n" \
+    "\t}\r\n" \
+    "\tmeshKits {\r\n" \
+    "\t\tHeads 0 {\r\n" \
+    "\t\t}\r\n" \
+    "\t\tGear 0 {\r\n" \
+    "\t\t}\r\n" \
+    "\t\tGore 0 {\r\n" \
+    "\t\t}\r\n" \
+    "\t\tDoor 1 {\r\n" \
+    "\t\t\t\"doors\" = \"\"\r\n" \
+    "\t\t}\r\n" \
+    "\t\tMelee_Highlight 0 {\r\n" \
+    "\t\t}\r\n" \
+    "\t}\r\n" \
+    "\tuserChannelWeightGroupOverride {\r\n" \
+    "\t\t\"MD6_WEIGHTGROUP_ALL\"\r\n" \
+    "\t}\r\n" \
+    "}"
+
 static int cf_source(void *c, const char *type, const char *name)
 {
     (void)c;
@@ -1867,6 +1953,47 @@ static void test_compose_unit(void)
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
     t[0] = AW_TEXT(""); t[1] = AW_TEXT("\tlayers {\n\t}\n");
     CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    /* Two copies of the stock lift door md6Def that differ only in an event
+     * bag compose without adding a ';' anywhere: the engine's md6Def parser
+     * refuses `"doors" = "";` (issue 160). */
+    t[0] = LIFT_HEAD LIFT_TAIL;
+    t[1] = LIFT_HEAD "\t\tanim \"md6/mods/f1/kick.md6anim\" {\n\t\t\tevent \"ae_startFX\" {\n\t\t\t\tframe 3\n\t\t\t\trow 0\n\t\t\t\tlocked 0\n\t\t\t}\n\t\t}\n" LIFT_TAIL;
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 1);
+    if (out) {
+        CHECK(strchr(out, ';') == NULL);
+        CHECK(strstr(out, "\tDoor 1 {\n\t\t\t\"doors\" = \"\"\n\t\t}\n") != NULL);
+        CHECK(strstr(out, "anim \"md6/mods/f1/kick.md6anim\" {") != NULL);
+        CHECK(strstr(out, "fxCondition_t FX_CINEMATIC_2\n") != NULL);
+        {
+            int again = -1;
+            char *twice;
+            t[0] = out;
+            twice = sh_modserve_test_compose(t, 2, &again);
+            CHECK(twice && again == 0 && !strcmp(twice, out));
+            free(twice);
+        }
+        free(out);
+    }
+    /* A provider that wrote the pair with a ';' (a converted package) is the
+     * same text; an appended item takes the convention of the block it joins. */
+    t[0] = "{\n\tmeshKits {\n\t\tDoor 1 {\n\t\t\t\"doors\" = \"\"\n\t\t}\n\t}\n}\n";
+    t[1] = "{\n\tmeshKits {\n\t\tDoor 1 {\n\t\t\t\"doors\" = \"\";\n\t\t}\n\t}\n}\n";
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 0 && !strcmp(out, t[0]));
+    free(out);
+    t[0] = "{\n\tmeshKits {\n\t\tDoor 1 {\n\t\t\t\"doors\" = \"\"\n\t\t}\n\t\tGear 0 {\n\t\t}\n\t}\n}\n";
+    t[1] = "{\n\tmeshKits {\n\t\tDoor 1 {\n\t\t\t\"doors\" = \"\";\n\t\t}\n\t\tGear 0 {\n\t\t}\n\t\tGear 1 {\n\t\t\t\"visor\" = \"\";\n\t\t}\n\t}\n}\n";
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 1 && strchr(out, ';') == NULL && strstr(out, "\"visor\" = \"\"\n") != NULL);
+    free(out);
+    /* The assignment grammar keeps its ';', and an item appended from a text
+     * written without terminators takes the list's. */
+    t[0] = WL_A;
+    t[1] = "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 1\n\t\t\titem[0] = \"single_spider_mastermind\"\n\t\t}\n\t}\n}\n";
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 1 && strstr(out, "num = 4;") && strstr(out, "item[3] = \"single_spider_mastermind\";\n"));
+    free(out);
 }
 
 static void test_conflicts(void)
