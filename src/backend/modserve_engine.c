@@ -1997,6 +1997,127 @@ static int me_count_mod_rows(void *palette, int *rows)
     return mods;
 }
 
+/* 'sh_mods palette check': where each palette row's owned strings live. The
+ * Play build sorts the palette in place and copies every row through the
+ * row copy constructor, so a row string outside the process heap is read
+ * after the Play transition freed it (the review's A-D3 fault: a row's
+ * clipModelName, entry+0x228, in a released map heap). */
+#define PAL_STR_FIELDS 6
+#define PAL_CHECK_LIST 16
+static const unsigned me_pal_str_off[PAL_STR_FIELDS] = { 0x168, 0x1a0, 0x1f8, 0x228, 0x258, 0x350 };
+static const char *const me_pal_str_name[PAL_STR_FIELDS] =
+    { "display name", "model", "+0x1f8", "clipModelName", "clipModel type", "door lock message" };
+
+static int me_rd_u32(const void *p, unsigned *v)
+{
+    __try { *v = *(const unsigned *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* 0 none, 1 process, 2 persist, 3 map, 4 not committed (released), 5 no
+ * recognisable allocator header. */
+static int me_ptr_class(const void *data, char *why, size_t cap)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    const char *h;
+    why[0] = 0;
+    if (!data) return 0;
+    memset(&mbi, 0, sizeof mbi);
+    if (!VirtualQuery(data, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) {
+        _snprintf_s(why, cap, _TRUNCATE, "not committed (state 0x%lx)", (unsigned long)mbi.State);
+        return 4;
+    }
+    h = sh_apply_engine_block_heap_name(data);
+    strncpy_s(why, cap, h, _TRUNCATE);
+    if (!strncmp(h, "MAP", 3)) return 3;
+    if (!strncmp(h, "PERSIST", 7)) return 2;
+    if (!strncmp(h, "PROCESS", 7)) return 1;
+    return 5;
+}
+
+static void me_palette_check(void)
+{
+    static const char *const cls[] = { "none", "process heap", "persistent heap", "MAP heap", "released memory", "unknown header" };
+    unsigned char *palette = (unsigned char *)sh_timeline_tile_palette();
+    void *entries = NULL;
+    int count = 0, i, f, c, listed = 0, rows_bad = 0, rec_bad = 0, sorts = 0, unscoped = 0, guarded = 0;
+    unsigned inline_n = 0, by_class[6] = { 0 };
+    char why[96], line[400];
+    if (!palette || !me_rd_ptr(palette + PAL_ENTRIES_OFF, &entries) || !me_rd_i32(palette + PAL_COUNT_OFF, &count) ||
+        !entries || count <= 0 || count > PAL_MAX) {
+        sh_printf("sh_mods palette check: no editor palette yet\n");
+        return;
+    }
+    {
+        int ac = me_ptr_class(entries, why, sizeof why);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: %d rows; the array at %p is in %s (%s)", count, entries,
+                    cls[ac], why);
+        sh_printf("sh_mods %s\n", line);
+        me_log("%s", line);
+    }
+    for (i = 0; i < count; ++i) {
+        const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
+        void *sedef = NULL, *name = NULL, *record = NULL;
+        const char *sedef_name = "?";
+        int row_bad = 0;
+        if (me_rd_ptr(entry, &sedef) && sedef && me_rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) && name)
+            sedef_name = (const char *)name;
+        for (f = 0; f < PAL_STR_FIELDS; ++f) {
+            const unsigned char *s = entry + me_pal_str_off[f];
+            void *data = NULL;
+            unsigned len = 0;
+            if (!me_rd_ptr(s + 0x10, &data) || !me_rd_u32(s + 8, &len)) continue;
+            if (!data || data == (const void *)(s + 0x1c)) { ++inline_n; continue; }
+            c = me_ptr_class(data, why, sizeof why);
+            ++by_class[c];
+            if (c >= 3) {
+                row_bad = 1;
+                if (listed < PAL_CHECK_LIST) {
+                    ++listed;
+                    __try {
+                        _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: row %d %s: %s (+0x%x) data %p, %u chars: %s", i,
+                                    sedef_name, me_pal_str_name[f], me_pal_str_off[f], data, len, why);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: row %d: %s (+0x%x) data %p: %s", i,
+                                    me_pal_str_name[f], me_pal_str_off[f], data, why);
+                    }
+                    sh_printf("sh_mods %s\n", line);
+                    me_log("%s", line);
+                }
+            }
+        }
+        /* The record is an interior pointer (no header of its own): only a
+         * released or map-heap block start counts. */
+        if (me_rd_ptr(entry + 0x150, &record) && record && (c = me_ptr_class(record, why, sizeof why)) >= 3 && c <= 4) {
+            ++rec_bad;
+            row_bad = 1;
+            if (listed < PAL_CHECK_LIST) {
+                ++listed;
+                __try {
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: row %d %s: record (+0x150) %p: %s", i, sedef_name,
+                                record, why);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: row %d: record (+0x150) %p: %s", i, record, why);
+                }
+                sh_printf("sh_mods %s\n", line);
+                me_log("%s", line);
+            }
+        }
+        rows_bad += row_bad;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "palette check: strings: %u inline, %u process heap, %u persistent heap, %u MAP heap, %u released, %u unknown; "
+                "%d row(s) with a string or record outside the process heap (%d records)%s",
+                inline_n, by_class[1], by_class[2], by_class[3], by_class[4], by_class[5], rows_bad, rec_bad,
+                rows_bad ? "; the next Play build would read them after the map heap is freed" : "");
+    sh_printf("sh_mods %s\n", line);
+    me_log("%s", line);
+    sh_timeline_tile_sorts(&sorts, &unscoped, &guarded);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "palette check: sort guard %s; %d sort(s) this session, %d outside process heap 0",
+                guarded ? "installed" : "NOT installed", sorts, unscoped);
+    sh_printf("sh_mods %s\n", line);
+    me_log("%s", line);
+}
+
 void sh_modserve_palette_after_build(void *palette)
 {
     int rows, mods;
@@ -2398,7 +2519,8 @@ int sh_modserve_command(void *args, const char *verb)
     if (!_stricmp(verb, "palette")) {
         sh_run_on_main_fn run = NULL;
         int result = 0;
-        if (!arg || _stricmp(arg, "rebuild")) { sh_printf("usage: sh_mods palette rebuild\n"); return 1; }
+        if (arg && !_stricmp(arg, "check")) { me_palette_check(); return 1; }
+        if (!arg || _stricmp(arg, "rebuild")) { sh_printf("usage: sh_mods palette rebuild | check\n"); return 1; }
         if (me_on_main() == 1) result = modserve_palette_rebuild_requested();
         else {
             sh_apply_engine_get_run_on_main(&run);

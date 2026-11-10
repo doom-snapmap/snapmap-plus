@@ -640,6 +640,11 @@ static const char *ae_block_heap_name(const void *p)
 }
 
 
+const char *sh_apply_engine_block_heap_name(const void *p)
+{
+    return ae_block_heap_name(p);
+}
+
 static const uint8_t *ae_editor_session(void)
 {
     if (!g_editor) return NULL;
