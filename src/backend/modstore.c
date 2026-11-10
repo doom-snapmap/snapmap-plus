@@ -1573,9 +1573,15 @@ int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
 
 /* New mod's example (DESIGN-additive 2.2): a crate that places and plays
  * untouched. Its entityDef is the game's SnapMap crate01 under the mod's key,
- * its Toybox row names it, and mod.json's strings give the row its name, its
+ * its Toybox row is the game's crate01 row (snapeditorentitydef
+ * prop/new/crate01: the prop_base parent, its preview, size, arrow and sounds)
+ * pointing at it, and mod.json's strings give the row its name, its
  * description and a Toybox category named after the mod. Nothing binary: the
- * model and the preview image are the game's. */
+ * model and the preview image are the game's. The row draws the entity's own
+ * model as the stock prop rows do; it names no renderInfo.renderModelName,
+ * which only rows whose entity has no model of its own carry (pickups,
+ * encounters, logic); the earlier example's flooded the editor log with
+ * "modelMatrix invert failed on model .../crate01.lwo" every frame (V13). */
 #define MS_EXAMPLE_DECL "example_crate"
 #define MS_EXAMPLE_DEF_DIR "assets\\generated\\decls\\entitydef\\mods\\"
 #define MS_EXAMPLE_ROW_DIR "assets\\generated\\decls\\snapeditorentitydef\\mods\\"
@@ -1600,22 +1606,29 @@ static const char MS_EXAMPLE_ROW[] =
     "\tinherit = \"prop/prop_base\";\r\n"
     "\tedit = {\r\n"
     "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\r\n"
-    "\t\tmetaCategoryNameTag = \"#str_snapentity_metacategory_toybox\";\r\n"
     "\t\tcategoryNameTag = \"#str_%s_category\";\r\n"
     "\t\tdisplayNameTag = \"#str_%s_" MS_EXAMPLE_DECL "_name\";\r\n"
     "\t\tdisplayDescriptionTag = \"#str_%s_" MS_EXAMPLE_DECL "_desc\";\r\n"
     "\t\tentityDef = \"mods/%s/" MS_EXAMPLE_DECL "\";\r\n"
     "\t\trenderInfo = {\r\n"
-    "\t\t\trenderModelName = \"models/snapmaps/props/new/crate01.lwo\";\r\n"
-    "\t\t\talwaysDrawBounds = false;\r\n"
     "\t\t\tsize = {\r\n"
-    "\t\t\t\tx = 54;\r\n"
-    "\t\t\t\ty = 54;\r\n"
-    "\t\t\t\tz = 54;\r\n"
+    "\t\t\t\tx = 54.3767967224;\r\n"
+    "\t\t\t\ty = 54.3779754639;\r\n"
+    "\t\t\t\tz = 53.595500946;\r\n"
+    "\t\t\t}\r\n"
+    "\t\t\tarrowSize = {\r\n"
+    "\t\t\t\tx = 2;\r\n"
+    "\t\t\t\ty = 2;\r\n"
+    "\t\t\t\tz = 1;\r\n"
     "\t\t\t}\r\n"
     "\t\t}\r\n"
-    "\t\tflags = {\r\n"
-    "\t\t\tplaceable = true;\r\n"
+    "\t\teventInfo = {\r\n"
+    "\t\t\tselectedEvent = {\r\n"
+    "\t\t\t\tsound = \"play_pickup_heavy_crates\";\r\n"
+    "\t\t\t}\r\n"
+    "\t\t\tplacedEvent = {\r\n"
+    "\t\t\t\tsound = \"play_putdown_heavy_crates\";\r\n"
+    "\t\t\t}\r\n"
     "\t\t}\r\n"
     "\t}\r\n"
     "}\r\n";

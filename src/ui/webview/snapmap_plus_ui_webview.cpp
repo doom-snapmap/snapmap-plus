@@ -3162,6 +3162,19 @@ static bool poc_mods_begin(int action, bool pick, const std::string &arg)
 }
 
 static void poc_watch_mods_finished(bool deferred);   /* fwd: the folder watchers, below */
+static void poc_watch_mods_covered();                 /* fwd: the folder watchers, below */
+
+/* The actions whose success ends with the backend's rescan of the whole mods folder
+ * (modui.c: New mod, an install that installed something, a rebuild that built, Refresh). */
+static bool poc_mods_rescanned(const PocModsJob &job)
+{
+    switch (job.action) {
+    case SH_MODS_ACT_NEW_MOD: case SH_MODS_ACT_INSTALL: case SH_MODS_ACT_REBUILD: case SH_MODS_ACT_RESCAN:
+        return job.run_rc == 1 && job.run_doc.find("\"ok\":true") != std::string::npos;
+    default:
+        return false;
+    }
+}
 
 /* A finished job, on the UI thread. */
 static void poc_mods_finish()
@@ -3174,6 +3187,7 @@ static void poc_mods_finish()
         bool deferred = job.run_rc != 1 || job.run_doc.find("\"deferred\":true") != std::string::npos;
         poc_watch_mods_finished(deferred);
     } else if (job.action) {
+        if (poc_mods_rescanned(job)) poc_watch_mods_covered();
         if (job.run_rc == -3)
             poc_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
         else if (job.run_rc == 1)
@@ -3410,10 +3424,20 @@ static void poc_watch_mods_finished(bool deferred)
     g_watch_mods_running = false;
     EnterCriticalSection(&g_watch_lock);
     if (deferred) sh_fw_retry(&g_fw_mods, now, SH_FW_RETRY_MS);
-    else (void)sh_fw_done(&g_fw_mods);
+    else { (void)sh_fw_done(&g_fw_mods); sh_fw_covered(&g_fw_mods); }
     LeaveCriticalSection(&g_watch_lock);
     poc_log(deferred ? "watch: the mods rescan was deferred (Play, a map load or a store write); asking again"
                      : "watch: the mods rescan ran");
+}
+
+/* A rescan of the window's own action ran (poc_mods_finish): the store writes before it, its
+ * own included, owe no second rescan (folder_watch.h sh_fw_covered). */
+static void poc_watch_mods_covered()
+{
+    if (!g_watch_started) return;
+    EnterCriticalSection(&g_watch_lock);
+    sh_fw_covered(&g_fw_mods);
+    LeaveCriticalSection(&g_watch_lock);
 }
 
 /* A mod folder's own name under mods\: no separators, no drive, not "." or "..". */

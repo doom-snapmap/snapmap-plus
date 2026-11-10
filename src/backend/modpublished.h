@@ -222,8 +222,12 @@ int  sh_modpub_row_substitute(const sh_modmanifest_row *row, char *hash, size_t 
 /* The manifest's substitute op (modmanifest.h sh_modmanifest_substitute_fn)
  * for an editor open: the gate with editor set, the row's other build from
  * the other_build op, the store not asked (an editor open has no hold), so
- * `why` says only "not installed on this computer". */
-int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap);
+ * `why` says only "not installed on this computer": that the editor opens
+ * the map without it, or, when the map's placed entities use it (`placed`),
+ * that the editor cannot open the map and what to do, the notice the player
+ * gets in place of the engine's damaged-save dialog. */
+int  sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
+                                 char *why, size_t why_cap);
 
 /* The sentence of a denial (verdicts 1 to 4), as the dialog and the console
  * line say it: "This <subject> needs <title> at a build that ...". `subject`

@@ -491,7 +491,10 @@ These backend files share the work:
   Mods tab's New mod (`sh_ms_new_mod_example`) writes the same folder with an
   example that places and plays untouched: an entityDef
   `mods/<key>/example_crate` with the game's SnapMap `crate01` model, its
-  Toybox row (`snapEditorEntityDef`, nothing binary) and the row's strings in
+  Toybox row (`snapEditorEntityDef`, nothing binary: the game's
+  `prop/new/crate01` row field for field but its names and its `entityDef`,
+  so it names no `renderInfo.renderModelName`, which only rows whose entity
+  has no model of its own carry) and the row's strings in
   the author block, then rescans, so its first build runs at once and keeps
   the key its block records. A
   store folder with neither an `id` nor a block `key` gets one the same way
@@ -858,7 +861,11 @@ product's own writes fire the watcher too: a change seen while the store lock
 is held (`SH_MODS_STORE`, `modstore_lock_busy`), or within a second after a
 hold ended, is dropped, so an install or export in progress never triggers a
 rescan mid-write. An author's edit during a long hold looks the same, so when
-that second ends with a change dropped, one rescan follows (`sh_fw_store`). A rescan of
+that second ends with a change dropped, one rescan follows (`sh_fw_store`), unless the
+window's own rescan already read the folder after it: a New mod, an install, a rebuild or a
+Refresh that succeeded, and the watcher's own rescan, end with the backend's rescan, so the
+changes dropped before it owe nothing more (`sh_fw_covered`, `poc_mods_rescanned`) and one
+rescan follows a New mod. A change dropped after that rescan still owes one. A rescan of
 unchanged trees is cheap by the rebuild rule. Each refresh and rescan logs one
 UI-log line with its reason (`watch: ...`). A folder that does not exist yet is
 opened again every five seconds.
@@ -2226,7 +2233,18 @@ An editor open asks no store, so its note for a key with no installed build
 (`sh_modpub_editor_substitute`) says only what this computer knows: "not
 installed on this computer, so the editor opens the map without it. Playing
 the map asks the mod store for it." The causes above, which depend on the
-store's answer, are said where the store is asked.
+store's answer, are said where the store is asked. When the map's placed
+entities name that mod's namespace (`mods/<id>/`, read by
+`sh_modmanifest_placed_names`), the engine's validator refuses the map
+(`GetLocalSavedMapEdit`'s RepairAndMigrate, then its damaged-save dialog,
+which the fault shield's save guard dismisses), so the editor cannot open it
+without the mod. The note then says so and is also the one-button notice
+raised once no gate took the parse (`sh_modmanifest_load_refusal`): "This
+map needs <name>, which is not installed on this computer, so the editor
+cannot open the map. Restore the mod's folder from the Recycle Bin, or play
+the map from My Maps to get it from the mod store." (My Maps Play holds and
+asks the store, above.) An editor open does not itself fetch: it has no hold
+point before the engine's load.
 
 A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be

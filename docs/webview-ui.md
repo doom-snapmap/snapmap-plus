@@ -313,15 +313,18 @@ Import, New Folder and Create are there; owner 2026-11-09): the attention filter
 shown only when a mod needs attention; its hover and label carry the count, "2 mods need attention:
 show only these", and pressing it sets `aria-pressed` and shows only those rows), This map (its hover
 names how many mods the open map uses), refresh, Open mods folder, Migrate (only while
-`migrate.pending > 0`) and install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
-at the pane's 220 px minimum all six buttons stay inside the pane and the label is clipped. The toolbar
+`migrate.pending > 0`) or, in its place whenever Migrate is hidden, New mod (`folder-plus`), and
+install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
+at the pane's 220 px minimum all six visible buttons stay inside the pane and the label is clipped. The toolbar
 under it holds the filter alone. The
 install dialog allows several folders (`FOS_ALLOWMULTISELECT`), joined with newlines in the action's
 argument; a picked folder without `mod.json` stands for every mod folder below it. One picked mod
 answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:
 `installedCount`, `refusedCount`, `editorRows`, `items` (one `{folder, ok, key, id, bundle, cause,
 editorRows, replaced}` per mod), `key` the first installed folder, and `index` from the one rescan.
-The rows are sorted by display name (the name, else the id, else the folder) without
+The rows are sorted by display name (the name, else the id, else the folder; a folder whose
+build serves nothing, as a refused or unbuilt one, is named by its `mod.json` whenever that parses,
+and by its folder path only when it does not) without
 case, then by id, then by folder. A mod that sits in an organizing folder of `mods\` (its row's
 `group`, "campaign-interactables" for `mods\campaign-interactables\campaign-interactables-1`) is
 listed under that folder's row, the Prefabs tab's folder primitives: a caret, the folder's path and
@@ -345,7 +348,8 @@ scrolled natively by the panel body; arrows, Home and End move the selection ove
 files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+), Build (Last built, the Bundle number to quote when asking
+the note that every player needs Snapmap+; for a folder of editor tweaks only, `facts.editorOnly`,
+"Changes only this computer's editor; maps made with it need nothing." instead), Build (Last built, the Bundle number to quote when asking
 for help, and one plain line per builder warning: `warnings`, else `firstWarning`; a warning never
 makes the mod need attention) and Sharing (how many of your published maps use it). About carries, after Folder, one plain line
 about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
@@ -365,9 +369,9 @@ names a folder the product received keeps as they are) and Encounters (the encou
 declaring map's conductor, their spawn bits assigned per map). The pane shows no build numbers and
 no list of builds: the player manages no builds (owner 2026-11-09). A failed latest build
 (`buildFailed`) is a yellow row whose cause reads "its latest build failed: <cause>; the last working
-version keeps serving until it builds". The head actions are Use in this map, Files (the
-`folder-tree` icon), Verify, Rebuild
-and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
+version keeps serving until it builds". The head actions are, left to right, Files (the
+`folder-tree` icon, left-most, owner 2026-11-09), Use in this map (Remove from map; never for a
+folder of editor tweaks only, `facts.editorOnly`), Verify, Rebuild and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
 for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
 from map and opens the same confirmation as the modal's row, which closes after the action. With
 nothing selected the pane explains how mods work.
@@ -393,7 +397,10 @@ reads as vanilla.
 
 **Files modal (read-only).** Files opens the selected mod's folder in the standard modal at the
 expanded Decl Text editor's size (`.modal.decl-focus-modal.mods-files-modal` in `#modsFilesModal`;
-Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Its head is the
+Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Every render
+keeps focus inside the modal (the selected file's row when focus was in the tree, else the close
+button), and while it is open a document-level listener takes Escape and Tab from anywhere in the
+page, as the expanded Decl Text modal's Escape does. Its head is the
 mod's display name and the details pane's one-line state. On the left, a filter box and the folder
 as a tree with the Prefabs primitives: names only, folders with their file counts, a folder holding
 only one folder shown as one row (`cm/models/mapobjects/hell_terrain`, `mods/<key>/demons`; a folder
@@ -417,9 +424,10 @@ else the first file a cause names, else `mod.json`. Its two reads (`modFiles`, `
 set the page's busy state or its status line, and no fresh document follows them; a refusal (another
 action still running) is shown in the modal.
 
-**New mod.** The empty list's card holds a New mod button, and the list's right-click menu (the
-page's `#ctxmenu`) a "New mod..." entry: the list's header has no room for a seventh icon button at
-its 220 px minimum. Both open a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
+**New mod.** The list's header holds a New mod icon button whenever Migrate is hidden (the two
+never show together: the header has room for six icon buttons at its 220 px minimum), the empty
+list's card a New mod button, and the list's right-click menu (the page's `#ctxmenu`) a "New mod..."
+entry, so it stays reachable while Migrate shows. Each opens a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
 creates, Escape cancels) that sends `newMod` with the name. Its answer selects the new mod (its
 key) and opens the Files modal on the example's Toybox row, with one quiet line above the editor:
 "Place Example crate from the Toybox in your map, change this file in the mod's folder, and save it:
@@ -507,7 +515,7 @@ Per entry of `mods`:
 | `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always` (it carries editor tweaks); absent when the serving index does not hold it. The page reads neither it, `scopeAuto` nor `scoped`. |
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
-| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
+| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, editorOnly, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `editorOnly` is `sh_mb_editor_only`, the rule `mapAddMod` refuses by (every file editor-time, no requirements): the page then shows no Use in this map or Remove from map. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
 | `"newest"` | bool | The newest installed build of its key (build number, then install time). |
 | `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |
 | `"buildFailed"` | object | `{cause, snapshot, servingBuild}` when the folder's latest build was refused: the last good build serves, from its snapshot when `snapshot`. |

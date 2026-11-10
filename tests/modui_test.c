@@ -378,8 +378,9 @@ static void bind_fakes(void)
 /* The manifest's substitute op (modpublished.c sh_modpub_editor_substitute):
  * the installed build of the row's key. */
 static char g_subst_to[80];
-static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
+    (void)placed;
     (void)row;
     if (why && why_cap) why[0] = 0;
     if (!g_subst_to[0]) return 0;
@@ -423,8 +424,9 @@ static int load_gone_row(const char *id, const char *gone, int attached)
 /* An editor load of the open test map with rows of `ids` at `hashes`; with
  * `subst`, the manifest substitutes each row by `subst_to` of its id. */
 static const char *g_sub_ids[4], *g_sub_to[4];
-static int fake_substitute_by_id(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
+static int fake_substitute_by_id(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed, char *why, size_t why_cap)
 {
+    (void)placed;
     int i;
     if (why && why_cap) why[0] = 0;
     for (i = 0; i < 4 && g_sub_ids[i]; i++)
@@ -612,6 +614,19 @@ static int bundle_has(const char *doc, const char *key, const char *needle)
         free(one);
         return r;
     }
+}
+
+/* `needle` anywhere in the row of `key`, nested objects included (up to the next row). */
+static int row_has(const char *doc, const char *key, const char *needle)
+{
+    char k[256];
+    const char *at, *next, *hit;
+    if (!doc) return 0;
+    _snprintf_s(k, sizeof k, _TRUNCATE, "{\"key\":\"%s\"", key);
+    if (!(at = strstr(doc, k))) return 0;
+    next = strstr(at + 1, "{\"key\":\"");
+    hit = strstr(at, needle);
+    return hit && (!next || hit < next);
 }
 
 static unsigned count_of(const char *doc, const char *needle)
@@ -1312,7 +1327,7 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(bundle_has(doc, "alex.shade-b", "\"state\":\"attention\",\"cause\":\"assets/generated/decls/entitydef/monster/imp.decl "
                                               "is not the size mod.json records; 'sh_mods doctor verify' checks the build\""));
-        CHECK(bundle_has(doc, "by-hand", "\"id\":\"\",\"name\":\"\""));
+        CHECK(bundle_has(doc, "by-hand", "\"id\":\"\",\"name\":\"By hand\""));   /* its mod.json names it before any build */
         CHECK(bundle_has(doc, "by-hand", "\"state\":\"attention\",\"cause\":\"not built yet"));
         free(doc);
         dr = doctor(1);
@@ -1801,6 +1816,12 @@ int main(int argc, char **argv)
                                "editor (1 editor tweak); every map you open here already has them, and a map never lists them.\""));
                 free(doc);
                 CHECK(g_marks == 1);   /* refused: not marked */
+                /* The list says so (facts.editorOnly, by the same rule), so the tab offers no
+                 * map action and no "every player needs" line; a mod with a new decl is not one. */
+                doc = list_doc();
+                CHECK(row_has(doc, "alex.tweakonly", "\"editor\":1,\"replaces\":0,\"editorOnly\":true,"));
+                CHECK(row_has(doc, "alex.req", "\"editorOnly\":false,"));
+                free(doc);
                 doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.tweakonly");
                 free(doc);
             }
@@ -2649,6 +2670,36 @@ int main(int argc, char **argv)
         free(doc);
     }
 
+    printf("-- a refused build that serves nothing is named by its mod.json, the folder only when that does not parse\n");
+    {
+        /* V13: v13-group\v13_broken (a decl with unbalanced braces, no last good build) was
+         * listed as "v13-group\v13_broken" although its mod.json named it. */
+        char broken[MAX_PATH * 2], bad[MAX_PATH * 2];
+        _snprintf_s(broken, sizeof broken, _TRUNCATE, "%s\\group2", g_root);
+        CreateDirectoryA(broken, NULL);
+        _snprintf_s(broken, sizeof broken, _TRUNCATE, "%s\\group2\\alex.broken", g_root);
+        mt_write(broken, "mod.json", "{\"id\":\"alex.broken\",\"version\":\"1.0.0\",\"name\":\"Broken thing\",\"author\":\"t\"}");
+        mt_write(broken, "assets\\generated\\decls\\entitydef\\mods\\alex.broken\\thing.decl", "{\r\n\tinherit = \"x\";\r\n");
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\group2\\alex.badjson", g_root);
+        mt_write(bad, "mod.json", "{\"id\":\"alex.badjson\",\"name\":\"Never shown\"");
+        mt_write(bad, "assets\\generated\\decls\\entitydef\\mods\\alex.badjson\\thing.decl", "{\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "group2\\\\alex.broken", "\"state\":\"attention\""));
+        CHECK(bundle_has(doc, "group2\\\\alex.broken", "\"name\":\"Broken thing\""));
+        CHECK(bundle_has(doc, "group2\\\\alex.badjson", "\"name\":\"\""));   /* the tab shows the folder */
+        if (!bundle_has(doc, "group2\\\\alex.broken", "\"name\":\"Broken thing\"")) printf("    %s\n", doc ? doc : "(null)");
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "group2\\alex.broken");
+        CHECK(has(doc, "\"key\":\"group2\\\\alex.broken\",\"name\":\"Broken thing\""));
+        free(doc);
+        mt_remove_tree(broken);
+        mt_remove_tree(bad);
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+    }
+
     printf("-- the Files view: every file with its class, a game file's archive, a refused file's cause\n");
     {
         char fm[MAX_PATH * 2], arg[MAX_PATH * 2];
@@ -2759,6 +2810,50 @@ int main(int argc, char **argv)
         _snprintf_s(want, sizeof want, _TRUNCATE, "entityDef = \\\"mods/%s/example_crate\\\";", key);
         CHECK(has(doc, "\"ok\":true") && has(doc, want));
         free(doc);
+        /* The example is the game's crate01, field for field (V13: the earlier row's
+         * renderInfo.renderModelName drew the model a second time in the editor, which logged
+         * "modelMatrix invert failed" every frame). The stock texts are the game's own decls
+         * snapeditorentitydef/prop/new/crate01.decl and entitydef/snapmaps/props/new/crate01.decl: the row differs only in its names, the
+         * entityDef only in leaving out the editorVars block, which only Radiant reads. */
+        {
+            static const char stock_row[] =
+                "{\n\tinherit = \"prop/prop_base\";\n\tedit = {\n"
+                "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/prop/crate01\";\n"
+                "\t\tdisplayNameTag = \"#str_snapentity_prop_crate01\";\n"
+                "\t\tdisplayDescriptionTag = \"#str_snapentity_prop_crate01_disp_desc\";\n"
+                "\t\tentityDef = \"snapmaps/props/new/crate01\";\n"
+                "\t\trenderInfo = {\n\t\t\tsize = {\n\t\t\t\tx = 54.3767967224;\n\t\t\t\ty = 54.3779754639;\n\t\t\t\tz = 53.595500946;\n\t\t\t}\n"
+                "\t\t\tarrowSize = {\n\t\t\t\tx = 2;\n\t\t\t\ty = 2;\n\t\t\t\tz = 1;\n\t\t\t}\n\t\t}\n"
+                "\t\teventInfo = {\n\t\t\tselectedEvent = {\n\t\t\t\tsound = \"play_pickup_heavy_crates\";\n\t\t\t}\n"
+                "\t\t\tplacedEvent = {\n\t\t\t\tsound = \"play_putdown_heavy_crates\";\n\t\t\t}\n\t\t}\n\t}\n}";
+            static const char stock_def_edit[] =
+                "\tedit = {\n\t\trenderModelInfo = {\n\t\t\tmodel = \"models/snapmaps/props/new/crate01.lwo\";\n\t\t}\n"
+                "\t\tclipModelInfo = {\n\t\t\ttype = \"CLIPMODEL_AUTO\";\n\t\t}\n\t\tdynamicObstacle = true;\n\t}\n}";
+            char path[MAX_PATH * 2], expect[4096], name[200], *got, *p, *q;
+            /* the stock row with the example's names, and the mod's category line after previewImage */
+            _snprintf_s(name, sizeof name, _TRUNCATE, "\t\tcategoryNameTag = \"#str_%s_category\";\n", key);
+            p = strstr(stock_row, "\t\tdisplayNameTag");
+            _snprintf_s(expect, sizeof expect, _TRUNCATE, "%.*s%s", (int)(p - stock_row), stock_row, name);
+            q = (char *)p;
+            _snprintf_s(expect + strlen(expect), sizeof expect - strlen(expect), _TRUNCATE,
+                        "\t\tdisplayNameTag = \"#str_%s_example_crate_name\";\n"
+                        "\t\tdisplayDescriptionTag = \"#str_%s_example_crate_desc\";\n"
+                        "\t\tentityDef = \"mods/%s/example_crate\";\n%s", key, key, key, strstr(q, "\t\trenderInfo"));
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/%s/assets/generated/decls/snapeditorentitydef/mods/%s/example_crate.decl", g_root, key, key);
+            got = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+            if (!got) printf("    cannot read %s\n", path);
+            if (got) { char *w = got, *r = got; for (; *r; r++) if (*r != '\r') *w++ = *r; *w = 0; while (w > got && w[-1] == '\n') *--w = 0; }
+            CHECK(got && !strcmp(got, expect));
+            if (got && strcmp(got, expect)) printf("    example row:\n%s\n    expected:\n%s\n", got, expect);
+            CHECK(got && !strstr(got, "renderModelName"));
+            free(got);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/%s/assets/generated/decls/entitydef/mods/%s/example_crate.decl", g_root, key, key);
+            got = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+            if (!got) printf("    cannot read %s\n", path);
+            if (got) { char *w = got, *r = got; for (; *r; r++) if (*r != '\r') *w++ = *r; *w = 0; while (w > got && w[-1] == '\n') *--w = 0; }
+            CHECK(got && !strncmp(got, "{\n\tclass = \"idProp_Coop\";\n", 26) && !strcmp(got + 26, stock_def_edit));
+            free(got);
+        }
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
         CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: a new mod needs a name.\""));
         free(doc);

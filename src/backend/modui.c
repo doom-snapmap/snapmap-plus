@@ -452,6 +452,30 @@ static char *mu_extra_string(const sh_mb_bundle *b, const char *key)
     return out;
 }
 
+/* The display name of a folder: its build's name, else (a folder whose build
+ * serves nothing, as a refused first build) the "name" its mod.json gives when
+ * that file parses, else "" so the tab names the folder. malloc'd or NULL. */
+static char *mu_folder_name(const sh_ms_entry *e)
+{
+    char path[MAX_PATH * 4 + 16];
+    unsigned char *text;
+    size_t len = 0;
+    mpj *x;
+    const mpj *v;
+    char *out = NULL;
+    if (e->loaded) return e->bundle.name && e->bundle.name[0] ? _strdup(e->bundle.name) : NULL;
+    if (!e->folder) return NULL;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", e->folder);
+    text = sh_mb_read_file(path, 1u << 20, &len);
+    x = text ? mpj_parse((const char *)text, len) : NULL;
+    v = x && x->type == MPJ_OBJ ? mpj_get(x, "name") : NULL;
+    if (v && v->type == MPJ_STR) out = sh_mm_decode(v->text);
+    if (out && !out[0]) { free(out); out = NULL; }
+    mpj_free(x);
+    free(text);
+    return out;
+}
+
 /* The text of a "#str_" key in a bundle's strings.en (keys omit the prefix,
  * matched case-insensitively), malloc'd, or NULL. */
 static char *mu_bundle_text(const sh_mb_bundle *b, const char *tag)
@@ -877,6 +901,9 @@ static void mu_put_facts(mu_buf *b, const sh_mb_bundle *bd)
     mu_knum(b, "surfaces", bd->classes.surfaces, 0);
     mu_knum(b, "editor", bd->classes.editor, 0);
     mu_knum(b, "replaces", bd->classes.replaces, 0);   /* edited copies are classes.edits, not here */
+    /* Editor tweaks and nothing else (sh_mb_editor_only, the rule mapAddMod refuses by): a map
+     * never records such a folder, so the tab offers no map action and no player needs it. */
+    mu_kbool(b, "editorOnly", sh_mb_editor_only(bd), 0);
     mu_puts(b, ",\"editorTweaks\":[");
     for (k = 0; k < bd->file_count && shown < MU_MAX_CARRIED; k++) {
         if (bd->files[k].cls != SH_MB_CLASS_EDITOR) continue;
@@ -1068,7 +1095,11 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     mu_putn(b, "{", 1);
     mu_kstr(b, "key", e->name, 1);
     mu_kstr(b, "id", e->loaded ? bd->id : "", 0);
-    mu_kstr(b, "name", e->loaded && bd->name ? bd->name : "", 0);
+    {
+        char *name = mu_folder_name(e);
+        mu_kstr(b, "name", name ? name : "", 0);
+        free(name);
+    }
     mu_kstr(b, "author", e->loaded && bd->author ? bd->author : "", 0);
     mu_kstr(b, "version", e->loaded ? mu_version(bd->version) : "", 0);
     mu_knum(b, "build", e->loaded ? bd->build : 0, 0);
@@ -4305,7 +4336,11 @@ static int mu_files(const char *key)
     memset(&b, 0, sizeof b);
     mu_result_head(&b, action, 1, "");
     mu_kstr(&b, "key", e->name, 0);
-    mu_kstr(&b, "name", e->loaded && e->bundle.name ? e->bundle.name : "", 0);
+    {
+        char *name = mu_folder_name(e);
+        mu_kstr(&b, "name", name ? name : "", 0);
+        free(name);
+    }
     mu_kstr(&b, "cause", cause, 0);
     mu_key(&b, "files", 0);
     mu_putn(&b, "[", 1);

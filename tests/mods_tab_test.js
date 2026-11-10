@@ -54,6 +54,14 @@ class FakeNode {
   click() { if (!this.disabled) this.dispatch('click'); }
   focus() { activeElement = this; }
   scrollIntoView() { this.scrolledIntoView++; }
+  /* The focusable controls a modal's Tab trap asks for (the one selector mods_tab.js uses). */
+  querySelectorAll(sel) {
+    const tags = sel.split(',').map(t => t.trim()).filter(t => /^[a-z]+$/.test(t));
+    const out = [];
+    const walk = n => { n.children.forEach(c => { if (tags.indexOf(c.tagName) >= 0 || c.attrs.tabindex === '0') out.push(c); walk(c); }); };
+    walk(this);
+    return out;
+  }
   all(cls) {
     const out = [];
     const walk = n => { n.children.forEach(c => { if ((' ' + c.className + ' ').indexOf(' ' + cls + ' ') >= 0) out.push(c); walk(c); }); };
@@ -68,7 +76,7 @@ class FakeNode {
   }
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
-             'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
+             'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
@@ -87,7 +95,12 @@ function harness(opts) {
   nodes.modsNewModal.style.display = 'none';
   const sent = [], toasts = [], menus = [];
   const saved = [];   /* what a page that still wrote mods.collapsed_groups would have saved */
-  const doc = {createElement: tag => new FakeNode(tag), createElementNS: (ns, tag) => Object.assign(new FakeNode(tag), {ns})};
+  /* The document: the page's body, the element with focus, and its own keydown listeners. */
+  const doc = new FakeNode('#document');
+  doc.body = new FakeNode('body');
+  doc.createElement = tag => new FakeNode(tag);
+  doc.createElementNS = (ns, tag) => Object.assign(new FakeNode(tag), {ns});
+  Object.defineProperty(doc, 'activeElement', {get: () => activeElement});
   let ui = null;
   ui = modsTab.create({
     document: doc, byId: id => nodes[id] || null, saveCollapsed: list => saved.push(list),
@@ -96,8 +109,19 @@ function harness(opts) {
     tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items})
   });
   ui.bind();
-  return {ui, nodes, sent, toasts, saved, menus};
+  return {ui, nodes, sent, toasts, saved, menus, doc};
 }
+/* A key pressed where focus is: the focused node's listeners, then the document's (the bubble). */
+function press(h, key, extra) {
+  const at = activeElement || h.doc.body;
+  const e = at.dispatch('keydown', Object.assign({key}, extra || {}));
+  let n = at.parentNode;
+  for (; n; n = n.parentNode) (n.listeners.keydown || []).forEach(f => f.call(n, e));
+  if (at !== h.doc) (h.doc.listeners.keydown || []).forEach(f => f.call(h.doc, e));
+  return e;
+}
+/* A node removed from the page loses focus to the body, as a browser's does. */
+function attached(h, n) { for (; n; n = n.parentNode) if (n === h.nodes.modsFilesModal || n === h.doc.body) return true; return false; }
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
 function keys(h) { return rows(h).map(n => n.getAttribute('data-key')); }
@@ -441,6 +465,42 @@ test('Migrate shows only while overrides holds entries the record does not cover
   done.migrate = {entries: 34, pending: 0, running: false};
   h.ui.onMessage({kind: 'mods', data: done});
   assert.equal(h.nodes.modsMigrateBtn.style.display, 'none');
+});
+test('New mod in the header: shown whenever Migrate is hidden, never beside it; the right-click entry stays', () => {
+  const h = harness({store: modsTab.standIn(Object.assign(clone(v3), {migrate: {entries: 34, pending: 0, running: false}}))});
+  h.ui.show();
+  /* the normal case: nothing to migrate, New mod in Migrate's place */
+  assert.equal(h.nodes.modsMigrateBtn.style.display, 'none');
+  assert.equal(h.nodes.modsNewBtn.style.display, '');
+  assert.equal(h.nodes.modsNewBtn.disabled, false);
+  h.nodes.modsNewBtn.click();
+  assert.equal(h.nodes.modsNewModal.style.display, 'flex');
+  assert.equal(activeElement, h.nodes.modsNewName);
+  h.nodes.modsNewCancel.click();
+  assert.equal(activeElement, h.nodes.modsNewBtn, 'focus returns to the header button');
+  h.nodes.modsNewBtn.click();
+  h.nodes.modsNewName.value = 'Header mod';
+  h.nodes.modsNewCreate.click();
+  assert.deepEqual(h.sent.filter(m => m.action === 'newMod'), [{cmd: 'modsAction', action: 'newMod', arg: 'Header mod'}]);
+  /* the right-click entry is still there */
+  h.nodes.modsList.dispatch('contextmenu', {pageX: 1, pageY: 1});
+  assert.deepEqual(h.menus.pop().items.map(i => i.label), ['New mod...']);
+  /* something to migrate: Migrate shows and New mod leaves the header (six buttons at most) */
+  const g = harness();
+  shown(g);
+  assert.equal(g.nodes.modsMigrateBtn.style.display, '');
+  assert.equal(g.nodes.modsNewBtn.style.display, 'none');
+  g.nodes.modsList.dispatch('contextmenu', {pageX: 1, pageY: 1});
+  assert.equal(g.menus.length, 1, 'New mod stays reachable by right-click');
+  /* while the migration runs Migrate stays and New mod stays hidden; afterwards New mod is back */
+  g.nodes.modsMigrateBtn.click();
+  assert.equal(g.nodes.modsNewBtn.style.display, 'none');
+  assert.equal(g.nodes.modsNewBtn.disabled, true, 'held while an action runs');
+  g.ui.onMessage({kind: 'modsActionResult', action: 'migrate', data: {action: 'migrate', ok: true, message: 'Moved your mods.'}});
+  g.ui.onMessage({kind: 'mods', data: Object.assign(clone(v3), {migrate: {entries: 34, pending: 0, running: false}})});
+  assert.equal(g.nodes.modsMigrateBtn.style.display, 'none');
+  assert.equal(g.nodes.modsNewBtn.style.display, '');
+  assert.equal(g.nodes.modsNewBtn.disabled, false);
 });
 
 /* ---- the details pane ------------------------------------------------------------------------- */
@@ -881,6 +941,27 @@ test('the stand-in host answers as the host does', () => {
 });
 
 /* ---- the page and host contract --------------------------------------------------------------- */
+test('a folder of editor tweaks only: no map action, and the editor-only line instead of "every player needs"', () => {
+  const h = live();
+  /* facts.editorOnly comes from the backend (sh_mb_editor_only); the tab adds no rule of its own */
+  assert.equal(h.ui.state().model.mods.find(b => b.key === 'local.my-overrides').facts.editorOnly, true);
+  h.ui.select('local.my-overrides');
+  assert.equal(h.nodes.modsUseBtn.style.display, 'none', 'no Use in this map while a map is open');
+  const req = section(h, 'requirements');
+  assert.ok(req.textContent.includes(modsTab.EDITOR_ONLY_NOTE));
+  assert.ok(!req.textContent.includes(modsTab.NEEDS_NOTE));
+  assert.equal(modsTab.EDITOR_ONLY_NOTE, "Changes only this computer's editor; maps made with it need nothing.");
+  /* a mod that adds content keeps both */
+  h.ui.select('local.hell-guard');
+  assert.equal(h.nodes.modsUseBtn.style.display, '');
+  assert.ok(section(h, 'requirements').textContent.includes(modsTab.NEEDS_NOTE));
+  /* the same mod with facts.editorOnly false (an older backend, or adds): the button shows */
+  const d = clone(v3);
+  d.mods.find(b => b.key === 'local.my-overrides').facts.editorOnly = false;
+  const g = live(d);
+  g.ui.select('local.my-overrides');
+  assert.equal(g.nodes.modsUseBtn.style.display, '');
+});
 test('Use in this map: a map-level mod is listed, marked, and removed again from the details pane', () => {
   const h = live();
   const use = h.nodes.modsUseBtn;
@@ -1119,8 +1200,10 @@ test('the header fits at the minimum pane width', () => {
   const inset = px(css, /--pane-inline: (\d+)px/);
   const min = Number(panel.match(/data-min-before="(\d+)"[^>]*data-split-label="Mods"/)[1]);
   const buttons = (head.match(/<button /g) || []).length;
-  assert.equal(buttons, 6, 'every header button counted, the hidden ones too');
-  assert.ok(2 * inset + headGap + buttons * button + (buttons - 1) * gap <= min,
+  assert.equal(buttons, 7, 'every header button counted, the hidden ones too');
+  /* Migrate and New mod never show together, so at most six are visible */
+  const visible = buttons - 1;
+  assert.ok(2 * inset + headGap + visible * button + (visible - 1) * gap <= min,
             'six buttons fit in a ' + min + ' px pane');
 });
 test('page contract', () => {
@@ -1133,20 +1216,24 @@ test('page contract', () => {
   /* the header's left side is icon buttons, as the Prefabs tab's (owner 2026-11-09); the toolbar holds the filter alone */
   const head = panel.slice(panel.indexOf('<div class="panel-head">'), panel.indexOf('<div class="panel-toolbar">'));
   const actions = head.slice(head.indexOf('<div class="panel-actions">'));
-  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn'])
+  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsInstallBtn'])
     assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
   const pfHead = html.slice(html.indexOf('<span class="panel-title">Prefabs</span>'), html.indexOf('id="prefabFilter"'));
   assert.match(pfHead, /<div class="panel-actions">\n\s*<button type="button" class="btn icon icon-button"/, 'the same primitives as the Prefabs header');
   const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar">'), panel.indexOf('id="modsList"'));
   assert.ok(toolbar.includes('id="modsFilter"') && !/<button/.test(toolbar), 'the toolbar is the filter alone');
   assert.ok(!/class="badge mods-attn"|mods-toolbar/.test(panel), 'no pill-shaped attention badge');
-  for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
+  for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsNewBtn', 'folder-plus'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
   assert.match(panel, /id="modsMigrateBtn" style="display:none"/);
   assert.match(panel, /<button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none"/);
   assert.ok(panel.indexOf('id="modsMapBtn"') < panel.indexOf('class="pane-splitter"'), 'the map button is in the left pane');
   for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<', '>Use in this map<']) assert.ok(panel.includes(label), 'head action ' + label);
   assert.match(panel, /id="modsUseBtn" disabled style="display:none"/);
+  /* the details head: Files left-most, then Use in this map, Verify, Rebuild, Uninstall (owner 2026-11-09) */
+  const detailHead = panel.slice(panel.indexOf('<span class="panel-title">Mod Details</span>'), panel.indexOf('id="modsDetail"'));
+  assert.deepEqual((detailHead.match(/<button [^>]*id="(\w+)"/g) || []).map(t => t.match(/id="(\w+)"/)[1]),
+                   ['modsFilesBtn', 'modsUseBtn', 'modsVerifyBtn', 'modsRebuildBtn', 'modsUninstallBtn']);
   for (const ic of ['check', 'triangle-alert', 'circle-info', 'folder-open', 'folder-input', 'map', 'chevron-down', 'x'])
     assert.ok(html.includes('<symbol id="icon-' + ic + '"'), 'icon ' + ic);
   /* the modal is the decl focus modal's markup */
@@ -1367,6 +1454,54 @@ test('the Files modal: the folder tree, one glyph per file, the file with its cl
   assert.equal(activeElement, h.nodes.modsFilesBtn);
   assert.equal(h.nodes.modsFilesHost.children.length, 0);
 });
+test('the Files modal keeps focus inside across its renders: Escape and Tab work after the data and a tree click', () => {
+  /* the browser preview's stand-in answers synchronously; the host answers later, so answer by hand */
+  const h = harness();
+  shown(h);
+  h.ui.select('local.hell-guard');
+  h.nodes.modsFilesBtn.focus();
+  h.nodes.modsFilesBtn.click();
+  const ov = h.nodes.modsFilesModal;
+  assert.ok(attached(h, activeElement) && activeElement !== h.nodes.modsFilesBtn, 'focus moved into the modal at open');
+  assert.equal(activeElement, h.nodes.modsFilesHost.all('mods-map-close')[0], 'the close button');
+  /* the data arrives: the host is rebuilt; focus stays inside (V13: it fell to the body) */
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFiles', ok: true, message: '', data: {key: 'local.hell-guard', name: 'Hell Guards', cause: '',
+    files: [{path: 'mod.json', kind: 'text', class: 'descriptor', inFolder: true},
+            {path: 'a.decl', kind: 'text', class: 'addition', inFolder: true},
+            {path: 'b.decl', kind: 'text', class: 'addition', inFolder: true}]}});
+  assert.ok(attached(h, activeElement), 'focus is inside the modal after the data');
+  assert.equal(activeElement, h.nodes.modsFilesHost.all('mods-map-close')[0]);
+  /* Tab from the last focusable wraps to the first; nothing escapes the modal */
+  /* a click on a file rebuilds the tree: focus goes to the selected file's new row */
+  const item = p => h.nodes.modsFilesHost.all('pf-item').find(n => n.getAttribute('data-path') === p);
+  const a = 'a.decl', b = 'b.decl';
+  item(a).focus();
+  item(a).click();
+  assert.equal(activeElement, item(a), 'the new row of the clicked file has focus');
+  assert.ok(attached(h, activeElement));
+  /* the arrows keep walking: each step rebuilds the tree, focus follows the selection */
+  press(h, 'ArrowDown');
+  assert.equal(h.ui.state().files.selected, b);
+  assert.equal(activeElement, item(b));
+  /* Escape from the tree closes, focus back on the Files button */
+  press(h, 'Escape');
+  assert.equal(ov.style.display, 'none');
+  assert.equal(activeElement, h.nodes.modsFilesBtn);
+  /* Escape with focus on the page's body (a click outside any control) closes it as well */
+  h.nodes.modsFilesBtn.click();
+  activeElement = h.doc.body;
+  const e = press(h, 'Escape');
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(ov.style.display, 'none', 'the document-level listener closes it');
+  /* closed: the document's Escape does nothing to the modal */
+  activeElement = h.doc.body;
+  assert.equal(press(h, 'Escape').defaultPrevented, false);
+  /* Tab with focus on the body goes to the modal's first control */
+  h.nodes.modsFilesBtn.click();
+  activeElement = h.doc.body;
+  const tab = press(h, 'Tab');
+  assert.ok(tab.defaultPrevented && attached(h, activeElement), 'Tab from outside lands inside the modal');
+});
 test('the Files modal: a refusal and a late answer stay in the modal; the status line is untouched', () => {
   const h = harness();
   shown(h);
@@ -1407,7 +1542,7 @@ test('the Files view model: classes, sources and the tree', () => {
 test('New mod: a name, the folder made with its example, the mod selected, Files open on its Toybox row', () => {
   const h = harness({store: modsTab.standIn(v3)});
   h.ui.show();
-  /* the list's right-click entry: the header has no room for a seventh button at 220 px */
+  /* the list's right-click entry (the header's button is tested above) */
   const e = h.nodes.modsList.dispatch('contextmenu', {pageX: 40, pageY: 90});
   assert.equal(e.defaultPrevented, true);
   assert.deepEqual(h.menus.map(m => m.items.map(i => i.label)), [['New mod...']]);

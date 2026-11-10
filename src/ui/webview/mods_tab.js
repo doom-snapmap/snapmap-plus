@@ -108,6 +108,8 @@ var modsTab = (function () {
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
+  /* A folder of editor tweaks only (facts.editorOnly): a map never records it (DESIGN-additive 2.6). */
+  var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
@@ -157,7 +159,7 @@ var modsTab = (function () {
     if (!f) return null;
     var reg = obj(f.registries) || {};
     return {adds: num(f.adds), borrows: num(f.borrows), surfaces: num(f.surfaces), editor: num(f.editor), replaces: num(f.replaces),
-            editorTweaks: normNames(f.editorTweaks),
+            editorOnly: bool(f.editorOnly), editorTweaks: normNames(f.editorTweaks),
             replacements: arr(f.replacements).map(function (r) { r = obj(r) || {}; return {path: str(r.path), edits: bool(r.edits)}; })
               .filter(function (r) { return r.path.length > 0; }),
             edits: arr(f.edits).map(function (e) {
@@ -566,7 +568,7 @@ var modsTab = (function () {
        the filter, the folders opened or closed by hand, and the file and hint a new mod opens on. */
     var fm = {open: false, key: '', data: null, loading: false, error: '', sel: '', text: null, asked: '', filter: '',
               dirs: {}, want: '', hint: '', opener: null, closeBtn: null, list: null, pane: null, visible: [],
-              titleNode: null, stateNode: null};
+              titleNode: null, stateNode: null, selNode: null};
     var reveal = '';   /* a mod the last action made or installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
@@ -671,10 +673,11 @@ var modsTab = (function () {
 
     function renderButtons() {
       var sel = !!selectedMod();
-      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn'].forEach(function (id) {
         var b = byId(id);
         if (b) b.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn' || id === 'modsVerifyBtn'));
       });
+      /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
       if (fb) fb.disabled = !sel;
       var mb = byId('modsMapBtn');
@@ -686,13 +689,18 @@ var modsTab = (function () {
       }
       renderUse();
       modalButtons.forEach(function (n) { n.disabled = !!busy; });
-      var mg = byId('modsMigrateBtn');
+      var mg = byId('modsMigrateBtn'), migrating = false;
       if (mg) {
         var show = loaded && model.migrate.pending > 0 && !model.migrate.running;
-        mg.style.display = show || busy === 'migrate' ? '' : 'none';
+        migrating = show || busy === 'migrate';
+        mg.style.display = migrating ? '' : 'none';
         mg.title = 'Migrate: move ' + plural(model.migrate.pending, 'entry', 'entries') +
                    ' of the old overrides folder into the mods folder';
       }
+      /* New mod takes Migrate's place in the header: six icon buttons fit at the pane's 220 px
+         minimum, and Migrate shows only while the old overrides folder holds something to move. */
+      var nb = byId('modsNewBtn');
+      if (nb) nb.style.display = migrating ? 'none' : '';
     }
     /* The details head's map action: Use in this map, or Remove from map once the open map uses the
        selected mod. Shown only while a map is open in the editor. */
@@ -702,11 +710,13 @@ var modsTab = (function () {
       for (var i = 0; i < m.mods.length; i++) if (m.mods[i].key && m.mods[i].key === b.key) return m.mods[i];
       return null;
     }
+    function editorOnly(b) { return !!(b && b.facts && b.facts.editorOnly); }
     function renderUse() {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
-      u.style.display = open ? '' : 'none';
+      /* A folder of editor tweaks only has no map action: a map never records it. */
+      u.style.display = open && !editorOnly(b) ? '' : 'none';
       var used = mapUses(b);
       u.textContent = used ? 'Remove from map' : 'Use in this map';
       u.className = 'btn' + (used ? ' danger' : '');
@@ -963,7 +973,7 @@ var modsTab = (function () {
         lines.forEach(function (line) { ll.appendChild(el('div', '', line)); });
         field(req, k[1], ll);
       });
-      req.appendChild(el('div', 'mods-note', NEEDS_NOTE));
+      req.appendChild(el('div', 'mods-note', editorOnly(b) ? EDITOR_ONLY_NOTE : NEEDS_NOTE));
 
       var when = formatDate(b.builtAt);
       if (when || b.bundle || b.warnings.length) {
@@ -1209,7 +1219,6 @@ var modsTab = (function () {
       if (opener !== undefined) fm.opener = opener;
       filesOverlay(true);
       renderFiles();
-      if (fm.closeBtn && fm.closeBtn.focus) fm.closeBtn.focus();
       read('modFiles', key);
     }
     function closeFiles() {
@@ -1217,7 +1226,7 @@ var modsTab = (function () {
       fm.open = false;
       filesOverlay(false);
       clear(byId('modsFilesHost'));
-      fm.list = fm.pane = fm.closeBtn = fm.titleNode = fm.stateNode = null;
+      fm.list = fm.pane = fm.closeBtn = fm.titleNode = fm.stateNode = fm.selNode = null;
       if (fm.opener && fm.opener.focus) fm.opener.focus();
       fm.opener = null;
     }
@@ -1294,7 +1303,16 @@ var modsTab = (function () {
       host.appendChild(body);
       renderFileTree();
       renderFilePane();
+      if (!inside(byId('modsFilesModal'), doc.activeElement)) focusIn(fm.closeBtn);
     }
+    /* A render rebuilds the node that had focus, which then falls to the page's body, outside the
+       modal, where Escape and Tab no longer reach the modal's own listener. So focus is put back:
+       on the selected file when it was in the tree, else on the close button. */
+    function inside(node, n) {
+      for (; node && n; n = n.parentNode) if (n === node) return true;
+      return false;
+    }
+    function focusIn(n) { if (n && n.focus) n.focus(); }
     /* Folders on the selected file's path, and the first level, start open; a filter opens all. */
     function dirOpen(d, depth) {
       if (str(fm.filter).trim()) return true;
@@ -1322,6 +1340,7 @@ var modsTab = (function () {
       if (f.cause) r.appendChild(fileGlyph('attn', 'triangle-alert', f.cause));
       else if (gameFile(f)) r.appendChild(fileGlyph('', 'gamepad-2', gameTitle(f)));
       r.addEventListener('click', function () { selectFile(f.path); });
+      if (on) fm.selNode = r;
       fm.visible.push(f.path);
       return r;
     }
@@ -1351,8 +1370,14 @@ var modsTab = (function () {
     function renderFileTree() {
       var box = fm.list;
       if (!box) return;
+      var hadFocus = inside(box, doc.activeElement);
       clear(box);
       fm.visible = [];
+      fillFileTree(box);
+      if (hadFocus || !inside(byId('modsFilesModal'), doc.activeElement)) focusIn(fm.selNode || fm.closeBtn);
+    }
+    function fillFileTree(box) {
+      fm.selNode = null;
       if (fm.loading) { box.appendChild(el('div', 'list-empty', 'Reading the files...')); return; }
       if (fm.error) { box.appendChild(el('div', 'list-empty mods-error', fm.error)); return; }
       var root = fileTree(fm.data.files, fm.filter);
@@ -1526,8 +1551,8 @@ var modsTab = (function () {
         function (n) { return !n.disabled && n.offsetParent !== null; });
       if (!f.length) return;
       var first = f[0], last = f[f.length - 1], at = doc.activeElement;
-      if (e.shiftKey && (at === first || !host.contains(at))) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && (at === last || !host.contains(at))) { e.preventDefault(); first.focus(); }
+      if (e.shiftKey && (at === first || !inside(host, at))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (at === last || !inside(host, at))) { e.preventDefault(); first.focus(); }
     }
 
     function renderHead() {
@@ -1677,13 +1702,19 @@ var modsTab = (function () {
       on('modsRefreshBtn', 'click', function () { refresh(); });
       on('modsFilesBtn', 'click', function () { var b = selectedMod(); if (b) openFiles(b.key, byId('modsFilesBtn')); });
       on('modsFilesModal', 'keydown', onFilesKey);
+      /* While the Files modal is open, Escape and Tab from anywhere in the page are its own, as the
+         expanded Decl Text modal's Escape is (a key from inside reaches the modal's listener). */
+      if (doc.addEventListener) doc.addEventListener('keydown', function (e) {
+        if (fm.open && !inside(byId('modsFilesModal'), e.target)) onFilesKey(e);
+      });
       on('modsFilesModal', 'mousedown', function (e) { if (e.target === byId('modsFilesModal')) closeFiles(); });
       on('modsNewModal', 'keydown', onNewKey);
       on('modsNewModal', 'mousedown', function (e) { if (e.target === byId('modsNewModal')) closeNewMod(); });
       on('modsNewCancel', 'click', closeNewMod);
       on('modsNewCreate', 'click', createNewMod);
-      /* New mod has no room in the list's header at its minimum width (six icon buttons fill it):
-         it is the empty list's button and the list's right-click entry. */
+      /* New mod: the header's button (while Migrate is hidden), the empty list's button and the
+         list's right-click entry. */
+      on('modsNewBtn', 'click', function () { openNewMod(byId('modsNewBtn')); });
       on('modsList', 'contextmenu', function (e) {
         if (!env.menu) return;
         if (e.preventDefault) e.preventDefault();
@@ -1915,7 +1946,7 @@ var modsTab = (function () {
   }
 
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
-          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
+          FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE, IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText,
           originText: originText, renamedText: renamedText, countLines: countLines, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
