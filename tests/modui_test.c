@@ -2584,6 +2584,18 @@ int main(int argc, char **argv)
         CHECK(has(g_doctor, "MODS: uninstall twin.key: twin.key is not installed.\n"));
     }
 
+    printf("-- an organizing folder: its mods' rows name it as their group\n");
+    {
+        char nested[MAX_PATH * 2];
+        _snprintf_s(nested, sizeof nested, _TRUNCATE, "%s\\group1\\alex.nested", g_root);
+        put_plain_mod(nested, "alex.nested", "1.0.0", "{\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+        doc = list_doc();
+        CHECK(has(doc, "\"key\":\"group1\\\\alex.nested\",") && bundle_has(doc, "group1\\\\alex.nested", "\"folder\":\"alex.nested\",\"group\":\"group1\""));
+        free(doc);
+    }
+
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

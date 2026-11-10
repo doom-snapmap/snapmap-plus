@@ -1150,4 +1150,55 @@ test('host and interface contract', () => {
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 
+/* ---- organizing folders (L28) ------------------------ ------------------------------------ */
+function grouped() {
+  const d = clone(v3);
+  for (const m of d.mods) if (['doors', 'elevators', 'tarps'].indexOf(m.key) >= 0) { m.group = 'campaign-interactables'; m.key = 'campaign-interactables\\' + m.key; }
+  d.mods.find(m => m.key === 'campaign-interactables\\tarps').cause = 'its latest build failed';
+  d.mods.find(m => m.key === 'campaign-interactables\\tarps').state = 'attention';
+  return d;
+}
+test('organizing folders: a caret row with a count, its mods indented, closed for the session only', () => {
+  const h = harness();
+  shown(h, grouped());
+  const list = h.nodes.modsList;
+  const folders = list.all('mods-folder');
+  assert.equal(folders.length, 1, 'one row per organizing folder');
+  const f = folders[0];
+  assert.equal(list.children[0], f, 'folders first');
+  const head = f.all('pf-folder-head')[0];
+  assert.equal(head.all('pf-fname')[0].textContent, 'campaign-interactables');
+  assert.equal(head.all('pf-fcount')[0].textContent, '3');
+  assert.equal(head.all('pf-caret').length, 1, 'the Prefabs caret');
+  assert.deepEqual(f.all('mods-row').map(n => n.getAttribute('data-key')),
+                   ['campaign-interactables\\doors', 'campaign-interactables\\elevators', 'campaign-interactables\\tarps'], 'its mods, in the list order');
+  assert.ok(f.all('pf-folder-body')[0].all('mods-row').length === 3, 'indented in the folder body');
+  assert.equal(rows(h).length, 36, 'every mod is still a row');
+  assert.ok(list.children.slice(1).every(n => /mods-row/.test(n.className)), 'the root mods follow, flat');
+  assert.ok(rows(h).every(n => n.all('mods-status-icon').length === 1 && n.all('mods-pill').length === 0), 'one glyph per row, no pills');
+  assert.equal(head.all('mods-status-icon').length, 0, 'an open folder shows its rows, not a summary glyph');
+  /* closing hides its rows and the arrow keys skip them; a problem inside shows on the closed row */
+  head.click();
+  const closed = h.nodes.modsList.all('mods-folder')[0];
+  assert.ok(!/pf-open/.test(closed.className));
+  assert.equal(closed.all('mods-row').length, 0);
+  assert.equal(closed.all('pf-folder-head')[0].getAttribute('aria-expanded'), 'false');
+  assert.equal(closed.all('mods-status-icon')[0].getAttribute('aria-label'), '1 mod needs attention');
+  assert.ok(h.ui.state().view.every(b => !b.group), 'the keys walk the rows shown');
+  assert.deepEqual(h.ui.state().closedGroups, ['campaign-interactables']);
+  assert.equal(h.saved.length, 0, 'nothing is saved: the closed state lasts for the session');
+  /* a new document keeps it closed; a filter shows the matches inside; selecting a mod inside opens it */
+  h.ui.onMessage({kind: 'mods', data: grouped()});
+  assert.equal(h.nodes.modsList.all('mods-folder')[0].all('mods-row').length, 0);
+  h.nodes.modsFilter.value = 'elev';
+  h.nodes.modsFilter.dispatch('input');
+  assert.deepEqual(keys(h), ['campaign-interactables\\elevators']);
+  h.nodes.modsFilter.value = '';
+  h.nodes.modsFilter.dispatch('input');
+  h.ui.select('campaign-interactables\\doors');
+  assert.equal(h.nodes.modsList.all('mods-folder')[0].all('mods-row').length, 3, 'selecting a mod inside opens its folder');
+  /* the v2 document and the v3 fixture have no group: one flat list */
+  assert.equal(modsTab.normalize(v3).mods.every(b => b.group === ''), true);
+});
+
 console.log('mods_tab_test: OK (' + passed + ' tests)');

@@ -11,9 +11,10 @@
    adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
    and a failed build (docs/webview-ui.md); the page shows no build numbers and no legacy state. Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
-   after every action; showing the tab asks for a rescan. Nothing polls. The list is one flat list the
-   page scrolls natively; each row carries one status glyph: needs attention, else in this map (from the
-   document's map.mods, no read of its own), else installed. All text goes through textContent. */
+   after every action; showing the tab asks for a rescan. Nothing polls. The list is plain rows the
+   page scrolls natively, a mod in an organizing folder of mods\ under that folder's row; each row
+   carries one status glyph: needs attention, else in this map (from the document's map.mods, no read
+   of its own), else installed. All text goes through textContent. */
 var modsTab = (function () {
   var STATES = {
     installed: {label: 'Installed', tone: 'ok'},
@@ -166,6 +167,8 @@ var modsTab = (function () {
             build: num(b.build), size: num(b.size), files: num(b.files), pointers: num(b.pointers), state: state,
             cause: str(b.cause), duplicateId: bool(b.duplicateId),
             editorRows: num(b.editorRows), folder: str(b.folder),
+            /* the organizing folder it sits in under mods\ ("" at the root) */
+            group: str(b.group),
             /* v3 */
             description: str(b.description), origin: typeof b.origin === 'string' && has(ORIGINS, b.origin) ? b.origin : '',
             migratedFrom: str(b.migratedFrom), servedBy: str(b.servedBy), builtAt: num(b.builtAt), bundle: str(b.bundle),
@@ -413,11 +416,13 @@ var modsTab = (function () {
   /* ------------------------------------------------------------------------------------------ DOM */
 
   /* env: {document, byId(id), post(message), toast(text, kind)}. The retired collapsed-groups
-     setting (mods.collapsed_groups) is neither read nor written. */
+     setting (mods.collapsed_groups) is neither read nor written: which organizing folders are
+     closed lasts for the session only. */
   function create(env) {
     var doc = env.document, byId = env.byId;
     var model = normalize(null), loaded = false, waiting = false, busy = '', quiet = false, selectedKey = '';
-    var view = [], filter = '', attnOnly = false, lastError = '', rowNodes = {};
+    var view = [], filter = '', attnOnly = false, lastError = '', rowNodes = {}, closedGroups = {};
+    var reveal = '';   /* a mod the last action installed: its organizing folder opens */
     /* The map modal: open, which page ('list' or 'confirm'), the dry run the confirmation shows,
        what opened the confirmation ('map' or 'uninstall') and the element focus returns to. */
     var modal = {open: false, page: 'list', preview: null, from: 'map', opener: null}, modalButtons = [];
@@ -516,12 +521,42 @@ var modsTab = (function () {
       if (busy && !(busy === 'rescan' && quiet)) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
     }
 
-    /* ---- the list: one flat list of plain rows in the model's order; every row shown is mounted */
+    /* ---- the list: plain rows in the model's order; every row shown is mounted. A mod in an
+       organizing folder of mods\ sits under that folder's row (the Prefabs tab's caret and count),
+       folders first; a closed folder hides its rows for the session. view is the rows shown, in
+       the order the arrow keys walk. */
     function computeView() {
       var shown = filterMods(model.mods, filter);
       if (attnOnly) shown = shown.filter(needsAttention);
       view = shown;
       return shown;
+    }
+    function groupClosed(g) { return closedGroups[g] === true && !str(filter).trim() && !attnOnly; }
+    function groupRow(g, members) {
+      var closed = groupClosed(g);
+      var f = el('div', 'pf-folder mods-folder' + (closed ? '' : ' pf-open'));
+      f.setAttribute('data-group', g);
+      var head = el('div', 'pf-folder-head');
+      head.setAttribute('role', 'button');
+      head.setAttribute('aria-expanded', closed ? 'false' : 'true');
+      head.title = 'mods\\' + g;
+      var caret = el('span', 'pf-caret');
+      caret.appendChild(icon('chevron-down'));
+      head.appendChild(caret);
+      head.appendChild(el('span', 'pf-fname', g.replace(/\\/g, '/')));
+      head.appendChild(el('span', 'pf-fcount', String(members.length)));
+      var attn = members.filter(needsAttention).length;
+      if (closed && attn) {
+        var w = statusIcon({tone: 'warn', icon: STATUS.warn.icon, label: plural(attn, 'mod needs', 'mods need') + ' attention'});
+        w.title = w.getAttribute('aria-label');
+        head.appendChild(w);
+      }
+      head.addEventListener('click', function () { closedGroups[g] = !groupClosed(g); renderList(); });
+      f.appendChild(head);
+      var body = el('div', 'pf-folder-body');
+      if (!closed) members.forEach(function (b) { body.appendChild(modRow(b)); });
+      f.appendChild(body);
+      return f;
     }
     /* The open map uses the mod: the document's map.mods names its folder. */
     function inMap(b) { return !!(model.map && model.map.open && mapUses(b)); }
@@ -541,7 +576,19 @@ var modsTab = (function () {
         box.appendChild(el('div', 'list-empty', attnOnly ? 'No mod that needs attention matches the filter.' : 'No installed mod matches the filter.'));
         return;
       }
-      shown.forEach(function (b) { box.appendChild(modRow(b)); });
+      var groups = {}, names = [], root = [];
+      shown.forEach(function (b) {
+        if (!b.group) { root.push(b); return; }
+        if (!has(groups, b.group)) { groups[b.group] = []; names.push(b.group); }
+        groups[b.group].push(b);
+      });
+      names.sort(function (x, y) { return cmp(x.toLowerCase(), y.toLowerCase()) || cmp(x, y); });
+      view = [];
+      names.forEach(function (g) {
+        box.appendChild(groupRow(g, groups[g]));
+        if (!groupClosed(g)) view = view.concat(groups[g]);
+      });
+      root.forEach(function (b) { box.appendChild(modRow(b)); view.push(b); });
     }
     function modRow(b) {
       var info = statusInfo(b), on = b.key === selectedKey, used = inMap(b);
@@ -564,6 +611,9 @@ var modsTab = (function () {
 
     function select(key) {
       selectedKey = key;
+      /* A mod in a closed organizing folder opens its folder. */
+      var sm = selectedMod();
+      if (sm && sm.group && groupClosed(sm.group)) { closedGroups[sm.group] = false; renderList(); }
       /* Restyle in place: this keeps the scroll anchor. */
       Object.keys(rowNodes).forEach(function (k) {
         var r = rowNodes[k], on = k === key;
@@ -934,6 +984,10 @@ var modsTab = (function () {
 
     function renderAll() {
       if (selectedKey && !selectedMod()) selectedKey = '';
+      if (reveal && selectedMod() && selectedKey === reveal) {
+        if (selectedMod().group) closedGroups[selectedMod().group] = false;
+        reveal = '';
+      }
       renderHead();
       renderList();
       renderDetail();
@@ -1010,7 +1064,7 @@ var modsTab = (function () {
       }
       setStatus(message, ok ? 'ok' : 'err');
       if (message) env.toast(message, ok ? 'ok' : 'err');
-      if (action === 'install' && ok && data.key) selectedKey = str(data.key);
+      if (action === 'install' && ok && data.key) reveal = selectedKey = str(data.key);
       if ((action === 'uninstall' || action === 'remove') && ok) selectedKey = '';
       /* After the real action the modal shows the next document: the list, or nothing after an
          uninstall started from the details pane. A refusal goes back the same way. */
@@ -1072,7 +1126,7 @@ var modsTab = (function () {
       },
       state: function () {
         return {model: model, loaded: loaded, waiting: waiting, busy: busy, selectedKey: selectedKey, view: view, error: lastError,
-                attentionOnly: attnOnly,
+                attentionOnly: attnOnly, closedGroups: Object.keys(closedGroups).filter(function (g) { return closedGroups[g]; }),
                 modal: {open: modal.open, page: modal.page, from: modal.from, preview: modal.preview}};
       }
     };

@@ -560,6 +560,7 @@ These backend files share the work:
   [The Mods tab's map scope](#the-mods-tabs-map-scope). What the tab does not show, every bundle's state with legacy ones,
   conflicts with their winners, shadows and verification, it prints as
   `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
+  Each row names its organizing folder (`group`).
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a

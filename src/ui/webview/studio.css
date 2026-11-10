@@ -707,5 +707,7 @@
   .mods-consequence-names { color: var(--muted); font-size: 10px; padding-top: 1px; }
   .mods-paths-list.mods-names { font-family: inherit; font-size: 11px; }
   .modal-actions.mods-map-foot { flex: none; margin-top: 0; padding-top: 10px; border-top: 1px solid var(--border); }
+  /* Organizing folders in the Mods list: the Prefabs tab's folder rows. */
+  .mods-folder > .pf-folder-head .mods-status-icon { margin: 0 0 0 auto; }
   .btn.danger-solid { background: var(--danger); border-color: var(--danger); color: #ffffff; }
   .btn.danger-solid:hover:not(:disabled) { filter: brightness(1.12); }

@@ -1082,6 +1082,17 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     mu_kbool(b, "duplicateId", r->duplicate, 0);
     mu_knum(b, "editorRows", (unsigned)u->editor_rows, 0);
     mu_kstr(b, "folder", mu_leaf(e->folder), 0);
+    {
+        /* The organizing folder it sits in under mods\ ("" at the root): its
+         * key ("group\x", sh_ms_entry.name) without the last part. */
+        char group[SH_MS_NAME_MAX + 1];
+        char *cut;
+        strcpy_s(group, sizeof group, e->name);
+        cut = strrchr(group, '\\');
+        if (cut) *cut = 0;
+        else group[0] = 0;
+        mu_kstr(b, "group", group, 0);
+    }
     mu_put_row_v3(b, m, rec, u);
     mu_putn(b, "}", 1);
 }

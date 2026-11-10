@@ -320,9 +320,15 @@ argument; a picked folder without `mod.json` stands for every mod folder below i
 answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:
 `installedCount`, `refusedCount`, `editorRows`, `items` (one `{folder, ok, key, id, bundle, cause,
 editorRows, replaced}` per mod), `key` the first installed folder, and `index` from the one rescan.
-The rows are one flat list sorted by display name (the name, else the id, else the folder) without
-case, then by id, then by folder; there are no groups, headers or carets. The filter matches name,
-id and folder, and it and the attention filter keep that order. The collapsed-groups setting of
+The rows are sorted by display name (the name, else the id, else the folder) without
+case, then by id, then by folder. A mod that sits in an organizing folder of `mods\` (its row's
+`group`, "campaign-interactables" for `mods\campaign-interactables\campaign-interactables-1`) is
+listed under that folder's row, the Prefabs tab's folder primitives: a caret, the folder's path and
+the count of its mods, its rows indented below. Folders come first, sorted by name, then the mods at
+the root. Clicking a folder's row closes or opens it for the session; a closed folder with a mod
+that needs attention shows the yellow triangle on its row. A filter, the attention filter, and
+selecting a mod inside (an install) open it. The filter matches name, id and folder, and it
+and the attention filter keep that order. The collapsed-groups setting of
 earlier builds, `mods.collapsed_groups`, is neither read nor written by the page: a value already in
 `config.json` stays there unused (`config.c` still knows the key). Each
 row is one status glyph, the name, and `id · version · size`; there are no pills. The glyph is a
@@ -420,6 +426,7 @@ Per entry of `mods`:
 
 | Key | Type | Meaning |
 |---|---|---|
+| `"group"` | string | The organizing folder it sits in under `mods\` (its key without the last part, `campaign-interactables` for `campaign-interactables\campaign-interactables-1`), "" at the root. |
 | `"description"` | string | mod.json's description, "" when none. |
 | `"origin"` | string | The product block's origin: `install`, `download`, `migration`, `delivery`, or "" for a folder the author made. |
 | `"migratedFrom"` | string | For `migration`: the folder it was built from, as `mu_origin` writes it (`overrides\hell-guards`). |
