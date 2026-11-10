@@ -3962,6 +3962,112 @@ static void test_additive_same_key(void)
     sh_modserve_scope_enable(0);
 }
 
+/* Two builds of one key, both with requirements (V1 run 2: the owner's build
+ * of a key and a newer one installed beside it). Paths whose bytes the two
+ * builds share have the first in index order as their static winner, here
+ * the older build; every step must be gated by the build that serves its
+ * path for the listing, not by the static winner's. */
+#define TB_MD6   "generated/decls/md6def/mods/two.build/gun.md6.decl"
+#define TB_ENT   "generated/decls/entitydef/mods/two.build/gun.decl"
+#define TB_SEDEF "generated/decls/snapeditorentitydef/mods/two.build/gun.decl"
+#define TB_OLD   "generated/decls/entitydef/mods/two.build/old_only.decl"
+#define TB_NEW   "generated/decls/entitydef/mods/two.build/new_only.decl"
+static void test_two_builds_requirements(void)
+{
+    static const fx_file b_old[] = {
+        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/two.build/gun.md6", NULL, '1' },
+        { TB_ENT, "entityDef gun { old }", -1, "entityDef", "mods/two.build/gun",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/two.build/gun.md6\"}]", '2' },
+        { TB_OLD, "entityDef old_only {}", -1, "entityDef", "mods/two.build/old_only", NULL, '3' },
+        { TB_SEDEF, "{ entityDef \"mods/two.build/gun\" }", -1, "snapEditorEntityDef", "mods/two.build/gun",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/two.build/gun\"}]", '5' },
+    };
+    static const fx_file b_new[] = {
+        { TB_MD6, "md6Def gun {}", -1, "md6Def", "mods/two.build/gun.md6", NULL, '1' },
+        { TB_ENT, "entityDef gun { new }", -1, "entityDef", "mods/two.build/gun",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/two.build/gun.md6\"}]", '6' },
+        { TB_NEW, "entityDef new_only {}", -1, "entityDef", "mods/two.build/new_only", NULL, '4' },
+        { TB_SEDEF, "{ entityDef \"mods/two.build/gun\" }", -1, "snapEditorEntityDef", "mods/two.build/gun",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/two.build/gun\"}]", '5' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], h_old[65], h_new[65], h_other[65];
+    const char *list[1];
+    char *slash;
+    int k;
+    sh_modserve_plan p;
+    sh_modserve_gates r;
+    sh_modserve_scope_info si;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\twobuilds\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
+    make_bundle(root, "a-owner", "two.build", "0.1.0", 'a', NULL, b_old, 4, "{\"installedAt\": 100}");
+    make_bundle(root, "b-beside", "two.build", "0.1.0", 'b', NULL, b_new, 4, "{\"installedAt\": 200}");
+    g_bundle_extra = NULL;
+    hash64('a', h_old); hash64('b', h_new); hash64('c', h_other);
+    printf("-- two builds of one key with requirements: rows ready, gates applied once, each map its build\n");
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 2);
+    sh_modserve_scope_enable(1);
+
+    /* No map open (boot, the editor's palette): the newest build's rows, all ready. */
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_bundle_scope(h_new, &si) && si.newest && si.requirements_live);
+    CHECK(sh_modserve_bundle_scope(h_old, &si) && !si.newest && !si.requirements_live);
+    CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_plan_editor(&p) == 3);
+    CHECK(step_index(&p, "snapEditorEntityDef", "mods/two.build/gun") >= 0);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 3);
+    CHECK(p.blocked == 0 && r.live == 2 && !r.not_live && !log_has("BLOCKED"));
+    for (k = 0; k < p.count; ++k) CHECK(p.steps[k].ready == 1);
+    /* The gates are applied once: each cvar set once, one bundle's requirements accepted. */
+    CHECK(g_gate_sets == 2 && g_gate_val[0] == 0 && g_gate_val[1] == 0);
+    CHECK(log_count("MODS: editor: requirements applied:") == 1);
+    sh_modserve_plan_free(&p);
+
+    /* A map pinning the older build: that build's bytes and names, all ready. */
+    list[0] = h_old;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(sh_modserve_bundle_scope(h_old, &si) && si.listed && si.requirements_live);
+    CHECK(sh_modserve_bundle_scope(h_new, &si) && si.inert && !si.requirements_live);
+    CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { old }"));
+    CHECK(sh_modserve_lookup(TB_OLD, NULL) && !sh_modserve_lookup(TB_NEW, NULL));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_plan_bundles(list, 1, &p, NULL) == 3);
+    CHECK(step_index(&p, "entityDef", "mods/two.build/old_only") >= 0 && step_index(&p, "entityDef", "mods/two.build/new_only") < 0);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "map load", &r) == 3);
+    CHECK(p.blocked == 0 && r.live == 2 && !log_has("BLOCKED"));
+    CHECK(g_gate_sets == 2);
+    sh_modserve_plan_free(&p);
+
+    /* A map pinning the newer build: the same, the other way round. */
+    list[0] = h_new;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
+    CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_plan_bundles(list, 1, &p, NULL) == 3);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "map load", &r) == 3);
+    CHECK(p.blocked == 0 && !log_has("BLOCKED"));
+    sh_modserve_plan_free(&p);
+
+    /* A map pinning a third build that is not installed declares nothing
+     * here (substitution is decided before the listing, modpub): the editor
+     * serves the newest build's names as with no map open. */
+    list[0] = h_other;
+    CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 0);
+    CHECK(!strcmp(ad_served(TB_ENT), "entityDef gun { new }"));
+    CHECK(sh_modserve_bundle_scope(h_new, &si) && !si.listed && si.requirements_live);
+    CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
+    sh_modserve_scope_enable(0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 /* Derived edits among the declared bundles only (DESIGN-additive 2.4): each
  * bundle's edited copy of the conductor is never served; the game's text with
  * the declared bundles' edits is, never an undeclared local mod's. */
@@ -4715,6 +4821,7 @@ int main(void)
     test_scope_providers();
     test_additive_determinism();
     test_additive_same_key();
+    test_two_builds_requirements();
     test_additive_compose();
     test_additive_key_and_snapshot();
     test_resource_lock();

@@ -284,7 +284,8 @@ name". Mods you download or import are never refused on their files. A map whose
   hash (an update, a fork) is another build: it is installed beside the one a map uses and never
   replaces it for that map, and the map's own build is downloaded by its hash ("installed at another
   build"). Both builds stay installed; each map serves its own, and with no map open the newest one
-  offers its Toybox rows. `sh_mods doctor` lists one row per build under the mod.
+  offers its Toybox rows, each ready with that build's required console settings. `sh_mods doctor`
+  lists one row per build under the mod.
 - Mods are installed by hash, whichever way they arrive (the Mods tab's install, `sh_mods install`,
   a rawmap or prefab ZIP, a download for a map): a build you already have is not installed again,
   and any other build lands as its own folder, the first build of a mod under its key and every

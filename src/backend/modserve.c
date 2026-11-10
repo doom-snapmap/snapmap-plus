@@ -5850,7 +5850,12 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
     if (!plan || !x) return 0;
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        const ms_bundle *b = &x->bundles[x->files[s->file].bundle];
+        /* The gates of the build that serves the step's path for the open
+         * map (ms_scoped), not of the path's static winner: with two builds
+         * of one key installed the winner can be the build the map does not
+         * use, whose requirements are off (req_off). */
+        int g = ms_scoped(x, s->file);
+        const ms_bundle *b = ms_gate_of(x, &x->files[g >= 0 ? g : s->file]);
         /* A step registered while its requirements were live stays ready. */
         if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
             x->files[s->file].reg_state != 1) {
