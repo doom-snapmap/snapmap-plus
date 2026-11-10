@@ -2457,7 +2457,8 @@ thread):
   only rows the asset rule reports missing or incomplete are asked for; the
   Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
   Load / Place. Otherwise the placement is denied with the gate's prefab
-  sentences ("This prefab needs <title> at a build that ..."). No, a failed
+  sentences ("This prefab needs <title> at a build that ... The prefab was not
+  placed."). No, a failed
   download and a bundle that will not install end as for a map, with "The
   prefab was not placed.";
 - with the gates unbound (a build where the published-map gates did not

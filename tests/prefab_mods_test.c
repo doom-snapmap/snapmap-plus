@@ -693,7 +693,8 @@ static void resolving(const sh_modmanifest_row *door)
     tick(3);
     CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
     CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that is not installed and was never published. "
-                                "Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
+                                "Restore its folder from the Recycle Bin or load the prefab's ZIP export. The prefab was not "
+                                "placed."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
 
@@ -705,7 +706,7 @@ static void resolving(const sh_modmanifest_row *door)
     tick(3);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
     CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that could not be downloaded: the mod store did "
-                                "not answer; try again in a few minutes."));
+                                "not answer; try again in a few minutes. The prefab was not placed."));
     CHECK(!strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
 
