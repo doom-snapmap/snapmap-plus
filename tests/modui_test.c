@@ -1312,7 +1312,7 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(bundle_has(doc, "alex.shade-b", "\"state\":\"attention\",\"cause\":\"assets/generated/decls/entitydef/monster/imp.decl "
                                               "is not the size mod.json records; 'sh_mods doctor verify' checks the build\""));
-        CHECK(bundle_has(doc, "by-hand", "\"id\":\"\",\"name\":\"\""));
+        CHECK(bundle_has(doc, "by-hand", "\"id\":\"\",\"name\":\"By hand\""));   /* its mod.json names it before any build */
         CHECK(bundle_has(doc, "by-hand", "\"state\":\"attention\",\"cause\":\"not built yet"));
         free(doc);
         dr = doctor(1);
@@ -2646,6 +2646,36 @@ int main(int argc, char **argv)
             at = GetFileAttributesA(joined);
             CHECK(at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY) && _stricmp(joined, nested) == 0);
         }
+        free(doc);
+    }
+
+    printf("-- a refused build that serves nothing is named by its mod.json, the folder only when that does not parse\n");
+    {
+        /* V13: v13-group\v13_broken (a decl with unbalanced braces, no last good build) was
+         * listed as "v13-group\v13_broken" although its mod.json named it. */
+        char broken[MAX_PATH * 2], bad[MAX_PATH * 2];
+        _snprintf_s(broken, sizeof broken, _TRUNCATE, "%s\\group2", g_root);
+        CreateDirectoryA(broken, NULL);
+        _snprintf_s(broken, sizeof broken, _TRUNCATE, "%s\\group2\\alex.broken", g_root);
+        mt_write(broken, "mod.json", "{\"id\":\"alex.broken\",\"version\":\"1.0.0\",\"name\":\"Broken thing\",\"author\":\"t\"}");
+        mt_write(broken, "assets\\generated\\decls\\entitydef\\mods\\alex.broken\\thing.decl", "{\r\n\tinherit = \"x\";\r\n");
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\group2\\alex.badjson", g_root);
+        mt_write(bad, "mod.json", "{\"id\":\"alex.badjson\",\"name\":\"Never shown\"");
+        mt_write(bad, "assets\\generated\\decls\\entitydef\\mods\\alex.badjson\\thing.decl", "{\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "group2\\\\alex.broken", "\"state\":\"attention\""));
+        CHECK(bundle_has(doc, "group2\\\\alex.broken", "\"name\":\"Broken thing\""));
+        CHECK(bundle_has(doc, "group2\\\\alex.badjson", "\"name\":\"\""));   /* the tab shows the folder */
+        if (!bundle_has(doc, "group2\\\\alex.broken", "\"name\":\"Broken thing\"")) printf("    %s\n", doc ? doc : "(null)");
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_FILES, "group2\\alex.broken");
+        CHECK(has(doc, "\"key\":\"group2\\\\alex.broken\",\"name\":\"Broken thing\""));
+        free(doc);
+        mt_remove_tree(broken);
+        mt_remove_tree(bad);
+        doc = run_doc(SH_MODS_ACT_RESCAN, "");
         free(doc);
     }
 

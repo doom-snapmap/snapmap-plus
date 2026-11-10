@@ -322,7 +322,9 @@ argument; a picked folder without `mod.json` stands for every mod folder below i
 answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:
 `installedCount`, `refusedCount`, `editorRows`, `items` (one `{folder, ok, key, id, bundle, cause,
 editorRows, replaced}` per mod), `key` the first installed folder, and `index` from the one rescan.
-The rows are sorted by display name (the name, else the id, else the folder) without
+The rows are sorted by display name (the name, else the id, else the folder; a folder whose
+build serves nothing, as a refused or unbuilt one, is named by its `mod.json` whenever that parses,
+and by its folder path only when it does not) without
 case, then by id, then by folder. A mod that sits in an organizing folder of `mods\` (its row's
 `group`, "campaign-interactables" for `mods\campaign-interactables\campaign-interactables-1`) is
 listed under that folder's row, the Prefabs tab's folder primitives: a caret, the folder's path and
