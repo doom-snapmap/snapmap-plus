@@ -903,11 +903,6 @@ int sh_strids_set_source(const char *path)
     return g_src_path[0] != '\0';
 }
 
-unsigned long sh_strids_injected_count(void)
-{
-    return (unsigned long)InterlockedCompareExchange(&g_inject_count, 0, 0);
-}
-
 #ifdef SH_STRIDS_TESTING
 /* Bind doubles for the four native helpers and inspect the rows requested by
  * one injection pass.

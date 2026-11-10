@@ -546,19 +546,3 @@ void sh_companions_refresh(void)
 {
     InterlockedExchange(&g_stale, 1);
 }
-
-int sh_companions_restore(void)
-{
-    if (!g_orig) return 1;
-    if (!hook_unpatch((void *)g_orig)) return 0;
-    g_orig = NULL;
-    backend_log("COMPANIONS: CallSpawn restored");
-    return 1;
-}
-
-void sh_companions_status(char *out, size_t cap)
-{
-    _snprintf_s(out, cap, _TRUNCATE, "companions: %s, %d owner(s) declared, %ld owner spawn(s), %ld spawned, %ld failed",
-                g_orig && hook_is_installed((void *)g_orig) ? "live" : "not installed", g_table.count,
-                g_owners_seen, g_spawned, g_failed);
-}

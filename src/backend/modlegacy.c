@@ -1599,14 +1599,6 @@ static int lg_find_converted(const char *root, const char *mods, const char *key
     return delivery && lg_find_migrated(root, key + 9, folder, cap);
 }
 
-int sh_modlegacy_find_converted(const char *key, const char *digest, char *folder, size_t cap)
-{
-    char root[MAX_PATH], mods[MAX_PATH];
-    if (!key || !folder || !cap || !lg_data_root(root, sizeof root)) return 0;
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    return lg_find_converted(root, mods, key, digest, folder, cap);
-}
-
 /* Remove a folder tree this conversion created (ANSI path). */
 static void lg_rmtree(const char *dir)
 {
@@ -1883,22 +1875,6 @@ static int lg_convert(const unsigned char *zipbytes, size_t length, const sh_leg
     }
     ok = lg_convert_tree(&zip, h, NULL, NULL, v, info);
     sh_modlegacy_zip_free(&zip);
-    return ok;
-}
-
-int sh_modlegacy_convert_payload(const unsigned char *zip, size_t length,
-                                 const sh_legacy_header *header, sh_modlegacy_verdict *verdict)
-{
-    sh_modmanifest_row info;
-    int ok;
-    if (!verdict || !header) return 0;
-    memset(&info, 0, sizeof info);
-    strcpy_s(verdict->key, sizeof verdict->key, header->key);
-    strcpy_s(verdict->digest, sizeof verdict->digest, header->digest);
-    verdict->key_form = header->key_form;
-    ok = lg_convert(zip, length, header, verdict, &info);
-    verdict->verdict = ok ? SH_MODLEGACY_CONVERT : SH_MODLEGACY_CLEAN;
-    sh_modmanifest_row_free(&info);
     return ok;
 }
 

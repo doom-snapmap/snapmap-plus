@@ -490,12 +490,6 @@ void sh_modpublished_compose_question(char *out, size_t cap, const char *const *
     pub_compose_question(out, cap, "map", names, count, bytes);
 }
 
-void sh_modpublished_compose_prefab_question(char *out, size_t cap, const char *const *names, size_t count,
-                                             unsigned long long bytes)
-{
-    pub_compose_question(out, cap, "prefab", names, count, bytes);
-}
-
 /* ------------------------------------------------------------ the denial gate */
 
 /* MODNET_ codes the fetch returns (modnet.h); the engine section checks they agree. */

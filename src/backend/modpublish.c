@@ -1553,14 +1553,6 @@ static int eng_upload_question_dialog(void *c, void *editor, size_t count, unsig
     return sh_engine_dialog_ask(MP_GDM_ID, MP_BUTTONS_YES_NO, text);
 }
 
-static int eng_upload_question_toast(void *c, void *editor, size_t count, unsigned long long bytes)
-{
-    char text[MP_TEXT_CAP];
-    sh_modpublish_compose_toast_question(text, sizeof text, count, bytes);
-    eng_editor_notice(c, editor, text);
-    return SH_MODPUBLISH_ASKED_BY_TOAST;
-}
-
 /* The search tag, appended to a saved-map model's tag list the way
  * PublishStart appends map:dev to the edit's: grow the list when it is full,
  * assign into list[num], num++. Main thread, inside the local save write. */

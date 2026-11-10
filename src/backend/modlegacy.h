@@ -147,13 +147,6 @@ int sh_modlegacy_normalize_id(const char *text, char *out, size_t cap);
 
 /* --------------------------------------------------------- conversion --- */
 
-/* Convert one verified ZIP into an installed legacy bundle under
- * <data>\mods\legacy\ and fill `verdict` (key, digest and form are taken
- * from `header`). Reuses an existing <id>@<digest16> folder. Returns 1 for
- * CONVERT, 0 for CLEAN with verdict->reason set. */
-int sh_modlegacy_convert_payload(const unsigned char *zip, size_t length,
-                                 const sh_legacy_header *header, sh_modlegacy_verdict *verdict);
-
 /* --------------------------------------------------------- folders ------ */
 
 /* A first-generation tree already on disk (a retired overrides\ folder),
@@ -206,12 +199,6 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
  * shadows and skipped; returns 1 on success, 0 with verdict->reason. */
 int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_origin *origin,
                               const char *dest, sh_modlegacy_verdict *verdict);
-
-/* The installed conversion of a carrier key, if any: a mod folder whose
- * mod.json legacy record has the same digest16 or delivery key, or a migrated
- * bundle the record's migration section lists for the same tree. `digest`
- * may be NULL. Returns 1 with the folder. */
-int sh_modlegacy_find_converted(const char *key, const char *digest, char *folder, size_t cap);
 
 /* The DeserializeFromJson step: convert or clean every legacy carrier, strip
  * smpkg./smpbind./smpref. rows, and write manifest rows for the converted

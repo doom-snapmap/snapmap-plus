@@ -94,10 +94,3 @@ int sh_modhud_scene_restore(void)
     ms_apply(1);
     return !InterlockedCompareExchange(&g_hidden, 0, 0);
 }
-
-void sh_modhud_scene_stats(unsigned *hides, unsigned *shows, int *hidden)
-{
-    if (hides) *hides = (unsigned)InterlockedCompareExchange(&g_hides, 0, 0);
-    if (shows) *shows = (unsigned)InterlockedCompareExchange(&g_shows, 0, 0);
-    if (hidden) *hidden = (int)InterlockedCompareExchange(&g_hidden, 0, 0);
-}

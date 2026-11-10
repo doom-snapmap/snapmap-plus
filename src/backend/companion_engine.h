@@ -79,13 +79,6 @@ int sh_companions_ensure(const char *phase);
  * next gate. */
 void sh_companions_refresh(void);
 
-/* Restore CallSpawn. Call only while no spawn can run (no map loading).
- * Returns 1 when the detour is gone (or was never committed). */
-int sh_companions_restore(void);
-
-/* One status line: live or not, owners, spawned and failed counts. */
-void sh_companions_status(char *out, size_t cap);
-
 /* The private signature table, for the two-image test. NULL-terminated. */
 extern const sig_entry SH_COMPANION_SIGNATURES[];
 

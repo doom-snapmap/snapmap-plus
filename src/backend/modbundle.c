@@ -1673,18 +1673,6 @@ static void mb_note(sh_mb_bundle *b, const char *fmt, ...)
 }
 
 
-const char *sh_mb_class_name(int cls)
-{
-    switch (cls) {
-    case SH_MB_CLASS_ADD: return "adds";
-    case SH_MB_CLASS_BORROW: return "borrows";
-    case SH_MB_CLASS_REPLACE: return "replaces";
-    case SH_MB_CLASS_EDITOR: return "editor";
-    case SH_MB_CLASS_SURFACE: return "surfaces";
-    default: return "";
-    }
-}
-
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap)
 {
     if (!out || !cap) return;

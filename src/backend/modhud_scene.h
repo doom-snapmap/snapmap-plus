@@ -47,7 +47,4 @@ void sh_modhud_scene_play_begin(void);
  * sync no longer plays, R320). Returns 1 when it showed the HUD. */
 int sh_modhud_scene_restore(void);
 
-/* Counters for diagnostics: events seen (hide, show) and whether the HUD is hidden now. */
-void sh_modhud_scene_stats(unsigned *hides, unsigned *shows, int *hidden);
-
 #endif

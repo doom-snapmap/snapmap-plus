@@ -320,8 +320,6 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
     return 1;
 }
 
-int sh_soundpreview_active(void) { return g_handle != 0; }
-
 /* Raise background audio. The engine's preview call writes s_soloSound/s_forceListener itself, so
  * entering the mode only has to do the half the engine does not. Idempotent. */
 static void sp_enter_mode(void)

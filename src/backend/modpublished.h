@@ -380,10 +380,6 @@ int  sh_modpub_prefab_holding(void);
 typedef void (*sh_modpub_prefab_ready_fn)(const char *name, const sh_modmanifest_list *rows);
 void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn);
 
-/* The prefab's question, as a map's says it: "This prefab needs N mod(s):
- * <names> (<size>). Download and install now?". */
-void sh_modpublished_compose_prefab_question(char *out, size_t cap, const char *const *names, size_t count,
-                                             unsigned long long bytes);
 /* The prefab's refusal notice (shorter than 256 bytes) and its console line:
  * mode 0 the store does not hold them, 1 the store could not be reached, 2
  * the store was not asked (no gates). `mods` are "id version" labels. */

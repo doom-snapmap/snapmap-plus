@@ -193,8 +193,6 @@ static int mp_ready_place(void)
            g_redo && g_select && g_deser && g_run_on_main && g_heap_ok && sh_rawmap_live_serialize_ready();
 }
 
-int sh_module_prefab_active(void) { return InterlockedCompareExchange(&g_phase, 0, 0) != MP_IDLE; }
-
 /* ------------------------------------------------------------ guarded reads */
 
 static int rd_i32(const void *p, int *v) { __try { *v = *(const int *)p; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }

@@ -433,15 +433,6 @@ static int mu_product_folder(const sh_ms_entry *e)
     return e->loaded && e->bundle.origin[0];
 }
 
-/* Which build of a row is shown: one that serves, then a superseded one,
- * then one waiting for a scan, then a skipped one; the newest among equals. */
-static int mu_rank(const mu_entry *u)
-{
-    if (u->admitted && strcmp(u->state, "superseded")) return 3;
-    if (u->admitted) return 2;
-    return !strcmp(u->state, "unindexed") ? 1 : 0;
-}
-
 /* ------------------------------------------------------------------ what a mod carries */
 
 /* A decoded top-level string of the author block's preserved keys (extra),
@@ -803,13 +794,6 @@ static int mu_suffix(const char *s, const char *suffix)
 static const char *mu_entry_title(const sh_ms_entry *s);
 
 /* ---- additive facts (DESIGN-additive 2.1, 2.4, 2.6, 2.9) */
-
-static void mu_strs_free(char **v, size_t n)
-{
-    size_t i;
-    for (i = 0; v && i < n; i++) free(v[i]);
-    free(v);
-}
 
 /* The stock banks the product block's registries "banks" names (DESIGN-
  * additive 2.4, "Sound events"), each with this process's state: up to 8. */
@@ -2819,15 +2803,6 @@ static int mu_busy(char *cause, size_t cap)
     return e->busy && e->busy(cause, cap) == 1;
 }
 
-/* "12.3 MB", as the page writes sizes. */
-static void mu_size_text(unsigned long long n, char *out, size_t cap)
-{
-    if (n < 1024) _snprintf_s(out, cap, _TRUNCATE, "%llu B", n);
-    else if (n < 1024ull * 1024) _snprintf_s(out, cap, _TRUNCATE, n < 10240 ? "%.1f KB" : "%.0f KB", n / 1024.0);
-    else if (n < 1024ull * 1024 * 1024) _snprintf_s(out, cap, _TRUNCATE, n < 10485760 ? "%.1f MB" : "%.0f MB", n / 1048576.0);
-    else _snprintf_s(out, cap, _TRUNCATE, "%.1f GB", n / 1073741824.0);
-}
-
 /* ---- the undo history (Uninstall) */
 
 /* The open map's undo and redo history is cleared after an Uninstall so no
@@ -4551,21 +4526,3 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
         return 0;
     }
 }
-
-#ifdef SH_MODUI_TESTING
-void sh_modui_test_reset(void)
-{
-    AcquireSRWLockExclusive(&g_lock);
-    free(g_doc);
-    g_doc = NULL;
-    g_doc_len = 0;
-    ReleaseSRWLockExclusive(&g_lock);
-    g_engine_bound = 0;
-    memset(&g_engine, 0, sizeof g_engine);
-    g_poll_next = 0;
-    InterlockedExchange(&g_undo_owed, 0);
-    InterlockedExchange(&g_scope_owed, 0);
-    InterlockedExchange(&g_scope_editor, 0);
-    InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
-}
-#endif

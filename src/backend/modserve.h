@@ -651,10 +651,6 @@ int  sh_modserve_registry_report(sh_modserve_line_fn fn, void *context);
  * block names): nothing serves it, and the doctor lists it under the
  * registry report, never as a conflict. */
 int  sh_modserve_is_partial(const char *request);
-/* The composer (malloc'd text, NULL when the texts do not compose): texts[0]
- * composed with the others' list and bag entries, the rule of shadows
- * several grandfathered bundles carry. *added counts the entries appended. */
-char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, int n, size_t *len, int *added);
 
 /* The points that must read the open map itself (the Play entry: Play does
  * not serialize the map) ask the bound source (modui.c) to recompute the

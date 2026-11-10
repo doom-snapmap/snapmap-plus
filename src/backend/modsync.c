@@ -85,14 +85,6 @@ static int msy_exists_w(const wchar_t *w, unsigned long long *size, int *is_dir)
     return 1;
 }
 
-static int msy_exists(const char *path, unsigned long long *size, int *is_dir)
-{
-    wchar_t *w = sh_mb_wpath(path);
-    int ok = w && msy_exists_w(w, size, is_dir);
-    free(w);
-    return ok;
-}
-
 static int msy_mkdirs_w(const wchar_t *path)
 {
     size_t n = wcslen(path), i, start = 0;
@@ -123,21 +115,6 @@ static int msy_mkdirs(const char *path)
     wchar_t *w = sh_mb_wpath(path);
     int ok = w && msy_mkdirs_w(w);
     free(w);
-    return ok;
-}
-
-static int msy_mkdirs_parent_w(const wchar_t *file)
-{
-    const wchar_t *slash = wcsrchr(file, L'\\');
-    wchar_t *dir;
-    int ok;
-    if (!slash) return 0;
-    dir = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(slash - file + 1));
-    if (!dir) return 0;
-    memcpy(dir, file, sizeof(wchar_t) * (size_t)(slash - file));
-    dir[slash - file] = 0;
-    ok = msy_mkdirs_w(dir);
-    free(dir);
     return ok;
 }
 

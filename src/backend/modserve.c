@@ -1798,12 +1798,6 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
 }
 #endif
 
-char *sh_modserve_compose_texts(const char *const *texts, const size_t *lens, int n, size_t *len, int *added)
-{
-    if (!texts || !lens || n < 1 || !len || !added) return NULL;
-    return ms_compose((const unsigned char *const *)texts, lens, n, len, added);
-}
-
 /* ------------------------------------------------------------------ conflict winner
  *
  * When several bundles provide one path with different bytes, which one

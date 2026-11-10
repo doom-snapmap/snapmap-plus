@@ -37,7 +37,4 @@ void sh_soundpreview_stop(void);
  */
 void sh_soundpreview_set_session(int on);
 
-/* Return whether a preview handle is retained, for the UI play/stop state. */
-int sh_soundpreview_active(void);
-
 #endif /* BACKEND_SOUNDPREVIEW_H */

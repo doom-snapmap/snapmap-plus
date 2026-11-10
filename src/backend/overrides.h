@@ -45,9 +45,6 @@ int sh_overrides_install(const uint8_t *module_base,
                          void *compare_fn, int compare_status_ok,
                          void *write_string_fn, int write_string_status_ok);
 
-/* Number of opens served by the shadow; used by diagnostics. */
-unsigned long sh_overrides_shadow_count(void);
-
 /* Read the effective base for navigation into a new process-heap buffer.
  * This applies Grid generation to built-in or installed inputs, without
  * re-entering navigation. Caller frees the result. An owned source failure

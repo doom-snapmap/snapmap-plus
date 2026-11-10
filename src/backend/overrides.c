@@ -80,7 +80,6 @@ static void  ov_dtor(ov_stream *s)                                   /* [0] clos
     }
 }
 static long long ov_ret0_a(ov_stream *s)        { (void)s; return 0; }   /* [1] return 0 */
-static long long ov_length(ov_stream *s)        { return s ? s->length : 0; }            /* [3] *(this+0x18) */
 static const char *ov_name(ov_stream *s)        { return s ? s->name : NULL; }           /* [4] *(this+0x10) */
 static long long ov_read(ov_stream *s, void *buf, uint64_t n)          /* [5] fread(buf,1,n,fp) */
 {
@@ -1060,11 +1059,6 @@ int sh_overrides_install(const uint8_t *module_base,
         (unsigned)(sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]));
     backend_log(line);
     return 1;
-}
-
-unsigned long sh_overrides_shadow_count(void)
-{
-    return (unsigned long)InterlockedCompareExchange(&g_shadow_count, 0, 0);
 }
 
 int sh_overrides_uninstall(void)

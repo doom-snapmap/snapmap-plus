@@ -228,10 +228,6 @@ int64_t sh_modswf_test_load(void *resource, void *arg) { return swf_load(resourc
 #endif
 
 #ifndef SH_MODSWF_PURE
-unsigned long sh_modswf_served_count(void)
-{
-    return (unsigned long)InterlockedCompareExchange(&g_served, 0, 0);
-}
 
 int sh_modswf_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {

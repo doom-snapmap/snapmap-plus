@@ -500,9 +500,6 @@ int  sh_mb_rekey_path(const char *rel, const char *folder, const char *key, char
  * when not a JSON object. */
 char *sh_mb_rekey_modjson(const char *text, size_t n, const char *key, const char *origin, size_t *out_len);
 
-/* "adds", "borrows", "replaces", "editor", "surfaces" for SH_MB_CLASS_*, else "". */
-const char *sh_mb_class_name(int cls);
-
 /* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 

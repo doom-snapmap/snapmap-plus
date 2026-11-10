@@ -107,8 +107,6 @@ void **sh_modswf_find_slot(const uint8_t *module_base, uint64_t value);
  * swap it. Call after the override provider is installed. Returns 1 when the
  * route is live. */
 int sh_modswf_install(const sig_result *results, size_t count, const uint8_t *module_base);
-/* Movies served through the route since boot. */
-unsigned long sh_modswf_served_count(void);
 #endif
 
 #ifdef SH_MODSWF_TESTING

@@ -273,7 +273,6 @@ void sh_modui_note_changed(void);
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
 #ifdef SH_MODUI_TESTING
-void sh_modui_test_reset(void);
 /* The hub launch state machine (modui.c): "none", "launched", "loading",
  * "playing", "running" or "ended". */
 const char *sh_modui_test_launch_state(void);
