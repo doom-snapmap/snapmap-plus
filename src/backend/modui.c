@@ -4118,6 +4118,8 @@ static int mu_rebuild(const char *key)
         if (ok) sh_ms_note_build(folder, &bd);
         modstore_unlock();
     }
+    /* A refused build is the folder's state, as the rebuild rule records it (DESIGN-additive 2.8). */
+    if (!ok) sh_ms_note_build_failure(folder, cause);
     mu_model_free(&m);
     note[0] = 0;
     if (!ok) {

@@ -2041,6 +2041,37 @@ int main(int argc, char **argv)
             CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: build 2, 1 files.\""));
             free(doc);
             CHECK((unsigned)g_rescans == rescans + 2);
+            /* A refused Rebuild is the folder's state, as a refused rescan build is:
+             * the row names the cause until a build succeeds (DESIGN-additive 2.8). */
+            {
+                static const char failed[] =
+                    "\"buildFailed\":{\"cause\":\"empty file: assets/generated/decls/entitydef/mods/alex.req/empty.decl\"";
+                char why[SH_MB_CAUSE_MAX], bad[MAX_PATH];
+                mt_put(path, "assets\\generated\\decls\\entitydef\\mods\\alex.req\\empty.decl", "", "wb");
+                doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
+                CHECK(has(doc, "\"ok\":false,\"message\":\"Not rebuilt: empty file: "));
+                free(doc);
+                sh_ms_build_cause(path, why, sizeof why);
+                CHECK(!strcmp(why, "empty file: assets/generated/decls/entitydef/mods/alex.req/empty.decl"));
+                doc = list_doc();
+                {
+                    const char *row = doc ? strstr(doc, "{\"key\":\"alex.req\"") : NULL;
+                    const char *next = row ? strstr(row + 1, "{\"key\":\"") : NULL;
+                    const char *hit = row ? strstr(row, failed) : NULL;
+                    CHECK(hit && (!next || hit < next));
+                }
+                free(doc);
+                _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\alex.req\\empty.decl", path);
+                CHECK(DeleteFileA(bad));
+                doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
+                CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: nothing changed (1 files).\""));
+                free(doc);
+                sh_ms_build_cause(path, why, sizeof why);
+                CHECK(!why[0]);
+                doc = list_doc();
+                CHECK(doc && !has(doc, "\"buildFailed\""));
+                free(doc);
+            }
             doc = run_doc(SH_MODS_ACT_REBUILD, "nobody");
             CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
             free(doc);
