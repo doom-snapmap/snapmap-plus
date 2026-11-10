@@ -2303,9 +2303,14 @@ carried folder no row names is left out):
   and is still left out;
 - after an install the serving index is rebuilt, as before.
 
-A ZIP in the bundle form of earlier releases (any `bundle.canonical.json`, or
-an `export.json` index) is refused: "this export was made by an earlier
-release; save the rawmap again". The map importer tells a map from a prefab by
+A map's ZIP in the bundle form beta.20 wrote (`map.rawmap.json`, an
+`export.json` index, and per bundle `mods/[legacy/]<id>@<version>+<build>/`
+with `bundle.canonical.json` and its files, each distinct file stored once)
+opens: each canonical manifest a row names is installed as a download is
+(`modsync_install_manifest`), its files taken from the ZIP by hash, so the
+bundle keeps the hash the map pins (`me_install_retired`). Any other ZIP in
+that form (no `map.rawmap.json`) is refused: "this export was made by an
+earlier release; save the rawmap again". The map importer tells a map from a prefab by
 the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
 `snapmapPlus` block is a map; a prefab's export is refused with "this is a
 prefab's export, not a map's". The published-map download path is not used.

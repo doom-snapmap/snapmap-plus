@@ -527,8 +527,12 @@ int main(int argc, char **argv)
         size_t len = 0;
         _snprintf_s(old, sizeof old, _TRUNCATE, "%s\\retired.zip", tmp);
         CHECK(mt_zip_stored(old, 2, OLD_N, OLD_D));
-        CHECK(modexport_read(old, &len, &st, cause, sizeof cause) == NULL && !strcmp(cause, MODEXPORT_RETIRED_MAP));
-        CHECK(!modexport_probe(old, cause, sizeof cause) && !strcmp(cause, MODEXPORT_RETIRED_MAP));
+        /* beta.20's map export opens (its bundles: below); a prefab's import still refuses it. */
+        text = modexport_read(old, &len, &st, cause, sizeof cause);
+        CHECK(text && len == strlen(OLD_D[0]) && st.bundles == 0);
+        free(text);
+        text = NULL;
+        CHECK(modexport_probe(old, cause, sizeof cause));
         CHECK(!strcmp(MODEXPORT_RETIRED_MAP, "this export was made by an earlier release; save the rawmap again"));
         CHECK(!modexport_read_prefab(old, NULL, NULL, &text, &len, name, sizeof name, &st, cause, sizeof cause) &&
               !strcmp(cause, MODEXPORT_RETIRED_PREFAB));
@@ -1185,6 +1189,65 @@ int main(int argc, char **argv)
         CHECK(sh_ms_set_root(storeA));
     }
 
+    /* ---- beta.20's map export: export.json and each bundle's canonical manifest ---- */
+    {
+        /* The bundle is installed from its canonical manifest as a download
+         * is, so it keeps the hash the map pins; a file the ZIP stores once
+         * for two paths fills both; a damaged file installs nothing. */
+        static const char *const T_FILES[] = { "assets/generated/image/mods/test.twenty/a.bimage",
+                                               "assets/generated/image/mods/test.twenty/b.bimage", NULL };
+        static const char *const T_BYTES[] = { "twenty bytes", "twenty bytes", NULL };
+        char storeT[MAX_PATH * 2], storeT2[MAX_PATH * 2], storeT3[MAX_PATH * 2], zipT[MAX_PATH * 2], tdir[MAX_PATH * 2], tkey[SH_MS_KEY_MAX + 1];
+        char export_json[512], why[256];
+        sh_modmanifest_row rt;
+        const sh_modmanifest_row *t1[] = { &rt, NULL };
+        sh_mb_bundle tb;
+        size_t len = 0, tl = 0;
+        char *tmap, *text, *canon = NULL;
+        int round;
+        _snprintf_s(storeT, sizeof storeT, _TRUNCATE, "%s\\storeT", tmp);
+        _snprintf_s(storeT2, sizeof storeT2, _TRUNCATE, "%s\\storeT2", tmp);
+        _snprintf_s(storeT3, sizeof storeT3, _TRUNCATE, "%s\\storeT3", tmp);
+        _snprintf_s(zipT, sizeof zipT, _TRUNCATE, "%s\\beta20.zip", tmp);
+        _snprintf_s(tdir, sizeof tdir, _TRUNCATE, "%s\\twenty", src);
+        CHECK(fresh_store(storeT));
+        make_mod(tdir, "test.twenty", T_FILES, T_BYTES);
+        CHECK(install(tdir, tkey, &rt) && !strcmp(tkey, "test.twenty"));
+        _snprintf_s(tdir, sizeof tdir, _TRUNCATE, "%s\\test.twenty", storeT);
+        memset(&tb, 0, sizeof tb);
+        CHECK(sh_mb_load_folder(tdir, &tb) && tb.canonical && !strcmp(tb.hash, rt.bundle));
+        if (tb.canonical) canon = _strdup(tb.canonical);
+        sh_mb_free(&tb);
+        tmap = map_naming(BASE_MAP, sizeof BASE_MAP - 1, t1, &tl);
+        _snprintf_s(export_json, sizeof export_json, _TRUNCATE,
+                    "{\"bundles\":[{\"build\":1,\"bundle\":\"%s\",\"folder\":\"mods/test.twenty@1.0.0+1\",\"id\":\"test.twenty\","
+                    "\"version\":\"1.0.0\"}],\"format\":1,\"map\":\"map.rawmap.json\"}", rt.bundle);
+        for (round = 0; round < 2 && tmap && canon; round++) {
+            const char *names[] = { "map.rawmap.json", "export.json", "mods/test.twenty@1.0.0+1/bundle.canonical.json",
+                                    "mods/test.twenty@1.0.0+1/assets/generated/image/mods/test.twenty/a.bimage" };
+            const char *datas[] = { tmap, export_json, canon, round ? "twenty bytez" : "twenty bytes" };
+            CHECK(mt_zip_stored(zipT, 4, names, datas));
+            CHECK(fresh_store(round ? storeT3 : storeT2));
+            text = modexport_read(zipT, &len, &st, cause, sizeof cause);
+            if (round) {
+                CHECK(text == NULL && strstr(cause, "test.twenty@1.0.0+1 in the export does not install") && folder_count(storeT3) == 0);
+                free(text);
+                break;
+            }
+            if (!text) fprintf(stderr, "beta.20 import: %s\n", cause);
+            CHECK(text && len == tl && !memcmp(text, tmap, len) && st.bundles == 1 && st.bundles_installed == 1);
+            CHECK(folder_count(storeT2) == 1 && sh_modserve_bundle_state(rt.bundle, NULL, 0) == 1);
+            CHECK(sh_modserve_row_served(&rt, why, sizeof why) == 1);
+            free(text);
+            /* Again: installed already, nothing written. */
+            text = modexport_read(zipT, &len, &st, cause, sizeof cause);
+            CHECK(text && st.bundles_installed == 0 && st.bundles_present == 1 && folder_count(storeT2) == 1);
+            free(text);
+        }
+        free(canon);
+        if (tmap) HeapFree(GetProcessHeap(), 0, tmap);
+        CHECK(sh_ms_set_root(storeA));
+    }
     HeapFree(GetProcessHeap(), 0, map);
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
