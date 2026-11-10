@@ -1633,11 +1633,20 @@ static void mb_bare_cb(void *context, int line, const char *name, size_t len)
 
 static void mb_warn(sh_mb_bundle *b, const char *fmt, ...)
 {
+    char line[SH_MB_CAUSE_MAX];
     va_list ap;
-    if (b->warnings++ == 0) {
-        va_start(ap, fmt);
-        _vsnprintf_s(b->first_warning, sizeof b->first_warning, _TRUNCATE, fmt, ap);
-        va_end(ap);
+    va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    if (b->warnings++ == 0) strcpy_s(b->first_warning, sizeof b->first_warning, line);
+    if (b->warning_list_count < SH_MB_WARNINGS_KEPT) {
+        char **grown;
+        if (!b->warning_list) {
+            grown = (char **)calloc(SH_MB_WARNINGS_KEPT, sizeof(char *));
+            if (!grown) return;
+            b->warning_list = grown;
+        }
+        if ((b->warning_list[b->warning_list_count] = _strdup(line)) != NULL) b->warning_list_count++;
     }
 }
 
@@ -1677,6 +1686,8 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->old_targets);
     for (i = 0; i < b->note_count; i++) free(b->notes[i]);
     free(b->notes);
+    for (i = 0; i < b->warning_list_count; i++) free(b->warning_list[i]);
+    free(b->warning_list);
     memset(b, 0, sizeof *b);
 }
 
@@ -2598,7 +2609,7 @@ static const struct mb_store_rule {
     { "author", 0, "bad author", "remove it from the author" },
 };
 
-static void mb_store_check(sh_mb_bundle *b, int rule, const char *value, size_t n)
+static void mb_store_check(sh_mb_bundle *b, int rule, const char *value, size_t n, int building)
 {
     const struct mb_store_rule *r = &MB_STORE_RULES[rule];
     char shown[72], line[SH_MB_CAUSE_MAX];
@@ -2631,7 +2642,7 @@ static void mb_store_check(sh_mb_bundle *b, int rule, const char *value, size_t 
                     r->store_says, r->fix);
     }
     mb_warn(b, "%s", line);
-    mb_note(b, "%s", line);
+    if (building) mb_note(b, "%s", line);
 }
 
 /* A folder the product received rather than one an author builds here: it
@@ -2662,10 +2673,10 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "%s \"" SH_MB_BLOCK_KEY "\" must be an object", b->descriptor); return 0; }
     if (!mb_common_fields(b, root, 0)) return 0;
-    if (building) {
-        mb_store_check(b, MB_STORE_NAME, b->name, strlen(b->name));
-        if (b->author) mb_store_check(b, MB_STORE_AUTHOR, b->author, strlen(b->author));
-    }
+    /* At a build and at every read of a built mod.json, so the doctor, a
+     * rescan and the Mods tab name them too; only the build reports them. */
+    mb_store_check(b, MB_STORE_NAME, b->name, strlen(b->name), building);
+    if (b->author) mb_store_check(b, MB_STORE_AUTHOR, b->author, strlen(b->author), building);
     {
         /* A converted first-generation package (modlegacy.c) carries a
          * "legacy" object; it stays in "extra" and grandfathers its names. */
@@ -2759,7 +2770,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
                 mb_old_intent(b, k, root->items[i], building);
                 continue;
             }
-            if (building) mb_store_check(b, MB_STORE_KEY, root->keys[i], root->klen[i]);
+            mb_store_check(b, MB_STORE_KEY, root->keys[i], root->klen[i], building);
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 mb_error(b, "out of memory");

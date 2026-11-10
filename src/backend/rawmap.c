@@ -22,6 +22,7 @@
 #include "map_carrier.h"
 #include "modmanifest.h"
 #include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
+#include "plain_reason.h"
 #include "modpublished.h"
 #include "signatures.h"
 #include "config.h"
@@ -138,28 +139,41 @@ int sh_rawmap_load_oneshot_pending(void)
     return (InterlockedCompareExchange(&g_swap_oneshot, 0, 0) != 0) ? 1 : 0;
 }
 
+static void rawmap_tell(const char *text);
+
 /* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
- * failure.
+ * failure, with the reason and next step in `why` when one is given.
  */
-static char *read_source_file(size_t *out_len)
+static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap)
 {
     char buf_path[MAX_PATH];
     resolve_source_path(buf_path, sizeof buf_path);
     const char *path = buf_path;
-    if (modexport_is_zip_path(path)) return modexport_read_text(path, out_len);
+    if (why && why_cap) why[0] = '\0';
+    if (modexport_is_zip_path(path)) return modexport_read_text_report(path, out_len, why, why_cap);
 
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (h == INVALID_HANDLE_VALUE) {
+        if (why && why_cap) strncpy_s(why, why_cap, sh_reason_win32(GetLastError(), path, 0), _TRUNCATE);
+        return NULL;
+    }
 
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (LONGLONG)INT_MAX) {
         CloseHandle(h);
+        if (why && why_cap)
+            strncpy_s(why, why_cap, "the file is empty or larger than 2 GB, so it is not a saved map; save the map again",
+                      _TRUNCATE);
         return NULL;
     }
     size_t n = (size_t)sz.QuadPart;
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);   /* Reserve the trailing NUL. */
-    if (!buf) { CloseHandle(h); return NULL; }
+    if (!buf) {
+        CloseHandle(h);
+        if (why && why_cap) strncpy_s(why, why_cap, "the game ran out of memory reading it; restart the game and try again", _TRUNCATE);
+        return NULL;
+    }
 
     size_t got = 0;
     while (got < n) {
@@ -169,11 +183,17 @@ static char *read_source_file(size_t *out_len)
         got += rd;
     }
     CloseHandle(h);
-    if (got != n) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
+    if (got != n) {
+        HeapFree(GetProcessHeap(), 0, buf);
+        if (why && why_cap) strncpy_s(why, why_cap, "the file could not be read to its end; try again", _TRUNCATE);
+        return NULL;
+    }
     buf[n] = '\0';
     *out_len = n;
     return buf;
 }
+
+static char *read_source_file(size_t *out_len) { return read_source_file_why(out_len, NULL, 0); }
 
 /* Convert or clean first-generation package carriers (DESIGN.md section 11):
  * converted packages become installed legacy bundles named by manifest rows,
@@ -577,7 +597,7 @@ static char *prepared_take(size_t *out_len)
 
 int sh_rawmap_prepare_reload(char *why, int cap)
 {
-    char path[MAX_PATH], name[MAX_PATH];
+    char path[MAX_PATH], name[MAX_PATH], cause[MODEXPORT_CAUSE_MAX], sentence[MODEXPORT_CAUSE_MAX + MAX_PATH];
     sh_modmanifest_list rows;
     size_t len = 0, missing;
     char *text;
@@ -588,13 +608,18 @@ int sh_rawmap_prepare_reload(char *why, int cap)
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
     /* A .zip is imported here: its mods install before the rows are counted. */
-    text = read_source_file(&len);
+    text = read_source_file_why(&len, cause, sizeof cause);
     if (text == NULL) {
-        char line[MAX_PATH + 96];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap reload REFUSED -- %s could not be read", path);
+        char line[MAX_PATH + MODEXPORT_CAUSE_MAX + 96];
+        if (!cause[0]) strcpy_s(cause, sizeof cause, "the file could not be read; try again");
+        _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap reload REFUSED -- %s was not opened: %s", path, cause);
         backend_log(line);
-        if (why && cap > 0)
-            _snprintf_s(why, (size_t)cap, _TRUNCATE, "%s could not be read (the backend log says why)", name);
+        /* The importer's or Windows' own reason and next step reach the player
+         * (console and toast, as a save's sentence does), never "see the log":
+         * the page's Load Rawmap toast was shown before this frame ran. */
+        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s.", name, cause);
+        rawmap_tell(sentence);
+        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
         return 0;
     }
     missing = rawmap_missing_guarded(text, len, &rows);
@@ -985,13 +1010,13 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
  * reported from inside the engine's serializer, which is no place to raise a
  * toast. One slot; a newer save's sentence replaces an unshown one. */
 static SRWLOCK g_tell_lock = SRWLOCK_INIT;
-static char g_tell[600];
+static char g_tell[MODEXPORT_CAUSE_MAX + MAX_PATH];
 static volatile LONG g_tell_pending;
 static volatile LONG g_tell_console_only;   /* the page shows its own toast for this one */
 
 static void rawmap_tell(const char *text)
 {
-    char line[640];
+    char line[sizeof g_tell + 32];
     _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap: %s", text);
     backend_log(line);
     AcquireSRWLockExclusive(&g_tell_lock);
@@ -1018,7 +1043,7 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
 
 void sh_rawmap_poll_main(void)
 {
-    char text[600];
+    char text[sizeof g_tell];
     void (*toast)(const char *, const char *) = g_notify_toast;
     void (*print)(const char *) = g_notify_print;
     if (!InterlockedExchange(&g_tell_pending, 0)) return;

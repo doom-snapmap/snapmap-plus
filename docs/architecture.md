@@ -2337,7 +2337,10 @@ carried folder no row names is left out):
 - the built bundle hash must equal the one the carried `mod.json` names;
   otherwise, and on any other refusal, exactly the folders this import
   installed are removed and the load is refused ("<id> <version> in the export
-  does not build to the bundle the map names");
+  does not build to the bundle the map names", or "<id> <version>, a mod this
+  map carries, does not install on this computer (<the builder's reason>);
+  nothing was installed. Ask whoever shared it for a new export saved with
+  this release");
 - a carried `mod.json` whose block an earlier builder's rules wrote (its
   `"rules"` absent or below `SH_MB_RULES`, and its recorded hash not the one
   today's rules give: `sh_mb_load_text_earlier_rules`) is not left out: it is
@@ -2347,8 +2350,21 @@ carried folder no row names is left out):
   treats it as another build of an installed key: the store's copy of the
   recorded build is offered beside it, else the installed build substitutes.
   A block with today's `"rules"` whose hash does not match was edited by hand
-  and is still left out;
+  and is still left out. A folder from earlier rules that today's rules refuse
+  (the development builds of 2026-11-04 to 11-07 wrote retired intent keys,
+  whose partials today's builder refuses: "this is a partial; put the whole
+  edited copy ...") is that one mod's failure: it is left out with one log
+  line naming the builder's reason, the rest of the export installs, and the
+  map's row for it is a mod this computer does not have, which the hold then
+  settles as for any map (the store, the installed build of its key, or the
+  gate's sentences);
 - after an install the serving index is rebuilt, as before.
+
+A refused import reaches the player whole: the editor reload
+(`sh_rawmap_prepare_reload`) prints and toasts "<file> was not opened:
+<the importer's cause>." (a `.json` that cannot be read gets Windows' reason
+through `plain_reason.h`), and the backend log line carries the same cause
+uncut (`MODEXPORT_CAUSE_MAX`).
 
 A map's ZIP in the bundle form beta.20 wrote (`map.rawmap.json`, an
 `export.json` index, and per bundle `mods/[legacy/]<id>@<version>+<build>/`
@@ -2457,7 +2473,8 @@ thread):
   only rows the asset rule reports missing or incomplete are asked for; the
   Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
   Load / Place. Otherwise the placement is denied with the gate's prefab
-  sentences ("This prefab needs <title> at a build that ..."). No, a failed
+  sentences ("This prefab needs <title> at a build that ... The prefab was not
+  placed."). No, a failed
   download and a bundle that will not install end as for a map, with "The
   prefab was not placed.";
 - with the gates unbound (a build where the published-map gates did not
@@ -2536,7 +2553,12 @@ builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
 such as `displayName` or `$schema`, a control character such as a tab in the
 name or author) are mirrored as build warnings in one table,
 `MB_STORE_RULES` in `modbundle.c`, so the author hears them at the build
-rather than at publish. A publish whose save
+rather than at publish. They are derived again whenever a built `mod.json` is
+read, so they also reach `sh_mods doctor` (one "warning i of n" line per
+bundle), each rescan (one line per mod with warnings), the Rebuild result
+(`warnings`, `firstWarning`) and each mod of the Mods tab's v3 payload
+(`warnings`: the first `SH_MB_WARNINGS_KEPT` as strings, `warningCount`,
+`firstWarning`). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the

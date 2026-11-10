@@ -56,6 +56,9 @@
 /* The retired index name: an export.json without ~type is that index. */
 #define MODEXPORT_INDEX        "export.json"
 #define MODEXPORT_MAP_MAX      (64u * 1024u * 1024u)
+/* Room for an import or export refusal: a mod named, plus the builder's own
+ * cause (SH_MB_CAUSE_MAX), with its file path, whole. */
+#define MODEXPORT_CAUSE_MAX    1024
 /* The refusals of the retired bundle form. */
 #define MODEXPORT_RETIRED_PREFAB "this export was made by an earlier release; export it again"
 #define MODEXPORT_RETIRED_MAP    "this export was made by an earlier release; save the rawmap again"
@@ -150,6 +153,9 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
                                                unsigned *bundles, char *cause, size_t cause_cap);
 /* The reader: a NUL-terminated process-heap buffer (HeapFree), or NULL. */
 char *modexport_read_text(const char *path_acp, size_t *out_len);
+/* The same reader for a caller that tells the player: on failure `cause`
+ * (MODEXPORT_CAUSE_MAX is room enough) says why, in the importer's words. */
+char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause, size_t cause_cap);
 /* The source check: 1 when the export can be loaded, else 0 with a reason. */
 int   modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity);
 

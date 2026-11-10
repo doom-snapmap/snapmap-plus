@@ -1100,7 +1100,7 @@ static void gate_decision_and_wording(void)
                         "this machine."));
     sh_modpub_gate_wording(SH_MODPUB_GATE_NEVER_PUBLISHED, "prefab", "door-kit", NULL, 0, text, sizeof text);
     CHECK(!strcmp(text, "This prefab needs door-kit at a build that is not installed and was never published. Restore "
-                        "its folder from the Recycle Bin or load the prefab's ZIP export."));
+                        "its folder from the Recycle Bin or load the prefab's ZIP export. The prefab was not placed."));
     sh_modpub_gate_wording(SH_MODPUB_GATE_OBTAIN, "map", "x", NULL, 0, text, sizeof text);
     CHECK(!text[0]);
     if (getenv("MODPUB_TEST_WORDS")) {
@@ -1181,7 +1181,8 @@ static void gate_causes_through_the_hold(void)
     sh_modmanifest_list_free(&rows);
     tick(3);
     CHECK(!strcmp(F.last_ask, "This prefab needs alex.pink-imp at a build that is not installed and was never "
-                              "published. Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
+                              "published. Restore its folder from the Recycle Bin or load the prefab's ZIP export. The "
+                              "prefab was not placed."));
     CHECK(F.drop_ui == 1 && F.launch_refused == 0);   /* a placement is not a launch */
 
     printf("-- cause 4: the store has it, but a borrow names a file this game does not hold\n");

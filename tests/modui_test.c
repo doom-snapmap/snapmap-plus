@@ -2374,6 +2374,46 @@ int main(int argc, char **argv)
         sh_mb_set_stock_ops(NULL);
     }
 
+    printf("-- a builder warning reaches the tab's row, the doctor and the rescan lines, not only the build\n");
+    {
+        char wd[MAX_PATH];
+        _snprintf_s(wd, sizeof wd, _TRUNCATE, "%s\\authoring\\alex.warn", tmp);
+        mt_write(wd, "mod.json", "{\"id\":\"alex.warn\",\"version\":\"1.0.0\",\"name\":\"Warn\",\"author\":\"t\","
+                                 "\"displayName\":\"Warn\"}");
+        mt_write(wd, "assets\\generated\\image\\mods\\alex.warn\\w.bimage", "warn bytes");
+        doc = run_doc(SH_MODS_ACT_INSTALL, wd);
+        CHECK(has(doc, "\"ok\":true") && has(doc, "\"warnings\":1") &&
+              has(doc, "\"firstWarning\":\"mod.json key \\\"displayName\\\": the mod store refuses it at publish"));
+        free(doc);
+        /* The store's copy is read back from its mod.json: the warning is derived again. */
+        doc = list_doc();
+        CHECK(has(doc, "\"warnings\":[\"mod.json key \\\"displayName\\\": the mod store refuses it at publish "
+                       "(\\\"bad extra key\\\"); author keys must be 1-64 characters") &&
+              has(doc, "\"warningCount\":1,\"firstWarning\":\"mod.json key \\\"displayName\\\""));
+        /* A mod without warnings says so with an empty list. */
+        CHECK(has(doc, "\"warnings\":[],\"warningCount\":0,\"firstWarning\":\"\""));
+        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: bundle mods\\alex.warn: warning 1 of 1: mod.json key \"displayName\": the mod store "
+                      "refuses it at publish (\"bad extra key\")"));
+        g_logat = 0;
+        g_logbuf[0] = 0;
+        doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+        CHECK(has(g_logbuf, "MODS: ui rescan: mods\\alex.warn (alex.warn): 1 warning(s), first: mod.json key \"displayName\""));
+        free(doc);
+        /* The tab's Rebuild says it too, and the list after it still carries it. */
+        doc = run_doc(SH_MODS_ACT_REBUILD, "alex.warn");
+        CHECK(has(doc, "\"action\":\"rebuild\",\"ok\":true") && has(doc, "\"warnings\":1") &&
+              has(doc, "\"firstWarning\":\"mod.json key \\\"displayName\\\""));
+        CHECK(has(g_logbuf, "MODS: ui rebuild alex.warn: 1 warning(s), first: mod.json key \"displayName\""));
+        free(doc);
+        doc = list_doc();
+        CHECK(has(doc, "\"warningCount\":1,\"firstWarning\":\"mod.json key \\\"displayName\\\""));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.warn");
+        free(doc);
+    }
+
     keys_match_fixture(payload, g_union ? g_union : "");
     free(g_union);
     g_union = NULL;

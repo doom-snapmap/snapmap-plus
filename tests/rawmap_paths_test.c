@@ -872,10 +872,11 @@ static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"nam
 extern unsigned long long g_mod_stub_export_result;
 extern int g_mod_stub_export_calls;
 extern char g_mod_stub_export_path[520];
+extern char g_mod_stub_import_cause[MODEXPORT_CAUSE_MAX];
 
 static struct {
     int installed, store, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
-    char ask[256], print[1024], toast[600], resume_note[256];
+    char ask[256], print[1600], toast[1600], resume_note[256];
 } R;
 
 static int r_on_main(void *c) { (void)c; return 1; }
@@ -1109,6 +1110,40 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     mods_end();
 }
 
+static void a_refused_zip_tells_the_player_why(void)
+{
+    char staged[MAX_PATH], why[1280], cause[MODEXPORT_CAUSE_MAX], want[sizeof cause + 64];
+    size_t n;
+    printf("\n-- a ZIP the importer refuses: the player hears the importer's reason, whole, and nothing loads\n");
+    mods_begin();
+    CHECK(temp_path("shared-map.zip", staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    /* A reason longer than the old 320-byte buffer, ending in its next step. */
+    strcpy_s(cause, sizeof cause, "test.alpha 1.0.0, a mod this map carries, does not install on this computer (");
+    for (n = strlen(cause); n < 600; n++) cause[n] = 'x';
+    cause[n] = 0;
+    strcat_s(cause, sizeof cause, "); nothing was installed. Ask whoever shared it for a new export saved with this release");
+    strcpy_s(g_mod_stub_import_cause, sizeof g_mod_stub_import_cause, cause);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "shared-map.zip was not opened: %s.", cause);
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(!strcmp(why, want));
+    CHECK(strstr(why, "backend log") == NULL);
+    CHECK(g_prepared == NULL && !g_in_reload);
+    sh_rawmap_poll_main();
+    CHECK(R.prints == 1 && !strcmp(R.print, want));
+    CHECK(R.toasts == 1 && !strcmp(R.toast, want));
+
+    printf("-- a .json that is missing: Windows' reason, worded\n");
+    CHECK(temp_path("no-such-map.json", staged, sizeof staged));
+    DeleteFileA(staged);
+    CHECK(sh_rawmap_swap_set_source(staged));
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(!strncmp(why, "no-such-map.json was not opened: ", 33) && strstr(why, "is missing") && strstr(why, "try again"));
+    strcpy_s(g_mod_stub_import_cause, sizeof g_mod_stub_import_cause, "the rawmap export is not linked into this test");
+    sh_rawmap_swap_set_source(NULL);
+    mods_end();
+}
+
 static void a_save_with_mods_writes_the_zip_beside_the_json(void)
 {
     char target[MAX_PATH], zip[MAX_PATH], status[4096];
@@ -1205,6 +1240,7 @@ int main(void)
     a_rawmap_whose_mods_are_installed_loads();
     a_rawmap_open_takes_its_own_rows_and_then_its_own_id();
     a_save_with_mods_writes_the_zip_beside_the_json();
+    a_refused_zip_tells_the_player_why();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

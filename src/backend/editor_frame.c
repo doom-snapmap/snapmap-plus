@@ -72,7 +72,7 @@ static volatile LONG  g_ticks     = 0;
 
 static CRITICAL_SECTION g_msg_lock;
 static int  g_msg_ready = 0;
-static char g_msg[192]  = "";
+static char g_msg[1280] = "";
 
 /* The 20-hex save-directory id the queued reload will hand to LoadMap. Captured when the request is
  * made (a disk walk is not something to do on a frame) and consumed on the frame that services it. */
@@ -335,10 +335,10 @@ static void ef_service_reload(void *editor)
 {
     ef_idstr s;
     const char *why = "";
-    char reason[256];
+    char reason[1280];   /* the rawmap layer's refusal: a file name and the importer's cause */
     int rc = 0;
     int prev_armed;
-    char line[256];
+    char line[sizeof reason + 96];
 
     if (!ef_editor_live_with_map(editor, &why)) return;   /* stay pending; try again next frame */
 

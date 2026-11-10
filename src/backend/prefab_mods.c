@@ -983,7 +983,7 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
     modexport_stats st;
     sh_modmanifest_list rows;
     char *text = NULL, given[256] = "", name[PM_NAME_MAX + 16], acp[PM_NAME_MAX * 2 + 16];
-    char dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[400], extra[400] = "";
+    char dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[MODEXPORT_CAUSE_MAX], extra[400] = "";
     size_t len = 0, i, absent = 0, dl;
     int k, result = -1;
     if (name_out && name_cap) name_out[0] = 0;

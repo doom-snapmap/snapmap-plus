@@ -127,6 +127,7 @@
 #define SH_MB_DESCRIPTOR_MAX  (1024u * 1024u)
 #define SH_MB_MANIFEST_MAX    (1024u * 1024u)   /* the store's bundle JSON cap */
 #define SH_MB_CAUSE_MAX       512u
+#define SH_MB_WARNINGS_KEPT   16u
 #define SH_MB_HASH_HEX        64u
 /* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
  * console line, within these bounds. The Worker's manifest check mirrors them. */
@@ -257,6 +258,13 @@ typedef struct sh_mb_bundle {
     unsigned errors, warnings;
     char  first_cause[SH_MB_CAUSE_MAX];
     char  first_warning[SH_MB_CAUSE_MAX];
+    /* Every warning in order, the first SH_MB_WARNINGS_KEPT of them
+     * (`warnings` counts them all). A built mod.json read back derives its
+     * descriptor's warnings again (the mod store's rules for keys, name and
+     * author), so a rescan and the doctor see them; the rest belong to the
+     * build's own report. */
+    char **warning_list;
+    size_t warning_list_count;
     /* Additive mods, phase 1. `id` above is the key: the namespace and the
      * canonical "id". */
     int   key_source;      /* SH_MB_KEY_FROM_*, 0 when unknown (a manifest) */

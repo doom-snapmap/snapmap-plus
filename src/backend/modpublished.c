@@ -554,8 +554,11 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
         break;
     default:
         out[0] = 0;
-        break;
+        return;
     }
+    /* A prefab's denial ends as every other prefab refusal does, saying the
+     * placement did not happen (architecture.md "Prefabs that name mods"). */
+    if (prefab && strlen(out) + 28 < cap) strcat_s(out, cap, " The prefab was not placed.");
 }
 
 int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, char *why, size_t why_cap)
