@@ -188,11 +188,21 @@ void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed);
 typedef int (*sh_modmanifest_resolve_fn)(const char *bundle_hash, const char *id, sh_modmanifest_row *out);
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 
+/* An author's own map follows their own folder (DESIGN-additive A.4, owner
+ * 2026-11-09): at an editor load (sh_modmanifest_set_editor_load 1: a map
+ * opened in the editor, a My Maps play), each row is offered to this op
+ * (modui.c binds sh_modserve_row_follow); 1 with `out` filled rewrites the
+ * row to that build before anything reads it, with one log line and no
+ * prompt, so the listing, the Mods tab and the next save name it. The op
+ * answers 1 only for an earlier hash of a folder of this machine's own (an
+ * alias an in-place rebuild recorded), never for a folder the product
+ * received with a map. NULL unbinds. */
+void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow);
+
 /* An editor open of the author's own map whose row pins a build that is no
  * longer installed (DESIGN-additive 2.5, 2.8): the installed build of the
- * same key serves in its place for this editor session, reported "declared
- * at build X, installed build Y"; the row keeps X until the author upgrades
- * the map (sh_mods map upgrade, the Mods tab) or a save re-pins it. The
+ * same key serves in its place for this editor session, with the hashes on
+ * the backend log; the row keeps X until a save re-pins it. The
  * substitute op answers per row: 1 with the build to serve (hash_out), 0 none
  * (why: the gate's sentence, may be empty). Bound by modpublished.c, which
  * asks its denial gate (sh_modpub_gate_decide, an editor open). Only a parse
@@ -232,11 +242,6 @@ size_t sh_modmanifest_current_remove(const char *bundle);
  * The next save writes it (sh_modmanifest_on_save) and every later load keeps
  * it. Returns 1 attached now, 0 already attached, -1 invalid or out of memory. */
 int    sh_modmanifest_current_attach(const sh_modmanifest_row *row);
-/* Point the current manifest's row of `from` (exact hash) at the build `to`
- * names (id, version, bundle, size): the Mods tab's "upgrade this map to the
- * installed build". The next listing and save follow it. 1 renamed, 0 no such
- * row or `to` is already a row. */
-int    sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to);
 /* A copy of the current manifest's map-level rows. Returns the row count. */
 size_t sh_modmanifest_current_attached(sh_modmanifest_list *out);
 /* Forget the current manifest (tests). */

@@ -2380,7 +2380,7 @@ static void me_print_bundle(void *context, const char *id, const char *version, 
                             int admitted, const char *cause, int files, int legacy)
 {
     (void)context;
-    sh_printf("  %s%s@%s  %.12s  %s%s%s  %d files\n", legacy ? "legacy " : "", id, version, hash,
+    sh_printf("  %s%s@%s  %.12s  %s%s%s  %d files\n", legacy ? "delivered " : "", id, version, hash,
               admitted ? "active" : "SKIPPED", admitted ? "" : ": ", admitted ? "" : cause, files);
 }
 

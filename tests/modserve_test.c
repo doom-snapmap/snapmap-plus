@@ -710,6 +710,42 @@ static void test_plan_alias(void)
     CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
     sh_modserve_plan_free(&p);
     CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+    /* The author's own folder (no origin: made by hand): a row pinning the
+     * earlier hash follows it; a hash installed as itself is no alias. */
+    {
+        sh_modserve_bundle_ref ref;
+        char path[MAX_PATH], *text = NULL, *edited;
+        size_t len = 0;
+        const char *at;
+        CHECK(sh_modserve_row_follow(OLD, &ref) == 1 && !strcmp(ref.hash, g_hash_a) && !strcmp(ref.id, "alex.pink-imp") &&
+              !strcmp(ref.version, "1.0.0"));
+        CHECK(sh_modserve_row_follow(g_hash_a, &ref) == 0 && sh_modserve_row_follow(g_hash_a2, &ref) == 0);
+        CHECK(sh_modserve_row_follow("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", &ref) == 0);
+        /* The same folder downloaded for a map (origin download): the alias
+         * still serves the pin, but the row is never rewritten. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.pink-imp@1.0.0\\mod.json", g_root);
+        text = (char *)sh_mb_read_file(path, 1u << 20, &len);
+        at = text ? strstr(text, "\"snapmap-plus\": {\"format\": 1,") : NULL;
+        CHECK(at != NULL);
+        if (at) {
+            size_t head = (size_t)(at - text) + strlen("\"snapmap-plus\": {\"format\": 1,");
+            static const char ins[] = " \"origin\": \"download\",";
+            const size_t il = sizeof ins - 1;
+            edited = (char *)malloc(len + il + 1);
+            memcpy(edited, text, head);
+            memcpy(edited + head, ins, il);
+            memcpy(edited + head + il, text + head, len - head);
+            write_file(path, edited, len + il);
+            CHECK(sh_modserve_index_build(g_root) == n);
+            CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+            CHECK(sh_modserve_row_follow(OLD, &ref) == 0);
+            write_file(path, text, len);
+            CHECK(sh_modserve_index_build(g_root) == n);
+            CHECK(sh_modserve_row_follow(OLD, &ref) == 1);
+            free(edited);
+        }
+        free(text);
+    }
     /* Without the alias the pinned hash is unknown. */
     CHECK(sh_mb_record_put(g_root, "aliases", NULL));
     CHECK(sh_modserve_index_build(g_root) == n);
@@ -3791,8 +3827,7 @@ static void test_additive_same_key(void)
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
     strcpy_s(row.bundle, sizeof row.bundle, h3);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Fork (k.fork) at build 8888888888888888, which is not installed; k.fork is installed "
-                         "at another build (7777777777777777)."));
+    CHECK(!strcmp(cause, "This map uses Fork (k.fork), which is not installed."));
     CHECK(sh_modserve_row_other_build(&row, &ref) && !strcmp(ref.hash, h2));
     strcpy_s(row.bundle, sizeof row.bundle, h2);
     CHECK(!sh_modserve_row_other_build(&row, &ref));
@@ -3895,8 +3930,10 @@ static void test_additive_compose(void)
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/hammer") && !strstr(text, "spider_mastermind"));
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
-    /* Grandfathered packages (their Toybox rows shadow editor decls) keep
-     * composing with each other in every map, as before phase 2. */
+    /* Converted first-generation packages (their Toybox rows shadow editor
+     * decls) follow the declared rule like any mod (owner 2026-11-09): in
+     * Play of a map that declares neither, nothing of them serves; a map
+     * that declares both composes them. */
     {
         static const fx_file lg1[] = {
             { CONDUCTOR, CONDUCTOR_GUARD, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'd' },
@@ -3915,9 +3952,17 @@ static void test_additive_compose(void)
         make_bundle(groot, "local.spider", "local.spider", "0.0.0", '5',
                     "\"" CONDUCTOR "\", \"generated/decls/snapeditorentitydef/demons/spider_enc.decl\"", lg2, 2, NULL);
         g_bundle_extra = NULL;
+        char h4[65], h5[65];
+        const char *both[2];
+        sh_modserve_scope_info gi;
         CHECK(sh_modserve_index_build(groot) == 2);
-        CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/staff") && strstr(text, "spider_mastermind_base"));
+        hash64('4', h4); hash64('5', h5);
+        CHECK(sh_modserve_bundle_scope(h4, &gi) && gi.scope == SH_MODSERVE_SCOPE_ALWAYS);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0 && sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);
+        CHECK(open_text(CONDUCTOR, text, sizeof text) != 1 || (!strstr(text, "talismanguard/staff") && !strstr(text, "spider_mastermind_base")));
+        CHECK(sh_modserve_bundle_scope(h4, &gi) && !gi.names_live);
+        both[0] = h4; both[1] = h5;
+        CHECK(sh_modserve_scope_set(both, 2, NULL, 0, 1) >= 1);
         CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "talismanguard/staff") && strstr(text, "spider_mastermind_base"));
         CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     }
@@ -4087,7 +4132,7 @@ static void test_resource_lock(void)
 
 /* The asset rule (sh_modserve_row_served): a row is served by the admitted
  * folder at its hash that provides every name it lists; missing with no
- * folder at that hash (worded "installed at another build" when the key is
+ * folder at that hash (worded as any missing mod, also when the key is
  * installed at another hash); incomplete, naming the first missing names,
  * when the folder lacks one. */
 static void test_row_served(void)
@@ -4142,8 +4187,7 @@ static void test_row_served(void)
     make_bundle(root, "hand-made", "local.hell-guard", "2.0.0", 'e', NULL, HG_NEW, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Hell Guards (local.hell-guard) at build dddddddddddddddd, which is not installed; "
-                         "local.hell-guard is installed at another build (eeeeeeeeeeeeeeee)."));
+    CHECK(!strcmp(cause, "This map uses Hell Guards (local.hell-guard), which is not installed."));
 
     /* The folder at the hash that lacks one listed path: incomplete, naming it. */
     remove_tree(top);
@@ -4370,7 +4414,7 @@ static void test_mixed_editor_bundle(void)
     strcpy_s(g_text_val[3], sizeof g_text_val[3], "stock");
     CHECK(sh_modserve_lookup(MX_SET, NULL) && sh_modserve_lookup(MX_NEW, NULL) && sh_modserve_lookup(PU_NEW, NULL));
     CHECK(sh_modserve_requirements_apply(&g_gates, "hub", &r) >= 0 && !strcmp(g_text_val[3], "stock"));
-    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic && !si.whole &&
+    CHECK(sh_modserve_bundle_scope(h_mixed, &si) && si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.automatic &&
           si.shadows_live && si.names_live && !si.requirements_live);
     /* Play of a map that declares nothing: only the tweak. */
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 1) >= 0);

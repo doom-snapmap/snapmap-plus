@@ -513,7 +513,7 @@ static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t
 {
     g_subst_calls++;
     if (!strcmp(row->id, "alex.gone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
-    strcpy_s(why, why_cap, "This map needs nobody.here at a build that is not installed and was never published.");
+    strcpy_s(why, why_cap, "This map needs nobody.here, which is not installed and was never published.");
     return 0;
 }
 
@@ -559,10 +559,6 @@ static void editor_substitution(void)
         CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].bundle, gone));
         sh_modmanifest_list_free(&cur);
     }
-    /* Upgrade this map: the row moves to the installed build and the substitution ends. */
-    strcpy_s(row.id, sizeof row.id, "alex.gone");
-    strcpy_s(row.bundle, sizeof row.bundle, HASH_A);
-    CHECK(sh_modmanifest_current_rename(gone, &row) == 1 && !sh_modmanifest_substituted(gone, sub, sizeof sub));
     /* The next load starts over. */
     sh_modmanifest_set_editor_load(1);
     loaded = text ? sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &ll) : NULL;
@@ -574,6 +570,74 @@ static void editor_substitution(void)
     sh_modmanifest_list_free(&rows);
     sh_modmanifest_reset();
     g_installed_count = 0;
+}
+
+/* The follow op as modui binds it: OWN_OLD is an earlier hash of a folder
+ * this machine made, now HASH_A; DL_OLD is a downloaded map's pin, which an
+ * alias of a received folder answers but never rewrites. */
+#define OWN_OLD "00000000000000000000000000000000000000000000000000000000000000e1"
+#define DL_OLD  "00000000000000000000000000000000000000000000000000000000000000e2"
+static int g_follow_calls;
+static int fake_follow(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    (void)id;
+    g_follow_calls++;
+    if (strcmp(bundle_hash, OWN_OLD)) return 0;
+    strcpy_s(out->id, sizeof out->id, "alex.own");
+    strcpy_s(out->version, sizeof out->version, "1.1.0");
+    strcpy_s(out->bundle, sizeof out->bundle, HASH_A);
+    out->size = 4321;
+    return 1;
+}
+
+static void own_folder_follow(void)
+{
+    sh_modmanifest_list rows = {0}, cur;
+    sh_modmanifest_row row;
+    char err[256], *text, *loaded;
+    size_t tl = 0, ll = 0;
+    printf("-- an editor load follows the author's own rebuilt folder; a downloaded pin stays\n");
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "alex.own");
+    strcpy_s(row.version, sizeof row.version, "1.0.0");
+    strcpy_s(row.bundle, sizeof row.bundle, OWN_OLD);
+    row.size = 10;
+    CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.own/thing"));
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    sh_modmanifest_row_free(&row);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "bob.dl");
+    strcpy_s(row.version, sizeof row.version, "2.0.0");
+    strcpy_s(row.bundle, sizeof row.bundle, DL_OLD);
+    row.size = 20;
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
+    CHECK(text != NULL);
+    sh_modmanifest_set_follow(fake_follow);
+    /* A published map's parse is not the author's editor: nothing is asked. */
+    g_follow_calls = 0;
+    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    CHECK(g_follow_calls == 0);
+    CHECK(sh_modmanifest_current(&cur) == 2 && !strcmp(cur.rows[0].bundle, OWN_OLD));
+    sh_modmanifest_list_free(&cur);
+    /* The editor's parse: the own row is rewritten, with its names; the downloaded one keeps its pin. */
+    g_last_log[0] = 0;
+    sh_modmanifest_set_editor_load(1);
+    loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+    sh_modmanifest_set_editor_load(0);
+    if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    CHECK(g_follow_calls == 2);
+    CHECK(sh_modmanifest_current(&cur) == 2);
+    CHECK(!strcmp(cur.rows[0].bundle, HASH_A) && !strcmp(cur.rows[0].version, "1.1.0") && cur.rows[0].size == 4321 &&
+          cur.rows[0].name_count == 1 && !strcmp(cur.rows[0].names[0], "mods/alex.own/thing"));
+    CHECK(!strcmp(cur.rows[1].bundle, DL_OLD) && !strcmp(cur.rows[1].version, "2.0.0"));
+    sh_modmanifest_list_free(&cur);
+    CHECK(g_activate_count == 2 && !strcmp(g_activated[0], HASH_A));
+    sh_modmanifest_set_follow(NULL);
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_reset();
 }
 
 static void save_closure(void)
@@ -1081,6 +1145,7 @@ int main(void)
     placed_names();
     save_closure();
     editor_substitution();
+    own_folder_follow();
     activate_by_id();
     load_step();
     mod_json();

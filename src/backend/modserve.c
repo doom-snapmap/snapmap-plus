@@ -115,6 +115,7 @@ typedef struct ms_bundle {
     const char *extra;                    /* the author block's other keys (and a product-block legacy) as JSON, or NULL */
     int legacy, admitted, first_file, file_count;   /* legacy: a package a map delivered */
     int grandfathered;                    /* a "legacy" object (author or product block): shadows may be new names */
+    int own;                              /* this machine's own folder: origin by-hand (or none), install or migration */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
     const char *req_text;                 /* canonical requirements (sh_mb_requirements_canonical), or NULL */
     ms_req_cvar *req_cvars; int req_ncvars;
@@ -938,7 +939,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     int nshadows = 0, cshadows = 0, i, validated = 1, members = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
-    char last[SH_MB_CAUSE_MAX] = "", *block_key = NULL;
+    char last[SH_MB_CAUSE_MAX] = "", *block_key = NULL, *origin = NULL;
     int manifest = 0;   /* the text is a snapshot's bundle.json (Contract 1 form), not a mod.json */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
@@ -1044,6 +1045,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
             if (!strcmp(key, "format")) { if (!manifest && !ms_jnum(v, ve, &format)) format = -1; }
             else if (!strcmp(key, "key")) block_key = ms_jstr(x, v, ve, 96);
+            else if (!strcmp(key, "origin")) origin = ms_jstr(x, v, ve, 16);
             else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
             else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
             else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
@@ -1059,6 +1061,12 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             }
         }
     }
+    /* The author's iteration path (DESIGN-additive A.4): a folder the author
+     * made or installed from a folder of their own, or their overrides moved
+     * in; never one the product received with a map (a rawmap or prefab
+     * import, a download, a delivered package). */
+    b->own = !origin || !origin[0] || !strcmp(origin, SH_MB_ORIGIN_BY_HAND) || !strcmp(origin, SH_MB_ORIGIN_MIGRATION) ||
+             !strcmp(origin, SH_MB_ORIGIN_INSTALL);
     if (author_legacy_v) {
         b->grandfathered = 1;
         b->legacy = ms_delivered(author_legacy_v, author_legacy_e);
@@ -2507,12 +2515,11 @@ static const char *const g_why_text[] = {
  * or movies. Those files are editor tweaks (DESIGN-additive 2.6): client-side,
  * they serve in every map this editor opens, a downloaded map included, and
  * nothing else of the bundle follows them: its names, surfaces, other shadows,
- * edits and requirements obey the declared rule like any bundle's. Only a
- * grandfathered package (a converted first-generation package whose Toybox
- * rows are shadows) still serves everything it carries in every map, until
- * it is rebuilt under a key. A mod.json "scope" key no longer chooses. */
+ * edits and requirements obey the declared rule like any bundle's. A converted
+ * first-generation package follows the same rule (owner 2026-11-09: no
+ * grandfathered serving; its map's row declares it). A mod.json "scope" key
+ * no longer chooses. */
 static int ms_scope_always(const ms_bundle *b) { return b->scope_editor != NULL; }
-static int ms_scope_whole(const ms_bundle *b) { return b->scope_editor != NULL && b->grandfathered; }
 
 /* The file class a bundle's serve flags admit. */
 static int ms_sv_class(const ms_file *f)
@@ -3081,7 +3088,7 @@ static int ms_registry_compute(ms_index *x, int on)
         for (i = 0; i < x->nbundles; ++i) {
             ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->reg_relevant || b->inert) continue;
-            if (b->rank < 0 && !ms_scope_whole(b)) continue;
+            if (b->rank < 0) continue;
             if (n < MS_REG_SOURCE_MAX) set[n++] = b;
         }
         qsort(set, (size_t)n, sizeof *set, ms_reg_order);
@@ -3164,14 +3171,13 @@ static int ms_scope_compute(ms_index *x, int mark)
                 inert = k != i && rank[k] >= 0 && rank[i] < 0 && !strcmp(x->bundles[k].id, b->id);
             if (!on || rank[i] >= 0) sv = MS_SV_ALL;
             else if (inert) sv = 0;
-            else if (ms_scope_whole(b)) sv = MS_SV_ALL;
             else if (play) sv = ms_scope_always(b) ? MS_SV_EDITOR : 0;
             else sv = (ms_scope_always(b) ? MS_SV_EDITOR : 0) | (b->newest ? MS_SV_NEW : 0) | MS_SV_RESTORE;
             /* Requirements are cvars: a declared bundle's apply; a bundle with
              * Toybox rows keeps them outside Play, because the palette
              * registers its rows in every editor map and with none open; in
              * Play no undeclared bundle's apply; an inert build never. */
-            roff = on && rank[i] < 0 && !ms_scope_whole(b) && (inert || play || !(b->has_rows && b->newest));
+            roff = on && rank[i] < 0 && (inert || play || !(b->has_rows && b->newest));
             b->inert = inert;
             was_sv = InterlockedExchange(&b->sv, sv);
             was_rank = InterlockedExchange(&b->rank, on ? rank[i] : -1);
@@ -3348,10 +3354,7 @@ static void ms_scope_log(const ms_index *x, const ms_index *old)
         if (!b->admitted || (!b->scope_editor && !b->scope_declared)) continue;
         o = old ? ms_bundle_by_hash(old, b->hash, 1) : -1;
         if (o >= 0) continue;
-        if (b->scope_editor && b->grandfathered)
-            ms_log("scope: %s@%s shadows editor-time content (%s); it serves in every map, as a grandfathered "
-                   "package does until it is rebuilt under its key", b->id, b->version, b->scope_editor);
-        else if (b->scope_editor)
+        if (b->scope_editor)
             ms_log("scope: %s@%s shadows editor-time content (%s); its editor tweaks serve in every map this editor "
                    "opens, the rest only in maps that declare it", b->id, b->version, b->scope_editor);
         else
@@ -3551,7 +3554,6 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     out->scope = ms_scope_always(b) ? SH_MODSERVE_SCOPE_ALWAYS : SH_MODSERVE_SCOPE_MAP;
     out->declared = b->scope_declared;
     out->automatic = b->scope_editor != NULL;
-    out->whole = ms_scope_whole(b);
     out->rank = (int)InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0);
     out->listed = out->rank >= 0;
     out->inert = InterlockedCompareExchange((volatile LONG *)&b->inert, 0, 0) != 0;
@@ -3709,8 +3711,6 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
         else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its key");
-        else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS && si.whole)
-            _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): serves in every map", si.editor_path);
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
                         "the rest only in maps that declare it", si.editor_path);
@@ -6001,8 +6001,8 @@ static int ms_other_build(const ms_index *x, const char *id, int not)
 /* The asset rule (modserve.h): a row is served by the installed folder at the
  * row's hash (or an alias of it) when every name it lists resolves, in that
  * build or through the serving index. A folder of the key at another hash is
- * another build: the row is missing, worded "installed at another build", and
- * the published-map hold fetches the row's own build by hash. */
+ * another build: the row is missing, worded as any missing mod, and the
+ * published-map hold fetches the row's own build by hash. */
 int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     const ms_index *x = g_index;
@@ -6036,9 +6036,6 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
             if (skipped >= 0 && x->bundles[skipped].hash && !_stricmp(x->bundles[skipped].hash, row->bundle))
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
-            else if (other >= 0)
-                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s at build %.16s, which is not installed; %s is "
-                            "installed at another build (%.16s).", what, title, row->bundle, row->id, x->bundles[other].hash);
             else if (skipped >= 0)
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
@@ -6072,6 +6069,30 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
 int sh_modserve_row_served(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
     return sh_modserve_row_served_for(row, "map", cause, cap);
+}
+
+int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out)
+{
+    const ms_index *x = g_index;
+    int i, at;
+    if (out) memset(out, 0, sizeof *out);
+    if (!x || !bundle_hash || strlen(bundle_hash) != 64) return 0;
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].hash && !_stricmp(x->bundles[i].hash, bundle_hash)) return 0;   /* installed as itself */
+    for (i = 0; i < x->naliases; ++i)
+        if (!_stricmp(x->aliases[i].from, bundle_hash)) break;
+    if (i == x->naliases) return 0;
+    for (at = 0; at < x->nbundles; ++at)
+        if (x->bundles[at].hash && !_stricmp(x->bundles[at].hash, x->aliases[i].to)) break;
+    if (at == x->nbundles || !x->bundles[at].admitted || !x->bundles[at].own || x->bundles[at].legacy) return 0;
+    if (out) {
+        const ms_bundle *b = &x->bundles[at];
+        strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
+        strncpy_s(out->version, sizeof out->version, b->version ? b->version : "", _TRUNCATE);
+        strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
+        out->size = (unsigned long long)b->total;
+    }
+    return 1;
 }
 
 int sh_modserve_row_other_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)

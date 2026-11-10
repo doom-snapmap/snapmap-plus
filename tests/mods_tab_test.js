@@ -1,5 +1,5 @@
 /* The Mods tab (mods_tab.js): the payload model (v3, and v2 from a backend that predates it), the
-   three row states, the flat list's order and its "In this map" pill, the retired collapsed-groups
+   three row states, the flat list's order and its one glyph per row, the retired collapsed-groups
    setting left alone, the origin line, the attention filter, the details
    sections, the empty states, the map modal (the decl focus modal's mechanism), the dry-run-driven
    confirmations of Remove from map and Uninstall, the vanilla state, the stand-in host the browser
@@ -96,7 +96,8 @@ function harness(opts) {
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
 function keys(h) { return rows(h).map(n => n.getAttribute('data-key')); }
-function pills(h) { return rows(h).filter(n => n.all('mods-pill').length).map(n => n.getAttribute('data-key')); }
+/* The rows whose one glyph is "in this map" (the pill is gone, owner 2026-11-09). */
+function pills(h) { return rows(h).filter(n => iconOf(n) === 'map').map(n => n.getAttribute('data-key')); }
 function iconOf(n) { return n.all('mods-status-icon')[0].getAttribute('data-status'); }
 function section(h, name, box) { return (box || h.nodes.modsDetail).all('mods-section').find(n => n.getAttribute('data-section') === name); }
 function modalText(h) { return h.nodes.modsMapHost.textContent; }
@@ -176,7 +177,7 @@ test('normalize: hostile and missing values', () => {
   assert.deepEqual(pv.map.references.map(r => r.kind), ['wire', 'timeline'], 'only wires and timeline references are severed');
   assert.deepEqual(pv.editorRows, []);
 });
-test('three states: every backend state and cause maps onto check, triangle or info', () => {
+test('two states: every backend state and cause maps onto check or triangle, with no build talk', () => {
   const s = b => modsTab.statusInfo(Object.assign({state: 'installed', files: 3, cause: '', duplicateId: false, servedBy: ''}, b));
   assert.deepEqual([s({}).tone, s({}).icon], ['ok', 'check']);
   assert.equal(s({}).sentence, 'Installed and serving 3 files');
@@ -194,13 +195,20 @@ test('three states: every backend state and cause maps onto check, triangle or i
                        'not built yet: bundle.json is missing', 'mod.json unreadable'])
     assert.equal(s({state: 'attention', cause}).cause, cause);
   assert.equal(s({state: 'attention'}).cause, 'not in use');
+  /* a folder another build of its key outranks is simply installed (owner 2026-11-09) */
   const info = s({servedBy: 'local.cyberdemon@0.0.0-05238b2e'});
-  assert.deepEqual([info.tone, info.icon], ['info', 'circle-info']);
-  assert.match(info.sentence, /^Installed; another build of this mod \(local\.cyberdemon@0\.0\.0-05238b2e\) serves its files\.$/);
-  assert.deepEqual(Object.keys(modsTab.STATUS), ['ok', 'warn', 'info']);
-  assert.equal(modsTab.mapModStatus({state: 'missing'}).cause, 'not installed on this machine');
+  assert.deepEqual([info.tone, info.icon], ['ok', 'check']);
+  assert.equal(info.sentence, 'Installed and serving 3 files');
+  assert.deepEqual(Object.keys(modsTab.STATUS), ['ok', 'warn']);
+  assert.equal(modsTab.mapModStatus({state: 'missing'}).cause, 'not installed on this computer; playing the map downloads it');
+  assert.equal(modsTab.mapModStatus({state: 'otherBuild'}).cause, modsTab.mapModStatus({state: 'missing'}).cause,
+    'another installed build of the key is never mentioned');
   assert.equal(modsTab.mapModStatus({state: 'active'}).tone, 'ok');
-  assert.equal(modsTab.mapModStatus({state: 'superseded'}).tone, 'info');
+  assert.equal(modsTab.mapModStatus({state: 'superseded'}).tone, 'ok');
+  const failed = s({buildFailed: {cause: 'x.decl: parse error', snapshot: true, servingBuild: 3}});
+  assert.equal(failed.cause, 'its latest build failed: x.decl: parse error; the last working version keeps serving until it builds');
+  for (const t of [info.sentence, failed.cause, modsTab.DUPLICATE_TEXT, modsTab.mapModStatus({state: 'otherBuild'}).cause])
+    assert.doesNotMatch(t, /build \d|another build|upgrade|legacy|grandfather/i, t);
 });
 test('origins: one plain line per origin', () => {
   assert.equal(modsTab.originText({origin: ''}), 'Added by hand');
@@ -248,8 +256,8 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
-                                     'mapUpgradeMod']);
+                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry']);
+  assert.equal(modsTab.actionMessage('mapUpgradeMod', 'a'), null, 'no build management: the upgrade action is gone');
   assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'),
                    {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'});
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
@@ -272,7 +280,7 @@ test('show rescans once; the list waits for the answer', () => {
   assert.equal(h.sent.length, 2, 'showing the tab again rereads the folder');
   assert.equal(h.ui.onMessage({kind: 'other'}), false);
 });
-test('the list: one flat list, one status icon per row, two lines per row, the In this map pill', () => {
+test('the list: one flat list, one status glyph per row, two lines per row, no pills', () => {
   const h = harness();
   shown(h);
   assert.equal(h.nodes.modsBadge.textContent, '36');
@@ -286,35 +294,35 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   assert.equal(hg.all('mods-row-name')[0].textContent, 'Hell Guards');
   assert.equal(hg.all('mods-row-sub')[0].textContent, 'local.hell-guard \u00b7 0.0.0 \u00b7 1.2 MB');
   assert.ok(!/files|installed game/.test(hg.textContent), 'the file counts left the row');
-  /* the open map's mods (the document's map.mods) carry the pill, and only those */
+  /* the open map's mods (the document's map.mods) show the in-this-map glyph, and only those */
   const used = v3.map.mods.map(r => r.key).filter(k => v3.mods.some(b => b.key === k));
   assert.ok(used.length >= 2 && used.indexOf('local.hell-guard') >= 0);
   assert.deepEqual(pills(h).slice().sort(), used.slice().sort());
-  const pill = hg.all('mods-pill')[0];
-  assert.equal(pill.textContent, 'In this map');
-  assert.equal(pill.title, 'The open map uses this mod');
-  assert.equal(hg.children[hg.children.length - 1], pill, 'the pill closes the row');
-  assert.equal(rowOf(h, 'airlock').all('mods-pill').length, 0);
-  assert.equal(iconOf(hg), 'ok');
-  assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install');
-  const icon = hg.all('mods-status-icon')[0];
+  assert.ok(rows(h).every(n => n.all('mods-pill').length === 0 && n.all('mods-status-icon').length === 1), 'one glyph, no pill');
+  assert.equal(hg.all('mods-status-icon')[0].getAttribute('aria-label'), 'In this map');
+  assert.equal(hg.all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-map');
+  assert.match(hg.title, /The open map uses this mod/);
+  assert.equal(hg.getAttribute('data-in-map'), 'true');
+  assert.equal(hg.children.length, 2, 'glyph and text, nothing else');
+  assert.equal(iconOf(rowOf(h, 'airlock')), 'ok');
+  assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install. The open map uses this mod.');
+  const icon = rowOf(h, 'airlock').all('mods-status-icon')[0];
   assert.equal(icon.children[0].ns, 'http://www.w3.org/2000/svg');
   assert.equal(icon.children[0].children[0].getAttribute('href'), '#icon-check');
   for (const key of ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']) {
-    assert.equal(iconOf(rowOf(h, key)), 'warn');
+    assert.equal(iconOf(rowOf(h, key)), 'warn', 'needs attention wins over in this map');
     assert.equal(rowOf(h, key).title, modsTab.DUPLICATE_TEXT);
   }
   assert.equal(rowOf(h, 'local.cyberdemon@0.0.0').all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-triangle-alert');
-  /* the grey info state */
+  /* a folder another build of its key outranks: installed, with no grey state and no build talk */
   const sup = clone(v3);
   sup.mods.find(b => b.key === 'local.cyberdemon@0.0.0').duplicateId = false;
   sup.mods.find(b => b.key === 'local.cyberdemon@0.0.0').state = 'installed';
   h.ui.onMessage({kind: 'mods', data: sup});
   const grey = rowOf(h, 'local.cyberdemon@0.0.0');
-  assert.equal(iconOf(grey), 'info');
-  assert.equal(grey.all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-circle-info');
-  assert.match(grey.title, /another build of this mod \(local\.cyberdemon@0\.0\.0-05238b2e\) serves its files/);
-  /* the pill follows the document: no map open, no pill; a map that drops a mod drops its pill */
+  assert.equal(iconOf(grey), 'ok');
+  assert.doesNotMatch(grey.title, /another build/);
+  /* the glyph follows the document: no map open, none; a map that drops a mod drops its glyph */
   const closed = clone(v3);
   closed.map = {entities: -1, names: 0, rows: [], placed: []};
   h.ui.onMessage({kind: 'mods', data: closed});
@@ -324,7 +332,7 @@ test('the list: one flat list, one status icon per row, two lines per row, the I
   h.ui.onMessage({kind: 'mods', data: fewer});
   assert.deepEqual(pills(h), ['local.hell-guard']);
   rowOf(h, 'local.hell-guard').click();
-  assert.equal(rowOf(h, 'local.hell-guard').all('mods-pill').length, 1, 'selecting keeps the pill');
+  assert.equal(iconOf(rowOf(h, 'local.hell-guard')), 'map', 'selecting keeps the glyph');
 });
 test('the retired collapsed-groups setting is neither read nor written', () => {
   const h = harness();
@@ -366,19 +374,20 @@ test('the filter matches name, id and folder over the flat list', () => {
   h.nodes.modsFilter.dispatch('input');
   assert.match(h.nodes.modsList.textContent, /No installed mod matches/);
 });
-test('the attention badge filters to the rows that need attention', () => {
+test('the attention icon button filters to the rows that need attention; its count is its hover', () => {
   const h = harness();
   assert.equal(h.nodes.modsAttnBtn.style.display, 'none', 'hidden before the first answer');
   shown(h);
   const b = h.nodes.modsAttnBtn;
   assert.equal(b.tagName, 'button', 'a real button: focusable, Enter and Space work');
   assert.equal(b.style.display, '');
-  assert.match(b.textContent, /^2$/);
+  assert.equal(b.textContent, '', 'an icon, no number on the button');
+  assert.match(b.title, /^2 mods need attention: show only these$/);
   assert.equal(b.getAttribute('aria-pressed'), 'false');
-  assert.match(b.className, /badge mods-attn/);
+  assert.equal(b.className, 'btn icon icon-button mods-attn', 'the panel icon button');
   b.click();
-  assert.equal(b.getAttribute('aria-pressed'), 'true');
-  assert.match(b.className, / on$/, 'the pressed state shows');
+  assert.equal(b.getAttribute('aria-pressed'), 'true', 'the pressed state shows');
+  assert.match(b.title, /show every mod$/);
   assert.deepEqual(rows(h).map(n => n.getAttribute('data-key')), ['local.cyberdemon@0.0.0', 'local.cyberdemon@0.0.0-05238b2e']);
   b.click();
   assert.equal(rows(h).length, 36);
@@ -440,9 +449,10 @@ test('details: every section for a v3 mod', () => {
   assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
   assert.equal(d.all('mods-detail-head')[0].all('mods-status-icon')[0].getAttribute('data-status'), 'ok');
   assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Installed and serving 24 files, 476 more read from your install');
-  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'facts', 'files', 'requirements', 'sharing']);
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'facts', 'files', 'requirements', 'build', 'sharing']);
   const about = section(h, 'about').textContent;
-  for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Build 2', 'Description The three Hell Guard brothers',
+  assert.ok(!/Build 2/.test(section(h, 'about').textContent), 'no build number');
+  for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Description The three Hell Guard brothers',
                    'Folder local.hell-guard', 'Moved from the old overrides folder (overrides\\hell-guards)'])
     assert.ok(about.indexOf(s) >= 0, s + ' in ' + about);
   assert.equal(section(h, 'about').all('mods-origin')[0].textContent, 'Moved from the old overrides folder (overrides\\hell-guards)',
@@ -474,9 +484,10 @@ test('details: every section for a v3 mod', () => {
   assert.ok(req.indexOf(modsTab.NEEDS_NOTE) >= 0);
   const share = section(h, 'sharing').textContent;
   assert.match(share, /Used by 2 of your published maps/);
-  assert.match(share, /Last built \d{4}-\d\d-\d\d \d\d:\d\d/);
-  assert.ok(share.indexOf('Bundle ' + v3.mods.find(m => m.key === 'local.hell-guard').bundle.slice(0, 16)) >= 0);
-  assert.match(share, /when you ask for help/);
+  const built = section(h, 'build').textContent;
+  assert.match(built, /Last built \d{4}-\d\d-\d\d \d\d:\d\d/);
+  assert.ok(built.indexOf('Bundle ' + v3.mods.find(m => m.key === 'local.hell-guard').bundle.slice(0, 16)) >= 0);
+  assert.match(built, /when you ask for help/);
   /* the folder link opens that folder */
   section(h, 'about').all('mods-link')[0].click();
   assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'openFolder', arg: 'local.hell-guard'});
@@ -534,7 +545,33 @@ test('details: a v2 document renders with the v3 parts left out', () => {
   assert.equal(rowOf(h, 'unbuilt-folder').all('mods-row-sub')[0].textContent, 'unbuilt-folder');
   /* v2 has no origins and no map mods: every row is a plain row without a pill */
   assert.deepEqual(pills(h), []);
-  assert.equal(h.nodes.modsAttnBtn.textContent, '4');
+  assert.match(h.nodes.modsAttnBtn.title, /^4 mods need attention/);
+});
+test('builder warnings: one plain line each under Build; a warning is not attention', () => {
+  const doc = clone(v3);
+  const air = doc.mods.find(m => m.key === 'airlock');
+  air.warnings = ['mod.json "displayName" is not published to the store; use "name"', 'assets/x.decl names y, which no archive holds'];
+  air.firstWarning = air.warnings[0];
+  const h = live(doc);
+  h.ui.select('airlock');
+  const lines = section(h, 'build').all('mods-warning').map(n => n.textContent);
+  assert.deepEqual(lines, air.warnings);
+  assert.equal(iconOf(rowOf(h, 'airlock')), 'ok', 'installed, not needs attention');
+  assert.equal(modsTab.statusInfo(modsTab.normalize(doc).mods.find(m => m.key === 'airlock')).tone, 'ok');
+  /* only firstWarning: that one line; neither: no line */
+  delete air.warnings;
+  assert.deepEqual(modsTab.normalize(doc).mods.find(m => m.key === 'airlock').warnings, [air.firstWarning]);
+  delete air.firstWarning;
+  assert.deepEqual(modsTab.normalize(doc).mods.find(m => m.key === 'airlock').warnings, []);
+  /* the stand-in host carries the warning through an action's fresh document */
+  const doc2 = clone(v3);
+  doc2.mods.find(m => m.key === 'airlock').firstWarning = 'assets/x.decl names y, which no archive holds';
+  const host = modsTab.standIn(doc2);
+  const out = host({cmd: 'modsAction', action: 'rebuild', arg: 'airlock'});
+  const h2 = live(out[1].data);
+  h2.ui.select('airlock');
+  assert.deepEqual(section(h2, 'build').all('mods-warning').map(n => n.textContent), ['assets/x.decl names y, which no archive holds']);
+  assert.equal(iconOf(rowOf(h2, 'airlock')), 'ok');
 });
 test('empty states: How mods work, with and without mods', () => {
   const h = harness();
@@ -598,7 +635,7 @@ test('the map modal opens and closes like the decl focus modal', () => {
   assert.equal(mr.length, 5);
   assert.match(mr[0].textContent, /^Hell Guards local\.hell-guard \u00b7 0\.0\.0 \u00b7 1\.2 MB 12 placed entities use it Also used by timeline: Wave 2: spawn the guards, wire: Relay: all guards dead Remove from map$/);
   assert.equal(iconOf(mr[4]), 'warn');
-  assert.match(mr[4].textContent, /jo\.lava-floor .* 2 placed entities use it; not installed on this machine/);
+  assert.match(mr[4].textContent, /jo\.lava-floor .* 2 placed entities use it; not installed on this computer; playing the map downloads it/);
   /* Escape, the backdrop and the close button each close it; focus returns to the opener */
   let e = ov.dispatch('keydown', {key: 'Escape'});
   assert.equal(e.defaultPrevented, true);
@@ -753,11 +790,11 @@ test('Uninstall goes to the Recycle Bin: saved maps that use it, the undo histor
   /* none of them, or the saves could not be read: no line; no map open: the history is left alone */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 0}})).map(c => c.text),
     ['Moves the folder mods\\a to the Windows Recycle Bin.']);
-  /* another build of the key stays: the maps open with it, nothing says they will not open */
+  /* another folder of the key stays: the maps open with it, nothing says they will not open */
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall',
     install: {folder: 'hell-guards@1a2b', savedMaps: 0, keptBuild: 'hell-guards'}})).map(c => c.text),
     ['Moves the folder mods\\hell-guards@1a2b to the Windows Recycle Bin.',
-     'Another build of this mod stays installed (mods\\hell-guards); maps that use the mod open with it.']);
+     'Another folder of this mod stays installed (mods\\hell-guards); maps that use the mod open with it.']);
   assert.equal(modsTab.uninstallHead(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}})), modsTab.UNINSTALL_HEAD.plain,
     'no map open: the head says nothing about undo');
   assert.equal(modsTab.normPreview({action: 'uninstall', install: {folder: 'a'}}).install.savedMaps, -1);
@@ -839,7 +876,7 @@ test('scope: About has no Applies line; a mod applies in the maps that declare i
   assert.equal(modsTab.scopeText, undefined);
 });
 /* ---- the additive model (DESIGN-additive 2.1 to 2.9) ------------------------------------------- */
-test('additive: derived facts, the game files a mod edits, encounters, legacy', () => {
+test('additive: derived facts, the game files a mod edits, encounters; no legacy state', () => {
   const n = modsTab.normalize(v3), m = k => n.mods.find(x => x.key === k);
   const r2 = m('alex.r2-imp');
   assert.equal(r2.facts.adds, 13);
@@ -860,12 +897,15 @@ test('additive: derived facts, the game files a mod edits, encounters, legacy', 
   assert.deepEqual(hg.find(l => l.label === 'Edits').list,
                    ['entitydef/ai/conductor/coop/snapmap_default: 3 list entries added', 'aifsmmanager/states/hellguard: 1 field set, 1 field removed']);
   assert.match(hg.find(l => l.label === 'Replaces').text, /^498 game files \(a folder the product received\)$/);
-  assert.equal(m('local.hell-guard').legacy, true);
+  assert.equal(m('local.hell-guard').legacy, undefined, 'a converted package is a mod like any other');
   assert.equal(modsTab.normalize(v2).mods[0].facts, null, 'a v2 document sends no facts');
   const h = live();
   h.ui.select('local.hell-guard');
   const fs = section(h, 'facts');
-  assert.ok(fs && /Legacy, rebuild to isolate/.test(fs.textContent) && /Edits: edits 2 game files/.test(fs.textContent));
+  assert.ok(fs && /Edits: edits 2 game files/.test(fs.textContent));
+  assert.doesNotMatch(h.nodes.modsDetail.textContent, /legacy|grandfather|first-generation|rebuild to isolate/i);
+  assert.ok(!/legacy|grandfather/i.test(source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')),
+    'no legacy vocabulary in the page outside comments');
   h.ui.select('alex.r2-imp');
   assert.match(section(h, 'facts').textContent, /Edits: edits 2 game files/);
   assert.ok(!/Registries|player\.|extends/.test(section(h, 'facts').textContent), 'no intent keys shown');
@@ -905,7 +945,7 @@ test('additive: a pushed document (a console verb) refreshes the open map modal 
   assert.equal(h.nodes.modsMapHost.tags('select').length, 0);
   h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: 'Mods folder reread.'}});
   const status = h.nodes.modsStatus.textContent;
-  /* `sh_mods map upgrade` moved a row to its installed build: the clash it hid now has two providers */
+  /* `sh_mods map add` attached a mod: the clash it brings now has two providers */
   const next = clone(v3);
   next.gen = 13;
   next.map.registryClashes = [{slot: 'entitydef/player/coop/edit/handsModelMPUseDoomHands',
@@ -931,7 +971,8 @@ test('additive: a row at another build still offers the clash choice its install
                               chosen: '', serving: 'alex.edits'}];
   const h = live(doc);
   h.ui.openMap();
-  assert.match(modalText(h), /installed at another build/);
+  assert.match(modalText(h), /not installed on this computer; playing the map downloads it/);
+  assert.doesNotMatch(modalText(h), /another build/);
   const sel = h.nodes.modsMapHost.tags('select');
   assert.equal(sel.length, 1);
   assert.match(modalText(h), /entitydef\/monster\/imp\/size Edits \(alex\.edits\) Edits Two \(alex\.edits2\)/);
@@ -961,25 +1002,18 @@ test('additive: stock banks a mod\'s borrowed sound events need, with this sessi
   h.ui.select('local.spider-mastermind');
   assert.match(section(h, 'facts').textContent, /Game sounds: needs doom_weapon_sp\.bnk/);
 });
-test('additive: one row per build of a key, the newest marked; a failed build', () => {
+test('additive: no list of builds per key; a failed build', () => {
   const h = live();
   h.ui.select('local.cyberdemon@0.0.0');
-  const bs = section(h, 'builds');
-  assert.ok(bs);
-  const lines = bs.all('mods-build');
-  assert.equal(lines.length, 2);
-  assert.deepEqual(lines.map(l => l.getAttribute('data-newest')), ['false', 'true']);
-  assert.match(lines[1].textContent, /Build 2 .* newest/);
-  assert.ok(/current/.test(lines[0].className), 'the selected folder is marked');
-  assert.match(lines[0].textContent, / this folder$/, 'and says so in its text');
-  assert.ok(!/this folder/.test(lines[1].textContent));
+  assert.equal(section(h, 'builds'), undefined, 'no builds section: the player manages no builds');
+  assert.doesNotMatch(h.nodes.modsDetail.textContent, /Build \d|newest/);
   const doc = clone(v3);
   doc.mods.find(x => x.key === 'airlock').buildFailed = {cause: 'assets/x.decl: parse error', snapshot: true, servingBuild: 1};
   const info = modsTab.statusInfo(modsTab.normalize(doc).mods.find(x => x.key === 'airlock'));
   assert.equal(info.tone, 'warn');
-  assert.equal(info.cause, 'its latest build failed: assets/x.decl: parse error; serving build 1 from its snapshot');
+  assert.equal(info.cause, 'its latest build failed: assets/x.decl: parse error; the last working version keeps serving until it builds');
 });
-test('additive: the map modal: installed at another build, declared nothing placed, upgrade, clash choice', () => {
+test('additive: the map modal: installed at another build, declared nothing placed, no upgrade, clash choice', () => {
   const doc = clone(v3);
   doc.map.mods.push({key: 'airlock', id: 'airlock', version: '0.0.0', state: 'installed', placedEntities: [], placedCount: 0,
                      references: [], size: 0, attached: true, nothingPlaced: true});
@@ -991,14 +1025,11 @@ test('additive: the map modal: installed at another build, declared nothing plac
   const text = modalText(h);
   assert.doesNotMatch(text, /Needs Snapmap\+/);
   assert.match(text, /Declared, nothing placed/);
-  assert.match(text, /installed at another build/);
-  assert.equal(modsTab.mapModStatus({state: 'otherBuild'}).cause, 'installed at another build');
-  /* the upgrade */
-  const up = modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT);
-  assert.ok(up && /build 2 is installed/.test(up.title));
-  up.click();
-  assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'mapUpgradeMod', arg: 'alex.r2-imp'});
-  assert.ok(!modalButtons(h).find(b => b.textContent === modsTab.UPGRADE_TEXT), 'the next document has no upgrade left');
+  assert.match(text, /not installed on this computer; playing the map downloads it/);
+  assert.doesNotMatch(text, /another build/);
+  /* an own map follows its folder in the backend: no row offers to move the map, whatever the document says */
+  assert.ok(!modalButtons(h).find(b => /upgrade/i.test(b.textContent + ' ' + (b.title || ''))));
+  assert.doesNotMatch(text, /upgrade|map uses build/i);
   /* the clash: one select per slot, its change written through the backend */
   const sel = h.nodes.modsMapHost.tags('select');
   assert.equal(sel.length, 1);
@@ -1018,12 +1049,20 @@ test('page contract', () => {
   GONE.forEach(id => assert.ok(!html.includes('id="' + id + '"'), 'mockup.html no longer has #' + id));
   const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<div class="statusbar">'));
   assert.ok(!/This map<|mods-pill/.test(panel), 'This map left the details pane');
-  const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar mods-toolbar">'), panel.indexOf('id="modsList"'));
-  for (const id of ['modsFilter', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn']) assert.ok(toolbar.includes('id="' + id + '"'), 'one toolbar row has ' + id);
+  /* the header's left side is icon buttons, as the Prefabs tab's (owner 2026-11-09); the toolbar holds the filter alone */
+  const head = panel.slice(panel.indexOf('<div class="panel-head">'), panel.indexOf('<div class="panel-toolbar">'));
+  const actions = head.slice(head.indexOf('<div class="panel-actions">'));
+  for (const id of ['modsAttnBtn', 'modsMapBtn', 'modsRefreshBtn', 'modsFolderBtn', 'modsMigrateBtn', 'modsInstallBtn'])
+    assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
+  const pfHead = html.slice(html.indexOf('<span class="panel-title">Prefabs</span>'), html.indexOf('id="prefabFilter"'));
+  assert.match(pfHead, /<div class="panel-actions">\n\s*<button type="button" class="btn icon icon-button"/, 'the same primitives as the Prefabs header');
+  const toolbar = panel.slice(panel.indexOf('<div class="panel-toolbar">'), panel.indexOf('id="modsList"'));
+  assert.ok(toolbar.includes('id="modsFilter"') && !/<button/.test(toolbar), 'the toolbar is the filter alone');
+  assert.ok(!/class="badge mods-attn"|mods-toolbar/.test(panel), 'no pill-shaped attention badge');
   for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsMigrateBtn', 'folder-input'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
   assert.match(panel, /id="modsMigrateBtn" style="display:none"/);
-  assert.match(panel, /<button type="button" class="badge mods-attn" id="modsAttnBtn" aria-pressed="false"/);
+  assert.match(panel, /<button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none"/);
   assert.ok(panel.indexOf('id="modsMapBtn"') < panel.indexOf('class="pane-splitter"'), 'the map button is in the left pane');
   for (const label of ['>Verify<', '>Rebuild<', '>Uninstall<', '>Use in this map<']) assert.ok(panel.includes(label), 'head action ' + label);
   assert.match(panel, /id="modsUseBtn" disabled style="display:none"/);
@@ -1046,7 +1085,7 @@ test('page contract', () => {
   assert.ok(!/MODS_COLLAPSED_KEY|saveCollapsed|loadCollapsed/.test(html));
   assert.ok(!/mods\.collapsed_groups'/.test(html), 'no request names the key');
   assert.ok(!/\.mods-group/.test(css), 'the group styles are gone');
-  assert.match(css, /\.mods-pill \{/);
+  assert.ok(!/\.mods-pill/.test(css), 'no pill styles');
   assert.equal(html.split('localStorage').length - 1, 2, 'browser storage stays the preview theme only');
   assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
   assert.ok(!/innerHTML/.test(source), 'all text goes through textContent');
@@ -1054,8 +1093,7 @@ test('page contract', () => {
   /* the scrolling and layout contract */
   assert.match(css, /\.panel-body \{ flex: 1; overflow-y: auto; min-height: 0; \}/);
   assert.ok(/\.mods-row \{[^}]*\}/.test(css) && !/\.mods-row \{[^}]*(position: absolute|height:)/.test(css), 'rows are in flow, no fixed height');
-  assert.match(css, /\.mods-toolbar\.panel-toolbar \{ flex-direction: row; align-items: center; \}/);
-  assert.match(css, /\.mods-toolbar input\[type=text\] \{ flex: 1 1 auto; width: auto; min-width: 0; \}/);
+
   assert.match(css, /\.btn\.danger-solid \{ background: var\(--danger\);/);
   assert.ok(!/mods-sizer|mods-shadow/.test(css), 'the windowed list and the shadow list are gone');
   /* the payload spec */

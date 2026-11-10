@@ -534,21 +534,21 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
     if (!out || !cap) return;
     switch (verdict) {
     case SH_MODPUB_GATE_GONE:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that is no longer available: its author "
+        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which is no longer available: its author "
                     "unpublished it, or it was removed. This is permanent on this machine.", what, t);
         break;
     case SH_MODPUB_GATE_UNREACHABLE:
         (void)sh_reason(SH_REASON_STORE, store_code, NULL, 0, reason, sizeof reason);
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that could not be downloaded: %s.", what, t,
+        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which could not be downloaded: %s.", what, t,
                     reason);
         break;
     case SH_MODPUB_GATE_NEVER_PUBLISHED:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that is not installed and was never "
+        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which is not installed and was never "
                     "published. Restore its folder from the Recycle Bin or load the %s.", what, t,
                     prefab ? "prefab's ZIP export" : "map's rawmap ZIP");
         break;
     case SH_MODPUB_GATE_GAME_REVISION:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at a build that needs a file this game does not hold "
+        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which needs a file this game does not hold "
                     "(%s): a different game revision. This is permanent on this machine.", what, t,
                     source && source[0] ? source : "a game file");
         break;
@@ -586,7 +586,7 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
         /* The store was not asked, so the note says only what this computer
          * knows; the gate's words ("no longer available", "never published")
          * are said where the store is asked, at Play. */
-        _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s at a build that is not installed on this computer, so "
+        _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
                     "the editor opens the map without it. Playing the map asks the mod store for it.", title);
     }
     return 0;
@@ -643,52 +643,15 @@ static const char **pub_missing_names(const pub_hold *h)
     return names;
 }
 
-void sh_modpublished_compose_other_build_question(char *out, size_t cap, const char *thing, const char *title,
-                                                  const char *want, const char *have, unsigned long long bytes)
-{
-    char size[32];
-    if (!out || !cap) return;
-    if (cap > PUB_TEXT_CAP) cap = PUB_TEXT_CAP;
-    pub_size_text(size, sizeof size, bytes);
-    _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s at build %.16s; you have build %.16s. Download build %.16s (%s) "
-                "and install it beside yours?", thing && thing[0] ? thing : "map", title && title[0] ? title : "a mod",
-                want ? want : "", have ? have : "", want ? want : "", size);
-}
-
-/* The question: one row installed at another build names both builds; any
- * other set lists the mods, a row at another build as "<key> (build <h8>,
- * you have <h8>)". */
+/* The question: the ordinary download approval, "This map needs N mod(s):
+ * <names> (<size>). Download and install now?". Another installed build of a
+ * key is never mentioned: the download lands beside it by hash and the map
+ * gets exactly what it pins (owner 2026-11-09). */
 static void pub_hold_question(const pub_hold *h, char *out, size_t cap)
 {
-    const char **names;
-    char (*labels)[160];
-    if (h->missing_count == 1 && h->other && h->other[0][0]) {
-        const sh_modmanifest_row *row = &h->rows.rows[h->missing[0]];
-        char title[300], text[PUB_TEXT_CAP * 2];
-        pub_title(title, sizeof title, row, h->probes && h->probes[0].name[0] ? h->probes[0].name : h->other_name[0]);
-        sh_modpublished_compose_other_build_question(text, sizeof text, pub_thing(h->hook), title, row->bundle,
-                                                     h->other[0], h->missing_bytes);
-        if (strlen(text) < PUB_TEXT_CAP - 1 && strlen(text) < cap) { strcpy_s(out, cap, text); return; }
-    }
-    names = calloc(h->missing_count ? h->missing_count : 1, sizeof(*names));
-    labels = calloc(h->missing_count ? h->missing_count : 1, sizeof(*labels));
-    if (!names || !labels) {
-        free((void *)names); free(labels);
-        pub_compose_question(out, cap, pub_thing(h->hook), NULL, 0, h->missing_bytes);
-        return;
-    }
-    for (size_t i = 0; i < h->missing_count; i++) {
-        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        const char *key = row->id[0] ? row->id : row->bundle;
-        if (h->other && h->other[i][0])
-            _snprintf_s(labels[i], sizeof labels[i], _TRUNCATE, "%s (build %.8s, you have %.8s)", key, row->bundle,
-                        h->other[i]);
-        else _snprintf_s(labels[i], sizeof labels[i], _TRUNCATE, "%s", key);
-        names[i] = labels[i];
-    }
-    pub_compose_question(out, cap, pub_thing(h->hook), names, h->missing_count, h->missing_bytes);
+    const char **names = pub_missing_names(h);
+    pub_compose_question(out, cap, pub_thing(h->hook), names, names ? h->missing_count : 0, h->missing_bytes);
     free((void *)names);
-    free(labels);
 }
 
 static void pub_hold_free(void)
@@ -1094,15 +1057,13 @@ static size_t pub_substitute(const int *verdicts)
         if (verdicts[i] != SH_MODPUB_GATE_SUBSTITUTE || !h->other || !h->other[i][0]) continue;
         pub_subst_add(row->bundle, h->other[i]);
         if (pub_is_prefab(h->hook))
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s '%s': %s: declared at build %.16s (not installed), serving "
-                        "build %.16s; the placement adds that build to the map", pub_hook_name(h->hook), h->id, key,
-                        row->bundle, h->other[i]);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "%s '%s': %s: uses the installed mod; the placement adds it to the "
+                        "map", pub_hook_name(h->hook), h->id, key);
         else
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s: declared at build %.16s (not installed), serving build "
-                        "%.16s; 'sh_mods map upgrade \"%s\"' (the Mods tab's Upgrade this map) moves the map to it",
-                        pub_hook_name(h->hook), key, row->bundle, h->other[i], key);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s: uses the installed mod; the next save of the map records it",
+                        pub_hook_name(h->hook), key);
         pub_print(line);
-        pub_logf("MODS: %s", line);
+        pub_logf("MODS: %s (declared %.16s, not installed; serving %.16s)", line, row->bundle, h->other[i]);
         drop[i] = 1;
         n++;
     }

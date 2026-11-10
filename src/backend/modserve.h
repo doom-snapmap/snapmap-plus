@@ -600,7 +600,6 @@ typedef struct sh_modserve_scope_info {
     int scope;               /* SH_MODSERVE_SCOPE_* in effect */
     int declared;            /* mod.json "scope": 0 absent, 1 "map", 2 "always" (ignored) */
     int automatic;           /* "always" because it shadows editor-time content */
-    int whole;               /* a grandfathered package: serves everything it carries in every map */
     int listed;              /* the current map declares it (this build) */
     int rank;                /* its position among the declared bundles (0 the first row), or -1 */
     int inert;               /* the current map declares another build of its key */
@@ -710,6 +709,17 @@ typedef struct sh_modserve_bundle_ref {
     unsigned long long size;   /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
 int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modserve_bundle_ref *out);
+
+/* An author's own map follows their own folder (DESIGN-additive A.4, owner
+ * 2026-11-09): 1 with *out filled when `bundle_hash` is installed as no
+ * folder but is an alias of an admitted folder of this machine's own (product
+ * block origin by-hand or none, install, or migration: an in-place rebuild
+ * recorded the old hash), so a row pinning it is rewritten to that folder's
+ * current build. 0 for a hash installed as itself, an unknown one, and an
+ * alias of a folder the product received with a map (a rawmap or prefab
+ * import, a download, a delivered package): a downloaded map keeps exactly
+ * its pin. */
+int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out);
 
 /* 1 with *out filled (the newest admitted build of the row's key) when the
  * row's own build is not installed but its key is at another hash: the

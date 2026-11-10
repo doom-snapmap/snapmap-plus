@@ -1214,6 +1214,43 @@ int sh_modmanifest_load_notes_flush(int say)
     return n + over;
 }
 
+/* At an editor load (a map opened in the editor, a My Maps play): a row
+ * pinning an earlier build of this machine's own folder, which an in-place
+ * rebuild left as an alias, is rewritten to the folder's current build
+ * (sh_modserve_row_follow), with one log line and no prompt; the listing, the
+ * Mods tab and the next save then name it. A row of a folder the product
+ * received keeps its pin (DESIGN-additive A.4, owner 2026-11-09). Returns the
+ * rows rewritten. */
+static sh_modmanifest_resolve_fn volatile g_follow;
+void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow) { g_follow = follow; }
+
+static int mm_follow_load(sh_modmanifest_list *list)
+{
+    sh_modmanifest_resolve_fn follow = g_follow;
+    int editor = InterlockedCompareExchange(&g_editor_load, 0, 0) != 0, n = 0;
+    size_t i;
+    if (!list || !editor || !follow) return 0;
+    for (i = 0; i < list->count; i++) {
+        sh_modmanifest_row *r = &list->rows[i], to;
+        char line[320];
+        memset(&to, 0, sizeof to);
+        if (follow(r->bundle, r->id, &to) != 1) continue;
+        if (!sh_modmanifest_valid_id(to.id) || !sh_modmanifest_valid_hash(to.bundle, strlen(to.bundle)) ||
+            !strcmp(to.bundle, r->bundle) || mm_list_find(list, to.bundle))
+            continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "MODS: map: %s: follows its own folder, rebuilt since the map was saved (%.16s -> %.16s); "
+                    "the next save records it", r->id, r->bundle, to.bundle);
+        strcpy_s(r->id, sizeof r->id, to.id);
+        strcpy_s(r->version, sizeof r->version, to.version);
+        strcpy_s(r->bundle, sizeof r->bundle, to.bundle);
+        r->size = to.size;
+        backend_log(line);
+        n++;
+    }
+    return n;
+}
+
 /* At a load: which declared builds the editor serves through another build. */
 static void mm_subst_load(const sh_modmanifest_list *list)
 {
@@ -1239,9 +1276,8 @@ static void mm_subst_load(const sh_modmanifest_list *list)
             }
             ReleaseSRWLockExclusive(&g_current_lock);
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "MODS: map: %s: declared at build %.16s, installed build %.16s serves it in the editor; "
-                        "'sh_mods map upgrade \"%s\"' (the Mods tab's Upgrade this map) moves the map to it",
-                        r->id, r->bundle, to, r->id);
+                        "MODS: map: %s: %.16s is not installed; the installed %.16s serves it in the editor and "
+                        "the next save records it", r->id, r->bundle, to);
         } else if (why[0]) {
             /* Held until the gate decides (B5): for a published map this
              * parse was not recognised as, the sentence is not the cause. */
@@ -1254,20 +1290,6 @@ static void mm_subst_load(const sh_modmanifest_list *list)
         } else continue;
         backend_log(line);
     }
-}
-
-int sh_modmanifest_current_rename(const char *from, const sh_modmanifest_row *to)
-{
-    int found = 0;
-    size_t i;
-    if (!from || !to || !sh_modmanifest_valid_hash(to->bundle, strlen(to->bundle)) || !sh_modmanifest_valid_id(to->id))
-        return 0;
-    AcquireSRWLockShared(&g_current_lock);
-    for (i = 0; i < g_current.count && !found; i++) found = !strcmp(g_current.rows[i].bundle, from);
-    if (found && mm_list_find(&g_current, to->bundle)) found = 0;
-    ReleaseSRWLockShared(&g_current_lock);
-    if (found) { mm_current_rename(from, to); mm_subst_drop(from); }
-    return found;
 }
 
 /* The map scope's hook and its arming (sh_modmanifest_set_scope). */
@@ -1535,6 +1557,7 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
     /* The map scope first: the bundles' shadows and requirements are live
      * before their gameplay decls register; the registry choices before the
      * listing that computes the registries. */
+    (void)mm_follow_load(&list);
     mm_subst_load(&list);
     mm_choices_load(&list);
     mm_scope_load(json, length, &list);

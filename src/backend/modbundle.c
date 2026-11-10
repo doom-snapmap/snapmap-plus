@@ -3888,8 +3888,7 @@ static void mb_report(sh_mb_bundle *b)
     unsigned declared = 0;
     const char *first_alias = NULL;
     if (b->legacy) {
-        mb_note(b, "legacy: a grandfathered bundle keeps its declared shadows and the rules of before; its classes are "
-                "reported only");
+        mb_note(b, "a converted package: it keeps its declared shadows; its classes are reported only");
         return;
     }
     for (i = 0; i < b->file_count; i++) {
@@ -4293,7 +4292,7 @@ names:
              * converted; a heuristic need it cannot satisfy is reported, and
              * the carrier is converted rather than cleaned. */
             else if (b->legacy)
-                mb_warn(b, "%s needs %s %s, which %s (legacy bundle: reported, not refused)", f->path,
+                mb_warn(b, "%s needs %s %s, which %s (a converted package: reported, not refused)", f->path,
                         f->needs[k].type, f->needs[k].name,
                         got < 0 ? "cannot be checked against the game" : "resolves to nothing");
             /* A shadow replaces a stock file whose own text may name content

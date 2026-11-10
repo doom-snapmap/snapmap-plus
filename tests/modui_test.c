@@ -808,7 +808,7 @@ int main(int argc, char **argv)
     dr = doctor(0);
     CHECK(has(dr, "MODS: doctor: store ") && has(dr, ": 0 mod folder(s), 0 of them delivered by maps; all listed in the Mods tab"));
     CHECK(has(dr, "MODS: doctor: migration: no overrides folder, or it is empty\n"));
-    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\nMODS: doctor: done\n"));
+    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 declared shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\nMODS: doctor: done\n"));
 
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
@@ -911,11 +911,11 @@ int main(int argc, char **argv)
     load_map_naming("alex.r2-imp", "00000000000000000000000000000000000000000000000000000000000000aa");
     doc = list_doc();
     CHECK(!has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
-    CHECK(has(doc, "at build 0000000000000000, which is not installed; alex.r2-imp is installed at another build ("));
+    CHECK(has(doc, "\"cause\":\"This map uses R2 Imp copy (alex.r2-imp), which is not installed.\""));
     CHECK(has(doc, "\"inManifest\":false"));
-    /* Its own state, not "skipped": installed at another build, and the upgrade offered. */
+    /* Its own state, not "skipped": installed at another build; nothing offers to move the map. */
     CHECK(has(doc, "\"state\":\"otherBuild\",\"cause\":\"This map uses"));
-    CHECK(has(doc, "\"attached\":false,\"upgrade\":{\"folder\":\"alex.r2-imp\""));
+    CHECK(!has(doc, "\"upgrade\""));
     free(doc);
     /* No folder declares the id: missing, with the refusal's sentence. */
     load_map_naming("alex.other", "00000000000000000000000000000000000000000000000000000000000000bb");
@@ -1004,33 +1004,27 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
     CHECK(has(doc, "\"action\":\"pruneList\",\"ok\":true") && has(doc, "\"candidates\":[]"));
     free(doc);
-    /* The map pins the older build: the tab offers the installed one, and
-     * Upgrade moves the map's row to it and says what changes. */
-    doc = list_doc();
-    CHECK(has(doc, "\"upgrade\":{\"folder\":\"alex.r2-imp@1.0.1\",\"bundle\":\""));
-    union_add(doc);   /* builds of one key, and the upgrade offer */
-    free(doc);
-    g_marks = 0;
-    doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
-    CHECK(g_marks == 1 && !strcmp(g_mark_label, "Upgrade Mod"));   /* the editor asks to save */
-    if (!has(doc, "\"ok\":true")) fprintf(stderr, "  upgrade: %s\n", doc ? doc : "(none)");
-    CHECK(has(doc, "\"ok\":true") && has(doc, "This map now uses R2 Imp copy build 1 (") &&
-          has(doc, "1 file(s) changed, 0 added, 0 removed"));
-    free(doc);
+    /* The map pins the older build, installed beside a newer one with no
+     * alias between them (a download lands so): an editor open keeps the pin,
+     * and the tab offers nothing (owner 2026-11-09: no build management). */
+    sh_modmanifest_set_editor_load(1);
+    load_map_naming("alex.r2-imp", hash1);
+    sh_modmanifest_set_editor_load(0);
     {
         sh_modmanifest_list cur;
-        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, hash2));
+        CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, hash1));
         sh_modmanifest_list_free(&cur);
     }
-    doc = run_doc(SH_MODS_ACT_MAP_UPGRADE, "alex.r2-imp");
-    CHECK(has(doc, "already uses the installed build"));
+    doc = list_doc();
+    CHECK(!has(doc, "\"upgrade\""));
+    union_add(doc);   /* builds of one key */
     free(doc);
-    CHECK(g_marks == 1);   /* nothing changed: not marked */
+    g_marks = 0;
     /* A choice between mods' edits goes through the manifest; an invalid slot is refused. */
     doc = run_doc(SH_MODS_ACT_CHOOSE, "entitydef/player/coop/edit/handsModelMPUseDoomHands\talex.r2-imp");
     CHECK(has(doc, "\"ok\":true") && has(doc, "entitydef/player/coop/edit/handsModelMPUseDoomHands now comes from alex.r2-imp"));
     free(doc);
-    CHECK(g_marks == 2 && !strcmp(g_mark_label, "Choose Mod"));
+    CHECK(g_marks == 1 && !strcmp(g_mark_label, "Choose Mod"));
     {
         char chosen[80];
         CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", chosen, sizeof chosen) && !strcmp(chosen, "alex.r2-imp"));
@@ -1038,7 +1032,7 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_CHOOSE, "bad slot\talex.r2-imp");
     CHECK(has(doc, "\"ok\":false"));
     free(doc);
-    CHECK(g_marks == 2);   /* refused: not marked */
+    CHECK(g_marks == 1);   /* refused: not marked */
     sh_modmanifest_reset();
     g_placed_count = 0;
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
@@ -1223,9 +1217,9 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: grandfathered shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a "
+        CHECK(has(dr, "MODS: doctor: declared shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a "
                       "(migrated); served by alex.shade-a\n"));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 declared shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
@@ -1237,7 +1231,7 @@ int main(int argc, char **argv)
         CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-a serves it "
                       "(no rule separates them; the first key in name order (a map's rows decide while it is open)); "
                       "from alex.shade-a, alex.shade-b\n"));
-        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
+        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 declared shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         /* Every section populated for the key comparison with the page's fixture. */
         load_map_naming("alex.r2-imp", hash2);
         g_placed[0] = "mods/alex.r2-imp/imp_copy";
@@ -1296,7 +1290,7 @@ int main(int argc, char **argv)
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: bundle mods\\alex.shade-b (alex.shade-b): skipped; "));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 grandfathered shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 1 declared shadow(s), 0 edit source(s) of 0 game file(s) (never served, so neither a shadow nor a conflict)\n"));
         /* Installed while the index is stale: unindexed until a rescan. */
         sh_modserve_index_build(g_root);
         {
@@ -2044,9 +2038,8 @@ int main(int argc, char **argv)
                     CHECK(load_gone_row("alex.req", GONE_REQ, pass));
                     CHECK(sh_modmanifest_substituted(GONE_REQ, sub, sizeof sub) && !strcmp(sub, ref.hash));
                     /* sh_mods map and the doctor say why: the row's build, and the build that serves it. */
-                    _snprintf_s(want, sizeof want, _TRUNCATE, "alex.req: declared at build %.16s (not installed), serving "
-                                "build %.16s (alex.req) in the editor; 'sh_mods map upgrade \"alex.req\"' moves the map to it",
-                                GONE_REQ, ref.hash);
+                    _snprintf_s(want, sizeof want, _TRUNCATE, "alex.req: served in the editor by mods\\alex.req; the next "
+                                "save records it, and Remove from map drops the row by its key");
                     g_doctor[0] = 0;
                     CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
                     CHECK(has(g_doctor, "MODS: map:   ") && has(g_doctor, want));
@@ -2081,10 +2074,37 @@ int main(int argc, char **argv)
             doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
             CHECK(has(doc, "\"action\":\"rebuild\",\"ok\":true,\"message\":\"Rebuilt alex.req: nothing changed (1 files).\""));
             free(doc);
-            mt_append(path, "assets\\generated\\decls\\entitydef\\mods\\alex.req\\twin.decl", "// changed\r\n");
-            doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
-            CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: build 2, 1 files.\""));
-            free(doc);
+            {
+                sh_modserve_bundle_ref before, after;
+                sh_modmanifest_list cur;
+                CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &before));
+                mt_append(path, "assets\\generated\\decls\\entitydef\\mods\\alex.req\\twin.decl", "// changed\r\n");
+                doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
+                CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: 1 files.\""));
+                free(doc);
+                /* The author's own folder, rebuilt in place: a map saved against
+                 * the earlier build follows it when it opens in the editor, with
+                 * one log line, no prompt and nothing marked modified; the Mods
+                 * tab offers nothing. */
+                CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &after) && strcmp(before.hash, after.hash));
+                CHECK(sh_modserve_row_follow(before.hash, NULL) == 1);
+                log_clear();
+                g_marks = 0;
+                {
+                    const char *ids[1], *hashes[1];
+                    ids[0] = "alex.req";
+                    hashes[0] = before.hash;
+                    CHECK(load_rows(ids, hashes, 1, 1));   /* an editor load */
+                }
+                CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].bundle, after.hash));
+                sh_modmanifest_list_free(&cur);
+                CHECK(has(g_logbuf, "MODS: map: alex.req: follows its own folder, rebuilt since the map was saved"));
+                CHECK(g_marks == 0);
+                doc = list_doc();
+                CHECK(doc && !has(doc, "\"upgrade\""));
+                free(doc);
+                sh_modmanifest_reset();
+            }
             CHECK((unsigned)g_rescans == rescans + 2);
             /* A refused Rebuild is the folder's state, as a refused rescan build is:
              * the row names the cause until a build succeeds (DESIGN-additive 2.8). */
@@ -2453,8 +2473,8 @@ int main(int argc, char **argv)
         CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\twin.key to the Windows Recycle Bin"));
         CHECK(!has(g_doctor, "builds of twin.key"));
         /* Its consequences are the key's: the other build stays and serves the maps. */
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall: another build of twin.key stays installed (mods\\%s); "
-                    "maps that use twin.key open with it\n", beside);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall: another folder of twin.key stays installed (mods\\%s); "
+                    "maps that use it open with it\n", beside);
         CHECK(has(g_doctor, line));
         CHECK(!has(g_doctor, "saved maps use it") && !has(g_doctor, "will not open"));
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "twin.key");   /* the tab names the folder */
@@ -2465,11 +2485,11 @@ int main(int argc, char **argv)
         /* The key: every build, each folder named, in the dry run. */
         g_doctor[0] = 0;
         CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);
-        CHECK(has(g_doctor, "MODS: uninstall: removes all 2 builds of twin.key; to keep one, uninstall the others as "
-                            "\"twin.key@<build>\"\n"));
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\twin.key (twin.key 1.0.0, build %s)\n", h1);
+        CHECK(has(g_doctor, "MODS: uninstall: removes all 2 folders of twin.key; to keep one, uninstall the others as "
+                            "\"twin.key@<hash16>\"\n"));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\twin.key (twin.key 1.0.0, bundle %s)\n", h1);
         CHECK(has(g_doctor, line));
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, build %s)\n", beside, h2);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, bundle %s)\n", beside, h2);
         CHECK(has(g_doctor, line));
         CHECK(has(g_doctor, "MODS: uninstall twin.key: dry run; add --yes to do it\n"));
         /* A map load lists, for its placed names, the build the new map
