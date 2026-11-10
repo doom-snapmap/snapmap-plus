@@ -408,7 +408,7 @@ static void mc_verify(const char *key)
 #define MC_OUTBOX_LINES 64
 static CRITICAL_SECTION g_mc_out_cs;
 static INIT_ONCE g_mc_out_once = INIT_ONCE_STATIC_INIT;
-static char g_mc_out[MC_OUTBOX_LINES][512];
+static char g_mc_out[MC_OUTBOX_LINES][1536];
 static int  g_mc_out_n, g_mc_out_dropped;
 
 static BOOL CALLBACK mc_out_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
@@ -440,7 +440,7 @@ static int mc_outbox_flush_main(void *ctx)
 
 static void mc_async_line(const char *fmt, ...)
 {
-    char line[512];
+    char line[sizeof g_mc_out[0]];
     va_list ap;
     sh_run_on_main_fn run = NULL;
     int res = 0;
@@ -539,7 +539,7 @@ static int mc_job_run(void *ctx, const modnet_io *io)
     }
     case MC_JOB_IMPORT: {
         modexport_stats es;
-        char cause[320], why[192];
+        char cause[MODEXPORT_CAUSE_MAX], why[192];
         size_t len = 0;
         char *text = modexport_read(j->path, &len, &es, cause, sizeof cause);
         why[0] = 0;

@@ -41,7 +41,7 @@ static int me_cause(char *cause, size_t cap, const char *fmt, ...)
 
 static void me_log(const char *fmt, ...)
 {
-    char line[1024];
+    char line[MODEXPORT_CAUSE_MAX + MAX_PATH * 4];
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
@@ -945,6 +945,8 @@ typedef struct me_carry {
     int installed;                      /* this import installed it, as `stored` */
     int earlier_rules;                  /* its block was written under an earlier builder's rules:
                                            b.hash is the hash it records; the install rebuilds it */
+    int left_out;                       /* an earlier-rules carry today's rules cannot build: not
+                                           installed, its row counts as a mod this computer lacks */
     char stored[SH_MS_KEY_MAX + 1];
     char stage[MAX_PATH * 4];           /* its copy outside the store, which the install builds */
     char why[SH_MB_CAUSE_MAX];          /* the last install refusal */
@@ -1187,7 +1189,7 @@ static int me_rows_name(const sh_modmanifest_list *rows, const char *hash)
 static int me_carried(const me_import *im, const char *hash)
 {
     size_t i;
-    for (i = 0; i < im->nc; i++) if (!_stricmp(im->c[i].b.hash, hash)) return 1;
+    for (i = 0; i < im->nc; i++) if (!im->c[i].left_out && !_stricmp(im->c[i].b.hash, hash)) return 1;
     return 0;
 }
 
@@ -1592,11 +1594,27 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
             st->bundles_installed++;
         }
     } while (progress && left);
+    /* A folder built under earlier rules that today's rules refuse (a retired
+     * intent key's partial, say) is that one mod's failure, not the export's:
+     * it is left out, and the map's row for it goes the way of any build this
+     * computer lacks (the hold asks the store, or serves the installed build
+     * of its key, or says why not). */
+    for (i = 0; i < im->nc && left; i++) {
+        me_carry *c = &im->c[i];
+        if (c->present || c->installed || !c->earlier_rules) continue;
+        c->left_out = 1;
+        left--;
+        me_log("MODS: import: mods/%s (%s %s, bundle %.16s) was built by an earlier development build and today's "
+               "rules do not build it (%s); left out, so the %s treats it as a mod this computer does not have",
+               c->name, c->b.id, c->b.version, c->b.hash, c->why, what);
+    }
     if (left) {
         for (i = 0; i < im->nc; i++) {
             const me_carry *c = &im->c[i];
-            if (c->present || c->installed) continue;
-            me_cause(cause, cap, "%s %s from the export does not install: %s", c->b.id, c->b.version, c->why);
+            if (c->present || c->installed || c->left_out) continue;
+            me_cause(cause, cap, "%s %s, a mod this %s carries, does not install on this computer (%s); nothing was "
+                     "installed. Ask whoever shared it for a new export saved with this release", c->b.id, c->b.version,
+                     what, c->why);
             break;
         }
         goto rollback;
@@ -1813,7 +1831,7 @@ static int me_acp_to_utf8(const char *acp, char *out, size_t cap)
 
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp)
 {
-    char cause[320];
+    char cause[MODEXPORT_CAUSE_MAX];
     return modexport_write_text_report(data, len, path_acp, NULL, cause, sizeof cause);
 }
 
@@ -1821,7 +1839,7 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
                                                unsigned *bundles, char *cause_out, size_t cause_cap)
 {
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[320];
+    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
     if (bundles) *bundles = 0;
     if (cause_out && cause_cap) cause_out[0] = 0;
     if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
@@ -1843,18 +1861,34 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
 
 char *modexport_read_text(const char *path_acp, size_t *out_len)
 {
+    return modexport_read_text_report(path_acp, out_len, NULL, 0);
+}
+
+char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause_out, size_t cause_cap)
+{
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[320];
+    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
     char *text, *heap;
     size_t len = 0;
     if (out_len) *out_len = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) { me_log("MODS: import: the source path is not usable"); return NULL; }
+    if (cause_out && cause_cap) cause_out[0] = 0;
+    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
+        me_log("MODS: import: the source path is not usable");
+        if (cause_out && cause_cap)
+            strncpy_s(cause_out, cause_cap, "its path cannot be used; move it to a folder whose name has only plain letters",
+                      _TRUNCATE);
+        return NULL;
+    }
     text = modexport_read(path, &len, &st, cause, sizeof cause);
-    if (!text) { me_log("MODS: import %s: refused: %s", path, cause); return NULL; }
+    if (!text) {
+        me_log("MODS: import %s: refused: %s", path, cause);
+        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, cause, _TRUNCATE);
+        return NULL;
+    }
     me_log("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
            "%llu byte(s) read in %.0f ms%s", path, st.bundles, st.bundles_installed, st.bundles_present, st.files,
            st.map_bytes, st.zip_bytes, st.ms,
-           st.bundles_absent ? "; the map also names mods the export does not carry" : "");
+           st.bundles_absent ? "; the map also names mods this computer does not have and the export does not install" : "");
     if (!len || len > (size_t)INT_MAX) { free(text); return NULL; }
     heap = (char *)HeapAlloc(GetProcessHeap(), 0, len + 1);
     if (heap) { memcpy(heap, text, len); heap[len] = 0; if (out_len) *out_len = len; }
@@ -1864,7 +1898,7 @@ char *modexport_read_text(const char *path_acp, size_t *out_len)
 
 int modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity)
 {
-    char path[MAX_PATH * 4], cause[320];
+    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
     int ok;
     if (out_msg && msg_capacity > 0) out_msg[0] = 0;
     if (!me_acp_to_utf8(path_acp, path, sizeof path)) {

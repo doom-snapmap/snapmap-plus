@@ -2337,7 +2337,10 @@ carried folder no row names is left out):
 - the built bundle hash must equal the one the carried `mod.json` names;
   otherwise, and on any other refusal, exactly the folders this import
   installed are removed and the load is refused ("<id> <version> in the export
-  does not build to the bundle the map names");
+  does not build to the bundle the map names", or "<id> <version>, a mod this
+  map carries, does not install on this computer (<the builder's reason>);
+  nothing was installed. Ask whoever shared it for a new export saved with
+  this release");
 - a carried `mod.json` whose block an earlier builder's rules wrote (its
   `"rules"` absent or below `SH_MB_RULES`, and its recorded hash not the one
   today's rules give: `sh_mb_load_text_earlier_rules`) is not left out: it is
@@ -2347,8 +2350,21 @@ carried folder no row names is left out):
   treats it as another build of an installed key: the store's copy of the
   recorded build is offered beside it, else the installed build substitutes.
   A block with today's `"rules"` whose hash does not match was edited by hand
-  and is still left out;
+  and is still left out. A folder from earlier rules that today's rules refuse
+  (the development builds of 2026-11-04 to 11-07 wrote retired intent keys,
+  whose partials today's builder refuses: "this is a partial; put the whole
+  edited copy ...") is that one mod's failure: it is left out with one log
+  line naming the builder's reason, the rest of the export installs, and the
+  map's row for it is a mod this computer does not have, which the hold then
+  settles as for any map (the store, the installed build of its key, or the
+  gate's sentences);
 - after an install the serving index is rebuilt, as before.
+
+A refused import reaches the player whole: the editor reload
+(`sh_rawmap_prepare_reload`) prints and toasts "<file> was not opened:
+<the importer's cause>." (a `.json` that cannot be read gets Windows' reason
+through `plain_reason.h`), and the backend log line carries the same cause
+uncut (`MODEXPORT_CAUSE_MAX`).
 
 A map's ZIP in the bundle form beta.20 wrote (`map.rawmap.json`, an
 `export.json` index, and per bundle `mods/[legacy/]<id>@<version>+<build>/`

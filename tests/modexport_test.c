@@ -51,9 +51,11 @@ static int g_failed, g_checks;
 } while (0)
 
 static int g_echo;
+static char g_left_out[2048];   /* the last "left out" line of an earlier build's carry */
 void backend_log(const char *line)
 {
     if (g_echo && line) printf("    %s\n", line);
+    if (line && strstr(line, "earlier development build")) strncpy_s(g_left_out, sizeof g_left_out, line, _TRUNCATE);
 }
 
 /* The map manifest links the serving layer's activation (modserve_engine.c). */
@@ -1183,6 +1185,42 @@ int main(int argc, char **argv)
             CHECK(text && st.bundles_installed == 0 && st.bundles_present == 1 && folder_count(storeR2) == 1);
             free(text);
             sh_mb_free(&nb);
+        }
+        /* An earlier build's folder today's rules refuse (a retired intent
+         * key's partial, as the 2026-11-07 development builds wrote): that
+         * mod is left out, not the export. The map comes back and its row
+         * counts as a mod this computer lacks, for the hold to settle. */
+        if (at && rmap && modjson) {
+            static const char PART[] = "\"player\":{\"bodyEvents\":\"mods/test.older/body_events.md6\"},";
+            static const char PARTIAL[] = "events { }\n";
+            char storeR4[MAX_PATH * 2];
+            size_t pl = strlen(PART);
+            char *pj = (char *)malloc(ml + pl + 1);
+            const char *names[] = { "older rules.json", "mods/test.older/mod.json",
+                                    "mods/test.older/assets/generated/image/mods/test.older/o.bimage",
+                                    "mods/test.older/assets/generated/decls/md6def/mods/test.older/body_events.md6.decl" };
+            const char *datas[4];
+            at[9] = '1';
+            CHECK(pj != NULL);
+            if (pj) {
+                pj[0] = '{';
+                memcpy(pj + 1, PART, pl);
+                memcpy(pj + 1 + pl, modjson + 1, ml - 1);
+                pj[ml + pl] = 0;
+                datas[0] = rmap; datas[1] = pj; datas[2] = "older bytes"; datas[3] = PARTIAL;
+                CHECK(mt_zip_stored(zipR, 4, names, datas));
+                _snprintf_s(storeR4, sizeof storeR4, _TRUNCATE, "%s\storeR4", tmp);
+                CHECK(fresh_store(storeR4));
+                text = modexport_read(zipR, &len, &st, cause, sizeof cause);
+                if (!text) fprintf(stderr, "earlier rules, refused today: %s\n", cause);
+                CHECK(text && len == rl && st.bundles == 1 && st.bundles_installed == 0 && st.bundles_absent == 1 &&
+                      folder_count(storeR4) == 0);
+                /* Left out for the builder's own reason, logged whole. */
+                CHECK(strstr(g_left_out, "mods/test.older (test.older 1.0.0") && strstr(g_left_out, "this is a partial") &&
+                      strstr(g_left_out, "at its game name (assets/generated/decls/md6def/player/mp/tp_body_mp.md6.decl)"));
+                free(text);
+                free(pj);
+            }
         }
         free(modjson);
         if (rmap) HeapFree(GetProcessHeap(), 0, rmap);
