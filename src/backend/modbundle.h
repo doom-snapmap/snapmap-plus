@@ -319,6 +319,10 @@ typedef struct sh_mb_stock_ops {
     /* Read those bytes into a process-heap buffer (HeapAlloc on GetProcessHeap;
      * the caller frees it with HeapFree): OK, MISMATCH, ABSENT or UNAVAILABLE. */
     int (*read)(void *context, const char *source, const char *sha256, unsigned char **bytes, size_t *len);
+    /* Which part of the install holds `source` (with those bytes when sha256
+     * is not NULL): SH_MB_STOCK_OK with "snap_gameresources", "gameresources"
+     * or "loose" in `out`, ABSENT or UNAVAILABLE. May be NULL. */
+    int (*container)(void *context, const char *source, const char *sha256, char *out, size_t cap);
 } sh_mb_stock_ops;
 
 /* Register the installed-content reader (copied; NULL clears). Without one the
@@ -343,6 +347,8 @@ int  sh_mb_stock_verify(const char *source, const char *sha256, unsigned long lo
 int  sh_mb_stock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size);
 int  sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
                       const char *path, char *cause, size_t cause_cap);
+/* The registered container operation: 1 with the archive (or "loose") in `out`; 0 when no reader answers. */
+int  sh_mb_stock_container(const char *source, const char *sha256, char *out, size_t cap);
 
 /* Validate a stock source path: the request-path rules without the extension
  * whitelist. 1 when valid. */

@@ -2985,6 +2985,8 @@ static bool poc_pick_mod_folder(std::wstring &out)
     return ok;
 }
 
+static bool poc_mods_read_only(int action);   /* fwd: below the action names */
+
 static DWORD WINAPI poc_mods_thread(LPVOID)
 {
     PocModsJob &job = g_mods_job;
@@ -3024,7 +3026,7 @@ static DWORD WINAPI poc_mods_thread(LPVOID)
             }
         }
     }
-    {
+    if (!poc_mods_read_only(job.action)) {
         PocModsMain m;
         memset(&m, 0, sizeof m);
         m.call.op = SH_MODS_LIST;
@@ -3056,8 +3058,16 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
     case SH_MODS_ACT_WATCH_RESCAN:       return L"watchRescan";
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
+    case SH_MODS_ACT_FILES:              return L"modFiles";
+    case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
     default:                      return L"";
     }
+}
+
+/* The Files view's reads change nothing, so no fresh document follows them. */
+static bool poc_mods_read_only(int action)
+{
+    return action == SH_MODS_ACT_FILES || action == SH_MODS_ACT_FILE_TEXT;
 }
 
 static int poc_mods_action_code(const std::wstring &name)
@@ -3078,6 +3088,8 @@ static int poc_mods_action_code(const std::wstring &name)
     if (name == L"removedEmpty")        return SH_MODS_ACT_REMOVED_EMPTY;
     if (name == L"mapAddMod")           return SH_MODS_ACT_MAP_ADD;
     if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
+    if (name == L"modFiles")            return SH_MODS_ACT_FILES;
+    if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
     return 0;
 }
 
@@ -3181,6 +3193,8 @@ static void poc_mods_finish()
     } else if (job.pushed) {
         /* A pushed refresh the game did not answer: the page keeps its document; asked again later. */
         g_mods_push_next = GetTickCount64() + 2000;
+    } else if (poc_mods_read_only(job.action)) {
+        /* A Files read: the page keeps its document. */
     } else poc_post_json(job.list_rc == -1
         ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
         : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");

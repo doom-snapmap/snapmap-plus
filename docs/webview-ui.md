@@ -297,7 +297,8 @@ markup when the field closes (`tests/prefab_rename_test.js`).
 
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
 Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
-answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and nothing
+answered with `modsActionResult` and then a fresh `mods` document (the Files view's two reads,
+`modFiles` and `modFileText`, with the result alone), one job at a time, and nothing
 polls. The host's folder watcher also asks for the rescan by itself 1500 ms after the mods folder
 goes quiet (`SH_MODS_ACT_WATCH_RESCAN`, deferred by the backend while Play runs, a map loads or a
 store write holds the lock, and asked again two seconds later); it posts only the fresh `mods`
@@ -364,7 +365,8 @@ names a folder the product received keeps as they are) and Encounters (the encou
 declaring map's conductor, their spawn bits assigned per map). The pane shows no build numbers and
 no list of builds: the player manages no builds (owner 2026-11-09). A failed latest build
 (`buildFailed`) is a yellow row whose cause reads "its latest build failed: <cause>; the last working
-version keeps serving until it builds". The head actions are Use in this map, Verify, Rebuild
+version keeps serving until it builds". The head actions are Use in this map, Files (the
+`folder-tree` icon), Verify, Rebuild
 and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
 for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
 from map and opens the same confirmation as the modal's row, which closes after the action. With
@@ -389,6 +391,32 @@ consequence list the confirmation shows, with exactly two buttons (Cancel, and D
 Uninstall). After the real action the next document redraws the modal; a map left with no mods
 reads as vanilla.
 
+**Files modal (read-only).** Files opens the selected mod's folder in the standard modal at the
+expanded Decl Text editor's size (`.modal.decl-focus-modal.mods-files-modal` in `#modsFilesModal`;
+Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Its head is the
+mod's display name and the details pane's one-line state. On the left, a filter box and the folder
+as a tree with the Prefabs primitives: names only, folders with their file counts, a folder holding
+only one folder shown as one row (`cm/models/mapobjects/hell_terrain`, `mods/<key>/demons`; a folder
+above `mods/` keeps its own row), files before folders, the first level and the selected file's
+folders open, every folder open under a filter. A file row carries one glyph at most: the yellow
+triangle in the problem colour when a cause names it (hover: the cause; a closed folder with such a
+file shows it too), else the `gamepad-2` glyph and a muted name for the game's own bytes the mod
+carries unchanged; the mod's own files and its edits of game files have none. On the right: the
+path once, the file's class as one phrase ("New file", "Your edit of a game file", "A game file
+under this mod's own name", "A game file SnapMap cannot see on its own", "Replaces a game file", "An
+editor tweak, on this computer only", "About the mod: ..." for `mod.json`, "Not served yet" for a
+file the last working version does not hold), for a game file where it comes from ("from the game's
+campaign and multiplayer files" for `gameresources`, "from the game's SnapMap files" for
+`snap_gameresources`), and for a binary file or one read from the install its size. A text file's
+text is shown in the Decl Text editor primitive (`.code-editor`: line numbers, the decl language's
+token colours through the page's `tokens`, a read-only textarea for selection and copy); `mod.json`
+comes without its product block, which a line above it says Snapmap+ writes. A binary file and a
+pointer the folder does not hold show no editor. The cause that names the file is shown under it
+in the Entity State problem strip, without a line number. The modal opens on the requested file,
+else the first file a cause names, else `mod.json`. Its two reads (`modFiles`, `modFileText`) never
+set the page's busy state or its status line, and no fresh document follows them; a refusal (another
+action still running) is shown in the modal.
+
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
 folder can be restored from the Recycle Bin by hand. Uninstalling:" (when `install.undoCleared`;
 without it, "The folder can be restored from the Recycle Bin by hand. Uninstalling:") and lists,
@@ -412,7 +440,9 @@ its status line.
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
 `tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
-`PREVIEW_MODS` must equal it). `tests/modui_test.c` checks the v3 document against a temporary
+`PREVIEW_MODS` must equal it). Its Files answers come from the page's `PREVIEW_MOD_FILES`
+(`local.hell-guard`'s files as its folder holds them, 12 of its 260 cooked animations, the archives
+illustrative); another mod lists `mod.json` and its carried paths. `tests/modui_test.c` checks the v3 document against a temporary
 store and a fake editor, including that every key of `tests/fixtures/mods_tab_payload_v3.json` is
 one the backend writes; `tests/mods_tab_test.js` renders both fixtures (`mods_tab_payload.json` is
 the v2 document an older backend sends).
@@ -494,6 +524,8 @@ again.
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
 | `uninstall` | `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder moved to the Windows Recycle Bin (deleted outright, and the message says so, when the bin cannot take it), whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
 | `removedEmpty` | Retired with the product's own bin; the page no longer sends it and the backend answers "Uninstalled mods go to the Windows Recycle Bin." as a refusal. |
+| `modFiles` | Read only, no fresh document follows. `data` is `{key, name, cause, files, truncated}`: `cause` is the mod's standing cause (its latest build's refusal while the last good build serves, else why it serves nothing); `files` holds one `{path, size, kind, class, game, container, inFolder, cause}` per file under the folder (walked on disk; dot folders skipped; at most 8192, then `truncated`) and per stock pointer its last good build reads from the install (`inFolder` false). `kind` is `text` (`.decl`, `.json`, `.txt`, `.md`, `.cfg`, `.entities`) or `binary`; `class` is `descriptor` (`mod.json`), `add`, `borrow`, `edit` (an edited copy of a game file), `replace`, `editor`, `surface`, or "" for a file the last good build does not hold; `game` says the file is the game's own bytes (a pointer), `container` the archive the install bridge matched (`snap_gameresources`, `gameresources`, `loose`, "" unknown); `cause` is the standing cause when it names that file. |
+| `modFileText` | Read only, no fresh document follows. `arg` is `"<key>\t<path below the folder>"`. `data` is `{key, path, size, text, productBlock, cause}`: the file's UTF-8 text (a byte order mark dropped), `mod.json` without its product block (`productBlock` true). Refused: a path outside the folder (a drive, a leading separator, an empty, `.` or `..` part), a binary kind, a file the folder does not hold, one above 1 MiB, one that is not UTF-8 text. |
 
 `data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
 `uninstallPreview` only. `map` is null when the open map does not use

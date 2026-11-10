@@ -46,6 +46,12 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
 int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size);
 int sh_modstock_verify(const char *source, const char *sha256, unsigned long long *size);
 int sh_modstock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len);
+/* Which part of the install holds `source`: OK with "snap_gameresources" or
+ * "gameresources" (the archive whose row has that name, the row with these
+ * bytes when both hold it and sha256 is given) or "loose" (a file under base\
+ * or the install root); ABSENT or UNAVAILABLE. Hashes only a name both
+ * archives hold. */
+int sh_modstock_container(const char *source, const char *sha256, char *out, size_t cap);
 
 /* 1 when the installed game holds `path` (an archive row or a loose file),
  * 0 when not, -1 when the installed indexes cannot be read. */

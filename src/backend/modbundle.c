@@ -2367,6 +2367,16 @@ int sh_mb_stock_read(const char *source, const char *sha256, unsigned char **byt
     return r;
 }
 
+int sh_mb_stock_container(const char *source, const char *sha256, char *out, size_t cap)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    if (out && cap) out[0] = 0;
+    if (!source || !out || !cap || !ops || !ops->container) return 0;
+    if (ops->container(ops->context, source, sha256, out, cap) == SH_MB_STOCK_OK && out[0]) return 1;
+    out[0] = 0;
+    return 0;
+}
+
 int sh_mb_check_source(const char *source, char *cause, size_t cap)
 {
     if (!source || !source[0]) return mb_cause(cause, cap, "the stock source is empty");

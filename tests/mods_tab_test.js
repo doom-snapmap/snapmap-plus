@@ -69,7 +69,7 @@ class FakeNode {
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
              'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
-             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn'];
+             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn'];
 /* store: a stand-in host (modsTab.standIn) that answers every modsAction synchronously, as the
@@ -81,17 +81,20 @@ function harness(opts) {
   nodes.modsMigrateBtn.style.display = 'none';
   nodes.modsMapModal.style.display = 'none';
   nodes.modsMapModal.appendChild(nodes.modsMapHost);
-  const sent = [], toasts = [];
+  nodes.modsFilesModal.style.display = 'none';
+  nodes.modsFilesModal.appendChild(nodes.modsFilesHost);
+  const sent = [], toasts = [], menus = [];
   const saved = [];   /* what a page that still wrote mods.collapsed_groups would have saved */
   const doc = {createElement: tag => new FakeNode(tag), createElementNS: (ns, tag) => Object.assign(new FakeNode(tag), {ns})};
   let ui = null;
   ui = modsTab.create({
     document: doc, byId: id => nodes[id] || null, saveCollapsed: list => saved.push(list),
     post: m => { sent.push(m); if (opts.store) opts.store(m).forEach(r => ui.onMessage(r)); },
-    toast: (t, k) => toasts.push({text: t, kind: k})
+    toast: (t, k) => toasts.push({text: t, kind: k}),
+    tokens: opts.tokens, menu: (x, y, items) => menus.push({x, y, items})
   });
   ui.bind();
-  return {ui, nodes, sent, toasts, saved};
+  return {ui, nodes, sent, toasts, saved, menus};
 }
 function rows(h) { return h.nodes.modsList.all('mods-row'); }
 function rowOf(h, key) { return rows(h).find(n => n.getAttribute('data-key') === key); }
@@ -256,7 +259,8 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify', 'mapAddMod',
-                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry']);
+                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
+                                     'modFiles', 'modFileText']);
   assert.equal(modsTab.actionMessage('mapUpgradeMod', 'a'), null, 'no build management: the upgrade action is gone');
   assert.deepEqual(modsTab.actionMessage('chooseRegistry', 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'),
                    {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tk.a'});
@@ -1102,7 +1106,18 @@ test('page contract', () => {
   const m = html.match(/\n  var PREVIEW_MODS = (\{.*\});  \/\/ migratedFrom names the retired package folder a mod was moved from\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
   assert.deepEqual(JSON.parse(m[1]), v3, 'PREVIEW_MODS is the v3 fixture');
-  assert.match(html, /var previewMods = modsTab\.standIn\(PREVIEW_MODS\);/);
+  assert.match(html, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
+  const pf = html.match(/\n  var PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
+  assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
+  const hgFiles = JSON.parse(pf[1])['local.hell-guard'];
+  assert.ok(hgFiles.files.length > 200 && hgFiles.files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
+  /* the Files modal is the decl focus modal's markup */
+  assert.match(html, /<div class="modal-overlay" id="modsFilesModal" style="display:none;" aria-hidden="true">\n  <div class="modal decl-focus-modal mods-files-modal" role="dialog" aria-modal="true" aria-labelledby="modsFilesTitle">\n    <div class="decl-focus-host mf-host" id="modsFilesHost"><\/div>/);
+  assert.match(panel, /id="modsFilesBtn"[^>]*><svg class="ui-icon"[^>]*><use href="#icon-folder-tree">/, 'Files is the folder-tree icon');
+  assert.ok(panel.indexOf('id="modsFilesBtn"') < panel.indexOf('id="modsVerifyBtn"') &&
+            panel.indexOf('id="modsFilesBtn"') > panel.indexOf('class="pane-splitter"'), 'Files sits in the details head beside Verify');
+  for (const ic of ['folder-tree', 'gamepad-2']) assert.ok(html.includes('<symbol id="icon-' + ic + '"'), 'icon ' + ic);
+  assert.match(html, /tokens: function\(text\)\{ var t = declLanguage\.tokenize\(text\); declLanguage\.parse\(t\); return t; \}/);
   assert.match(html, /if \(o\.cmd === 'modsAction'\) \{[\s\S]*?previewMods\(o\)\.forEach\(onMessage\);/);
   /* the retired collapsed-groups setting: the page neither asks for it nor saves it */
   assert.ok(!/MODS_COLLAPSED_KEY|saveCollapsed|loadCollapsed/.test(html));
@@ -1150,7 +1165,7 @@ test('host and interface contract', () => {
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 
-/* ---- organizing folders (L28) ------------------------ ------------------------------------ */
+/* ---- organizing folders and the Files modal (L28) -------- ------------------------------------ */
 function grouped() {
   const d = clone(v3);
   for (const m of d.mods) if (['doors', 'elevators', 'tarps'].indexOf(m.key) >= 0) { m.group = 'campaign-interactables'; m.key = 'campaign-interactables\\' + m.key; }
@@ -1199,6 +1214,143 @@ test('organizing folders: a caret row with a count, its mods indented, closed fo
   assert.equal(h.nodes.modsList.all('mods-folder')[0].all('mods-row').length, 3, 'selecting a mod inside opens its folder');
   /* the v2 document and the v3 fixture have no group: one flat list */
   assert.equal(modsTab.normalize(v3).mods.every(b => b.group === ''), true);
+});
+
+const HG = 'assets/generated/decls/snapeditorentitydef/mods/local.hell-guard/demons/hell_guard_hammer_enc.decl';
+const FOLDERS = {'local.hell-guard': {files: [
+  {path: 'mod.json', size: 900, kind: 'text', class: 'descriptor', game: false, container: '', inFolder: true, cause: ''},
+  {path: HG, size: 1200, kind: 'text', class: 'add', game: false, container: '', inFolder: true, cause: ''},
+  {path: 'assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl', size: 0, kind: 'text', class: '', game: false, container: '',
+   inFolder: true, cause: 'empty file: assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl'},
+  {path: 'assets/generated/cm/models/mapobjects/hell_terrain/boulder_kit_f.bcm', size: 2048, kind: 'binary', class: 'surface', game: true,
+   container: 'snap_gameresources', inFolder: false, cause: ''},
+  {path: 'assets/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl', size: 300, kind: 'text', class: 'edit', game: false,
+   container: '', inFolder: true, cause: ''}],
+  texts: {'mod.json': '{\r\n  "name": "Hell Guards"\r\n}\r\n', [HG]: '{\r\n\tinherit = "demons/demon_base";\r\n}\r\n'}}};
+test('the Files modal: the folder tree, one glyph per file, the file with its class and read-only text', () => {
+  const h = harness({store: modsTab.standIn(v3, FOLDERS)});
+  h.ui.show();
+  h.ui.select('local.hell-guard');
+  assert.equal(h.nodes.modsFilesBtn.disabled, false, 'Files needs a selected mod');
+  h.nodes.modsFilesBtn.click();
+  assert.equal(h.nodes.modsFilesModal.style.display, 'flex');
+  assert.equal(h.nodes.modsFilesModal.getAttribute('aria-hidden'), 'false');
+  assert.deepEqual(h.sent.filter(m => m.action === 'modFiles'), [{cmd: 'modsAction', action: 'modFiles', arg: 'local.hell-guard'}]);
+  const st = h.ui.state();
+  assert.equal(st.busy, '', 'a read never holds the page busy');
+  assert.equal(st.files.open, true);
+  /* the file a problem names is selected first, and its text asked for */
+  assert.equal(st.files.selected, 'assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl');
+  const host = h.nodes.modsFilesHost;
+  assert.equal(host.all('modal-title')[0].textContent, 'Hell Guards');
+  assert.equal(host.all('mf-state')[0].textContent, 'Installed and serving 24 files, 476 more read from your install');
+  assert.equal(host.all('mf-filter')[0].getAttribute('placeholder'), 'Filter files...');
+  /* the tree: mod.json at the top, folders with counts, a closed folder with a problem inside marked */
+  const list = host.all('mf-list')[0];
+  assert.equal(list.children[0].getAttribute('data-path'), 'mod.json');
+  const names = list.all('pf-fname').map(n => n.textContent);
+  assert.ok(names.indexOf('assets/generated') >= 0, 'a folder holding one folder shows as one row');
+  assert.ok(names.indexOf('entitydef') >= 0 && names.indexOf('mods/local.hell-guard') >= 0, 'the decl type keeps its row above mods/');
+  assert.ok(names.indexOf('cm/models/mapobjects/hell_terrain') >= 0);
+  const item = p => list.all('pf-item').find(n => n.getAttribute('data-path') === p);
+  const broken = item('assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl');
+  assert.ok(/selected/.test(broken.className));
+  assert.equal(broken.all('mf-g')[0].getAttribute('aria-label'), 'empty file: assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl');
+  assert.ok(/attn/.test(broken.all('mf-g')[0].className));
+  /* the right side: the path once, the class phrase, the text read-only, the cause in the problem strip */
+  const pane = host.all('mf-file')[0];
+  assert.equal(pane.all('mf-path')[0].textContent, 'assets/generated/decls/entitydef/mods/local.hell-guard/ broken.decl');
+  assert.equal(pane.all('mf-meta')[0].children[0].textContent, 'Not served yet');
+  assert.equal(pane.all('prob')[0].textContent, 'empty file: assets/generated/decls/entitydef/mods/local.hell-guard/broken.decl');
+  assert.ok(/problems has/.test(pane.all('problems')[0].className), 'the Entity State strip');
+  /* the mod's own decl: no glyph, its text in the Decl Text editor primitive, read-only */
+  assert.equal(item(HG), undefined, 'a folder off the selected file stays closed');
+  h.ui.selectFile(HG);
+  assert.deepEqual(h.sent[h.sent.length - 1], {cmd: 'modsAction', action: 'modFileText', arg: 'local.hell-guard\t' + HG});
+  assert.equal(item(HG).all('mf-g').length, 0, "the mod's own file has no glyph");
+  const ed = host.all('mf-file')[0].all('code-editor')[0];
+  assert.ok(ed, 'the Decl Text editor');
+  const ta = ed.tags('textarea')[0];
+  assert.equal(ta.readOnly, true);
+  assert.equal(ta.value, '{\n\tinherit = "demons/demon_base";\n}\n');
+  assert.equal(ed.all('ce-gutter')[0].children[0].textContent, '1\n2\n3', 'one number per line');
+  assert.equal(host.all('mf-meta')[0].children[0].textContent, 'New file');
+  assert.equal(host.all('prob').length, 0, 'no problem, no strip');
+  /* a game file: the game glyph, muted, its archive named, binary: class, size and source, no editor */
+  const bcm = 'assets/generated/cm/models/mapobjects/hell_terrain/boulder_kit_f.bcm';
+  const sent = h.sent.length;
+  h.ui.selectFile(bcm);
+  assert.equal(h.sent.length, sent, 'nothing to read for a binary file');
+  assert.ok(/mf-ro/.test(item(bcm).className));
+  assert.equal(item(bcm).all('mf-g')[0].children[0].children[0].getAttribute('href'), '#icon-gamepad-2');
+  assert.deepEqual(host.all('mf-meta')[0].children.map(n => n.textContent),
+                   ['A game file SnapMap cannot see on its own', "from the game's SnapMap files", '2.0 KB']);
+  assert.equal(host.all('mf-file')[0].all('code-editor').length, 0);
+  /* an edit of a game file is the author's: no game glyph */
+  h.ui.selectFile('assets/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl');
+  assert.equal(item('assets/generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl').all('mf-g').length, 0);
+  assert.equal(host.all('mf-meta')[0].children[0].textContent, 'Your edit of a game file');
+  /* mod.json without its product block */
+  item('mod.json').click();
+  assert.match(host.all('mf-file')[0].textContent, /Snapmap\+ writes the rest of mod\.json itself/);
+  assert.equal(host.all('mf-meta')[0].children[0].textContent, modsTab.FILE_CLASSES.descriptor);
+  /* the filter keeps matching files and opens their folders */
+  const input = host.all('mf-filter')[0];
+  input.value = 'boulder';
+  input.dispatch('input');
+  assert.deepEqual(host.all('mf-list')[0].all('pf-item').map(n => n.getAttribute('data-path')), [bcm]);
+  assert.equal(h.ui.state().files.selected, 'mod.json', 'filtering does not change the file shown');
+  /* Escape closes; focus returns to the Files button */
+  h.nodes.modsFilesModal.dispatch('keydown', {key: 'Escape'});
+  assert.equal(h.nodes.modsFilesModal.style.display, 'none');
+  assert.equal(activeElement, h.nodes.modsFilesBtn);
+  assert.equal(h.nodes.modsFilesHost.children.length, 0);
+});
+test('the Files modal: a refusal and a late answer stay in the modal; the status line is untouched', () => {
+  const h = harness();
+  shown(h);
+  h.ui.select('local.hell-guard');
+  h.nodes.modsFilesBtn.click();
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFiles', ok: false, message: 'Another mods action is still running.', data: null});
+  assert.match(h.nodes.modsFilesHost.textContent, /Another mods action is still running\./);
+  assert.equal(h.toasts.length, 0, 'no toast for a read');
+  assert.equal(h.nodes.modsStatus.textContent, '');
+  /* an answer for another mod is not this modal's */
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFiles', ok: true, message: '', data: {key: 'airlock', files: [{path: 'mod.json'}]}});
+  assert.equal(h.ui.state().files.data, null);
+  /* a text refusal answers the file last asked for */
+  h.ui.openFiles('local.hell-guard');
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFiles', ok: true, message: '', data: {key: 'local.hell-guard', name: 'Hell Guards', cause: '',
+    files: [{path: 'mod.json', kind: 'text', class: 'descriptor', inFolder: true}]}});
+  assert.equal(h.ui.state().files.selected, 'mod.json');
+  h.ui.onMessage({kind: 'modsActionResult', action: 'modFileText', ok: false, message: 'mod.json could not be read; close any program that holds it and try again.', data: null});
+  assert.match(h.nodes.modsFilesHost.textContent, /close any program that holds it/);
+  assert.equal(h.ui.state().busy, '');
+});
+test('the Files view model: classes, sources and the tree', () => {
+  const d = modsTab.normFiles({key: 'k', files: [{path: 'b\\x.decl', kind: 'text', class: 'mystery', container: 'mars', game: 'yes'},
+                                                  {path: ''}, {path: 'a.json', kind: 'text', class: 'descriptor'}]});
+  assert.deepEqual(d.files.map(f => [f.path, f.cls, f.container, f.game, f.text]), [['a.json', 'descriptor', '', false, true], ['b/x.decl', '', '', false, true]]);
+  assert.deepEqual(modsTab.fileMeta({cls: 'borrow', game: true, container: 'gameresources', text: true, inFolder: false, size: 10}),
+                   ["A game file under this mod's own name", "from the game's campaign and multiplayer files", '10 B']);
+  const t = modsTab.fileTree([{path: 'assets/generated/decls/entitydef/mods/k/a.decl', cause: 'x'},
+                              {path: 'assets/generated/decls/entitydef/mods/k/b.decl', cause: ''},
+                              {path: 'assets/generated/decls/material/mods/k/c.decl', cause: ''}], '');
+  assert.equal(t.dirs[0].name, 'assets/generated/decls');
+  assert.deepEqual(t.dirs[0].dirs.map(x => [x.name, x.count, x.attn]), [['entitydef', 2, 1], ['material', 1, 0]]);
+  assert.equal(t.dirs[0].dirs[0].dirs[0].name, 'mods/k');
+  assert.equal(modsTab.fileTree([{path: 'a/b.decl'}], 'zzz').count, 0);
+  for (const v of Object.values(modsTab.FILE_CLASSES).concat(Object.values(modsTab.FILE_SOURCES)))
+    assert.ok(!/\bbuild|legacy|bundle\b/i.test(v), 'no build or legacy vocabulary: ' + v);
+});
+test('the Files modal highlights with the decl tokens when the page supplies them', () => {
+  const tokens = text => [{type: 'punc', start: 0, end: 1}, {type: 'ident', isKey: true, start: 3, end: 10}, {type: 'str', start: 13, end: 32}];
+  const h = harness({store: modsTab.standIn(v3, FOLDERS), tokens});
+  h.ui.show();
+  h.ui.openFiles('local.hell-guard', HG);
+  const code = h.nodes.modsFilesHost.all('code-editor')[0].tags('code')[0];
+  assert.deepEqual(code.children.filter(n => n.className).map(n => [n.className, n.textContent]),
+                   [['tk-punc', '{'], ['tk-key', 'inherit'], ['tk-str', '"demons/demon_base"']]);
 });
 
 console.log('mods_tab_test: OK (' + passed + ' tests)');

@@ -709,5 +709,39 @@
   .modal-actions.mods-map-foot { flex: none; margin-top: 0; padding-top: 10px; border-top: 1px solid var(--border); }
   /* Organizing folders in the Mods list: the Prefabs tab's folder rows. */
   .mods-folder > .pf-folder-head .mods-status-icon { margin: 0 0 0 auto; }
+  /* The Files modal: the standard modal at the expanded Decl Text editor's size (.decl-focus-modal). */
+  .modal.decl-focus-modal.mods-files-modal { padding: 14px 16px; }
+  .mf-host { flex-direction: column; gap: 0; overflow: hidden; }
+  .mf-head { padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .mf-head .modal-title { flex: none; }
+  .mf-state { flex: 1 1 auto; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mf-state.warn { color: var(--warnText); }
+  .mf-body { flex: 1 1 auto; display: flex; min-height: 0; }
+  .mf-tree { flex: 0 0 280px; width: 280px; display: flex; flex-direction: column; min-height: 0; padding: 10px 10px 0 0; border-right: 1px solid var(--border); }
+  .mf-tree > .mf-filter { flex: none; margin-bottom: 6px; }
+  .mf-list { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: 8px; }
+  .mf-list .pf-folder, .mf-list .pf-folder-body, .mf-list .pf-folder-head { min-width: 0; }
+  .mf-list .pf-fname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mf-list .pf-item { display: flex; align-items: center; gap: 6px; }
+  .mf-list .pf-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .mf-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pf-item.mf-ro { color: var(--muted); }
+  .pf-item.selected.mf-ro { color: var(--selText); }
+  .mf-g { flex: none; width: 13px; display: inline-grid; place-items: center; color: var(--muted); }
+  .mf-g .ui-icon { width: 13px; height: 13px; }
+  .pf-folder-head .mf-g { margin-left: auto; }
+  .mf-g.attn { color: var(--sqErr); }
+  .pf-item.selected .mf-g:not(.attn) { color: var(--selText); }
+  .mf-file { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; padding: 10px 0 0 14px; user-select: text; -webkit-user-select: text; }
+  .mf-fhead { flex: none; }
+  .mf-path { font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; color: var(--text); }
+  .mf-path .dir { color: var(--muted); }
+  .mf-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 2px; color: var(--muted); line-height: 1.45; }
+  .mf-hint { flex: none; margin-top: 8px; color: var(--muted); line-height: 1.45; }
+  .mf-file .code-editor { flex: 1 1 auto; min-height: 120px; margin-top: 8px; }
+  .mf-file .code-editor textarea { caret-color: transparent; }
+  .mf-binary { margin-top: 10px; color: var(--muted); line-height: 1.45; }
+  .mf-file .problems.mf-problems { cursor: default; }
+  .mf-file .problems .prob { cursor: default; }
   .btn.danger-solid { background: var(--danger); border-color: var(--danger); color: #ffffff; }
   .btn.danger-solid:hover:not(:disabled) { filter: brightness(1.12); }
