@@ -3873,6 +3873,12 @@ static int mu_map_add(const char *key, const mu_out *o)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, mp.entities == -1 ? "No map is open in the editor."
                                                                    : "The open map cannot be read on this build.");
     else if (entry < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
+    else if (sh_mb_editor_only(&m.list.items[entry].bundle))
+        /* Editor tweaks are client-side (DESIGN-additive 2.6): every map opened in
+         * this editor already has them, a map never records them. */
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s changes only this computer's editor (%u editor tweak%s); every "
+                    "map you open here already has them, and a map never lists them.", title,
+                    m.list.items[entry].bundle.classes.editor, m.list.items[entry].bundle.classes.editor == 1 ? "" : "s");
     else if (st <= 0 || !sh_modserve_bundle_serving(m.list.items[entry].bundle.hash, NULL, &ref))
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not in use, so a map cannot use it: %s.", title,
                     st < 0 && cause[0] ? cause : "the serving index has not read it; refresh the Mods tab");

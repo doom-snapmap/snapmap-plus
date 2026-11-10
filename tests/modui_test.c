@@ -1722,6 +1722,25 @@ int main(int argc, char **argv)
             CHECK(has(doc, "\"ok\":true,\"message\":\"Gates is already used by the whole of Imp Arena.\""));
             free(doc);
             CHECK(g_marks == 1);   /* already attached: not marked again */
+            /* A folder of editor tweaks only (an author's editor overrides): nothing in it
+             * plays, every map opened here has them, so a map never lists it (DESIGN-additive 2.6). */
+            {
+                char tw[MAX_PATH * 2];
+                _snprintf_s(tw, sizeof tw, _TRUNCATE, "%s\\authoring\\alex.tweakonly", tmp);
+                CreateDirectoryA(tw, NULL);
+                mt_write(tw, "mod.json", "{\"id\":\"alex.tweakonly\",\"version\":\"1.0.0\",\"name\":\"Only tweaks\",\"author\":\"tester\"}");
+                mt_write(tw, "assets\\generated\\decls\\snapeditorentitydef\\demons\\demon_base.decl", "{\r\n\t// tweaked\r\n}\r\n");
+                doc = run_doc(SH_MODS_ACT_INSTALL, tw);
+                CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"alex.tweakonly\""));
+                free(doc);
+                doc = run_doc(SH_MODS_ACT_MAP_ADD, "alex.tweakonly");
+                CHECK(has(doc, "\"action\":\"mapAddMod\",\"ok\":false,\"message\":\"Only tweaks changes only this computer's "
+                               "editor (1 editor tweak); every map you open here already has them, and a map never lists them.\""));
+                free(doc);
+                CHECK(g_marks == 1);   /* refused: not marked */
+                doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.tweakonly");
+                free(doc);
+            }
             /* A rawmap opened in its place (sh_rawmaps load) is a new map until its first save:
              * the borrowed saved map's name and id are not the open map's. */
             g_opened_from = "v2b-empty.rawmap.json";
