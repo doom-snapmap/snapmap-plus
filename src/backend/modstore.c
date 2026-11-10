@@ -241,6 +241,19 @@ static const char *ms_rel(const char *folder)
     return ms_leaf(folder);
 }
 
+/* A work folder of an install or a first-build rename: "<name>.staging-<pid>"
+ * or "<name>.old-<pid>", the suffix last. A mod named "doom.old-school" is not one. */
+static int ms_work_suffix(const wchar_t *name, const wchar_t *tag)
+{
+    const wchar_t *at = NULL, *p;
+    for (p = wcsstr(name, tag); p; p = wcsstr(p + 1, tag)) at = p;
+    if (!at) return 0;
+    at += wcslen(tag);
+    if (!*at) return 0;
+    for (; *at; at++) if (*at < L'0' || *at > L'9') return 0;
+    return 1;
+}
+
 /* Folders of the store that can be mods: not hidden, not a staging or
  * replaced copy, not the retired blobs\ and legacy\ (the retired layout). */
 static int ms_candidate(const WIN32_FIND_DATAW *fd)
@@ -248,7 +261,7 @@ static int ms_candidate(const WIN32_FIND_DATAW *fd)
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
     if (fd->cFileName[0] == L'.') return 0;
     if (!_wcsicmp(fd->cFileName, L"blobs") || !_wcsicmp(fd->cFileName, L"legacy")) return 0;
-    if (wcsstr(fd->cFileName, L".staging-") || wcsstr(fd->cFileName, L".old-")) return 0;
+    if (ms_work_suffix(fd->cFileName, L".staging-") || ms_work_suffix(fd->cFileName, L".old-")) return 0;
     return 1;
 }
 

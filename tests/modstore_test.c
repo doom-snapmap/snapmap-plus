@@ -1069,6 +1069,29 @@ static void test_recycle(const char *tmp)
 /* Mod folders at any depth: an organizing folder without mod.json is looked
  * into, a mod folder is not, and a nested mod is named by its path under
  * mods\. Building in place, matching, verifying and deleting take that path. */
+/* Only "<name>.staging-<pid>" and "<name>.old-<pid>" are work folders; a mod
+ * whose name merely contains ".old-" is a mod. */
+static void test_work_folder_names(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH];
+    sh_ms_list list;
+    printf("-- work folders: only a .staging-<pid> or .old-<pid> suffix is skipped\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\worknames\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\doom.old-school", root);
+    make_small_mod(dir, "alex.oldschool");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\my.staging-area", root);
+    make_small_mod(dir, "alex.stagingarea");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.top.old-4242", root);
+    make_small_mod(dir, "alex.top");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\alex.top.staging-17", root);
+    make_small_mod(dir, "alex.top");
+    CHECK(sh_ms_enumerate(&list) && list.count == 2);
+    CHECK(find_entry(&list, "doom.old-school") && find_entry(&list, "my.staging-area"));
+    CHECK(!find_entry(&list, "alex.top.old-4242") && !find_entry(&list, "alex.top.staging-17"));
+    sh_ms_list_free(&list);
+}
+
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], key[SH_MS_NAME_MAX + 1];
@@ -1614,6 +1637,7 @@ int main(int argc, char **argv)
     test_bin_sweep(tmp);
     test_recycle(tmp);
     test_nested(tmp);
+    test_work_folder_names(tmp);
     test_first_build(tmp);
 
     test_upgrade(fixture, tmp);

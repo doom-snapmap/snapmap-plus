@@ -1158,6 +1158,19 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
  * and is entered, to eight levels (modstore.h SH_MS_NEST_MAX); a mod folder is not entered. The
  * retired blobs\ and legacy\ folders, hidden folders and install staging are
  * not mods. `rel` is the folder's path below the root, a bundle's name. */
+/* "<name>.staging-<pid>" or "<name>.old-<pid>", the suffix last (modstore.c's
+ * work folders); a mod named "doom.old-school" is not one. */
+static int ms_work_suffix(const char *name, const char *tag)
+{
+    const char *at = NULL, *p;
+    for (p = strstr(name, tag); p; p = strstr(p + 1, tag)) at = p;
+    if (!at) return 0;
+    at += strlen(tag);
+    if (!*at) return 0;
+    for (; *at; at++) if (*at < '0' || *at > '9') return 0;
+    return 1;
+}
+
 static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int depth)
 {
     char pattern[MAX_PATH];
@@ -1174,7 +1187,7 @@ static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int de
             continue;
         if (fd.cFileName[0] == '.') continue;
         if (!_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
-        if (strstr(fd.cFileName, ".staging-") || strstr(fd.cFileName, ".old-")) continue;
+        if (ms_work_suffix(fd.cFileName, ".staging-") || ms_work_suffix(fd.cFileName, ".old-")) continue;
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
         if (rel && rel[0]) _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s\\%s", rel, fd.cFileName);
         else strncpy_s(subrel, sizeof subrel, fd.cFileName, _TRUNCATE);
