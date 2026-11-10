@@ -817,24 +817,19 @@ test('Use in this map: a map-level mod is listed, marked, and removed again from
   const h3 = live(closed);
   assert.equal(h3.nodes.modsUseBtn.style.display, 'none');
 });
-test('scope: where a mod applies is in About only when the backend says so', () => {
+test('scope: About has no Applies line; a mod applies in the maps that declare it (DESIGN-additive 2.3)', () => {
+  /* The backend's scope is "always" exactly when the bundle carries editor tweaks, which a mixed
+     folder's additions do not share; where tweaks apply is the Editor tweaks line's to say. */
   const doc = clone(v3);
   const by = k => doc.mods.find(m => m.key === k);
   by('airlock').scope = 'map'; by('airlock').scoped = true;
-  by('alex.r2-imp').scope = 'map'; by('alex.r2-imp').scoped = false;
-  by('crucible').scope = 'always'; by('crucible').scopeAuto = true;
-  by('commdish').scope = 'always';
-  const n = modsTab.normalize(doc), m = k => n.mods.find(x => x.key === k);
-  assert.equal(modsTab.scopeText(m('airlock')), 'Only in maps that use it');
-  assert.equal(modsTab.scopeText(m('alex.r2-imp')), '', 'new names only: nothing to say');
-  assert.equal(modsTab.scopeText(m('crucible')), 'In every map: it changes the editor itself');
-  assert.equal(modsTab.scopeText(m('commdish')), 'In every map');
-  assert.equal(modsTab.scopeText(m('dlc')), '', 'an older backend sends no scope');
+  by('local.my-overrides').scope = 'always'; by('local.my-overrides').scopeAuto = true;
   const h = live(doc);
-  h.ui.select('airlock');
-  assert.match(section(h, 'about').textContent, /Applies Only in maps that use it/);
-  h.ui.select('dlc');
-  assert.ok(!/Applies/.test(section(h, 'about').textContent));
+  for (const key of ['airlock', 'local.my-overrides', 'dlc']) {
+    h.ui.select(key);
+    assert.ok(!/Applies|In every map|Only in maps that use it/.test(section(h, 'about').textContent), key);
+  }
+  assert.equal(modsTab.scopeText, undefined);
 });
 /* ---- the additive model (DESIGN-additive 2.1 to 2.9) ------------------------------------------- */
 test('additive: derived facts, the game files a mod edits, encounters, legacy', () => {

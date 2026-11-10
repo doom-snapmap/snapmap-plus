@@ -7,7 +7,7 @@
    rows, marked duplicateId), whether overrides\ still holds entries to migrate, and the open map
    (which this tab no longer shows). Payload v3 adds, per mod, what the details pane describes:
    description, origin, migratedFrom, servedBy, builtAt, bundle, counts, requirements,
-   editorRowNames, carriedPaths, publishedMaps and scope, and the additive model's derived facts (facts:
+   editorRowNames, carriedPaths and publishedMaps, and the additive model's derived facts (facts:
    adds, borrows, surfaces, editor tweaks, replacements with the declared marker, registry contributions),
    legacy, builds per key (newest marked) and a failed build (docs/webview-ui.md). Every v3 field is optional:
    a v2 document renders with those parts left out. The host posts the document as {kind:'mods', data}
@@ -76,12 +76,6 @@ var modsTab = (function () {
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
-  /* Where a mod's replacements and requirements apply (payload scope; docs/webview-ui.md). */
-  var SCOPE_TEXT = {
-    map: 'Only in maps that use it',
-    always: 'In every map',
-    auto: 'In every map: it changes the editor itself'
-  };
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
@@ -178,16 +172,9 @@ var modsTab = (function () {
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
             carriedPaths: Array.isArray(b.carriedPaths) ? normNames(b.carriedPaths) : null,
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
-            scope: b.scope === 'map' || b.scope === 'always' ? b.scope : '', scopeAuto: bool(b.scopeAuto), scoped: bool(b.scoped),
             /* additive */
             facts: normFacts(b.facts), legacy: bool(b.legacy), newest: b.newest !== false,
             builds: Array.isArray(b.builds) ? b.builds.map(normBuild) : [], buildFailed: normFailed(b.buildFailed)};
-  }
-  /* The About line for where the mod applies; '' when the backend did not say or nothing is scoped. */
-  function scopeText(b) {
-    if (b.scope === 'always') return b.scopeAuto ? SCOPE_TEXT.auto : SCOPE_TEXT.always;
-    if (b.scope === 'map' && b.scoped) return SCOPE_TEXT.map;
-    return '';
   }
   function title(b) { return b.name || b.id || b.key; }
   function cmp(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
@@ -663,8 +650,6 @@ var modsTab = (function () {
       field(about, 'Folder', link);
       about.appendChild(el('div', 'mods-line mods-origin', originText(b)));
       if (renamedText(b)) about.appendChild(el('div', 'mods-line mods-origin', renamedText(b)));
-      var applies = scopeText(b);
-      if (applies) field(about, 'Applies', applies);
 
       var adds = section(box, 'adds', 'What it adds');
       var names = b.editorRowNames || [];
@@ -1225,7 +1210,7 @@ var modsTab = (function () {
           originText: originText, renamedText: renamedText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
-          SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create,
+          SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
           NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, EDITED_COPY_TEXT: EDITED_COPY_TEXT,
           factLines: factLines, slotText: slotText};
 })();

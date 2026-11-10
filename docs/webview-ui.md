@@ -333,10 +333,9 @@ about where the folder came from, from `origin`: "Added by hand" (no origin), "M
 overrides folder" (`migration`, followed by `migratedFrom` in parentheses when the document names
 it), "Imported from an export" (`install`) and "Downloaded for a map you played" (`download`,
 `delivery`), and for a hand-made folder its first build renamed, a second line "Renamed from
-<renamedFrom>; N references rewritten". About carries an Applies line when the
-backend sends the mod's `scope`: "Only in maps that use it" for a map-scoped mod with shadows or
-requirements, "In every map" for `always` (with "it changes the editor itself" when `scopeAuto`),
-nothing for a mod that only adds new names. After What it adds, **What it is made of** shows the
+<renamedFrom>; N references rewritten". About has no Applies line: what a mod adds applies only
+in the maps that declare it, and its editor tweaks say under What it is made of where they apply.
+After What it adds, **What it is made of** shows the
 builder's derived facts (`facts`) when the backend sends them: "Legacy, rebuild to isolate" for a
 converted first-generation package (`legacy`), then Adds, Borrows (game files under its own names),
 Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only: they apply in your editor whatever map is open and are never saved with a map or used at Play, with
@@ -420,7 +419,7 @@ Per entry of `mods`:
 | `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
 | `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |
-| `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always`; absent when the serving index does not hold it. |
+| `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always` (it carries editor tweaks); absent when the serving index does not hold it. The page reads neither it, `scopeAuto` nor `scoped`. |
 | `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
 | `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
 | `"legacy"` | bool | A converted first-generation package (its `legacy` record): its names are campaign names until it is rebuilt under a key. |
