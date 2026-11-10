@@ -87,6 +87,9 @@ var modsTab = (function () {
   var NOTHING_PLACED_TEXT = 'Declared, nothing placed';
   var LEGACY_TEXT = 'Legacy, rebuild to isolate';
   var UPGRADE_TEXT = 'Upgrade this map to the installed build';
+  /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
+     records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
+  var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var EDITED_COPY_TEXT = 'an edited copy: its edits apply in maps that declare this mod';
   /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
      path starts at the first top-level decl member the slot names. */
@@ -393,7 +396,7 @@ var modsTab = (function () {
     if (f.adds) out.push({label: 'Adds', text: plural(f.adds, 'new file')});
     if (f.borrows) out.push({label: 'Borrows', text: plural(f.borrows, 'game file') + ' under its own names, read from your install'});
     if (f.surfaces) out.push({label: 'Surfaces', text: plural(f.surfaces, 'game file') + ' SnapMap cannot see, read from your install'});
-    if (f.editor) out.push({label: 'Editor tweaks', text: plural(f.editor, 'file') + ', on this computer only; never in a map', list: f.editorTweaks});
+    if (f.editor) out.push({label: 'Editor tweaks', text: plural(f.editor, 'file') + ', on this computer only: ' + EDITOR_TWEAKS_TEXT, list: f.editorTweaks});
     if (f.edits.length) {
       out.push({label: 'Edits', text: 'edits ' + plural(f.edits.length, 'game file') + '; maps that declare it get the game\'s text with these edits',
                 list: f.edits.map(editLine)});
@@ -1223,7 +1226,7 @@ var modsTab = (function () {
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
           SCOPE: SCOPE, SCOPE_TEXT: SCOPE_TEXT, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, scopeText: scopeText, standIn: standIn, create: create,
-          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITED_COPY_TEXT: EDITED_COPY_TEXT,
+          NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, LEGACY_TEXT: LEGACY_TEXT, UPGRADE_TEXT: UPGRADE_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, EDITED_COPY_TEXT: EDITED_COPY_TEXT,
           factLines: factLines, slotText: slotText};
 })();
 

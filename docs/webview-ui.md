@@ -339,7 +339,7 @@ requirements, "In every map" for `always` (with "it changes the editor itself" w
 nothing for a mod that only adds new names. After What it adds, **What it is made of** shows the
 builder's derived facts (`facts`) when the backend sends them: "Legacy, rebuild to isolate" for a
 converted first-generation package (`legacy`), then Adds, Borrows (game files under its own names),
-Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only; never in a map, with
+Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only: they apply in your editor whatever map is open and are never saved with a map or used at Play, with
 the paths in a `details` list), Edits ("edits N game files; maps that declare it get the game's text
 with these edits", one line per edited game file with what its edits do: fields set and removed, list
 entries added, named entries added or replaced, entries added and removed), Replaces (the files at game

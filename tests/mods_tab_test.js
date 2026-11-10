@@ -849,7 +849,9 @@ test('additive: derived facts, the game files a mod edits, encounters, legacy', 
   assert.deepEqual(lines[2].list, ['encounter mods/alex.r2-imp/single_imp']);
   const mo = modsTab.factLines(m('local.my-overrides'));
   assert.equal(mo[0].label, 'Editor tweaks');
-  assert.match(mo[0].text, /63 files, on this computer only; never in a map/);
+  assert.equal(mo[0].text, '63 files, on this computer only: ' + modsTab.EDITOR_TWEAKS_TEXT);
+  assert.match(mo[0].text, /apply in your editor whatever map is open/, 'they always apply in this editor (DESIGN-additive 2.6)');
+  assert.ok(!/never in a map/.test(mo[0].text), 'not "never in a map": they apply in every map this editor opens');
   const sp = modsTab.factLines(m('local.spider-mastermind')).find(l => l.label === 'Edits');
   assert.deepEqual(sp.list, ['aifsmmanager/states/spidermastermind: 2 named entries added or replaced']);
   const hg = modsTab.factLines(m('local.hell-guard'));
