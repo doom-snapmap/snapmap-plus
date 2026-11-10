@@ -21,12 +21,12 @@ var modsTab = (function () {
   };
   /* duplicateId: another folder holds this key at this hash, an exact copy (modui.c mu_model_rows).
      Two hashes of one key are two builds, never attention (DESIGN-additive 2.2), and a key never changes. */
-  var DUPLICATE_TEXT = 'an identical copy of this build is installed in another folder; uninstall one of the two';
-  /* The three row states: each backend state and cause maps onto exactly one. */
+  var DUPLICATE_TEXT = 'an identical copy of this mod is installed in another folder; uninstall one of the two';
+  /* The row states a player sees: installed, or needs attention with its cause (owner 2026-11-09: no
+     build management, so a folder another build of its key outranks is simply installed). */
   var STATUS = {
     ok:   {icon: 'check', label: 'Installed and serving'},
-    warn: {icon: 'triangle-alert', label: 'Needs attention'},
-    info: {icon: 'circle-info', label: 'Installed; another build serves its files'}
+    warn: {icon: 'triangle-alert', label: 'Needs attention'}
   };
   /* The details pane's line about where the folder came from (the product block's origin). */
   var ORIGINS = {
@@ -53,10 +53,13 @@ var modsTab = (function () {
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
-  var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'info'};
-  /* A map needs the paths its rows list; a mod folder provides them (the asset rule). */
-  var MAP_CAUSES = {missing: 'not installed on this machine', incomplete: 'installed, but it lacks files this map uses',
-                    otherBuild: 'installed at another build', skipped: 'installed but not in use'};
+  var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'ok'};
+  /* A map needs the paths its rows list; a mod folder provides them (the asset rule). A row whose own
+     build is not installed reads as not installed, whatever else of its key is: playing the map
+     downloads exactly what it pins. */
+  var NOT_INSTALLED = 'not installed on this computer; playing the map downloads it';
+  var MAP_CAUSES = {missing: NOT_INSTALLED, incomplete: 'installed, but it lacks files this map uses',
+                    otherBuild: NOT_INSTALLED, skipped: 'installed but not in use'};
   /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
   var UNINSTALL_HEAD = {
     undo: 'Undo history is cleared. The folder can be restored from the Recycle Bin by hand. Uninstalling:',
@@ -247,8 +250,8 @@ var modsTab = (function () {
   }
   function mapModStatus(r) {
     var tone = MAP_STATES[r.state] || 'warn';
-    var cause = tone === 'ok' ? 'Installed' : tone === 'info' ? 'Installed; another build serves its files' : (MAP_CAUSES[r.state] || r.state);
-    return {tone: tone, icon: STATUS[tone].icon, label: tone === 'warn' ? STATUS.warn.label : STATUS[tone].label, cause: cause};
+    var cause = tone === 'ok' ? 'Installed' : (MAP_CAUSES[r.state] || r.state);
+    return {tone: tone, icon: STATUS[tone].icon, label: STATUS[tone].label, cause: cause};
   }
   function refText(r) { return REF_KINDS[r.kind] + ': ' + r.name; }
   /* The consequence lines of a dry run, in the order the confirmation lists them. Each line is
@@ -271,7 +274,7 @@ var modsTab = (function () {
     if (pv.install) {
       out.push({text: 'Moves the folder mods\\' + pv.install.folder + ' to the Windows Recycle Bin.'});
       if (pv.install.keptBuild)
-        out.push({text: 'Another build of this mod stays installed (mods\\' + pv.install.keptBuild + '); maps that use the mod open with it.'});
+        out.push({text: 'Another folder of this mod stays installed (mods\\' + pv.install.keptBuild + '); maps that use the mod open with it.'});
       else if (pv.install.savedMaps > 0) out.push({text: savedMapsText(pv.install.savedMaps)});
     }
     return out;
@@ -307,19 +310,13 @@ var modsTab = (function () {
     var cause;
     if (b.buildFailed) {
       cause = 'its latest build failed: ' + (b.buildFailed.cause || 'see the build log') +
-              (b.buildFailed.snapshot ? '; serving build ' + b.buildFailed.servingBuild + ' from its snapshot'
-                                      : '; serving build ' + b.buildFailed.servingBuild);
+              '; the last working version keeps serving until it builds';
       return {tone: 'warn', icon: STATUS.warn.icon, label: STATUS.warn.label, cause: cause, sentence: 'Needs attention: ' + cause};
     }
     if (b.duplicateId || b.state === 'attention') {
       cause = b.duplicateId ? DUPLICATE_TEXT : (b.cause || 'not in use');
       return {tone: 'warn', icon: STATUS.warn.icon, label: STATUS.warn.label, cause: cause,
               sentence: 'Needs attention: ' + cause};
-    }
-    if (b.servedBy) {
-      cause = 'another build of this mod (' + b.servedBy + ') serves its files';
-      return {tone: 'info', icon: STATUS.info.icon, label: STATUS.info.label, cause: cause,
-              sentence: 'Installed; ' + cause + '.'};
     }
     cause = servingText(b);
     return {tone: 'ok', icon: STATUS.ok.icon, label: STATUS.ok.label, cause: cause, sentence: cause};
@@ -630,7 +627,6 @@ var modsTab = (function () {
       var about = section(box, 'about', 'About');
       field(about, 'Id', b.id || '(not built yet)');
       if (b.version) field(about, 'Version', b.version);
-      if (b.build > 0) field(about, 'Build', String(b.build));
       if (b.author) field(about, 'Author', b.author);
       if (b.description) field(about, 'Description', b.description).className += ' mods-field-long';
       var link = el('button', 'mods-link', b.folder || b.key);
@@ -670,20 +666,6 @@ var modsTab = (function () {
           } else field(fs, l.label, l.text);
         });
       }
-      if (b.builds.length > 1) {
-        var bs = section(box, 'builds', 'Builds of this mod');
-        b.builds.forEach(function (x) {
-          var line = 'Build ' + x.build + (x.version ? ' (' + x.version + ')' : '') + ' \u00b7 ' + x.bundle.slice(0, 16) +
-                     (x.newest ? ' \u00b7 newest' : '') + (x.failed ? ' \u00b7 its latest build failed' : '') +
-                     (x.folder === b.key ? ' \u00b7 this folder' : '');
-          /* "current" has no style of its own: the text says which build is the selected folder's. */
-          var row = el('div', 'mods-line mods-build' + (x.folder === b.key ? ' current' : ''), line);
-          row.setAttribute('data-newest', x.newest ? 'true' : 'false');
-          bs.appendChild(row);
-        });
-        bs.appendChild(el('div', 'mods-note', 'Each map uses the build it was saved with; the newest serves with no map open.'));
-      }
-
       var files = section(box, 'files', 'Files');
       var carried = Math.max(0, b.files - b.pointers);
       field(files, 'Carried', plural(carried, 'file') + ', ' + formatSize(b.size));

@@ -3827,8 +3827,7 @@ static void test_additive_same_key(void)
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
     strcpy_s(row.bundle, sizeof row.bundle, h3);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Fork (k.fork) at build 8888888888888888, which is not installed; k.fork is installed "
-                         "at another build (7777777777777777)."));
+    CHECK(!strcmp(cause, "This map uses Fork (k.fork), which is not installed."));
     CHECK(sh_modserve_row_other_build(&row, &ref) && !strcmp(ref.hash, h2));
     strcpy_s(row.bundle, sizeof row.bundle, h2);
     CHECK(!sh_modserve_row_other_build(&row, &ref));
@@ -4123,7 +4122,7 @@ static void test_resource_lock(void)
 
 /* The asset rule (sh_modserve_row_served): a row is served by the admitted
  * folder at its hash that provides every name it lists; missing with no
- * folder at that hash (worded "installed at another build" when the key is
+ * folder at that hash (worded as any missing mod, also when the key is
  * installed at another hash); incomplete, naming the first missing names,
  * when the folder lacks one. */
 static void test_row_served(void)
@@ -4178,8 +4177,7 @@ static void test_row_served(void)
     make_bundle(root, "hand-made", "local.hell-guard", "2.0.0", 'e', NULL, HG_NEW, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(!strcmp(cause, "This map uses Hell Guards (local.hell-guard) at build dddddddddddddddd, which is not installed; "
-                         "local.hell-guard is installed at another build (eeeeeeeeeeeeeeee)."));
+    CHECK(!strcmp(cause, "This map uses Hell Guards (local.hell-guard), which is not installed."));
 
     /* The folder at the hash that lacks one listed path: incomplete, naming it. */
     remove_tree(top);

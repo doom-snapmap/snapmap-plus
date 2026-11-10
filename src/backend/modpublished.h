@@ -103,15 +103,9 @@ int sh_modpublished_holding(void);
 /* The question as raised: "This map needs N mod(s): <names> (<size>).
  * Download and install now?", names that do not fit summarized as "and K
  * more". Always shorter than 256 bytes (the native dialog body). A mod whose
- * key is installed at another build is listed as "<key> (build <h8>, you
- * have <h8>)". */
+ * key is installed at another build is listed like any other. */
 void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
                                       unsigned long long bytes);
-/* The question for one mod installed at another build (DESIGN-additive 2.5):
- * "This <thing> needs <title> at build <want16>; you have build <have16>.
- * Download build <want16> (<size>) and install it beside yours?" */
-void sh_modpublished_compose_other_build_question(char *out, size_t cap, const char *thing, const char *title,
-                                                  const char *want, const char *have, unsigned long long bytes);
 
 /* ------------------------------------------------------------ seam */
 

@@ -6009,8 +6009,8 @@ static int ms_other_build(const ms_index *x, const char *id, int not)
 /* The asset rule (modserve.h): a row is served by the installed folder at the
  * row's hash (or an alias of it) when every name it lists resolves, in that
  * build or through the serving index. A folder of the key at another hash is
- * another build: the row is missing, worded "installed at another build", and
- * the published-map hold fetches the row's own build by hash. */
+ * another build: the row is missing, worded as any missing mod, and the
+ * published-map hold fetches the row's own build by hash. */
 int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     const ms_index *x = g_index;
@@ -6044,9 +6044,6 @@ int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subjec
             if (skipped >= 0 && x->bundles[skipped].hash && !_stricmp(x->bundles[skipped].hash, row->bundle))
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
-            else if (other >= 0)
-                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s at build %.16s, which is not installed; %s is "
-                            "installed at another build (%.16s).", what, title, row->bundle, row->id, x->bundles[other].hash);
             else if (skipped >= 0)
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");

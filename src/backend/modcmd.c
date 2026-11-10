@@ -208,11 +208,11 @@ static void mc_build(const char *folder_in)
         if (sh_mb_load_folder(folder, &last)) {
             char snap[MAX_PATH * 4];
             if (mc_in_store(folder) && sh_ms_snapshot_of(folder, snap, sizeof snap))
-                mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s) from snapshot %s", folder,
-                        b.first_cause, last.build, last.hash, snap);
+                mc_line("MODS: build %s: build failed: %s; the last working version keeps serving (bundle %.16s, kept in %s)",
+                        folder, b.first_cause, last.hash, snap);
             else
-                mc_line("MODS: build %s: build failed: %s; serving build %llu (bundle %.16s)", folder, b.first_cause,
-                        last.build, last.hash);
+                mc_line("MODS: build %s: build failed: %s; the last working version keeps serving (bundle %.16s)", folder,
+                        b.first_cause, last.hash);
         } else
             mc_line("MODS: build %s: build failed: %s; no earlier build serves", folder, b.first_cause);
         sh_mb_free(&last);
@@ -323,11 +323,11 @@ static void mc_list(void)
                     e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
             mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (legacy)" : "", classes);
             if (e->build_failed[0] && e->snapshot)
-                mc_line("MODS: list: mods\\%s  build failed: %s; serving build %llu from snapshot %s", e->name,
-                        e->build_failed, e->bundle.build, e->snapshot);
+                mc_line("MODS: list: mods\\%s  build failed: %s; the last working version keeps serving (kept in %s)",
+                        e->name, e->build_failed, e->snapshot);
             else if (e->build_failed[0])
-                mc_line("MODS: list: mods\\%s  build failed: %s; serving build %llu", e->name, e->build_failed,
-                        e->bundle.build);
+                mc_line("MODS: list: mods\\%s  build failed: %s; the last working version keeps serving", e->name,
+                        e->build_failed);
         } else
             mc_line("MODS: list: mods\\%s  %s: %s", e->name, state, e->cause);
     }

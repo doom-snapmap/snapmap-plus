@@ -2752,7 +2752,7 @@ static int mu_remove(const char *key)
         if (ok && !rm.outright) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was moved to the Recycle Bin.", shown);
         else if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was deleted because the Recycle Bin could not "
                                  "take it (%s).", shown, rm.outright_why);
-        else if (rm.removed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu of %zu builds of %s; %s.", rm.removed,
+        else if (rm.removed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu of %zu folders of %s; %s.", rm.removed,
                                          rm.removed + rm.failed, shown, rm.first_fail);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be removed: %s. Close any program using its folder and try again.",
                          shown, rm.first_fail[0] ? rm.first_fail : "nothing was deleted");
@@ -3636,7 +3636,7 @@ static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *
 {
     char snap[MAX_PATH * 4];
     if (s->loaded)
-        mu_line(o, "%s:   mods\\%s (%s %s, build %.16s)", verb, mu_leaf(s->folder), s->bundle.id,
+        mu_line(o, "%s:   mods\\%s (%s %s, bundle %.16s)", verb, mu_leaf(s->folder), s->bundle.id,
                 s->bundle.version[0] ? s->bundle.version : "-", s->bundle.hash);
     else mu_line(o, "%s:   mods\\%s (not built)", verb, mu_leaf(s->folder));
     if (sh_ms_snapshot_of(s->folder, snap, sizeof snap) == 1)
@@ -3782,7 +3782,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                         if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i]))
                             mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
                 if (builds > 1) {
-                    mu_line(o, "%s: removes all %d builds of %s; to keep one, uninstall the others as \"%s@<build>\"",
+                    mu_line(o, "%s: removes all %d folders of %s; to keep one, uninstall the others as \"%s@<hash16>\"",
                             verb, builds, key, key);
                     mu_line(o, "%s: moves these folders to the Windows Recycle Bin; restore them from there by hand", verb);
                     for (t = 0; t < m.list.count; t++) if (targets[t]) mu_say_target(o, verb, &m.list.items[t]);
@@ -3796,8 +3796,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                                 mu_leaf(snap));
                 }
                 if (stay)
-                    mu_line(o, "%s: another build of %s stays installed (mods\\%s); maps that use %s open with it", verb,
-                            s->bundle.id, mu_leaf(stay->folder), s->bundle.id);
+                    mu_line(o, "%s: another folder of %s stays installed (mods\\%s); maps that use it open with it", verb,
+                            s->bundle.id, mu_leaf(stay->folder));
                 else if (saved > 0)
                     mu_line(o, "%s: %d of your saved maps use it; they will not open until a mod folder provides its assets "
                             "again", verb, saved);
@@ -4077,7 +4077,7 @@ static int mu_rebuild(const char *key)
         mu_log("rebuild %s: %s@%s+%llu, bundle %s%s", key, bd.id, bd.version, bd.build, bd.hash, same ? " (unchanged)" : "");
         mu_rescan(note, sizeof note);
         if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed (%zu files).", key, bd.file_count);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: build %llu, %zu files.", key, bd.build, bd.file_count);
+        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: %zu files.", key, bd.file_count);
     }
     InterlockedIncrement(&g_gen);
     {

@@ -911,7 +911,7 @@ int main(int argc, char **argv)
     load_map_naming("alex.r2-imp", "00000000000000000000000000000000000000000000000000000000000000aa");
     doc = list_doc();
     CHECK(!has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"alex.r2-imp\""));
-    CHECK(has(doc, "at build 0000000000000000, which is not installed; alex.r2-imp is installed at another build ("));
+    CHECK(has(doc, "\"cause\":\"This map uses R2 Imp copy (alex.r2-imp), which is not installed.\""));
     CHECK(has(doc, "\"inManifest\":false"));
     /* Its own state, not "skipped": installed at another build; nothing offers to move the map. */
     CHECK(has(doc, "\"state\":\"otherBuild\",\"cause\":\"This map uses"));
@@ -2080,7 +2080,7 @@ int main(int argc, char **argv)
                 CHECK(sh_modserve_bundle_serving(NULL, "alex.req", &before));
                 mt_append(path, "assets\\generated\\decls\\entitydef\\mods\\alex.req\\twin.decl", "// changed\r\n");
                 doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
-                CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: build 2, 1 files.\""));
+                CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: 1 files.\""));
                 free(doc);
                 /* The author's own folder, rebuilt in place: a map saved against
                  * the earlier build follows it when it opens in the editor, with
@@ -2433,8 +2433,8 @@ int main(int argc, char **argv)
         CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\twin.key to the Windows Recycle Bin"));
         CHECK(!has(g_doctor, "builds of twin.key"));
         /* Its consequences are the key's: the other build stays and serves the maps. */
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall: another build of twin.key stays installed (mods\\%s); "
-                    "maps that use twin.key open with it\n", beside);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall: another folder of twin.key stays installed (mods\\%s); "
+                    "maps that use it open with it\n", beside);
         CHECK(has(g_doctor, line));
         CHECK(!has(g_doctor, "saved maps use it") && !has(g_doctor, "will not open"));
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "twin.key");   /* the tab names the folder */
@@ -2445,11 +2445,11 @@ int main(int argc, char **argv)
         /* The key: every build, each folder named, in the dry run. */
         g_doctor[0] = 0;
         CHECK(sh_modui_command(2, by_key, doctor_line, NULL) == 1);
-        CHECK(has(g_doctor, "MODS: uninstall: removes all 2 builds of twin.key; to keep one, uninstall the others as "
-                            "\"twin.key@<build>\"\n"));
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\twin.key (twin.key 1.0.0, build %s)\n", h1);
+        CHECK(has(g_doctor, "MODS: uninstall: removes all 2 folders of twin.key; to keep one, uninstall the others as "
+                            "\"twin.key@<hash16>\"\n"));
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\twin.key (twin.key 1.0.0, bundle %s)\n", h1);
         CHECK(has(g_doctor, line));
-        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, build %s)\n", beside, h2);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: uninstall:   mods\\%s (twin.key 1.0.0, bundle %s)\n", beside, h2);
         CHECK(has(g_doctor, line));
         CHECK(has(g_doctor, "MODS: uninstall twin.key: dry run; add --yes to do it\n"));
         /* A map load lists, for its placed names, the build the new map

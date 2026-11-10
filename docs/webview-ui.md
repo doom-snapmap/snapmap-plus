@@ -364,7 +364,8 @@ placed-entity count, and "Declared, nothing placed" when nothing of it is placed
 removing it deletes nothing. Nothing in the tab moves a map between builds: an author's own map
 follows their own rebuilt folder in the backend when it opens in the editor and at save (see
 [architecture](architecture.md#mods)), and a downloaded map keeps what it pins. A row pinning a build that is not installed while its key is installed at
-another reads "installed at another build" (`otherBuild`). A map records nothing about the Snapmap+
+another reads "not installed on this computer; playing the map downloads it" (`otherBuild`), as a
+missing mod does: the tab never talks about builds. A map records nothing about the Snapmap+
 version that saved it (DESIGN-additive 2.7, withdrawn). When several declared
 mods edit one field or named entry of a game file to different values (`registryClashes`), **Choices
 between mods** shows one select per slot ("<path> in <game file>") with its providers, the serving one

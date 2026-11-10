@@ -692,7 +692,7 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(r == SH_PREFAB_MODS_HELD);
     tick(3);
     CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
-    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that is not installed and was never published. "
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which is not installed and was never published. "
                                 "Restore its folder from the Recycle Bin or load the prefab's ZIP export."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
@@ -704,7 +704,7 @@ static void resolving(const sh_modmanifest_row *door)
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     tick(3);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
-    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod at a build that could not be downloaded: the mod store did "
+    CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which could not be downloaded: the mod store did "
                                 "not answer; try again in a few minutes."));
     CHECK(!strcmp(F.last_ask, F.last_print));
     sh_modmanifest_list_free(&rows);
@@ -1346,7 +1346,7 @@ static void gate_end_to_end(const char *tmp)
         CHECK(sh_modserve_index_build(author) >= 3);
     }
     e_hold(&gone, 0);
-    CHECK(!strcmp(F.last_print, "This map needs test.gone at a build that is no longer available: its author "
+    CHECK(!strcmp(F.last_print, "This map needs test.gone, which is no longer available: its author "
                                 "unpublished it, or it was removed. This is permanent on this machine."));
     CHECK(F.asks == 1 && F.ask_buttons == 0 && !strcmp(F.last_ask, F.last_print) && F.fetches == 0);
     printf("    cause 1: %s\n", F.last_ask);
@@ -1359,7 +1359,7 @@ static void gate_end_to_end(const char *tmp)
         CHECK(sh_modserve_index_build(author) >= 2);
     }
     e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that is not installed and was never published. "
+    CHECK(!strcmp(F.last_ask, "This map needs test.never, which is not installed and was never published. "
                               "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
     printf("    cause 3: %s\n", F.last_ask);
@@ -1375,13 +1375,13 @@ static void gate_end_to_end(const char *tmp)
      * hold's own test (modpublished_test); here the rawmap of a mod nobody
      * published reads cause 3 the same way. */
     e_hold(&gone, 0);
-    CHECK(strstr(F.last_ask, "This map needs test.gone at a build that is not installed and was never published.") == F.last_ask);
+    CHECK(strstr(F.last_ask, "This map needs test.gone, which is not installed and was never published.") == F.last_ask);
 
     /* Cause 4: the store has it, but its borrow names a file this game holds
      * with other bytes (another game revision). */
     g_e_game_lacks = 1;
     e_hold(&borrow, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs Borrowing Mod (test.borrow) at a build that needs a file this game does not "
+    CHECK(!strcmp(F.last_ask, "This map needs Borrowing Mod (test.borrow), which needs a file this game does not "
                               "hold (generated/image/stock/rock.bimage): a different game revision. This is permanent on "
                               "this machine."));
     CHECK(!strcmp(F.last_print, F.last_ask) && F.fetches == 0);
@@ -1391,7 +1391,7 @@ static void gate_end_to_end(const char *tmp)
     /* Cause 2: the store setting points where nothing answers. */
     CHECK(modnet_set_base_url("http://127.0.0.1:1"));
     e_hold(&never, 0);
-    CHECK(!strcmp(F.last_ask, "This map needs test.never at a build that could not be downloaded: the mod store could "
+    CHECK(!strcmp(F.last_ask, "This map needs test.never, which could not be downloaded: the mod store could "
                               "not be reached; check the internet connection and try again."));
     printf("    cause 2: %s\n", F.last_ask);
     /* The same with another build of the key installed: a rawmap is the
@@ -1399,8 +1399,8 @@ static void gate_end_to_end(const char *tmp)
     g_e_resumes = 0;
     e_hold(&twob2, 0);
     CHECK(!sh_modpublished_holding() && g_e_resumes == 1 && F.asks == 0 && F.fetches == 0);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "rawmap load: test.twob: declared at build %.16s (not installed), serving "
-                "build %.16s", twob2.bundle, twob1.bundle);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "rawmap load: test.twob: uses the installed mod; the next save of the map "
+                "records it");
     CHECK(strstr(F.last_print, want) == F.last_print);
     printf("    substituted: %s\n", F.last_print);
     CHECK(modnet_set_base_url(url));
@@ -1409,8 +1409,7 @@ static void gate_end_to_end(const char *tmp)
     /* Installed at another build: obtainable. The question names both
      * builds; Yes downloads the map's build by hash and installs it beside. */
     e_hold(&twob2, 1);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "This map needs Two Builds (test.twob) at build %.16s; you have build %.16s. "
-                "Download build %.16s (under 0.1 MB) and install it beside yours?", twob2.bundle, twob1.bundle, twob2.bundle);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "This map needs 1 mod: test.twob (under 0.1 MB). Download and install now?");
     CHECK(F.asks == 1 && F.ask_buttons == 6 && !strcmp(F.last_ask, want));
     printf("    other build: %s\n", F.last_ask);
     for (int i = 0; i < 200 && sh_modpublished_holding(); i++) tick(1);

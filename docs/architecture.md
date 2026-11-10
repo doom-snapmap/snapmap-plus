@@ -613,7 +613,7 @@ conductor, strings), `edits` (the derived edits of each decl at a game name), sh
 `stock` (pointers; `"inAssets": false` when no file stands behind one). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
 serving, and the store records the failure on the folder (`sh_mods list`:
-"build failed: <cause>; serving build N from snapshot <path>"); a folder that
+"build failed: <cause>; the last working version keeps serving (kept in <path>)"); a folder that
 never built is skipped. Because authors edit files in place, every successful
 build of a store folder keeps a snapshot of its carried files and its
 `mod.json` under `mods\.builds\<key>@<hash16>\` (one per folder, named in the
@@ -699,9 +699,8 @@ build or through the serving index; missing when no admitted folder has that
 hash, also when the key is installed at another hash (another build, inert
 for the map); incomplete when the build is admitted but a listed name does
 not resolve. Its cause is the refusal: "This map uses Hell Guards
-(local.hell-guard), which is not installed.", "This map uses Hell Guards
-(local.hell-guard) at build <hash16>, which is not installed;
-local.hell-guard is installed at another build (<hash16>)." or "Hell Guards
+(local.hell-guard), which is not installed." (also when another build of the
+key is installed: the player is never told about builds, owner 2026-11-09) or "Hell Guards
 (local.hell-guard) is installed but does not provide
 mods/local.hell-guard/hell_guard_combo_enc, which this map uses." (the first
 three missing names, then "and N more"; the folder's own name, else the key
@@ -2188,7 +2187,7 @@ claim this machine holds names the bundle, `modsync_claim_names`). Held and
 installable is obtainable; any other answer denies the launch in one of four
 causes, `sh_modpub_gate_wording`:
 
-| cause | when | sentence (after "This map needs <name> (<key>) at a build that ") |
+| cause | when | sentence (after "This map needs <name> (<key>), which ") |
 |---|---|---|
 | 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
 | 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
@@ -2207,16 +2206,15 @@ obtained; see the console." when there are more) and every denied bundle gets
 one console line. A prefab's sentences say "prefab" and "the prefab's ZIP
 export". The title is the store manifest's name, else an installed build's,
 else the key alone. A key installed at another build (`sh_modserve_row_other_build`)
-is never a cause. When the store holds the declared build it is the obtainable
-case, and with one such mod the question names both builds ("This map needs
-<title> at build <h16>; you have build <h16>. Download build <h16> (<size>) and
-install it beside yours?"); in a longer list the mod reads "<key> (build <h8>,
-you have <h8>)". When the declared build cannot be obtained, the player's own
+is never a cause, and never mentioned. When the store holds the declared build
+it is the obtainable case, asked with the ordinary question above; the
+download lands beside the installed build by hash without a word about builds
+(owner 2026-11-09). When the declared build cannot be obtained, the player's own
 content substitutes (verdict `SH_MODPUB_GATE_SUBSTITUTE`, fact `own`): a My
 Maps play, a rawmap load or a prefab placement goes on with the installed build
 of the key, as an editor open does (DESIGN-additive 2.5). Each such row prints
-`<hold>: <key>: declared at build <X16> (not installed), serving build <Y16>;
-the next save of the map records it`, leaves the hold's missing list, and is
+`<hold>: <key>: uses the installed mod; the next save of the map records it`
+(the hashes on the backend log), leaves the hold's missing list, and is
 remembered for the session (`sh_modpub_row_substitute`, checked against the
 key's installed build on every use), so the hold's resume, a rawmap's reopen,
 the next launch of the same map and the Prefabs tab's second placement find
@@ -2469,7 +2467,7 @@ thread):
   only rows the asset rule reports missing or incomplete are asked for; the
   Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
   Load / Place. Otherwise the placement is denied with the gate's prefab
-  sentences ("This prefab needs <title> at a build that ..."). No, a failed
+  sentences ("This prefab needs <title>, which ..."). No, a failed
   download and a bundle that will not install end as for a map, with "The
   prefab was not placed.";
 - with the gates unbound (a build where the published-map gates did not

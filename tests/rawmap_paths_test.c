@@ -964,7 +964,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     ticks(4);
     CHECK(!sh_modpublished_holding() && R.fetches == 0 && R.resumes == 0);
     /* The denial gate's cause 3: never published, and no folder at its hash. */
-    CHECK(!strcmp(R.print, "This map needs test.alpha at a build that is not installed and was never published. "
+    CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed and was never published. "
                            "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
 
@@ -976,7 +976,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
         CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
         CHECK(g_prepared == NULL && !g_in_reload);
         ticks(4);
-        CHECK(strstr(R.print, "This map needs test.alpha at a build") && strstr(R.print, "rawmap ZIP"));
+        CHECK(strstr(R.print, "This map needs test.alpha, which") && strstr(R.print, "rawmap ZIP"));
     }
     DeleteFileA(staged);
     mods_end();

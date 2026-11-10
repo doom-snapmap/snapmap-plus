@@ -513,7 +513,7 @@ static int fake_substitute(const sh_modmanifest_row *row, char *hash_out, size_t
 {
     g_subst_calls++;
     if (!strcmp(row->id, "alex.gone")) { strcpy_s(hash_out, hash_cap, HASH_A); return 1; }
-    strcpy_s(why, why_cap, "This map needs nobody.here at a build that is not installed and was never published.");
+    strcpy_s(why, why_cap, "This map needs nobody.here, which is not installed and was never published.");
     return 0;
 }
 
