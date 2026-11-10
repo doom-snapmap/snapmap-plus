@@ -613,8 +613,9 @@ static int mu_model_build(mu_model *m)
                 const sh_mb_file *f = &e->bundle.files[k];
                 /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
                 if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
-                /* An edited copy is counted under edits, never as a replaced stock file. */
-                if (f->shadowed && !f->edited) u->shadows++;
+                /* An edited copy is counted under edits and an editor tweak under
+                 * editor (DESIGN-additive 2.6), never as a replaced stock file. */
+                if (f->shadowed && !f->edited && f->cls != SH_MB_CLASS_EDITOR) u->shadows++;
             }
         if (!e->loaded) {
             u->state = "skipped";

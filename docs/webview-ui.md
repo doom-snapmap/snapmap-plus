@@ -415,7 +415,7 @@ Per entry of `mods`:
 | `"servedBy"` | string | The key of another folder whose build serves this mod's paths (superseded); "" when it serves its own. Drives the grey icon. |
 | `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
 | `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
-| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files (an edited copy of a game file is not one), sound banks, movies, snapModule decls, virtual textures. |
+| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files (an edited copy of a game file is not one, nor an editor tweak), sound banks, movies, snapModule decls, virtual textures. |
 | `"requirements"` | object | The builder's canonical requirements, `{commands?: {activate?: [line], deactivate?: [line]}, cvars: {name: "value"}}`; `{cvars: {}}` when none. Whether each is live is in `sh_mods status` and `sh_mods doctor`, not the payload. |
 | `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |

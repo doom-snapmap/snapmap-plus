@@ -1359,6 +1359,10 @@ int main(int argc, char **argv)
                 const char *rows = p ? strstr(p, "\"editorRows\":1,") : NULL, *names = p ? strstr(p, "\"editorRowNames\":[\"mods/alex.tweak/row\"]") : NULL;
                 const char *tweak = p ? strstr(p, "\"editor\":1,") : NULL;
                 CHECK(p && rows && names && tweak && (!e || (rows < e && names < e && tweak < e)));
+                {   /* An editor tweak is not a replaced stock file: the tab would say "Replaces 1 stock file". */
+                    const char *c0 = p ? strstr(p, "\"counts\":{\"shadows\":0,") : NULL;
+                    CHECK(c0 && (!e || c0 < e));
+                }
             }
             free(doc);
             doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.tweak");
