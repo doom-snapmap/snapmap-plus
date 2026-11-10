@@ -690,6 +690,22 @@ static void me_closure_begin(me_closure *c)
     c->counted = 1;
 }
 
+/* Keep what the kept decls hold (sh_modserve_holds_raise): after every
+ * serving pass, and before the Play level load purges level 1. */
+static void me_keep_holds(const char *phase)
+{
+    sh_modserve_holds h;
+    if (!g_res_head) return;
+    if (!sh_modserve_holds_raise(g_res_head, &h)) {
+        me_log("%s: resource lists could not be walked; what kept decls hold was not checked", phase);
+        return;
+    }
+    if (h.raised)
+        me_log("%s: %u resource(s) kept decls hold kept for the session with them (%u kept decl(s), %u name(s) they "
+               "need): %s%s", phase, h.raised, h.roots, h.names, h.first,
+               strlen(h.first) + 40 >= sizeof h.first ? ", ..." : "");
+}
+
 static void me_closure_end(me_closure *c, const char *phase, const char *what)
 {
     if (c->counted) g_mark_depth--;
@@ -701,6 +717,7 @@ static void me_closure_end(me_closure *c, const char *phase, const char *what)
         else if (!raised.lists) me_log("%s: resource lists could not be walked after the %s; not kept", phase, what);
     }
     sh_modserve_watermark_free(&c->mark);
+    if (!g_mark_depth) me_keep_holds(phase);
 }
 
 static void me_reparse_early(const char *phase, int in_heap);
@@ -790,6 +807,9 @@ void sh_modserve_play_begin(void)
     /* Map scope: entities placed since the load or the last save may list a
      * bundle; its shadows and requirements come in before the level loads. */
     if (on_main == 1 && sh_modserve_scope_source(SH_MODSERVE_AT_PLAY) > 0) (void)sh_modserve_scope_apply("play");
+    /* What the editor's spawns created for a kept decl since the last pass
+     * is still level 1: kept before the level load's purge frees it. */
+    if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
     if (!sh_modserve_requirements_held()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
@@ -1789,7 +1809,7 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
             k->kept++;
             if (older)
                 me_log("editor: %s '%s' kept for the session (editor row '%s' points at it); it was created at level 1 "
-                       "before this pass, so the resources its parse created are not kept with it", type, name, row);
+                       "before this pass, so what its parse created is kept by the names its file needs", type, name, row);
             else me_log("editor: %s '%s' kept for the session (editor row '%s' points at it)", type, name, row);
         } else k->permanent++;
     } __except (me_fault_filter(GetExceptionCode())) { me_log_fault("keep", type, name, before); }
@@ -1884,6 +1904,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
         else if (!raised.lists) me_log("%s: resource lists could not be walked after the pass; closure not raised", phase);
     }
     sh_modserve_watermark_free(&mark);
+    me_keep_holds(phase);
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != SH_MODSERVE_RANK_SEDEF) continue;
         if (plan.steps[i].ready == 1) rows_ok++;

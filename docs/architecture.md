@@ -1454,7 +1454,33 @@ A decl the keeper finds at level 1 from before its watermark (created by the
 engine's own load) is counted as `older`: an md6Def is left whole at level 1,
 since a row names it only by name and the editor finds it without creating it
 (VK FUN_14123b340 / GL FUN_14123a7e0); an animWeb or material a row holds by
-pointer is kept, and its own resources stay map-scoped.
+pointer is kept, and what it holds is kept by name, as below.
+
+A watermark keeps only what a pass creates, so a decl a pass keeps after the
+engine's own load parsed it would outlive what that parse created. An open
+map's load creates the decls its entities name at level 1, and their parse
+creates what they hold: the weapons pack's chainsaw pickup web made its clip
+(`.../chainsaw_pickup_pre_idle.md6anim`) there and caches the clip's pointer
+in a blend-tree entry; the map pass then kept the web (4), the clip stayed at
+1, the Play purge freed it, and `idAnimWebBlendTree::Init` (VK FUN_1417244c0 /
+GL FUN_141724fb0) used it at the Play spawn (a divide by zero at VK 0x15d2574
+/ GL 0x15d3994, or a read at VK 0x1a1d3d9; snaphak-re triage X1). The rule is
+therefore by name, not by time: every resource a level-4 decl of a served
+bundle holds is level 4 (`sh_modserve_holds_raise`). From each non-surface
+decl of an admitted bundle the engine holds at level 4, the needs the builder
+recorded for its file (an animWeb's clips and md6Defs, an md6Def's mesh,
+skeleton and clips, an entityDef's models and md6Defs) are closed through
+every index file that provides one, looked up by the list's type (+0x08;
+`anim` for idMD6Anim, VK 0x140215b00) and the folded name, and raised from 1
+to 4. It runs after every serving pass (`me_closure_end` at the outermost
+watermark, `me_editor_rows`) and before the Play level load
+(`sh_modserve_play_begin`), so a held name the engine creates after a pass (an
+editor spawn) is kept before the first purge that follows. A log line
+`<phase>: N resource(s) kept decls hold kept for the session with them` names
+what it raised. Nothing the product keeps is released in a session, and a
+name a kept decl no longer needs is not raised by later runs. What the needs
+do not name (a stock mesh's materials, a skeleton a cooked mesh or clip names
+only in its bytes) is outside the rule.
 
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
 {"activate": [...], "deactivate": [...]}}`) are read only through the builder's

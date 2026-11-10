@@ -4890,7 +4890,9 @@ int sh_modserve_error_names_decl(const char *text, const char *type, const char 
 #define MS_RL_NEXT    0x18
 #define MS_RL_ENTRIES 0x20
 #define MS_RL_COUNT   0x28
+#define MS_RL_TYPE    0x08
 #define MS_RES_LEVEL  0x28
+#define MS_RES_NAME   0x08
 #define MS_RL_MAX_LISTS   4096
 #define MS_RL_MAX_ENTRIES (1 << 22)
 
@@ -5073,6 +5075,150 @@ void sh_modserve_watermark_free(sh_modserve_watermark *w)
     if (!w) return;
     free(w->res);
     memset(w, 0, sizeof *w);
+}
+
+/* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
+ * type case-insensitive, the name folded as the raw-name match folds it
+ * (case, a backslash as '/', '-' as '_'). */
+typedef struct ms_hold { const char *type, *name; int file; } ms_hold;
+
+static char ms_hold_fold(char c)
+{
+    if (c == '-') return '_';
+    return ms_fold(c);
+}
+
+static int ms_hold_cmp(const void *pa, const void *pb)
+{
+    const ms_hold *a = (const ms_hold *)pa, *b = (const ms_hold *)pb;
+    const char *s = a->name, *t = b->name;
+    int c = _stricmp(a->type, b->type);
+    if (c) return c;
+    for (; *s && *t; ++s, ++t) {
+        char x = ms_hold_fold(*s), y = ms_hold_fold(*t);
+        if (x != y) return (unsigned char)x < (unsigned char)y ? -1 : 1;
+    }
+    return *s ? 1 : *t ? -1 : 0;
+}
+
+typedef struct ms_holds_walk {
+    const ms_hold *set; size_t n;
+    unsigned char *root;                  /* pass 1: per index file, held at level 4 */
+    sh_modserve_holds *out;               /* pass 2: raised */
+} ms_holds_walk;
+
+static const ms_hold *ms_holds_find(const ms_holds_walk *w, const unsigned char *list, const unsigned char *res)
+{
+    ms_hold key;
+    key.type = *(const char *const *)(list + MS_RL_TYPE);
+    key.name = *(const char *const *)(res + MS_RES_NAME);
+    key.file = -1;
+    if (!key.type || !key.name || !w->n) return NULL;
+    return (const ms_hold *)bsearch(&key, w->set, w->n, sizeof *w->set, ms_hold_cmp);
+}
+
+static void ms_holds_roots_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_holds_walk *w = (ms_holds_walk *)context;
+    const ms_hold *h;
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 4) return;
+    h = ms_holds_find(w, list, res);
+    if (h) w->root[h->file] = 1;
+}
+
+static void ms_holds_raise_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_holds_walk *w = (ms_holds_walk *)context;
+    const char *name;
+    size_t at;
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res)) return;
+    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    w->out->raised++;
+    name = *(const char *const *)(res + MS_RES_NAME);
+    at = strlen(w->out->first);
+    if (at + strlen(name) + 3 < sizeof w->out->first)
+        _snprintf_s(w->out->first + at, sizeof w->out->first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+}
+
+/* Everything a level-4 decl of a served bundle holds, by name: the needs the
+ * builder recorded for its file and, through every need another file of the
+ * index provides (a served decl or model, a closure pointer), that file's
+ * needs, at any depth. A decl the pass keeps may have been parsed before its
+ * watermark (an open map's own load created the chainsaw pickup's web at level
+ * 1 and its parse created the clip; the pass then raised the web, and the
+ * clip, older than the watermark, stayed at 1 and was freed under the web by
+ * the Play purge, report X1), so the watermark alone cannot keep what it
+ * holds. Each named resource found at level 1 is raised to 4; one the engine
+ * does not hold yet is raised by the first pass after it is created. */
+int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
+{
+    const ms_index *x = g_index;
+    sh_modserve_holds local;
+    ms_holds_walk w;
+    ms_hold *cands = NULL, *set = NULL;
+    int *queue = NULL, nq = 0, qh = 0, i, k, ok = 0;
+    size_t nc = 0, ns = 0, cs = 0;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    if (!x || !head_slot || !x->nfiles) return 0;
+    memset(&w, 0, sizeof w);
+    cands = (ms_hold *)malloc(sizeof *cands * (size_t)x->nfiles);
+    w.root = (unsigned char *)calloc((size_t)x->nfiles, 1);
+    queue = (int *)malloc(sizeof *queue * (size_t)x->nfiles);
+    if (!cands || !w.root || !queue) goto done;
+    /* The roots: decls of admitted bundles the product serves (a surface is
+     * the game's own decl, kept at the game's level). */
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
+        cands[nc].type = f->ptype;
+        cands[nc].name = f->pname;
+        cands[nc].file = i;
+        nc++;
+    }
+    if (nc > 1) qsort(cands, nc, sizeof *cands, ms_hold_cmp);
+    w.set = cands;
+    w.n = nc;
+    if (!ms_res_walk(head_slot, ms_holds_roots_one, &w, &out->lists)) goto done;
+    for (i = 0; i < x->nfiles; ++i) if (w.root[i]) { queue[nq++] = i; out->roots++; }
+    /* Their needs, closed through the files that provide them. */
+    while (qh < nq) {
+        const ms_file *f = &x->files[queue[qh++]];
+        for (k = 0; k < f->need_count; ++k) {
+            const ms_need *nd = &x->needs[f->need_first + k];
+            if (!nd->type || !nd->name) continue;
+            if (ns == cs) {
+                size_t c = cs ? cs * 2 : 256;
+                ms_hold *g = (ms_hold *)realloc(set, sizeof *set * c);
+                if (!g) goto done;
+                set = g;
+                cs = c;
+            }
+            set[ns].type = nd->type;
+            set[ns].name = nd->name;
+            set[ns].file = nd->file;
+            ns++;
+            if (nd->file >= 0 && nd->file < x->nfiles && !w.root[nd->file]) {
+                w.root[nd->file] = 1;
+                queue[nq++] = nd->file;
+            }
+        }
+    }
+    if (ns > 1) qsort(set, ns, sizeof *set, ms_hold_cmp);
+    for (i = 0, k = 0; (size_t)i < ns; ++i)
+        if (!k || ms_hold_cmp(&set[k - 1], &set[i])) set[k++] = set[i];
+    ns = (size_t)k;
+    out->names = (unsigned)ns;
+    w.set = set;
+    w.n = ns;
+    w.out = out;
+    ok = ns ? ms_res_walk(head_slot, ms_holds_raise_one, &w, &out->lists) : 1;
+done:
+    free(cands);
+    free(set);
+    free(queue);
+    free(w.root);
+    return ok;
 }
 
 unsigned sh_modserve_load_keep_lifetime(void *resource, void (*load)(void *), unsigned *was)

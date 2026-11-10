@@ -180,7 +180,10 @@ name". Mods you download or import are never refused on their files. A map whose
   treated like a changed one and takes effect the same way. Toybox rows a rescan adds or changes
   keep what their editor previews name (a private md6Def and its poses, an `fxInfo` FX, an
   attachment's model) for the rest of the session, as rows present at startup do, so Play and the
-  return to the editor after an in-session install behave as after a restart. The rescan's result
+  return to the editor after an in-session install behave as after a restart. Whatever a mod's
+  object the session keeps holds (a pickup's animations, a model's mesh and skeleton) is kept with
+  it, also when the map's own load created it before the mod was activated, so the first Play
+  after a map was opened in the editor no longer frees it. The rescan's result
   and the backend log's `MODS: refresh:` lines say which applied.
   `sh_mods build "<folder>"` does it at once; `sh_mods install "<folder>"` copies a folder from
   elsewhere into `mods\<id>\`, verifies it and makes it available at once (a folder without an
