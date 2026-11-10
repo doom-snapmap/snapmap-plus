@@ -304,6 +304,40 @@ static void test_scan(void)
         CHECK(!strcmp(got, want));
         if (strcmp(got, want)) fprintf(stderr, "  animWeb scan gave %s\n", got);
     }
+    /* An effect names its particles and ribbons (and light and decal
+     * materials); a particle or ribbon names its materials; an entityDef
+     * names its movies. */
+    {
+        const char *fx = "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tdeclPrt = \"player/eyes\";\r\n"
+                         "\t\t\t\tdeclRenderParm = \"bloomcolor\";\r\n\t\t\t}\r\n\t\t\titem[1] = {\r\n\t\t\t\tdeclRibbon = \"trail\";\r\n"
+                         "\t\t\t\tlightMtr = \"lights/l\";\r\n\t\t\t\tdecalMtr = \"decals/d\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}";
+        const char *prt = "{\r\n\tedit = {\r\n\t\tstages = {\r\n\t\t\titem[0] = {\r\n\t\t\t\tsystemProperties = {\r\n"
+                          "\t\t\t\t\tmaterial = \"p/a\";\r\n\t\t\t\t}\r\n\t\t\t\tsystemPropertiesGPU = {\r\n\t\t\t\t\tmaterial = \"p/b\";\r\n"
+                          "\t\t\t\t}\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}";
+        const char *ent = "{\r\n\tedit = {\r\n\t\tguiData = {\r\n\t\t\tswfFile = \"swf/doors/x.swf\";\r\n\t\t}\r\n"
+                          "\t\tguiFile = \"swf/screens/y.swf\";\r\n\t\tmaterial = \"not/scanned\";\r\n\t}\r\n}";
+        const char *want_fx = "particle=player/eyes;ribbon=trail;material=lights/l;material=decals/d;";
+        const char *want_ent = "swf=swf/doors/x.swf;swf=swf/screens/y.swf;";
+        char cand[2][SH_MB_REQUEST_MAX + 1];
+        got[0] = 0;
+        sh_mb_scan_needs("fx", (const unsigned char *)fx, strlen(fx), collect, got);
+        CHECK(!strcmp(got, want_fx));
+        if (strcmp(got, want_fx)) fprintf(stderr, "  fx scan gave %s\n", got);
+        got[0] = 0;
+        sh_mb_scan_needs("particle", (const unsigned char *)prt, strlen(prt), collect, got);
+        CHECK(!strcmp(got, "material=p/a;material=p/b;"));
+        got[0] = 0;
+        sh_mb_scan_needs("ribbon", (const unsigned char *)prt, strlen(prt), collect, got);
+        CHECK(!strcmp(got, "material=p/a;material=p/b;"));
+        got[0] = 0;
+        sh_mb_scan_needs("entityDef", (const unsigned char *)ent, strlen(ent), collect, got);
+        CHECK(!strcmp(got, want_ent));
+        if (strcmp(got, want_ent)) fprintf(stderr, "  entityDef scan gave %s\n", got);
+        CHECK(sh_mb_need_requests("swf", "swf/switches/Switch2_Up.swf", cand, 2) == 1 &&
+              !strcmp(cand[0], "generated/swf/switches/switch2_up.bswf"));
+        CHECK(sh_mb_need_requests("swf", "swf/mods/a-b/gui.swf", cand, 2) == 1 &&
+              !strcmp(cand[0], "generated/swf/mods/a-b/gui.bswf"));
+    }
 }
 
 /* The stock 13954591 names the fixture leans on, plus one shadowable decl. */

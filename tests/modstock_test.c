@@ -23,6 +23,11 @@
  *     gains it as a pointer, transitively (animWeb -> md6Def -> mesh and
  *     skeleton), stable across a rebuild; snap_gameresources names gain
  *     nothing; a name no archive holds still fails; the file cap fails by name;
+ *     derived again by every build (a pointer whose need is gone is dropped,
+ *     an author stock entry stays); an effect gains its campaign-only
+ *     particle, ribbon, their materials and a transparency atlas, an
+ *     entityDef its movie and the movie's atlas, and a virtual-textured
+ *     material with an installed row no image;
  *   serving: a pointer is answered with the installed bytes, a carried copy of
  *     the same bytes in another bundle is not a conflict, and a pointer D2
  *     cannot answer falls through.
@@ -616,6 +621,219 @@ static void test_campaign_closure(const char *tmp)
     }
 }
 
+/* The closure is derived from each build's needs: a pointer one build added
+ * is gone after the decl that needed it is removed, and the hash changes. */
+static void test_closure_recomputed(const char *tmp)
+{
+    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], hash[65];
+    sh_mb_bundle b;
+    size_t len = 0;
+    unsigned char *text;
+
+    _snprintf_s(d4, sizeof d4, _TRUNCATE, "%s\\d4", tmp);
+    sh_modstock_set_install(d4);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close5", tmp);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
+    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, K_WEB, K_WEB_TEXT);
+    mt_write(dir, "assets\\generated\\decls\\material\\mods\\t.close\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    memcpy(hash, b.hash, sizeof hash);
+    sh_mb_free(&b);
+    /* The product block marks the derived pointers. */
+    text = sh_mb_read_file(path, 1 << 20, &len);
+    CHECK(text && strstr((const char *)text, "\"closure\": true") && strstr((const char *)text, K_MD6));
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    /* An unchanged rebuild derives the same set: same hash and build. */
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3 && !strcmp(b.hash, hash) && b.build == 1);
+    CHECK(has_note(&b, "3 game files borrowed for completeness"));
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    sh_mb_free(&b);
+    /* The animWeb is removed: nothing needs the chain, so it is gone. */
+    mt_delete(dir, K_WEB);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
+          strcmp(b.hash, hash) != 0 && b.build == 2);
+    CHECK(!find(&b, K_MD6) && !find(&b, K_MESH) && !find(&b, K_SKL) && !has_note(&b, "borrowed for completeness"));
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    sh_mb_free(&b);
+    text = sh_mb_read_file(path, 1 << 20, &len);
+    CHECK(text && !strstr((const char *)text, K_MD6) && !strstr((const char *)text, "\"closure\""));
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    /* A folder built by rules 3, which wrote no mark: its pointers at the
+     * game's own path to campaign-only content are derived again too. */
+    mt_write(dir, K_WEB, K_WEB_TEXT);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    sh_mb_free(&b);
+    text = sh_mb_read_file(path, 1 << 20, &len);
+    CHECK(text != NULL);
+    if (text) {
+        char *t3 = (char *)malloc(len + 1), *q;
+        size_t n3 = 0, j;
+        const char *mark = "\"closure\": true";
+        CHECK(t3 != NULL);
+        /* Cut each mark with the comma and line break before it. */
+        for (j = 0; t3 && j < len; j++) {
+            if (len - j >= strlen(mark) && !memcmp(text + j, mark, strlen(mark))) {
+                while (n3 && t3[n3 - 1] != ',') n3--;
+                if (n3) n3--;
+                j += strlen(mark) - 1;
+                continue;
+            }
+            t3[n3++] = (char)text[j];
+        }
+        if (t3) {
+            t3[n3] = 0;
+            q = strstr(t3, "\"rules\": 4");
+            CHECK(q && !strstr(t3, "closure"));
+            if (q) q[9] = '3';
+            mt_write(dir, "mod.json", t3);
+            free(t3);
+        }
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    mt_delete(dir, K_WEB);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && !find(&b, K_MD6) && !find(&b, K_MESH));
+    sh_mb_free(&b);
+    /* An author stock entry is the author's: it stays when nothing needs it. */
+    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\",\"stock\":{\"" K_MESH "\":{\"source\":\"" K_MESH "\"}}}");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && find(&b, K_MESH) && !find(&b, K_MESH)->closure);
+    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    sh_mb_free(&b);
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && find(&b, K_MESH));
+    sh_mb_free(&b);
+}
+
+/* ------------------------------------- effects, movies and images ---- */
+/* A fifth install (D5), everything in gameresources only unless noted: a
+ * particle and a ribbon (a bare name, as the game names its ribbons), the
+ * materials they draw with, one naming a transparency atlas; a movie and its
+ * atlas; two virtual-textured materials whose source images have standalone
+ * rows, one with an installed virtual-texture row; a particle SnapMap holds. */
+
+#define E_PRT     "generated/decls/particle/k/eyes.decl"
+#define E_RIB     "generated/decls/ribbon/k_trail.decl"
+#define E_GLOW    "generated/decls/material/k/glow.decl"
+#define E_TRAIL   "generated/decls/material/k/trailmat.decl"
+#define E_ATLAS   "generated/transsortatlas/k/beam.bimage"
+#define E_SWF     "generated/swf/k/panel.bswf"
+#define E_SWFIMG  "generated/swf/k/panel.bimage"
+#define E_VT      "generated/decls/material/k/vtmat.decl"
+#define E_VTIMG   "generated/image/k/vtimg.bimage"
+#define E_VT2     "generated/decls/material/k/vtmat2.decl"
+#define E_VT2IMG  "generated/image/k/vtimg2.bimage"
+#define E_SNAPPRT "generated/decls/particle/k/snapsparks.decl"
+static const char E_PRT_TEXT[] = "{\r\n\tedit = {\r\n\t\tstages = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n"
+                                 "\t\t\t\tsystemProperties = {\r\n\t\t\t\t\tmaterial = \"k/glow\";\r\n\t\t\t\t}\r\n"
+                                 "\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n";
+static const char E_RIB_TEXT[] = "{\r\n\tedit = {\r\n\t\tmaterial = \"k/trailmat\";\r\n\t\tduration = 1000;\r\n\t}\r\n}\r\n";
+static const char E_GLOW_TEXT[] = "{\r\nstageprogram\ttranssortblend\r\ntransatlasmap\t\"k/beam.tga\"\r\n}\r\n";
+static const char E_TRAIL_TEXT[] = "{\r\nstageprogram\tca_ribbonblend\r\n}\r\n";
+static const char E_VT_TEXT[] = "{\r\ndiffusemap\t\"k/vtimg\"\r\nusevirtualmapping\t1.000000\r\n}\r\n";
+static const char E_VT2_TEXT[] = "{\r\ndiffusemap\t\"k/vtimg2\"\r\nusevirtualmapping\t1.000000\r\n}\r\n";
+static const char E_VMTR[] = "26\t// file format version\r\n2\t// num vmtrs\r\n"
+                             "//   x      y width  hght flags  timeStamp    mtrCheck\r\n"
+                             "     0      0  1920  1920     0          0   -46041280 \"models/other\"\r\n"
+                             "  1920      0  1920  1920     0          0  1117842188 \"k/vtmat\"\r\n";
+static unsigned char E_ATLAS_B[80], E_SWF_B[40], E_SWFIMG_B[60], E_VTIMG_B[50], E_VT2IMG_B[52];
+
+static void make_install5(const char *d5)
+{
+    size_t k;
+    for (k = 0; k < sizeof E_ATLAS_B; k++) E_ATLAS_B[k] = (unsigned char)(k * 3 + 7);
+    for (k = 0; k < sizeof E_SWF_B; k++) E_SWF_B[k] = (unsigned char)(k * 5 + 1);
+    for (k = 0; k < sizeof E_SWFIMG_B; k++) E_SWFIMG_B[k] = (unsigned char)(k * 9 + 2);
+    for (k = 0; k < sizeof E_VTIMG_B; k++) E_VTIMG_B[k] = (unsigned char)(k * 11 + 3);
+    for (k = 0; k < sizeof E_VT2IMG_B; k++) E_VT2IMG_B[k] = (unsigned char)(k * 13 + 4);
+    {
+        entry g[] = {
+            { E_PRT,    (const unsigned char *)E_PRT_TEXT, sizeof E_PRT_TEXT - 1, 0, 0 },
+            { E_RIB,    (const unsigned char *)E_RIB_TEXT, sizeof E_RIB_TEXT - 1, 0, 0 },
+            { E_GLOW,   (const unsigned char *)E_GLOW_TEXT, sizeof E_GLOW_TEXT - 1, 0, 0 },
+            { E_TRAIL,  (const unsigned char *)E_TRAIL_TEXT, sizeof E_TRAIL_TEXT - 1, 0, 0 },
+            { E_ATLAS,  E_ATLAS_B, sizeof E_ATLAS_B, 0, 0 },
+            { E_SWF,    E_SWF_B, sizeof E_SWF_B, 0, 0 },
+            { E_SWFIMG, E_SWFIMG_B, sizeof E_SWFIMG_B, 0, 0 },
+            { E_VT,     (const unsigned char *)E_VT_TEXT, sizeof E_VT_TEXT - 1, 0, 0 },
+            { E_VTIMG,  E_VTIMG_B, sizeof E_VTIMG_B, 0, 0 },
+            { E_VT2,    (const unsigned char *)E_VT2_TEXT, sizeof E_VT2_TEXT - 1, 0, 0 },
+            { E_VT2IMG, E_VT2IMG_B, sizeof E_VT2IMG_B, 0, 0 },
+        };
+        entry s[] = { { E_SNAPPRT, (const unsigned char *)E_PRT_TEXT, sizeof E_PRT_TEXT - 1, 0, 0 } };
+        write_container(d5, "gameresources", g, (int)(sizeof g / sizeof g[0]));
+        write_container(d5, "snap_gameresources", s, 1);
+    }
+    put_rel(d5, "virtualtextures\\_vmtr.vmtr", E_VMTR, sizeof E_VMTR - 1);
+}
+
+static void test_closure_effects(const char *tmp)
+{
+    char d5[MAX_PATH * 2], dir[MAX_PATH * 2];
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+    const char *fx_added[] = { E_PRT, E_RIB, E_GLOW, E_TRAIL, E_ATLAS };
+    int i;
+
+    _snprintf_s(d5, sizeof d5, _TRUNCATE, "%s\\d5", tmp);
+    make_install5(d5);
+    sh_modstock_set_install(d5);
+
+    /* An effect naming a campaign-only particle and ribbon gains them, the
+     * materials they draw with and the transparency atlas one names; a
+     * particle SnapMap holds adds nothing. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx1", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Effect test\"}");
+    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\t.fx\\glow.decl",
+             "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 3;\r\n"
+             "\t\t\titem[0] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/eyes\";\r\n\t\t\t}\r\n"
+             "\t\t\titem[1] = {\r\n\t\t\t\ttype = \"FX_RIBBON\";\r\n\t\t\t\tdeclRibbon = \"k_trail\";\r\n\t\t\t}\r\n"
+             "\t\t\titem[2] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/snapsparks\";\r\n\t\t\t}\r\n"
+             "\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    if (b.errors) fprintf(stderr, "  effects: %s\n", b.first_cause);
+    CHECK(b.stock_count == 5 && b.file_count == 6);
+    for (i = 0; i < 5; i++) {
+        f = find(&b, fx_added[i]);
+        CHECK(f && f->stock && f->absent && f->closure && !strcmp(f->stock_source, fx_added[i]));
+    }
+    CHECK(!find(&b, E_SNAPPRT) && has_note(&b, "5 game files borrowed for completeness"));
+    sh_mb_free(&b);
+
+    /* An entityDef whose guiData names a campaign-only movie gains the cooked
+     * movie and its atlas. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\swf1", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Movie test\"}");
+    mt_write(dir, "assets\\generated\\decls\\entitydef\\mods\\t.fx\\panel.decl",
+             "{\r\n\tedit = {\r\n\t\tguiData = {\r\n\t\t\tswfFile = \"swf/k/panel.swf\";\r\n\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 2);
+    f = find(&b, E_SWF);
+    CHECK(f && f->closure && f->ptype && !strcmp(f->ptype, "swf"));
+    f = find(&b, E_SWFIMG);
+    CHECK(f && f->closure);
+    sh_mb_free(&b);
+
+    /* A virtual-textured material with an installed row gains no image (the
+     * engine samples its pages); one without a row gains its image. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\vt1", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Virtual texture test\"}");
+    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\t.fx\\a.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat\";\r\n\t}\r\n}\r\n");
+    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\t.fx\\b.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat2\";\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    CHECK(find(&b, E_VT) && find(&b, E_VT2) && !find(&b, E_VTIMG) && find(&b, E_VT2IMG) && b.stock_count == 3);
+    sh_mb_free(&b);
+
+    /* A particle no archive holds is reported, not refused. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx2", tmp);
+    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Effect test\"}");
+    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\t.fx\\gone.decl",
+             "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 1;\r\n"
+             "\t\t\titem[0] = {\r\n\t\t\t\tdeclPrt = \"k/none\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 0);
+    CHECK(strstr(b.first_warning, "names particle k/none, which no archive holds") != NULL);
+    sh_mb_free(&b);
+}
+
 /* ------------------------------------------------- store, sync, serve ---- */
 
 typedef struct blob_src { int calls; } blob_src;
@@ -863,6 +1081,8 @@ int main(void)
     test_builder(tmp);
     test_renamed_names_dead(tmp);
     test_campaign_closure(tmp);
+    test_closure_recomputed(tmp);
+    test_closure_effects(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();
