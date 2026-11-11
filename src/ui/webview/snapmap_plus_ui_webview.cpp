@@ -60,7 +60,11 @@ static ComPtr<ICoreWebView2Environment12> g_webview_environment12;
 static ComPtr<ICoreWebView2_17>            g_webview17;
 static bool                     g_webview_ready = false;
 static std::wstring             g_html;
-static std::string              g_version = "dev";
+/* The release this window was built as (root build.ps1 -Version); "dev" for a local build. */
+#ifndef SNAPMAP_PLUS_VERSION
+#define SNAPMAP_PLUS_VERSION "dev"
+#endif
+static const std::string        g_version = SNAPMAP_PLUS_VERSION;
 /* Game identity from the backend ("" = backend not attached to a supported build). */
 static std::string              g_game;
 static unsigned int             g_config_status_flags = 0;
@@ -445,21 +449,6 @@ static void poc_save_pins(const std::string &doc)
     }
 }
 
-static void poc_read_version()
-{
-    std::wstring dir = poc_data_dir();
-    if (dir.empty()) return;
-    FILE *f = nullptr;
-    if (_wfopen_s(&f, (dir + L"\\install.json").c_str(), L"rb") != 0 || !f) return;
-    std::string data; char buf[4096]; size_t r;
-    while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
-    fclose(f);
-    size_t k = data.find("\"version\""); if (k == std::string::npos) return;
-    k = data.find(':', k); if (k == std::string::npos) return;
-    k = data.find('"', k);  if (k == std::string::npos) return; k++;
-    size_t e = data.find('"', k); if (e == std::string::npos) return;
-    g_version = data.substr(k, e - k);
-}
 
 /* Engine reads and edits run on DOOM's main thread while this thread waits. */
 #define POC_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
@@ -4856,9 +4845,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
     if (args && args->out_slot) *reinterpret_cast<void **>(args->out_slot) = g_loop;
     g_iface = args ? args->iface : nullptr;
     /* The window and the backend are built together: their interface tables must be the
-     * same size, or every slot past the shorter one is unknown. A mismatched pair runs the
-     * window only to say so. */
-    g_pair_mismatch = g_iface && sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl);
+     * same size, or every slot past the shorter one is unknown, and a backend that names its
+     * release must name this window's. A mismatched pair runs the window only to say so. */
+    std::string backend_version = args ? sh_game_identity::backend_version(args->argc, args->argv) : std::string();
+    g_pair_mismatch = g_iface && (sh_iface_vtbl_bytes(g_iface) != sizeof(sh_iface_vtbl) ||
+                                  (!backend_version.empty() && backend_version != g_version));
     g_ents = (PocEnt *)malloc(sizeof(PocEnt) * POC_MAX_ENTS);
     g_tls  = (PocTl  *)malloc(sizeof(PocTl)  * POC_MAX_TLS);
     if (!g_ents || !g_tls) {
@@ -4867,18 +4858,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
         free(g_tls);  g_tls  = nullptr;
         return 1;
     }
-    poc_read_version();
     g_game = args ? sh_game_identity::from_argv(args->argc, args->argv) : std::string();
 
     poc_log("=== sh_ui_init (WebView2 POC, entities-deep) entered ===");
     poc_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
     if (g_pair_mismatch) {
-        char v[160];
-        _snprintf_s(v, sizeof v, _TRUNCATE, "install mismatch: the backend's interface is %u bytes, this window's %u; "
-                    "showing the reinstall notice only", (unsigned)sh_iface_vtbl_bytes(g_iface), (unsigned)sizeof(sh_iface_vtbl));
+        char v[320];
+        _snprintf_s(v, sizeof v, _TRUNCATE, "install mismatch: the backend is %s with a %u-byte interface, this window "
+                    "%s with %u; showing the reinstall notice only", backend_version.empty() ? "(unnamed)" : backend_version.c_str(),
+                    (unsigned)sh_iface_vtbl_bytes(g_iface), g_version.c_str(), (unsigned)sizeof(sh_iface_vtbl));
         poc_log(v);
     }
-    { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "installed version: %s", g_version.c_str()); poc_log(v); }
+    { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "window version: %s", g_version.c_str()); poc_log(v); }
     { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); poc_log(v); }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
