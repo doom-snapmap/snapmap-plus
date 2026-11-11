@@ -746,6 +746,23 @@ static void test_sort_hook_recovery(void)
     CHECK(strstr(g_log, "STRINGS: injected ") != NULL && strstr(g_log, "(bundles 2, baked ") != NULL);
     CHECK(rearm_strings() == 1);
     CHECK(count_key("hook_recovery_key") == 1);
+    /* The engine rebuilds its table (a language load as the editor or a map
+     * starts) and sorts it: a mod's names are back before that sort orders
+     * it, so nothing parsed after the rebuild misses them. */
+    g_dictionary.count = 0;
+    g_log[0] = '\0';
+    invoke_sort_hook();
+    CHECK(count_key("hook_recovery_key") == 1 && count_key("boot_name") == 1);
+    CHECK(strstr(g_log, "the game rebuilt its string table") != NULL);
+    for (unsigned int i = 1; i < g_dictionary.count; i++)
+        CHECK(*(unsigned int *)g_records[i-1] <= *(unsigned int *)g_records[i]);
+    /* where the process heap cannot be selected, the next main-thread pass re-adds them */
+    g_dictionary.count = 0;
+    g_push_ignored = 1;
+    invoke_sort_hook();
+    CHECK(count_key("boot_name") == 0);
+    g_push_ignored = 0;
+    CHECK(sh_strids_refresh_pending() == 1 && count_key("boot_name") == 1);
     /* After it, a published index asks for one refresh, which rearms once. */
     {
         static const fake_bundle later[] = {
