@@ -469,6 +469,9 @@ static int mu_ends(const char *s, const char *suffix)
     return n >= k && !_stricmp(s + n - k, suffix);
 }
 
+/* A mod folder in an earlier shape that appears after the update (copied in by hand). */
+#define MU_EARLIER_SHAPE "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+
 /* One plain sentence for an entry's cause (the store's, the builder's or the
  * serving index's): what is wrong and what to do. The builder's shape and
  * build causes (modbundle.c) and the store's (modstore.c) that read as
@@ -485,17 +488,11 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
     if (mu_starts(c, "not built: ")) c += 11;
     if (!_strnicmp(c, SH_MB_SHAPE, shape)) {
         const char *t = c + shape;
-        if (strstr(t, "package.json"))
-            strncpy_s(out, cap, "This mod folder uses package.json, which this version of Snapmap+ does not read; make a new "
-                      "mod with New mod and move this folder's assets folder into it.", _TRUNCATE);
-        else if (strstr(t, "earlier version of Snapmap+"))
-            strncpy_s(out, cap, "This mod folder was made by an earlier version of Snapmap+; delete the \"snapmap-plus\" part "
-                      "at the end of its mod.json and press Refresh to build it again.", _TRUNCATE);
-        else if (mu_starts(t, "mod.json uses \"")) {
-            const char *q = t + 15, *end = strchr(q, '"');
-            _snprintf_s(out, cap, _TRUNCATE, "Its mod.json uses \"%.*s\", which this version of Snapmap+ does not read; "
-                        "remove it from mod.json and press Refresh.", end ? (int)(end - q) : 0, q);
-        } else if (strstr(t, "no valid salt") || strstr(t, "has no salt") || strstr(t, "no salt yet"))
+        /* Every earlier shape gets the one sentence: the installer converts it, and nothing tells an
+         * author to edit mod.json by hand for it. */
+        if (strstr(t, "package.json") || strstr(t, "earlier version of Snapmap+") || mu_starts(t, "mod.json uses \""))
+            strncpy_s(out, cap, MU_EARLIER_SHAPE, _TRUNCATE);
+        else if (strstr(t, "no valid salt") || strstr(t, "has no salt") || strstr(t, "no salt yet"))
             strncpy_s(out, cap, strstr(t, "no salt yet") ? "This mod has not been built yet; press Refresh to build it."
                                                        : "The part of its mod.json that Snapmap+ writes is damaged; delete the "
                                                          "\"snapmap-plus\" part at the end of mod.json and press Refresh.", _TRUNCATE);

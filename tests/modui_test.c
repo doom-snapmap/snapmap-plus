@@ -1070,11 +1070,28 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "broken", "\"state\":\"attention\""));
         CHECK(row_str(doc, "broken", "cause", cause, sizeof cause) && !strncmp(cause, "This mod could not be built: ", 29));
         if (cause[0]) printf("    broken: %s\n", cause);
+        /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
         CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
-              !strcmp(cause, "Its mod.json uses \"id\", which this version of Snapmap+ does not read; remove it from mod.json and "
-                             "press Refresh."));
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                             "converts it."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
-        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) && strstr(cause, "package.json") && strstr(cause, "New mod"));
+        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                             "converts it."));
+        {
+            /* An earlier version's builder part: the same sentence. */
+            char older[MAX_PATH * 2];
+            _snprintf_s(older, sizeof older, _TRUNCATE, "%s\\older_block", g_root);
+            CreateDirectoryA(older, NULL);
+            mt_write(older, "mod.json", "{\"name\":\"Older\",\"snapmap-plus\":{\"format\":1,\"bundle\":\"x\"}}");
+            free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+            free(doc);
+            doc = list_doc();
+            CHECK(row_str(doc, "older_block", "cause", cause, sizeof cause) &&
+                  !strncmp(cause, "This mod was made for an earlier version of Snapmap+.", 53));
+            if (cause[0]) printf("    older_block: %s\n", cause);
+            mt_remove_tree(older);
+        }
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);
