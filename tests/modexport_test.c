@@ -210,26 +210,69 @@ static unsigned count_entries_with(const unsigned char *zip, size_t len, const c
 static unsigned count_entries(const unsigned char *zip, size_t len) { return count_entries_with(zip, len, ""); }
 
 /* The number of folders directly under dir. */
-static int folder_count(const char *dir)
+static int folder_count(const char *dir);
+
+/* Mod folders under `dir`: not ., .., .builds; an import's organizing folders
+ * (mods\\imports\\<export name>\\, DESIGN-additive A.4) are looked into. */
+static int folder_count_in(const char *dir, int depth)
 {
     WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH * 2];
+    char pattern[MAX_PATH * 2], child[MAX_PATH * 2], mj[MAX_PATH * 2];
     HANDLE h;
     int n = 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') n++;   /* mod folders: not ., .., .builds */
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", child);
+        if (depth < 2 && !mt_exists(mj) && (depth || !_stricmp(fd.cFileName, "imports"))) n += folder_count_in(child, depth + 1);
+        else n++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return n;
+}
+static int folder_count(const char *dir) { return folder_count_in(dir, 0); }
+
+/* Where an export's import placed the build `name`: "imports\\<export>\\<name>",
+ * or "" when no import holds it. Rotating static buffers. */
+static const char *imported(const char *store, const char *name)
+{
+    static char out[8][MAX_PATH];
+    static int at;
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2], mj[MAX_PATH * 2];
+    HANDLE h;
+    char *o = out[at++ & 7];
+    o[0] = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\imports\\*", store);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return o;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\imports\\%s\\%s\\mod.json", store, fd.cFileName, name);
+        if (mt_exists(mj)) { _snprintf_s(o, MAX_PATH, _TRUNCATE, "imports\\%s\\%s", fd.cFileName, name); break; }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return o;
+}
+
+/* The folder of `name`: at the store's root, else where an import put it. */
+static const char *where(const char *store, const char *name)
+{
+    char path[MAX_PATH * 2];
+    const char *im;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, name);
+    if (mt_exists(path)) return name;
+    im = imported(store, name);
+    return im[0] ? im : name;
 }
 
 static int has_folder(const char *store, const char *name)
 {
     char path[MAX_PATH * 2];
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, name);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, where(store, name));
     return mt_exists(path);
 }
 
@@ -445,11 +488,12 @@ int main(int argc, char **argv)
         CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(rb.bundle, NULL, 0) == 1);
         CHECK(sh_modserve_bundle_state(rc.bundle, NULL, 0) == 0);
         /* Installed as a folder from elsewhere is: the same bundle, its files in assets\. */
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.alpha", storeB);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", storeB, where(storeB, "test.alpha"));
         memset(&b, 0, sizeof b);
         CHECK(sh_mb_load_folder(path, &b) && !strcmp(b.hash, ra.bundle) && b.build == 1);
         sh_mb_free(&b);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.beta\\assets\\generated\\image\\mods\\test.beta\\shared.bimage", storeB);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\generated\\image\\mods\\test.beta\\shared.bimage", storeB,
+                    where(storeB, "test.beta"));
         CHECK(mt_exists(path));
     }
     {
@@ -459,8 +503,9 @@ int main(int argc, char **argv)
         size_t l1 = 0, l2 = 0, len = 0;
         unsigned char *b1, *b2;
         char *text;
-        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\test.alpha\\mod.json", storeB);
-        _snprintf_s(asset, sizeof asset, _TRUNCATE, "%s\\test.alpha\\assets\\generated\\image\\mods\\test.alpha\\a.bimage", storeB);
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\%s\\mod.json", storeB, where(storeB, "test.alpha"));
+        _snprintf_s(asset, sizeof asset, _TRUNCATE, "%s\\%s\\assets\\generated\\image\\mods\\test.alpha\\a.bimage", storeB,
+                    where(storeB, "test.alpha"));
         CHECK(GetFileAttributesExA(mj, GetFileExInfoStandard, &before_mj));
         CHECK(GetFileAttributesExA(asset, GetFileExInfoStandard, &before_asset));
         b1 = slurp(mj, &l1);
@@ -566,8 +611,10 @@ int main(int argc, char **argv)
         if (!text) fprintf(stderr, "beside import: %s\n", cause);
         CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
         free(text);
-        /* 1.0.0 lands beside 2.0.0 under rule 1: <key>@<hash16> for a later build of a key. */
-        _snprintf_s(beside_a, sizeof beside_a, _TRUNCATE, "test.alpha@%.16s", ra.bundle);
+        /* 1.0.0 is placed under mods\\imports\\<export name>\\test.alpha, never
+         * as <key>@<hash16> beside the player's own 2.0.0 (owner 2026-11-10). */
+        strcpy_s(beside_a, sizeof beside_a, imported(storeH, "test.alpha"));
+        CHECK(!strncmp(beside_a, "imports\\", 8) && !strchr(beside_a, '@'));
         CHECK(has_folder(storeH, beside_a) && has_folder(storeH, "test.beta") && folder_count(storeH) == 3);
         {
             char mj[MAX_PATH * 2];
@@ -580,7 +627,7 @@ int main(int argc, char **argv)
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));   /* the installed folder is not rewritten */
         free(b1); free(b2);
         CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(ra2.bundle, NULL, 0) == 1);
-        /* That folder's name travels: an export from storeH carries mods/test.alpha@<hash16>/. */
+        /* That folder's name travels: an export from storeH carries mods/imports/<export>/test.alpha/. */
         {
             const sh_modmanifest_row *one[] = { &ra, NULL };
             size_t ml = 0, zl = 0;
@@ -591,6 +638,7 @@ int main(int argc, char **argv)
             char ename[160];
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeH, beside_a);
             _snprintf_s(ename, sizeof ename, _TRUNCATE, "mods/%s/mod.json", beside_a);
+            for (char *c = ename; *c; c++) if (*c == '\\') *c = '/';
             CHECK(z && entry_is_file(z, zl, ename, path) && entry_data(z, zl, "two versions.json"));
             CHECK(z && entry_data(z, zl, "mods/test.alpha/mod.json") == 0 && count_entries(z, zl) == 4);
             free(z);
@@ -614,7 +662,8 @@ int main(int argc, char **argv)
         if (!text) fprintf(stderr, "served import: %s\n", cause);
         CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
         free(text);
-        CHECK(folder_count(storeI) == 3 && has_folder(storeI, "test.beta") && has_folder(storeI, beside_a));
+        strcpy_s(beside_a, sizeof beside_a, imported(storeI, "test.alpha"));
+        CHECK(folder_count(storeI) == 3 && has_folder(storeI, "test.beta") && beside_a[0] && has_folder(storeI, beside_a));
         b2 = slurp(before, &l2);
         CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
         free(b1); free(b2);
@@ -634,7 +683,8 @@ int main(int argc, char **argv)
             if (!text) fprintf(stderr, "beside same version: %s\n", cause);
             CHECK(text && st.bundles_installed == 2 && st.bundles_present == 0);
             free(text);
-            CHECK(has_folder(storeL, "test.alpha") && has_folder(storeL, beside_a) && folder_count(storeL) == 3);
+            strcpy_s(beside_a, sizeof beside_a, imported(storeL, "test.alpha"));
+            CHECK(has_folder(storeL, "test.alpha") && beside_a[0] && has_folder(storeL, beside_a) && folder_count(storeL) == 3);
             b2 = slurp(before, &l2);
             CHECK(b1 && b2 && l1 == l2 && !memcmp(b1, b2, l1));
             free(b1); free(b2);
@@ -820,7 +870,9 @@ int main(int argc, char **argv)
         CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
         CHECK(sh_ms_set_root(storeD) && sh_modserve_index_build(storeD) >= 0);
         text = modexport_read(zip3, &len, &st, cause, sizeof cause);
-        CHECK(text && st.bundles_installed == 1 && has_folder(storeD, "test.gamma") && has_folder(storeD, beside_c));
+        /* Both builds are under mods\\imports\\pinned\\: the second as test.gamma-2, no hash in its name. */
+        CHECK(text && st.bundles_installed == 1 && has_folder(storeD, "imports\\pinned\\test.gamma") &&
+              has_folder(storeD, "imports\\pinned\\test.gamma-2") && folder_count(storeD) == 3);
         CHECK(sh_modserve_bundle_state(rc.bundle, NULL, 0) == 1 && sh_modserve_bundle_state(rc2.bundle, NULL, 0) == 1);
         free(text);
         if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
@@ -1165,7 +1217,7 @@ int main(int argc, char **argv)
             CHECK(text && st.bundles == 1 && st.bundles_installed == 1 && st.bundles_absent == 0);
             /* Today's rules number it build 2 (the recorded build's hash is not
              * theirs), as the author's own store does at its rules rebuild. */
-            _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\test.older", storeR2);
+            _snprintf_s(mpath, sizeof mpath, _TRUNCATE, "%s\\%s", storeR2, where(storeR2, "test.older"));
             memset(&nb, 0, sizeof nb);
             CHECK(has_folder(storeR2, "test.older") && folder_count(storeR2) == 1 && sh_mb_load_folder(mpath, &nb) &&
                   nb.build == 2 && strcmp(nb.hash, OLD_HASH) && sh_modserve_bundle_state(nb.hash, NULL, 0) == 1);

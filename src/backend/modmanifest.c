@@ -1236,6 +1236,36 @@ int sh_modmanifest_load_notes_flush(int say)
 static sh_modmanifest_resolve_fn volatile g_follow;
 void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow) { g_follow = follow; }
 
+static int mm_follow_load(sh_modmanifest_list *list);
+
+int sh_modmanifest_current_follow(sh_modmanifest_resolve_fn follow, const char *item)
+{
+    size_t i;
+    int n = 0;
+    if (!follow) return 0;
+    AcquireSRWLockExclusive(&g_current_lock);
+    for (i = 0; i < g_current.count; i++) {
+        sh_modmanifest_row *r = &g_current.rows[i], to;
+        char line[400];
+        memset(&to, 0, sizeof to);
+        if (follow(r->bundle, r->id, &to) != 1) continue;
+        if (!sh_modmanifest_valid_id(to.id) || !sh_modmanifest_valid_hash(to.bundle, strlen(to.bundle)) ||
+            !strcmp(to.bundle, r->bundle) || mm_list_find(&g_current, to.bundle))
+            continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "MODS: map: %s: follows its own folder, your published map '%s' (%.16s -> %.16s); nothing is "
+                    "downloaded for it", r->id, item && item[0] ? item : "?", r->bundle, to.bundle);
+        strcpy_s(r->id, sizeof r->id, to.id);
+        strcpy_s(r->version, sizeof r->version, to.version);
+        strcpy_s(r->bundle, sizeof r->bundle, to.bundle);
+        r->size = to.size;
+        backend_log(line);
+        n++;
+    }
+    ReleaseSRWLockExclusive(&g_current_lock);
+    return n;
+}
+
 static int mm_follow_load(sh_modmanifest_list *list)
 {
     sh_modmanifest_resolve_fn follow = g_follow;

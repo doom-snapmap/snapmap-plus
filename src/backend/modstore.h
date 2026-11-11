@@ -221,6 +221,54 @@ int  sh_ms_install_with(const char *folder, const char *as_name, const char *ori
 int  sh_ms_build_folder_name(const char *mods_root, const char *key, const char *hash, int key_installed,
                              char *out, size_t cap);
 
+/* Where a build the product received for a map is placed (DESIGN-additive
+ * A.4, owner 2026-11-10): never as <key>@<hash16> beside the player's own
+ * folders, but under an organizing folder of its own, "<group>\<title>\<key>":
+ * the group "downloads" for a build the mod store sent for a map (title the
+ * map's), "imports" for a build a rawmap or prefab ZIP carried (title the
+ * ZIP's name). No hash ever names a visible folder. */
+#define SH_MS_GROUP_DOWNLOADS "downloads"
+#define SH_MS_GROUP_IMPORTS   "imports"
+typedef struct sh_ms_place {
+    const char *group;     /* SH_MS_GROUP_* */
+    const char *title;     /* the map's (or ZIP's) title; NULL or "": straight under the group */
+    const char *map_id;    /* the published item, when known: tells two maps of one title apart */
+} sh_ms_place;
+
+/* `title` made a folder name (UTF-8): the characters Windows refuses in a
+ * name and control characters dropped, runs of spaces folded, leading dots
+ * and spaces and trailing dots and spaces cut, a work-folder suffix
+ * (".staging-", ".old-") spelled with "_", a device name (con, prn, aux, nul,
+ * com1 to com9, lpt1 to lpt9) given a trailing "_", at most 60 bytes cut at a
+ * character boundary. 1 with the segment, 0 when nothing is left. */
+int  sh_ms_title_segment(const char *title, char *out, size_t cap);
+
+/* The folder name under `mods_root` for the build of `key` at `hash` placed
+ * by `place`: "<group>\<title segment>\<key>", the title segment followed by
+ * " (<map id>)" when the record's "downloads" section already gives that
+ * title folder to another map, then "<key>-2", "<key>-3" ... when the name is
+ * taken by another build. Returns 1 with a free name, 2 with the name of a
+ * folder there that already holds a build at `hash`, 0 when none is free
+ * (also when the group or title folder is itself a mod folder). */
+int  sh_ms_placed_folder_name(const char *mods_root, const sh_ms_place *place, const char *key, const char *hash,
+                              char *out, size_t cap);
+
+/* The record's "downloads" section: {"<map id, or title:<segment>>":
+ * {"title": "<the map's title>", "folders": ["<folder under mods\>", ...]}}.
+ * A download notes the folder that serves the map, a new one or one already
+ * present anywhere in the store, so the Mods tab says which map a downloaded
+ * build was fetched for. Returns 1 when written. */
+int  sh_ms_downloads_note(const char *map_id, const char *title, const char *folder);
+/* The title of the first map the section notes for `folder` (its name under
+ * mods\, either slash): 1 with it, else 0. */
+int  sh_ms_downloaded_for(const char *folder, char *title, size_t cap);
+
+/* sh_ms_install_with, a folder from elsewhere placed by `place` (NULL: by
+ * rule 1, sh_ms_build_folder_name) instead of beside the builds of its key. */
+int  sh_ms_install_placed(const char *folder, const char *origin, const sh_ms_place *place,
+                          const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
+                          sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+
 typedef struct sh_ms_verify_stats {
     unsigned files, bytes_mb, entries;
     unsigned pointers;          /* of files, stock pointers resolved against the installed game */

@@ -303,13 +303,21 @@ name". Mods you download or import are never refused on their files. A map whose
   by the installed folder at the bundle hash its row records. A folder of the same mod at another
   hash (an update, a fork) is another build: it is installed beside the one a map uses and never
   replaces it for that map, and the map's own build is downloaded by its hash ("installed at another
-  build"). Both builds stay installed; each map serves its own, and with no map open the newest one
-  offers its Toybox rows, each ready with that build's required console settings. `sh_mods doctor`
+  build"). Both builds stay installed; each map serves its own, and with no map open your own
+  folder of the mod offers its Toybox rows (the newest build when you have no folder of it of your
+  own: a mod downloaded for a map never takes over from the one you edit), each ready with that build's required console settings. `sh_mods doctor`
   lists one row per build under the mod.
 - Mods are installed by hash, whichever way they arrive (the Mods tab's install, `sh_mods install`,
   a rawmap or prefab ZIP, a download for a map): a build you already have is not installed again,
-  and any other build lands as its own folder, the first build of a mod under its key and every
-  later one as `<key>@<first 16 hex of its hash>` beside it. Nothing installed is replaced, and
+  and any other build lands as its own folder. A folder you install sits at the top of `mods\`, the
+  first build of a mod under its key and every later one as `<key>@<first 16 hex of its hash>`
+  beside it. A mod downloaded for a map lives in a folder named after that map,
+  `mods\downloads\<map title>\<key>\`, and a mod a rawmap or prefab ZIP brought in
+  `mods\imports\<ZIP name>\<key>\`; the Mods tab shows those as organizing folders and says
+  "Downloaded for <map title>".
+- Playing your own published map uses your own mod folders, as opening it from My Maps does: a row
+  whose mod one of your folders builds follows that folder's current build, and nothing is
+  downloaded for it. A map someone else published plays exactly the builds it pins. Nothing installed is replaced, and
   nothing is ever refused for "same version, different files": the hash is the identity. Each
   folder records where it came from (`origin`: `by-hand`, `install`, `imported`, `download`).
   Uninstalling one build leaves the others.

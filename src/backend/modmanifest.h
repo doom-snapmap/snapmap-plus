@@ -199,6 +199,15 @@ void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
  * received with a map. NULL unbinds. */
 void sh_modmanifest_set_follow(sh_modmanifest_resolve_fn follow);
 
+/* An author's own published map follows their own folders the same way
+ * (DESIGN-additive A.4, owner 2026-11-10): the published gate, for an item
+ * this machine published (modpublished.c), offers each row of the current
+ * manifest to `follow` (bound there to sh_modserve_row_follow_own: the build
+ * of the row's key that one of this machine's own folders serves); 1 with
+ * `out` filled rewrites the row, with one "MODS: map: <key>: follows its own
+ * folder" line naming `item`. Returns the rows rewritten. */
+int  sh_modmanifest_current_follow(sh_modmanifest_resolve_fn follow, const char *item);
+
 /* An editor open of the author's own map whose row pins a build that is no
  * longer installed (DESIGN-additive 2.5, 2.8): the installed build of the
  * same key serves in its place for this editor session, with the hashes on

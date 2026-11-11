@@ -1005,6 +1005,18 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
     free(desc);
     mu_kstr(b, "origin", e->loaded ? bd->origin : "", 0);
     mu_kstr(b, "migratedFrom", !strncmp(u->origin, "overrides\\", 10) ? u->origin : "", 0);   /* the retired package folder */
+    {
+        /* The map a downloaded build was fetched for: the record's
+         * "downloads" section, else the title folder it sits in
+         * (mods\downloads\<title>\<key>). */
+        char title[300] = "";
+        if (e->loaded && !strcmp(bd->origin, SH_MB_ORIGIN_DOWNLOAD) && !sh_ms_downloaded_for(e->name, title, sizeof title) &&
+            !_strnicmp(e->name, SH_MS_GROUP_DOWNLOADS "\\", sizeof SH_MS_GROUP_DOWNLOADS)) {
+            const char *t = e->name + sizeof SH_MS_GROUP_DOWNLOADS, *end = strchr(t, '\\');
+            if (end) _snprintf_s(title, sizeof title, _TRUNCATE, "%.*s", (int)(end - t), t);
+        }
+        mu_kstr(b, "downloadedFor", title, 0);
+    }
     mu_kstr(b, "servedBy", !strcmp(u->state, "superseded") && u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "", 0);
     mu_knum(b, "builtAt", e->loaded && bd->built > 0 ? (unsigned long long)bd->built : 0, 0);
     mu_kstr(b, "bundle", e->loaded ? bd->hash : "", 0);

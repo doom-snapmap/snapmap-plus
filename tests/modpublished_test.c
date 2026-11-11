@@ -126,18 +126,26 @@ typedef struct fake {
     int other_build_a;               /* alex.pink-imp is installed at another build (OTHER_A) */
     int fetch_detail_calls;
     int launch_refused, refused_hook; /* launch_refused: how often, and the last hook */
+    /* the map a fetch is for, and the author's own published map */
+    char fetch_title[160], fetch_map[96];
+    int titled;                      /* metadata_title answers "Pink Arena" */
+    int own_item;                    /* this machine published item 1234abcd */
+    int own_a;                       /* an own folder builds alex.pink-imp at OWN_A */
 } fake;
 
 static fake F;
 static int g_metadata_cookie;
 
 static int f_on_main(void *c) { (void)c; return 1; }
+#define OWN_A "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+#define METADATA_ID "1234abcd"   /* METADATA below: the double reads the item id from it */
 /* The asset rule as modserve.c answers it, over the fixture's two mods. */
 static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     const char *what = subject ? subject : "map";
     (void)c;
     if (cause && cap) cause[0] = 0;
+    if (F.own_a && !strcmp(row->bundle, OWN_A)) return SH_MODPUB_ROW_SERVED;   /* the own folder's build */
     if (!strcmp(row->bundle, HASH_A) || !strcmp(row->id, "alex.pink-imp")) {
         if (F.installed_a || F.other_a == 1 || F.recorded_a) return SH_MODPUB_ROW_SERVED;
         if (F.other_a == 2) {
@@ -329,12 +337,40 @@ static int f_fetch_detail(void *c, const char *hash, char *out, size_t cap)
     return 1;
 }
 
+static int f_fetch_for(void *c, const char *hash, const char *title, const char *map_id, sh_modpub_progress_fn progress,
+                       volatile int *cancel)
+{
+    strcpy_s(F.fetch_title, sizeof F.fetch_title, title ? title : "");
+    strcpy_s(F.fetch_map, sizeof F.fetch_map, map_id ? map_id : "");
+    return f_fetch(c, hash, progress, cancel);
+}
+static int f_metadata_title(void *c, const void *metadata, char *out, size_t cap)
+{
+    (void)c; (void)metadata;
+    if (!F.titled) return 0;
+    strcpy_s(out, cap, "Pink Arena");
+    return 1;
+}
+static int f_own_item(void *c, const char *item) { (void)c; return F.own_item && !strcmp(item, METADATA_ID); }
+static int f_follow_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    (void)bundle_hash;
+    if (!F.own_a || strcmp(id, "alex.pink-imp")) return 0;
+    memset(out, 0, sizeof *out);
+    strcpy_s(out->id, sizeof out->id, "alex.pink-imp");
+    strcpy_s(out->version, sizeof out->version, "1.0.0");
+    strcpy_s(out->bundle, sizeof out->bundle, OWN_A);
+    out->size = 10;
+    return 1;
+}
+static int f_follow_own(void *c, const char *item) { (void)c; return sh_modmanifest_current_follow(f_follow_row, item); }
+
 static const sh_modpub_ops OPS = {
     NULL, f_on_main, f_row_state, f_rescan, f_activate, f_can_ask, f_ask, f_poll, f_release,
     f_worker_run, f_fetch, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_store_has, f_print, f_store_probe, f_claimed, f_other_build, f_mod_name,
-    f_fetch_detail, f_launch_refused
+    f_fetch_detail, f_launch_refused, f_fetch_for, f_metadata_title, f_own_item, f_follow_own
 };
 
 static void reset(void)
@@ -621,6 +657,57 @@ static void yes_resumes_with_a_fresh_map(void)
     /* The next completion of the same map passes: nothing is missing now. */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, TWO_MODS, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+}
+
+static void downloads_are_for_a_map(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- a fetch is told the map it is for: its title and item\n");
+    /* A stranger's map: fetched for its title and item, so the build lands
+     * in mods\\downloads\\<title>\\ (modsync_fetch_bundle_for). */
+    reset();
+    F.titled = 1;
+    F.own_a = 1;   /* an own folder of the key exists, but the map is not this machine's */
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_title, "Pink Arena") && !strcmp(F.fetch_map, METADATA_ID));
+    memset(&rows, 0, sizeof rows);
+    CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].bundle, HASH_A));   /* its pin is kept */
+    sh_modmanifest_list_free(&rows);
+}
+
+static void own_published_map_follows_own_folder(void)
+{
+    sh_modmanifest_list rows;
+    printf("-- the author's own published map follows their own folder; nothing is downloaded\n");
+    /* The author's own published map: its row follows the own folder's
+     * build with one line, nothing is asked and nothing downloaded. */
+    reset();
+    F.titled = 1;
+    F.own_item = 1;
+    F.own_a = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && !F.hold_ui);
+    tick(5);
+    CHECK(F.asks == 0 && F.fetch_calls == 0);
+    memset(&rows, 0, sizeof rows);
+    CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].bundle, OWN_A));
+    sh_modmanifest_list_free(&rows);
+
+    /* Own, but no own folder builds the key: it is fetched as any map is. */
+    reset();
+    F.own_item = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    F.answer = 1;
+    tick(1);
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_map, METADATA_ID));
 }
 
 static void editor_only_row_plays_without_a_folder(void)
@@ -952,6 +1039,7 @@ static void rawmap_store_has_downloads_and_reopens(void)
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.rescans == 1);
+    CHECK(!strcmp(F.fetch_title, "rawmap") && !F.fetch_map[0]);   /* mods\downloads\rawmap\ */
     CHECK(F.activations == 0);           /* the reopened rawmap's own parse activates */
     CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_RAWMAP_LOAD && !strcmp(F.resume_id, "rawmap.json"));
     CHECK(!F.resume_text[0] && F.metadata_copies == 0 && F.hold_ui == 0);
@@ -1500,6 +1588,8 @@ int main(void)
     feed_play_is_gated();
     launch_boundary();
     yes_resumes_with_a_fresh_map();
+    downloads_are_for_a_map();
+    own_published_map_follows_own_folder();
     editor_only_row_plays_without_a_folder();
     no_drops();
     fetch_failure_drops();

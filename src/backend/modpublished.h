@@ -303,6 +303,21 @@ typedef struct sh_modpub_ops {
      * declared (modui.h sh_modui_scope_launch_refused). Called after
      * drop_ui for every hook but a rawmap load and a prefab placement. */
     void (*launch_refused)(void *c, int hook);
+    /* The fetch, told which map it is for (modsync_fetch_bundle_for: the
+     * build lands under mods\downloads\<title>\<key>\). `title` and `map_id`
+     * may be "". NULL: `fetch` answers alone. Worker thread; 0 ok. */
+    int  (*fetch_for)(void *c, const char *hash, const char *title, const char *map_id, sh_modpub_progress_fn progress,
+                      volatile int *cancel);
+    /* The published item's title from its metadata, else 0. */
+    int  (*metadata_title)(void *c, const void *metadata, char *out, size_t cap);
+    /* 1 when this machine published the item: a claim it holds is keyed by
+     * the item, or the record links the item to a map saved here. */
+    int  (*own_item)(void *c, const char *item);
+    /* An own published map follows its own folders (DESIGN-additive A.4,
+     * owner 2026-11-10): the current manifest's rows whose key one of this
+     * machine's own folders builds are rewritten to that folder's build
+     * (sh_modmanifest_current_follow). Returns the rows rewritten. */
+    int  (*follow_own)(void *c, const char *item);
 } sh_modpub_ops;
 
 /* The decision a hook detour asks for before calling its original. Returns 1

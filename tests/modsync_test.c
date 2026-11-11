@@ -491,18 +491,22 @@ int main(int argc, char **argv)
     CHECK(sh_ms_set_root(storeB));
     CHECK(sh_modserve_index_build(storeB) == 0);
     CHECK(sh_modserve_bundle_state(hB, NULL, 0) == 0);
-    CHECK(modsync_fetch_bundle(hB, NULL, &st));
+    /* A download for a map lands under mods\\downloads\\<map title>\\<key>
+     * (owner 2026-11-10): never as <key>@<hash16> beside the player's own. */
+    CHECK(modsync_fetch_bundle_for(hB, "Hell: Gate?", "item-1", NULL, &st));
     CHECK(st.code == MODNET_OK && !st.already_installed && st.blobs_transferred == 2 && st.bytes_down > 0);
-    CHECK(strcmp(st.key, keyB) == 0);
+    CHECK(strcmp(st.key, "downloads\\Hell Gate\\test.beta") == 0);
     {
         sh_ms_verify_stats vs;
-        char cause[SH_MB_CAUSE_MAX];
-        CHECK(sh_ms_verify(keyB, &vs, cause, sizeof cause) && vs.files == 2);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.canonical.json", storeB, keyB);
+        char cause[SH_MB_CAUSE_MAX], title[128];
+        CHECK(sh_ms_verify(st.key, &vs, cause, sizeof cause) && vs.files == 2);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.canonical.json", storeB, st.key);
         CHECK(!mt_exists(path));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeB, keyB);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeB, st.key);
         CHECK(mt_exists(path) && file_contains(path, "\"origin\": \"download\""));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", storeB, keyB);
+        CHECK(sh_ms_downloaded_for(st.key, title, sizeof title) && !strcmp(title, "Hell: Gate?"));
+        CHECK(sh_ms_downloaded_for("downloads/Hell Gate/test.beta", title, sizeof title));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", storeB, st.key);
         CHECK(count_files(path) == 2);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", storeB);
         CHECK(!mt_exists(path));
@@ -574,18 +578,49 @@ int main(int argc, char **argv)
     {
         char want[SH_MS_KEY_MAX + 1];
         sh_ms_list l;
+        /* A second build of one key fetched with no map: mods\\downloads\\<key>-2,
+         * no hash in any visible name. */
         CHECK(modsync_fetch_bundle(hG2, NULL, &st) && !st.already_installed && st.bundles_created == 1);
-        _snprintf_s(want, sizeof want, _TRUNCATE, "test.gamma@%.16s", hG2);
+        strcpy_s(want, sizeof want, "downloads\\test.gamma-2");
         CHECK(!strcmp(st.key, want));
         CHECK(sh_modserve_bundle_state(hG, NULL, 0) == 1 && sh_modserve_bundle_state(hG2, NULL, 0) == 1);
         CHECK(sh_ms_enumerate(&l) && l.count == 2);
         sh_ms_list_free(&l);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeC, want);
         CHECK(file_contains(path, "\"origin\": \"download\""));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.gamma\\mod.json", storeC);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\downloads\\test.gamma\\mod.json", storeC);
         CHECK(mt_exists(path));   /* the first build keeps its folder and name */
         /* Fetched again: present, nothing replaced. */
         CHECK(modsync_fetch_bundle(hG2, NULL, &st) && st.already_installed);
+    }
+    {
+        /* Two maps of one title: the second map's folder carries its id.
+         * A build already present anywhere is not stored again: the record
+         * notes the map's link to that folder. Uninstalling a downloaded
+         * build forgets it and removes the emptied organizing folders. */
+        char title[128], cause[SH_MB_CAUSE_MAX], full[MAX_PATH * 2];
+        sh_ms_list l;
+        CHECK(sh_ms_set_root(storeC));
+        CHECK(modsync_fetch_bundle_for(hB, "Arena", "item-a", NULL, &st) && !st.already_installed);
+        CHECK(!strcmp(st.key, "downloads\\Arena\\test.beta"));
+        CHECK(modsync_fetch_bundle_for(hA, "Arena", "item-b", NULL, &st) && !st.already_installed);
+        CHECK(!strcmp(st.key, "downloads\\Arena (item-b)\\test.alpha"));
+        CHECK(modsync_fetch_bundle_for(hB, "Third Map", "item-c", NULL, &st) && st.already_installed);
+        CHECK(!strcmp(st.key, "downloads\\Arena\\test.beta"));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeC);
+        CHECK(file_contains(path, "\"item-c\"") && file_contains(path, "\"Third Map\""));
+        CHECK(sh_ms_downloaded_for("downloads\\Arena\\test.beta", title, sizeof title) && !strcmp(title, "Arena"));
+        /* The same map again: its own title folder, never "(id)". */
+        CHECK(sh_ms_placed_folder_name(storeC, &(sh_ms_place){ SH_MS_GROUP_DOWNLOADS, "Arena", "item-a" }, "test.new", hA,
+                                       title, sizeof title) == 1 && !strcmp(title, "downloads\\Arena\\test.new"));
+        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\downloads\\Arena (item-b)\\test.alpha", storeC);
+        CHECK(sh_ms_delete_mod_folder(full, cause, sizeof cause) != 0);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\downloads\\Arena (item-b)", storeC);
+        CHECK(!mt_exists(path));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeC);
+        CHECK(!file_contains(path, "item-b"));
+        CHECK(sh_ms_enumerate(&l));
+        sh_ms_list_free(&l);
     }
 
     /* ---- the gate's probe against the loopback store ---- */

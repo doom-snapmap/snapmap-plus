@@ -503,6 +503,19 @@ static int ms_retire(const wchar_t *path, const wchar_t *root, char *why, size_t
     return ms_rmtree(path, root) ? SH_MS_DELETED : 0;
 }
 
+static void ms_dl_forget(const char *rootu, const char *rel);
+static void ms_prune_group_parents(const wchar_t *path, const wchar_t *root);
+
+/* After a folder left the store: the downloads record forgets it and empty
+ * organizing folders of a group (downloads, imports) above it go. */
+static void ms_after_removal(const char *folder, const wchar_t *w, const wchar_t *root)
+{
+    char rootu[MAX_PATH * 4];
+    if (!folder || !w || !root) return;
+    if (sh_ms_root(rootu, sizeof rootu)) ms_dl_forget(rootu, ms_rel(folder));
+    ms_prune_group_parents(w, root);
+}
+
 static void ms_log_discard(const char *folder, int r, const char *why)
 {
     if (r == SH_MS_RECYCLED) ms_log("MODS: store: moved mods\\%s to the Recycle Bin", ms_rel(folder));
@@ -521,6 +534,7 @@ int sh_ms_remove_folder(const char *folder)
     if (root && w) r = ms_retire(w, root, why, sizeof why);
     ms_log_discard(folder, r, why);
     if (r) ms_snapshot_drop(folder);
+    if (r) ms_after_removal(folder, w, root);
     free(root);
     free(w);
     modstore_unlock();
@@ -545,6 +559,7 @@ int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
     else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
     ms_log_discard(folder, r, why);
     if (r) ms_snapshot_drop(folder);
+    if (r) ms_after_removal(folder, w, root);
     free(root);
     free(w);
     modstore_unlock();
@@ -2484,7 +2499,7 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
     return 1;
 }
 
-static int ms_install_locked(const char *folder, const char *as_name, const char *origin,
+static int ms_install_locked(const char *folder, const char *as_name, const char *origin, const sh_ms_place *place,
                              const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                              sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap);
 
@@ -2509,7 +2524,20 @@ int sh_ms_install_with(const char *folder, const char *as_name, const char *orig
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, as_name, origin, resolver, name_out, name_cap, stats ? stats : &local, bundle_out,
+    ok = ms_install_locked(folder, as_name, origin, NULL, resolver, name_out, name_cap, stats ? stats : &local, bundle_out,
+                           cause, cap);
+    modstore_unlock();
+    return ok;
+}
+
+int sh_ms_install_placed(const char *folder, const char *origin, const sh_ms_place *place,
+                         const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
+                         sh_mb_bundle *bundle_out, char *cause, size_t cap)
+{
+    sh_ms_install_stats local;
+    int ok;
+    modstore_lock();
+    ok = ms_install_locked(folder, NULL, origin, place, resolver, name_out, name_cap, stats ? stats : &local, bundle_out,
                            cause, cap);
     modstore_unlock();
     return ok;
@@ -2542,6 +2570,334 @@ int sh_ms_build_folder_name(const char *mods_root, const char *key, const char *
     return 0;
 }
 
+/* ------------------------------------------------- placed folders ---- */
+
+int sh_ms_title_segment(const char *title, char *out, size_t cap)
+{
+    char seg[64 + 8];
+    size_t w = 0, i, n, stem;
+    int space = 0, device = 0;
+    if (out && cap) out[0] = 0;
+    if (!title || !out || cap < 2) return 0;
+    for (i = 0; title[i] && w < 60; i++) {
+        unsigned char c = (unsigned char)title[i];
+        size_t len = 1;
+        if (c < 0x20 || c == 0x7F || c == ' ' || strchr("<>:\"/\\|?*", c)) { space = w > 0; continue; }
+        if (c >= 0x80) {
+            /* One whole UTF-8 sequence, or nothing of it. */
+            len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 0;
+            if (!len) continue;
+            for (n = 1; n < len; n++) if (((unsigned char)title[i + n] & 0xC0) != 0x80) break;
+            if (n < len) continue;
+        }
+        if (w + (space ? 1 : 0) + len > 60) break;
+        if (space) { seg[w++] = ' '; space = 0; }
+        memcpy(seg + w, title + i, len);
+        w += len;
+        i += len - 1;
+    }
+    seg[w] = 0;
+    /* No leading dot (a dot folder is skipped), no trailing dot or space. */
+    for (i = 0; seg[i] == '.' || seg[i] == ' '; i++) {}
+    if (i) { memmove(seg, seg + i, w - i + 1); w -= i; }
+    while (w && (seg[w - 1] == '.' || seg[w - 1] == ' ')) seg[--w] = 0;
+    if (!w) return 0;
+    {
+        /* The listing skips work folders by these suffixes. */
+        char *p;
+        while ((p = strstr(seg, ".staging-")) != NULL || (p = strstr(seg, ".old-")) != NULL) *p = '_';
+    }
+    stem = strcspn(seg, ".");
+    if (stem == 3 && (!_strnicmp(seg, "con", 3) || !_strnicmp(seg, "prn", 3) || !_strnicmp(seg, "aux", 3) ||
+                      !_strnicmp(seg, "nul", 3)))
+        device = 1;
+    if (stem == 4 && (!_strnicmp(seg, "com", 3) || !_strnicmp(seg, "lpt", 3)) && seg[3] >= '1' && seg[3] <= '9')
+        device = 1;
+    if (device) {
+        memmove(seg + stem + 1, seg + stem, w - stem + 1);
+        seg[stem] = '_';
+        w++;
+    }
+    strncpy_s(out, cap, seg, _TRUNCATE);
+    return 1;
+}
+
+/* The record's "downloads" section, parsed (an empty object when absent);
+ * NULL only when it cannot be read or without memory. Under sh_mb_record_lock. */
+static mpj *ms_dl_load(const char *rootu)
+{
+    char *text = NULL;
+    mpj *doc = NULL;
+    int got = sh_mb_record_get(rootu, "downloads", &text);
+    if (got < 0) { free(text); return NULL; }
+    if (got == 1 && text) doc = mpj_parse(text, strlen(text));
+    free(text);
+    if (doc && doc->type != MPJ_OBJ) { mpj_free(doc); doc = NULL; }
+    return doc ? doc : mpj_new(MPJ_OBJ);
+}
+
+static int ms_dl_save(const char *rootu, const mpj *doc)
+{
+    size_t len = 0;
+    char *text;
+    int ok;
+    if (!doc) return 0;
+    if (!doc->n) return sh_mb_record_put(rootu, "downloads", NULL);
+    text = mpj_dump(doc, &len);
+    ok = text && sh_mb_record_put(rootu, "downloads", text);
+    free(text);
+    return ok;
+}
+
+/* `s` as an escaped JSON string body (no quotes), malloc'd. */
+static char *ms_dl_escape(const char *s)
+{
+    size_t n = strlen(s), w = 0, i;
+    char *o = (char *)malloc(n * 6 + 1);
+    if (!o) return NULL;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { o[w++] = '\\'; o[w++] = (char)c; }
+        else if (c < 0x20) w += (size_t)_snprintf_s(o + w, 7, _TRUNCATE, "\\u%04x", c);
+        else o[w++] = (char)c;
+    }
+    o[w] = 0;
+    return o;
+}
+
+/* A folder name under mods\ as the section spells it: forward slashes. */
+static void ms_dl_spell(const char *folder, char *out, size_t cap)
+{
+    char *c;
+    strncpy_s(out, cap, folder ? folder : "", _TRUNCATE);
+    for (c = out; *c; c++) if (*c == '\\') *c = '/';
+}
+
+/* The section's key for a map: its item id, else "title:<segment>". */
+static int ms_dl_key(const char *map_id, const char *title, char *out, size_t cap)
+{
+    char seg[72];
+    if (map_id && map_id[0]) { strncpy_s(out, cap, map_id, _TRUNCATE); return 1; }
+    if (title && sh_ms_title_segment(title, seg, sizeof seg)) { _snprintf_s(out, cap, _TRUNCATE, "title:%s", seg); return 1; }
+    return 0;
+}
+
+/* 1 when another map of the same title (an entry other than `self` whose
+ * title makes the segment `seg`) lists a folder under `prefix/`. A map only
+ * linked to a folder there (a build it shares) does not take the title. */
+static int ms_dl_prefix_taken(const mpj *doc, const char *self, const char *seg, const char *prefix)
+{
+    size_t pl = strlen(prefix);
+    int i, k;
+    for (i = 0; doc && i < doc->n; i++) {
+        const mpj *folders = mpj_get(doc->items[i], "folders"), *t = mpj_get(doc->items[i], "title");
+        char quoted[600], title[300] = "", tseg[72] = "";
+        size_t got = 0;
+        if (self && !strcmp(doc->keys[i], self)) continue;
+        if (!t || t->type != MPJ_STR || !t->text) continue;
+        _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", t->text);
+        if (!sh_json_decode_string(quoted, strlen(quoted), title, sizeof title, &got) ||
+            !sh_ms_title_segment(title, tseg, sizeof tseg) || _stricmp(tseg, seg))
+            continue;
+        for (k = 0; folders && folders->type == MPJ_ARR && k < folders->n; k++) {
+            const mpj *f = folders->items[k];
+            if (f && f->type == MPJ_STR && f->text && !_strnicmp(f->text, prefix, pl) && f->text[pl] == '/') return 1;
+        }
+    }
+    return 0;
+}
+
+int sh_ms_placed_folder_name(const char *mods_root, const sh_ms_place *place, const char *key, const char *hash,
+                             char *out, size_t cap)
+{
+    char seg[72 + 48], dir[200], self[SH_MB_ID_MAX + 80] = "", path[MAX_PATH * 4];
+    int round, have_title;
+    wchar_t *w;
+    if (out && cap) out[0] = 0;
+    if (!mods_root || !place || !place->group || !place->group[0] || !key || !key[0] || !hash || strlen(hash) < 16 ||
+        !out || !cap)
+        return 0;
+    have_title = place->title && sh_ms_title_segment(place->title, seg, 72);
+    if (have_title && place->map_id && place->map_id[0] && ms_dl_key(place->map_id, place->title, self, sizeof self)) {
+        /* Two maps of one title: the second one's folder carries its id. */
+        char prefix[160];
+        mpj *doc;
+        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s/%s", place->group, seg);
+        sh_mb_record_lock();
+        doc = ms_dl_load(mods_root);
+        if (doc && ms_dl_prefix_taken(doc, self, seg, prefix)) {
+            size_t l = strlen(seg);
+            _snprintf_s(seg + l, sizeof seg - l, _TRUNCATE, " (%.40s)", place->map_id);
+        }
+        mpj_free(doc);
+        sh_mb_record_unlock();
+    }
+    if (have_title) _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", place->group, seg);
+    else strncpy_s(dir, sizeof dir, place->group, _TRUNCATE);
+    {
+        /* An organizing folder only: a group or title folder holding a
+         * descriptor is a mod, and nothing can be placed inside a mod. */
+        int bad;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", mods_root, place->group);
+        w = sh_mb_wpath(path);
+        bad = w && ms_has_descriptor(w);
+        free(w);
+        if (!bad && have_title) {
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", mods_root, dir);
+            w = sh_mb_wpath(path);
+            bad = w && ms_has_descriptor(w);
+            free(w);
+        }
+        if (bad) return 0;
+    }
+    for (round = 1; round < 13; round++) {
+        char leaf[SH_MB_ID_MAX + 8];
+        DWORD a;
+        if (round == 1) strcpy_s(leaf, sizeof leaf, key);
+        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s-%d", key, round);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s", mods_root, dir, leaf);
+        w = sh_mb_wpath(path);
+        a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (a == INVALID_FILE_ATTRIBUTES) { _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, leaf); return 1; }
+        if (a & FILE_ATTRIBUTE_DIRECTORY) {
+            sh_mb_bundle have;
+            int same = sh_mb_load_folder(path, &have) && strcmp(have.hash, hash) == 0;
+            sh_mb_free(&have);
+            if (same) { _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, leaf); return 2; }
+        }
+    }
+    return 0;
+}
+
+int sh_ms_downloads_note(const char *map_id, const char *title, const char *folder)
+{
+    char rootu[MAX_PATH * 4], key[SH_MB_ID_MAX + 80], spelled[SH_MS_NAME_MAX + 1], *ek = NULL, *et = NULL, *ef = NULL;
+    mpj *doc = NULL, *entry, *folders = NULL;
+    int i, ok = 0, have = 0;
+    if (!folder || !folder[0] || !ms_dl_key(map_id, title, key, sizeof key) || !sh_ms_root(rootu, sizeof rootu)) return 0;
+    ms_dl_spell(folder, spelled, sizeof spelled);
+    ek = ms_dl_escape(key);
+    et = ms_dl_escape(title ? title : "");
+    ef = ms_dl_escape(spelled);
+    if (!ek || !et || !ef) goto out;
+    sh_mb_record_lock();
+    doc = ms_dl_load(rootu);
+    entry = doc ? mpj_get(doc, ek) : NULL;
+    if (doc && !entry) {
+        entry = mpj_new(MPJ_OBJ);
+        if (entry && !mpj_set(doc, ek, entry)) entry = NULL;
+    }
+    if (entry && entry->type == MPJ_OBJ) {
+        if (title && title[0]) (void)mpj_set(entry, "title", mpj_new_str(et));
+        folders = mpj_get(entry, "folders");
+        if (!folders || folders->type != MPJ_ARR) {
+            folders = mpj_new(MPJ_ARR);
+            if (folders && !mpj_set(entry, "folders", folders)) folders = NULL;
+        }
+        for (i = 0; folders && i < folders->n; i++)
+            if (folders->items[i]->type == MPJ_STR && !_stricmp(folders->items[i]->text, ef)) have = 1;
+        if (folders && !have) (void)mpj_push(folders, mpj_new_str(ef));
+        ok = folders && ms_dl_save(rootu, doc);
+    }
+    if (!ok) ms_log("MODS: record: the map mods\\%s was downloaded for (%s) could not be noted", folder, key);
+    mpj_free(doc);
+    sh_mb_record_unlock();
+out:
+    free(ek);
+    free(et);
+    free(ef);
+    return ok;
+}
+
+int sh_ms_downloaded_for(const char *folder, char *title, size_t cap)
+{
+    char rootu[MAX_PATH * 4], spelled[SH_MS_NAME_MAX + 1], *ef;
+    mpj *doc;
+    int i, k, found = 0;
+    if (title && cap) title[0] = 0;
+    if (!folder || !sh_ms_root(rootu, sizeof rootu)) return 0;
+    ms_dl_spell(folder, spelled, sizeof spelled);
+    if (!(ef = ms_dl_escape(spelled))) return 0;
+    sh_mb_record_lock();
+    doc = ms_dl_load(rootu);
+    sh_mb_record_unlock();
+    for (i = 0; doc && !found && i < doc->n; i++) {
+        const mpj *t = mpj_get(doc->items[i], "title"), *folders = mpj_get(doc->items[i], "folders");
+        for (k = 0; folders && folders->type == MPJ_ARR && !found && k < folders->n; k++) {
+            char quoted[600];
+            size_t got = 0;
+            if (folders->items[k]->type != MPJ_STR || _stricmp(folders->items[k]->text, ef)) continue;
+            if (!t || t->type != MPJ_STR || !t->text || !t->text[0]) continue;
+            _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", t->text);
+            if (title && cap) sh_json_decode_string(quoted, strlen(quoted), title, cap, &got);
+            found = 1;
+        }
+    }
+    mpj_free(doc);
+    free(ef);
+    return found;
+}
+
+/* A folder left the store: the section forgets it, and an entry with no
+ * folder left goes. */
+static void ms_dl_forget(const char *rootu, const char *rel)
+{
+    char spelled[SH_MS_NAME_MAX + 1], *ef;
+    mpj *doc;
+    int i, k, changed = 0;
+    ms_dl_spell(rel, spelled, sizeof spelled);
+    if (!(ef = ms_dl_escape(spelled))) return;
+    sh_mb_record_lock();
+    doc = ms_dl_load(rootu);
+    for (i = 0; doc && i < doc->n; i++) {
+        mpj *folders = mpj_get(doc->items[i], "folders");
+        if (!folders || folders->type != MPJ_ARR) continue;
+        for (k = 0; k < folders->n; k++) {
+            if (folders->items[k]->type != MPJ_STR || _stricmp(folders->items[k]->text, ef)) continue;
+            mpj_free(folders->items[k]);
+            memmove(&folders->items[k], &folders->items[k + 1], sizeof *folders->items * (size_t)(folders->n - k - 1));
+            folders->n--;
+            k--;
+            changed = 1;
+        }
+        if (!folders->n) {
+            mpj_free(doc->items[i]);
+            free(doc->keys[i]);
+            memmove(&doc->items[i], &doc->items[i + 1], sizeof *doc->items * (size_t)(doc->n - i - 1));
+            memmove(&doc->keys[i], &doc->keys[i + 1], sizeof *doc->keys * (size_t)(doc->n - i - 1));
+            doc->n--;
+            i--;
+            changed = 1;
+        }
+    }
+    if (doc && changed) (void)ms_dl_save(rootu, doc);
+    mpj_free(doc);
+    sh_mb_record_unlock();
+    free(ef);
+}
+
+/* After a folder under a group left: its title folder and the group folder
+ * go too once nothing is left in them (RemoveDirectoryW removes only an
+ * empty folder). */
+static void ms_prune_group_parents(const wchar_t *path, const wchar_t *root)
+{
+    static const wchar_t *const groups[] = { L"downloads", L"imports", NULL };
+    size_t rl = wcslen(root), i;
+    wchar_t *copy, *slash;
+    if (!ms_inside(path, root)) return;
+    for (i = 0; groups[i]; i++) {
+        size_t gl = wcslen(groups[i]);
+        if (!_wcsnicmp(path + rl + 1, groups[i], gl) && path[rl + 1 + gl] == L'\\') break;
+    }
+    if (!groups[i] || !(copy = _wcsdup(path))) return;
+    while ((slash = wcsrchr(copy, L'\\')) != NULL && (size_t)(slash - copy) > rl) {
+        *slash = 0;
+        if (!RemoveDirectoryW(copy)) break;
+    }
+    free(copy);
+}
+
 /* The mod.json author text of a source folder (mod.json, else package.json). */
 static char *ms_author_text(const wchar_t *src, size_t *len)
 {
@@ -2555,7 +2911,7 @@ static char *ms_author_text(const wchar_t *src, size_t *len)
     return t;
 }
 
-static int ms_install_locked(const char *folder, const char *as_name, const char *origin,
+static int ms_install_locked(const char *folder, const char *as_name, const char *origin, const sh_ms_place *place,
                              const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                              sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
@@ -2676,9 +3032,14 @@ static int ms_install_locked(const char *folder, const char *as_name, const char
                    b.hash, name);
             ok = 1;
             goto done;
-        } else if (!sh_ms_build_folder_name(rootu, b.id, b.hash, key_installed, name, sizeof name)) {
+        } else if (place && place->group && place->group[0]
+                       ? !sh_ms_placed_folder_name(rootu, place, b.id, b.hash, name, sizeof name)
+                       : !sh_ms_build_folder_name(rootu, b.id, b.hash, key_installed, name, sizeof name)) {
             sh_ms_list_free(&list);
-            ms_cause(cause, cap, "no free folder name for %s at %.16s", b.id, b.hash);
+            if (place && place->group && place->group[0])
+                ms_cause(cause, cap, "no free folder for %s under mods\\%s (is mods\\%s itself a mod folder? rename it)",
+                         b.id, place->group, place->group);
+            else ms_cause(cause, cap, "no free folder name for %s at %.16s", b.id, b.hash);
             goto done;
         }
     }

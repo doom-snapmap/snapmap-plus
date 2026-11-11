@@ -800,8 +800,10 @@ int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char 
 /* The admitted build that serves a mod: with `bundle_hash`, exactly that
  * bundle (aliases resolve), or none when it is not installed, whatever other
  * build of the key is (a map pins its build, DESIGN-additive 2.5); without
- * one, the newest admitted bundle of `id` (built time, then folder). 1 with
- * *out filled, 0 when none. */
+ * one, the admitted bundle of `id` that serves with no map open: the
+ * player's own folder (origin by-hand, install, migration) when one exists,
+ * else the newest (built time, then folder). 1 with *out filled, 0 when
+ * none. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], version[160], hash[SH_MODSERVE_HASH_HEX + 1];
     unsigned long long size;   /* carried bytes, as a manifest row's size */
@@ -818,6 +820,14 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
  * import, a download, a delivered package): a downloaded map keeps exactly
  * its pin. */
 int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out);
+
+/* An own published map follows its own folders (DESIGN-additive A.4, owner
+ * 2026-11-10): 1 with *out filled when an admitted, non-legacy folder of this
+ * machine's own (origin by-hand or none, install, migration) builds the key
+ * `id`, with the build that serves it (the newest own one), and that build is
+ * not `bundle_hash` already. 0 when no own folder builds the key: a key only
+ * a download or an import holds keeps the row's pin. */
+int sh_modserve_row_follow_own(const char *id, const char *bundle_hash, sh_modserve_bundle_ref *out);
 
 /* 1 with *out filled (the newest admitted build of the row's key) when the
  * row's own build is not installed but its key is at another hash: the
