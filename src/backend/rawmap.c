@@ -27,6 +27,7 @@
 #include "plain_reason.h"
 #include "modpublished.h"
 #include "modserve.h"     /* the loaded map's place */
+#include "modui.h"        /* SH_MODUI_SCRIPTS_OFF */
 #include "signatures.h"
 #include "config.h"
 #include "navmesh.h"
@@ -630,6 +631,16 @@ static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifes
     }
 }
 
+static int rawmap_scripts_off_guarded(const sh_modmanifest_list *rows, const char *place)
+{
+    __try {
+        return sh_modpub_rawmap_scripts_off(rows, place);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the rawmap's scripts check FAULTED; the map is refused");
+        return -1;
+    }
+}
+
 static int rawmap_hold_guarded(const sh_modmanifest_list *rows, const char *name, const char *place)
 {
     __try {
@@ -689,6 +700,18 @@ int sh_rawmap_prepare_reload(char *why, int cap)
     if (missing == RAWMAP_MISSING_FAULTED) {
         HeapFree(GetProcessHeap(), 0, text);
         _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s", name, RAWMAP_CHECK_FAULTED);
+        rawmap_tell(sentence);
+        RAWMAP_DIAG(0, "refused", path, 0, sentence, len, 0);
+        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
+        return 0;
+    }
+    /* A rawmap that came with its mods follows "Play maps whose mods include
+     * scripts" at every open, however its mods got here. */
+    if ((held = rawmap_scripts_off_guarded(&rows, place)) != 0) {
+        sh_modmanifest_list_free(&rows);
+        HeapFree(GetProcessHeap(), 0, text);
+        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, held < 0 ? "%s was not opened: %s" : "%s was not opened. %s",
+                    name, held < 0 ? RAWMAP_CHECK_FAULTED : SH_MODUI_SCRIPTS_OFF);
         rawmap_tell(sentence);
         RAWMAP_DIAG(0, "refused", path, 0, sentence, len, 0);
         if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);

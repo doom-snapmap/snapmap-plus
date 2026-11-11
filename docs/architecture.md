@@ -1746,7 +1746,10 @@ feature.
   were on; the player's own maps have no place and are never refused. A
   rawmap or prefab ZIP import whose carried mods have scripts is refused with
   the same sentence while the setting is off and installs nothing
-  (`modexport.c` me_install).
+  (`modexport.c` me_install), and a rawmap that came with its mods (it records
+  a place) is refused at every open while the setting is off when the builds
+  serving it there carry scripts (`sh_modpub_rawmap_scripts_off`, asked by
+  `sh_rawmap_prepare_reload` before the engine sees the text).
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
   `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is

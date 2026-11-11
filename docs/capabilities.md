@@ -387,7 +387,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   map that was downloaded with its scripts while the setting was on does not play either once it is
   off, with the same sentence; your own maps always play. A
   rawmap or prefab ZIP whose mods include scripts is refused at import with the same sentence while
-  the setting is off, and nothing is installed. Yes downloads only what you approve in the dialog,
+  the setting is off, and nothing is installed; a rawmap imported with its mods while the setting
+  was on does not open again once it is off, with the same sentence. Yes downloads only what you approve in the dialog,
   verified by hash, installs it beside what you have, and starts the map, with no word about
   versions or builds; No leaves the map unloaded with that sentence. Joining a lobby
   asks the same way and checks that the host still runs that map before going on. Maps whose mods
@@ -983,8 +984,8 @@ files). Scripts run only inside this map and cannot read or change your files.")
 tab a Script node says which script its name runs, offers the names its mod's scripts handle and
 fire as its Displayname's choices, and says so when no script uses its name; an object a script
 drives reads "Driven by a script in <mod>.". The tab's setting "Play maps whose mods include
-scripts" (on by default) is saved as `mods.scripted_maps`; the download gate's refusal for it
-waits on the mod store saying which builds carry scripts.
+scripts" (on by default) is saved as `mods.scripted_maps`; while it is off, a map or rawmap that came with mods
+carrying scripts is neither downloaded nor opened.
 
 ## Not user-facing
 

@@ -1119,6 +1119,30 @@ static void download_progress_and_cancel(void)
     F.fetch_gate = NULL;
 }
 
+static void rawmap_scripts_follow_the_setting(void)
+{
+    sh_modmanifest_list rows;
+    char place[SH_MODPUB_PLACE_CAP];
+    printf("-- a rawmap that came with scripted mods does not open while scripts are off; the player's own does\n");
+    reset();
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    F.served_scripts = 3;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD_PLACED, strlen(ONE_MOD_PLACED), &rows, place, sizeof place) == 0);
+    CHECK(!sh_modpub_rawmap_scripts_off(&rows, place));   /* on: it opens */
+    F.scripts_off = 1;
+    CHECK(sh_modpub_rawmap_scripts_off(&rows, place) == 1);
+    F.served_scripts = 0;
+    CHECK(!sh_modpub_rawmap_scripts_off(&rows, place));   /* its mods carry no scripts */
+    sh_modmanifest_list_free(&rows);
+    /* The player's own rawmap (no place) is never refused. */
+    F.installed_a = 1;
+    F.served_scripts = 3;
+    F.served_scripts_calls = 0;
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, place, sizeof place) == 0 && !place[0]);
+    CHECK(!sh_modpub_rawmap_scripts_off(&rows, place) && F.served_scripts_calls == 0);
+    sh_modmanifest_list_free(&rows);
+}
+
 static void scripts_and_the_setting(void)
 {
     printf("-- a map whose missing builds carry scripts: the question says so; with scripts off it is refused\n");
@@ -1710,6 +1734,7 @@ int main(void)
     scripts_and_the_setting();
     download_progress_and_cancel();
     scripts_off_at_launch();
+    rawmap_scripts_follow_the_setting();
     rawmap_missing_counts_rows();
     a_map_carries_its_place();
     one_notice_queue();

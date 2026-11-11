@@ -374,6 +374,14 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
 size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char *place,
                                 size_t place_cap);
 
+/* 1 when the rawmap may not open because the player turned off "Play maps
+ * whose mods include scripts" and the builds serving its rows in its place
+ * carry scripts: a rawmap that came with its mods (a ZIP import while the
+ * setting was on) follows the setting at every open, as a downloaded map
+ * does at every launch. A rawmap without a place (the player's own) is never
+ * refused. The caller tells the player SH_MODUI_SCRIPTS_OFF. */
+int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *place);
+
 /* Hold a rawmap load whose rows name missing builds in `place` (as
  * sh_modpub_rawmap_missing gave it; the fetch fills that place, or the root).
  * `source` is the file name the messages use. Returns 1 held (the store is

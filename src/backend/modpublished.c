@@ -827,11 +827,16 @@ nomem:
  * arrived with its mods (it has a place; the player's own maps have none)
  * whose builds carry scripts is not loaded, however its mods got here. The
  * launch is refused with the setting's sentence. 1 when refused. */
+static int pub_scripts_off(const char *place, const sh_modmanifest_list *rows)
+{
+    return place && place[0] && rows && rows->count && g_ops.scripted_maps_allowed &&
+           !g_ops.scripted_maps_allowed(g_ops.context) && g_ops.served_scripts &&
+           g_ops.served_scripts(g_ops.context, rows, place);
+}
+
 static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh_modmanifest_list *rows)
 {
-    if (!place[0] || !rows->count || !g_ops.scripted_maps_allowed || g_ops.scripted_maps_allowed(g_ops.context) ||
-        !g_ops.served_scripts || !g_ops.served_scripts(g_ops.context, rows, place))
-        return 0;
+    if (!pub_scripts_off(place, rows)) return 0;
     pub_logf("MODS: %s: the map's mods include scripts and the player turned scripts off; it is not loaded",
              pub_hook_name(hook));
     if (owner && g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
@@ -1332,6 +1337,13 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     for (size_t i = 0; i < rows->count; i++)
         if (!pub_row_served(&rows->rows[i], at)) missing++;
     return missing;
+}
+
+int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *place)
+{
+    if (!g_ops_set || !pub_scripts_off(place, rows)) return 0;
+    pub_logf("MODS: rawmap load: the map's mods include scripts and the player turned scripts off; it is not opened");
+    return 1;
 }
 
 #define PUB_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + 16)
