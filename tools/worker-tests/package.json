@@ -1,0 +1,8 @@
+{
+  "name": "snapmap-plus-worker-tests",
+  "private": true,
+  "description": "The Worker runtime suite's one dependency, installed by CI with npm ci from the lockfile.",
+  "devDependencies": {
+    "miniflare": "4.20260730.0"
+  }
+}

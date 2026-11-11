@@ -629,7 +629,14 @@ int main(void)
                 {sh_grid_size shrink=huge;shrink.xyz[2]=4000;
                     assert(sh_grid_native_apply(edit_data,0,&shrink)&&connected[0]==-1);
                     assert(sh_grid_native_read(edit_data,0,&read)&&!memcmp(&read,&shrink,sizeof read));
-                    assert(strstr(sh_grid_native_last_message(),"updated to 10000 x 10000 x 4000"));}
+                    assert(strstr(sh_grid_native_last_message(),"Room size set to 10000 x 10000 x 4000."));}
+    {char out[256];
+        grid_plain("GRID: dimension edit refused; not on the engine thread",out,sizeof out);
+        assert(!strcmp(out,"Room size not changed: the editor was busy; try again."));
+        grid_plain("GRID: connected resize would overlap another module; move the obstruction first",out,sizeof out);
+        assert(!strcmp(out,"Room size not changed: connected resize would overlap another module; move the obstruction first."));
+        grid_plain("GRID: module 3 has no loaded module record; dimensions unchanged",out,sizeof out);
+        assert(!strcmp(out,"Room size not changed: module 3 has no loaded module record."));}
                 *(int*)(map_data+0x758)=2;*(int*)(map_data+0x7e0)=3;*(int*)(map_data+0x7c8)=4;
                 /* Still touching the doorway: native reconnect joins it again,
                  * so it follows the room back as an attached neighbour. */

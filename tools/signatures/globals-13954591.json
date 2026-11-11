@@ -1,5 +1,5 @@
 {
- "_doc": "Build 13954591 updates for engine_globals_table.gen.h: replacement anchors for the eight 2018 anchors that no longer match, and every global's Vulkan/OpenGL RVA. Source: snaphak-re rederive lane (R-008) address table, each value verified by at least two independent confirmations per renderer. Apply with gen_globals_table.py --update.",
+ "_doc": "Build 13954591 updates for engine_globals_table.gen.h: replacement anchors for the eight 2018 anchors that no longer match, and every global's Vulkan/OpenGL RVA. Each value was verified by at least two independent confirmations per renderer. Apply with gen_globals_table.py --update.",
  "globals": {
   "cmd_system_slot": {
    "vk_rva": "0x2f451c0",

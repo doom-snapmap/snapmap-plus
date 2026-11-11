@@ -51,7 +51,7 @@ func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	}
 }
 
-// R-021: the retired package folders are neither copied nor created, and an old one is left
+// The retired package folders are neither copied nor created, and an old one is left
 // in place for the player to deal with; everything else still moves.
 func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
 	la, up := newDataDirs(t)

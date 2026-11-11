@@ -239,7 +239,6 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.set_entity_0x170       = s->set_displayname;        /* +0x128 */
     g_iface_vtbl_live.serialize_selection    = s->serialize_selection;    /* +0xb0  */
     g_iface_vtbl_live.resolve_prefab_path    = s->resolve_prefab_path;    /* +0xc0  */
-    g_iface_vtbl_live.selection_guard        = s->remove_from_selection;  /* +0x130 */
 
     g_iface_vtbl_live.enum_decls_of_resclass = s->enum_decls_of_resclass; /* +0x110 */
 
@@ -274,7 +273,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.request_prefab_mesh     = s->request_prefab_mesh;     /* +0x310 */
     g_iface_vtbl_live.get_prefab_mesh         = s->get_prefab_mesh;         /* +0x318 */
     g_iface_vtbl_live.resolve_prefab_defaults = s->resolve_prefab_defaults; /* +0x320 */
-    /* clone-extension (the File menu's rawmap load/save file surface). */
+    /* the File menu's rawmap load/save file surface. */
     g_iface_vtbl_live.rawmap_status           = s->rawmap_status;           /* +0x328 */
     g_iface_vtbl_live.rawmap_configure        = s->rawmap_configure;        /* +0x330 */
     g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */

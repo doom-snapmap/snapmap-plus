@@ -76,16 +76,27 @@ if ($env:SNAPMAP_PLUS_API_BASE -match '^https?://(127\.0\.0\.1|localhost|\[::1\]
 $releases = "$api/repos/$repo/releases"
 $headers = @{ "User-Agent" = "snapmap-plus-installer"; "Accept" = "application/vnd.github+json" }
 
+# A release tag's sort key: vMAJOR.MINOR.PATCH ranks above its -beta.N prereleases. $null for
+# a tag of another shape.
+function Get-VersionKey([string]$tag) {
+    if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$') { return $null }
+    $stable = if ($Matches[4]) { 0 } else { 1 }
+    $beta = if ($Matches[4]) { [int]$Matches[4] } else { 0 }
+    return [pscustomobject]@{ Version = [version]("{0}.{1}.{2}" -f $Matches[1], $Matches[2], $Matches[3]); Stable = $stable; Beta = $beta }
+}
+
 function Get-Release([string]$tag) {
-    if ($tag) { return Invoke-RestMethod -UseBasicParsing -Uri "$releases/tags/$tag" -Headers $headers }
-    # The newest stable release, or the newest beta while none is published. The
+    if ($tag) { return Invoke-RestMethod -UseBasicParsing -TimeoutSec 30 -Uri "$releases/tags/$tag" -Headers $headers }
+    # The newest stable release by version, or the newest beta while none is published. The
     # latest-release download link cannot be used: it never serves a beta.
-    $all = Invoke-RestMethod -UseBasicParsing -Uri ($releases + "?per_page=30") -Headers $headers
-    $list = @($all | Where-Object { -not $_.draft })
+    $all = Invoke-RestMethod -UseBasicParsing -TimeoutSec 30 -Uri ($releases + "?per_page=100") -Headers $headers
+    $list = @($all | Where-Object { -not $_.draft -and (Get-VersionKey $_.tag_name) } | Sort-Object -Descending `
+        @{ Expression = { (Get-VersionKey $_.tag_name).Version } }, @{ Expression = { (Get-VersionKey $_.tag_name).Stable } },
+        @{ Expression = { (Get-VersionKey $_.tag_name).Beta } })
     $stable = @($list | Where-Object { -not $_.prerelease })
     if ($stable.Count -gt 0) { return $stable[0] }
     if ($list.Count -gt 0) { return $list[0] }
-    throw "No Snapmap+ release has been published yet."
+    throw "No Snapmap+ release has been published yet; try again later."
 }
 
 # Download a release's snapmap-plus.exe and check it against the size and digest GitHub publishes.
@@ -94,7 +105,7 @@ function Save-Installer($release, [string]$out) {
     if (-not $asset) { throw "Release $($release.tag_name) has no snapmap-plus.exe yet; try again in a minute." }
     $part = "$out.download"
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $part
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 900 -Uri $asset.browser_download_url -OutFile $part
         $size = (Get-Item -LiteralPath $part).Length
         if ($asset.size -and $size -ne $asset.size) {
             throw "snapmap-plus.exe from $($release.tag_name) is incomplete ($size of $($asset.size) bytes); run this again."
@@ -124,7 +135,7 @@ if ($build -eq "2018") {
         $legacy = Join-Path $work "snapmap-plus.exe"
         Save-Installer (Get-Release $legacyTag) $legacy
         & $legacy install --doom $doom --release $legacyTag
-        if ($LASTEXITCODE -ne 0) { throw "the $legacyTag installer failed (exit $LASTEXITCODE)" }
+        if ($LASTEXITCODE -ne 0) { throw "the $legacyTag installer for the 2018 build failed (exit $LASTEXITCODE); its lines above say why -- run this again to retry." }
     } finally {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }

@@ -21,6 +21,7 @@ Usage:
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
   snapmap-plus version
+  snapmap-plus set-token <token>
   snapmap-plus help
 
 Options:
@@ -28,13 +29,16 @@ Options:
                       Auto-detected from your Steam libraries if omitted.
   --local <dist-dir>  Install from a local dist/ tree (built by package.ps1) instead of
                       downloading a release.
-  --release <tag>     Install a specific release version instead of the latest.
-  --beta              Install the latest beta (pre-release) instead of the latest stable.
+  --release <tag>     Install that release version, older ones included.
+  --beta              Install the newest release, beta or stable (without it, the newest stable).
   --no-self           With "update": don't also update snapmap-plus.exe itself (overlay only).
   --force             Let this snapmap-plus.exe replace a newer copy kept in %LOCALAPPDATA%\snapmap-plus.
+  --token <token>     A GitHub access token for this command only (set-token saves one).
   --yes, -y           Skip the "are you sure?" confirmation (for scripts / automation).
   --plain             Print without colour. Colour is also off when NO_COLOR is set or the
                       output is not a console.
+
+Install and update never move to an older version unless --release names it.
 
 With "changelog", a bare version shows just that release (the leading v is optional):
   snapmap-plus changelog v0.2.1-beta.4    that release's notes
@@ -43,12 +47,11 @@ With "changelog", a bare version shows just that release (the leading v is optio
 With no argument it shows the newest release and lists the earlier ones.
 
 With no --local, install/update download from GitHub. Uninstall restores any files it
-replaced and leaves your Snapmap+ modding data untouched.
+replaced and leaves your Snapmap+ modding data untouched; with --doom it also works when
+the install record is gone.
 
-On install and update the installer runs snapmap-plus-store.exe, which converts a mods
-folder and the package folders of earlier releases to the current layout and moves an
-overrides folder into mods, entries added later included; DOOM itself never migrates
-them. "migrate" runs that conversion on its own, without reinstalling.
+"migrate" converts a mods folder of earlier releases to the current layout, without
+reinstalling; install and update do this by themselves.
 
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.
@@ -114,7 +117,7 @@ func runCommand(cmd string, args []string) error {
 		return cmdMigrate(f)
 	case "status":
 		return cmdStatus(f)
-	case "changelog", "info", "--info":
+	case "changelog":
 		return cmdChangelog(f, args)
 	case "set-token":
 		return cmdSetToken(args)

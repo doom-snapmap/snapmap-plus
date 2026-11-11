@@ -42,6 +42,10 @@ characters return 413. The UI receives a failed response and retains the draft.
   (`beta` / `stable`, from the version string; dev builds get neither), the renderer (`vulkan` /
   `opengl`), the game build (`build-13954591`, or `build-2642713` for a 2018-build report), and
   `user-report` (identifies relay-filed issues for release retest prompts).
+- **Player text is made safe for a public issue.** An `@name` in the title or details gets a zero-width
+  space after the `@`, so it notifies nobody; the contact is shown as inline code, so it carries no
+  mention, link or markup; a version that is not release-shaped (`v1.2.3`, `v1.2.3-beta.4`, `dev`,
+  `local`) is filed as `unknown`; attached logs are fenced with more backticks than any run inside them.
 
 A filed bug report's metadata block reads, for example:
 
@@ -50,7 +54,7 @@ A filed bug report's metadata block reads, for example:
 - Version: v0.2.2-beta.1 (beta)
 - Renderer: Vulkan
 - Game: DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
-- Contact: someone@example.com
+- Contact: `someone@example.com`
 ```
 
 **Why the game identity:** Snapmap+ supports exactly one DOOM 2016 build, so a report is only

@@ -71,12 +71,12 @@ func interactiveMain() {
 	commandLoop(enter)
 }
 
-// enterDefault selects install, update, or no action for a bare Enter.
+// enterDefault selects install, update (only to a newer version), or no action for a bare Enter.
 func enterDefault(installed bool, installedVersion, latestTag string) string {
 	if !installed {
 		return "install"
 	}
-	if latestTag != "" && latestTag != installedVersion {
+	if c, ok := compareVersions(latestTag, installedVersion); ok && c > 0 {
 		return "update"
 	}
 	return ""
@@ -151,7 +151,7 @@ var noticeClient = &http.Client{Timeout: 5 * time.Second}
 // latestDefaultTag returns the default release tag, or an empty string when
 // the bounded update check fails. Failure suppresses only the notice.
 func latestDefaultTag() string {
-	req, err := http.NewRequest("GET", releasesURL()+"?per_page=30", nil)
+	req, err := http.NewRequest("GET", releasesURL()+"?per_page=100", nil)
 	if err != nil {
 		return ""
 	}
@@ -172,15 +172,11 @@ func latestDefaultTag() string {
 	if json.NewDecoder(resp.Body).Decode(&list) != nil {
 		return ""
 	}
-	if pick, _ := pickDefaultRelease(list); pick != nil {
+	sortReleases(list)
+	if pick := newestRelease(list, false); pick != nil {
 		return pick.TagName
 	}
 	return ""
-}
-
-func readLine() string {
-	s, _ := stdin.ReadString('\n')
-	return cleanLine(s)
 }
 
 // readLineEOF reads a line and additionally reports whether stdin is still open -- false means EOF with
@@ -203,12 +199,6 @@ func cleanLine(s string) string {
 func isYes(s string) bool {
 	s = strings.ToLower(strings.TrimSpace(s))
 	return s == "" || s == "y" || s == "yes"
-}
-
-func pause() {
-	ui.Ask("Press Enter to close.", "")
-	readLine()
-	ui.Answered(false)
 }
 
 // isInteractive reports whether stdin is a real terminal -- so we only prompt when a human can answer.

@@ -71,3 +71,20 @@ Revoke the key in the Anthropic Console, create a replacement in the same worksp
 Delete the environment secret. `prepare-release.yml` then produces skeleton entries for hand-writing, and
 nothing else changes. Deleting the workflow removes the dependency entirely; `CHANGELOG.md` is then written
 by hand and every consumer still works.
+
+## Code signing (not set up)
+
+Release binaries are unsigned, so Windows SmartScreen shows "Windows protected your PC" (unknown
+publisher) until a download has built reputation; the player guide and the README tell players how to
+check the file and run it. `release.yml` holds a disabled step, "Sign the binaries (disabled)", placed
+after compilation and before `package.ps1` hashes the DLLs, so the manifest, the attestation and the
+published hashes would all cover signed bytes. It is written for Azure Trusted Signing and needs:
+
+- repository variables `SIGNING_ENDPOINT`, `SIGNING_ACCOUNT` and `SIGNING_PROFILE` (the account's
+  regional endpoint, its name and the certificate profile);
+- repository secrets `SIGNING_AZURE_TENANT_ID`, `SIGNING_AZURE_CLIENT_ID` and
+  `SIGNING_AZURE_CLIENT_SECRET` (an app registration with the signer role on that account).
+
+To enable it, create the account and identity, add those values, and change the step's `if: false` to
+`if: vars.SIGNING_ENDPOINT != ''`. A different signing service replaces the step's command and keeps
+its place in the workflow. The service is paid; add it to the inventory above when it exists.

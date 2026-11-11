@@ -206,7 +206,7 @@ func newUpdateRig(t *testing.T, runningTag string) *updateRig {
 }
 
 // seedUserData writes the player data the installer must leave exactly as it is: the backend's
-// config, prefabs and strings, a mods folder holding both the pre-Contract-5 layout and the
+// config, prefabs and strings, a mods folder holding both an earlier release's layout and the
 // current one, and the retired overrides and override-backups folders with packages in them.
 func (r *updateRig) seedUserData(t *testing.T) {
 	t.Helper()

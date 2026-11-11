@@ -20,6 +20,9 @@ func TestShouldSelfUpdate(t *testing.T) {
 		{"already current", "v0.1.0-beta.4", "v0.1.0-beta.4", false},
 		{"no release tag", "v0.1.0-beta.4", "", false},
 		{"newer release", "v0.1.0-beta.3", "v0.1.0-beta.4", true},
+		{"older release", "v1.0.0", "v1.0.0-beta.26", false},
+		{"older stable", "v1.1.0-beta.1", "v1.0.0", false},
+		{"beta to stable", "v1.0.0-beta.26", "v1.0.0", true},
 	}
 	for _, c := range cases {
 		if got := shouldSelfUpdate(c.running, c.tag); got != c.want {
@@ -235,7 +238,7 @@ func TestReplaceExeInstallAndRollbackFailures(t *testing.T) {
 				t.Fatal("failed publication returned success")
 			}
 			if rollbackFails {
-				if !strings.Contains(err.Error(), "rollback failed") || !strings.Contains(err.Error(), aside) {
+				if !strings.Contains(err.Error(), "the old one could not be put back") || !strings.Contains(err.Error(), aside) {
 					t.Fatalf("missing recovery details: %v", err)
 				}
 				if got := readF(t, aside); got != "OLD" {
