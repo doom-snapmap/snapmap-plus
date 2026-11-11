@@ -173,19 +173,22 @@ void sh_modvt_reset(void);
  * differs from what the engine read. */
 typedef struct sh_modvt_lit_info {
     char salt[65], hash[65];
-    int size, placed, served, x, y, materials;
+    int size, placed, served, square, x, y, materials;
 } sh_modvt_lit_info;
 
-/* The game's square 16 member (copied). 1 when it opens as square 16. */
-int      sh_modvt_lit_set_stock(const uint8_t *bytes, size_t len);
+/* The squares the lit pages use, k from 0 (16, 8, 7), else 0. */
+int      sh_modvt_lit_square(int k);
+/* The game's member of `square` (copied). 1 when it opens as that square. */
+int      sh_modvt_lit_set_stock(int square, const uint8_t *bytes, size_t len);
 /* Recompute who is served and place newcomers. Returns how many are served. */
 int      sh_modvt_lit_refresh(void);
-/* The served set's signature (names the merged member), 0 when none is placed. */
-uint64_t sh_modvt_lit_signature(void);
+/* The served set's signature in `square` (names its merged member), 0 when no
+ * served mod is placed there. */
+uint64_t sh_modvt_lit_signature(int square);
 /* Entry k of the session's lit builds: 1 filled, 0 past the end. */
 int      sh_modvt_lit_state(int k, sh_modvt_lit_info *out);
-/* The merged member of the served set (malloc'd). 1, or 0 with the cause. */
-int      sh_modvt_lit_compose(uint8_t **out, size_t *len, char *why, size_t cap);
+/* The merged member of `square` for the served set (malloc'd). 1, or 0 with the cause. */
+int      sh_modvt_lit_compose(int square, uint8_t **out, size_t *len, char *why, size_t cap);
 /* 1 when `request` is a material a served mod's build lists. */
 int      sh_modvt_lit_wanted(const char *request);
 /* `text` (the served bytes of `request`) as the lit pages are served now: 1

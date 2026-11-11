@@ -103,19 +103,26 @@ static void build_free(build *b)
     memset(b, 0, sizeof *b);
 }
 
-/* Square 16 as the game ships it: levels 1 to 8 one row at the top edge, 9 to 11 one cell. */
-static uint8_t *stock_member(size_t *len)
+/* A nearly empty stock square: levels 1 to 8 one row at the top edge (square
+ * 16 as the game ships it; square 8 also one at the bottom), 9 to 11 one cell. */
+static uint8_t *stock_member_of(int square, size_t *len)
 {
     build b = { 0 };
     int L, x;
     uint8_t *m;
     for (L = 1; L <= 8; ++L)
-        for (x = 0; x < side(L); ++x) { cell_add(&b, L, x, 0, (uint32_t)b.npages); page_new(&b, 7000u + (unsigned)b.npages); }
+        for (x = 0; x < side(L); ++x) {
+            cell_add(&b, L, x, 0, (uint32_t)b.npages);
+            page_new(&b, 7000u + (unsigned)b.npages);
+            if (square == 8) { cell_add(&b, L, x, side(L) - 1, (uint32_t)b.npages); page_new(&b, 7000u + (unsigned)b.npages); }
+        }
     for (L = 9; L < 12; ++L) { cell_add(&b, L, 0, 0, (uint32_t)b.npages); page_new(&b, 7000u + (unsigned)b.npages); }
-    m = member_write(&b, 16, len);
+    m = member_write(&b, square, len);
     build_free(&b);
     return m;
 }
+
+static uint8_t *stock_member(size_t *len) { return stock_member_of(16, len); }
 
 /* A relative-form member covering w x h level-0 pages with the whole mip chain. */
 static uint8_t *lit_member(int w, int h, unsigned seed, int square, int hole, size_t *len)

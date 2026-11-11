@@ -630,7 +630,7 @@ static void lit_pages(void)
     free(json);
 
     sh_modvt_lit_reset();
-    CHECK(sh_modvt_lit_set_stock(stock, ns) == 1);
+    CHECK(sh_modvt_lit_set_stock(16, stock, ns) == 1);
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(mods) == 2);
     /* No map open (the editor offers both): both served, each in a 256 block of its own. */
@@ -640,11 +640,11 @@ static void lit_pages(void)
         if (!strcmp(info.salt, "litmod11")) { kb = k; ib = info; }
     }
     CHECK(ka >= 0 && kb >= 0);
-    CHECK(ka >= 0 && ia.placed && ia.served && ia.size == 32 && ia.x == 0 && ia.y == 256 && ia.materials == 2);
+    CHECK(ka >= 0 && ia.placed && ia.served && ia.size == 32 && ia.square == 16 && ia.x == 0 && ia.y == 256 && ia.materials == 2);
     CHECK(kb >= 0 && ib.placed && ib.served && ib.size == 8 && ib.x == 256 && ib.y == 256 && ib.materials == 1);
-    sig = sh_modvt_lit_signature();
+    sig = sh_modvt_lit_signature(16);
     CHECK(sig != 0);
-    CHECK(sh_modvt_lit_compose(&merged, &n, cause, sizeof cause) && sh_vtp_open(&vm, merged, n, cause, sizeof cause) &&
+    CHECK(sh_modvt_lit_compose(16, &merged, &n, cause, sizeof cause) && sh_vtp_open(&vm, merged, n, cause, sizeof cause) &&
           vm.square == 16);
     free(merged);
     merged = NULL;
@@ -656,7 +656,7 @@ static void lit_pages(void)
     orig = read_text(a, "assets\\generated\\decls\\material\\mods\\litmod00\\head.decl");
     olen = orig ? strlen(orig) : 0;
     CHECK(sh_modvt_lit_material("generated/decls/material/mods/litmod00/head.decl", orig, olen, &out, &n) == 1);
-    node.x = ia.x; node.y = ia.y; node.size = ia.size;
+    node.x = ia.x; node.y = ia.y; node.size = ia.size; node.square = ia.square;
     {
         size_t wn;
         char *want = sh_vtp_material_moved(orig, olen, node, &wn);
@@ -678,15 +678,15 @@ static void lit_pages(void)
     CHECK(sh_modvt_lit_refresh() == 1);
     CHECK(sh_modvt_lit_state(ka, &info) && !info.served && info.placed && info.x == ia.x && info.y == ia.y);
     CHECK(sh_modvt_lit_state(kb, &info) && info.served && info.x == ib.x && info.y == ib.y);
-    CHECK(sh_modvt_lit_signature() != sig && sh_modvt_lit_signature() != 0);
+    CHECK(sh_modvt_lit_signature(16) != sig && sh_modvt_lit_signature(16) != 0);
     CHECK(!sh_modvt_lit_wanted("generated/decls/material/mods/litmod00/head.decl"));
     /* A map with neither: nothing is served, square 16 is the game's. */
     CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
-    CHECK(sh_modvt_lit_refresh() == 0 && sh_modvt_lit_signature() == 0);
+    CHECK(sh_modvt_lit_refresh() == 0 && sh_modvt_lit_signature(16) == 0);
     /* Back in the editor: the first set again, the same places, the same name. */
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
-    CHECK(sh_modvt_lit_refresh() == 2 && sh_modvt_lit_signature() == sig);
+    CHECK(sh_modvt_lit_refresh() == 2 && sh_modvt_lit_signature(16) == sig);
     sh_modserve_scope_enable(0);
     sh_modvt_lit_reset();
     free(stock);

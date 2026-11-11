@@ -1,14 +1,15 @@
-/* vtpack.h -- mods' lit virtual-texture pages packed into square 16 of the
- * stock `_vmtr` family (docs/vt-baker.md, "Lit pages"). Pure: no engine, no
+/* vtpack.h -- mods' lit virtual-texture pages packed into the free area of
+ * the stock `_vmtr` family's squares (docs/vt-baker.md, "Lit pages"). Pure: no engine, no
  * file system; modvt.c serves what this builds and modbundle.c checks a
  * mod's member with it.
  *
  * Why: every lit model program of DOOM 2016 (skinvmtr, skinvmtrwounds,
  * outside and the rest) samples only the stock `_vmtr` family, so a mod's lit
- * pages draw only from inside it. Square 16 of the stock family holds no
- * level-0 page and one page row at its top edge at levels 1 to 8.
+ * pages draw only from inside it. Squares 7, 8 and 16 of the stock family
+ * hold no level-0 page and only a few page rows at levels 1 to 8; every other
+ * square is mostly full (its member is 0.6 to 3 GB).
  *
- * The mod form, relative to the mod (nothing names square 16 or another mod):
+ * The mod form, relative to the mod (nothing names a square or another mod):
  *   member     virtualtextures/mods/<salt>/vmtr.mega2: a version 2 member
  *              whose level table is square 1's, its pages from the origin.
  *              Its extent is the bounding box of its level-0 cells (w x h
@@ -20,19 +21,19 @@
  *
  * The packer, deterministic for its inputs:
  *   place      a node already held keeps its place; every other node, largest
- *              first, then by key, takes the S-aligned position of square 16
- *              that touches no stock cell at levels 0..log2 S and no other
- *              node, choosing the most carried levels (below), then the lowest
- *              row, then the lowest column.
+ *              first, then by key, takes the S-aligned position, in the
+ *              squares given, that touches no stock cell at levels 0..log2 S and no other
+ *              node, choosing the most carried levels (below), then the
+ *              square given first, then the lowest row, then the lowest column.
  *   carry      levels 0..log2 S of a mod are always written: its own cells
  *              moved by the node's position >> L. A coarser level L, up to
  *              SH_VTP_CARRY_MAX, is also written (its own cell L, 0, 0) while
  *              the node is aligned to 2^L, the stock cell there is empty and no
  *              other served node lies in that 2^L block. Levels 9 to 11 are
  *              cells shared with other squares and stay stock.
- *   member     every stock page unchanged and in its stock order (so every
+ *   member     per square, every stock page unchanged and in its stock order (so every
  *              stock cell keeps its page and bytes), then each served mod's
- *              pages in key order, each page once.
+ *              pages in key order, each page once (the mods in that square).
  *   material   the stock form: landpagefile and any stock vmtr parameter
  *              dropped, the stock vmtr tail added before the closing brace, and
  *              the mapping's x and y moved to the node's place in the family.
@@ -58,7 +59,6 @@ extern "C" {
 #define SH_VTP_PAGE       120          /* payload texels per page side */
 #define SH_VTP_CELLS      349527u      /* cells of one member, every level */
 #define SH_VTP_EMPTY      0xFFFFFFFFu
-#define SH_VTP_SQUARE     16           /* the stock square the packer fills */
 #define SH_VTP_LIT_SQUARE 1            /* the relative form's own square */
 #define SH_VTP_NODE_MAX   256          /* a 512 node is the whole square, its top row included */
 #define SH_VTP_CARRY_MAX  8            /* levels 9..11 are shared with other squares */
@@ -110,7 +110,7 @@ int sh_vtp_lit_info(const sh_vtp_member *m, sh_vtp_lit *out, char *why, size_t c
 
 /* ------------------------------------------------------------------ packing */
 
-typedef struct sh_vtp_node { int x, y, size; } sh_vtp_node;   /* square-local level-0 pages */
+typedef struct sh_vtp_node { int x, y, size, square; } sh_vtp_node;   /* square-local level-0 pages; the stock square */
 
 /* 1 when an S x S node at (x, y) touches no stock cell at levels 0..log2 S. */
 int sh_vtp_fits(const sh_vtp_member *stock, int x, int y, int size);
@@ -127,9 +127,10 @@ typedef struct sh_vtp_req {
     sh_vtp_node node;                   /* in when held, out when placed */
 } sh_vtp_req;
 
-/* Place every request (rules above). Returns how many are placed; a request
- * with no room stays unplaced. */
-int sh_vtp_place(const sh_vtp_member *stock, sh_vtp_req *reqs, int n);
+/* Place every request (rules above) in the stock squares `stocks` (members of
+ * those squares, in the order a tie prefers them). Returns how many are
+ * placed; a request with no room stays unplaced. */
+int sh_vtp_place(const sh_vtp_member *const *stocks, int nstocks, sh_vtp_req *reqs, int n);
 
 typedef struct sh_vtp_mod {
     const char *key;
@@ -139,10 +140,9 @@ typedef struct sh_vtp_mod {
     uint32_t cells, pages;              /* out */
 } sh_vtp_mod;
 
-/* The merged member of square 16: the stock member (a member of square 16)
- * plus `mods`, served now, each at its node. A malloc'd image in *out. 1, or
- * 0 with the cause (out of memory, a member that is not square 16's, two mods
- * on one cell). */
+/* The merged member of the stock member's square: its pages plus those of
+ * `mods` (served now) whose node lies in that square. A malloc'd image in
+ * *out. 1, or 0 with the cause (out of memory, two mods on one cell). */
 int sh_vtp_compose(const sh_vtp_member *stock, sh_vtp_mod *mods, int n, uint8_t **out, size_t *out_len,
                    char *why, size_t cap);
 

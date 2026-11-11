@@ -105,7 +105,7 @@ static void test_place(const sh_vtp_member *stock)
     memset(a, 0, sizeof a);
     a[0].key = "tyrant@1"; a[0].size = 64;
     a[1].key = "small@2"; a[1].size = 8;
-    n = sh_vtp_place(stock, a, 2);
+    n = sh_vtp_place(&stock, 1, a, 2);
     CHECK(n == 2);
     /* Each gets a 256 block of its own, so every level up to 8 is carried. */
     CHECK(a[0].node.x == 0 && a[0].node.y == 256 && a[0].node.size == 64);
@@ -115,14 +115,14 @@ static void test_place(const sh_vtp_member *stock)
     memset(b, 0, sizeof b);
     b[0] = a[1]; b[1] = a[0];
     b[0].placed = b[1].placed = 0;
-    CHECK(sh_vtp_place(stock, b, 2) == 2);
+    CHECK(sh_vtp_place(&stock, 1, b, 2) == 2);
     CHECK(b[0].node.x == a[1].node.x && b[0].node.y == a[1].node.y && b[1].node.x == a[0].node.x &&
           b[1].node.y == a[0].node.y);
     /* A held place is kept; a newcomer goes around it. */
     memset(b, 0, sizeof b);
-    b[0].key = "small@2"; b[0].size = 8; b[0].held = 1; b[0].node.x = 8; b[0].node.y = 40;
+    b[0].key = "small@2"; b[0].size = 8; b[0].held = 1; b[0].node.x = 8; b[0].node.y = 40; b[0].node.square = 16;
     b[1].key = "big@3"; b[1].size = 128;
-    CHECK(sh_vtp_place(stock, b, 2) == 2);
+    CHECK(sh_vtp_place(&stock, 1, b, 2) == 2);
     CHECK(b[0].node.x == 8 && b[0].node.y == 40);
     CHECK(b[1].node.y == 256 && nodes_disjoint(b, 2));
     /* Nothing touches the stock row: every placed node fits. */
@@ -134,7 +134,7 @@ static void test_place(const sh_vtp_member *stock)
     b[1].key = "b"; b[1].size = 256;
     b[2].key = "c"; b[2].size = 256;
     b[3].key = "d"; b[3].size = 128;
-    CHECK(sh_vtp_place(stock, b, 4) == 3);
+    CHECK(sh_vtp_place(&stock, 1, b, 4) == 3);
     CHECK(b[0].placed && b[1].placed && !b[2].placed && b[3].placed);
     CHECK(b[3].node.y == 128 && nodes_disjoint(b, 4));
     /* Fit counts per node size (square 16's free area). */
@@ -164,7 +164,7 @@ static void test_compose(const char *dir, const sh_vtp_member *stock)
     memset(r, 0, sizeof r);
     r[0].key = "aaaa1111@h1"; r[0].size = 32;
     r[1].key = "bbbb2222@h2"; r[1].size = 8;
-    CHECK(sh_vtp_place(stock, r, 2) == 2);
+    CHECK(sh_vtp_place(&stock, 1, r, 2) == 2);
     memset(mods, 0, sizeof mods);
     /* Given out of key order: the member orders them by key. */
     mods[0].key = r[1].key; mods[0].m = &vb; mods[0].node = r[1].node;
@@ -264,7 +264,7 @@ static const char g_plain[] =
 
 static void test_materials(void)
 {
-    sh_vtp_node node = { 0, 256, 64 };
+    sh_vtp_node node = { 0, 256, 64, 16 };
     size_t n;
     char *t;
     double v[4];
@@ -295,6 +295,42 @@ static void test_materials(void)
     CHECK(sh_vtp_material_plain("{\ndiffusemap\tx\n", 15, &n) == NULL);
 }
 
+/* A second square: a mod placed in square 8 is composed into square 8's member
+ * only, and its material moves to square 8's origin (column 3, row 1). */
+static void test_second_square(const sh_vtp_member *sq16)
+{
+    size_t n8, nm, n;
+    uint8_t *b8 = stock_member_of(8, &n8), *ma = lit_member(20, 12, 300, 1, 0, &nm), *m16 = NULL, *m8 = NULL;
+    sh_vtp_member s8, va, v8;
+    const sh_vtp_member *only8[1], *both[2];
+    sh_vtp_req r[3];
+    sh_vtp_mod mod;
+    char why[300], *t;
+    size_t tl;
+    CHECK(sh_vtp_open(&s8, b8, n8, why, sizeof why) && s8.square == 8);
+    CHECK(sh_vtp_open(&va, ma, nm, why, sizeof why));
+    only8[0] = &s8;
+    memset(r, 0, sizeof r);
+    r[0].key = "cccc3333@h3"; r[0].size = 128;
+    CHECK(sh_vtp_place(only8, 1, r, 1) == 1 && r[0].node.square == 8 && sh_vtp_fits(&s8, r[0].node.x, r[0].node.y, 128));
+    /* Square 16 first: two 256 blocks fill its lower half; square 8 has no 256 block clear of its rows. */
+    both[0] = sq16; both[1] = &s8;
+    memset(r, 0, sizeof r);
+    r[0].key = "a"; r[0].size = 256;
+    r[1].key = "b"; r[1].size = 256;
+    r[2].key = "c"; r[2].size = 256;
+    CHECK(sh_vtp_place(both, 2, r, 3) == 2 && r[0].node.square == 16 && r[1].node.square == 16 && !r[2].placed);
+    memset(&mod, 0, sizeof mod);
+    mod.key = "cccc3333@h3"; mod.m = &va; mod.node.square = 8; mod.node.x = 0; mod.node.y = 128; mod.node.size = 32;
+    CHECK(sh_vtp_compose(&s8, &mod, 1, &m8, &n, why, sizeof why) && sh_vtp_open(&v8, m8, n, why, sizeof why) &&
+          v8.square == 8 && v8.page_count > s8.page_count && sh_vtp_cell(&v8, 0, 0, 128) != SH_VTP_EMPTY);
+    CHECK(sh_vtp_compose(sq16, &mod, 1, &m16, &n, why, sizeof why) && n == sq16->len && !memcmp(m16, sq16->data, n));
+    t = sh_vtp_material_moved(g_mat, sizeof g_mat - 1, mod.node, &tl);
+    CHECK(t && strstr(t, "virtualmapping\t{ 0.0039062500, 0.0039062500, 0.7539062500, 0.3281250000 }"));
+    free(t);
+    free(m8); free(m16); free(ma); free(b8);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
@@ -308,6 +344,7 @@ int main(int argc, char **argv)
     test_place(&stock);
     test_compose(dir, &stock);
     test_materials();
+    test_second_square(&stock);
     free(stock_bytes);
     printf("vtpack_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -234,7 +234,7 @@ int sh_vtp_fits(const sh_vtp_member *stock, int x, int y, int size)
 
 static int vp_overlap(sh_vtp_node a, sh_vtp_node b)
 {
-    return a.x < b.x + b.size && b.x < a.x + a.size && a.y < b.y + b.size && b.y < a.y + a.size;
+    return a.square == b.square && a.x < b.x + b.size && b.x < a.x + a.size && a.y < b.y + b.size && b.y < a.y + a.size;
 }
 
 int sh_vtp_carry(const sh_vtp_member *stock, sh_vtp_node node, const sh_vtp_node *others, int n)
@@ -244,6 +244,7 @@ int sh_vtp_carry(const sh_vtp_member *stock, sh_vtp_node node, const sh_vtp_node
         sh_vtp_node block;
         int clash = 0;
         block.size = 1 << L;
+        block.square = node.square;
         if (node.x % block.size || node.y % block.size) break;
         if (sh_vtp_cell(stock, L, node.x >> L, node.y >> L) != SH_VTP_EMPTY) break;
         block.x = node.x;
@@ -263,7 +264,7 @@ static int vp_req_cmp(const void *a, const void *b)
     return strcmp(x->key, y->key);
 }
 
-int sh_vtp_place(const sh_vtp_member *stock, sh_vtp_req *reqs, int n)
+int sh_vtp_place(const sh_vtp_member *const *stocks, int nstocks, sh_vtp_req *reqs, int n)
 {
     sh_vtp_node *placed = (sh_vtp_node *)malloc(sizeof *placed * (size_t)(n ? n : 1));
     int *order = (int *)malloc(sizeof *order * (size_t)(n ? n : 1));
@@ -278,19 +279,22 @@ int sh_vtp_place(const sh_vtp_member *stock, sh_vtp_req *reqs, int n)
     qsort(order, (size_t)no, sizeof *order, vp_req_cmp);
     for (k = 0; k < no; ++k) {
         sh_vtp_req *r = &reqs[order[k]];
-        int S = r->size, x, y, best = -1, bx = 0, by = 0;
+        int S = r->size, x, y, s, best = -1, bx = 0, by = 0, bs = 0;
         if (S < 1 || S > SH_VTP_NODE_MAX || (S & (S - 1))) continue;
-        for (y = 0; y + S <= SH_VTP_SQ_PAGES; y += S)
-            for (x = 0; x + S <= SH_VTP_SQ_PAGES; x += S) {
-                sh_vtp_node c;
-                int clash = 0, score;
-                c.x = x; c.y = y; c.size = S;
-                for (i = 0; i < np && !clash; ++i) clash = vp_overlap(c, placed[i]);
-                if (clash || !sh_vtp_fits(stock, x, y, S)) continue;
-                score = sh_vtp_carry(stock, c, placed, np);
-                if (score > best) { best = score; bx = x; by = y; }
-            }
+        /* Every square in the given order; the first one wins a tie. */
+        for (s = 0; s < nstocks; ++s)
+            for (y = 0; y + S <= SH_VTP_SQ_PAGES; y += S)
+                for (x = 0; x + S <= SH_VTP_SQ_PAGES; x += S) {
+                    sh_vtp_node c;
+                    int clash = 0, score;
+                    c.square = stocks[s]->square; c.x = x; c.y = y; c.size = S;
+                    for (i = 0; i < np && !clash; ++i) clash = vp_overlap(c, placed[i]);
+                    if (clash || !sh_vtp_fits(stocks[s], x, y, S)) continue;
+                    score = sh_vtp_carry(stocks[s], c, placed, np);
+                    if (score > best) { best = score; bx = x; by = y; bs = stocks[s]->square; }
+                }
         if (best < 0) continue;
+        r->node.square = bs;
         r->node.x = bx;
         r->node.y = by;
         r->node.size = S;
@@ -313,13 +317,13 @@ int sh_vtp_compose(const sh_vtp_member *stock, sh_vtp_mod *mods, int n, uint8_t 
                    size_t cap)
 {
     uint32_t *index = NULL, **maps = NULL, npages, p;
-    int *order = NULL, i, k, L, ok = 0;
+    int *order = NULL, i, k, L, ok = 0, n_here = 0;
     sh_vtp_node *nodes = NULL;
     uint64_t bytes = 0, pos;
     uint8_t *img = NULL;
     *out = NULL;
     *out_len = 0;
-    if (stock->square != SH_VTP_SQUARE) { vp_why(why, cap, "the stock member is square %d's, not %d's", stock->square, SH_VTP_SQUARE); return 0; }
+    if (stock->square < 1 || stock->square > 16) { vp_why(why, cap, "the stock member is not one square's"); return 0; }
     index = (uint32_t *)malloc(sizeof *index * SH_VTP_CELLS);
     order = (int *)malloc(sizeof *order * (size_t)(n ? n : 1));
     maps = (uint32_t **)calloc((size_t)(n ? n : 1), sizeof *maps);
@@ -328,11 +332,16 @@ int sh_vtp_compose(const sh_vtp_member *stock, sh_vtp_mod *mods, int n, uint8_t 
     for (i = 0; i < (int)SH_VTP_CELLS; ++i) index[i] = rd32(stock->data + stock->index_off + 4ull * (uint64_t)i);
     npages = stock->page_count;
     for (p = 0; p < stock->page_count; ++p) bytes += rd64(stock->data + stock->table_off + 16ull * p + 8);
-    for (i = 0; i < n; ++i) order[i] = i;
-    g_sort_mods = mods;
-    qsort(order, (size_t)n, sizeof *order, vp_mod_cmp);
+    /* Only the mods placed in this square. */
+    {
+        int m = 0;
+        for (i = 0; i < n; ++i) if (mods[i].node.square == stock->square) order[m++] = i;
+        g_sort_mods = mods;
+        qsort(order, (size_t)m, sizeof *order, vp_mod_cmp);
+        n_here = m;
+    }
     /* Cells and page ids, mods in key order. */
-    for (k = 0; k < n; ++k) {
+    for (k = 0; k < n_here; ++k) {
         sh_vtp_mod *md = &mods[order[k]];
         int top, j, no = 0;
         if (md->m->square != SH_VTP_LIT_SQUARE) { vp_why(why, cap, "%s: its member is not in the relative form", md->key); goto done; }
@@ -381,7 +390,7 @@ int sh_vtp_compose(const sh_vtp_member *stock, sh_vtp_mod *mods, int n, uint8_t 
         for (L = 0; L < SH_VTP_LEVELS; ++L) {
             uint32_t e[6];
             int q;
-            vp_level(SH_VTP_SQUARE, L, e);
+            vp_level(stock->square, L, e);
             for (q = 0; q < 6; ++q) wr32(img + 0x50 + 0x18 * L + 4 * q, e[q]);
         }
         /* Payloads: stock pages in stock order, then each mod's in its new id order. */
@@ -398,7 +407,7 @@ int sh_vtp_compose(const sh_vtp_member *stock, sh_vtp_mod *mods, int n, uint8_t 
                 wr64(table + 16ull * id + 8, len);
                 pos += len;
             }
-            for (k = 0; k < n; ++k) {
+            for (k = 0; k < n_here; ++k) {
                 const sh_vtp_mod *md = &mods[order[k]];
                 uint32_t base = id, j;
                 /* maps[k] assigns consecutive ids from `base` in first-seen order. */
@@ -583,10 +592,12 @@ char *sh_vtp_material_moved(const char *text, size_t len, sh_vtp_node node, size
     int n = 0, i, close, mapped = 0;
     vp_line *ls = vp_lines(text, len, &n);
     vp_out o = { 0 };
-    double dx = (double)((3 * SH_VTP_SQ_PAGES + node.x) * SH_VTP_PAGE) / SH_VTP_TEXELS;
-    double dy = (double)((3 * SH_VTP_SQ_PAGES + node.y) * SH_VTP_PAGE) / SH_VTP_TEXELS;
+    int col = (node.square - 1) % 4, row = (node.square - 1) / 4;
+    double dx = (double)((col * SH_VTP_SQ_PAGES + node.x) * SH_VTP_PAGE) / SH_VTP_TEXELS;
+    double dy = (double)((row * SH_VTP_SQ_PAGES + node.y) * SH_VTP_PAGE) / SH_VTP_TEXELS;
     if (out_len) *out_len = 0;
     if (!ls) return NULL;
+    if (node.square < 1 || node.square > 16) { free(ls); return NULL; }
     close = vp_close_line(ls, n);
     for (i = 0; i < n && !mapped; ++i) { double v[4]; mapped = vp_mapping_line(ls[i], v); }
     if (close < 0 || !mapped) { free(ls); return NULL; }
