@@ -187,6 +187,11 @@ $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c 
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
 $tests += @{ name = "companion_test"; src = 'companion_test.c ..\src\backend\companion.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Mod scripts' engine side: the queues, the entity handles, the mod table and
+# the tick's guards (pure); with images, the private signatures, the detour
+# windows, the tick's caller and the handle resolver's vtable slots.
+$tests += @{ name = "script_hooks_test"; src = 'script_hooks_test.c ..\src\backend\script\script_hooks.c ..\src\backend\script\script_queue.c ..\src\backend\script\script_handles.c'; defs = '/DSH_SCRIPT_PURE' }
+$tests += @{ name = "script_sigs_test"; src = 'script_sigs_test.c ..\src\backend\script\script_sigs.c ..\src\backend\x64_len.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Mod scenes blocks: the grammar and where a scene plays; with images, the two
 # spawn signatures, the game's vtable slots that hold them and the show-post stub.
 $tests += @{ name = "modscene_decl_test"; src = 'modscene_decl_test.c ..\src\backend\modscene_decl.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }

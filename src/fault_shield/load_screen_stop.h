@@ -32,6 +32,14 @@ static const uint8_t k_cancel_map_change_prologue[LOAD_SCREEN_STOP_STOLEN] = {
 /* Return 1 when armed (or already armed), 0 when not installed. */
 int sh_load_screen_stop_install(const uint8_t *module_base, const sig_result *results, size_t count);
 
+/* The map-end subscriber (mod scripts, script/script_hooks.h): called on the
+ * engine main thread at every CancelMapChange, before the loading screen is
+ * stopped and before the original runs, with during_load 1 when the
+ * loading-screen thread was still drawing (a failed load). Set once at boot;
+ * NULL clears. Called only while the detour is armed. */
+typedef void (*sh_map_end_fn)(int during_load);
+void sh_load_screen_stop_set_map_end(sh_map_end_fn fn);
+
 /* 1 once the detour is committed, else 0. The redirect policy reads it. */
 int sh_load_screen_stop_armed(void);
 

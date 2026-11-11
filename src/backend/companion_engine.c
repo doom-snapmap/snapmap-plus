@@ -84,6 +84,9 @@ static volatile LONG g_off_main_logged;
 static long g_spawned, g_failed, g_owners_seen;
 static int  g_log_lines;
 static __declspec(thread) int g_depth;
+static sh_spawn_subscriber_fn g_spawn_sub;   /* mod scripts (companion_engine.h) */
+static sh_spawn_wanted_fn     g_spawn_wanted;
+static sh_gate_subscriber_fn  g_gate_sub;
 
 static void cl_log(const char *fmt, ...)
 {
@@ -352,6 +355,33 @@ static void after_spawn(void *obj)
     spawn_companions(ent, o, gm, manager);
 }
 
+/* The spawn subscriber's view: the entityDef's name, then each inherit
+ * while it stays in the mods namespace (the walk owner_for makes). */
+static void spawn_fanout(void *obj)
+{
+    const char *names[INHERIT_DEPTH + 1];
+    void *ent, *decl, *manager = NULL;
+    int n = 0;
+    ent = g_is_entity(obj);
+    if (!ent) return;
+    decl = read_ptr(ent, ENT_DECL);
+    if (!decl) return;
+    names[n] = decl_str(decl, DECL_NAME);
+    if (!sh_companion_owner_namespace(names[n]) && !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
+        return;
+    if (names[n]) n++;
+    while (n <= INHERIT_DEPTH) {
+        const char *inherit = decl_str(decl, DECL_INHERIT);
+        if (!inherit || !sh_companion_owner_namespace(inherit)) break;
+        names[n++] = inherit;
+        if (!manager) manager = entitydef_manager();
+        if (!manager || n > INHERIT_DEPTH) break;
+        decl = g_decl(manager, inherit, 0);
+        if (!decl) break;
+    }
+    if (n) g_spawn_sub(ent, names, n);
+}
+
 static void nested_after_spawn(void *obj)
 {
     g_depth++;
@@ -371,6 +401,13 @@ static void callspawn_detour(void *obj)
     } __except (av_only(GetExceptionCode())) {
         g_failed++;
         cl_log("COMPANIONS: a fault while adding companions was contained; that owner may be incomplete");
+    }
+    if (!g_spawn_sub || !g_spawn_wanted || !g_spawn_wanted()) return;
+    __try {
+        spawn_fanout(obj);
+    } __except (av_only(GetExceptionCode())) {
+        cl_log("COMPANIONS: a fault while recording a spawn for mod scripts was contained; that entity is not "
+               "driven by its scripts");
     }
 }
 
@@ -509,9 +546,16 @@ int sh_companions_ensure(const char *phase)
     sh_companion_arm a;
     int d;
     const char *at = phase ? phase : "gate";
+    if (g_gate_sub) g_gate_sub(at);
     memset(&a, 0, sizeof a);
     a.resolved = g_resolved;
     a.installed = g_orig && hook_is_installed((void *)g_orig);
+    /* Mod scripts watch the spawn chain too: armed for them without an owner. */
+    if (a.resolved && !a.installed && g_spawn_wanted && g_spawn_wanted() && on_main_thread() == 1) {
+        if (prologue_ok()) return commit_detour(at);
+        cl_log("COMPANIONS: CallSpawn's prologue is not the expected one (another detour?); not installed at the %s", at);
+        return 0;
+    }
     a.on_main = a.resolved && !a.installed ? on_main_thread() : 0;
     a.index_changed = a.resolved && !a.installed && a.on_main == 1 ? index_changed() : 0;
     a.owners = -1;
@@ -545,4 +589,15 @@ int sh_companions_ensure(const char *phase)
 void sh_companions_refresh(void)
 {
     InterlockedExchange(&g_stale, 1);
+}
+
+void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_wanted_fn wanted)
+{
+    g_spawn_wanted = fn ? wanted : NULL;
+    g_spawn_sub = fn;
+}
+
+void sh_companions_set_gate_subscriber(sh_gate_subscriber_fn fn)
+{
+    g_gate_sub = fn;
 }
