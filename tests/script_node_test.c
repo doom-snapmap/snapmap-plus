@@ -79,6 +79,22 @@ static void test_row(void)
     CHECK(!sh_script_node_is_def("mods/doorlogc/logic/script", NULL, 0));
     CHECK(!sh_script_node_is_def("snapmaps/logic/relay", NULL, 0));
     CHECK(!sh_script_node_is_def("mods//script", NULL, 0));
+    {
+        /* a node placed in a map: the map's own entityDef for it first, the mod's node second */
+        const char *placed[] = { "1_s_ind_player_start/mods/doorlogc/script_404", "mods/doorlogc/script" };
+        const char *direct[] = { "mods/doorlogc/script" };
+        const char *other[]  = { "1_s_ind_player_start/mods/scprobe1/probe/marker_12", "mods/scprobe1/probe/marker" };
+        CHECK(sh_script_node_in_chain(placed, 2));
+        CHECK(sh_script_node_in_chain(direct, 1));
+        CHECK(!sh_script_node_in_chain(other, 2));
+        CHECK(!sh_script_node_in_chain(placed, 1));
+        CHECK(!sh_script_node_in_chain(NULL, 0));
+        CHECK(sh_script_node_in_chain_text("1_s_ind_player_start/mods/doorlogc/script_404\nmods/doorlogc/script"));
+        CHECK(sh_script_node_in_chain_text("mods/doorlogc/script"));
+        CHECK(!sh_script_node_in_chain_text("1_s_ind_player_start/mods/doorlogc/script_404"));
+        CHECK(!sh_script_node_in_chain_text("1_x/mods/scprobe1/probe/marker_12\nmods/scprobe1/probe/marker"));
+        CHECK(!sh_script_node_in_chain_text("") && !sh_script_node_in_chain_text(NULL));
+    }
 
     CHECK(sh_script_node_reserved("doorlogc", "generated/decls/entitydef/mods/doorlogc/script.decl"));
     CHECK(sh_script_node_reserved("doorlogc", "Generated\\Decls\\SnapEditorEntityDef\\mods\\DOORLOGC\\script.decl"));

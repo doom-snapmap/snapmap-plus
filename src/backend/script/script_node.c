@@ -636,16 +636,15 @@ static int entity_uid(void *entity)
     return sh_script_node_uid_from_name(tail);
 }
 
-/* 1 when the recorded entityDef chain's first name is a Script node's. */
+/* 1 when the recorded entityDef chain holds a Script node's name
+ * (sh_script_node_in_chain_text). */
 static int handle_is_node(sh_script_handle h)
 {
-    char *names, *nl;
+    char *names;
     int n = sh_script_handle_names(h, NULL, 0), is;
     if (n <= 0 || !(names = (char *)malloc((size_t)n + 1))) return 0;
     sh_script_handle_names(h, names, (size_t)n + 1);   /* the chain whole */
-    nl = strchr(names, '\n');
-    if (nl) *nl = 0;
-    is = sh_script_node_is_def(names, NULL, 0);
+    is = sh_script_node_in_chain_text(names);
     free(names);
     return is;
 }
@@ -669,7 +668,7 @@ static void relay_detour(void *self, void *activator)
     if (self) {
         const char *names[9];
         int n = sh_companions_def_chain(self, names, 9);
-        if (n > 0 && sh_script_node_is_def(names[0], NULL, 0)) {
+        if (sh_script_node_in_chain(names, n)) {
             /* A Script node whose scripts are not running here (a client, a
              * stopped mod, or scripts unavailable): it does nothing, as its
              * script would not run. */

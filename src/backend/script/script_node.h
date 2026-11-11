@@ -103,6 +103,16 @@ int sh_script_node_registers_input(const char *text, size_t len);
  * salt copied into salt_out. Pure. */
 int sh_script_node_is_def(const char *name, char *salt_out, size_t cap);
 
+/* 1 when an entity's entityDef chain holds a Script node. A node placed in a
+ * map spawns from the map's own entityDef for that entity (named for the
+ * module and the entity), which inherits mods/<salt>/script: the chain is
+ * that name first and the node's second, so every name is asked. Nothing else
+ * inherits a Script node; its path is reserved. `names` is the chain as the
+ * spawn hook reads it; the text form is the chain a script handle records,
+ * one name per line. Pure. */
+int sh_script_node_in_chain(const char *const *names, int count);
+int sh_script_node_in_chain_text(const char *chain);
+
 /* 1 when `request` (a served path, any case, either separator) is one of the
  * two files the row generates for `salt`: an author's own file there would
  * collide with the row, so the builder refuses it. Pure. */

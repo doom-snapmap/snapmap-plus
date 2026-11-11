@@ -128,6 +128,33 @@ int sh_script_node_is_def(const char *name, char *salt_out, size_t cap)
     return 1;
 }
 
+int sh_script_node_in_chain(const char *const *names, int count)
+{
+    int i;
+    for (i = 0; names && i < count; i++)
+        if (names[i] && sh_script_node_is_def(names[i], NULL, 0)) return 1;
+    return 0;
+}
+
+int sh_script_node_in_chain_text(const char *chain)
+{
+    const char *line = chain;
+    while (line && *line) {
+        const char *end = strchr(line, '\n');
+        size_t n = end ? (size_t)(end - line) : strlen(line);
+        char *one = (char *)malloc(n + 1);
+        int is;
+        if (!one) return 0;
+        memcpy(one, line, n);
+        one[n] = 0;
+        is = sh_script_node_is_def(one, NULL, 0);
+        free(one);
+        if (is) return 1;
+        line = end ? end + 1 : NULL;
+    }
+    return 0;
+}
+
 static int path_eq(const char *a, const char *b)
 {
     while (*a && *b) { if (fold(*a) != fold(*b)) return 0; a++; b++; }
