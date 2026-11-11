@@ -1,5 +1,5 @@
 /* Fault-log record and formatter. shield_emit adds a timestamp and writes to
- * OutputDebugStringA and shield_faults.log. JSON crash records are separate. */
+ * shield_faults.log (and the debugger stream). JSON crash records are separate. */
 #ifndef SHIELD_FAULT_RECORD_H
 #define SHIELD_FAULT_RECORD_H
 
@@ -18,11 +18,12 @@ typedef struct shield_fault {
 /* Pure + deterministic: format the record body (no timestamp). Returns chars written (>=0). */
 int  shield_format(char *buf, size_t n, const shield_fault *f);
 
-/* Prepend a local timestamp + "[shield] " and write to OutputDebugStringA (-> in-game console +
- * any attached debugger) and append to shield_faults.log. */
+/* Prepend a local timestamp + "[shield] ", append to shield_faults.log and send to any attached
+ * debugger. */
 void shield_emit(const shield_fault *f);
 
-/* Set the log path to <dir-of-self>\snapmap-plus\logs\shield_faults.log. Call once from DllMain (DLL_PROCESS_ATTACH). */
+/* Set the log path to <dir-of-self>\snapmap-plus\logs\shield_faults.log (a wide path of any
+ * length). Call once from DllMain (DLL_PROCESS_ATTACH). */
 void shield_set_logpath_from_module(HINSTANCE self);
 
 #endif /* SHIELD_FAULT_RECORD_H */

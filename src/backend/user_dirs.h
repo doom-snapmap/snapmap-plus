@@ -3,18 +3,17 @@
 #define SNAPMAP_PLUS_USER_DIRS_H
 
 #include <stddef.h>
+#include <wchar.h>
 
-/* The subfolders of the user-data root (%LOCALAPPDATA%\snapmap-plus) that
- * startup creates, NULL-terminated: the root itself ("") and prefabs (the
- * strings folder of earlier releases is retired: the store tool moves its
- * document into the mod My overrides).
- * Keep the installer's userContentSubdirs aligned with this list. */
-extern const char *const sh_user_dirs_subfolders[];
+/* The folders under the local application data folder that startup creates,
+ * in creation order, NULL-terminated: the user-data root (snapmap-plus) and
+ * its prefabs folder. Keep the installer's userContentSubdirs aligned. */
+extern const wchar_t *const sh_user_dirs_subfolders[];
 
-/* Create `base`\snapmap-plus and its subfolders. Existing folders are fine;
- * other failures are logged. Returns the number of folders that exist
- * afterwards. */
-int sh_user_dirs_ensure_under(const char *base);
+/* Create those folders under base (a wide path of any length). Existing
+ * folders are fine; other failures are logged. Returns the number of folders
+ * that exist afterwards. */
+int sh_user_dirs_ensure_under(const wchar_t *base);
 
 /* The same under %LOCALAPPDATA%. */
 void sh_user_dirs_ensure(void);
