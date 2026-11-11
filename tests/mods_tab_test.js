@@ -1,12 +1,12 @@
 /* The Mods tab (mods_tab.js): the payload model (v4), the two row states, the two kinds of groups
    (Your mods with its organizing folders, one group per downloaded map), the one glyph per row, the
    filter and the attention filter, the details sections (what a mod adds, changes and borrows, its
-   console settings and files, the plain cause, the same-files hint, Copy mod id), the vocabulary rule
+   console settings and files, the plain cause, the same-files hint), the vocabulary rule
    over every text a player reads, the empty state and New mod saying Refresh picks up edits, the map
-   modal and the dry-run-driven confirmations, the Files view, the stand-in host the browser preview
-   uses, and the page and host contract around it. tests/fixtures/mods_tab_payload_v4.json is the
+   modal and the dry-run-driven confirmations, the Files view, and the page and host contract around
+   it. tests/fixtures/mods_tab_payload_v4.json is the
    document the backend writes (its keys are checked by modui_test.c against the backend) and the
-   browser preview's stand-in data. A minimal DOM stands in for the browser. Pure ASCII. */
+   browser preview's sample data. A minimal DOM stands in for the browser. Pure ASCII. */
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -76,13 +76,210 @@ class FakeNode {
   }
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
-             'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsRefreshBtn',
+             'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
-const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
+const GONE = ['modsRebuildBtn', 'modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsMigrateBtn', 'modsVerifyBtn'];
-/* store: a stand-in host (modsTab.standIn) that answers every modsAction synchronously, as the
-   browser preview does; without one the test answers by hand. */
+const str = v => typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v));
+const num = v => { const n = Number(v); return isFinite(n) ? n : 0; };
+const arr = v => Array.isArray(v) ? v : [];
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
+const READS = {modFiles: true, modFileText: true};
+/* ---- a fake host ---------------------------------------------------------------------------- */
+
+/* The tests' backend: it holds a copy of a document, answers each modsAction as the host does
+   (the action's result, then a fresh document) and changes its copy the way the backend would, so
+   the page is exercised by the same render-from-the-document path as in the game. handle(message)
+   returns the messages the host would post. folders (optional): {key: {files: [modFiles entries],
+   texts: {path: text}}}, the files of some mods; any other mod lists mod.json. */
+function standIn(initial, folders) {
+  var docu = JSON.parse(JSON.stringify(initial || {}));
+  var disk = JSON.parse(JSON.stringify(folders || {}));
+  function fileEntry(path, size, cls, extra) {
+    var f = {path: path, size: size, kind: /\.(decl|json|txt|md|cfg|entities)$/i.test(path) ? 'text' : 'binary', 'class': cls,
+             game: false, container: '', inFolder: true, cause: ''};
+    Object.keys(extra || {}).forEach(function (k) { f[k] = extra[k]; });
+    return f;
+  }
+  function folderOf(b) {
+    if (has(disk, b.key)) return disk[b.key];
+    return {files: [fileEntry('mod.json', 400, 'descriptor')], texts: {}};
+  }
+  /* New mod's example, as the backend writes it (modstore.c ms_write_example). */
+  function exampleFolder(key, name) {
+    var def = 'assets/generated/decls/entitydef/mods/' + key + '/example_crate.decl';
+    var row = 'assets/generated/decls/snapeditorentitydef/mods/' + key + '/example_crate.decl';
+    var texts = {};
+    texts['mod.json'] = '{\r\n  "name": ' + JSON.stringify(name) + ',\r\n  "description": "",\r\n  "author": "",\r\n' +
+      '  "strings": {\r\n    "en": {\r\n      "' + key + '_category": ' + JSON.stringify(name) + ',\r\n' +
+      '      "' + key + '_example_crate_name": "Example crate",\r\n' +
+      '      "' + key + '_example_crate_desc": "A crate your new mod adds. Change it in the mod\'s files."\r\n    }\r\n  }\r\n}\r\n';
+    texts[def] = '{\r\n\tclass = "idProp_Coop";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = "models/snapmaps/props/new/crate01.lwo";\r\n' +
+      '\t\t}\r\n\t\tclipModelInfo = {\r\n\t\t\ttype = "CLIPMODEL_AUTO";\r\n\t\t}\r\n\t\tdynamicObstacle = true;\r\n\t}\r\n}\r\n';
+    texts[row] = '{\r\n\tinherit = "prop/prop_base";\r\n\tedit = {\r\n' +
+      '\t\tpreviewImage = "textures/guis/snapmaps/entity_icons/prop/crate01";\r\n' +
+      '\t\tmetaCategoryNameTag = "#str_snapentity_metacategory_toybox";\r\n' +
+      '\t\tcategoryNameTag = "#str_' + key + '_category";\r\n' +
+      '\t\tdisplayNameTag = "#str_' + key + '_example_crate_name";\r\n' +
+      '\t\tdisplayDescriptionTag = "#str_' + key + '_example_crate_desc";\r\n' +
+      '\t\tentityDef = "mods/' + key + '/example_crate";\r\n' +
+      '\t\trenderInfo = {\r\n\t\t\trenderModelName = "models/snapmaps/props/new/crate01.lwo";\r\n\t\t\talwaysDrawBounds = false;\r\n' +
+      '\t\t\tsize = {\r\n\t\t\t\tx = 54;\r\n\t\t\t\ty = 54;\r\n\t\t\t\tz = 54;\r\n\t\t\t}\r\n\t\t}\r\n' +
+      '\t\tflags = {\r\n\t\t\tplaceable = true;\r\n\t\t}\r\n\t}\r\n}\r\n';
+    return {row: row, folder: {files: [fileEntry('mod.json', texts['mod.json'].length, 'descriptor'),
+                                        fileEntry(def, texts[def].length, 'add'), fileEntry(row, texts[row].length, 'add')], texts: texts}};
+  }
+  function clone() { return JSON.parse(JSON.stringify(docu)); }
+  function mods() { return Array.isArray(docu.mods) ? docu.mods : (docu.mods = []); }
+  function modOf(key) { return mods().filter(function (b) { return b.key === key; })[0] || null; }
+  function mapMods() { return docu.map && Array.isArray(docu.map.mods) ? docu.map.mods : []; }
+  function mapModOf(key) { return mapMods().filter(function (r) { return (r.key || r.salt) === key; })[0] || null; }
+  function nameOf(key, name) { var b = modOf(key); return b ? (b.name || b.folder || b.key) : (name || key); }
+  function recount() {
+    mods().forEach(function (b) { b.state = b.cause ? 'attention' : 'ready'; });
+    if (docu.map && Array.isArray(docu.map.mods)) {
+      docu.map.vanilla = docu.map.mods.length === 0;
+    }
+  }
+  function mapPart(r) {
+    var left = mapMods().length - 1;
+    return {name: str(docu.map && docu.map.name), entities: arr(r.placedEntities).slice(), entityCount: num(r.placedCount),
+            references: arr(r.references).slice(), manifestRow: true, attached: !!r.attached,
+            tagRemoved: left === 0,
+            vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
+  }
+  /* Uninstall moves the folder to the Recycle Bin; the saved maps are not the preview's to count. */
+  function installPart(b, open) {
+    return {folder: b.key, disposition: 'recycle', savedMaps: num(b.savedMaps), undoCleared: !!open};
+  }
+  function removeFromMap(r) {
+    docu.map.mods = mapMods().filter(function (x) { return x !== r; });
+    docu.map.entities = Math.max(0, num(docu.map.entities) - num(r.placedCount));
+  }
+  return function handle(o) {
+    var a = str(o && o.action), key = str(o && o.arg), ok = true, msg = '', data = {action: a};
+    if (a === 'openFolder') return [];
+    if (has(READS, a)) {
+      /* The Files view's reads: the result alone, as the host answers them. */
+      var tab = key.indexOf('\t'), mk = tab < 0 ? key : key.slice(0, tab), fp = tab < 0 ? '' : key.slice(tab + 1);
+      var mb = modOf(mk), fo = mb ? folderOf(mb) : null;
+      data.key = mk;
+      if (!mb) { ok = false; msg = 'That mod is no longer installed.'; }
+      else if (a === 'modFiles') {
+        data.name = str(mb.name);
+        data.cause = str(mb.cause);
+        data.files = JSON.parse(JSON.stringify(fo.files));
+        data.truncated = false;
+      } else {
+        var ent = fo.files.filter(function (f) { return f.path === fp; })[0];
+        if (!ent) { ok = false; msg = "The mod's folder does not hold this file; it is read from your install."; }
+        else if (ent.kind !== 'text') { ok = false; msg = 'This file is binary; it has no text to show.'; }
+        else if (!ent.inFolder) { ok = false; msg = "The mod's folder does not hold this file; it is read from your install."; }
+        else {
+          data.path = fp;
+          data.text = has(fo.texts, fp) ? fo.texts[fp] : '// Browser preview: in the game this is the file\'s text from the mods folder.\r\n';
+          data.size = data.text.length;
+          data.productBlock = fp === 'mod.json';
+          data.cause = str(ent.cause);
+        }
+      }
+      data.ok = ok;
+      data.message = msg;
+      return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}];
+    }
+    if (a === 'newMod') {
+      var nmName = key.trim();
+      if (!nmName) { ok = false; msg = 'No mod was created: a new mod needs a name.'; }
+      else {
+        var nk = nmName.replace(/[\\\/:*?"<>|]/g, '').trim() || 'mod', base = nk, ex, salt = 'k3x9', n = 2;
+        for (; modOf(nk); n++) nk = base + ' (' + n + ')';
+        salt = ('newmod' + (mods().length % 100)).slice(0, 8);
+        ex = exampleFolder(salt, nmName);
+        disk[nk] = ex.folder;
+        mods().push({key: nk, salt: salt, name: nmName, author: '', size: 1530, files: 3,
+                     state: 'ready', cause: '', editorRows: 1, folder: nk, group: '', place: '', placeTitle: '',
+                     description: '', requirements: {cvars: {}}, editorRowNames: ['Example crate'], publishedMaps: 0,
+                     facts: {adds: 2, borrows: 0, surfaces: 0, editor: 0, replaces: 0, editorOnly: false, editorTweaks: [],
+                             replacements: [], edits: [], registries: {}},
+                     borrows: {paths: [], count: 0}, warnings: []});
+        data.key = nk;
+        data.file = ex.row;
+        msg = 'Created ' + nmName + ' in mods\\' + nk + '. Its Example crate is in the Toybox. After you change its files, press Refresh to see the change.';
+      }
+      recount();
+      data.ok = ok;
+      data.message = msg;
+      return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}, {kind: 'mods', data: clone()}];
+    }
+    var r = mapModOf(key), b = modOf(key);
+    if (a === 'rescan') msg = '';
+    else if (a === 'addToMine') {
+      if (!b) { ok = false; msg = 'That mod is no longer installed.'; }
+      else if (!b.place) msg = nameOf(key) + ' is already one of your mods.';
+      else {
+        var mine = JSON.parse(JSON.stringify(b));
+        mine.key = mine.folder = b.folder;
+        mine.place = mine.placeTitle = '';
+        mods().push(mine);
+        data.key = mine.key;
+        msg = 'Added ' + nameOf(key) + ' to your mods, in mods\\' + mine.key + '; your own maps can use it now.';
+      }
+    } else if (a === 'mapAddMod') {
+      if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
+      else if (!b) { ok = false; msg = key + ' is not installed.'; }
+      else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + '. Add it to your mods first (Add to my mods); then your own maps can use it.'; }
+      else if (r && r.attached) msg = nameOf(key) + ' is already used by the whole of ' + docu.map.name + '.';
+      else {
+        if (r) r.attached = true;
+        else docu.map.mods.push({key: key, salt: str(b.salt), name: str(b.name), state: 'installed',
+                                 placedEntities: [], placedCount: 0, placedModules: 0, references: [], size: num(b.size),
+                                 inManifest: true, viaNeeds: false, attached: true, nothingPlaced: true, build: ''});
+        msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '; save the map to keep it.';
+      }
+    } else if (a === 'chooseRegistry') {
+      var tab = key.indexOf('\t'), slot = tab < 0 ? key : key.slice(0, tab), pick = tab < 0 ? '' : key.slice(tab + 1);
+      var cl = docu.map && Array.isArray(docu.map.registryClashes) ? docu.map.registryClashes.filter(function (c) { return c.slot === slot; })[0] : null;
+      if (!cl) { ok = false; msg = 'The open map has no choice for ' + slot + '.'; }
+      else {
+        var chosenName = (cl.providers.filter(function (p) { return p.id === pick; })[0] || {}).name || 'the chosen mod';
+        cl.chosen = pick;
+        cl.serving = pick || (cl.providers[0] && cl.providers[0].id) || '';
+        msg = pick ? 'This map now uses ' + chosenName + '\'s version of ' + slot + '; it applies now and is saved with the map\'s next save.'
+                   : slot + ": the map's choice is cleared; the first mod in the map's list serves it.";
+      }
+    } else if (a === 'mapRemoveModPreview') {
+      if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
+      else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.name), map: mapPart(r), install: null};
+    } else if (a === 'uninstallPreview') {
+      if (!b) { ok = false; msg = key + ' is not installed.'; }
+      else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null,
+                           install: installPart(b, !!(docu.map && docu.map.entities !== -1)),
+                           editorRows: arr(b.editorRowNames).slice()};
+    } else if (a === 'mapRemoveMod') {
+      if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
+      else { msg = 'Removed ' + nameOf(r.key, r.name) + ' from ' + docu.map.name + ': ' + plural(num(r.placedCount), 'object') + ' deleted.'; removeFromMap(r); }
+    } else if (a === 'uninstall') {
+      if (!b) { ok = false; msg = key + ' is not installed.'; }
+      else {
+        var open = !!(docu.map && docu.map.entities !== -1);
+        msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was moved to the Recycle Bin' +
+              (open ? ' and the undo history was cleared.' : '.');
+        if (r) removeFromMap(r);
+        docu.mods = mods().filter(function (x) { return x !== b; });
+      }
+    } else { ok = false; msg = 'Browser preview: the mods store is not available here.'; }
+    recount();
+    data.ok = ok;
+    data.message = msg;
+    return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}, {kind: 'mods', data: clone()}];
+  };
+}
+
+
+/* store: the fake host above, answering every modsAction synchronously; without one the test
+   answers by hand. */
 function harness(opts) {
   opts = opts || {};
   const nodes = {};
@@ -130,11 +327,11 @@ function modalText(h) { return h.nodes.modsMapHost.textContent; }
 function modalButtons(h) { return h.nodes.modsMapHost.tags('button').filter(b => !/mods-map-close/.test(b.className)); }
 /* As the host answers a rescan: its result, then the document. */
 function answer(h, data) {
-  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: 'Mods folder read again.'}});
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: ''}});
   h.ui.onMessage({kind: 'mods', data: data});
 }
 function shown(h, data) { h.ui.show(); if (!h.ui.state().loaded) answer(h, data || v4); }
-function live(data) { const h = harness({store: modsTab.standIn(data || v4)}); h.ui.show(); return h; }
+function live(data) { const h = harness({store: standIn(data || v4)}); h.ui.show(); return h; }
 
 /* ---- the model -------------------------------------------------------------------------------- */
 test('normalize: the v4 fixture', () => {
@@ -192,8 +389,8 @@ test('formatting: sizes, the row line', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
-  assert.deepEqual(modsTab.actionMessage('rebuild', 'alex.r2-imp'), {cmd: 'modsAction', action: 'rebuild', arg: 'alex.r2-imp'});
-  for (const gone of ['migrate', 'verify', 'remove', 'pruneList', 'pruneApply', 'palette'])
+  assert.deepEqual(modsTab.actionMessage('mapAddMod', 'alex.r2-imp'), {cmd: 'modsAction', action: 'mapAddMod', arg: 'alex.r2-imp'});
+  for (const gone of ['migrate', 'verify', 'remove', 'pruneList', 'pruneApply', 'palette', 'rebuild'])
     assert.equal(modsTab.actionMessage(gone), null, gone + ' is not a page action');
 });
 
@@ -223,12 +420,11 @@ test('the vocabulary: no salt, hash, bundle, key, pointer, surface, legacy, migr
   h.nodes.modsMapHost.all('mods-map-row')[0].tags('button').find(x => x.textContent === 'Remove from map').click();
   check('the confirmation');
   h.ui.closeMap();
-  h.ui.select('alex.r2-imp');
-  h.nodes.modsRebuildBtn.click();
-  check('after Rebuild');
+  h.nodes.modsRefreshBtn.click();
+  check('after Refresh');
   /* the page's own texts */
   const own = [modsTab.READY_TEXT, modsTab.REFRESH_TEXT, modsTab.EMPTY_TEXT, modsTab.BORROWS_NOTE, modsTab.NEEDS_NOTE,
-               modsTab.EDITOR_ONLY_NOTE, modsTab.NEW_MOD_HINT, modsTab.COPY_ID_TITLE, modsTab.NOTHING_CHANGED_TEXT,
+               modsTab.EDITOR_ONLY_NOTE, modsTab.NEW_MOD_HINT, modsTab.folderRuleText('Crate Pack'), modsTab.NOTHING_CHANGED_TEXT,
                modsTab.EDITOR_TWEAKS_TEXT, modsTab.MAP_LEVEL_TEXT, modsTab.NOTHING_PLACED_TEXT]
     .concat(Object.values(modsTab.FILE_CLASSES), Object.values(modsTab.FILE_SOURCES), Object.values(modsTab.SCOPE),
             Object.values(modsTab.UNINSTALL_HEAD));
@@ -325,7 +521,7 @@ test('keyboard selection walks the shown rows', () => {
   assert.equal(h.ui.state().selectedKey, 'maps\\Hell Guard Arena\\Hell Guards');
 });
 test('empty: say how to start and that Refresh picks up edits; New mod in the card', () => {
-  const h = harness({store: modsTab.standIn(Object.assign(clone(v4), {mods: []}))});
+  const h = harness({store: standIn(Object.assign(clone(v4), {mods: []}))});
   h.ui.show();
   const card = h.nodes.modsList.all('mods-empty')[0];
   assert.ok(card.textContent.indexOf(modsTab.EMPTY_TEXT) >= 0);
@@ -350,7 +546,7 @@ test('details: description, what it adds, what it changes, what it borrows, cons
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')),
                    ['about', 'adds', 'changes', 'borrows', 'requirements', 'files', 'sharing']);
   assert.match(section(h, 'about').textContent, /^About Description A copy of the Imp/);
-  assert.match(section(h, 'about').textContent, /Folder alex\.r2-imp Copy mod id$/);
+  assert.match(section(h, 'about').textContent, /Folder alex\.r2-imp$/);
   assert.equal(section(h, 'adds').textContent, 'What it adds 2 Toybox rows Imp (R2) Imp (R2, caged)');
   const ch = section(h, 'changes');
   assert.match(ch.textContent, /^What it changes in the game Edits 2 game files; a map that uses this mod gets the game's text with these edits\./);
@@ -395,29 +591,44 @@ test('details: a mod that cannot be used says what is wrong and what to do, plai
                    ['about', 'adds', 'requirements', 'files', 'sharing'], 'no derived facts for a mod that is not built');
   assert.equal(h.nodes.modsUseBtn.disabled, true, 'a mod that cannot be used is not added to a map');
 });
-test('details: a downloaded map\'s mod: where it came from, not rebuilt, not used in your maps', () => {
+test('details: a downloaded map\'s mod has the short view: its name, its map, Add to my mods and Remove', () => {
   const h = live();
   h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
-  assert.match(section(h, 'about').textContent, /Came with Hell Guard Arena/);
-  assert.match(section(h, 'changes').textContent, /Replaces 1 game file for the maps that use it\./);
-  assert.equal(h.nodes.modsRebuildBtn.disabled, true);
-  assert.match(h.nodes.modsRebuildBtn.title, /came with a downloaded map/);
-  assert.equal(h.nodes.modsUseBtn.disabled, true);
-  assert.match(h.nodes.modsUseBtn.title, /only that map uses it/);
-  assert.equal(section(h, 'sharing'), undefined, 'your published maps do not use a downloaded copy');
-  assert.equal(h.nodes.modsUninstallBtn.disabled, false, 'a downloaded copy can be uninstalled');
+  const d = h.nodes.modsDetail;
+  assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
+  assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Came with the map Hell Guard Arena; only that map uses it.');
+  assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about'], 'nothing written for authors');
+  assert.equal(section(h, 'about').textContent, 'About Came with Hell Guard Arena ' + modsTab.PLACE_CLEANUP_TEXT);
+  assert.equal(h.nodes.modsFilesBtn.style.display, 'none');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, false);
+  const add = h.nodes.modsUseBtn;
+  assert.equal(add.textContent, 'Add to my mods');
+  assert.equal(add.style.display, '');
+  assert.equal(add.disabled, false);
+  assert.equal(add.title, modsTab.ADD_MINE_TITLE);
+  add.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'addToMine', arg: 'maps\\Hell Guard Arena\\Hell Guards'});
+  assert.match(h.toasts.pop().text, /^Added Hell Guards to your mods, in mods\\Hell Guards; your own maps can use it now\.$/);
+  assert.equal(h.ui.state().selectedKey, 'Hell Guards', 'your new copy is selected');
+  assert.equal(h.nodes.modsUseBtn.textContent, 'Use in this map');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Uninstall');
+  /* Remove: the uninstall confirmation, named Remove */
+  h.ui.select('maps\\Hell Guard Arena\\Lava Floor');
+  h.nodes.modsUninstallBtn.click();
+  assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
+  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
-test('details: Copy mod id hands the id to the page, for authors', () => {
-  const copied = [];
-  const h = harness({copy: t => copied.push(t)});
+test('an author never needs the salt: no Copy mod id, and the folder rule said where they look', () => {
+  const h = harness();
   shown(h);
   h.ui.select('alex.r2-imp');
-  const b = h.nodes.modsDetail.all('mods-copy-id')[0];
-  assert.equal(b.textContent, 'Copy mod id');
-  assert.equal(b.title, modsTab.COPY_ID_TITLE);
-  b.click();
-  assert.deepEqual(copied, ['alexrimp']);
-  assert.deepEqual(h.toasts.pop(), {text: 'Copied the mod id of R2 Imp copy.', kind: 'ok'});
+  assert.equal(h.nodes.modsDetail.all('mods-copy-id').length, 0);
+  assert.ok(!/Copy mod id|mod id/i.test(source), 'no Copy mod id and no "mod id" anywhere in the page code');
+  assert.equal(modsTab.folderRuleText('Crate Pack'),
+               'Put new files under assets\\mods\\Crate Pack\\, and in your files write mods/Crate Pack/ and plain string names.');
+  h.ui.select('');
+  assert.ok(h.nodes.modsDetail.textContent.indexOf(modsTab.folderRuleText('')) >= 0, 'How mods work says it too');
 });
 test('details: a folder of editor tweaks only has no map action', () => {
   const h = live();
@@ -447,23 +658,52 @@ test('the header and the details head: the buttons the tab has, and no others', 
   const h = harness();
   shown(h);
   assert.equal(h.nodes.modsNewBtn.style.display || '', '', 'New mod always shows');
-  assert.equal(h.nodes.modsRebuildBtn.disabled, true, 'nothing selected');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, true, 'nothing selected');
   h.ui.select('alex.r2-imp');
-  assert.equal(h.nodes.modsRebuildBtn.disabled, false);
-  h.nodes.modsRebuildBtn.click();
-  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'rebuild', arg: 'alex.r2-imp'});
-  assert.equal(h.ui.state().busy, 'rebuild');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, false);
+  h.nodes.modsRefreshBtn.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'rescan'});
+  assert.equal(h.ui.state().busy, 'rescan');
   assert.ok(h.nodes.modsInstallBtn.disabled && h.nodes.modsRefreshBtn.disabled, 'held while busy');
-  h.ui.onMessage({kind: 'modsActionResult', action: 'rebuild', ok: true, message: 'Rebuilt R2 Imp copy: nothing changed.', data: {}});
+  assert.equal(h.nodes.modsStatus.textContent, 'Reading your mods and building what changed...', 'a build shows its progress');
+  h.ui.onMessage({kind: 'modsProgress', action: 'rescan', phase: 'game'});
+  assert.equal(h.nodes.modsStatus.textContent, 'Bringing the change into the game...');
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', ok: true, message: '', data: {}});
   assert.equal(h.ui.state().busy, '');
+  assert.equal(h.nodes.modsStatus.textContent, '', 'a Refresh with nothing left to do says nothing');
+  /* Install asks folders or ZIPs, then the host's picker opens */
   h.nodes.modsInstallBtn.click();
+  const menu = h.menus.pop();
+  assert.deepEqual(menu.items.map(i => i.label), ['Install mod folders...', 'Install mod ZIPs...']);
+  menu.items[0].run();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'install'});
+  h.ui.onMessage({kind: 'modsActionResult', action: 'install', ok: false, data: {cancelled: true}});
+  menu.items[1].run();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'install', arg: 'zip'});
   h.ui.onMessage({kind: 'modsActionResult', action: 'install', ok: false, data: {cancelled: true}});
   h.nodes.modsFolderBtn.click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFolder'});
   h.ui.select('campaign-interactables\\doors');
   h.nodes.modsDetail.all('mods-link')[0].click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFolder', arg: 'campaign-interactables\\doors'});
+});
+test('Refresh shows what a change still needs, even when quiet; a game part that did not run says so', () => {
+  const h = harness();
+  shown(h);
+  h.nodes.modsRefreshBtn.click();
+  const sentence = 'Some of the changes take effect only after you restart DOOM.';
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', ok: true, message: sentence,
+                  data: {refresh: {needsRestart: 1, needsMapReload: 0}}});
+  assert.equal(h.nodes.modsStatus.textContent, sentence);
+  assert.deepEqual(h.toasts.pop(), {text: sentence, kind: 'ok'});
+  h.ui.onMessage({kind: 'mods', data: v4});
+  assert.equal(h.nodes.modsStatus.textContent, sentence, 'the document that follows keeps the sentence');
+  h.nodes.modsNewBtn.click();
+  h.nodes.modsNewName.value = 'Late';
+  h.nodes.modsNewCreate.click();
+  h.ui.onMessage({kind: 'modsActionResult', action: 'newMod', applyPending: true, ok: true, message: 'Created Late in mods\\Late.',
+                  data: {key: 'Late'}});
+  assert.equal(h.toasts.pop().text, 'Created Late in mods\\Late. ' + modsTab.APPLY_PENDING_TEXT);
 });
 test('the map modal: the open map\'s details and mods, in plain words', () => {
   const h = live();
@@ -472,7 +712,7 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.equal(ov.style.display, 'flex');
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Hell Guard Arena');
   const t = modalText(h);
-  for (const s of ['Name Hell Guard Arena', 'Published Yes, 2026-', 'Its mods Uploaded with the published map', 'Search tag mods (present)',
+  for (const s of ['Name Hell Guard Arena', 'Published Yes, 2026-', 'Its mods Uploaded with the published map',
                    'Mods 3 mods, 5.4 MB for a player to download'])
     assert.ok(t.indexOf(s) >= 0, s);
   assert.ok(t.indexOf('Saved map') < 0, 'no saved-map id');
@@ -481,10 +721,11 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.match(mr[0].textContent, /^R2 Imp copy 1\.8 MB 3 placed entities use it Also used by timeline: Wave 2: spawn the imps, wire: Relay: all imps dead Remove from map$/);
   assert.match(mr[1].textContent, /^Doors 3\.6 MB Used by the whole map, nothing placed/);
   assert.equal(iconOf(mr[2]), 'warn');
-  assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer; playing the map downloads it/);
+  assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer Remove from map$/);
   /* a choice between mods names the mods, never their ids */
   const opts = h.nodes.modsMapHost.tags('option').map(o => o.textContent);
-  assert.deepEqual(opts, ['R2 Imp copy', 'Doors']);
+  assert.deepEqual(opts, ['The first mod the map lists (R2 Imp copy)', 'R2 Imp copy', 'Doors']);
+  assert.ok(modalText(h).indexOf('Search tag') < 0, 'no search tag row: the product keeps it in step');
   h.nodes.modsMapHost.tags('select')[0].value = 'doorsx8q';
   h.nodes.modsMapHost.tags('select')[0].dispatch('change');
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\tdoorsx8q'});
@@ -512,12 +753,26 @@ test('Remove from map: the dry run drives the confirmation; the document drives 
   const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.match(items[0], /^Deletes 3 placed entities from Hell Guard Arena\. Imp \(R2\) 1/);
   assert.match(items[1], /^Severs 2 wire or timeline references to those entities\./);
-  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Delete from map']);
+  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove from map']);
   modalButtons(h)[1].click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveMod', arg: 'alex.r2-imp'});
   assert.equal(h.nodes.modsMapHost.all('mods-map-row').length, 2);
-  assert.match(h.toasts.pop().text, /^Removed R2 Imp copy from Hell Guard Arena: 3 entities deleted\./);
+  assert.match(h.toasts.pop().text, /^Removed R2 Imp copy from Hell Guard Arena: 3 objects deleted\./);
   assert.equal(iconOf(rowOf(h, 'alex.r2-imp')), 'ok', 'the row loses the in-this-map glyph');
+});
+test('a choice between mods can be cleared; Remove from map is the one wording', () => {
+  const h = live();
+  h.nodes.modsMapBtn.click();
+  const sel = () => h.nodes.modsMapHost.tags('select')[0];
+  assert.equal(sel().value, '', 'no choice yet: the first mod the map lists decides');
+  sel().value = 'doorsx8q';
+  sel().dispatch('change');
+  assert.equal(sel().value, 'doorsx8q');
+  sel().value = '';
+  sel().dispatch('change');
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'chooseRegistry', arg: 'entitydef/player/coop/edit/handsModelMPUseDoomHands\t'});
+  assert.equal(sel().value, '', 'cleared');
+  assert.ok(!/Delete from map/.test(source), 'every control says Remove from map');
 });
 test('Use in this map from the details pane, and back', () => {
   const h = live();
@@ -526,16 +781,16 @@ test('Use in this map from the details pane, and back', () => {
   assert.equal(use.textContent, 'Use in this map');
   use.click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapAddMod', arg: 'Arena Gates'});
-  assert.match(h.toasts.pop().text, /^Arena Gates is now used by the whole of Hell Guard Arena\./);
+  assert.match(h.toasts.pop().text, /^Arena Gates is now used by the whole of Hell Guard Arena; save the map to keep it\.$/);
   assert.equal(use.textContent, 'Remove from map');
   use.click();
   assert.equal(h.ui.state().modal.page, 'confirm');
   modalButtons(h)[1].click();
   assert.equal(h.ui.state().modal.open, false, 'started from the details pane: the dialog closes');
   assert.equal(use.textContent, 'Use in this map');
-  /* a downloaded map's mod: refused by the stand-in as by the backend */
+  /* a downloaded map's mod: refused by the fake host as by the backend */
   h.ui.act('mapAddMod', 'maps\\Hell Guard Arena\\Lava Floor');
-  assert.match(h.toasts.pop().text, /came with the map Hell Guard Arena, so only that map uses it/);
+  assert.match(h.toasts.pop().text, /came with the map Hell Guard Arena\. Add it to your mods first \(Add to my mods\)/);
 });
 test('Uninstall: the confirmation lists what it does; the folder goes to the Recycle Bin', () => {
   const h = live();
@@ -558,12 +813,12 @@ test('Uninstall: the confirmation lists what it does; the folder goes to the Rec
      'Another folder of this mod stays installed (mods\\Hell Guards); maps that use the mod open with it.']);
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 3}})).map(c => c.text),
     ['Moves the folder mods\\a to the Windows Recycle Bin.',
-     '3 of your saved maps use it; they will not open until a mod folder provides its files again.']);
+     '3 of your saved maps use it; they will not open until you restore it from the Recycle Bin.']);
 });
 
 /* ---- New mod and the Files view --------------------------------------------------------------- */
 test('New mod: a name, the folder made with its example, Refresh named as the way to pick up edits', () => {
-  const h = harness({store: modsTab.standIn(v4)});
+  const h = harness({store: standIn(v4)});
   h.ui.show();
   h.nodes.modsNewBtn.click();
   assert.equal(h.nodes.modsNewModal.style.display, 'flex');
@@ -582,7 +837,7 @@ test('New mod: a name, the folder made with its example, Refresh named as the wa
   assert.equal(st.files.open, true);
   assert.match(st.files.selected, /^assets\/generated\/decls\/snapeditorentitydef\/mods\/[a-z0-9]+\/example_crate\.decl$/);
   const pane = h.nodes.modsFilesHost.all('mf-file')[0];
-  assert.equal(pane.all('mf-hint')[0].textContent, modsTab.NEW_MOD_HINT);
+  assert.equal(pane.all('mf-hint')[0].textContent, modsTab.NEW_MOD_HINT + ' ' + modsTab.folderRuleText('Crate Pack'));
   assert.match(modsTab.NEW_MOD_HINT, /press Refresh in the Mods tab/);
   /* the list's right-click entry */
   const e = h.nodes.modsList.dispatch('contextmenu', {pageX: 40, pageY: 90});
@@ -601,7 +856,7 @@ const FOLDERS = {'alex.r2-imp': {files: [
    container: '', inFolder: true, cause: ''}],
   texts: {'mod.json': '{\r\n  "name": "R2 Imp copy"\r\n}\r\n', [IMP]: '{\r\n\tinherit = "ai/demon/imp";\r\n}\r\n'}}};
 test('the Files modal: the folder tree with the salt in its paths, one glyph per file, the text read-only', () => {
-  const h = harness({store: modsTab.standIn(v4, FOLDERS)});
+  const h = harness({store: standIn(v4, FOLDERS)});
   h.ui.show();
   h.ui.select('alex.r2-imp');
   h.nodes.modsFilesBtn.click();
@@ -617,7 +872,7 @@ test('the Files modal: the folder tree with the salt in its paths, one glyph per
   assert.ok(names.indexOf('mods/alexrimp') >= 0, 'the Files view shows the salt in its paths');
   const pane = host.all('mf-file')[0];
   assert.equal(pane.all('prob')[0].textContent, 'This mod could not be built: the file is empty; fix that in its folder and press Refresh.');
-  assert.equal(pane.all('mf-meta')[0].children[0].textContent, 'Not read yet');
+  assert.equal(pane.all('mf-meta')[0].children[0].textContent, 'Not part of the mod; Snapmap+ ignores it');
   h.ui.selectFile(IMP);
   const ta = host.all('mf-file')[0].all('code-editor')[0].tags('textarea')[0];
   assert.equal(ta.readOnly, true);
@@ -629,6 +884,20 @@ test('the Files modal: the folder tree with the salt in its paths, one glyph per
   assert.equal(h.nodes.modsFilesModal.style.display, 'none');
   assert.equal(activeElement, h.nodes.modsFilesBtn);
 });
+test('the Files view: Open in editor hands a file of the folder to the system', () => {
+  const h = harness({store: standIn(v4, FOLDERS)});
+  h.ui.show();
+  h.ui.select('alex.r2-imp');
+  h.nodes.modsFilesBtn.click();
+  h.ui.selectFile(IMP);
+  const open = h.nodes.modsFilesHost.all('mf-open')[0];
+  assert.equal(open.textContent, 'Open in editor');
+  open.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFile', arg: 'alex.r2-imp\t' + IMP});
+  assert.equal(h.ui.state().busy, '', 'opening a file never holds the page');
+  h.ui.selectFile('assets/models/monsters/imp/imp.lwo');
+  assert.equal(h.nodes.modsFilesHost.all('mf-open').length, 0, 'a game file the folder does not hold has nothing to open');
+});
 test('the Files view model: classes, sources and the tree', () => {
   const d = modsTab.normFiles({key: 'k', files: [{path: 'b\\x.decl', kind: 'text', class: 'mystery', container: 'mars', game: 'yes'},
                                                   {path: ''}, {path: 'a.json', kind: 'text', class: 'descriptor'}]});
@@ -638,14 +907,13 @@ test('the Files view model: classes, sources and the tree', () => {
   assert.equal(t.dirs[0].name, 'assets/generated/decls');
   assert.deepEqual(t.dirs[0].dirs.map(x => [x.name, x.count, x.attn]), [['entitydef', 1, 1], ['material', 1, 0]]);
 });
-test('the stand-in host answers as the host does', () => {
-  const store = modsTab.standIn(v4);
+test('the fake host answers as the host does', () => {
+  const store = standIn(v4);
   const r = store({cmd: 'modsAction', action: 'rescan'});
   assert.deepEqual(r.map(m => m.kind), ['modsActionResult', 'mods']);
   assert.notEqual(r[1].data, v4, 'a copy, never the original');
   assert.deepEqual(store({cmd: 'modsAction', action: 'openFolder'}), []);
   assert.equal(store({cmd: 'modsAction', action: 'install'})[0].ok, false);
-  assert.equal(store({cmd: 'modsAction', action: 'rebuild', arg: 'maps\\Hell Guard Arena\\Hell Guards'})[0].ok, false);
   assert.deepEqual(store({cmd: 'modsAction', action: 'uninstallPreview', arg: 'maps\\Hell Guard Arena\\Hell Guards'})[0].data.preview.editorRows,
     ['Hell Guard (hammer)', 'Hell Guard (shield)', 'Hell Guard (fist)']);
   assert.equal(v4.mods.length, 8, 'the fixture is untouched');
@@ -677,20 +945,19 @@ test('page contract', () => {
     assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
   for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsNewBtn', 'folder-plus'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map'], ['modsRefreshBtn', 'refresh-cw']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
-  assert.match(panel, /id="modsRefreshBtn" title="Refresh: read the mods folder again, after you change a mod's files"/);
+  assert.match(panel, /id="modsRefreshBtn" title="Refresh: after you change a mod's files, build them again and bring the change into the game"/);
   const detailHead = panel.slice(panel.indexOf('<span class="panel-title">Mod Details</span>'), panel.indexOf('id="modsDetail"'));
   assert.deepEqual((detailHead.match(/<button [^>]*id="(\w+)"/g) || []).map(t => t.match(/id="(\w+)"/)[1]),
-                   ['modsFilesBtn', 'modsUseBtn', 'modsRebuildBtn', 'modsUninstallBtn']);
+                   ['modsFilesBtn', 'modsUseBtn', 'modsUninstallBtn']);
   assert.ok(!/migrat|verify/i.test(panel), 'no Migrate and no Verify in the tab');
   assert.match(html, /id="modsList" role="listbox" tabindex="0"/);
   assert.equal(html.split('<script src="mods_tab.js"></script>').length, 2, 'one module tag');
   assert.match(html, /if \(which === 'mods'\) modsUi\.show\(\);/);
-  assert.match(html, /copy: copyText,/, 'the page hands Copy mod id its clipboard helper');
-  /* the browser preview's data is the v4 fixture, answered by the stand-in host */
+  /* the browser preview's data is the v4 fixture; the release page carries no stand-in */
   const m = standin.match(/\nvar PREVIEW_MODS = (\{.*\});\r?\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
   assert.deepEqual(JSON.parse(m[1]), v4, 'PREVIEW_MODS is the v4 fixture');
-  assert.match(standin, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
+  assert.ok(!/standIn|stand-in/.test(source), 'mods_tab.js, which the release page carries, holds no stand-in host');
   const pf = standin.match(/\nvar PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
   assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
   assert.ok(JSON.parse(pf[1])['alex.r2-imp'].files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
@@ -701,15 +968,17 @@ test('page contract', () => {
   /* the payload spec */
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
-                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'Copy mod id'])
+                   '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
-  for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
+  for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder' && x !== 'openFile'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
   assert.ok(host.includes('if (act == L"openFolder") ui_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('else if (act == L"openFile") ui_mods_open_file(arg);'), 'openFile opens one file of a mod folder');
+  assert.ok(host.includes('ui_mods_relative_file(rel)'), 'openFile takes a path below the mod folder');
   assert.ok(host.includes('ui_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.ok(host.includes('ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });

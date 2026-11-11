@@ -36,6 +36,9 @@ check(api.parse('').count === 0 && api.parse('{not json').count === 0 && api.par
 check(api.parse({mods: [{id: ''}, null, {salt: 'x'}]}).count === 0, 'rows without an id are dropped');
 check(api.parse({mods: [{id: 'x'}]}).missing === 1, 'a row without installed:true counts as missing');
 check(api.label(door) === 'test.door' && api.label({id: 'x'}) === 'x', 'a label is the mod\'s name (a mod has no version)');
+check(api.label({id: 'abcd1234', salt: 'abcd1234'}) === 'an unnamed mod', 'a mod recorded without a name is never named by its salt');
+check(api.badge({count: 1, missing: 1, mods: [{id: 'abcd1234', salt: 'abcd1234', installed: false}]}).text === 'Needs mods: an unnamed mod',
+      'nor in its pill');
 
 /* The list pill. */
 check(api.badge(api.parse('')) === null, 'no mods, no pill');
@@ -53,8 +56,8 @@ check(b && b.text === 'Needs mods: ghost.mod +1', 'only the missing ones are nam
 let d = api.detail(st);
 check(d.rows.length === 2 && d.rows[0].label === 'test.door' && d.rows[0].state === 'Installed' && !d.rows[0].missing &&
       d.rows[1].state === 'Not installed' && d.rows[1].missing, 'one row per mod with its state');
-check(d.note === 'Needs mods: 1 is not installed. Load / Place offers to download them when the mod store has them; ' +
-      'otherwise ask the prefab\'s author for its ZIP export.', 'the note says what Load / Place does: ' + d.note);
+check(d.note === 'Needs mods: 1 is not installed. Load / Place offers to download them when they are available online; ' +
+      'otherwise ask the prefab\'s author for its export.', 'the note says what Load / Place does: ' + d.note);
 check(api.detail(api.parse({mods: [ghost, ghost]})).note.indexOf('Needs mods: 2 are not installed.') === 0, 'plural note');
 check(api.detail(api.parse({mods: [door]})).note === 'Every mod this prefab needs is installed.', 'all installed');
 check(api.detail(api.parse('')).rows.length === 0 && api.detail(api.parse('')).note === '', 'no mods, no section');

@@ -24,6 +24,7 @@
 #include <time.h>
 #include "raw_deflate.h"
 #include "modbankinfo.h"
+#include "modzip.h"
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
 #include "modstock.h"
@@ -69,11 +70,16 @@ static void mu_log(const char *fmt, ...)
 /* ------------------------------------------------------------------ product defaults */
 
 #ifndef SH_MODUI_PURE
+static int mu_on_main(void);
+
 static int mu_default_stock(const char *request)
 {
     static int probed;   /* 0 unprobed, 1 ok, -1 unavailable */
     unsigned char *body = NULL;
     size_t len = 0;
+    /* Off the main thread (a build the window runs on its worker) only the
+     * installed archives answer: the engine's provider is the main thread's. */
+    if (!mu_on_main()) return sh_modstock_exists(request);
     if (probed == 0) {
         __try { body = sh_overrides_read_engine_resource(MU_STOCK_PROBE, &len); }
         __except (EXCEPTION_EXECUTE_HANDLER) { body = NULL; }
@@ -150,7 +156,6 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->delete_entities) g_engine.delete_entities = engine->delete_entities;
         if (engine->remove_tag) g_engine.remove_tag = engine->remove_tag;
         if (engine->busy) g_engine.busy = engine->busy;
-        if (engine->entity_valid) g_engine.entity_valid = engine->entity_valid;
         if (engine->toast) g_engine.toast = engine->toast;
         if (engine->print) g_engine.print = engine->print;
         if (engine->scope_apply) g_engine.scope_apply = engine->scope_apply;
@@ -367,87 +372,7 @@ static void mu_model_free(mu_model *m)
     memset(m, 0, sizeof *m);
 }
 
-/* ------------------------------------------------------------------ plain words */
-
-/* What a player reads never names a salt, a hash, a build number, a bundle,
- * a key, a pointer, a surface, a legacy or a migration (the owner's
- * vocabulary rule). The builder's and the store's causes are written for the
- * log; mu_plain rewrites one for the page: the entry's own salt becomes
- * "<mod id>" (the Copy mod id action gives it), any other salt of the store
- * "<another mod's id>", a hex run of 16 characters or more goes, and the
- * internal words become the plain ones. */
-typedef struct mu_word { const char *from, *to; } mu_word;
-static const mu_word MU_WORDS[] = {
-    { "bundle.json", "mod.json" }, { "the bundle manifest", "the list of the mod's files" },
-    { "bundles", "mods" }, { "bundle", "mod" },
-    { "stock pointers", "game files" }, { "stock pointer", "game file" },
-    { "pointers", "game files" }, { "pointer", "game file" },
-    { "surfaces", "game files" }, { "surface", "game file" },
-    { "the product block", "the part Snapmap+ writes" }, { "the builder block", "the part Snapmap+ writes" },
-    { "product block", "part Snapmap+ writes" }, { "builder block", "part Snapmap+ writes" },
-    { "salts", "mod ids" }, { "salt", "mod id" },
-    { "keys", "names" }, { "key", "name" },
-    { "legacy", "older" }, { "migrated", "moved" }, { "migration", "move" }, { "migrate", "move" },
-    { "the mod store", "Snapmap+" }, { "the product", "Snapmap+" },
-    { NULL, NULL }
-};
-
-static int mu_word_char(char c) { return isalnum((unsigned char)c) || c == '_'; }
-
-static void mu_plain(const mu_model *m, const char *own, const char *in, char *out, size_t cap)
-{
-    size_t at = 0;
-    const char *p = in ? in : "";
-    if (!cap) return;
-    while (*p && at + 1 < cap) {
-        const mu_word *w;
-        size_t i, n = 0;
-        int done = 0;
-        int start = p == in || !mu_word_char(p[-1]);
-        /* a hex run of 16 or more */
-        while (isxdigit((unsigned char)p[n])) n++;
-        if (start && n >= 16 && !mu_word_char(p[n])) { p += n; continue; }
-        /* a salt of the store */
-        if (start && !mu_word_char(p[SH_SALT_LEN]) && sh_salt_valid(p, SH_SALT_LEN)) {
-            const char *to = NULL;
-            if (own && own[0] && !_strnicmp(p, own, SH_SALT_LEN)) to = "<mod id>";
-            for (i = 0; !to && m && i < m->list.count; i++)
-                if (m->list.items[i].salt[0] && !_strnicmp(p, m->list.items[i].salt, SH_SALT_LEN)) to = "<another mod's id>";
-            if (to) {
-                size_t tl = strlen(to);
-                if (at + tl >= cap) break;
-                memcpy(out + at, to, tl);
-                at += tl;
-                p += SH_SALT_LEN;
-                continue;
-            }
-        }
-        for (w = MU_WORDS; start && w->from && !done; w++) {
-            size_t fl = strlen(w->from), tl = strlen(w->to);
-            if (_strnicmp(p, w->from, fl) || mu_word_char(p[fl])) continue;
-            if (at + tl >= cap) { done = -1; break; }
-            memcpy(out + at, w->to, tl);
-            if (isupper((unsigned char)p[0]) && islower((unsigned char)out[at])) out[at] = (char)toupper((unsigned char)out[at]);
-            at += tl;
-            p += fl;
-            done = 1;
-        }
-        if (done < 0) break;
-        if (done) continue;
-        out[at++] = *p++;
-    }
-    out[at] = 0;
-    /* runs of spaces a removed hash left, and a space before punctuation */
-    {
-        char *r = out, *w2 = out;
-        for (; *r; r++) {
-            if (*r == ' ' && (w2 == out || w2[-1] == ' ' || w2[-1] == '(')) continue;
-            if ((*r == ')' || *r == ',' || *r == ';' || *r == '.') && w2 > out && w2[-1] == ' ') w2--;
-            *w2++ = *r;
-        }
-        *w2 = 0;
-    }
-}
+/* ------------------------------------------------------------------ sentences */
 
 /* Append `s`, then end the sentence with a full stop when it has none. */
 static void mu_sentence_end(char *out, size_t cap)
@@ -464,17 +389,18 @@ static int mu_ends(const char *s, const char *suffix)
     return n >= k && !_stricmp(s + n - k, suffix);
 }
 
-/* One plain sentence for an entry's cause (the store's, the builder's or the
- * serving index's): what is wrong and what to do. The builder's shape and
- * build causes (modbundle.c) and the store's (modstore.c) that read as
- * internals are rewritten here; any other cause is passed through mu_plain
- * inside "This mod could not be built: ...". */
-static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *cause, char *out, size_t cap)
+/* A mod folder in an earlier shape that appears after the update (copied in by hand). */
+#define MU_EARLIER_SHAPE "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+
+/* One sentence for an entry's cause (the store's, the builder's or the
+ * serving index's): what is wrong and what to do. The causes the window
+ * itself knows the next step for are said here; every other cause is the
+ * raiser's own sentence, shown inside "This mod could not be built: ..."
+ * (each is written plainly where it is raised). */
+static void mu_plain_cause(const sh_ms_entry *e, const char *cause, char *out, size_t cap)
 {
-    char plain[SH_MB_CAUSE_MAX + 200];
     const char *c = cause ? cause : "";
     const size_t shape = sizeof SH_MB_SHAPE - 1;
-    const char *own = e ? e->salt : NULL;
     out[0] = 0;
     if (!c[0]) return;
     if (mu_starts(c, "not built: ")) c += 11;
@@ -484,24 +410,17 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
     }
     if (!_strnicmp(c, SH_MB_SHAPE, shape)) {
         const char *t = c + shape;
-
-        if (strstr(t, "package.json"))
-            strncpy_s(out, cap, "This mod folder uses package.json, which this version of Snapmap+ does not read; make a new "
-                      "mod with New mod and move this folder's assets folder into it.", _TRUNCATE);
-        else if (strstr(t, "earlier version of Snapmap+"))
-            strncpy_s(out, cap, "This mod folder was made by an earlier version of Snapmap+; delete the \"snapmap-plus\" part "
-                      "at the end of its mod.json and press Refresh to build it again.", _TRUNCATE);
-        else if (mu_starts(t, "mod.json uses \"")) {
-            const char *q = t + 15, *end = strchr(q, '"');
-            _snprintf_s(out, cap, _TRUNCATE, "Its mod.json uses \"%.*s\", which this version of Snapmap+ does not read; "
-                        "remove it from mod.json and press Refresh.", end ? (int)(end - q) : 0, q);
-        } else if (strstr(t, "no valid salt") || strstr(t, "has no salt") || strstr(t, "no salt yet"))
+        /* Every earlier shape gets the one sentence: the installer converts it, and nothing tells an
+         * author to edit mod.json by hand for it. */
+        if (strstr(t, "package.json") || strstr(t, "earlier version of Snapmap+") || mu_starts(t, "mod.json uses \""))
+            strncpy_s(out, cap, MU_EARLIER_SHAPE, _TRUNCATE);
+        else if (strstr(t, "no valid salt") || strstr(t, "has no salt") || strstr(t, "no salt yet"))
             strncpy_s(out, cap, strstr(t, "no salt yet") ? "This mod has not been built yet; press Refresh to build it."
                                                        : "The part of its mod.json that Snapmap+ writes is damaged; delete the "
                                                          "\"snapmap-plus\" part at the end of mod.json and press Refresh.", _TRUNCATE);
         else if (mu_starts(t, "its files are under mods/"))
-            strncpy_s(out, cap, "Some of its files are under another mod's name in their path; move them under this mod's own "
-                      "name (the Files view shows it) and press Refresh.", _TRUNCATE);
+            _snprintf_s(out, cap, _TRUNCATE, "Some of its files are in another mod's folder name (mods/<other>/); move them "
+                        "under mods/%s/ and press Refresh.", e ? mu_leaf(e->name) : "<this mod's folder name>");
         else if (strstr(t, "not built by the mod store"))
             strncpy_s(out, cap, "This folder sits among a downloaded map's mods but did not come with the map; move it out of "
                       "the maps folder into your own mods and press Refresh.", _TRUNCATE);
@@ -513,19 +432,13 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
         else if (strstr(t, "no folder"))
             strncpy_s(out, cap, "The mod's folder is gone; press Refresh.", _TRUNCATE);
         else {
-            mu_plain(m, own, t, plain, sizeof plain);
-            _snprintf_s(out, cap, _TRUNCATE, "Snapmap+ cannot build this mod folder: %s; fix it and press Refresh.", plain);
+            _snprintf_s(out, cap, _TRUNCATE, "Snapmap+ cannot build this mod folder: %s", t);
+            mu_sentence_end(out, cap);
         }
         return;
     }
     if (mu_starts(c, "a new mod, not built yet") || mu_starts(c, "not built yet")) {
         strncpy_s(out, cap, "This mod has not been built yet; press Refresh to build it.", _TRUNCATE);
-        return;
-    }
-    if (mu_starts(c, "mods\\") && strstr(c, " is a copy of mods\\")) {
-        const char *of = strstr(c, " is a copy of mods\\") + 19, *end = strchr(of, ';');
-        _snprintf_s(out, cap, _TRUNCATE, "This folder is a copy of the mod in %.*s; press Refresh to make it a mod of its own.",
-                    end ? (int)(end - of) : (int)strlen(of), of);
         return;
     }
     if (mu_starts(c, "mod.json is not a valid JSON object")) {
@@ -545,12 +458,11 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
                     cut ? (int)(cut - c) : 0, c);
         return;
     }
-    mu_plain(m, own, c, plain, sizeof plain);
-    if (strstr(plain, "Refresh") || strstr(plain, "builds again") || strstr(plain, "builds it again")) {
-        _snprintf_s(out, cap, _TRUNCATE, "This mod could not be built: %s", plain);
+    if (strstr(c, "Refresh") || strstr(c, "builds again") || strstr(c, "builds it again")) {
+        _snprintf_s(out, cap, _TRUNCATE, "This mod could not be built: %s", c);
         mu_sentence_end(out, cap);
     } else
-        _snprintf_s(out, cap, _TRUNCATE, "This mod could not be built: %s; fix that in its folder and press Refresh.", plain);
+        _snprintf_s(out, cap, _TRUNCATE, "This mod could not be built: %s; fix that in its folder and press Refresh.", c);
 }
 
 /* ------------------------------------------------------------------ what a mod carries */
@@ -721,7 +633,7 @@ static const char **mu_blobs(const sh_ms_entry *e, size_t *n)
     return v;
 }
 
-/* Two mods with near-identical content are two mods (ONE-SHAPE rule 1): the
+/* Two mods with near-identical content are two mods (identity is the salt): the
  * tab only says so. For each root mod, the other root mod whose files include
  * the most of its carried files at equal bytes, when that is at least half of
  * them (the blocks the scan read; nothing is hashed here). */
@@ -772,12 +684,12 @@ static int mu_model_build(mu_model *m)
                 /* A Toybox row the mod adds; an editor tweak of a stock row is not one. */
                 if (f->ptype && !_stricmp(f->ptype, "snapEditorEntityDef") && f->cls != SH_MB_CLASS_EDITOR) u->editor_rows++;
                 /* An edited copy is counted under edits and an editor tweak under
-                 * editor (DESIGN-additive 2.6), never as a replaced game file. */
+                 * editor, never as a replaced game file. */
                 if (f->shadowed && !f->edited && f->cls != SH_MB_CLASS_EDITOR) u->shadows++;
             }
         if (!e->loaded || e->refused) {
             u->state = "skipped";
-            mu_plain_cause(m, e, e->cause[0] ? e->cause : SH_MB_SHAPE "its mod.json cannot be read", u->cause, sizeof u->cause);
+            mu_plain_cause(e, e->cause[0] ? e->cause : SH_MB_SHAPE "its mod.json cannot be read", u->cause, sizeof u->cause);
             continue;
         }
         /* The serving index decides what is served; the store's own check
@@ -786,19 +698,19 @@ static int mu_model_build(mu_model *m)
         st = sh_modserve_bundle_state(e->bundle.hash, why, sizeof why);
         if (st < 0) {
             u->state = "skipped";
-            mu_plain_cause(m, e, why[0] ? why : e->cause, u->cause, sizeof u->cause);
-            if (!u->cause[0]) strncpy_s(u->cause, sizeof u->cause, "Snapmap+ could not use this mod; press Refresh, and "
-                                        "Rebuild it if it stays.", _TRUNCATE);
+            mu_plain_cause(e, why[0] ? why : e->cause, u->cause, sizeof u->cause);
+            if (!u->cause[0]) strncpy_s(u->cause, sizeof u->cause, "Snapmap+ could not use this mod. Press Refresh; if it "
+                                        "stays, use Send feedback.", _TRUNCATE);
             continue;
         }
         if (st == 0) {
             u->state = sh_ms_entry_usable(e) ? "unindexed" : "skipped";
             if (sh_ms_entry_usable(e))
                 strncpy_s(u->cause, sizeof u->cause, "Snapmap+ has not read this mod yet; press Refresh.", _TRUNCATE);
-            else mu_plain_cause(m, e, e->cause[0] ? e->cause : "not built yet", u->cause, sizeof u->cause);
+            else mu_plain_cause(e, e->cause[0] ? e->cause : "not built yet", u->cause, sizeof u->cause);
             continue;
         }
-        if (!sh_ms_entry_usable(e) && e->cause[0]) mu_plain_cause(m, e, e->cause, u->cause, sizeof u->cause);
+        if (!sh_ms_entry_usable(e) && e->cause[0]) mu_plain_cause(e, e->cause, u->cause, sizeof u->cause);
         u->admitted = 1;
         u->state = "active";
     }
@@ -931,10 +843,10 @@ static int mu_suffix(const char *s, const char *suffix)
 
 static const char *mu_entry_title(const sh_ms_entry *s);
 
-/* ---- additive facts (DESIGN-additive 2.1, 2.4, 2.6, 2.9) */
+/* ---- what the builder derived */
 
-/* The stock banks the product block's registries "banks" names (DESIGN-
- * additive 2.4, "Sound events"), each with this process's state: up to 8. */
+/* The stock banks the product block's registries "banks" names, each with
+ * this process's state: up to 8. */
 static int mu_stock_banks(const sh_mb_bundle *bd, char banks[8][SH_MBI_LEAF_MAX])
 {
     mpj *x;
@@ -980,7 +892,7 @@ static void mu_put_stock_banks(mu_buf *b, const sh_mb_bundle *bd)
 /* What the builder derived from the files (payload "facts"): the classes,
  * the editor tweaks, every replacement with whether it is an edited copy,
  * the game files the mod edits with their operation counts (the product
- * block's "edits", DESIGN-additive 2.4), and the product block's
+ * block's "edits"), and the product block's
  * "registries" (conductor encounters, string keys, stock banks). */
 typedef struct mu_edits_ctx { mu_buf *b; int first; unsigned files; } mu_edits_ctx;
 
@@ -1145,7 +1057,7 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     mu_putn(b, "[", 1);
     for (k = 0; e->loaded && k < bd->warning_list_count; k++) {
         char plain[SH_MB_CAUSE_MAX + 200];
-        mu_plain(m, e->salt, bd->warning_list[k], plain, sizeof plain);
+        strncpy_s(plain, sizeof plain, bd->warning_list[k], _TRUNCATE);
         mu_sentence_end(plain, sizeof plain);
         if (plain[0] && islower((unsigned char)plain[0])) plain[0] = (char)toupper((unsigned char)plain[0]);
         if (k) mu_putn(b, ",", 1);
@@ -1453,7 +1365,7 @@ typedef struct mu_mapmod {
     size_t uid_count, uid_cap;
     int modules;              /* placed modules (Blueprint instances) that use it */
     /* Its row's declared build when the editor serves the row through this
-     * (installed) build of its key (a SUBSTITUTE load, DESIGN-additive 2.5). */
+     * (installed) build of its salt (an editor load that substituted it). */
     char declared[SH_MODMANIFEST_HASH_CAP];
 } mu_mapmod;
 
@@ -1889,10 +1801,15 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_puts(b, ",\"providers\":[");
         for (k = 0; k < s->n; k++) {
             int at = mu_find_salt(m, s->keys[k], -1);
+            const char *name = at >= 0 ? mu_entry_title(&m->list.items[at]) : "";
+            size_t q;
+            /* Not installed: the name the map saved for it. */
+            for (q = 0; !name[0] && q < mp->rows.count; q++)
+                if (!_stricmp(mp->rows.rows[q].salt, s->keys[k])) name = mp->rows.rows[q].name;
             if (k) mu_putn(b, ",", 1);
             mu_putn(b, "{", 1);
             mu_kstr(b, "id", s->keys[k], 1);
-            mu_kstr(b, "name", at >= 0 ? mu_entry_title(&m->list.items[at]) : s->keys[k], 0);
+            mu_kstr(b, "name", name[0] ? name : "a mod that is not installed", 0);
             mu_putn(b, "}", 1);
         }
         mu_putn(b, "]", 1);
@@ -1905,8 +1822,7 @@ static void mu_put_clashes(mu_buf *b, const mu_model *m, const mu_map *mp)
     free(c.slots);
 }
 
-/* The state a map entry shows: installed, superseded, incomplete, skipped,
- * missing. A mod the placed names reach is installed; one only a row names
+/* The state a map entry shows: installed, incomplete, skipped, missing. A mod the placed names reach is installed; one only a row names
  * is judged by that row. */
 static const char *mu_mapmod_state(const mu_model *m, const mu_map *mp, const mu_mapmod *x)
 {
@@ -1994,7 +1910,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         const char *state = mu_row_state(m, r, cause, sizeof cause, &at);
         /* key: the folder that serves the row (its own build, or the one the
          * asset rule plays). */
-        mu_plain(m, NULL, cause, plain, sizeof plain);
+        strncpy_s(plain, sizeof plain, cause, _TRUNCATE);
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "salt", r->salt, 1);
@@ -2054,7 +1970,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_knum(b, "at", mp->claim && mp->claim->updated > 0 ? (unsigned long long)mp->claim->updated : 0, 0);
             mu_putn(b, "}", 1);
         }
-        if (mp->have_info && mp->info.tagged >= 0) mu_kbool(b, "tagged", mp->info.tagged, 0);
         mu_puts(b, ",\"mods\":[");
         for (i = 0; i < mu_map_mod_count(mp); i++) {
             const mu_mapmod *x = &mp->mods[i];
@@ -2136,10 +2051,9 @@ static const char *mu_action_name(int action)
 {
     switch (action) {
     case SH_MODS_ACT_INSTALL: return "install";
-    case SH_MODS_ACT_VERIFY: return "verify";
     case SH_MODS_ACT_RESCAN: return "rescan";
     case SH_MODS_ACT_PALETTE: return "palette";
-    case SH_MODS_ACT_REBUILD: return "rebuild";
+    case SH_MODS_ACT_APPLY: return "apply";
     case SH_MODS_ACT_UNINSTALL: return "uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW: return "uninstallPreview";
     case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
@@ -2149,6 +2063,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_FILES: return "modFiles";
     case SH_MODS_ACT_FILE_TEXT: return "modFileText";
     case SH_MODS_ACT_NEW_MOD: return "newMod";
+    case SH_MODS_ACT_ADD_MINE: return "addToMine";
     default: return "unknown";
     }
 }
@@ -2191,18 +2106,16 @@ static int mu_stock_exists(void *context, const char *request)
     return r;
 }
 
-/* The rebuild rule, the serving index, then the refresh of what changed
- * under the running game (*rf filled when non-NULL; state -1: not run). */
-static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
+/* The file part of a rescan, on any thread: the rebuild rule (sh_ms_sync: a
+ * new folder gets its salt, a folder whose tree changed is built again), then
+ * each mod's builder warnings in the log. */
+static void mu_sync(void)
 {
-    const sh_modui_engine *e = mu_engine();
     sh_ms_sync_stats sync;
     sh_mb_resolver r;
     mu_stock stock = { 0 };
-    int n;
-    if (rf) { memset(rf, 0, sizeof *rf); rf->state = -1; }
-    if (!e->rescan) { strncpy_s(note, cap, "the mods folder cannot be read again from here", _TRUNCATE); return -1; }
-    /* The rebuild rule first: a folder whose tree changed is built again. */
+    sh_ms_list l;
+    size_t i;
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
@@ -2210,33 +2123,61 @@ static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
     if (sh_ms_sync(&r, &sync) && (sync.rebuilt || sync.failed || sync.salted || sync.resalted))
         mu_log("rescan: %u new mod(s), %u copy(ies) made mods of their own, %u folder(s) built, %u refused (%llu ms)",
                sync.salted, sync.resalted, sync.rebuilt, sync.failed, sync.ms);
+    InterlockedIncrement(&g_gen);
+    if (!sh_ms_enumerate(&l)) return;
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *x = &l.items[i];
+        if (x->loaded && x->bundle.warnings)
+            mu_log("rescan: mods\\%s: %u warning(s), first: %s", x->name, x->bundle.warnings, x->bundle.first_warning);
+    }
+    sh_ms_list_free(&l);
+}
+
+/* The game's part, on the main thread: the serving index read again, then
+ * what changed brought into the running game (*rf; state -1 when that did not
+ * run). Returns the mods in use, or -1 with the plain reason in `why`. */
+static int mu_apply(sh_modserve_refresh *rf, char *why, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    int n;
+    memset(rf, 0, sizeof *rf);
+    rf->state = -1;
+    why[0] = 0;
+    if (!e->rescan) {
+        strncpy_s(why, cap, "The game cannot read the mods folder again from here.", _TRUNCATE);
+        return -1;
+    }
     n = e->rescan();
     InterlockedIncrement(&g_gen);
-    {
-        /* Each mod's builder warnings, one line per mod, as the build says them. */
-        sh_ms_list l;
-        size_t i;
-        if (sh_ms_enumerate(&l)) {
-            for (i = 0; i < l.count; i++) {
-                const sh_ms_entry *x = &l.items[i];
-                if (x->loaded && x->bundle.warnings)
-                    mu_log("rescan: mods\\%s: %u warning(s), first: %s", x->name, x->bundle.warnings, x->bundle.first_warning);
-            }
-            sh_ms_list_free(&l);
-        }
+    if (n < 0) {
+        strncpy_s(why, cap, "Snapmap+ could not read the mods folder; press Refresh to try again.", _TRUNCATE);
+        return -1;
     }
-    if (n < 0) strncpy_s(note, cap, "Snapmap+ could not read the mods folder; press Refresh to try again", _TRUNCATE);
-    else _snprintf_s(note, cap, _TRUNCATE, "%d mod%s in use", n, n == 1 ? "" : "s");
-    if (n >= 0 && e->refresh) {
-        sh_modserve_refresh local;
-        sh_modserve_refresh *out = rf ? rf : &local;
-        memset(out, 0, sizeof *out);
-        out->state = e->refresh(out);
-    }
+    if (e->refresh) rf->state = e->refresh(rf);
+    mu_log("rescan: %d mod(s) in use; in the game: %s", n, rf->state < 0 ? "no refresh bound" : rf->note);
     return n;
 }
 
-static int mu_rescan(char *note, size_t cap) { return mu_rescan_refresh(note, cap, NULL); }
+/* Both, on the main thread (an uninstall). */
+static int mu_rescan(sh_modserve_refresh *rf, char *why, size_t cap)
+{
+    mu_sync();
+    return mu_apply(rf, why, cap);
+}
+
+/* What the player must still do for a change to show, as one sentence, or
+ * "" when it shows now. */
+static void mu_refresh_sentence(const sh_modserve_refresh *rf, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!rf || rf->state < 0) return;
+    if (rf->needs_restart > 0)
+        strncpy_s(out, cap, "Some of the changes take effect only after you restart DOOM.", _TRUNCATE);
+    else if (rf->needs_map_reload > 0)
+        strncpy_s(out, cap, "Some of the changes take effect when you next open the map.", _TRUNCATE);
+    else if (rf->state == 2 || rf->pending > 0)
+        strncpy_s(out, cap, "Some of the changes take effect when you are back in the editor.", _TRUNCATE);
+}
 
 /* "refresh":{reparsed, reloaded, needsMapReload, needsRestart, note} plus
  * what is still pending and whether it was deferred. */
@@ -2250,8 +2191,90 @@ static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
     mu_knum(b, "needsRestart", (unsigned)(rf->needs_restart < 0 ? 0 : rf->needs_restart), 0);
     mu_knum(b, "pending", (unsigned)(rf->pending < 0 ? 0 : rf->pending), 0);
     mu_kbool(b, "deferred", rf->state == 2, 0);
-    mu_kstr(b, "note", rf->note, 0);
     mu_putn(b, "}", 1);
+}
+
+/* ---- the file actions: Install, New mod, Refresh and Add to my mods */
+
+/* Their file work (copies, salts, builds) runs on the calling thread, which
+ * may be the window's worker rather than the game's main thread, and nothing
+ * calls it failed for taking long. The game's part (mu_apply) is the main
+ * thread's: off it, the result is kept here and "apply": true asks for
+ * SH_MODS_ACT_APPLY, which finishes it with what the game did. On the main
+ * thread both run in one call. */
+static int  g_owed_action;
+static int  g_owed_ok;
+static char g_owed_msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900];
+static char *g_owed_extra;
+
+static int mu_file_action(int action)
+{
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
+           action == SH_MODS_ACT_ADD_MINE;
+}
+
+/* The finished result: the action's message, then the sentence a change
+ * still needs (or why the game could not take it), its own members and what
+ * the game did. */
+static int mu_finish(int action, int ok, const char *msg, const char *extra, const sh_modserve_refresh *rf, const char *why)
+{
+    char sentence[300], full[sizeof g_owed_msg + 320];
+    mu_buf b;
+    memset(&b, 0, sizeof b);
+    mu_refresh_sentence(rf, sentence, sizeof sentence);
+    _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s%s", msg ? msg : "", msg && msg[0] && (why[0] || sentence[0]) ? " " : "",
+                why[0] ? why : sentence);
+    mu_result_head(&b, action, ok, full);
+    if (extra) mu_puts(&b, extra);
+    if (rf->state >= 0) mu_put_refresh(&b, rf);
+    return mu_result_tail(&b);
+}
+
+/* A file action's result: with `changed` the game's part follows, at once on
+ * the main thread, else owed ("apply": true). A failed game part fails a
+ * Refresh, whose whole point it is; an install that landed stays installed. */
+static int mu_file_result(int action, int ok, const char *msg, mu_buf *extra, int changed)
+{
+    sh_modserve_refresh rf;
+    char why[200] = "";
+    const char *members = extra->p && !extra->oom ? extra->p : NULL;
+    int r;
+    memset(&rf, 0, sizeof rf);
+    rf.state = -1;
+    if (changed && !mu_on_main()) {
+        mu_buf b;
+        memset(&b, 0, sizeof b);
+        free(g_owed_extra);
+        g_owed_extra = members ? _strdup(members) : NULL;
+        g_owed_action = action;
+        g_owed_ok = ok;
+        strncpy_s(g_owed_msg, sizeof g_owed_msg, msg ? msg : "", _TRUNCATE);
+        mu_result_head(&b, action, ok, msg ? msg : "");
+        if (members) mu_puts(&b, members);
+        mu_kbool(&b, "apply", 1, 0);
+        free(extra->p);
+        return mu_result_tail(&b);
+    }
+    if (changed && mu_apply(&rf, why, sizeof why) < 0 && action == SH_MODS_ACT_RESCAN) ok = 0;
+    r = mu_finish(action, ok, msg, members, &rf, why);
+    free(extra->p);
+    return r;
+}
+
+/* SH_MODS_ACT_APPLY, on the main thread: the game's part of the file action
+ * that ran on the worker. */
+static int mu_apply_owed(void)
+{
+    sh_modserve_refresh rf;
+    char why[200] = "";
+    int r, ok = g_owed_ok;
+    if (!g_owed_action) return mu_simple_result(SH_MODS_ACT_APPLY, 1, "");
+    if (mu_apply(&rf, why, sizeof why) < 0 && g_owed_action == SH_MODS_ACT_RESCAN) ok = 0;
+    r = mu_finish(g_owed_action, ok, g_owed_msg, g_owed_extra, &rf, why);
+    g_owed_action = 0;
+    free(g_owed_extra);
+    g_owed_extra = NULL;
+    return r;
 }
 
 static int mu_absolute(const char *folder)
@@ -2263,6 +2286,25 @@ static int mu_absolute(const char *folder)
 /* The record (mods\snapmap-plus.json) could not be read or written during the
  * action: the player reads which file and what to do (modbundle.h
  * sh_mb_record_why), not only the backend log. */
+static void mu_record_note(char *msg, size_t cap);
+
+/* An install refusal: the store's own (where it cannot copy or write) as it
+ * says it, a build's or a shape's as the folder's cause. */
+static void mu_install_cause(const char *cause, char *out, size_t cap)
+{
+    static const char *const store[] = { "that folder", "the store folder", "cannot create", "no free folder", "cannot copy",
+                                         "the copy did not verify", "cannot write", "no mod folder given", "out of memory", NULL };
+    int i;
+    for (i = 0; store[i]; i++)
+        if (mu_starts(cause, store[i])) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s", cause);
+            if (out[0] && islower((unsigned char)out[0])) out[0] = (char)toupper((unsigned char)out[0]);
+            mu_sentence_end(out, cap);
+            return;
+        }
+    mu_plain_cause(NULL, cause, out, cap);
+}
+
 static void mu_record_note(char *msg, size_t cap)
 {
     char why[MAX_PATH * 4 + 240];
@@ -2270,9 +2312,9 @@ static void mu_record_note(char *msg, size_t cap)
     if (!sh_mb_record_why(why, sizeof why)) return;
     n = strlen(msg);
     if (n && msg[n - 1] != '.') strncat_s(msg, cap, ".", _TRUNCATE);
-    strncat_s(msg, cap, " Some of its bookkeeping was not saved: ", _TRUNCATE);
+    strncat_s(msg, cap, " Snapmap+ could not update its records: ", _TRUNCATE);
     strncat_s(msg, cap, why, _TRUNCATE);
-    strncat_s(msg, cap, ".", _TRUNCATE);
+    strncat_s(msg, cap, "; close any program using that file and try again.", _TRUNCATE);
 }
 
 /* The display name of an installed folder (its build's, else its folder's). */
@@ -2289,14 +2331,14 @@ static int mu_install_one(const char *folder)
     sh_mb_bundle bd;
     mu_stock stock = { 0 };
     char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200], name[300],
-         msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160];
+         msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900];
     int ok, rows = 0;
     size_t k;
-    mu_buf b;
-    memset(&b, 0, sizeof b);
+    mu_buf x;
+    memset(&x, 0, sizeof x);
     mu_log("install %s: building", folder);
     memset(&st, 0, sizeof st);
-    key[0] = cause[0] = note[0] = plain[0] = 0;
+    key[0] = cause[0] = plain[0] = 0;
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
@@ -2309,11 +2351,11 @@ static int mu_install_one(const char *folder)
     mu_name_of(&bd, ok ? key : folder, name, sizeof name);
     if (!ok) {
         mu_log("install %s: refused: %s", folder, cause);
-        mu_plain_cause(NULL, NULL, cause[0] ? cause : "the mod could not be built", plain, sizeof plain);
+        mu_install_cause(cause[0] ? cause : "the mod could not be built", plain, sizeof plain);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not installed. %s", name, plain);
     } else {
         mu_log("install %s: installed as mods\\%s (salt %s, build %s)", folder, key, bd.id, bd.hash);
-        mu_rescan(note, sizeof note);
+        mu_sync();
         if (st.present)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already installed.", name);
         else if (st.resalted)
@@ -2323,19 +2365,17 @@ static int mu_install_one(const char *folder)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", name, rows ? "; its Toybox rows are in the palette" : "");
     }
     mu_record_note(msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
-    mu_kstr(&b, "key", ok ? key : "", 0);
-    mu_kstr(&b, "cause", ok ? "" : plain, 0);
-    mu_knum(&b, "files", bd.file_count, 0);
-    mu_knum(&b, "size", bd.total_size, 0);
-    mu_knum(&b, "editorRows", (unsigned)rows, 0);
-    mu_knum(&b, "warnings", bd.warnings, 0);
-    mu_kbool(&b, "replaced", st.replaced, 0);
-    mu_kbool(&b, "inPlace", st.in_place, 0);
-    mu_kbool(&b, "stockUnchecked", stock.unavailable, 0);
-    mu_kstr(&b, "index", note, 0);
+    mu_kstr(&x, "key", ok ? key : "", 0);
+    mu_kstr(&x, "cause", ok ? "" : plain, 0);
+    mu_knum(&x, "files", bd.file_count, 0);
+    mu_knum(&x, "size", bd.total_size, 0);
+    mu_knum(&x, "editorRows", (unsigned)rows, 0);
+    mu_knum(&x, "warnings", bd.warnings, 0);
+    mu_kbool(&x, "replaced", st.replaced, 0);
+    mu_kbool(&x, "inPlace", st.in_place, 0);
+    mu_kbool(&x, "stockUnchecked", stock.unavailable, 0);
     sh_mb_free(&bd);
-    return mu_result_tail(&b);
+    return mu_file_result(SH_MODS_ACT_INSTALL, ok, msg, &x, ok);
 }
 
 /* The install action's argument: one or more absolute folders, separated by
@@ -2346,7 +2386,7 @@ static int mu_install_one(const char *folder)
  * many installed and how many refused, with each refusal's cause, "key" the
  * first installed folder so the page can select it, and one rescan at the
  * end. */
-typedef struct mu_bulk_item { char *folder; int found; } mu_bulk_item;
+typedef struct mu_bulk_item { char *folder; int found; const char *why; } mu_bulk_item;
 
 static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char *folder, int found)
 {
@@ -2359,9 +2399,91 @@ static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char 
     }
     (*items)[*n].folder = _strdup(folder);
     (*items)[*n].found = found;
+    (*items)[*n].why = NULL;
     if (!(*items)[*n].folder) return 0;
     (*n)++;
     return 1;
+}
+
+static void mu_remove_tree(const wchar_t *dir);
+
+/* A picked path that names a ZIP (the Prefab and map exports share mods so). */
+static int mu_zip_name(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 4 && !_stricmp(path + n - 4, ".zip");
+}
+
+#define MU_UNZIP_ENTRY_MAX (1024u * 1024u * 1024u)   /* the largest file a mod ZIP may hold */
+
+/* Unpack the ZIP at `zip` into a new folder under %TEMP% (`dir`), every
+ * entry at its own path (the reader refuses an unsafe name). 1, else 0 with
+ * the plain cause and nothing left behind. */
+static int mu_unzip(const char *zip, char *dir, size_t dir_cap, char *cause, size_t cause_cap)
+{
+    sh_zip_reader r;
+    wchar_t tmp[MAX_PATH + 1];
+    char *tmpu, why[300] = "";
+    size_t i;
+    int ok = 1;
+    wchar_t *wdir;
+    memset(&r, 0, sizeof r);
+    if (!sh_zip_reader_open(&r, zip, why, sizeof why)) {
+        _snprintf_s(cause, cause_cap, _TRUNCATE, "it cannot be read as a ZIP (%s)", why);
+        return 0;
+    }
+    if (!GetTempPathW(MAX_PATH, tmp) || (tmpu = sh_mb_utf8(tmp)) == NULL) {
+        sh_zip_reader_close(&r);
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be found", _TRUNCATE);
+        return 0;
+    }
+    _snprintf_s(dir, dir_cap, _TRUNCATE, "%ssnapmap-plus-zip-%lu-%llu", tmpu, GetCurrentProcessId(), GetTickCount64());
+    free(tmpu);
+    wdir = sh_mb_wpath(dir);
+    if (!wdir || !CreateDirectoryW(wdir, NULL)) {
+        free(wdir);
+        sh_zip_reader_close(&r);
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be written", _TRUNCATE);
+        return 0;
+    }
+    for (i = 0; ok && i < r.n; i++) {
+        const char *name = r.e[i].name;
+        size_t nl = strlen(name), len = 0, k;
+        char path[MAX_PATH * 4 + SH_ZIP_NAME_MAX + 4];
+        unsigned char *bytes;
+        wchar_t *wp;
+        HANDLE h;
+        DWORD put = 0;
+        if (!nl || name[nl - 1] == '/') continue;   /* a folder entry */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        for (k = strlen(dir); path[k]; k++) {
+            if (path[k] != '/') continue;
+            path[k] = 0;
+            wp = sh_mb_wpath(path);
+            if (wp) CreateDirectoryW(wp, NULL);
+            free(wp);
+            path[k] = '\\';
+        }
+        bytes = sh_zip_reader_read(&r, (long)i, MU_UNZIP_ENTRY_MAX, &len, why, sizeof why);
+        if (!bytes) {
+            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s in it cannot be read (%s)", name, why);
+            ok = 0;
+            break;
+        }
+        wp = sh_mb_wpath(path);
+        h = wp ? CreateFileW(wp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+        if (h == INVALID_HANDLE_VALUE || !WriteFile(h, bytes, (DWORD)len, &put, NULL) || put != (DWORD)len) {
+            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s could not be unpacked (error %lu)", name, GetLastError());
+            ok = 0;
+        }
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        free(wp);
+        free(bytes);
+    }
+    sh_zip_reader_close(&r);
+    if (!ok) mu_remove_tree(wdir);
+    free(wdir);
+    return ok;
 }
 
 static int mu_install(const char *arg)
@@ -2369,12 +2491,14 @@ static int mu_install(const char *arg)
     mu_bulk_item *items = NULL;
     size_t n = 0, cap = 0, i, picked = 0;
     const char *p = arg ? arg : "";
-    char first_key[SH_MS_NAME_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160] = "",
-         refused_first[SH_MB_CAUSE_MAX + 600] = "";
+    char first_key[SH_MS_NAME_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900],
+         refused_all[SH_MB_CAUSE_MAX * 4] = "";
     unsigned installed = 0, refused = 0, rows = 0;
     int rc, single_mod = 0;
-    mu_buf b, items_json;
-    memset(&b, 0, sizeof b);
+    char *unpacked[16];
+    size_t zips = 0;
+    mu_buf x, items_json;
+    memset(&x, 0, sizeof x);
     memset(&items_json, 0, sizeof items_json);
     sh_mb_record_why_clear();
 
@@ -2391,6 +2515,28 @@ static int mu_install(const char *arg)
         if (!len) continue;
         picked++;
         if (!mu_absolute(folder)) { mu_bulk_add(&items, &n, &cap, folder, 0); continue; }
+        if (mu_zip_name(folder)) {
+            /* A ZIP: unpacked under %TEMP%, then every mod folder in it, as a folder of mods. */
+            char dir[MAX_PATH * 4 + 64], why[600] = "", **mods = NULL;
+            size_t count = 0, k;
+            if (zips >= sizeof unpacked / sizeof unpacked[0] || !mu_unzip(folder, dir, sizeof dir, why, sizeof why)) {
+                if (mu_bulk_add(&items, &n, &cap, folder, -1)) items[n - 1].why = _strdup(why[0] ? why : "too many ZIPs at once");
+                single_mod = 0;
+                continue;
+            }
+            unpacked[zips++] = _strdup(dir);
+            if (sh_ms_folder_is_mod(dir)) {
+                mu_bulk_add(&items, &n, &cap, dir, 1);
+                count = 1;
+            } else if (sh_ms_find_mods(dir, &mods, &count) && count)
+                for (k = 0; k < count; k++) mu_bulk_add(&items, &n, &cap, mods[k], 2);
+            sh_ms_find_free(mods, count);
+            mu_log("install %s: a ZIP of %zu mod(s)", folder, count);
+            if (!count && mu_bulk_add(&items, &n, &cap, folder, -1))
+                items[n - 1].why = _strdup("it holds no mod: a mod is a folder with a mod.json");
+            single_mod = picked == 1 && count == 1;
+            continue;
+        }
         if (sh_ms_folder_is_mod(folder)) { mu_bulk_add(&items, &n, &cap, folder, 1); if (picked == 1) single_mod = 1; continue; }
         single_mod = 0;
         {
@@ -2405,20 +2551,20 @@ static int mu_install(const char *arg)
             sh_ms_find_free(mods, count);
         }
     }
-    if (picked == 0) { free(items); return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder to install."); }
-    if (picked == 1 && n == 1 && !items[0].found) {
-        rc = mu_simple_result(SH_MODS_ACT_INSTALL, 0, mu_absolute(items[0].folder)
+    if (picked == 0) { free(items); return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder or a mod ZIP to install."); }
+    if (picked == 1 && n == 1 && items[0].found <= 0) {
+        char why[700];
+        if (items[0].found < 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "That ZIP was not installed: %s.", items[0].why ? items[0].why : "it cannot be read");
+        else strcpy_s(why, sizeof why, mu_absolute(items[0].folder)
             ? "That folder holds no mod: a mod folder has a mod.json; choose one, or a folder of mod folders."
-            : "Choose a mod folder to install.");
-        free(items[0].folder);
-        free(items);
-        return rc;
+            : "Choose a mod folder or a mod ZIP to install.");
+        rc = mu_simple_result(SH_MODS_ACT_INSTALL, 0, why);
+        goto out;
     }
     if (picked == 1 && single_mod && n == 1) {
         rc = mu_install_one(items[0].folder);
-        free(items[0].folder);
-        free(items);
-        return rc;
+        goto out;
     }
 
     /* Bulk: install each, rescan once. */
@@ -2444,6 +2590,8 @@ static int mu_install(const char *arg)
             for (k = 0; k < bd.file_count; k++)
                 if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") &&
                     bd.files[k].cls != SH_MB_CLASS_EDITOR) mod_rows++;
+        } else if (items[i].found < 0) {
+            strcpy_s(cause, sizeof cause, items[i].why ? items[i].why : "it cannot be read as a ZIP");
         } else {
             strcpy_s(cause, sizeof cause, mu_absolute(items[i].folder) ? "it holds no mod.json, and no folder below it does"
                                                                         : "it is not a folder on this computer");
@@ -2456,10 +2604,14 @@ static int mu_install(const char *arg)
         } else {
             refused++;
             mu_log("install %s: refused: %s", items[i].folder, cause);
-            if (items[i].found) mu_plain_cause(NULL, NULL, cause, plain, sizeof plain);
+            if (items[i].found > 0) mu_install_cause(cause, plain, sizeof plain);
             else _snprintf_s(plain, sizeof plain, _TRUNCATE, "It was not installed: %s.", cause);
             mu_name_of(&bd, items[i].folder, name, sizeof name);
-            if (!refused_first[0]) _snprintf_s(refused_first, sizeof refused_first, _TRUNCATE, "%s: %s", name, plain);
+            {
+                /* Every refusal is said, not only the first. */
+                size_t at = strlen(refused_all);
+                _snprintf_s(refused_all + at, sizeof refused_all - at, _TRUNCATE, " %s: %s", name, plain);
+            }
         }
         mu_putn(&items_json, i ? ",{" : "{", i ? 2 : 1);
         mu_kstr(&items_json, "folder", items[i].folder, 1);
@@ -2472,39 +2624,43 @@ static int mu_install(const char *arg)
         sh_mb_free(&bd);
     }
     mu_putn(&items_json, "]", 1);
-    if (installed) mu_rescan(note, sizeof note);
+    if (installed) mu_sync();
     if (installed && !refused)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s%s.", installed, installed == 1 ? "" : "s",
                     rows ? "; their Toybox rows are in the palette" : "");
     else if (installed)
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s; %u %s not installed. %s%s", installed, installed == 1 ? "" : "s",
-                    refused, refused == 1 ? "was" : "were", refused_first, refused > 1 ? " The log names the others." : "");
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s; %u %s not installed.%s", installed, installed == 1 ? "" : "s",
+                    refused, refused == 1 ? "was" : "were", refused_all);
     else
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing was installed. %s%s", refused_first,
-                    refused > 1 ? " The log names the others." : "");
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing was installed.%s", refused_all);
     mu_record_note(msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_INSTALL, installed > 0, msg);
-    mu_kstr(&b, "key", first_key, 0);
-    mu_knum(&b, "installedCount", installed, 0);
-    mu_knum(&b, "refusedCount", refused, 0);
-    mu_knum(&b, "editorRows", rows, 0);
-    mu_key(&b, "items", 0);
-    mu_putn(&b, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
-    mu_kstr(&b, "index", note, 0);
-    for (i = 0; i < n; i++) free(items[i].folder);
-    free(items);
+    mu_kstr(&x, "key", first_key, 0);
+    mu_knum(&x, "installedCount", installed, 0);
+    mu_knum(&x, "refusedCount", refused, 0);
+    mu_knum(&x, "editorRows", rows, 0);
+    mu_key(&x, "items", 0);
+    mu_putn(&x, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
     free(items_json.p);
-    return mu_result_tail(&b);
+    rc = mu_file_result(SH_MODS_ACT_INSTALL, installed > 0, msg, &x, installed > 0);
+out:
+    for (i = 0; i < n; i++) { free(items[i].folder); free((void *)items[i].why); }
+    free(items);
+    for (i = 0; i < zips; i++) {
+        wchar_t *w = unpacked[i] ? sh_mb_wpath(unpacked[i]) : NULL;
+        if (w) mu_remove_tree(w);
+        free(w);
+        free(unpacked[i]);
+    }
+    return rc;
 }
 
 /* ---- verify */
 
-/* Rehash the folders `key` names (sh_ms_entry_matches: a folder or a
- * salt), or every loaded one when key is empty, adding the results up. Each
- * failure is also printed to `o` when given. Returns 0 when the store cannot
- * be read. */
-static int mu_verify_core(const char *key, const mu_out *o, sh_ms_verify_stats *sum, unsigned *passed,
-                          unsigned *failed, char *first, size_t first_cap)
+/* `sh_mods doctor verify`: rehash every loaded folder, adding the results
+ * up. Each failure is also printed to `o`. Returns 0 when the store cannot be
+ * read. */
+static int mu_verify_all(const mu_out *o, sh_ms_verify_stats *sum, unsigned *passed, unsigned *failed, char *first,
+                         size_t first_cap)
 {
     sh_ms_list list;
     sh_ms_verify_stats st;
@@ -2513,20 +2669,6 @@ static int mu_verify_core(const char *key, const mu_out *o, sh_ms_verify_stats *
     memset(sum, 0, sizeof *sum);
     *passed = *failed = 0;
     first[0] = 0;
-    if (key && key[0]) {
-        int ok;
-        memset(&st, 0, sizeof st);
-        ok = sh_ms_verify(key, &st, cause, sizeof cause);
-        *sum = st;
-        if (ok) *passed = st.entries ? st.entries : 1;
-        else {
-            *failed = 1;
-            _snprintf_s(first, first_cap, _TRUNCATE, "%s: %s", key, cause);
-            mu_say(o, "verify %s: FAILED: %s", key, cause);
-        }
-        mu_log("verify %s: %s%s%s", key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
-        return 1;
-    }
     if (!sh_ms_enumerate(&list)) return 0;
     for (i = 0; i < list.count; i++) {
         const sh_ms_entry *e = &list.items[i];
@@ -2558,25 +2700,6 @@ static void mu_verify_message(unsigned passed, unsigned failed, const char *firs
                      "them again. First: %s", failed, passed + failed, first);
 }
 
-static int mu_verify(const char *key)
-{
-    sh_ms_verify_stats sum;
-    char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
-    unsigned passed = 0, failed = 0;
-    mu_buf b;
-    memset(&b, 0, sizeof b);
-    if (!mu_verify_core(key, NULL, &sum, &passed, &failed, first, sizeof first))
-        return mu_simple_result(SH_MODS_ACT_VERIFY, 0, "The mods folder cannot be read.");
-    InterlockedIncrement(&g_gen);
-    mu_verify_message(passed, failed, first, msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_VERIFY, failed == 0 && passed > 0, msg);
-    mu_knum(&b, "passed", passed, 0);
-    mu_knum(&b, "failed", failed, 0);
-    mu_knum(&b, "filesChecked", sum.files, 0);
-    mu_knum(&b, "mib", sum.bytes_mb, 0);
-    return mu_result_tail(&b);
-}
-
 /* What one removal did. */
 typedef struct mu_removal {
     size_t removed, failed;
@@ -2585,7 +2708,6 @@ typedef struct mu_removal {
     char deleted[SH_MS_NAME_MAX + 1];   /* the last folder removed (its name in mods\) */
     size_t outright;             /* removed folders the Recycle Bin could not take, so deleted */
     char outright_why[200];      /* why the bin could not take the first of them */
-    char note[160];              /* the rescan's note */
 } mu_removal;
 
 static const char *mu_entry_title(const sh_ms_entry *s);
@@ -2623,7 +2745,11 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
             mu_log("remove %s: mods\\%s moved to the Recycle Bin", e->name, mu_leaf(e->folder));
         }
     }
-    if (out->removed) mu_rescan(out->note, sizeof out->note);
+    if (out->removed) {
+        sh_modserve_refresh rf;
+        char why[200];
+        if (mu_rescan(&rf, why, sizeof why) < 0) mu_log("uninstall: %s", why);
+    }
     modstore_unlock();
 }
 
@@ -2692,6 +2818,16 @@ static ULONGLONG g_undo_owed_at;
 static char g_undo_owed_key[SH_MS_NAME_MAX + 1];
 static ULONGLONG g_poll_next;
 #define MU_UNDO_WAIT_MS 10000
+
+/* A map remove's owed row drop (mu_drop_tick, with mu_map_apply). */
+#define MU_DROP_MAX 16
+static volatile LONG g_drop_owed;
+static ULONGLONG g_drop_owed_at;
+static char g_drop_key[SH_MS_NAME_MAX + 1];
+static char g_drop_hash[SH_MODSERVE_HASH_HEX + 1], g_drop_salt[SH_MB_ID_MAX + 1];
+static char g_drop_builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+static int g_drop_n, g_drop_tag;
+static void mu_drop_tick(void);
 
 /* Clear now. 1 cleared, 0 no editor map (nothing to clear), -1 failed. */
 static int mu_undo_clear_now(const char *key)
@@ -2809,7 +2945,7 @@ static volatile LONG g_scope_owed;
 static volatile LONG g_scope_editor;
 
 /* A hub launch's listing and what the product has seen of its Play
- * (ADD-V4a H2). The gate's listing must hold through the level load: a
+ * The gate's listing must hold through the level load: a
  * poll that finds the game idle between the gate and the load is not the
  * end of the Play. Driven by the signals the product has:
  *
@@ -2890,25 +3026,10 @@ static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const cha
     (*arr)[(*n)++] = s;
 }
 
-/* Builds a map remove just took out of the map: its entity delete commits
- * after the call returns (SH_EDITOR_DELETE_DISPATCHED), so the placed names
- * read for the listing may still name them; they are not listed again by
- * that closure. Main thread; set and cleared around the remove's listing. */
-#define MU_LISTING_SKIP 8
-static char g_listing_skip[MU_LISTING_SKIP][SH_MODSERVE_HASH_HEX + 1];
-static int g_listing_skip_n;
-
-static int mu_listing_skipped(const char *hash)
-{
-    int i;
-    for (i = 0; hash && i < g_listing_skip_n; i++) if (!_stricmp(g_listing_skip[i], hash)) return 1;
-    return 0;
-}
-
 /* The build a placed name (or its closure) lists. The closure resolves each
  * name under the listing in force, which at a load is the previous map's, so
- * the build it reports may be one that map declared (ADD-L6 F2: a rawmap
- * opened over a map pinning an older build saved that build). The listing
+ * the build it reports may be one that map declared (a rawmap opened over a
+ * map pinning an older build would save that build). The listing
  * instead takes, per salt, what the new map serves: the build its rows
  * declare (already listed), else the build sh_modserve_row_build names for
  * that salt in the open map's context (the root folder's for the player's own
@@ -2921,7 +3042,6 @@ static void mu_listing_visit(void *context, const char *bundle_id, const char *b
     sh_modmanifest_row probe;
     size_t i;
     (void)size; (void)name;
-    if (mu_listing_skipped(bundle_hash)) return;
     for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the salt */
     memset(&probe, 0, sizeof probe);
     if (bundle_id && strlen(bundle_id) < sizeof probe.salt && bundle_hash && strlen(bundle_hash) < sizeof probe.build) {
@@ -2929,7 +3049,6 @@ static void mu_listing_visit(void *context, const char *bundle_id, const char *b
         strcpy_s(probe.build, sizeof probe.build, bundle_hash);
     }
     if (probe.salt[0] && sh_modserve_row_build(&probe, &serving) && _stricmp(serving.hash, bundle_hash)) {
-        if (mu_listing_skipped(serving.hash)) return;
         if (l->no == l->co) {
             size_t nc = l->co ? l->co * 2 : 8;
             char **na = (char **)realloc((void *)l->own, nc * sizeof *na);
@@ -3038,6 +3157,8 @@ static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap)
 static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
 {
     int changed;
+    /* A map was opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
+    if (when == SH_MODSERVE_AT_LOAD) InterlockedIncrement(&g_gen);
     if (!sh_modserve_scope_enabled()) return;
     if (when == SH_MODSERVE_AT_LOAD) InterlockedExchange(&g_scope_editor, 0);
     changed = mu_listing_set(rows, names, name_count, 1);
@@ -3049,7 +3170,7 @@ static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *na
 /* The serving layer's source at the Play entry: Play does not serialize the
  * map. Only the editor's Play reads the open map live; a hub launch keeps the
  * listing its launch gate set (sh_modui_scope_launch), since the editor's
- * entities and manifest are not the launched map's (ADD-L6 H). */
+ * entities and manifest are not the launched map's. */
 static int mu_scope_source(int when)
 {
     if (!sh_modserve_scope_enabled() || !mu_on_main()) return 0;
@@ -3074,7 +3195,7 @@ int sh_modui_scope_launch(const char *why)
     if (!mu_on_main()) return 0;
     /* Once per launch, at the gate, before anything of the launch is set:
      * the decls the level load would parse are parsed here, at the hub, in
-     * the hub's (editor) mode, as an editor entry parses them (ADD-L11). A
+     * the hub's (editor) mode, as an editor entry parses them. A
      * second boundary of the same launch (launched, or loading: its level
      * load has not reached Play) does not run it again. */
     if (e->launch_preload && InterlockedCompareExchange(&g_launch, 0, 0) != MU_LAUNCH_LAUNCHED &&
@@ -3126,7 +3247,6 @@ int sh_modui_scope_launch_refused(const char *why)
         sh_modmanifest_current_close();
         mu_settings_close();
         InterlockedExchange(&g_scope_editor, 0);
-        (void)sh_modserve_scope_set_place(NULL, 1);
         changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
         mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
     }
@@ -3169,9 +3289,9 @@ static void mu_scope_tick(int editor_map)
             /* The rows go with the listing: a hub launch or a Play entry must
              * not read the editor map's manifest as its own. */
             InterlockedExchange(&g_scope_editor, 0);
+            InterlockedIncrement(&g_gen);
             sh_modmanifest_current_close();
             mu_settings_close();
-            (void)sh_modserve_scope_set_place(NULL, 1);
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
@@ -3180,11 +3300,10 @@ static void mu_scope_tick(int editor_map)
             /* ENDED: the launched Play began, the game was busy with it, and
              * it is idle again, so that Play is over. Never on an idle poll
              * before its Play ran (the gap between the gate and the level
-             * load: ADD-V4a H2). */
+             * load). */
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             mu_settings_close();
-            (void)sh_modserve_scope_set_place(NULL, 1);
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
                 (void)mu_scope_apply("hub");
@@ -3207,7 +3326,7 @@ int sh_modui_poll_due(void)
     ULONGLONG now;
     /* An owed undo clear is checked after every native frame: it must land
      * before the next frame's input can step the history back. */
-    if (InterlockedCompareExchange(&g_undo_owed, 0, 0)) return 1;
+    if (InterlockedCompareExchange(&g_undo_owed, 0, 0) || InterlockedCompareExchange(&g_drop_owed, 0, 0)) return 1;
     if (!(sh_modserve_scope_enabled() && (InterlockedCompareExchange(&g_scope_owed, 0, 0) || sh_modserve_scope_map_open() ||
                                           sh_modserve_scope_relevant())))
         return 0;
@@ -3231,9 +3350,11 @@ int sh_modui_poll_main(void *context)
     if (!e->map_info || e->map_info(&info) != 1) {                  /* the editor, with a map */
         /* The map the clear was owed for is gone; so is its history. */
         if (InterlockedExchange(&g_undo_owed, 0)) mu_log("uninstall %s: the editor left the map before the clear", g_undo_owed_key);
+        if (InterlockedExchange(&g_drop_owed, 0)) mu_log("map remove %s: the editor left the map before the delete committed", g_drop_key);
         mu_scope_tick(0);
         return 0;
     }
+    mu_drop_tick();
     mu_undo_tick();
     mu_scope_tick(1);
     return 1;
@@ -3282,15 +3403,16 @@ static void mu_plan_build(const mu_model *m, const mu_map *mp, const char *key, 
     if (p->mod < 0) return;
     x = &mp->mods[p->mod];
     if (!mp->have_mm)
-        strncpy_s(p->refusal, sizeof p->refusal, "the open map's entities cannot be read on this build", _TRUNCATE);
+        strncpy_s(p->refusal, sizeof p->refusal, "Snapmap+ cannot read this map's objects in this game version; use Send "
+                  "feedback", _TRUNCATE);
     else if (x->modules)
         _snprintf_s(p->refusal, sizeof p->refusal, _TRUNCATE, "the map places %d of its modules; delete them in Blueprint mode first",
                     x->modules);
     else if (mu_mapmod_follows(x))
         strncpy_s(p->refusal, sizeof p->refusal, "another mod this map uses needs it; remove that mod from the map first", _TRUNCATE);
     else if (x->uid_count > SH_EDITOR_DELETE_MAX)
-        _snprintf_s(p->refusal, sizeof p->refusal, _TRUNCATE, "it has %zu placed entities, more than one delete takes (%d)",
-                    x->uid_count, SH_EDITOR_DELETE_MAX);
+        _snprintf_s(p->refusal, sizeof p->refusal, _TRUNCATE, "it has %zu placed objects; delete some of them in the editor "
+                    "first (at most %d go in one step)", x->uid_count, SH_EDITOR_DELETE_MAX);
     if (x->uid_count && mp->have_mm) {
         p->ref_count = sh_mm_references(&mp->mm, x->uids, x->uid_count, &p->refs);
         if (p->ref_count == (size_t)-1) { p->ref_count = 0; p->refs = NULL; }
@@ -3308,7 +3430,7 @@ static void mu_plan_free(mu_plan *p) { free(p->refs); p->refs = NULL; }
 static const char *mu_delete_cause(int status)
 {
     switch (status) {
-    case SH_EDITOR_DELETE_NOT_MAIN:    return "the request did not run on the game's main thread";
+    case SH_EDITOR_DELETE_NOT_MAIN:    return "the editor did not answer; try again";
     case SH_EDITOR_DELETE_NOT_READY:   return "the editor is not ready; open the map in the editor and try again";
     case SH_EDITOR_DELETE_NOT_ENTITY:  return "the editor is not in Object mode; switch to it and try again";
     case SH_EDITOR_DELETE_BUSY:        return "the editor is busy (an entity or a wire is held, or an edit is finishing); try again";
@@ -3318,23 +3440,77 @@ static const char *mu_delete_cause(int status)
     case SH_EDITOR_DELETE_PROTECTED:   return "the editor does not allow deleting one of its entities";
     case SH_EDITOR_DELETE_REFERENCED:  return "another object refers to these entities and the editor asks before deleting them; "
                                               "delete them in the editor, then try again";
-    case SH_EDITOR_DELETE_FAULT:       return "the delete faulted; check the map";
+    case SH_EDITOR_DELETE_FAULT:       return "the editor stopped the delete with an error; save your map, check it, and "
+                                              "use Send feedback if it repeats";
     case SH_EDITOR_DELETE_INCOMPLETE:  return "the delete did not take every entity; check the map";
-    default:                           return "the editor's delete is not available on this build";
+    default:                           return "Snapmap+ cannot delete objects in this game version; delete them in the "
+                                              "editor yourself";
     }
+}
+
+/* The rows a map remove drops: never before the map holds none of the
+ * mod's objects. With placed entities the native delete releases them at
+ * once but commits its undo step on later editor frames, so the drop is owed
+ * to the tick (mu_drop_tick), which waits for that commit, reads the map
+ * again and drops the rows only when no object of the mod is left; objects
+ * that are still there (a delete the editor did not finish) keep their row.
+ * Main thread (the state sits with the undo history's, above). */
+
+/* Drop the noted rows, with the last mod the search tag, and bring the
+ * change into the game. */
+static void mu_drop_rows(const char *key, char builds[][SH_MODMANIFEST_HASH_CAP], int n, int untag)
+{
+    const sh_modui_engine *e = mu_engine();
+    size_t rows = 0;
+    int i, tag = 0;
+    for (i = 0; i < n; i++) rows += sh_modmanifest_current_remove(builds[i]);
+    if (untag && e->remove_tag) tag = e->remove_tag(MU_TAG);
+    (void)mu_scope_now("map remove");
+    InterlockedIncrement(&g_gen);
+    mu_log("map remove %s: %zu row(s) of the map's list of mods dropped%s", key, rows,
+           !untag ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
+                                                                   : ", the search tag could not be removed");
+}
+
+/* The tick's part: once the delete has committed (or MU_UNDO_WAIT_MS went
+ * by), the owed drop happens when the map holds none of the mod's objects. */
+static void mu_drop_tick(void)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_model m;
+    mu_map mp;
+    size_t i;
+    int left = 0;
+    if (!InterlockedCompareExchange(&g_drop_owed, 0, 0)) return;
+    if (e->undo_pending && e->undo_pending() > 0 && GetTickCount64() - g_drop_owed_at < MU_UNDO_WAIT_MS) return;
+    InterlockedExchange(&g_drop_owed, 0);
+    if (!mu_model_build(&m)) { mu_model_free(&m); return; }
+    mu_map_build(&mp, &m, NULL);
+    for (i = 0; i < mp.mod_count; i++) {
+        const mu_mapmod *x = &mp.mods[i];
+        if ((g_drop_hash[0] && mu_same_bundle(&m, x->hash, g_drop_hash)) || (g_drop_salt[0] && !_stricmp(x->id, g_drop_salt)))
+            left += (int)x->uid_count + x->modules;
+    }
+    if (mp.entities < 0 || left)
+        mu_log("map remove %s: %d of its objects are still in the map, so its row stays", g_drop_key, left);
+    else mu_drop_rows(g_drop_key, g_drop_builds, g_drop_n, g_drop_tag);
+    mu_map_free(&mp);
+    mu_model_free(&m);
 }
 
 /* Remove the planned mod from the open map: its entities in one native
  * Delete Selection (one undo step; the editor drops the wires and references
- * to them with the entities), its manifest row, and with the last mod the
- * search tag. 1 done, 0 refused (msg says why; nothing changed). */
+ * to them with the entities), then its manifest row, and with the last mod
+ * the search tag, at once when it has no entities, else once the delete has
+ * committed (mu_drop_tick). 1 done, 0 refused (msg says why; nothing
+ * changed). */
 static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const char *key, char *msg, size_t cap)
 {
     const sh_modui_engine *e = mu_engine();
     const mu_mapmod *x = &mp->mods[p->mod];
-    size_t i, rows = 0, at = 0;
-    int tag = 0;
-    char dropped[400] = "";
+    char builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+    size_t i;
+    int n = 0;
     if (p->refusal[0]) { _snprintf_s(msg, cap, _TRUNCATE, "%s", p->refusal); return 0; }
     if (x->uid_count) {
         int st;
@@ -3348,46 +3524,33 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
         }
     }
     /* Its row goes; with the last mod, so do the rows of mods only it needed. */
-    g_listing_skip_n = 0;
-    if (x->hash[0]) strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, x->hash);
-    for (i = 0; i < mp->rows.count; i++) {
+    for (i = 0; i < mp->rows.count && n < MU_DROP_MAX; i++) {
         const sh_modmanifest_row *row = &mp->rows.rows[i];
-        size_t k, n;
+        size_t k;
         int drop = 0;
         /* By salt: a row another build serves is the mod's row too. */
         for (k = 0; k < mp->mod_count && !drop; k++)
             if (mu_row_is_mod(m, row, &mp->mods[k]))
                 drop = (int)k == p->mod || (p->vanilla_after && mu_mapmod_follows(&mp->mods[k]));
-        if (!drop) continue;
-        n = sh_modmanifest_current_remove(row->build);
-        rows += n;
-        if (n && at < sizeof dropped - 1) {
-            int w;
-            if (!strcmp(row->build, x->hash) || _stricmp(row->salt, x->id))
-                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s at build %.16s", at ? ", " : " (",
-                                row->salt, row->build);
-            else
-                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s declared at build %.16s, served by "
-                                "build %.16s", at ? ", " : " (", row->salt, row->build, x->hash);
-            if (w > 0) at += (size_t)w;
-        }
-        if (g_listing_skip_n < MU_LISTING_SKIP && strlen(mp->rows.rows[i].build) == SH_MODSERVE_HASH_HEX &&
-            !mu_listing_skipped(mp->rows.rows[i].build))
-            strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, mp->rows.rows[i].build);
+        if (drop) strcpy_s(builds[n++], SH_MODMANIFEST_HASH_CAP, row->build);
     }
-    if (p->tag_removed && e->remove_tag) tag = e->remove_tag(MU_TAG);
-    /* The mod's shadows, registries and requirements leave with it at once:
-     * its deleted entities, whose delete has not committed yet, do not keep
-     * it listed. The next listing (a save, the Play entry) reads the map as
-     * it is then. */
-    (void)mu_scope_now("map remove");
-    g_listing_skip_n = 0;
-    InterlockedIncrement(&g_gen);
-    if (at && at < sizeof dropped - 1) strcat_s(dropped, sizeof dropped, ")");
-    mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s%s", key, x->uid_count,
-           x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows, dropped,
-           !p->tag_removed ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
-                                                                             : ", the search tag could not be removed");
+    if (!x->uid_count) {
+        mu_log("map remove %s: nothing of it is placed", key);
+        mu_drop_rows(key, builds, n, p->tag_removed);
+    } else {
+        mu_log("map remove %s: %zu entit%s deleted in one undo step; the row goes once the delete has committed", key,
+               x->uid_count, x->uid_count == 1 ? "y" : "ies");
+        strncpy_s(g_drop_key, sizeof g_drop_key, key, _TRUNCATE);
+        strncpy_s(g_drop_hash, sizeof g_drop_hash, x->hash, _TRUNCATE);
+        strncpy_s(g_drop_salt, sizeof g_drop_salt, x->id, _TRUNCATE);
+        memcpy(g_drop_builds, builds, sizeof builds);
+        g_drop_n = n;
+        g_drop_tag = p->tag_removed;
+        g_drop_owed_at = GetTickCount64();
+        g_poll_next = 0;
+        InterlockedExchange(&g_drop_owed, 1);
+        InterlockedIncrement(&g_gen);
+    }
     msg[0] = 0;
     return 1;
 }
@@ -3452,32 +3615,29 @@ static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, co
     if (p->published) mu_line(o, "%s: the published copy on the server is unaffected until you publish the map again", verb);
 }
 
+/* A mod's name where a sentence names it: its build's name, else (an unnamed
+ * mod) its folder's own name, never its salt. */
 static const char *mu_entry_title(const sh_ms_entry *s)
 {
-    return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
+    return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : mu_leaf(s->name);
 }
 
-/* The folders an uninstall of `key` removes, marked in `mark` (the list's
- * size); returns how many. The tab names one folder (its key). The console
- * (by_key) names a mod as sh_ms_entry_matches reads it (a folder, a nested
- * folder's own name), and every folder of that mod goes: its root folder and
- * the copies maps brought. */
-static int mu_uninstall_targets(const mu_model *m, const char *key, int by_key, unsigned char *mark)
+/* The one folder an uninstall of `key` removes, in the tab and the console
+ * alike: the folder of that name under mods\, else (the console, by_key) the
+ * first folder sh_ms_entry_matches finds for it (a nested folder's own name,
+ * or a salt), the player's own before a map's copy. Another folder of the
+ * same mod stays, and the dry run says so. Returns the entry, or -1. */
+static int mu_uninstall_target(const mu_model *m, const char *key, int by_key)
 {
     size_t i;
-    int n = 0;
-    const char *salt = NULL;
-    for (i = 0; i < m->list.count; i++) {
-        const sh_ms_entry *s = &m->list.items[i];
-        int hit = !strcmp(s->name, key) || (by_key && sh_ms_entry_matches(s, key));
-        if (hit && by_key && s->salt[0] && !salt) salt = s->salt;
-        mark[i] = (unsigned char)hit;
-    }
-    for (i = 0; i < m->list.count; i++) {
-        if (salt && !mark[i] && !_stricmp(m->list.items[i].salt, salt)) mark[i] = 1;
-        n += mark[i];
-    }
-    return n;
+    int pass;
+    for (i = 0; i < m->list.count; i++) if (!strcmp(m->list.items[i].name, key)) return (int)i;
+    for (pass = 0; by_key && pass < 2; pass++)
+        for (i = 0; i < m->list.count; i++) {
+            const sh_ms_entry *s = &m->list.items[i];
+            if ((pass == 0) == (s->place[0] == 0) && sh_ms_entry_matches(s, key)) return (int)i;
+        }
+    return -1;
 }
 
 /* Whether the entry at `at` adds a Toybox row of that display name. */
@@ -3489,20 +3649,10 @@ static int mu_entry_has_row(const mu_model *m, size_t at, const char *name)
     return 0;
 }
 
-/* One folder an uninstall removes, for the dry run. */
-static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *s)
-{
-    char title[400];
-    mu_place_title(s, title, sizeof title);
-    if (s->loaded)
-        mu_line(o, "%s:   mods\\%s (%s%s%s)", verb, s->name, mu_entry_title(s), title[0] ? ", downloaded for " : "", title);
-    else mu_line(o, "%s:   mods\\%s (not built)", verb, s->name);
-}
-
 /* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the
  * tab and the console (o non-NULL prints the same consequences; by_key, the
- * console's uninstall, removes every folder of the mod it names,
- * mu_uninstall_targets). */
+ * console's uninstall, also finds a mod by a nested folder's own name or its
+ * salt, mu_uninstall_target). */
 static int mu_map_action(int action, const char *key, const mu_out *o, int by_key)
 {
     int uninstall = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_UNINSTALL_PREVIEW;
@@ -3515,7 +3665,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     mu_plan p;
     mu_buf b;
     char msg[MAX_PATH * 8 + 900], cause[300], title[300];
-    int entry = -1, ok = 1, builds = 0;
+    int entry = -1, ok = 1;
     unsigned char *targets = NULL;
     size_t i, t;
     memset(&b, 0, sizeof b);
@@ -3535,8 +3685,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     targets = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
     if (!targets) { mu_map_free(&mp); mu_record_free(&rec); mu_model_free(&m); return -1; }
     if (uninstall) {
-        builds = mu_uninstall_targets(&m, key, by_key, targets);
-        for (i = 0; i < m.list.count && entry < 0; i++) if (targets[i]) entry = (int)i;
+        entry = mu_uninstall_target(&m, key, by_key);
+        if (entry >= 0) targets[entry] = 1;
     } else {
         for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
     }
@@ -3553,7 +3703,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
     msg[0] = 0;
     if (uninstall && entry < 0) {
         ok = 0;
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is no longer installed; press Refresh.", mu_leaf(key));
     } else if (!uninstall && p.mod < 0) {
         ok = 0;
         _snprintf_s(msg, sizeof msg, _TRUNCATE, mp.entities < 0 ? "No map is open in the editor." : "The open map does not use %s.", title);
@@ -3605,16 +3755,6 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
             mu_kint(&b, "savedMaps", saved, 0);
             mu_kbool(&b, "undoCleared", mp.entities >= 0, 0);
             if (stay) mu_kstr(&b, "keptBuild", stay->name, 0);
-            if (builds > 1) {
-                size_t k = 0;
-                mu_puts(&b, ",\"folders\":[");
-                for (t = 0; t < m.list.count; t++) {
-                    if (!targets[t]) continue;
-                    if (k++) mu_putn(&b, ",", 1);
-                    mu_str(&b, m.list.items[t].name);
-                }
-                mu_putn(&b, "]", 1);
-            }
             mu_putn(&b, "}", 1);
             mu_puts(&b, ",\"editorRows\":[");
             {
@@ -3644,15 +3784,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                     for (i = 0; targets[t] && i < (size_t)m.entries[t].row_count; i++)
                         if (!stay || !mu_entry_has_row(&m, stay_at, m.entries[t].row_names[i]))
                             mu_line(o, "%s:   %s", verb, m.entries[t].row_names[i]);
-                if (builds > 1) {
-                    mu_line(o, "%s: removes all %d folders of %s (yours and the copies maps brought); to keep one, "
-                            "uninstall the others by their folder", verb, builds, title);
-                    mu_line(o, "%s: moves these folders to the Windows Recycle Bin; restore them from there by hand", verb);
-                    for (t = 0; t < m.list.count; t++) if (targets[t]) mu_say_target(o, verb, &m.list.items[t]);
-                } else {
-                    mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
-                            s->name);
-                }
+                mu_line(o, "%s: moves the folder mods\\%s to the Windows Recycle Bin; restore it from there by hand", verb,
+                        s->name);
                 if (stay)
                     mu_line(o, "%s: another folder of %s stays installed (mods\\%s); maps that use it open with it", verb,
                             title, stay->name);
@@ -3682,11 +3815,11 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
              * dropped alone changes nothing the editor sees. */
             if (!x->uid_count) mu_mark_modified("Remove Mod From Map");
             if (!x->uid_count)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: no entity used it, so only its row was dropped%s.",
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s; nothing placed used it%s.",
                             title, mp.name[0] ? mp.name : "the open map", p.vanilla_after ? "; the map now plays without Snapmap+" : "");
             else
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: %zu entit%s deleted%s. Ctrl+Z in the editor brings %s back.",
-                            title, mp.name[0] ? mp.name : "the open map", x->uid_count, x->uid_count == 1 ? "y" : "ies",
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: %zu object%s deleted%s. Ctrl+Z in the editor brings %s back.",
+                            title, mp.name[0] ? mp.name : "the open map", x->uid_count, x->uid_count == 1 ? "" : "s",
                             p.vanilla_after ? "; the map now plays without Snapmap+" : "", x->uid_count == 1 ? "it" : "them");
         } else {
             unsigned char *removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
@@ -3705,11 +3838,6 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
                 for (t = 0; t < m.list.count; t++) removing[t] = targets[t];
                 mu_remove_marked(&m, removing, &rm);
                 ok = rm.removed > 0 && rm.failed == 0;
-            }
-            if (builds > 1) {
-                char built[40];
-                _snprintf_s(built, sizeof built, _TRUNCATE, " (%zu of %d folders)", rm.removed, builds);
-                strncat_s(title, sizeof title, built, _TRUNCATE);
             }
             mu_log("uninstall %s: %s%s", key, !ok ? "the folder could not be removed" : rm.outright ? "the folder was deleted outright"
                    : "the folder was moved to the Recycle Bin", removed_from_map ? " after the open map was cleaned of it" : "");
@@ -3745,7 +3873,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o, int by_ke
 
 /* The map's mod rows and choices live outside the edit map, so a change to
  * them alone leaves the editor's map unmodified and leaving it without a Save
- * writes nothing (ADD-V7b). Each change commits one undo step, as a placed
+ * writes nothing. Each change commits one undo step, as a placed
  * entity does, so the editor asks to save. */
 static void mu_mark_modified(const char *label)
 {
@@ -3756,10 +3884,13 @@ static void mu_mark_modified(const char *label)
 
 /* ---- map add: a map-level row */
 
-/* Attach `key` (a folder, as sh_ms_entry_matches reads it) to the open map:
- * the current manifest gets a map-level row naming the mod's build, and the
- * map scope follows at once. The next save writes the row. A mod a
- * downloaded map brought (a place folder) serves only that map. */
+/* Attach `key` (a folder, as sh_ms_entry_matches reads it, or a salt) to the
+ * open map: the current manifest gets a map-level row naming the build of the
+ * mod's folder at the root, and the map scope follows at once. The next save
+ * writes the row. A folder a downloaded map or a prefab brought names its mod:
+ * the root folder of its salt is the one the player's maps use (placing a
+ * prefab puts its mods there after the one approval); without one the player is
+ * sent to Add to my mods. */
 static int mu_map_add(const char *key, const mu_out *o)
 {
     const int action = SH_MODS_ACT_MAP_ADD;
@@ -3788,6 +3919,9 @@ static int mu_map_add(const char *key, const mu_out *o)
         if (!strcmp(m.list.items[i].name, key) && m.list.items[i].loaded) entry = (int)i;
     for (i = 0; i < m.list.count && entry < 0; i++)
         if (sh_ms_entry_matches(&m.list.items[i], key) && m.list.items[i].loaded && !m.list.items[i].place[0]) entry = (int)i;
+    for (i = 0; entry >= 0 && m.list.items[entry].place[0] && i < m.list.count; i++)
+        if (!m.list.items[i].place[0] && m.list.items[i].loaded && !_stricmp(m.list.items[i].salt, m.list.items[entry].salt))
+            entry = (int)i;
     strncpy_s(title, sizeof title, entry >= 0 ? mu_entry_title(&m.list.items[entry]) : key, _TRUNCATE);
     where = mp.name[0] ? mp.name : "the open map";
     st = entry >= 0 ? sh_modserve_bundle_state(m.list.items[entry].bundle.hash, cause, sizeof cause) : 0;
@@ -3795,13 +3929,13 @@ static int mu_map_add(const char *key, const mu_out *o)
     if (entry >= 0) mu_place_title(&m.list.items[entry], place, sizeof place);
     if (mp.entities < 0)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, mp.entities == -1 ? "No map is open in the editor."
-                                                                   : "The open map cannot be read on this build.");
-    else if (entry < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
+                                                                   : "Snapmap+ cannot read this map in this game version; use Send feedback.");
+    else if (entry < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is no longer installed; press Refresh.", mu_leaf(key));
     else if (m.list.items[entry].place[0])
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s, so only that map uses it. To use it in your own "
-                    "maps, copy its folder into your own mods and press Refresh.", title, place);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s. Add it to your mods first (Add to my mods); then "
+                    "your own maps can use it.", title, place);
     else if (sh_mb_editor_only(&m.list.items[entry].bundle))
-        /* Editor tweaks are client-side (DESIGN-additive 2.6): every map opened in
+        /* Editor tweaks are this computer's: every map opened in
          * this editor already has them, a map never records them. */
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s changes only this computer's editor (%u editor tweak%s); every "
                     "map you open here already has them, and a map never lists them.", title,
@@ -3843,10 +3977,7 @@ static int mu_map_add(const char *key, const mu_out *o)
             mu_mark_modified("Add Mod To Map");
             mu_log("map add %s: %s (%.16s) attached to %s as a map-level row%s", key, row.salt, row.build,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply now; the map "
-                        "lists it with its mods at the map's next save, and players are then offered it when they open "
-                        "the map. Remove from map takes it out again.", title, where,
-                        x && x->uid_count ? " as well as by its placed entities" : "");
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s; save the map to keep it.", title, where);
         }
     }
     mu_line(o, "map add %s: %s", key, msg);
@@ -3857,7 +3988,28 @@ static int mu_map_add(const char *key, const mu_out *o)
     return mu_result_tail(&b);
 }
 
-/* ---- registry choice (DESIGN-additive 2.4) */
+/* ---- registry choice */
+
+/* A slot ("<game file>/<path>", modregistry.h) as the page shows it: "<path>
+ * in <game file>", the path starting at the first top-level decl member. */
+static void mu_slot_text(const char *slot, char *out, size_t cap)
+{
+    static const char *const top[] = { "edit", "editorVars", "inherit", "events", "aliases", "init", "class", NULL };
+    const char *p = slot ? slot : "";
+    int seg = 0, k;
+    for (; *p; p++) {
+        size_t n;
+        if (p != slot && p[-1] != '/') continue;
+        if (seg++ < 2) continue;
+        n = strcspn(p, "/");
+        for (k = 0; top[k]; k++)
+            if (strlen(top[k]) == n && !strncmp(p, top[k], n)) {
+                _snprintf_s(out, cap, _TRUNCATE, "%s in %.*s", p, (int)(p - slot - 1), slot);
+                return;
+            }
+    }
+    strncpy_s(out, cap, slot ? slot : "", _TRUNCATE);
+}
 
 /* The open map's registry choice for a slot several declared mods set
  * (`sh_mods choose`, the tab's clash select): applied at once, written into
@@ -3888,116 +4040,18 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
             if (e) strncpy_s(name, sizeof name, mu_entry_title(e), _TRUNCATE);
             sh_ms_list_free(&l);
         }
+        char where[SH_MR_SLOT_MAX + 8];
+        mu_slot_text(slot, where, sizeof where);
         if (r < 0) {
-            char plain[700];
-            mu_plain(NULL, key, line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14), plain, sizeof plain);
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s.", plain);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "That choice was refused: %s",
+                        line + (strncmp(line, "MODS: choose: ", 14) ? 0 : 14));
+            mu_sentence_end(msg, sizeof msg);
         } else if (key && key[0])
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s's version of %s; it applies now and is saved with the "
-                        "map's next save.", name[0] ? name : "the chosen mod", slot);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s: the map's choice is cleared; the first mod in the map's list serves it.", slot);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "This map now uses %s's value for %s; save the map to keep it.",
+                        name[0] ? name : "the chosen mod", where);
+        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "The choice for %s is cleared; the first mod the map lists decides it.", where);
     }
     return mu_simple_result(action, r >= 0, msg);
-}
-
-/* ---- rebuild */
-
-/* Build one folder of the player's own mods again from its files (as
- * 'sh_mods build'), write its block (the cause of a refused build included:
- * the folder serves nothing until fixed), then rescan so the game serves the
- * new build. A folder a map brought is kept as that map needs it and is not
- * built here. */
-static int mu_rebuild(const char *key)
-{
-    mu_model m;
-    sh_mb_resolver r;
-    sh_mb_bundle bd;
-    mu_stock stock = { 0 };
-    char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200], msg[SH_MB_CAUSE_MAX + 800], note[160],
-         before[SH_MB_HASH_HEX + 1] = "", name[300], salt[SH_SALT_LEN + 1] = "";
-    int entry = -1, ok, built = 0;
-    size_t i;
-    memset(&bd, 0, sizeof bd);
-    if (!key || !key[0]) return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "Select a mod to rebuild.");
-    if (mu_busy(cause, sizeof cause)) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
-    if (entry < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "That mod is no longer installed."); }
-    {
-        char *n = mu_folder_name(&m.list.items[entry]);
-        strncpy_s(name, sizeof name, n ? n : mu_leaf(m.list.items[entry].folder), _TRUNCATE);
-        free(n);
-    }
-    if (m.list.items[entry].place[0]) {
-        char title[400];
-        mu_place_title(&m.list.items[entry], title, sizeof title);
-        mu_model_free(&m);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s and is kept exactly as that map needs it, so it is "
-                    "not rebuilt.", name, title);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    strncpy_s(folder, sizeof folder, m.list.items[entry].folder, _TRUNCATE);
-    if (m.list.items[entry].loaded) strncpy_s(before, sizeof before, m.list.items[entry].bundle.hash, _TRUNCATE);
-    cause[0] = plain[0] = 0;
-    /* A new folder gets its salt first (its references follow), as the scan does. */
-    if (sh_ms_assign_salt(folder, mu_leaf(folder), salt, cause, sizeof cause) < 0) {
-        mu_model_free(&m);
-        mu_log("rebuild %s: refused: %s", key, cause);
-        mu_plain_cause(NULL, NULL, cause, plain, sizeof plain);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not rebuilt. %s", name, plain);
-        InterlockedIncrement(&g_gen);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    r.installed = sh_ms_request_exists;
-    r.installed_context = &m.list;
-    r.stock = mu_stock_exists;
-    r.stock_context = &stock;
-    mu_log("rebuild %s: building", key);
-    ok = built = sh_mb_build(folder, NULL, &r, &bd);
-    if (!ok) strncpy_s(cause, sizeof cause, bd.first_cause[0] ? bd.first_cause : "the mod could not be built", _TRUNCATE);
-    modstore_lock();
-    if (ok) {
-        ok = sh_mb_write(&bd, folder, cause, sizeof cause);
-        if (ok) sh_ms_note_build(folder, &bd);
-    } else if (sh_salt_valid(bd.id, strlen(bd.id))) {
-        /* A refused build is the folder's state (ONE-SHAPE rule 2): its block
-         * records the cause and the folder serves nothing until fixed. */
-        char why[SH_MB_CAUSE_MAX];
-        if (!sh_mb_write_failed(&bd, folder, why, sizeof why)) mu_log("rebuild %s: the cause could not be written: %s", key, why);
-    }
-    modstore_unlock();
-    if (!ok) sh_ms_note_build_failure(folder, cause);
-    mu_model_free(&m);
-    note[0] = 0;
-    if (!ok) {
-        mu_log("rebuild %s: refused: %s", key, cause);
-        mu_plain_cause(NULL, NULL, cause, plain, sizeof plain);
-        mu_rescan(note, sizeof note);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not rebuilt. %s", name, plain);
-    } else {
-        int same = !strcmp(before, bd.hash);
-        mu_log("rebuild %s: %s, build %s%s", key, bd.id, bd.hash, same ? " (unchanged)" : "");
-        if (bd.warnings) mu_log("rebuild %s: %u warning(s), first: %s", key, bd.warnings, bd.first_warning);
-        mu_rescan(note, sizeof note);
-        if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed.", name);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s; the game uses the new files now.", name);
-    }
-    InterlockedIncrement(&g_gen);
-    {
-        mu_buf b;
-        memset(&b, 0, sizeof b);
-        mu_result_head(&b, SH_MODS_ACT_REBUILD, ok, msg);
-        mu_kstr(&b, "key", key, 0);
-        mu_kstr(&b, "cause", ok ? "" : plain, 0);
-        mu_knum(&b, "warnings", ok ? bd.warnings : 0, 0);
-        mu_kstr(&b, "index", note, 0);
-        sh_mb_free(&bd);
-        (void)built;
-        return mu_result_tail(&b);
-    }
 }
 
 /* ---- the Files view (read-only) and New mod */
@@ -4098,7 +4152,7 @@ static const char *mu_file_cause(const char *cause, const char *path)
 }
 
 /* The mod's standing cause: why the folder serves nothing (a failed build
- * included: rule 2, no last good build), or "". Raw: the Files view matches
+ * included: there is no last good build), or "". Raw: the Files view matches
  * it against file paths before saying it plainly. */
 static const char *mu_entry_cause(const sh_ms_entry *e)
 {
@@ -4161,14 +4215,14 @@ static int mu_files(const char *key)
     const char *cause;
     char plain[SH_MB_CAUSE_MAX + 200];
     if (!key || !key[0]) return mu_simple_result(action, 0, "Select a mod to see its files.");
-    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "The mods folder cannot be read.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "Snapmap+ cannot read your mods folder. Check that it exists and is not locked, then press Refresh.");
     e = mu_entry_named(&l, key);
     if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
     memset(&d, 0, sizeof d);
     mu_walk(e->folder, "", &d, 0);
     seen = (unsigned char *)calloc(e->loaded && e->bundle.file_count ? e->bundle.file_count : 1, 1);
     cause = mu_entry_cause(e);
-    mu_plain_cause(NULL, e, cause, plain, sizeof plain);
+    mu_plain_cause(e, cause, plain, sizeof plain);
     memset(&b, 0, sizeof b);
     mu_result_head(&b, action, 1, "");
     mu_kstr(&b, "key", e->name, 0);
@@ -4254,7 +4308,7 @@ static int mu_file_text(const char *arg)
     strcpy_s(rel, sizeof rel, tab + 1);
     if (!mu_rel_ok(rel)) return mu_simple_result(action, 0, "That file is not inside the mod's folder.");
     if (!mu_text_kind(rel)) return mu_simple_result(action, 0, "This file is binary; it has no text to show.");
-    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "The mods folder cannot be read.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "Snapmap+ cannot read your mods folder. Check that it exists and is not locked, then press Refresh.");
     e = mu_entry_named(&l, key);
     if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
     _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", e->folder, rel);
@@ -4304,13 +4358,185 @@ static int mu_file_text(const char *arg)
     mu_kbool(&b, "productBlock", author && had_block, 0);
     {
         char plain[SH_MB_CAUSE_MAX + 200] = "";
-        if (mu_file_cause(mu_entry_cause(e), rel)[0]) mu_plain_cause(NULL, e, mu_entry_cause(e), plain, sizeof plain);
+        if (mu_file_cause(mu_entry_cause(e), rel)[0]) mu_plain_cause(e, mu_entry_cause(e), plain, sizeof plain);
         mu_kstr(&b, "cause", plain, 0);
     }
     free(author);
     free(text);
     sh_ms_list_free(&l);
     return mu_result_tail(&b);
+}
+
+/* ---- Add to my mods */
+
+/* Copy the tree `from` into `to` (wide long paths), real files only (links
+ * are not followed). 1 when every file was copied. */
+static int mu_copy_tree(const wchar_t *from, const wchar_t *to, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t nf = wcslen(from), nt = wcslen(to);
+    wchar_t *pattern;
+    int ok = 1;
+    if (depth > 32 || (!CreateDirectoryW(to, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)) return 0;
+    pattern = (wchar_t *)malloc((nf + 3) * sizeof *pattern);
+    if (!pattern) return 0;
+    _snwprintf_s(pattern, nf + 3, _TRUNCATE, L"%ls\\*", from);
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    do {
+        size_t nl = wcslen(fd.cFileName);
+        wchar_t *a, *b;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        a = (wchar_t *)malloc((nf + nl + 2) * sizeof *a);
+        b = (wchar_t *)malloc((nt + nl + 2) * sizeof *b);
+        if (a && b) {
+            _snwprintf_s(a, nf + nl + 2, _TRUNCATE, L"%ls\\%ls", from, fd.cFileName);
+            _snwprintf_s(b, nt + nl + 2, _TRUNCATE, L"%ls\\%ls", to, fd.cFileName);
+            ok = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? mu_copy_tree(a, b, depth + 1) : sh_ms_copy_file(a, b);
+        } else ok = 0;
+        free(a);
+        free(b);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* Remove a tree this file made (wide long path), links removed and never followed. */
+static void mu_remove_tree(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    size_t n = wcslen(dir);
+    wchar_t *pattern = (wchar_t *)malloc((n + 3) * sizeof *pattern);
+    if (!pattern) return;
+    _snwprintf_s(pattern, n + 3, _TRUNCATE, L"%ls\\*", dir);
+    h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            size_t nl = wcslen(fd.cFileName);
+            wchar_t *p;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            p = (wchar_t *)malloc((n + nl + 2) * sizeof *p);
+            if (!p) continue;
+            _snwprintf_s(p, n + nl + 2, _TRUNCATE, L"%ls\\%ls", dir, fd.cFileName);
+            SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                mu_remove_tree(p);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(p);
+            else DeleteFileW(p);
+            free(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* For integration (modui.h): the store's install of a folder of the store
+ * (a mod a map brought) at the root, until the store side provides it. The
+ * folder is copied outside the store first, so the install takes it as a mod
+ * from elsewhere: every file it holds is copied to mods\<its name> and built
+ * under its own salt (nothing is dropped). */
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap)
+{
+    wchar_t tmp[MAX_PATH + 1];
+    char *tmpu, work[MAX_PATH * 4 + 64], copy[MAX_PATH * 4 + 320];
+    wchar_t *src = NULL, *wwork = NULL, *wcopy = NULL;
+    int ok = 0;
+    if (cause && cause_cap) cause[0] = 0;
+    if (!GetTempPathW(MAX_PATH, tmp) || (tmpu = sh_mb_utf8(tmp)) == NULL) {
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be found", _TRUNCATE);
+        return 0;
+    }
+    _snprintf_s(work, sizeof work, _TRUNCATE, "%ssnapmap-plus-add-%lu-%llu", tmpu, GetCurrentProcessId(), GetTickCount64());
+    free(tmpu);
+    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\%s", work, mu_leaf(folder));
+    src = sh_mb_wpath(folder);
+    wwork = sh_mb_wpath(work);
+    wcopy = sh_mb_wpath(copy);
+    if (!src || !wwork || !wcopy) strncpy_s(cause, cause_cap, "out of memory", _TRUNCATE);
+    else if (!CreateDirectoryW(wwork, NULL) || !mu_copy_tree(src, wcopy, 0))
+        _snprintf_s(cause, cause_cap, _TRUNCATE, "its files could not be copied (error %lu); close any program using them",
+                    GetLastError());
+    else ok = sh_ms_install_from_folder(copy, resolver, name_out, name_cap, stats, bundle_out, cause, cause_cap);
+    if (wwork) mu_remove_tree(wwork);
+    free(src);
+    free(wwork);
+    free(wcopy);
+    return ok;
+}
+
+/* addToMine (arg: a folder of a downloaded map's mods): copy it to the root
+ * of mods\ as one of the player's own mods, which their own maps can then use
+ * A salt the root already holds is that folder. */
+static int mu_add_mine(const char *key)
+{
+    const int action = SH_MODS_ACT_ADD_MINE;
+    sh_ms_list l;
+    const sh_ms_entry *e, *own;
+    char name[300], folder[MAX_PATH * 4], ownname[SH_MS_NAME_MAX + 1] = "", made[SH_MS_NAME_MAX + 1] = "",
+         cause[SH_MB_CAUSE_MAX] = "", msg[SH_MB_CAUSE_MAX + 900];
+    int place, usable, ok;
+    mu_buf x;
+    memset(&x, 0, sizeof x);
+    if (!key || !key[0]) return mu_simple_result(action, 0, "Select a mod first.");
+    if (!sh_ms_enumerate(&l)) return mu_simple_result(action, 0, "Snapmap+ cannot read your mods folder; press Refresh.");
+    e = mu_entry_named(&l, key);
+    if (!e || !e->folder) { sh_ms_list_free(&l); return mu_simple_result(action, 0, "That mod is no longer installed."); }
+    {
+        char *n = mu_folder_name(e);
+        strncpy_s(name, sizeof name, n ? n : mu_leaf(e->folder), _TRUNCATE);
+        free(n);
+    }
+    strncpy_s(folder, sizeof folder, e->folder, _TRUNCATE);
+    place = e->place[0] != 0;
+    usable = e->loaded && sh_ms_entry_usable(e);
+    own = e->salt[0] ? sh_ms_find_salt(&l, e->salt, NULL, NULL) : NULL;
+    if (own) strncpy_s(ownname, sizeof ownname, own->name, _TRUNCATE);
+    sh_ms_list_free(&l);
+    if (!place) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already one of your mods.", name);
+        mu_kstr(&x, "key", key, 0);
+        return mu_file_result(action, 1, msg, &x, 0);
+    }
+    if (ownname[0]) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already one of your mods, in mods\\%s.", name, ownname);
+        mu_kstr(&x, "key", ownname, 0);
+        return mu_file_result(action, 1, msg, &x, 0);
+    }
+    if (!usable) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s cannot be added to your mods while it cannot be used; press Refresh.", name);
+        return mu_simple_result(action, 0, msg);
+    }
+    {
+        sh_mb_resolver r;
+        sh_ms_install_stats st;
+        sh_mb_bundle bd;
+        mu_stock stock = { 0 };
+        memset(&st, 0, sizeof st);
+        memset(&bd, 0, sizeof bd);
+        r.installed = NULL;
+        r.installed_context = NULL;
+        r.stock = mu_stock_exists;
+        r.stock_context = &stock;
+        mu_log("add to my mods %s: copying to the root", key);
+        ok = sh_ms_install_to_root(folder, &r, made, sizeof made, &st, &bd, cause, sizeof cause);
+        sh_mb_free(&bd);
+    }
+    if (ok) {
+        mu_log("add to my mods %s: now mods\\%s", key, made);
+        mu_sync();
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Added %s to your mods, in mods\\%s; your own maps can use it now.", name, made);
+    } else {
+        mu_log("add to my mods %s: refused: %s", key, cause);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not added to your mods: %s.", name, cause[0] ? cause : "it could not be copied");
+    }
+    mu_kstr(&x, "key", ok ? made : "", 0);
+    return mu_file_result(action, ok, msg, &x, ok);
 }
 
 /* newMod: a mod folder named after the mod with a working example (an
@@ -4321,25 +4547,21 @@ static int mu_new_mod(const char *name)
 {
     const int action = SH_MODS_ACT_NEW_MOD;
     char salt[SH_MB_ID_MAX + 1], folder[MAX_PATH * 4], example[MAX_PATH], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200],
-         msg[SH_MB_CAUSE_MAX + 600], note[160], key[SH_MS_NAME_MAX + 1] = "";
+         msg[SH_MB_CAUSE_MAX + 600], key[SH_MS_NAME_MAX + 1] = "";
     sh_ms_list l;
     const sh_ms_entry *e = NULL;
     int ok;
     size_t i;
-    mu_buf b;
-    if (mu_busy(cause, sizeof cause)) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
-        return mu_simple_result(action, 0, msg);
-    }
+    mu_buf x;
+    memset(&x, 0, sizeof x);
     if (!sh_ms_new_mod_example(name, salt, folder, sizeof folder, example, sizeof example, cause, sizeof cause)) {
         mu_log("new mod: refused: %s", cause);
-        mu_plain(NULL, NULL, cause, plain, sizeof plain);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No mod was created: %s", plain);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "No mod was created: %s", cause);
         mu_sentence_end(msg, sizeof msg);
         return mu_simple_result(action, 0, msg);
     }
     mu_log("new mod: %s (salt %s) with its example %s", folder, salt, example);
-    mu_rescan(note, sizeof note);
+    mu_sync();
     ok = sh_ms_enumerate(&l);
     for (i = 0; ok && i < l.count && !e; i++)
         if (l.items[i].folder && !_stricmp(l.items[i].folder, folder)) e = &l.items[i];
@@ -4350,17 +4572,13 @@ static int mu_new_mod(const char *name)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s. Its Example crate is in the Toybox. After you change "
                     "its files, press Refresh to see the change.", name, key);
     else {
-        mu_plain_cause(NULL, e, e ? e->cause : "not built yet", plain, sizeof plain);
+        mu_plain_cause(e, e ? e->cause : "not built yet", plain, sizeof plain);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s, but it cannot be used yet. %s", name, key, plain);
     }
-    InterlockedIncrement(&g_gen);
-    memset(&b, 0, sizeof b);
-    mu_result_head(&b, action, 1, msg);
-    mu_kstr(&b, "key", key, 0);
-    mu_kstr(&b, "file", example, 0);
-    mu_kstr(&b, "index", note, 0);
+    mu_kstr(&x, "key", key, 0);
+    mu_kstr(&x, "file", example, 0);
     if (ok) sh_ms_list_free(&l);
-    return mu_result_tail(&b);
+    return mu_file_result(action, 1, msg, &x, 1);
 }
 
 /* ---- the console verbs */
@@ -4487,12 +4705,6 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     return 1;
 }
 
-int sh_modui_wait(unsigned ms)
-{
-    (void)ms;
-    return 1;
-}
-
 /* ------------------------------------------------------------------ the doctor */
 
 static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
@@ -4507,9 +4719,7 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
     if (e->loaded) {
         size_t k;
         for (k = 0; k < e->bundle.warning_list_count; k++) {
-            char plain[SH_MB_CAUSE_MAX + 200];
-            mu_plain(m, e->salt, e->bundle.warning_list[k], plain, sizeof plain);
-            mu_say(o, "mod mods\\%s: warning %zu of %u: %s", e->name, k + 1, e->bundle.warnings, plain);
+            mu_say(o, "mod mods\\%s: warning %zu of %u: %s", e->name, k + 1, e->bundle.warnings, e->bundle.warning_list[k]);
         }
     }
     if (u->same_as >= 0)
@@ -4567,7 +4777,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
         unsigned passed = 0, failed = 0;
         char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
         mu_say(&o, "verify: checking every mod's files");
-        if (!mu_verify_core("", &o, &sum, &passed, &failed, first, sizeof first)) mu_say(&o, "verify: the mods folder cannot be read");
+        if (!mu_verify_all(&o, &sum, &passed, &failed, first, sizeof first)) mu_say(&o, "verify: the mods folder cannot be read");
         else {
             mu_verify_message(passed, failed, first, msg, sizeof msg);
             mu_say(&o, "verify: %s (%u file(s), %u MiB)", msg, sum.files, sum.bytes_mb);
@@ -4583,7 +4793,8 @@ int sh_modui_run(int action, const char *arg)
 {
     const sh_modui_engine *e = mu_engine();
     char note[160];
-    if (!mu_on_main()) return -1;
+    /* Off the main thread only the file actions run, and only their file part. */
+    if (!mu_on_main() && !mu_file_action(action)) return -1;
     /* Reading a mod's files needs no engine hook; every other action does. */
     if (action != SH_MODS_ACT_FILES && action != SH_MODS_ACT_FILE_TEXT &&
         sh_feature_refusal(SH_FEATURE_MODS, note, sizeof note))
@@ -4591,26 +4802,16 @@ int sh_modui_run(int action, const char *arg)
     switch (action) {
     case SH_MODS_ACT_INSTALL:
         return mu_install(arg);
-    case SH_MODS_ACT_VERIFY:
-        return mu_verify(arg);
     case SH_MODS_ACT_RESCAN: {
-        int n;
-        char msg[520];
-        sh_modserve_refresh rf;
-        mu_buf b;
-        note[0] = 0;
-        n = mu_rescan_refresh(note, sizeof note, &rf);
-        mu_log("rescan: %s", note);
-        if (n >= 0 && rf.state > 0)
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder read again: %s. In the game: %s.", note, rf.note);
-        else if (n >= 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder read again: %s.", note);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s.", note);
-        if (n < 0 || rf.state < 0) return mu_simple_result(action, n >= 0, msg);
-        memset(&b, 0, sizeof b);
-        mu_result_head(&b, action, 1, msg);
-        mu_put_refresh(&b, &rf);
-        return mu_result_tail(&b);
+        /* Refresh: every changed folder built again, then the game's part.
+         * Its message is only the sentence a change still needs. */
+        mu_buf x;
+        memset(&x, 0, sizeof x);
+        mu_sync();
+        return mu_file_result(action, 1, "", &x, 1);
     }
+    case SH_MODS_ACT_APPLY:
+        return mu_apply_owed();
     case SH_MODS_ACT_PALETTE: {
         int r;
         if (!e->palette_rebuild) return mu_simple_result(action, 0, "The editor palette cannot be rebuilt from here.");
@@ -4621,24 +4822,17 @@ int sh_modui_run(int action, const char *arg)
             ? "Editor palette rebuilt; new mod rows are in the editor."
             : "Palette not rebuilt: open a map in the editor and release any held entity or wire, then try again.");
     }
-    case SH_MODS_ACT_REBUILD:
-        return mu_rebuild(arg);
     case SH_MODS_ACT_UNINSTALL:
     case SH_MODS_ACT_UNINSTALL_PREVIEW:
     case SH_MODS_ACT_MAP_REMOVE:
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW:
         return mu_map_action(action, arg, NULL, 0);
-    case SH_MODS_ACT_REMOVED_EMPTY:
-    case SH_MODS_ACT_REMOVED_RESTORE:
-    case SH_MODS_ACT_REMOVE:
-        /* The product's own bin is retired: Uninstall moves the folder to the Windows Recycle Bin. */
-        return mu_simple_result(action, 0, "Uninstalled mods go to the Windows Recycle Bin; use Uninstall.");
     case SH_MODS_ACT_MAP_ADD:
         return mu_map_add(arg, NULL);
     case SH_MODS_ACT_CHOOSE: {
         char slot[SH_MR_SLOT_MAX] = "";
         const char *tab = arg ? strchr(arg, '\t') : NULL;
-        if (!tab || (size_t)(tab - arg) >= sizeof slot) return mu_simple_result(action, 0, "Choose a slot and a mod.");
+        if (!tab || (size_t)(tab - arg) >= sizeof slot) return mu_simple_result(action, 0, "Choose which mod's value this map uses.");
         memcpy(slot, arg, (size_t)(tab - arg));
         slot[tab - arg] = 0;
         return mu_choose(slot, tab + 1, NULL);
@@ -4649,6 +4843,8 @@ int sh_modui_run(int action, const char *arg)
         return mu_file_text(arg);
     case SH_MODS_ACT_NEW_MOD:
         return mu_new_mod(arg);
+    case SH_MODS_ACT_ADD_MINE:
+        return mu_add_mine(arg);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
@@ -4675,9 +4871,6 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
         return n >= 0;
     case SH_MODS_FETCH:
         return sh_modui_fetch(call->out, call->out_cap, &call->needed, &call->generation);
-    case SH_MODS_WAIT:
-        call->needed = 0;
-        return sh_modui_wait(call->out_cap > 0 ? (unsigned)call->out_cap : 0);
     case SH_MODS_STORE: {
         unsigned gen = 0;
         call->needed = modstore_lock_busy(&gen) ? 1 : 0;

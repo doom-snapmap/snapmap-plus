@@ -340,12 +340,13 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *          receives the view. Returns the row count, -1 failed (the file is
  *          left as the engine wrote it).
  *   MODS_STATUS   any thread. text: a view. out receives
- *          {"count":N,"missing":M,"mods":[{"id","version","bundle","size",
- *          "installed"}...]}. Returns M, -1 unreadable.
+ *          {"count":N,"missing":M,"mods":[{"id","salt","build","size",
+ *          "installed","state","cause"}...]} ("id" is the name the mod was
+ *          recorded with). Returns M, -1 unreadable.
  *   MODS_RESOLVE  not the game thread (it runs there and waits). text: the
  *          prefab file; meta_path: its sidecar; name: its name. Returns 1
  *          place now (every mod installed and in the open map), 2 held while
- *          the mod store is asked (poll MODS_POLL with seq), -6 a module the
+ *          the download is asked for (poll MODS_POLL with seq), -6 a module the
  *          player cannot get (DLC), -7 refused, 0 the game did not answer;
  *          out receives the message for -6, -7 and 2. The caller strips the
  *          block before the engine sees the text.
@@ -439,25 +440,23 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 /* Mods tab (backend/modui.c). Text crosses as UTF-8 JSON through one buffer the
  * backend keeps: LIST and RUN fill it, FETCH copies it.
  *   LIST   main thread (call inside run_on_main). Builds the tab's document:
- *          installed mods (one row per mod), whether the retired overrides
- *          folder still holds entries to migrate, and the open map's manifest
+ *          the mod folders (one row per folder) and the open map's manifest
  *          rows and placed-name closure. Returns 1, or 0 when refused (off the
  *          main thread, no memory). needed is set.
- *   RUN    main thread. Runs `action` with `arg` (INSTALL: absolute folder;
- *          VERIFY: id@version+build, "" for every build; PRUNE_APPLY:
- *          newline-separated keys; REMOVE: the key of a listed mod; MIGRATE
- *          starts the migration's worker thread; REBUILD, UNINSTALL and the
- *          map actions: a mod's key, see modui.h) and keeps its result
- *          document. Returns 1
- *          when the action ran (the document's "ok" says whether it
- *          succeeded), 0 when refused before it ran.
+ *   RUN    main thread, except INSTALL, NEW_MOD, RESCAN and ADD_MINE, which may run on
+ *          any thread: their file work (copies, salts, builds) runs there with
+ *          no time limit, and off the main thread their result says
+ *          "apply": true, asking for APPLY on the main thread, which brings the
+ *          change into the game and answers the finished result. Runs `action`
+ *          with `arg` (INSTALL: absolute folders; UNINSTALL and the map
+ *          actions: a mod's folder under mods\, see modui.h) and keeps its
+ *          result document. Returns 1 when the action ran (the document's "ok"
+ *          says whether it succeeded), 0 when refused before it ran.
  *   FETCH  any thread. Copies the buffer: 1 copied, -1 a size query (out NULL
  *          or out_cap not above needed; needed set, out untouched), 0 nothing
  *          built yet.
  *   ROOT   any thread. Copies the store folder as UTF-8: 1, -1 too small, 0
  *          unresolved.
- *   WAIT   any thread. Waits up to out_cap milliseconds (out unused) for a
- *          migration MIGRATE started to finish: 1 idle, 0 still running.
  *   STORE  any thread. 1 with needed = 1 while a store write holds the store
  *          lock (else 0) and generation = the store lock's released holds
  *          (not the document generation). An older backend answers 0.
@@ -467,31 +466,22 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_RUN   2
 #define SH_MODS_FETCH 3
 #define SH_MODS_ROOT  4
-#define SH_MODS_WAIT  5
 #define SH_MODS_STORE 6
-#define SH_MODS_ACT_INSTALL     1
-#define SH_MODS_ACT_VERIFY      2
-#define SH_MODS_ACT_RESCAN      3
+/* Op 5 and actions 2, 5 to 9, 14, 15, 17 and 19 are retired; the slot answers them "Unknown action.". */
+#define SH_MODS_ACT_INSTALL     1    /* arg: absolute folders, newline-separated: install them (any thread) */
+#define SH_MODS_ACT_RESCAN      3    /* Refresh: build every changed folder, then bring the changes into the game (any thread) */
 #define SH_MODS_ACT_PALETTE     4
-#define SH_MODS_ACT_PRUNE_LIST  5
-#define SH_MODS_ACT_PRUNE_APPLY 6
-#define SH_MODS_ACT_REMOVE      7
-#define SH_MODS_ACT_MIGRATE     8
-#define SH_MODS_ACT_REBUILD             9    /* arg: a mod's key: build its folder again, then rescan */
-#define SH_MODS_ACT_UNINSTALL          10    /* arg: key: clean the open map of it, clear its undo history, delete the folder */
-#define SH_MODS_ACT_UNINSTALL_PREVIEW  11    /* arg: key: what UNINSTALL would do; changes nothing */
-#define SH_MODS_ACT_MAP_REMOVE         12    /* arg: key (or the id of a row not installed): remove it from the open map */
+#define SH_MODS_ACT_UNINSTALL          10    /* arg: a folder: clean the open map of it, clear its undo history, delete the folder */
+#define SH_MODS_ACT_UNINSTALL_PREVIEW  11    /* arg: a folder: what UNINSTALL would do; changes nothing */
+#define SH_MODS_ACT_MAP_REMOVE         12    /* arg: a folder (or the salt of a row not installed): remove it from the open map */
 #define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13    /* arg: as MAP_REMOVE: what it would do; changes nothing */
-#define SH_MODS_ACT_REMOVED_EMPTY      14    /* retired with the recycle bin: answers a refusal */
-#define SH_MODS_ACT_REMOVED_RESTORE    15    /* retired with the recycle bin: answers a refusal */
-#define SH_MODS_ACT_MAP_ADD            16    /* arg: key (or an installed id): attach the mod to the open map (a map-level row) */
-/* 17 is retired (the mods folder watcher's rescan: the store is scanned at boot, on Refresh, and
-   after an install, a download or New mod). */
-#define SH_MODS_ACT_CHOOSE             18    /* arg: "<slot>\t<key>": the open map's registry choice (an empty key clears) */
-/* 19 is retired (the map upgrade action: an own map follows its folder at load and save). */
-#define SH_MODS_ACT_FILES              20    /* arg: key: the mod folder's files (read-only; no fresh list follows) */
-#define SH_MODS_ACT_FILE_TEXT          21    /* arg: "<key>\t<path below the folder>": one text file (read-only; no list) */
-#define SH_MODS_ACT_NEW_MOD            22    /* arg: a display name: a new mod folder with a working example, then the rescan */
+#define SH_MODS_ACT_MAP_ADD            16    /* arg: a folder: attach the mod to the open map (a map-level row) */
+#define SH_MODS_ACT_CHOOSE             18    /* arg: "<slot>\t<salt>": the open map's registry choice (an empty salt clears) */
+#define SH_MODS_ACT_FILES              20    /* arg: a folder: its files (read-only; no fresh list follows) */
+#define SH_MODS_ACT_FILE_TEXT          21    /* arg: "<folder>\t<path below the folder>": one text file (read-only; no list) */
+#define SH_MODS_ACT_NEW_MOD            22    /* arg: a display name: a new mod folder with a working example, then the rescan (any thread) */
+#define SH_MODS_ACT_APPLY              23    /* main thread: finish the file action that ran off it (its "apply": true) */
+#define SH_MODS_ACT_ADD_MINE           24    /* arg: a downloaded map's mod folder: copy it to the root as one of your mods (any thread) */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

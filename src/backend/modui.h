@@ -14,8 +14,8 @@
  *             from the game, its console settings, the builder's warnings in
  *             plain words, and the informational same-files hint (another of
  *             the player's mods carries at least half of its files). "salt"
- *             is the mod's identity for the page's Copy mod id and the Files
- *             view; no sentence names a salt, a hash or a build number.
+ *             is the mod's identity for the Files view; no sentence names a
+ *             salt, a hash or a build number.
  *   map       the manifest rows the last map load carried (modmanifest's
  *             current record), each with its state under the asset rule
  *             (modserve.h sh_modserve_row_served: active, incomplete,
@@ -26,20 +26,23 @@
  *             record's links and claims), the search tag, and one entry per
  *             mod it uses with the entities that use it and the wires and
  *             Timelines pointing at them (modmap.h)
- * The actions are install a folder, rebuild one, uninstall one (the open map
- * cleaned of it first), attach a mod to the open map (a map-level row,
- * modmanifest.h) and remove a mod from it, their dry runs, the registry
- * choice, rescan (the tab's Refresh: there is no folder watcher, so Refresh
- * is how edits are picked up), New mod, the read-only Files view, and the
- * console's verify and palette rebuild. What the tab does not show (every
- * folder's state, conflicts with their winners, the game files mods replace,
- * verification) is printed by sh_modui_doctor, the `sh_mods doctor` verb.
+ * The actions are install, uninstall one folder (the open map cleaned of it
+ * first), attach a mod to the open map (a map-level row, modmanifest.h) and
+ * remove a mod from it, their dry runs, the registry choice, Refresh (the one
+ * rescan: there is no folder watcher, so Refresh builds every changed folder
+ * and brings the change into the game), New mod, the read-only Files view,
+ * and the palette rebuild. What the tab does not show (every folder's state,
+ * conflicts with their winners, the game files mods replace, verification)
+ * is printed by sh_modui_doctor, the `sh_mods doctor` verb.
  *
  * Threads: every operation except FETCH and ROOT runs on DOOM's main thread
- * (the frontend calls the slot inside run_on_main), serialized with the
- * sh_mods console command and the map-load conversion that also use the store.
- * The document and the action result are kept in one buffer that FETCH copies
- * on any thread.
+ * (the frontend calls the slot inside run_on_main), except the file part of
+ * Install, New mod and Refresh: the window runs those on its own worker, so a
+ * build never holds the game, and then asks for SH_MODS_ACT_APPLY on the main
+ * thread. The store lock serializes their file work with the sh_mods console
+ * command and the map-load conversion that also use the store. The document
+ * and the action result are kept in one buffer that FETCH copies on any
+ * thread.
  *
  * File work only, apart from the bound engine operations below. */
 #ifndef SNAPMAP_PLUS_MODUI_H
@@ -100,10 +103,6 @@ typedef struct sh_modui_engine {
     /* 1 with the cause when the game cannot take a change now (Play is
      * running, a map is loading), else 0. */
     int (*busy)(char *cause, size_t cap);
-    /* 1 when the open editor map holds the entity with this uniqueId. Main
-     * thread. Bound by iface_engine.c; nothing reads it since the undo watch
-     * was retired with the recycle bin. */
-    int (*entity_valid)(int uid);
     /* The editor toast with a title and literal text; nothing outside the editor. */
     void (*toast)(const char *title, const char *text);
     /* One line in the game console (no newline). */
@@ -165,24 +164,30 @@ int  sh_modui_list(void);
 /* Run one action (SH_MODS_ACT_*) and keep its result document
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
  * INSTALL (absolute; several separated by newlines), a row's key (its folder
- * name under mods\) for REBUILD, UNINSTALL and the map actions, and "" or a
- * key for VERIFY (the console's check). UNINSTALL, in order: the open map's
+ * name under mods\) for UNINSTALL and the map actions. INSTALL, NEW_MOD and
+ * RESCAN may be called off the main thread: their file work runs there and
+ * their result carries "apply": true until SH_MODS_ACT_APPLY, on the main
+ * thread, brings the change into the game and answers the finished result
+ * (its message ends with the one sentence a change still needs: a restart,
+ * the next map open, or the return to the editor). UNINSTALL, in
+ * order: the open map's
  * entities of the mod through the native delete (refused, with nothing
  * deleted, while Play runs, a map loads or the editor is busy), the open
  * map's undo and redo history cleared to the current state (after the
  * delete's own commit, on the tick), the folder moved to the Windows Recycle
  * Bin (sh_ms_delete_mod_folder; deleted outright, and the result says so,
  * when the bin cannot take it), the rescan. The product never brings a
- * folder back; the player can restore one from the bin by hand. The retired
- * actions (MIGRATE, PRUNE_*, REMOVE, REMOVED_*) answer a refusal. Returns the
+ * folder back; the player can restore one from the bin by hand. An action
+ * number the slot does not know answers "Unknown action.". Returns the
  * result length, or -1 when refused before the action ran.
  *
  * MAP_ADD (arg: a key) attaches that mod to the open map: the current
  * manifest gets a map-level row for the mod's build, the map scope is
  * recomputed and applied at once, and the next save writes the row (so the
  * map publishes, downloads and lists the mod); MAP_REMOVE drops the row
- * again, deleting nothing when no entity uses the mod. A mod a downloaded map
- * brought (a place folder) serves only that map and is not attached.
+ * again, deleting nothing when no entity uses the mod. A folder a downloaded
+ * map or a prefab brought names its mod: the root folder of its salt is
+ * attached, and without one the answer sends the player to Add to my mods.
  *
  * Map scope: binding also registers the manifest's scope hook, its row
  * resolver and the serving layer's scope source. At every load the listing is
@@ -250,8 +255,8 @@ int  sh_modui_poll_main(void *context);
  * (sh_modserve_scope_set_place): `place` the launched map's place
  * ("maps\<segment>", NULL for none) and `own` 1 for the player's own map (a
  * My Maps play, a map this machine published), whose rows follow the root
- * folders. When the editor leaves its map, or a launched Play is over, the
- * context returns to no place, own. */
+ * folders. Nothing in this file resets the place: where a map finds its mods
+ * is a fact of that map, set from its record at every load. */
 int  sh_modui_scope_launch(const char *why);
 int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
 
@@ -262,10 +267,6 @@ int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
  * is closed and nothing is declared. The serving mode returns to EDITOR.
  * Main thread. Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch_refused(const char *why);
-
-/* The slot's WAIT: nothing of the tab runs in the background (no migration,
- * no folder watcher), so it answers 1 (idle) at once. Any thread. */
-int  sh_modui_wait(unsigned ms);
 
 
 /* `sh_mods doctor [verify]`: every mod folder with its state and its plain
@@ -289,6 +290,45 @@ void sh_modui_note_changed(void);
 
 /* The interface slot body (see snapmap_plus_iface.h, `mods`). */
 int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
+
+/* ---- For integration: what this file needs from the store and serving side.
+ * Each is declared here with the exact signature the window calls; where a
+ * thin implementation lives in modui.c until the owning side provides it, the
+ * owner's definition replaces it at integration. */
+struct sh_mb_resolver;
+struct sh_mb_bundle;
+struct sh_ms_install_stats;
+
+/* Install a folder of the store (a mod a downloaded map or an imported ZIP
+ * brought, mods\maps\<map>\<mod>) at the root of mods\ as one of the player's
+ * own mods, as sh_ms_install_from_folder installs a folder from elsewhere:
+ * every file it holds copied to mods\<its name> (" (2)" when taken) under its
+ * own salt, built, the source untouched. Returns 1 with the folder name under
+ * mods\, else 0 with the plain cause. Any thread; takes the store lock. Add
+ * to my mods calls it; placing a prefab installs its mods at the root by
+ * the same step. Thin implementation: modui.c (copies the folder outside the
+ * store, then installs that copy). */
+int sh_ms_install_to_root(const char *folder, const struct sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          struct sh_ms_install_stats *stats, struct sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+
+/* How many of the player's saved maps record `place` ("maps\<segment>") as
+ * where they find their mods (the saved map's record), or -1 when it cannot be
+ * told. The Mods tab's short view of a downloaded map's mods says whether the
+ * start-up cleanup keeps them. Serving or store side; no implementation here:
+ * until it lands the short view states the cleanup rule without a count. */
+int sh_ms_place_saved_maps(const char *place);
+
+/* The start-up cleanup: every place under mods\maps\ that no
+ * saved map of the player records and whose map was not played for `days`
+ * days is removed (playing the map again downloads it again). Returns how
+ * many places went, -1 when the store cannot be read. Store side, called at
+ * boot; the window only describes it. */
+int sh_ms_places_prune(unsigned days);
+
+/* The published-map gate sets the launched map's place through
+ * sh_modui_scope_launch_at today. Once the place is a fact of the map, set
+ * from its record at every load, the gate sets it and calls
+ * sh_modui_scope_launch, and sh_modui_scope_launch_at goes. */
 
 #ifdef SH_MODUI_TESTING
 /* The hub launch state machine (modui.c): "none", "launched", "loading",

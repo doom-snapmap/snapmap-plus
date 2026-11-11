@@ -1404,7 +1404,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
 }
 /* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
  * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
- * g_load_result is 3 (held while the mod store is asked, followed by ui_poll_prefab_mods),
+ * g_load_result is 3 (held while the download is asked for, followed by ui_poll_prefab_mods),
  * -6 (a module the player cannot get) or -7 (refused), with the message in g_load_message.
  * The rows are the file's block's, else (a prefab saved before the block) its sidecar's; a
  * prefab naming none goes on as before, and the backend answers that without the game. */
@@ -1428,7 +1428,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
                 call.seq, msg);
     ui_log(l);
     if (r == 1) return true;                       /* every mod installed and in the open map */
-    if (r == 2 && call.seq > 0) {                  /* the mod store is asked; Yes downloads, then it is placed */
+    if (r == 2 && call.seq > 0) {                  /* the download is asked for; Yes downloads, then it is placed */
         g_mods_wait_seq = call.seq;
         g_mods_wait_name = g_load_prefab_name;
         g_mods_wait_folder = g_load_prefab_folder;
@@ -2913,14 +2913,15 @@ static void ui_budget_poll()
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
  * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
- * mockup), and for an action (modsAction); nothing polls. Every slot operation that reads or changes the store runs on DOOM's main thread, so it
- * goes through run_on_main, from a short-lived worker thread rather than this one: an install
- * rehashes every file and can take seconds, and the window must keep painting meanwhile. While it
- * runs, run_on_main is occupied, so other edits from this window are refused as when the game is
- * busy. The worker touches no page state; it hands its documents back through g_mods_done and the
- * think loop posts them (ui_mods_finish), the same handoff as the rawmap picker. Each job ends
- * with a fresh document, so the list follows every action without being asked. */
-#define UI_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
+ * mockup), and for an action (modsAction); nothing polls. Each job runs on a short-lived worker
+ * thread rather than this one. Install, New mod and Refresh do their file work (copies, salts,
+ * builds, which can take minutes) on that worker, off DOOM's main thread, with no time limit; only
+ * their game part (APPLY) and every other operation run on DOOM's main thread through
+ * run_on_main. The worker touches no page state: it reports its phase through g_mods_phase, which
+ * the think loop posts as modsProgress, and hands its documents back through g_mods_done, which
+ * the think loop posts (ui_mods_finish), the same handoff as the rawmap picker. Each job ends with
+ * a fresh document, so the list follows every action without being asked. */
+#define UI_MODS_START_MS   8000   /* how long a job waits for the game to start a main-thread call */
 #define UI_MODS_DOC_MAX    (64 * 1024 * 1024)
 
 struct UiModsJob {
@@ -2931,11 +2932,15 @@ struct UiModsJob {
     int         list_rc;
     unsigned    list_gen;  /* the backend's generation when the document was built */
     bool        pushed;    /* a document the page did not ask for (ui_mods_push_tick) */
+    bool        apply_pending;   /* the file work landed; the game did not start its part in time */
     std::string run_doc, list_doc;
 };
 static UiModsJob    g_mods_job;
 static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
+/* The running job's phase for the page: 0 none, 1 the file work, 2 the game's part. */
+static volatile LONG g_mods_phase = 0;
+static LONG          g_mods_phase_posted = 0;
 /* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
  * is all the shipped page sends), a change the window did not make
  * (a console verb, `sh_mods map add` or `uninstall`, the undo clear an Uninstall owes) moves the
@@ -2994,10 +2999,11 @@ static bool ui_mods_fetch(std::string &out)
     return true;
 }
 
-/* The folder dialog for Install, on the worker thread (its own apartment). Several folders may be
- * picked; they are joined with newlines, which no path contains, and the backend takes each one as
- * a mod folder or as a folder of mods. */
-static bool ui_pick_mod_folder(std::wstring &out)
+/* The dialog for Install, on the worker thread (its own apartment): mod folders, or with `zip` mod
+ * ZIPs (a Prefab or map export carries its mods so). Several may be picked; they are joined with
+ * newlines, which no path contains, and the backend takes each one as a mod folder, a folder of
+ * mods, or a ZIP of mods. */
+static bool ui_pick_mods(bool zip, std::wstring &out)
 {
     IFileOpenDialog *dlg = nullptr;
     bool ok = false;
@@ -3006,9 +3012,13 @@ static bool ui_pick_mod_folder(std::wstring &out)
         return false;
     FILEOPENDIALOGOPTIONS opt = 0;
     if (SUCCEEDED(dlg->GetOptions(&opt)))
-        dlg->SetOptions(opt | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT |
-                        FOS_PATHMUSTEXIST);
-    dlg->SetTitle(L"Install mods: choose mod folders, or a folder that holds several");
+        dlg->SetOptions(opt | (zip ? FOS_FILEMUSTEXIST : FOS_PICKFOLDERS) | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM |
+                        FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_PATHMUSTEXIST);
+    if (zip) {
+        static const COMDLG_FILTERSPEC kZip[] = { { L"Mod ZIP", L"*.zip" } };
+        dlg->SetFileTypes(1, kZip);
+        dlg->SetTitle(L"Install mods: choose mod ZIPs");
+    } else dlg->SetTitle(L"Install mods: choose mod folders, or a folder that holds several");
     dlg->SetOkButtonLabel(L"Install");
     {
         static const GUID kModFolderPickerGuid =
@@ -3051,6 +3061,13 @@ static bool ui_pick_mod_folder(std::wstring &out)
 
 static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 
+/* The actions whose file work runs on the worker itself (modui.h): never through run_on_main. */
+static bool ui_mods_file_action(int action)
+{
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN ||
+           action == SH_MODS_ACT_ADD_MINE;
+}
+
 static DWORD WINAPI ui_mods_thread(LPVOID)
 {
     UiModsJob &job = g_mods_job;
@@ -3059,12 +3076,31 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
     if (job.pick) {
         std::wstring picked;
         HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        bool ok = ui_pick_mod_folder(picked);
+        bool ok = ui_pick_mods(job.arg == "zip", picked);
         if (SUCCEEDED(init)) CoUninitialize();
         if (ok) job.arg = sh_webview_json::to_utf8(picked);
         else job.run_rc = -3;
     }
-    if (job.action && job.run_rc != -3) {
+    if (job.action && job.run_rc != -3 && ui_mods_file_action(job.action)) {
+        sh_mods_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODS_RUN;
+        call.action = job.action;
+        call.arg = job.arg.c_str();
+        InterlockedExchange(&g_mods_phase, 1);
+        job.run_rc = (ui_mods_slot(&call) == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
+        if (job.run_rc == 1 && job.run_doc.find("\"apply\":true") != std::string::npos) {
+            /* The game's part: the serving index and the refresh, on DOOM's main thread. */
+            UiModsMain m;
+            std::string done;
+            memset(&m, 0, sizeof m);
+            m.call.op = SH_MODS_RUN;
+            m.call.action = SH_MODS_ACT_APPLY;
+            InterlockedExchange(&g_mods_phase, 2);
+            if (ui_mods_on_main(&m) && m.rc == 1 && ui_mods_fetch(done)) job.run_doc = done;
+            else job.apply_pending = true;
+        }
+    } else if (job.action && job.run_rc != -3) {
         UiModsMain m;
         memset(&m, 0, sizeof m);
         m.call.op = SH_MODS_RUN;
@@ -3091,20 +3127,16 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_INSTALL:     return L"install";
     case SH_MODS_ACT_RESCAN:      return L"rescan";
     case SH_MODS_ACT_PALETTE:     return L"palette";
-    case SH_MODS_ACT_PRUNE_LIST:  return L"pruneList";
-    case SH_MODS_ACT_PRUNE_APPLY: return L"pruneApply";
-    case SH_MODS_ACT_REMOVE:      return L"remove";
-    case SH_MODS_ACT_REBUILD:     return L"rebuild";
     case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
     case SH_MODS_ACT_MAP_REMOVE:         return L"mapRemoveMod";
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return L"mapRemoveModPreview";
-    case SH_MODS_ACT_REMOVED_EMPTY:      return L"removedEmpty";
     case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";
     case SH_MODS_ACT_CHOOSE:             return L"chooseRegistry";
     case SH_MODS_ACT_FILES:              return L"modFiles";
     case SH_MODS_ACT_FILE_TEXT:          return L"modFileText";
     case SH_MODS_ACT_NEW_MOD:            return L"newMod";
+    case SH_MODS_ACT_ADD_MINE:           return L"addToMine";
     default:                      return L"";
     }
 }
@@ -3120,20 +3152,16 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"install")    return SH_MODS_ACT_INSTALL;
     if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
     if (name == L"palette")    return SH_MODS_ACT_PALETTE;
-    if (name == L"pruneList")  return SH_MODS_ACT_PRUNE_LIST;
-    if (name == L"pruneApply") return SH_MODS_ACT_PRUNE_APPLY;
-    if (name == L"remove")     return SH_MODS_ACT_REMOVE;
-    if (name == L"rebuild")    return SH_MODS_ACT_REBUILD;
     if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
     if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
     if (name == L"mapRemoveMod")        return SH_MODS_ACT_MAP_REMOVE;
     if (name == L"mapRemoveModPreview") return SH_MODS_ACT_MAP_REMOVE_PREVIEW;
-    if (name == L"removedEmpty")        return SH_MODS_ACT_REMOVED_EMPTY;
     if (name == L"mapAddMod")           return SH_MODS_ACT_MAP_ADD;
     if (name == L"chooseRegistry")      return SH_MODS_ACT_CHOOSE;
     if (name == L"modFiles")            return SH_MODS_ACT_FILES;
     if (name == L"modFileText")         return SH_MODS_ACT_FILE_TEXT;
     if (name == L"newMod")              return SH_MODS_ACT_NEW_MOD;
+    if (name == L"addToMine")           return SH_MODS_ACT_ADD_MINE;
     return 0;
 }
 
@@ -3179,6 +3207,7 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
     g_mods_job.pick = pick;
     g_mods_job.arg = arg;
     g_mods_job.pushed = false;
+    g_mods_job.apply_pending = false;
     g_mods_job.list_gen = 0;
     g_mods_job.run_doc.clear();
     g_mods_job.list_doc.clear();
@@ -3207,11 +3236,12 @@ static void ui_mods_finish()
         if (job.run_rc == -3)
             ui_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
         else if (job.run_rc == 1)
-            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
+            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name +
+                         (job.apply_pending ? L"\",\"applyPending\":true,\"data\":" : L"\",\"data\":"), job.run_doc, L"}");
         else if (job.run_rc == -1)
-            ui_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
+            ui_mods_post_result(name, false, L"The game did not take the request. Try again with the editor open.", nullptr);
         else
-            ui_mods_post_result(name, false, L"The mods store refused this action. Refresh the tab and try again; if it keeps failing, use Send feedback.", nullptr);
+            ui_mods_post_result(name, false, L"Snapmap+ could not do that. Try again; if it keeps failing, use Send feedback.", nullptr);
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
         ui_log(l);
@@ -3227,11 +3257,25 @@ static void ui_mods_finish()
         /* A Files read: the page keeps its document. */
     } else ui_post_json(job.list_rc == -1
         ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
-        : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
+        : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"Snapmap+ could not read your mods. Press Refresh; if it stays, use Send feedback.\"}");
     job.run_doc.clear();
     job.list_doc.clear();
+    InterlockedExchange(&g_mods_phase, 0);
+    g_mods_phase_posted = 0;
     InterlockedExchange(&g_mods_done, 0);
     InterlockedExchange(&g_mods_busy, 0);
+}
+
+/* The running job's phase, on the UI thread: the page shows what it is doing (modsProgress). */
+static void ui_mods_progress_tick()
+{
+    LONG phase = InterlockedCompareExchange(&g_mods_phase, 0, 0);
+    if (!phase || phase == g_mods_phase_posted || InterlockedCompareExchange(&g_mods_done, 0, 0)) return;
+    g_mods_phase_posted = phase;
+    std::wstring m = L"{\"kind\":\"modsProgress\",\"action\":\"";
+    m += ui_mods_action_name(g_mods_job.action);
+    m += phase == 1 ? L"\",\"phase\":\"files\"}" : L"\",\"phase\":\"game\"}";
+    ui_post_json(m.c_str());
 }
 
 /* The prefabs folder watcher (folder_watch.h). One thread watches the prefabs folder
@@ -3428,6 +3472,52 @@ static void ui_mods_open_folder(const std::wstring &folder)
         }
     }
     ui_mods_post_result(L"openFolder", ok, ok ? L"" : L"The mods folder could not be opened.", nullptr);
+}
+
+/* A file's path below its mod folder for Open in editor: '/'-separated plain names, no drive, no "."
+ * or ".." part. */
+static bool ui_mods_relative_file(const std::wstring &path)
+{
+    if (path.empty() || path.size() > 1000) return false;
+    size_t at = 0;
+    for (;;) {
+        size_t cut = path.find(L'/', at);
+        if (!ui_mods_plain_folder(path.substr(at, cut == std::wstring::npos ? std::wstring::npos : cut - at))) return false;
+        if (cut == std::wstring::npos) return true;
+        at = cut + 1;
+    }
+}
+
+/* Open in editor (the Files view): one file of a mod folder, "<folder>\t<path below it>", in the
+ * program Windows opens it with; a kind with none (a .decl) gets Windows' own Open with dialog. */
+static void ui_mods_open_file(const std::wstring &arg)
+{
+    size_t tab = arg.find(L'\t');
+    std::wstring folder = tab == std::wstring::npos ? L"" : arg.substr(0, tab), rel = tab == std::wstring::npos ? L"" : arg.substr(tab + 1);
+    sh_mods_call call;
+    char root[MAX_PATH * 4];
+    bool ok = false;
+    if (!ui_mods_relative_folder(folder) || !ui_mods_relative_file(rel)) {
+        ui_mods_post_result(L"openFile", false, L"That file is not inside a mod folder.", nullptr);
+        return;
+    }
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_ROOT;
+    call.out = root;
+    call.out_cap = (int)sizeof root;
+    if (ui_mods_slot(&call) == 1) {
+        std::wstring w = ui_widen(root) + L"\\" + folder + L"\\" + rel;
+        for (wchar_t &c : w) if (c == L'/') c = L'\\';
+        DWORD at = GetFileAttributesW(w.c_str());
+        if (at == INVALID_FILE_ATTRIBUTES || (at & FILE_ATTRIBUTE_DIRECTORY)) {
+            ui_mods_post_result(L"openFile", false, L"That file is no longer in the mod's folder; press Refresh.", nullptr);
+            return;
+        }
+        INT_PTR r = (INT_PTR)ShellExecuteW(g_hwnd, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (r == SE_ERR_NOASSOC) r = (INT_PTR)ShellExecuteW(g_hwnd, L"openas", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        ok = r > 32;
+    }
+    ui_mods_post_result(L"openFile", ok, ok ? L"" : L"Windows could not open the file. Open it from the mod's folder instead.", nullptr);
 }
 
 /* Extract a view's flat tags and re-escape each value. Never splice view
@@ -3918,16 +4008,17 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 ui_mods_begin(0, false, std::string());
             } else if (cmd == L"modsAction") {
                 g_mods_page_seen = true;   /* the page's open and Refresh are a rescan: arm the push */
-                /* Install always asks for its folder here, in the native picker: the page never
-                 * names a path to install. */
+                /* Install always asks for its folders or ZIPs here, in the native picker: the page
+                 * never names a path to install, only which picker ("zip" or none). */
                 std::wstring act, arg;
                 sh_webview_json::get_string(json, L"action", act);
                 sh_webview_json::get_string(json, L"arg", arg);
                 if (act == L"openFolder") ui_mods_open_folder(arg);
+                else if (act == L"openFile") ui_mods_open_file(arg);
                 else {
                     int code = ui_mods_action_code(act);
                     if (!code) ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);
-                    else if (code == SH_MODS_ACT_INSTALL) ui_mods_begin(code, true, std::string());
+                    else if (code == SH_MODS_ACT_INSTALL) ui_mods_begin(code, true, arg == L"zip" ? "zip" : std::string());
                     else ui_mods_begin(code, false, sh_webview_json::to_utf8(arg));
                 }
             } else if (cmd == L"resolvePrefabModel") {
@@ -4412,28 +4503,6 @@ static HRESULT on_environment_created(HRESULT result, ICoreWebView2Environment *
                         reinterpret_cast<void **>(g_webview_environment12.GetAddressOf()));
     return env->CreateCoreWebView2Controller(g_hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(on_controller_created).Get());
 }
-/* Development aid: a file `%LOCALAPPDATA%\\snapmap-plus\\devtools-port` holding one port number
- * (1024..65535) opens Chromium's remote debugging on 127.0.0.1 at that port for this window, so a
- * test driver can inspect and drive the page. Absent or malformed, nothing is opened. */
-static int ui_devtools_port(const wchar_t *local)
-{
-    if (!local || !*local) return 0;
-    std::wstring path = std::wstring(local) + L"\\snapmap-plus\\devtools-port";
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    char buf[16] = {}; DWORD got = 0;
-    BOOL ok = ReadFile(h, buf, (DWORD)(sizeof buf - 1), &got, nullptr);
-    CloseHandle(h);
-    if (!ok) return 0;
-    long port = 0; int digits = 0;
-    for (DWORD i = 0; i < got; i++) {
-        char c = buf[i];
-        if (c >= '0' && c <= '9') { port = port * 10 + (c - '0'); digits++; if (digits > 5) return 0; }
-        else if (c == ' ' || c == '\r' || c == '\n' || c == '\t') { if (digits) break; }
-        else return 0;
-    }
-    return (digits && port >= 1024 && port <= 65535) ? (int)port : 0;
-}
 static void ui_start_webview()
 {
     wchar_t local[MAX_PATH] = {}; std::wstring udf = L".";
@@ -4447,14 +4516,7 @@ static void ui_start_webview()
         else if (how == sh_webview_profile::kept_old)
             ui_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
     }
-    ComPtr<ICoreWebView2EnvironmentOptions> options;
-    int devtools_port = have_local ? ui_devtools_port(local) : 0;
-    if (devtools_port) {
-        auto opts = Make<CoreWebView2EnvironmentOptions>();
-        wchar_t args[64]; _snwprintf_s(args, _countof(args), _TRUNCATE, L"--remote-debugging-port=%d", devtools_port);
-        if (opts && SUCCEEDED(opts->put_AdditionalBrowserArguments(args))) { options = opts; ui_logf("devtools: remote debugging on 127.0.0.1:%d (devtools-port file)", devtools_port); }
-    }
-    HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), options.Get(),
+    HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(on_environment_created).Get());
     if (FAILED(hr)) ui_logf("Create env FAILED hr=0x%08lx", (unsigned long)hr);
 }
@@ -4540,6 +4602,7 @@ static void ui_think_loop()
         LeaveCriticalSection(&g_loop->mtx);
         /* The prefabs folder watcher: the Prefabs list follows the disk. */
         ui_watch_tick();
+        ui_mods_progress_tick();
         ui_mods_push_tick();
 
         if (did_save) {

@@ -1,6 +1,6 @@
 /* The Mods tab: the player's mods and the mods downloaded maps brought, and the selected mod's
    details, with the few actions a player uses (install a folder, make a new mod, refresh, open the
-   mods folder, use a mod in the open map or remove it from the map, rebuild, uninstall). Browser
+   mods folder, use a mod in the open map or remove it from the map, uninstall). Browser
    global + CommonJS test export. Pure ASCII.
 
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread
@@ -16,7 +16,7 @@
    used, the backend's one plain sentence saying what is wrong and what to do. A mod carrying the
    same files as another shows an informational hint. Nothing a player reads names a salt, a hash,
    a build number or the internal words; the salt reaches the page only for the Files view's
-   paths and the Copy mod id action. There is no folder watcher: Refresh rereads the folder, and
+   paths, and an author never needs it. There is no folder watcher: Refresh rereads the folder, and
    the empty state and New mod say so. The host posts the document as {kind:'mods', data} after
    every action; showing the tab asks for a Refresh. Nothing polls. All text goes through
    textContent. */
@@ -35,7 +35,7 @@ var modsTab = (function () {
   /* A mod that cannot be used and whose cause the backend did not send. */
   var UNUSABLE_TEXT = 'This mod cannot be used right now; press Refresh.';
   function placeText(b) { return 'Came with the map ' + (b.placeTitle || 'you downloaded') + '; only that map uses it.'; }
-  /* The informational hint: near-identical mods are two mods (ONE-SHAPE rule 1); nothing merges. */
+  /* The informational hint: near-identical mods are two mods (identity is the salt); nothing merges. */
   function sameFilesText(s) {
     return 'Carries ' + plural(s.count, 'file') + ' that ' + s.name + ' also carries. They stay two separate mods.';
   }
@@ -45,12 +45,14 @@ var modsTab = (function () {
   var IN_MAP_GLYPH = {tone: 'map', icon: 'map', label: IN_MAP_TEXT};
   /* There is no folder watcher: Refresh is how a changed mod is read again. */
   var REFRESH_TEXT = "After you change a mod's files, press Refresh to see the change.";
-  var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or install a mod folder with the download button.';
+  /* An action whose files landed while the game did not take its part (the host's applyPending). */
+  var APPLY_PENDING_TEXT = 'The game has not taken the change yet; press Refresh to bring it in.';
+  var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or add a mod folder or ZIP you have with Install.';
   /* The two *Preview actions are dry runs that answer with the consequence list the confirmation
      shows. mapAddMod attaches the selected mod to the open map without placing anything (a
      map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
      Windows Recycle Bin. */
-  var ACTIONS = ['install', 'rescan', 'openFolder', 'rebuild', 'mapAddMod',
+  var ACTIONS = ['install', 'rescan', 'openFolder', 'openFile', 'mapAddMod', 'addToMine',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                  'modFiles', 'modFileText', 'newMod'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
@@ -64,9 +66,9 @@ var modsTab = (function () {
     replace: 'Replaces a game file',
     editor: 'An editor tweak, on this computer only',
     surface: 'A game file SnapMap cannot see on its own',
-    '': 'Not read yet'
+    '': 'Not part of the mod; Snapmap+ ignores it'
   };
-  var NOT_SERVED_TITLE = 'Snapmap+ reads this file when you press Refresh in the Mods tab.';
+  var NOT_SERVED_TITLE = 'Snapmap+ builds a mod from mod.json and its assets folder when you press Refresh; this file is not in that build.';
   /* Where a game file's bytes come from: the archive the install bridge matched. */
   var FILE_SOURCES = {
     gameresources: "from the game's campaign and multiplayer files",
@@ -76,13 +78,21 @@ var modsTab = (function () {
   };
   /* The quiet line above a new mod's example: its first steps. */
   var NEW_MOD_HINT = "Place Example crate from the Toybox in your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods tab.";
+  /* How an author names their own files and strings: by the mod's folder name, never its salt
+     (Refresh files them under the mod). One sentence, where the author sees it. */
+  function folderRuleText(folder) {
+    var f = str(folder) || "<the mod's folder name>";
+    return 'Put new files under assets\\mods\\' + f + '\\, and in your files write mods/' + f + '/ and plain string names.';
+  }
   var NEW_MOD_NOTE = 'Snapmap+ makes a folder for it in mods\\ with an example crate you can place right away.';
   /* What removing a mod from a map severs: wires and timeline references to its placed entities.
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok'};
-  /* A map needs the files its rows list; a mod folder provides them (the asset rule). */
-  var NOT_INSTALLED = 'not installed on this computer; playing the map downloads it';
+  /* A map needs the files its rows list; a mod folder provides them (the asset rule). Whether a Play
+     can download it depends on the map (a map never published, the editor's own Play cannot), so the
+     line says only what is true in every case. */
+  var NOT_INSTALLED = 'not installed on this computer';
   var MAP_CAUSES = {missing: NOT_INSTALLED, incomplete: 'installed, but it lacks files this map uses',
                     skipped: 'installed, but it cannot be used right now'};
   /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */
@@ -93,7 +103,7 @@ var modsTab = (function () {
   function uninstallHead(pv) { return pv && pv.install && pv.install.undoCleared ? UNINSTALL_HEAD.undo : UNINSTALL_HEAD.plain; }
   /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
   function savedMapsText(n) {
-    return n + ' of your saved maps use it; they will not open until a mod folder provides its files again.';
+    return n + ' of your saved maps use it; they will not open until you restore it from the Recycle Bin.';
   }
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
@@ -104,18 +114,19 @@ var modsTab = (function () {
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var BORROWS_NOTE = "Game files are never stored or uploaded with the mod; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
-  /* A folder of editor tweaks only (facts.editorOnly): a map never records it (DESIGN-additive 2.6). */
+  /* A folder of editor tweaks only (facts.editorOnly): a map never records it. */
   var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
-  var PLACE_USE_TITLE = 'This mod came with a downloaded map; only that map uses it';
-  var PLACE_REBUILD_TITLE = 'This mod came with a downloaded map and is kept exactly as that map needs it';
+  /* A downloaded map's mod: the short view, its map, Add to my mods and Remove. */
+  var ADD_MINE_TITLE = 'Copy this mod into your own mods, so your own maps can use it';
+  var PLACE_CLEANUP_TEXT = 'Snapmap+ removes it at start when none of your saved maps uses it and you have not played ' +
+                           'that map for 30 days; playing the map downloads it again.';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
-     records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
+     records them and Play never sees them. */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var NOTHING_CHANGED_TEXT = 'Changes nothing of the game; it only adds.';
-  var COPY_ID_TITLE = "Copy this mod's id: the name its own files and strings sit under, which the Files view shows in their paths";
   /* A clash names "<game file>/<path>" (modregistry.h), shown as "<path> in <game file>": the
      path starts at the first top-level decl member the slot names. */
   var TOP_MEMBERS = ['edit', 'editorVars', 'inherit', 'events', 'aliases', 'init', 'class'];
@@ -243,7 +254,6 @@ var modsTab = (function () {
     return {open: open, name: str(m.name), saved: num(m.saved), entities: num(m.entities),
             published: pub ? {state: str(pub.state), at: num(pub.at)} : null,
             uploaded: up ? {claimed: bool(up.claimed), at: num(up.at)} : null,
-            tagged: typeof m.tagged === 'boolean' ? m.tagged : null,
             mods: Array.isArray(m.mods) ? m.mods.map(normMapMod) : null,
             vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null,
             clashes: arr(m.registryClashes).map(normClash).filter(function (c) { return c.slot && c.providers.length > 1; })};
@@ -284,7 +294,6 @@ var modsTab = (function () {
                                          list: m.references.map(refText)});
       if (m.manifestRow) out.push({text: m.attached ? "Removes the mod from the map's list of mods; the whole map used it."
                                                     : "Removes the mod's row from the map's list of mods."});
-      if (m.tagRemoved) out.push({text: 'Removes the search tag mods: this is the last mod the map uses.'});
       if (m.vanillaAfter) out.push({text: 'The map then needs no mods and plays without Snapmap+.'});
       if (m.published) out.push({text: 'The published copy on the server is unaffected until you publish the map again.'});
     }
@@ -435,7 +444,7 @@ var modsTab = (function () {
                 ' sounds, which SnapMap leaves out, for a map that uses it.',
                 list: f.stockBanks.map(function (s) {
                   return s.bank + ': ' + (s.state === 'loaded' && s.ms ? 'loaded (' + s.ms + ' ms)' :
-                                          s.state === 'failed' ? 'did not load (error ' + s.result + ')' : s.state);
+                                          s.state === 'failed' ? 'did not load; restart DOOM and try again' : s.state);
                 }), kind: 'banks', items: f.stockBanks});
     }
     if (f.editor) out.push({text: 'Tweaks ' + plural(f.editor, 'editor file') + ' on this computer only: ' + EDITOR_TWEAKS_TEXT + '.',
@@ -621,12 +630,14 @@ var modsTab = (function () {
       s.textContent = str(text);
       s.className = 'mods-status' + (tone ? ' ' + tone : '');
     }
-    var BUSY_TEXT = {install: 'Installing...', rescan: 'Reading the mods folder...',
-                     rebuild: 'Building the mod again...',
+    /* Install, New mod and Refresh build off the game's thread for as long as it takes; the host
+       says when the game takes the change (modsProgress, phase "game"). */
+    var GAME_PHASE_TEXT = 'Bringing the change into the game...';
+    var BUSY_TEXT = {install: 'Installing and building...', rescan: 'Reading your mods and building what changed...',
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
-                     newMod: 'Making the new mod...'};
+                     newMod: 'Making the new mod...', addToMine: 'Copying it into your mods...'};
 
     function selectedMod() {
       for (var i = 0; i < model.mods.length; i++) if (model.mods[i].key === selectedKey) return model.mods[i];
@@ -636,19 +647,20 @@ var modsTab = (function () {
 
     function renderButtons() {
       var b = selectedMod(), sel = !!b;
-      ['modsInstallBtn', 'modsFolderBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsFolderBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn'].forEach(function (id) {
         var n = byId(id);
-        if (n) n.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn'));
+        if (n) n.disabled = !!busy || (!sel && id === 'modsUninstallBtn');
       });
-      /* A downloaded map's mod is kept exactly as that map needs it: it is not rebuilt. */
-      var rb = byId('modsRebuildBtn');
-      if (rb) {
-        if (sel && b.place) rb.disabled = true;
-        rb.title = sel && b.place ? PLACE_REBUILD_TITLE : 'Build the selected mod again from its folder';
-      }
       /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
-      if (fb) fb.disabled = !sel;
+      if (fb) { fb.disabled = !sel; fb.style.display = sel && b.place ? 'none' : ''; }
+      /* A downloaded map's mod is removed from this computer, the same uninstall under its short name. */
+      var un = byId('modsUninstallBtn');
+      if (un) {
+        un.textContent = sel && b.place ? 'Remove' : 'Uninstall';
+        un.title = sel && b.place ? 'Remove this mod of a downloaded map from this computer'
+                                  : 'Uninstall the selected mod; you see everything it changes before you decide';
+      }
       var mb = byId('modsMapBtn');
       if (mb) {
         var mm = model.map && model.map.open && model.map.mods ? model.map.mods.length : -1;
@@ -672,18 +684,27 @@ var modsTab = (function () {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
+      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it. */
+      if (b && b.place) {
+        u.style.display = '';
+        u.textContent = 'Add to my mods';
+        u.className = 'btn';
+        u.title = ADD_MINE_TITLE;
+        u.disabled = !!busy || needsAttention(b);
+        return;
+      }
       /* A folder of editor tweaks only has no map action: a map never records it. */
       u.style.display = open && !editorOnly(b) ? '' : 'none';
       var used = mapUses(b);
       u.textContent = used ? 'Remove from map' : 'Use in this map';
       u.className = 'btn' + (used ? ' danger' : '');
-      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : b && b.place ? PLACE_USE_TITLE : USE_TITLE;
-      u.disabled = !!busy || !b || !open || (!used && (needsAttention(b) || !!b.place));
+      u.title = used ? 'Remove the selected mod and everything that uses it from this map' : USE_TITLE;
+      u.disabled = !!busy || !b || !open || (!used && needsAttention(b));
     }
     function setBusy(action) {
       busy = action || '';
       renderButtons();
-      if (busy && !(busy === 'rescan' && quiet)) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
+      if (busy) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
     }
 
     /* ---- the list: two kinds of groups, every row shown mounted. "Your mods" holds the player's
@@ -866,21 +887,12 @@ var modsTab = (function () {
       var card = el('div', 'mods-howto');
       card.appendChild(el('div', 'mods-howto-head', 'How mods work'));
       card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and an assets\\ folder.'));
+      card.appendChild(el('p', '', folderRuleText('')));
       card.appendChild(el('p', '', 'Maps record which mods they use. Players who open one are offered the download, which is listed under the map\'s name.'));
       card.appendChild(el('p', '', REFRESH_TEXT));
-      card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod or use the download button.'
+      card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod, or add a mod folder or ZIP with Install.'
                                          : 'Select a mod to see what it adds.'));
       box.appendChild(card);
-    }
-    function copyId(b) {
-      if (!b || !b.salt) return;
-      var done = function () { env.toast('Copied the mod id of ' + title(b) + '.', 'ok'); };
-      try {
-        if (env.copy) { env.copy(b.salt); done(); return; }
-        var nav = typeof navigator !== 'undefined' ? navigator : null;
-        if (nav && nav.clipboard && nav.clipboard.writeText) { nav.clipboard.writeText(b.salt); done(); return; }
-      } catch (err) { /* below */ }
-      env.toast('The mod id could not be copied here.', 'warn');
     }
     /* A list line that opens to show its names. */
     function listLine(box, text, items, item) {
@@ -907,24 +919,24 @@ var modsTab = (function () {
       head.appendChild(el('span', 'mods-detail-name', title(b)));
       box.appendChild(head);
       box.appendChild(el('div', 'mods-detail-sentence ' + info.tone, info.sentence));
+      /* A downloaded map's mod: the short view. A player who only plays maps needs its name, its
+         map and Remove; Add to my mods (the head) makes it one of their own. */
+      if (b.place) {
+        var shortAbout = section(box, 'about', 'About');
+        field(shortAbout, 'Came with', b.placeTitle || 'a downloaded map');
+        shortAbout.appendChild(el('div', 'mods-note', PLACE_CLEANUP_TEXT));
+        return;
+      }
       if (b.sameFilesAs) box.appendChild(el('div', 'mods-note mods-same', sameFilesText(b.sameFilesAs)));
 
       var about = section(box, 'about', 'About');
       if (b.description) field(about, 'Description', b.description).className += ' mods-field-long';
       if (b.author) field(about, 'Author', b.author);
-      if (b.place) field(about, 'Came with', b.placeTitle || 'a downloaded map');
       var link = el('button', 'mods-link', b.key);
       link.type = 'button';
       link.title = 'Open this folder in Explorer';
       link.addEventListener('click', function () { act('openFolder', folderArg(b)); });
       field(about, 'Folder', link);
-      if (b.salt) {
-        var cp = el('button', 'mods-link mods-copy-id', 'Copy mod id');
-        cp.type = 'button';
-        cp.title = COPY_ID_TITLE;
-        cp.addEventListener('click', function () { copyId(b); });
-        about.appendChild(cp);
-      }
 
       var adds = section(box, 'adds', 'What it adds');
       if (b.editorRowNames.length) {
@@ -984,7 +996,7 @@ var modsTab = (function () {
         var wl = section(box, 'warnings', 'Warnings');
         b.warnings.forEach(function (w) { wl.appendChild(el('div', 'mods-line mods-warning', w)); });
       }
-      if (b.publishedMaps >= 0 && !b.place) {
+      if (b.publishedMaps >= 0) {
         var share = section(box, 'sharing', 'Sharing');
         field(share, 'Published maps', b.publishedMaps ? 'Used by ' + plural(b.publishedMaps, 'of your published maps', 'of your published maps') : 'Used by none of your published maps');
       }
@@ -1071,7 +1083,6 @@ var modsTab = (function () {
       if (m.uploaded) field(det, 'Its mods', m.uploaded.claimed
         ? 'Uploaded with the published map' + (m.uploaded.at ? ' (' + formatDate(m.uploaded.at) + ')' : '')
         : 'Not uploaded');
-      if (m.tagged !== null) field(det, 'Search tag', m.tagged ? 'mods (present)' : 'mods (absent)');
       if (m.mods) {
         var total = m.mods.reduce(function (a, r) { return a + r.size; }, 0);
         field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));
@@ -1083,13 +1094,18 @@ var modsTab = (function () {
         m.clashes.forEach(function (c) {
           var sel = el('select', 'mods-clash');
           sel.setAttribute('data-slot', c.slot);
+          /* No choice: the first mod the map lists decides, and this option clears a choice. */
+          var first = el('option', '', 'The first mod the map lists (' + c.providers[0].name + ')');
+          first.value = '';
+          if (!c.chosen) first.selected = true;
+          sel.appendChild(first);
           c.providers.forEach(function (p) {
             var o = el('option', '', p.name);
             o.value = p.id;
-            if (p.id === c.serving) o.selected = true;
+            if (c.chosen && p.id === c.chosen) o.selected = true;
             sel.appendChild(o);
           });
-          sel.value = c.serving;
+          sel.value = c.chosen;
           sel.disabled = !!busy;
           sel.addEventListener('change', function () { act('chooseRegistry', c.slot + '\t' + str(sel.value)); });
           modalButtons.push(sel);
@@ -1100,7 +1116,7 @@ var modsTab = (function () {
       var list = section(body, 'mapMods', 'Mods in this map');
       if (!m.mods.length) {
         list.appendChild(el('div', 'mods-vanilla', m.vanilla === false ? 'This map lists no mods.'
-          : 'This map is now vanilla: it uses no mods and plays without Snapmap+.'));
+          : 'This map uses no mods now; it plays without Snapmap+.'));
         return;
       }
       m.mods.forEach(function (r) { list.appendChild(mapModRow(r)); });
@@ -1131,7 +1147,10 @@ var modsTab = (function () {
     function renderConfirm(host, pv) {
       var name = pv.name || modName(pv.key, '');
       var uninstall = pv.action === 'uninstall';
-      modalHead(host, uninstall ? 'Uninstall ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
+      var placed = false;
+      model.mods.forEach(function (b) { if (b.key === pv.key && b.place) placed = true; });
+      var verb = placed ? 'Remove' : 'Uninstall';
+      modalHead(host, uninstall ? verb + ' ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', confirmScope(pv)));
@@ -1164,7 +1183,7 @@ var modsTab = (function () {
         if (modal.from === 'uninstall' || modal.from === 'details') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
       }));
-      acts.appendChild(modalButton(uninstall ? 'Uninstall' : 'Delete from map', 'danger-solid', function () {
+      acts.appendChild(modalButton(uninstall ? verb : 'Remove from map', 'danger-solid', function () {
         act(uninstall ? 'uninstall' : 'mapRemoveMod', pv.key);
       }));
       host.appendChild(acts);
@@ -1469,6 +1488,14 @@ var modsTab = (function () {
         meta.appendChild(s);
       });
       head.appendChild(meta);
+      /* The view is read-only: Open in editor hands a file of the folder to the system's editor. */
+      if (f.inFolder) {
+        var ed = el('button', 'btn mf-open', 'Open in editor');
+        ed.type = 'button';
+        ed.title = 'Open this file in your editor; press Refresh in the Mods tab after you save it';
+        ed.addEventListener('click', function () { act('openFile', fm.key + '\t' + f.path); });
+        head.appendChild(ed);
+      }
       pane.appendChild(head);
       if (fm.hint && f.path === fm.want) pane.appendChild(el('div', 'mf-hint', fm.hint));
       var tx = fm.text && fm.asked === f.path ? fm.text : null;
@@ -1594,12 +1621,14 @@ var modsTab = (function () {
       var m = actionMessage(action, arg);
       if (!m) return false;
       quiet = false;
-      if (action !== 'openFolder') setBusy(action);
+      if (action !== 'openFolder' && action !== 'openFile') setBusy(action);
       env.post(m);
       return true;
     }
-    /* Reread the folder: a rescan, which the host follows with a fresh document. Quiet: its result
-       only shows when it fails. A running action already ends with a fresh document. */
+    /* Refresh, the one rescan: every changed folder is built again and the change brought into the
+       game; the host follows it with a fresh document. Quiet: its result shows only when it failed
+       or when a change still needs something (a restart, the next map open). A running action
+       already ends with a fresh document. */
     function refresh() {
       if (busy || waiting) return false;
       waiting = true;
@@ -1620,8 +1649,6 @@ var modsTab = (function () {
       } else {
         model = normalize(d.data);
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
-        /* A pushed document (a console verb changed the store or the open map) keeps the status line. */
-        if (!busy && !d.pushed) setStatus('', '');
       }
       renderAll();
     }
@@ -1634,11 +1661,14 @@ var modsTab = (function () {
       quiet = false;
       setBusy('');
       if (action === 'install' && data.cancelled) { setStatus('', ''); return; }
+      /* The file work landed but the game did not take its part yet: Refresh brings it in. */
+      if (d.applyPending) message = (message ? message + ' ' : '') + APPLY_PENDING_TEXT;
       if (wasQuiet) {
         /* A failed rescan is followed by a document unless the host cannot reach the backend at all. */
         waiting = false;
         if (!ok && !loaded) { loaded = true; lastError = message || 'The mods list is unavailable.'; renderAll(); }
-        if (!ok) setStatus(message, 'err');
+        setStatus(message, ok ? (message ? 'ok' : '') : 'err');
+        if (message) env.toast(message, ok ? 'ok' : 'err');
         return;
       }
       if (action === 'mapRemoveModPreview' || action === 'uninstallPreview') {
@@ -1654,11 +1684,12 @@ var modsTab = (function () {
       }
       setStatus(message, ok ? 'ok' : 'err');
       if (message) env.toast(message, ok ? 'ok' : 'err');
-      if (action === 'install' && ok && data.key) reveal = selectedKey = str(data.key);
+      if ((action === 'install' || action === 'addToMine') && ok && data.key) reveal = selectedKey = str(data.key);
       /* A new mod: selected, and the Files modal opens on its example's Toybox row. */
       if (action === 'newMod' && ok && data.key) {
         reveal = selectedKey = str(data.key);
-        openFiles(selectedKey, byId('modsFilesBtn'), str(data.file), NEW_MOD_HINT);
+        var made = selectedKey.slice(selectedKey.lastIndexOf('\\') + 1);
+        openFiles(selectedKey, byId('modsFilesBtn'), str(data.file), NEW_MOD_HINT + ' ' + folderRuleText(made));
       }
       if (action === 'uninstall' && ok) selectedKey = '';
       /* After the real action the modal shows the next document: the list, or nothing after an
@@ -1672,7 +1703,15 @@ var modsTab = (function () {
     /* ---- wiring */
     function bind() {
       var on = function (id, ev, fn) { var n = byId(id); if (n) n.addEventListener(ev, fn); };
-      on('modsInstallBtn', 'click', function () { act('install'); });
+      /* Install takes mod folders or mod ZIPs: the button asks which, then the host's picker opens. */
+      on('modsInstallBtn', 'click', function () {
+        if (busy) return;
+        var n = byId('modsInstallBtn'), r = n && n.getBoundingClientRect ? n.getBoundingClientRect() : null;
+        var items = [{label: 'Install mod folders...', run: function () { act('install'); }},
+                     {label: 'Install mod ZIPs...', run: function () { act('install', 'zip'); }}];
+        if (env.menu) env.menu(r ? r.left : 0, r ? r.bottom : 0, items);
+        else act('install');
+      });
       on('modsFolderBtn', 'click', function () { act('openFolder'); });
       on('modsUninstallBtn', 'click', function () {
         var b = selectedMod();
@@ -1684,7 +1723,8 @@ var modsTab = (function () {
       on('modsUseBtn', 'click', function () {
         var b = selectedMod();
         if (!b || busy) return;
-        if (mapUses(b)) {
+        if (b.place) act('addToMine', b.key);
+        else if (mapUses(b)) {
           modal.from = 'details';
           modal.opener = byId('modsUseBtn');
           act('mapRemoveModPreview', b.key);
@@ -1692,7 +1732,6 @@ var modsTab = (function () {
       });
       on('modsMapModal', 'keydown', onModalKey);
       on('modsMapModal', 'mousedown', function (e) { if (e.target === byId('modsMapModal')) closeMap(); });
-      on('modsRebuildBtn', 'click', function () { var b = selectedMod(); if (b && !b.place) act('rebuild', b.key); });
       on('modsRefreshBtn', 'click', function () { refresh(); });
       on('modsFilesBtn', 'click', function () { var b = selectedMod(); if (b) openFiles(b.key, byId('modsFilesBtn')); });
       on('modsFilesModal', 'keydown', onFilesKey);
@@ -1738,6 +1777,7 @@ var modsTab = (function () {
         if (!d || typeof d !== 'object') return false;
         if (d.kind === 'mods') { onMods(d); return true; }
         if (d.kind === 'modsActionResult') { onResult(d); return true; }
+        if (d.kind === 'modsProgress') { if (busy && d.phase === 'game') setStatus(GAME_PHASE_TEXT, 'busy'); return true; }
         return false;
       },
       state: function () {
@@ -1750,199 +1790,15 @@ var modsTab = (function () {
     };
   }
 
-  /* ------------------------------------------------------------------------------- stand-in host */
-
-  /* The browser preview's backend: it holds a copy of a document, answers each modsAction as the
-     host does (the action's result, then a fresh document) and changes its copy the way the backend
-     would, so the page is exercised by the same render-from-the-document path as in the game.
-     handle(message) returns the messages the host would post. Used by mockup.html and the tests. */
-  /* folders (optional): {key: {files: [modFiles entries], texts: {path: text}}}, the preview's
-     files of some mods; any other mod lists mod.json and its carried paths. */
-  function standIn(initial, folders) {
-    var docu = JSON.parse(JSON.stringify(initial || {}));
-    var disk = JSON.parse(JSON.stringify(folders || {}));
-    function fileEntry(path, size, cls, extra) {
-      var f = {path: path, size: size, kind: /\.(decl|json|txt|md|cfg|entities)$/i.test(path) ? 'text' : 'binary', 'class': cls,
-               game: false, container: '', inFolder: true, cause: ''};
-      Object.keys(extra || {}).forEach(function (k) { f[k] = extra[k]; });
-      return f;
-    }
-    function folderOf(b) {
-      if (has(disk, b.key)) return disk[b.key];
-      return {files: [fileEntry('mod.json', 400, 'descriptor')], texts: {}};
-    }
-    /* New mod's example, as the backend writes it (modstore.c ms_write_example). */
-    function exampleFolder(key, name) {
-      var def = 'assets/generated/decls/entitydef/mods/' + key + '/example_crate.decl';
-      var row = 'assets/generated/decls/snapeditorentitydef/mods/' + key + '/example_crate.decl';
-      var texts = {};
-      texts['mod.json'] = '{\r\n  "name": ' + JSON.stringify(name) + ',\r\n  "description": "",\r\n  "author": "",\r\n' +
-        '  "strings": {\r\n    "en": {\r\n      "' + key + '_category": ' + JSON.stringify(name) + ',\r\n' +
-        '      "' + key + '_example_crate_name": "Example crate",\r\n' +
-        '      "' + key + '_example_crate_desc": "A crate your new mod adds. Change it in the mod\'s files."\r\n    }\r\n  }\r\n}\r\n';
-      texts[def] = '{\r\n\tclass = "idProp_Coop";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = "models/snapmaps/props/new/crate01.lwo";\r\n' +
-        '\t\t}\r\n\t\tclipModelInfo = {\r\n\t\t\ttype = "CLIPMODEL_AUTO";\r\n\t\t}\r\n\t\tdynamicObstacle = true;\r\n\t}\r\n}\r\n';
-      texts[row] = '{\r\n\tinherit = "prop/prop_base";\r\n\tedit = {\r\n' +
-        '\t\tpreviewImage = "textures/guis/snapmaps/entity_icons/prop/crate01";\r\n' +
-        '\t\tmetaCategoryNameTag = "#str_snapentity_metacategory_toybox";\r\n' +
-        '\t\tcategoryNameTag = "#str_' + key + '_category";\r\n' +
-        '\t\tdisplayNameTag = "#str_' + key + '_example_crate_name";\r\n' +
-        '\t\tdisplayDescriptionTag = "#str_' + key + '_example_crate_desc";\r\n' +
-        '\t\tentityDef = "mods/' + key + '/example_crate";\r\n' +
-        '\t\trenderInfo = {\r\n\t\t\trenderModelName = "models/snapmaps/props/new/crate01.lwo";\r\n\t\t\talwaysDrawBounds = false;\r\n' +
-        '\t\t\tsize = {\r\n\t\t\t\tx = 54;\r\n\t\t\t\ty = 54;\r\n\t\t\t\tz = 54;\r\n\t\t\t}\r\n\t\t}\r\n' +
-        '\t\tflags = {\r\n\t\t\tplaceable = true;\r\n\t\t}\r\n\t}\r\n}\r\n';
-      return {row: row, folder: {files: [fileEntry('mod.json', texts['mod.json'].length, 'descriptor'),
-                                          fileEntry(def, texts[def].length, 'add'), fileEntry(row, texts[row].length, 'add')], texts: texts}};
-    }
-    function clone() { return JSON.parse(JSON.stringify(docu)); }
-    function mods() { return Array.isArray(docu.mods) ? docu.mods : (docu.mods = []); }
-    function modOf(key) { return mods().filter(function (b) { return b.key === key; })[0] || null; }
-    function mapMods() { return docu.map && Array.isArray(docu.map.mods) ? docu.map.mods : []; }
-    function mapModOf(key) { return mapMods().filter(function (r) { return (r.key || r.salt) === key; })[0] || null; }
-    function nameOf(key, name) { var b = modOf(key); return b ? (b.name || b.folder || b.key) : (name || key); }
-    function recount() {
-      mods().forEach(function (b) { b.state = b.cause ? 'attention' : 'ready'; });
-      if (docu.map && Array.isArray(docu.map.mods)) {
-        docu.map.tagged = docu.map.mods.length > 0;
-        docu.map.vanilla = docu.map.mods.length === 0;
-      }
-    }
-    function mapPart(r) {
-      var left = mapMods().length - 1;
-      return {name: str(docu.map && docu.map.name), entities: arr(r.placedEntities).slice(), entityCount: num(r.placedCount),
-              references: arr(r.references).slice(), manifestRow: true, attached: !!r.attached,
-              tagRemoved: left === 0 && docu.map.tagged !== false,
-              vanillaAfter: left === 0, published: !!(docu.map.published && docu.map.published.state === 'published')};
-    }
-    /* Uninstall moves the folder to the Recycle Bin; the saved maps are not the preview's to count. */
-    function installPart(b, open) {
-      return {folder: b.key, disposition: 'recycle', savedMaps: num(b.savedMaps), undoCleared: !!open};
-    }
-    function removeFromMap(r) {
-      docu.map.mods = mapMods().filter(function (x) { return x !== r; });
-      docu.map.entities = Math.max(0, num(docu.map.entities) - num(r.placedCount));
-    }
-    return function handle(o) {
-      var a = str(o && o.action), key = str(o && o.arg), ok = true, msg = '', data = {action: a};
-      if (a === 'openFolder') return [];
-      if (has(READS, a)) {
-        /* The Files view's reads: the result alone, as the host answers them. */
-        var tab = key.indexOf('\t'), mk = tab < 0 ? key : key.slice(0, tab), fp = tab < 0 ? '' : key.slice(tab + 1);
-        var mb = modOf(mk), fo = mb ? folderOf(mb) : null;
-        data.key = mk;
-        if (!mb) { ok = false; msg = 'That mod is no longer installed.'; }
-        else if (a === 'modFiles') {
-          data.name = str(mb.name);
-          data.cause = str(mb.cause);
-          data.files = JSON.parse(JSON.stringify(fo.files));
-          data.truncated = false;
-        } else {
-          var ent = fo.files.filter(function (f) { return f.path === fp; })[0];
-          if (!ent) { ok = false; msg = "The mod's folder does not hold this file; it is read from your install."; }
-          else if (ent.kind !== 'text') { ok = false; msg = 'This file is binary; it has no text to show.'; }
-          else if (!ent.inFolder) { ok = false; msg = "The mod's folder does not hold this file; it is read from your install."; }
-          else {
-            data.path = fp;
-            data.text = has(fo.texts, fp) ? fo.texts[fp] : '// Browser preview: in the game this is the file\'s text from the mods folder.\r\n';
-            data.size = data.text.length;
-            data.productBlock = fp === 'mod.json';
-            data.cause = str(ent.cause);
-          }
-        }
-        data.ok = ok;
-        data.message = msg;
-        return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}];
-      }
-      if (a === 'newMod') {
-        var nmName = key.trim();
-        if (!nmName) { ok = false; msg = 'No mod was created: a new mod needs a name.'; }
-        else {
-          var nk = nmName.replace(/[\\\/:*?"<>|]/g, '').trim() || 'mod', base = nk, ex, salt = 'k3x9', n = 2;
-          for (; modOf(nk); n++) nk = base + ' (' + n + ')';
-          salt = ('newmod' + (mods().length % 100)).slice(0, 8);
-          ex = exampleFolder(salt, nmName);
-          disk[nk] = ex.folder;
-          mods().push({key: nk, salt: salt, name: nmName, author: '', size: 1530, files: 3,
-                       state: 'ready', cause: '', editorRows: 1, folder: nk, group: '', place: '', placeTitle: '',
-                       description: '', requirements: {cvars: {}}, editorRowNames: ['Example crate'], publishedMaps: 0,
-                       facts: {adds: 2, borrows: 0, surfaces: 0, editor: 0, replaces: 0, editorOnly: false, editorTweaks: [],
-                               replacements: [], edits: [], registries: {}},
-                       borrows: {paths: [], count: 0}, warnings: []});
-          data.key = nk;
-          data.file = ex.row;
-          msg = 'Created ' + nmName + ' in mods\\' + nk + '. Its Example crate is in the Toybox. After you change its files, press Refresh to see the change.';
-        }
-        recount();
-        data.ok = ok;
-        data.message = msg;
-        return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}, {kind: 'mods', data: clone()}];
-      }
-      var r = mapModOf(key), b = modOf(key);
-      if (a === 'rescan') msg = '';
-      else if (a === 'rebuild') {
-        if (!b) { ok = false; msg = 'That mod is no longer installed.'; }
-        else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ' and is kept exactly as that map needs it, so it is not rebuilt.'; }
-        else msg = 'Rebuilt ' + nameOf(key) + ': nothing changed.';
-      } else if (a === 'mapAddMod') {
-        if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
-        else if (!b) { ok = false; msg = key + ' is not installed.'; }
-        else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ', so only that map uses it.'; }
-        else if (r && r.attached) msg = nameOf(key) + ' is already used by the whole of ' + docu.map.name + '.';
-        else {
-          if (r) r.attached = true;
-          else docu.map.mods.push({key: key, salt: str(b.salt), name: str(b.name), state: 'installed',
-                                   placedEntities: [], placedCount: 0, placedModules: 0, references: [], size: num(b.size),
-                                   inManifest: true, viaNeeds: false, attached: true, nothingPlaced: true, build: ''});
-          msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '.';
-        }
-      } else if (a === 'chooseRegistry') {
-        var tab = key.indexOf('\t'), slot = tab < 0 ? key : key.slice(0, tab), pick = tab < 0 ? '' : key.slice(tab + 1);
-        var cl = docu.map && Array.isArray(docu.map.registryClashes) ? docu.map.registryClashes.filter(function (c) { return c.slot === slot; })[0] : null;
-        if (!cl) { ok = false; msg = 'The open map has no choice for ' + slot + '.'; }
-        else {
-          var chosenName = (cl.providers.filter(function (p) { return p.id === pick; })[0] || {}).name || 'the chosen mod';
-          cl.chosen = pick;
-          cl.serving = pick || (cl.providers[0] && cl.providers[0].id) || '';
-          msg = pick ? 'This map now uses ' + chosenName + '\'s version of ' + slot + '; it applies now and is saved with the map\'s next save.'
-                     : slot + ": the map's choice is cleared; the first mod in the map's list serves it.";
-        }
-      } else if (a === 'mapRemoveModPreview') {
-        if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
-        else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.name), map: mapPart(r), install: null};
-      } else if (a === 'uninstallPreview') {
-        if (!b) { ok = false; msg = key + ' is not installed.'; }
-        else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null,
-                             install: installPart(b, !!(docu.map && docu.map.entities !== -1)),
-                             editorRows: arr(b.editorRowNames).slice()};
-      } else if (a === 'mapRemoveMod') {
-        if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
-        else { msg = 'Removed ' + nameOf(r.key, r.name) + ' from ' + docu.map.name + ': ' + plural(num(r.placedCount), 'entity', 'entities') + ' deleted.'; removeFromMap(r); }
-      } else if (a === 'uninstall') {
-        if (!b) { ok = false; msg = key + ' is not installed.'; }
-        else {
-          var open = !!(docu.map && docu.map.entities !== -1);
-          msg = 'Uninstalled ' + nameOf(key) + (r ? ' and removed it from the open map' : '') + '. Its folder was moved to the Recycle Bin' +
-                (open ? ' and the undo history was cleared.' : '.');
-          if (r) removeFromMap(r);
-          docu.mods = mods().filter(function (x) { return x !== b; });
-        }
-      } else { ok = false; msg = 'Browser preview: the mods store is not available here.'; }
-      recount();
-      data.ok = ok;
-      data.message = msg;
-      return [{kind: 'modsActionResult', action: a, ok: ok, message: msg, data: data}, {kind: 'mods', data: clone()}];
-    };
-  }
-
   return {STATES: STATES, STATUS: STATUS, ACTIONS: ACTIONS, YOUR_MODS: YOUR_MODS, READY_TEXT: READY_TEXT, REFRESH_TEXT: REFRESH_TEXT,
+          APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
           IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
-          sameFilesText: sameFilesText, bareName: bareName, COPY_ID_TITLE: COPY_ID_TITLE,
+          sameFilesText: sameFilesText, bareName: bareName, PLACE_CLEANUP_TEXT: PLACE_CLEANUP_TEXT, ADD_MINE_TITLE: ADD_MINE_TITLE, folderRuleText: folderRuleText,
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, UNINSTALL_HEAD: UNINSTALL_HEAD, uninstallHead: uninstallHead, savedMapsText: savedMapsText,
-          SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, standIn: standIn, create: create,
+          SCOPE: SCOPE, MAP_LEVEL_TEXT: MAP_LEVEL_TEXT, create: create,
           NOTHING_PLACED_TEXT: NOTHING_PLACED_TEXT, EDITOR_TWEAKS_TEXT: EDITOR_TWEAKS_TEXT, NOTHING_CHANGED_TEXT: NOTHING_CHANGED_TEXT,
           changeLines: changeLines, slotText: slotText, pathParts: pathParts, editParts: editParts, valueClass: valueClass, folderArg: folderArg,
           PATH_TITLES: PATH_TITLES,

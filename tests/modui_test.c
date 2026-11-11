@@ -5,8 +5,7 @@
  * state), the main-thread refusal, Refresh's result, an install through the
  * tab, a hand-made folder salted at Refresh, a copy made a mod of its own, the
  * informational same-files hint, the plain causes of a failed build and of
- * folders in an earlier shape, a downloaded map's place group, Rebuild (a
- * place folder refused), the open map's rows by salt with the asset rule's
+ * folders in an earlier shape, a downloaded map's place group, the open map's rows by salt with the asset rule's
  * states, Use in this map, Remove from map and Uninstall with their dry runs
  * against a fake editor, the console verbs with their --yes gate, the Files
  * view, New mod (the message saying Refresh picks up edits), the doctor, the
@@ -30,6 +29,7 @@
 #include "modregistry.h"
 #include "mod_test_util.h"
 #include "editor_delete.h"
+#include "modzip.h"
 
 static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -210,7 +210,9 @@ static int fake_map_info(sh_modui_map_info *out)
     return 1;
 }
 
-static int g_delete_status = SH_EDITOR_DELETE_DISPATCHED, g_delete_calls, g_deleted[16], g_deleted_n;
+/* g_delete_keeps: the delete dispatches but its objects are back by the commit (an editor that did not
+ * finish it, or a Ctrl+Z before the row would go). */
+static int g_delete_status = SH_EDITOR_DELETE_DISPATCHED, g_delete_calls, g_deleted[16], g_deleted_n, g_delete_keeps;
 static int fake_delete(const int *ids, int count)
 {
     int i, k;
@@ -218,9 +220,21 @@ static int fake_delete(const int *ids, int count)
     if (g_delete_status != SH_EDITOR_DELETE_DISPATCHED) return g_delete_status;
     for (i = 0; i < count; i++) {
         if (g_deleted_n < 16) g_deleted[g_deleted_n++] = ids[i];
-        for (k = 0; k < g_ent_n; k++) if (g_ents[k].uid == ids[i]) g_ents[k].alive = 0;
+        for (k = 0; k < g_ent_n && !g_delete_keeps; k++) if (g_ents[k].uid == ids[i]) g_ents[k].alive = 0;
     }
     return SH_EDITOR_DELETE_DISPATCHED;
+}
+
+/* Whether the open map's list of mods (the current manifest) has a row of `salt`. */
+static int current_has(const char *salt)
+{
+    sh_modmanifest_list rows;
+    size_t i;
+    int hit = 0;
+    if (!sh_modmanifest_current(&rows)) return 0;
+    for (i = 0; i < rows.count; i++) hit |= !_stricmp(rows.rows[i].salt, salt);
+    sh_modmanifest_list_free(&rows);
+    return hit;
 }
 
 static int g_tag_removals;
@@ -237,7 +251,6 @@ static char g_toast[600], g_print[600];
 static int g_toasts;
 static void fake_toast(const char *title, const char *text) { g_toasts++; _snprintf_s(g_toast, sizeof g_toast, _TRUNCATE, "%s: %s", title, text); }
 static void fake_print(const char *line) { strncpy_s(g_print, sizeof g_print, line, _TRUNCATE); }
-static int fake_entity_valid(int uid) { return g_map_on && ent_alive(uid); }
 
 /* The undo clear (editor_undo.h): available while a map is open, how often
  * it ran, and the editor's pending delete commit the tick waits for. */
@@ -336,7 +349,6 @@ static void bind_fakes(void)
     e.delete_entities = fake_delete;
     e.remove_tag = fake_remove_tag;
     e.busy = fake_busy;
-    e.entity_valid = fake_entity_valid;
     e.toast = fake_toast;
     e.print = fake_print;
     e.on_main_thread = fake_on_main;
@@ -670,6 +682,20 @@ static void put_fresh_mod(const char *folder, const char *name, const char *leaf
     mt_write(folder, rel, body);
 }
 
+/* A ZIP at `path` holding `n` entries (name, text). */
+static int put_zip(const char *path, const char *const *names, const char *const *texts, int n)
+{
+    sh_zip_writer w;
+    wchar_t wpath[MAX_PATH * 2];
+    int i, ok;
+    memset(&w, 0, sizeof w);
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH * 2) || !sh_zip_writer_open(&w, wpath)) return 0;
+    for (i = 0; i < n; i++) sh_zip_writer_add(&w, names[i], texts[i], strlen(texts[i]));
+    ok = sh_zip_writer_finish(&w);
+    sh_zip_writer_free(&w);
+    return ok;
+}
+
 /* The game's text of the decl the edits case copies (a fake installed-content reader). */
 static const char IMP_STOCK[] = "{\r\n\tinherit = \"ai/demon/imp\";\r\n}";
 static int imp_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
@@ -848,7 +874,8 @@ int main(int argc, char **argv)
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
     CHECK(sh_modui_list() == -1);
-    CHECK(sh_modui_run(SH_MODS_ACT_RESCAN, NULL) == -1);
+    CHECK(sh_modui_run(SH_MODS_ACT_MAP_ADD, "x") == -1);
+    CHECK(sh_modui_run(SH_MODS_ACT_UNINSTALL, "x") == -1);
     CHECK(sh_modui_doctor(0, doctor_line, NULL) == -1);
     {
         sh_mods_call call;
@@ -857,25 +884,48 @@ int main(int argc, char **argv)
         CHECK(sh_modui_slot(NULL, &call) == 0);
         call.op = SH_MODS_FETCH;
         CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);   /* the earlier document remains */
-        call.op = SH_MODS_WAIT;
-        CHECK(sh_modui_slot(NULL, &call) == 1);                       /* nothing runs in the background */
+        call.op = 5;                                                   /* the retired WAIT */
+        CHECK(sh_modui_slot(NULL, &call) == 0);
     }
     g_main = 1;
 
-    printf("-- Refresh: the result carries what the refresh did in the game\n");
+    printf("-- Refresh: always says what a change still needs (a restart, the next map open), else nothing\n");
     g_refresh_mode = 1;
     g_refreshes = 0;
     doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
     CHECK(g_refreshes == 1);
-    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true"));
-    CHECK(has(doc, "In the game: 3 decl(s) re-parsed, 1 model(s) and image(s) reloaded."));
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"Some of the changes take effect only after you restart DOOM.\""));
     CHECK(has(doc, "\"refresh\":{\"reparsed\":3,\"reloaded\":1,\"needsMapReload\":2,\"needsRestart\":1,"));
+    CHECK(!has(doc, "decl(s)") && !has(doc, "\"note\"") && doc_prose_ok(doc));
+    free(doc);
+    g_refresh_mode = 2;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"message\":\"Some of the changes take effect when you are back in the editor.\""));
     free(doc);
     g_refresh_mode = 0;
     doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
-    CHECK(has(doc, "Mods folder read again: 0 mods in use."));
-    CHECK(!has(doc, "In the game:") && doc_prose_ok(doc));
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"\"") && doc_prose_ok(doc));
     free(doc);
+
+    printf("-- off the main thread: the file work runs there with no time limit, the game's part waits for APPLY\n");
+    g_main = 0;
+    g_refreshes = 0;
+    g_refresh_mode = 1;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"\"") && has(doc, "\"apply\":true"));
+    CHECK(g_refreshes == 0 && !has(doc, "\"refresh\""));
+    free(doc);
+    CHECK(sh_modui_run(SH_MODS_ACT_APPLY, NULL) == -1);   /* the game's part is the main thread's */
+    g_main = 1;
+    doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+    CHECK(g_refreshes == 1);
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"Some of the changes take effect only after you restart DOOM.\""));
+    CHECK(has(doc, "\"refresh\":{") && !has(doc, "\"apply\""));
+    free(doc);
+    doc = run_doc(SH_MODS_ACT_APPLY, NULL);   /* nothing owed */
+    CHECK(has(doc, "\"action\":\"apply\",\"ok\":true") && g_refreshes == 1);
+    free(doc);
+    g_refresh_mode = 0;
     {
         sh_modui_engine e;
         memset(&e, 0, sizeof e);
@@ -883,22 +933,26 @@ int main(int argc, char **argv)
         sh_modui_bind(&e);   /* no rescan bound in a SH_MODUI_PURE build */
         g_refreshes = 0;
         doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
-        CHECK(has(doc, "\"ok\":false") && !has(doc, "\"refresh\"") && g_refreshes == 0);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"The game cannot read the mods folder again from here.\""));
+        CHECK(!has(doc, "\"refresh\"") && g_refreshes == 0);
         free(doc);
         bind_fakes();
     }
-    /* the retired actions answer a refusal */
-    doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
-    CHECK(has(doc, "\"ok\":false,\"message\":\"Unknown action.\""));
-    free(doc);
-    doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
-    CHECK(has(doc, "\"ok\":false"));
-    free(doc);
+    /* the retired action numbers (verify, prune, remove, migrate, the recycle bin's) are unknown */
+    {
+        static const int retired[] = { 2, 5, 6, 7, 8, 9, 14, 15, 17, 19 };
+        int r;
+        for (r = 0; r < (int)(sizeof retired / sizeof retired[0]); r++) {
+            doc = run_doc(retired[r], NULL);
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Unknown action.\""));
+            free(doc);
+        }
+    }
     g_rescans = 0;
 
     printf("-- install through the tab: named by the mod, ready, its rows in the palette\n");
     doc = run_doc(SH_MODS_ACT_INSTALL, "relative\\folder");
-    CHECK(has(doc, "\"action\":\"install\",\"ok\":false,\"message\":\"Choose a mod folder to install.\""));
+    CHECK(has(doc, "\"action\":\"install\",\"ok\":false,\"message\":\"Choose a mod folder or a mod ZIP to install.\""));
     free(doc);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\authoring", tmp);
     {
@@ -938,6 +992,43 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"ok\":true") && (has(doc, "R2 Imp copy is already installed.") || has(doc, "Installed R2 Imp copy")));
     CHECK(doc_prose_ok(doc));
     free(doc);
+
+    printf("-- install a ZIP: its mods are unpacked and installed; a ZIP without a mod or not a ZIP says so\n");
+    {
+        char zip[MAX_PATH * 2];
+        static const char *const names[] = { "zipped/mod.json", "zipped/assets/generated/decls/entitydef/mods/zipped/zipped.decl",
+                                             "readme.txt" };
+        static const char *const texts[] = { "{\"name\":\"Zipped\",\"author\":\"tester\"}",
+                                             "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tzipped = 1;\r\n}\r\n", "hello" };
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\zipped.zip", tmp);
+        CHECK(put_zip(zip, names, texts, 3));
+        g_main = 0;   /* the window's worker */
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":true,\"message\":\"Installed Zipped.\"") && has(doc, "\"apply\":true"));
+        free(doc);
+        g_main = 1;
+        free(run_doc(SH_MODS_ACT_APPLY, NULL));
+        doc = list_doc();
+        CHECK(bundle_has(doc, "zipped", "\"state\":\"ready\""));
+        {
+            char s[16] = "";
+            row_salt(doc, "zipped", s, sizeof s);
+            note_salt(s);
+        }
+        free(doc);
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "zipped"));
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\empty.zip", tmp);
+        CHECK(put_zip(zip, names + 2, texts + 2, 1));
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That ZIP was not installed: it holds no mod: a mod is a folder with a "
+                       "mod.json.\""));
+        free(doc);
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\fake.zip", tmp);
+        mt_write(tmp, "authoring\\fake.zip", "not a zip");
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That ZIP was not installed: it cannot be read as a ZIP"));
+        free(doc);
+    }
 
     printf("-- a hand-made folder is a new mod at Refresh; two with the same files carry the hint, both serve\n");
     {
@@ -993,17 +1084,30 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "broken", "\"state\":\"attention\""));
         CHECK(row_str(doc, "broken", "cause", cause, sizeof cause) && !strncmp(cause, "This mod could not be built: ", 29));
         if (cause[0]) printf("    broken: %s\n", cause);
-        CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) && !strcmp(cause, SH_MB_EARLIER));
+        /* An earlier shape: the one sentence, never advice to edit mod.json by hand. */
+        CHECK(row_str(doc, "old_shape", "cause", cause, sizeof cause) &&
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                             "converts it."));
         if (cause[0]) printf("    old_shape: %s\n", cause);
-        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) && !strcmp(cause, SH_MB_EARLIER));
-
+        CHECK(row_str(doc, "packaged", "cause", cause, sizeof cause) &&
+              !strcmp(cause, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                             "converts it."));
+        {
+            /* An earlier version's builder part: the same sentence. */
+            char older[MAX_PATH * 2];
+            _snprintf_s(older, sizeof older, _TRUNCATE, "%s\\older_block", g_root);
+            CreateDirectoryA(older, NULL);
+            mt_write(older, "mod.json", "{\"name\":\"Older\",\"snapmap-plus\":{\"format\":1,\"bundle\":\"x\"}}");
+            free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+            free(doc);
+            doc = list_doc();
+            CHECK(row_str(doc, "older_block", "cause", cause, sizeof cause) &&
+                  !strncmp(cause, "This mod was made for an earlier version of Snapmap+.", 53));
+            if (cause[0]) printf("    older_block: %s\n", cause);
+            mt_remove_tree(older);
+        }
         CHECK(doc_prose_ok(doc));
         union_add(doc);
-        free(doc);
-        /* Rebuild says the same plain sentence, and the folder serves nothing. */
-        doc = run_doc(SH_MODS_ACT_REBUILD, "broken");
-        CHECK(has(doc, "\"ok\":false,\"message\":\"Broken was not rebuilt. This mod could not be built: "));
-        CHECK(doc_prose_ok(doc));
         free(doc);
         /* The Files view names the cause too, plainly. */
         doc = run_doc(SH_MODS_ACT_FILES, "broken");
@@ -1059,22 +1163,26 @@ int main(int argc, char **argv)
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);
-        doc = run_doc(SH_MODS_ACT_REBUILD, name);
-        CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy came with the map Hell Arena and is kept exactly as that map "
-                       "needs it, so it is not rebuilt.\""));
-        free(doc);
+        /* Use in this map with the map's copy named: the root folder of its salt is attached. */
         open_test_map();
         doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
-        CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy came with the map Hell Arena, so only that map uses it."));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"R2 Imp copy is now used by the whole of "));
         free(doc);
         g_map_on = 0;
-        /* The console's uninstall names the mod: every folder of it, yours and the map's copy. */
+        sh_modmanifest_reset();
+        /* Add to my mods: the salt is already yours, so that folder is the one. */
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"R2 Imp copy is already one of your mods, in "
+                       "mods\\\\alex.r2-imp.\"") && has(doc, "\"key\":\"alex.r2-imp\""));
+        free(doc);
+        /* The console's uninstall removes one folder, as the tab's does: yours first; the map's copy stays. */
         {
             const char *un_argv[] = { "uninstall", "alex.r2-imp" };
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
-            CHECK(has(g_doctor, "MODS: uninstall: removes all 2 folders of R2 Imp copy (yours and the copies maps brought)"));
-            CHECK(has(g_doctor, "downloaded for Hell Arena)"));
+            CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp to the Windows Recycle Bin"));
+            CHECK(has(g_doctor, "MODS: uninstall: another folder of R2 Imp copy stays installed (mods\\maps\\Hell Arena\\"));
+            CHECK(!has(g_doctor, "folders of"));
             CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: dry run; add --yes to do it\n"));
             CHECK(lines_prose_ok(g_doctor));
         }
@@ -1083,6 +1191,76 @@ int main(int argc, char **argv)
         free(doc);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, name);
         CHECK(!mt_exists(path));
+    }
+
+    printf("-- Add to my mods: a downloaded map's mod copied to the root, off the game's thread\n");
+    {
+        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "", key[600], esc[800];
+        sh_ms_install_stats st;
+        sh_ms_place place;
+        sh_mb_bundle bd;
+        sh_mb_resolver r;
+        size_t q, w = 0;
+        _snprintf_s(solo, sizeof solo, _TRUNCATE, "%s\\solo", g_root);
+        put_fresh_mod(solo, "Solo", "solo", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tsolo = 1;\r\n}\r\n");
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        _snprintf_s(recv, sizeof recv, _TRUNCATE, "%s\\authoring\\solo_received", tmp);
+        CHECK(mt_copy_tree(solo, recv));
+        memset(&st, 0, sizeof st);
+        memset(&place, 0, sizeof place);
+        memset(&bd, 0, sizeof bd);
+        memset(&r, 0, sizeof r);
+        r.stock = stock_cb;
+        place.title = "Solo Arena";
+        place.map_id = "6ae40b378bf5037d3d63bd77";
+        CHECK(sh_ms_install_placed(recv, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+        sh_mb_free(&bd);
+        CHECK(sh_ms_delete_mod_folder(solo, cause, sizeof cause) != 0);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
+        esc[w] = 0;
+        /* Only the map's copy: Use in this map sends the player to Add to my mods, which is there. */
+        open_test_map();
+        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"Solo came with the map Solo Arena. Add it to your mods first (Add to my "
+                       "mods); then your own maps can use it.\""));
+        free(doc);
+        g_main = 0;
+        g_refreshes = 0;
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"Added Solo to your mods, in mods\\\\Solo; your own "
+                       "maps can use it now.\"") && has(doc, "\"apply\":true") && g_refreshes == 0);
+        free(doc);
+        g_main = 1;
+        doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+        CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true") && has(doc, "\"key\":\"Solo\"") && g_refreshes == 1);
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "Solo", "\"state\":\"ready\"") && bundle_has(doc, "Solo", "\"place\":\"\""));
+        CHECK(bundle_has(doc, esc, "\"state\":\"ready\""));   /* the map's copy stays for its map */
+        {
+            char a[16] = "", b[16] = "";
+            row_salt(doc, "Solo", a, sizeof a);
+            row_salt(doc, esc, b, sizeof b);
+            CHECK(a[0] && !strcmp(a, b));   /* one mod: the same salt at the root and in the place */
+            note_salt(a);
+        }
+        CHECK(doc_prose_ok(doc));
+        free(doc);
+        /* Now the map's copy names your own folder, which the map uses. */
+        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is now used by the whole of "));
+        free(doc);
+        g_map_on = 0;
+        sh_modmanifest_reset();
+        /* Your own mod: nothing to add. */
+        doc = run_doc(SH_MODS_ACT_ADD_MINE, "Solo");
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is already one of your mods.\""));
+        free(doc);
+        strcpy_s(key, sizeof key, name);
+        free(run_doc(SH_MODS_ACT_UNINSTALL, key));
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "Solo"));
+        mt_remove_tree(recv);
     }
 
     printf("-- the open map: rows by salt, the asset rule's states, plain causes\n");
@@ -1154,7 +1332,7 @@ int main(int argc, char **argv)
     /* Use in this map: twin_a, nothing placed. */
     g_marks = 0;
     doc = run_doc(SH_MODS_ACT_MAP_ADD, "twin_a");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Twin A is now used by the whole of Imp Arena."));
+    CHECK(has(doc, "\"ok\":true,\"message\":\"Twin A is now used by the whole of Imp Arena; save the map to keep it.\""));
     CHECK(g_marks == 1 && doc_prose_ok(doc));
     free(doc);
     doc = run_doc(SH_MODS_ACT_MAP_ADD, "twin_a");
@@ -1169,8 +1347,25 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"entityCount\":0,") && has(doc, "\"manifestRow\":true"));
     free(doc);
     doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "twin_a");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Twin A from Imp Arena: no entity used it, so only its row was dropped.\""));
+    CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Twin A from Imp Arena; nothing placed used it.\""));
     free(doc);
+    /* Remove from map never leaves objects without a row: the row goes once the delete has committed and
+     * the map holds none of the mod's objects; objects still there keep it. */
+    g_delete_keeps = 1;
+    g_undo_pending = 1;
+    log_clear();
+    doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.r2-imp");
+    CHECK(has(doc, "\"ok\":true") && current_has("alexrimp"));
+    free(doc);
+    CHECK(sh_modui_poll_due() == 1);
+    (void)sh_modui_poll_main(NULL);
+    CHECK(current_has("alexrimp"));                 /* not committed yet: nothing dropped */
+    g_undo_pending = 0;
+    (void)sh_modui_poll_main(NULL);
+    CHECK(current_has("alexrimp") && has(g_logbuf, "of its objects are still in the map, so its row stays"));
+    CHECK(ent_alive(1) && ent_alive(2) && g_tagged == 1);
+    g_delete_keeps = 0;
+    g_deleted_n = 0;
     /* The imp mod: the dry run of Remove from map and of Uninstall. */
     doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, "alex.r2-imp");
     CHECK(has(doc, "\"entityCount\":2,") && has(doc, "\"tagRemoved\":true,\"vanillaAfter\":true"));
@@ -1218,15 +1413,16 @@ int main(int argc, char **argv)
         CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
         CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: Uninstalled R2 Imp copy and removed it from the open map."));
         CHECK(lines_prose_ok(g_doctor));
-        CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
+        CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2));
+        CHECK(current_has("alexrimp") && g_tagged == 1);   /* the delete has not committed: the row and the tag stay */
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp", g_root);
         CHECK(!mt_exists(path));
-        /* The undo history is cleared once the delete committed. */
+        /* The row, the tag and the undo history go once the delete committed. */
         g_undo_clears = 0;
         g_undo_pending = 0;
         CHECK(sh_modui_poll_due() == 1);
         (void)sh_modui_poll_main(NULL);
-        CHECK(g_undo_clears == 1);
+        CHECK(g_undo_clears == 1 && !current_has("alexrimp") && g_tagged == 0);
     }
     g_map_on = 0;
     sh_modmanifest_reset();
@@ -1275,20 +1471,18 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
         CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: "));
         free(doc);
-        g_busy = "Play is running";
+        /* Off the main thread (the window's worker): made and built there, finished by APPLY. */
+        g_main = 0;
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "Later");
-        CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: Play is running.\""));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") && has(doc, "\"apply\":true"));
         free(doc);
-        g_busy = NULL;
+        g_main = 1;
+        doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+        CHECK(has(doc, "\"action\":\"newMod\",\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") &&
+              has(doc, "\"key\":\"Later\"") && !has(doc, "\"apply\""));
+        free(doc);
     }
 
-    printf("-- Rebuild of one of your mods\n");
-    doc = run_doc(SH_MODS_ACT_REBUILD, "twin_b");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt Twin B: nothing changed.\""));
-    free(doc);
-    doc = run_doc(SH_MODS_ACT_REBUILD, "nobody");
-    CHECK(has(doc, "\"ok\":false,\"message\":\"That mod is no longer installed.\""));
-    free(doc);
 
     printf("-- an organizing folder: its mods name it as their group\n");
     {
@@ -1303,6 +1497,25 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "Packs\\\\twin_c", "\"folder\":\"twin_c\",\"group\":\"Packs\""));
         union_add(doc);
         free(doc);
+    }
+
+    printf("-- an unnamed mod is named by its folder, never by its salt\n");
+    {
+        char nn[MAX_PATH * 2], s[16] = "";
+        _snprintf_s(nn, sizeof nn, _TRUNCATE, "%s\\noname", g_root);
+        CreateDirectoryA(nn, NULL);
+        mt_write(nn, "mod.json", "{\"name\":\"\"}");
+        mt_write(nn, "assets\\generated\\decls\\entitydef\\mods\\noname\\nn.decl", "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n}\r\n");
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
+        doc = list_doc();
+        row_salt(doc, "noname", s, sizeof s);
+        note_salt(s);
+        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: mod mods\\noname (noname)"));
+        CHECK(lines_prose_ok(dr));
+        mt_remove_tree(nn);
+        free(run_doc(SH_MODS_ACT_RESCAN, NULL));
     }
 
     printf("-- the doctor: every folder, plainly\n");

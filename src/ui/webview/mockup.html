@@ -334,7 +334,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   </div>
 
   <!-- Mods tab (mods_tab.js): Your mods and one group per downloaded map, the selected mod's details,
-       and the player's actions. The host runs modsAction on the game thread and follows each with a
+       and the player's actions. The host runs modsAction (builds off the game's thread) and follows each with a
        fresh list; showing the tab and Refresh ask for a rescan (there is no folder watcher). Nothing
        polls. Diagnostics are the console's sh_mods doctor. -->
   <div class="content" id="panel-mods" role="tabpanel" aria-labelledby="tab-mods" style="display:none;">
@@ -345,10 +345,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="panel-actions">
           <button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none" title="Show only the mods that need attention" aria-label="Show only the mods that need attention"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-triangle-alert"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsMapBtn" title="This map: its details and the mods it uses" aria-label="This map: its details and the mods it uses" aria-haspopup="dialog"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-map"></use></svg></button>
-          <button type="button" class="btn icon icon-button" id="modsRefreshBtn" title="Refresh: read the mods folder again, after you change a mod's files" aria-label="Refresh: read the mods folder again"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
+          <button type="button" class="btn icon icon-button" id="modsRefreshBtn" title="Refresh: after you change a mod's files, build them again and bring the change into the game" aria-label="Refresh: build changed mods"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsFolderBtn" title="Open mods folder" aria-label="Open mods folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-open"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsNewBtn" aria-haspopup="dialog" title="New mod: make a mod of your own, with an example to start from" aria-label="New mod"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-plus"></use></svg></button>
-          <button type="button" class="btn primary icon icon-button" id="modsInstallBtn" title="Install a mod folder: choose it, and it is checked, copied into the mods folder and verified" aria-label="Install a mod folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
+          <button type="button" class="btn primary icon icon-button" id="modsInstallBtn" aria-haspopup="menu" title="Install mods: mod folders, or mod ZIPs such as a prefab export; Snapmap+ copies them into your mods and builds them" aria-label="Install mods"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
         </div>
       </div>
       <div class="panel-toolbar">
@@ -372,7 +372,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="panel-actions">
           <button type="button" class="btn icon icon-button" id="modsFilesBtn" disabled aria-haspopup="dialog" title="Files: browse this mod's files" aria-label="Files: browse this mod's files"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-tree"></use></svg></button>
           <button type="button" class="btn" id="modsUseBtn" disabled style="display:none" title="Use the selected mod in the whole open map without placing anything; the map lists it when you save">Use in this map</button>
-          <button type="button" class="btn" id="modsRebuildBtn" disabled title="Build the selected mod again from its folder">Rebuild</button>
           <button type="button" class="btn danger" id="modsUninstallBtn" disabled title="Uninstall the selected mod; you see everything it changes before you decide">Uninstall</button>
         </div>
       </div>
@@ -2447,17 +2446,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var pfr = pfFileResultToast(d);
       if (pfr) toast(pfr.text, pfr.level);
     } else if (d.kind === 'editorMode') {
-      var prevMapOpen = edMode.known ? edMode.mapOpen : null;
       edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0,
                 modules: typeof d.modules === 'number' ? d.modules : -1,
                 mapOpen: typeof d.mapOpen === 'number' ? d.mapOpen : -1};
       pfRefreshModeUi(); updateCreateBtn();
-      // The Mods tab's "In this map" pills follow the map: when the editor takes a map or lets it go
-      // (mapOpen from the backend; -1 from an older one), the tab's document is read again while showing.
-      if (prevMapOpen !== null && prevMapOpen !== edMode.mapOpen) {
-        var modsPanel = document.getElementById('panel-mods');
-        if (modsPanel && modsPanel.style.display !== 'none' && typeof modsUi !== 'undefined') modsUi.show();
-      }
     } else if (d.kind === 'createModulePrefabResult') {
       var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
       if (d.result === 1) {
@@ -2812,14 +2804,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var i = 0; i < mods.length; i++) if (mods[i].installed !== true) missing++;
     return {count: mods.length, missing: missing, mods: mods};
   }
-  function pfModLabel(m) { return m.id; }
+  // A mod by the name it was recorded with; a mod recorded without one is never named by its salt.
+  function pfModLabel(m) { return m.id && m.id !== m.salt ? m.id : 'an unnamed mod'; }
   // The list row's pill: null without mods; "Needs mods: <id> +N" naming the missing ones when any
   // is not installed, else "Mods: <id> +N". The title lists every mod with its state.
   function pfModsBadge(st) {
     if (!st || !st.count) return null;
     var missing = st.mods.filter(function(m){ return m.installed !== true; });
     var shown = missing.length ? missing : st.mods;
-    var first = shown[0].id + (shown.length > 1 ? ' +' + (shown.length - 1) : '');
+    var first = pfModLabel(shown[0]) + (shown.length > 1 ? ' +' + (shown.length - 1) : '');
     var title = st.mods.map(function(m){ return pfModLabel(m) + (m.installed === true ? ' (installed)' : ' (not installed)'); }).join('\n');
     return missing.length ? {text: 'Needs mods: ' + first, cls: 'pf-mods pf-mods-missing', title: title}
                           : {text: 'Mods: ' + first, cls: 'pf-mods', title: title};
@@ -2829,14 +2822,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!st || !st.count) return {rows: [], note: ''};
     var rows = st.mods.map(function(m){ return {label: pfModLabel(m), state: m.installed === true ? 'Installed' : 'Not installed', missing: m.installed !== true}; });
     var note = st.missing
-      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Load / Place offers to download them when the mod store has them; otherwise ask the prefab\'s author for its ZIP export.'
+      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Load / Place offers to download them when they are available online; otherwise ask the prefab\'s author for its export.'
       : 'Every mod this prefab needs is installed.';
     return {rows: rows, note: note};
   }
-  // A Load / Place answer about mods: 3 the mod store is being asked, -7 refused. Others are null.
+  // A Load / Place answer about mods: 3 the download is being asked for, -7 refused. Others are null.
   function pfModsLoadToast(d) {
     if (!d) return null;
-    if (d.result === 3) return {text: d.message || ('Checking the mod store for the mods "' + d.name + '" needs'), level: 'ok'};
+    if (d.result === 3) return {text: d.message || ('Checking online for the mods "' + d.name + '" needs'), level: 'ok'};
     if (d.result === -7) return {text: d.message || ('"' + d.name + '" was not placed: its mods are not installed'), level: 'warn'};
     return null;
   }
@@ -3843,8 +3836,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     byId: function(id){ return document.getElementById(id); },
     // Organizing folders close for the session only: the retired mods.collapsed_groups setting is neither read nor written.
     post: post, toast: toast,
-    // Copy mod id, for authors.
-    copy: copyText,
     // The Files view highlights a file's text with the Decl Text editor's tokens.
     tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; },
     // New mod's right-click entry on the list, in the page's context menu.
