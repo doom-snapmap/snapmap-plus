@@ -63,4 +63,10 @@ int sh_editor_undo_clear(int probe);
  * once). Main thread. */
 int sh_editor_mark_modified(const char *label);
 
+/* Mark the open editor map modified without an undo step, for a change undo
+ * cannot restore (a map setting held in the map's text, map_render_editor.c):
+ * the editor's own vt+0x160(editor, 1), the call EditorCommitEdit ends with.
+ * 1 marked, 0 no editor map, -1 unavailable. Main thread. */
+int sh_editor_mark_modified_no_undo(void);
+
 #endif /* BACKEND_EDITOR_UNDO_H */
