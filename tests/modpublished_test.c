@@ -5,8 +5,9 @@
  * fetch, a build that will not install, a second load abandoning the hold, the
  * joiner's host re-check, the warm-cache joiner branch and My Maps play; a
  * parse whose classification another detour broke, the SnapMap feed's play
- * and the launch boundary; the serving context every hold sets (a stranger's
- * map its place, the player's own maps the root folders); and the rawmap
+ * and the launch boundary; the place every gate decides (a stranger's map its
+ * item's place, the player's own maps the root, a map the place it records),
+ * against a store double that honours places; and the rawmap
  * gate: the rows a rawmap names counted under the asset rule, the store
  * check, the refusal that names each mod and the download that reopens the
  * rawmap.
@@ -47,6 +48,7 @@ static int g_failed, g_checks;
 #define ROW(salt, name, hash, size) \
     "{\"mod\":\"" salt "@" hash "\",\"name\":\"" name "\",\"version\":\"1\",\"size\":" size ",\"names\":[]}"
 #define MEMBER(rows) ",\"snapmap-plus\":{\"format\":1,\"mods\":[" rows "]}"
+#define MEMBER_AT(rows, place) ",\"snapmap-plus\":{\"format\":1,\"mods\":[" rows "],\"place\":\"" place "\"}"
 
 static const char VANILLA[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
@@ -54,6 +56,10 @@ static const char VANILLA[] =
 static const char ONE_MOD[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":["
     VAR("door_label", "Open") "]}" MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728")) "}";
+/* A map that arrived with its mods: it records its place. */
+static const char ONE_MOD_PLACED[] =
+    "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
+    MEMBER_AT(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728"), "Pink Arena") "}";
 static const char TWO_MODS[] =
     "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}"
     MEMBER(ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728") "," ROW(SALT_B, "bob.room", HASH_B, "1048576")) "}";
@@ -61,8 +67,9 @@ static const char TWO_MODS[] =
 /* ---- engine and worker doubles -------------------------------------------------------------- */
 
 typedef struct fake {
-    int installed_a, installed_b, install_on_fetch, refuse_install;
+    int installed_a, installed_b, install_on_fetch, refuse_install;   /* installed: the root at the row's build */
     int root_a;                      /* a root folder holds alexpink at another build (own maps follow it) */
+    char place_a[64], place_b[64];   /* the place that holds the row's build ("maps\<segment>"), "" none */
     int fetch_fails;                 /* nonzero: the fetch of the first build returns this */
     int fetch_calls, fetch_cancelled;
     HANDLE fetch_gate;               /* when set, the fetch waits on it */
@@ -96,14 +103,13 @@ typedef struct fake {
     int claimed_a;                   /* a claim this machine holds names alexpink's build */
     int fetch_detail_calls;
     int launch_refused, refused_hook; /* launch_refused: how often, and the last hook */
-    /* the map a fetch is for, and the author's own published map */
-    char fetch_title[160], fetch_map[96], fetch_salt[16];
+    /* where a fetch installs, and the author's own published map */
+    char fetch_place[64], fetch_salt[16];
     int titled;                      /* metadata_title answers "Pink Arena" */
     int own_item;                    /* this machine published item 1234abcd */
-    /* the serving context the gate set (scope_place) */
-    int scopes;
-    char scope_title[160], scope_map[96];
-    int scope_own;
+    /* the loaded map's place, as the gates set it (place_set) */
+    int place_sets;
+    char loaded_place[64];
 } fake;
 
 static fake F;
@@ -111,14 +117,14 @@ static int g_metadata_cookie;
 
 #define METADATA_ID "1234abcd"   /* METADATA below: the double reads the item id from it */
 
-/* What sh_modserve_row_build answers in the context the gate set: a
- * stranger's map is served at the row's build (its place, or the root at
- * that build); the player's own map by any root build of the salt. */
-static int f_served(const sh_modmanifest_row *row)
+/* The one place resolver (modserve.h) over the double's store: the root at
+ * the row's build; then, with a place, that place at the row's build, and
+ * without one (the player's own map) the root at any build. */
+static int f_served(const sh_modmanifest_row *row, const char *place)
 {
     if (!strcmp(row->build, HASH_A) || !strcmp(row->salt, SALT_A))
-        return F.installed_a || (F.scope_own && F.root_a);
-    if (!strcmp(row->build, HASH_B)) return F.installed_b;
+        return F.installed_a || (place[0] ? !_stricmp(place, F.place_a) : F.root_a);
+    if (!strcmp(row->build, HASH_B)) return F.installed_b || (place[0] && !_stricmp(place, F.place_b));
     return 0;
 }
 
@@ -143,7 +149,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int count)
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     if (out) memset(out, 0, sizeof *out);
-    if (!row || !f_served(row)) return 0;
+    if (!row || !f_served(row, F.loaded_place)) return 0;
     if (out) {
         strcpy_s(out->id, sizeof out->id, row->salt);
         strcpy_s(out->hash, sizeof out->hash, row->build);
@@ -159,15 +165,16 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
 
 static int f_on_main(void *c) { (void)c; return 1; }
 /* The asset rule as modserve.c answers it, over the fixture's two mods. */
-static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+static int f_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                       size_t cap)
 {
     const char *what = subject ? subject : "map";
     (void)c;
     if (cause && cap) cause[0] = 0;
     if (!strcmp(row->build, HASH_A)) {
         if (F.recorded_a) return SH_MODPUB_ROW_SERVED;
-        if (f_served(row) && !F.incomplete_a) return SH_MODPUB_ROW_SERVED;
-        if (f_served(row)) {
+        if (f_served(row, place) && !F.incomplete_a) return SH_MODPUB_ROW_SERVED;
+        if (f_served(row, place)) {
             if (cause) _snprintf_s(cause, cap, _TRUNCATE, "alex.pink-imp is installed but does not provide "
                                    "mods/alexpink/imp, which this %s uses.", what);
             return SH_MODPUB_ROW_INCOMPLETE;
@@ -181,7 +188,7 @@ static int f_row_state(void *c, const sh_modmanifest_row *row, const char *subje
         return SH_MODPUB_ROW_MISSING;
     }
     if (!strcmp(row->build, HASH_B)) {
-        if (F.installed_b) return SH_MODPUB_ROW_SERVED;
+        if (f_served(row, place)) return SH_MODPUB_ROW_SERVED;
         if (cause) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses bob.room, which is not installed.", what);
     }
     return SH_MODPUB_ROW_MISSING;
@@ -232,13 +239,12 @@ static int f_worker_run(void *c, void (*job)(void *), void *ctx)
     F.worker = CreateThread(NULL, 0, f_thread, t, 0, NULL);
     return F.worker != NULL;
 }
-static int f_fetch_for(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
-                       sh_modpub_progress_fn progress, volatile int *cancel)
+static int f_fetch_for(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+                       volatile int *cancel)
 {
     (void)c;
     F.fetch_calls++;
-    strcpy_s(F.fetch_title, sizeof F.fetch_title, title ? title : "");
-    strcpy_s(F.fetch_map, sizeof F.fetch_map, map_id ? map_id : "");
+    strcpy_s(F.fetch_place, sizeof F.fetch_place, place ? place : "");
     strcpy_s(F.fetch_salt, sizeof F.fetch_salt, row->salt);
     if (progress) progress(NULL, 1, 2);
     if (F.fetch_gate) {
@@ -248,8 +254,9 @@ static int f_fetch_for(void *c, const sh_modmanifest_row *row, const char *title
     if (F.fetch_fails && F.fetch_calls == 1) return F.fetch_fails;
     if (F.editor_only_a && !strcmp(row->build, HASH_A)) { F.recorded_a = 1; return 0; }   /* recorded, nothing installed */
     if (F.install_on_fetch && !F.refuse_install) {
-        if (!strcmp(row->build, HASH_A)) F.installed_a = 1;
-        if (!strcmp(row->build, HASH_B)) F.installed_b = 1;
+        /* Into the place, or the root. */
+        if (!strcmp(row->build, HASH_A)) { if (place[0]) strcpy_s(F.place_a, sizeof F.place_a, place); else F.installed_a = 1; }
+        if (!strcmp(row->build, HASH_B)) { if (place[0]) strcpy_s(F.place_b, sizeof F.place_b, place); else F.installed_b = 1; }
     }
     return 0;
 }
@@ -344,13 +351,25 @@ static int f_metadata_title(void *c, const void *metadata, char *out, size_t cap
     return 1;
 }
 static int f_own_item(void *c, const char *item) { (void)c; return F.own_item && !strcmp(item, METADATA_ID); }
-static void f_scope_place(void *c, const char *title, const char *map_id, int own)
+/* The item's place: mods\maps\<title>\. */
+static int f_item_place(void *c, const char *title, const char *item, char *out, size_t cap)
+{
+    (void)c; (void)item;
+    _snprintf_s(out, cap, _TRUNCATE, "maps\\%s", title && title[0] ? title : "map");
+    return 1;
+}
+static void f_place_set(void *c, const char *place)
 {
     (void)c;
-    F.scopes++;
-    strcpy_s(F.scope_title, sizeof F.scope_title, title ? title : "");
-    strcpy_s(F.scope_map, sizeof F.scope_map, map_id ? map_id : "");
-    F.scope_own = own;
+    F.place_sets++;
+    strcpy_s(F.loaded_place, sizeof F.loaded_place, place ? place : "");
+}
+static int f_place_norm(void *c, const char *place, char *out, size_t cap)
+{
+    (void)c;
+    if (!place || strchr(place, '\\') || strchr(place, '/') || strstr(place, "..")) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "maps\\%s", place);
+    return 1;
 }
 
 static const sh_modpub_ops OPS = {
@@ -358,7 +377,7 @@ static const sh_modpub_ops OPS = {
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
-    f_scope_place
+    f_item_place, f_place_set, f_place_norm
 };
 
 static void reset(void)
@@ -460,7 +479,7 @@ static void vanilla_and_installed_pass_through(void)
     F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_OFFLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
-    CHECK(sh_modpublished_holding() && F.scopes == 1 && F.scope_own == 0 && !strcmp(F.scope_map, METADATA_ID));
+    CHECK(sh_modpublished_holding() && F.place_sets == 0);   /* a held map changes nothing yet */
     tick(1);
     CHECK(F.asks == 1 && !strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (3.0 MB). Download and install now?"));
 
@@ -652,21 +671,26 @@ static void downloads_are_for_a_map(void)
 {
     sh_modmanifest_list rows;
     printf("-- a stranger's map is served from its own place; a fetch lands there, the pin kept\n");
-    /* A stranger's map: its context is its place (the item), and the fetch
-     * is told the map's title and item, so the build lands in
-     * mods\maps\<title>\<mod name>\ (modsync_fetch_build_for). A root folder
-     * of the salt at another build does not serve it. */
+    /* A stranger's map: its place is its item's, mods\maps\<title>\, where
+     * the fetch installs; a root folder of the salt at another build does
+     * not serve it. The resumed map is served from that place. */
     reset();
     F.titled = 1;
     F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
-    CHECK(!strcmp(F.scope_title, "Pink Arena") && !strcmp(F.scope_map, METADATA_ID) && F.scope_own == 0);
+    CHECK(F.place_sets == 0);
     tick(1);
     CHECK(F.asks == 1);
     F.answer = 1;
     tick_until_idle();
-    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_title, "Pink Arena") && !strcmp(F.fetch_map, METADATA_ID));
+    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_place, "maps\\Pink Arena") && !F.installed_a);
+    CHECK(F.resumes == 1 && !strcmp(F.loaded_place, "maps\\Pink Arena"));
+    {
+        char launch[64];
+        CHECK(sh_modpub_launch_place(launch, sizeof launch) && !strcmp(launch, "maps\\Pink Arena"));
+        CHECK(!sh_modpub_launch_place(launch, sizeof launch));   /* consumed */
+    }
     CHECK(!strcmp(F.fetch_salt, SALT_A));
     memset(&rows, 0, sizeof rows);
     CHECK(sh_modmanifest_current(&rows) == 1 && !strcmp(rows.rows[0].build, HASH_A));   /* its pin is kept */
@@ -694,7 +718,7 @@ static void own_published_map_follows_own_folder(void)
     F.root_a = 1;
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 1);
-    CHECK(F.scope_own == 1 && !strcmp(F.scope_map, METADATA_ID));
+    CHECK(F.place_sets == 1 && !F.loaded_place[0]);
     CHECK(!sh_modpublished_holding() && !F.hold_ui);
     tick(5);
     CHECK(F.asks == 0 && F.fetch_calls == 0);
@@ -707,14 +731,69 @@ static void own_published_map_follows_own_folder(void)
     F.answer = 1;
     tick(1);
     tick_until_idle();
-    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_map, METADATA_ID));
+    CHECK(F.fetch_calls == 1 && !F.fetch_place[0] && F.installed_a);   /* into the root */
 
     /* A My Maps play is the player's own: the root folder serves it. */
     reset();
     F.root_a = 1;
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
-    CHECK(F.scope_own == 1 && !F.scope_map[0] && !sh_modpublished_holding());
+    CHECK(F.place_sets == 1 && !F.loaded_place[0] && !sh_modpublished_holding());
+}
+
+static void a_map_carries_its_place(void)
+{
+    char launch[64];
+    printf("-- a map finds its mods where it records them, at every load\n");
+    /* A map imported from a ZIP or downloaded, saved to My Maps: its place
+     * comes back with it, so its mods are found there and nothing is asked. */
+    reset();
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    strcpy_s(F.loaded_place, sizeof F.loaded_place, "maps\\Elsewhere");   /* the last map's */
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD_PLACED, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(!sh_modpublished_holding() && F.asks == 0 && !strcmp(F.loaded_place, "maps\\Pink Arena"));
+    CHECK(sh_modpub_launch_place(launch, sizeof launch) && !strcmp(launch, "maps\\Pink Arena"));
+
+    /* Copy to My Maps of a stranger's map with a mod (the map records no
+     * place): the player's own map, so the fetch installs at the root and
+     * the row is served there when the hold checks it again. */
+    reset();
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 0);
+    F.answer = 1;
+    tick(1);
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && !F.fetch_place[0] && F.installed_a && F.resumes == 1);
+    CHECK(!strstr(F.last_ask, "could not be installed") && !sh_modpub_test_notice()[0]);
+    /* The next play of it passes at once: the root serves it. */
+    parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+
+    /* The launch boundary decides a parse no gate saw in that map's place,
+     * never in the place an earlier map left behind. */
+    reset();
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    strcpy_s(F.loaded_place, sizeof F.loaded_place, "maps\\Elsewhere");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD_PLACED, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, (void *)1) == 1);
+    CHECK(!strcmp(F.loaded_place, "maps\\Pink Arena"));
+    reset();
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Elsewhere");      /* only another map's place holds it */
+    strcpy_s(F.loaded_place, sizeof F.loaded_place, "maps\\Elsewhere");
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD_PLACED, MAP);
+    CHECK(sh_modpub_launch_gate(SH_MODPUB_LOBBY_LAUNCH, MANAGER, NULL, (void *)1) == 0);   /* held */
+    CHECK(sh_modpublished_holding());
+
+    /* A place that is not one (a hostile map naming a folder outside
+     * mods\maps\) is no place: the map finds its mods at the root. */
+    reset();
+    F.root_a = 1;
+    parse(SH_MODPUB_PARSE_OTHER,
+          "{\"entities\":[],\"snapmap-plus\":{\"format\":1,\"mods\":["
+          ROW(SALT_A, "alex.pink-imp", HASH_A, "3145728") "],\"place\":\"..\"}}", MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
+    CHECK(!F.loaded_place[0]);
 }
 
 static void editor_only_row_plays_without_a_folder(void)
@@ -832,7 +911,7 @@ static void second_load_abandons(void)
     CHECK(sh_modpublished_holding() && F.asks == 1 && F.hold_ui == 1);
     SetEvent(F.fetch_gate);
     tick_until_idle();
-    CHECK(F.fetch_cancelled == 0 && F.fetch_calls == 1 && F.resumes == 1 && F.installed_a);
+    CHECK(F.fetch_cancelled == 0 && F.fetch_calls == 1 && F.resumes == 1 && !strcmp(F.place_a, "maps\\map"));
     CloseHandle(F.fetch_gate); F.fetch_gate = NULL;
 }
 
@@ -965,33 +1044,35 @@ static void tick_until_probed(void)
 static void rawmap_missing_counts_rows(void)
 {
     sh_modmanifest_list rows;
-    printf("-- a rawmap's rows are counted under the asset rule\n");
+    char place[SH_MODPUB_PLACE_CAP];
+    printf("-- a rawmap's rows are counted under the asset rule, in the place it records\n");
     reset();
-    CHECK(sh_modpub_rawmap_missing(VANILLA, strlen(VANILLA), &rows) == 0 && rows.count == 0);
+    CHECK(sh_modpub_rawmap_missing(VANILLA, strlen(VANILLA), &rows, place, sizeof place) == 0 && rows.count == 0);
     sh_modmanifest_list_free(&rows);
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2 && rows.count == 2);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, place, sizeof place) == 2 && rows.count == 2);
     sh_modmanifest_list_free(&rows);
     F.installed_b = 1;
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, place, sizeof place) == 1 && !place[0]);
     sh_modmanifest_list_free(&rows);
-    /* The rawmap's context: the author's own, its place named after the file
-     * (a ZIP's is the place its import filled). A root folder of the salt
-     * at any build serves it then. */
+    /* No place: the author's own, a root folder of the salt at any build
+     * serves it. A place: only the root at the row's build, or that place. */
     F.root_a = 1;
-    sh_modpub_rawmap_source("C:\\maps\\shared.zip");
-    CHECK(F.scope_own == 1 && !strcmp(F.scope_title, "shared") && !strcmp(F.scope_map, "zip:shared.zip"));
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, place, sizeof place) == 0);
     sh_modmanifest_list_free(&rows);
-    sh_modpub_rawmap_source("arena.rawmap.json");
-    CHECK(!strcmp(F.scope_title, "arena.rawmap") && !F.scope_map[0]);
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD_PLACED, strlen(ONE_MOD_PLACED), &rows, place, sizeof place) == 1);
+    CHECK(!strcmp(place, "maps\\Pink Arena"));
+    sh_modmanifest_list_free(&rows);
+    strcpy_s(F.place_a, sizeof F.place_a, "maps\\Pink Arena");
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD_PLACED, strlen(ONE_MOD_PLACED), &rows, place, sizeof place) == 0);
+    sh_modmanifest_list_free(&rows);
+    CHECK(F.place_sets == 0);   /* counting changes nothing */
     F.root_a = 0;
-    F.scope_own = 0;
     /* Not a published-map parse: the rawmap check never touches the parse record. */
     CHECK(sh_modpublished_last_parse(NULL) == -1);
     /* Without bound gates nothing is missing: the rawmap loads as it always did. */
     sh_modpub_test_set_ops(NULL);
     F.installed_a = F.installed_b = 0;
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 0);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, place, sizeof place) == 0);
     sh_modmanifest_list_free(&rows);
     sh_modpub_test_set_ops(&OPS);
     /* Never a hook a detour can ask about. */
@@ -1004,8 +1085,8 @@ static void rawmap_store_lacks_refuses(void)
     printf("-- a rawmap whose mods the store lacks is denied: cause 3, never published\n");
     reset();
     F.store_b = 0;                       /* bob.room was never published */
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 2);
-    CHECK(sh_modpub_rawmap_hold(&rows, "shared.json") == 1);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, NULL, 0) == 2);
+    CHECK(sh_modpub_rawmap_hold(&rows, "shared.json", "") == 1);
     sh_modmanifest_list_free(&rows);
     CHECK(sh_modpublished_holding() && sh_modpub_test_state() == 4 && F.asks == 0);
     /* One line per row the asset rule names, then the store check. */
@@ -1023,8 +1104,8 @@ static void rawmap_store_lacks_refuses(void)
     printf("-- a store that cannot be reached: cause 2, nothing downloaded\n");
     reset();
     F.store_a = -1;
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
-    CHECK(sh_modpub_rawmap_hold(&rows, "one.zip") == 1);
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "one.zip", "") == 1);
     sh_modmanifest_list_free(&rows);
     tick_until_probed();
     tick(2);
@@ -1040,8 +1121,8 @@ static void rawmap_store_has_downloads_and_reopens(void)
     printf("-- a rawmap whose mods the store has asks as My Maps does, then downloads and reopens\n");
     reset();
     F.installed_b = 1;
-    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows) == 1);
-    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    CHECK(sh_modpub_rawmap_missing(TWO_MODS, strlen(TWO_MODS), &rows, NULL, 0) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 1);
     sh_modmanifest_list_free(&rows);
     tick_until_probed();
     CHECK(F.store_calls == 1 && sh_modpub_test_state() == 1);
@@ -1051,15 +1132,15 @@ static void rawmap_store_has_downloads_and_reopens(void)
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.rescans == 1);
-    CHECK(!strcmp(F.fetch_title, "rawmap") && !F.fetch_map[0]);   /* mods\downloads\rawmap\ */
+    CHECK(!F.fetch_place[0] && F.installed_a);   /* a rawmap without a place: into the root */
     CHECK(F.activations == 0);           /* the reopened rawmap's own parse activates */
     CHECK(F.resumes == 1 && F.resume_hook == SH_MODPUB_RAWMAP_LOAD && !strcmp(F.resume_id, "rawmap.json"));
     CHECK(!F.resume_text[0] && F.metadata_copies == 0 && F.hold_ui == 0);
 
     printf("-- No leaves the rawmap closed and names the mod\n");
     reset();
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
-    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 1);
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 1);
     sh_modmanifest_list_free(&rows);
     tick_until_probed();
     tick(1);
@@ -1071,8 +1152,8 @@ static void rawmap_store_has_downloads_and_reopens(void)
     printf("-- nothing missing after all: no hold\n");
     reset();
     F.installed_a = 1;
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
-    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 0 && !sh_modpublished_holding());
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 0);
+    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json", "") == 0 && !sh_modpublished_holding());
     sh_modmanifest_list_free(&rows);
 }
 
@@ -1308,7 +1389,7 @@ static void gate_causes_through_the_hold(void)
     /* A prefab's placement: its own wording. */
     reset();
     F.store_a = 0;
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 1);
     CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
     sh_modmanifest_list_free(&rows);
     tick(3);
@@ -1413,12 +1494,11 @@ static void gate_own_substitutes(void)
     sh_modmanifest_set_editor_load(1);                 /* the parse detour: a read that is not a published map's */
     parse(SH_MODPUB_PARSE_OTHER, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_LOCAL_OFFLINE, MANAGER, NULL, MAP, MODEL, NULL, NULL) == 1);
-    CHECK(!sh_modpublished_holding() && F.scope_own == 1 && F.store_calls == 0 && F.asks == 0);
+    CHECK(!sh_modpublished_holding() && !F.loaded_place[0] && F.store_calls == 0 && F.asks == 0);
     /* A community map naming the same build, from the browser: its own
      * context, and cause 1 when the store lacks it. */
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_BROWSER_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
-    CHECK(F.scope_own == 0);
     tick(3);
     CHECK(F.launch_refused == 1 && F.refused_hook == SH_MODPUB_BROWSER_PLAY);
     CHECK(!strcmp(F.last_ask, "This map needs alex.pink-imp, which is no longer available: its "
@@ -1436,7 +1516,7 @@ static void gate_own_substitutes(void)
     F.answer = 1;
     tick_until_idle();
     CHECK(F.fetch_calls == 1 && F.resumes == 1 && F.installed_b && F.activated_count == 2);
-    CHECK(!F.fetch_map[0]);   /* a My Maps map has no item: its place is named after nothing but the mod */
+    CHECK(!F.fetch_place[0]);   /* a My Maps map without a place: into the root */
     /* The other one nothing serves and the store lacks: denied for it alone. */
     reset();
     F.root_a = 1;
@@ -1451,16 +1531,13 @@ static void gate_own_substitutes(void)
     printf("-- a rawmap load and a prefab placement follow the root folders the same way\n");
     reset();
     F.root_a = 1;
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);   /* checked before any context */
-    CHECK(sh_modpub_rawmap_hold(&rows, "rawmap.json") == 0);                 /* its own context serves it */
-    CHECK(!sh_modpublished_holding() && F.scope_own == 1 && !strcmp(F.scope_title, "rawmap"));
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 0);   /* no place: the root serves it */
     sh_modmanifest_list_free(&rows);
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 0);
-    sh_modmanifest_list_free(&rows);
+    F.root_a = 0;
     reset();
     g_ready_calls = 0;
     sh_modpub_set_prefab_ready(f_prefab_ready);
-    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows) == 1);
+    CHECK(sh_modpub_rawmap_missing(ONE_MOD, strlen(ONE_MOD), &rows, NULL, 0) == 1);
     CHECK(sh_modpub_prefab_hold(&rows, "Door Kit") == 1);
     sh_modmanifest_list_free(&rows);
     tick(1);
@@ -1468,7 +1545,7 @@ static void gate_own_substitutes(void)
     F.answer = 1;
     tick_until_idle();
     CHECK(!sh_modpublished_holding() && g_ready_calls == 1 && !strcmp(g_ready_name, "Door Kit") && F.resumes == 0);
-    CHECK(F.fetch_calls == 1 && !strcmp(F.fetch_title, "Door Kit"));
+    CHECK(F.fetch_calls == 1 && !F.fetch_place[0] && F.installed_a);   /* a prefab's mods: the root */
     reset();
 }
 
@@ -1508,6 +1585,7 @@ int main(void)
     a_newer_launch_replaces();
     the_question();
     rawmap_missing_counts_rows();
+    a_map_carries_its_place();
     rawmap_store_lacks_refuses();
     rawmap_store_has_downloads_and_reopens();
     the_refusal();

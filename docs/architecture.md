@@ -772,9 +772,9 @@ These backend files share the work:
   New mod is `newMod`, whose result says Refresh picks up the author's edits.
   The rows a map save writes are resolved through `sh_modserve_row_build`
   (the resolver modui.c binds), and the listing's undeclared names take the
-  build `sh_modserve_row_build` names in the open map's context;
-  `sh_modui_scope_launch_at` sets that context (place, own) for a hub launch,
-  and the editor's exit returns it to no place, own.
+  build `sh_modserve_row_build` names in the loaded map's place (set by the
+  map's parse and the published gates, `modserve.h`); the editor's exit and
+  the end of a launched Play return it to the root.
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
@@ -918,7 +918,8 @@ segment to another map; the folder is named after the mod (` (2)` when another
 mod of the place has the name). One build per salt per place: a later build of
 the salt for that map replaces the place's folder (`sh_ms_place_folder`
 answers 2 with it), the old one to the Recycle Bin. The `places` section maps
-each map (its item id, `zip:<file name>`, else `title:<segment>`) to its title
+each map (its item id, `zip:<the ZIP's path>`, `place:<segment>` for a fetch into a map's
+recorded place, else `title:<segment>`) to its title
 and place (`sh_ms_place_note`, `sh_ms_place_of`, `sh_ms_place_title`), so the
 Mods tab says which map a place serves. A new folder dropped into a place is
 refused ("it was not built by the mod store"); a hand copy inside one place is
@@ -935,14 +936,11 @@ verified, and when the root already holds the salt the arriving copy gets a
 new salt and is built under it (`resalted`: the arriving folder is the newer
 copy whatever its `built`). `sh_ms_install_placed` installs a built mod into a
 map's place instead; `sh_ms_install_as` names the store tool's target, which it
-replaces. An author's own map follows their own root folders with no prompt
-(owner 2026-11-09, 2026-11-10): every row is activated through the build
-`sh_modserve_row_build` answers for it, which for an editor load, a My Maps play
-and a published map this machine published is the root folder of the row's
-salt whatever hash the row pins, and the next save writes that build's hash, as
-the save already writes rows from the serving index. There is no upgrade
-action and there are no aliases: a row names a salt and a build, and
-`sh_modserve_row_build` answers it from the folders as they are.
+replaces. A map without a place (the player's own) follows the root folders with no
+prompt: every row is activated through the build the resolver below answers,
+the root folder of the row's salt whatever hash the row pins, and the next save
+writes that build's hash, as the save already writes rows from the serving
+index. There is no upgrade action and there are no aliases.
 
 New mod (`sh_ms_new_mod_example`): a folder `mods\<the name as a folder
 name>` (` (2)` when taken; never `maps`) with a new salt in its block, an
@@ -951,16 +949,31 @@ strings in `mod.json` keyed `<salt>_category`, `<salt>_example_crate_name` and
 `<salt>_example_crate_desc` (referenced `#str_<salt>_...`); the scan that
 follows builds it.
 
+The map's place (DECISIONS 11). Where a map finds its mods is a fact of the
+map, never a global setting. A place is `""` (the root of `mods\`: the
+player's own maps) or `maps\<segment>` (a map that arrived with its mods: a
+download, a rawmap ZIP import). The saved map records it in its member
+(`"place":"<segment>"`, `map_carrier.h`; `rawmap.c` `place_on_save` writes the
+loaded map's place at every save and every rawmap write), and every parse sets
+it from that record before the manifest step (`place_prepare_guarded`,
+`sh_modserve_place_load`; a record that is not a place is the root, and a
+failed parse puts the previous place back with `sh_modserve_place_restore`).
+The published gates then set a stranger's map's place from its item, and a
+refused launch puts the editor map's back. `sh_modserve_place_norm` admits a
+segment only when it is exactly what `sh_ms_title_segment` makes of it, so a
+map cannot name a folder outside `mods\maps\`.
+
 The asset rule. A map, rawmap or prefab names the builds its manifest rows
-pin by salt and build hash. `sh_modserve_row_build(row, ref)` (`modserve.c`)
-answers which installed build serves a row, in the open map's context
-(`sh_modserve_scope_set_place(place, own)`: the map's place,
-`maps\<segment>`, and whether it is the author's own map), by the same rule the
-fetch uses to decide a build is present (`modsync.c`): for a stranger's map,
-its own place's folder of the salt at the row's hash, else the root folder of
-the salt when it is at that hash (the owner's decision of 2026-11-10); for the
-author's own map, the root folder of the salt at any hash, else its own
-place's folder at the row's hash. Another map's place never answers: each map
+pin by salt and build hash. One resolver in `modserve.c` answers which
+installed build serves a row of a map whose place is P
+(`sh_modserve_row_build`, `sh_modserve_row_served` for the loaded map's place;
+`sh_modserve_row_build_in`, `sh_modserve_row_served_in` for a given place,
+changing nothing): the root folder of the salt at the row's hash; then, with a
+place, P's folder of the salt at the row's hash, and without one, the root
+folder of the salt at any hash. A bare hash (the listing, plans) resolves the
+same way, the root's folder at the hash and then P's; describing a build (its
+scope, its state) falls back to any folder that holds it. Another map's place
+never answers a row: each map
 keeps its own copy. `sh_modserve_row_served(row, cause, cap)`
 (`sh_modserve_row_served_for` with the word "prefab") is the one predicate
 every hold uses: a row is served when that build is admitted and every name it
@@ -2354,9 +2367,9 @@ Two layers (DESIGN-additive 2.3): while a map is open or played, the bundles
 it declares serve, then the game. The listing is the declared bundles' hashes
 in row order in `modserve.c`, set by `sh_modserve_scope_set` from manifest
 rows (the builds `sh_modserve_row_build` answers for them) and the placed
-closure (a salt alone declares nothing), with whether a map is open, the map's
-context (`sh_modserve_scope_set_place`: a hash held in several areas names the
-open map's place's folder, else the root's), and a mode,
+closure (a salt alone declares nothing), with whether a map is open, the
+loaded map's place (`sh_modserve_place_set`: a hash names the root's folder at
+that build, else the place's, never another map's place), and a mode,
 `sh_modserve_scope_mode`: `SH_MODSERVE_MODE_PLAY` from the Play entry
 (`sh_modserve_scope_source` with `SH_MODSERVE_AT_PLAY`) until the editor's
 tick sets `SH_MODSERVE_MODE_EDITOR` again (`modui.c`), and EDITOR with no map.
@@ -2917,23 +2930,21 @@ engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
 "This map needs N mod(s): <names> (<size>). Download and install now?". Each
 row it asks for prints the asset rule's sentence on the console first.
 
-The map's serving context. Before anything counts what is missing, each gate
-sets the map's context (`sh_modserve_scope_set_place` through the gate's
-`scope_place` op): a published map's place is the one the record gives its
-item (`sh_ms_place_of`), else the one its title names (`sh_ms_place_dir`), and
-it is the player's own when this machine published the item (a claim keyed by
-it, or `sh_modpublish_item_linked`); a My Maps play has no place and is own; a
-rawmap is own with the place its file name names (`zip:<file name>` for a ZIP,
-the place its import filled; `sh_modpub_rawmap_source`, which the rawmap
-layer calls before `sh_modpub_rawmap_missing`, and the hold again); a prefab
-placement is own with the place named after the prefab (prefab_mods.c). An own
-map's rows follow the root folder of each salt at whatever build it holds; a
-stranger's are served by its own place's folder at the row's build, else by
-the root's when it holds that build (`sh_modserve_row_build`). There is no
-substitution: the root folder is the player's own build. The launch itself
-(the lobby and offline launches, a My Maps play, a held map's resume) goes
-through `sh_modui_scope_launch_at` with that place and own flag, and the Mods
-tab's tick returns the context to no place, own, when the Play is over.
+The map's place at the gates. Before anything counts what is missing, each
+gate decides the place of the map it holds and counts its rows there without
+changing what the loaded map serves (`sh_modserve_row_served_in` through the
+`row_state` op): a stranger's published map's place is the one the record gives
+its item (`sh_ms_place_of`), else a free one its title names, noted for the
+item (`sh_ms_place_dir`, `sh_ms_place_note`, the `item_place` op); a map this
+machine published (a claim keyed by the item, or `sh_modpublish_item_linked`)
+has none; a My Maps play, a launch no gate saw and a rawmap use the place their
+text records (`sh_carrier_place`); a prefab placement has none (DECISIONS 12).
+A gate that lets a map through, and a hold that resumes it, make that place the
+loaded map's (`place_set` op) and the place its launch serves from
+(`sh_modpub_launch_place`, which the launch detours apply before
+`sh_modui_scope_launch`); a refused launch restores the place the editor map had.
+The Mods tab's tick returns the place to the root when the editor leaves its map
+or a launched Play is over.
 
 The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
 completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
@@ -3000,13 +3011,15 @@ abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled. After No, a hold that
 asked for one row shows that row's sentence and "The map was not loaded."
 (for example "This map uses Hell Guards, which is not installed. The map was
-not loaded."). The download is unpacked into the map's place,
-
-`mods\maps\<map title>\<mod name>\` (`modsync_fetch_build_for`; the title is the
-published item's, an idStr at metadata +0x398 beside the id at +0 and the revision at
-+0x30, a rawmap's file name, a prefab's name), replacing that place's earlier
-build of the same salt and nothing else; the resume checks every row against the
-asset rule again.
+not loaded."). The download (`modexport_fetch_build`) is unpacked where the
+map finds it: into its place, `mods\maps\<segment>\<mod name>\`
+(`modsync_fetch_build_for` under the record key `place:<segment>`; a published
+item's title is an idStr at metadata +0x398 beside the id at +0 and the
+revision at +0x30), replacing that place's earlier build of the same salt and
+nothing else; or, for a map without a place and a prefab, into a place of the
+build's own (`fetch:<salt>`) whose folder then moves to the root under its own
+name, the emptied place removed. The resume checks every row against the asset
+rule again, in the same place.
 
 ### Rawmaps that name mods
 
@@ -3063,36 +3076,43 @@ mods/<folder>/assets/...   carried mods share it), mod.json and carried files by
 A mod in an organizing folder (`mods\campaign-interactables\campaign-interactables-1\`),
 or in a map's place, is carried under its own folder name
 (`mods/campaign-interactables-1/`). Each row's build is taken from the usable
-folder of its salt at exactly the row's build (the root's first, else a
-place's); else from the root folder of the salt at another build: an export is
-of the author's own map, which follows the root folders, so the exported rows
-are moved to that build. There is no `export.json`, no `bundle.json` and no
+folder the resolver names in the place the map text records: the root folder
+of its salt at the row's build, then that place's; a map without a place takes
+the root folder of the salt at whatever build it holds, so the export carries
+the build the author plays, and its rows are moved to that build. There is no `export.json`, no `bundle.json` and no
 `bundle.canonical.json`: the rows name the builds, and each carried `mod.json`
 records its own salt and build hash in its builder block. A stock pointer is an
 entry of `mod.json`; installed game content is never written into the ZIP, so a
 pointer whose bytes an author's folder holds under `assets\` travels without
 them.
 
-Importing it (`modexport_read`, on whichever thread loads the map; a carried
-folder no row names is left out) first sets the serving context to the map
-about to open (own, the ZIP's place), then:
+Importing it (`modexport_read`; a carried folder no row names is left out)
+changes nothing the loaded map serves. The map arrives with its mods: its
+place is the ZIP's, `mods\maps\<ZIP name>\`, keyed `zip:<the ZIP's path>` so
+two ZIPs with one name get two places, and when a carried folder would replace
+that place's folder of its salt at another build (an earlier import of the ZIP),
+the import takes a place of its own beside it instead, so a map saved from the
+earlier import keeps its mods and a failed import loses nothing. Then:
 
-- a carried folder whose row something already serves in that context
-  (`sh_modserve_row_served`: the root folder of its salt at any build, or the
-  ZIP's place at the row's build) is skipped and counted as already installed;
+- a carried folder whose row the resolver serves in that place (the root
+  folder of its salt at the row's build, or the place's) is skipped and counted
+  as already installed;
 - each remaining folder is copied out of the ZIP into a temporary folder (with
   the bytes of a pointer the folder held filled from this player's own game)
-  and installed into the ZIP's place, `mods\maps\<ZIP name>\<mod name>\`
-  (`sh_ms_install_placed`, the record's `zip:<file name>`), replacing that
-  place's folder of the salt; its replacements are kept, as for any received
-  build. A mod that needs another carried mod is built after it;
+  and installed into the place, `mods\maps\<segment>\<mod name>\`
+  (`sh_ms_install_placed`); its replacements are kept, as for any received
+  build. A prefab's export installs at the root instead
+  (`sh_ms_install_from_folder`, DECISIONS 12). A mod that needs another carried
+  mod is built after it;
 - the built hash must equal the one the carried `mod.json` records; otherwise,
   and on any other refusal, exactly the folders this import installed are
   removed and the load is refused ("<name> in the export does not build to the
   build the map names", or "<name>, a mod this map carries, does not install on
   this computer (<the builder's reason>); nothing was installed");
-- after an install the serving index is rebuilt, and the context stays on the
-  ZIP's place for the map that opens from it.
+- after an install the serving index is rebuilt, and the map text comes back
+  recording the place (`sh_carrier_put_place`) when a row is served there, so
+  the load that parses it, and every later load of a map saved from it, finds
+  its mods.
 
 An export in an earlier shape installs nothing and is refused with one
 sentence, "This export was saved in a format this version does not read.": a

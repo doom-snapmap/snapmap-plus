@@ -145,16 +145,22 @@ typedef struct sh_modpub_resume {
 
 /* ------------------------------------------------------------ the denial gate
  * Every hold (published plays, lobby joins, My Maps, rawmap loads, prefab
- * placements) first sets the map's serving context (its place and whether it
- * is the player's own, sh_modserve_scope_set_place through the scope_place
- * op), counts the rows nothing serves in that context (the asset rule), asks
- * the mod store about each one on the worker (the probe: HEAD of the build's
- * archive) and then makes one decision per build, sh_modpub_gate_decide. A
- * build the store holds is obtainable: the player is asked once, with the
- * mods' names and the total size, and Yes fetches each archive into the map's
- * place (mods\maps\<map title>\<mod name>\, modsync_fetch_build_for). Every
- * other build denies the launch, in exactly one of four causes, each with its
- * own sentence in the game's own dialog and one console line:
+ * placements) knows the map's place (modserve.h, DECISIONS 11): a published
+ * map this machine did not publish is served from its item's place
+ * (mods\maps\<map title>\, the item_place op); a My Maps play, a launch no
+ * gate saw and a rawmap use the place the map records ("" when it records
+ * none: the root); a prefab placement and a map this machine published use
+ * the root. It counts the rows nothing serves in that place (the asset rule,
+ * without changing what the loaded map serves), asks the mod store about
+ * each one on the worker (the probe: HEAD of the build's archive) and then
+ * makes one decision per build, sh_modpub_gate_decide. A build the store
+ * holds is obtainable: the player is asked once, with the mods' names and the
+ * total size, and Yes fetches each archive into that place (the root, or
+ * mods\maps\<segment>\<mod name>\). A gate that lets a map through, or a
+ * hold that resumes it, makes its place the loaded map's (the place_set op)
+ * and the place its launch serves from (sh_modpub_launch_place). Every other
+ * build denies the launch, in exactly one of four causes, each with its own
+ * sentence in the game's own dialog and one console line:
  *
  *   1 GONE             published, and the store answers not found (404, or
  *                      451 on the takedown list): its author unpublished it,
@@ -167,12 +173,11 @@ typedef struct sh_modpub_resume {
  *                      this machine lacks (a different game revision), learned
  *                      when the archive is installed. Permanent.
  *
- * There is no substitution: the player's own maps (every editor load, a My
- * Maps play, a rawmap load, a prefab placement, a published map this machine
- * published) follow the root folder of each salt at whatever build it holds
- * (sh_modserve_row_build), so their rows are missing only when no root folder
- * holds the salt. A stranger's map is served by its own place's folder at the
- * row's build, else the root's when it holds that build, else it fetches.
+ * There is no substitution: a map without a place (the player's own) follows
+ * the root folder of each salt at whatever build it holds, so its rows are
+ * missing only when no root folder holds the salt; a map with a place is
+ * served by the root's folder at the row's build, else its place's, else it
+ * fetches (sh_modserve_row_build_in).
  *
  * Placeholders (phase 6) plug in here and nowhere else: a placeholder system
  * adds a verdict that sh_modpub_gate_decide returns instead of a denial, and
@@ -231,10 +236,12 @@ typedef struct sh_modpub_probe {
 typedef struct sh_modpub_ops {
     void *context;
     int  (*on_main)(void *c);
-    /* The asset rule (modserve.h sh_modserve_row_served_for): SH_MODPUB_ROW_*,
-     * with the refusal sentence in `cause` when it is not served. `subject`
-     * is "map" or "prefab" (NULL: "map"). */
-    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
+    /* The asset rule for a map whose place is `place` ("" the root;
+     * modserve.h sh_modserve_row_served_in): SH_MODPUB_ROW_*, with the
+     * refusal sentence in `cause` when it is not served. `subject` is "map"
+     * or "prefab" (NULL: "map"). Changes nothing. */
+    int  (*row_state)(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                      size_t cap);
     int  (*rescan)(void *c);
     /* Activate the rows' mods through the builds that serve them
      * (sh_modmanifest_activate). */
@@ -244,12 +251,11 @@ typedef struct sh_modpub_ops {
     int  (*poll)(void *c, int ticket);          /* an sh_engine_dialog_result */
     void (*release)(void *c, int ticket);
     int  (*worker_run)(void *c, void (*job)(void *), void *job_context);   /* 1 started */
-    /* Fetch the row's build into the map's place (modsync_fetch_build_for:
-     * mods\maps\<title>\<mod name>\, or the place the record gives map_id, a
-     * published item id or "zip:<file name>"; "" for none). Worker thread;
-     * stops early when *cancel is set; 0 ok, else a MODNET_E_ code. */
-    int  (*fetch_for)(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
-                      sh_modpub_progress_fn progress, volatile int *cancel);
+    /* Fetch the row's build into `place` ("maps\<segment>": that place's
+     * folder of the salt; "" the root). Worker thread; stops early when
+     * *cancel is set; 0 ok, else a MODNET_E_ code. */
+    int  (*fetch_for)(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+                      volatile int *cancel);
     void *(*metadata_copy)(void *c, const void *metadata);
     void (*metadata_free)(void *c, void *copy);
     int  (*metadata_ids)(void *c, const void *metadata, char *id, size_t id_cap, char *rev, size_t rev_cap);
@@ -282,11 +288,23 @@ typedef struct sh_modpub_ops {
     /* 1 when this machine published the item: a claim it holds is keyed by
      * the item, or the record links the item to a map saved here. */
     int  (*own_item)(void *c, const char *item);
-    /* The map's serving context (sh_modserve_scope_set_place): the place the
-     * record gives map_id (an item id or "zip:<file name>"), else the place
-     * `title` names; both empty for none. `own` 1 for the player's own map. */
-    void (*scope_place)(void *c, const char *title, const char *map_id, int own);
+    /* The place of the published item `item` titled `title`: the one the
+     * store's record gives it, else a free mods\maps\<title>\ (modstore.h
+     * sh_ms_place_dir). 1 with "maps\<segment>", 0 when none can be made. */
+    int  (*item_place)(void *c, const char *title, const char *item, char *out, size_t cap);
+    /* Make `place` the loaded map's (modserve.h sh_modserve_place_set). */
+    void (*place_set)(void *c, const char *place);
+    /* `place` as a place (modserve.h sh_modserve_place_norm): 1 with it in
+     * `out`, 0 when it is not one. */
+    int  (*place_norm)(void *c, const char *place, char *out, size_t cap);
 } sh_modpub_ops;
+
+#define SH_MODPUB_PLACE_CAP 300
+
+/* The place the next launch serves from, as the last gate or hold decided it
+ * for the map it let through: 1 with it in `out` (consumed), 0 when no gate
+ * decided since the last call (the launch keeps the place its parse set). */
+int sh_modpub_launch_place(char *out, size_t cap);
 
 /* The decision a hook detour asks for before calling its original. Returns 1
  * to pass through (call the original now, unchanged) and 0 when the call was
@@ -320,25 +338,21 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra);
  * the gates are bound (sh_modpub_test_set_ops, or the install); otherwise
  * nothing is missing and the rawmap loads as before. */
 
-/* The rawmap about to be checked (`source` its file name): its serving
- * context is set, the author's own map (its rows follow the root folders)
- * whose place is mods\maps\<file name without .json or .zip>\, the place a
- * ZIP's import or an earlier hold filled. The rawmap layer calls it before
- * sh_modpub_rawmap_missing; the hold sets it again itself. */
-void sh_modpub_rawmap_source(const char *source);
-
 /* Read every row of `text` into *rows (cleared first; free with
- * sh_modmanifest_list_free) and return how many name a build nothing serves
- * in the current context under the asset rule (sh_modserve_row_build names
- * none, or the build lacks a name the row lists). */
-size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows);
+ * sh_modmanifest_list_free) and the place the text records into `place`
+ * ("" for none; SH_MODPUB_PLACE_CAP is room enough), and return how many
+ * rows name a build nothing serves in that place under the asset rule.
+ * Changes nothing. */
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char *place,
+                                size_t place_cap);
 
-/* Hold a rawmap load whose rows name missing builds. `source` is the file
- * name the messages use. Returns 1 held (the store is being asked), 0 when
- * nothing is missing after all, -1 when it could not be held (off the main
- * thread, no gates, no memory); the -1 case raises the refusal notice
- * itself. Main thread. */
-int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
+/* Hold a rawmap load whose rows name missing builds in `place` (as
+ * sh_modpub_rawmap_missing gave it; the fetch fills that place, or the root).
+ * `source` is the file name the messages use. Returns 1 held (the store is
+ * being asked), 0 when nothing is missing after all, -1 when it could not be
+ * held (off the main thread, no gates, no memory); the -1 case raises the
+ * refusal notice itself. Main thread. */
+int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, const char *place);
 
 /* The refusal as the one-button notice shows it (shorter than 256 bytes,
  * names that do not fit summarized as "and K more"): `mods` are the mods' names;
@@ -357,8 +371,8 @@ void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *m
  * No, a failed download and a build that will not install behave as for a
  * map, with "The prefab was not placed." */
 
-/* Hold a placement whose rows name missing builds (the caller has set the
- * placement's serving context); `name` is the prefab's
+/* Hold a placement whose rows name missing builds; they are fetched to the
+ * root (DECISIONS 12). `name` is the prefab's
  * name the messages use. Returns 1 held (the store is being asked), 0 when
  * nothing is missing, -1 when it could not be held (off the main thread, no
  * memory), -2 when the gates are not bound (nothing raised: the caller

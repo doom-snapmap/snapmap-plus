@@ -639,8 +639,8 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * hash of its manifest rows (a placed mod's row or a map-level row,
  * modmanifest.h) and of its placed names (the save-time closure); the first
  * hash of a salt in row order declares that salt, and every other build of
- * the salt is inert for the map. A hash names the folder of the open map's
- * place when it holds that build, else the root's (sh_modserve_scope_set_place).
+ * the salt is inert for the map. A hash names the root's folder at that
+ * build, else the folder of the loaded map's place (sh_modserve_place_set).
  *
  * Per path, the file that serves it for the open map is chosen among the
  * providers the map declares: the fewest needs the declared bundles do not
@@ -700,19 +700,53 @@ int  sh_modserve_scope_enabled(void);
  * their requirements. Any thread; serialised with index builds. */
 int  sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open);
 
-/* The open map's context for serving its rows (ONE-SHAPE rule 4): `place` is
- * its place, "maps\<segment>" below the store root (or the segment alone;
- * NULL or "" for none: a map with no place), set at the published-map gates
- * and the launch boundary from the item (the store's place record), at a
- * rawmap load from the file name, at a prefab placement from its import
- * record; `own` 1 for the author's own map (every editor load, every My Maps
- * play, a published map this machine published), whose rows always follow
- * the root folders. sh_modserve_row_build and the listing's hashes resolve
- * in this context. Recomputes the listing when it changed and returns the
- * bundles that changed what they serve (0 when unchanged), or 0 for a place
- * name over SH_MODSERVE_PLACE_CAP. Any thread. */
+/* Where the loaded map finds its mods (DECISIONS 1 and 11): its place.
+ *
+ * A place is "" (the root of mods\: the player's own maps) or
+ * "maps\<segment>" (mods\maps\<segment>\, a map that arrived with its mods:
+ * a download, a rawmap ZIP import). The place is a fact of the map: the
+ * saved map records it in its member ("place", map_carrier.h; written by
+ * every save, rawmap.c), and every load sets it from that record
+ * (sh_modserve_place_load at each parse), after which the published gates
+ * set a downloaded map's place from its item (modpublished.c). There is no
+ * other global setting: the editor's exit and the end of a launched Play
+ * return it to the root.
+ *
+ * The one resolver. A row "<salt>@<build hash>" of the loaded map resolves to
+ *   1. the root folder of the salt at the row's build hash; else
+ *   2. with a place: that place's folder of the salt at the row's hash;
+ *      without one: the root folder of the salt at any build.
+ * Never another map's place. A bare hash (the listing, plans, bundle state)
+ * resolves the same way: the root's folder at the hash, else the place's.
+ * sh_modserve_row_build and sh_modserve_row_served use the loaded map's
+ * place; the _in forms take a place and change nothing (a gate counting a
+ * map's rows before that map loads).
+ *
+ * sh_modserve_place_norm: 1 with `out` the place as stored ("" or
+ *   "maps\<segment>"; "maps/<segment>" and a bare segment are accepted), 0
+ *   when `place` is not one: the segment must be exactly what
+ *   sh_ms_title_segment makes of it (no separator, no dot step, no
+ *   character Windows refuses), so a hostile map cannot point outside
+ *   mods\maps\.
+ * sh_modserve_place_set: make `place` the loaded map's (a gate, a launch).
+ *   Returns the bundles whose serving changed, or -1 when it is not a place
+ *   (nothing changes).
+ * sh_modserve_place_load: a map parse's place (an invalid one is the root),
+ *   remembering the place it replaces; sh_modserve_place_restore puts that
+ *   back (a parse that failed, a launch that was refused) and returns 1, or
+ *   0 when nothing is remembered.
+ * sh_modserve_place_get: the loaded map's place.
+ * sh_modserve_scope_set_place: the earlier entry, kept for callers outside
+ *   the publishing files until they move to sh_modserve_place_set: `own`
+ *   nonzero is the root, else `place`.
+ * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
 #define SH_MODSERVE_PLACE_CAP 300
+int  sh_modserve_place_norm(const char *place, char *out, size_t cap);
+int  sh_modserve_place_set(const char *place);
+int  sh_modserve_place_load(const char *place);
+int  sh_modserve_place_restore(void);
+void sh_modserve_place_get(char *out, size_t cap);
 int  sh_modserve_scope_set_place(const char *place, int own);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
@@ -831,16 +865,13 @@ int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, si
  * the index build. */
 int sh_modserve_editor_only_recorded(const char *bundle_hash);
 int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
+int sh_modserve_row_served_in(const struct sh_modmanifest_row *row, const char *place, const char *subject,
+                              char *cause, size_t cap);
 
-/* The build that serves a row now (ONE-SHAPE rule 4; the owner's decision of
- * 2026-11-10), in the open map's context (sh_modserve_scope_set_place): for
- * a stranger's map, its place's folder of the row's salt at the row's hash,
- * else the root folder of the salt when it holds that hash; for the author's
- * own map, the root folder of the salt at any hash (own maps follow the
- * root, and the next save writes its hash), else its own place's folder at
- * the row's hash. Never another map's place: each map keeps its own copy (the
- * fetch's presence rule, modsync.c). 1 with *out filled, 0 when none (the
- * row is missing and the fetch runs). `id` is the salt. */
+/* The build that serves a row now: the one place resolver above, for the
+ * loaded map's place, or (sh_modserve_row_build_in) for `place`. 1 with *out
+ * filled, 0 when none (the row is missing and a hold fetches it). `id` is the
+ * salt. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], hash[SH_MODSERVE_HASH_HEX + 1];
     char name[400];                    /* the author's name, "" when none */
@@ -849,6 +880,7 @@ typedef struct sh_modserve_bundle_ref {
     unsigned long long size;           /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
+int sh_modserve_row_build_in(const struct sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out);
 
 /* Map placed logical names (entityDef inherit names, or any decl name a
  * bundle provides) to the installed bundles that provide them, including the

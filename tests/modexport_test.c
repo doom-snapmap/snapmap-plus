@@ -7,18 +7,20 @@
  * mod.json and carried files byte for byte, the same bytes on a second write.
  * Imported into an empty store, each carried folder lands in the ZIP's place,
  * mods\maps\<zip name>\<mod name>\, the serving index holds both and the map
- * text comes back unchanged; a second import installs nothing; a store whose
- * root already holds a salt (at any build: the rawmap is the player's own)
- * installs only the other one. A damaged entry, and a folder whose files do
- * not build to the hash its mod.json records, refuse the import and leave
- * nothing installed. A map naming a build the export does not carry counts
+ * text comes back recording that place (DECISIONS 11), while what the loaded
+ * map serves is unchanged; a second import installs nothing; a store whose
+ * root holds a salt at the row's build installs only the other one; an
+ * import that would replace another build of a salt in the place takes a
+ * place of its own and leaves the earlier one as it was. A damaged entry,
+ * and a folder whose files do not build to the hash its mod.json records,
+ * refuse the import, leave nothing installed and change nothing. A map naming a build the export does not carry counts
  * it as absent. A row pinning another build of a root salt is exported as the
  * root folder's build, its row moved. Every earlier shape is refused with one
  * sentence: a bundle.canonical.json, an export.json index, a carried
  * mod.json with a format-1 block, a map with old rows. A prefab's export has
- * the same layout; it imports into mods\maps\<prefab name>\; each importer
- * refuses the other's ZIP. The rawmap hooks take ANSI paths and return
- * process-heap text. Pure file work: no network. */
+ * the same layout; its mods install at the root (DECISIONS 12); each
+ * importer refuses the other's ZIP. The rawmap hooks return process-heap
+ * text. Pure file work: no network. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +31,7 @@
 #include "../src/backend/modserve.h"
 #include "../src/backend/modmanifest.h"
 #include "../src/backend/modzip.h"
+#include "../src/backend/map_carrier.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -210,14 +213,37 @@ static int entry_at(const char *name, const char *hash)
     return ok;
 }
 
-/* A fresh store at `root`, its serving index built, the context the
- * player's own with no place. */
+/* A fresh store at `root`, its serving index built, the loaded map one
+ * without a place. */
 static void store_at(const char *root)
 {
     CreateDirectoryA(root, NULL);
     sh_ms_set_root(root);
     (void)sh_modserve_index_build(root);
-    (void)sh_modserve_scope_set_place("", 1);
+    (void)sh_modserve_place_set(NULL);
+}
+
+/* `text` is `map` with the member's place set to `segment` (NULL: none). */
+static int recorded_as(const char *text, size_t len, const char *map, const char *segment)
+{
+    char place[SH_CARRIER_PLACE_CAP], err[96];
+    size_t n = 0;
+    char *bare;
+    int got = sh_carrier_place(text, len, place, sizeof place), ok;
+    if (segment ? got != 1 || strcmp(place, segment) : got != 0) return 0;
+    if (!segment) return len == strlen(map) && !memcmp(text, map, len);
+    bare = sh_carrier_put_place(text, len, NULL, &n, err, sizeof err);
+    ok = bare && n == strlen(map) && !memcmp(bare, map, n);
+    if (bare) HeapFree(GetProcessHeap(), 0, bare);
+    return ok;
+}
+
+/* The loaded map's place is still none. */
+static int loaded_place_none(void)
+{
+    char now[SH_MODSERVE_PLACE_CAP];
+    sh_modserve_place_get(now, sizeof now);
+    return !now[0];
 }
 
 int main(int argc, char **argv)
@@ -294,22 +320,26 @@ int main(int argc, char **argv)
     CHECK(z1 && z2 && z1l == z2l && !memcmp(z1, z2, z1l));
     free(z2); z2 = NULL;
 
-    printf("-- import into an empty store: each folder in the ZIP's place, the map unchanged\n");
+    printf("-- import into an empty store: each folder in the ZIP's place, the map records it\n");
     store_at(b_root);
     CHECK(modexport_probe(zip, cause, sizeof cause));
     back = modexport_read(zip, &len, &st, cause, sizeof cause);
     if (!back) fprintf(stderr, "  import: %s\n", cause);
-    CHECK(back && len == strlen(map) && !memcmp(back, map, len));
+    CHECK(back && recorded_as(back, len, map, "Pink Arena"));
     free(back);
     CHECK(st.bundles == 2 && st.bundles_installed == 2 && st.bundles_present == 0 && st.bundles_absent == 0);
     CHECK(entry_at("maps\\Pink Arena\\Pink Imp", rows[0].build) && entry_at("maps\\Pink Arena\\Bob Room", rows[1].build));
     CHECK(count_entries() == 2);
     {
-        char dir[MAX_PATH];
-        CHECK(sh_ms_place_of("zip:Pink Arena.zip", dir, sizeof dir, NULL, 0) && !strcmp(dir, "maps\\Pink Arena"));
+        char dir[MAX_PATH], key[MAX_PATH + 8];
+        _snprintf_s(key, sizeof key, _TRUNCATE, "zip:%s", zip);
+        CHECK(sh_ms_place_of(key, dir, sizeof dir, NULL, 0) && !strcmp(dir, "maps\\Pink Arena"));
     }
-    /* The map opened from it is served from the place. */
-    CHECK(sh_modserve_row_served(&rows[0], NULL, 0) == SH_MODSERVE_ROW_SERVED);
+    /* The import changed nothing the loaded map serves; the map opened from
+     * the text is served from its place. */
+    CHECK(loaded_place_none());
+    CHECK(sh_modserve_row_served(&rows[0], NULL, 0) != SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_row_served_in(&rows[0], "Pink Arena", NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED);
 
     printf("-- a second import installs nothing\n");
     back = modexport_read(zip, &len, &st, cause, sizeof cause);
@@ -346,7 +376,7 @@ int main(int argc, char **argv)
         back = modexport_read(path, &len, &st, cause, sizeof cause);
         CHECK(!back && strstr(cause, "Bob Room"));
         if (g_echo) printf("    damaged: %s\n", cause);
-        CHECK(count_entries() == 0 && st.bundles_installed == 0);
+        CHECK(count_entries() == 0 && st.bundles_installed == 0 && loaded_place_none());
         free(back);
         free(bad);
     }
@@ -465,7 +495,7 @@ int main(int argc, char **argv)
         CHECK(count_entries() == 2);   /* c's own two, nothing added */
     }
 
-    printf("-- a prefab's export: the same layout, imported into the prefab's place\n");
+    printf("-- a prefab's export: the same layout, its mods installed at the root\n");
     {
         sh_modmanifest_list pr;
         char pz[MAX_PATH], g[MAX_PATH], *text = NULL, pname[128];
@@ -482,7 +512,12 @@ int main(int argc, char **argv)
         store_at(g);
         CHECK(modexport_read_prefab(pz, NULL, NULL, &text, &tl, pname, sizeof pname, &st, cause, sizeof cause));
         CHECK(text && !strcmp(pname, "Door Kit") && st.bundles_installed == 1);
-        CHECK(entry_at("maps\\Door Kit\\Pink Imp", rows[0].build));
+        CHECK(!entry_at("maps\\Door Kit\\Pink Imp", rows[0].build) && count_entries() == 1);
+        {
+            sh_modserve_bundle_ref ref;
+            (void)sh_modserve_index_rescan();
+            CHECK(sh_modserve_row_build(&rows[0], &ref) && !ref.place[0] && !strcmp(ref.hash, rows[0].build));
+        }
         free(text);
         /* Each importer refuses the other's export. */
         CHECK(!modexport_read(pz, &len, &st, cause, sizeof cause) && strstr(cause, "prefab's export, not a map's"));
@@ -491,7 +526,7 @@ int main(int argc, char **argv)
         sh_modmanifest_list_free(&pr);
     }
 
-    printf("-- the rawmap hooks: ANSI paths, process-heap text\n");
+    printf("-- the rawmap hooks: process-heap text recording the ZIP's place\n");
     {
         char h[MAX_PATH], acp[MAX_PATH * 2];
         unsigned bundles = 0;
@@ -502,9 +537,44 @@ int main(int argc, char **argv)
         CHECK(map && modexport_write_text_report(map, strlen(map), acp, &bundles, cause, sizeof cause) > 0 && bundles == 2);
         store_at(h);
         heap = modexport_read_text_report(acp, &len, cause, sizeof cause);
-        CHECK(heap && len == strlen(map) && !memcmp(heap, map, len));
+        CHECK(heap && recorded_as(heap, len, map, "hooked"));
         if (heap) HeapFree(GetProcessHeap(), 0, heap);
         CHECK(entry_at("maps\\hooked\\Pink Imp", rows[0].build));
+    }
+
+    printf("-- an import that would replace another build in its place takes a place of its own\n");
+    {
+        char pinkasset[MAX_PATH * 2], dir[MAX_PATH], key[MAX_PATH + 8], *m1, segment[SH_CARRIER_PLACE_CAP];
+        sh_ms_sync_stats ss;
+        sh_modmanifest_list got;
+        unsigned rej = 0;
+        /* The author changes Pink Imp and exports the same ZIP again. */
+        store_at(a_root);
+        _snprintf_s(pinkasset, sizeof pinkasset, _TRUNCATE, "%s\\pink\\assets\\generated\\image\\mods\\%s\\a.bimage",
+                    a_root, rows[0].salt);
+        CHECK(spit(pinkasset, "changed", 7));
+        CHECK(sh_ms_sync(NULL, &ss));
+        (void)sh_modserve_index_build(a_root);
+        m1 = map_with(rows, 1);
+        CHECK(m1 && modexport_write(m1, strlen(m1), zip, &st, cause, sizeof cause));
+        /* b's place holds the earlier build: the import goes beside it. */
+        store_at(b_root);
+        back = modexport_read(zip, &len, &st, cause, sizeof cause);
+        if (!back) fprintf(stderr, "  beside: %s\n", cause);
+        CHECK(back && st.bundles_installed == 1);
+        CHECK(entry_at("maps\\Pink Arena\\Pink Imp", rows[0].build));   /* the earlier import's, kept */
+        CHECK(back && sh_carrier_place(back, len, segment, sizeof segment) == 1 && strcmp(segment, "Pink Arena") != 0);
+        memset(&got, 0, sizeof got);
+        CHECK(back && sh_modmanifest_read(back, len, &got, &rej) == 1);
+        if (got.count)
+            CHECK(sh_modserve_row_served_in(&got.rows[0], segment, NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED &&
+                  strcmp(got.rows[0].build, rows[0].build) != 0);
+        sh_modmanifest_list_free(&got);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "zip:%s", zip);
+        CHECK(sh_ms_place_of(key, dir, sizeof dir, NULL, 0) && !strcmp(dir, "maps\\Pink Arena"));
+        CHECK(loaded_place_none());
+        free(back);
+        free(m1);
     }
 
     free(z1);

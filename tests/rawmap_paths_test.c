@@ -862,9 +862,10 @@ static struct {
 } R;
 
 static int r_on_main(void *c) { (void)c; return 1; }
-static int r_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+static int r_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                       size_t cap)
 {
-    (void)c; (void)subject;
+    (void)c; (void)place; (void)subject;
     if (cause && cap) cause[0] = 0;
     return !strcmp(row->build, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
 }
@@ -877,10 +878,10 @@ static int r_poll(void *c, int ticket)
 { (void)c; (void)ticket; if (R.answered || !R.answer) return 0; R.answered = 1; return R.answer; }
 static void r_release(void *c, int ticket) { (void)c; (void)ticket; }
 static int r_worker_run(void *c, void (*job)(void *), void *ctx) { (void)c; job(ctx); return 1; }
-static int r_fetch(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
-                   sh_modpub_progress_fn progress, volatile int *cancel)
+static int r_fetch(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+                   volatile int *cancel)
 {
-    (void)c; (void)title; (void)map_id; (void)progress; (void)cancel;
+    (void)c; (void)place; (void)progress; (void)cancel;
     R.fetches++;
     if (!strcmp(row->build, HASH_A)) R.installed = 1;
     return 0;

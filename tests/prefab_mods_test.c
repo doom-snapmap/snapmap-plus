@@ -160,9 +160,10 @@ static const sh_prefab_mods_ops PM_OPS = {
 
 /* modpublished's doubles: the hold runs as in the game, its jobs inline. */
 static int p_on_main(void *c) { (void)c; return 1; }
-static int p_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+static int p_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                       size_t cap)
 {
-    (void)c; (void)subject;
+    (void)c; (void)place; (void)subject;
     return f_row_state(row, cause, cap);
 }
 static int p_rescan(void *c) { (void)c; return 1; }
@@ -185,10 +186,10 @@ static int p_poll(void *c, int ticket)
 }
 static void p_release(void *c, int ticket) { (void)c; (void)ticket; }
 static int p_worker_run(void *c, void (*job)(void *), void *ctx) { (void)c; job(ctx); return 1; }
-static int p_fetch_for(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
-                       sh_modpub_progress_fn progress, volatile int *cancel)
+static int p_fetch_for(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+                       volatile int *cancel)
 {
-    (void)c; (void)title; (void)map_id; (void)progress; (void)cancel;
+    (void)c; (void)place; (void)progress; (void)cancel;
     F.fetches++;
     if (!strcmp(row->build, GHOST)) F.ghost_installed = 1;
     return 0;
@@ -988,15 +989,15 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.meta.json", libB);
     CHECK(!mt_exists(path));
 
-    /* Placed in the prefab's place, mods\\maps\\<prefab name>\\<mod name>\\. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Door\\test.door\\mod.json", storeB);
+    /* Installed at the root, as the player's own mod (DECISIONS 12). */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\door\\mod.json", storeB);
     CHECK(mt_exists(path));
 
     printf("-- importing it again writes nothing\n");
     {
         char mj[MAX_PATH * 2], pj[MAX_PATH * 2];
         _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Door.json", libB);
-        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\maps\\Door\\test.door\\mod.json", storeB);
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\door\\mod.json", storeB);
         CHECK(write_time(pj, &before_p) && write_time(mj, &before_m));
         Sleep(30);
         CHECK(sh_prefab_mods_import(zipA, libB, name, sizeof name, msg, sizeof msg) == 0);
@@ -1163,28 +1164,27 @@ static char g_e_source[260];
 static int g_e_resumes;
 static int g_e_game_lacks;
 
-static int e_row_state(void *c, const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+static int e_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
+                       size_t cap)
 {
     (void)c;
-    return sh_modserve_row_served_for(row, subject, cause, cap);
+    return sh_modserve_row_served_in(row, place, subject, cause, cap);
 }
 static int e_rescan(void *c) { (void)c; return sh_modserve_index_rescan() >= 0; }
-/* As eng_fetch_for: the archive into the map's place. */
-static int e_fetch_for(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
-                       sh_modpub_progress_fn progress, volatile int *cancel)
+/* As eng_fetch_for: the archive where the map finds it (its place, or the root). */
+static int e_fetch_for(void *c, const sh_modmanifest_row *row, const char *place, sh_modpub_progress_fn progress,
+                       volatile int *cancel)
 {
     modnet_io io;
     modsync_stats st;
-    sh_ms_place place;
+    char where[MAX_PATH];
     (void)c; (void)progress;
     memset(&io, 0, sizeof io);
     memset(&st, 0, sizeof st);
     io.cancel = (volatile long *)cancel;
     F.fetches++;
-    place.title = title && title[0] ? title : row->name;
-    place.map_id = map_id && map_id[0] ? map_id : NULL;
     g_e_source[0] = 0;
-    if (modsync_fetch_build_for(row, &place, &io, &st)) return 0;
+    if (modexport_fetch_build(row, place, &io, &st, where, sizeof where)) return 0;
     if (st.game_lacks) strcpy_s(g_e_source, sizeof g_e_source, st.game_source);
     return st.code ? st.code : -1;
 }
@@ -1212,24 +1212,24 @@ static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_mod
 }
 static int e_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
 static int e_resume(void *c, const sh_modpub_resume *r) { (void)c; (void)r; g_e_resumes++; return 1; }
-/* As eng_scope_place: the record's place, else the title's. */
-static void e_scope_place(void *c, const char *title, const char *map_id, int own)
+/* As eng_item_place and eng_place_set. */
+static int e_item_place(void *c, const char *title, const char *item, char *out, size_t cap)
 {
-    char dir[SH_MODSERVE_PLACE_CAP] = "";
     sh_ms_place place;
     (void)c;
-    if (!(map_id && map_id[0] && sh_ms_place_of(map_id, dir, sizeof dir, NULL, 0)) && title && title[0]) {
-        place.title = title;
-        place.map_id = map_id && map_id[0] ? map_id : NULL;
-        if (!sh_ms_place_dir(&place, dir, sizeof dir)) dir[0] = 0;
-    }
-    (void)sh_modserve_scope_set_place(dir, own);
+    if (item && item[0] && sh_ms_place_of(item, out, cap, NULL, 0)) return 1;
+    place.title = title && title[0] ? title : "map";
+    place.map_id = item && item[0] ? item : NULL;
+    return sh_ms_place_dir(&place, out, cap) && sh_ms_place_note(&place, out);
 }
+static void e_place_set(void *c, const char *place) { (void)c; (void)sh_modserve_place_set(place); }
+static int e_place_norm(void *c, const char *place, char *out, size_t cap)
+{ (void)c; return sh_modserve_place_norm(place, out, cap); }
 
 static const sh_modpub_ops E_OPS = {
     NULL, p_on_main, e_row_state, e_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
     p_worker_run, e_fetch_for, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, e_resume, p_log,
-    p_print, e_store_probe, e_claimed, e_fetch_detail, NULL, NULL, NULL, e_scope_place
+    p_print, e_store_probe, e_claimed, e_fetch_detail, NULL, NULL, NULL, e_item_place, e_place_set, e_place_norm
 };
 
 /* A fake installed game: one file at ROCK_SRC, with the bytes a mod borrows,
@@ -1347,7 +1347,7 @@ static void e_hold(const sh_modmanifest_row *row, int answer)
     sh_modpub_test_reset();   /* the last notice, left asked, goes */
     memset(&F, 0, sizeof F);
     F.answer = answer;
-    CHECK(sh_modpub_rawmap_hold(&rows, "e2e.json") == 1);
+    CHECK(sh_modpub_rawmap_hold(&rows, "e2e.json", "") == 1);
     sh_modmanifest_list_free(&rows);
     for (i = 0; i < 400 && (sh_modpublished_holding() || i < 6); i++) tick(1);
 }
@@ -1430,14 +1430,16 @@ static void gate_end_to_end(const char *tmp)
     CHECK(modnet_set_base_url(url));
 
     /* Obtainable: one question with the name and the size; Yes fetches the
-     * archive into the rawmap's place, mods\maps\e2e\<mod name>\, and the
-     * rawmap opens again. */
+     * archive for a rawmap without a place into the root, mods\<mod name>\,
+     * and the rawmap opens again. */
     g_e_resumes = 0;
     e_hold(&twob, 1);
     CHECK(F.asks == 1 && F.ask_buttons == 6 && strstr(F.last_ask, "This map needs 1 mod: Two Builds (") == F.last_ask);
     printf("    obtainable: %s\n", F.last_ask);
     CHECK(!sh_modpublished_holding() && F.fetches == 1 && g_e_resumes == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\e2e\\Two Builds\\mod.json", player);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\%s", player, twob.salt);
+    CHECK(!mt_exists(path));   /* the download's own place went with the move */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Two Builds\\mod.json", player);
     CHECK(mt_exists(path));
     CHECK(sh_modserve_row_served(&twob, NULL, 0) == SH_MODSERVE_ROW_SERVED);
 

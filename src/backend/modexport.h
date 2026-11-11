@@ -159,4 +159,16 @@ char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *ca
 /* The source check: 1 when the export can be loaded, else 0 with a reason. */
 int   modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity);
 
+/* ---------------------------------------------- received builds ---- */
+/* Fetch the row's build from the mod store (modsync_fetch_build_for) to
+ * where a map whose place is `place` finds it (modserve.h): that place's
+ * folder of the salt ("maps\<segment>"), or, for "" (the player's own map, a
+ * prefab), the root: it is unpacked into a place of its own and its folder
+ * moves to mods\<its name>. Worker thread. 1 with `where` its folder under
+ * mods\ ("" for an editor-only build); 0 with st->code and st->cause. */
+struct modnet_io;
+struct modsync_stats;
+int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const struct modnet_io *io,
+                          struct modsync_stats *st, char *where, size_t where_cap);
+
 #endif /* SNAPMAP_PLUS_MODEXPORT_H */

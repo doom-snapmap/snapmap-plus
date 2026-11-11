@@ -337,11 +337,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
 - A mod is its salt, eight characters in its `mod.json`, never its folder name, which you may
   rename at any time. Your own folders sit at the root of the mods folder, one build per mod; the
-  mods a downloaded map, a rawmap or a prefab ZIP brought sit in that map's place,
-  `mods\maps\<map title>\<mod name>\`, one build per mod per map. Someone else's map plays with
-  its own place's build at the hash its row records, or with your root folder of the mod when that
-  folder is at the same hash; otherwise the map's build is downloaded into its place. Your own maps
-  always use your root folders, whatever build they were saved with, and the next save records it.
+  mods a downloaded map or a rawmap ZIP brought sit in that map's place,
+  `mods\maps\<map title>\<mod name>\`, one build per mod per map. Where a map finds its mods is
+  part of the map: the saved map records its place, so a map imported from a ZIP or downloaded and
+  then saved to My Maps reopens with its mods. Such a map plays with your root folder of the mod
+  when that folder is at the hash its row records, else with its place's build at that hash;
+  otherwise the build is downloaded into its place. Your own maps (no place) always use your root
+  folders, whatever build they were saved with, and the next save records it; a mod one of them
+  needs and you lack (a map copied to My Maps, a placed prefab's mod) is downloaded into the root.
   With no map open only your root folders offer Toybox rows, each ready with its required console
   settings; a build in a map's place serves only for that map. `sh_mods doctor` lists one row per
   build under the mod. A folder in an earlier shape, or whose build failed, serves nothing, and the
@@ -350,9 +353,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
 - A mod you install (the Mods tab's install, `sh_mods install`) lands at the top of `mods\` under
   its own folder name (` (2)` when taken); a build you already have is not installed again, and a
   second folder of a mod you already have becomes a new mod with its own salt. A mod that came with
-  a map (a download, a rawmap or prefab ZIP) lives in that map's place,
+  a map (a download, a rawmap ZIP) lives in that map's place,
   `mods\maps\<map title>\<mod name>\`, one folder per mod per map, replaced when the map brings a
-  newer build; place folders are never built again, and a folder you make inside one is refused.
+  newer build; a ZIP imported again with another build of a mod gets a place of its own, so the
+  map saved from the first import keeps its mods. A prefab ZIP's mods install at the root. Place
+  folders are never built again, and a folder you make inside one is refused.
   Removing the last mod of a place removes the place.
 - Playing your own published map uses your own mod folders, as opening it from My Maps does: a row
   whose mod one of your folders builds follows that folder's current build, and nothing is

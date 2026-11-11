@@ -53,6 +53,22 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     return 0;
 }
 
+/* The loaded map's place (sh_modserve_place_*): a parse sets it, a failed
+ * one puts it back. */
+static char g_stub_place[SH_MODSERVE_PLACE_CAP], g_stub_place_prev[SH_MODSERVE_PLACE_CAP];
+int sh_modserve_place_load(const char *place)
+{
+    strcpy_s(g_stub_place_prev, sizeof g_stub_place_prev, g_stub_place);
+    strncpy_s(g_stub_place, sizeof g_stub_place, place ? place : "", _TRUNCATE);
+    return 0;
+}
+int sh_modserve_place_restore(void)
+{
+    strcpy_s(g_stub_place, sizeof g_stub_place, g_stub_place_prev);
+    return 1;
+}
+void sh_modserve_place_get(char *out, size_t cap) { strncpy_s(out, cap, g_stub_place, _TRUNCATE); }
+
 int sh_modserve_index_rescan(void)
 {
     g_mod_stub_rescans++;
