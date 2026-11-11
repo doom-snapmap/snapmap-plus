@@ -488,7 +488,7 @@ static void test_report(void)
         report_capture();
         CHECK(strstr(g_report, "1 map load(s) this session") != NULL);
         CHECK(strstr(g_report, "the last found 1 baked set(s)") != NULL);
-        CHECK(strstr(g_report, "ind_totally_blank_room_4x.baas_monster48") != NULL);
+        CHECK(strstr(g_report, "monster48: in use") != NULL);
 
         /* the same session, one more load, nothing baked: the counter advances
          * and the table is empty -- the stale-clear rule, said out loud */

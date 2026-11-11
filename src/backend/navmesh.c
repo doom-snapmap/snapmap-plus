@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "navmesh.h"
+#include "aas_edit.h"
 #include "map_shards.h"
 #include "map_carrier.h"
 #include "config.h"
@@ -71,8 +72,9 @@ static volatile LONG g_build_count;
 static size_t     g_last_build_sets;
 static char       g_last_refusal[SH_SMNAV_REASON_CAP];
 
-/* With the feature off a map's member "nav" part is kept as it was read, so a
- * save carries it back unchanged (process heap; NULL when none). */
+/* A map's member "nav" part as it was read, so a save carries it back
+ * unchanged when nothing is held to re-embed: the feature was off at load, or
+ * turned off since (process heap; NULL when none). Under g_nav_lock. */
 static char      *g_raw_nav;
 static size_t     g_raw_nav_len;
 
@@ -202,40 +204,7 @@ static uint16_t nav_be16(const unsigned char *p)
 
 static int32_t nav_be32s(const unsigned char *p) { return (int32_t)nav_be32(p); }
 
-/* AAS lump order and fixed record sizes. */
-enum {
-    L_PLANES = 0, L_VERTICES, L_EDGES, L_EDGEINDEX, L_REACH, L_AREAS, L_NODES,
-    L_PORTALS, L_PORTALINDEX, L_CLUSTERS, L_OBSTACLEPVS, L_REACHNAMES,
-    L_ANIMNAMES, L_DEPNAMES, L_INTERACTNAMES, L_COVER, L_AREACOVERINDEX,
-    L_TOUCHCOVERINDEX, L_TRAVPOINTS, L_HINTNODES, L_TREES, L_AREABOUNDS
-};
-
-typedef struct nav_lump_def { const char *name; unsigned record; } nav_lump_def;
-
-static const nav_lump_def NAV_LUMPS[SH_AAS_LUMPS] = {
-    { "planes",                  16 },
-    { "vertices",                12 },
-    { "edges",                   12 },
-    { "edgeIndex",                4 },
-    { "reachabilities",          40 },
-    { "areas",                   44 },
-    { "nodes",                   16 },
-    { "portals",                 12 },
-    { "portalIndex",              4 },
-    { "clusters",                16 },
-    { "obstaclePVS",              1 },
-    { "reachNames",             132 },
-    { "traversalAnimNames",     128 },
-    { "dependencyNames",        128 },
-    { "interactionEntityNames", 128 },
-    { "cover",                   56 },
-    { "areaCoverIndex",           4 },
-    { "touchingCoverIndex",       4 },
-    { "traversalPoints",         60 },
-    { "hintNodes",               24 },
-    { "trees",                   24 },
-    { "areaBounds",              12 }
-};
+typedef char sh_aas_lumps_agree[(SH_AAS_LUMPS == SH_AAS_L__COUNT) ? 1 : -1];
 
 typedef struct nav_aas {
     const unsigned char *p;
@@ -253,7 +222,7 @@ static void nav_verr(char *err, size_t cap, const char *fmt, ...)
     va_end(ap);
 }
 
-#define NAV_REC(a, lump, i) ((a)->p + (a)->off[lump] + (size_t)(i) * NAV_LUMPS[lump].record)
+#define NAV_REC(a, lump, i) ((a)->p + (a)->off[lump] + (size_t)(i) * SH_AAS_LUMP_DEFS[lump].record)
 
 /* Require every BSP node to be reachable once from a root within the native
  * depth limit. Reject cycles, multiple parents and unreachable nodes.
@@ -261,9 +230,9 @@ static void nav_verr(char *err, size_t cap, const char *fmt, ...)
 static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
 {
     enum { ST_REF = 1, ST_REFMANY = 2, ST_SEEN = 4 };
-    uint32_t num_nodes = a->count[L_NODES];
-    uint32_t num_areas = a->count[L_AREAS];
-    uint32_t num_planes = a->count[L_PLANES];
+    uint32_t num_nodes = a->count[SH_AAS_L_NODES];
+    uint32_t num_areas = a->count[SH_AAS_L_AREAS];
+    uint32_t num_planes = a->count[SH_AAS_L_PLANES];
     unsigned char *state;
     uint32_t visited = 0, n;
     int rc = 0;
@@ -283,7 +252,7 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
     /* Pass 1: every plane index and every child is in range, and no node is
      * claimed by two parents. */
     for (n = 0; n < num_nodes; n++) {
-        const unsigned char *rec = NAV_REC(a, L_NODES, n);
+        const unsigned char *rec = NAV_REC(a, SH_AAS_L_NODES, n);
         uint32_t plane = nav_be32(rec);
         int k;
         if (plane >= num_planes) {
@@ -342,7 +311,7 @@ static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
                          (unsigned)SH_AAS_MAX_DEPTH);
                 goto done;
             }
-            rec = NAV_REC(a, L_NODES, node);
+            rec = NAV_REC(a, SH_AAS_L_NODES, node);
             for (k = 0; k < 2; k++) {
                 int32_t child = nav_be32s(rec + 8 + 4 * k);
                 if (child <= 0) continue;
@@ -374,8 +343,8 @@ done:
  */
 static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
 {
-    uint32_t num_reach = a->count[L_REACH];
-    uint32_t num_areas = a->count[L_AREAS];
+    uint32_t num_reach = a->count[SH_AAS_L_REACHABILITIES];
+    uint32_t num_areas = a->count[SH_AAS_L_AREAS];
     size_t bytes = (size_t)((num_reach + 7u) / 8u);
     unsigned char *seen;
     unsigned *degrees;
@@ -398,7 +367,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
     /* Load rebuilds these lists from the records. An omitted list head must
      * not hide an overflow from this gate. Cross-indices were checked above. */
     for (area = 0; area < num_reach; area++) {
-        unsigned from = nav_be16(NAV_REC(a, L_REACH, area) + 6);
+        unsigned from = nav_be16(NAV_REC(a, SH_AAS_L_REACHABILITIES, area) + 6);
         if (++degrees[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
             nav_verr(err, err_cap, "area %u has more than %u outgoing reachabilities",
                      from, SH_AAS_MAX_AREA_REACHABILITIES);
@@ -414,7 +383,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
         size_t link_off = (list == 0) ? 0x20 : 0x24;
         for (area = 0; area < num_areas; area++) {
             unsigned degree = 0;
-            int32_t at = nav_be32s(NAV_REC(a, L_AREAS, area) + head_off);
+            int32_t at = nav_be32s(NAV_REC(a, SH_AAS_L_AREAS, area) + head_off);
             while (at != -1) {
                 uint32_t idx;
                 if (list == 0 && ++degree > SH_AAS_MAX_AREA_REACHABILITIES) {
@@ -437,7 +406,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
                     goto done;
                 }
                 bits[idx >> 3] |= (unsigned char)(1u << (idx & 7));
-                at = nav_be32s(NAV_REC(a, L_REACH, idx) + link_off);
+                at = nav_be32s(NAV_REC(a, SH_AAS_L_REACHABILITIES, idx) + link_off);
             }
         }
     }
@@ -483,20 +452,20 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     for (i = 0; i < SH_AAS_LUMPS; i++) {
         uint64_t bytes;
         if (len - off < 4) {
-            nav_verr(err, err_cap, "lump %s: no room for its count", NAV_LUMPS[i].name);
+            nav_verr(err, err_cap, "lump %s: no room for its count", SH_AAS_LUMP_DEFS[i].name);
             return 0;
         }
         a.count[i] = nav_be32(p + off);
         off += 4;
         if (a.count[i] > SH_AAS_MAX_RECORDS) {
             nav_verr(err, err_cap, "lump %s: a count of %u is beyond any real file",
-                     NAV_LUMPS[i].name, a.count[i]);
+                     SH_AAS_LUMP_DEFS[i].name, a.count[i]);
             return 0;
         }
-        bytes = (uint64_t)a.count[i] * NAV_LUMPS[i].record;
+        bytes = (uint64_t)a.count[i] * SH_AAS_LUMP_DEFS[i].record;
         if (bytes > (uint64_t)(len - off)) {
             nav_verr(err, err_cap, "lump %s: %u records overrun the payload",
-                     NAV_LUMPS[i].name, a.count[i]);
+                     SH_AAS_LUMP_DEFS[i].name, a.count[i]);
             return 0;
         }
         a.off[i] = off;
@@ -507,93 +476,106 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
         return 0;
     }
 
-    if (a.count[L_AREAS] > SH_AAS_MAX_AREAS) {
+    if (a.count[SH_AAS_L_AREAS] > SH_AAS_MAX_AREAS) {
         nav_verr(err, err_cap, "%u areas, over the %u a u16 index can reach",
-                 a.count[L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
+                 a.count[SH_AAS_L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
         return 0;
     }
-    if (a.count[L_CLUSTERS] > 0xFFFFu) {
+    if (a.count[SH_AAS_L_CLUSTERS] > 0xFFFFu) {
         nav_verr(err, err_cap, "%u clusters, over the %u a u16 index can reach",
-                 a.count[L_CLUSTERS], 0xFFFFu);
+                 a.count[SH_AAS_L_CLUSTERS], 0xFFFFu);
         return 0;
     }
-    if (a.count[L_AREABOUNDS] != a.count[L_AREAS]) {
+    /* An area's first traversal point is a u16, so the table indexes at most 65536 points. */
+    if (a.count[SH_AAS_L_TRAVERSALPOINTS] > SH_AAS_MAX_TRAVERSAL_POINTS) {
+        nav_verr(err, err_cap, "%u traversal points, over the %u a u16 index can reach",
+                 a.count[SH_AAS_L_TRAVERSALPOINTS], (unsigned)SH_AAS_MAX_TRAVERSAL_POINTS);
+        return 0;
+    }
+    if (a.count[SH_AAS_L_AREABOUNDS] != a.count[SH_AAS_L_AREAS]) {
         nav_verr(err, err_cap, "areaBounds holds %u records for %u areas",
-                 a.count[L_AREABOUNDS], a.count[L_AREAS]);
+                 a.count[SH_AAS_L_AREABOUNDS], a.count[SH_AAS_L_AREAS]);
         return 0;
     }
 
     /* edge -> vertex */
-    for (n = 0; n < a.count[L_EDGES]; n++) {
-        const unsigned char *rec = NAV_REC(&a, L_EDGES, n);
+    for (n = 0; n < a.count[SH_AAS_L_EDGES]; n++) {
+        const unsigned char *rec = NAV_REC(&a, SH_AAS_L_EDGES, n);
         uint32_t v0 = nav_be32(rec), v1 = nav_be32(rec + 4);
-        if (v0 >= a.count[L_VERTICES] || v1 >= a.count[L_VERTICES]) {
+        if (v0 >= a.count[SH_AAS_L_VERTICES] || v1 >= a.count[SH_AAS_L_VERTICES]) {
             nav_verr(err, err_cap, "edge %u references a vertex outside the %u present",
-                     n, a.count[L_VERTICES]);
+                     n, a.count[SH_AAS_L_VERTICES]);
             return 0;
         }
     }
 
     /* edgeIndex -> edges. The value is signed: the sign carries the traversal
      * direction, so the magnitude is what has to be in range. */
-    for (n = 0; n < a.count[L_EDGEINDEX]; n++) {
-        int32_t v = nav_be32s(NAV_REC(&a, L_EDGEINDEX, n));
+    for (n = 0; n < a.count[SH_AAS_L_EDGEINDEX]; n++) {
+        int32_t v = nav_be32s(NAV_REC(&a, SH_AAS_L_EDGEINDEX, n));
         int64_t mag = (v < 0) ? -(int64_t)v : (int64_t)v;
-        if (mag >= (int64_t)a.count[L_EDGES]) {
+        if (mag >= (int64_t)a.count[SH_AAS_L_EDGES]) {
             nav_verr(err, err_cap, "edgeIndex %u references edge %d of %u",
-                     n, v, a.count[L_EDGES]);
+                     n, v, a.count[SH_AAS_L_EDGES]);
             return 0;
         }
     }
 
     /* areaCoverIndex -> cover */
-    for (n = 0; n < a.count[L_AREACOVERINDEX]; n++) {
-        uint32_t v = nav_be32(NAV_REC(&a, L_AREACOVERINDEX, n));
-        if (v >= a.count[L_COVER]) {
+    for (n = 0; n < a.count[SH_AAS_L_AREACOVERINDEX]; n++) {
+        uint32_t v = nav_be32(NAV_REC(&a, SH_AAS_L_AREACOVERINDEX, n));
+        if (v >= a.count[SH_AAS_L_COVER]) {
             nav_verr(err, err_cap, "areaCoverIndex %u references cover %u of %u",
-                     n, v, a.count[L_COVER]);
+                     n, v, a.count[SH_AAS_L_COVER]);
             return 0;
         }
     }
 
     /* areas: the spans they own, and the cluster they belong to */
-    for (n = 0; n < a.count[L_AREAS]; n++) {
-        const unsigned char *rec = NAV_REC(&a, L_AREAS, n);
+    for (n = 0; n < a.count[SH_AAS_L_AREAS]; n++) {
+        const unsigned char *rec = NAV_REC(&a, SH_AAS_L_AREAS, n);
         uint32_t num_edges   = nav_be16(rec + 0x06);
         uint32_t first_edge  = nav_be32(rec + 0x08);
         uint32_t cluster     = nav_be16(rec + 0x0C);
         uint32_t first_pvs   = nav_be32(rec + 0x10);
         uint32_t first_cover = nav_be16(rec + 0x20);
         uint32_t num_cover   = nav_be16(rec + 0x22);
-        if ((uint64_t)first_edge + num_edges > a.count[L_EDGEINDEX]) {
+        uint32_t first_trav  = nav_be16(rec + 0x24);
+        uint32_t num_trav    = nav_be16(rec + 0x26);
+        if (first_trav + num_trav > a.count[SH_AAS_L_TRAVERSALPOINTS]) {
+            nav_verr(err, err_cap, "area %u claims traversal points %u..%u of %u",
+                     n, first_trav, first_trav + num_trav, a.count[SH_AAS_L_TRAVERSALPOINTS]);
+            return 0;
+        }
+        if ((uint64_t)first_edge + num_edges > a.count[SH_AAS_L_EDGEINDEX]) {
             nav_verr(err, err_cap, "area %u claims edgeIndex %u..%u of %u",
-                     n, first_edge, first_edge + num_edges, a.count[L_EDGEINDEX]);
+                     n, first_edge, first_edge + num_edges, a.count[SH_AAS_L_EDGEINDEX]);
             return 0;
         }
-        if (cluster >= a.count[L_CLUSTERS]) {
+        if (cluster >= a.count[SH_AAS_L_CLUSTERS]) {
             nav_verr(err, err_cap, "area %u is in cluster %u of %u",
-                     n, cluster, a.count[L_CLUSTERS]);
+                     n, cluster, a.count[SH_AAS_L_CLUSTERS]);
             return 0;
         }
-        if (first_pvs > a.count[L_OBSTACLEPVS]) {
+        if (first_pvs > a.count[SH_AAS_L_OBSTACLEPVS]) {
             nav_verr(err, err_cap, "area %u starts its obstacle PVS at %u of %u",
-                     n, first_pvs, a.count[L_OBSTACLEPVS]);
+                     n, first_pvs, a.count[SH_AAS_L_OBSTACLEPVS]);
             return 0;
         }
-        if ((uint64_t)first_cover + num_cover > a.count[L_AREACOVERINDEX]) {
+        if ((uint64_t)first_cover + num_cover > a.count[SH_AAS_L_AREACOVERINDEX]) {
             nav_verr(err, err_cap, "area %u claims areaCoverIndex %u..%u of %u",
-                     n, first_cover, first_cover + num_cover, a.count[L_AREACOVERINDEX]);
+                     n, first_cover, first_cover + num_cover, a.count[SH_AAS_L_AREACOVERINDEX]);
             return 0;
         }
     }
 
     /* reachabilities: the areas they join */
-    for (n = 0; n < a.count[L_REACH]; n++) {
-        const unsigned char *rec = NAV_REC(&a, L_REACH, n);
+    for (n = 0; n < a.count[SH_AAS_L_REACHABILITIES]; n++) {
+        const unsigned char *rec = NAV_REC(&a, SH_AAS_L_REACHABILITIES, n);
         uint32_t from = nav_be16(rec + 0x06), to = nav_be16(rec + 0x08);
-        if (from >= a.count[L_AREAS] || to >= a.count[L_AREAS]) {
+        if (from >= a.count[SH_AAS_L_AREAS] || to >= a.count[SH_AAS_L_AREAS]) {
             nav_verr(err, err_cap, "reachability %u joins areas %u and %u of %u",
-                     n, from, to, a.count[L_AREAS]);
+                     n, from, to, a.count[SH_AAS_L_AREAS]);
             return 0;
         }
     }
@@ -980,7 +962,8 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     if (g_raw_nav) { HeapFree(GetProcessHeap(), 0, g_raw_nav); g_raw_nav = NULL; g_raw_nav_len = 0; }
     /* Off means off, including the table: a map loaded while the feature is
      * disabled must not leave the previous map's navigation live. Its member
-     * part is kept as text so a save does not drop the author's bake. */
+     * part is kept as text so a save does not drop the author's bake, whether
+     * the feature is still off at save time or has been turned on since. */
     if (on) nav_build_locked(json, len);
     else if (json && len) {
         size_t from = 0, to = 0;
@@ -1047,25 +1030,17 @@ static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_
         if (!s->payload) continue;
         b64 = (char *)HeapAlloc(GetProcessHeap(), 0, ((s->payload_len + 2) / 3) * 4 + 1);
         if (!b64) {
-            char warn[SH_SMNAV_REASON_CAP + 160];
-            _snprintf_s(warn, sizeof warn, _TRUNCATE,
-                        "NAV: '%s' (%s) could NOT be written back into this save (no memory to encode it); "
-                        "the map is being saved WITHOUT it", s->module, s->cls);
-            backend_log(warn);
-            continue;
+            /* All or nothing: a save never silently drops one set of several. */
+            HeapFree(GetProcessHeap(), 0, out);
+            _snprintf_s(err, err_cap, _TRUNCATE,
+                        "there was no memory to encode the navigation of '%s' (%s)", s->module, s->cls);
+            return NULL;
         }
         b64_len = sh_shard_b64_encode(s->payload, s->payload_len, b64);
+        /* A held payload is at most SH_SMNAV_MAX_PAYLOAD, which fits well within
+         * SH_SMNAV_MAX_SHARDS chunks. */
         chunks = (b64_len + SH_SMNAV_CARRIER_CHUNK - 1) / SH_SMNAV_CARRIER_CHUNK;
         if (chunks == 0) chunks = 1;
-        if (chunks > SH_SMNAV_MAX_SHARDS) {
-            char warn[SH_SMNAV_REASON_CAP + 160];
-            _snprintf_s(warn, sizeof warn, _TRUNCATE,
-                        "NAV: '%s' (%s) could NOT be written back into this save (it needs more chunks than "
-                        "the format allows); the map is being saved WITHOUT it", s->module, s->cls);
-            backend_log(warn);
-            HeapFree(GetProcessHeap(), 0, b64);
-            continue;
-        }
         n = _snprintf_s(out + w, need + 1 - w, _TRUNCATE,
                         "%s{\"module\":\"%s\",\"class\":\"%s\",\"digest\":\"%s\",\"geom\":\"%s\",\"data\":[",
                         sets ? "," : "", s->module, s->cls, s->digest, s->geom);
@@ -1147,17 +1122,18 @@ char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
 
     if (out_len) *out_len = 0;
     if (!json || len == 0) return NULL;
-    if (!sh_navmesh_enabled()) {
-        /* Off: the member part the map arrived with goes back as it was read. */
+    if (nav_held_count() == 0 || !nav_config_on(NAV_CONFIG_EMBED)) {
+        /* Nothing held (the feature was off when the map loaded): the member part the map
+         * arrived with goes back as it was read, whatever the setting is now. */
         char err[160] = "";
         size_t w = 0;
-        if (!g_raw_nav) return NULL;
-        cur = sh_carrier_put(json, len, "nav", g_raw_nav, g_raw_nav_len, &w, err, sizeof err);
+        AcquireSRWLockShared(&g_nav_lock);
+        cur = g_raw_nav ? sh_carrier_put(json, len, "nav", g_raw_nav, g_raw_nav_len, &w, err, sizeof err)
+                        : NULL;
+        ReleaseSRWLockShared(&g_nav_lock);
         if (cur && out_len) *out_len = w;
         return cur;
     }
-    if (!nav_config_on(NAV_CONFIG_EMBED)) return NULL;
-    if (nav_held_count() == 0) return NULL;
 
     AcquireSRWLockExclusive(&g_nav_lock);
     cur = nav_embed_locked(json, len, &cur_len, &embedded);
@@ -1269,7 +1245,8 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
         (unsigned long)InterlockedCompareExchange(&g_build_count, 0, 0), g_last_build_sets);
 
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) {
-        out("navigation: DISABLED for this session after a fault; the engine serves its own.\n");
+        out("navigation: custom navigation turned itself off after an error this session; "
+            "restart DOOM to use it again.\n");
         return;
     }
     if (!nav_config_on(NAV_CONFIG_ENABLED)) {
@@ -1291,13 +1268,11 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
         }
         for (i = 0; i < g_set_count; i++) {
             const nav_set *s = &g_sets[i];
-            if (s->served) {
-                out("  [served] %s (%zu bytes)\n", s->res_name, s->payload_len);
-                out("  [served] %s\n", s->cook_name);
-            } else {
-                out("  [held]   %s %s -- %s\n", s->module, s->cls,
+            if (s->served)
+                out("  %s %s: in use (%zu bytes)\n", s->module, s->cls, s->payload_len);
+            else
+                out("  %s %s: kept from an older save, not used (%s)\n", s->module, s->cls,
                     s->reason[0] ? s->reason : "its module was refused");
-            }
         }
     }
     ReleaseSRWLockShared(&g_nav_lock);
