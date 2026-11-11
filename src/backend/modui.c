@@ -416,7 +416,7 @@ static void mu_restart_sentence(char *out, size_t cap)
     _snprintf_s(out, cap, _TRUNCATE, "Restart DOOM to hear the new %s.", names);
 }
 
-typedef struct mu_script_list { mu_buf *b; int count; } mu_script_list;
+typedef struct mu_script_list { mu_buf *b; int count; long skip; long seen; } mu_script_list;
 
 static void mu_script_mod(void *context, const char *salt)
 {
@@ -437,8 +437,15 @@ static void mu_script_mod(void *context, const char *salt)
 static void mu_script_line(void *context, const char *line)
 {
     mu_script_list *l = (mu_script_list *)context;
+    if (l->seen++ < l->skip) return;   /* before the tail the window shows */
     if (l->count++) mu_putn(l->b, ",", 1);
     mu_str(l->b, line);
+}
+
+static void mu_script_count(void *context, const char *line)
+{
+    (void)line;
+    ((mu_script_list *)context)->seen++;
 }
 
 int sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed)
@@ -446,16 +453,28 @@ int sh_modui_scripts(const char *salt, char *out, int out_cap, int *needed)
     const sh_modui_engine *e = mu_engine();
     mu_buf b;
     mu_script_list l;
-    int r;
+    int r, full = salt && !strncmp(salt, SH_MODS_SCRIPTS_FULL, sizeof SH_MODS_SCRIPTS_FULL - 1);
+    long total = 0;
+    char num[32];
+    if (full) salt += sizeof SH_MODS_SCRIPTS_FULL - 1;
     memset(&b, 0, sizeof b);
+    memset(&l, 0, sizeof l);
     l.b = &b;
-    l.count = 0;
     mu_puts(&b, "{\"mods\":[");
     if (e->script_mods) (void)e->script_mods(mu_script_mod, &l);
     mu_putn(&b, "]", 1);
     mu_kstr(&b, "salt", salt ? salt : "", 0);
+    if (salt && salt[0] && e->script_log) {
+        l.seen = 0;
+        (void)e->script_log(salt, mu_script_count, &l);
+        total = l.seen;
+    }
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"total\":%ld,\"full\":%s", total, full ? "true" : "false");
+    mu_puts(&b, num);
     mu_puts(&b, ",\"log\":[");
     l.count = 0;
+    l.seen = 0;
+    l.skip = full || total <= SH_MODUI_SCRIPT_TAIL ? 0 : total - SH_MODUI_SCRIPT_TAIL;
     if (salt && salt[0] && e->script_log) (void)e->script_log(salt, mu_script_line, &l);
     mu_puts(&b, "]}");
     if (needed) *needed = b.oom ? 0 : (int)b.len;
