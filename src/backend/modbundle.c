@@ -23,6 +23,7 @@
 #include "backend_log.h"
 #include "script/script_node.h"   /* the Script node row: its reserved paths, which mods get it */
 #include "store_lock.h"
+#include "vtpack.h"      /* a mod's lit virtual-texture pages (the relative form) */
 
 #define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
 
@@ -30,6 +31,7 @@
 #define MB_WALK_DEPTH   48
 #define MB_SCAN_DEPTH   128
 #define MB_READ_CHUNK   (1u << 20)
+#define SH_MB_LIT_MAX   (64u << 20)    /* a lit member, as the per-file cap */
 /* With a stock reader, files over the caps or of a type a bundle cannot carry
  * are hashed before they are refused (a stock copy becomes a pointer), so the
  * walk itself stops at this many listed bytes. */
@@ -910,7 +912,8 @@ int sh_mb_extension_allowed(const char *request)
     /* A script only in the mod's scripts folder (sh_mb_script_request). */
     if (mb_ieq_n(dot, strlen(dot), ".lua")) return sh_mb_script_request(request, NULL, NULL) > 0;
     /* A virtual-texture family member only at a name the engine's loader builds. */
-    if (mb_ieq_n(dot, strlen(dot), ".mega2")) return sh_mb_vt_member(request, NULL, 0, NULL);
+    if (mb_ieq_n(dot, strlen(dot), ".mega2"))
+        return sh_mb_vt_member(request, NULL, 0, NULL) || sh_mb_vt_lit_member(request, NULL, 0);
     /* .baas_<class>, for example .baas_monster48 */
     if (strlen(dot) > 6 && mb_ieq_n(dot, 6, ".baas_")) {
         for (i = 6; dot[i]; i++)
@@ -1264,6 +1267,22 @@ int sh_mb_vt_member(const char *request, char *family, size_t cap, int *member)
         family[fam_len] = 0;
     }
     if (member) *member = num;
+    return 1;
+}
+
+/* A mod's lit pages: exactly virtualtextures/mods/<salt>/vmtr.mega2. */
+int sh_mb_vt_lit_member(const char *request, char *salt, size_t cap)
+{
+    const char *s, *slash;
+    if (!request || _strnicmp(request, "virtualtextures/mods/", 21) != 0) return 0;
+    s = request + 21;
+    slash = strchr(s, '/');
+    if (!slash || slash == s || _stricmp(slash, "/vmtr.mega2") != 0) return 0;
+    if (salt) {
+        if ((size_t)(slash - s) + 1 > cap) return 0;
+        memcpy(salt, s, (size_t)(slash - s));
+        salt[slash - s] = 0;
+    }
     return 1;
 }
 
@@ -1933,6 +1952,7 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->extra);
     free(b->canonical);
     free(b->registries);
+    free(b->vt);
     free(b->scripts);
     free(b->edits);
     for (i = 0; i < b->note_count; i++) free(b->notes[i]);
@@ -3711,6 +3731,11 @@ static void mb_registries(sh_mb_bundle *b)
         free(edits);
     }
     mbj_free(extra);
+    if (b->vt) {
+        mb_puts(&o, first ? "\"vt\":" : ",\"vt\":");
+        mb_puts(&o, b->vt);
+        first = 0;
+    }
     mb_put(&o, "}", 1);
     free(b->registries);
     b->registries = o.oom ? NULL : o.p;
@@ -4054,6 +4079,108 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
  * nothing holds is not recorded (the engine's own hole, as before). */
 
 #define MB_MESH_PREFIX 4096u
+
+/* ----------------------------------------------- lit virtual textures ---- */
+
+static int mb_lit_material_file(const sh_mb_file *f)
+{
+    return f->is_decl && !f->stock && (!_strnicmp(f->request, "generated/decls/material/", 25) ||
+                                       !_strnicmp(f->request, "generated/decls/material2/", 26));
+}
+
+/* A mod's lit pages (vtpack.h, docs/vt-baker.md "Lit pages"): the member in
+ * the relative form, checked whole (Validation 1, 2 and the mip chain); every
+ * material naming it maps a whole-page rectangle inside its extent whose
+ * level-0 cells hold pages. Records in the block what the server needs:
+ *   "vt":{"extent":[w,h],"node":S,"pages":N,"materials":["<request>",...]} */
+static void mb_check_lit(sh_mb_bundle *b, const wchar_t *root)
+{
+    const sh_mb_file *member = NULL;
+    unsigned char *bytes = NULL;
+    size_t len = 0, i, nmat = 0;
+    sh_vtp_member m;
+    sh_vtp_lit lit;
+    char why[400];
+    mb_buf o = {0};
+    free(b->vt);
+    b->vt = NULL;
+    memset(&m, 0, sizeof m);
+    memset(&lit, 0, sizeof lit);
+    for (i = 0; i < b->file_count; i++)
+        if (!b->files[i].is_decl && sh_mb_vt_lit_member(b->files[i].request, NULL, 0)) member = &b->files[i];
+    if (member) {
+        wchar_t *w = mb_file_wpath(root, member->path);
+        bytes = w ? mb_read_wfile(w, SH_MB_LIT_MAX, &len) : NULL;
+        free(w);
+        if (!bytes) { mb_error(b, "%s could not be read", member->path); return; }
+        if (!sh_vtp_open(&m, bytes, len, why, sizeof why) || !sh_vtp_lit_info(&m, &lit, why, sizeof why)) {
+            mb_error(b, "%s: these lit textures cannot be used: %s; bake them again in the relative form "
+                     "(docs/vt-baker.md, Lit pages)", member->path, why);
+            free(bytes);
+            return;
+        }
+    }
+    mb_put(&o, "{", 1);
+    if (member) {
+        char head[160];
+        _snprintf_s(head, sizeof head, _TRUNCATE, "\"extent\":[%d,%d],\"node\":%d,\"pages\":%u,\"materials\":[", lit.w,
+                    lit.h, lit.node, lit.pages);
+        mb_puts(&o, head);
+    }
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        wchar_t *w;
+        unsigned char *t;
+        size_t tl = 0;
+        double v[4];
+        if (!mb_lit_material_file(f)) continue;
+        w = mb_file_wpath(root, f->path);
+        t = w ? mb_read_wfile(w, SH_MB_LIT_MAX, &tl) : NULL;
+        free(w);
+        if (!t || !sh_vtp_material_names((const char *)t, tl, b->id)) { free(t); continue; }
+        if (!member) {
+            mb_error(b, "%s names landpagefile \"mods/%s/vmtr\", but the mod carries no virtualtextures/mods/%s/vmtr.mega2",
+                     f->path, b->id, b->id);
+        } else if (!sh_vtp_material_mapping((const char *)t, tl, v)) {
+            mb_error(b, "%s names the mod's lit pages but has no virtualmapping { w, h, x, y }", f->path);
+        } else {
+            long q[4];
+            int k, bad = 0, x, y, empty = 0;
+            for (k = 0; k < 4; k++) {
+                double texels = v[k] * SH_VTP_TEXELS;
+                q[k] = (long)(texels + (texels < 0 ? -0.5 : 0.5));
+                if (q[k] < 0 || q[k] % SH_VTP_PAGE || texels - (double)q[k] > 0.25 || (double)q[k] - texels > 0.25) bad = 1;
+            }
+            if (bad || q[0] <= 0 || q[1] <= 0) {
+                mb_error(b, "%s: its virtualmapping is not a rectangle of whole 120-texel pages", f->path);
+            } else if ((q[2] + q[0]) / SH_VTP_PAGE > lit.w || (q[3] + q[1]) / SH_VTP_PAGE > lit.h) {
+                mb_error(b, "%s: its virtualmapping reaches past the %d x %d pages of %s", f->path, lit.w, lit.h,
+                         member->path);
+            } else {
+                for (y = (int)(q[3] / SH_VTP_PAGE); y < (int)((q[3] + q[1]) / SH_VTP_PAGE) && !empty; y++)
+                    for (x = (int)(q[2] / SH_VTP_PAGE); x < (int)((q[2] + q[0]) / SH_VTP_PAGE) && !empty; x++)
+                        empty = sh_vtp_cell(&m, 0, x, y) == SH_VTP_EMPTY;
+                if (empty)
+                    mb_error(b, "%s: its virtualmapping covers level-0 pages %s does not hold", f->path, member->path);
+            }
+            if (nmat++) mb_put(&o, ",", 1);
+            mb_put_jcstr(&o, f->request);
+        }
+        free(t);
+    }
+    if (member) {
+        mb_puts(&o, "]}");
+        if (!nmat)
+            mb_warn(b, "%s: no material names landpagefile \"mods/%s/vmtr\", so these lit textures are never drawn",
+                    member->path, b->id);
+        else
+            mb_note(b, "lit textures: %d x %d pages for %zu material%s; Snapmap+ places them in the game's own texture "
+                    "square for every map that uses this mod", lit.w, lit.h, nmat, nmat == 1 ? "" : "s");
+        b->vt = o.oom ? NULL : o.p;
+        if (o.oom) { free(o.p); mb_error(b, "out of memory"); }
+    } else free(o.p);
+    free(bytes);
+}
 
 /* The first bytes of a carried file of the bundle (malloc'd). */
 static unsigned char *mb_read_prefix(const wchar_t *root, const char *path, size_t max, size_t *len)
@@ -5003,9 +5130,13 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 /* A family member is named by its family, which must be the mod's own. */
                 char slashed[SH_MB_REQUEST_MAX + 2];
                 _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
+                char lit[SH_MB_ID_MAX + 1];
                 if (!f->is_decl && sh_mb_vt_member(f->request, NULL, 0, NULL) &&
                     _strnicmp(slashed + 16, ns_raw, strlen(ns_raw)) != 0)
                     mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/%s/<family>_sq<N>.mega2",
+                             f->path, b->id);
+                if (!f->is_decl && sh_mb_vt_lit_member(f->request, lit, sizeof lit) && _stricmp(lit, b->id) != 0)
+                    mb_error(b, "%s: a mod's lit virtual-texture pages must be virtualtextures/mods/%s/vmtr.mega2",
                              f->path, b->id);
             } else {
                 int got = r && r->stock ? r->stock(r->stock_context, f->request) : -1;
@@ -5143,6 +5274,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
     mb_scripts_free(&scripts);
     mb_classify_all(b);
     mb_derive_edits(b, root);
+    mb_check_lit(b, root);
     mb_registries(b);
     mb_report(b);
     free(own.req);

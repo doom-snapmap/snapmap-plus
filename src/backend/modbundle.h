@@ -235,6 +235,7 @@ typedef struct sh_mb_bundle {
     size_t warning_list_count;
     sh_mb_classes classes; /* counts of the files' classes */
     char *registries;      /* compact JSON of the block's "registries" object, or NULL */
+    char *vt;              /* the lit pages' record, registries "vt" (mb_check_lit), or NULL */
     char *scripts;         /* compact JSON of the block's "scripts" object, or NULL (no scripts) */
     unsigned script_files; /* files of kind script (sh_mb_script_request) */
     /* Derived edits: the block's "edits", a JSON array
@@ -681,9 +682,14 @@ char *sh_mb_requirements_canonical(const char *text, size_t len, char *cause, si
  * virtualtextures/mods/<id>/[<folders>/]<family>_sq<N>.mega2, N 1 to 16 with
  * no leading zero, no "_vmtr" in the family. Returns 1 and, when non-NULL,
  * the family name ("mods/<id>/.../<family>", which a material names as its
- * landpagefile) and N; else 0. The only form in which a .mega2 is admitted.
+ * landpagefile) and N; else 0. With sh_mb_vt_lit_member, the only forms in
+ * which a .mega2 is admitted.
  * A member can never be a shadow: no stock family lives under mods/. */
 int  sh_mb_vt_member(const char *request, char *family, size_t family_cap, int *member);
+
+/* A mod's lit virtual-texture pages (vtpack.h, the relative form):
+ * exactly virtualtextures/mods/<salt>/vmtr.mega2. 1 with the salt, else 0. */
+int  sh_mb_vt_lit_member(const char *request, char *salt, size_t salt_cap);
 
 /* Sound banks. Wwise opens a bank by file name under one folder, and the bank
  * id is FNV-1 of the lower-cased stem, so a mod bank is admitted only as
