@@ -697,24 +697,36 @@ These backend files share the work:
   salt and build; a row naming an `id` or a `bundle` does not parse (the parse
   detour has already refused such a map). The display name of a placed mod's
   row comes from the build that serves it at the save (the row resolver).
-- `modui.c` is the WebView Mods tab's backend. It lists one row per mod
-  folder (two folders declaring one id both flagged, a package a map delivered
-  listed like any other) with what each carries, marks each installed or
-  needing attention with its cause, reports whether `overrides\` still holds
-  entries to migrate, describes the open map and the mods it uses, and runs
-  Install, Verify, Rebuild, Uninstall, Remove from map, their dry runs, Migrate
-  and rescan on the main thread, as in
-  [The Mods tab's map scope](#the-mods-tabs-map-scope). What the tab does not show, every bundle's state with legacy ones,
-  conflicts with their winners, shadows and verification, it prints as
-  `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
-  Each row names its organizing folder (`group`). Its Files view reads only:
+- `modui.c` is the WebView Mods tab's backend (payload v4). It lists one row
+  per mod folder, the player's own at the root (with their organizing folder,
+  `group`) and each downloaded map's in that map's place (`place`,
+  `placeTitle`), with what each adds, changes and borrows from the game, marks
+  each ready or needing attention with one plain sentence saying what is wrong
+  and what to do (`mu_plain_cause`: the builder's shape and build causes and
+  the store's are rewritten for the page, and `mu_plain` keeps salts, hashes
+  and the internal words out of every sentence a player reads), says when
+  another of the player's mods carries at least half of a mod's files at
+  equal bytes (`sameFilesAs`, informational: two mods stay two mods),
+  describes the open map and the mods it uses, and runs Install, Rebuild (the
+  player's own folders only), Uninstall, Use in this map, Remove from map,
+  their dry runs, the registry choice and Refresh on the main thread, as in
+  [The Mods tab's map scope](#the-mods-tabs-map-scope). There is no Migrate,
+  no folder watcher and no build list. What the tab does not show, every
+  folder's state, conflicts with their winners, the game files mods replace
+  and verification, it prints as `sh_mods doctor [verify]` (see
+  [WebView UI](webview-ui.md#mods-tab)). Its Files view reads only:
   `modFiles` lists a folder's files (walked on disk, dot folders skipped) and
-  the pointers its last good build reads from the install, each with its class
+  the game files its build reads from the install, each with its class
   (`f->cls`), whether it is the game's own bytes and their archive, and the
-  mod's standing cause when that names the file; `modFileText` answers one
-  text file of at most 1 MiB of UTF-8 inside the folder (`mod.json` without its
-  product block). Neither is followed by a fresh document. New mod is
-  `newMod`.
+  plain cause when the folder's cause names the file; `modFileText` answers
+  one text file of at most 1 MiB of UTF-8 inside the folder (`mod.json`
+  without the part Snapmap+ writes). Neither is followed by a fresh document.
+  New mod is `newMod`, whose result says Refresh picks up the author's edits.
+  The rows a map save writes are resolved through `sh_modserve_row_build`
+  (the resolver modui.c binds), and the listing's undeclared names take the
+  build `sh_modserve_row_build` names in the open map's context;
+  `sh_modui_scope_launch_at` sets that context (place, own) for a hub launch,
+  and the editor's exit returns it to no place, own.
   `modmap.c` reads the open map's entities, wires and Timeline references from
   its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
@@ -2456,10 +2468,11 @@ Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
 is read again from the editor, so the confirmation lists exactly what the dry
 run computed and the modal redraws from what the backend found afterwards.
-The console verbs `sh_mods map`, `sh_mods map add "<id>"`, `sh_mods map remove
-"<id>" [--yes]` and `sh_mods uninstall "<id>" [--yes]` share the dry runs and
-the actions; the console's uninstall of a key removes every installed build of
-it (`mu_uninstall_targets`), `"<id>@<hash16>"` one build, where the tab names
+The console verbs `sh_mods map`, `sh_mods map add "<mod folder>"`, `sh_mods map
+remove "<mod folder>" [--yes]` and `sh_mods uninstall "<mod folder>" [--yes]`
+share the dry runs and the actions and name mods by their names and folders;
+the console's uninstall removes every folder of the mod it names (the player's
+own and the copies maps brought, `mu_uninstall_targets`), where the tab names
 one folder. Adding a mod to the map changes the current manifest only; the
 next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
@@ -2941,9 +2954,8 @@ name or author) are mirrored as build warnings in one table,
 rather than at publish. They are derived again whenever a built `mod.json` is
 read, so they also reach `sh_mods doctor` (one "warning i of n" line per
 bundle), each rescan (one line per mod with warnings), the Rebuild result
-(`warnings`, `firstWarning`) and each mod of the Mods tab's v3 payload
-(`warnings`: the first `SH_MB_WARNINGS_KEPT` as strings, `warningCount`,
-`firstWarning`). The builder's other warnings are its build report's. A publish whose save
+(`warnings`, `firstWarning`) and each mod of the Mods tab's payload
+(`warnings`: the first `SH_MB_WARNINGS_KEPT`, in plain words). The builder's other warnings are its build report's. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
 map needs Snapmap+. Every local save keeps the tag in step with its rows: the
 `WriteLocalSavedMapText` detour adds it to the model the save writes when the
