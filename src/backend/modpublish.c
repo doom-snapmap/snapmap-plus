@@ -417,7 +417,8 @@ static int mp_job_run(void *context, const modnet_io *io)
 {
     mp_job *job = context;
     const char *list[MODSYNC_MAX_BUILDS];
-    int n = job->count < MODSYNC_MAX_BUILDS ? job->count : MODSYNC_MAX_BUILDS;
+    int n = job->count;   /* the publish refuses a map past MODSYNC_MAX_BUILDS (sh_modpublish_after_save) */
+    if (n > MODSYNC_MAX_BUILDS) return 0;
     for (int i = 0; i < n; i++) list[i] = job->hashes[i];
     switch (job->kind) {
     case JOB_UPLOAD:
@@ -715,6 +716,17 @@ int sh_modpublish_after_save(void *editor)
         else
             strcpy_s(line, sizeof line, "The map was not published: its list of mods cannot be read. Save the map "
                                         "again, then publish it.");
+        mp_logf("MODS: publish refused: %s", line);
+        if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
+        mp_editor_notice(editor, line);
+        memset(&g_ctx, 0, sizeof g_ctx);
+        return 0;
+    }
+    if (g_save.count > MODSYNC_MAX_BUILDS) {
+        /* One claim names at most this many builds: the rest would never upload. */
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "The map was not published: it uses %zu mods, more than the %d one map can carry. Remove some in "
+                    "the Mods tab, save, and publish again.", g_save.count, MODSYNC_MAX_BUILDS);
         mp_logf("MODS: publish refused: %s", line);
         if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
         mp_editor_notice(editor, line);

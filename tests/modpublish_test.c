@@ -360,6 +360,32 @@ int main(int argc, char **argv)
         if (rows_text) HeapFree(GetProcessHeap(), 0, rows_text);
     }
 
+    printf("-- a map naming more mods than one claim carries is refused, not cut\n");
+    {
+        static char hashes[MODSYNC_MAX_BUILDS + 1][80], names[MODSYNC_MAX_BUILDS + 1][16];
+        static const char *hp[MODSYNC_MAX_BUILDS + 1], *np[MODSYNC_MAX_BUILDS + 1];
+        char *many;
+        int fails = F.fails;
+        for (int i = 0; i <= MODSYNC_MAX_BUILDS; i++) {
+            char salt[9];
+            _snprintf_s(salt, sizeof salt, _TRUNCATE, "m%07d", i);
+            _snprintf_s(hashes[i], sizeof hashes[i], _TRUNCATE, "%s@%064d", salt, i);
+            _snprintf_s(names[i], sizeof names[i], _TRUNCATE, "Mod %d", i);
+            hp[i] = hashes[i];
+            np[i] = names[i];
+        }
+        many = map_with(hp, np, MODSYNC_MAX_BUILDS + 1, &len);
+        CHECK(many != NULL);
+        if (many) {
+            sh_modpublish_save_seen(many, len);
+            CHECK(sh_modpublish_after_save(EDITOR) == 0);
+            CHECK(!sh_modpublish_holding() && F.fails == fails + 1 && F.asks == 0);
+            CHECK(strstr(F.toast, "it uses 257 mods, more than the 256 one map can carry") != NULL);
+            HeapFree(GetProcessHeap(), 0, many);
+        }
+        F.fails = fails;   /* the counts below are of the publishes after this one */
+    }
+
     printf("-- the bound counts the snapmap-plus member: a map with navigation or settings and no mods\n");
     {
         static const char head[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
