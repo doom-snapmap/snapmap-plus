@@ -244,7 +244,7 @@ static void test_builder(void)
     CHECK(!sh_mb_build(g_dir, NULL, &resolver, &b) &&
           strstr(b.first_cause, "assets/generated/swf/screens_tech/") &&
           strstr(b.first_cause, ": the game ships this file and a mod cannot replace it with other bytes; delete your "
-                                "copy and the mod borrows the game's, or put your version under mods/screensx/"));
+                                "copy and the mod borrows the game's, or put your version under a mods folder named like this mod folder"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, NULL, &resolver, &b));
