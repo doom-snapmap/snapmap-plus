@@ -24,6 +24,7 @@
 #include <time.h>
 #include "raw_deflate.h"
 #include "modbankinfo.h"
+#include "modzip.h"
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
 #include "modstock.h"
@@ -2450,7 +2451,7 @@ static int mu_install_one(const char *folder)
  * many installed and how many refused, with each refusal's cause, "key" the
  * first installed folder so the page can select it, and one rescan at the
  * end. */
-typedef struct mu_bulk_item { char *folder; int found; } mu_bulk_item;
+typedef struct mu_bulk_item { char *folder; int found; const char *why; } mu_bulk_item;
 
 static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char *folder, int found)
 {
@@ -2463,9 +2464,91 @@ static int mu_bulk_add(mu_bulk_item **items, size_t *n, size_t *cap, const char 
     }
     (*items)[*n].folder = _strdup(folder);
     (*items)[*n].found = found;
+    (*items)[*n].why = NULL;
     if (!(*items)[*n].folder) return 0;
     (*n)++;
     return 1;
+}
+
+static void mu_remove_tree(const wchar_t *dir);
+
+/* A picked path that names a ZIP (the Prefab and map exports share mods so). */
+static int mu_zip_name(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 4 && !_stricmp(path + n - 4, ".zip");
+}
+
+#define MU_UNZIP_ENTRY_MAX (1024u * 1024u * 1024u)   /* the largest file a mod ZIP may hold */
+
+/* Unpack the ZIP at `zip` into a new folder under %TEMP% (`dir`), every
+ * entry at its own path (the reader refuses an unsafe name). 1, else 0 with
+ * the plain cause and nothing left behind. */
+static int mu_unzip(const char *zip, char *dir, size_t dir_cap, char *cause, size_t cause_cap)
+{
+    sh_zip_reader r;
+    wchar_t tmp[MAX_PATH + 1];
+    char *tmpu, why[300] = "";
+    size_t i;
+    int ok = 1;
+    wchar_t *wdir;
+    memset(&r, 0, sizeof r);
+    if (!sh_zip_reader_open(&r, zip, why, sizeof why)) {
+        _snprintf_s(cause, cause_cap, _TRUNCATE, "it cannot be read as a ZIP (%s)", why);
+        return 0;
+    }
+    if (!GetTempPathW(MAX_PATH, tmp) || (tmpu = sh_mb_utf8(tmp)) == NULL) {
+        sh_zip_reader_close(&r);
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be found", _TRUNCATE);
+        return 0;
+    }
+    _snprintf_s(dir, dir_cap, _TRUNCATE, "%ssnapmap-plus-zip-%lu-%llu", tmpu, GetCurrentProcessId(), GetTickCount64());
+    free(tmpu);
+    wdir = sh_mb_wpath(dir);
+    if (!wdir || !CreateDirectoryW(wdir, NULL)) {
+        free(wdir);
+        sh_zip_reader_close(&r);
+        strncpy_s(cause, cause_cap, "the temporary folder cannot be written", _TRUNCATE);
+        return 0;
+    }
+    for (i = 0; ok && i < r.n; i++) {
+        const char *name = r.e[i].name;
+        size_t nl = strlen(name), len = 0, k;
+        char path[MAX_PATH * 4 + SH_ZIP_NAME_MAX + 4];
+        unsigned char *bytes;
+        wchar_t *wp;
+        HANDLE h;
+        DWORD put = 0;
+        if (!nl || name[nl - 1] == '/') continue;   /* a folder entry */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        for (k = strlen(dir); path[k]; k++) {
+            if (path[k] != '/') continue;
+            path[k] = 0;
+            wp = sh_mb_wpath(path);
+            if (wp) CreateDirectoryW(wp, NULL);
+            free(wp);
+            path[k] = '\\';
+        }
+        bytes = sh_zip_reader_read(&r, (long)i, MU_UNZIP_ENTRY_MAX, &len, why, sizeof why);
+        if (!bytes) {
+            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s in it cannot be read (%s)", name, why);
+            ok = 0;
+            break;
+        }
+        wp = sh_mb_wpath(path);
+        h = wp ? CreateFileW(wp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+        if (h == INVALID_HANDLE_VALUE || !WriteFile(h, bytes, (DWORD)len, &put, NULL) || put != (DWORD)len) {
+            _snprintf_s(cause, cause_cap, _TRUNCATE, "%s could not be unpacked (error %lu)", name, GetLastError());
+            ok = 0;
+        }
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        free(wp);
+        free(bytes);
+    }
+    sh_zip_reader_close(&r);
+    if (!ok) mu_remove_tree(wdir);
+    free(wdir);
+    return ok;
 }
 
 static int mu_install(const char *arg)
@@ -2477,6 +2560,8 @@ static int mu_install(const char *arg)
          refused_first[SH_MB_CAUSE_MAX + 600] = "";
     unsigned installed = 0, refused = 0, rows = 0;
     int rc, single_mod = 0;
+    char *unpacked[16];
+    size_t zips = 0;
     mu_buf x, items_json;
     memset(&x, 0, sizeof x);
     memset(&items_json, 0, sizeof items_json);
@@ -2495,6 +2580,28 @@ static int mu_install(const char *arg)
         if (!len) continue;
         picked++;
         if (!mu_absolute(folder)) { mu_bulk_add(&items, &n, &cap, folder, 0); continue; }
+        if (mu_zip_name(folder)) {
+            /* A ZIP: unpacked under %TEMP%, then every mod folder in it, as a folder of mods. */
+            char dir[MAX_PATH * 4 + 64], why[600] = "", **mods = NULL;
+            size_t count = 0, k;
+            if (zips >= sizeof unpacked / sizeof unpacked[0] || !mu_unzip(folder, dir, sizeof dir, why, sizeof why)) {
+                if (mu_bulk_add(&items, &n, &cap, folder, -1)) items[n - 1].why = _strdup(why[0] ? why : "too many ZIPs at once");
+                single_mod = 0;
+                continue;
+            }
+            unpacked[zips++] = _strdup(dir);
+            if (sh_ms_folder_is_mod(dir)) {
+                mu_bulk_add(&items, &n, &cap, dir, 1);
+                count = 1;
+            } else if (sh_ms_find_mods(dir, &mods, &count) && count)
+                for (k = 0; k < count; k++) mu_bulk_add(&items, &n, &cap, mods[k], 2);
+            sh_ms_find_free(mods, count);
+            mu_log("install %s: a ZIP of %zu mod(s)", folder, count);
+            if (!count && mu_bulk_add(&items, &n, &cap, folder, -1))
+                items[n - 1].why = _strdup("it holds no mod: a mod is a folder with a mod.json");
+            single_mod = picked == 1 && count == 1;
+            continue;
+        }
         if (sh_ms_folder_is_mod(folder)) { mu_bulk_add(&items, &n, &cap, folder, 1); if (picked == 1) single_mod = 1; continue; }
         single_mod = 0;
         {
@@ -2509,20 +2616,20 @@ static int mu_install(const char *arg)
             sh_ms_find_free(mods, count);
         }
     }
-    if (picked == 0) { free(items); return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder to install."); }
-    if (picked == 1 && n == 1 && !items[0].found) {
-        rc = mu_simple_result(SH_MODS_ACT_INSTALL, 0, mu_absolute(items[0].folder)
+    if (picked == 0) { free(items); return mu_simple_result(SH_MODS_ACT_INSTALL, 0, "Choose a mod folder or a mod ZIP to install."); }
+    if (picked == 1 && n == 1 && items[0].found <= 0) {
+        char why[700];
+        if (items[0].found < 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "That ZIP was not installed: %s.", items[0].why ? items[0].why : "it cannot be read");
+        else strcpy_s(why, sizeof why, mu_absolute(items[0].folder)
             ? "That folder holds no mod: a mod folder has a mod.json; choose one, or a folder of mod folders."
-            : "Choose a mod folder to install.");
-        free(items[0].folder);
-        free(items);
-        return rc;
+            : "Choose a mod folder or a mod ZIP to install.");
+        rc = mu_simple_result(SH_MODS_ACT_INSTALL, 0, why);
+        goto out;
     }
     if (picked == 1 && single_mod && n == 1) {
         rc = mu_install_one(items[0].folder);
-        free(items[0].folder);
-        free(items);
-        return rc;
+        goto out;
     }
 
     /* Bulk: install each, rescan once. */
@@ -2548,6 +2655,8 @@ static int mu_install(const char *arg)
             for (k = 0; k < bd.file_count; k++)
                 if (bd.files[k].ptype && !_stricmp(bd.files[k].ptype, "snapEditorEntityDef") &&
                     bd.files[k].cls != SH_MB_CLASS_EDITOR) mod_rows++;
+        } else if (items[i].found < 0) {
+            strcpy_s(cause, sizeof cause, items[i].why ? items[i].why : "it cannot be read as a ZIP");
         } else {
             strcpy_s(cause, sizeof cause, mu_absolute(items[i].folder) ? "it holds no mod.json, and no folder below it does"
                                                                         : "it is not a folder on this computer");
@@ -2593,10 +2702,18 @@ static int mu_install(const char *arg)
     mu_knum(&x, "editorRows", rows, 0);
     mu_key(&x, "items", 0);
     mu_putn(&x, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
-    for (i = 0; i < n; i++) free(items[i].folder);
-    free(items);
     free(items_json.p);
-    return mu_file_result(SH_MODS_ACT_INSTALL, installed > 0, msg, &x, installed > 0);
+    rc = mu_file_result(SH_MODS_ACT_INSTALL, installed > 0, msg, &x, installed > 0);
+out:
+    for (i = 0; i < n; i++) { free(items[i].folder); free((void *)items[i].why); }
+    free(items);
+    for (i = 0; i < zips; i++) {
+        wchar_t *w = unpacked[i] ? sh_mb_wpath(unpacked[i]) : NULL;
+        if (w) mu_remove_tree(w);
+        free(w);
+        free(unpacked[i]);
+    }
+    return rc;
 }
 
 /* ---- verify */

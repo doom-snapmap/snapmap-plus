@@ -29,6 +29,7 @@
 #include "modregistry.h"
 #include "mod_test_util.h"
 #include "editor_delete.h"
+#include "modzip.h"
 
 static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -667,6 +668,20 @@ static void put_fresh_mod(const char *folder, const char *name, const char *leaf
     mt_write(folder, rel, body);
 }
 
+/* A ZIP at `path` holding `n` entries (name, text). */
+static int put_zip(const char *path, const char *const *names, const char *const *texts, int n)
+{
+    sh_zip_writer w;
+    wchar_t wpath[MAX_PATH * 2];
+    int i, ok;
+    memset(&w, 0, sizeof w);
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH * 2) || !sh_zip_writer_open(&w, wpath)) return 0;
+    for (i = 0; i < n; i++) sh_zip_writer_add(&w, names[i], texts[i], strlen(texts[i]));
+    ok = sh_zip_writer_finish(&w);
+    sh_zip_writer_free(&w);
+    return ok;
+}
+
 /* The game's text of the decl the edits case copies (a fake installed-content reader). */
 static const char IMP_STOCK[] = "{\r\n\tinherit = \"ai/demon/imp\";\r\n}";
 static int imp_identify(void *c, const char *source, char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
@@ -923,7 +938,7 @@ int main(int argc, char **argv)
 
     printf("-- install through the tab: named by the mod, ready, its rows in the palette\n");
     doc = run_doc(SH_MODS_ACT_INSTALL, "relative\\folder");
-    CHECK(has(doc, "\"action\":\"install\",\"ok\":false,\"message\":\"Choose a mod folder to install.\""));
+    CHECK(has(doc, "\"action\":\"install\",\"ok\":false,\"message\":\"Choose a mod folder or a mod ZIP to install.\""));
     free(doc);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\authoring", tmp);
     {
@@ -963,6 +978,43 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"ok\":true") && (has(doc, "R2 Imp copy is already installed.") || has(doc, "Installed R2 Imp copy")));
     CHECK(doc_prose_ok(doc));
     free(doc);
+
+    printf("-- install a ZIP: its mods are unpacked and installed; a ZIP without a mod or not a ZIP says so\n");
+    {
+        char zip[MAX_PATH * 2];
+        static const char *const names[] = { "zipped/mod.json", "zipped/assets/generated/decls/entitydef/mods/zipped/zipped.decl",
+                                             "readme.txt" };
+        static const char *const texts[] = { "{\"name\":\"Zipped\",\"author\":\"tester\"}",
+                                             "{\r\n\tinherit = \"ai/demon/imp_coop\";\r\n\tzipped = 1;\r\n}\r\n", "hello" };
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\zipped.zip", tmp);
+        CHECK(put_zip(zip, names, texts, 3));
+        g_main = 0;   /* the window's worker */
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"action\":\"install\",\"ok\":true,\"message\":\"Installed Zipped.\"") && has(doc, "\"apply\":true"));
+        free(doc);
+        g_main = 1;
+        free(run_doc(SH_MODS_ACT_APPLY, NULL));
+        doc = list_doc();
+        CHECK(bundle_has(doc, "zipped", "\"state\":\"ready\""));
+        {
+            char s[16] = "";
+            row_salt(doc, "zipped", s, sizeof s);
+            note_salt(s);
+        }
+        free(doc);
+        free(run_doc(SH_MODS_ACT_UNINSTALL, "zipped"));
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\empty.zip", tmp);
+        CHECK(put_zip(zip, names + 2, texts + 2, 1));
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That ZIP was not installed: it holds no mod: a mod is a folder with a "
+                       "mod.json.\""));
+        free(doc);
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\authoring\\fake.zip", tmp);
+        mt_write(tmp, "authoring\\fake.zip", "not a zip");
+        doc = run_doc(SH_MODS_ACT_INSTALL, zip);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"That ZIP was not installed: it cannot be read as a ZIP"));
+        free(doc);
+    }
 
     printf("-- a hand-made folder is a new mod at Refresh; two with the same files carry the hint, both serve\n");
     {

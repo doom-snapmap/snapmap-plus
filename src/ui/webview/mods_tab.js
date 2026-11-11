@@ -47,7 +47,7 @@ var modsTab = (function () {
   var REFRESH_TEXT = "After you change a mod's files, press Refresh to see the change.";
   /* An action whose files landed while the game did not take its part (the host's applyPending). */
   var APPLY_PENDING_TEXT = 'The game has not taken the change yet; press Refresh to bring it in.';
-  var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or install a mod folder with the download button.';
+  var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or add a mod folder or ZIP you have with Install.';
   /* The two *Preview actions are dry runs that answer with the consequence list the confirmation
      shows. mapAddMod attaches the selected mod to the open map without placing anything (a
      map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
@@ -884,7 +884,7 @@ var modsTab = (function () {
       card.appendChild(el('p', '', 'A mod is a folder in mods\\ holding mod.json and an assets\\ folder.'));
       card.appendChild(el('p', '', 'Maps record which mods they use. Players who open one are offered the download, which is listed under the map\'s name.'));
       card.appendChild(el('p', '', REFRESH_TEXT));
-      card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod or use the download button.'
+      card.appendChild(el('p', '', empty ? 'To add a mod, make one with New mod, or add a mod folder or ZIP with Install.'
                                          : 'Select a mod to see what it adds.'));
       box.appendChild(card);
     }
@@ -1701,7 +1701,15 @@ var modsTab = (function () {
     /* ---- wiring */
     function bind() {
       var on = function (id, ev, fn) { var n = byId(id); if (n) n.addEventListener(ev, fn); };
-      on('modsInstallBtn', 'click', function () { act('install'); });
+      /* Install takes mod folders or mod ZIPs: the button asks which, then the host's picker opens. */
+      on('modsInstallBtn', 'click', function () {
+        if (busy) return;
+        var n = byId('modsInstallBtn'), r = n && n.getBoundingClientRect ? n.getBoundingClientRect() : null;
+        var items = [{label: 'Install mod folders...', run: function () { act('install'); }},
+                     {label: 'Install mod ZIPs...', run: function () { act('install', 'zip'); }}];
+        if (env.menu) env.menu(r ? r.left : 0, r ? r.bottom : 0, items);
+        else act('install');
+      });
       on('modsFolderBtn', 'click', function () { act('openFolder'); });
       on('modsUninstallBtn', 'click', function () {
         var b = selectedMod();

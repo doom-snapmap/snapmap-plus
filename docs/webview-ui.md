@@ -332,10 +332,11 @@ buttons: the attention filter (a yellow triangle, shown only when a mod needs at
 carries the count, "1 mod needs attention: show only these"), This map, Refresh, Open mods folder,
 New mod (`folder-plus`) and install (primary). At the pane's 220 px minimum all six stay inside the
 pane and the label is clipped. The toolbar holds the filter alone; it matches name, folder,
-organizing folder and the map's name. The install dialog allows several folders, joined with
-newlines in the action's argument; a picked folder without `mod.json` stands for every mod folder
-below it, and the result says how many were installed and how many were not, with the first one's
-plain cause.
+organizing folder and the map's name. Install asks "Install mod folders..." or "Install mod
+ZIPs..." (`install`, with `arg` `"zip"` for the second), and the host's picker allows several,
+joined with newlines in the action's argument; a picked folder without `mod.json` stands for every
+mod folder below it, and a ZIP (a prefab or map export, or any ZIP of mod folders) is unpacked and
+each mod folder in it installed. The result says how many were installed and how many were not.
 
 The list has two kinds of groups, each a Prefabs folder row (caret, title, count) that closes for
 the session: **Your mods** (the root of `mods\`), holding the organizing folders of `mods\` first

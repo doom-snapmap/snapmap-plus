@@ -673,8 +673,15 @@ test('the header and the details head: the buttons the tab has, and no others', 
   h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', ok: true, message: '', data: {}});
   assert.equal(h.ui.state().busy, '');
   assert.equal(h.nodes.modsStatus.textContent, '', 'a Refresh with nothing left to do says nothing');
+  /* Install asks folders or ZIPs, then the host's picker opens */
   h.nodes.modsInstallBtn.click();
+  const menu = h.menus.pop();
+  assert.deepEqual(menu.items.map(i => i.label), ['Install mod folders...', 'Install mod ZIPs...']);
+  menu.items[0].run();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'install'});
+  h.ui.onMessage({kind: 'modsActionResult', action: 'install', ok: false, data: {cancelled: true}});
+  menu.items[1].run();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'install', arg: 'zip'});
   h.ui.onMessage({kind: 'modsActionResult', action: 'install', ok: false, data: {cancelled: true}});
   h.nodes.modsFolderBtn.click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFolder'});
