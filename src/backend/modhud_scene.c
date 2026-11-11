@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "modhud_scene.h"
+#include "modhud.h"
 #include "modserve.h"
 #include "patch.h"
 #include "backend_log.h"
@@ -80,6 +81,8 @@ int sh_modhud_scene_install(const sig_result *results, size_t n)
 
 void sh_modhud_scene_play_begin(void)
 {
+    /* The weapon rules follow the map this Play serves (modhud.h). */
+    sh_modhud_mark_stale();
     InterlockedExchange(&g_logged_hide, 0);
     InterlockedExchange(&g_logged_show, 0);
     if (InterlockedCompareExchange(&g_hidden, 0, 0)) {

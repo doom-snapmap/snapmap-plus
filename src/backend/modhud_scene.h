@@ -39,7 +39,8 @@ static __inline int sh_modhud_scene_decide(int event_number, int in_play)
  * 1 when installed, 0 when skipped (logged). */
 int sh_modhud_scene_install(const sig_result *results, size_t n);
 
-/* Play is starting: show the HUD again if a scene hid it and never showed it. */
+/* Play is starting: show the HUD again if a scene hid it and never showed it,
+ * and have the weapon rules read again for the map this Play serves. */
 void sh_modhud_scene_play_begin(void);
 
 /* A mod scene node finished its scene (On Scene Finished): show the HUD again

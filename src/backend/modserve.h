@@ -1163,9 +1163,18 @@ int sh_modserve_inplace_keeper(int mark_depth, int work);
 
 /* Functions called after every table this layer publishes (boot, rescan),
  * on the thread that built it, outside the build lock, in the order they
- * were added (up to four; adding one twice is ignored). NULL clears all. */
+ * were added; adding one twice is ignored, NULL clears all. Each call site
+ * brings its own link (the static the macro declares), so the list has room
+ * for every listener the program registers and none is ever dropped. */
 typedef void (*sh_modserve_index_fn)(void);
-void sh_modserve_set_index_listener(sh_modserve_index_fn fn);
+typedef struct sh_modserve_index_link {
+    sh_modserve_index_fn fn;
+    struct sh_modserve_index_link *volatile next;
+    int linked;
+} sh_modserve_index_link;
+void sh_modserve_index_link_add(sh_modserve_index_link *link, sh_modserve_index_fn fn);
+#define sh_modserve_set_index_listener(fn) \
+    do { static sh_modserve_index_link sh_index_link_; sh_modserve_index_link_add(&sh_index_link_, (fn)); } while (0)
 
 /* Whether `name` is a snapEditorEntityDef that an admitted bundle provides
  * (palette reporting). */

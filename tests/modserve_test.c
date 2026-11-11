@@ -439,6 +439,38 @@ static double now_ns(void)
 
 /* ------------------------------------------------------------------ tests */
 
+/* Index listeners: every call site keeps its own link, so any number of
+ * listeners is called after each table, in the order they were added. */
+static int g_heard[8], g_heard_n;
+static void heard0(void) { g_heard[g_heard_n++ & 7] = 0; }
+static void heard1(void) { g_heard[g_heard_n++ & 7] = 1; }
+static void heard2(void) { g_heard[g_heard_n++ & 7] = 2; }
+static void heard3(void) { g_heard[g_heard_n++ & 7] = 3; }
+static void heard4(void) { g_heard[g_heard_n++ & 7] = 4; }
+static void heard5(void) { g_heard[g_heard_n++ & 7] = 5; }
+
+static void test_index_listeners(void)
+{
+    char missing[MAX_PATH];
+    _snprintf_s(missing, sizeof missing, _TRUNCATE, "%s\\does-not-exist", g_root);
+    sh_modserve_set_index_listener(heard0);
+    sh_modserve_set_index_listener(heard1);
+    sh_modserve_set_index_listener(heard2);
+    sh_modserve_set_index_listener(heard3);
+    sh_modserve_set_index_listener(heard4);
+    sh_modserve_set_index_listener(heard5);
+    sh_modserve_set_index_listener(heard2);   /* a second time: ignored */
+    g_heard_n = 0;
+    (void)sh_modserve_index_build(missing);
+    CHECK(g_heard_n == 6);
+    CHECK(g_heard[0] == 0 && g_heard[1] == 1 && g_heard[2] == 2 && g_heard[3] == 3 && g_heard[4] == 4 && g_heard[5] == 5);
+    sh_modserve_set_index_listener(NULL);
+    g_heard_n = 0;
+    (void)sh_modserve_index_build(missing);
+    CHECK(g_heard_n == 0);
+}
+
+
 static void test_empty_index(void)
 {
     char missing[MAX_PATH];
@@ -5173,7 +5205,9 @@ int main(void)
     char top[MAX_PATH];
     char *slash;
     build_fixture();
+    test_index_listeners();
     test_empty_index();
+
     test_index_and_isolation();
     test_unopened_shadows();
     test_unopened_after_rescan();

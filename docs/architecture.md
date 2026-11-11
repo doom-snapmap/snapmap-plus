@@ -1829,19 +1829,29 @@ provider; no `.pages` file is needed, and materials carry an explicit
   [vt-baker.md](vt-baker.md).
 
 A mod's `hud` key (the author block of `mod.json`) selects how
-the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`
-contract: `{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
+the stock ammo widget shows a weapon (`modhud.c`; the object is
+`{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
 `weapon` removes the multiplayer mode's forced numeric display for that weapon,
 so a nonpositive capacity shows the widget's infinity frame; no ammunition,
 decl or widget field changes. The object is exactly `{"weapons": ...}`. Rules
-are read at startup from every admitted build under `mods\` (organizing
-folders and the maps' places included); identical rules compose and
-conflicting ones refuse the whole table with both salts logged. The widget update's one
+are read from the serving index's author keys (`sh_modserve_each_bundle_extra`)
+of the builds the open map serves, one build per salt: a build counts when its
+names serve now (`sh_modserve_bundle_scope`, `names_live`). The table is read
+again at the HUD's next question after every index change (an index listener)
+and every Play entry, so an install, download, rebuild, Refresh or removal
+needs no restart. Identical rules compose; two mods asking different displays
+for one weapon leave that weapon to the game, both named in the log, and every
+other rule stays; a hud object that does not read drops that mod's rules only.
+The widget update's one
 call to the mode predicate (`WeaponHudModeCall`, `WeaponHudGameMode`) has its
 aligned rel32 swapped to a near relay that passes the widget, whose weapon decl
 is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
-`weapon-hud compiled: N rules`, `weapon-hud installed: ...`, and
+`weapon-hud: N rules from the mods the open map uses`, `weapon-hud installed: ...`, and
 `weapon-hud active: ...` on first use.
+
+Index listeners (`sh_modserve_set_index_listener`) carry their own storage:
+each call site's macro declares a static link, so the list holds every
+listener the program registers and none is dropped.
 
 When bundles of different keys provide one path with different bytes, the
 open map decides among the providers it declares ([Map scope](#map-scope)):

@@ -202,8 +202,8 @@ static char g_last_root[MS_PATH_MAX];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
-#define MS_LISTENERS 4
-static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c, nav_bake.c */
+static sh_modserve_index_link *volatile g_index_links;   /* sh_modserve_set_index_listener */
+static SRWLOCK g_index_link_lock = SRWLOCK_INIT;
 
 /* ------------------------------------------------------------------ logging */
 
@@ -4033,16 +4033,31 @@ int sh_modserve_index_build(const char *mods_root)
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
            x->nbundles > x->admitted ? "; skipped bundles are listed above" : "",
            x->conflicts ? "; conflicts are listed above" : "");
-    { int i; for (i = 0; i < MS_LISTENERS; i++) if (g_index_listener[i]) g_index_listener[i](); }
+    { sh_modserve_index_link *l; for (l = g_index_links; l; l = l->next) if (l->fn) l->fn(); }
     return x->admitted;
 }
 
-void sh_modserve_set_index_listener(sh_modserve_index_fn fn)
+void sh_modserve_index_link_add(sh_modserve_index_link *link, sh_modserve_index_fn fn)
 {
-    int i;
-    if (!fn) { for (i = 0; i < MS_LISTENERS; i++) g_index_listener[i] = NULL; return; }
-    for (i = 0; i < MS_LISTENERS; i++) if (g_index_listener[i] == fn) return;
-    for (i = 0; i < MS_LISTENERS; i++) if (!g_index_listener[i]) { g_index_listener[i] = fn; return; }
+    sh_modserve_index_link *l, *tail = NULL;
+    AcquireSRWLockExclusive(&g_index_link_lock);
+    if (!fn) {
+        for (l = g_index_links; l; l = tail) { tail = l->next; l->next = NULL; l->linked = 0; }
+        g_index_links = NULL;
+    } else {
+        int known = 0;
+        for (l = g_index_links; l; l = l->next) { if (l->fn == fn) known = 1; tail = l; }
+        if (!known && link->linked) link->fn = fn;   /* the same call site, another function */
+        else if (!known) {
+            link->fn = fn;
+            link->next = NULL;
+            link->linked = 1;
+            /* Appended whole: a publish walking the list sees it or not, never half. */
+            if (tail) InterlockedExchangePointer((void *volatile *)&tail->next, link);
+            else InterlockedExchangePointer((void *volatile *)&g_index_links, link);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_index_link_lock);
 }
 
 int sh_modserve_index_boot(void)

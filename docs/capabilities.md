@@ -422,9 +422,11 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   them under Requirements.
 - A mod's `hud` setting chooses how the ammo panel shows a weapon: `"ammo_display": "weapon"` for a
   weapon decl lets the panel show the weapon's own capacity (the campaign pistol's infinity symbol
-  and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
-  installed mod at startup, and two mods asking different things for one weapon turn the setting off
-  for all weapons, with both named in the log.
+  and full bar) instead of SnapMap's forced number. It changes only the display and follows the mods
+  the open map uses: an install, download, rebuild, Refresh or removal takes effect at the next Play
+  with no restart. Two mods asking different things for one weapon leave that weapon as the game
+  shows it, with both named in the log; their other weapons keep their settings.
+
 - A scene a mod plays through a sync animation can hide the HUD for its duration with the game's
   own animation events on the player's third-person body: `ae_hideHudForContextPrompt` on the
   frame the scene starts and `ae_showHudForContextPrompt` on the frame it releases the player, in
