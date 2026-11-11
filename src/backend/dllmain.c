@@ -178,6 +178,8 @@ static void install_features(const sig_result *results, size_t db)
      * crash took away mid-replacement is put back first, so it serves on
      * this boot, and the work folders a crash left are removed. */
     (void)sh_ms_recover_work();
+    /* A new serving table may change a module's shipped navigation. */
+    sh_modserve_set_index_listener(sh_nav_bake_invalidate_sources);
     (void)sh_modserve_index_boot();
     /* Folders not built yet are built off this thread as a rescan builds
      * them, then indexed, once this install has released the store
