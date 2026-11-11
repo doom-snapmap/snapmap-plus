@@ -17,6 +17,7 @@ const modsTab = require(path.join(web, 'mods_tab.js'));
 const v2 = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'mods_tab_payload.json'), 'utf8'));
 const v3 = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'mods_tab_payload_v3.json'), 'utf8'));
 const html = fs.readFileSync(path.join(web, 'mockup.html'), 'utf8').replace(/\r\n/g, '\n');
+const standin = fs.readFileSync(path.join(web, 'preview_standin.js'), 'utf8').replace(/\r\n/g, '\n');
 const source = fs.readFileSync(path.join(web, 'mods_tab.js'), 'utf8');
 const host = fs.readFileSync(path.join(web, 'snapmap_plus_ui_webview.cpp'), 'utf8').replace(/\r\n/g, '\n');
 const iface = fs.readFileSync(path.join(root, 'src', 'common', 'snapmap_plus_iface.h'), 'utf8').replace(/\r\n/g, '\n');
@@ -1245,11 +1246,11 @@ test('page contract', () => {
   assert.match(html, /function onMessage\(d\) \{\n    if \(typeof modsUi !== 'undefined' && modsUi\.onMessage\(d\)\) return;/);
   assert.match(html, /if \(which === 'mods'\) modsUi\.show\(\);/);
   /* the browser preview's data is the v3 fixture, answered by the stand-in host */
-  const m = html.match(/\n  var PREVIEW_MODS = (\{.*\});  \/\/ migratedFrom names the retired package folder a mod was moved from\n/);
+  const m = standin.match(/\nvar PREVIEW_MODS = (\{.*\});  \/\/ migratedFrom names the retired package folder a mod was moved from\n/);
   assert.ok(m, 'PREVIEW_MODS is one JSON line');
   assert.deepEqual(JSON.parse(m[1]), v3, 'PREVIEW_MODS is the v3 fixture');
-  assert.match(html, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
-  const pf = html.match(/\n  var PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
+  assert.match(standin, /var previewMods = modsTab\.standIn\(PREVIEW_MODS, PREVIEW_MOD_FILES\);/);
+  const pf = standin.match(/\nvar PREVIEW_MOD_FILES = (\{.*\});\r?\n/);
   assert.ok(pf, 'PREVIEW_MOD_FILES is one JSON line');
   const hgFiles = JSON.parse(pf[1])['local.hell-guard'];
   assert.ok(hgFiles.files.length > 200 && hgFiles.files.every(f => f.path && f.kind && 'class' in f), 'the preview lists files as modFiles does');
@@ -1261,13 +1262,13 @@ test('page contract', () => {
             panel.indexOf('id="modsFilesBtn"') > panel.indexOf('class="pane-splitter"'), 'Files sits in the details head beside Verify');
   for (const ic of ['folder-tree', 'gamepad-2']) assert.ok(html.includes('<symbol id="icon-' + ic + '"'), 'icon ' + ic);
   assert.match(html, /tokens: function\(text\)\{ var t = declLanguage\.tokenize\(text\); declLanguage\.parse\(t\); return t; \}/);
-  assert.match(html, /if \(o\.cmd === 'modsAction'\) \{[\s\S]*?previewMods\(o\)\.forEach\(onMessage\);/);
+  assert.match(standin, /if \(o\.cmd === 'modsAction'\) \{[\s\S]*?previewMods\(o\)\.forEach\(onMessage\);/);
   /* the retired collapsed-groups setting: the page neither asks for it nor saves it */
   assert.ok(!/MODS_COLLAPSED_KEY|saveCollapsed|loadCollapsed/.test(html));
   assert.ok(!/mods\.collapsed_groups'/.test(html), 'no request names the key');
   assert.ok(!/\.mods-group/.test(css), 'the group styles are gone');
   assert.ok(!/\.mods-pill/.test(css), 'no pill styles');
-  assert.equal(html.split('localStorage').length - 1, 2, 'browser storage stays the preview theme only');
+  assert.equal((html + standin).split('localStorage').length - 1, 2, 'browser storage stays the preview theme only');
   assert.ok(!/setInterval|setTimeout|requestAnimationFrame/.test(source), 'the tab never polls or defers');
   assert.ok(!/innerHTML/.test(source), 'all text goes through textContent');
   assert.ok(!/[^\x00-\x7f]/.test(source), 'ASCII only');

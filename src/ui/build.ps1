@@ -63,7 +63,7 @@ if ($hdrOld -ne $sb.ToString()) { Set-Content -Path $hdrPath -Value $sb.ToString
 Write-Host "generated $hdrPath ($([Math]::Round(($html.Length/1KB),1)) KB of HTML)"
 
 # Compile with the dynamic CRT required by the WebView2 static loader.
-# The .def file pins sh_ui_init at ordinal 10 and the sl_* compatibility exports.
+# The .def file pins sh_ui_init at ordinal 10, the window's one export.
 $incArgs = @(
     "/I`"$wvInclude`"",
     "/I`"$objDir`"",
@@ -73,7 +73,7 @@ $incArgs = @(
     "/I`"$backend`""
 ) -join " "
 $Sources = @("webview\snapmap_plus_ui_webview.cpp", "webview\config_message.cpp", "webview\webview_json.cpp",
-             "webview\theme_bootstrap.cpp", "sl_exports.cpp", "..\common\log_rotate.c", "..\backend\host_image.c",
+             "webview\theme_bootstrap.cpp", "..\common\log_rotate.c", "..\backend\host_image.c",
              "..\backend\prefab_grab.c", "..\backend\prefab_block.c")
 $libArgs = @(
     "`"$wvLib`"",

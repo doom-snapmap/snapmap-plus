@@ -137,7 +137,8 @@ check(iface.indexOf('strstr(inherit_name, "spawner")') < iface.indexOf('sh_typei
 check(iface.includes('slots.resolve_prefab_defaults = slot_resolve_prefab_defaults') &&
       common.includes('offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320'),
       'model-and-scale resolution is append-only at interface extension 23');
-check(html.includes("model:'',scale:[1,1,1]"),'browser preview completes model-and-scale requests');
+check(fs.readFileSync(path.join(root,'src','ui','webview','preview_standin.js'),'utf8').includes("model:'',scale:[1,1,1]"),
+      'browser preview completes model-and-scale requests');
 check(js.includes('var frame = grabFrame(doc);') && js.includes('entityFromJson(list[i], frame)') &&
       js.includes('applyFrame(vec3(edit.spawnPosition,[0,0,0]), orientationAxes(edit.spawnOrientation)'),
       'the preview places stored transforms through the prefab grabAxis, as the paste does');

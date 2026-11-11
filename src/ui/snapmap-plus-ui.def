@@ -1,24 +1,7 @@
-; snapmap-plus-ui.def -- the export surface of the clean-room snapmap-plus-ui.dll (the WebView2 "Snapmap+" frontend).
+; snapmap-plus-ui.def -- the export surface of snapmap-plus-ui.dll, the WebView2 Snapmap+ window.
 ;
-; The export SHAPE is faithful to the OG snaphakui.dll: an init entry at ord 10 (the CreateThread entry the
-; backend spine targets; the OG named it snaphak_ui_init, ours is sh_ui_init) + the 9 sl_* SuperScript-Lua
-; bindings (OG names verbatim). NOT a proxy DLL -- the frontend is LoadLibraryA'd by the backend, not by the
-; OS loader satisfying an import, so there are no System32 forwarding thunks. It exports ONLY its init + the
-; sl_* surface.
-;
-; sh_ui_init is pinned to ordinal 10 (the OG ord). The sl_* names are undecorated C (the SuperScript
-; ABI is by-name C). All bodies are the __declspec(dllexport) functions in webview/snapmap_plus_ui_webview.cpp / sl_exports.cpp;
-; this .def fixes the ordinal + name set. (A .def co-existing with __declspec(dllexport) is fine -- the
-; linker unions them; the .def pins the ordinal that dllexport alone would auto-assign.)
+; The backend loads this DLL with LoadLibrary and starts its window thread at sh_ui_init, which it
+; finds by name; the ordinal stays 10, the value the backend has always used. Nothing else is exported.
 LIBRARY "snapmap-plus-ui"
 EXPORTS
     sh_ui_init                      @10
-    sl_is_valid_entityid
-    sl_get_entity_classname_impl
-    sl_get_entity_inherit_impl
-    sl_get_entity_declsource_impl
-    sl_show_toast_impl
-    sl_push_entityid_sh
-    sl_pop_entityid_sh
-    sl_get_group_size
-    sl_get_group_ids_array
