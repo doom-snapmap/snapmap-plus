@@ -327,6 +327,25 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return 0; }
 }
 
+size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap)
+{
+    if (buf && cap) buf[0] = '\0';
+    if (!inheritName || !inheritName[0] || !buf || cap < 2) return 0;
+    if (!g_resource_mgr_ctx || !g_decl_find) return 0;
+    __try {
+        const uint8_t *decl = (const uint8_t *)g_decl_find(g_resource_mgr_ctx, inheritName);
+        if (!decl) return 0;
+        const char *text = *(const char * const *)(decl + DECL_RESOLVED_TEXT_OFF);
+        if (!text) return 0;
+        size_t len = 0;
+        while (len < cap && text[len]) ++len;
+        if (len == 0 || len >= cap) { buf[0] = '\0'; return 0; }
+        memcpy(buf, text, len);
+        buf[len] = '\0';
+        return len;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return 0; }
+}
+
 /* Use the read-only declaration lookup with the material-manager context.
  * Shipped material names are available before rendering; this does not imply
  * their GPU images are resident. Dimension getters are best effort. */

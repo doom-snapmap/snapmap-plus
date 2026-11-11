@@ -64,4 +64,15 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
                                      size_t *out_edge_count,
                                      size_t *out_cycle_count);
 
+/* A placed entity's own decl text from its prepared text (`prepared`, the
+ * inherit chain merged root first with its own members) and its inherit's
+ * prepared text (`inherited`; may be empty). Every leaf whose key path and
+ * value equal the inherit's is dropped, as the engine drops them when it
+ * reads a saved entity, and so is a block left empty; the first statement is
+ * always written. The result is tab-indented `key = value;` lines. Returns 0,
+ * with `out` empty, for a malformed or truncated text or a full `out`. */
+int sh_decl_text_own_state(const unsigned char *prepared, size_t prepared_length,
+                           const unsigned char *inherited, size_t inherited_length,
+                           char *out, size_t capacity, size_t *out_length);
+
 #endif /* BACKEND_DECL_TEXT_H */

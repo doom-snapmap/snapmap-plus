@@ -59,6 +59,7 @@ $tests = @(
     @{ name = "map_payload_test"; src = 'map_payload_test.c ..\src\backend\map_payload.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "json_patch_test"; src = 'json_patch_test.c ..\src\backend\json_patch.c'; arg = "" }
     @{ name = "edit_pair_test"; src = 'edit_pair_test.c'; arg = "" }
+    @{ name = "decl_text_own_state_test"; src = 'decl_text_own_state_test.c ..\src\backend\decl_text.c'; arg = "" }
     @{ name = "engine_cvar_read_test"; src = 'engine_cvar_read_test.c'; arg = "" }
     @{ name = "modhud_scene_test"; src = 'modhud_scene_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = "" }
     @{ name = "modscene_place_test"; src = 'modscene_place_test.c ..\src\backend\modscene_place.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING /DSH_MODSCENE_PLACE_PURE'; arg = "" }

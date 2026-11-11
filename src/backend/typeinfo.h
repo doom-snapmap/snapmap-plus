@@ -36,6 +36,10 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
 /* Copy inherited renderModelInfo.model from resolved entityDef text. Return 1
  * on a hit. Uses read-only lookup, with no load, creation, rendering, or GPU call. */
 int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap);
+/* Copy the prepared text of the entityDef `inheritName` (its inherit chain
+ * merged root first) into buf. Returns its length, or 0 when the decl is not
+ * found, has no text, or does not fit. */
+size_t sh_typeinfo_inherit_text(const char *inheritName, char *buf, size_t cap);
 
 /* Collect up to cap live class names, borrowed from engine-owned static strings.
  * Return the count, including partial reads, or -1 if the registry is unavailable. */
