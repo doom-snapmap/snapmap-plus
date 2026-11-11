@@ -66,10 +66,30 @@ int sh_modserve_index_build(const char *mods_root);
 int sh_modserve_index_boot(void);
 
 /* Rebuild from the folder of the last build (after an install or a fetch).
- * The old table is retired, never freed, because a provider open on another
- * thread may still be reading it. Decls already registered stay registered;
- * editor rows of new bundles need modserve_palette_rebuild_requested. */
+ * Decls already registered stay registered; editor rows of new bundles need
+ * modserve_palette_rebuild_requested. */
 int sh_modserve_index_rescan(void);
+
+/* Free the tables two or more builds behind the published one, when no
+ * provider call is in flight on any thread and no plan is alive. A new table
+ * carries what later questions need from the one it replaces (the salts
+ * registered this session, which bytes the engine already read, the removed
+ * paths a refresh still owes), so nothing reads an older table after its
+ * build. Every string the index hands out (a lookup hit, a bundle's salt,
+ * hash or extra text) therefore stays valid until the second table built
+ * after the one that gave it is published and this runs; a consumer that
+ * keeps one longer copies it. Main thread, at the start of a registration
+ * pass (no product call holds an older pointer there). Returns the tables
+ * freed and logs "MODS: index: N earlier table(s) freed". */
+int sh_modserve_index_retire(void);
+
+/* Remove from the mods folder's served copies (banks renamed for their hash,
+ * rewritten texts) every file the published table does not serve from, and
+ * any temporary a crashed write left. Each copy is written beside its name
+ * and replaces it whole. Run once at boot (sh_modserve_index_boot); skipped,
+ * with one line, while another game instance on this account uses the
+ * folder. Returns the files removed. */
+int sh_modserve_served_prune(void);
 
 /* Nonzero when the published table serves at least one path. */
 int sh_modserve_active(void);
@@ -82,7 +102,8 @@ int sh_modserve_active(void);
 
 /* ------------------------------------------------------------------ serve */
 
-/* One lookup result. Pointers stay valid for the process. */
+/* One lookup result. Pointers stay valid while their table lives
+ * (sh_modserve_index_retire). */
 typedef struct sh_modserve_hit {
     const char *request;     /* the indexed request path (lowercase) */
     const char *disk_path;   /* the file read at open time */
@@ -895,7 +916,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
  * winner and why:
  *   MODS: conflict: shadow '<path>' is provided by A, B; serving A (<reason>)
  *   MODS: conflict: shadow '<path>' is provided by ...; serving A's text with the others' list entries (N added)
- * Pointers stay valid for the process. */
+ * Pointers stay valid while their table lives (sh_modserve_index_retire). */
 typedef struct sh_modserve_conflict {
     const char *request, *providers, *reason;
     const char *served_id, *served_hash;
@@ -928,7 +949,7 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
  * product does not read itself (the manifest's "extra", such as "strings" and
  * "hud"), in a fixed order: root folders before maps' places, then by salt,
  * then by folder; `place` is 1 for a folder in a map's place. `extra` is the object's JSON
- * text; the strings stay valid for the process. Returns the number visited,
+ * text; the strings stay valid while their table lives. Returns the number visited,
  * or -1 when the order could not be allocated (nothing is visited). Used by
  * strids.c for the bundle string layer. */
 typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *hash, int place, const char *extra);
@@ -936,14 +957,14 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
 
 /* Visit every admitted bundle in index order with its salt, its hash and its
  * product block's "registries" object (JSON text, NULL when the block has
- * none). The strings stay valid for the process. Returns the number visited.
+ * none). The strings stay valid while their table lives. Returns the number visited.
  * Used by modsound.c for the stock banks a bundle needs ("banks"). */
 typedef void (*sh_modserve_registries_fn)(void *context, const char *id, const char *hash, const char *registries);
 int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *context);
 
 /* Visit every file the published table serves (admitted bundles, conflict
- * winners, not withdrawn), in index order. The strings stay valid for the
- * process. Used by modvt.c to find the bundles' virtual-texture members. */
+ * winners, not withdrawn), in index order. The strings stay valid while their
+ * table lives. Used by modvt.c to find the bundles' virtual-texture members. */
 typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t size, const char *bundle_id,
                                     const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
@@ -955,7 +976,7 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
  * or "lib/x.lua", lower case), its request, its size and the SHA-256 the
  * build recorded (the bytes sh_modserve_open must answer with), and the
  * serving build's hash. Returns the number visited. The strings stay valid
- * for the process. The runtime reads scripts only this way, never from a
+ * while their table lives. The runtime reads scripts only this way, never from a
  * folder (script_source.c). */
 typedef void (*sh_modserve_script_fn)(void *context, const char *relpath, const char *request, uint64_t size,
                                       const char *sha256, const char *bundle_hash);

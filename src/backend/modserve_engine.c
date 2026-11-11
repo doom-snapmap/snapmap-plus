@@ -2248,6 +2248,8 @@ static int me_editor_rows(const char *phase, int first, int *todo)
  * (modsound.h), bundle strings of an index published off the main thread. */
 static void me_pass_prelude(const char *phase)
 {
+    /* Earlier index tables are freed at the start of an outermost pass. */
+    if (me_on_main() == 1 && !g_mark_depth) (void)sh_modserve_index_retire();
     sh_modvt_before_pass(phase);
     sh_modsound_before_pass(phase);
     (void)sh_strids_scope_check();   /* string edits follow the open map's declared mods */

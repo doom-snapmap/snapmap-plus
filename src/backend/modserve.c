@@ -55,6 +55,7 @@ typedef struct ms_file {
     volatile LONG plan_seen;              /* a plan run settled it ready (registered, or left to the game) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
+    int settled;                          /* an earlier table served these bytes and the engine read them */
     volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
     volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
@@ -159,9 +160,13 @@ typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
-/* A request the replaced table served and this one does not (refresh). */
-struct ms_index;
-typedef struct ms_gone { const struct ms_index *from; int file; volatile LONG pending; } ms_gone;
+/* A request the replaced table served and this one does not (refresh), with
+ * what the refresh needs copied into this table's arena. */
+typedef struct ms_gone {
+    const char *type, *name, *request, *bundle_id;
+    int is_shadow;
+    volatile LONG pending;
+} ms_gone;
 
 typedef struct ms_index {
     char root[MS_PATH_MAX];
@@ -176,7 +181,8 @@ typedef struct ms_index {
     const char **editor_only; int neditor_only;                        /* record "editorOnly": bundles a map named that change only the editor */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
-    struct ms_index *prev;                /* the table this one replaced (retired, never freed) */
+    struct ms_index *prev;                /* the table this one replaced (sh_modserve_index_retire frees it later) */
+    const char **reg_ids; int nreg_ids;   /* salts a registration pass registered a decl of, this session */
     ms_gone *gone; int ngone;             /* refresh: requests no longer served (pending gone shadows carried) */
     sh_modserve_diff diff;                /* refresh: this table against prev */
     volatile LONG expanded;               /* refresh: the inheritance closure was marked */
@@ -193,6 +199,11 @@ typedef struct ms_index {
 } ms_index;
 
 static ms_index *volatile g_index;
+/* What holds a table besides the main thread's own calls
+ * (sh_modserve_index_retire): provider calls in flight on any thread, and
+ * plans, whose steps name a table's strings. */
+static volatile LONG g_readers, g_plans_alive;
+static sh_modserve_step *ms_steps_alloc(int n);
 static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
@@ -279,7 +290,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
-    free(x->editor_only); free(x->gone); free(x->alts);
+    free(x->editor_only); free(x->gone); free(x->alts); free((void *)x->reg_ids);
     free(x);
 }
 
@@ -2347,26 +2358,65 @@ static void ms_diff_note(char *out, size_t cap, const char *request)
     _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s", at ? ", " : "", request);
 }
 
-static int ms_add_gone(ms_index *x, int *cap, const ms_index *from, int file, int pending)
+static int ms_add_gone(ms_index *x, int *cap, const char *type, const char *name, const char *request,
+                       const char *bundle_id, int is_shadow, int pending)
 {
+    ms_gone *g;
     if (!ms_grow((void **)&x->gone, cap, x->ngone + 1, sizeof *x->gone)) return 0;
-    x->gone[x->ngone].from = from;
-    x->gone[x->ngone].file = file;
-    x->gone[x->ngone].pending = pending;
+    g = &x->gone[x->ngone];
+    g->type = type ? ms_strdup(x, type) : NULL;
+    g->name = name ? ms_strdup(x, name) : NULL;
+    g->request = ms_strdup(x, request);
+    g->bundle_id = ms_strdup(x, bundle_id);
+    if ((type && !g->type) || (name && !g->name) || !g->request || !g->bundle_id) return 0;
+    g->is_shadow = is_shadow;
+    g->pending = pending;
     x->ngone++;
     return 1;
 }
 
-/* A registration pass registered a decl of mod `id` from this table (or an
- * earlier one): the mod is in use this session. */
+/* A registration pass registered a decl of mod `id` from table `t`, or from
+ * a table before it (t->reg_ids): the mod is in use this session. */
 static int ms_id_registered(const ms_index *t, const char *id)
 {
     int i;
-    for (; t; t = t->prev)
-        for (i = 0; i < t->nfiles; ++i)
-            if (t->files[i].reg_state == 1 && !t->files[i].is_sedef && !strcmp(t->bundles[t->files[i].bundle].id, id))
-                return 1;
+    if (!t) return 0;
+    for (i = 0; i < t->nreg_ids; ++i) if (!strcmp(t->reg_ids[i], id)) return 1;
+    for (i = 0; i < t->nfiles; ++i)
+        if (t->files[i].reg_state == 1 && !t->files[i].is_sedef && !strcmp(t->bundles[t->files[i].bundle].id, id))
+            return 1;
     return 0;
+}
+
+/* What the new table carries from the one it replaces, so no later question
+ * reads an earlier table: the salts registered this session, and per file
+ * whether an earlier table served the same bytes the engine read. */
+static void ms_carry_forward(ms_index *x, const ms_index *old)
+{
+    int i, j, cap = 0;
+    for (i = 0; i < old->nreg_ids + old->nfiles; ++i) {
+        const char *id;
+        if (i < old->nreg_ids) id = old->reg_ids[i];
+        else {
+            const ms_file *f = &old->files[i - old->nreg_ids];
+            if (f->reg_state != 1 || f->is_sedef) continue;
+            id = old->bundles[f->bundle].id;
+        }
+        for (j = 0; j < x->nreg_ids && strcmp(x->reg_ids[j], id); ++j) {}
+        if (j < x->nreg_ids) continue;
+        if (!ms_grow((void **)&x->reg_ids, &cap, x->nreg_ids + 1, sizeof *x->reg_ids)) return;
+        x->reg_ids[x->nreg_ids] = ms_strdup(x, id);
+        if (x->reg_ids[x->nreg_ids]) x->nreg_ids++;
+    }
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        int o = old->nkeys ? ms_find(old->slots, old->mask, f->request) : -1;
+        const ms_file *of = o >= 0 ? &old->files[o] : NULL;
+        if (of && ms_same_bytes(f, of) &&
+            (of->settled || InterlockedCompareExchange((volatile LONG *)&of->opens, 0, 0) ||
+             InterlockedCompareExchange((volatile LONG *)&of->reparse_tried, 0, 0)))
+            f->settled = 1;
+    }
 }
 
 /* Per served request path, the new table against the one it replaces. Marks
@@ -2445,9 +2495,11 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (of->is_sedef && of->ptype && of->pname) d->gone_rows++;
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
-            if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
+            if (!ms_add_gone(x, &cap, of->ptype, of->pname, of->request, old->bundles[of->bundle].id, of->is_shadow, 1))
+                ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
         } else if (of->is_sedef && !of->is_restore && of->ptype && of->pname) {
-            if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed editor row stays in the palette");
+            if (!ms_add_gone(x, &cap, of->ptype, of->pname, of->request, old->bundles[of->bundle].id, of->is_shadow, 1))
+                ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
     }
     /* Registries (L2b deviation 7): a rescan that changes the text a registry
@@ -2475,9 +2527,9 @@ static void ms_diff(ms_index *x, const ms_index *old)
         const ms_gone *g = &old->gone[i];
         int n;
         if (!InterlockedCompareExchange((volatile LONG *)&g->pending, 0, 0)) continue;
-        n = x->nkeys ? ms_find(x->slots, x->mask, g->from->files[g->file].request) : -1;
+        n = x->nkeys ? ms_find(x->slots, x->mask, g->request) : -1;
         if (n >= 0 && x->files[n].served) continue;
-        (void)ms_add_gone(x, &cap, g->from, g->file, 1);
+        (void)ms_add_gone(x, &cap, g->type, g->name, g->request, g->bundle_id, g->is_shadow, 1);
     }
 }
 
@@ -3852,23 +3904,79 @@ static int ms_mkdirs_for(const char *path)
     return ms_wide(dir, wide, sizeof wide / sizeof wide[0]) && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
 }
 
-/* Write `bytes` at `path` unless it already holds exactly them. 1 the file holds them. */
+/* Write `bytes` at `path` unless it already holds exactly them. 1 the file
+ * holds them. The bytes go to a temporary beside it first and replace it
+ * whole, so another game instance reading the name never sees a part. */
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len)
 {
     size_t have_len = 0;
     unsigned char *have = ms_read_whole(path, (size_t)SH_MODSERVE_MAX_FILE, &have_len);
-    wchar_t wide[MS_PATH_MAX + 8];
+    char tmp[MS_PATH_MAX];
+    wchar_t wide[MS_PATH_MAX + 8], wtmp[MS_PATH_MAX + 8];
     HANDLE h;
     DWORD put = 0;
     int same = have && have_len == len && !memcmp(have, bytes, len), ok;
     if (have) HeapFree(GetProcessHeap(), 0, have);
     if (same) return 1;
-    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
-    h = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
+    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0]) ||
+        !ms_wide(tmp, wtmp, sizeof wtmp / sizeof wtmp[0]))
+        return 0;
+    h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
     ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
     CloseHandle(h);
+    if (ok) ok = MoveFileExW(wtmp, wide, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) DeleteFileW(wtmp);
     return ok;
+}
+
+/* Delete every file under <root>\.served\<sub> that no file of `x` is served
+ * from. Returns the count. */
+static int ms_prune_served_dir(const ms_index *x, const char *sub)
+{
+    char dir[MS_PATH_MAX], path[MS_PATH_MAX], name[MS_PATH_MAX];
+    wchar_t wide[MS_PATH_MAX + 8];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int removed = 0, i, used;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.served\\%s", x->root, sub);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\*", dir);
+    if (!ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
+    h = FindFirstFileW(wide, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd.cFileName, -1, name, (int)sizeof name, NULL, NULL))
+            continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        for (used = 0, i = 0; i < x->nfiles && !used; ++i) used = x->files[i].disk && !_stricmp(x->files[i].disk, path);
+        if (!used && ms_wide(path, wide, sizeof wide / sizeof wide[0]) && DeleteFileW(wide)) removed++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return removed;
+}
+
+int sh_modserve_served_prune(void)
+{
+    static HANDLE instance;
+    const ms_index *x;
+    int removed;
+    /* Another game instance on this account may serve files this table does
+     * not name (it read the folder at another time): it is left whole. */
+    if (!instance) {
+        instance = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served");
+        if (instance && GetLastError() == ERROR_ALREADY_EXISTS) {
+            ms_log("index: another game instance uses the mods folder; mods\\.served is left as it is");
+            return 0;
+        }
+    }
+    AcquireSRWLockShared(&g_build_lock);
+    x = g_index;
+    removed = x ? ms_prune_served_dir(x, "banks") + ms_prune_served_dir(x, "files") : 0;
+    ReleaseSRWLockShared(&g_build_lock);
+    if (removed) ms_log("index: %d file(s) no mod uses any more removed from mods\\.served", removed);
+    return removed;
 }
 
 /* Serve `f` from rewritten bytes, written under mods\.served\ by their own
@@ -4044,10 +4152,10 @@ int sh_modserve_index_build(const char *mods_root)
     (void)ms_scope_compute(x, 0);
     ReleaseSRWLockShared(&g_scope_lock);
     ms_scope_log(x, old);
-    if (old) ms_diff(x, old);
+    if (old) { ms_diff(x, old); ms_carry_forward(x, old); }
     x->prev = old;
-    /* Publish the complete table; the old one is retired, never freed, since
-     * a provider open on another thread may be inside it. */
+    /* Publish the complete table; the old one stays while a reader may hold
+     * it, and sh_modserve_index_retire frees it two tables later. */
     InterlockedExchangePointer((void *volatile *)&g_index, x);
     ReleaseSRWLockExclusive(&g_build_lock);
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
@@ -4074,10 +4182,13 @@ int sh_modserve_index_boot(void)
         ms_log("index empty: the user-data folder is unavailable");
         return 0;
     }
+    int admitted;
     /* The product's index is map-scoped from its first table: no map is open
      * at boot, so no map-scoped shadow serves before a map lists it. */
     InterlockedExchange(&g_scope_on, 1);
-    return sh_modserve_index_build(root);
+    admitted = sh_modserve_index_build(root);
+    if (admitted >= 0) (void)sh_modserve_served_prune();
+    return admitted;
 }
 
 int sh_modserve_index_rescan(void)
@@ -4154,8 +4265,23 @@ static int ms_lookup_hit(const char *request, sh_modserve_hit *out, int scoped)
     return 1;
 }
 
-int sh_modserve_lookup(const char *request, sh_modserve_hit *out) { return ms_lookup_hit(request, out, 1); }
-int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out) { return ms_lookup_hit(request, out, 0); }
+int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_lookup_hit(request, out, 1);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
+int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_lookup_hit(request, out, 0);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
 
 /* The bytes of one indexed file (process heap), or NULL: a stock pointer's
  * installed bytes, else the file at its indexed size. A pointer the reader
@@ -4256,8 +4382,8 @@ void sh_modserve_set_serve_listener(sh_modserve_serve_fn fn)
     InterlockedExchangePointer((PVOID volatile *)&g_serve_listener, (PVOID)fn);
 }
 
-int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
-                               const unsigned char **body, size_t *body_len, uint64_t *size)
+static int ms_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                             const unsigned char **body, size_t *body_len, uint64_t *size)
 {
     const ms_index *x = NULL;
     const ms_file *f = ms_lookup_file(&x, request);
@@ -4276,7 +4402,17 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
     return 1;
 }
 
-int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
+int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                               const unsigned char **body, size_t *body_len, uint64_t *size)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_serve_identity(request, bundle_hash, file_hash, body, body_len, size);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
+static int ms_open(const char *request, unsigned char **bytes, size_t *length)
 {
     sh_modserve_serve_fn listen;
     const ms_index *x = NULL;
@@ -4338,12 +4474,64 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     return 1;
 }
 
+int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_open(request, bytes, length);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
 int sh_modserve_probe_claims(const char *path)
 {
-    const ms_file *f = ms_lookup_file(NULL, path);
-    if (!f || !f->is_decl) return 0;
+    const ms_file *f;
+    int claimed;
+    InterlockedIncrement(&g_readers);
+    f = ms_lookup_file(NULL, path);
+    claimed = f && f->is_decl;
+    InterlockedDecrement(&g_readers);
+    if (!claimed) return 0;
     InterlockedIncrement(&g_probe_claims);
     return 1;
+}
+
+/* Free the tables two or more generations behind the published one
+ * (modserve.h). Everything a later question needs from them was carried into
+ * the newer tables at their build (ms_carry_forward, the gone list), so only
+ * a reader still inside one holds it: a provider call in flight, a plan, or a
+ * caller that kept a pointer from the table before the published one, which
+ * stays. */
+int sh_modserve_index_retire(void)
+{
+    ms_index *x, *t, *next;
+    int freed = 0, i;
+    AcquireSRWLockExclusive(&g_build_lock);
+    x = g_index;
+    if (!x || !x->prev || !x->prev->prev || InterlockedCompareExchange(&g_readers, 0, 0) ||
+        InterlockedCompareExchange(&g_plans_alive, 0, 0)) {
+        ReleaseSRWLockExclusive(&g_build_lock);
+        return 0;
+    }
+    t = x->prev->prev;
+    x->prev->prev = NULL;
+    for (; t; t = next) {
+        next = t->prev;
+        /* The file cache is keyed by file address: a later table may reuse it. */
+        AcquireSRWLockExclusive(&g_cache_lock);
+        for (i = 0; i < MS_CACHE_SLOTS; ++i)
+            if (g_cache[i].file && g_cache[i].file >= t->files && g_cache[i].file < t->files + t->nfiles) {
+                g_cache_bytes -= g_cache[i].len;
+                HeapFree(GetProcessHeap(), 0, g_cache[i].bytes);
+                memset(&g_cache[i], 0, sizeof g_cache[i]);
+            }
+        ReleaseSRWLockExclusive(&g_cache_lock);
+        ms_index_free(t);
+        freed++;
+    }
+    ReleaseSRWLockExclusive(&g_build_lock);
+    if (freed) ms_log("index: %d earlier table(s) freed", freed);
+    return freed;
 }
 
 #ifdef SH_MODSERVE_TESTING
@@ -4476,7 +4664,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
             }
         }
     }
-    out->steps = (sh_modserve_step *)calloc((size_t)(n ? n : 1), sizeof(sh_modserve_step));
+    out->steps = ms_steps_alloc(n);
     if (!out->steps) goto oom;
     for (i = 0; i < n; ++i) {
         const ms_file *f = &x->files[order[i]];
@@ -4644,9 +4832,18 @@ done:
     return r;
 }
 
+/* Steps for a plan; the plan holds its table until sh_modserve_plan_free. */
+static sh_modserve_step *ms_steps_alloc(int n)
+{
+    sh_modserve_step *s = (sh_modserve_step *)calloc((size_t)(n > 0 ? n : 1), sizeof(sh_modserve_step));
+    if (s) InterlockedIncrement(&g_plans_alive);
+    return s;
+}
+
 void sh_modserve_plan_free(sh_modserve_plan *plan)
 {
     if (!plan) return;
+    if (plan->steps) InterlockedDecrement(&g_plans_alive);
     free(plan->steps);
     memset(plan, 0, sizeof *plan);
 }
@@ -7085,7 +7282,6 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
 /* An earlier table served these bytes or re-parsed them: an open on the
  * provider thread can land in the table a rescan is replacing, after the
  * rescan copied the marks. */
-static int ms_settled_before(const ms_index *x, const ms_file *f);
 
 /* The bundle has cvar requirements and they are all live now. */
 static int ms_gates_live_for(const ms_index *x, const ms_file *f)
@@ -7099,22 +7295,10 @@ static int ms_gates_live_for(const ms_index *x, const ms_file *f)
  * before the bundle's requirement gates were live and live now. */
 static int ms_stale(const ms_index *x, const ms_file *f)
 {
-    if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !ms_settled_before(x, f);
+    if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !f->settled;
     return InterlockedCompareExchange((volatile LONG *)&f->opened_ungated, 0, 0) && ms_gates_live_for(x, f);
 }
 
-static int ms_settled_before(const ms_index *x, const ms_file *f)
-{
-    const ms_index *p;
-    for (p = x->prev; p; p = p->prev) {
-        int o = p->nkeys ? ms_find(p->slots, p->mask, f->request) : -1;
-        if (o >= 0 && ms_same_bytes(f, &p->files[o]) &&
-            (InterlockedCompareExchange((volatile LONG *)&p->files[o].opens, 0, 0) ||
-             InterlockedCompareExchange((volatile LONG *)&p->files[o].reparse_tried, 0, 0)))
-            return 1;
-    }
-    return 0;
-}
 
 int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
 {
@@ -7163,7 +7347,7 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
          * the provider and is never marked ungated (ADD-V7b D1). */
         if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_gates_live_for(x, ef) ||
             !(InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
-              (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ms_settled_before(x, ef))))
+              (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ef->settled)))
             continue;
         visited++;
         if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)
@@ -7224,12 +7408,20 @@ int sh_modserve_refresh_expand(void)
     if (!types) return 0;
     /* The types and names of the changed and gone decls (generation 0). */
     for (i = 0; i < x->nfiles + x->ngone; ++i) {
-        const ms_file *f = i < x->nfiles ? &x->files[i] : &x->gone[i - x->nfiles].from->files[x->gone[i - x->nfiles].file];
+        const char *type, *name;
         int t, seen = 0;
-        if (i < x->nfiles ? (!f->refresh || !f->is_decl) : !x->gone[i - x->nfiles].pending) continue;
-        if (!f->ptype || !f->pname) continue;
-        for (t = 0; t < ntypes; ++t) if (!_stricmp(types[t], f->ptype)) seen = 1;
-        if (!seen && ntypes < 64) strncpy_s(types[ntypes++], 64, f->ptype, _TRUNCATE);
+        if (i < x->nfiles) {
+            const ms_file *f = &x->files[i];
+            if (!f->refresh || !f->is_decl) continue;
+            type = f->ptype; name = f->pname;
+        } else {
+            const ms_gone *g = &x->gone[i - x->nfiles];
+            if (!g->pending) continue;
+            type = g->type; name = g->name;
+        }
+        if (!type || !name) continue;
+        for (t = 0; t < ntypes; ++t) if (!_stricmp(types[t], type)) seen = 1;
+        if (!seen && ntypes < 64) strncpy_s(types[ntypes++], 64, type, _TRUNCATE);
     }
     if (!ntypes) { free(types); return 0; }
     /* Each served decl of those types: its top-level parent. */
@@ -7257,11 +7449,17 @@ int sh_modserve_refresh_expand(void)
             int j;
             if (!parent[i] || f->refresh || ms_surface(f)) continue;
             for (j = 0; j < x->nfiles + x->ngone; ++j) {
-                const ms_file *p = j < x->nfiles ? &x->files[j] : &x->gone[j - x->nfiles].from->files[x->gone[j - x->nfiles].file];
+                const char *ptype, *pname;
                 if (j < x->nfiles) {
+                    const ms_file *p = &x->files[j];
                     if (!p->refresh || !p->is_decl || (int)p->refresh_gen != gen - 1) continue;
-                } else if (gen != 1 || !x->gone[j - x->nfiles].pending) continue;
-                if (!p->ptype || !p->pname || _stricmp(p->ptype, f->ptype) || _stricmp(p->pname, parent[i])) continue;
+                    ptype = p->ptype; pname = p->pname;
+                } else {
+                    const ms_gone *g = &x->gone[j - x->nfiles];
+                    if (gen != 1 || !g->pending) continue;
+                    ptype = g->type; pname = g->name;
+                }
+                if (!ptype || !pname || _stricmp(ptype, f->ptype) || _stricmp(pname, parent[i])) continue;
                 InterlockedExchange(&f->refresh_gen, gen);
                 InterlockedExchange(&f->refresh, 1);
                 x->diff.dependents++;
@@ -7336,12 +7534,11 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
             if (part == SH_MODSERVE_PART_EDITOR) continue;
             for (i = 0; i < x->ngone; ++i) {
                 ms_gone *g = (ms_gone *)&x->gone[i];
-                const ms_file *of = &g->from->files[g->file];
                 sh_modserve_refresh_item it;
                 if (!InterlockedCompareExchange(&g->pending, 0, 0)) continue;
-                it.type = of->ptype; it.name = of->pname; it.request = of->request;
-                it.bundle_id = g->from->bundles[of->bundle].id;
-                it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = of->is_shadow; it.gates_live = 1;
+                it.type = g->type; it.name = g->name; it.request = g->request;
+                it.bundle_id = g->bundle_id;
+                it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = g->is_shadow; it.gates_live = 1;
                 visited++;
                 if (fn(context, &it) == 1) InterlockedExchange(&g->pending, 0);
             }
@@ -7456,8 +7653,8 @@ int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept,
         if (ms_split_keeps(x, s)) nk++;
     }
     if (!nk) return 0;
-    kept->steps = (sh_modserve_step *)calloc((size_t)nk, sizeof(sh_modserve_step));
-    rest->steps = (sh_modserve_step *)calloc((size_t)(plan->count - nk ? plan->count - nk : 1), sizeof(sh_modserve_step));
+    kept->steps = ms_steps_alloc(nk);
+    rest->steps = ms_steps_alloc(plan->count - nk);
     if (!kept->steps || !rest->steps) { sh_modserve_plan_free(kept); sh_modserve_plan_free(rest); return -1; }
     for (i = 0; i < plan->count; ++i) {
         const sh_modserve_step *s = &plan->steps[i];

@@ -4853,6 +4853,64 @@ static void test_bank_stems(void)
             CHECK(strstr(ad_served("generated/decls/sound/mods/bbank000/hit.decl"), want) != NULL);
         }
     }
+    /* The served copies no build needs any more, and a temporary a crashed
+     * write left, are removed; the bank the table serves stays. */
+    {
+        char stray[MAX_PATH], tmp[MAX_PATH], live[MAX_PATH];
+        sh_modserve_hit hit;
+        CHECK(sh_modserve_lookup(req, &hit) && hit.disk_path);
+        strcpy_s(live, sizeof live, hit.disk_path);
+        _snprintf_s(stray, sizeof stray, _TRUNCATE, "%s%s", root, "/.served/files/0123456789abcdef.decl");
+        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.77.tmp", live);
+        for (t = stray; *t; ++t) if (*t == '/') *t = '\\';
+        write_file(stray, "old", 3);
+        write_file(tmp, "part", 4);
+        CHECK(sh_modserve_served_prune() == 2);
+        CHECK(GetFileAttributesA(stray) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA(tmp) == INVALID_FILE_ATTRIBUTES);
+        CHECK(GetFileAttributesA(live) != INVALID_FILE_ATTRIBUTES);
+        CHECK(sh_modserve_open(req, &bytes, &len) == 1 && len == 24);
+        if (bytes) { HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL; }
+    }
+}
+
+/* Index tables two builds back are freed at a pass's start once nothing holds
+ * them: not while a plan or a provider call is alive. What a later question
+ * needs (which bytes the engine already read) is carried into the new table. */
+static void test_index_retire(void)
+{
+    static const fx_file files[] = {
+        { "generated/decls/entitydef/mods/retire00/thing.decl", "entityDef thing {}", -1, "entityDef",
+          "mods/retire00/thing", NULL, '1' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], *slash, *t;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    sh_modserve_plan plan;
+    int i;
+    printf("-- index tables two builds back are freed once nothing holds them\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s%s", top, "/retire/mods");
+    for (t = root; *t; ++t) if (*t == '/') *t = '\\';
+    mkdirs(root);
+    make_bundle(root, "retire", "retire00", NULL, '7', NULL, files, 1, NULL);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_open("generated/decls/entitydef/mods/retire00/thing.decl", &bytes, &len) == 1);
+    if (bytes) { HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL; }
+    for (i = 0; i < 3; ++i) CHECK(sh_modserve_index_build(root) == 1);
+    /* A plan names the published table's strings: nothing is freed. */
+    CHECK(sh_modserve_plan_editor(&plan) >= 0);
+    CHECK(sh_modserve_index_retire() == 0);
+    sh_modserve_plan_free(&plan);
+    log_clear();
+    CHECK(sh_modserve_index_retire() >= 2);
+    CHECK(log_has("MODS: index: ") && log_has("earlier table(s) freed"));
+    CHECK(sh_modserve_index_retire() == 0);
+    CHECK(sh_modserve_open("generated/decls/entitydef/mods/retire00/thing.decl", &bytes, &len) == 1 && len == 18);
+    if (bytes) { HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL; }
+    sh_modserve_attrib_reset();
 }
 
 /* An undeclared folder mixing an editor tweak with an addition and a cvar
@@ -5303,6 +5361,7 @@ int main(void)
     test_row_served();
     test_dependency_names();
     test_bank_stems();
+    test_index_retire();
     test_store_root_utf8();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');

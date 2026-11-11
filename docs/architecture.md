@@ -2195,9 +2195,16 @@ row of a mod that is not installed is kept as it is.
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
 store, a legacy conversion, the end of the overrides migration's worker,
-`sh_mods rescan`). Readers see one complete table;
-retired tables are never freed, because a provider open on another thread may
-still read one. Registration, activation and the palette rebuild run on DOOM's
+`sh_mods rescan`). Readers see one complete table. A new table carries what
+later questions need from the one it replaces (the salts registered this
+session, which bytes the engine already read, the removed paths a refresh
+still owes, `ms_carry_forward` and the gone list), so no question reads an
+older table after its build; at the start of each registration pass on the
+main thread, `sh_modserve_index_retire` frees every table two or more builds
+behind the published one when no provider call is in flight on any thread
+(each counts itself in and out) and no plan is alive, and drops the file
+cache's entries for it. A string the index hands out stays valid until then;
+a consumer that keeps one longer copies it. Registration, activation and the palette rebuild run on DOOM's
 main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
