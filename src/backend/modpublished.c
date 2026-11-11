@@ -936,6 +936,17 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     if (pub_is_completion(hook) && g_ops.metadata_title &&
         !g_ops.metadata_title(g_ops.context, metadata, title, sizeof title))
         title[0] = 0;
+    /* The author's own published map follows their own folders, as a My
+     * Maps load does (DESIGN-additive A.4, owner 2026-11-10): its rows are
+     * rewritten to the builds this machine's own folders serve before
+     * anything counts what is missing, so nothing is fetched for them. A
+     * stranger's map keeps exactly what it pins. */
+    if (pub_is_completion(hook) && item[0] && record->rows.count && g_ops.own_item && g_ops.follow_own &&
+        g_ops.own_item(g_ops.context, item) && g_ops.follow_own(g_ops.context, item) > 0) {
+        sh_modmanifest_list_free(&record->rows);
+        (void)sh_modmanifest_current(&record->rows);
+        record->missing = pub_count_missing(&record->rows);
+    }
     if (pub_is_completion(hook)) pub_seen_note(item, rev, title, &record->rows);
     if (!record->rows.count || !record->missing) {
         pub_record_clear(record);   /* consumed */
@@ -1735,6 +1746,7 @@ const char *sh_modpub_test_notice(void) { return g_notice; }
 #include "engine_dialog.h"
 #include "modserve.h"
 #include "modstore.h"
+#include "modpublish.h" /* sh_modpublish_item_linked: an item this machine published */
 #include "modui.h"      /* sh_modui_scope_launch: a hub launch's listing */
 #include "process_heap_scope.h"
 #include "rawmap.h"     /* sh_rawmap_reopen_after_mods: a rawmap hold's resume */
@@ -1999,6 +2011,31 @@ static int eng_metadata_title(void *c, const void *metadata, char *out, size_t c
 {
     (void)c;
     return metadata && eng_string((const uint8_t *)metadata + ENG_METADATA_TITLE, out, cap) && out[0];
+}
+
+static int eng_own_item(void *c, const char *item)
+{
+    (void)c;
+    return item && item[0] && (modsync_claim_lookup(item, NULL, NULL) || sh_modpublish_item_linked(item));
+}
+
+/* A row of an own published map: the build its key's own folder serves. */
+static int eng_follow_own_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+{
+    sh_modserve_bundle_ref ref;
+    if (!out || !sh_modserve_row_follow_own(id, bundle_hash, &ref)) return 0;
+    if (strlen(ref.id) >= sizeof out->id || strlen(ref.version) >= sizeof out->version) return 0;
+    strcpy_s(out->id, sizeof out->id, ref.id);
+    strcpy_s(out->version, sizeof out->version, ref.version);
+    strcpy_s(out->bundle, sizeof out->bundle, ref.hash);
+    out->size = ref.size;
+    return 1;
+}
+
+static int eng_follow_own(void *c, const char *item)
+{
+    (void)c;
+    return sh_modmanifest_current_follow(eng_follow_own_row, item);
 }
 
 static int eng_fetch_detail(void *c, const char *hash, char *out, size_t cap)
@@ -2361,7 +2398,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_store_has, eng_print, eng_store_probe, eng_claimed, eng_other_build, eng_mod_name,
-    eng_fetch_detail, eng_launch_refused, eng_fetch_for, eng_metadata_title
+    eng_fetch_detail, eng_launch_refused, eng_fetch_for, eng_metadata_title, eng_own_item, eng_follow_own
 };
 
 /* ------------------------------------------------------------ detours */

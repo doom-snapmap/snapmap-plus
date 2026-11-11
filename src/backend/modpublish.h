@@ -75,6 +75,10 @@ extern "C" {
 #define SH_MODPUBLISH_TAG "mods"
 /* Item -> saved-map links written at the feed post, in the store root. */
 #define SH_MODPUBLISH_LINKS_SECTION "links"   /* the section of mods\snapmap-plus.json */
+
+/* 1 when the record's "links" section names `item`: a map saved on this
+ * machine was published as that item. */
+int  sh_modpublish_item_linked(const char *item);
 /* A delete check waits this long for the engine's published-items answer. */
 #define SH_MODPUBLISH_DELETE_CHECK_MS 60000ull
 

@@ -313,7 +313,10 @@ name". Mods you download or import are never refused on their files. A map whose
   beside it. A mod downloaded for a map lives in a folder named after that map,
   `mods\downloads\<map title>\<key>\`, and a mod a rawmap or prefab ZIP brought in
   `mods\imports\<ZIP name>\<key>\`; the Mods tab shows those as organizing folders and says
-  "Downloaded for <map title>". Nothing installed is replaced, and
+  "Downloaded for <map title>".
+- Playing your own published map uses your own mod folders, as opening it from My Maps does: a row
+  whose mod one of your folders builds follows that folder's current build, and nothing is
+  downloaded for it. A map someone else published plays exactly the builds it pins. Nothing installed is replaced, and
   nothing is ever refused for "same version, different files": the hash is the identity. Each
   folder records where it came from (`origin`: `by-hand`, `install`, `imported`, `download`).
   Uninstalling one build leaves the others.

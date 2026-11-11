@@ -819,6 +819,14 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
  * its pin. */
 int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out);
 
+/* An own published map follows its own folders (DESIGN-additive A.4, owner
+ * 2026-11-10): 1 with *out filled when an admitted, non-legacy folder of this
+ * machine's own (origin by-hand or none, install, migration) builds the key
+ * `id`, with the build that serves it (the newest own one), and that build is
+ * not `bundle_hash` already. 0 when no own folder builds the key: a key only
+ * a download or an import holds keeps the row's pin. */
+int sh_modserve_row_follow_own(const char *id, const char *bundle_hash, sh_modserve_bundle_ref *out);
+
 /* 1 with *out filled (the newest admitted build of the row's key) when the
  * row's own build is not installed but its key is at another hash: the
  * "installed at another build" case the launch gate words (phase 4). */

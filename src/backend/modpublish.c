@@ -806,6 +806,17 @@ static int mp_links_save(const mpj *doc)
     return ok;
 }
 
+int sh_modpublish_item_linked(const char *item)
+{
+    mpj *doc;
+    int found;
+    if (!mp_link_id(item)) return 0;
+    doc = mp_links_load();
+    found = doc && mpj_get(mpj_get(doc, "links"), item) != NULL;
+    mpj_free(doc);
+    return found;
+}
+
 /* Record that `item` was published from this saved map. */
 static void mp_link_record(const char *item, const char *cloud, const char *local)
 {

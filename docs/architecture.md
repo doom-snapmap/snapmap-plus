@@ -842,7 +842,18 @@ tab then shows it and the next save writes it, as the save already writes
 rows from the serving index. An alias of a folder the product received with
 a map (`imported`, `download`, `delivery`) still serves the pin but never
 rewrites it, and a build installed beside another of its key (no alias) is
-never moved: a downloaded map keeps exactly what it pins. There is no
+never moved: a downloaded map keeps exactly what it pins. A published map this
+machine published is treated at launch like a My Maps load (owner 2026-11-10):
+when the published gate sees its item (a claim of this machine's is keyed by the
+item, `modsync_claim_lookup`, or the record's `links` section names it,
+`sh_modpublish_item_linked`), each row of the current manifest whose key one of
+this machine's own folders builds is rewritten to that folder's current build
+(`sh_modmanifest_current_follow` with `sh_modserve_row_follow_own`: the newest
+admitted, non-legacy own build of the key) before anything counts what is
+missing, with one `MODS: map: <key>: follows its own folder, your published map
+'<item>' (<old16> -> <new16>); nothing is downloaded for it` line, so nothing is
+fetched for those rows and the launch's listing names the own build. A key no
+own folder builds is fetched as for any map, and a stranger's map is unchanged. There is no
 upgrade action. The aliases stay flat: an alias naming the old hash is re-pointed
 at the new one, so one hop always resolves. After each pass of the rebuild rule
 the store drops every alias whose target no folder builds to any more (a

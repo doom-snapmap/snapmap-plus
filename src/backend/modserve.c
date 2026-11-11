@@ -6789,6 +6789,31 @@ int sh_modserve_row_follow(const char *bundle_hash, sh_modserve_bundle_ref *out)
     return 1;
 }
 
+int sh_modserve_row_follow_own(const char *id, const char *bundle_hash, sh_modserve_bundle_ref *out)
+{
+    const ms_index *x = g_index;
+    char lower[SH_MB_ID_MAX + 1];
+    int i, at = -1;
+    if (out) memset(out, 0, sizeof *out);
+    if (!x || !id || !id[0] || strlen(id) > SH_MB_ID_MAX) return 0;
+    strcpy_s(lower, sizeof lower, id);
+    ms_lower(lower);
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->admitted || !b->own || b->legacy || !b->id || strcmp(b->id, lower)) continue;
+        if (at < 0 || ms_newer(x, i, at)) at = i;
+    }
+    if (at < 0 || (bundle_hash && x->bundles[at].hash && !_stricmp(x->bundles[at].hash, bundle_hash))) return 0;
+    if (out) {
+        const ms_bundle *b = &x->bundles[at];
+        strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
+        strncpy_s(out->version, sizeof out->version, b->version ? b->version : "", _TRUNCATE);
+        strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
+        out->size = (unsigned long long)b->total;
+    }
+    return 1;
+}
+
 int sh_modserve_row_other_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
 {
     const ms_index *x = g_index;
