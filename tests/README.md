@@ -283,4 +283,10 @@ The Worker runtime suite runs the feedback relay under Miniflare against a GitHu
 dependency with `npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0`, then run
 `node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare`.
 
+The long-values flow runs against the mod store Worker itself: after `run-tests.ps1` has built
+`prefab_mods_test`, `node tests/long_values_worker_test.js build/worker-tests/node_modules/miniflare <snapmap-web checkout>`
+serves the website repository's `api/worker.js` under Miniflare and builds, publishes, saves, downloads and installs a mod
+with a 2,000-character name and author, a 10,000-character homepage and a 60-folder, 5,000-byte path under a long mods folder.
+Tests read a heap result into their own buffers through `heap_out.h`.
+
 Changes to signatures or engine-global anchors require `-Doom <unpacked-image> -DoomAlt <other-renderer-image>`. See [contributing](../docs/contributing.md#7-run-the-tests) for the full requirements. Installer and release-tool tests live with those components. Preserve fixture data unless intentionally changing the case it represents.
