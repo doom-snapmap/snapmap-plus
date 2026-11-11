@@ -483,7 +483,7 @@ void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_
 void sh_script_stop_text(const char *mod, const char *file, int line, const char *what,
                          const char *todo, char *out, size_t cap)
 {
-    char where[200];
+    char where[600];   /* a script's path: a Windows file name is at most 255 characters */
     if (file && file[0] && line > 0) put(where, sizeof where, ", %s line %d", file, line);
     else if (file && file[0]) put(where, sizeof where, ", %s", file);
     else where[0] = 0;

@@ -751,24 +751,34 @@ static DWORD       g_damage_tls = TLS_OUT_OF_INDEXES;
 
 typedef struct damage_ctx { void *ai; const uint8_t *record; struct damage_ctx *outer; } damage_ctx;
 
-/* "mods/<salt>/x" of mod `mod` as "x"; any other name as it is. */
-static void relative_name(int mod, const char *full, char *out, size_t cap)
+/* "mods/<salt>/x" of mod `mod` as "x" (a pointer into full); any other name as it is. */
+static const char *relative_name(int mod, const char *full)
 {
     const char *salt = sh_script_hooks_mod_salt(mod);
     size_t n = salt ? strlen(salt) : 0;
+    if (!full) return "";
     if (n && !_strnicmp(full, "mods/", 5) && !_strnicmp(full + 5, salt, n) && full[5 + n] == '/' && full[6 + n])
         full += 6 + n;
-    strncpy_s(out, cap, full, _TRUNCATE);
+    return full;
 }
 
-/* The name of the decl at `decl` (idDecl +0x08) into out; "" when unreadable. */
-static void decl_name(const void *decl, char *out, size_t cap)
+/* A whole copy of an engine string (malloc'd), or NULL when it is unreadable. */
+static char *engine_dup(const char *s)
 {
-    const char *name = (const char *)read_ptr(decl, SH_COMBAT_DECL_NAME);
-    out[0] = 0;
-    if (!name) return;
-    __try { strncpy_s(out, cap, name, _TRUNCATE); }
-    __except (av_only(GetExceptionCode())) { out[0] = 0; }
+    size_t n = 0;
+    char *out;
+    if (!s) return NULL;
+    __try { n = strlen(s); } __except (av_only(GetExceptionCode())) { return NULL; }
+    out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    __try { memcpy(out, s, n); out[n] = 0; } __except (av_only(GetExceptionCode())) { free(out); return NULL; }
+    return out;
+}
+
+/* The name of the decl at `decl` (idDecl +0x08), malloc'd; NULL when unreadable. */
+static char *decl_name(const void *decl)
+{
+    return engine_dup((const char *)read_ptr(decl, SH_COMBAT_DECL_NAME));
 }
 
 /* A handle a script can hold for an entity, by spawn id (0 for none or the world). */
@@ -789,6 +799,7 @@ static void on_damage_detour(void *entity, uint32_t attacker_id, float amount)
 {
     sh_script_event ev;
     damage_ctx *ctx;
+    char *decl = NULL, *zone = NULL;
     int mod = -1;
     sh_script_handle self;
     ((on_damage_fn)g_ch[CH_ON_DAMAGE].tramp)(entity, attacker_id, amount);
@@ -802,26 +813,34 @@ static void on_damage_detour(void *entity, uint32_t attacker_id, float amount)
     ctx = g_damage_tls != TLS_OUT_OF_INDEXES ? (damage_ctx *)TlsGetValue(g_damage_tls) : NULL;
     if (ctx && ctx->ai == entity) {
         const uint8_t *rec = ctx->record;
-        char name[SH_SCRIPT_EVENT_TEXT];
+        const char *zone_at = NULL;
+        void *decl_at = NULL;
         __try {
             int hits = *(const int *)(rec + SH_COMBAT_REC_HITS), i;
             ev.third = handle_for(*(void * const *)(rec + SH_COMBAT_REC_INFLICTOR));
-            decl_name(*(void * const *)(rec + SH_COMBAT_REC_DECL), name, sizeof name);
-            relative_name(mod, name, ev.text, sizeof ev.text);
+            decl_at = *(void * const *)(rec + SH_COMBAT_REC_DECL);
             memcpy(ev.vec, rec + SH_COMBAT_REC_DIR, 3 * sizeof(float));
             ev.flags |= SH_SCRIPT_EVF_VEC;
+            /* the engine's own record: at most SH_COMBAT_REC_ZONES_MAX hits are laid out in it */
             if (hits > SH_COMBAT_REC_ZONES_MAX) hits = SH_COMBAT_REC_ZONES_MAX;
-            for (i = 0; i < hits && !ev.text2[0]; i++) {
-                const char *const *zone = *(const char *const *const *)(rec + SH_COMBAT_REC_ZONE + (size_t)i * 8);
-                if (zone && *zone) strncpy_s(ev.text2, sizeof ev.text2, *zone, _TRUNCATE);
+            for (i = 0; i < hits && !zone_at; i++) {
+                const char *const *z = *(const char *const *const *)(rec + SH_COMBAT_REC_ZONE + (size_t)i * 8);
+                if (z && *z && **z) zone_at = *z;
             }
         } __except (av_only(GetExceptionCode())) {
             ev.flags = 0;
-            ev.text[0] = ev.text2[0] = 0;
+            decl_at = NULL;
+            zone_at = NULL;
         }
+        decl = decl_name(decl_at);
+        zone = engine_dup(zone_at);
+        ev.text = relative_name(mod, decl);
+        ev.text2 = zone;
     }
     sh_script_combat_note_hit(self, ev.text, ev.other);
     sh_script_queue_push(mod, &ev);
+    free(decl);
+    free(zone);
 }
 
 static void damage_apply_detour(void *ai, void *record)
@@ -840,7 +859,7 @@ static void killed_detour(void *ai, void *inflictor, void *attacker, void *parms
                           uint64_t a8)
 {
     sh_script_event ev;
-    char name[SH_SCRIPT_EVENT_TEXT];
+    char *name = NULL;
     int mod = -1;
     sh_script_handle self = sh_script_hooks_handle_of(ai, &mod);
     memset(&ev, 0, sizeof ev);
@@ -849,17 +868,19 @@ static void killed_detour(void *ai, void *inflictor, void *attacker, void *parms
         ev.self = self;
         ev.other = handle_for(attacker);
         ev.third = handle_for(inflictor);
-        decl_name(read_ptr(parms, SH_COMBAT_PARMS_DECL), name, sizeof name);
-        relative_name(mod, name, ev.text, sizeof ev.text);
+        name = decl_name(read_ptr(parms, SH_COMBAT_PARMS_DECL));
+        ev.text = relative_name(mod, name);
     }
     ((killed_fn)g_ch[CH_KILLED].tramp)(ai, inflictor, attacker, parms, a5, a6, a7, a8);
     if (self && mod >= 0 && sh_script_combat_first_death(self)) sh_script_queue_push(mod, &ev);
+    free(name);
 }
 
 static void set_pain_detour(void *ai, int reaction, int ms)
 {
     sh_script_event ev;
     const char *name;
+    char *decl = NULL;
     int mod = -1;
     sh_script_handle self;
     ((set_pain_fn)g_ch[CH_SET_PAIN].tramp)(ai, reaction, ms);
@@ -870,30 +891,31 @@ static void set_pain_detour(void *ai, int reaction, int ms)
     memset(&ev, 0, sizeof ev);
     ev.kind = SH_SCRIPT_EV_PAIN;
     ev.self = self;
-    strncpy_s(ev.text, sizeof ev.text, name, _TRUNCATE);
-    sh_script_combat_last_hit(self, ev.text2, sizeof ev.text2, &ev.other);
+    ev.text = name;
+    sh_script_combat_last_hit(self, &decl, &ev.other);
+    ev.text2 = decl;
     sh_script_queue_push(mod, &ev);
+    free(decl);
 }
 
 static void anim_notify_detour(void *entity, const char *message)
 {
     int mod = -1;
     sh_script_handle self;
-    char text[SH_SCRIPT_EVENT_TEXT];
+    char *text;
     ((anim_notify_fn)g_ch[CH_ANIM_NOTIFY].tramp)(entity, message);
     self = sh_script_hooks_handle_of(entity, &mod);
     if (!self || mod < 0 || !message) return;
-    text[0] = 0;
-    __try { strncpy_s(text, sizeof text, message, _TRUNCATE); }
-    __except (av_only(GetExceptionCode())) { return; }
-    if (text[0]) sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0.0f, text, NULL);
+    text = engine_dup(message);   /* the row's whole text */
+    if (text && text[0]) sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0.0f, text, NULL);
+    free(text);
 }
 
 static void launch_detour(void *projectile, void *owner, const float *origin, const float *axis, void *a5,
                           uint64_t a6, uint64_t a7, uint64_t a8)
 {
     sh_script_event ev;
-    char name[SH_SCRIPT_EVENT_TEXT];
+    char *name;
     int mod = -1;
     uint32_t id;
     sh_script_handle self;
@@ -906,8 +928,8 @@ static void launch_detour(void *projectile, void *owner, const float *origin, co
     ev.kind = SH_SCRIPT_EV_PROJECTILE;
     ev.self = self;
     ev.other = sh_script_combat_launch(id, self, mod);   /* its handle and launch record, released together */
-    decl_name(read_ptr(projectile, SH_COMBAT_PROJ_DECL), name, sizeof name);
-    relative_name(mod, name, ev.text, sizeof ev.text);
+    name = decl_name(read_ptr(projectile, SH_COMBAT_PROJ_DECL));
+    ev.text = relative_name(mod, name);
     __try {
         if (origin && axis) {
             memcpy(ev.vec, origin, 3 * sizeof(float));
@@ -916,6 +938,7 @@ static void launch_detour(void *projectile, void *owner, const float *origin, co
         }
     } __except (av_only(GetExceptionCode())) { ev.flags = 0; }
     if (ev.other) sh_script_queue_push(mod, &ev);
+    free(name);
 }
 
 /* Record a resolved target and its window bytes (install, main thread). */

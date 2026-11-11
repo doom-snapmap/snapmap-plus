@@ -283,7 +283,7 @@ static const char *log_now(void)
     sh_script_log_read(SALT, log_cat, NULL);
     return g_log;
 }
-static char g_stop[SH_SCRIPT_LINE_CAP];
+static char g_stop[4096];
 static const char *stop_now(void)
 {
     g_stop[0] = 0;

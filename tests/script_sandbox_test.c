@@ -118,8 +118,8 @@ typedef struct {
     uint64_t entity, other, inflictor;
     double   amount;
     char     names[SH_SCRIPT_NAMES_CAP];
-    char     text[SH_SCRIPT_EVENT_TEXT];
-    char     location[SH_SCRIPT_EVENT_TEXT];
+    char     text[4096];
+    char     location[4096];
 } tev;
 
 /* The handle a hook hands over for a spawn id: the mod's record, else a
@@ -172,7 +172,7 @@ static const char *log_of(const char *salt)
     sh_script_log_read(salt, log_cat, NULL);
     return g_log;
 }
-static char g_stop[SH_SCRIPT_LINE_CAP];
+static char g_stop[4096];
 static const char *stop_of(const char *salt)
 {
     sh_script_stop_line(salt, g_stop, sizeof g_stop);
@@ -905,6 +905,20 @@ static void count_line(void *ctx, const char *line)
     if (n > g_longest) g_longest = n;
 }
 
+/* A stop line longer than the old 512 bytes: the script's own error text whole. */
+static void test_long_stop_line(void)
+{
+    char *line;
+    int st = run_one("api = 1\nerror(string.rep('e', 3000))\n");
+    CHECK(st == SH_SCRIPT_STOPPED);
+    line = sh_script_stop_line_dup("aaaaaaaa");
+    CHECK(line && strlen(line) > 3000 && strstr(line, "Script stopped: Test Mod, scripts\\main.lua line 2: ") == line);
+    free(line);
+    log_of("aaaaaaaa");
+    CHECK(strlen(g_log) > 3000);   /* the log keeps it whole too */
+    sh_script_map_end();
+}
+
 static void test_log_whole(void)
 {
     int n;
@@ -1039,6 +1053,7 @@ int main(void)
     test_random();
     test_teardown();
     test_log_whole();
+    test_long_stop_line();
     test_fuzz();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);

@@ -119,7 +119,7 @@ static int count_of(const char *hay, const char *needle)
 
 static void test_play(void)
 {
-    char stop[SH_SCRIPT_LINE_CAP];
+    char stop[4096];
     LARGE_INTEGER f, t0, t1;
     double ms;
     int i;
@@ -418,7 +418,7 @@ static void test_spin_heal(void)
     CHECK(player->health == 75);
     CHECK(sh_script_status("spinheal") == SH_SCRIPT_RUNNING);
     if (sh_script_status("spinheal") != SH_SCRIPT_RUNNING) {
-        char stop[SH_SCRIPT_LINE_CAP];
+        char stop[4096];
         sh_script_stop_line("spinheal", stop, sizeof stop);
         printf("  %s\n", stop);
     }
@@ -619,7 +619,7 @@ static void test_brute(void)
     CHECK(strstr(g_b_log, "ssaction_ChangeAnimState:melee;") != NULL);
     CHECK(sh_script_status("brutemod") == SH_SCRIPT_RUNNING);
     if (sh_script_status("brutemod") != SH_SCRIPT_RUNNING) {
-        char stop[SH_SCRIPT_LINE_CAP];
+        char stop[4096];
         sh_script_stop_line("brutemod", stop, sizeof stop);
         printf("  %s\n", stop);
     }

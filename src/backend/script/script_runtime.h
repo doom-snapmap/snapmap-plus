@@ -66,7 +66,6 @@ extern "C" {
 #define SH_SCRIPT_SALT_CAP      16
 #define SH_SCRIPT_MODNAME_CAP   96
 #define SH_SCRIPT_DEFNAME_CAP   192        /* a full entityDef name, mods/<salt>/... */
-#define SH_SCRIPT_LINE_CAP      512        /* a stop line the product composes (the UI's copy) */
 
 #define SH_SCRIPT_HOOK_STRIDE   1000       /* VM instructions between clock reads */
 #define SH_SCRIPT_WALL_MS       5000       /* wall time one delivery may run before it is stopped */
@@ -176,8 +175,7 @@ int sh_script_started(void);
  * A damage record's vec is the hit direction (hit.direction).
  * A record for an entity the mod's scripts do not drive is dropped at
  * delivery. Spawns and removals are the handle table's (sh_script_handles_sweep).
- * Names, notify strings and node names are at most SH_SCRIPT_EVENT_TEXT - 1
- * bytes; registration refuses longer ones. */
+ * Notify strings, frame-event commands and node names have any length. */
 
 /* What the running mods bind: 1 when a running mod registered a handler for the
  * full entityDef name, with that mod's salt in salt_out and the kinds bound
@@ -262,9 +260,12 @@ int sh_script_refuse(lua_State *L, const char *fmt, ...);
 #define SH_SCRIPT_ENDED   3      /* the map ended with the scripts running */
 int sh_script_status(const char *salt);
 
-/* Copy the stop line of `salt` into out: 1 when its scripts stopped in the
- * current or last map, else 0 (out holds ""). Any thread. */
+/* Copy the stop line of `salt` into out (cut to the caller's cap): 1 when its
+ * scripts stopped in the current or last map, else 0 (out holds ""). The
+ * line itself has any length: sh_script_stop_line_dup gives it whole,
+ * malloc'd (NULL when there is none). Any thread. */
 int sh_script_stop_line(const char *salt, char *out, size_t cap);
+char *sh_script_stop_line_dup(const char *salt);
 
 /* Call fn for each line of `salt`'s script log, oldest first (prints,
  * warnings, the stop line). Returns the line count. Any thread; fn runs under
@@ -288,7 +289,7 @@ typedef struct sh_script_mod_info {
     int  handlers;           /* handlers registered (on.*) */
     int  entities;           /* entities its scripts drive now */
     int  log_lines;
-    char stop_line[SH_SCRIPT_LINE_CAP];
+    int  stopped_line;       /* a stop line is kept: sh_script_stop_line_dup gives it whole */
 } sh_script_mod_info;
 int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out);
 

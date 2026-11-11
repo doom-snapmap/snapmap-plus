@@ -85,7 +85,6 @@ extern "C" {
 #define SH_SCRIPT_NODE_DEF_PARENT  "snapmaps/logic/relay"   /* the stock Relay entityDef */
 #define SH_SCRIPT_NODE_ROW_PARENT  "logic/relay"            /* the stock Relay row */
 #define SH_SCRIPT_NODE_FIRED       8                        /* SNAP_EVENT_LOGIC_FIRED */
-#define SH_SCRIPT_NODE_NAME_MAX    127                      /* SH_SCRIPT_EVENT_TEXT - 1 */
 #define SH_SCRIPT_NODE_PER_MOD     256                      /* Script nodes node():fire() reaches per call */
 
 /* Variable types, as the engine numbers them (snapVarType_t). */
@@ -146,6 +145,8 @@ void sh_script_node_map_clear(void);
 /* The display name of the Script node with this uniqueId into out: 1 when
  * the map has such a node (out may be "" for an unnamed one), 0 when not. */
 int  sh_script_node_name_of(int uid, char *out, size_t cap);
+/* The same name whole, malloc'd (the caller frees it); NULL when uid is no Script node. */
+char *sh_script_node_name_dup(int uid);
 
 /* A variable by name (ASCII case-insensitive): 1 with *type and *index,
  * 0 when the map has none, -1 when two or more variables carry the name

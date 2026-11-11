@@ -453,7 +453,7 @@ static void test_door(void)
 
 static void test_api(void)
 {
-    char err[160], stop[SH_SCRIPT_LINE_CAP];
+    char err[160], stop[4096];
     sh_script_handle n1;
     int mod;
     static const struct { const char *salt, *text, *want; } refusals[] = {
@@ -493,6 +493,9 @@ static void test_api(void)
         "  print('n', tostring(node('open_door')), node('open_door').name)\n"
         "  print('fired', node('OPEN_DOOR'):fire(), node('open_door'):fire(nil))\n"
         "  print('missing', node('no_such_node'):fire(), node('no_such_node'):fire())\n"
+        "  local nm = string.rep('n', 300)\n"
+        "  print('longnode', #node(nm).name, tostring(node(nm)) == 'Script node \"' .. nm .. '\"')\n"
+        "  on.input(string.rep('i', 300), function() end)\n"
         "end)\n";
     g_nmem++;
     CHECK(sh_script_map_open() == 1);
@@ -516,6 +519,7 @@ static void test_api(void)
     CHECK(strstr(g_out, "n\tScript node \"open_door\"\topen_door\n") != NULL);
     CHECK(strstr(g_out, "fired\t1\t1\n") != NULL && g_nfired == 2 && g_fired[0].activator == 0);
     CHECK(strstr(g_out, "missing\t0\t0\n") != NULL);
+    CHECK(strstr(g_out, "longnode\t300\ttrue\n") != NULL);   /* a node name of any length (the old cap was 127) */
     CHECK(strstr(g_out, "Warning: scripts\\main.lua line 14: node(\"no_such_node\"):fire() found no Script node of Vars Mod "
                         "named \"no_such_node\" in this map, so nothing fired. Place a Script node from Vars Mod and name it "
                         "\"no_such_node\".\n") != NULL);

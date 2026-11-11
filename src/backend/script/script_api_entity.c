@@ -402,8 +402,8 @@ static int l_anim_force(lua_State *L)
     char *dest;
     sh_script_earg a[4];
     int ms;
-    if (sh_script_api_opt_number(L, 3, "anim_force", "the blend time in seconds", &blend) && (blend < 0 || blend > 10))
-        sh_script_refuse(L, "\"anim_force\" needs a blend time from 0 to 10 seconds, got %g", blend);
+    if (sh_script_api_opt_number(L, 3, "anim_force", "the blend time in seconds", &blend) && !(blend >= 0))
+        sh_script_refuse(L, "\"anim_force\" needs a blend time of 0 seconds or more, got %g", blend);
     ent = sh_script_api_owned(L, 1, "anim_force", "animate", &h);
     if (!ent) return 0;
     ms = (int)(blend * 1000.0 + 0.5);

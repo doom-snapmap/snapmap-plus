@@ -304,7 +304,7 @@ static const char *log_now(void)
     sh_script_log_read(SALT, log_cat, NULL);
     return g_log;
 }
-static char g_stop[SH_SCRIPT_LINE_CAP];
+static char g_stop[4096];
 static const char *stop_now(void)
 {
     g_stop[0] = 0;
@@ -565,6 +565,7 @@ static void test_hook_records(void)
         "on.anim('ai/brute', 'throw', function(self) print('anim throw') end)\n"
         "on.anim('ai/brute', 'fsm_window:Combat:0.5', function(self) print('anim whole') end)\n"
         "on.frame_event('ai/brute', 'FSM_Window', function(self, args)\n"
+        "  if #args == 1 then print('long frame', #args[1]) return end\n"
         "  print('frame', #args, args[1], args[2] + 1, math.type(args[2]))\n"
         "end)\n"
         "on.frame_event('ai/brute', 'throw', function(self, args) print('frame throw', #args) end)\n"
@@ -583,20 +584,28 @@ static void test_hook_records(void)
 
     memset(&ev, 0, sizeof ev);
     ev.kind = SH_SCRIPT_EV_DAMAGE; ev.self = self; ev.other = player; ev.third = imp; ev.amount = 25;
-    strcpy_s(ev.text, sizeof ev.text, "damage/rock");
-    strcpy_s(ev.text2, sizeof ev.text2, "left_forearm");
+    ev.text = "damage/rock";
+    ev.text2 = "left_forearm";
     ev.vec[1] = 1; ev.flags = SH_SCRIPT_EVF_VEC;
     CHECK(sh_script_queue_push(mod, &ev) == 1);
     CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0, "throw", NULL) == 1);
     CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0, "fsm_window:Combat:0.5", NULL) == 1);
+    {
+        /* a row of 400 characters (the old record cut it at 127): the command and its argument arrive whole */
+        static char longrow[420];
+        memcpy(longrow, "fsm_window:", 11);
+        memset(longrow + 11, 'x', 389);
+        longrow[400] = 0;
+        CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0, longrow, NULL) == 1);
+    }
     memset(&ev, 0, sizeof ev);
     ev.kind = SH_SCRIPT_EV_PAIN; ev.self = self; ev.other = player;
-    strcpy_s(ev.text, sizeof ev.text, "PAIN_FALTER");
-    strcpy_s(ev.text2, sizeof ev.text2, "damage/rock");
+    ev.text = "PAIN_FALTER";
+    ev.text2 = "damage/rock";
     CHECK(sh_script_queue_push(mod, &ev) == 1);
     memset(&ev, 0, sizeof ev);
     ev.kind = SH_SCRIPT_EV_PROJECTILE; ev.self = self; ev.other = rocket;
-    strcpy_s(ev.text, sizeof ev.text, "rocket");
+    ev.text = "rocket";
     ev.vec[0] = 7; ev.vec[3] = 1; ev.flags = SH_SCRIPT_EVF_VEC;
     CHECK(sh_script_queue_push(mod, &ev) == 1);
     CHECK(sh_script_queue_post(mod, SH_SCRIPT_EV_DEATH, self, player, imp, 0, "damage/rock", NULL) == 1);
@@ -608,6 +617,7 @@ static void test_hook_records(void)
     CHECK(has(g_log, "anim whole"));
     /* the command matches without case; the arguments keep the row's case; numbers are numbers */
     CHECK(has(g_log, "frame\t2\tCombat\t1.5\tfloat"));
+    CHECK(has(g_log, "long frame\t389"));
     CHECK(has(g_log, "pain\tPAIN_FALTER\tdamage/rock\tplayer/sp"));
     CHECK(has(g_log, "projectile\tprojectile/stock_rocket\trocket\t7.0\t1.0"));
     CHECK(has(g_log, "death\tdamage/rock\tplayer/sp"));
@@ -678,14 +688,21 @@ static void test_projectiles_held(void)
 
 static void test_records(void)
 {
-    char decl[64];
+    char *decl = NULL, longdecl[600];
     sh_script_handle a = 0;
     int mod = -1;
     sh_script_combat_reset();
-    CHECK(!sh_script_combat_last_hit(7, decl, sizeof decl, &a));
+    CHECK(!sh_script_combat_last_hit(7, &decl, &a) && decl == NULL);
     sh_script_combat_note_hit(7, "damage/rock", 9);
     sh_script_combat_note_hit(7, "damage/beam", 11);
-    CHECK(sh_script_combat_last_hit(7, decl, sizeof decl, &a) && !strcmp(decl, "damage/beam") && a == 11);
+    CHECK(sh_script_combat_last_hit(7, &decl, &a) && decl && !strcmp(decl, "damage/beam") && a == 11);
+    free(decl);
+    /* a decl name of any length is kept whole */
+    memset(longdecl, 'd', sizeof longdecl - 1);
+    longdecl[sizeof longdecl - 1] = 0;
+    sh_script_combat_note_hit(7, longdecl, 12);
+    CHECK(sh_script_combat_last_hit(7, &decl, &a) && decl && strlen(decl) == sizeof longdecl - 1 && a == 12);
+    free(decl);
     CHECK(sh_script_combat_first_death(7) == 1);
     CHECK(sh_script_combat_first_death(7) == 0);
     CHECK(sh_script_combat_first_death(8) == 1);

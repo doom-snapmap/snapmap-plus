@@ -23,13 +23,18 @@ typedef struct {
 
 static void say(con *c, const char *fmt, ...)
 {
-    char text[SH_SCRIPT_LINE_CAP + 200];
+    char *text;
+    int n;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(text, sizeof text, _TRUNCATE, fmt, ap);
+    n = _vscprintf(fmt, ap);
     va_end(ap);
-    text[sizeof text - 1] = 0;
+    if (n < 0 || !(text = (char *)malloc((size_t)n + 1))) return;
+    va_start(ap, fmt);
+    _vsnprintf_s(text, (size_t)n + 1, _TRUNCATE, fmt, ap);
+    va_end(ap);
     if (c->line) c->line(c->context, text);
+    free(text);
 }
 
 static const char *plural(int n, const char *one, const char *many)
@@ -52,8 +57,10 @@ static void status_one(void *context, const char *salt, const char *name)
             plural(i.files, "file", "files"), i.handlers, plural(i.handlers, "handler", "handlers"), i.entities,
             plural(i.entities, "entity", "entities"));
     } else if (i.status == SH_SCRIPT_STOPPED) {
-        if (i.stop_line[0]) say(c, "%s", i.stop_line);
+        char *line = i.stopped_line ? sh_script_stop_line_dup(salt) : NULL;
+        if (line) say(c, "%s", line);
         else say(c, "%s: stopped for this map.", i.name);
+        free(line);
     } else if (i.status == SH_SCRIPT_ENDED) {
         say(c, "%s: ended with the map after loading %d of %d %s and registering %d %s.", i.name, i.files_run, i.files,
             plural(i.files, "file", "files"), i.handlers, plural(i.handlers, "handler", "handlers"));

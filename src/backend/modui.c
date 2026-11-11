@@ -132,7 +132,7 @@ static int mu_default_script_info(const char *salt, sh_modui_script_info *out)
                 : i.status == SH_SCRIPT_RUNNING ? SH_MODUI_SCRIPT_RUNNING
                 : i.status == SH_SCRIPT_ENDED ? SH_MODUI_SCRIPT_ENDED : SH_MODUI_SCRIPT_NONE;
     out->lines = i.log_lines;
-    strncpy_s(out->stop, sizeof out->stop, i.stop_line, _TRUNCATE);
+    out->stop = i.stopped_line ? sh_script_stop_line_dup(salt) : NULL;
     return 1;
 }
 static int mu_default_script_log(const char *salt, sh_modui_line_fn fn, void *context)
@@ -364,9 +364,10 @@ static void mu_put_script_run(mu_buf *b, const char *key, const char *salt)
     mu_key(b, key, 0);
     mu_putn(b, "{", 1);
     mu_kstr(b, "status", mu_script_status_name(info.status), 1);
-    mu_kstr(b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED ? info.stop : "", 0);
+    mu_kstr(b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED && info.stop ? info.stop : "", 0);
     mu_knum(b, "lines", (unsigned)(info.lines < 0 ? 0 : info.lines), 0);
     mu_putn(b, "}", 1);
+    free(info.stop);
 }
 
 /* ------------------------------------------------------------------ sound banks a restart brings in */
@@ -429,9 +430,10 @@ static void mu_script_mod(void *context, const char *salt)
     mu_putn(l->b, "{", 1);
     mu_kstr(l->b, "salt", salt, 1);
     mu_kstr(l->b, "status", mu_script_status_name(info.status), 0);
-    mu_kstr(l->b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED ? info.stop : "", 0);
+    mu_kstr(l->b, "stop", info.status == SH_MODUI_SCRIPT_STOPPED && info.stop ? info.stop : "", 0);
     mu_knum(l->b, "lines", (unsigned)(info.lines < 0 ? 0 : info.lines), 0);
     mu_putn(l->b, "}", 1);
+    free(info.stop);
 }
 
 static void mu_script_line(void *context, const char *line)

@@ -149,6 +149,20 @@ done:
     return ok;
 }
 
+char *sh_script_node_name_dup(int uid)
+{
+    int i;
+    char *out = NULL;
+    AcquireSRWLockShared(&g_map_lock);
+    for (i = 0; i < g_nnodes; i++) {
+        if (g_nodes[i].uid != uid) continue;
+        out = _strdup(g_nodes[i].name);
+        break;
+    }
+    ReleaseSRWLockShared(&g_map_lock);
+    return out;
+}
+
 int sh_script_node_name_of(int uid, char *out, size_t cap)
 {
     int i, found = 0;
@@ -215,15 +229,15 @@ void sh_script_node_set_ops(const sh_script_node_ops *ops)
 
 int sh_script_node_post_input(int mod, sh_script_handle node, sh_script_handle activator, int uid)
 {
-    char name[SH_SCRIPT_NODE_NAME_MAX + 1];
-    name[0] = 0;
-    if (uid >= 0) sh_script_node_name_of(uid, name, sizeof name);
-    return sh_script_queue_post(mod, SH_SCRIPT_EV_INPUT, node, activator, 0, 0.0f, name, NULL);
+    char *name = uid >= 0 ? sh_script_node_name_dup(uid) : NULL;
+    int r = sh_script_queue_post(mod, SH_SCRIPT_EV_INPUT, node, activator, 0, 0.0f, name ? name : "", NULL);
+    free(name);
+    return r;
 }
 
 /* =============================================================== the API */
 
-typedef struct node_ud { char name[SH_SCRIPT_NODE_NAME_MAX + 1]; } node_ud;
+typedef struct node_ud { char name[1]; } node_ud;   /* the whole name follows, NUL-terminated */
 
 static const char *var_type_name(int type)
 {
@@ -240,7 +254,7 @@ static const char *var_type_name(int type)
  * `reg` (a warning naming the calling script line). */
 static void warn_once(lua_State *L, const char *reg, const char *key, const char *text)
 {
-    char file[128], line[SH_SCRIPT_LINE_CAP];
+    char file[512];
     int ln = 0;
     if (lua_getfield(L, LUA_REGISTRYINDEX, reg) != LUA_TTABLE) {
         lua_pop(L, 1);
@@ -257,22 +271,21 @@ static void warn_once(lua_State *L, const char *reg, const char *key, const char
     luaL_where(L, 1);
     sh_script_split_where(lua_tostring(L, -1), file, sizeof file, &ln);
     lua_pop(L, 1);
-    if (file[0] && ln) _snprintf_s(line, sizeof line, _TRUNCATE, "%s line %d: %s", file, ln, text);
-    else copyz(line, sizeof line, text);
-    lua_warning(L, line, 0);
+    if (file[0] && ln) lua_pushfstring(L, "%s line %d: %s", file, ln, text);
+    else lua_pushstring(L, text);
+    lua_warning(L, lua_tostring(L, -1), 0);
+    lua_pop(L, 1);
 }
 
-static void check_node_name(lua_State *L, int arg, const char *call, char *out, size_t cap)
+static const char *check_node_name(lua_State *L, int arg, const char *call, size_t *len)
 {
     size_t n = 0;
     const char *s = lua_type(L, arg) == LUA_TSTRING ? lua_tolstring(L, arg, &n) : NULL;
     if (!s || !n)
         sh_script_refuse(L, "\"%s\" needs the name of a Script node, got %s", call,
                          lua_isnoneornil(L, arg) ? "nothing" : (s ? "an empty name" : luaL_typename(L, arg)));
-    if (n > SH_SCRIPT_NODE_NAME_MAX)
-        sh_script_refuse(L, "\"%s\" was given a node name longer than %d characters; give the Script node a shorter name",
-                         call, SH_SCRIPT_NODE_NAME_MAX);
-    copyz(out, cap, s);
+    *len = n;
+    return s;
 }
 
 /* node:fire([activator]) */
@@ -280,7 +293,6 @@ static int node_fire(lua_State *L)
 {
     node_ud *self = (node_ud *)luaL_testudata(L, 1, MT_NODE);
     sh_script_handle act = 0, nodes[SH_SCRIPT_NODE_PER_MOD];
-    char name[SH_SCRIPT_NODE_NAME_MAX + 1];
     int mod, n, i, fired = 0;
     if (!self)
         return sh_script_refuse(L, "\"fire\" is called on a Script node, as node(\"name\"):fire(); it was called on %s",
@@ -291,20 +303,24 @@ static int node_fire(lua_State *L)
     n = (mod >= 0 && g_ops.nodes) ? g_ops.nodes(g_ops.context, mod, nodes, SH_SCRIPT_NODE_PER_MOD) : 0;
     for (i = 0; i < n; i++) {
         int uid = g_ops.node_uid ? g_ops.node_uid(g_ops.context, nodes[i]) : -1;
-        if (uid < 0 || !sh_script_node_name_of(uid, name, sizeof name) || _stricmp(name, self->name)) continue;
+        char *name = uid >= 0 ? sh_script_node_name_dup(uid) : NULL;
+        int same = name && !_stricmp(name, self->name);
+        free(name);
+        if (!same) continue;
         if (g_ops.fire && g_ops.fire(g_ops.context, nodes[i], act)) fired++;
     }
     if (!fired && n >= 0) {
-        char text[400], key[SH_SCRIPT_NODE_NAME_MAX + 1];
+        luaL_Buffer key;
         const char *p;
-        size_t k = 0;
-        for (p = self->name; *p && k + 1 < sizeof key; p++) key[k++] = fold(*p);
-        key[k] = 0;
-        _snprintf_s(text, sizeof text, _TRUNCATE,
-                    "node(\"%s\"):fire() found no Script node of %s named \"%s\" in this map, so nothing fired. "
-                    "Place a Script node from %s and name it \"%s\".",
-                    self->name, sh_script_mod_name(L), self->name, sh_script_mod_name(L), self->name);
-        warn_once(L, REG_MISSED, key, text);
+        int top = lua_gettop(L);
+        luaL_buffinit(L, &key);
+        for (p = self->name; *p; p++) luaL_addchar(&key, fold(*p));
+        luaL_pushresult(&key);
+        lua_pushfstring(L, "node(\"%s\"):fire() found no Script node of %s named \"%s\" in this map, so nothing fired. "
+                           "Place a Script node from %s and name it \"%s\".",
+                        self->name, sh_script_mod_name(L), self->name, sh_script_mod_name(L), self->name);
+        warn_once(L, REG_MISSED, lua_tostring(L, top + 1), lua_tostring(L, top + 2));
+        lua_settop(L, top);
     }
     lua_pushinteger(L, fired);
     return 1;
@@ -334,11 +350,10 @@ static int node_newindex(lua_State *L)
 
 int sh_script_node_lua_node(lua_State *L)
 {
-    char name[SH_SCRIPT_NODE_NAME_MAX + 1];
-    node_ud *ud;
-    check_node_name(L, 1, "node", name, sizeof name);
-    ud = (node_ud *)lua_newuserdatauv(L, sizeof *ud, 0);
-    copyz(ud->name, sizeof ud->name, name);
+    size_t n = 0;
+    const char *name = check_node_name(L, 1, "node", &n);
+    node_ud *ud = (node_ud *)lua_newuserdatauv(L, sizeof *ud + n, 0);
+    memcpy(ud->name, name, n + 1);
     if (luaL_newmetatable(L, MT_NODE)) {
         lua_pushcfunction(L, node_index); lua_setfield(L, -2, "__index");
         lua_pushcfunction(L, node_newindex); lua_setfield(L, -2, "__newindex");
@@ -350,7 +365,7 @@ int sh_script_node_lua_node(lua_State *L)
 }
 
 /* The variable named at arg 1: its type and index, or a refusal. */
-static void check_var(lua_State *L, const char *call, char *name, size_t cap, int *type, int *index)
+static const char *check_var(lua_State *L, const char *call, int *type, int *index)
 {
     size_t n = 0;
     int other = -1, found;
@@ -358,16 +373,14 @@ static void check_var(lua_State *L, const char *call, char *name, size_t cap, in
     if (!s || !n)
         sh_script_refuse(L, "\"%s\" needs the name of a map variable, got %s", call,
                          lua_isnoneornil(L, 1) ? "nothing" : (s ? "an empty name" : luaL_typename(L, 1)));
-    if (n >= cap)
-        sh_script_refuse(L, "\"%s\" was given a variable name longer than %d characters", call, (int)cap - 1);
-    copyz(name, cap, s);
-    found = sh_script_node_var_find(name, type, index, &other);
+    found = sh_script_node_var_find(s, type, index, &other);
     if (found == 0)
         sh_script_refuse(L, "\"%s\": this map has no Integer, Number, Boolean or String variable named \"%s\"; "
-                         "check the name in the map's variables", call, name);
+                         "check the name in the map's variables", call, s);
     if (found < 0)
         sh_script_refuse(L, "\"%s\": this map has more than one variable named \"%s\" (%s and %s variable); "
-                         "rename one of them in the editor", call, name, var_type_name(*type), var_type_name(other));
+                         "rename one of them in the editor", call, s, var_type_name(*type), var_type_name(other));
+    return s;
 }
 
 /* 1 when the map's values can be read for this variable; otherwise its one
@@ -376,13 +389,10 @@ static int var_ready(lua_State *L, int type, int index, const char *name)
 {
     int count = g_ops.var_count ? g_ops.var_count(g_ops.context, type) : -1;
     if (count > index) return 1;
-    {
-        char text[300];
-        _snprintf_s(text, sizeof text, _TRUNCATE,
-                    "the map's variable \"%s\" could not be read here, so vars left it alone. "
-                    "Map variables are available while the map is played.", name);
-        warn_once(L, REG_VARS_OFF, name, text);
-    }
+    lua_pushfstring(L, "the map's variable \"%s\" could not be read here, so vars left it alone. "
+                       "Map variables are available while the map is played.", name);
+    warn_once(L, REG_VARS_OFF, name, lua_tostring(L, -1));
+    lua_pop(L, 1);
     return 0;
 }
 
@@ -399,10 +409,10 @@ static void push_value(lua_State *L, const sh_script_node_value *v)
 
 int sh_script_node_lua_vars_get(lua_State *L)
 {
-    char name[SH_SCRIPT_NODE_NAME_MAX + 1];
+    const char *name;
     int type, index;
     sh_script_node_value *v;
-    check_var(L, "vars.get", name, sizeof name, &type, &index);
+    name = check_var(L, "vars.get", &type, &index);
     if (!var_ready(L, type, index, name) || !g_ops.var_get) { lua_pushnil(L); return 1; }
     v = (sh_script_node_value *)calloc(1, sizeof *v);
     if (!v) return luaL_error(L, "not enough memory");
@@ -415,10 +425,10 @@ int sh_script_node_lua_vars_get(lua_State *L)
 
 int sh_script_node_lua_vars_set(lua_State *L)
 {
-    char name[SH_SCRIPT_NODE_NAME_MAX + 1];
+    const char *name;
     int type, index, ok;
     sh_script_node_value in, *stored;
-    check_var(L, "vars.set", name, sizeof name, &type, &index);
+    name = check_var(L, "vars.set", &type, &index);
     memset(&in, 0, sizeof in);
     in.type = type;
     switch (type) {
@@ -558,8 +568,8 @@ const uint8_t SH_SCRIPT_NODE_RELAY_PROLOGUE[SH_SCRIPT_RELAY_STOLEN] = {
 #define IDSTR_SIZE            0x30u
 #define IDSTR_LEN_OFF         0x08u
 #define IDSTR_DATA_OFF        0x10u
-#define VARS_MAX              100000
-#define NAME_READ_MAX         256
+#define VARS_MAX              100000      /* the engine's variable list read from its memory: a larger count
+                                               means the layout is not the expected one, so nothing is read */
 
 typedef void  (*relay_fn)(void *self, void *activator);
 typedef void  (*fire_fn)(void *entity, int event, void *activator);
@@ -617,17 +627,28 @@ static uint32_t spawn_id_of(void *entity)
     return id;
 }
 
+/* The uniqueId at the end of the entity's game name (a name of any length:
+ * only the part after its last '_' is copied, which a uniqueId keeps to the
+ * ten digits of an int). */
 static int entity_uid(void *entity)
 {
-    char name[NAME_READ_MAX];
+    char tail[16];
     void *data = NULL;
-    size_t i;
+    size_t i, last = (size_t)-1, k = 0;
+    const char *name;
     if (!entity || !rd_ptr((const uint8_t *)entity + ENT_NAME_DATA_OFF, &data) || !data) return -1;
+    name = (const char *)data;
     __try {
-        for (i = 0; i + 1 < sizeof name && ((const char *)data)[i]; i++) name[i] = ((const char *)data)[i];
-        name[i] = 0;
+        for (i = 0; name[i]; i++) if (name[i] == '_') last = i;
+        if (last == (size_t)-1) return -1;
+        tail[k++] = '_';
+        for (i = last + 1; name[i]; i++) {
+            if (k + 1 >= sizeof tail) return -1;   /* more digits than an int holds: no uniqueId */
+            tail[k++] = name[i];
+        }
+        tail[k] = 0;
     } __except (av_only(GetExceptionCode())) { return -1; }
-    return sh_script_node_uid_from_name(name);
+    return sh_script_node_uid_from_name(tail);
 }
 
 /* 1 when the recorded entityDef chain's first name is a Script node's. */

@@ -127,9 +127,10 @@ int  sh_script_combat_launched(uint32_t projectile_spawn_id, int *mod, sh_script
 int  sh_script_combat_launches(void);
 
 /* The last hit `victim` took: its damage decl and attacker (0 for none).
- * The pain hook reports them with the reaction. Any thread. */
+ * The pain hook reports them with the reaction. *decl gets a malloc'd copy
+ * of the whole name (the caller frees it). Any thread. */
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker);
-int  sh_script_combat_last_hit(sh_script_handle victim, char *decl, size_t cap, sh_script_handle *attacker);
+int  sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker);
 
 /* 1 the first time `victim`'s death is reported this map, 0 after (the
  * engine may run its death path again for a gib). Any thread. */

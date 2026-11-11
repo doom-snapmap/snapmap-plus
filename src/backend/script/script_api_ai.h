@@ -188,19 +188,20 @@ const char *sh_ai_monster_name(uint32_t value);
  * -90: to its right, 0: up). Pure. */
 void sh_ai_line_offset(const float a[3], const float b[3], float t, float offset, float roll_deg, float out[3]);
 
-/* A control table: knots t (0..1, rising) with values, linear between knots
- * and 0 outside them. Pure. */
-#define SH_AI_SPLINE_KNOTS 16
+/* A control table: n knots t (0..1, rising) with values, linear between
+ * knots and 0 outside them; any number of knots (t and v point at the
+ * caller's arrays). Pure. */
 typedef struct sh_ai_table {
-    int   n;
-    float t[SH_AI_SPLINE_KNOTS];
-    float v[SH_AI_SPLINE_KNOTS];
+    int    n;
+    float *t;
+    float *v;
 } sh_ai_table;
 float sh_ai_table_at(const sh_ai_table *table, float t);
 
 /* spline_clear's curve from `from` to `to`: the two ends and one point per
  * knot inside, each moved value x horizontal length across the line in the
- * direction the roll gives. Returns the points written (2..cap). Pure. */
+ * direction the roll gives. Returns the points written (2..cap; a cap of
+ * table->n + 2 holds every point). Pure. */
 int sh_ai_spline_points(const float from[3], const float to[3], const sh_ai_table *table, float roll_deg,
                         float (*out)[3], int cap);
 
@@ -219,7 +220,7 @@ typedef struct sh_ai_position_query {
     float at[3];                  /* the target's position */
     float min, max, ideal;        /* inches from the target */
     int   visible;                /* the place must see the target */
-    int   count;                  /* candidates on the ring (2..16) */
+    int   count;                  /* candidates on the ring (2 or more, any number) */
     float path_weight;
 } sh_ai_position_query;
 
@@ -282,7 +283,8 @@ typedef struct sh_script_ai_engine {
     /* 1 valid (*index: the animation), 0 not, 2 still being asked, -1 no such node */
     int      (*anim_valid)(void *ai, const char *node, unsigned tests, int side, int *index);
     /* 0 found (*n points), 1 still searching, 2 no path, -1 unavailable */
-    int      (*path_points)(void *ai, const float goal[3], int key, float (*out)[3], int cap, int *n);
+    /* the computed path's points, whole: *out malloc'd (the caller frees it), *n its count */
+    int      (*path_points)(void *ai, const float goal[3], int key, float (**out)[3], int *n);
     /* 0 found, 1 still searching, 2 none, -1 unavailable */
     int      (*firing_position)(void *ai, const sh_ai_position_query *q, float out[3]);
     /* 1 clear (*n points), 0 blocked, 2 still searching, -1 unavailable */
@@ -300,7 +302,10 @@ int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_
                      int *n);
 int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
                          int key_base, int *index);
-#define SH_AI_PATH_POINTS_MAX 64
+/* The engine's path cache is keyed by an int: each demon's record gets
+ * SH_AI_KEY_SPAN keys for its queries (a query with more candidates than that
+ * shares keys in turn; the engine then answers "searching" a little longer). */
+#define SH_AI_KEY_SPAN 0x4000
 
 /* The engine the calls use (the engine side installs the real one; tests a
  * fake). NULL makes every call refuse with "not available". */

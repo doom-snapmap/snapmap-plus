@@ -88,12 +88,21 @@ int sh_script_queue_open(int mod)
     return 1;
 }
 
+void sh_script_event_release(sh_script_event *ev)
+{
+    if (!ev) return;
+    free((void *)ev->text);   /* one block holds both strings */
+    ev->text = ev->text2 = NULL;
+}
+
 void sh_script_queue_close(int mod)
 {
     queue *q = q_at(mod);
+    uint32_t i;
     if (!q) return;
     q_lock(q);
     q->open = 0;
+    for (i = 0; i < q->count; i++) sh_script_event_release(&q->ring[(q->head + i) % q->cap]);
     q->head = q->count = 0;
     q_unlock(q);
 }
@@ -127,35 +136,39 @@ static int grow_ring(queue *q)
 int sh_script_queue_push(int mod, const sh_script_event *ev)
 {
     queue *q = q_at(mod);
+    size_t n1, n2;
+    char *block;
     int r;
     if (!q || !ev) return -1;
+    /* the strings, whole, in one block (copied before the lock) */
+    n1 = ev->text ? strlen(ev->text) : 0;
+    n2 = ev->text2 ? strlen(ev->text2) : 0;
+    block = (char *)malloc(n1 + n2 + 2);
+    if (block) {
+        if (n1) memcpy(block, ev->text, n1);
+        block[n1] = 0;
+        if (n2) memcpy(block + n1 + 1, ev->text2, n2);
+        block[n1 + 1 + n2] = 0;
+    }
     q_lock(q);
     if (!q->open || !q->ring) {
         r = -1;
-    } else if (q->count >= q->cap && !grow_ring(q)) {
+    } else if (!block || (q->count >= q->cap && !grow_ring(q))) {
         InterlockedIncrement(&q->dropped);
         r = 0;
     } else {
         sh_script_event *slot = &q->ring[(q->head + q->count) % q->cap];
         *slot = *ev;
-        slot->text[SH_SCRIPT_EVENT_TEXT - 1] = 0;
-        slot->text2[SH_SCRIPT_EVENT_TEXT - 1] = 0;
+        slot->text = block;
+        slot->text2 = block + n1 + 1;
+        block = NULL;
         slot->seq = ++q->seq;
         q->count++;
         r = 1;
     }
     q_unlock(q);
+    free(block);   /* only when the record was not kept */
     return r;
-}
-
-static void copy_text(char *dst, const char *src)
-{
-    size_t n;
-    if (!src) { dst[0] = 0; return; }
-    n = strlen(src);
-    if (n > SH_SCRIPT_EVENT_TEXT - 1) n = SH_SCRIPT_EVENT_TEXT - 1;
-    memcpy(dst, src, n);
-    dst[n] = 0;
 }
 
 int sh_script_queue_post(int mod, sh_script_event_kind kind, sh_script_handle self, sh_script_handle other,
@@ -168,8 +181,8 @@ int sh_script_queue_post(int mod, sh_script_event_kind kind, sh_script_handle se
     ev.other = other;
     ev.third = third;
     ev.amount = amount;
-    copy_text(ev.text, text);
-    copy_text(ev.text2, text2);
+    ev.text = text;
+    ev.text2 = text2;
     return sh_script_queue_push(mod, &ev);
 }
 

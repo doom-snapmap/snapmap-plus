@@ -111,7 +111,7 @@ static void test_queue_bounds(void)
 {
     sh_script_event ev, out[4];
     int i, first = -1, other = 99;
-    char long_text[200];
+    char long_text[5000];
     HANDLE th;
     sh_script_queue_set_drain_thread(GetCurrentThreadId());
     CHECK(sh_script_queue_push(1, NULL) == -1);
@@ -148,7 +148,7 @@ static void test_queue_bounds(void)
     CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_ANIM, 2, 0, 0, 0, "y", NULL) == 1);   /* the earlier one still works */
     CHECK(sh_script_queue_drain(300, out, 4) == 1 && out[0].self == 1);
     CHECK(sh_script_queue_drain(1, out, 4) == 1 && out[0].self == 2);
-    /* Strings are copied and cut to fit. */
+    /* Strings are copied whole, of any length (the old record cut them at 127 bytes). */
     memset(long_text, 'a', sizeof long_text - 1);
     long_text[sizeof long_text - 1] = 0;
     sh_script_queue_close(1);
@@ -159,7 +159,9 @@ static void test_queue_bounds(void)
     CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_INPUT, 1, 2, 3, 1.5f, long_text, long_text) == 1);
     CHECK(sh_script_queue_drain(1, &ev, 1) == 1);
     CHECK(ev.seq == 1 && ev.kind == SH_SCRIPT_EV_INPUT && ev.self == 1 && ev.other == 2 && ev.third == 3 && ev.amount == 1.5f);
-    CHECK(strlen(ev.text) == SH_SCRIPT_EVENT_TEXT - 1 && strlen(ev.text2) == SH_SCRIPT_EVENT_TEXT - 1);
+    CHECK(strlen(ev.text) == sizeof long_text - 1 && strlen(ev.text2) == sizeof long_text - 1);
+    sh_script_event_release(&ev);
+    CHECK(ev.text == NULL && ev.text2 == NULL);
     /* A record pushed between drains waits for the next one. */
     CHECK(sh_script_queue_drain(1, out, 4) == 0);
     CHECK(sh_script_queue_post(1, SH_SCRIPT_EV_DEATH, 7, 0, 0, 0, NULL, NULL) == 1);

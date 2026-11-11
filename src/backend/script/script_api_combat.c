@@ -46,7 +46,7 @@ typedef struct rec_map {
 } rec_map;
 
 typedef struct launch_val { int mod; sh_script_handle owner; } launch_val;
-typedef struct hit_val { sh_script_handle attacker; char decl[SH_SCRIPT_EVENT_TEXT]; } hit_val;
+typedef struct hit_val { sh_script_handle attacker; char *decl; } hit_val;   /* decl malloc'd, whole */
 
 static SRWLOCK g_rec_lock = SRWLOCK_INIT;
 static rec_map g_launch = { NULL, NULL, sizeof(launch_val), 0, 0 };
@@ -142,12 +142,27 @@ static void rec_free(rec_map *m)
     m->cap = m->n = 0;
 }
 
+/* A last hit's decl text goes with its record. Lock held. */
+static void hit_forget(sh_script_handle h)
+{
+    hit_val *v = (hit_val *)rec_get(&g_hits, h);
+    if (v) free(v->decl);
+    rec_del(&g_hits, h);
+}
+
+static void hits_free(void)
+{
+    uint32_t i;
+    for (i = 0; i < g_hits.cap; i++) if (g_hits.keys[i]) free(((hit_val *)(g_hits.vals + (size_t)i * g_hits.vsize))->decl);
+    rec_free(&g_hits);
+}
+
 /* The handle table released an entity: its records go. */
 static void rec_gone(sh_script_handle h, uint32_t spawn_id)
 {
     AcquireSRWLockExclusive(&g_rec_lock);
     rec_del(&g_launch, spawn_id);
-    rec_del(&g_hits, h);
+    hit_forget(h);
     rec_del(&g_dead, h);
     ReleaseSRWLockExclusive(&g_rec_lock);
 }
@@ -156,7 +171,7 @@ void sh_script_combat_reset(void)
 {
     AcquireSRWLockExclusive(&g_rec_lock);
     rec_free(&g_launch);
-    rec_free(&g_hits);
+    hits_free();
     rec_free(&g_dead);
     g_fire_owner = 0;
     g_fire_id = SH_SCRIPT_SPAWN_ID_NONE;
@@ -235,27 +250,32 @@ static uint32_t fire_end(void)
 void sh_script_combat_note_hit(sh_script_handle victim, const char *decl, sh_script_handle attacker)
 {
     hit_val *v;
+    char *copy;
     if (!victim) return;
+    copy = _strdup(decl ? decl : "");
     AcquireSRWLockExclusive(&g_rec_lock);
     v = (hit_val *)rec_put(&g_hits, victim);
     if (v) {
         v->attacker = attacker;
-        strncpy_s(v->decl, sizeof v->decl, decl ? decl : "", _TRUNCATE);
+        free(v->decl);
+        v->decl = copy;
+        copy = NULL;
     }
     ReleaseSRWLockExclusive(&g_rec_lock);
+    free(copy);
 }
 
-int sh_script_combat_last_hit(sh_script_handle victim, char *decl, size_t cap, sh_script_handle *attacker)
+int sh_script_combat_last_hit(sh_script_handle victim, char **decl, sh_script_handle *attacker)
 {
     const hit_val *v;
     int found = 0;
-    if (decl && cap) decl[0] = 0;
+    if (decl) *decl = NULL;
     if (attacker) *attacker = 0;
     if (!victim) return 0;
     AcquireSRWLockShared(&g_rec_lock);
     v = (const hit_val *)rec_get(&g_hits, victim);
     if (v) {
-        if (decl && cap) strncpy_s(decl, cap, v->decl, _TRUNCATE);
+        if (decl) *decl = _strdup(v->decl ? v->decl : "");
         if (attacker) *attacker = v->attacker;
         found = 1;
     }

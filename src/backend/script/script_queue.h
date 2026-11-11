@@ -7,7 +7,7 @@
  * queues are drained only by the script tick (script_hooks.h), on the main
  * thread, so no Lua code ever runs inside an engine hook and nothing runs
  * re-entrantly. A record carries values, never pointers: entities travel as
- * handles (script_handles.h) and strings are copied.
+ * handles (script_handles.h) and strings are copied whole, of any length.
  *
  * A queue grows with what arrives in a frame and has no count of its own;
  * one per scripted mod, and the queues grow with the map's mods. Only a record
@@ -25,7 +25,6 @@
 extern "C" {
 #endif
 
-#define SH_SCRIPT_EVENT_TEXT  128    /* bytes of each copied string, NUL included (a full decl name fits) */
 
 /* What happened. Spawn and removal are not queued: the handle table finds
  * them each tick (script_handles.h). */
@@ -53,9 +52,15 @@ typedef struct sh_script_event {
     sh_script_handle self, other, third;
     float amount;
     float vec[6];                       /* damage: direction; projectile: origin, direction */
-    char text[SH_SCRIPT_EVENT_TEXT];
-    char text2[SH_SCRIPT_EVENT_TEXT];
+    /* The two strings. A hook pushes its own (any length; NULL is ""); the
+     * queue keeps a copy, and a drained record owns its copy until
+     * sh_script_event_release. Never NULL in a drained record. */
+    const char *text;
+    const char *text2;
 } sh_script_event;
+
+/* Free a drained record's strings (text and text2 are then NULL). */
+void sh_script_event_release(sh_script_event *ev);
 
 /* Open queue `mod` (from 0; made when new) for a new map: empty, counters
  * reset, accepting records. Returns 1, or 0 when out of memory (the slot then
@@ -75,11 +80,12 @@ void sh_script_queue_close_all(void);
 int  sh_script_queue_push(int mod, const sh_script_event *ev);
 
 /* Convenience for hooks: fill and push one record. Strings may be NULL; they
- * are truncated to SH_SCRIPT_EVENT_TEXT - 1 bytes. */
+ * are copied whole. */
 int  sh_script_queue_post(int mod, sh_script_event_kind kind, sh_script_handle self, sh_script_handle other,
                           sh_script_handle third, float amount, const char *text, const char *text2);
 
-/* Move up to `cap` records, oldest first, into out[]. Tick thread only (the
+/* Move up to `cap` records, oldest first, into out[]; each owns its strings
+ * until sh_script_event_release. Tick thread only (the
  * thread that last called sh_script_queue_set_drain_thread); any other thread
  * gets -1 and nothing moves. Returns the number moved. Records pushed while a
  * handler runs stay queued for the next drain call (the runtime's passes). */

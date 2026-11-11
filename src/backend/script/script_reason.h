@@ -40,6 +40,7 @@ void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_
 /* The one stop line:
  *   Script stopped: <mod>, scripts\x.lua line 12: <what>. <todo>.
  * without " line N" when line is 0 and without the location when file is "". */
+/* (out needs room for the mod name, the path, what and todo, and 40 more bytes.) */
 void sh_script_stop_text(const char *mod, const char *file, int line, const char *what,
                          const char *todo, char *out, size_t cap);
 

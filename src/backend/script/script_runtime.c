@@ -117,7 +117,10 @@ void shs_log(shs_mod *m, const char *line)
         if (grown) { m->log = grown; m->clog = cap; }
     }
     if (kept && m->nlog < m->clog) { m->log[m->nlog++] = kept; kept = NULL; }
-    if (is_stop) copyz(m->stop_line, sizeof m->stop_line, line);
+    if (is_stop) {
+        char *copy = _strdup(line);
+        if (copy) { free(m->stop_line); m->stop_line = copy; }
+    }
     ReleaseSRWLockExclusive(&g_lock);
     free(kept);                                   /* only when memory had no room to keep it */
     cn = n + strlen(m->name) + 16;
@@ -262,39 +265,47 @@ static void close_mod(shs_mod *m, int status);
 
 static void stop_line(shs_mod *m, const char *file, int line, const char *what, const char *todo)
 {
-    char text[SH_SCRIPT_LINE_CAP];
-    char disp[SHS_PATH_CAP];
-    size_t i;
+    char disp[SHS_PATH_CAP], *text;
+    size_t i, cap;
     copyz(disp, sizeof disp, file);
     for (i = 0; disp[i]; i++) if (disp[i] == '/') disp[i] = '\\';
-    sh_script_stop_text(m->name, disp, line, what, todo, text, sizeof text);
+    cap = strlen(m->name) + strlen(disp) + strlen(what) + (todo ? strlen(todo) : 0) + 64;
+    text = (char *)malloc(cap);   /* the line whole, whatever the script's error said */
+    if (!text) return;
+    sh_script_stop_text(m->name, disp, line, what, todo, text, cap);
     shs_log(m, text);
+    free(text);
 }
 
 /* Word and log the stop of a failed call; the error object is on L's top. */
 static void stop_from_error(shs_mod *m, lua_State *L, int status)
 {
-    char what[320], todo[200], file[SHS_PATH_CAP];
+    char todo[200], file[SHS_PATH_CAP], *what;
     int line = 0;
     const char *msg = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
+    /* the plain sentence keeps the script's own error text whole */
+    size_t what_cap = (msg ? strlen(msg) : 0) + 1024;
+    what = (char *)malloc(what_cap);
+    if (!what) return;
     file[0] = 0;
     if (status == LUA_ERRMEM && m->stop < 0) m->stop = SH_SCRIPT_STOP_MEMORY;
     if (m->stop >= 0) {
-        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, what, sizeof what, todo, sizeof todo);
+        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, what, what_cap, todo, sizeof todo);
         if (m->err_file[0]) { copyz(file, sizeof file, m->err_file); line = m->err_line; }
         else if (msg) sh_script_split_where(msg, file, sizeof file, &line);
         if (!file[0] && m->last_src[0]) { copyz(file, sizeof file, m->last_src); line = m->last_line; }
     } else if (msg) {
         const char *text = sh_script_split_where(msg, file, sizeof file, &line);
         if (m->err_file[0]) { copyz(file, sizeof file, m->err_file); line = m->err_line; }
-        sh_script_reason(text, what, sizeof what, todo, sizeof todo);
+        sh_script_reason(text, what, what_cap, todo, sizeof todo);
     } else {
         copyz(file, sizeof file, m->err_file);
         line = m->err_line;
-        copyz(what, sizeof what, "the script raised an error whose value is not text");
+        copyz(what, what_cap, "the script raised an error whose value is not text");
         copyz(todo, sizeof todo, "Give error(...) a text that says what went wrong");
     }
     stop_line(m, file, line, what, todo);
+    free(what);
 }
 
 /* Run the C job `job` with `ud` as one protected call. 1 when it returned,
@@ -558,6 +569,16 @@ static int add_bind(shs_mod *m, const char *full, unsigned bit)
 }
 
 /* Append the function at `fn` to the list t[key] of the table at `t`. */
+/* Push a lower-case copy of s (ASCII letters; any length) and return it. */
+static const char *push_lower(lua_State *L, const char *s)
+{
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (; *s; s++) luaL_addchar(&b, (*s >= 'A' && *s <= 'Z') ? (char)(*s + 32) : *s);
+    luaL_pushresult(&b);
+    return lua_tostring(L, -1);
+}
+
 static void list_append(lua_State *L, int t, const char *key, int fn)
 {
     if (lua_getfield(L, t, key) != LUA_TTABLE) {
@@ -577,7 +598,8 @@ static int on_entity(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
     int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
-    char call[24], full[SH_SCRIPT_DEFNAME_CAP], notify[SH_SCRIPT_EVENT_TEXT];
+    char call[24], full[SH_SCRIPT_DEFNAME_CAP];
+    const char *notify = NULL;
     int fn = SHS_KEYED(kind) ? 3 : 2;
     _snprintf_s(call, sizeof call, _TRUNCATE, "on.%s", k_kinds[kind]);
     call[sizeof call - 1] = 0;
@@ -587,21 +609,16 @@ static int on_entity(lua_State *L)
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
         if (!s || !n)
             sh_script_refuse(L, "\"on.frame_event\" needs the command name its ae_notify rows start with as its second value");
-        if (n + 1 >= sizeof notify || strchr(s, ':') || strchr(s, ' '))
-            sh_script_refuse(L, "\"on.frame_event\" needs a command name without \":\" or spaces, at most %d characters",
-                             (int)sizeof notify - 2);
-        copyz(notify, sizeof notify, s);
-        lower(notify);
+        if (strchr(s, ':') || strchr(s, ' '))
+            sh_script_refuse(L, "\"on.frame_event\" needs a command name without \":\" or spaces");
+        notify = push_lower(L, s);
     } else if (kind == SHS_KIND_ANIM) {
         size_t n;
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
         if (!s || !n)
             sh_script_refuse(L, "\"on.anim\" needs the notify text of an ae_notify row as its second value");
-        if (n >= sizeof notify || n >= SH_SCRIPT_EVENT_TEXT)
-            sh_script_refuse(L, "\"on.anim\" was given a notify text longer than %d characters; use a shorter one in the ae_notify row and here",
-                             SH_SCRIPT_EVENT_TEXT - 1);
-        copyz(notify, sizeof notify, s);
-        lower(notify);
+        (void)n;
+        notify = push_lower(L, s);
     }
     if (lua_type(L, fn) != LUA_TFUNCTION)
         sh_script_refuse(L, "\"%s\" needs a function as its %s value, got %s", call, fn == 3 ? "third" : "second",
@@ -624,19 +641,15 @@ static int on_entity(lua_State *L)
 
 static int on_input(lua_State *L)
 {
-    char name[SH_SCRIPT_NAMES_CAP];
+    const char *name;
     size_t n;
     const char *s = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &n) : NULL;
     if (!s || !n)
         sh_script_refuse(L, "\"on.input\" needs the name of a Script node as its first value");
-    if (n >= SH_SCRIPT_EVENT_TEXT)
-        sh_script_refuse(L, "\"on.input\" was given a node name longer than %d characters; give the Script node a shorter name",
-                         SH_SCRIPT_EVENT_TEXT - 1);
     if (lua_type(L, 2) != LUA_TFUNCTION)
         sh_script_refuse(L, "\"on.input\" needs a function as its second value, got %s",
                          lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
-    copyz(name, sizeof name, s);
-    lower(name);
+    name = push_lower(L, s);
     lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_HANDLERS);
     lua_getfield(L, -1, "input");
     list_append(L, lua_gettop(L), name, 2);
@@ -1097,6 +1110,7 @@ int sh_script_map_prepare(const sh_script_mod_desc *mods, int n, const sh_script
         if (m->in_map) continue;                 /* listed twice */
         AcquireSRWLockExclusive(&g_lock);
         log_free(m);
+        free(m->stop_line);
         memset(m, 0, sizeof *m);
         copyz(m->salt, sizeof m->salt, salt);
         copyz(m->name, sizeof m->name, mods[i].name && mods[i].name[0] ? mods[i].name : salt);
@@ -1332,34 +1346,35 @@ static void call_chain_keyed(lua_State *L, const char *kind, const char *chain, 
 
 static void input_missed(lua_State *L, shs_mod *m, const char *node)
 {
-    char line[SH_SCRIPT_LINE_CAP], list[300];
-    size_t used = 0;
-    int count = 0;
+    luaL_Buffer list;
+    int count = 0, top = lua_gettop(L);
     push_handlers(L, "missed", NULL);
-    if (lua_getfield(L, -1, node) != LUA_TNIL) { lua_pop(L, 2); return; }
+    if (lua_getfield(L, -1, node) != LUA_TNIL) { lua_settop(L, top); return; }
     lua_pop(L, 1);
     lua_pushboolean(L, 1);
     lua_setfield(L, -2, node);
     lua_pop(L, 1);
-    list[0] = 0;
+    luaL_buffinit(L, &list);
     if (push_handlers(L, "input", NULL)) {
         lua_pushnil(L);
         while (lua_next(L, -2)) {
             if (lua_type(L, -2) == LUA_TSTRING) {
                 const char *k = lua_tostring(L, -2);
-                int w = _snprintf_s(list + used, sizeof list - used, _TRUNCATE, "%s%s", count ? ", " : "", k);
-                if (w > 0 && used + (size_t)w < sizeof list - 1) used += (size_t)w;
-                count++;
+                lua_pop(L, 1);
+                if (count++) luaL_addstring(&list, ", ");
+                luaL_addstring(&list, k);
+            } else {
+                lua_pop(L, 1);
             }
-            lua_pop(L, 1);
         }
     }
     lua_pop(L, 1);
-    list[sizeof list - 1] = 0;
-    if (count) _snprintf_s(line, sizeof line, _TRUNCATE, "Script node \"%s\" (%s): no script handles it. The script handles: %s.", node, m->name, list);
-    else _snprintf_s(line, sizeof line, _TRUNCATE, "Script node \"%s\" (%s): no script handles it. The scripts handle no Script node.", node, m->name);
-    line[sizeof line - 1] = 0;
-    shs_log(m, line);
+    luaL_pushresult(&list);
+    if (count) lua_pushfstring(L, "Script node \"%s\" (%s): no script handles it. The script handles: %s.", node, m->name,
+                               lua_tostring(L, -1));
+    else lua_pushfstring(L, "Script node \"%s\" (%s): no script handles it. The scripts handle no Script node.", node, m->name);
+    shs_log(m, lua_tostring(L, -1));
+    lua_settop(L, top);
 }
 
 /* Job: deliver one queued record. */
@@ -1369,9 +1384,7 @@ static int job_event(lua_State *L)
     shs_mod *m = shs_mod_of(L);
     int base = lua_gettop(L), at;
     if (ev->kind == SH_SCRIPT_EV_INPUT) {
-        char node[SH_SCRIPT_EVENT_TEXT];
-        copyz(node, sizeof node, ev->text);
-        lower(node);
+        const char *node = push_lower(L, ev->text);
         sh_script_push_entity(L, ev->self);
         sh_script_push_entity(L, ev->other);
         at = lua_gettop(L) - 1;
@@ -1392,22 +1405,23 @@ static int job_event(lua_State *L)
             push_hit(L, ev);
             call_chain(L, ev->kind == SH_SCRIPT_EV_DAMAGE ? "damage" : "death", chain, at, 2);
         } else if (ev->kind == SH_SCRIPT_EV_ANIM) {
-            char notify[SH_SCRIPT_EVENT_TEXT], command[SH_SCRIPT_EVENT_TEXT];
-            char *colon;
-            copyz(notify, sizeof notify, ev->text);
-            lower(notify);
+            const char *notify = push_lower(L, ev->text), *colon;
+            const char *command;
+            int self_at;
             call_chain_keyed(L, "anim", chain, notify, at, 1);
             /* a frame event: "<command>:<args>", the command matched without case */
-            copyz(command, sizeof command, notify);
-            colon = strchr(command, ':');
-            if (colon) *colon = 0;
+            colon = strchr(notify, ':');
+            lua_pushlstring(L, notify, colon ? (size_t)(colon - notify) : strlen(notify));
+            command = lua_tostring(L, -1);
             if (command[0]) {
+                lua_pushvalue(L, at);                  /* self and the arguments, side by side */
+                self_at = lua_gettop(L);
                 push_frame_args(L, ev->text);
-                call_chain_keyed(L, "frame_event", chain, command, at, 2);
+                call_chain_keyed(L, "frame_event", chain, command, self_at, 2);
             }
         } else if (ev->kind == SH_SCRIPT_EV_PAIN) {
             lua_pushstring(L, ev->text);
-            if (ev->text2[0]) lua_pushstring(L, ev->text2); else lua_pushnil(L);
+            if (ev->text2 && ev->text2[0]) lua_pushstring(L, ev->text2); else lua_pushnil(L);
             sh_script_push_entity(L, ev->other);
             call_chain(L, "pain", chain, at, 4);
         } else if (ev->kind == SH_SCRIPT_EV_PROJECTILE) {
@@ -1549,9 +1563,11 @@ static int drain(shs_mod *m)
     int n = m->hook >= 0 ? sh_script_queue_pending(m->hook) : 0, k;
     sh_script_event ev;
     for (k = 0; k < n; k++) {
+        int ran;
         if (sh_script_queue_drain(m->hook, &ev, 1) != 1) break;
-        if (!run_job(m, job_event, &ev)) return 0;
-        if (g_end_pending) return 0;
+        ran = run_job(m, job_event, &ev);
+        sh_script_event_release(&ev);
+        if (!ran || g_end_pending) return 0;
     }
     return 1;
 }
@@ -1622,17 +1638,27 @@ int sh_script_status(const char *salt)
 
 int sh_script_stop_line(const char *salt, char *out, size_t cap)
 {
-    int i, found = 0;
+    char *line = sh_script_stop_line_dup(salt);
     if (cap) out[0] = 0;
-    if (!salt) return 0;
+    if (!line) return 0;
+    copyz(out, cap, line);
+    free(line);
+    return 1;
+}
+
+char *sh_script_stop_line_dup(const char *salt)
+{
+    int i;
+    char *line = NULL;
+    if (!salt) return NULL;
     AcquireSRWLockShared(&g_lock);
     for (i = 0; i < g_nmods; i++)
-        if ((*g_modv[i]).salt[0] && _stricmp((*g_modv[i]).salt, salt) == 0 && (*g_modv[i]).stop_line[0]) {
-            copyz(out, cap, (*g_modv[i]).stop_line);
-            found = 1;
+        if ((*g_modv[i]).salt[0] && _stricmp((*g_modv[i]).salt, salt) == 0 && (*g_modv[i]).stop_line) {
+            free(line);
+            line = _strdup((*g_modv[i]).stop_line);
         }
     ReleaseSRWLockShared(&g_lock);
-    return found;
+    return line;
 }
 
 int sh_script_log_read(const char *salt, sh_script_line_fn fn, void *context)
@@ -1696,7 +1722,7 @@ int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out)
         out->handlers = m->handlers;
         out->entities = m->nents;
         out->log_lines = m->nlog;
-        copyz(out->stop_line, sizeof out->stop_line, m->stop_line);
+        out->stopped_line = m->stop_line != NULL;
         found = 1;
     }
     ReleaseSRWLockShared(&g_lock);
@@ -1716,16 +1742,19 @@ static void list_all_cb(void *ctx, const char *relpath)
 static void check_line(sh_script_line_fn fn, void *context, const char *mod, const char *file, int line,
                        const char *what, const char *todo)
 {
-    char text[SH_SCRIPT_LINE_CAP];
+    char *text;
+    size_t cap;
     if (!fn) return;
+    cap = strlen(mod) + strlen(file) + strlen(what) + (todo ? strlen(todo) : 0) + 48;
+    if (!(text = (char *)malloc(cap))) return;
     if (line > 0)
-        _snprintf_s(text, sizeof text, _TRUNCATE, "%s, %s line %d: %s.%s%s%s", mod, file, line, what,
+        _snprintf_s(text, cap, _TRUNCATE, "%s, %s line %d: %s.%s%s%s", mod, file, line, what,
                     todo && todo[0] ? " " : "", todo ? todo : "", todo && todo[0] ? "." : "");
     else
-        _snprintf_s(text, sizeof text, _TRUNCATE, "%s, %s: %s.%s%s%s", mod, file, what,
+        _snprintf_s(text, cap, _TRUNCATE, "%s, %s: %s.%s%s%s", mod, file, what,
                     todo && todo[0] ? " " : "", todo ? todo : "", todo && todo[0] ? "." : "");
-    text[sizeof text - 1] = 0;
     fn(context, text);
+    free(text);
 }
 
 int sh_script_check_files(const char *salt, const char *name, const sh_script_source *source,

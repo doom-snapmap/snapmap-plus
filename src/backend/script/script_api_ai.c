@@ -171,7 +171,7 @@ float sh_ai_position_score(float dist_to_target, float ideal, float path_len, fl
 
 /* ------------------------------------------------------------- per demon */
 
-#define AI_FIND_MAX    16        /* candidate places find_position and firing_position try (the count argument) */
+#define AI_ANY         3.0e38f   /* no upper bound: a setting may be as large as the script asks */
 #define AI_FOLLOW_MIN  32.0f     /* move_to_entity re-aims when the target moved this far */
 
 typedef struct ai_rec {
@@ -381,8 +381,10 @@ static float opt_num_field(lua_State *L, int idx, const char *key, float dflt, c
     if (!lua_isnil(L, -1)) {
         int isnum = 0;
         lua_Number n = lua_tonumberx(L, -1, &isnum);
-        if (!isnum || n != n || n < lo || n > hi)
+        if (!isnum || n != n || n < lo || n > hi) {
+            if (hi >= AI_ANY) sh_script_refuse(L, "\"%s\": %s must be a number of at least %g", call, key, (double)lo);
             sh_script_refuse(L, "\"%s\": %s must be a number from %g to %g", call, key, (double)lo, (double)hi);
+        }
         v = (float)n;
     }
     lua_pop(L, 1);
@@ -765,7 +767,7 @@ static int path_of(void *ai, sh_script_handle h, const float goal[3], int n, flo
     ai_rec *r = rec_of(h);
     int key;
     if (!r) return -1;
-    key = 0x53500000 | (rec_index(r) << 5) | (n & 31);
+    key = 0x50000000 | ((rec_index(r) & 0xFFF) << 14) | (n % SH_AI_KEY_SPAN);
     return g_engine->path(ai, goal, key, len);
 }
 
@@ -813,25 +815,25 @@ static int l_can_reach(lua_State *L)
  * the target from there (unless parms.visible is false) and a path reaches
  * it; the one with the lowest score |distance to target - ideal| + path
  * length * path_weight wins, skipping those whose path is longer than
- * max_path. parms: target, min, max, ideal, count (2..16), path_weight,
+ * max_path. parms: target, min, max, ideal, count (2 or more), path_weight,
  * max_path, visible. */
 static int l_find_position(lua_State *L)
 {
     sh_script_handle h = 0;
-    float center[3], at[3], ring[AI_FIND_MAX][3], best[3];
+    float center[3], at[3], (*ring)[3], best[3];
     float mn, mx, ideal, weight, max_path, best_score = 0, head = 64.0f;
     int count, i, have = 0, searching = 0, has_target, visible;
     void *ai, *target = NULL;
     if (!lua_isnoneornil(L, 2) && lua_type(L, 2) != LUA_TTABLE)
         sh_script_refuse(L, "\"find_position\" takes a table of settings, as { ideal = 400 }, got %s", luaL_typename(L, 2));
     if (lua_isnoneornil(L, 2)) { lua_settop(L, 1); lua_newtable(L); }
-    mn = opt_num_field(L, 2, "min", 0, "find_position", 0, 65536);
-    mx = opt_num_field(L, 2, "max", 2048, "find_position", 0, 65536);
+    mn = opt_num_field(L, 2, "min", 0, "find_position", 0, AI_ANY);
+    mx = opt_num_field(L, 2, "max", 2048, "find_position", 0, AI_ANY);
     if (mx < mn) sh_script_refuse(L, "\"find_position\": max must not be less than min");
     ideal = opt_num_field(L, 2, "ideal", (mn + mx) / 2, "find_position", mn, mx);
-    count = (int)opt_num_field(L, 2, "count", 8, "find_position", 2, AI_FIND_MAX);
-    weight = opt_num_field(L, 2, "path_weight", 0.5f, "find_position", 0, 100);
-    max_path = opt_num_field(L, 2, "max_path", 0, "find_position", 0, 1e6f);
+    count = (int)opt_num_field(L, 2, "count", 8, "find_position", 2, 2147483520.0f);
+    weight = opt_num_field(L, 2, "path_weight", 0.5f, "find_position", 0, AI_ANY);
+    max_path = opt_num_field(L, 2, "max_path", 0, "find_position", 0, AI_ANY);
     lua_getfield(L, 2, "visible");
     visible = lua_isnil(L, -1) ? 1 : lua_toboolean(L, -1);
     lua_pop(L, 1);
@@ -853,6 +855,8 @@ static int l_find_position(lua_State *L)
         float eye[3];
         if (g_engine->eye && g_engine->eye(ai, eye) && eye[2] > at[2]) head = eye[2] - at[2];
     }
+    /* the candidates, as many as asked, in memory the collector frees */
+    ring = (float (*)[3])lua_newuserdatauv(L, (size_t)count * sizeof *ring, 0);
     sh_ai_ring(center, at, ideal, count, ring);
     for (i = 0; i < count; i++) {
         float len = 0, d, score;
@@ -1233,12 +1237,14 @@ static int sees(const sh_script_ai_engine *e, void *ai, const float from[3], con
 int sh_ai_firing_run(const sh_script_ai_engine *e, void *ai, const sh_ai_position_query *q, int key_base,
                      float out[3])
 {
-    float at[3], center[3], ring[AI_FIND_MAX][3], best[3], head, cur_score = 1e30f, best_score = 0;
-    int count, i, have = 0, searching = 0;
+    float at[3], center[3], (*ring)[3], best[3], head, cur_score = 1e30f, best_score = 0;
+    int count, i, have = 0, searching = 0, r;
     if (!e || !ai || !q || !e->origin || !e->path || !e->origin(ai, at)) return -1;
     memcpy(center, q->at, sizeof center);
     if (q->target && !e->origin(q->target, center)) return 2;
-    count = q->count < 2 ? 2 : q->count > AI_FIND_MAX ? AI_FIND_MAX : q->count;
+    count = q->count < 2 ? 2 : q->count;
+    ring = (float (*)[3])malloc((size_t)count * sizeof *ring);   /* as many candidates as asked */
+    if (!ring) return -1;
     head = eye_height(e, ai, at);
     /* the current place: within the band, and (when asked) seeing the target */
     {
@@ -1281,19 +1287,21 @@ int sh_ai_firing_run(const sh_script_ai_engine *e, void *ai, const sh_ai_positio
             to[0] = center[0]; to[1] = center[1]; to[2] = center[2] + AI_TARGET_RAISE;
             if (sees(e, ai, from, to, q->target) != 1) continue;
         }
-        st = e->path(ai, p, key_base + i, &len);
+        st = e->path(ai, p, key_base + i % SH_AI_KEY_SPAN, &len);
         if (st == 1) { searching = 1; continue; }
         if (st != 0) continue;
         score = sh_ai_position_score(dist2(p, center), q->ideal, len, q->path_weight);
         if (!have || score < best_score) { have = 1; best_score = score; memcpy(best, p, sizeof best); }
     }
+    free(ring);
     if (q->kind == SH_AI_POS_ANY && cur_score < 1e29f && (!have || cur_score <= best_score)) {
         memcpy(out, at, sizeof best);
         return 0;
     }
     if (have && q->kind == SH_AI_POS_SUPERIOR && !(best_score + SH_AI_POS_MARGIN < cur_score)) have = 0;
     if (have) { memcpy(out, best, sizeof best); return 0; }
-    return searching ? 1 : 2;
+    r = searching ? 1 : 2;
+    return r;
 }
 
 int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap,
@@ -1590,8 +1598,8 @@ static int l_anim_force_via(lua_State *L)
     void *ai;
     int i, slot = -1;
     char *d, *v;
-    if (sh_script_api_opt_number(L, 4, "anim_force_via", "the blend time in seconds", &blend) && (blend < 0 || blend > 10))
-        sh_script_refuse(L, "\"anim_force_via\" needs a blend time from 0 to 10 seconds, got %g", blend);
+    if (sh_script_api_opt_number(L, 4, "anim_force_via", "the blend time in seconds", &blend) && !(blend >= 0))
+        sh_script_refuse(L, "\"anim_force_via\" needs a blend time of 0 seconds or more, got %g", blend);
     ai = self_ai(L, "anim_force_via", &h);
     if (!ai) return 0;
     for (i = 0; i < g_nforce; i++) if (g_force_via[i].handle == h) { slot = i; break; }
@@ -1635,7 +1643,7 @@ static void push_points(lua_State *L, float (*p)[3], int n)
 static int l_path_points(lua_State *L)
 {
     sh_script_handle h = 0;
-    float goal[3], pts[SH_AI_PATH_POINTS_MAX][3];
+    float goal[3], (*pts)[3] = NULL, (*held)[3];
     void *ai;
     ai_rec *r;
     int st, n = 0;
@@ -1644,12 +1652,17 @@ static int l_path_points(lua_State *L)
     ai = self_ai(L, "path_points", &h);
     if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
     if (!target_point(L, 2, "path_points", goal, NULL)) { lua_pushnil(L); lua_pushstring(L, "no path"); return 2; }
-    st = g_engine->path_points(ai, goal, 0x53500000 | (rec_index(r) << 5), pts, SH_AI_PATH_POINTS_MAX, &n);
+    st = g_engine->path_points(ai, goal, 0x50000000 | ((rec_index(r) & 0xFFF) << 14), &pts, &n);
     if (st == 0) {
-        if (n == 0) { memcpy(pts[0], goal, sizeof pts[0]); n = 1; }   /* already there: the goal alone */
-        push_points(L, pts, n);
+        /* every point of the path, held by the collector while they are pushed */
+        held = (float (*)[3])lua_newuserdatauv(L, (size_t)(n > 0 ? n : 1) * sizeof *held, 0);
+        if (n > 0 && pts) memcpy(held, pts, (size_t)n * sizeof *held);
+        free(pts);
+        if (n <= 0) { memcpy(held[0], goal, sizeof held[0]); n = 1; }   /* already there: the goal alone */
+        push_points(L, held, n);
         return 1;
     }
+    free(pts);
     lua_pushnil(L);
     lua_pushstring(L, st == 1 ? "searching" : st == 2 || st == 0 ? "no path" : "unavailable");
     return 2;
@@ -1659,7 +1672,7 @@ static int l_path_points(lua_State *L)
  * parms: target (an entity or a position; its enemy when omitted), kind
  * ("any", "new", "superior", "reposition"), min, max, ideal (inches from the
  * target), visible (the place must see the target; true when omitted),
- * count (candidates, 2..16), path_weight, parms (the positioning profile it
+ * count (candidates, 2 or more), path_weight, parms (the positioning profile it
  * came from; carried, not read). */
 static int l_firing_position(lua_State *L)
 {
@@ -1691,12 +1704,12 @@ static int l_firing_position(lua_State *L)
             sh_script_refuse(L, "\"firing_position\": kind is \"any\", \"new\", \"superior\" or \"reposition\"");
     }
     lua_pop(L, 1);
-    q.min = opt_num_field(L, 2, "min", 0, "firing_position", 0, 65536);
-    q.max = opt_num_field(L, 2, "max", 2048, "firing_position", 0, 65536);
+    q.min = opt_num_field(L, 2, "min", 0, "firing_position", 0, AI_ANY);
+    q.max = opt_num_field(L, 2, "max", 2048, "firing_position", 0, AI_ANY);
     if (q.max < q.min) sh_script_refuse(L, "\"firing_position\": max must not be less than min");
     q.ideal = opt_num_field(L, 2, "ideal", (q.min + q.max) / 2, "firing_position", q.min, q.max);
-    q.count = (int)opt_num_field(L, 2, "count", 8, "firing_position", 2, AI_FIND_MAX);
-    q.path_weight = opt_num_field(L, 2, "path_weight", 0.5f, "firing_position", 0, 100);
+    q.count = (int)opt_num_field(L, 2, "count", 8, "firing_position", 2, 2147483520.0f);
+    q.path_weight = opt_num_field(L, 2, "path_weight", 0.5f, "firing_position", 0, AI_ANY);
     lua_getfield(L, 2, "visible");
     q.visible = lua_isnil(L, -1) ? 1 : lua_toboolean(L, -1);
     lua_pop(L, 1);
@@ -1723,16 +1736,42 @@ static int l_firing_position(lua_State *L)
     return 2;
 }
 
+/* The length of the array a Lua list field holds (its [1], [2], ... or its
+ * "times[1]" keys as converted tables write them), -1 when it is not a table. */
+static int list_len(lua_State *L, int idx, const char *field, const char *prefix)
+{
+    int n = 0;
+    lua_getfield(L, idx, field);
+    if (lua_type(L, -1) != LUA_TTABLE) { lua_pop(L, 1); return -1; }
+    for (;;) {
+        char key[48];
+        int none;
+        lua_rawgeti(L, -1, n + 1);
+        none = lua_isnil(L, -1);
+        lua_pop(L, 1);
+        if (none) {
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s[%d]", prefix, n + 1);
+            lua_getfield(L, -1, key);
+            none = lua_isnil(L, -1);
+            lua_pop(L, 1);
+        }
+        if (none) break;
+        n++;
+    }
+    lua_pop(L, 1);
+    return n;
+}
+
 /* A control table's knots from a Lua table: { times = {...}, values = {...} }
  * (arrays, or keys "times[1]" and "values[1]" as converted tables write
- * them). A value missing for the last time is 0. */
+ * them). A value missing for the last time is 0. Reads `cap` at most. */
 static int read_list(lua_State *L, int idx, const char *field, const char *prefix, float *out, int cap)
 {
     int n = 0, i;
     lua_getfield(L, idx, field);
     if (lua_type(L, -1) != LUA_TTABLE) { lua_pop(L, 1); return -1; }
     for (i = 1; i <= cap; i++) {
-        char key[32];
+        char key[48];
         int isnum = 0;
         lua_Number v;
         lua_rawgeti(L, -1, i);
@@ -1752,15 +1791,16 @@ static int read_list(lua_State *L, int idx, const char *field, const char *prefi
 }
 
 /* Knots as a list { {t = 0.2, v = 0.1}, ... } (as a brain keeps its control
- * tables) into the table; the count, or -1 when the list is not knots. */
+ * tables) into the table (room for every one); the count, or -1 when the
+ * list is not knots. */
 static int read_knots(lua_State *L, int idx, sh_ai_table *tb)
 {
-    int n = 0, i;
-    for (i = 1; i <= SH_AI_SPLINE_KNOTS + 1; i++) {
+    int n = 0, i, cap = (int)lua_rawlen(L, idx);
+    for (i = 1; i <= cap; i++) {
         int t_ok = 0, v_ok = 0;
         lua_Number t, v;
         if (lua_rawgeti(L, idx, i) == LUA_TNIL) { lua_pop(L, 1); break; }
-        if (lua_type(L, -1) != LUA_TTABLE || n == SH_AI_SPLINE_KNOTS) { lua_pop(L, 1); return -1; }
+        if (lua_type(L, -1) != LUA_TTABLE) { lua_pop(L, 1); return -1; }
         lua_getfield(L, -1, "t"); t = lua_tonumberx(L, -1, &t_ok); lua_pop(L, 1);
         lua_getfield(L, -1, "v"); v = lua_tonumberx(L, -1, &v_ok); lua_pop(L, 1);
         lua_pop(L, 1);
@@ -1772,28 +1812,48 @@ static int read_knots(lua_State *L, int idx, sh_ai_table *tb)
     return n;
 }
 
+/* The spline at idx into q; its knot arrays are a userdata left on the
+ * stack (the collector frees them after the call). */
 static void check_spline(lua_State *L, int idx, sh_ai_spline_query *q)
 {
-    int tbl, nt, nv, i;
-    float v[SH_AI_SPLINE_KNOTS];
+    int tbl, field, nt, nv, i, room;
+    float *v, *mem;
     if (lua_type(L, idx) != LUA_TTABLE)
         sh_script_refuse(L, "\"spline_clear\" needs the spline as a table { times = {...}, values = {...}, roll = 90 }, "
                          "got %s", lua_isnoneornil(L, idx) ? "nothing" : luaL_typename(L, idx));
     lua_getfield(L, idx, "table");
-    tbl = lua_type(L, -1) == LUA_TTABLE ? lua_gettop(L) : idx;
+    field = lua_gettop(L);
+    tbl = lua_type(L, -1) == LUA_TTABLE ? field : idx;
     if (lua_rawgeti(L, tbl, 1) == LUA_TTABLE) {
         lua_pop(L, 1);
+        room = (int)lua_rawlen(L, tbl);
+        mem = (float *)lua_newuserdatauv(L, (size_t)(room > 0 ? room : 1) * 2 * sizeof(float), 0);
+        lua_insert(L, field);                 /* below the table field: kept to the end of the call */
+        if (tbl == field) tbl++;
+        field++;
+        q->table.t = mem;
+        q->table.v = mem + (room > 0 ? room : 1);
         nt = read_knots(L, tbl, &q->table);
         if (nt < 1)
-            sh_script_refuse(L, "\"spline_clear\" needs the spline's knots as { {t = 0.5, v = 0.2}, ... } (at most %d, "
-                             "t a number)", SH_AI_SPLINE_KNOTS);
+            sh_script_refuse(L, "\"spline_clear\" needs the spline's knots as { {t = 0.5, v = 0.2}, ... } (t a number)");
     } else {
+        int lt, lv;
         lua_pop(L, 1);
-        nt = read_list(L, tbl, "times", "times", q->table.t, SH_AI_SPLINE_KNOTS);
-        nv = read_list(L, tbl, "values", "values", v, SH_AI_SPLINE_KNOTS);
+        lt = list_len(L, tbl, "times", "times");
+        lv = list_len(L, tbl, "values", "values");
+        room = (lt > 0 ? lt : 1) + (lv > 0 ? lv : 1);
+        mem = (float *)lua_newuserdatauv(L, (size_t)(room + (lt > 0 ? lt : 1)) * sizeof(float), 0);
+        lua_insert(L, field);                 /* below the table field: kept to the end of the call */
+        if (tbl == field) tbl++;
+        field++;
+        q->table.t = mem;
+        q->table.v = mem + (lt > 0 ? lt : 1);
+        v = q->table.v + (lt > 0 ? lt : 1);
+        nt = read_list(L, tbl, "times", "times", q->table.t, lt > 0 ? lt : 0);
+        nv = read_list(L, tbl, "values", "values", v, lv > 0 ? lv : 0);
         if (nt < 1 || nv < 1 || nv > nt)
-            sh_script_refuse(L, "\"spline_clear\" needs the spline's times and values (numbers, at most %d, one value "
-                             "for each time but the last)", SH_AI_SPLINE_KNOTS);
+            sh_script_refuse(L, "\"spline_clear\" needs the spline's times and values (numbers, one value for each "
+                             "time but the last)");
         for (i = 0; i < nt; i++) q->table.v[i] = i < nv ? v[i] : 0.0f;
     }
     for (i = 0; i < nt; i++)
@@ -1824,15 +1884,16 @@ static int l_spline_clear(lua_State *L)
 {
     sh_script_handle h = 0;
     sh_ai_spline_query q;
-    float pts[SH_AI_SPLINE_KNOTS + 2][3];
+    float (*pts)[3];
     double secs;
     void *ai, *t;
     int st, n = 0;
     memset(&q, 0, sizeof q);
+    lua_settop(L, 5);   /* the arguments keep their places; the knot arrays go above them */
     sh_script_check_entity(L, 2, "spline_clear");
     check_spline(L, 3, &q);
     secs = sh_script_api_check_number(L, 4, "spline_clear", "the seconds ahead to predict the target");
-    if (secs < 0 || secs > 10) sh_script_refuse(L, "\"spline_clear\" needs the seconds ahead from 0 to 10, got %g", secs);
+    if (!(secs >= 0)) sh_script_refuse(L, "\"spline_clear\" needs the seconds ahead, 0 or more, got %g", secs);
     if (!lua_isnoneornil(L, 5)) {
         const char *f = lua_type(L, 5) == LUA_TSTRING ? lua_tostring(L, 5) : NULL;
         char bad[64];
@@ -1855,7 +1916,9 @@ static int l_spline_clear(lua_State *L)
             q.to[2] += (float)(v.v[2] * secs);
         }
     }
-    st = g_engine->spline_clear(ai, &q, pts, SH_AI_SPLINE_KNOTS + 2, &n);
+    /* every knot's point and the two ends: the curve is never cut */
+    pts = (float (*)[3])lua_newuserdatauv(L, (size_t)(q.table.n + 2) * sizeof *pts, 0);
+    st = g_engine->spline_clear(ai, &q, pts, q.table.n + 2, &n);
     if (st == 1) { lua_pushboolean(L, 1); push_points(L, pts, n); return 2; }
     if (st == 0) { lua_pushboolean(L, 0); return 1; }
     lua_pushnil(L);
@@ -2499,8 +2562,8 @@ static int e_aim_point(void *ai, const float pos[3])
 
 typedef struct path_capture {
     volatile DWORD thread;
-    float (*out)[3];
-    int cap, n;
+    float (*out)[3];             /* malloc'd here: every point of the engine's path */
+    int n;
 } path_capture;
 static path_capture g_capture;
 
@@ -2510,9 +2573,11 @@ static float plen_detour(void *move_fsm, const uint8_t *path)
         __try {
             int n = *(const int *)(path + SH_AI_PATH_SEGMENT_COUNT), i, k = 0;
             const uint8_t *seg = *(const uint8_t *const *)(path + SH_AI_PATH_SEGMENTS);
-            if (seg && n > 0) {
+            free(g_capture.out);
+            g_capture.out = NULL;
+            if (seg && n > 0 && (g_capture.out = (float (*)[3])malloc((size_t)(n + 1) * sizeof *g_capture.out)) != NULL) {
                 memcpy(g_capture.out[k++], seg + 4, 12);
-                for (i = 0; i < n && k < g_capture.cap; i++) memcpy(g_capture.out[k++], seg + (size_t)i * 0x1C + 0x10, 12);
+                for (i = 0; i < n; i++) memcpy(g_capture.out[k++], seg + (size_t)i * 0x1C + 0x10, 12);
             }
             g_capture.n = k;
         } __except (av_only(GetExceptionCode())) { g_capture.n = 0; }
@@ -2557,21 +2622,23 @@ static int commit_hook(void *target, void *detour, size_t stolen, void **orig, i
     return 1;
 }
 
-static int e_path_points(void *ai, const float goal[3], int key, float (*out)[3], int cap, int *n)
+static int e_path_points(void *ai, const float goal[3], int key, float (**out)[3], int *n)
 {
     float len = 0;
     int st;
     *n = 0;
+    *out = NULL;
     if (!commit_hook((void *)g_plen_target, (void *)plen_detour, SH_AI_PATH_LENGTH_STOLEN, (void **)&g_plen_orig,
                      &g_plen_failed, "path_points"))
         return -1;
-    g_capture.out = out;
-    g_capture.cap = cap;
+    g_capture.out = NULL;
     g_capture.n = 0;
     g_capture.thread = GetCurrentThreadId();
     st = e_path(ai, goal, key, &len);
     g_capture.thread = 0;
-    if (st == 0) *n = g_capture.n;
+    if (st == 0) { *out = g_capture.out; *n = g_capture.n; }
+    else free(g_capture.out);
+    g_capture.out = NULL;
     return st;
 }
 
@@ -2679,7 +2746,7 @@ static const sh_script_ai_engine k_engine;
 /* Path-cache keys of the compositions: 64 per demon (anim_valid +0, firing_position +32). */
 static int ai_key(void *ai)
 {
-    return 0x41500000 | (int)((((uintptr_t)ai >> 4) & 0x3FF) << 6);
+    return 0x40000000 | (int)((((uintptr_t)ai >> 4) & 0x3FF) << 15);   /* 2 * SH_AI_KEY_SPAN keys a demon */
 }
 
 static int e_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
@@ -2689,7 +2756,7 @@ static int e_anim_valid(void *ai, const char *node, unsigned tests, int side, in
 
 static int e_firing_position(void *ai, const sh_ai_position_query *q, float out[3])
 {
-    return sh_ai_firing_run(&k_engine, ai, q, ai_key(ai) + 32, out);
+    return sh_ai_firing_run(&k_engine, ai, q, ai_key(ai) + SH_AI_KEY_SPAN, out);
 }
 
 static int e_spline_clear(void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap, int *n)

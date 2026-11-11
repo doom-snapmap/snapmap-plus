@@ -73,7 +73,7 @@ typedef void (*sh_modui_name_fn)(void *context, const char *name);
 typedef struct sh_modui_script_info {
     int  status;          /* SH_MODUI_SCRIPT_* */
     int  lines;           /* lines in its log */
-    char stop[512];       /* the stop line while status is STOPPED, else "" */
+    char *stop;           /* the stop line while status is STOPPED (malloc'd, whole; the reader frees it), else NULL */
 } sh_modui_script_info;
 
 /* Engine operations, bound by iface_engine.c in the product and by fakes in

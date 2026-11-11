@@ -86,7 +86,7 @@ typedef struct shs_mod {
     /* log: every line of the map, whole; guarded by the runtime's lock */
     char    **log;
     int       nlog, clog;
-    char      stop_line[SH_SCRIPT_LINE_CAP];
+    char     *stop_line;     /* the stop line, whole (malloc'd), or NULL */
 } shs_mod;
 
 /* The mod of a state or coroutine. */
