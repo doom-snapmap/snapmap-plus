@@ -654,13 +654,13 @@ static void test_earlier_shapes(const char *tmp)
 {
     static const struct { const char *leaf, *file, *text, *cause; } cases[] = {
         { "format1", "mod.json", "{\"name\":\"Old\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.old\",\"build\":3}}",
-          "it was built by an earlier version of Snapmap+" },
+          "Run the Snapmap+ installer again and it converts it." },
         { "pkg", "package.json", "{\"id\":\"alex.pkg\",\"name\":\"Pkg\"}",
-          "its descriptor is package.json, which this version does not read" },
-        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "mod.json uses \"id\", which this version does not read" },
-        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "mod.json uses \"key\", which this version does not read" },
-        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "mod.json uses \"scope\"" },
-        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "mod.json uses \"hud.schema\"" },
+          "Run the Snapmap+ installer again and it converts it." },
+        { "withid", "mod.json", "{\"id\":\"alex.withid\",\"name\":\"With id\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "withkey", "mod.json", "{\"key\":\"x\",\"name\":\"With key\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "withscope", "mod.json", "{\"scope\":\"map\",\"name\":\"Scope\"}", "Run the Snapmap+ installer again and it converts it." },
+        { "hudschema", "mod.json", "{\"name\":\"Hud\",\"hud\":{\"schema\":1}}", "Run the Snapmap+ installer again and it converts it." },
         { "notjson", "mod.json", "{\"name\": oops", "mod.json is not a valid JSON object" },
         { NULL, NULL, NULL, NULL } };
     char root[MAX_PATH], dir[MAX_PATH], *before[16], *after;
@@ -755,7 +755,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
     }
     free(t);
     CHECK(!sh_ms_install_placed(src2, &arena, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause) &&
-          strstr(cause, "its files are under mods/alexrimp/ but it is otherimp"));
+          strstr(cause, "is under mods/alexrimp/, which is neither this mod folder"));
     /* The same title for another map: a place of its own. */
     CHECK(sh_ms_place_dir(&other, dir, sizeof dir) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
     CHECK(sh_ms_install_placed(src, &other, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
@@ -771,13 +771,13 @@ static void test_place_folders(const char *fixture, const char *tmp)
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.salted == 0 && ss.folders == 0);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "maps\\Hell Arena Part 1\\dropped");
-    CHECK(e && e->refused && strstr(e->cause, "it was not built by the mod store"));
+    CHECK(e && e->refused && strstr(e->cause, "where Snapmap+ builds nothing"));
     sh_ms_list_free(&list);
     {
         char built[SH_MS_NAME_MAX + 1], c2[600], dropped[MAX_PATH * 2];
         sh_ms_install_stats s2;
         _snprintf_s(dropped, sizeof dropped, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
-        CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "not built by the mod store"));
+        CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
         CHECK(!sh_ms_install_from_folder(path, &RESOLVER, built, sizeof built, &s2, NULL, c2, sizeof c2) &&
               strstr(c2, "never built again"));
     }
@@ -789,7 +789,7 @@ static void test_place_folders(const char *fixture, const char *tmp)
         CHECK(mt_copy_tree(path, copy));
         CHECK(sh_ms_enumerate(&list));
         e = find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy (hand)");
-        CHECK(e && e->refused && strstr(e->cause, "another folder of this map has the same mod: mods\\maps\\pack.rawmap.zip\\R2 Imp copy"));
+        CHECK(e && e->refused && strstr(e->cause, "Another folder of this map's mods, mods\\maps\\pack.rawmap.zip\\R2 Imp copy, holds the same mod"));
         CHECK(sh_ms_entry_usable(find_entry(&list, "maps\\pack.rawmap.zip\\R2 Imp copy")));
         sh_ms_list_free(&list);
         mt_remove_tree(copy);

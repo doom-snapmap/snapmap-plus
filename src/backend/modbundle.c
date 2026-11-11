@@ -2105,7 +2105,7 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     const char *retired;
     int state, pkg = 0;
     if (cause && cap) cause[0] = 0;
-    if (!root) { mb_cause(cause, cap, SH_MB_SHAPE "it has no folder"); return SH_MB_DESC_UNREADABLE; }
+    if (!root) { mb_cause(cause, cap, "This mod folder could not be found; press Refresh"); return SH_MB_DESC_UNREADABLE; }
     p = mb_wjoin(root, L"mod.json");
     if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
     free(p);
@@ -2116,15 +2116,15 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     }
     free(root);
     if (!text && pkg) {
-        mb_cause(cause, cap, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
+        mb_cause(cause, cap, SH_MB_EARLIER);
         return SH_MB_DESC_EARLIER;
     }
-    if (!text) { mb_cause(cause, cap, SH_MB_SHAPE "its mod.json is missing or cannot be read"); return SH_MB_DESC_UNREADABLE; }
+    if (!text) { mb_cause(cause, cap, "This mod folder's mod.json is missing or cannot be read; close any program holding it and press Refresh"); return SH_MB_DESC_UNREADABLE; }
     j = mbj_parse((const char *)text, len, NULL, 0);
     free(text);
     if (!j || j->t != MBJ_OBJ) {
         mbj_free(j);
-        mb_cause(cause, cap, SH_MB_SHAPE "its mod.json is not a JSON object");
+        mb_cause(cause, cap, "mod.json is not valid JSON (one object, { ... }); correct it and press Refresh");
         return SH_MB_DESC_UNREADABLE;
     }
     block = mbj_get(j, SH_MB_BLOCK_KEY);
@@ -2132,13 +2132,14 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     salt = block && block->t == MBJ_OBJ ? mbj_get(block, "salt") : NULL;
     retired = mb_retired_key(j);
     if (block && (block->t != MBJ_OBJ || !fmt || fmt->t != MBJ_NUM || strcmp(fmt->s, "2") != 0)) {
-        mb_cause(cause, cap, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
+        mb_cause(cause, cap, SH_MB_EARLIER);
         state = SH_MB_DESC_EARLIER;
     } else if (retired) {
-        mb_cause(cause, cap, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read", retired);
+        (void)retired;
+        mb_cause(cause, cap, SH_MB_EARLIER);
         state = SH_MB_DESC_RETIRED_KEY;
     } else if (block && (!salt || salt->t != MBJ_STR || !sh_salt_valid(salt->s, salt->n))) {
-        mb_cause(cause, cap, SH_MB_SHAPE "its \"" SH_MB_BLOCK_KEY "\" block has no valid salt");
+        mb_cause(cause, cap, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
         state = SH_MB_DESC_UNREADABLE;
     } else {
         state = block ? SH_MB_DESC_BUILT : SH_MB_DESC_FRESH;
@@ -2667,7 +2668,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     const char *retired;
     if (root->t != MBJ_OBJ) { mb_error(b, "mod.json must contain one JSON object"); return 0; }
     if ((retired = mb_retired_key(root)) != NULL) {
-        mb_error(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read", retired);
+        mb_error(b, SH_MB_EARLIER);
         return 0;
     }
     if (mbj_get(root, "files") || mbj_get(root, "bundle") || mbj_get(root, "build")) {
@@ -5421,13 +5422,13 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     }
     v = mbj_get(block, "format");
     if (!v || v->t != MBJ_NUM || strcmp(v->s, "2") != 0) {
-        mb_error(out, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
+        mb_error(out, SH_MB_EARLIER);
         return 0;
     }
     if (!mb_only_keys(block, bkeys)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" has a key this release does not know"); return 0; }
     v = mbj_get(block, "salt");
     if (!v || v->t != MBJ_STR || !sh_salt_valid(v->s, v->n)) {
-        mb_error(out, SH_MB_SHAPE "its \"" SH_MB_BLOCK_KEY "\" block has no valid salt");
+        mb_error(out, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
         return 0;
     }
     memcpy(out->id, v->s, SH_SALT_LEN);
@@ -6325,7 +6326,7 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char *cause, size_t cap)
     size_t i;
     int pass;
     if (cause && cap) cause[0] = 0;
-    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(cause, cap, SH_MB_SHAPE "it has no salt");
+    if (!b || !sh_salt_valid(b->id, strlen(b->id))) return mb_cause(cause, cap, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         for (pass = 0; pass < 2; pass++) {
@@ -6339,8 +6340,10 @@ int sh_mb_salt_paths_check(const sh_mb_bundle *b, char *cause, size_t cap)
                 end = strchr(seg, '/');
                 if (!end || end == seg) continue;
                 if ((size_t)(end - seg) == SH_SALT_LEN && _strnicmp(seg, b->id, SH_SALT_LEN) == 0) continue;
-                return mb_cause(cause, cap, SH_MB_SHAPE "its files are under mods/%.*s/ but it is %s",
-                                (int)(end - seg), seg, b->id);
+                return mb_cause(cause, cap, "%s is under mods/%.*s/, which is neither this mod folder's name nor its "
+                                "salt; move it under a mods folder named like this folder and press Refresh",
+                                f->path ? f->path : t, (int)(end - seg), seg);
+
             }
         }
     }
@@ -6382,7 +6385,7 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
     has_mod = desc_mod && GetFileAttributesW(desc_mod) != INVALID_FILE_ATTRIBUTES;
     has_pkg = desc_pkg && GetFileAttributesW(desc_pkg) != INVALID_FILE_ATTRIBUTES;
     if (!has_mod && has_pkg) {
-        mb_error(out, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
+        mb_error(out, SH_MB_EARLIER);
     } else if (!has_mod) {
         mb_error(out, "the mod folder has no mod.json");
     } else {
@@ -6397,13 +6400,13 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
                 bs = mbj_get(block, "salt");
             }
             if (block && (block->t != MBJ_OBJ || !fmt || fmt->t != MBJ_NUM || strcmp(fmt->s, "2") != 0)) {
-                mb_error(out, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
+                mb_error(out, SH_MB_EARLIER);
             } else if (bs && (bs->t != MBJ_STR || !sh_salt_valid(bs->s, bs->n))) {
-                mb_error(out, SH_MB_SHAPE "its \"" SH_MB_BLOCK_KEY "\" block has no valid salt");
+                mb_error(out, "The part of mod.json that Snapmap+ writes (\"" SH_MB_BLOCK_KEY "\") is damaged, so this mod cannot be told apart; put back mod.json from a backup, or make the mod again with New mod");
             } else if (bs && salt && (strlen(salt) != bs->n || memcmp(salt, bs->s, bs->n) != 0)) {
                 mb_error(out, "mod.json's salt is %s, not %s", bs->s, salt);
             } else if (!bs && !(salt && sh_salt_valid(salt, strlen(salt)))) {
-                mb_error(out, SH_MB_SHAPE "it has no salt yet; Refresh in the Mods tab gives it one");
+                mb_error(out, "This mod folder has not been scanned yet; press Refresh in the Mods tab");
             } else {
                 const char *id = bs ? bs->s : salt;
                 memcpy(out->id, id, SH_SALT_LEN);

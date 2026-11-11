@@ -36,7 +36,7 @@
  * author's and never read. A folder in an earlier shape (package.json, a block
  * without a salt, an author id, key, shadows, stock, scope, player, extends,
  * replaces, legacy, composes or schema key, a hud schema) is refused with
- * SH_MB_SHAPE and a cause about the thing itself (sh_mb_descriptor_state).
+ * SH_MB_EARLIER, one sentence (sh_mb_descriptor_state).
  *
  * Additive mods. The builder classifies every file from its path and bytes
  * (SH_MB_CLASS_*); "shadows" is derived from the classification (every
@@ -111,7 +111,10 @@
 #define SH_MB_RULES           11
 
 /* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
-#define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
+/* The refusal of a folder in an earlier shape (DECISIONS 21), one sentence;
+ * SH_MB_SHAPE is its first part, which readers of a cause match on. */
+#define SH_MB_SHAPE           "This mod was made for an earlier version of Snapmap+. "
+#define SH_MB_EARLIER         SH_MB_SHAPE "Run the Snapmap+ installer again and it converts it."
 #define SH_MB_ID_MAX          64u
 #define SH_MB_NAME_MAX        80u      /* code points */
 #define SH_MB_AUTHOR_MAX      80u      /* code points */
@@ -325,7 +328,7 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
  * written to disk. The salt is the block's; `salt` (NULL to read it) gives
  * one to a folder whose block has none yet, and must equal the block's when
  * both are present. A folder in an earlier shape, or one without a salt, is
- * refused with SH_MB_SHAPE. "built" is the block's when it has one, else the
+ * refused with SH_MB_EARLIER. "built" is the block's when it has one, else the
  * time of this build when it succeeds; out->tree is the folder's tree hash and
  * out->prev_hash the build hash its block recorded. Every file is classified
  * (out->files[].cls, out->classes); a file outside the namespace that is not a
@@ -366,7 +369,7 @@ char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had
  * recomputed from the canonical form. Files on disk are not read. Returns 1
  * when valid. A block without "build" fails with "not built: <cause>" (or
  * "not built yet"), after filling id, built, rules, tree and state_cause; an
- * earlier shape fails with SH_MB_SHAPE. A block with a "cause" beside its
+ * earlier shape fails with SH_MB_EARLIER. A block with a "cause" beside its
  * "build" loads with validated 0. */
 int  sh_mb_load(const char *mod_json_path, sh_mb_bundle *out);
 int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
@@ -451,13 +454,13 @@ int  modbundle_build_folder(const char *folder, char *first_cause, size_t n);
 #define SH_MB_DESC_RETIRED_KEY 4
 #define SH_MB_DESC_UNREADABLE  5
 int  sh_mb_descriptor_state(const char *folder);
-/* The same, with the refusal sentence (SH_MB_SHAPE + cause) for EARLIER,
+/* The same, with the refusal sentence (SH_MB_EARLIER) for EARLIER,
  * RETIRED_KEY and UNREADABLE; "" for FRESH and BUILT. */
 int  sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cause_cap);
 
 /* Every carried file and provided name under some mods/<x>/ has x equal to
  * the bundle's salt (any case; a salt has one spelling). 1 when so; else 0
- * with SH_MB_SHAPE "its files are under mods/<x>/ but it is <salt>". */
+ * with the sentence naming the first file under another mod's salt. */
 int  sh_mb_salt_paths_check(const sh_mb_bundle *bundle, char *cause, size_t cause_cap);
 
 /* Every reference to mods/<from> in `text` (n bytes), as written or in the

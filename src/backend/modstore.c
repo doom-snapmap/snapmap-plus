@@ -874,7 +874,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         if (e->place[0]) {
             /* A place holds the builds a map brought; nothing is made there. */
             e->refused = 1;
-            strcpy_s(e->cause, sizeof e->cause, SH_MB_SHAPE "it was not built by the mod store");
+            strcpy_s(e->cause, sizeof e->cause, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
         } else if (recorded[0]) {
             strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
         } else {
@@ -887,7 +887,7 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         e->refused = 1;
         if (e->state == SH_MB_DESC_UNREADABLE && e->folder && sh_ms_descriptor_unparsable(e->folder, recorded, sizeof recorded))
             strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
-        else strncpy_s(e->cause, sizeof e->cause, why[0] ? why : SH_MB_SHAPE "its mod.json cannot be read", _TRUNCATE);
+        else strncpy_s(e->cause, sizeof e->cause, why[0] ? why : "This mod folder's mod.json cannot be read; close any program holding it and press Refresh", _TRUNCATE);
         return;
     }
     e->loaded = sh_mb_load_folder(e->folder, &e->bundle);
@@ -967,8 +967,8 @@ static void ms_mark_duplicates(sh_ms_list *l)
         if (keeper[i] == (size_t)-1) continue;
         e->refused = 1;
         if (e->place[0]) {
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, SH_MB_SHAPE "another folder of this map has the same mod: "
-                        "mods\\%s", l->items[keeper[i]].name);
+            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "Another folder of this map's mods, mods\\%s, holds the same "
+                        "mod; remove one of them", l->items[keeper[i]].name);
         } else {
             /* A copy the scan could not give a new salt (its binaries name
              * the salt, as an outside converter's do) says why, plainly;
@@ -1750,7 +1750,7 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
         ms_cause(cause, ccap, "%s", why);
         r = -1;
     } else if (ms_in_place(folder)) {
-        ms_cause(cause, ccap, SH_MB_SHAPE "it was not built by the mod store");
+        ms_cause(cause, ccap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
         r = -1;
     } else {
         r = ms_assign_to(folder, NULL, 0, from, 1, NULL, NULL, salt_out, cause, ccap);
@@ -2812,7 +2812,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
          * with its references rewritten (the source is only read), built; a
          * refused build leaves nothing installed. */
         char *fu;
-        if (place) { ms_cause(cause, cap, SH_MB_SHAPE "it was not built by the mod store"); goto done; }
+        if (place) { ms_cause(cause, cap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh"); goto done; }
         if (as_name && as_name[0]) strncpy_s(name, sizeof name, as_name, _TRUNCATE);
         else if (!ms_free_root_name(root, leaf, name, sizeof name)) { ms_cause(cause, cap, "no free folder name under mods\\ for %s", leaf); goto done; }
         final = ms_wjoin_utf8(root, name);

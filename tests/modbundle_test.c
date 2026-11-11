@@ -457,13 +457,13 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     sh_mb_free(&again);
     /* Without a block a salt must be given. */
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &again));
-    CHECK_CAUSE(again, SH_MB_SHAPE "it has no salt yet");
+    CHECK_CAUSE(again, "This mod folder has not been scanned yet");
     sh_mb_free(&again);
     /* package.json is an earlier shape. */
     mt_delete(folder, "mod.json");
     mt_write(folder, "package.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\"}");
     CHECK(!sh_mb_build(folder, SALT, &RESOLVER, &again));
-    CHECK_CAUSE(again, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
+    CHECK_CAUSE(again, SH_MB_EARLIER);
     sh_mb_free(&again);
     mt_delete(folder, "package.json");
     mt_write(folder, "mod.json", "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
@@ -671,12 +671,12 @@ static void test_identity(const char *fixture, const char *tmp)
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_FRESH);
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":1,\"key\":\"alex.r2-imp\",\"build\":3}}");
     CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER);
-    CHECK(!strcmp(cause, SH_MB_SHAPE "it was built by an earlier version of Snapmap+"));
+    CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"id\":\"alex.r2-imp\"}");
     CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY);
-    CHECK(!strcmp(cause, SH_MB_SHAPE "mod.json uses \"id\", which this version does not read"));
+    CHECK(!strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"hud\":{\"schema\":\"snapmap-plus.weapon-hud.v1\",\"weapons\":{}}}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY && strstr(cause, "\"hud.schema\""));
+    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_RETIRED_KEY && !strcmp(cause, SH_MB_EARLIER));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2}}");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "mod.json", "[1]");
@@ -684,7 +684,7 @@ static void test_identity(const char *fixture, const char *tmp)
     mt_delete(folder, "mod.json");
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_UNREADABLE);
     mt_write(folder, "package.json", "{\"name\":\"x\"}");
-    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER && strstr(cause, "package.json"));
+    CHECK(sh_mb_descriptor_state_why(folder, cause, sizeof cause) == SH_MB_DESC_EARLIER && !strcmp(cause, SH_MB_EARLIER));
     mt_delete(folder, "package.json");
 
     /* Files under another namespace than the salt. */
@@ -692,7 +692,7 @@ static void test_identity(const char *fixture, const char *tmp)
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "mod.json", "{\"name\":\"x\",\"snapmap-plus\":{\"format\":2,\"salt\":\"yyyyyyyy\"}}");
     CHECK(!sh_mb_build(folder, NULL, &RESOLVER, &b));
-    CHECK_CAUSE(b, SH_MB_SHAPE "its files are under mods/alexrimp/ but it is yyyyyyyy");
+    CHECK_CAUSE(b, "is under mods/alexrimp/, which is neither this mod folder's name nor its salt");
     sh_mb_free(&b);
 
     /* The block a first scan writes: the author's bytes kept, its own
@@ -1102,19 +1102,19 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_bundle b;
     sh_mb_resolver no_stock = { NULL, NULL, NULL, NULL };
     /* Earlier shapes and retired author keys: refused with the plain reason. */
-    refused(fixture, tmp, m_bad_id, &RESOLVER, SH_MB_SHAPE "mod.json uses \"id\", which this version does not read");
-    refused(fixture, tmp, m_key, &RESOLVER, SH_MB_SHAPE "mod.json uses \"key\"");
-    refused(fixture, tmp, m_legacy, &RESOLVER, SH_MB_SHAPE "mod.json uses \"legacy\"");
-    refused(fixture, tmp, m_era_schema, &RESOLVER, SH_MB_SHAPE "mod.json uses \"schema\"");
-    refused(fixture, tmp, m_stock_key, &RESOLVER, SH_MB_SHAPE "mod.json uses \"stock\"");
-    refused(fixture, tmp, m_hud_schema, &RESOLVER, SH_MB_SHAPE "mod.json uses \"hud.schema\"");
-    refused(fixture, tmp, m_scope_map, &RESOLVER, SH_MB_SHAPE "mod.json uses \"scope\"");
-    refused(fixture, tmp, m_shadow_not_shipped, &RESOLVER, SH_MB_SHAPE "mod.json uses \"shadows\"");
-    refused(fixture, tmp, m_replaces_declared, &RESOLVER, SH_MB_SHAPE "mod.json uses \"replaces\"");
-    refused(fixture, tmp, m_old_player, &RESOLVER, SH_MB_SHAPE "mod.json uses \"player\"");
-    refused(fixture, tmp, m_old_extends, &RESOLVER, SH_MB_SHAPE "mod.json uses \"extends\"");
-    refused(fixture, tmp, m_old_body_events, &RESOLVER, SH_MB_SHAPE "mod.json uses \"player\"");
-    refused(fixture, tmp, m_old_block, &RESOLVER, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
+    refused(fixture, tmp, m_bad_id, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_key, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_legacy, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_era_schema, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_stock_key, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_hud_schema, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_scope_map, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_shadow_not_shipped, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_replaces_declared, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_player, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_extends, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_body_events, &RESOLVER, SH_MB_EARLIER);
+    refused(fixture, tmp, m_old_block, &RESOLVER, SH_MB_EARLIER);
     /* The folder's name is never the key: the salt given is. */
     accepted(fixture, tmp, m_no_id, &b);
     CHECK(b.errors == 0 && !strcmp(b.id, SALT));
