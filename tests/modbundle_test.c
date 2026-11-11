@@ -37,11 +37,11 @@ static int log_has(const char *needle)
 
 /* The fixture's build hash (format 2). A change here is a change of the
  * canonical form or of the fixture. */
-#define GOLDEN_HASH "d7bf03895d16e8185bf8d110a43e75be14e311903543c9850347308ffea23466"
+#define GOLDEN_HASH "bc862690bd8d128d93ced2f8d95ef86afb8bbdabc5e36d83d8abedeebacbadee"
 
 /* The fixture with only the two blacklist gates as requirements: the
  * general requirements canonicalise them to this text and hash. */
-#define GATES_GOLDEN_HASH "8a0c792673fb4e1354a1de4a9cd1240df18ac6c0cd2b793bb5e88ea4584247e0"
+#define GATES_GOLDEN_HASH "a25c4236910f6e994363fcb99258a0a4a4c5c55c539b024254a8e935b3e1980e"
 #define GATES_CANONICAL   "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"
 
 static int has_need(const sh_mb_file *f, const char *type, const char *name)
@@ -101,17 +101,6 @@ static void test_names(void)
     CHECK(sh_mb_id_normalize(long_id, 64, id));
     sh_mb_id_sanitized("alexrimp", s);
     CHECK(!strcmp(s, "alexrimp"));
-
-    CHECK(sh_mb_version_valid("1.0.0"));
-    CHECK(sh_mb_version_valid("1.0 beta"));
-    CHECK(sh_mb_version_valid("v2-rc1+x"));
-    CHECK(!sh_mb_version_valid(""));
-    CHECK(!sh_mb_version_valid("1.0."));
-    CHECK(!sh_mb_version_valid("1/0"));
-    CHECK(!sh_mb_version_valid("1:0"));
-    CHECK(!sh_mb_version_valid("a*b"));
-    CHECK(!sh_mb_version_valid(" 1"));
-    CHECK(!sh_mb_version_valid("123456789012345678901234567890123"));
 
     CHECK(sh_mb_check_request("generated/decls/entitydef/mods/a/b.decl", cause, sizeof cause));
     CHECK(sh_mb_check_request("maps/my room/a.bmodel", cause, sizeof cause));
@@ -398,7 +387,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     if (b.errors) fprintf(stderr, "  fixture refused: %s\n", b.first_cause);
     if (b.warnings) fprintf(stderr, "  fixture warning: %s\n", b.first_warning);
     CHECK(b.warnings == 0);
-    CHECK(!strcmp(b.id, SALT) && !strcmp(b.version, "1.0.0") && b.built > 0 && b.validated);
+    CHECK(!strcmp(b.id, SALT) && b.built > 0 && b.validated);
     CHECK(strlen(b.tree) == 64 && !b.prev_hash[0]);
     CHECK(b.file_count == 13);
     CHECK(b.needs.unresolved == 0 && b.needs.stock == 8 && b.needs.local == b.needs.total - 8);
@@ -476,7 +465,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\Any Name At All", tmp);
     CHECK(mt_copy_tree(fixture, folder));
     mt_write(folder, "mod.json", "{\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}},"
-                                 "\"author\":\"alex\",  \"name\":\"R2 Imp copy\",\"version\":\"1.0.0\"}");
+                                 "\"author\":\"alex\",  \"name\":\"R2 Imp copy\"}");
     CHECK(sh_mb_build(folder, SALT, &RESOLVER, &again));
     CHECK(!strcmp(again.hash, b.hash));
     sh_mb_free(&again);
@@ -491,7 +480,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     CHECK_CAUSE(again, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
     sh_mb_free(&again);
     mt_delete(folder, "package.json");
-    mt_write(folder, "mod.json", "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\","
+    mt_write(folder, "mod.json", "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
                                  "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}");
 
     /* Write, then read back: the author's bytes are kept and the canonical
@@ -507,7 +496,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     text = sh_mb_read_file(path, 1 << 20, &len);
     {
         char *own = text ? sh_mb_author_bytes((const char *)text, len, &blen_unused, NULL) : NULL;
-        static const char pkg[] = "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\","
+        static const char pkg[] = "{\"name\":\"R2 Imp copy\",\"author\":\"alex\","
                                   "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}";
         CHECK(own && blen_unused == sizeof pkg - 1 && !memcmp(own, pkg, sizeof pkg - 1));
         CHECK(text && strstr((const char *)text, "\"snapmap-plus\": {\n    \"format\": 2,\n    \"salt\": \"" SALT "\",\n"));
@@ -926,7 +915,7 @@ static void accepted(const char *fixture, const char *tmp, mutate_fn mutate, sh_
     if (out->errors) fprintf(stderr, "  case %d refused: %s\n", g_case, out->first_cause);
 }
 
-#define DESC(extra) "{\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\"" extra "}"
+#define DESC(extra) "{\"name\":\"R2 Imp copy\"" extra "}"
 static void m_bad_id(const char *f) { mt_write(f, "mod.json", "{\"id\":\"alex.r2-imp\",\"name\":\"x\"}"); }
 static void m_key(const char *f) { mt_write(f, "mod.json", "{\"key\":\"alexrimp\",\"name\":\"x\"}"); }
 static void m_legacy(const char *f) { mt_write(f, "mod.json", DESC(",\"legacy\":{\"source\":\"overrides\"}")); }
@@ -1162,7 +1151,10 @@ static void test_refusals(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     refused(fixture, tmp, m_no_name, &RESOLVER, "missing its required name");
     refused(fixture, tmp, m_bad_json, &RESOLVER, "invalid JSON");
-    refused(fixture, tmp, m_bad_version, &RESOLVER, "version must be");
+    /* A mod has no version: a hand-written one is an unknown author key, kept under extra. */
+    accepted(fixture, tmp, m_bad_version, &b);
+    CHECK(b.errors == 0 && b.extra && strstr(b.extra, "\"version\":\"1/2\"") && !strstr(b.canonical, ",\"version\":"));
+    sh_mb_free(&b);
     refused(fixture, tmp, m_reserved, &RESOLVER, "may not contain files, build or bundle");
     refused(fixture, tmp, m_float, &RESOLVER, "not a plain integer or fixed decimal");
     accepted(fixture, tmp, m_decimal, &b);
@@ -1256,7 +1248,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     }
     CHECK(has_note(&b, "edits generated/decls/entitydef/monster/imp.decl: 2 operations (1 set, 1 removed,") &&
           has_note(&b, "edits 1 game file: maps that declare this mod get the game's text with these edits"));
-    CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],") != NULL);
+    CHECK(strstr(b.canonical, ",\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]}") != NULL);
     {
         /* The block's edits survive a write and a load. */
         sh_mb_bundle back;
@@ -1315,7 +1307,7 @@ static void test_refusals(const char *fixture, const char *tmp)
     /* A bundle carrying only the two gates: its canonical text and hash. */
     accepted(fixture, tmp, m_gates_only, &b);
     CHECK(b.requirements && !strcmp(b.requirements, GATES_CANONICAL));
-    CHECK(strstr(b.canonical, ",\"requirements\":" GATES_CANONICAL ",") != NULL);
+    CHECK(strstr(b.canonical, ",\"requirements\":" GATES_CANONICAL "}") != NULL);
     CHECK(!strcmp(b.hash, GATES_GOLDEN_HASH));
     if (strcmp(b.hash, GATES_GOLDEN_HASH)) fprintf(stderr, "  gates-only hash %s\n", b.hash);
     CHECK(!strstr(b.canonical, "scope"));

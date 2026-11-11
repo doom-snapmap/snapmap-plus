@@ -48,7 +48,7 @@ int sh_strids_refresh_pending(void);
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
 /* Read back how row `index` was attributed: its id and its owner ("<baked>"
- * for the baked defaults, "<id>@<version>" for a bundle). */
+ * for the baked defaults, the salt for a bundle). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 

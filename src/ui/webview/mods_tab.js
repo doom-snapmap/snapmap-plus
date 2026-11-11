@@ -9,7 +9,7 @@
    downloaded map's mods in that map's place ("place", "placeTitle"); and the open map (the map
    modal and the rows' in-this-map glyph). The list shows two kinds of groups: "Your mods", with
    the organizing folders inside it, and one group per downloaded map, titled with the map's name.
-   Each row: the mod's name, its version and size, one status glyph (needs attention, else in this
+   Each row: the mod's name and size, one status glyph (needs attention, else in this
    map, else ready). The details pane: the description, what the mod adds (its Toybox rows by
    name), what it changes in the game (its edits, in words), what it borrows from the game (a
    count, expandable), the console settings it needs, its files, and, for a mod that cannot be
@@ -57,7 +57,7 @@ var modsTab = (function () {
   var READS = {modFiles: true, modFileText: true};
   /* What each file of a mod is to the game, as one phrase (the backend's "class"). */
   var FILE_CLASSES = {
-    descriptor: 'About the mod: its name, version, requirements and Toybox text',
+    descriptor: 'About the mod: its name, requirements and Toybox text',
     add: 'New file',
     borrow: "A game file under this mod's own name",
     edit: 'Your edit of a game file',
@@ -184,7 +184,7 @@ var modsTab = (function () {
   function normMod(b) {
     b = b && typeof b === 'object' ? b : {};
     var state = has(STATES, b.state) ? b.state : 'attention';
-    return {key: str(b.key), salt: str(b.salt), name: str(b.name), author: str(b.author), version: str(b.version),
+    return {key: str(b.key), salt: str(b.salt), name: str(b.name), author: str(b.author),
             size: num(b.size), files: num(b.files), state: state, cause: str(b.cause),
             editorRows: num(b.editorRows), folder: str(b.folder),
             /* the organizing folder it sits in under mods\ ("" at the top, and for a map's mods) */
@@ -223,7 +223,7 @@ var modsTab = (function () {
   function normMapMod(m) {
     m = obj(m) || {};
     var names = normNames(m.placedEntities);
-    return {key: str(m.key), salt: str(m.salt), name: str(m.name), version: str(m.version), state: str(m.state) || 'missing',
+    return {key: str(m.key), salt: str(m.salt), name: str(m.name), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
             references: normRefs(m.references), size: num(m.size), attached: bool(m.attached),
             nothingPlaced: bool(m.nothingPlaced)};
@@ -314,12 +314,9 @@ var modsTab = (function () {
     var d = new Date(s * 1000);
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
-  /* The row's second line: the version and the size. */
+  /* The row's second line: the size. */
   function subText(b) {
-    var parts = [];
-    if (b.version) parts.push(b.version);
-    parts.push(formatSize(b.size));
-    return parts.join(' \u00b7 ');
+    return formatSize(b.size);
   }
 
   /* One of the two states, its one-line cause (the icon's hover title) and the details sentence. */
@@ -907,7 +904,6 @@ var modsTab = (function () {
 
       var about = section(box, 'about', 'About');
       if (b.description) field(about, 'Description', b.description).className += ' mods-field-long';
-      if (b.version) field(about, 'Version', b.version);
       if (b.author) field(about, 'Author', b.author);
       if (b.place) field(about, 'Came with', b.placeTitle || 'a downloaded map');
       var link = el('button', 'mods-link', b.key);
@@ -1110,7 +1106,7 @@ var modsTab = (function () {
       row.appendChild(statusIcon(info));
       var text = el('div', 'mods-row-text');
       text.appendChild(el('div', 'mods-row-name', modName(r.key, r.name)));
-      text.appendChild(el('div', 'mods-row-sub', (r.version ? r.version + ' \u00b7 ' : '') + formatSize(r.size)));
+      text.appendChild(el('div', 'mods-row-sub', formatSize(r.size)));
       var uses = r.nothingPlaced ? NOTHING_PLACED_TEXT : r.attached
         ? MAP_LEVEL_TEXT + (r.placedCount ? ', and ' + plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it') : '')
         : plural(r.placedCount, 'placed entity', 'placed entities') + (r.placedCount === 1 ? ' uses it' : ' use it');
@@ -1773,7 +1769,7 @@ var modsTab = (function () {
       var def = 'assets/generated/decls/entitydef/mods/' + key + '/example_crate.decl';
       var row = 'assets/generated/decls/snapeditorentitydef/mods/' + key + '/example_crate.decl';
       var texts = {};
-      texts['mod.json'] = '{\r\n  "name": ' + JSON.stringify(name) + ',\r\n  "version": "0.1.0",\r\n  "description": "",\r\n  "author": "",\r\n' +
+      texts['mod.json'] = '{\r\n  "name": ' + JSON.stringify(name) + ',\r\n  "description": "",\r\n  "author": "",\r\n' +
         '  "strings": {\r\n    "en": {\r\n      "' + key + '_category": ' + JSON.stringify(name) + ',\r\n' +
         '      "' + key + '_example_crate_name": "Example crate",\r\n' +
         '      "' + key + '_example_crate_desc": "A crate your new mod adds. Change it in the mod\'s files."\r\n    }\r\n  }\r\n}\r\n';
@@ -1860,7 +1856,7 @@ var modsTab = (function () {
           salt = ('newmod' + (mods().length % 100)).slice(0, 8);
           ex = exampleFolder(salt, nmName);
           disk[nk] = ex.folder;
-          mods().push({key: nk, salt: salt, name: nmName, author: '', version: '0.1.0', size: 1530, files: 3,
+          mods().push({key: nk, salt: salt, name: nmName, author: '', size: 1530, files: 3,
                        state: 'ready', cause: '', editorRows: 1, folder: nk, group: '', place: '', placeTitle: '',
                        description: '', requirements: {cvars: {}}, editorRowNames: ['Example crate'], publishedMaps: 0,
                        facts: {adds: 2, borrows: 0, surfaces: 0, editor: 0, replaces: 0, editorOnly: false, editorTweaks: [],
@@ -1888,7 +1884,7 @@ var modsTab = (function () {
         else if (r && r.attached) msg = nameOf(key) + ' is already used by the whole of ' + docu.map.name + '.';
         else {
           if (r) r.attached = true;
-          else docu.map.mods.push({key: key, salt: str(b.salt), name: str(b.name), version: str(b.version), state: 'installed',
+          else docu.map.mods.push({key: key, salt: str(b.salt), name: str(b.name), state: 'installed',
                                    placedEntities: [], placedCount: 0, placedModules: 0, references: [], size: num(b.size),
                                    inManifest: true, viaNeeds: false, attached: true, nothingPlaced: true, build: ''});
           msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '.';

@@ -410,8 +410,9 @@ static char *cv_cut(const char *text, size_t len, size_t at, const char *const *
     return out;
 }
 
-static const char *const CV_RETIRED[] = { "id", "key", "shadows", "stock", "scope", "player", "extends", "replaces", "legacy",
-                                          "composes", "schema", "format", SH_MB_BLOCK_KEY, NULL };
+/* "version" too: a mod has no version (DECISIONS 8). */
+static const char *const CV_RETIRED[] = { "id", "key", "version", "shadows", "stock", "scope", "player", "extends", "replaces",
+                                          "legacy", "composes", "schema", "format", SH_MB_BLOCK_KEY, NULL };
 
 /* A fresh author part from an earlier descriptor: the block and the retired
  * author keys cut, a hud's "schema" cut, a "name" given when it has none. */
@@ -1161,7 +1162,6 @@ static int cv_resolve(cv_ids *ids, const char *key, const char *bundle, sh_map_o
     strncpy_s(out->salt, sizeof out->salt, salt, _TRUNCATE);
     strncpy_s(out->build, sizeof out->build, e->bundle.hash, _TRUNCATE);
     if (e->bundle.name) strncpy_s(out->name, sizeof out->name, e->bundle.name, _TRUNCATE);
-    strncpy_s(out->version, sizeof out->version, e->bundle.version, _TRUNCATE);
     out->size = e->bundle.total_size;
     return 1;
 }
@@ -1303,7 +1303,6 @@ static int cv_prefab_text(cv_ids *ids, const char *text, size_t n, char **out, s
             strcpy_s(mr.salt, sizeof mr.salt, s.salt);
             strcpy_s(mr.build, sizeof mr.build, s.build);
             strcpy_s(mr.name, sizeof mr.name, s.name[0] ? s.name : id->text);
-            strcpy_s(mr.version, sizeof mr.version, s.version);
             mr.size = s.size;
             v = mpj_get(row, "attached");
             mr.attached = v && v->type == MPJ_BOOL && v->b;

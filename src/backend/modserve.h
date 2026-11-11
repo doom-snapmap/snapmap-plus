@@ -55,8 +55,7 @@ extern "C" {
 
 /* Build the table from `mods_root` (the folder that holds the bundle folders,
  * spelled in UTF-8 as sh_ms_root spells it) and publish it, replacing any
- * earlier table. Logs one MODS: line per skipped bundle, per conflict and per
- * superseded version, then
+ * earlier table. Logs one MODS: line per skipped bundle and per conflict, then
  * "MODS: index built in N ms (B bundles, F files)". Returns the number of
  * bundles admitted, or -1 when the table could not be allocated (the previous
  * table, if any, stays published). A missing folder is an empty index. */
@@ -539,8 +538,8 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
  *   MODS: requirements: conflict: <cvar>: <later> asks "<a>", <earlier> asks "<b>"; <later>, the later install, loses ...
  * Each accepted bundle's requirements are logged once, the first time an
  * index carries it with that text:
- *   MODS: requirements: g_useResourceBlackList=0 for <id>@<version>
- *   MODS: requirements: 1 activate and 1 deactivate command(s) for <id>@<version>
+ *   MODS: requirements: g_useResourceBlackList=0 for <mod name>
+ *   MODS: requirements: 1 activate and 1 deactivate command(s) for <mod name>
  * A cvar a requirement sets is global (with g_useImageBlackList 0 the five
  * stock font-atlas directories load as well, S1 consequence 16). */
 
@@ -622,7 +621,7 @@ int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_
                                const sh_modserve_gate_ops *gates, const char *phase, sh_modserve_gates *out);
 
 /* One line per requirement of each admitted bundle and its state for the
- * open map ("requirements: <id>@<version>: cvar <name>=<value>: live", "not
+ * open map ("requirements: <mod name>: cvar <name>=<value>: live", "not
  * active for this map (...)", "refused (<cause>)", "NOT live (<cause>; ...)",
  * "restored (...)", "not applied yet (...)"; "... activate command
  * \"<line>\": ran"; "... deactivate command ...: runs when the mod stops" or
@@ -661,7 +660,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context);
  * editor-time content (a generated/decls/snapeditor*, snappropertyinspector*
  * or snappalette* decl, or the editor's own movies) is the editor-tweak class:
  * its editor tweaks serve in every map, logged once:
- *   MODS: scope: <salt>@<version> shadows editor-time content (<request>); its editor tweaks serve in every map ...
+ *   MODS: scope: <mod name> shadows editor-time content (<request>); its editor tweaks serve in every map ...
  *
  * Requirements: a declared bundle's apply; an undeclared bundle that adds
  * Toybox rows (its root folder's build) keeps them live outside Play, because the
@@ -753,18 +752,19 @@ typedef struct sh_modserve_scope_info {
 /* The scope of the admitted bundle `bundle_hash` (in the open map's context). 1 filled, 0 not admitted. */
 int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *out);
 
-/* For sh_mods status, doctor and map: one header per salt installed at several
+/* For sh_mods status, doctor and map: one header per mod installed at several
  * builds, then one line per admitted bundle with what it serves for the open
- * map,
- *   scope: mod <salt>: 2 builds installed (the root folder and maps' places); ...
- *   scope: <salt>@<version> (<hash16>) (N names, N shadows, N surfaces[, requirements]): <state>
+ * map. A mod is named by its name (else its folder), never by its salt or a
+ * hash:
+ *   scope: mod <mod name>: 2 builds installed (the root folder and maps' places); ...
+ *   scope: <mod name> (N names, N shadows, N surfaces[, requirements]): <state>
  * where the state is "declared by the open map (row N): serves everything it
  * carries", "inert: the open map declares another build of its salt", "not
  * declared by the map being played: serves nothing", "not declared (no map is
  * open): its names serve for the Toybox ...", "editor-time content (...)" or
  * "map scope is off: ..."; then, per path several bundles provide, which
  * layer serves it and why (at most 40 lines), and one count line:
- *   serving: <request>: <salt>@<version> (<hash16>), declared (row N): <why>; not served: <others>
+ *   serving: <request>: <mod name>, declared (row N): <why>; not served: <others>
  *   serving: <request>: the game (no declared bundle provides it); not served: <providers>
  *   serving: N path(s) from bundles the open map declares, M from undeclared bundles (...), K left to the game
  * Returns the line count. */
@@ -836,7 +836,7 @@ int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char 
  * fetch's presence rule, modsync.c). 1 with *out filled, 0 when none (the
  * row is missing and the fetch runs). `id` is the salt. */
 typedef struct sh_modserve_bundle_ref {
-    char id[96], version[160], hash[SH_MODSERVE_HASH_HEX + 1];
+    char id[96], hash[SH_MODSERVE_HASH_HEX + 1];
     char name[400];                    /* the author's name, "" when none */
     char folder[260];                  /* its folder below the store root */
     char place[SH_MODSERVE_PLACE_CAP]; /* "maps\<segment>" for a place's folder, "" at the root */
@@ -859,8 +859,8 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
  * match, then once with name NULL for each further bundle the needs closure
  * reaches. `size` is the sum of the bundle's file sizes. Returns the number of
  * distinct bundles reported. Stock names match nothing. */
-typedef void (*sh_modserve_closure_fn)(void *context, const char *bundle_id, const char *version,
-                                       const char *bundle_hash, unsigned long long size, const char *name);
+typedef void (*sh_modserve_closure_fn)(void *context, const char *bundle_id, const char *bundle_hash,
+                                       unsigned long long size, const char *name);
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context);
 
@@ -877,12 +877,12 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
  * is served with the other providers' list entries appended (composed). One
  * MODS: line per conflict at the index build names the providers, the static
  * winner and why:
- *   MODS: conflict: shadow '<path>' is provided by a@1, b@2; serving a@1 (<reason>)
- *   MODS: conflict: shadow '<path>' is provided by ...; serving a@1's text with the others' list entries (N added)
+ *   MODS: conflict: shadow '<path>' is provided by A, B; serving A (<reason>)
+ *   MODS: conflict: shadow '<path>' is provided by ...; serving A's text with the others' list entries (N added)
  * Pointers stay valid for the process. */
 typedef struct sh_modserve_conflict {
     const char *request, *providers, *reason;
-    const char *served_id, *served_version, *served_hash;
+    const char *served_id, *served_hash;
     int count;        /* providers */
     int composed;     /* 1: list entries of every provider merged (the declared ones, with map scope on) */
     int withdrawn;    /* 1: a registration pass withdrew the winner (see plan_run) */
@@ -903,7 +903,7 @@ void sh_modserve_get_stats(sh_modserve_stats *out);
 
 /* Visit every scanned bundle (admitted or skipped): its salt (the folder
  * when it has none), and `place` 1 for a folder in a map's place. */
-typedef void (*sh_modserve_bundle_fn)(void *context, const char *id, const char *version,
+typedef void (*sh_modserve_bundle_fn)(void *context, const char *id,
                                       const char *hash, int admitted, const char *cause,
                                       int files, int place);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
@@ -915,8 +915,7 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
  * text; the strings stay valid for the process. Returns the number visited,
  * or -1 when the order could not be allocated (nothing is visited). Used by
  * strids.c for the bundle string layer. */
-typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *version, int place,
-                                     const char *extra);
+typedef void (*sh_modserve_extra_fn)(void *context, const char *id, int place, const char *extra);
 int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
 
 /* Visit every admitted bundle in index order with its salt, its hash and its
@@ -930,7 +929,7 @@ int sh_modserve_each_bundle_registries(sh_modserve_registries_fn fn, void *conte
  * winners, not withdrawn), in index order. The strings stay valid for the
  * process. Used by modvt.c to find the bundles' virtual-texture members. */
 typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t size, const char *bundle_id,
-                                    const char *version, const char *bundle_hash);
+                                    const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
 
 /* Early decls. The serving index and the provider are published after the

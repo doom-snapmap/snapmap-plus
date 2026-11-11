@@ -101,7 +101,7 @@ typedef struct strids_row {
     int          layer;       /* STRIDS_LAYER_* */
 } strids_row;
 
-/* "<id>@<version>" of each bundle that supplied strings in this pass. */
+/* The salt of each bundle that supplied strings in this pass. */
 static char **g_bundle_names;
 static size_t g_bundle_names_n, g_bundle_names_capacity;
 static size_t g_layer_rows[STRIDS_LAYERS];
@@ -519,7 +519,7 @@ typedef struct strids_bundle_pass {
  * refuses any other, so a decl references #str_<salt>_<name>). Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
-static void inject_bundle(void *context, const char *id, const char *version, int place, const char *extra)
+static void inject_bundle(void *context, const char *id, int place, const char *extra)
 {
     strids_bundle_pass *pass = (strids_bundle_pass *)context;
     sh_json_object root = {0}, languages = {0}, pairs = {0};
@@ -529,7 +529,6 @@ static void inject_bundle(void *context, const char *id, const char *version, in
     int owner;
     (void)place;   /* the order already places maps' places after the root */
     if (!id) id = "";
-    if (!version) version = "";
     if (!extra || !sh_json_parse_object(extra, strlen(extra), STRIDS_BUNDLE_JSON_DEPTH, &root)) goto done;
     strings = sh_json_object_get(&root, "strings");
     if (!strings) goto done;
@@ -538,7 +537,7 @@ static void inject_bundle(void *context, const char *id, const char *version, in
     english = sh_json_object_get(&languages, "en");
     if (!english) goto done;
     if (*english != '{' || !decode_pairs(english, strlen(english), &pairs)) goto refused;
-    name_cap = strlen(id) + strlen(version) + 2;
+    name_cap = strlen(id) + 1;
     if (g_bundle_names_n >= INT_MAX ||
         !strids_reserve((void **)&g_bundle_names, &g_bundle_names_capacity,
                         g_bundle_names_n + 1, sizeof(*g_bundle_names)) ||
@@ -546,7 +545,7 @@ static void inject_bundle(void *context, const char *id, const char *version, in
         g_pass_failed = 1;
         goto done;
     }
-    _snprintf_s(name, name_cap, _TRUNCATE, "%s@%s", id, version);
+    _snprintf_s(name, name_cap, _TRUNCATE, "%s", id);
     owner = (int)g_bundle_names_n;
     g_bundle_names[g_bundle_names_n++] = name;
     before = g_layer_rows[STRIDS_LAYER_BUNDLE];
@@ -562,8 +561,8 @@ refused:
     {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: strids REFUSED the strings of bundle %s@%s: expected extra.strings.en to be a JSON "
-                    "object of valid text strings and nonempty IDs", id, version);
+                    "B1: strids REFUSED the strings of bundle %s: expected extra.strings.en to be a JSON "
+                    "object of valid text strings and nonempty IDs", id);
         backend_log(line);
     }
 done:
@@ -840,7 +839,7 @@ void sh_strids_test_set_sort(void *sort)
 }
 
 /* How the injector attributed each row this pass: the id, and its owner ("<baked>" for the baked
- * defaults, "<id>@<version>" for a bundle). Returns 0 past the end. */
+ * defaults, the salt for a bundle). Returns 0 past the end. */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
 {
     if (index < 0 || (size_t)index >= g_injected_n) return 0;

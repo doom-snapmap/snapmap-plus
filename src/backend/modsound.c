@@ -746,12 +746,12 @@ void sh_modsound_test_stock_reset(void)
 typedef struct ms_collect { sh_modsound_table *t; int banks; } ms_collect;
 
 static void ms_collect_file(void *context, const char *request, uint64_t size, const char *bundle_id,
-                            const char *version, const char *bundle_hash)
+                            const char *bundle_hash)
 {
     ms_collect *c = (ms_collect *)context;
     sh_modserve_hit hit;
     char leaf[SH_MODSOUND_LEAF_MAX];
-    (void)version; (void)bundle_hash;
+    (void)bundle_hash;
     if (!sh_modsound_leaf(request, leaf, sizeof leaf)) return;
     if (!sh_modserve_lookup(request, &hit)) return;
     switch (sh_modsound_table_add(c->t, request, hit.disk_path, size, bundle_id, hit.is_stock)) {
@@ -771,18 +771,18 @@ static void ms_need_registries(void *context, const char *id, const char *hash, 
     if (registries && strstr(registries, "\"banks\":[")) (void)sh_modsound_needs_add_registries(c->t, hash, id, registries);
 }
 
-static void ms_need_count(void *context, const char *request, uint64_t size, const char *bundle_id, const char *version,
+static void ms_need_count(void *context, const char *request, uint64_t size, const char *bundle_id,
                           const char *bundle_hash)
 {
-    (void)size; (void)bundle_id; (void)version; (void)bundle_hash;
+    (void)size; (void)bundle_id; (void)bundle_hash;
     if (request && !_strnicmp(request, "generated/decls/sound/", 22)) ((ms_need_ctx *)context)->sound_decls++;
 }
 
-static void ms_need_served(void *context, const char *request, uint64_t size, const char *bundle_id, const char *version,
+static void ms_need_served(void *context, const char *request, uint64_t size, const char *bundle_id,
                            const char *bundle_hash)
 {
     ms_need_ctx *c = (ms_need_ctx *)context;
-    (void)size; (void)version;
+    (void)size;
     (void)sh_modsound_needs_add_served(c->t, bundle_hash, bundle_id, request);
 }
 

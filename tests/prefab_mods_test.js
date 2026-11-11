@@ -24,8 +24,8 @@ new Function('api', src.slice(begin, end) +
   ' api.fileToast = pfFileResultToast; api.label = pfModLabel;')(api);
 
 /* MODS_STATUS rows: "id" is the row's name (else its salt), with the salt and the build. */
-const door = {id: 'test.door', salt: 'testdoor', version: '1.0.0', build: 'a'.repeat(64), size: 100, installed: true};
-const ghost = {id: 'ghost.mod', salt: 'ghostmod', version: '2.0', build: '9'.repeat(64), size: 1048576, installed: false};
+const door = {id: 'test.door', salt: 'testdoor', build: 'a'.repeat(64), size: 100, installed: true};
+const ghost = {id: 'ghost.mod', salt: 'ghostmod', build: '9'.repeat(64), size: 1048576, installed: false};
 const both = JSON.stringify({count: 2, missing: 1, mods: [door, ghost]});
 
 /* Parsing: the host's escaped string or an object; anything malformed is no mods. */
@@ -33,15 +33,15 @@ let st = api.parse(both);
 check(st.count === 2 && st.missing === 1 && st.mods[1].id === 'ghost.mod', 'status string parses: ' + JSON.stringify(st));
 check(api.parse({mods: [door]}).count === 1 && api.parse({mods: [door]}).missing === 0, 'an object parses too');
 check(api.parse('').count === 0 && api.parse('{not json').count === 0 && api.parse(null).count === 0, 'malformed reads as none');
-check(api.parse({mods: [{id: ''}, null, {version: '1'}]}).count === 0, 'rows without an id are dropped');
+check(api.parse({mods: [{id: ''}, null, {salt: 'x'}]}).count === 0, 'rows without an id are dropped');
 check(api.parse({mods: [{id: 'x'}]}).missing === 1, 'a row without installed:true counts as missing');
-check(api.label(door) === 'test.door 1.0.0' && api.label({id: 'x'}) === 'x', 'labels are "id version"');
+check(api.label(door) === 'test.door' && api.label({id: 'x'}) === 'x', 'a label is the mod\'s name (a mod has no version)');
 
 /* The list pill. */
 check(api.badge(api.parse('')) === null, 'no mods, no pill');
 let b = api.badge(st);
 check(b && b.text === 'Needs mods: ghost.mod' && /pf-mods-missing/.test(b.cls), 'a missing mod names it: ' + JSON.stringify(b));
-check(b && b.title === 'test.door 1.0.0 (installed)\nghost.mod 2.0 (not installed)', 'the title lists every mod and its state');
+check(b && b.title === 'test.door (installed)\nghost.mod (not installed)', 'the title lists every mod and its state');
 b = api.badge(api.parse({mods: [door]}));
 check(b && b.text === 'Mods: test.door' && b.cls === 'pf-mods', 'installed mods are listed: ' + JSON.stringify(b));
 b = api.badge(api.parse({mods: [door, Object.assign({}, door, {id: 'other.mod'})]}));
@@ -51,7 +51,7 @@ check(b && b.text === 'Needs mods: ghost.mod +1', 'only the missing ones are nam
 
 /* Prefab Details. */
 let d = api.detail(st);
-check(d.rows.length === 2 && d.rows[0].label === 'test.door 1.0.0' && d.rows[0].state === 'Installed' && !d.rows[0].missing &&
+check(d.rows.length === 2 && d.rows[0].label === 'test.door' && d.rows[0].state === 'Installed' && !d.rows[0].missing &&
       d.rows[1].state === 'Not installed' && d.rows[1].missing, 'one row per mod with its state');
 check(d.note === 'Needs mods: 1 is not installed. Load / Place offers to download them when the mod store has them; ' +
       'otherwise ask the prefab\'s author for its ZIP export.', 'the note says what Load / Place does: ' + d.note);

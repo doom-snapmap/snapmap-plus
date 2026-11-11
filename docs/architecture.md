@@ -732,9 +732,10 @@ These backend files share the work:
   decision and `sh_mods held`.
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
-  carrier). A row is `{"mod":"<salt>@<build hash>","name","version","size",
+  carrier). A row is `{"mod":"<salt>@<build hash>","name","size",
   "names":[...],"attached"?,"choices"?}`: the salt names the mod, the hash its
-  build, and `name` and `version` are the author's, for display. Rows merge by
+  build, and `name` is the author's, for display. A mod has no version: the
+  build hash alone tells builds apart, and no player or author sees or sets one. Rows merge by
   salt and build; a row naming an `id` or a `bundle` does not parse (the parse
   detour has already refused such a map). The display name of a placed mod's
   row comes from the build that serves it at the save (the row resolver).
@@ -1412,7 +1413,7 @@ way from the installed bytes. A bare program name in a material, shared includes
 together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
 0) and may write the permutation decl into the player's `base\generated\`.
 The first open of each served render-program file logs
-`MODS: renderprog: served <request> (<id>@<version>, <n> bytes)` (the first 64),
+`MODS: renderprog: served <request> (<mod name>, <n> bytes)` (the first 64),
 which shows the variant this GPU binds.
 ### Owner-bound companions
 
@@ -2227,7 +2228,7 @@ tests enable it where they test it (`sh_modserve_scope_enable`).
 ("scope: key <key>: N bundles installed; ..."), one line per bundle (key, version, hash, its names, shadows and surfaces, and
 what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
-<key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or
+<mod name>, declared (row N): <why>; not served: ...` or
 `the game (no declared bundle provides it)`), and the counts per layer. The
 walks of the engine's resource lists (watermarks, `sh_modserve_resource_each`,
 `op_held`, the ledger's census and sweep) hold the engine's resource lock: the
@@ -2383,9 +2384,9 @@ bridge's install (`sh_modstock_set_install`):
   left out) into a staging folder outside the store and installed by
   `modstore.c` as `mods\<folder>\` (its own name; with the tree's first 8 hex
   when another mod holds that name), `mod.json` and real files. The package's
-  keys are the author part in the one shape: its name, version (else the
-  package's own, else `1.0.0`), requirements, strings and hud and its other keys,
-  without the retired ones (`id`, `composes`, an era B `schema`) and with no
+  keys are the author part in the one shape: its name, requirements, strings and
+  hud and its other keys, without the retired ones (`id`, `version`, `composes`,
+  an era B `schema`) and with no
   product block. The staged folder is salted with `from` its id (or, for an
   era B pack without one, its folder name; `sh_ms_assign_salt`, which also names
   its strings `<salt>_<key>`) and built under the current rules with its
@@ -2853,7 +2854,7 @@ top-level member, `snapmapPlus`, after the engine's own members
 
 ```
 "snapmapPlus":{"format":1,"description":"","tags":[],
-               "mods":[{"mod":"<salt>@<build hash>","name","version","size","names"}...],
+               "mods":[{"mod":"<salt>@<build hash>","name","size","names"}...],
                "summary":{...}}
 ```
 
@@ -2887,7 +2888,7 @@ placed names of the prefab text (`sh_modmanifest_placed_names`: every
 `inherit`, `moduleName` and string inside an `edit` object) go through
 `modserve_bundles_for_names_visit`, which names every admitted build that
 provides one and the builds its needs reach. Each build is one row in the
-manifest's form (`<salt>@<build hash>`, its name and version from the build).
+manifest's form (`<salt>@<build hash>`, its name from the build).
 Create writes the file the engine
 serialized and then has the backend write a fresh block into it (`MODS_RECORD`:
 empty description and tags, the rows, `[]` when there are none); a module
@@ -2926,7 +2927,7 @@ map's root folders first), with the place the prefab's import filled,
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`, given the
   folder of the build that serves the row, else its salt), with one
-  console line: "Prefab <name> uses <mod name> <version>; this map did not list it,
+  console line: "Prefab <name> uses <mod name>; this map did not list it,
   so it was added to the map (the Mods tab's Remove from map takes it out).".
   Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
@@ -2989,7 +2990,7 @@ in one ZIP. An export in an earlier shape (any `bundle.canonical.json`, in a
 ZIP or an extracted folder, an `export.json` index, a carried `mod.json` or
 rows in an earlier shape) is refused with "The prefab was not imported. This
 export was saved in a format this version does not read."
-`sh_prefab mods "<name>"` lists the block's rows, each as `<name> <version>
+`sh_prefab mods "<name>"` lists the block's rows, each as `<name>
 (<salt>@<build16>)`, and whether each is served in the placement's context,
 with the asset rule's sentence for one that is not.
 

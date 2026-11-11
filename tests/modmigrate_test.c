@@ -441,7 +441,7 @@ static void full_pass(const char *root)
     hash_c = _strdup(b.hash);
     sh_mb_free(&b);
     /* The era B pack: named by its folder, its version kept, its layout migrated, no era B schema. */
-    CHECK(bundle_of(mods, "Old Pack", &b) == 1 && sh_salt_valid(b.id, strlen(b.id)) && !strcmp(b.version, "1.0.0"));
+    CHECK(bundle_of(mods, "Old Pack", &b) == 1 && sh_salt_valid(b.id, strlen(b.id)));
     {
         char req[160];
         _snprintf_s(req, sizeof req, _TRUNCATE, "generated/decls/entitydef/mods/%s/thing.decl", b.id);

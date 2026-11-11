@@ -548,9 +548,6 @@ static void mu_plain_cause(const mu_model *m, const sh_ms_entry *e, const char *
         _snprintf_s(out, cap, _TRUNCATE, "This mod could not be built: %s; fix that in its folder and press Refresh.", plain);
 }
 
-/* The version a row shows. */
-static const char *mu_version(const char *v) { return v ? v : ""; }
-
 /* ------------------------------------------------------------------ what a mod carries */
 
 /* A decoded top-level string of the author block's preserved keys (extra),
@@ -1099,7 +1096,6 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
         free(name);
     }
     mu_kstr(b, "author", e->loaded && bd->author ? bd->author : "", 0);
-    mu_kstr(b, "version", e->loaded ? mu_version(bd->version) : "", 0);
     mu_knum(b, "size", e->loaded ? bd->total_size : 0, 0);
     mu_knum(b, "files", e->loaded ? bd->file_count - bd->stock_count : 0, 0);
     mu_kstr(b, "state", ok ? "ready" : "attention", 0);
@@ -1381,7 +1377,6 @@ static void mu_names_free(mu_names *n)
 typedef struct mu_closure_bundle {
     char hash[SH_MODSERVE_HASH_HEX + 1];
     char id[SH_MB_ID_MAX + 1];
-    char version[SH_MB_VERSION_MAX + 1];
     unsigned long long size;
     char *names[MU_MAX_ROW_NAMES];
     int name_count;
@@ -1394,8 +1389,8 @@ typedef struct mu_closure {
     int oom;
 } mu_closure;
 
-static void mu_closure_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
-                             unsigned long long size, const char *name)
+static void mu_closure_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                             const char *name)
 {
     mu_closure *c = (mu_closure *)context;
     mu_closure_bundle *cb = NULL;
@@ -1415,7 +1410,6 @@ static void mu_closure_visit(void *context, const char *bundle_id, const char *v
         memset(cb, 0, sizeof *cb);
         strncpy_s(cb->hash, sizeof cb->hash, bundle_hash, _TRUNCATE);
         strncpy_s(cb->id, sizeof cb->id, bundle_id ? bundle_id : "", _TRUNCATE);
-        strncpy_s(cb->version, sizeof cb->version, version ? version : "", _TRUNCATE);
         cb->size = size;
         cb->via_needs = name == NULL;
     }
@@ -1445,7 +1439,6 @@ static void mu_closure_free(mu_closure *c)
 typedef struct mu_mapmod {
     char hash[SH_MODSERVE_HASH_HEX + 1];
     char id[SH_MB_ID_MAX + 1];
-    char version[SH_MB_VERSION_MAX + 1];
     unsigned long long size;
     int in_rows;              /* the current manifest has a row for it */
     int attached;             /* that row is map-level: the map uses the mod without placing it */
@@ -1485,7 +1478,7 @@ typedef struct mu_map {
     const mu_claim *claim;    /* that item's claim, or NULL */
 } mu_map;
 
-static int mu_mapmod_add(mu_map *mp, const char *hash, const char *id, const char *version, unsigned long long size)
+static int mu_mapmod_add(mu_map *mp, const char *hash, const char *id, unsigned long long size)
 {
     size_t i;
     for (i = 0; i < mp->mod_count; i++) if (!strcmp(mp->mods[i].hash, hash)) return (int)i;
@@ -1499,7 +1492,6 @@ static int mu_mapmod_add(mu_map *mp, const char *hash, const char *id, const cha
     memset(&mp->mods[mp->mod_count], 0, sizeof *mp->mods);
     strncpy_s(mp->mods[mp->mod_count].hash, sizeof mp->mods[0].hash, hash, _TRUNCATE);
     strncpy_s(mp->mods[mp->mod_count].id, sizeof mp->mods[0].id, id ? id : "", _TRUNCATE);
-    strncpy_s(mp->mods[mp->mod_count].version, sizeof mp->mods[0].version, version ? version : "", _TRUNCATE);
     mp->mods[mp->mod_count].size = size;
     return (int)mp->mod_count++;
 }
@@ -1521,15 +1513,15 @@ static void mu_mapmod_uid(mu_map *mp, int mod, int uid)
 
 typedef struct mu_visit { mu_closure *closure; mu_map *mp; } mu_visit;
 
-static void mu_map_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
-                         unsigned long long size, const char *name)
+static void mu_map_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                         const char *name)
 {
     mu_visit *v = (mu_visit *)context;
     mu_map *mp = v->mp;
     int mod;
-    mu_closure_visit(v->closure, bundle_id, version, bundle_hash, size, name);
+    mu_closure_visit(v->closure, bundle_id, bundle_hash, size, name);
     if (!bundle_hash || mp->oom) return;
-    mod = mu_mapmod_add(mp, bundle_hash, bundle_id, version, size);
+    mod = mu_mapmod_add(mp, bundle_hash, bundle_id, size);
     if (mod < 0) return;
     mp->mods[mod].in_closure = 1;
     if (!name) return;
@@ -1731,9 +1723,9 @@ static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
             if (sub_ok[0]) {
                 for (k = 0; k < mp->mod_count && mod < 0; k++)
                     if (mu_same_bundle(m, mp->mods[k].hash, sub_ok)) mod = (int)k;
-                if (mod < 0) mod = mu_mapmod_add(mp, sub_ok, row->salt, row->version, row->size);
+                if (mod < 0) mod = mu_mapmod_add(mp, sub_ok, row->salt, row->size);
             }
-            if (mod < 0) mod = mu_mapmod_add(mp, row->build, row->salt, row->version, row->size);
+            if (mod < 0) mod = mu_mapmod_add(mp, row->build, row->salt, row->size);
             if (mod >= 0) {
                 mp->mods[mod].in_rows = 1;
                 if (row->attached) mp->mods[mod].attached = 1;
@@ -2002,7 +1994,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         mu_putn(b, "{", 1);
         mu_kstr(b, "salt", r->salt, 1);
         mu_kstr(b, "name", r->name, 0);
-        mu_kstr(b, "version", mu_version(r->version), 0);
         mu_kstr(b, "build", r->build, 0);
         mu_knum(b, "size", r->size, 0);
         mu_kstr(b, "state", state, 0);
@@ -2027,7 +2018,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "salt", cb->id, 1);
-        mu_kstr(b, "version", mu_version(cb->version), 0);
         mu_kstr(b, "build", cb->hash, 0);
         mu_knum(b, "size", cb->size, 0);
         mu_kstr(b, "key", at >= 0 ? m->list.items[at].name : "", 0);
@@ -2077,7 +2067,6 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
                 mu_kstr(b, "name", name ? name : row_name, 0);
                 free(name);
             }
-            mu_kstr(b, "version", mu_version(x->version), 0);
             mu_kstr(b, "state", mu_mapmod_state(m, mp, x), 0);
             mu_key(b, "placedEntities", 0);
             mu_put_entity_names(b, m, mp, x);
@@ -2659,8 +2648,8 @@ static void mu_say_substituted(const mu_out *o, const mu_model *m, const char *p
     int at = mu_find_hash(m, serving), named = mu_find_salt(m, salt, -1);
     const sh_ms_entry *e = at >= 0 ? &m->list.items[at] : named >= 0 ? &m->list.items[named] : NULL;
     (void)declared;
-    mu_line(o, "%s%s: the map saved an earlier version of it; mods\\%s serves it now, and the next save records that "
-               "version", prefix, e ? mu_entry_title(e) : "a mod", e ? e->name : "?");
+    mu_line(o, "%s%s: the map was saved with an earlier copy of it; mods\\%s serves it now, and the next save "
+               "records that one", prefix, e ? mu_entry_title(e) : "a mod", e ? e->name : "?");
 }
 
 /* Each row of the open map another build serves. */
@@ -2919,14 +2908,14 @@ static int mu_listing_skipped(const char *hash)
  * declare (already listed), else the build sh_modserve_row_build names for
  * that salt in the open map's context (the root folder's for the player's own
  * map). A chosen build is copied into the listing. */
-static void mu_listing_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
-                             unsigned long long size, const char *name)
+static void mu_listing_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                             const char *name)
 {
     mu_listing *l = (mu_listing *)context;
     sh_modserve_bundle_ref serving;
     sh_modmanifest_row probe;
     size_t i;
-    (void)version; (void)size; (void)name;
+    (void)size; (void)name;
     if (mu_listing_skipped(bundle_hash)) return;
     for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the salt */
     memset(&probe, 0, sizeof probe);
@@ -3152,11 +3141,9 @@ static int mu_resolve_row(const char *build, const char *salt, sh_modmanifest_ro
     strcpy_s(probe.salt, sizeof probe.salt, salt);
     strcpy_s(probe.build, sizeof probe.build, build);
     if (!sh_modserve_row_build(&probe, &ref)) return 0;
-    if (strlen(ref.id) >= sizeof out->salt || strlen(ref.version) >= sizeof out->version ||
-        strlen(ref.hash) >= sizeof out->build) return 0;
+    if (strlen(ref.id) >= sizeof out->salt || strlen(ref.hash) >= sizeof out->build) return 0;
     strcpy_s(out->salt, sizeof out->salt, ref.id);
     strcpy_s(out->build, sizeof out->build, ref.hash);
-    strcpy_s(out->version, sizeof out->version, ref.version);
     strncpy_s(out->name, sizeof out->name, ref.name, _TRUNCATE);
     out->size = ref.size;
     return 1;
@@ -3503,8 +3490,7 @@ static void mu_say_target(const mu_out *o, const char *verb, const sh_ms_entry *
     char title[400];
     mu_place_title(s, title, sizeof title);
     if (s->loaded)
-        mu_line(o, "%s:   mods\\%s (%s%s%s%s%s)", verb, s->name, mu_entry_title(s), s->bundle.version[0] ? " " : "",
-                s->bundle.version, title[0] ? ", downloaded for " : "", title);
+        mu_line(o, "%s:   mods\\%s (%s%s%s)", verb, s->name, mu_entry_title(s), title[0] ? ", downloaded for " : "", title);
     else mu_line(o, "%s:   mods\\%s (not built)", verb, s->name);
 }
 
@@ -3835,7 +3821,6 @@ static int mu_map_add(const char *key, const mu_out *o)
             strncpy_s(row.salt, sizeof row.salt, e->salt, _TRUNCATE);
             strncpy_s(row.build, sizeof row.build, e->bundle.hash, _TRUNCATE);
             strncpy_s(row.name, sizeof row.name, e->bundle.name ? e->bundle.name : "", _TRUNCATE);
-            strncpy_s(row.version, sizeof row.version, e->bundle.version, _TRUNCATE);
             row.size = e->bundle.total_size;
         }
         row.names = NULL;
@@ -3851,7 +3836,7 @@ static int mu_map_add(const char *key, const mu_out *o)
             (void)mu_scope_now_declared("map add");
             InterlockedIncrement(&g_gen);
             mu_mark_modified("Add Mod To Map");
-            mu_log("map add %s: %s@%s (%.16s) attached to %s as a map-level row%s", key, row.salt, row.version, row.build,
+            mu_log("map add %s: %s (%.16s) attached to %s as a map-level row%s", key, row.salt, row.build,
                    where, x && x->uid_count ? " (it also has placed entities)" : "");
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is now used by the whole of %s%s. Its changes apply now; the map "
                         "lists it with its mods at the map's next save, and players are then offered it when they open "
@@ -3989,7 +3974,7 @@ static int mu_rebuild(const char *key)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not rebuilt. %s", name, plain);
     } else {
         int same = !strcmp(before, bd.hash);
-        mu_log("rebuild %s: %s@%s, build %s%s", key, bd.id, bd.version, bd.hash, same ? " (unchanged)" : "");
+        mu_log("rebuild %s: %s, build %s%s", key, bd.id, bd.hash, same ? " (unchanged)" : "");
         if (bd.warnings) mu_log("rebuild %s: %u warning(s), first: %s", key, bd.warnings, bd.first_warning);
         mu_rescan(note, sizeof note);
         if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed.", name);
@@ -4412,9 +4397,8 @@ static void mu_say_map(const mu_out *o)
             const char *row_name = "", *state = mu_mapmod_state(&m, &mp, x);
             for (k = 0; at < 0 && k < mp.rows.count && !row_name[0]; k++)
                 if (!_stricmp(mp.rows.rows[k].salt, x->id)) row_name = mp.rows.rows[k].name;
-            mu_line(o, "map: mod %s%s%s (%s%s, %s): %s%zu placed entit%s%s, %zu wire or timeline reference(s)%s%s",
+            mu_line(o, "map: mod %s (%s%s, %s): %s%zu placed entit%s%s, %zu wire or timeline reference(s)%s%s",
                     at >= 0 ? mu_entry_title(&m.list.items[at]) : row_name[0] ? row_name : "a mod",
-                    x->version[0] ? " " : "", mu_version(x->version),
                     at >= 0 ? "mods\\" : "", at >= 0 ? m.list.items[at].name : "not installed",
                     !strcmp(state, "installed") ? "ready" : state,
                     x->attached ? "used by the whole map, " : "", x->uid_count,
@@ -4512,8 +4496,7 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
     const sh_ms_entry *e = u->e;
     char title[400];
     mu_place_title(e, title, sizeof title);
-    mu_say(o, "mod mods\\%s (%s%s%s%s%s): %s%s%s", e->name, mu_entry_title(e), e->loaded && e->bundle.version[0] ? " " : "",
-           e->loaded ? e->bundle.version : "", title[0] ? ", downloaded for " : "", title,
+    mu_say(o, "mod mods\\%s (%s%s%s): %s%s%s", e->name, mu_entry_title(e), title[0] ? ", downloaded for " : "", title,
            u->admitted && !u->cause[0] ? "ready" : !strcmp(u->state, "unindexed") ? "not read yet" : "needs attention",
            u->cause[0] ? ": " : "", u->cause);
     if (e->loaded) {

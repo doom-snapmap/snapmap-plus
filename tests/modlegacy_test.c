@@ -732,7 +732,7 @@ static void convert_era_c(void)
      * once so the activation later in the same parse can see it. */
     CHECK(g_mod_stub_rescans == rescans + 1);
     CHECK(sh_modlegacy_last_report(v, 4) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT && v[0].layout == 'C');
-    CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") && strncmp(v[0].version, "legacy-", 7) &&
+    CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") &&
           v[0].key_form == SH_LEGACY_KEY_DELIVERY && v[0].files == 3 && v[0].salt[0] == 't');
     CHECK(v[0].shadows == 2);   /* two names outside mods/<id>/: the namespaced icon is not one */
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\acceptance.r137.mixed-rows", g_root);

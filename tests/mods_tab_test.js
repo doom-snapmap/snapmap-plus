@@ -185,8 +185,8 @@ test('formatting: sizes, the row line', () => {
   assert.equal(modsTab.formatSize(0), '0 B');
   assert.equal(modsTab.formatSize(2048), '2.0 KB');
   assert.equal(modsTab.formatSize(1843230), '1.8 MB');
-  assert.equal(modsTab.subText({version: '1.0.0', size: 1843230}), '1.0.0 · 1.8 MB');
-  assert.equal(modsTab.subText({version: '', size: 2048}), '2.0 KB');
+  assert.equal(modsTab.subText({size: 1843230}), '1.8 MB');
+  assert.equal(modsTab.subText({version: '1.0.0', size: 2048}), '2.0 KB');   /* a mod has no version */
   assert.equal(modsTab.bareName('mods/alexrimp/single_imp', 'alexrimp'), 'single_imp');
   assert.equal(modsTab.bareName('ai/imp', 'alexrimp'), 'ai/imp');
 });
@@ -268,10 +268,10 @@ test('two kinds of groups: Your mods with its folders, and one group per downloa
   assert.deepEqual(keys(h), ['campaign-interactables\\doors', 'Arena Gates', 'Arena Gates (old)', 'Broken Barrels', 'Editor Grid',
                              'alex.r2-imp', 'maps\\Hell Guard Arena\\Hell Guards', 'maps\\Hell Guard Arena\\Lava Floor']);
   assert.deepEqual(h.ui.state().view.map(b => b.key), keys(h), 'the arrow keys walk the shown order');
-  /* each row: the name, the version and size, one glyph */
+  /* each row: the name and size, one glyph */
   const imp = rowOf(h, 'alex.r2-imp');
   assert.equal(imp.all('mods-row-name')[0].textContent, 'R2 Imp copy');
-  assert.equal(imp.all('mods-row-sub')[0].textContent, '1.0.0 · 1.8 MB');
+  assert.equal(imp.all('mods-row-sub')[0].textContent, '1.8 MB');
   assert.equal(imp.children.length, 2, 'glyph and text, nothing else');
   assert.ok(rows(h).every(n => n.all('mods-status-icon').length === 1));
   assert.equal(iconOf(imp), 'map', 'the open map uses it');
@@ -476,10 +476,10 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.ok(t.indexOf('Saved map') < 0, 'no saved-map id');
   const mr = h.nodes.modsMapHost.all('mods-map-row');
   assert.equal(mr.length, 3);
-  assert.match(mr[0].textContent, /^R2 Imp copy 1\.0\.0 · 1\.8 MB 3 placed entities use it Also used by timeline: Wave 2: spawn the imps, wire: Relay: all imps dead Remove from map$/);
+  assert.match(mr[0].textContent, /^R2 Imp copy 1\.8 MB 3 placed entities use it Also used by timeline: Wave 2: spawn the imps, wire: Relay: all imps dead Remove from map$/);
   assert.match(mr[1].textContent, /^Doors 3\.6 MB Used by the whole map, nothing placed/);
   assert.equal(iconOf(mr[2]), 'warn');
-  assert.match(mr[2].textContent, /^Spiked Walls 1\.0\.0 · 51 KB 2 placed entities use it; not installed on this computer; playing the map downloads it/);
+  assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer; playing the map downloads it/);
   /* a choice between mods names the mods, never their ids */
   const opts = h.nodes.modsMapHost.tags('option').map(o => o.textContent);
   assert.deepEqual(opts, ['R2 Imp copy', 'Doors']);

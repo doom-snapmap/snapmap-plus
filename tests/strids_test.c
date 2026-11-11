@@ -90,7 +90,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     if (g_bundle_refuse) return -1;
     for (i = 0; i < g_nbundles; i++) {
         if (!g_bundles[i].admitted || !g_bundles[i].extra) continue;
-        fn(context, g_bundles[i].id, g_bundles[i].version, g_bundles[i].place, g_bundles[i].extra);
+        fn(context, g_bundles[i].id, g_bundles[i].place, g_bundles[i].extra);
         n++;
     }
     return n;
@@ -404,15 +404,15 @@ static void test_bundle_layer(void)
     CHECK(value_for("alpha_name") && !strcmp(value_for("alpha_name"), "Alpha"));
     CHECK(value_for("beta_name") && !strcmp(value_for("beta_name"), "Beta"));
     CHECK(value_for("legacy_name") && !strcmp(value_for("legacy_name"), "Legacy"));
-    CHECK(row_owner("alpha_name") && !strcmp(row_owner("alpha_name"), "alpha.mod@1.0.0"));
-    CHECK(row_owner("legacy_name") && !strcmp(row_owner("legacy_name"), "old.map@0123456789abcdef"));
-    CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "alpha.mod@1.0.0"));
+    CHECK(row_owner("alpha_name") && !strcmp(row_owner("alpha_name"), "alpha.mod"));
+    CHECK(row_owner("legacy_name") && !strcmp(row_owner("legacy_name"), "old.map"));
+    CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "alpha.mod"));
     /* First writer wins across bundles; one line per disagreeing bundle. */
     CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
-    CHECK(log_count("B1: strids REFUSED '#str_CLASH_KEY' from bundle beta.mod@1.0.0 -- bundle alpha.mod@1.0.0 "
+    CHECK(log_count("B1: strids REFUSED '#str_CLASH_KEY' from bundle beta.mod -- bundle alpha.mod "
                     "already defines it with different text; the first definition stands") == 1);
-    CHECK(log_count("B1: strids REFUSED '#str_clash_key' from bundle old.map@0123456789abcdef -- bundle "
-                    "alpha.mod@1.0.0 already defines it") == 1);
+    CHECK(log_count("B1: strids REFUSED '#str_clash_key' from bundle old.map -- bundle "
+                    "alpha.mod already defines it") == 1);
     CHECK(log_count("REFUSED '#str_") == 2);   /* equal text and baked precedence are not conflicts */
     CHECK(count_key("same_key") == 1);
     /* Only en; only admitted bundles. */
@@ -426,9 +426,9 @@ static void test_bundle_layer(void)
     SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", "1");
     g_log[0] = '\0';
     CHECK(rearm_strings() == 1);
-    CHECK(log_count("B1: strids: bundle alpha.mod@1.0.0 supplied 5 string(s)") == 1);
-    CHECK(log_count("B1: strids: bundle beta.mod@1.0.0 supplied 1 string(s)") == 1);
-    CHECK(log_count("B1: strids: bundle old.map@0123456789abcdef supplied 1 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle alpha.mod supplied 5 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle beta.mod supplied 1 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle old.map supplied 1 string(s)") == 1);
     CHECK(log_count("supplied") == 3);
     SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", NULL);
 
@@ -440,7 +440,7 @@ static void test_bundle_layer(void)
     CHECK(count_key("beta_name") == 0 && count_key("same_key") == 0);
     CHECK(value_for("delta_name") && !strcmp(value_for("delta_name"), "Delta"));
     CHECK(count_key("eps_name") == 0);
-    CHECK(strstr(g_log, "B1: strids REFUSED the strings of bundle eps.bad@1.0.0") != NULL);
+    CHECK(strstr(g_log, "B1: strids REFUSED the strings of bundle eps.bad") != NULL);
     CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
     CHECK(log_count("REFUSED '#str_") == 1);
     CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), baked_nav));

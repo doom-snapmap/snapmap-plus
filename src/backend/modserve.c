@@ -110,7 +110,7 @@ typedef struct ms_req_cvar { const char *name, *value; } ms_req_cvar;   /* canon
  * store (place NULL) or a map's place, mods\maps\<segment> (place
  * "maps\<segment>"). The index holds one build per salt per area. */
 typedef struct ms_bundle {
-    const char *dir, *folder, *id, *version, *hash, *name;
+    const char *dir, *folder, *id, *hash, *name;
     const char *extra;                    /* the author block's other keys as JSON, or NULL */
     const char *place;                    /* "maps\<segment>" for a folder in a map's place; NULL at the root */
     int admitted, first_file, file_count;
@@ -138,6 +138,14 @@ typedef struct ms_bundle {
     const char *edits;                    /* the product block's "edits" array (JSON, derived edits), or NULL */
     size_t edits_len;
 } ms_bundle;
+
+/* A mod as a line names it: the author's name, else its folder, else its salt. */
+static const char *ms_label(const ms_bundle *b)
+{
+    if (b->name && b->name[0]) return b->name;
+    if (b->folder && b->folder[0]) return b->folder;
+    return b->id ? b->id : "";
+}
 
 #define MS_SV_NEW     1                   /* names under its salt */
 #define MS_SV_SHADOW  2                   /* files at game names that differ from the game's */
@@ -867,7 +875,7 @@ static const char *const g_ms_retired[] = { "id", "key", "shadows", "stock", "sc
                                             "legacy", "composes", "schema", NULL };
 
 /* Parse <dir>\mod.json into the index; leaves b->cause set on failure. The
- * author block gives the name, the version, the requirements and "extra"
+ * author block gives the name, the requirements and "extra"
  * (every key the product does not read itself: strings, hud, description,
  * ...); the builder block ("snapmap-plus", format 2) gives the salt, the
  * build hash, the files and the shadows. A folder in an earlier shape, one
@@ -884,7 +892,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     ms_json c;
     const char *v, *ve, *files_v = NULL, *files_e = NULL, *stock_v = NULL, *stock_e = NULL, *req_v = NULL, *req_e = NULL;
     const char *block_v = NULL, *block_e = NULL, *shadows_v = NULL, *shadows_e = NULL, *retired = NULL;
-    char **shadows = NULL, *salt = NULL, *version = NULL, *name = NULL, *state_cause = NULL;
+    char **shadows = NULL, *salt = NULL, *name = NULL, *state_cause = NULL;
     int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
@@ -917,8 +925,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         const char *ks = c.p;
         if (!ms_jmember(&c, key, sizeof key, &v, &ve)) break;
         for (k = 0; !retired && g_ms_retired[k]; ++k) if (!strcmp(key, g_ms_retired[k])) retired = g_ms_retired[k];
-        if (!strcmp(key, "version")) version = ms_jstr(x, v, ve, 160);
-        else if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, 400);
+        if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, 400);
         else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
         else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "author") || !strcmp(key, "homepage")) continue;
@@ -971,7 +978,6 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     free(extra.p);
     salt = ms_trim(salt);
     b->id = salt;
-    b->version = ms_trim(version);
     b->name = ms_trim(name);
     b->installed_at = built;
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
@@ -996,7 +1002,6 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     else if (state_cause && state_cause[0]) ms_fail(b, "not built: %s", state_cause);
     else if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
     if (!b->id) b->id = "";
-    if (!b->version) b->version = "";
     if (!b->cause[0] && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
     if (shadows_v && !b->cause[0]) {
         ms_json a = { shadows_v, shadows_e };
@@ -2012,7 +2017,7 @@ static int ms_resolve(ms_index *x)
             who[0] = 0;
             for (k = i; k < j && at + 2 < sizeof who; ++k) {
                 const ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s@%s", k > i ? ", " : "", b->id, b->version);
+                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", k > i ? ", " : "", ms_label(b));
                 if (w < 0) break;
                 at += (size_t)w;
             }
@@ -2061,9 +2066,8 @@ static int ms_resolve(ms_index *x)
             if (any_shadow) ms_record_alts(x, &avail, keys, i, j, winner, 1);
             if (composed) {
                 x->composed++;
-                _snprintf_s(how, sizeof how, _TRUNCATE, "composed: %d list entr%s of the other providers added to %s@%s's text",
-                            added, added == 1 ? "y" : "ies", x->bundles[x->files[winner].bundle].id,
-                            x->bundles[x->files[winner].bundle].version);
+                _snprintf_s(how, sizeof how, _TRUNCATE, "composed: %d list entr%s of the other providers added to %s's text",
+                            added, added == 1 ? "y" : "ies", ms_label(&x->bundles[x->files[winner].bundle]));
             } else _snprintf_s(how, sizeof how, _TRUNCATE, "%s", reason);
             if (ms_grow((void **)&x->conflict_list, &x->cconflict_list, x->nconflict_list + 1, sizeof(ms_conflict))) {
                 c = &x->conflict_list[x->nconflict_list++];
@@ -2076,13 +2080,12 @@ static int ms_resolve(ms_index *x)
             }
             if (logged++ < MS_CONFLICT_LOGS) {
                 if (composed)
-                    ms_log("conflict: %s '%s' is provided by %s; serving %s@%s's text with the others' list entries "
+                    ms_log("conflict: %s '%s' is provided by %s; serving %s's text with the others' list entries "
                            "(%d added)", any_shadow ? "shadow" : "path", keys[i].key, who,
-                           x->bundles[x->files[winner].bundle].id, x->bundles[x->files[winner].bundle].version, added);
+                           ms_label(&x->bundles[x->files[winner].bundle]), added);
                 else
-                    ms_log("conflict: %s '%s' is provided by %s; serving %s@%s (%s)", any_shadow ? "shadow" : "path",
-                           keys[i].key, who, x->bundles[x->files[winner].bundle].id,
-                           x->bundles[x->files[winner].bundle].version, reason);
+                    ms_log("conflict: %s '%s' is provided by %s; serving %s (%s)", any_shadow ? "shadow" : "path",
+                           keys[i].key, who, ms_label(&x->bundles[x->files[winner].bundle]), reason);
             }
         }
         i = j;
@@ -2719,7 +2722,6 @@ static int ms_registry_files(ms_index *x)
     memset(pb, 0, sizeof *pb);
     pb->dir = pb->folder = "";
     pb->id = "snapmap-plus.registries";
-    pb->version = "generated";
     pb->hash = "";
     pb->name = "game files generated by the product from the declared mods' edits";
     pb->rank = -1;
@@ -2889,7 +2891,7 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
         sh_mr_source *s = &src[i];
         char who[200];
         int nd = 0, want_decls = b->edits && strstr(b->edits, SH_MB_REGISTRY_CONDUCTOR) != NULL;
-        _snprintf_s(who, sizeof who, _TRUNCATE, "%s@%s (%.16s)", b->id, b->version, b->hash);
+        _snprintf_s(who, sizeof who, _TRUNCATE, "%s", ms_label(b));
         s->key = b->id;
         s->who = ms_strdup(x, who);
         s->edits = b->edits;
@@ -3303,8 +3305,8 @@ static void ms_scope_log(const ms_index *x, const ms_index *old)
         if (!b->admitted || !b->scope_editor) continue;
         o = old ? ms_bundle_by_hash(old, b->hash, 1) : -1;
         if (o >= 0) continue;
-        ms_log("scope: %s@%s shadows editor-time content (%s); its editor tweaks serve in every map this editor "
-               "opens, the rest only in maps that declare it", b->id, b->version, b->scope_editor);
+        ms_log("scope: %s shadows editor-time content (%s); its editor tweaks serve in every map this editor "
+               "opens, the rest only in maps that declare it", ms_label(b), b->scope_editor);
     }
 }
 
@@ -3452,8 +3454,8 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
                 const ms_bundle *b;
                 if (!f->edit || !x->bundles[f->bundle].admitted) continue;
                 b = &x->bundles[f->bundle];
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry edits %s: %s@%s (%.16s) edits it; its copy is never "
-                            "served, its edits apply in maps that declare it", f->request, b->id, b->version, b->hash);
+                _snprintf_s(line, sizeof line, _TRUNCATE, "registry edits %s: %s edits it; its copy is never "
+                            "served, its edits apply in maps that declare it", f->request, ms_label(b));
                 fn(context, line);
                 n++;
             }
@@ -3536,12 +3538,11 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     return 1;
 }
 
-/* "salt@version (hash16)", without an empty version. */
+/* A mod in a report a player reads (sh_mods map, doctor): its name, never
+ * its salt or a hash. */
 static void ms_who(const ms_bundle *b, char *out, size_t cap)
 {
-    if (b->version && b->version[0])
-        _snprintf_s(out, cap, _TRUNCATE, "%s@%s (%.16s)", b->id, b->version, b->hash);
-    else _snprintf_s(out, cap, _TRUNCATE, "%s (%.16s)", b->id, b->hash);
+    _snprintf_s(out, cap, _TRUNCATE, "%s", ms_label(b));
 }
 
 /* 1 when the providers of winner `i`'s path carry more than one set of bytes. */
@@ -3659,7 +3660,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
         }
         if (builds > 1 && first) {
             _snprintf_s(line, sizeof line, _TRUNCATE, "scope: mod %s: %d builds installed (the root folder and maps' places); "
-                        "each map serves the build it declares, and with no map open the root folder's", b->id, builds);
+                        "each map serves the build it declares, and with no map open the root folder's", ms_label(b), builds);
             fn(context, line);
             lines++;
         }
@@ -4274,13 +4275,11 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
             InterlockedIncrement(&g_open_failures);
             if (!InterlockedExchange((volatile LONG *)&f->fail_logged, 1)) {
                 if (f->stock)
-                    ms_log("'%s' from %s@%s points at installed content '%s' (sha256 %.16s), which could not be read "
-                           "with that hash; the engine's own resolution is used", f->request, x->bundles[f->bundle].id,
-                           x->bundles[f->bundle].version, f->stock, f->blob);
+                    ms_log("'%s' from %s points at installed content '%s' (sha256 %.16s), which could not be read "
+                           "with that hash; the engine's own resolution is used", f->request, ms_label(&x->bundles[f->bundle]), f->stock, f->blob);
                 else
-                    ms_log("'%s' from %s@%s could not be read at its indexed size (%llu bytes) from '%s'; "
-                           "the engine's own resolution is used", f->request, x->bundles[f->bundle].id,
-                           x->bundles[f->bundle].version, (unsigned long long)f->size, f->disk);
+                    ms_log("'%s' from %s could not be read at its indexed size (%llu bytes) from '%s'; "
+                           "the engine's own resolution is used", f->request, ms_label(&x->bundles[f->bundle]), (unsigned long long)f->size, f->disk);
             }
             return -1;
         }
@@ -4298,12 +4297,10 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
         (!strncmp(f->request, "generated/renderprogs/", 22) || !strncmp(f->request, "generated/spirv/", 16) ||
          !strncmp(f->request, "generated/decls/renderprog/", 27)) &&
         InterlockedIncrement(&g_renderprog_logged) <= 64)
-        ms_log("renderprog: served %s (%s@%s, %zu bytes%s)", f->request, x->bundles[f->bundle].id,
-               x->bundles[f->bundle].version, len, f->stock ? ", installed content" : "");
+        ms_log("renderprog: served %s (%s, %zu bytes%s)", f->request, ms_label(&x->bundles[f->bundle]), len, f->stock ? ", installed content" : "");
     InterlockedIncrement(&g_opens_served);
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
-        ms_log("shadow '%s' served from %s@%s (%zu bytes%s)", f->request, x->bundles[f->bundle].id,
-               x->bundles[f->bundle].version, len, body ? ", composed with the other providers' list entries" : "");
+        ms_log("shadow '%s' served from %s (%zu bytes%s)", f->request, ms_label(&x->bundles[f->bundle]), len, body ? ", composed with the other providers' list entries" : "");
     listen = (sh_modserve_serve_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_serve_listener, NULL, NULL);
     if (listen) listen(f->request, x->bundles[f->bundle].hash, body ? NULL : f->blob, buf, len);
     *bytes = buf;
@@ -5927,7 +5924,7 @@ typedef struct ms_held {
     char name[SH_MB_REQ_NAME_MAX + 1];
     char want[SH_MB_REQ_VALUE_MAX + 1];   /* the value the accepted bundles ask */
     char original[MS_REQ_ORIGINAL_MAX];   /* what this layer displaced (owned only) */
-    char owner[MS_WHO_MAX];               /* id@version of the earliest install asking it */
+    char owner[MS_WHO_MAX];               /* the name of the earliest install asking it */
     int needed;                           /* an accepted bundle asks it (this pass) */
     int owned;                            /* this layer changed it and restores `original` */
     int state;                            /* 1 live, 0 not applied yet, -1 not live */
@@ -6068,13 +6065,13 @@ static void ms_req_index(ms_index *x, const ms_index *old)
                     if (_stricmp(e->req_cvars[m].name, b->req_cvars[k].name) ||
                         ms_req_same(e->req_cvars[m].value, b->req_cvars[k].value))
                         continue;
-                    _snprintf_s(text, sizeof text, _TRUNCATE, "%s=%s lost to %s@%s, installed earlier, which asks \"%s\"",
-                                b->req_cvars[k].name, b->req_cvars[k].value, e->id, e->version, e->req_cvars[m].value);
+                    _snprintf_s(text, sizeof text, _TRUNCATE, "%s=%s lost to %s, installed earlier, which asks \"%s\"",
+                                b->req_cvars[k].name, b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value);
                     b->req_lost = ms_strdup(x, text);
                     if (!b->req_lost) b->req_lost = "a cvar lost to an earlier install";
-                    ms_log("requirements: conflict: %s: %s@%s asks \"%s\", %s@%s asks \"%s\"; %s@%s, the later install, loses "
-                           "and its requirements are not applied", b->req_cvars[k].name, b->id, b->version,
-                           b->req_cvars[k].value, e->id, e->version, e->req_cvars[m].value, b->id, b->version);
+                    ms_log("requirements: conflict: %s: %s asks \"%s\", %s asks \"%s\"; %s, the later install, loses "
+                           "and its requirements are not applied", b->req_cvars[k].name, ms_label(b),
+                           b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value, ms_label(b));
                     break;
                 }
             }
@@ -6089,10 +6086,9 @@ static void ms_req_index(ms_index *x, const ms_index *old)
         }
         if (seen || b->req_lost) continue;
         for (k = 0; k < b->req_ncvars; ++k)
-            ms_log("requirements: %s=%s for %s@%s", b->req_cvars[k].name, b->req_cvars[k].value, b->id, b->version);
+            ms_log("requirements: %s=%s for %s", b->req_cvars[k].name, b->req_cvars[k].value, ms_label(b));
         if (b->req_nact || b->req_ndeact)
-            ms_log("requirements: %d activate and %d deactivate command(s) for %s@%s", b->req_nact, b->req_ndeact, b->id,
-                   b->version);
+            ms_log("requirements: %d activate and %d deactivate command(s) for %s", b->req_nact, b->req_ndeact, ms_label(b));
     }
     free(order);
     AcquireSRWLockShared(&g_req_lock);
@@ -6201,7 +6197,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
                     }
                     if (strcmp(h->want, b->req_cvars[k].value)) h->state = 0;
                     strncpy_s(h->want, sizeof h->want, b->req_cvars[k].value, _TRUNCATE);
-                    _snprintf_s(h->owner, sizeof h->owner, _TRUNCATE, "%s@%s", b->id, b->version);
+                    _snprintf_s(h->owner, sizeof h->owner, _TRUNCATE, "%s", ms_label(b));
                     h->needed = 1;
                     r.needed++;
                 }
@@ -6365,7 +6361,7 @@ finish:
         if (!a) {
             int ran = 0;
             if (b->req_nact && (!ops || !ops->command)) {
-                ms_log("%s: requirements: %s@%s: %d activate command(s) wait for the command buffer", phase, b->id, b->version,
+                ms_log("%s: requirements: %s: %d activate command(s) wait for the command buffer", phase, ms_label(b),
                        b->req_nact);
                 continue;
             }
@@ -6374,14 +6370,14 @@ finish:
             memset(a, 0, sizeof *a);
             strncpy_s(a->id, sizeof a->id, b->id, _TRUNCATE);
             ms_stopped_set(b->id, 0);
-            if (b->req_nact) ms_log("%s: requirements of %s@%s start; running its activate commands", phase, b->id, b->version);
+            if (b->req_nact) ms_log("%s: requirements of %s start; running its activate commands", phase, ms_label(b));
             for (k = 0; k < b->req_nact; ++k) ran += ms_req_line(ops, phase, b->id, b->req_act[k]);
             r.commands += ran;
             a->act_ran = ran;
             a->act_total = b->req_nact;
         }
         /* The current build's lines run when it stops. */
-        _snprintf_s(a->who, sizeof a->who, _TRUNCATE, "%s@%s", b->id, b->version);
+        _snprintf_s(a->who, sizeof a->who, _TRUNCATE, "%s", ms_label(b));
         for (k = 0; k < a->ndeact; ++k) free(a->deact[k]);
         a->ndeact = 0;
         for (k = 0; k < b->req_ndeact && k < (int)SH_MB_REQ_COMMANDS_MAX; ++k) {
@@ -6498,7 +6494,7 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
                 state = "not applied yet", strcpy_s(why, sizeof why, " (the next editor pass or map load applies it)");
             else if (h->state == 1) state = "live", why[0] = 0;
             else state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; its steps are blocked)", h->why);
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: cvar %s=%s: %s%s", b->id, b->version,
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: cvar %s=%s: %s%s", ms_label(b),
                         b->req_cvars[k].name, b->req_cvars[k].value, state, why);
             fn(context, line);
             lines++;
@@ -6508,13 +6504,13 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
                               : a ? (k < a->act_ran ? "ran" : "NOT run")
                               : off ? (stopped ? "ran, then stopped (not active for this map)" : "not run (not active for this map)")
                               : "runs at the next editor pass or map load";
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: activate command \"%s\": %s", b->id, b->version,
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: activate command \"%s\": %s", ms_label(b),
                         b->req_act[k], state);
             fn(context, line);
             lines++;
         }
         for (k = 0; k < b->req_ndeact; ++k) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: deactivate command \"%s\": %s", b->id, b->version,
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: deactivate command \"%s\": %s", ms_label(b),
                         b->req_deact[k], stopped ? "ran when it stopped" : "runs when the mod stops");
             fn(context, line);
             lines++;
@@ -6677,7 +6673,6 @@ static void ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
     if (!out) return;
     memset(out, 0, sizeof *out);
     strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
-    strncpy_s(out->version, sizeof out->version, b->version ? b->version : "", _TRUNCATE);
     strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
     strncpy_s(out->name, sizeof out->name, b->name ? b->name : "", _TRUNCATE);
     strncpy_s(out->folder, sizeof out->folder, b->folder ? b->folder : "", _TRUNCATE);
@@ -6844,7 +6839,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         f = ms_scoped_or(x, ms_name_file(x, lower));
         if (f < 0 || ms_editor_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
-        visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, names[i]);
+        visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
         if (!seen_bundle[x->files[f].bundle]) { seen_bundle[x->files[f].bundle] = 1; found++; }
         if (!seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
@@ -6855,7 +6850,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
             const ms_bundle *b = &x->bundles[f->bundle];
             seen_bundle[f->bundle] = 1;
             found++;
-            visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, NULL);
+            visit(context, b->id, b->hash, (unsigned long long)b->total, NULL);
         }
         for (k = 0; k < f->need_count; ++k) {
             int p = ms_scoped_or(x, x->needs[f->need_first + k].file);
@@ -6911,7 +6906,6 @@ int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out)
         out->providers = c->providers ? c->providers : "";
         out->reason = c->reason ? c->reason : "";
         out->served_id = x->bundles[f->bundle].id;
-        out->served_version = x->bundles[f->bundle].version;
         out->served_hash = x->bundles[f->bundle].hash;
         out->count = c->count;
         if (sh_modserve_scope_enabled()) {
@@ -6931,7 +6925,7 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)
     if (!x || !fn) return;
     for (i = 0; i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
-        fn(context, b->id && b->id[0] ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "",
+        fn(context, b->id && b->id[0] ? b->id : b->folder, b->hash ? b->hash : "",
            b->admitted, b->cause, b->file_count, b->place != NULL);
     }
 }
@@ -6968,7 +6962,7 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
     ReleaseSRWLockExclusive(&order_lock);
     for (i = 0; i < n; ++i) {
         const ms_bundle *b = &x->bundles[order[i]];
-        fn(context, b->id ? b->id : b->folder, b->version ? b->version : "", b->place != NULL, b->extra);
+        fn(context, b->id ? b->id : b->folder, b->place != NULL, b->extra);
     }
     free(order);
     return n;
@@ -6997,7 +6991,7 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
         const ms_file *f = &x->files[i];
         const ms_bundle *b = &x->bundles[f->bundle];
         if (!f->served || f->withdrawn || !b->admitted) continue;
-        fn(context, f->request, f->size, b->id ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "");
+        fn(context, f->request, f->size, b->id ? b->id : b->folder, b->hash ? b->hash : "");
     }
 }
 

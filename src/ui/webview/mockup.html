@@ -2801,7 +2801,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // --- prefab tree (pure) end ---
   // --- prefab mods (pure) ---
   // The mods a prefab records (backend/prefab_mods.c, MODS_STATUS), as the host sends them:
-  // {count, missing, mods:[{id, version, bundle, size, installed}]}, a JSON string or an object.
+  // {count, missing, mods:[{id, salt, build, size, installed}]}, a JSON string or an object.
   // Anything malformed reads as no mods.
   function pfModsParse(text) {
     var s = null;
@@ -2812,7 +2812,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var i = 0; i < mods.length; i++) if (mods[i].installed !== true) missing++;
     return {count: mods.length, missing: missing, mods: mods};
   }
-  function pfModLabel(m) { return m.version ? m.id + ' ' + m.version : m.id; }
+  function pfModLabel(m) { return m.id; }
   // The list row's pill: null without mods; "Needs mods: <id> +N" naming the missing ones when any
   // is not installed, else "Mods: <id> +N". The title lists every mod with its state.
   function pfModsBadge(st) {

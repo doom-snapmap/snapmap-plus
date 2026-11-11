@@ -344,7 +344,7 @@ the session: **Your mods** (the root of `mods\`), holding the organizing folders
 that map brought. A closed group with a mod that needs attention shows the triangle on its row; a
 filter, the attention filter and selecting a mod inside open it. Inside a group the rows are sorted
 by display name without case, then by folder. Each row is one status glyph, the mod's name and
-`version · size`. The glyph is a yellow triangle when the mod needs attention (`state`
+its size (a mod has no version). The glyph is a yellow triangle when the mod needs attention (`state`
 `attention`; its hover is the cause), else the map icon when the open map uses it (its `key` is an
 entry of the document's `map.mods`), else a green check (`ready`; hover "Ready to use.", or for a
 downloaded map's mod "Came with the map <name>; only that map uses it."). Arrows, Home and End move
@@ -386,8 +386,8 @@ explains how mods work.
 **Map modal.** The map button opens the decl editor's focus modal (`#modsMapModal`; the backdrop and
 Escape close it, Tab stays inside, focus returns to the opener) with the open map's details (name,
 published and whether its mods were uploaded with it, the search tag `mods`, how many mods and their
-size for a player to download, last save) and one row per mod the map uses: its name, `version ·
-size`, the entities placed from it and the wires and Timelines pointing at them, each with Remove
+size for a player to download, last save) and one row per mod the map uses: its name, its
+size, the entities placed from it and the wires and Timelines pointing at them, each with Remove
 from map. A map-level mod (`attached`) reads "Used by the whole map", or "Used by the whole map,
 nothing placed" (`nothingPlaced`). A mod the map needs that is not installed reads "not installed on
 this computer; playing the map downloads it". When several of the map's mods edit one field of a
@@ -468,7 +468,7 @@ Per entry of `mods`:
 |---|---|---|
 | `"key"` | string | The folder's path under `mods\` (`campaign-interactables\doors`, `maps\Hell Guard Arena\Hell Guards`): what every action names. |
 | `"salt"` | string | The mod's identity (its `snapmap-plus.salt`); "" before its first build. The page uses it only for the Files view's paths and Copy mod id. |
-| `"name"`, `"author"`, `"version"`, `"description"` | string | The author's part of `mod.json` (a folder that is not built is named by its `mod.json` when that parses). |
+| `"name"`, `"author"`, `"description"` | string | The author's part of `mod.json` (a folder that is not built is named by its `mod.json` when that parses). |
 | `"size"`, `"files"` | number | The carried bytes and files (game files read from the install not counted). |
 | `"state"` | string | `ready` or `attention`. |
 | `"cause"` | string | For `attention`: one plain sentence saying what is wrong and what to do. |
@@ -482,11 +482,11 @@ Per entry of `mods`:
 | `"publishedMaps"` | number | How many of the player's published maps record its build; absent when unknown. |
 | `"sameFilesAs"` | object | `{name, folder, count}` when another of the player's mods carries at least half of its files at equal bytes; absent otherwise. |
 
-`map` keeps `entities` (-1 when no map is open), `names`, `rows` (`{salt, name, version, build, size,
+`map` keeps `entities` (-1 when no map is open), `names`, `rows` (`{salt, name, build, size,
 state, cause, key, nameCount, names, attached}`: `state` active, incomplete, skipped or missing,
-`cause` the plain refusal) and `placed` (`{salt, version, build, size, key, viaNeeds, inManifest,
+`cause` the plain refusal) and `placed` (`{salt, build, size, key, viaNeeds, inManifest,
 nameCount, names}`), and while a map is open in the editor adds `name`, `saved`, `published`
-(`{state, at}`), `uploaded` (`{claimed, at}`), `tagged`, `mods` (one `{key, salt, name, version,
+(`{state, at}`), `uploaded` (`{claimed, at}`), `tagged`, `mods` (one `{key, salt, name,
 state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds,
 "attached", nothingPlaced, build}` per mod the map uses), `"vanilla"` and `registryClashes`
 (`{slot, providers: [{id: salt, name}], chosen, serving}`).

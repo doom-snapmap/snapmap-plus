@@ -21,7 +21,7 @@
 #define PM_MSG_CAP  600
 #define PM_LINE_CAP 1200
 #define PM_NAME_MAX 120
-#define PM_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + SH_MODMANIFEST_VERSION_CAP + 4)   /* "name version" */
+#define PM_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + 4)   /* the mod's name */
 
 static sh_prefab_mods_ops g_ops;
 static int g_ops_bound;
@@ -80,14 +80,13 @@ static sh_modmanifest_row *pm_find(sh_modmanifest_list *list, const char *salt, 
 
 /* The save step's visitor (modmanifest.c, mm_save_visit): one row per build
  * ("<salt>@<hash>"), the placed names it provides on it. */
-static void pm_visit(void *context, const char *salt, const char *version, const char *build,
-                     unsigned long long size, const char *name)
+static void pm_visit(void *context, const char *salt, const char *build, unsigned long long size,
+                     const char *name)
 {
     pm_closure *c = (pm_closure *)context;
     sh_modmanifest_row *row;
     if (!c || c->failed || !salt || !build) return;
-    if (!sh_salt_valid(salt, strlen(salt)) || !sh_modmanifest_valid_hash(build, strlen(build)) ||
-        (version && strlen(version) >= SH_MODMANIFEST_VERSION_CAP)) {
+    if (!sh_salt_valid(salt, strlen(salt)) || !sh_modmanifest_valid_hash(build, strlen(build))) {
         c->failed = 1;
         return;
     }
@@ -96,7 +95,6 @@ static void pm_visit(void *context, const char *salt, const char *version, const
         sh_modmanifest_row fresh;
         memset(&fresh, 0, sizeof fresh);
         strcpy_s(fresh.salt, sizeof fresh.salt, salt);
-        strcpy_s(fresh.version, sizeof fresh.version, version ? version : "");
         strcpy_s(fresh.build, sizeof fresh.build, build);
         fresh.size = size;
         if (!sh_modmanifest_list_add(&c->list, &fresh)) { c->failed = 1; return; }
@@ -112,7 +110,7 @@ static int pm_row_order(const void *a, const void *b)
     return c ? c : strcmp(x->build, y->build);
 }
 
-/* The display name and version of each row, from the build that serves it
+/* The display name of each row, from the build that serves it
  * (the closure names salts and builds only). */
 static void pm_names(sh_modmanifest_list *list)
 {
@@ -122,7 +120,6 @@ static void pm_names(sh_modmanifest_list *list)
         sh_modserve_bundle_ref ref;
         if (r->name[0] || !sh_modserve_row_build(r, &ref) || strcmp(ref.hash, r->build)) continue;
         strncpy_s(r->name, sizeof r->name, ref.name, _TRUNCATE);
-        if (!r->version[0]) strncpy_s(r->version, sizeof r->version, ref.version, _TRUNCATE);
     }
 }
 
@@ -268,8 +265,7 @@ void sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap)
     if (!out || !cap) return;
     if (!row) { out[0] = 0; return; }
     name = row->name[0] ? row->name : row->salt;
-    if (row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", name, row->version);
-    else _snprintf_s(out, cap, _TRUNCATE, "%s", name);
+    _snprintf_s(out, cap, _TRUNCATE, "%s", name);
 }
 
 typedef struct pm_buf { char *p; size_t n, cap; int bad; } pm_buf;
@@ -339,7 +335,6 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
         /* "id" is what the page names the mod by: the row's name, else its salt. */
         pm_puts(&b, "{\"id\":"); pm_put_str(&b, r->name[0] ? r->name : r->salt);
         pm_puts(&b, ",\"salt\":"); pm_put_str(&b, r->salt);
-        pm_puts(&b, ",\"version\":"); pm_put_str(&b, r->version);
         pm_puts(&b, ",\"build\":"); pm_put_str(&b, r->build);
         _snprintf_s(num, sizeof num, _TRUNCATE, ",\"size\":%llu", r->size);
         pm_puts(&b, num);

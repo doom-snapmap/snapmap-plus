@@ -49,7 +49,7 @@ static void mv_log(const char *fmt, ...)
 typedef struct mv_collect { sh_modvt_family *out; int cap, n; } mv_collect;
 
 static void mv_collect_file(void *context, const char *request, uint64_t size, const char *bundle_id,
-                            const char *version, const char *bundle_hash)
+                            const char *bundle_hash)
 {
     mv_collect *c = (mv_collect *)context;
     char fam[SH_MODVT_NAME_MAX];
@@ -69,7 +69,7 @@ static void mv_collect_file(void *context, const char *request, uint64_t size, c
         memset(f, 0, sizeof *f);
         strcpy_s(f->name, sizeof f->name, fam);
         _snprintf_s(f->path, sizeof f->path, _TRUNCATE, "virtualtextures/%s.pages", fam);
-        _snprintf_s(f->bundle, sizeof f->bundle, _TRUNCATE, "%s@%s", bundle_id, version);
+        _snprintf_s(f->bundle, sizeof f->bundle, _TRUNCATE, "%s", bundle_id);
         strncpy_s(f->bundle_hash, sizeof f->bundle_hash, bundle_hash, _TRUNCATE);
         f->members = 1u << (member - 1);
         f->bytes = size;

@@ -341,8 +341,8 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
 int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source);
 
 /* The refusal as the one-button notice shows it (shorter than 256 bytes,
- * names that do not fit summarized as "and K more"): `mods` are "name version"
- * labels; `unreachable` selects the wording for a store that could not be
+ * names that do not fit summarized as "and K more"): `mods` are the mods' names;
+ * `unreachable` selects the wording for a store that could not be
  * asked. */
 void sh_modpublished_compose_refusal(char *out, size_t cap, const char *const *mods, size_t count, int unreachable);
 
@@ -375,7 +375,7 @@ void sh_modpub_set_prefab_ready(sh_modpub_prefab_ready_fn fn);
 
 /* The prefab's refusal notice (shorter than 256 bytes) and its console line:
  * mode 0 the store does not hold them, 1 the store could not be reached, 2
- * the store was not asked (no gates). `mods` are "name version" labels. */
+ * the store was not asked (no gates). `mods` are the mods' names. */
 void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *const *mods, size_t count, int mode);
 void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name, const char *const *mods, size_t count,
                                          int mode);

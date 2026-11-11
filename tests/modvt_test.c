@@ -247,7 +247,7 @@ static void families(void)
     n = sh_modvt_collect(fams, SH_MODVT_MAX);
     CHECK(n == 2);
     CHECK(n == 2 && !strcmp(fams[0].name, "mods/vtmod000/fam") && fams[0].members == 0x5u && fams[0].bytes == 22 &&
-          !strcmp(fams[0].path, "virtualtextures/mods/vtmod000/fam.pages") && !strcmp(fams[0].bundle, "vtmod000@1.0.0") &&
+          !strcmp(fams[0].path, "virtualtextures/mods/vtmod000/fam.pages") && !strcmp(fams[0].bundle, "vtmod000") &&
           !strcmp(fams[0].bundle_hash, hash_a));
     CHECK(n == 2 && !strcmp(fams[1].name, "mods/vtmod000/other") && fams[1].members == 0x2u);
     CHECK(sh_modvt_collect(NULL, 0) == 2);
@@ -268,7 +268,7 @@ static void families(void)
     CHECK(!strcmp(f.path[4], "virtualtextures/mods/vtmod000/fam.pages") && f.fl[4] == 2);
     CHECK(sh_modvt_record_owner(4) && !strcmp(sh_modvt_record_owner(4), "mods/vtmod000/fam"));
     CHECK(sh_modvt_record_owner(3) == NULL && sh_modvt_owned_count() == 2);
-    CHECK(log_count("registered family 'mods/vtmod000/fam' (vtmod000@1.0.0, 2 members, 22 bytes) as record 4") == 1);
+    CHECK(log_count("registered family 'mods/vtmod000/fam' (vtmod000, 2 members, 22 bytes) as record 4") == 1);
 
     /* Rescan: idempotent. */
     CHECK(sh_modserve_index_build(mods) == 2 && g_listener_calls == 2);

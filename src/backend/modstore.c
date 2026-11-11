@@ -2150,7 +2150,7 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
                     "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
                     "    }\r\n  },\r\n", salt, esc, salt, salt);
     _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
+                "{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
                 "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
                 esc, strings, SH_MB_FORMAT, salt);
     if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", leaf); goto done; }
@@ -2900,8 +2900,8 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         if (ms_build_in_place(v[i].folder, NULL, resolver, &b, cause, sizeof cause)) {
             st->rebuilt++;
             sh_mb_classes_text(&b.classes, classes, sizeof classes);
-            ms_log("MODS: store: %s built: %s %s (salt %s), build %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s; %s",
-                   v[i].name, b.name ? b.name : "", b.version, b.id, b.hash, b.file_count, b.stock_count,
+            ms_log("MODS: store: %s built: %s (salt %s), build %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s; %s",
+                   v[i].name, b.name ? b.name : "", b.id, b.hash, b.file_count, b.stock_count,
                    (unsigned long long)(GetTickCount64() - b0),
                    b.prev_hash[0] && strcmp(b.prev_hash, b.hash) ? ", its tree changed" : (b.prev_hash[0] ? ", unchanged content" : ""),
                    classes);

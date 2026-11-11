@@ -1481,14 +1481,14 @@ typedef struct me_dep {
     int nseen;
 } me_dep;
 
-static void me_dep_visit(void *context, const char *request, uint64_t size, const char *bundle_id, const char *version,
+static void me_dep_visit(void *context, const char *request, uint64_t size, const char *bundle_id,
                          const char *bundle_hash)
 {
     me_dep *c = (me_dep *)context;
     unsigned char *body;
     size_t len = 0;
     int i;
-    (void)size; (void)version; (void)bundle_hash;
+    (void)size; (void)bundle_hash;
     if (strncmp(request, "generated/decls/md6def/", 23) && strncmp(request, "generated/decls/animweb/", 24)) return;
     if (sh_modserve_is_surface(request)) return;
     for (i = 0; i < c->nseen; ++i) if (!strcmp(c->seen[i], request)) return;
@@ -2696,11 +2696,11 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 
 /* ------------------------------------------------------------------ console */
 
-static void me_print_bundle(void *context, const char *id, const char *version, const char *hash,
-                            int admitted, const char *cause, int files, int place)
+static void me_print_bundle(void *context, const char *id, const char *hash, int admitted, const char *cause,
+                            int files, int place)
 {
     (void)context;
-    sh_printf("  %s%s@%s  %.12s  %s%s%s  %d files\n", place ? "in a map's place: " : "", id, version, hash,
+    sh_printf("  %s%s  %.12s  %s%s%s  %d files\n", place ? "in a map's place: " : "", id, hash,
               admitted ? "active" : "SKIPPED", admitted ? "" : ": ", admitted ? "" : cause, files);
 }
 

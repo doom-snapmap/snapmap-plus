@@ -7,7 +7,7 @@
  * build hash.
  *
  * mod.json, format 2, is one JSON object with two parts. The author's part is
- * every top-level key except "snapmap-plus": name (required), version,
+ * every top-level key except "snapmap-plus": name (required),
  * description, author, homepage, requirements, strings, hud, companions and
  * any other key, which is kept and becomes the manifest's "extra". The
  * builder's part, the member "snapmap-plus", is written only by the product:
@@ -103,11 +103,10 @@
  * folder whose block carries another number is built again once by the
  * rebuild rule, so a product update reclassifies every own folder. Raise it
  * when a build's classification, edits or manifest change. */
-#define SH_MB_RULES           8
+#define SH_MB_RULES           9
 /* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
 #define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
 #define SH_MB_ID_MAX          64u
-#define SH_MB_VERSION_MAX     32u
 #define SH_MB_NAME_MAX        80u      /* code points */
 #define SH_MB_AUTHOR_MAX      80u      /* code points */
 #define SH_MB_HOMEPAGE_MAX    512u     /* code points */
@@ -192,7 +191,6 @@ typedef struct sh_mb_need_stats {
 
 typedef struct sh_mb_bundle {
     char  id[SH_MB_ID_MAX + 1];             /* the salt (modsalt.h): the namespace and the canonical "id" */
-    char  version[SH_MB_VERSION_MAX + 1];   /* the author's label, "0.0.0" when absent */
     char *name, *author, *homepage;
     char *requirements;    /* canonical JSON object text, or NULL */
     char *extra;           /* canonical JSON object of preserved author keys, or NULL */
@@ -513,10 +511,6 @@ int  sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1]);
 /* The id as it appears inside an engine-derived binary name: the engine's name
  * sanitiser turns every character outside [A-Za-z0-9$./\\] into '_'. */
 void sh_mb_id_sanitized(const char *id, char out[SH_MB_ID_MAX + 1]);
-
-/* Validate a version string: 1-32 code points, none of / \\ : * ? " < > | or
- * control characters, not ending in '.', no leading or trailing space. */
-int  sh_mb_version_valid(const char *version);
 
 /* Validate one request path (relative, '/', no "." or ".." segment, allowed
  * characters [A-Za-z0-9._-$+@~()] and internal spaces, no segment that

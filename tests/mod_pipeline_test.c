@@ -247,11 +247,9 @@ static char *read_all(const char *path, size_t *len)
 }
 
 typedef struct visit_rec { int calls, named; char hash[65]; char id[65]; unsigned long long size; } visit_rec;
-static void on_visit(void *ctx, const char *id, const char *version, const char *hash, unsigned long long size,
-                     const char *name)
+static void on_visit(void *ctx, const char *id, const char *hash, unsigned long long size, const char *name)
 {
     visit_rec *v = (visit_rec *)ctx;
-    (void)version;
     v->calls++;
     if (name) v->named++;
     strcpy_s(v->hash, sizeof v->hash, hash);
@@ -600,9 +598,9 @@ static void beta19_conversion(const char *root)
             else if (!_stricmp(f->ptype, "entityDef")) edef++;
             else decls++;
         }
-        printf("    %s@%s layout %c, %u file(s), %llu byte(s), %u shadow name(s), bundle %.16s; provides %u editor row(s), "
+        printf("    %s layout %c, %u file(s), %llu byte(s), %u shadow name(s), bundle %.16s; provides %u editor row(s), "
                "%u entityDef(s), %u other decl(s), %u raw asset(s); requirements %s\n",
-               v[k].id, v[k].version, v[k].layout ? v[k].layout : '?', v[k].files, v[k].size, v[k].shadows, v[k].build,
+               v[k].id, v[k].layout ? v[k].layout : '?', v[k].files, v[k].size, v[k].shadows, v[k].build,
                sedef, edef, decls, raw, b.requirements ? b.requirements : "none");
         for (p = 0; p < nplaced; p++) {
             for (i = 0; i < b.file_count; i++) if (pt_provides(&b.files[i], placed[p])) break;
@@ -673,8 +671,8 @@ static void cut_content(const char *root)
     CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
     g_log[0] = 0;
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for localcut@1.0.0") &&
-          strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for localcut@1.0.0"));
+    CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for Cut") &&
+          strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for Cut"));
     CHECK(sh_modserve_requirements() == 2);
     g_gate[0] = g_gate[1] = 1;
     g_gate_sets = 0;

@@ -378,9 +378,6 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
     if (!mm_member_text(&object, "name", out->name, sizeof out->name, 0)) {
         MM_ERR("row '%s' has no valid name", out->salt); goto done;
     }
-    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 0)) {
-        MM_ERR("row '%s' has no valid version", out->salt); goto done;
-    }
     if (!mm_member_uint(&object, "size", &out->size)) {
         MM_ERR("row '%s' has no valid size", out->salt); goto done;
     }
@@ -445,8 +442,6 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     mm_put(&t, row->build, strlen(row->build));
     mm_put(&t, "\",\"name\":", 9);
     mm_put_quoted(&t, row->name);
-    mm_put(&t, ",\"version\":", 11);
-    mm_put_quoted(&t, row->version);
     _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
     mm_put(&t, number, strlen(number));
     mm_put(&t, ",\"names\":[", 10);
@@ -756,7 +751,6 @@ int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest
     if (!mm_member_text(&object, "name", out->name, sizeof out->name, 1) || !out->name[0]) {
         MM_ERR("mod.json has no name of at most %d characters", SH_MODMANIFEST_DISPLAY_CAP - 1); goto done;
     }
-    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 1)) strcpy_s(out->version, sizeof out->version, "0.0.0");
     raw = sh_json_object_get(&object, "snapmap-plus");
     if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 24, &block)) {
         MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;
@@ -1030,7 +1024,6 @@ static void mm_current_rename(const char *from, const sh_modmanifest_row *to)
             if (strcmp(r->build, from)) continue;
             strcpy_s(r->salt, sizeof r->salt, to->salt);
             strcpy_s(r->name, sizeof r->name, to->name);
-            strcpy_s(r->version, sizeof r->version, to->version);
             strcpy_s(r->build, sizeof r->build, to->build);
             r->size = to->size;
             break;
@@ -1439,15 +1432,14 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;
 
-static void mm_save_visit(void *context, const char *bundle_id, const char *version,
-                          const char *bundle_hash, unsigned long long size, const char *name)
+static void mm_save_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                          const char *name)
 {
     mm_save_ctx *ctx = (mm_save_ctx *)context;
     sh_modmanifest_row *row;
     if (!ctx || ctx->failed || !bundle_id || !bundle_hash) return;
     if (!mm_salt_ok(bundle_id) ||
-        !sh_modmanifest_valid_hash(bundle_hash, strlen(bundle_hash)) ||
-        (version && strlen(version) >= SH_MODMANIFEST_VERSION_CAP)) {
+        !sh_modmanifest_valid_hash(bundle_hash, strlen(bundle_hash))) {
         ctx->failed = 1;
         return;
     }
@@ -1456,7 +1448,6 @@ static void mm_save_visit(void *context, const char *bundle_id, const char *vers
         sh_modmanifest_row fresh;
         memset(&fresh, 0, sizeof fresh);
         strcpy_s(fresh.salt, sizeof fresh.salt, bundle_id);
-        strcpy_s(fresh.version, sizeof fresh.version, version ? version : "");
         strcpy_s(fresh.build, sizeof fresh.build, bundle_hash);
         fresh.size = size;
         if (!sh_modmanifest_list_add(&ctx->list, &fresh)) { ctx->failed = 1; return; }
@@ -1478,7 +1469,7 @@ static int mm_cstr_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* The placed closure's rows take their display name (and version) from the
+/* The placed closure's rows take their display name from the
  * build that serves them, which the closure visit does not give. */
 static void mm_save_names(mm_save_ctx *ctx)
 {
@@ -1490,7 +1481,6 @@ static void mm_save_names(mm_save_ctx *ctx)
         if (!r->name[0] && resolve(r->build, r->salt, &served) == 1 && !strcmp(served.build, r->build) &&
             !strcmp(served.salt, r->salt)) {
             strcpy_s(r->name, sizeof r->name, served.name);
-            if (!r->version[0]) strcpy_s(r->version, sizeof r->version, served.version);
         }
         sh_modmanifest_row_free(&served);
     }
@@ -1513,7 +1503,6 @@ static int mm_save_attached(mm_save_ctx *ctx, const sh_modmanifest_list *attache
             sh_modmanifest_valid_hash(served.build, strlen(served.build))) {
             mm_current_rename(row.build, &served);
             strcpy_s(row.name, sizeof row.name, served.name);
-            strcpy_s(row.version, sizeof row.version, served.version);
             strcpy_s(row.build, sizeof row.build, served.build);
             row.size = served.size;
         }

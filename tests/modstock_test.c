@@ -316,7 +316,7 @@ static void test_builder(const char *tmp)
             char file[1024], text[2048];
             _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
             _snprintf_s(text, sizeof text, _TRUNCATE, "{\"bundle\":\"%s\",\"files\":[%s],\"format\":2,\"id\":\"" SALT_STOCK "\","
-                        "\"name\":\"x\",\"version\":\"0.0.0\"}", h, file);
+                        "\"name\":\"x\"}", h, file);
             CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
             CHECK(strstr(b.first_cause, "stock") != NULL);
             sh_mb_free(&b);

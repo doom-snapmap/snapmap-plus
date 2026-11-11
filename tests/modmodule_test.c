@@ -335,11 +335,11 @@ static void test_builder(const char *tmp, const char *install)
 /* ------------------------------------------------------------- serving ---- */
 
 typedef struct visit_ctx { int calls; char id[80]; } visit_ctx;
-static void visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
-                  unsigned long long size, const char *name)
+static void visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
+                  const char *name)
 {
     visit_ctx *v = (visit_ctx *)context;
-    (void)version; (void)bundle_hash; (void)size;
+    (void)bundle_hash; (void)size;
     if (name) { v->calls++; strcpy_s(v->id, sizeof v->id, bundle_id); }
 }
 
@@ -533,7 +533,6 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
                 memset(&row, 0, sizeof row);
                 strncpy_s(row.salt, sizeof row.salt, b->id, _TRUNCATE);
                 if (b->name) strncpy_s(row.name, sizeof row.name, b->name, _TRUNCATE);
-                strcpy_s(row.version, sizeof row.version, b->version);
                 strcpy_s(row.build, sizeof row.build, hash);
                 row.size = b->total_size;
                 CHECK(sh_modmanifest_row_add_name(&row, sum.modules[0].name));

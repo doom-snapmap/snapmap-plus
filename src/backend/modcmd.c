@@ -134,11 +134,11 @@ static int mc_in_store(const char *folder)
 
 static void mc_needs_line(const char *verb, const sh_mb_bundle *b)
 {
-    mc_line("MODS: %s %s@%s: needs %u (in bundle %u, installed mods %u, game %u, unresolved %u)",
-            verb, b->id, b->version, b->needs.total, b->needs.local, b->needs.installed,
+    mc_line("MODS: %s %s: needs %u (in bundle %u, installed mods %u, game %u, unresolved %u)",
+            verb, b->id, b->needs.total, b->needs.local, b->needs.installed,
             b->needs.stock, b->needs.unresolved);
     if (b->warnings)
-        mc_line("MODS: %s %s@%s: %u warning(s), first: %s", verb, b->id, b->version, b->warnings, b->first_warning);
+        mc_line("MODS: %s %s: %u warning(s), first: %s", verb, b->id, b->warnings, b->first_warning);
 }
 
 /* The salt, the classes and the builder's report lines (additive mods). */
@@ -204,7 +204,7 @@ static void mc_build(const char *folder_in)
     r.stock_context = &stock;
     if (!sh_mb_build(folder, NULL, &r, &b)) {
         if (b.id[0]) {
-            mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.file_count,
+            mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.file_count,
                     b.total_size);
             mc_needs_line("build", &b);
             mc_classes_line("build", folder, &b);
@@ -218,7 +218,7 @@ static void mc_build(const char *folder_in)
         sh_ms_list_free(&list);
         return;
     }
-    mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.file_count,
+    mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.file_count,
             b.total_size);
     mc_needs_line("build", &b);
     mc_stock_line("build", folder, &b);
@@ -251,7 +251,7 @@ static void mc_install_one(const char *folder, int rescan)
     r.stock_context = &stock;
     ok = sh_ms_install_from_folder(folder, &r, name, sizeof name, &st, &b, cause, sizeof cause);
     if (b.id[0]) {
-        mc_line("MODS: install %s: %s@%s, %zu file(s), %llu byte(s)%s", folder, b.id, b.version, b.file_count,
+        mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)%s", folder, b.id, b.file_count,
                 b.total_size, b.errors ? "" : ", mod.json written");
         mc_needs_line("install", &b);
     }
@@ -755,7 +755,7 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     if (!_stricmp(verb, "verify")) {
-        if (!arg[0]) { sh_printf("usage: sh_mods verify \"<id@version+build>\"\n"); return; }
+        if (!arg[0]) { sh_printf("usage: sh_mods verify \"<folder or salt>\"\n"); return; }
         mc_verify(arg);
         return;
     }
@@ -833,8 +833,7 @@ int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
     } else {
         ok = 1;
         if (mc_in_store(folder)) sh_ms_note_build(folder, &b);   /* built from its current tree */
-        mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s); build %s written", folder, b.id,
-                b.version, b.file_count, b.total_size, b.hash);
+        mc_line("MODS: build %s: %s, %zu file(s), %llu byte(s); build %s written", folder, b.id, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);
         mc_stock_line("build", folder, &b);
         mc_classes_line("build", folder, &b);

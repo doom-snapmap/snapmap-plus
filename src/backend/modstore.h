@@ -61,7 +61,7 @@ unsigned modstore_lock_waits(void);
 int      modstore_lock_busy(unsigned *generation);
 
 /* A label buffer of an entry (sh_ms_entry.key). */
-#define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)
+#define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 128 + 1 + 20)
 /* A folder name under mods\. */
 #define SH_MS_NAME_MAX 1023   /* a nested folder's path under mods\ */
 #define SH_MS_NEST_MAX 8      /* organizing folders are entered this many levels below mods\ */
@@ -349,7 +349,7 @@ int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap);
 void sh_ms_note_build_failure(const char *folder, const char *cause);
 
 /* New mod: a folder mods\<sh_ms_title_segment(name), else "mod"> (" (2)" ...
- * when taken) holding a mod.json of name, version "0.1.0", empty description
+ * when taken) holding a mod.json of name, empty description
  * and author, and the block {"format": 2, "salt": <a new salt>}, and an
  * empty assets\. The caller's scan builds it. Returns 1 with the salt and the
  * absolute folder; 0 with the cause. */

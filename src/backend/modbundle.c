@@ -876,23 +876,6 @@ void sh_mb_id_sanitized(const char *id, char out[SH_MB_ID_MAX + 1])
     out[i] = 0;
 }
 
-static size_t mb_codepoints(const char *s, size_t n);
-
-/* The store's rule: 1-32 code points, none of / \ : * ? " < > |, no control
- * characters, not ending in '.'. A leading or trailing space is also refused
- * because the version names a folder. Assumes valid UTF-8. */
-int sh_mb_version_valid(const char *v)
-{
-    size_t i, n;
-    if (!v) return 0;
-    n = strlen(v);
-    if (n == 0 || n > 4 * SH_MB_VERSION_MAX || mb_codepoints(v, n) > SH_MB_VERSION_MAX) return 0;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)v[i];
-        if (c < 0x20 || c == 0x7F || strchr("<>:\"/\\|?*", c)) return 0;
-    }
-    return v[n - 1] != '.' && v[n - 1] != ' ' && v[0] != ' ';
-}
 
 static int mb_path_char(char c)
 {
@@ -2416,7 +2399,7 @@ static int mb_hex64_text(const char *s, size_t n, char out[SH_MB_HASH_HEX + 1])
  * manifest's "id" is the salt; an author block has none (mb_retired_key). */
 static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
 {
-    const mbj *id = mbj_get(root, "id"), *ver = mbj_get(root, "version"), *name = mbj_get(root, "name");
+    const mbj *id = mbj_get(root, "id"), *name = mbj_get(root, "name");
     const mbj *author = mbj_get(root, "author"), *home = mbj_get(root, "homepage");
     const mbj *req = mbj_get(root, "requirements"), *sh = mbj_get(root, "shadows");
     const mbj *fmt = mbj_get(root, "format");
@@ -2438,23 +2421,6 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
         }
         memcpy(b->id, id->s, SH_SALT_LEN);
         b->id[SH_SALT_LEN] = 0;
-    }
-    if (ver) {
-        char *v;
-        if (ver->t != MBJ_STR || strlen(ver->s) != ver->n) { mb_error(b, "%s version must be a string", what); return 0; }
-        v = manifest ? mb_strdup(ver->s) : mb_trimmed_dup(ver);
-        if (!v || !sh_mb_version_valid(v)) {
-            mb_error(b, "%s version must be 1-32 characters without /\\:*?\"<>| or control characters, not ending in '.' or a space", what);
-            free(v);
-            return 0;
-        }
-        strcpy_s(b->version, sizeof b->version, v);
-        free(v);
-    } else if (manifest) {
-        mb_error(b, "%s has no version", what);
-        return 0;
-    } else {
-        strcpy_s(b->version, sizeof b->version, "0.0.0");
     }
     if (!name || name->t != MBJ_STR || strlen(name->s) != name->n) {
         mb_error(b, "%s is missing its required name", what);
@@ -2580,7 +2546,7 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
         memset(&tmp, 0, sizeof tmp);
         tmp.t = MBJ_OBJ;
         for (i = 0; i < root->count; i++) {
-            static const char *const known[] = { "version", "name", "author", "homepage", "requirements",
+            static const char *const known[] = { "name", "author", "homepage", "requirements",
                                                  SH_MB_BLOCK_KEY, NULL };
             int k, is_known = 0;
             for (k = 0; known[k]; k++)
@@ -4636,7 +4602,7 @@ static void mb_key(mb_buf *o, int *first, const char *key)
 }
 
 /* Keys in byte order: author bundle extra files format homepage id name
- * requirements shadows version; file keys: blob needs path provides request size,
+ * requirements shadows; file keys: blob needs path provides request size,
  * or for a stock pointer needs path provides request stock{sha256 source}.
  * "bundle" (the hash itself) only in the manifest form a reader checks. */
 /* One file element of the canonical manifest's "files" array. */
@@ -4711,8 +4677,6 @@ static char *mb_emit(const sh_mb_bundle *b, int with_bundle, size_t *out_len)
         }
         mb_put(&o, "]", 1);
     }
-    mb_key(&o, &first, "version");
-    mb_put_jcstr(&o, b->version);
     mb_put(&o, "}", 1);
     if (o.oom) { free(o.p); return NULL; }
     if (out_len) *out_len = o.n;
@@ -4888,7 +4852,7 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
 int sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out)
 {
     static const char *const keys[] = { "author", "bundle", "extra", "files", "format", "homepage", "id",
-                                        "name", "requirements", "shadows", "version", NULL };
+                                        "name", "requirements", "shadows", NULL };
     char cause[SH_MB_CAUSE_MAX];
     mbj *root;
     const mbj *files, *bundle, *extra;
@@ -5825,8 +5789,6 @@ static char *mb_author_synth(const sh_mb_bundle *b, size_t *out_len)
     size_t i;
     mb_puts(&o, "{\"name\":");
     mb_put_jcstr(&o, b->name ? b->name : b->id);
-    mb_puts(&o, ",\"version\":");
-    mb_put_jcstr(&o, b->version);
     if (b->author) { mb_puts(&o, ",\"author\":"); mb_put_jcstr(&o, b->author); }
     if (b->homepage) { mb_puts(&o, ",\"homepage\":"); mb_put_jcstr(&o, b->homepage); }
     if (b->requirements) { mb_puts(&o, ",\"requirements\":"); mb_puts(&o, b->requirements); }
