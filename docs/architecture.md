@@ -3602,10 +3602,9 @@ place); a placement never changes where the open map finds its mods
   (`modserve_activate_bundles`) and each one the open map does not list (its
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`, given the
-  folder of the build that serves the row, else its salt), with one
-  console line: "Prefab <name> uses <mod name>; this map did not list it,
-  so it was added to the map (the Mods tab's Remove from map takes it out).".
-  Then the placement goes on unchanged;
+  folder of the build that serves the row, else its salt); the Mods tab
+  shows the new row, and a row that could not be added gets one console
+  line. Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
   with its own hook (`SH_MODPUB_PREFAB_PLACE`): the denial gate asks the store
   on the worker; when every missing bundle is obtainable the engine's Yes/No asks

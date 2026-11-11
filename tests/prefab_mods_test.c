@@ -676,10 +676,9 @@ static void resolving(const sh_modmanifest_row *door)
     rows_of(&rows, door, 0);
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     CHECK(r == SH_PREFAB_MODS_PLACE && seq == 0 && F.activations == 1 && F.attaches == 1 && !strcmp(F.attached[0], door->build));
-    CHECK(!strcmp(F.last_print, "Prefab Door uses test.door; this map did not list it, so it was added to the map "
-                                "(the Mods tab's Remove from map takes it out)."));
+    CHECK(F.prints == 0);   /* the Mods tab shows the new row: no console note */
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
-    CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 1);   /* the map lists it now */
+    CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 0);   /* the map lists it now */
     sh_modmanifest_list_free(&rows);
     /* No rows: placed as before, nothing asked. */
     memset(&rows, 0, sizeof rows);
@@ -1096,6 +1095,11 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(pt && sh_prefab_mods_rows_of(pt, tl, NULL, &rows) == 1);
         json = sh_prefab_mods_status_json(&rows, &missing);
         CHECK(json && missing == 0 && strstr(json, "\"installed\":true"));
+        free(json);
+        /* A row recorded without a name is never named by its salt. */
+        rows.rows[0].name[0] = 0;
+        json = sh_prefab_mods_status_json(&rows, &missing);
+        CHECK(json && strstr(json, "{\"id\":\"an unnamed mod\",\"salt\":"));
         free(json);
         sh_modmanifest_list_free(&rows);
         /* `sh_prefab mods` reads, in the open map's context, and changes nothing. */

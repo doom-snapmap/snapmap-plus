@@ -341,8 +341,8 @@ char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missin
     for (i = 0; rows && i < rows->count; i++) {
         const sh_modmanifest_row *r = &rows->rows[i];
         if (i) pm_puts(&b, ",");
-        /* "id" is what the page names the mod by: the row's name, else its salt. */
-        pm_puts(&b, "{\"id\":"); pm_put_str(&b, r->name[0] ? r->name : r->salt);
+        /* "id" is what the page names the mod by: the row's name (a player never sees a salt). */
+        pm_puts(&b, "{\"id\":"); pm_put_str(&b, r->name[0] ? r->name : "an unnamed mod");
         pm_puts(&b, ",\"salt\":"); pm_put_str(&b, r->salt);
         pm_puts(&b, ",\"build\":"); pm_put_str(&b, r->build);
         _snprintf_s(num, sizeof num, _TRUNCATE, ",\"size\":%llu", r->size);
@@ -728,12 +728,9 @@ static void pm_prepare(const sh_modmanifest_list *rows, const char *name)
         if (!o->attach) continue;
         sh_prefab_mods_label(r, label, sizeof label);
         a = o->attach(r, note, sizeof note);
-        if (a > 0) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "Prefab %s uses %s; this map did not list it, so it was added to "
-                        "the map (the Mods tab's Remove from map takes it out).", name && name[0] ? name : "prefab", label);
-            pm_print(line);
-            pm_logf("PREFABS: %s", line);
-        } else if (a < 0) {
+        /* Added: the Mods tab shows the map's new row; nothing to say. */
+        if (a > 0) pm_logf("PREFABS: prefab %s: %s added to the map's mods", name && name[0] ? name : "prefab", label);
+        else if (a < 0) {
             _snprintf_s(line, sizeof line, _TRUNCATE, "Prefab %s uses %s, which could not be added to this map%s%s.",
                         name && name[0] ? name : "prefab", label, note[0] ? ": " : "", note);
             pm_print(line);
