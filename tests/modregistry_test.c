@@ -173,8 +173,8 @@ static void test_body_clip_count(void)
         "\t\tanim \"md6/b \\\"q\\\".md6anim\"\n\t\t{\n\t\t}\n"
         "\t\t// anim \"md6/commented.md6anim\" {\n"
         "\t}\n\taliases {\n"
-        "\t\talias { name \"mods/k/one\" anim \"md6/mods/k/one.md6anim\" }\n"
-        "\t\talias {\n\t\t\tname \"mods/k/two\"\n\t\t\tanim \"md6/mods/k/two.md6anim\"\n\t\t}\n"
+        "\t\talias { name \"mods/k0000000/one\" anim \"md6/mods/k0000000/one.md6anim\" }\n"
+        "\t\talias {\n\t\t\tname \"mods/k0000000/two\"\n\t\t\tanim \"md6/mods/k0000000/two.md6anim\"\n\t\t}\n"
         "\t}\n\tprops {\n\t\tprop \"x.md6\" {\n\t\t\tanim \"md6/not_a_clip.md6anim\" {\n\t\t\t}\n\t\t}\n\t}\n}\n";
     printf("-- the body's clips counted by structure, not by an alias row's anim word\n");
     CHECK(sh_modregistry_body_clips(BODY, strlen(BODY)) == 2);
@@ -217,10 +217,11 @@ static void put_json_string(char *out, size_t cap, size_t *at, const char *s)
  * trailing comma), a product block and the files. A file at a game name the
  * fake reader holds is an edited copy: its edits are derived here as the
  * builder derives them (sh_dt_diff) and it is listed in shadows, as the
- * builder writes it; `legacy` 1 makes a grandfathered package whose shadows
- * serve as before. The bundle hash is 64 x `digit`. */
+ * builder writes it; `whole` 1 records no edits, so the copy is a shadow
+ * served whole. The block is format 2, keyed by the salt `id`. The bundle
+ * hash is 64 x `digit`. */
 static void make_mod(const char *root, const char *folder, const char *id, char digit, const char *author,
-                     const fx *files, int n, int legacy)
+                     const fx *files, int n, int whole)
 {
     static char json[262144], edits[131072], shadows[4096];
     char dir[MAX_PATH], path[MAX_PATH], h[65], *p;
@@ -233,7 +234,7 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
         const char *stock = stock_text(files[i].request);
         if (!stock) continue;
         sa += _snprintf_s(shadows + sa, sizeof shadows - sa, _TRUNCATE, "%s\"%s\"", sa ? ", " : "", files[i].request);
-        if (!legacy) {
+        if (!whole) {
             char cause[300], *one = sh_dt_diff(files[i].request, stock, strlen(stock), files[i].body, strlen(files[i].body),
                                               NULL, cause, sizeof cause);
             CHECK(one != NULL);
@@ -246,11 +247,10 @@ static void make_mod(const char *root, const char *folder, const char *id, char 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"id\": \"%s\",\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n  %s%s\n"
-                      "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\", \"built\": %d%s%s,\n"
+                      "{\n  \"version\": \"1.0.0\",\n  \"name\": \"%s\",\n  %s\n"
+                      "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\", \"built\": %d%s%s,\n"
                       "    \"shadows\": [%s],\n    \"files\": [\n",
-                      id, id, author ? author : "", legacy ? "\"legacy\": {\"source\": \"overrides\"}," : "", h, 100 + digit,
-                      ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
+                      id, author ? author : "", id, h, 100 + digit, ea ? ", \"edits\": " : "", ea ? edits : "", shadows);
     for (i = 0; i < n; ++i) {
         char sha[65];
         sh_mb_sha256_hex((const unsigned char *)files[i].body, strlen(files[i].body), sha);
@@ -322,45 +322,45 @@ static void build_set(const char *root, int reverse)
     static const fx guard[] = {
         { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
           BOSS_CONDUCTOR("4", CITEM(2, "2097152", "ai/demon/talismanguard/staff") CITEM(3, "4194304", "ai/demon/talismanguard/hammer")) },
-        ENC("local.hell-guard", "single_hell_guard_staff", "2097152"),
-        ENC("local.hell-guard", "single_hell_guard_hammer", "4194304"),
-        { "generated/decls/snapaiscore/mods/local.hell-guard/hell_guard_staff.decl", "snapAiScore", "mods/local.hell-guard/hell_guard_staff",
+        ENC("localhel", "single_hell_guard_staff", "2097152"),
+        ENC("localhel", "single_hell_guard_hammer", "4194304"),
+        { "generated/decls/snapaiscore/mods/localhel/hell_guard_staff.decl", "snapAiScore", "mods/localhel/hell_guard_staff",
           "{\n\tedit = {\n\t\taiType = \"2097152\";\n\t\tbaseScore = 1200;\n\t}\n}" },
     };
     static const fx spider[] = {
         { REQ_CONDUCTOR, "entityDef", "ai/conductor/coop/snapmap_default",
           BOSS_CONDUCTOR("3", CITEM(2, "2097152", "ai/demon/spider_mastermind_base")) },
-        ENC("local.spider-mastermind", "single_spider_mastermind", "2097152"),
+        ENC("localspi", "single_spider_mastermind", "2097152"),
         { REQ_SPIDER, "aiFSMManager", "states/spidermastermind", SPIDER_ROOT_AND_RENAMED },
     };
     static const fx scenes[] = {   /* body clips and an alias; a clip the hands mod adds too, other rows */
         { REQ_BODY, "md6Def", "player/mp/tp_body_mp.md6",
-          BODY_WITH("\t\tanim \"md6/mods/k.scenes/a.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
+          BODY_WITH("\t\tanim \"md6/mods/kscenes0/a.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
                     "\t\tanim \"md6/shared.md6anim\" {\n\t\t\tevent \"ae_scene\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n",
-                    "\t\talias { name \"mods/k.scenes/x\" anim \"md6/mods/k.scenes/x.md6anim\" }\n") },
+                    "\t\talias { name \"mods/kscenes0/x\" anim \"md6/mods/kscenes0/x.md6anim\" }\n") },
     };
     static const fx hands[] = {   /* player fields, a body clip, a weapon's field */
         { REQ_PLAYER, "entityDef", "player/coop",
           PLAYER_WITH("\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n"
-                      "\t\tthirdPersonBodyMPUseDoomHands = \"mods/k.hands/body\";\r\n") },
+                      "\t\tthirdPersonBodyMPUseDoomHands = \"mods/khands00/body\";\r\n") },
         { REQ_BODY, "md6Def", "player/mp/tp_body_mp.md6",
-          BODY_WITH("\t\tanim \"md6/mods/k.hands/b.md6anim\" {\n\t\t\tevent \"ae_show\" {\n\t\t\t\tframe 4\n\t\t\t}\n\t\t}\n"
+          BODY_WITH("\t\tanim \"md6/mods/khands00/b.md6anim\" {\n\t\t\tevent \"ae_show\" {\n\t\t\t\tframe 4\n\t\t\t}\n\t\t}\n"
                     "\t\tanim \"md6/shared.md6anim\" {\n\t\t\tevent \"ae_hands\" {\n\t\t\t\tframe 9\n\t\t\t}\n\t\t}\n", "") },
-        { "generated/decls/entitydef/mods/k.hands/body.decl", "entityDef", "mods/k.hands/body", "{ inherit = \"player_tp_body_mp\"; }" },
+        { "generated/decls/entitydef/mods/khands00/body.decl", "entityDef", "mods/khands00/body", "{ inherit = \"player_tp_body_mp\"; }" },
         { REQ_PISTOL, "weapon", "weapon/zion/player/sp/pistol", "{\n\tedit = {\n\t\tdamage = 99;\n\t}\n}\n" },
     };
     static const fx rival[] = {   /* sets the same player field to another value */
-        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\thandsModelMPUseDoomHands = \"mods/k.rival/hands.md6\";\r\n") },
+        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\thandsModelMPUseDoomHands = \"mods/krival00/hands.md6\";\r\n") },
     };
     int order[5] = { 0, 1, 2, 3, 4 }, i;
     mkdirs(root);
     for (i = 0; i < 5; ++i) {
-        int k = reverse ? order[4 - i] : order[i];
-        if (k == 0) make_mod(root, reverse ? "z-guard" : "a-guard", "local.hell-guard", '1', NULL, guard, 4, 0);
-        if (k == 1) make_mod(root, reverse ? "y-spider" : "b-spider", "local.spider-mastermind", '2', NULL, spider, 3, 0);
-        if (k == 2) make_mod(root, reverse ? "x-scenes" : "c-scenes", "k.scenes", '3', NULL, scenes, 1, 0);
-        if (k == 3) make_mod(root, reverse ? "w-hands" : "d-hands", "k.hands", '4', NULL, hands, 4, 0);
-        if (k == 4) make_mod(root, reverse ? "v-rival" : "e-rival", "k.rival", '5', NULL, rival, 1, 0);
+        int k0000000 = reverse ? order[4 - i] : order[i];
+        if (k0000000 == 0) make_mod(root, reverse ? "z-guard" : "a-guard", "localhel", '1', NULL, guard, 4, 0);
+        if (k0000000 == 1) make_mod(root, reverse ? "y-spider" : "b-spider", "localspi", '2', NULL, spider, 3, 0);
+        if (k0000000 == 2) make_mod(root, reverse ? "x-scenes" : "c-scenes", "kscenes0", '3', NULL, scenes, 1, 0);
+        if (k0000000 == 3) make_mod(root, reverse ? "w-hands" : "d-hands", "khands00", '4', NULL, hands, 4, 0);
+        if (k0000000 == 4) make_mod(root, reverse ? "v-rival" : "e-rival", "krival00", '5', NULL, rival, 1, 0);
     }
 }
 
@@ -413,12 +413,12 @@ static void test_generation(void)
                          "2097152=ai/demon/spider_mastermind_base;") || (printf("%s\n", rows1), 0));
     CHECK(strstr(text, "\t\t\tnum = 5;\r\n") && strstr(text, "globalAIMods = {\r\n\t\t\tnum = 1;"));
     CHECK(sh_modserve_lookup(REQ_CONDUCTOR, &hit) && !strcmp(hit.bundle_id, "snapmap-plus.registries"));
-    CHECK(open_text("generated/decls/snapaiencounter/mods/local.hell-guard/single_hell_guard_staff.decl", text, sizeof text) == 1 &&
+    CHECK(open_text("generated/decls/snapaiencounter/mods/localhel/single_hell_guard_staff.decl", text, sizeof text) == 1 &&
           strstr(text, "memberType = \"1048576\""));
-    CHECK(open_text("generated/decls/snapaiencounter/mods/local.hell-guard/single_hell_guard_hammer.decl", text, sizeof text) == 1 &&
+    CHECK(open_text("generated/decls/snapaiencounter/mods/localhel/single_hell_guard_hammer.decl", text, sizeof text) == 1 &&
           strstr(text, "memberType = \"524288\""));
-    CHECK(open_text("generated/decls/snapaiscore/mods/local.hell-guard/hell_guard_staff.decl", text, sizeof text) == 1 && strstr(text, "aiType = \"1048576\""));
-    CHECK(open_text("generated/decls/snapaiencounter/mods/local.spider-mastermind/single_spider_mastermind.decl", text, sizeof text) == 1 &&
+    CHECK(open_text("generated/decls/snapaiscore/mods/localhel/hell_guard_staff.decl", text, sizeof text) == 1 && strstr(text, "aiType = \"1048576\""));
+    CHECK(open_text("generated/decls/snapaiencounter/mods/localspi/single_spider_mastermind.decl", text, sizeof text) == 1 &&
           strstr(text, "memberType = \"2097152\""));
     /* The spider's FSM states: its root graph replaces the stock entry of that name, its renamed copy is added. */
     CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "fsmType = \"idAIFSM\"") &&
@@ -429,7 +429,7 @@ static void test_generation(void)
     CHECK(open_text(REQ_CONDUCTOR, text, sizeof text) == 1);
     conductor_lines(text, rows2);
     CHECK(strstr(rows2, "524288=ai/demon/spider_mastermind_base;") != NULL);
-    CHECK(open_text("generated/decls/snapaiencounter/mods/local.spider-mastermind/single_spider_mastermind.decl", text, sizeof text) == 1 &&
+    CHECK(open_text("generated/decls/snapaiencounter/mods/localspi/single_spider_mastermind.decl", text, sizeof text) == 1 &&
           strstr(text, "memberType = \"524288\""));
     /* The same manifest on an install in the opposite folder order: the same texts. */
     list[0] = hg; list[1] = hs;
@@ -444,21 +444,21 @@ static void test_generation(void)
      * player fields and a weapon field of one bundle. */
     list[0] = hsc; list[1] = hh;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
-    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/k.scenes/a.md6anim") &&
-          strstr(text, "md6/mods/k.hands/b.md6anim") && strstr(text, "anim \"md6/a.md6anim\"") && strstr(text, "mods/k.scenes/x"));
+    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/kscenes0/a.md6anim") &&
+          strstr(text, "md6/mods/khands00/b.md6anim") && strstr(text, "anim \"md6/a.md6anim\"") && strstr(text, "mods/kscenes0/x"));
     CHECK(count_of(text, "anim \"md6/shared.md6anim\"") == 1 && strstr(text, "ae_scene") && strstr(text, "ae_hands"));
     CHECK(sh_modregistry_body_clips(text, strlen(text)) == 4);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";") &&
-          strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/k.hands/body\";") && strstr(text, "inherit = \"player/mp\";") &&
+          strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/khands00/body\";") && strstr(text, "inherit = \"player/mp\";") &&
           strstr(text, "\t\t\t\tnum = 3;\r\n"));
     CHECK(open_text(REQ_PISTOL, text, sizeof text) == 1 && strstr(text, "damage = 99;"));
     CHECK(sh_modserve_lookup(REQ_PISTOL, &hit) && !strcmp(hit.bundle_id, "snapmap-plus.registries"));
     rep[0] = 0;
     CHECK(sh_modserve_registry_report(report_line, rep) > 0);
     CHECK(strstr(rep, "registry " REQ_PLAYER ": generated") &&
-          strstr(rep, "md6def/player/mp/tp_body_mp.md6: 3 edit(s) from k.scenes@1.0.0") &&
+          strstr(rep, "md6def/player/mp/tp_body_mp.md6: 3 edit(s) from kscenes0@1.0.0") &&
           strstr(rep, "player body: the merged body holds 4 clips and 1 alias") &&
-          strstr(rep, "registry edits " REQ_PLAYER ": k.hands@1.0.0 (4444444444444444) edits it; its copy is never served"));
+          strstr(rep, "registry edits " REQ_PLAYER ": khands00@1.0.0 (4444444444444444) edits it; its copy is never served"));
     if (!strstr(rep, "player body: the merged body holds 4 clips")) printf("%s\n", rep);
     /* Played: the same (the declared set serves in Play). */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
@@ -476,20 +476,20 @@ static void test_generation(void)
     g_log_len = 0; g_log[0] = 0;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
-    CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by k.hands@1.0.0 (4444444444444444), "
-                  "k.rival@1.0.0 (5555555555555555); serving k.hands@1.0.0 (4444444444444444) (row order; choose with "
+    CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00@1.0.0 (4444444444444444), "
+                  "krival00@1.0.0 (5555555555555555); serving khands00@1.0.0 (4444444444444444) (row order; choose with "
                   "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<key>\")"));
-    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "k.rival", line, sizeof line) >= 1 &&
-          strstr(line, "is served from k.rival"));
-    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"mods/k.rival/hands.md6\";") &&
-          strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/k.hands/body\";"));
-    CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) && !strcmp(key, "k.rival"));
-    CHECK(sh_modregistry_choose_command("player.hands", "k.rival", line, sizeof line) == -1 && strstr(line, "is not a slot"));
+    CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
+          strstr(line, "is served from krival00"));
+    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";") &&
+          strstr(text, "thirdPersonBodyMPUseDoomHands = \"mods/khands00/body\";"));
+    CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) && !strcmp(key, "krival00"));
+    CHECK(sh_modregistry_choose_command("player.hands", "krival00", line, sizeof line) == -1 && strstr(line, "is not a slot"));
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", line, sizeof line) >= 1);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "player/fp_hands.md6"));
     /* The losing source's edit is counted: superseded by row order, then by the map's choice. */
-    CHECK(log_has("2 edit(s) from k.rival@1.0.0 (5555555555555555): 0 applied, 1 already held, 1 superseded by k.hands (row order)"));
-    CHECK(log_has("3 edit(s) from k.hands@1.0.0 (4444444444444444): 2 applied, 0 already held, 1 superseded by k.rival's choice"));
+    CHECK(log_has("2 edit(s) from krival00@1.0.0 (5555555555555555): 0 applied, 1 already held, 1 superseded by khands00 (row order)"));
+    CHECK(log_has("3 edit(s) from khands00@1.0.0 (4444444444444444): 2 applied, 0 already held, 1 superseded by krival00's choice"));
 
     /* A choice persists: the save writes it into its key's row, a load reads
      * it back, and the next listing applies it. */
@@ -500,18 +500,18 @@ static void test_generation(void)
         size_t slen = 0, llen = 0;
         memset(&ra, 0, sizeof ra);
         memset(&rb, 0, sizeof rb);
-        strcpy_s(ra.id, sizeof ra.id, "k.hands");
+        strcpy_s(ra.salt, sizeof ra.salt, "khands00");
         strcpy_s(ra.version, sizeof ra.version, "1.0.0");
-        strcpy_s(ra.bundle, sizeof ra.bundle, hh);
-        strcpy_s(rb.id, sizeof rb.id, "k.rival");
+        strcpy_s(ra.build, sizeof ra.build, hh);
+        strcpy_s(rb.salt, sizeof rb.salt, "krival00");
         strcpy_s(rb.version, sizeof rb.version, "1.0.0");
-        strcpy_s(rb.bundle, sizeof rb.bundle, hr);
+        strcpy_s(rb.build, sizeof rb.build, hr);
         ra.size = rb.size = 10;
         CHECK(sh_modmanifest_current_attach(&ra) >= 0 && sh_modmanifest_current_attach(&rb) >= 0);
-        CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "k.rival", line, sizeof line) >= 1 &&
+        CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
               strstr(line, "applies now; saved with the map's next save"));
         saved = sh_modmanifest_on_save(MAPJ, sizeof MAPJ - 1, &slen);
-        CHECK(saved && strstr(saved, "k.rival") && strstr(saved, "choices") &&
+        CHECK(saved && strstr(saved, "krival00") && strstr(saved, "choices") &&
               strstr(saved, "entitydef/player/coop/edit/handsModelMPUseDoomHands"));
         /* Another map in between: no choice; row order serves. */
         sh_modmanifest_reset();
@@ -521,10 +521,10 @@ static void test_generation(void)
         /* The saved map loaded again: its choice is read back and applied. */
         loaded = saved ? sh_modmanifest_prepare_load(saved, slen, &llen) : NULL;
         CHECK(sh_modregistry_choices_get("entitydef/player/coop/edit/handsModelMPUseDoomHands", key, sizeof key) &&
-              !strcmp(key, "k.rival"));
+              !strcmp(key, "krival00"));
         CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 0);
         CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 &&
-              strstr(text, "handsModelMPUseDoomHands = \"mods/k.rival/hands.md6\";"));
+              strstr(text, "handsModelMPUseDoomHands = \"mods/krival00/hands.md6\";"));
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
         if (saved) HeapFree(GetProcessHeap(), 0, saved);
     }
@@ -617,23 +617,23 @@ static void test_leftovers(void)
 {
     static const fx body1[] = {
         { REQ_BODY, "md6Def", "player/mp/tp_body_mp.md6",
-          BODY_WITH("\t\tanim \"md6/mods/k.edit/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n", "") },
+          BODY_WITH("\t\tanim \"md6/mods/kedit000/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n", "") },
     };
     static const fx body2[] = {
         { REQ_BODY, "md6Def", "player/mp/tp_body_mp.md6",
-          BODY_WITH("\t\tanim \"md6/mods/k.edit/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
-                    "\t\tanim \"md6/mods/k.edit/two.md6anim\" {\n\t\t\tevent \"ae_show\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n", "") },
+          BODY_WITH("\t\tanim \"md6/mods/kedit000/one.md6anim\" {\n\t\t\tevent \"ae_hide\" {\n\t\t\t\tframe 1\n\t\t\t}\n\t\t}\n"
+                    "\t\tanim \"md6/mods/kedit000/two.md6anim\" {\n\t\t\tevent \"ae_show\" {\n\t\t\t\tframe 2\n\t\t\t}\n\t\t}\n", "") },
     };
     static const fx gated[] = {
-        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\tthirdPersonBodyMPUseDoomHands = \"mods/k.gated/body\";\r\n") },
-        { "generated/decls/entitydef/mods/k.gated/body.decl", "entityDef", "mods/k.gated/body", "{ inherit = \"player_tp_body_mp\"; }" },
+        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\tthirdPersonBodyMPUseDoomHands = \"mods/kgated00/body\";\r\n") },
+        { "generated/decls/entitydef/mods/kgated00/body.decl", "entityDef", "mods/kgated00/body", "{ inherit = \"player_tp_body_mp\"; }" },
     };
     static const fx gated2[] = {
-        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\tthirdPersonBodyMPUseDoomHands = \"mods/k.gated/body\";\r\n"
+        { REQ_PLAYER, "entityDef", "player/coop", PLAYER_WITH("\t\tthirdPersonBodyMPUseDoomHands = \"mods/kgated00/body\";\r\n"
                                                              "\t\thandsModelMPUseDoomHands = \"player/fp_hands.md6\";\r\n") },
-        { "generated/decls/entitydef/mods/k.gated/body.decl", "entityDef", "mods/k.gated/body", "{ inherit = \"player_tp_body_mp\"; }" },
+        { "generated/decls/entitydef/mods/kgated00/body.decl", "entityDef", "mods/kgated00/body", "{ inherit = \"player_tp_body_mp\"; }" },
     };
-    static const fx legacy[] = {   /* a grandfathered package: its own copy of the spider states, one graph added */
+    static const fx whole[] = {   /* a whole copy of the spider states (a replacement), one graph added */
         { REQ_SPIDER, "aiFSMManager", "states/spidermastermind",
           "{\n\tedit = {\n\t\tobject = {\n\t\t\tdebugFlags = 6;\n\t\t}\n\t\tsubGraphs = {\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n"
           "\t\t\t\t\tname = \"spiderMastermind\";\n\t\t\t\t}\n\t\t\t}\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n"
@@ -645,50 +645,29 @@ static void test_leftovers(void)
           "\t\t\t\t\tname = \"spiderMastermind\";\n\t\t\t\t}\n\t\t\t}\n\t\t\tsubGraph = {\n\t\t\t\tobject = {\n"
           "\t\t\t\t\tname = \"ext_root\";\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" },
     };
-    static const fx old[] = {   /* built before derived edits: a bodyEvents partial its product block names */
-        { "generated/decls/md6def/mods/k.old/body_events.md6.decl", "md6Def", "mods/k.old/body_events.md6",
-          "{\n\tevents {\n\t\tanim \"md6/mods/k.old/x.md6anim\" {\n\t\t}\n\t}\n}\n" },
-    };
     static char text[65536];
     char root[MAX_PATH], he[65], hg[65], hc[65], hx[65], path[MAX_PATH];
     const char *list[3];
     sh_modserve_diff d;
     rf_seen seen;
-    printf("-- derived edits: rescan marks, gates of generated text, grandfathered copies, old partials\n");
+    printf("-- derived edits: rescan marks, gates of generated text, whole copies\n");
     set_ops();
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\set-left\\mods", g_top);
     mkdirs(root);
-    make_mod(root, "edit", "k.edit", '6', NULL, body1, 1, 0);
-    make_mod(root, "gated", "k.gated", '7', "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}},", gated, 2, 0);
-    make_mod(root, "copy", "k.copy", '8', NULL, legacy, 1, 1);
-    make_mod(root, "ext", "k.ext", '9', NULL, adder, 1, 0);
-    make_mod(root, "old", "k.old", 'a', NULL, old, 1, 0);
-    {
-        /* k.old's product block as an older build wrote it. */
-        static char json[8192];
-        FILE *f;
-        size_t n;
-        char *at;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\old\\mod.json", root);
-        if (!fopen_s(&f, path, "rb") && f) { n = fread(json, 1, sizeof json - 1, f); json[n] = 0; fclose(f); }
-        at = strstr(json, ", \"built\": ");
-        if (at) {
-            static char out[8192];
-            _snprintf_s(out, sizeof out, _TRUNCATE, "%.*s, \"registries\": {\"player\": {\"bodyEvents\": \"mods/k.old/body_events.md6\"}}%s",
-                        (int)(at - json), json, at);
-            write_file(path, out);
-        }
-    }
+    make_mod(root, "edit", "kedit000", '6', NULL, body1, 1, 0);
+    make_mod(root, "gated", "kgated00", '7', "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}},", gated, 2, 0);
+    make_mod(root, "copy", "kcopy000", '8', NULL, whole, 1, 1);
+    make_mod(root, "ext", "kext0000", '9', NULL, adder, 1, 0);
     hash_of('6', he); hash_of('7', hg); hash_of('8', hc); hash_of('9', hx);
     sh_modserve_scope_enable(1);
-    CHECK(sh_modserve_index_build(root) == 5);
+    CHECK(sh_modserve_index_build(root) == 4);
     list[0] = he; list[1] = hg;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
-    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/k.edit/one.md6anim") && !strstr(text, "two.md6anim"));
-    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "mods/k.gated/body"));
+    CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "md6/mods/kedit000/one.md6anim") && !strstr(text, "two.md6anim"));
+    CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "mods/kgated00/body"));
     /* The author edits the copy and rebuilds; the rescan marks the body for refresh. */
-    make_mod(root, "edit", "k.edit", '6', NULL, body2, 1, 0);
-    CHECK(sh_modserve_index_build(root) == 5);
+    make_mod(root, "edit", "kedit000", '6', NULL, body2, 1, 0);
+    CHECK(sh_modserve_index_build(root) == 4);
     sh_modserve_last_diff(&d);
     CHECK(d.changed_decls >= 1);
     CHECK(open_text(REQ_BODY, text, sizeof text) == 1 && strstr(text, "two.md6anim"));
@@ -696,26 +675,22 @@ static void test_leftovers(void)
     seen.player_gates = -1;
     (void)sh_modserve_each_refresh(rf_visit, &seen);
     CHECK(strstr(seen.requests, REQ_BODY ";") != NULL || (printf("  refresh: %s\n", seen.requests), 0));
-    /* The player entity's text comes from k.gated, whose cvar is not live: gated as its source. */
-    make_mod(root, "gated", "k.gated", '7', "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}},", gated2, 2, 0);
-    CHECK(sh_modserve_index_build(root) == 5);
+    /* The player entity's text comes from kgated00, whose cvar is not live: gated as its source. */
+    make_mod(root, "gated", "kgated00", '7', "\"requirements\": {\"cvars\": {\"g_weaponDoomMPUseDoomHands\": \"1\"}},", gated2, 2, 0);
+    CHECK(sh_modserve_index_build(root) == 4);
     memset(&seen, 0, sizeof seen);
     seen.player_gates = -1;
     (void)sh_modserve_each_refresh(rf_visit, &seen);
     CHECK(seen.player_gates == 0 || (printf("  player gates %d: %s\n", seen.player_gates, seen.requests), 0));
-    /* A grandfathered copy at a generated name is that package's edits. */
+    /* A whole copy at a generated name is that mod's edits. */
     list[0] = hc; list[1] = hx;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 1);
     CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && strstr(text, "ext_root") &&
           strstr(text, "spiderMastermind"));
-    /* Alone, the grandfathered copy serves as before (no bundle edits that file). */
+    /* Alone, the whole copy serves as it is (no bundle edits that file). */
     list[0] = hc;
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) >= 1);
     CHECK(open_text(REQ_SPIDER, text, sizeof text) == 1 && strstr(text, "legacy_root") && !strstr(text, "ext_root"));
-    /* An old build's partial: never served or probed, listed by the doctor's report. */
-    CHECK(sh_modserve_is_partial("generated/decls/md6def/mods/k.old/body_events.md6.decl") &&
-          !sh_modserve_lookup("generated/decls/md6def/mods/k.old/body_events.md6.decl", NULL) &&
-          sh_modserve_probe_claims("generated/decls/md6def/mods/k.old/body_events.md6.decl") == 0);
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     sh_modmanifest_reset();
     sh_modserve_scope_enable(0);
