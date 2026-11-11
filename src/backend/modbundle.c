@@ -5411,6 +5411,276 @@ char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const cha
     return out;
 }
 
+
+/* ------------------------------------------- a new mod's strings keys ---- */
+/* DECISIONS 6: at a folder's first scan its strings keys gain the "<salt>_"
+ * prefix and its "#str_<key>" references follow (sh_ms_assign_salt). A key
+ * is found by a byte-exact walk of the author's text: the top-level
+ * "strings" member, each language object in it, each of its keys. */
+
+/* Past one JSON value at p (whitespace before it skipped); NULL when it does
+ * not read. Only the extent is checked, not the grammar of literals. */
+static const char *mb_sk_skip_ws(const char *p, const char *end)
+{
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+    return p;
+}
+
+static const char *mb_sk_skip_string(const char *p, const char *end)
+{
+    if (p >= end || *p != '"') return NULL;
+    for (p++; p < end; p++) {
+        if (*p == '\\') { p++; continue; }
+        if (*p == '"') return p + 1;
+    }
+    return NULL;
+}
+
+static const char *mb_sk_skip_value(const char *p, const char *end, int depth)
+{
+    p = mb_sk_skip_ws(p, end);
+    if (p >= end || depth > 64) return NULL;
+    if (*p == '"') return mb_sk_skip_string(p, end);
+    if (*p == '{' || *p == '[') {
+        char close = *p == '{' ? '}' : ']';
+        int obj = *p == '{';
+        p = mb_sk_skip_ws(p + 1, end);
+        if (p < end && *p == close) return p + 1;
+        for (;;) {
+            if (obj) {
+                p = mb_sk_skip_string(mb_sk_skip_ws(p, end), end);
+                p = p ? mb_sk_skip_ws(p, end) : NULL;
+                if (!p || p >= end || *p != ':') return NULL;
+                p++;
+            }
+            p = mb_sk_skip_value(p, end, depth + 1);
+            p = p ? mb_sk_skip_ws(p, end) : NULL;
+            if (!p || p >= end) return NULL;
+            if (*p == close) return p + 1;
+            if (*p != ',') return NULL;
+            p++;
+        }
+    }
+    while (p < end && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+    return p;
+}
+
+/* Walk the members of the object at p, calling fn with each key's span
+ * (quotes included) and value start. Returns the end of the object, or NULL. */
+typedef int (*mb_sk_member_fn)(void *ctx, const char *key, size_t key_len, const char *value, const char *value_end);
+static const char *mb_sk_members(const char *p, const char *end, mb_sk_member_fn fn, void *ctx)
+{
+    p = mb_sk_skip_ws(p, end);
+    if (p >= end || *p != '{') return NULL;
+    p = mb_sk_skip_ws(p + 1, end);
+    if (p < end && *p == '}') return p + 1;
+    for (;;) {
+        const char *k = mb_sk_skip_ws(p, end), *ke = mb_sk_skip_string(k, end), *v, *ve;
+        if (!ke) return NULL;
+        p = mb_sk_skip_ws(ke, end);
+        if (p >= end || *p != ':') return NULL;
+        v = mb_sk_skip_ws(p + 1, end);
+        ve = mb_sk_skip_value(v, end, 1);
+        if (!ve) return NULL;
+        if (fn && !fn(ctx, k, (size_t)(ke - k), v, ve)) return NULL;
+        p = mb_sk_skip_ws(ve, end);
+        if (p >= end) return NULL;
+        if (*p == '}') return p + 1;
+        if (*p != ',') return NULL;
+        p++;
+    }
+}
+
+typedef struct mb_sk_span { size_t at, len; char *to; } mb_sk_span;
+
+typedef struct mb_sk_ctx {
+    const char *base, *salt, *from;
+    mb_sk_span *spans;
+    size_t n, cap;
+    sh_mb_strkey *keys;
+    size_t nkeys, kcap;
+    int failed;
+} mb_sk_ctx;
+
+static int mb_sk_is_name(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* The prefixed key: "<salt>_<key>", a leading "mods/<salt>/" of an earlier
+ * spelling dropped and every other character outside [A-Za-z0-9_] made '_'. */
+static char *mb_sk_new_key(const char *key, size_t n, const char *salt, const char *from)
+{
+    size_t sl = strlen(salt), fl = from ? strlen(from) : 0, i, w;
+    char *out;
+    if (n > 5 + sl + 1 && !_strnicmp(key, "mods/", 5) && !_strnicmp(key + 5, salt, sl) && key[5 + sl] == '/') {
+        key += 6 + sl;
+        n -= 6 + sl;
+    } else if (fl && n > fl + 1 && sh_salt_valid(from, fl) && !_strnicmp(key, from, fl) && key[fl] == '_') {
+        /* A copy's keys carry the salt it is leaving. */
+        key += fl + 1;
+        n -= fl + 1;
+    }
+    out = (char *)malloc(sl + 1 + n + 1);
+    if (!out) return NULL;
+    memcpy(out, salt, sl);
+    out[sl] = '_';
+    for (i = 0, w = sl + 1; i < n; i++) out[w++] = mb_sk_is_name(key[i]) ? key[i] : '_';
+    out[w] = 0;
+    return out;
+}
+
+static int mb_sk_key(void *vctx, const char *key, size_t key_len, const char *value, const char *value_end)
+{
+    mb_sk_ctx *c = (mb_sk_ctx *)vctx;
+    const char *k = key + 1;
+    size_t kn = key_len - 2, i, sl = strlen(c->salt);
+    char *to = NULL, *from;
+    (void)value;
+    (void)value_end;
+    if (memchr(k, '\\', kn)) return 1;   /* an escaped key is left as written (the build names it) */
+    if (kn > sl && !_strnicmp(k, c->salt, sl) && k[sl] == '_') return 1;   /* already prefixed */
+    for (i = 0; i < c->nkeys && !(strlen(c->keys[i].from) == kn && !memcmp(c->keys[i].from, k, kn)); i++) {}
+    if (i == c->nkeys) {
+        if (c->nkeys == c->kcap) {
+            size_t cap = c->kcap ? c->kcap * 2 : 32;
+            sh_mb_strkey *g = (sh_mb_strkey *)realloc(c->keys, cap * sizeof *g);
+            if (!g) { c->failed = 1; return 0; }
+            c->keys = g;
+            c->kcap = cap;
+        }
+        from = mb_strndup(k, kn);
+        to = mb_sk_new_key(k, kn, c->salt, c->from);
+        if (!from || !to) { free(from); free(to); c->failed = 1; return 0; }
+        {
+            /* Two keys that differ only in characters a key cannot hold
+             * ("a b", "a_b") stay two keys: "_2", "_3", ... */
+            size_t j, tl = strlen(to);
+            unsigned dup = 1;
+            for (;;) {
+                int clash = 0;
+                for (j = 0; j < c->nkeys && !clash; j++) clash = !_stricmp(c->keys[j].to, to);
+                if (!clash) break;
+                {
+                    char *next = (char *)malloc(tl + 16);
+                    if (!next) { free(from); free(to); c->failed = 1; return 0; }
+                    _snprintf_s(next, tl + 16, _TRUNCATE, "%.*s_%u", (int)tl, to, ++dup);
+                    free(to);
+                    to = next;
+                }
+            }
+        }
+        c->keys[c->nkeys].from = from;
+        c->keys[c->nkeys].to = to;
+        c->nkeys++;
+    }
+    if (c->n == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 32;
+        mb_sk_span *g = (mb_sk_span *)realloc(c->spans, cap * sizeof *g);
+        if (!g) { c->failed = 1; return 0; }
+        c->spans = g;
+        c->cap = cap;
+    }
+    c->spans[c->n].at = (size_t)(k - c->base);
+    c->spans[c->n].len = kn;
+    c->spans[c->n].to = c->keys[i].to;
+    c->n++;
+    return 1;
+}
+
+static int mb_sk_language(void *vctx, const char *key, size_t key_len, const char *value, const char *value_end)
+{
+    (void)key; (void)key_len;
+    if (*value != '{') return 1;
+    return mb_sk_members(value, value_end, mb_sk_key, vctx) != NULL;
+}
+
+static int mb_sk_top(void *vctx, const char *key, size_t key_len, const char *value, const char *value_end)
+{
+    if (key_len != 9 || memcmp(key, "\"strings\"", 9) || *value != '{') return 1;
+    return mb_sk_members(value, value_end, mb_sk_language, vctx) != NULL;
+}
+
+void sh_mb_strkeys_free(sh_mb_strkey *keys, size_t count)
+{
+    size_t i;
+    for (i = 0; keys && i < count; i++) { free(keys[i].from); free(keys[i].to); }
+    free(keys);
+}
+
+char *sh_mb_salt_strings(const char *text, size_t n, const char *from, const char *salt, sh_mb_strkey **keys, size_t *count,
+                         size_t *out_len)
+{
+    mb_sk_ctx c;
+    mb_buf o = {0};
+    size_t i, at = 0, skip = 0;
+    if (keys) *keys = NULL;
+    if (count) *count = 0;
+    if (out_len) *out_len = 0;
+    if (!text || !salt || !sh_salt_valid(salt, strlen(salt))) return NULL;
+    memset(&c, 0, sizeof c);
+    if (n >= 3 && !memcmp(text, "\xef\xbb\xbf", 3)) skip = 3;
+    c.base = text;
+    c.salt = salt;
+    c.from = from;
+    if (!mb_sk_members(text + skip, text + n, mb_sk_top, &c) || c.failed) {
+        free(c.spans);
+        sh_mb_strkeys_free(c.keys, c.nkeys);
+        return NULL;
+    }
+    for (i = 0; i < c.n; i++) {
+        mb_put(&o, text + at, c.spans[i].at - at);
+        mb_puts(&o, c.spans[i].to);
+        at = c.spans[i].at + c.spans[i].len;
+    }
+    mb_put(&o, text + at, n - at);
+    free(c.spans);
+    if (o.oom || !o.p) { free(o.p); sh_mb_strkeys_free(c.keys, c.nkeys); return NULL; }
+    if (keys) *keys = c.keys;
+    else sh_mb_strkeys_free(c.keys, c.nkeys);
+    if (count) *count = c.nkeys;
+    if (out_len) *out_len = o.n;
+    return o.p;
+}
+
+size_t sh_mb_restr_text(const char *text, size_t n, const sh_mb_strkey *keys, size_t count, char **out, size_t *out_len)
+{
+    mb_buf o = {0};
+    size_t i = 0, at = 0, hits = 0, k;
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!text || !count) return 0;
+    while (i + 5 <= n) {
+        const char *p = (const char *)memchr(text + i, '#', n - i);
+        size_t pos, best = (size_t)-1, best_len = 0;
+        if (!p) break;
+        pos = (size_t)(p - text);
+        i = pos + 1;
+        if (pos + 5 > n || _strnicmp(p, "#str_", 5)) continue;
+        /* The longest key that ends at a name boundary. */
+        for (k = 0; k < count; k++) {
+            size_t kl = strlen(keys[k].from);
+            if (pos + 5 + kl > n || kl <= best_len || _strnicmp(p + 5, keys[k].from, kl)) continue;
+            if (pos + 5 + kl < n && mb_sk_is_name(text[pos + 5 + kl])) continue;
+            best = k;
+            best_len = kl;
+        }
+        if (best == (size_t)-1) continue;
+        hits++;
+        if (out) {
+            mb_put(&o, text + at, pos + 5 - at);
+            mb_puts(&o, keys[best].to);
+        }
+        at = pos + 5 + best_len;
+        i = at;
+    }
+    if (!out || !hits) return hits;
+    mb_put(&o, text + at, n - at);
+    if (o.oom) { free(o.p); return (size_t)-1; }
+    *out = o.p;
+    if (out_len) *out_len = o.n;
+    return hits;
+}
 /* The canonical text of `key` in the bundle's extra, or NULL. */
 static char *mb_extra_member(const sh_mb_bundle *b, const char *key)
 {

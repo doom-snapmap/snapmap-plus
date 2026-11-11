@@ -142,8 +142,11 @@ already-cooked idTech 6 files at the paths the game asks for. Converting assets 
 Doomforge's job, not this product's. Each mod has a salt, eight letters and digits it is given once,
 the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, and every `strings` key
 is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl as `#str_<salt>_<name>`.
-A folder made by hand has no salt until its first scan, so give it strings after that scan has
-written the salt into `mod.json`. The folder's name is yours and you can rename it at any time. A stock file
+A folder made by hand has no salt until its first scan: write its strings with plain keys
+(`imp_blue_name`, referenced `#str_imp_blue_name`), and that scan names them `<salt>_imp_blue_name`
+and rewrites the folder's own references with them. After that scan a new key must carry the
+prefix itself; one without it is refused with a sentence naming the expected prefix. The folder's
+name is yours and you can rename it at any time. A stock file
 the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.
@@ -514,7 +517,14 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   when there is something to do; its lines are printed as it goes, and a failure is a warning that
   names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
   `snapmap-plus migrate` runs the same check and migrate on its own, without reinstalling, which is
-  how a package dropped into `overrides\` after the first conversion gets moved. Everything it
+  how a package dropped into `overrides\` after the first conversion gets moved. The same run
+  converts, once, every mod folder and saved map an earlier release wrote: each folder of an
+  earlier shape gets its salt, its own `mods/<old key>/` paths and strings follow it and it is
+  built (a folder that cannot be, for example one whose binary file names its old key, is left as
+  it was with its cause), second builds Snapmap+ made of one mod and `mods\.builds\` go to the
+  Recycle Bin, and the maps in My Maps, `rawmap.json` and the prefabs have their mod rows and
+  placed names rewritten to the salts, each with a copy of the file as it was beside it
+  (`<name>.before-snapmap-plus-1.0`); a map naming a mod nothing provides is left untouched. Everything it
   deletes goes to the Windows Recycle Bin. A mod folder you add by hand is still built
   at the next rescan. When its `mod.json` has neither an `id` nor a key in its `snapmap-plus`
   member, that first build gives it a key the way New mod does (its folder name as a slug plus

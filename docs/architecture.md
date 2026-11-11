@@ -834,8 +834,15 @@ or New mod; there is no folder watcher. Under the store lock it:
    folder of the store holds), every reference to `mods/<folder name>/` in its
    own files rewritten to `mods/<salt>/` (decl text and any other text, the
    folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
-   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s strings keys and
-   its block `{"format": 2, "salt": ...}`). Everything is read and rewritten in
+   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s references and
+   its block `{"format": 2, "salt": ...}`). Its strings keys gain the salt's
+   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced),
+   and every `#str_<key>` reference in its own text files, `mod.json` among
+   them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
+   writes plain keys in a new folder; a binary file naming one of them refuses
+   the folder as a binary naming `mods/<folder name>/` does. After the first
+   scan a key without the prefix is refused by the build ("mod.json strings key
+   <key> is not named <salt>_<name>"). Everything is read and rewritten in
    memory first, staged beside the folder as `<name>.staging-<pid>` (unchanged
    files hard-linked), then swapped in with two renames under the same name, the
    second undone on failure; the folder as it was goes to the Recycle Bin. A
@@ -1034,8 +1041,53 @@ lines as its action lines and a summary, and exits 0 when nothing is left to do,
 nothing and changes nothing. The installer runs it on install and update (see
 [installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
 A folder without a builder block is salted and built at the next scan, or at
-the next boot (below). A Contract 2 folder whose `bundle.json` this release
-cannot read is left as it was and logged.
+the next boot (below). A Contract 2 folder is written as a format-1 `mod.json`
+(its manifest's author fields and a block naming its key and build) for the
+conversion below; one whose `bundle.json` does not read is left as it was and
+logged.
+
+The conversion to the one shape (`store_convert.c`, store tool only) runs after
+those steps, once per store: what an earlier release wrote is converted so the
+game reads only the current shape. Folders: every folder of `mods\` outside
+`mods\maps\` whose `mod.json` is an earlier shape (`sh_mb_old_is_old`, or a
+`package.json` alone) has its old key (author `id`, else the block's `key`,
+else its name). Of several folders of one key, the player's own are kept and
+the second builds the product made (`<key>@<hash16>`, those under `downloads\`
+or `imports\`) go to the Recycle Bin once a kept one is converted; with only
+product-made ones the newest is kept. A kept folder's author part is cut free of
+the block, the retired author keys and a hud `schema` (every other byte kept),
+salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
+(the same rewrite as the first scan's: paths, texts, strings keys
+`<salt>_<key>` and their `#str_` references), built there by the real builder
+over the store's installed bundles and the game's archives (`sh_modstock_exists`,
+replacements kept), and swapped in under its own name only when the build
+succeeds; the folder as it was goes to the Recycle Bin. A folder that cannot be
+converted is left exactly as it was, its cause printed, and its tree hash kept in
+the record so `check` lists it without counting it as work until it changes.
+Folders that need another one's names are tried again after it. The record
+section `converted` keeps `keys` (old key to salt), `builds` (every old build
+hash to its salt: the folders', the removed second builds', `.builds\`
+snapshots' and the retired `aliases`), `folders`, `refused` and `maps` (maps
+left as they were, by content hash). Maps: every `SNAPMAPS<id>\map.decl` of
+`Saved Games\id Software\DOOM\base\savegame.user` (`store_saves.c`; both
+renderers share it, `--saves` names another for tests), the data folder's
+`rawmap.json` and every prefab under `prefabs\`. A text of an earlier shape
+(`sh_map_old_read`; packages a map carried are converted first by
+`sh_modlegacy_process`) has each old row resolved by key, else by build hash,
+to a root folder's salt and current build, and is written in the current
+shape by `sh_map_old_write` (a prefab's block rows rewritten to
+`<salt>@<build>` and its names rekeyed). The file is written through a
+temporary and a replacing rename, with a copy of it as it was beside it
+(`<name>.before-snapmap-plus-1.0`). A saved map is re-framed (its 4-byte header
+kept, the text deflated by `store_deflate.c` and read back before anything is
+written) and its `map.decl.verify` signed again (HMAC-SHA256 keyed by the
+sidecar's own salt and the id the game binds saves to) only after the present
+sidecar verifies with a candidate id (the account folder's name, or that id
+with its instance field cleared); `game.details` is left as it is. A map
+naming a key no converted folder provides, or whose signature matches no
+candidate, is left untouched with its cause. Last, `mods\.builds\` goes to the
+Recycle Bin and the record's retired sections (`cache`, `aliases`, `snapshots`,
+`renamed`, `downloads`) are removed.
 
 Crash leftovers. An install, a download and a salting assemble a
 folder as `<name>.staging-<pid>` and move the folder they replace aside as
@@ -2297,18 +2349,23 @@ bridge's install (`sh_modstock_set_install`):
   left out) into a staging folder outside the store and installed by
   `modstore.c` as `mods\<folder>\` (its own name; with the tree's first 8 hex
   when another mod holds that name), `mod.json` and real files. The package's
-  keys are the author block: its id (or, for an era B pack without one, its
-  folder name), version (else `0.0.0`), requirements, strings and hud, and its
-  other keys (`composes`, an era B `schema`) kept; the product block's `legacy`
-  record (`source`, `folder`, `tree`) grandfathers its names as shadows. Two
-  folders with one id are both built, each in its own folder, and the duplicate
-  is reported;
+  keys are the author part in the one shape: its name, version (else the
+  package's own, else `1.0.0`), requirements, strings and hud and its other keys,
+  without the retired ones (`id`, `composes`, an era B `schema`) and with no
+  product block. The staged folder is salted with `from` its id (or, for an
+  era B pack without one, its folder name; `sh_ms_assign_salt`, which also names
+  its strings `<salt>_<key>`) and built under the current rules with its
+  replacements kept, so a pack that only built under the retired `legacy`
+  relaxations is refused alone with its cause. Moved again into the folder an
+  earlier pass made of the same tree (the record's `trees`), it keeps that
+  folder's salt (`sh_ms_assign_salt_as`). Two folders with one id are both built,
+  each in its own folder with its own salt, and the duplicate is reported;
 - each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a mod
-  folder `mods\<id>\` keyed `delivery.<tree>`, the beta.19 tree
+  folder `mods\<id>\` the same way; the record's `trees` gives its beta.19 tree
   fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
-  byte, the NUL-terminated relative path and the file's SHA-256), which is the
-  key a map's carrier of the same delivery has; a later load of that map reuses
-  it;
+  byte, the NUL-terminated relative path and the file's SHA-256) to it, which is
+  how a map's carrier `delivery.<tree>` of the same delivery is answered when the
+  store tool converts that map;
 - a folder without a descriptor whose only package is one direct child folder
   (beta.19 read unmarked folders as groups) has that child migrated under the
   child's own id, and its line says so; a folder without a descriptor and with
@@ -2338,10 +2395,9 @@ package is: placed under `assets\` at their paths below `overrides\`, files a
 mod cannot carry left out and counted, copies of installed content made stock
 pointers, with a descriptor of id `my-overrides`, name `My overrides` and the
 document's keys as `strings.en`, and installed by `modstore.c` as
-`mods\my-overrides\` with the migration's origin and legacy record (the Mods tab
-says "Moved from the old overrides folder"). With the document alone the folder
-is `mod.json` (the same author block, origin `migration`) and an empty
-`assets\`. When `mods\my-overrides\` already exists only what it lacks is added
+`mods\my-overrides\`, salted from `my-overrides` (its strings `<salt>_<key>`).
+With the document alone the folder is `mod.json` (the same author part) and an
+empty `assets\`. When `mods\my-overrides\` already exists only what it lacks is added
 (files compared by path, keys case-insensitively) and one `MODS: migration:
 kept my-overrides' <path or key>` line names each it has with other bytes or
 text; an identical one is counted, not named. The changed tree is built again at
