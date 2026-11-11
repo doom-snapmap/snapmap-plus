@@ -902,9 +902,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         if (ms_file_size(path) >= 0)
             ms_fail(b, "mod.json could not be read (it may be open in another program, or larger than %u MB). Close it "
                     "and press Refresh.", SH_MODSERVE_MAX_JSON >> 20);
-        else if (ms_file_size(pkg) >= 0)
-            ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                    "converts it.");
+        else if (ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_EARLIER);
         else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
         return;
     }
@@ -995,12 +993,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     b->installed_at = built;
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
      * sh_mb_descriptor_state_why words it. */
-    if (block_v && (!block_object || format != (double)SH_MB_FORMAT))
-        ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
-                "converts it.");
-    else if (retired)
-        ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read. Remove \"%s\" from mod.json and "
-                "press Refresh.", retired, retired);
+    /* Every earlier shape is the one sentence (DECISIONS 21), as the builder says it. */
+    if ((block_v && (!block_object || format != (double)SH_MB_FORMAT)) || retired) ms_fail(b, SH_MB_EARLIER);
     else if (block_v && (!salt || !sh_salt_valid(salt, strlen(salt))))
         ms_fail(b, "The part of mod.json Snapmap+ writes is damaged. Delete the \"" SH_MB_BLOCK_KEY "\" block and press "
                 "Refresh to build the mod again.");
@@ -1009,7 +1003,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
          * map's place holds only builds the product received. */
         char last[SH_MB_CAUSE_MAX] = "";
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
-        if (b->place) ms_fail(b, SH_MB_SHAPE "it was not built by the mod store");
+        if (b->place) ms_fail(b, SH_MODSERVE_PLACE_FRESH);
         else {
             if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
             if (last[0]) ms_fail(b, "not built: %s", last);

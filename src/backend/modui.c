@@ -580,9 +580,6 @@ static int mu_ends(const char *s, const char *suffix)
     return n >= k && !_stricmp(s + n - k, suffix);
 }
 
-/* A mod folder in an earlier shape that appears after the update (copied in by hand). */
-#define MU_EARLIER_SHAPE "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
-
 /* One sentence for an entry's cause (the store's, the builder's or the
  * serving index's): what is wrong and what to do. The causes the window
  * itself knows the next step for are said here; every other cause is the
@@ -591,11 +588,10 @@ static int mu_ends(const char *s, const char *suffix)
 static void mu_plain_cause(const sh_ms_entry *e, const char *cause, char *out, size_t cap)
 {
     const char *c = cause ? cause : "";
-    const size_t shape = sizeof SH_MB_SHAPE - 1;
     out[0] = 0;
     if (!c[0]) return;
     if (mu_starts(c, "not built: ")) c += 11;
-    if (!strcmp(c, SH_MB_EARLIER)) {   /* already the one plain sentence (DECISIONS 21) */
+    if (!strcmp(c, SH_MB_EARLIER) || !strcmp(c, SH_MODSERVE_PLACE_FRESH)) {   /* already plain sentences */
         strncpy_s(out, cap, c, _TRUNCATE);
         return;
     }
@@ -603,35 +599,6 @@ static void mu_plain_cause(const sh_ms_entry *e, const char *cause, char *out, s
         /* A script's own message names its file and line, what is wrong and what to do. */
         strncpy_s(out, cap, c, _TRUNCATE);
         mu_sentence_end(out, cap);
-        return;
-    }
-    if (!_strnicmp(c, SH_MB_SHAPE, shape)) {
-        const char *t = c + shape;
-        /* Every earlier shape gets the one sentence: the installer converts it, and nothing tells an
-         * author to edit mod.json by hand for it. */
-        if (strstr(t, "package.json") || strstr(t, "earlier version of Snapmap+") || mu_starts(t, "mod.json uses \""))
-            strncpy_s(out, cap, MU_EARLIER_SHAPE, _TRUNCATE);
-        else if (strstr(t, "no valid salt") || strstr(t, "has no salt") || strstr(t, "no salt yet"))
-            strncpy_s(out, cap, strstr(t, "no salt yet") ? "This mod has not been built yet; press Refresh to build it."
-                                                       : "The part of its mod.json that Snapmap+ writes is damaged; delete the "
-                                                         "\"snapmap-plus\" part at the end of mod.json and press Refresh.", _TRUNCATE);
-        else if (mu_starts(t, "its files are under mods/"))
-            _snprintf_s(out, cap, _TRUNCATE, "Some of its files are in another mod's folder name (mods/<other>/); move them "
-                        "under mods/%s/ and press Refresh.", e ? mu_leaf(e->name) : "<this mod's folder name>");
-        else if (strstr(t, "not built by the mod store"))
-            strncpy_s(out, cap, "This folder sits among a downloaded map's mods but did not come with the map; move it out of "
-                      "the maps folder into your own mods and press Refresh.", _TRUNCATE);
-        else if (mu_starts(t, "another folder of this map has the same mod"))
-            strncpy_s(out, cap, "This map's downloaded mods hold this mod twice; uninstall this copy.", _TRUNCATE);
-        else if (strstr(t, "mod.json") && (strstr(t, "missing") || strstr(t, "cannot be read") || strstr(t, "not a JSON")))
-            strncpy_s(out, cap, "Its mod.json is missing or is not valid JSON; fix it so it holds at least a \"name\", then "
-                      "press Refresh.", _TRUNCATE);
-        else if (strstr(t, "no folder"))
-            strncpy_s(out, cap, "The mod's folder is gone; press Refresh.", _TRUNCATE);
-        else {
-            _snprintf_s(out, cap, _TRUNCATE, "Snapmap+ cannot build this mod folder: %s", t);
-            mu_sentence_end(out, cap);
-        }
         return;
     }
     if (mu_starts(c, "a new mod, not built yet") || mu_starts(c, "not built yet")) {
@@ -886,7 +853,7 @@ static int mu_model_build(mu_model *m)
             }
         if (!e->loaded || e->refused) {
             u->state = "skipped";
-            mu_plain_cause(e, e->cause[0] ? e->cause : SH_MB_SHAPE "its mod.json cannot be read", u->cause, sizeof u->cause);
+            mu_plain_cause(e, e->cause[0] ? e->cause : "its mod.json cannot be read", u->cause, sizeof u->cause);
             continue;
         }
         /* The serving index decides what is served; the store's own check

@@ -768,6 +768,12 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  * sh_modserve_place_get: the loaded map's place.
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
+/* The cause of a folder in a map's place that the product did not receive:
+ * a place holds only the builds a map brought, and nothing there is built. */
+#define SH_MODSERVE_PLACE_FRESH \
+    "This folder sits among a downloaded map's mods but did not come with the map. Move it out of the maps folder " \
+    "into your own mods and press Refresh."
+
 #define SH_MODSERVE_PLACE_CAP 300
 int  sh_modserve_place_norm(const char *place, char *out, size_t cap);
 int  sh_modserve_place_set(const char *place);

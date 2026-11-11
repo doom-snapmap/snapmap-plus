@@ -4547,15 +4547,15 @@ static void test_salt_and_place(void)
     CHECK(log_has("bundle 'maps\\Doors\\Doors Pack (2)' skipped: This map's folder holds this mod twice (also in "
                   "maps\\Doors\\Doors Pack). Delete one of the two folders."));
     CHECK(log_has("bundle 'format-one' skipped: " "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."));
-    CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_SHAPE "mod.json uses \"id\", which this version does not read"));
-    CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_SHAPE "mod.json uses \"hud.schema\", which this version does not read"));
+    CHECK(log_has("bundle 'retired-id' skipped: " SH_MB_EARLIER));
+    CHECK(log_has("bundle 'hud-schema' skipped: " SH_MB_EARLIER));
     CHECK(log_has("bundle 'package-only' skipped: " "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."));
     CHECK(log_has("bundle 'bad-salt' skipped: The part of mod.json Snapmap+ writes is damaged. Delete the \"snapmap-plus\" "
                   "block and press Refresh to build the mod again."));
     CHECK(log_has("bundle 'salted-only' skipped: not built yet (Refresh in the Mods tab builds it)"));
     CHECK(log_has("bundle 'failed' skipped: not built: generated/decls/entitydef/mods/failedmd/a.decl: parse error"));
     CHECK(log_has("bundle 'fresh' skipped: not built yet (Refresh in the Mods tab builds it)"));
-    CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MB_SHAPE "it was not built by the mod store"));
+    CHECK(log_has("bundle 'maps\\Doors\\fresh' skipped: " SH_MODSERVE_PLACE_FRESH));
     CHECK(log_has("bundle 'elsewhere' skipped: '" SP_THING "' is outside mods/zother00/ (its salt)"));
     CHECK(!log_has("repair"));
     sh_modserve_scope_enable(1);
