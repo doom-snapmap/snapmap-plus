@@ -121,6 +121,9 @@ static int f_published_query(void *c, const char *cloud, unsigned ticket)
     return F.query_start;
 }
 static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)editor; strcpy_s(F.toast, sizeof F.toast, text); }
+/* The mod system's notice queue (modpublished.c). */
+static char g_menu_notice[256];
+static void f_menu_notice(void *c, const char *text) { (void)c; strcpy_s(g_menu_notice, sizeof g_menu_notice, text); }
 static void set_ops(void)
 {
     sh_modpublish_ops ops;
@@ -132,6 +135,7 @@ static void set_ops(void)
     ops.remove_tag = f_remove_tag;
     ops.edit_ids = f_edit_ids;
     ops.published_query = f_published_query;
+    ops.notice = f_menu_notice;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -746,15 +750,12 @@ int main(int argc, char **argv)
         CHECK(sh_modpublish_copy_allowed("dddddddddddddddddddddd44", "eeeeeeeeeeeeeeeeeeeeee55") == 1);   /* not cached */
         CHECK(make_sized(path, SH_MODPUBLISH_TEXT_BOUND));
         CHECK(sh_modpublish_copy_allowed("dddddddddddddddddddddd44", "eeeeeeeeeeeeeeeeeeeeee55") == 1);
-        CHECK(sh_modpublish_test_notice()[0] == 0);
+        CHECK(g_menu_notice[0] == 0);
         CHECK(make_sized(path, SH_MODPUBLISH_TEXT_BOUND + 1));
         CHECK(sh_modpublish_copy_allowed("dddddddddddddddddddddd44", "eeeeeeeeeeeeeeeeeeeeee55") == 0);
-        CHECK(strstr(sh_modpublish_test_notice(), "over the map service's 10.0 MB limit by 1 byte") != NULL);
-        F.asks = 0;
-        F.answer = 1;
-        sh_modpublish_poll();
-        CHECK(F.asks == 1 && F.ask_buttons == 0 && strstr(F.asked, "cannot be copied to My Maps") != NULL);
-        sh_modpublish_poll();
+        /* Raised by the mod system's one notice queue (modpublished_test). */
+        CHECK(strstr(g_menu_notice, "over the map service's 10.0 MB limit by 1 byte") != NULL &&
+              strstr(g_menu_notice, "cannot be copied to My Maps") != NULL);
         CHECK(sh_modpublish_copy_allowed("../x", "y") == 1);   /* an id that is not a file name: native */
         DeleteFileA(path);
     }

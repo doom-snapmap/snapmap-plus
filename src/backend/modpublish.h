@@ -186,6 +186,9 @@ typedef struct sh_modpublish_ops {
      * failed. Called from a local save write whose save carries no mod rows,
      * so the search tag matches the save. NULL: the tag is never removed. */
     int  (*remove_tag)(void *c, void *model, const char *tag);
+    /* A one-button notice in the menus (a copy refused): the mod system's
+     * one notice queue, modpublished.h sh_modpublished_notice. */
+    void (*notice)(void *c, const char *text);
 } sh_modpublish_ops;
 
 #ifdef SH_MODPUBLISH_TESTING
@@ -193,7 +196,6 @@ void sh_modpublish_test_set_ops(const sh_modpublish_ops *ops);
 void sh_modpublish_test_reset(void);
 /* 0 idle, 1 raise, 2 asking, 3 uploading, 4 waiting for the worker */
 int  sh_modpublish_test_state(void);
-const char *sh_modpublish_test_notice(void);      /* pending menu notice, or "" */
 const char *sh_modpublish_test_provisional(void); /* the live publish context's provisional ref, or "" */
 int  sh_modpublish_test_background_busy(void);    /* queued or running background jobs */
 void sh_modpublish_test_set_cache_root(const char *root);

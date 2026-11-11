@@ -404,9 +404,14 @@ static int g_notice_ticket, g_notice_waited;
 static void pub_notice(const char *text)
 {
     if (!text || !text[0]) return;
-    strcpy_s(g_notice, sizeof g_notice, text);
+    strncpy_s(g_notice, sizeof g_notice, text, _TRUNCATE);
     g_notice_waited = 0;
-    pub_logf("MODS: published map notice: %s", text);
+    pub_logf("MODS: notice: %s", text);
+}
+
+void sh_modpublished_notice(const char *text)
+{
+    pub_notice(text);
 }
 
 static const char *pub_hook_name(int hook)

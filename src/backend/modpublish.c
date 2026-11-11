@@ -587,17 +587,14 @@ typedef struct mp_context {
 static mp_hold g_hold;
 static mp_context g_ctx;
 
-/* One pending menu notice, raised with a single Accept button when the
- * dialog surface is idle. A later notice replaces an unraised one. */
-static char g_notice[MP_TEXT_CAP];
-static int g_notice_ticket, g_notice_waited;
-
+/* A menu notice goes to the mod system's one notice queue (the notice op:
+ * modpublished.h sh_modpublished_notice), raised with a single Accept
+ * button when the dialog surface is idle. */
 static void mp_menu_notice(const char *text)
 {
     if (!text || !text[0]) return;
-    strcpy_s(g_notice, sizeof g_notice, text);
-    g_notice_waited = 0;
     mp_logf("MODS: notice: %s", text);
+    if (g_ops.notice) g_ops.notice(g_ops.context, text);
 }
 
 static void mp_editor_notice(void *editor, const char *text)
@@ -1177,29 +1174,6 @@ void sh_modpublish_launch(void)
 
 /* ------------------------------------------------------------ the tick */
 
-static void mp_poll_notice(void)
-{
-    int answer;
-    if (g_notice_ticket) {
-        answer = g_ops.poll ? g_ops.poll(g_ops.context, g_notice_ticket) : -1;
-        if (answer == MP_DIALOG_PENDING) return;
-        if (g_ops.release) g_ops.release(g_ops.context, g_notice_ticket);
-        g_notice_ticket = 0;
-        return;
-    }
-    if (!g_notice[0] || g_hold.state == HOLD_RAISE || g_hold.state == HOLD_ASKING) return;
-    if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
-        if (++g_notice_waited > MP_RAISE_TICKS) {
-            mp_log("MODS: the notice could not be shown; the dialog surface stayed busy");
-            g_notice[0] = 0;
-        }
-        return;
-    }
-    g_notice_ticket = g_ops.ask ? g_ops.ask(g_ops.context, MP_GDM_ID, MP_BUTTONS_ACCEPT, g_notice) : 0;
-    if (!g_notice_ticket) mp_log("MODS: the notice dialog would not raise");
-    g_notice[0] = 0;
-}
-
 static void mp_orphans_retire(void)
 {
     mp_job **link = &g_orphans;
@@ -1279,7 +1253,6 @@ static void mp_poll_hold(void)
     }
     switch (h->state) {
     case HOLD_RAISE:
-        if (g_notice_ticket) break;
         if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
             if (++h->waited > MP_RAISE_TICKS)
                 mp_cancel("The map was not published: the upload question could not be shown. Publish it again.",
@@ -1364,8 +1337,8 @@ static void mp_poll_background(void)
 void sh_modpublish_poll(void)
 {
     if (!g_ops_set) return;
-    if (g_hold.state == HOLD_IDLE && g_ctx.kind == CTX_NONE && !g_queue && !g_orphans && !g_notice[0] &&
-        !g_notice_ticket && !g_checks && !g_answers) return;
+    if (g_hold.state == HOLD_IDLE && g_ctx.kind == CTX_NONE && !g_queue && !g_orphans && !g_checks && !g_answers)
+        return;
     if (!mp_on_main()) return;
     mp_orphans_retire();
     mp_poll_checks();
@@ -1374,7 +1347,6 @@ void sh_modpublish_poll(void)
         (mp_token(g_ctx.editor) != g_ctx.token || GetTickCount64() - g_ctx.at > MP_CONTEXT_MS))
         mp_ctx_clear(1, "the publish never reached its feed post");
     mp_poll_background();
-    mp_poll_notice();
 }
 
 /* ------------------------------------------------------------ tests */
@@ -1393,7 +1365,6 @@ void sh_modpublish_test_reset(void)
     while (g_queue) { mp_job *j = g_queue; g_queue = j->next; mp_job_free(j); }
     g_running = NULL;
     mp_save_clear(&g_save);
-    g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
     InterlockedExchange(&g_resuming, 0);
     memset(&g_tag, 0, sizeof g_tag);
     while (g_checks) { mp_check *c = g_checks; g_checks = c->next; free(c); }
@@ -1414,7 +1385,6 @@ void sh_modpublish_test_age_delete_checks(unsigned long long ms)
 void sh_modpublish_test_set_link_min_age(long long seconds) { g_link_min_age = seconds; }
 void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
-const char *sh_modpublish_test_notice(void) { return g_notice; }
 const char *sh_modpublish_test_provisional(void)
 {
     return g_hold.state != HOLD_IDLE ? g_hold.ref : g_ctx.provisional;
@@ -1438,6 +1408,7 @@ void sh_modpublish_test_set_cache_root(const char *root)
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "engine_dialog.h"
+#include "modpublished.h"   /* sh_modpublished_notice: the one notice queue */
 #include "rawmap.h"
 
 #define ENG_EDITOR_IN_SESSION 0x8       /* byte: nonzero inside an editor session */
@@ -1785,10 +1756,13 @@ static int eng_published_query(void *c, const char *cloud_id, unsigned ticket)
 }
 
 
+/* The mod system's one notice queue (modpublished.c). */
+static void eng_notice(void *c, const char *text) { (void)c; sh_modpublished_notice(text); }
+
 static const sh_modpublish_ops ENG_OPS = {
     NULL, eng_on_main, eng_can_ask, eng_ask, eng_poll, eng_release, eng_editor_token, eng_publish_fail,
     eng_resume, eng_editor_notice, eng_upload_question_dialog, eng_log, eng_add_tag, eng_edit_ids, eng_published_query,
-    eng_remove_tag
+    eng_remove_tag, eng_notice
 };
 
 /* ------------------------------------------------------------ detours */

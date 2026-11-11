@@ -742,6 +742,21 @@ static void own_published_map_follows_own_folder(void)
     CHECK(F.place_sets == 1 && !F.loaded_place[0] && !sh_modpublished_holding());
 }
 
+static void one_notice_queue(void)
+{
+    printf("-- the mod system's one notice queue: a notice from elsewhere is raised with one Accept button\n");
+    reset();
+    sh_modpublished_notice("This map is 10.1 MB, over the map service's 10.0 MB limit by 0.1 MB, so it cannot be "
+                           "copied to My Maps.");
+    tick(1);
+    CHECK(F.asks == 1 && F.ask_buttons == 0 && strstr(F.last_ask, "cannot be copied to My Maps") != NULL);
+    sh_modpublished_notice("first");
+    sh_modpublished_notice("second");   /* a later notice replaces one not raised yet */
+    F.answer = 1;
+    tick(3);
+    CHECK(F.asks == 2 && !strcmp(F.last_ask, "second"));
+}
+
 static void a_map_carries_its_place(void)
 {
     char launch[64];
@@ -1588,6 +1603,7 @@ int main(void)
     the_question();
     rawmap_missing_counts_rows();
     a_map_carries_its_place();
+    one_notice_queue();
     rawmap_store_lacks_refuses();
     rawmap_store_has_downloads_and_reopens();
     the_refusal();

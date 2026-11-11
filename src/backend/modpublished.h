@@ -101,6 +101,13 @@ void sh_modpublished_poll(void);
 /* 1 while a map is held (asking, fetching or resuming). */
 int sh_modpublished_holding(void);
 
+/* The mod system's one notice queue: `text` (under 256 bytes) is raised
+ * with a single Accept button by the tick once the dialog surface is idle
+ * and no question is up; a later notice replaces one not raised yet. Used
+ * by the gates and holds here and by the publish copy gate (modpublish.c).
+ * Main thread. */
+void sh_modpublished_notice(const char *text);
+
 /* The question as raised: "This map needs N mod(s): <names> (<size>).
  * Download and install now?", the mods' names, those that do not fit
  * summarized as "and K more", and the total size of their archives. Always
