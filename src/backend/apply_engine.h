@@ -14,11 +14,6 @@
  * slot checks its own dependencies when installation is partial. */
 int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys);
 
-/* Most recent kind-2 result: 0 stage failed, 1 staged-only, 2 native paste
- * action armed. Arming does not confirm consumption or entry into grab; the
- * engine runs the action on a later frame and the user positions the result. */
-int sh_apply_last_place_result(void);
-
 /* The Prefabs tab's view of Load / Place (sh_prefab_watch): seq counts the
  * decided object pastes, result is the last one's SH_PREFAB_PLACE_* and reason
  * says why it was staged only. Returns 1 while a queued paste is held in the
