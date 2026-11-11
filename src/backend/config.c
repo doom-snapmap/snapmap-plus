@@ -330,21 +330,23 @@ static int find_descriptor_n(const char *key, size_t key_length)
 }
 
 /* https://<host>[...], or http:// for a loopback host; printable ASCII
- * without spaces, quotes or backslashes, at most 511 bytes. */
+ * without spaces, quotes or backslashes, of any length. */
 static int validate_mods_store(const char *value_json)
 {
-    char decoded[512];
-    size_t length = 0, i;
-    if (!value_json || !sh_json_decode_string(value_json, strlen(value_json), decoded, sizeof decoded, &length) ||
-        length == 0 || length >= sizeof decoded)
-        return 0;
+    size_t n = value_json ? strlen(value_json) : 0, length = 0, i;
+    char *decoded = n ? (char *)malloc(n + 1) : NULL;   /* decoding never lengthens */
+    int ok = 0;
+    if (!decoded || !sh_json_decode_string(value_json, n, decoded, n + 1, &length) || length == 0) goto done;
     for (i = 0; i < length; i++)
         if ((unsigned char)decoded[i] <= 0x20 || (unsigned char)decoded[i] >= 0x7f || decoded[i] == '"' || decoded[i] == '\\')
-            return 0;
+            goto done;
     decoded[length] = 0;
-    if (strncmp(decoded, "https://", 8) == 0) return length > 8;
-    return strncmp(decoded, "http://127.0.0.1", 16) == 0 || strncmp(decoded, "http://localhost", 16) == 0 ||
-           strncmp(decoded, "http://[::1]", 12) == 0;
+    if (strncmp(decoded, "https://", 8) == 0) ok = length > 8;
+    else ok = strncmp(decoded, "http://127.0.0.1", 16) == 0 || strncmp(decoded, "http://localhost", 16) == 0 ||
+              strncmp(decoded, "http://[::1]", 12) == 0;
+done:
+    free(decoded);
+    return ok;
 }
 
 static int validate_theme(const char *value_json)
@@ -1448,6 +1450,25 @@ int sh_config_get_string(const char *key, char *out, int out_capacity)
 done:
     free(json);
     return result;
+}
+
+char *sh_config_get_text(const char *key)
+{
+    int json_length = sh_config_get_json(key, NULL, 0, NULL);
+    char *json, *out;
+    size_t decoded_length = 0;
+    if (json_length < 0) return NULL;
+    json = (char *)malloc((size_t)json_length + 1);
+    out = (char *)malloc((size_t)json_length + 1);   /* decoding never lengthens */
+    if (!json || !out || sh_config_get_json(key, json, json_length + 1, NULL) != json_length ||
+        !sh_json_decode_string(json, (size_t)json_length, out, (size_t)json_length + 1, &decoded_length)) {
+        free(json);
+        free(out);
+        return NULL;
+    }
+    free(json);
+    out[decoded_length] = 0;
+    return out;
 }
 
 static int iface_config_get_json(sh_iface *self, const char *key,

@@ -144,11 +144,14 @@ int main(void)
     CHECK(!modnet_set_base_url("https://store.test/x?y=1"));
     CHECK(modnet_set_base_url("https://store.test/base/"));
     {
-        char base[MODNET_URL_MAX];
-        CHECK(modnet_base_url(base, sizeof base) && strcmp(base, "https://store.test/base/") == 0);
+        char *base = modnet_base_url();
+        CHECK(base && strcmp(base, "https://store.test/base/") == 0);
+        free(base);
         CHECK(modnet_set_base_url(NULL));
         /* No settings service in this test: the documented default applies. */
-        CHECK(modnet_base_url(base, sizeof base) && strcmp(base, MODNET_DEFAULT_STORE) == 0);
+        base = modnet_base_url();
+        CHECK(base && strcmp(base, MODNET_DEFAULT_STORE) == 0);
+        free(base);
     }
     CHECK(modnet_set_base_url(url));
 
@@ -273,6 +276,25 @@ int main(void)
     code = modnet_get_build(ha, got, NULL, &r);
     CHECK(code == MODNET_E_UNAVAILABLE && modnet_transient(code) && modnet_unreachable(code) && !mt_exists(got));
     CHECK(strstr(r.message, "injected failure 503") != NULL);
+
+    {
+        /* A store address is any length: it is kept and used whole. */
+        size_t n = strlen(url);
+        char *longer = (char *)malloc(n + 6002), *base;
+        CHECK(longer != NULL);
+        memcpy(longer, url, n);
+        longer[n] = '/';
+        memset(longer + n + 1, 'p', 6000);
+        longer[n + 6001] = 0;
+        CHECK(modnet_set_base_url(longer));
+        base = modnet_base_url();
+        CHECK(base && strcmp(base, longer) == 0);
+        free(base);
+        code = modnet_get_build(h_none, got, NULL, &r);
+        CHECK(code != MODNET_E_CONFIG && code != MODNET_E_ARG && r.status != 0);   /* the request reached the store */
+        free(longer);
+    }
+    CHECK(modnet_set_base_url(url));
 
     /* ---- claims ---- */
     {

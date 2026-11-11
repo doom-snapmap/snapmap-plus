@@ -49,7 +49,6 @@
 #define MODNET_HASH_HEX       64
 #define MODNET_CLAIM_HEX      32
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
-#define MODNET_URL_MAX        512
 /* One part, and the largest archive one request sends: the Worker's part
  * size (api/mods_store.js PART_SIZE), under the platform's 100 MB (decimal)
  * request body limit. The store's own answer names the part size it uses. */
@@ -120,8 +119,8 @@ const char *modnet_code_text(int code);
 int  modnet_transient(int code);
 
 /* The store base URL in effect (override, else the "mods.store" setting,
- * else the default). Returns 1 when out holds it. */
-int  modnet_base_url(char *out, size_t cap);
+ * else the default), whole (malloc'd; free); NULL when memory runs out. */
+char *modnet_base_url(void);
 /* Override the base URL for this process (tests; NULL or "" restores the
  * setting). Waits for requests in flight and drops the pooled session.
  * Returns 1 when the URL is usable. */

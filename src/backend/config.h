@@ -30,6 +30,9 @@ int sh_config_get_bool(const char *key, int *out_value,
                        unsigned int *out_flags);
 int sh_config_set_json(const char *key, const char *value_json);
 int sh_config_get_string(const char *key, char *out, int out_capacity);
+/* The string setting `key`, whole (malloc'd; free); NULL when it is absent,
+ * not a string, or memory runs out. */
+char *sh_config_get_text(const char *key);
 void sh_config_bind_iface_slots(void);
 
 #ifdef SH_CONFIG_TESTING

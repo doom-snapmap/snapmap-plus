@@ -490,6 +490,38 @@ static void test_user_overrides_setting_validation_and_persistence(void)
     cleanup_temp_root(root);
 }
 
+/* The mod store address is kept and read whole, at any length. */
+static void test_long_store_address(void)
+{
+    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
+    char *json = (char *)malloc(6100), *url = (char *)malloc(6100), *got;
+    CHECK(json && url);
+    strcpy(url, "https://store.test/");
+    memset(url + strlen(url), 'a', 6000);
+    url[19 + 6000] = 0;
+    sprintf_s(json, 6100, "\"%s\"", url);
+    CHECK(make_temp_root(root, MAX_PATH));
+    CHECK(make_config_dir(root, dir, path));
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init() == 1);
+    CHECK(sh_config_set_json("mods.store", json) == SH_CONFIG_SET_PERSISTED);
+    got = sh_config_get_text("mods.store");
+    CHECK(got && strcmp(got, url) == 0);
+    free(got);
+    CHECK(sh_config_set_json("mods.store", "\"http://example.com/\"") == SH_CONFIG_SET_REJECTED);
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init() == 1);
+    got = sh_config_get_text("mods.store");
+    CHECK(got && strcmp(got, url) == 0);
+    free(got);
+    sh_config_test_reset();
+    cleanup_temp_root(root);
+    free(json);
+    free(url);
+}
+
 static void test_setter_rereads_external_edits_and_recreates_deleted_file(void)
 {
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
@@ -1308,6 +1340,7 @@ int wmain(int argc, wchar_t **argv)
     test_sets_valid_theme_and_preserves_unknown_values();
     test_entity_settings_validation_and_persistence();
     test_user_overrides_setting_validation_and_persistence();
+    test_long_store_address();
     test_repairs_missing_and_invalid_registered_values();
     test_setter_rereads_external_edits_and_recreates_deleted_file();
     test_accepts_bom_and_canonicalizes_registered_strings();

@@ -38,13 +38,12 @@
 
 static SRWLOCK   g_lock = SRWLOCK_INIT;
 static HINTERNET g_session;
-static char      g_override[MODNET_URL_MAX];
-static int       g_override_set;
-static wchar_t   g_host[256];
-static char      g_session_url[MODNET_URL_MAX];   /* the base URL the pooled session was opened with */
+static char     *g_override;         /* malloc'd; NULL: the setting */
+static wchar_t  *g_host;             /* malloc'd, while a session is open */
+static char     *g_session_url;      /* the base URL the pooled session was opened with (malloc'd) */
 static INTERNET_PORT g_port;
 static int       g_secure;
-static wchar_t   g_prefix[256];      /* base path without a trailing '/' */
+static wchar_t  *g_prefix;           /* base path without a trailing '/' (malloc'd) */
 
 static double mn_now_ms(void)
 {
@@ -173,89 +172,109 @@ static int mn_is_loopback(const wchar_t *host)
            _wcsicmp(host, L"[::1]") == 0 || _wcsicmp(host, L"::1") == 0;
 }
 
-int modnet_base_url(char *out, size_t cap)
+/* The base URL in effect, given the override (read under the lock). */
+static char *mn_url_from(const char *override)
 {
-    char tmp[MODNET_URL_MAX];
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    AcquireSRWLockShared(&g_lock);
-    if (g_override_set) strncpy_s(tmp, sizeof tmp, g_override, _TRUNCATE);
-    else tmp[0] = 0;
-    ReleaseSRWLockShared(&g_lock);
-    if (!tmp[0]) {
-        int n = sh_config_get_string("mods.store", tmp, (int)sizeof tmp);
-        if (n <= 0) strcpy_s(tmp, sizeof tmp, MODNET_DEFAULT_STORE);
-    }
-    if (strlen(tmp) >= cap) return 0;
-    strcpy_s(out, cap, tmp);
-    return 1;
+    char *url;
+    if (override) return _strdup(override);
+    url = sh_config_get_text("mods.store");
+    if (url && url[0]) return url;
+    free(url);
+    return _strdup(MODNET_DEFAULT_STORE);
 }
 
-/* Parse a base URL into host, port, scheme and path prefix. */
-static int mn_parse_url(const char *url, wchar_t *host, size_t host_cap, INTERNET_PORT *port, int *secure,
-                        wchar_t *prefix, size_t prefix_cap, char *why, size_t why_cap)
+char *modnet_base_url(void)
 {
-    wchar_t wurl[MODNET_URL_MAX], whost[256], wpath[512];
+    char *url;
+    AcquireSRWLockShared(&g_lock);
+    url = g_override ? _strdup(g_override) : NULL;
+    ReleaseSRWLockShared(&g_lock);
+    return url ? url : mn_url_from(NULL);
+}
+
+/* Parse a base URL into host, port, scheme and path prefix (each malloc'd).
+ * The address is any length; WinHTTP points into it, so nothing is cut. */
+static int mn_parse_url(const char *url, wchar_t **host, INTERNET_PORT *port, int *secure, wchar_t **prefix,
+                        char *why, size_t why_cap)
+{
+    wchar_t *wurl = NULL, *whost = NULL, *wpath = NULL;
     URL_COMPONENTS uc;
     size_t n;
-    if (!url || !url[0] || strlen(url) >= MODNET_URL_MAX ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, url, -1, wurl, MODNET_URL_MAX)) {
+    int units, ok = 0;
+    *host = *prefix = NULL;
+    units = url && url[0] ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, url, -1, NULL, 0) : 0;
+    if (units <= 1 || !(wurl = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)units)) ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, url, -1, wurl, units)) {
         strncpy_s(why, why_cap, "the mod store address is empty or not text", _TRUNCATE);
-        return 0;
+        goto done;
     }
     memset(&uc, 0, sizeof uc);
     uc.dwStructSize = sizeof uc;
-    uc.lpszHostName = whost;
-    uc.dwHostNameLength = (DWORD)(sizeof whost / sizeof whost[0]);
-    uc.lpszUrlPath = wpath;
-    uc.dwUrlPathLength = (DWORD)(sizeof wpath / sizeof wpath[0]);
-    if (!WinHttpCrackUrl(wurl, 0, 0, &uc) || !whost[0]) {
+    uc.dwHostNameLength = (DWORD)-1;   /* point into wurl: no buffer to fit */
+    uc.dwUrlPathLength = (DWORD)-1;
+    uc.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wurl, 0, 0, &uc) || !uc.lpszHostName || !uc.dwHostNameLength) {
         strncpy_s(why, why_cap, "the mod store address is not a URL", _TRUNCATE);
-        return 0;
+        goto done;
     }
+    whost = (wchar_t *)malloc(sizeof(wchar_t) * ((size_t)uc.dwHostNameLength + 1));
+    wpath = (wchar_t *)malloc(sizeof(wchar_t) * ((size_t)uc.dwUrlPathLength + 1));
+    if (!whost || !wpath) { strncpy_s(why, why_cap, "out of memory", _TRUNCATE); goto done; }
+    wmemcpy(whost, uc.lpszHostName, uc.dwHostNameLength);
+    whost[uc.dwHostNameLength] = 0;
+    if (uc.dwUrlPathLength) wmemcpy(wpath, uc.lpszUrlPath, uc.dwUrlPathLength);
+    wpath[uc.dwUrlPathLength] = 0;
     if (uc.nScheme == INTERNET_SCHEME_HTTPS) *secure = 1;
     else if (uc.nScheme == INTERNET_SCHEME_HTTP && mn_is_loopback(whost)) *secure = 0;
     else {
         strncpy_s(why, why_cap, "the mod store address must use https (http only for a loopback test host)", _TRUNCATE);
-        return 0;
+        goto done;
     }
-    if (wcschr(wpath, L'?') || wcschr(wpath, L'#')) {
+    if (uc.dwExtraInfoLength || wcschr(wpath, L'?') || wcschr(wpath, L'#')) {
         strncpy_s(why, why_cap, "the mod store address must not carry a query", _TRUNCATE);
-        return 0;
+        goto done;
     }
     n = wcslen(wpath);
     while (n && wpath[n - 1] == L'/') wpath[--n] = 0;
-    if (wcslen(whost) >= host_cap || n >= prefix_cap) {
-        strncpy_s(why, why_cap, "the mod store address is too long", _TRUNCATE);
-        return 0;
-    }
-    wcscpy_s(host, host_cap, whost);
-    wcscpy_s(prefix, prefix_cap, wpath);
+    *host = whost;
+    *prefix = wpath;
+    whost = wpath = NULL;
     *port = uc.nPort;
-    return 1;
+    ok = 1;
+done:
+    free(wurl);
+    free(whost);
+    free(wpath);
+    return ok;
 }
 
 static void mn_close_session_locked(void)
 {
     if (g_session) WinHttpCloseHandle(g_session);
     g_session = NULL;
-    g_host[0] = 0;
-    g_prefix[0] = 0;
-    g_session_url[0] = 0;
+    free(g_host);
+    free(g_prefix);
+    free(g_session_url);
+    g_host = g_prefix = NULL;
+    g_session_url = NULL;
 }
 
 int modnet_set_base_url(const char *url)
 {
-    wchar_t host[256], prefix[256];
+    wchar_t *host = NULL, *prefix = NULL;
     INTERNET_PORT port = 0;
-    int secure = 0, ok = 1;
-    char why[160];
-    if (url && url[0]) ok = mn_parse_url(url, host, 256, &port, &secure, prefix, 256, why, sizeof why);
-    if (!ok) return 0;
+    int secure = 0;
+    char why[160], *copy = NULL;
+    if (url && url[0]) {
+        if (!mn_parse_url(url, &host, &port, &secure, &prefix, why, sizeof why)) return 0;
+        free(host);
+        free(prefix);
+        if (!(copy = _strdup(url))) return 0;
+    }
     AcquireSRWLockExclusive(&g_lock);   /* waits for requests in flight */
     mn_close_session_locked();
-    if (url && url[0]) { strncpy_s(g_override, sizeof g_override, url, _TRUNCATE); g_override_set = 1; }
-    else { g_override[0] = 0; g_override_set = 0; }
+    free(g_override);
+    g_override = copy;
     ReleaseSRWLockExclusive(&g_lock);
     return 1;
 }
@@ -270,17 +289,13 @@ void modnet_shutdown(void)
 /* Create the session under the exclusive lock. */
 static int mn_open_session_locked(char *why, size_t why_cap)
 {
-    char url[MODNET_URL_MAX];
+    char *url;
     DWORD protocols;
     if (g_session) return 1;
     /* modnet_base_url takes the shared lock; read the override directly. */
-    if (g_override_set) strncpy_s(url, sizeof url, g_override, _TRUNCATE);
-    else {
-        int n = sh_config_get_string("mods.store", url, (int)sizeof url);
-        if (n <= 0) strcpy_s(url, sizeof url, MODNET_DEFAULT_STORE);
-    }
-    if (!mn_parse_url(url, g_host, 256, &g_port, &g_secure, g_prefix, 256, why, why_cap)) return 0;
-    strncpy_s(g_session_url, sizeof g_session_url, url, _TRUNCATE);
+    if (!(url = mn_url_from(g_override))) { strncpy_s(why, why_cap, "out of memory", _TRUNCATE); return 0; }
+    if (!mn_parse_url(url, &g_host, &g_port, &g_secure, &g_prefix, why, why_cap)) { free(url); return 0; }
+    g_session_url = url;
     if (mn_is_loopback(g_host)) {
         g_session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     } else {
@@ -294,7 +309,7 @@ static int mn_open_session_locked(char *why, size_t why_cap)
     }
     if (!g_session) {
         _snprintf_s(why, why_cap, _TRUNCATE, "the HTTP session could not be opened (error %lu)", GetLastError());
-        g_host[0] = 0;
+        mn_close_session_locked();
         return 0;
     }
     WinHttpSetTimeouts(g_session, MN_RESOLVE_MS, MN_CONNECT_MS, MN_SEND_MS, MN_RECEIVE_MS);
@@ -309,19 +324,18 @@ static int mn_open_session_locked(char *why, size_t why_cap)
 /* Take the shared lock with an open session. Returns 1 holding the lock. */
 static int mn_acquire(char *why, size_t why_cap)
 {
-    char wanted[MODNET_URL_MAX];
     /* The setting is read on every request so a changed "mods.store" takes
      * effect at the next request, not at the next launch: a session opened
      * for another base URL is dropped (after the requests in flight finish)
      * and reopened for the current one. */
-    if (!modnet_base_url(wanted, sizeof wanted)) wanted[0] = 0;
+    char *wanted = modnet_base_url();
     for (;;) {
         AcquireSRWLockShared(&g_lock);
-        if (g_session && (!wanted[0] || strcmp(g_session_url, wanted) == 0)) return 1;
+        if (g_session && (!wanted || strcmp(g_session_url, wanted) == 0)) { free(wanted); return 1; }
         ReleaseSRWLockShared(&g_lock);
         AcquireSRWLockExclusive(&g_lock);
-        if (g_session && wanted[0] && strcmp(g_session_url, wanted) != 0) mn_close_session_locked();
-        if (!mn_open_session_locked(why, why_cap)) { ReleaseSRWLockExclusive(&g_lock); return 0; }
+        if (g_session && wanted && strcmp(g_session_url, wanted) != 0) mn_close_session_locked();
+        if (!mn_open_session_locked(why, why_cap)) { ReleaseSRWLockExclusive(&g_lock); free(wanted); return 0; }
         ReleaseSRWLockExclusive(&g_lock);
     }
 }
@@ -367,7 +381,8 @@ static int mn_winhttp_error(modnet_result *r, const char *step)
 static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, const modnet_io *io, modnet_result *r)
 {
     HINTERNET conn = NULL, req = NULL;
-    wchar_t path[1024], wroute[512], headers[512];
+    wchar_t *path = NULL, *wroute = NULL, *headers = NULL, *ct = NULL;
+    int units;
     char why[160];
     DWORD status = 0, size, policy, features;
     unsigned char *buf = NULL;
@@ -379,10 +394,19 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     *resp_len = 0;
     r->status = 0;
     if (mn_cancelled(io)) return mn_fail(r, MODNET_E_CANCELLED, NULL);
-    if (!MultiByteToWideChar(CP_UTF8, 0, q->route, -1, wroute, 512)) return mn_fail(r, MODNET_E_ARG, "bad route");
+    units = MultiByteToWideChar(CP_UTF8, 0, q->route, -1, NULL, 0);
+    if (units <= 0 || !(wroute = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)units)) ||
+        !MultiByteToWideChar(CP_UTF8, 0, q->route, -1, wroute, units)) {
+        free(wroute);
+        return mn_fail(r, MODNET_E_ARG, "bad route");
+    }
     why[0] = 0;
-    if (!mn_acquire(why, sizeof why)) return mn_fail(r, MODNET_E_CONFIG, "%s", why[0] ? why : "no mod store address");
-    _snwprintf_s(path, 1024, _TRUNCATE, L"%s%s", g_prefix, wroute);
+    if (!mn_acquire(why, sizeof why)) {
+        free(wroute);
+        return mn_fail(r, MODNET_E_CONFIG, "%s", why[0] ? why : "no mod store address");
+    }
+    path = sh_wtextf(L"%s%s", g_prefix, wroute);
+    if (!path) { code = mn_fail(r, MODNET_E_ARG, "out of memory"); goto done; }
     conn = WinHttpConnect(g_session, g_host, g_port, 0);
     if (!conn) { code = mn_winhttp_error(r, "connect"); goto done; }
     req = WinHttpOpenRequest(conn, q->verb, path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -395,15 +419,18 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &features, sizeof features);
     if (q->receive_ms) WinHttpSetTimeouts(req, MN_RESOLVE_MS, MN_CONNECT_MS, MN_SEND_MS, (int)q->receive_ms);
     if (q->content_type) {
-        wchar_t ct[64];
-        MultiByteToWideChar(CP_UTF8, 0, q->content_type, -1, ct, 64);
+        units = MultiByteToWideChar(CP_UTF8, 0, q->content_type, -1, NULL, 0);
+        if (units > 0 && (ct = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)units)))
+            MultiByteToWideChar(CP_UTF8, 0, q->content_type, -1, ct, units);
         /* Content-Length is written by WinHTTP from the total length below,
          * zero included, for every request that has a body. */
-        _snwprintf_s(headers, 512, _TRUNCATE, L"Content-Type: %s\r\nAccept: application/json, application/octet-stream\r\n%s", ct,
-                     q->headers ? q->headers : L"");
+        if (ct)
+            headers = sh_wtextf(L"Content-Type: %s\r\nAccept: application/json, application/octet-stream\r\n%s", ct,
+                                q->headers ? q->headers : L"");
     } else {
-        _snwprintf_s(headers, 512, _TRUNCATE, L"Accept: application/json, application/octet-stream\r\n");
+        headers = sh_wtextf(L"Accept: application/json, application/octet-stream\r\n");
     }
+    if (!headers) { code = mn_fail(r, MODNET_E_ARG, "out of memory"); goto done; }
     r->requests++;
     if (!WinHttpSendRequest(req, headers, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0,
                             q->content_type ? (DWORD)q->body_len : 0, 0)) {
@@ -557,6 +584,10 @@ done:
     if (req) WinHttpCloseHandle(req);
     if (conn) WinHttpCloseHandle(conn);
     ReleaseSRWLockShared(&g_lock);
+    free(path);
+    free(wroute);
+    free(headers);
+    free(ct);
     if (code == MODNET_OK) r->code = MODNET_OK;
     return code;
 }
