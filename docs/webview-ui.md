@@ -15,7 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
-| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the flat installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
+| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the list (Your mods, and one group per downloaded map), the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule, the meter colour levels and a bounded memo. No DOM. |
 | `src/ui/webview/prefab_host.h` | The host's Prefabs tab decisions: Create's precheck, a prefab's kind by its file's `~type`, and the live usage gate. Pure; `tests/prefab_host_test.cpp`. |
 | `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
@@ -68,7 +68,7 @@ The header defines the complete ABI. These are the main entry points:
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
-| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, WAIT follows a migration from any thread. See [Mods tab](#mods-tab). |
+| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, WAIT answers idle at once (nothing of the tab runs in the background). See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
@@ -296,319 +296,225 @@ markup when the field closes (`tests/prefab_rename_test.js`).
 ## Mods tab
 
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
-Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
+Showing the tab and the Refresh button send `modsAction {action: "rescan"}`. Every action is
 answered with `modsActionResult` and then a fresh `mods` document (the Files view's two reads,
-`modFiles` and `modFileText`, with the result alone), one job at a time, and nothing
-polls. The mods folder is not watched: an author's edit in a folder shows after the next Refresh.
-The page renders only from the last document and the last dry run, never from its own
-bookkeeping, so counts, manifest rows and the published state are always what the backend just
-read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods doctor [verify]`.
+`modFiles` and `modFileText`, with the result alone), one job at a time, and nothing polls. The
+mods folder is not watched: an author's edit shows after the next Refresh, which the empty state,
+How mods work and New mod's result say ("After you change a mod's files, press Refresh to see the
+change."). The page renders only from the last document and the last dry run, never from its own
+bookkeeping. Every folder's state, conflicts, replaced game files and verification stay in
+`sh_mods doctor [verify]`.
 
-**List pane.** The panel head is built as the Prefabs tab's: the title, the mod count badge, and on
-the left pane's header line the panel's icon buttons (`btn icon icon-button` in `.panel-actions`, as
-Import, New Folder and Create are there; owner 2026-11-09): the attention filter (a yellow triangle,
-shown only when a mod needs attention; its hover and label carry the count, "2 mods need attention:
-show only these", and pressing it sets `aria-pressed` and shows only those rows), This map (its hover
-names how many mods the open map uses), refresh, Open mods folder, Migrate (only while
-`migrate.pending > 0`) or, in its place whenever Migrate is hidden, New mod (`folder-plus`), and
-install (primary). The title and badge sit in `.mods-head-label`, which gives up its room first:
-at the pane's 220 px minimum all six visible buttons stay inside the pane and the label is clipped. The toolbar
-under it holds the filter alone. The
-install dialog allows several folders (`FOS_ALLOWMULTISELECT`), joined with newlines in the action's
-argument; a picked folder without `mod.json` stands for every mod folder below it. One picked mod
-answers with the single result (`key`, `id`, `bundle`, ...); anything else answers with the bulk result:
-`installedCount`, `refusedCount`, `editorRows`, `items` (one `{folder, ok, key, id, bundle, cause,
-editorRows, replaced}` per mod), `key` the first installed folder, and `index` from the one rescan.
-The rows are sorted by display name (the name, else the id, else the folder; a folder whose
-build serves nothing, as a refused or unbuilt one, is named by its `mod.json` whenever that parses,
-and by its folder path only when it does not) without
-case, then by id, then by folder. A mod that sits in an organizing folder of `mods\` (its row's
-`group`, "campaign-interactables" for `mods\campaign-interactables\campaign-interactables-1`) is
-listed under that folder's row, the Prefabs tab's folder primitives: a caret, the folder's path and
-the count of its mods, its rows indented below. Folders come first, sorted by name, then the mods at
-the root. Clicking a folder's row closes or opens it for the session; a closed folder with a mod
-that needs attention shows the yellow triangle on its row. A filter, the attention filter, and
-selecting a mod inside (an install, New mod) open it. The filter matches name, id and folder, and it
-and the attention filter keep that order. The collapsed-groups setting of
-earlier builds, `mods.collapsed_groups`, is neither read nor written by the page: a value already in
-`config.json` stays there unused (`config.c` still knows the key). Each
-row is one status glyph, the name, and `id · version · size`; there are no pills. The glyph is a
-yellow triangle when the mod needs attention (`attention`, `duplicateId`, an exact copy in a second
-folder, "an identical copy of this mod is installed in another folder; uninstall one of the two", or a
-failed latest build), else the accent map icon when the open map uses it (the row's `key` is the `key`
-of an entry of the document's `map.mods`, read only while a map is open, so it costs no read of its
-own), else a green check (`installed`, `servedBy` set or not, and with builder warnings). The hover
-title is the cause, with "The open map uses this mod." after it for a mod in the map. The list is a plain list
-scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
+**Vocabulary.** Nothing a player reads names a salt, a hash, a build number, "bundle", "key",
+"pointer", "surface", "legacy" or "migrate". The backend says every cause, warning and result as
+plain sentences (`mu_plain_cause`, `mu_plain`: the builder's shape and build causes are rewritten,
+a salt in a path becomes `<mod id>`); the mod's salt reaches the page only as `salt`, which the
+Files view's paths show and **Copy mod id** copies (for authors writing paths and strings by hand).
+`tests/mods_tab_test.js` and `tests/modui_test.c` check every text a player reads against that list.
 
-**Details pane.** The selected mod's name, icon and one sentence ("Installed and serving 24
-files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
-read from the installed game, and the carried paths in the Limits section's `details` primitive),
-Requirements (console settings, the commands run when the mod is active and when it is removed, and
-the note that every player needs Snapmap+; for a folder of editor tweaks only, `facts.editorOnly`,
-"Changes only this computer's editor; maps made with it need nothing." instead), Build (Last built, the Bundle number to quote when asking
-for help, and one plain line per builder warning: `warnings`, else `firstWarning`; a warning never
-makes the mod need attention) and Sharing (how many of your published maps use it). About carries, after Folder, one plain line
-about where the folder came from, from `origin`: "Added by hand" (no origin), "Moved from the old
-overrides folder" (`migration`, followed by `migratedFrom` in parentheses when the document names
-it), "Imported from an export" (`install`) and "Downloaded for a map you played" (`download`,
-`delivery`), and for a hand-made folder its first build renamed, a second line "Renamed from
-<renamedFrom>; N references rewritten". About has no Applies line: what a mod adds applies only
-in the maps that declare it, and its editor tweaks say under What it is made of where they apply.
-After What it adds, **What it is made of** shows the
-builder's derived facts (`facts`) when the backend sends them (a converted first-generation package
-is shown like any mod, with no legacy state): Adds, Borrows (game files under its own names),
-Surfaces (game files SnapMap cannot see), Editor tweaks (on this computer only: they apply in your editor whatever map is open and are never saved with a map or used at Play, with
-the paths in a `details` list), Edits ("edits N game files; maps that declare it get the game's text
-with these edits", one line per edited game file with what its edits do: fields set and removed, list
-entries added, named entries added or replaced, entries added and removed), Replaces (the files at game
-names a folder the product received keeps as they are) and Encounters (the encounter decls listed in a
-declaring map's conductor, their spawn bits assigned per map). The pane shows no build numbers and
-no list of builds: the player manages no builds (owner 2026-11-09). A failed latest build
-(`buildFailed`) is a yellow row whose cause reads "its latest build failed: <cause>; the last working
-version keeps serving until it builds". The head actions are, left to right, Files (the
-`folder-tree` icon, left-most, owner 2026-11-09), Use in this map (Remove from map; never for a
-folder of editor tweaks only, `facts.editorOnly`), Verify, Rebuild and Uninstall. Use in this map shows only while a map is open in the editor; it sends `mapAddMod`
-for the selected mod (no dry run: it deletes nothing) and, once the map lists the mod, reads Remove
-from map and opens the same confirmation as the modal's row, which closes after the action. With
-nothing selected the pane explains how mods work.
+**List pane.** The panel head is the Prefabs tab's: the title, the mod count badge, and six icon
+buttons: the attention filter (a yellow triangle, shown only when a mod needs attention; its hover
+carries the count, "1 mod needs attention: show only these"), This map, Refresh, Open mods folder,
+New mod (`folder-plus`) and install (primary). At the pane's 220 px minimum all six stay inside the
+pane and the label is clipped. The toolbar holds the filter alone; it matches name, folder,
+organizing folder and the map's name. The install dialog allows several folders, joined with
+newlines in the action's argument; a picked folder without `mod.json` stands for every mod folder
+below it, and the result says how many were installed and how many were not, with the first one's
+plain cause.
 
-**Map modal.** The map button in the list pane's head opens the decl editor's focus modal
-(`.modal.decl-focus-modal` in `#modsMapModal`; the backdrop and Escape close it, Tab stays inside,
-focus returns to the opener) with the open map's details and one row per mod the map is linked to,
-each with Remove from map. A map-level mod (`attached`) reads "Used by the whole map" instead of its
-placed-entity count, and "Declared, nothing placed" when nothing of it is placed (`nothingPlaced`);
-removing it deletes nothing. Nothing in the tab moves a map between builds: an author's own map
-follows their own rebuilt folder in the backend when it opens in the editor and at save (see
-[architecture](architecture.md#mods)), and a downloaded map keeps what it pins. A row pinning a build that is not installed while its key is installed at
-another reads "not installed on this computer; playing the map downloads it" (`otherBuild`), as a
-missing mod does: the tab never talks about builds. A map records nothing about the Snapmap+
-version that saved it (DESIGN-additive 2.7, withdrawn). When several declared
-mods edit one field or named entry of a game file to different values (`registryClashes`), **Choices
-between mods** shows one select per slot ("<path> in <game file>") with its providers, the serving one
-selected; a change sends `chooseRegistry` with
-`"<slot>\t<key>"`, and the next document shows what the backend serves. Remove from map and Uninstall first send a dry run; its answer is the
-consequence list the confirmation shows, with exactly two buttons (Cancel, and Delete or
-Uninstall). After the real action the next document redraws the modal; a map left with no mods
-reads as vanilla.
+The list has two kinds of groups, each a Prefabs folder row (caret, title, count) that closes for
+the session: **Your mods** (the root of `mods\`), holding the organizing folders of `mods\` first
+(their own caret rows, `group`) and then the mods at the top; and one group per downloaded map
+(`place`, `mods\maps\<map title>\`), titled with the map's name (`placeTitle`), holding the mods
+that map brought. A closed group with a mod that needs attention shows the triangle on its row; a
+filter, the attention filter and selecting a mod inside open it. Inside a group the rows are sorted
+by display name without case, then by folder. Each row is one status glyph, the mod's name and
+`version · size`. The glyph is a yellow triangle when the mod needs attention (`state`
+`attention`; its hover is the cause), else the map icon when the open map uses it (its `key` is an
+entry of the document's `map.mods`), else a green check (`ready`; hover "Ready to use.", or for a
+downloaded map's mod "Came with the map <name>; only that map uses it."). Arrows, Home and End move
+the selection over the rows shown.
+
+**Details pane.** The selected mod's name, glyph and one sentence: "Ready to use.", the downloaded
+map's line, or the backend's one plain sentence saying what is wrong and what to do (`cause`, for
+example "This mod could not be built: ...; fix that in its folder and press Refresh."). A mod that
+carries at least half of its files at the same bytes as another of the player's mods shows the
+informational hint "Carries N files that <name> also carries. They stay two separate mods."
+(`sameFilesAs`); nothing is merged and it is never attention. Then the sections:
+
+- **About**: Description, Version, Author, Came with (a downloaded map's name), Folder (opens it in
+  Explorer: `openFolder` with the row's `key`) and the Copy mod id link.
+- **What it adds**: its Toybox rows by name (`editorRowNames`), or "Adds no Toybox rows.".
+- **What it changes in the game** (`facts`, only for a built mod): the game files it edits, in
+  words ("Edits 2 game files; a map that uses this mod gets the game's text with these edits.", one
+  line per file: fields set and removed, list entries added, named entries added or replaced,
+  entries added and removed), the game files a received folder replaces, the encounters it lists,
+  the game sound banks it loads with this session's state, and its editor tweaks (on this computer
+  only); else "Changes nothing of the game; it only adds.".
+- **What it borrows from the game** (`borrows`): a count that opens to the game files it reads from
+  the install, named by the game file, with the note that game files are never stored or uploaded.
+- **Console settings**: the cvars it needs and the commands run when it is used and no longer used,
+  then "Every player needs Snapmap+ to play a map that uses this mod." (for a folder of editor tweaks
+  only, `facts.editorOnly`, "Changes only this computer's editor; maps made with it need nothing.").
+- **Files**: its file count and size and a link to the Files view.
+- **Warnings**: the builder's warnings in plain words (`warnings`); a warning never makes a mod
+  need attention.
+- **Sharing**: how many of the player's published maps use it (not for a downloaded map's mod).
+
+The head actions are, left to right, Files (`folder-tree`), Use in this map (Remove from map once
+the open map uses the mod; shown only while a map is open; never for a folder of editor tweaks only;
+disabled for a mod that needs attention and for a downloaded map's mod, which serves only its map),
+Rebuild (disabled for a downloaded map's mod: it is kept exactly as its map needs it) and Uninstall.
+Use in this map sends `mapAddMod` (no dry run: it deletes nothing). With nothing selected the pane
+explains how mods work.
+
+**Map modal.** The map button opens the decl editor's focus modal (`#modsMapModal`; the backdrop and
+Escape close it, Tab stays inside, focus returns to the opener) with the open map's details (name,
+published and whether its mods were uploaded with it, the search tag `mods`, how many mods and their
+size for a player to download, last save) and one row per mod the map uses: its name, `version ·
+size`, the entities placed from it and the wires and Timelines pointing at them, each with Remove
+from map. A map-level mod (`attached`) reads "Used by the whole map", or "Used by the whole map,
+nothing placed" (`nothingPlaced`). A mod the map needs that is not installed reads "not installed on
+this computer; playing the map downloads it". When several of the map's mods edit one field of a
+game file to different values (`registryClashes`), **Choices between mods** shows one select per
+slot ("<path> in <game file>") naming the mods; a change sends `chooseRegistry` with
+`"<slot>\t<salt>"`. Remove from map and Uninstall first send a dry run; its answer is the
+consequence list the confirmation shows, with exactly two buttons (Cancel, and Delete from map or
+Uninstall). A map left with no mods reads as vanilla.
 
 **Files modal (read-only).** Files opens the selected mod's folder in the standard modal at the
-expanded Decl Text editor's size (`.modal.decl-focus-modal.mods-files-modal` in `#modsFilesModal`;
-Escape and the backdrop close it, Tab stays inside, focus returns to the opener). Every render
-keeps focus inside the modal (the selected file's row when focus was in the tree, else the close
-button), and while it is open a document-level listener takes Escape and Tab from anywhere in the
-page, as the expanded Decl Text modal's Escape does. Its head is the
-mod's display name and the details pane's one-line state. On the left, a filter box and the folder
-as a tree with the Prefabs primitives: names only, folders with their file counts, a folder holding
-only one folder shown as one row (`cm/models/mapobjects/hell_terrain`, `mods/<key>/demons`; a folder
-above `mods/` keeps its own row), files before folders, the first level and the selected file's
-folders open, every folder open under a filter. A file row carries one glyph at most: the yellow
-triangle in the problem colour when a cause names it (hover: the cause; a closed folder with such a
-file shows it too), else the `gamepad-2` glyph and a muted name for the game's own bytes the mod
-carries unchanged; the mod's own files and its edits of game files have none. On the right: the
-path once, the file's class as one phrase ("New file", "Your edit of a game file", "A game file
-under this mod's own name", "A game file SnapMap cannot see on its own", "Replaces a game file", "An
-editor tweak, on this computer only", "About the mod: ..." for `mod.json`, "Not served yet" for a
-file the last working version does not hold), for a game file where it comes from ("from the game's
-campaign and multiplayer files" for `gameresources`, "from the game's SnapMap files" for
-`snap_gameresources`), and for a binary file or one read from the install its size. A text file's
-text is shown in the Decl Text editor primitive (`.code-editor`: line numbers, the decl language's
-token colours through the page's `tokens`, a read-only textarea for selection and copy); `mod.json`
-comes without its product block, which a line above it says Snapmap+ writes. A binary file and a
-pointer the folder does not hold show no editor. The cause that names the file is shown under it
-in the Entity State problem strip, without a line number. The modal opens on the requested file,
-else the first file a cause names, else `mod.json`. Its two reads (`modFiles`, `modFileText`) never
-set the page's busy state or its status line, and no fresh document follows them; a refusal (another
-action still running) is shown in the modal.
+expanded Decl Text editor's size (`#modsFilesModal`; Escape and the backdrop close it, Tab stays
+inside, focus returns to the opener; every render keeps focus inside). Its head is the mod's name
+and the details pane's sentence. On the left, a filter and the folder as a tree with the Prefabs
+primitives (a folder holding only one folder shown as one row; a folder above `mods/` keeps its own
+row; the paths here show the mod's own `mods/<salt>/` segment); a file row carries one glyph at
+most: the triangle when the cause names it, else the `gamepad-2` glyph for the game's own bytes. On
+the right: the path once, the file's class as one phrase ("New file", "Your edit of a game file", "A
+game file under this mod's own name", "A game file SnapMap cannot see on its own", "Replaces a game
+file", "An editor tweak, on this computer only", "About the mod: ..." for `mod.json`, "Not read yet"
+for a file the build does not hold), where a game file comes from, and a text file's text in the
+Decl Text editor primitive, read-only (`mod.json` without the part Snapmap+ writes). The plain cause
+naming the file is shown in the Entity State problem strip. The two reads never set the page's busy
+state or its status line.
 
-**New mod.** The list's header holds a New mod icon button whenever Migrate is hidden (the two
-never show together: the header has room for six icon buttons at its 220 px minimum), the empty
-list's card a New mod button, and the list's right-click menu (the page's `#ctxmenu`) a "New mod..."
-entry, so it stays reachable while Migrate shows. Each opens a small standard modal (`#modsNewModal`: Name, Cancel, Create; Enter
-creates, Escape cancels) that sends `newMod` with the name. Its answer selects the new mod (its
-key) and opens the Files modal on the example's Toybox row, with one quiet line above the editor:
-"Place Example crate from the Toybox in your map, change this file in the mod's folder, and save it:
-the mod follows your changes."
+**New mod.** The header's New mod button, the empty list's card and the list's right-click menu
+("New mod...") open a small modal (Name, Cancel, Create; Enter creates, Escape cancels) that sends
+`newMod`. Its answer ("Created <name> in mods\<folder>. Its Example crate is in the Toybox. After you
+change its files, press Refresh to see the change.") selects the new mod and opens the Files modal on
+the example's Toybox row, with one line above the editor: "Place Example crate from the Toybox in
+your map. To change the mod, edit this file in the mod's folder, then press Refresh in the Mods
+tab."
 
 **Uninstall goes to the Windows Recycle Bin.** Its confirmation reads "Undo history is cleared. The
-folder can be restored from the Recycle Bin by hand. Uninstalling:" (when `install.undoCleared`;
-without it, "The folder can be restored from the Recycle Bin by hand. Uninstalling:") and lists,
-after the map part and the Toybox rows, "Moves the folder mods\<folder> to the Windows Recycle Bin."
-and "N of your saved maps use it; they will not open until a mod folder provides its assets again"
-(when `install.savedMaps` is above 0), or, when another build of the key stays installed
-(`install.keptBuild`), "Another build of this mod stays installed (mods\<folder>); maps that use the
-mod open with it." The result reads "Its folder was moved to the Recycle Bin",
-or, when the bin could not take it, "Its folder was deleted because the Recycle Bin could not take it
-(<why>)". The product keeps no bin of its own: the footer has no removed-mods line and the page sends
-no `removedEmpty`; a document's `removed` object, sent by an older backend, is not read.
+folder can be restored from the Recycle Bin by hand. Uninstalling:" (with a map open; without one,
+the second sentence alone) and lists the map part, the Toybox rows it removes, "Moves the folder
+mods\<folder> to the Windows Recycle Bin." and "N of your saved maps use it; they will not open until
+a mod folder provides its files again" (`install.savedMaps` above 0), or, when another folder of the
+mod stays installed (`install.keptBuild`: the player's own, or the copy a map brought), "Another
+folder of this mod stays installed (mods\<folder>); maps that use the mod open with it."
 
 A pushed document: once the page has asked for the document, the host reads the backend's
-generation every 500 ms (the `mods` slot's FETCH size query, no main-thread call) and, when it has
-moved past the generation of the last document it posted while no job of its own runs, posts
-`{"kind": "mods", "pushed": true, "data": ...}`. That is how a console verb (`sh_mods map add`,
-`sh_mods uninstall`, `sh_mods choose`, a build or rescan; `sh_modui_note_changed`) reaches an open
-tab without a rescan. The page renders it as any document, the open map modal included, and keeps
-its status line.
+generation every 500 ms and, when it has moved past the last document's while no job of its own
+runs, posts `{"kind": "mods", "pushed": true, "data": ...}`, so a console verb (`sh_mods map add`,
+`sh_mods uninstall`, `sh_mods choose`, a build or rescan) reaches an open tab. The page renders it
+as any document and keeps its status line.
 
-In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
-result and a fresh document and changes its copy as the backend would, starting from
-`tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
-`PREVIEW_MODS` must equal it). Its Files answers come from the page's `PREVIEW_MOD_FILES`
-(`local.hell-guard`'s files as its folder holds them, 12 of its 260 cooked animations, the archives
-illustrative); another mod lists `mod.json` and its carried paths, and New mod adds the example as
-the backend writes it. `tests/modui_test.c` checks the v3 document against a temporary
-store and a fake editor, including that every key of `tests/fixtures/mods_tab_payload_v3.json` is
-one the backend writes; `tests/mods_tab_test.js` renders both fixtures (`mods_tab_payload.json` is
-the v2 document an older backend sends).
+In the browser preview, `modsTab.standIn` stands in for the host, starting from
+`tests/fixtures/mods_tab_payload_v4.json` (the page's `PREVIEW_MODS` must equal it; its Files answers
+come from `PREVIEW_MOD_FILES`). `tests/modui_test.c` checks the document against a temporary store
+and a fake editor, including that every key of that fixture is one the backend writes.
 
 ### Colour in the details pane
 
 The details pane colours a thing by its kind with the Decl Text editor's own token hues
-(`studio.css`, both themes), so a path, a key or a value reads the same here, in the Files modal and
-in the editor. Colour marks a kind, never decoration; lists stay lists. Every coloured part, or the
-line holding it, has a hover title naming its meaning, so colour is never the only carrier. One
-screen shows at most four hues: string, keyword, key and number.
+(`studio.css`, both themes). Colour marks a kind, never decoration; every coloured part, or the line
+holding it, has a hover title naming its meaning.
 
 | Thing | Class | Hue token | Meaning (hover title) |
 |---|---|---|---|
 | A path's folder | `mk-dir` | `--muted` | where the file sits |
-| A path's `mods/<key>/` segment (the mod's namespace; its file name stays in the text colour) | `mk-own` | `--tkStr` | "the mod's own file" |
-| A game path's file name (Carried paths, Edits, Replaces) | `mk-game` | `--tkBool` | "a game file this mod edits", "a game file this mod replaces" |
-| A game sound bank (Game sounds) | `mk-game` | `--tkBool` | "a game sound bank, read from your install" |
-| What an edit sets or adds (fields set, entries added or replaced) | `mk-set` | `--tkNum` | "what this mod sets or adds in the game's text" |
-| What an edit removes (fields or entries removed) | `mk-removed` | `--muted` | "what this mod removes from the game's text" |
+| A path's own `mods/<salt>/` segment (Files view) | `mk-own` | `--tkStr` | "the mod's own file" |
+| A game path's file name (Edits, Replaces, Borrows) | `mk-game` | `--tkBool` | "a game file this mod edits", "replaces", "reads from your install" |
+| A game sound bank | `mk-game` | `--tkBool` | "a game sound bank, read from your install" |
+| What an edit sets or adds | `mk-set` | `--tkNum` | "what this mod sets or adds in the game's text" |
+| What an edit removes | `mk-removed` | `--muted` | "what this mod removes from the game's text" |
 | A console setting's name | `mk-key` | `--tkKey` | "a console setting this mod needs" |
 | A console setting's value: a number, else a string | `mk-num`, `mk-str` | `--tkNum`, `--tkStr` | "the value it is set to while a map uses this mod" |
-| A Toybox row name (What it adds) | `mk-str` | `--tkStr` | "a Toybox row this mod adds" |
+| A Toybox row name, an encounter | `mk-str` | `--tkStr` | "a Toybox row this mod adds" |
 
-The editor has no pair of hues for added and removed text, and its only red (`--sqErr`, `tk-bad`) is
-the attention colour, which this pane keeps for problems. What an edit sets uses the number hue;
-what it removes stays neutral (`--muted`) and is named by its words and its title.
+### Payload v4 (`modui.c`)
 
-### Payload v3 (`modui.c`)
-
-v3 is v2 plus the fields below, with `"v": 3`. Every v2 key stays. Each new field is optional: the
-page leaves out what is absent, so a v2 document still renders.
+`{"v": 4, "gen", "root", "storeReadable", "mods": [...], "map": {...}}`. There is no `migrate`
+object and no build list: one folder is one row.
 
 Per entry of `mods`:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `"group"` | string | The organizing folder it sits in under `mods\` (its key without the last part, `campaign-interactables` for `campaign-interactables\campaign-interactables-1`), "" at the root. |
-| `"description"` | string | mod.json's description, "" when none. |
-| `"origin"` | string | The product block's origin: `install`, `download`, `migration`, `delivery`, or "" for a folder the author made. |
-| `"migratedFrom"` | string | For `migration`: the folder it was built from, as `mu_origin` writes it (`overrides\hell-guards`). |
-| `"renamedFrom"` | string | The folder name a hand-made folder had before its first build renamed it to its generated key (`sh_ms_renamed_from`); "" otherwise. |
-| `"renamedReferences"` | number | How many references to `mods/<renamedFrom>/` that rename rewrote; 0 otherwise. |
-| `"servedBy"` | string | The key of another folder whose build serves this mod's paths (superseded); "" when it serves its own. The page does not show it. |
-| `"warnings"`, `"firstWarning"` | array of strings, string | The builder's warnings (optional): the Build section shows one plain line per entry of `warnings`, else `firstWarning`. |
-| `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
-| `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
-| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files (an edited copy of a game file is not one, nor an editor tweak), sound banks, movies, snapModule decls, virtual textures. |
-| `"requirements"` | object | The builder's canonical requirements, `{commands?: {activate?: [line], deactivate?: [line]}, cvars: {name: "value"}}`; `{cvars: {}}` when none. Whether each is live is in `sh_mods status` and `sh_mods doctor`, not the payload. |
-| `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
-| `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
-| `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |
-| `"scope"` | string | Where its shadows and requirements apply: `map` (only while a map that lists it is open or played) or `always` (it carries editor tweaks); absent when the serving index does not hold it. The page reads neither it, `scopeAuto` nor `scoped`. |
-| `"scopeAuto"` | bool | `always` because it shadows editor-time content without a `scope` key in its mod.json. |
-| `"scoped"` | bool | `map` and it has shadows or requirements, so the open map decides whether they apply. |
-| `"facts"` | object | The builder's derived facts: `{adds, borrows, surfaces, editor, replaces, editorOnly, "editorTweaks": [request], "replacements": [{path, edits}], "edits": [{file, ops, set, remove, list, keyed, bag, drop}], "registries": {...}}`. `editorOnly` is `sh_mb_editor_only`, the rule `mapAddMod` refuses by (every file editor-time, no requirements): the page then shows no Use in this map or Remove from map. `replaces` counts only what a folder the product received replaces (`classes.replaces`); edited copies are `classes.edits`. `edits` on a replacement says it is an edited copy whose edits the product applies, and the page lists it under Edits, never under Replaces; the `edits` list is the product block's derived edits per game file with its operation counts; `registries` is the product block's object (`conductor` encounters, `strings`, `banks`). |
-| `"newest"` | bool | The newest installed build of its key (build number, then install time). |
-| `"builds"` | array | Sent when the key is installed at several hashes: one `{folder, bundle, build, version, builtAt, newest, failed}` per build. |
-| `"buildFailed"` | object | `{cause, snapshot, servingBuild}` when the folder's latest build was refused: the last good build serves, from its snapshot when `snapshot`. |
+| `"key"` | string | The folder's path under `mods\` (`campaign-interactables\doors`, `maps\Hell Guard Arena\Hell Guards`): what every action names. |
+| `"salt"` | string | The mod's identity (its `snapmap-plus.salt`); "" before its first build. The page uses it only for the Files view's paths and Copy mod id. |
+| `"name"`, `"author"`, `"version"`, `"description"` | string | The author's part of `mod.json` (a folder that is not built is named by its `mod.json` when that parses). |
+| `"size"`, `"files"` | number | The carried bytes and files (game files read from the install not counted). |
+| `"state"` | string | `ready` or `attention`. |
+| `"cause"` | string | For `attention`: one plain sentence saying what is wrong and what to do. |
+| `"editorRows"`, `"editorRowNames"` | number, string[] | The Toybox rows it adds and their display names (strings resolved, else the decl name without the mod's namespace). |
+| `"folder"`, `"group"` | string | The folder's own name, and the organizing folder it sits in at the root ("" at the top and for a map's mods). |
+| `"place"`, `"placeTitle"` | string | For a mod a downloaded map brought: its place `maps\<segment>` and the map's name; "" for the player's own. |
+| `"requirements"` | object | The builder's canonical `{commands?: {activate?, deactivate?}, cvars: {name: "value"}}`. |
+| `"facts"` | object | For a built mod: `{adds, borrows, surfaces, editor, replaces, editorOnly, editorTweaks, replacements: [{path, edits}], edits: [{file, ops, set, remove, list, keyed, bag, drop}], registries, stockBanks?}`. |
+| `"borrows"` | object | For a built mod: `{paths: [the game file each borrowed file reads], count}`. |
+| `"warnings"` | string[] | The builder's warnings, in plain words. |
+| `"publishedMaps"` | number | How many of the player's published maps record its build; absent when unknown. |
+| `"sameFilesAs"` | object | `{name, folder, count}` when another of the player's mods carries at least half of its files at equal bytes; absent otherwise. |
 
-`files` stays every file including stock pointers, and `pointers` the stock pointers. The page
-derives the carried count as files minus pointers: the head sentence counts carried files only, with
-the pointers as a second clause ("Installed and serving 24 files, 476 more read from your install"),
-and `size` is the carried bytes.
-
-`map` keeps its v2 keys (`entities` is -1 when no map is open, `names`, `rows`, `placed`) and adds:
-
-| Key | Type | Meaning |
-|---|---|---|
-| `name`, `id` | string | The map's name (its last local save's `game.details`, "" before the first save) and saved-map id (the editor's local id; the page shows 16 characters). |
-| `saved` | number | Unix seconds of the last local save (`game.details` `modified`); 0 when unknown. |
-| `published` | object | `{state: "published", at}` when the record's `links` section holds an item published from this map (written by a publish with mods from this installation, dropped at its unpublish); `at` is the link's time. Absent otherwise: the product cannot tell an unpublished map from one published without mods or elsewhere, so it never sends `unpublished`. |
-| `uploaded` | object | `{claimed, at}`, sent with `published`: whether the record's `claims` section holds that item's claim, and its time. |
-| `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
-| `mods` | array | One per manifest row of the map's record (its `snapmap-plus` member's `mods`), and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `incomplete` (a folder of its id is installed but lacks a name the map's row lists), `skipped` or `missing`, judged by the asset rule ([architecture](architecture.md#mods)), so a row pinning another build of an installed id is `installed`; `rows[].state` is `active`, `superseded`, `"incomplete"`, `skipped` or `missing` the same way, with the refusal sentence in `cause`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. `"attached"` says its row is map-level (Use in this map, `sh_mods map add`): the map uses the mod without placing it. `"scope"` and `"active"` say where it applies and whether its shadows serve now. |
-| `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
-| `"registryClashes"` | array | One `{slot, "providers": [{id, name}], chosen, serving}` per slot `<game file>/<path>` (`entitydef/player/coop/edit/handsModelMPUseDoomHands`) two or more declared mods' edits set to different values, in row order; `chosen` is the map's choice ("" none), `serving` the key that serves. |
-
-Each entry of `mods` may also carry `"nothingPlaced"` (a
-map-level row with nothing placed) and `"bundle"` (the hash the map uses), and `state` may be
-`otherBuild` (the row's build is not installed; its key is, at another hash).
-
-The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
-
-The document carries no `removed` object: the recycle bin is retired (an older backend sent one; the
-page ignores it).
+`map` keeps `entities` (-1 when no map is open), `names`, `rows` (`{salt, name, version, build, size,
+state, cause, key, nameCount, names, attached}`: `state` active, incomplete, skipped or missing,
+`cause` the plain refusal) and `placed` (`{salt, version, build, size, key, viaNeeds, inManifest,
+nameCount, names}`), and while a map is open in the editor adds `name`, `saved`, `published`
+(`{state, at}`), `uploaded` (`{claimed, at}`), `tagged`, `mods` (one `{key, salt, name, version,
+state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds,
+"attached", nothingPlaced, build}` per mod the map uses), `"vanilla"` and `registryClashes`
+(`{slot, providers: [{id: salt, name}], chosen, serving}`).
 
 ### Actions
 
-`arg` is a mod's `key` (for a map row that is not installed, its `id`). Each is answered with
-`modsActionResult {action, ok, message, data}` and then a fresh `mods` document whose `map` is read
-again.
+`arg` is a mod's `key` (for a map row that is not installed, its salt). Each is answered with
+`modsActionResult {action, ok, message, data}` and then a fresh `mods` document.
 
 | Action | Meaning |
 |---|---|
-| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may carry `arg`, a mod folder's path under `mods\` that the host opens instead of the mods folder: About's Folder link sends the row's `group`, a `\`, then its `folder` (only `folder` at the root), each part a plain folder name with no drive and no `.` or `..`. |
-| `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
-| `verify` | Rehash that one folder's build (`""` still checks every build). |
-| `mapAddMod` | Attach the mod to the open map without placing anything: the map's manifest record gets a map-level row for the build that serves (marked `attached`), its decls are registered and its shadows, registries (the generated player entity, weapon slots, body events, conductor) and requirements apply at once, as a map load applies them, and the next save writes the row, so publishing uploads it, a player who opens the map is offered it, and the `mods` tag follows. Refused with no map open, a mod that is not installed or not in use, Play running or a map loading. |
-| `chooseRegistry` | `arg` is `"<slot>\t<key>"` (an empty key clears): the open map's choice of whose edit serves that slot of a game file, applied at once and saved with the map's next save (`sh_mods choose`). `registryClashes` resolves a row that pins a build that is not installed to the build that serves it, so its clash is listed. |
-| `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
-| `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
-| `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
-| `uninstall` | `mapRemoveMod` on the open map when it uses the mod (a refused delete stops it with nothing deleted), the open map's undo and redo history cleared to the current state (after the delete's own commit), then the folder moved to the Windows Recycle Bin (deleted outright, and the message says so, when the bin cannot take it), whatever its origin, and its aliases dropped, then the rescan. Closed maps are not edited; one that uses the mod refuses to open until a mod folder provides its assets again. Refused while a map is open on a build whose undo clear is unavailable. Replaces `remove`. |
-| `removedEmpty` | Retired with the product's own bin; the page no longer sends it and the backend answers "Uninstalled mods go to the Windows Recycle Bin." as a refusal. |
-| `modFiles` | Read only, no fresh document follows. `data` is `{key, name, cause, files, truncated}`: `cause` is the mod's standing cause (its latest build's refusal while the last good build serves, else why it serves nothing); `files` holds one `{path, size, kind, class, game, container, inFolder, cause}` per file under the folder (walked on disk; dot folders skipped; at most 8192, then `truncated`) and per stock pointer its last good build reads from the install (`inFolder` false). `kind` is `text` (`.decl`, `.json`, `.txt`, `.md`, `.cfg`, `.entities`) or `binary`; `class` is `descriptor` (`mod.json`), `add`, `borrow`, `edit` (an edited copy of a game file), `replace`, `editor`, `surface`, or "" for a file the last good build does not hold; `game` says the file is the game's own bytes (a pointer), `container` the archive the install bridge matched (`snap_gameresources`, `gameresources`, `loose`, "" unknown); `cause` is the standing cause when it names that file. |
-| `modFileText` | Read only, no fresh document follows. `arg` is `"<key>\t<path below the folder>"`. `data` is `{key, path, size, text, productBlock, cause}`: the file's UTF-8 text (a byte order mark dropped), `mod.json` without its product block (`productBlock` true). Refused: a path outside the folder (a drive, a leading separator, an empty, `.` or `..` part), a binary kind, a file the folder does not hold, one above 1 MiB, one that is not UTF-8 text. |
-| `newMod` | `arg` is a display name. Makes `mods\<generated key>\` with `mod.json` (name, version 0.1.0, the example's strings, the product block's key) and the example: `assets/generated/decls/entitydef/mods/<key>/example_crate.decl` (the game's SnapMap `crate01`) and its Toybox row at `assets/generated/decls/snapeditorentitydef/mods/<key>/example_crate.decl`, then rescans, so the folder builds at once under its key and the Toybox gets "Example crate". `data` adds `key` and `file` (the row's path). Refused while Play runs or a map loads, and for an empty name. |
+| `rescan` | Refresh: the scan (new folders get their salt, copies a salt of their own, changed folders are built), the serving index, and what changed brought into the running game. |
+| `install` | Install one or more folders (the native picker). |
+| `openFolder` | The host's own: opens the mods folder, or with `arg` that folder under it. |
+| `rebuild` | Build one of the player's own folders again (as `sh_mods build`; a refused build is written into its block and the folder serves nothing until fixed), then rescan. A downloaded map's mod is refused. |
+| `mapAddMod` | Attach the mod to the open map without placing anything (a map-level row for its build); the next save writes it. A downloaded map's mod is refused. |
+| `chooseRegistry` | `"<slot>\t<salt>"` (an empty salt clears): the open map's choice of whose edit serves that slot. |
+| `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |
+| `uninstallPreview`, `uninstall` | The dry run and the uninstall: the open map cleaned of the mod, its undo history cleared, the folder moved to the Recycle Bin, the rescan. |
+| `modFiles`, `modFileText` | The Files view's reads (no fresh document follows). |
+| `newMod` | `arg` is a display name: `mods\<name>\` with `mod.json`, a new salt and a working example (an entityDef and its Toybox row), built at once; `data` is `{key, file}`. |
 
-`data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
-`uninstallPreview` only. `map` is null when the open map does not use
-the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
-manifestRow, tagRemoved, vanillaAfter, published, attached?}` (`attached` true for a map-level row); `install` is null for `mapRemoveMod`, else
-`{folder, disposition, "savedMaps", "undoCleared"}`: `disposition` is `recycle`; `savedMaps` counts the
-local saves in My Maps whose `map.decl` carries a row of the mod (-1 when the saves could not be read);
-`undoCleared` is true when a map is open, whose undo history the uninstall clears. An older backend
-sent `move` with `movedTo`, and then `delete`; the page reads any of them as `recycle`. A refused dry run is `ok: false` with the
-reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
-a map is loading, the mod is placed as Blueprint modules (removed in Blueprint mode), or only another
-mod the map uses needs it. The real actions refuse the same way, and also when the editor refuses
-the delete (it is not in Object mode, an entity or wire is held, or another object refers to an
-entity, where the editor would ask first); nothing changes then.
+The retired actions (`migrate`, `verify` from the tab, `remove`, `pruneList`, `pruneApply`,
+`removedEmpty`) are not sent by the page; the backend answers a refusal.
 
-The backend runs `mapRemoveMod` as: the placed entities in one `sh_editor_delete_batch` (DOOM's own
-Delete Selection, one undo step "Delete Selection"; the editor drops the wires to them with the
-entities), the mod's row dropped from the map's manifest record (the
-next save rebuilds the rows from the placed entities, so it writes none for the mod), and with the
-last mod the search tag removed from the editor's copy of the map's tags. `uninstall` runs that on
-the open map first, then clears the undo history (`editor_undo.c`, see
-[architecture](architecture.md#the-mods-tabs-map-scope)), moves the folder to the Recycle Bin (as `remove`) and rescans; the rescan's refresh rebuilds
-the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
-still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
-[--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions;
-`sh_mods map add "<id>"` runs `mapAddMod` and
-`sh_mods choose "<slot>" "<key>"` runs `chooseRegistry`.
+`data.preview` is `{action, key, name, map, install}`, plus `editorRows` for `uninstallPreview`.
+`map` is null when the open map does not use the mod, else `{name, entities, entityCount,
+references: [{kind, name}], manifestRow, tagRemoved, vanillaAfter, published, attached?}`; `install`
+is null for `mapRemoveMod`, else `{folder, disposition: "recycle", "savedMaps", "undoCleared",
+keptBuild?}`. A refused dry run is `ok: false` with the plain reason in `message`.
 
 | Console verb | Tab equivalent |
 |---|---|
 | `sh_mods map` | the map modal |
-| `sh_mods map add "<id>"` | Use in this map (`mapAddMod`) |
-| `sh_mods map remove "<id>" [--yes]` | Remove from map (`mapRemoveModPreview`, `mapRemoveMod`) |
-| `sh_mods uninstall "<id>" [--yes]` | Uninstall (`uninstallPreview`, `uninstall`) |
-| `sh_mods choose "<slot>" "<key>"` | Choices between mods (`chooseRegistry`) |
+| `sh_mods map add "<mod folder>"` | Use in this map (`mapAddMod`) |
+| `sh_mods map remove "<mod folder>" [--yes]` | Remove from map |
+| `sh_mods uninstall "<mod folder>" [--yes]` | Uninstall (every folder of the mod: the player's own and the copies maps brought) |
+| `sh_mods choose "<slot>" "<mod folder>"` | Choices between mods (`chooseRegistry`) |
 | `sh_mods rebuild "<folder>"` | Rebuild (`rebuild`) |
-| `sh_mods verify "<folder>"` | Verify (`verify`) |
 | `sh_mods install "<folder>"` | the install button (`install`) |
-| `sh_mods rescan` | the refresh button (`rescan`) |
-| `sh_mods new "<name>"` | New mod makes the same folder, with its example (`newMod`) |
-| `sh_mods doctor [verify]` | none (every bundle's state; one line per build of a key; per path the layer that serves it; the registries and their clashes) |
-| `sh_mods held [filter]` | none (what the game was served and holds this session) |
-| `sh_mods status`, `list`, `build`, `copystock`, `palette rebuild` | none |
-| `sh_mods push`, `pull`, `release`, `retry`, `export`, `import`, `cancel` | none (the mod store) |
+| `sh_mods rescan` | Refresh (`rescan`) |
+| `sh_mods new "<name>"` | New mod (`newMod`) |
+| `sh_mods verify "<folder>"`, `sh_mods doctor [verify]` | none (every folder's state, conflicts, replaced game files, a check of every file) |
 
 ## Timeline events
 
