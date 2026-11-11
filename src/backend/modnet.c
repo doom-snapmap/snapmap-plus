@@ -24,7 +24,6 @@
 #define MN_CHUNK        (256u * 1024u)
 #define MN_ERROR_BODY   (64u * 1024u)
 #define MN_SMALL_BODY   (64u * 1024u)
-#define MN_MISSING_BODY (512u * 1024u)
 #define MN_RESOLVE_MS   15000
 #define MN_CONNECT_MS   15000
 #define MN_SEND_MS      30000
@@ -316,10 +315,14 @@ typedef struct mn_req {
     const wchar_t *verb;
     const char *route;             /* "/mods/..." */
     const char *content_type;      /* NULL: no body */
-    const unsigned char *body;
+    const unsigned char *body;     /* the body in memory, or ... */
+    HANDLE body_file;              /* ... read from this file (body_len bytes from its start) */
     size_t body_len;
     unsigned long long max_response;
     unsigned long long expect_total;   /* download progress total when no Content-Length */
+    HANDLE sink;                   /* a 2xx body is written here, not returned */
+    int head;                      /* HEAD: no body is read */
+    unsigned long long *length;    /* the response's declared Content-Length, when it has one */
 } mn_req;
 
 static int mn_cancelled(const modnet_io *io)
@@ -386,10 +389,33 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
     }
     if (q->content_type && q->body_len) {
         size_t off = 0;
+        unsigned char *chunkbuf = NULL;
+        if (q->body_file) {
+            LARGE_INTEGER zero;
+            zero.QuadPart = 0;
+            chunkbuf = (unsigned char *)malloc(MN_CHUNK);
+            if (!chunkbuf) { code = mn_fail(r, MODNET_E_NOMEM, NULL); goto done; }
+            if (!SetFilePointerEx(q->body_file, zero, NULL, FILE_BEGIN)) {
+                free(chunkbuf);
+                code = mn_fail(r, MODNET_E_ARG, "the archive file cannot be read (error %lu)", GetLastError());
+                goto done;
+            }
+        }
         while (off < q->body_len) {
             DWORD chunk = (DWORD)((q->body_len - off) > MN_CHUNK ? MN_CHUNK : (q->body_len - off)), wrote = 0;
-            if (mn_cancelled(io)) { code = mn_fail(r, MODNET_E_CANCELLED, NULL); goto done; }
-            if (!WinHttpWriteData(req, q->body + off, chunk, &wrote) || wrote == 0) {
+            const unsigned char *from = q->body + off;
+            if (mn_cancelled(io)) { free(chunkbuf); code = mn_fail(r, MODNET_E_CANCELLED, NULL); goto done; }
+            if (chunkbuf) {
+                DWORD rd = 0;
+                if (!ReadFile(q->body_file, chunkbuf, chunk, &rd, NULL) || rd != chunk) {
+                    free(chunkbuf);
+                    code = mn_fail(r, MODNET_E_ARG, "the archive file changed while it was sent");
+                    goto done;
+                }
+                from = chunkbuf;
+            }
+            if (!WinHttpWriteData(req, from, chunk, &wrote) || wrote != chunk) {
+                free(chunkbuf);
                 code = mn_winhttp_error(r, "upload");
                 goto done;
             }
@@ -397,6 +423,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             r->sent += wrote;
             if (io && io->progress) io->progress(io->context, off, q->body_len);
         }
+        free(chunkbuf);
     }
     if (!WinHttpReceiveResponse(req, NULL)) { code = mn_winhttp_error(r, "response"); goto done; }
     size = sizeof status;
@@ -416,13 +443,24 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             have_declared = end && end != cl && *end == 0;
         }
     }
+    if (q->length && have_declared) *q->length = declared;
+    if (q->head) {
+        /* A HEAD answer has no body, whatever its Content-Length says. */
+        buf = (unsigned char *)malloc(1);
+        if (!buf) { code = mn_fail(r, MODNET_E_NOMEM, NULL); goto done; }
+        buf[0] = 0;
+        *resp = buf;
+        buf = NULL;
+        goto done;
+    }
     /* Refusals carry a short JSON error; nothing more is read from them. */
     cap_bytes = status >= 300 ? MN_ERROR_BODY : q->max_response;
     if (status < 300 && have_declared && declared > cap_bytes) {
         code = mn_fail(r, MODNET_E_TOO_LARGE, "the response is larger than %llu bytes", cap_bytes);
         goto done;
     }
-    cap = (size_t)(have_declared && declared < cap_bytes ? declared : (cap_bytes < 65536 ? cap_bytes : 65536)) + 1;
+    if (q->sink && status < 300) cap = MN_CHUNK + 1;   /* one chunk at a time, written out */
+    else cap = (size_t)(have_declared && declared < cap_bytes ? declared : (cap_bytes < 65536 ? cap_bytes : 65536)) + 1;
     buf = (unsigned char *)malloc(cap);
     if (!buf) { code = mn_fail(r, MODNET_E_NOMEM, NULL); goto done; }
     for (;;) {
@@ -434,6 +472,25 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
             if (status >= 300) break;   /* enough of a refusal to read its cause */
             code = mn_fail(r, MODNET_E_TOO_LARGE, "the response is larger than %llu bytes", cap_bytes);
             goto done;
+        }
+        if (q->sink && status < 300) {
+            /* Streamed to the file, one chunk at a time. */
+            DWORD left = avail;
+            while (left) {
+                DWORD want = left > MN_CHUNK ? MN_CHUNK : left, put = 0;
+                if (!WinHttpReadData(req, buf, want, &rd)) { code = mn_winhttp_error(r, "download"); goto done; }
+                if (rd == 0) break;
+                if (!WriteFile(q->sink, buf, rd, &put, NULL) || put != rd) {
+                    code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+                    goto done;
+                }
+                got += rd;
+                r->received += rd;
+                left -= rd < left ? rd : left;
+                if (io && io->progress) io->progress(io->context, got, have_declared ? declared : q->expect_total);
+            }
+            if (left) break;
+            continue;
         }
         if (got + avail + 1 > cap) {
             size_t want = cap * 2;
@@ -458,6 +515,7 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         code = mn_fail(r, MODNET_E_PROTOCOL, "the response ended early (%zu of %llu bytes)", got, declared);
         goto done;
     }
+    if (q->sink && status < 300) got = 0;   /* the body went to the file */
     buf[got] = 0;
     *resp = buf;
     *resp_len = got;
@@ -593,327 +651,124 @@ static int mn_set_add(mn_hashset *s, const char *h)
     return 1;
 }
 
-int modnet_missing(const char *const *hashes, int n, char (**missing)[MODNET_HASH_HEX + 1], int *missing_count,
-                   const modnet_io *io, modnet_result *r)
+int modnet_head_build(const char *hash, unsigned long long *size, const modnet_io *io, modnet_result *r)
 {
     modnet_result local;
-    mn_hashset all = {0}, out = {0};
-    double t0;
-    int i, start, code = MODNET_OK;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (missing) *missing = NULL;
-    if (missing_count) *missing_count = 0;
-    if (!missing || !missing_count || n < 0 || (n && !hashes)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    for (i = 0; i < n; i++) {
-        if (!modnet_valid_hash(hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad blob hash")); }
-        if (!mn_set_has(&all, hashes[i]) && !mn_set_add(&all, hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    }
-    for (start = 0; start < all.n && code == MODNET_OK; start += MODNET_MAX_QUERY) {
-        int end = start + MODNET_MAX_QUERY < all.n ? start + MODNET_MAX_QUERY : all.n;
-        mn_buf body = {0};
-        mn_req q;
-        unsigned char *resp = NULL;
-        size_t rlen = 0;
-        mn_puts(&body, "{\"blobs\":[");
-        for (i = start; i < end; i++) {
-            if (i > start) mn_puts(&body, ",");
-            mn_puts(&body, "\"");
-            mn_put(&body, all.v[i], MODNET_HASH_HEX);
-            mn_puts(&body, "\"");
-        }
-        mn_puts(&body, "]}");
-        if (body.bad) { free(body.p); code = mn_fail(r, MODNET_E_NOMEM, NULL); break; }
-        memset(&q, 0, sizeof q);
-        q.verb = L"POST";
-        q.route = "/mods/missing";
-        q.content_type = "application/json";
-        q.body = (const unsigned char *)body.p;
-        q.body_len = body.n;
-        q.max_response = MN_MISSING_BODY;
-        code = mn_exchange(&q, &resp, &rlen, io, r);
-        free(body.p);
-        if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "missing");
-        else if (code == MODNET_OK) {
-            mpj *root = mpj_parse((const char *)resp, rlen);
-            const mpj *arr = root && root->type == MPJ_OBJ ? mpj_get(root, "missing") : NULL;
-            if (!arr || arr->type != MPJ_ARR) code = mn_fail(r, MODNET_E_PROTOCOL, "missing: no list in the answer");
-            for (i = 0; code == MODNET_OK && i < arr->n; i++) {
-                const mpj *h = arr->items[i];
-                /* Only hashes this request asked about may come back. */
-                if (h->type != MPJ_STR || !modnet_valid_hash(h->text)) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: bad hash in the answer"); break; }
-                {
-                    int k, asked = 0;
-                    for (k = start; k < end && !asked; k++) asked = memcmp(all.v[k], h->text, MODNET_HASH_HEX) == 0;
-                    if (!asked) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: the answer names a hash not asked about"); break; }
-                }
-                if (!mn_set_has(&out, h->text) && !mn_set_add(&out, h->text)) code = mn_fail(r, MODNET_E_NOMEM, NULL);
-            }
-            mpj_free(root);
-        }
-        free(resp);
-    }
-    free(all.v);
-    if (code != MODNET_OK) { free(out.v); return mn_end(r, t0, code); }
-    *missing = out.v;
-    *missing_count = out.n;
-    return mn_end(r, t0, MODNET_OK);
-}
-
-int modnet_missing_bundle(const char *bundle, const char *canonical, size_t len, const char *const *hashes, int n,
-                          char (**missing)[MODNET_HASH_HEX + 1], int *missing_count, int *checked,
-                          const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    mn_hashset all = {0}, out = {0};
-    mn_buf body = {0};
-    mn_req q;
+    char route[96];
     unsigned char *resp = NULL;
-    size_t rlen = 0;
-    double t0;
-    int i, code = MODNET_OK;
-    char actual[SH_MB_HASH_HEX + 1];
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (missing) *missing = NULL;
-    if (missing_count) *missing_count = 0;
-    if (checked) *checked = 0;
-    if (!missing || !missing_count || !modnet_valid_hash(bundle) || !canonical || n < 0 || (n && !hashes))
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    if (len > MODNET_MAX_BUNDLE || memchr(canonical, 0, len))
-        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "the manifest of %.16s is over 1 MiB", bundle));
-    sh_mb_sha256_hex(canonical, len, actual);
-    if (strcmp(actual, bundle) != 0)
-        return mn_end(r, t0, mn_fail(r, MODNET_E_HASH, "bundle %.16s: the manifest does not hash to its name", bundle));
-    for (i = 0; i < n; i++) {
-        if (!modnet_valid_hash(hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad blob hash")); }
-        if (!mn_set_has(&all, hashes[i]) && !mn_set_add(&all, hashes[i])) { free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    }
-    if (all.n > MODNET_MAX_QUERY) {
-        free(all.v);
-        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "bundle %.16s carries more than %d files", bundle, MODNET_MAX_QUERY));
-    }
-    /* {"blobs":[...],"bundle":"<hash>","manifest":"<canonical text>"}: the
-     * store checks the manifest as its bundle PUT would and answers that
-     * PUT's refusal here, before any blob is sent. */
-    mn_puts(&body, "{\"blobs\":[");
-    for (i = 0; i < all.n; i++) {
-        if (i) mn_puts(&body, ",");
-        mn_puts(&body, "\"");
-        mn_put(&body, all.v[i], MODNET_HASH_HEX);
-        mn_puts(&body, "\"");
-    }
-    mn_puts(&body, "],\"bundle\":\"");
-    mn_puts(&body, bundle);
-    mn_puts(&body, "\",\"manifest\":");
-    {
-        /* The manifest is NUL-free (checked above); copy it to terminate it. */
-        char *text = (char *)malloc(len + 1);
-        if (!text) body.bad = 1;
-        else {
-            memcpy(text, canonical, len);
-            text[len] = 0;
-            mn_put_json_string(&body, text);
-            free(text);
-        }
-    }
-    mn_puts(&body, "}");
-    if (body.bad) { free(body.p); free(all.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
-    memset(&q, 0, sizeof q);
-    q.verb = L"POST";
-    q.route = "/mods/missing";
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)body.p;
-    q.body_len = body.n;
-    q.max_response = MN_MISSING_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    free(body.p);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "bundle");
-    else if (code == MODNET_OK) {
-        mpj *root = mpj_parse((const char *)resp, rlen);
-        const mpj *arr = root && root->type == MPJ_OBJ ? mpj_get(root, "missing") : NULL;
-        const mpj *echo = root && root->type == MPJ_OBJ ? mpj_get(root, "bundle") : NULL;
-        if (!arr || arr->type != MPJ_ARR) code = mn_fail(r, MODNET_E_PROTOCOL, "missing: no list in the answer");
-        for (i = 0; code == MODNET_OK && i < arr->n; i++) {
-            const mpj *h = arr->items[i];
-            int k, asked = 0;
-            if (h->type != MPJ_STR || !modnet_valid_hash(h->text)) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: bad hash in the answer"); break; }
-            for (k = 0; k < all.n && !asked; k++) asked = memcmp(all.v[k], h->text, MODNET_HASH_HEX) == 0;
-            if (!asked) { code = mn_fail(r, MODNET_E_PROTOCOL, "missing: the answer names a hash not asked about"); break; }
-            if (!mn_set_has(&out, h->text) && !mn_set_add(&out, h->text)) code = mn_fail(r, MODNET_E_NOMEM, NULL);
-        }
-        /* A store that checked the manifest names it back; an older one
-         * answers the blob list alone and checks at the bundle PUT. */
-        if (code == MODNET_OK && checked) *checked = echo && echo->type == MPJ_STR && !strcmp(echo->text, bundle);
-        mpj_free(root);
-    }
-    free(resp);
-    free(all.v);
-    if (code != MODNET_OK) { free(out.v); return mn_end(r, t0, code); }
-    *missing = out.v;
-    *missing_count = out.n;
-    return mn_end(r, t0, MODNET_OK);
-}
-
-int modnet_put_blob(const char *sha, const void *bytes, size_t len, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char route[96], actual[SH_MB_HASH_HEX + 1];
-    unsigned char *resp = NULL;
+    unsigned long long length = 0;
     size_t rlen = 0;
     mn_req q;
     double t0;
     int code;
     if (!r) r = &local;
     mn_begin(r, &t0);
-    if (!modnet_valid_hash(sha) || (len && !bytes)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    if (len > MODNET_MAX_BLOB) return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "blob %.16s is over 64 MiB", sha));
-    sh_mb_sha256_hex(bytes ? bytes : "", len, actual);
-    if (strcmp(actual, sha) != 0) return mn_end(r, t0, mn_fail(r, MODNET_E_HASH, "blob %.16s: the bytes do not hash to its name", sha));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s", sha);
+    if (size) *size = 0;
+    if (!modnet_valid_hash(hash)) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
+    memset(&q, 0, sizeof q);
+    q.verb = L"HEAD";
+    q.route = route;
+    q.head = 1;
+    q.length = &length;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, NULL, 0, "build");
+    else if (code == MODNET_OK && size) *size = length;
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
+int modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
+                     modnet_result *r)
+{
+    modnet_result local;
+    char route[96];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    wchar_t *wpath;
+    HANDLE h;
+    LARGE_INTEGER actual;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(hash) || !path || !path[0] || !size) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    if (size > MODNET_MAX_ARCHIVE)
+        return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "the build archive is %llu MB; the limit is %llu MB",
+                                     (size + 1024 * 1024 - 1) / (1024 * 1024), MODNET_MAX_ARCHIVE / (1024 * 1024)));
+    wpath = sh_mb_wpath(path);
+    if (!wpath) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
+    h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wpath);
+    if (h == INVALID_HANDLE_VALUE)
+        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the build archive cannot be opened (error %lu)", GetLastError()));
+    if (!GetFileSizeEx(h, &actual) || (unsigned long long)actual.QuadPart != size) {
+        CloseHandle(h);
+        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "the build archive is not the size given"));
+    }
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
     memset(&q, 0, sizeof q);
     q.verb = L"PUT";
     q.route = route;
-    q.content_type = "application/octet-stream";
-    q.body = (const unsigned char *)bytes;
-    q.body_len = len;
+    q.content_type = MODNET_ARCHIVE_TYPE;
+    q.body_file = h;
+    q.body_len = (size_t)size;
     q.max_response = MN_SMALL_BODY;
     code = mn_exchange(&q, &resp, &rlen, io, r);
+    CloseHandle(h);
     if (code == MODNET_OK) {
         if (r->status == 201) r->created = 1;
-        else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "blob");
+        else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "build");
     }
     free(resp);
     return mn_end(r, t0, code);
 }
 
-int modnet_get_blob(const char *sha, unsigned long long expected_size, unsigned char **bytes, size_t *len,
-                    const modnet_io *io, modnet_result *r)
+int modnet_get_build(const char *hash, const char *out_path, const modnet_io *io, modnet_result *r)
 {
     modnet_result local;
-    char route[96], actual[SH_MB_HASH_HEX + 1];
+    char route[96];
     unsigned char *resp = NULL;
     size_t rlen = 0;
+    wchar_t *wpath;
+    HANDLE h;
     mn_req q;
     double t0;
     int code;
     if (!r) r = &local;
     mn_begin(r, &t0);
-    if (bytes) *bytes = NULL;
-    if (len) *len = 0;
-    if (!modnet_valid_hash(sha) || !bytes || !len || expected_size > MODNET_MAX_BLOB)
-        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/blob/%s", sha);
+    if (!modnet_valid_hash(hash) || !out_path || !out_path[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    wpath = sh_mb_wpath(out_path);
+    if (!wpath) return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL));
+    SetFileAttributesW(wpath, FILE_ATTRIBUTE_NORMAL);
+    h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                    NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+        free(wpath);
+        return mn_end(r, t0, code);
+    }
+    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/build/%s", hash);
     memset(&q, 0, sizeof q);
     q.verb = L"GET";
     q.route = route;
-    q.max_response = expected_size ? expected_size : MODNET_MAX_BLOB;
-    q.expect_total = expected_size;
+    q.max_response = MODNET_MAX_ARCHIVE;
+    q.sink = h;
     code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "blob");
-    else if (code == MODNET_OK) {
-        if (expected_size && rlen != expected_size)
-            code = mn_fail(r, MODNET_E_HASH, "blob %.16s: %zu bytes arrived, %llu expected", sha, rlen, expected_size);
-        else {
-            sh_mb_sha256_hex(resp, rlen, actual);
-            if (strcmp(actual, sha) != 0) code = mn_fail(r, MODNET_E_HASH, "blob %.16s: the bytes do not hash to its name", sha);
-        }
-        if (code == MODNET_OK) { *bytes = resp; *len = rlen; resp = NULL; }
-    }
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "build");
+    else if (code == MODNET_OK && r->received == 0)
+        code = mn_fail(r, MODNET_E_PROTOCOL, "build %.16s: the store sent nothing", hash);
+    if (code == MODNET_OK && !FlushFileBuffers(h))
+        code = mn_fail(r, MODNET_E_ARG, "the download cannot be written (error %lu)", GetLastError());
+    CloseHandle(h);
+    if (code != MODNET_OK) DeleteFileW(wpath);
+    free(wpath);
     free(resp);
     return mn_end(r, t0, code);
 }
 
-int modnet_put_bundle(const char *hash, const char *canonical, size_t len, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char route[96], actual[SH_MB_HASH_HEX + 1];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (!modnet_valid_hash(hash) || !canonical || !len) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    if (len > MODNET_MAX_BUNDLE) return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "bundle manifest over 1 MiB"));
-    sh_mb_sha256_hex(canonical, len, actual);
-    if (strcmp(actual, hash) != 0) return mn_end(r, t0, mn_fail(r, MODNET_E_HASH, "bundle %.16s: the manifest text does not hash to its name", hash));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/bundle/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"PUT";
-    q.route = route;
-    q.content_type = "application/json";
-    q.body = (const unsigned char *)canonical;
-    q.body_len = len;
-    q.max_response = MN_SMALL_BODY;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK) {
-        if (r->status == 201) r->created = 1;
-        else if (r->status != 200) code = mn_status_fail(r, resp, rlen, "bundle");
-    }
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-/* Remove `"bundle":"<hash>"` and one adjacent comma from text (in place). */
-static int mn_strip_bundle_member(char *text, size_t *len, const char *hash)
-{
-    char needle[96];
-    char *at;
-    size_t nl, start, end;
-    _snprintf_s(needle, sizeof needle, _TRUNCATE, "\"bundle\":\"%s\"", hash);
-    nl = strlen(needle);
-    at = strstr(text, needle);
-    if (!at) return 0;
-    start = (size_t)(at - text);
-    end = start + nl;
-    if (start > 0 && text[start - 1] == ',') start--;
-    else if (text[end] == ',') end++;
-    memmove(text + start, text + end, *len - end + 1);
-    *len -= end - start;
-    return 1;
-}
-
-int modnet_get_bundle(const char *hash, char **text, size_t *len, const modnet_io *io, modnet_result *r)
-{
-    modnet_result local;
-    char route[96], actual[SH_MB_HASH_HEX + 1];
-    unsigned char *resp = NULL;
-    size_t rlen = 0;
-    mn_req q;
-    double t0;
-    int code;
-    if (!r) r = &local;
-    mn_begin(r, &t0);
-    if (text) *text = NULL;
-    if (len) *len = 0;
-    if (!modnet_valid_hash(hash) || !text || !len) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
-    _snprintf_s(route, sizeof route, _TRUNCATE, "/mods/bundle/%s", hash);
-    memset(&q, 0, sizeof q);
-    q.verb = L"GET";
-    q.route = route;
-    q.max_response = MODNET_MAX_BUNDLE;
-    code = mn_exchange(&q, &resp, &rlen, io, r);
-    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "bundle");
-    else if (code == MODNET_OK) {
-        sh_mb_sha256_hex(resp, rlen, actual);
-        if (strcmp(actual, hash) != 0) {
-            /* The store also keeps a body that is the canonical text with
-             * "bundle" included; without that member it must hash to its name. */
-            if (!mn_strip_bundle_member((char *)resp, &rlen, hash)) code = mn_fail(r, MODNET_E_HASH, "bundle %.16s: the manifest does not hash to its name", hash);
-            else {
-                sh_mb_sha256_hex(resp, rlen, actual);
-                if (strcmp(actual, hash) != 0) code = mn_fail(r, MODNET_E_HASH, "bundle %.16s: the manifest does not hash to its name", hash);
-            }
-        }
-        if (code == MODNET_OK) { *text = (char *)resp; *len = rlen; resp = NULL; }
-    }
-    free(resp);
-    return mn_end(r, t0, code);
-}
-
-int modnet_claim(const char *ref, const char *const *bundles, int n, const char *secret,
+int modnet_claim(const char *ref, const char *const *builds, int n, const char *secret,
                  char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1],
                  const modnet_io *io, modnet_result *r)
 {
@@ -929,14 +784,14 @@ int modnet_claim(const char *ref, const char *const *bundles, int n, const char 
     mn_begin(r, &t0);
     if (claim_out) claim_out[0] = 0;
     if (secret_out) secret_out[0] = 0;
-    if (!claim_out || !secret_out || !modnet_valid_ref(ref) || n <= 0 || !bundles || (secret && !modnet_valid_hash(secret)))
+    if (!claim_out || !secret_out || !modnet_valid_ref(ref) || n <= 0 || !builds || (secret && !modnet_valid_hash(secret)))
         return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
     for (i = 0; i < n; i++) {
-        if (!modnet_valid_hash(bundles[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad bundle hash")); }
-        if (!mn_set_has(&set, bundles[i]) && !mn_set_add(&set, bundles[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+        if (!modnet_valid_hash(builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, "bad build hash")); }
+        if (!mn_set_has(&set, builds[i]) && !mn_set_add(&set, builds[i])) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
     }
-    if (set.n > MODNET_MAX_CLAIM) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "more than %d bundles in one claim", MODNET_MAX_CLAIM)); }
-    mn_puts(&body, "{\"bundles\":[");
+    if (set.n > MODNET_MAX_CLAIM) { free(set.v); return mn_end(r, t0, mn_fail(r, MODNET_E_TOO_LARGE, "more than %d builds in one claim", MODNET_MAX_CLAIM)); }
+    mn_puts(&body, "{\"builds\":[");
     for (i = 0; i < set.n; i++) {
         if (i) mn_puts(&body, ",");
         mn_puts(&body, "\"");

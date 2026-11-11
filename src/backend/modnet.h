@@ -1,10 +1,12 @@
-/* modnet.h -- the backend's HTTP client for the mod store (Contract 4).
+/* modnet.h -- the backend's HTTP client for the mod store (ONE-SHAPE rule 5).
  *
- * The store is anonymous and content-addressed: blobs are cooked files named
- * by the SHA-256 of their bytes, bundles are canonical manifests named by the
- * SHA-256 of their text, and claims keep bundles served. Every byte that
- * comes back is verified against the hash that named it before it is
- * returned, so the transport is untrusted.
+ * The store keeps one object per build: a stored ZIP of the mod folder
+ * (mod.json and assets/<request> for every carried file, modzip.h), named by
+ * the build hash, at /mods/build/<hash>. Claims keep builds served; a release
+ * drops the claim and every build no claim names any more. The transport is
+ * untrusted: the downloader (modsync.c) verifies every file of an archive
+ * against its mod.json and the build hash against the map's row before
+ * anything is installed.
  *
  * Transport: WinHTTP, one process-wide session. The base URL is the product
  * setting "mods.store" (config.c; default https://api.snapmapplus.com). HTTPS
@@ -14,7 +16,8 @@
  * followed. Every request with a body sends Content-Length. Timeouts: resolve
  * and connect 15 s, send and receive 30 s per operation step. Bodies are never
  * logged; a refusal's short "error" text (sanitised, at most 160 characters)
- * is carried back in the result.
+ * is carried back in the result. An archive is streamed from and to a file,
+ * never held whole in memory.
  *
  * Every call blocks; the caller picks the thread. The engine's main thread
  * must never call these. A cancel flag (modnet_io) is checked between chunks
@@ -33,10 +36,11 @@
 #define MODNET_CLAIM_HEX      32
 #define MODNET_DEFAULT_STORE  "https://api.snapmapplus.com"
 #define MODNET_URL_MAX        512
-#define MODNET_MAX_QUERY      4096                    /* hashes per /mods/missing request */
-#define MODNET_MAX_CLAIM      256                     /* bundles per claim */
-#define MODNET_MAX_BLOB       (64ull * 1024u * 1024u)
-#define MODNET_MAX_BUNDLE     (1024u * 1024u)
+#define MODNET_MAX_CLAIM      256                     /* builds per claim */
+/* One build archive: under the 100 MB request body limit of the Worker's
+ * plan. A larger mod is refused at publish with a plain reason. */
+#define MODNET_MAX_ARCHIVE    (96ull * 1024u * 1024u)
+#define MODNET_ARCHIVE_TYPE   "application/zip"
 #define MODNET_REF_MAX        64                      /* UTF-16 code units, as the store counts */
 
 /* Result codes. 0 is success; every failure is negative. */
@@ -50,16 +54,16 @@ enum {
     MODNET_E_CANCELLED   =  -6,
     MODNET_E_HTTP        =  -7,   /* a status this client does not expect */
     MODNET_E_PROTOCOL    =  -8,   /* a malformed or inconsistent response */
-    MODNET_E_HASH        =  -9,   /* bytes did not hash to their name */
+    MODNET_E_HASH        =  -9,   /* an archive did not match the build it was fetched for */
     MODNET_E_TOO_LARGE   = -10,   /* over a cap (local check or 413) */
     MODNET_E_NOT_FOUND   = -11,   /* 404 */
     MODNET_E_FORBIDDEN   = -12,   /* 403: wrong claim secret */
-    MODNET_E_CONFLICT    = -13,   /* 409: the store lacks blobs or bundles the request names */
+    MODNET_E_CONFLICT    = -13,   /* 409: a claim names a build the store does not hold */
     MODNET_E_REFUSED     = -14,   /* 400, 411, 415, 422: the store refused the content */
     MODNET_E_RATE        = -15,   /* 429 */
     MODNET_E_BLOCKED     = -16,   /* 451: on the takedown list */
     MODNET_E_UNAVAILABLE = -17,   /* 5xx */
-    /* Not a store answer: the bundle was obtained, but a borrow (stock
+    /* Not a store answer: the build was obtained, but a borrow (stock
      * pointer) in it names game bytes this machine does not hold, a different
      * game revision, so it cannot be installed here (DESIGN-additive 2.8,
      * case 4). modsync sets it; no request returns it. */
@@ -114,54 +118,38 @@ int  modnet_valid_hash(const char *text);
  * of valid UTF-8 without control characters. */
 int  modnet_valid_ref(const char *ref);
 
-/* POST /mods/missing for any number of hashes (split into requests of 4096).
- * *missing receives a malloc'd array of the hashes the store lacks (in the
- * order given, duplicates removed); free with free(). Returns the code. */
-int  modnet_missing(const char *const *hashes, int n, char (**missing)[MODNET_HASH_HEX + 1], int *missing_count,
-                    const modnet_io *io, modnet_result *r);
+/* HEAD /mods/build/<hash>. MODNET_OK with *size (optional) the archive's
+ * bytes when the store serves it; MODNET_E_NOT_FOUND when it does not (never
+ * uploaded, purged, or unclaimed past its hour); MODNET_E_BLOCKED on the
+ * takedown list. */
+int  modnet_head_build(const char *hash, unsigned long long *size, const modnet_io *io, modnet_result *r);
 
-/* POST /mods/missing for one bundle's blobs (at most MODNET_MAX_QUERY) with
- * its canonical manifest ahead of them: {"blobs":[...],"bundle":"<hash>",
- * "manifest":"<canonical text>"}. The store checks the manifest as its bundle
- * PUT would and answers that PUT's refusal (422 with the store's message,
- * MODNET_E_REFUSED, "bundle: HTTP 422: <message>", the PUT's wording) before any blob is sent.
- * *checked is 1 when the answer names the bundle back (the store checked the
- * manifest), 0 when an older store answered the blob list alone. *missing as
- * for modnet_missing. */
-int  modnet_missing_bundle(const char *bundle, const char *canonical, size_t len, const char *const *hashes, int n,
-                           char (**missing)[MODNET_HASH_HEX + 1], int *missing_count, int *checked,
-                           const modnet_io *io, modnet_result *r);
+/* PUT /mods/build/<hash> with the archive file at `path` (UTF-8), streamed,
+ * Content-Type application/zip. `size` must be the file's size; over
+ * MODNET_MAX_ARCHIVE is refused locally (MODNET_E_TOO_LARGE) before any
+ * request. 201 (created) and 200 (already stored) are success; r->created
+ * tells them apart. A 422 carries the store's first cause. */
+int  modnet_put_build(const char *hash, const char *path, unsigned long long size, const modnet_io *io,
+                      modnet_result *r);
 
-/* PUT /mods/blob/<sha>. The bytes are hashed first and refused locally when
- * they do not match. 200 (already stored) and 201 (created) are success;
- * r->created tells them apart. */
-int  modnet_put_blob(const char *sha, const void *bytes, size_t len, const modnet_io *io, modnet_result *r);
+/* GET /mods/build/<hash> into the file `out_path` (UTF-8, created or
+ * replaced), at most MODNET_MAX_ARCHIVE bytes, streamed. r->received is its
+ * size. On any failure the file is removed. The bytes are not checked here:
+ * the archive's mod.json names the build, which the caller verifies. */
+int  modnet_get_build(const char *hash, const char *out_path, const modnet_io *io, modnet_result *r);
 
-/* GET /mods/blob/<sha>. *bytes (malloc'd) is returned only when its SHA-256
- * equals sha; expected_size, when nonzero, must also match. */
-int  modnet_get_blob(const char *sha, unsigned long long expected_size, unsigned char **bytes, size_t *len,
-                     const modnet_io *io, modnet_result *r);
-
-/* PUT /mods/bundle/<hash> with the exact canonical manifest text (whose
- * SHA-256 must be hash; checked locally first). 409 means the store lacks
- * blobs the manifest names (renegotiate and retry). */
-int  modnet_put_bundle(const char *hash, const char *canonical, size_t len, const modnet_io *io, modnet_result *r);
-
-/* GET /mods/bundle/<hash>. *text (malloc'd, NUL-terminated) is the canonical
- * manifest without "bundle", returned only when its SHA-256 equals hash. A
- * stored body that carries "bundle" is accepted when removing that member
- * yields the hash. */
-int  modnet_get_bundle(const char *hash, char **text, size_t *len, const modnet_io *io, modnet_result *r);
-
-/* POST /mods/claim. secret NULL makes a new claim; a stored secret replaces
- * the bundle set of the claim for this ref (403 when it matches none).
- * claim_out and secret_out receive the claim id and its secret. */
-int  modnet_claim(const char *ref, const char *const *bundles, int n, const char *secret,
+/* POST /mods/claim {"builds":[...],"ref":...,"secret"?}: one claim per
+ * published item. secret NULL makes a new claim; a stored secret replaces the
+ * build set of the claim for this ref (403 when it matches none). 409 when a
+ * build named is not stored. claim_out and secret_out receive the claim id
+ * and its secret. */
+int  modnet_claim(const char *ref, const char *const *builds, int n, const char *secret,
                   char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1],
                   const modnet_io *io, modnet_result *r);
 
 /* POST /mods/release. 204 is success; 404 (no such claim) and 403 (wrong
- * secret) come back as their codes. */
+ * secret) come back as their codes. The store deletes every build no claim
+ * names any more at once. */
 int  modnet_release(const char *claim, const char *secret, const modnet_io *io, modnet_result *r);
 
 /* ------------------------------------------------------------ jobs ---- */

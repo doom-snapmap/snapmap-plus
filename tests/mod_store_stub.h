@@ -1,22 +1,21 @@
 /* mod_store_stub.h -- an in-memory mod store on 127.0.0.1 for the store
- * client tests (modnet_test, modsync_test, modexport_test).
+ * client tests (modnet_test, modsync_test and the flows above them).
  *
  * A small Winsock HTTP/1.1 server on a thread, one request per connection
- * (Connection: close), implementing the Contract 4 routes the client uses
- * with the status codes and bodies of the Worker
- * (snapmap-web api/mods_store.js): POST /mods/missing, PUT and GET
- * /mods/blob/<sha>, PUT and GET /mods/bundle/<hash>, POST /mods/claim and
- * /mods/release. It checks what the Worker checks that the flows can reach:
- * the blob body hashes to its path (422), Content-Type on blob PUT (415),
- * Content-Length present (411), the bundle body hashes to its path (422),
- * unknown top-level manifest keys (422), blobs a manifest names exist (409),
- * claim secrets (403) and unknown claims (404). A manifest sent with
- * POST /mods/missing gets the bundle PUT's key and hash checks (422) and is
- * named back as "bundle", as the Worker since W1 does. Validation of names and
- * paths is not repeated. Counters and fault switches let the tests observe
- * negotiation and inject failures.
+ * (Connection: close), implementing the routes of the Worker
+ * (snapmap-web api/mods_store.js, ONE-SHAPE rule 5) the client uses:
+ * HEAD, PUT and GET /mods/build/<hash>, POST /mods/claim and /mods/release.
+ * It checks what the Worker checks that the flows can reach: Content-Type
+ * application/zip on a build PUT (415), Content-Length present (411), at most
+ * 96 MiB (413), and the archive itself (422): a ZIP the product's reader
+ * opens, holding mod.json whose build is the path's hash and one
+ * assets/<request> entry per carried file its block lists, nothing else. A
+ * claim names stored builds (409), a re-claim needs the secret (403), a
+ * release of an unknown claim is 404; a release deletes every build no live
+ * claim names any more. Counters and fault switches let the tests observe
+ * the exchange and inject failures.
  *
- * Requires ws2_32.lib and the SHA-256 in modbundle.c. */
+ * Requires ws2_32.lib, modzip.c (and raw_deflate.c) and modbundle.c. */
 #ifndef SNAPMAP_PLUS_MOD_STORE_STUB_H
 #define SNAPMAP_PLUS_MOD_STORE_STUB_H
 
@@ -28,15 +27,17 @@
 #include <string.h>
 
 #include "../src/backend/modbundle.h"
+#include "../src/backend/modzip.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define STUB_MAX_OBJECTS 512
+#define STUB_MAX_OBJECTS 256
 #define STUB_MAX_CLAIMS  64
-#define STUB_MAX_BODY    (70u * 1024u * 1024u)
+#define STUB_MAX_BODY    (100u * 1024u * 1024u)
+#define STUB_MAX_ARCHIVE (96u * 1024u * 1024u)
 
 typedef struct stub_obj { char hash[65]; unsigned char *bytes; size_t len; } stub_obj;
-typedef struct stub_claim { char id[33], ref[260], secret[65]; char bundles[32][65]; int nb; int live; } stub_claim;
+typedef struct stub_claim { char id[33], ref[260], secret[65]; char builds[32][65]; int nb; int live; } stub_claim;
 
 typedef struct stub_state {
     SOCKET listener;
@@ -44,30 +45,23 @@ typedef struct stub_state {
     int port;
     volatile LONG stop;
     CRITICAL_SECTION cs;
-    stub_obj blobs[STUB_MAX_OBJECTS];
-    int nblobs;
-    stub_obj bundles[STUB_MAX_OBJECTS];
-    int nbundles;
+    stub_obj builds[STUB_MAX_OBJECTS];
+    int nbuilds;
     stub_claim claims[STUB_MAX_CLAIMS];
     int nclaims;
     unsigned counter;
     /* counters */
-    int requests, missing_calls, blob_puts, blob_created, blob_gets, bundle_puts, bundle_created, bundle_gets,
-        claim_calls, claim_with_secret, release_calls;
+    int requests, head_calls, build_puts, build_created, build_gets, claim_calls, claim_with_secret, release_calls,
+        builds_deleted;
     /* the last request with a body */
     int last_cl_headers;          /* Content-Length headers seen */
     long long last_cl_value;
     char last_method[8], last_path[160], last_ctype[64];
+    char last_refusal[200];       /* the last 422's error text */
     /* faults */
     char fail_prefix[48];         /* the next request whose "METHOD path" starts with this ... */
     int fail_status;              /* ... gets this status and a JSON error */
-    int corrupt_blob_gets;        /* GET blob answers with one byte flipped */
-    char corrupt_bundle[65];      /* GET bundle for this hash answers with altered text */
-    int serve_bundle_member;      /* GET bundle answers with "bundle" inserted, as the Worker may store it */
-    char drop_blob_before_bundle[65];  /* removed just before the next bundle PUT (a purge race) */
-    char refuse_manifest[200];    /* a manifest at /mods/missing is refused with 422 and this message */
-    int missing_ignores_manifest; /* /mods/missing answers as an older Worker: blobs only, no "bundle" */
-    int missing_manifests;        /* /mods/missing requests that carried a manifest the stub checked */
+    int corrupt_build_gets;       /* GET build answers with one byte flipped in the middle */
     char trail[8192];             /* "claim <ref>" and "release <ref>" lines, in the order the stub took them */
 } stub_state;
 
@@ -136,82 +130,6 @@ static int stub_str(const char *body, const char *key, char *out, size_t cap)
     return 1;
 }
 
-/* The JSON string starting at p (just past its opening quote), unescaped
- * (malloc'd), or NULL. \uXXXX is decoded to UTF-8. */
-static char *stub_unescape(const char *p)
-{
-    size_t cap = strlen(p) + 1, n = 0;
-    char *o = (char *)malloc(cap);
-    if (!o) return NULL;
-    for (; *p && *p != '"'; p++) {
-        unsigned c = (unsigned char)*p;
-        if (c == '\\') {
-            p++;
-            if (!*p) break;
-            switch (*p) {
-            case 'n': c = '\n'; break;
-            case 'r': c = '\r'; break;
-            case 't': c = '\t'; break;
-            case 'b': c = '\b'; break;
-            case 'f': c = '\f'; break;
-            case 'u': {
-                unsigned v = 0;
-                int k;
-                for (k = 1; k <= 4; k++) {
-                    char h = p[k];
-                    if (!h) { free(o); return NULL; }
-                    v = v * 16 + (unsigned)(h <= '9' ? h - '0' : (h | 32) - 'a' + 10);
-                }
-                p += 4;
-                if (v >= 0x80) {
-                    if (v < 0x800) { o[n++] = (char)(0xC0 | (v >> 6)); c = 0x80 | (v & 0x3F); }
-                    else { o[n++] = (char)(0xE0 | (v >> 12)); o[n++] = (char)(0x80 | ((v >> 6) & 0x3F)); c = 0x80 | (v & 0x3F); }
-                } else c = v;
-                break;
-            }
-            default: c = (unsigned char)*p; break;
-            }
-        }
-        o[n++] = (char)c;
-    }
-    if (*p != '"') { free(o); return NULL; }
-    o[n] = 0;
-    return o;
-}
-
-/* The Worker's TOP_KEYS check: the first top-level key it does not know, or NULL. */
-static const char *stub_unknown_top_key(const char *body, char *buf, size_t cap)
-{
-    static const char *const known[] = { "format", "id", "build", "version", "name", "author", "homepage",
-                                         "requirements", "shadows", "files", "bundle", NULL };
-    int depth = 0, instr = 0, esc = 0, i;
-    const char *p, *start = NULL;
-    for (p = body; *p; p++) {
-        if (instr) {
-            if (esc) esc = 0;
-            else if (*p == '\\') esc = 1;
-            else if (*p == '"') {
-                instr = 0;
-                if (depth == 1 && start && p[1] == ':') {
-                    size_t n = (size_t)(p - start);
-                    int ok = 0;
-                    if (n >= cap) n = cap - 1;
-                    memcpy(buf, start, n);
-                    buf[n] = 0;
-                    for (i = 0; known[i]; i++) if (strcmp(known[i], buf) == 0) ok = 1;
-                    if (!ok) return buf;
-                }
-                start = NULL;
-            }
-            continue;
-        }
-        if (*p == '"') { instr = 1; start = p + 1; }
-        else if (*p == '{' || *p == '[') depth++;
-        else if (*p == '}' || *p == ']') depth--;
-    }
-    return NULL;
-}
-
 static void stub_hex_of(unsigned v, const char *salt, char *out, size_t chars)
 {
     char seed[96], h[65];
@@ -221,7 +139,7 @@ static void stub_hex_of(unsigned v, const char *salt, char *out, size_t chars)
     out[chars] = 0;
 }
 
-static void stub_send(SOCKET s, int status, const char *ctype, const void *body, size_t len)
+static void stub_send_ex(SOCKET s, int status, const char *ctype, const void *body, size_t len, int head_only)
 {
     char head[256];
     const char *reason = status == 200 ? "OK" : status == 201 ? "Created" : status == 204 ? "No Content" : "Status";
@@ -229,6 +147,7 @@ static void stub_send(SOCKET s, int status, const char *ctype, const void *body,
                         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
                         status, reason, ctype ? ctype : "application/json", len);
     send(s, head, n, 0);
+    if (head_only) return;
     while (len) {
         int chunk = (int)(len > (1u << 20) ? (1u << 20) : len);
         int sent = send(s, (const char *)body, chunk, 0);
@@ -238,9 +157,75 @@ static void stub_send(SOCKET s, int status, const char *ctype, const void *body,
     }
 }
 
+static void stub_send(SOCKET s, int status, const char *ctype, const void *body, size_t len)
+{
+    stub_send_ex(s, status, ctype, body, len, 0);
+}
+
 static void stub_json(SOCKET s, int status, const char *json)
 {
     stub_send(s, status, "application/json", json, strlen(json));
+}
+
+/* The Worker's archive check, on the product's own reader: NULL when the
+ * archive is the build `hash`, else the first cause (static text). */
+static const char *stub_check_archive(const char *hash, const unsigned char *body, size_t len, char *why, size_t cap)
+{
+    char path[MAX_PATH], dir[MAX_PATH], cause[256];
+    sh_zip_reader zr;
+    sh_mb_bundle b;
+    unsigned char *text;
+    size_t tlen = 0, i, carried = 0;
+    FILE *f;
+    long idx;
+    const char *bad = NULL;
+    GetTempPathA(sizeof dir, dir);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%sstub-archive-%lu.zip", dir, GetCurrentProcessId());
+    if (fopen_s(&f, path, "wb") || !f) return "the stub cannot stage the archive";
+    fwrite(body, 1, len, f);
+    fclose(f);
+    memset(&b, 0, sizeof b);
+    if (!sh_zip_reader_open(&zr, path, cause, sizeof cause)) {
+        DeleteFileA(path);
+        _snprintf_s(why, cap, _TRUNCATE, "not a stored ZIP: %s", cause);
+        return why;
+    }
+    idx = sh_zip_reader_find(&zr, "mod.json");
+    text = idx < 0 ? NULL : sh_zip_reader_read(&zr, idx, 1024 * 1024, &tlen, cause, sizeof cause);
+    if (!text) bad = "the archive has no mod.json";
+    else if (!sh_mb_load_text((const char *)text, tlen, &b)) {
+        _snprintf_s(why, cap, _TRUNCATE, "mod.json: %s", b.first_cause);
+        bad = why;
+    } else if (strcmp(b.hash, hash) != 0) bad = "mod.json build does not match the path";
+    for (i = 0; !bad && i < b.file_count; i++) {
+        char entry[512];
+        if (b.files[i].stock) continue;
+        carried++;
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", b.files[i].request);
+        if (sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
+    }
+    if (!bad && zr.n != carried + 1) bad = "the archive holds entries mod.json does not list";
+    free(text);
+    sh_mb_free(&b);
+    sh_zip_reader_close(&zr);
+    DeleteFileA(path);
+    return bad;
+}
+
+/* Builds no live claim names are deleted at once (release). */
+static void stub_drop_unclaimed(void)
+{
+    int i = 0;
+    while (i < g_stub.nbuilds) {
+        int c, k, held = 0;
+        for (c = 0; c < g_stub.nclaims && !held; c++)
+            for (k = 0; g_stub.claims[c].live && k < g_stub.claims[c].nb && !held; k++)
+                held = !strcmp(g_stub.claims[c].builds[k], g_stub.builds[i].hash);
+        if (held) { i++; continue; }
+        free(g_stub.builds[i].bytes);
+        g_stub.builds[i] = g_stub.builds[--g_stub.nbuilds];
+        g_stub.builds_deleted++;
+    }
 }
 
 static void stub_route(SOCKET s, const char *method, const char *path, const char *ctype, int cl_headers,
@@ -252,179 +237,58 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
         int st = g_stub.fail_status;
         g_stub.fail_prefix[0] = 0;
         _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"injected failure %d\"}", st);
-        stub_json(s, st, out);
+        stub_send_ex(s, st, "application/json", out, strlen(out), !strcmp(method, "HEAD"));
         return;
     }
-    if (!strcmp(method, "POST") && !strcmp(path, "/mods/missing")) {
-        static char list[4096][65];
-        int n = stub_hex_list((const char *)body, "blobs", list, 4096), i, w = 0;
-        char *big, bundle[65];
-        const char *man = body ? strstr((const char *)body, "\"manifest\":\"") : NULL;
-        size_t cap = 64 + (size_t)(n > 0 ? n : 0) * 68 + 80;
-        g_stub.missing_calls++;
-        bundle[0] = 0;
-        if (man && !g_stub.missing_ignores_manifest) {
-            /* A manifest ahead of the blobs: the bundle PUT's checks and wording. */
-            char *text = stub_unescape(man + 12), actual[65], key[64];
-            const char *bad;
-            g_stub.missing_manifests++;
-            if (!text || !stub_str((const char *)body, "bundle", bundle, sizeof bundle) || strlen(bundle) != 64) {
-                free(text);
-                stub_json(s, 400, "{\"error\":\"bad bundle hash\"}");
-                return;
-            }
-            sh_mb_sha256_hex(text, strlen(text), actual);
-            bad = stub_unknown_top_key(text, key, sizeof key);
-            free(text);
-            if (g_stub.refuse_manifest[0]) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"%s\"}", g_stub.refuse_manifest);
-                stub_json(s, 422, out);
-                return;
-            }
-            if (bad) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown manifest key %s\"}", bad);
-                stub_json(s, 422, out);
-                return;
-            }
-            if (strcmp(actual, bundle) != 0) { stub_json(s, 422, "{\"error\":\"canonical manifest does not hash to the path\"}"); return; }
+    if (!strncmp(path, "/mods/build/", 12) && strlen(path) == 76 && stub_is_hex(path + 12, 64)) {
+        const char *hash = path + 12;
+        stub_obj *o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
+        if (!strcmp(method, "HEAD")) {
+            g_stub.head_calls++;
+            if (!o) { stub_send_ex(s, 404, "application/json", "{\"error\":\"not found\"}", 21, 1); return; }
+            stub_send_ex(s, 200, "application/zip", o->bytes, o->len, 1);
+            return;
         }
-        if (n < 0) { stub_json(s, 400, "{\"error\":\"expected an array of SHA-256 hex strings\"}"); return; }
-        big = (char *)malloc(cap);
-        w = _snprintf_s(big, cap, _TRUNCATE, "{%s%s%s\"missing\":[", bundle[0] ? "\"bundle\":\"" : "", bundle,
-                        bundle[0] ? "\"," : "");
-        for (i = 0; i < n; i++) {
-            int k, dup = 0;
-            for (k = 0; k < i; k++) dup |= strcmp(list[k], list[i]) == 0;
-            if (dup || stub_find(g_stub.blobs, g_stub.nblobs, list[i])) continue;
-            w += _snprintf_s(big + w, cap - (size_t)w, _TRUNCATE, "%s\"%s\"", big[w - 1] == '[' ? "" : ",", list[i]);
-        }
-        _snprintf_s(big + w, cap - (size_t)w, _TRUNCATE, "]}");
-        stub_json(s, 200, big);
-        free(big);
-        return;
-    }
-    if (!strncmp(path, "/mods/blob/", 11) && strlen(path) == 75 && stub_is_hex(path + 11, 64)) {
-        const char *hash = path + 11;
-        stub_obj *o = stub_find(g_stub.blobs, g_stub.nblobs, hash);
         if (!strcmp(method, "GET")) {
-            g_stub.blob_gets++;
+            g_stub.build_gets++;
             if (!o) { stub_json(s, 404, "{\"error\":\"not found\"}"); return; }
-            if (g_stub.corrupt_blob_gets && o->len) {
+            if (g_stub.corrupt_build_gets && o->len) {
                 unsigned char *copy = (unsigned char *)malloc(o->len);
                 memcpy(copy, o->bytes, o->len);
-                copy[0] ^= 0x5a;
-                stub_send(s, 200, "application/octet-stream", copy, o->len);
+                copy[o->len / 2] ^= 0x5a;
+                stub_send(s, 200, "application/zip", copy, o->len);
                 free(copy);
                 return;
             }
-            stub_send(s, 200, "application/octet-stream", o->bytes, o->len);
+            stub_send(s, 200, "application/zip", o->bytes, o->len);
             return;
         }
         if (!strcmp(method, "PUT")) {
-            char actual[65];
-            g_stub.blob_puts++;
-            if (_stricmp(ctype, "application/octet-stream") != 0) { stub_json(s, 415, "{\"error\":\"content-type must be application/octet-stream\"}"); return; }
+            const char *bad;
+            char why[300];
+            g_stub.build_puts++;
+            if (_stricmp(ctype, "application/zip") != 0) { stub_json(s, 415, "{\"error\":\"content-type must be application/zip\"}"); return; }
             if (cl_headers == 0) { stub_json(s, 411, "{\"error\":\"content-length required\"}"); return; }
-            sh_mb_sha256_hex(body ? (const void *)body : "", blen, actual);
-            if (strcmp(actual, hash) != 0) { stub_json(s, 422, "{\"error\":\"body does not hash to the path\"}"); return; }
+            if (blen > STUB_MAX_ARCHIVE) { stub_json(s, 413, "{\"error\":\"the archive is over 96 MiB\"}"); return; }
             if (o) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"blob\":\"%s\",\"size\":%zu}", hash, o->len);
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu}", hash, o->len);
                 stub_json(s, 200, out);
                 return;
             }
-            o = &g_stub.blobs[g_stub.nblobs++];
+            bad = stub_check_archive(hash, body, blen, why, sizeof why);
+            if (bad) {
+                strncpy_s(g_stub.last_refusal, sizeof g_stub.last_refusal, bad, _TRUNCATE);
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"%s\"}", bad);
+                stub_json(s, 422, out);
+                return;
+            }
+            o = &g_stub.builds[g_stub.nbuilds++];
             strcpy_s(o->hash, sizeof o->hash, hash);
             o->bytes = (unsigned char *)malloc(blen ? blen : 1);
             if (blen) memcpy(o->bytes, body, blen);
             o->len = blen;
-            g_stub.blob_created++;
-            _snprintf_s(out, sizeof out, _TRUNCATE, "{\"blob\":\"%s\",\"size\":%zu}", hash, blen);
-            stub_json(s, 201, out);
-            return;
-        }
-        stub_json(s, 405, "{\"error\":\"method not allowed\"}");
-        return;
-    }
-    if (!strncmp(path, "/mods/bundle/", 13) && strlen(path) == 77 && stub_is_hex(path + 13, 64)) {
-        const char *hash = path + 13;
-        stub_obj *o = stub_find(g_stub.bundles, g_stub.nbundles, hash);
-        if (!strcmp(method, "GET")) {
-            g_stub.bundle_gets++;
-            if (!o) { stub_json(s, 404, "{\"error\":\"not found\"}"); return; }
-            if (!strcmp(g_stub.corrupt_bundle, hash)) {
-                char *copy = (char *)malloc(o->len + 1);
-                memcpy(copy, o->bytes, o->len);
-                copy[o->len] = 0;
-                { char *n = strstr(copy, "\"name\":\""); if (n) n[8] ^= 0x01; }
-                stub_send(s, 200, "application/json; charset=utf-8", copy, o->len);
-                free(copy);
-                return;
-            }
-            if (g_stub.serve_bundle_member) {
-                /* canonicalText(manifest, true): "bundle" in sorted key order, after "build". */
-                char *copy = (char *)malloc(o->len + 96), *at;
-                memcpy(copy, o->bytes, o->len);
-                copy[o->len] = 0;
-                at = strstr(copy, ",\"extra\":");
-                if (!at) at = strstr(copy, ",\"files\":");
-                if (at) {
-                    size_t head = (size_t)(at - copy);
-                    char *joined = (char *)malloc(o->len + 96);
-                    memcpy(joined, copy, head);
-                    _snprintf_s(joined + head, 96, _TRUNCATE, ",\"bundle\":\"%s\"", hash);
-                    memcpy(joined + head + 76, copy + head, o->len - head);
-                    stub_send(s, 200, "application/json; charset=utf-8", joined, o->len + 76);
-                    free(joined);
-                } else stub_send(s, 200, "application/json; charset=utf-8", o->bytes, o->len);
-                free(copy);
-                return;
-            }
-            stub_send(s, 200, "application/json; charset=utf-8", o->bytes, o->len);
-            return;
-        }
-        if (!strcmp(method, "PUT")) {
-            char actual[65], key[64];
-            const char *bad;
-            const char *p;
-            char miss[4096];
-            int nmiss = 0, w;
-            g_stub.bundle_puts++;
-            if (g_stub.drop_blob_before_bundle[0]) {
-                stub_obj *d = stub_find(g_stub.blobs, g_stub.nblobs, g_stub.drop_blob_before_bundle);
-                if (d) { free(d->bytes); *d = g_stub.blobs[--g_stub.nblobs]; }
-                g_stub.drop_blob_before_bundle[0] = 0;
-            }
-            sh_mb_sha256_hex(body ? (const void *)body : "", blen, actual);
-            if ((bad = stub_unknown_top_key((const char *)body, key, sizeof key)) != NULL) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown manifest key %s\"}", bad);
-                stub_json(s, 422, out);
-                return;
-            }
-            if (strcmp(actual, hash) != 0) { stub_json(s, 422, "{\"error\":\"canonical manifest does not hash to the path\"}"); return; }
-            w = _snprintf_s(miss, sizeof miss, _TRUNCATE, "[");
-            for (p = strstr((const char *)body, "\"blob\":\""); p; p = strstr(p + 8, "\"blob\":\"")) {
-                char h[65];
-                memcpy(h, p + 8, 64);
-                h[64] = 0;
-                if (!stub_find(g_stub.blobs, g_stub.nblobs, h)) {
-                    w += _snprintf_s(miss + w, sizeof miss - (size_t)w, _TRUNCATE, "%s\"%s\"", nmiss ? "," : "", h);
-                    nmiss++;
-                }
-            }
-            if (nmiss) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"missing blobs\",\"missing\":%s],\"missingCount\":%d}", miss, nmiss);
-                stub_json(s, 409, out);
-                return;
-            }
-            _snprintf_s(out, sizeof out, _TRUNCATE, "{\"bundle\":\"%s\"}", hash);
-            if (o) { stub_json(s, 200, out); return; }
-            o = &g_stub.bundles[g_stub.nbundles++];
-            strcpy_s(o->hash, sizeof o->hash, hash);
-            o->bytes = (unsigned char *)malloc(blen + 1);
-            memcpy(o->bytes, body, blen);
-            o->bytes[blen] = 0;
-            o->len = blen;
-            g_stub.bundle_created++;
+            g_stub.build_created++;
+            _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu}", hash, blen);
             stub_json(s, 201, out);
             return;
         }
@@ -433,11 +297,11 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
     }
     if (!strcmp(method, "POST") && !strcmp(path, "/mods/claim")) {
         char ref[260], secret[80], list[32][65];
-        int n = stub_hex_list((const char *)body, "bundles", list, 32), i, has_secret;
+        int n = stub_hex_list((const char *)body, "builds", list, 32), i, has_secret;
         stub_claim *c = NULL;
         g_stub.claim_calls++;
         if (!stub_str((const char *)body, "ref", ref, sizeof ref)) { stub_json(s, 400, "{\"error\":\"bad ref\"}"); return; }
-        if (n <= 0) { stub_json(s, 400, "{\"error\":\"no bundles\"}"); return; }
+        if (n <= 0) { stub_json(s, 400, "{\"error\":\"no builds\"}"); return; }
         has_secret = stub_str((const char *)body, "secret", secret, sizeof secret);
         if (has_secret) {
             g_stub.claim_with_secret++;
@@ -446,8 +310,8 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             if (!c) { stub_json(s, 403, "{\"error\":\"no claim matches this ref and secret\"}"); return; }
         }
         for (i = 0; i < n; i++)
-            if (!stub_find(g_stub.bundles, g_stub.nbundles, list[i])) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown bundles\",\"missing\":[\"%s\"],\"missingCount\":1}", list[i]);
+            if (!stub_find(g_stub.builds, g_stub.nbuilds, list[i])) {
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown builds\",\"missing\":[\"%s\"]}", list[i]);
                 stub_json(s, 409, out);
                 return;
             }
@@ -460,7 +324,7 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             stub_hex_of(++g_stub.counter, "secret", c->secret, 64);
         }
         c->nb = n < 32 ? n : 32;
-        for (i = 0; i < c->nb; i++) strcpy_s(c->bundles[i], 65, list[i]);
+        for (i = 0; i < c->nb; i++) strcpy_s(c->builds[i], 65, list[i]);
         stub_trail("claim", ref);
         _snprintf_s(out, sizeof out, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", c->id, c->secret);
         stub_json(s, has_secret ? 200 : 201, out);
@@ -478,6 +342,7 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             if (strcmp(c->secret, secret) != 0) { stub_json(s, 403, "{\"error\":\"wrong secret\"}"); return; }
             c->live = 0;
             stub_trail("release", c->ref);
+            stub_drop_unclaimed();
             stub_send(s, 204, "application/json", "", 0);
             return;
         }
@@ -543,7 +408,7 @@ static void stub_serve_one(SOCKET s)
     }
     EnterCriticalSection(&g_stub.cs);
     g_stub.requests++;
-    if (strcmp(method, "GET") != 0) {
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
         g_stub.last_cl_headers = cl_headers;
         g_stub.last_cl_value = cl;
         strcpy_s(g_stub.last_method, sizeof g_stub.last_method, method);
@@ -598,8 +463,7 @@ static void stub_stop(void)
     InterlockedExchange(&g_stub.stop, 1);
     closesocket(g_stub.listener);
     if (g_stub.thread) { WaitForSingleObject(g_stub.thread, 5000); CloseHandle(g_stub.thread); }
-    for (i = 0; i < g_stub.nblobs; i++) free(g_stub.blobs[i].bytes);
-    for (i = 0; i < g_stub.nbundles; i++) free(g_stub.bundles[i].bytes);
+    for (i = 0; i < g_stub.nbuilds; i++) free(g_stub.builds[i].bytes);
     WSACleanup();
 }
 
@@ -616,26 +480,34 @@ static void stub_fail_next(const char *prefix, int status)
     LeaveCriticalSection(&g_stub.cs);
 }
 
-static int stub_has_blob(const char *hash)
+static int stub_has_build(const char *hash)
 {
     int r;
     EnterCriticalSection(&g_stub.cs);
-    r = stub_find(g_stub.blobs, g_stub.nblobs, hash) != NULL;
+    r = stub_find(g_stub.builds, g_stub.nbuilds, hash) != NULL;
     LeaveCriticalSection(&g_stub.cs);
     return r;
 }
 
-static int stub_has_bundle(const char *hash)
+/* Store bytes under a hash without the PUT's checks (a forged archive, or a
+ * test's own). */
+static void stub_put_raw(const char *hash, const void *bytes, size_t len)
 {
-    int r;
+    stub_obj *o;
     EnterCriticalSection(&g_stub.cs);
-    r = stub_find(g_stub.bundles, g_stub.nbundles, hash) != NULL;
+    o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
+    if (!o && g_stub.nbuilds < STUB_MAX_OBJECTS) { o = &g_stub.builds[g_stub.nbuilds++]; strcpy_s(o->hash, sizeof o->hash, hash); }
+    else if (o) free(o->bytes);
+    if (o) {
+        o->bytes = (unsigned char *)malloc(len ? len : 1);
+        if (len) memcpy(o->bytes, bytes, len);
+        o->len = len;
+    }
     LeaveCriticalSection(&g_stub.cs);
-    return r;
 }
 
-/* The live claim for ref: its bundle count, or -1. */
-static int stub_claim_bundles(const char *ref, char id_out[33])
+/* The live claim for ref: its build count, or -1. */
+static int stub_claim_builds(const char *ref, char id_out[33])
 {
     int i, n = -1;
     EnterCriticalSection(&g_stub.cs);
