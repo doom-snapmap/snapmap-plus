@@ -41,10 +41,12 @@ void modstore_lock(void)
 {
     InitOnceExecuteOnce(&g_ms_lock_once, ms_lock_init, NULL, NULL);
     if (!TryEnterCriticalSection(&g_ms_lock)) {
-        /* Held by another thread: wait for it rather than fail. */
-        InterlockedIncrement(&g_ms_lock_waits);
+        /* Held by another thread: wait for it rather than fail. The waiting
+         * count is raised before the wait count, so a holder that sees a new
+         * wait always finds the waiter and yields to it (ms_lock_yield). */
         InterlockedIncrement(&g_ms_lock_waiting);
-        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
+        InterlockedIncrement(&g_ms_lock_waits);
+        backend_log("MODS: store: waiting for another store operation to finish (an install, a download or a build)");
         EnterCriticalSection(&g_ms_lock);
         InterlockedDecrement(&g_ms_lock_waiting);
     }

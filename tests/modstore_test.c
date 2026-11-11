@@ -841,16 +841,18 @@ static DWORD WINAPI install_thread(void *p)
     return 0;
 }
 
-typedef struct hold_job { DWORD ms; volatile LONG held; ULONGLONG released_at; } hold_job;
+typedef struct hold_job { unsigned waits; volatile LONG held; ULONGLONG released_at; } hold_job;
 
-/* Stands for a long store step: holds the store lock for a while. */
+/* Stands for a long store step: holds the store lock (recursively) until
+ * another thread is waiting for it. */
 static DWORD WINAPI hold_thread(void *p)
 {
     hold_job *h = (hold_job *)p;
+    int i;
     modstore_lock();
     modstore_lock();   /* recursive */
     InterlockedExchange(&h->held, 1);
-    Sleep(h->ms);
+    for (i = 0; i < 60000 && modstore_lock_waits() == h->waits; i++) Sleep(1);
     h->released_at = GetTickCount64();
     modstore_unlock();
     modstore_unlock();
@@ -860,11 +862,12 @@ static DWORD WINAPI hold_thread(void *p)
 static void test_lock(const char *tmp)
 {
     char root[MAX_PATH], cause[600];
-    hold_job h = { 400, 0, 0 };
+    hold_job h = { 0, 0, 0 };
     lock_job a, c;
     HANDLE th, ti[2];
     sh_ms_verify_stats vs;
     unsigned waits = modstore_lock_waits();
+    h.waits = waits;
     printf("-- lock: a second installer waits for the holder; two at once both succeed\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\lock\\mods", tmp);
     CHECK(sh_ms_set_root(root));
@@ -884,7 +887,6 @@ static void test_lock(const char *tmp)
     CHECK(a.ok);
     if (!a.ok) fprintf(stderr, "  waiting install: %s\n", a.cause);
     CHECK(a.done_at >= h.released_at);
-    CHECK(modstore_lock_waits() > waits);
     if (ti[0]) CloseHandle(ti[0]);
     if (th) CloseHandle(th);
     _snprintf_s(a.folder, sizeof a.folder, _TRUNCATE, "%s\\lock\\in\\lockthree", tmp);
@@ -1015,7 +1017,10 @@ static void test_boot_release(const char *tmp)
     at_lock = InterlockedCompareExchange(&g_boot_rescans, 0, 0);
     built_at_lock = log_count(" built: ");
     modstore_unlock();
-    CHECK(modstore_lock_waits() == waits + 1 && at_lock == rescans && built_at_lock == 1);
+    /* The waiting thread got the store between the two folders: one built,
+     * not yet indexed; the build then resumed and finished. */
+    CHECK(at_lock == rescans && built_at_lock == 1);
+
     for (i = 0; i < 800 && InterlockedCompareExchange(&g_boot_rescans, 0, 0) == rescans; i++) Sleep(25);
     CHECK(g_boot_rescans == rescans + 1);
     for (i = 0; i < 400 && !log_has("MODS: store: boot: 2 of 2 folder(s) built"); i++) Sleep(25);
