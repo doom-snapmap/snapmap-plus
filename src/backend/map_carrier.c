@@ -447,3 +447,50 @@ int sh_carrier_object_string(const char *obj, const char *end, const char *key, 
     if (body_len) *body_len = n - 2;
     return 1;
 }
+
+/* ------------------------------------------------------------ earlier shapes */
+
+/* The variable families earlier builds wrote (map_carrier.h, sh_map_old_shape). */
+static const char *const cr_old_families[] = {
+    "smpkg.", "smpbind.", "smpref.", "smpmod1.", "smpprod1.", "smp.render.v1", "smp.bounds.v1", "smnav1."
+};
+
+/* 1 when the string whose opening quote is at `quote` is the value of a
+ * "name" member: ..."name" <ws> : <ws> "<family>... */
+static int cr_is_name_value(const char *json, const char *quote)
+{
+    const char *r = quote - 1;
+    while (r >= json && sh_shard_is_ws(*r)) r--;
+    if (r < json || *r != ':') return 0;
+    r--;
+    while (r >= json && sh_shard_is_ws(*r)) r--;
+    if (r - 5 < json) return 0;
+    return memcmp(r - 5, "\"name\"", 6) == 0;
+}
+
+int sh_map_old_shape(const char *json, size_t len)
+{
+    size_t f, from = 0, to = 0;
+    if (!json || !len) return SH_MAP_OLD_NONE;
+    for (f = 0; f < sizeof cr_old_families / sizeof cr_old_families[0]; f++) {
+        size_t m = strlen(cr_old_families[f]), at = 0;
+        while (at < len) {
+            const char *hit = sh_shard_find(json + at, len - at, cr_old_families[f], m);
+            if (!hit) break;
+            at = (size_t)(hit - json) + 1;
+            if (hit > json && hit[-1] == '"' && cr_is_name_value(json, hit - 1)) return SH_MAP_OLD_VARIABLES;
+        }
+    }
+    /* Rows of the member's "mods" part that name an "id" or a "bundle". */
+    if (sh_carrier_part(json, len, "mods", &from, &to) == 1) {
+        const char *cursor = json + from, *end = json + to, *elem;
+        size_t elem_len;
+        while (sh_carrier_array_next(&cursor, end, &elem, &elem_len) == 1) {
+            if (*elem != '{') continue;
+            if (sh_carrier_object_member(elem, elem + elem_len, "id", NULL, NULL) == 1 ||
+                sh_carrier_object_member(elem, elem + elem_len, "bundle", NULL, NULL) == 1)
+                return SH_MAP_OLD_ROWS;
+        }
+    }
+    return SH_MAP_OLD_NONE;
+}

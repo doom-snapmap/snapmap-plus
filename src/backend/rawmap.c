@@ -18,7 +18,6 @@
 #include "rawmap.h"
 #include "hook.h"
 #include "backend_log.h"
-#include "modlegacy.h"
 #include "map_carrier.h"
 #include "modmanifest.h"
 #include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
@@ -29,7 +28,6 @@
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "nav_regions.h"
-#include "map_shards.h"
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
 #include "commands.h"       /* sh_printf: the staged rawmap that opened in place of a chosen map */
 
@@ -252,20 +250,24 @@ static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap)
 
 static char *read_source_file(size_t *out_len) { return read_source_file_why(out_len, NULL, 0); }
 
-/* Convert or clean first-generation package carriers (DESIGN.md section 11):
- * converted packages become installed legacy bundles named by manifest rows,
- * everything else is stripped. Returns an owned process-heap buffer, or NULL
- * to keep the original on no change or failure. */
-static char *legacy_strip_guarded(const char *json, size_t len)
+/* A map in an earlier shape (map_carrier.h, sh_map_old_shape) is refused
+ * before anything reads it: one line, and the plain sentence held as the
+ * load's refusal (sh_modmanifest_load_refuse). Returns 1 when refused. */
+static int old_shape_refused(const char *json, size_t len)
 {
+    int shape;
     __try {
-        size_t out_len = 0;
-        if (!json || len == 0) return NULL;
-        return sh_modlegacy_process(json, len, &out_len);
+        shape = sh_map_old_shape(json, len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("LEGACY: conversion FAULTED; the map loads with its legacy rows as inert strings");
-        return NULL;
+        backend_log("CARRIER: the earlier-shape check FAULTED; the map is read as it is");
+        return 0;
     }
+    if (shape == SH_MAP_OLD_NONE) return 0;
+    backend_log(shape == SH_MAP_OLD_ROWS
+                    ? "CARRIER: map refused: its mod rows name mods the way earlier builds did; nothing was read"
+                    : "CARRIER: map refused: it carries the variables earlier builds wrote; nothing was read");
+    sh_modmanifest_load_refuse(SH_MAP_OLD_REFUSAL);
+    return 1;
 }
 
 /* Read the map manifest, keep it for the load, strip its rows before the
@@ -527,20 +529,20 @@ static void carrier_describe_guarded(const char *json, size_t len)
     }
 }
 
-/* Prepare the chosen JSON before native parsing: rebuild map-scoped
- * navigation state, read the map's Snapmap+ data (the "snapmap-plus" member,
- * else the legacy rows of each family), strip the legacy rows and retired
- * envelopes, and remove the member last. Each failed strip retains the
- * preceding buffer. Returns an owned process-heap buffer or NULL to use the
- * original.
+/* Prepare the chosen JSON before native parsing: refuse a map in an earlier
+ * shape (*refused set, NULL returned, nothing read), else rebuild map-scoped
+ * navigation state, read the map's Snapmap+ data from the "snapmap-plus"
+ * member and remove the member last. Each failed step retains the preceding
+ * buffer. Returns an owned process-heap buffer or NULL to use the original.
  */
-static char *prepare_map_buffer(const char *json)
+static char *prepare_map_buffer(const char *json, int *refused)
 {
-    char *legacy, *nav, *manifest, *settings, *current, *bare;
+    char *manifest, *settings, *current = NULL, *bare;
     size_t len = json ? strlen(json) : 0;
-    size_t nav_len = 0;
 
+    *refused = 0;
     if (len == 0) return NULL;
+    if (old_shape_refused(json, len)) { *refused = 1; return NULL; }
     carrier_describe_guarded(json, len);
 
     sh_navmesh_build_from_map(json, len);
@@ -548,20 +550,9 @@ static char *prepare_map_buffer(const char *json)
      * same way. A map with no marked volume must not inherit the last map's. */
     sh_nav_bake_set_map(json, len);
 
-    legacy = legacy_strip_guarded(json, len);
-    nav = sh_navmesh_strip(legacy ? legacy : json, legacy ? strlen(legacy) : len, &nav_len);
-    if (nav) {
-        if (legacy) HeapFree(GetProcessHeap(), 0, legacy);
-        current = nav;
-    } else current = legacy;
-    /* Last, so rows the legacy conversion wrote are read with the map's own. */
-    manifest = manifest_prepare_guarded(current ? current : json, current ? strlen(current) : len);
-    if (manifest) {
-        if (current) HeapFree(GetProcessHeap(), 0, current);
-        current = manifest;
-    }
-    /* The map's Snapmap+ settings rows (map_settings.h): held for the map and
-     * removed, so the editor's variables list never shows them. */
+    manifest = manifest_prepare_guarded(json, len);
+    if (manifest) current = manifest;
+    /* The map's Snapmap+ settings (map_settings.h), held for the map. */
     settings = settings_prepare_guarded(current ? current : json, current ? strlen(current) : len);
     if (settings) {
         if (current) HeapFree(GetProcessHeap(), 0, current);
@@ -740,12 +731,20 @@ int sh_rawmap_reopen_after_mods(char *note, size_t cap)
 static int deser_prepared(const char *json, void *out_map)
 {
     char *prepared;
+    int refused = 0;
     /* A read that is not a published map's is the editor's (My Maps, an opened
-     * map): a row whose build is gone is served by its key's installed build.
+     * map): a row whose build is gone is served by another build of its salt.
      * Play, the hub and rawmap loads were held by the gate before this parse. */
     sh_modmanifest_set_editor_load(g_parse_kind == SH_MODPUB_PARSE_OTHER);
-    prepared = prepare_map_buffer(json);
+    prepared = prepare_map_buffer(json, &refused);
     sh_modmanifest_set_editor_load(0);
+    if (refused) {
+        /* The engine never parses it: the open map keeps its settings, and the
+         * gates see a failed parse whose refusal note they say. */
+        sh_map_settings_loaded(0);
+        sh_modpublished_parse_seen(g_parse_kind, json, out_map, 0);
+        return 0;
+    }
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     /* The parsed map's settings become the open map's before anything selects them. */
     sh_map_settings_loaded(rc);

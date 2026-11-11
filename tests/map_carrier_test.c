@@ -1,7 +1,8 @@
 /* map_carrier_test -- the map's "snapmap-plus" root member (map_carrier.h):
  * found only at the root, read by part, stripped, written compact and last
  * with its parts in order, removed when it carries nothing, refused (read as
- * absent, still stripped) when malformed, and a map without it untouched. */
+ * absent, still stripped) when malformed, and a map without it untouched;
+ * the earlier-shape detector (sh_map_old_shape). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -25,7 +26,7 @@ static int g_failed, g_checks;
     "\"~type\":\"snapVarString_t\"}],\"~type\":\"idSnapVariables\"},\"version\":111,\"~type\":\"idSnapMap\""
 static const char ENGINE[] = ENGINE_HEAD "}";
 
-#define MODS "[{\"id\":\"a.b\",\"version\":\"1\",\"bundle\":\"x\",\"size\":1,\"names\":[]}]"
+#define MODS "[{\"mod\":\"aaaabbbb@x\",\"version\":\"1\",\"size\":1,\"names\":[]}]"
 #define SETTINGS "{\"render\":\"4;0\",\"bounds\":\"1;32671\"}"
 #define NAV "[{\"module\":\"a/b\",\"class\":\"monster48\",\"digest\":\"0123456789abcdef\",\"geom\":\"fedcba9876543210\",\"data\":[\"QUJD\",\"RUZH\"]}]"
 #define MEMBER(parts) ",\"snapmap-plus\":{\"format\":1" parts "}"
@@ -232,6 +233,47 @@ static void readers(void)
           sh_carrier_array_next(&cursor, cursor + 4, &elem, &len) == -1);
 }
 
+/* One pass names a map in an earlier shape: a variables.string name in a
+ * retired family, or a member row with "id" or "bundle". A family's text that
+ * is not a variable's name (prose, an entity name, a value) is not one. */
+static void old_shapes(void)
+{
+    static const char *const families[] = {
+        "smpkg.my_pack.0.1.0123456789abcdef", "smpbind.x.0123456789abcdef", "smpref.y.0123456789abcdef",
+        "smpmod1.0.1", "smpprod1.v0.2.1", "smp.render.v1", "smp.bounds.v1",
+        "smnav1.cat/mod.monster48.0.1.0123456789abcdef.fedcba9876543210"
+    };
+    char map[1024];
+    size_t i;
+    printf("-- earlier shapes: each family and an id row is named; the current shape passes\n");
+    CHECK(sh_map_old_shape(ENGINE, sizeof ENGINE - 1) == SH_MAP_OLD_NONE);
+    for (i = 0; i < sizeof families / sizeof families[0]; i++) {
+        _snprintf_s(map, sizeof map, _TRUNCATE,
+                    "{\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[{\"info\":{\"name\" : \"%s\","
+                    "\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"QUJD\",\"~type\":\"snapVarString_t\"}]}}", families[i]);
+        CHECK(sh_map_old_shape(map, strlen(map)) == SH_MAP_OLD_VARIABLES);
+    }
+    /* The same words elsewhere are not variables. */
+    {
+        static const char prose[] = "{\"entities\":[{\"note\":\"smpmod1.0.1\",\"inherit\":\"smp.render.v1\"}],"
+                                    "\"variables\":{\"string\":[{\"info\":{\"name\":\"door\"},\"initialValue\":\"smnav1.x\"}]}}";
+        CHECK(sh_map_old_shape(prose, sizeof prose - 1) == SH_MAP_OLD_NONE);
+    }
+    /* Member rows: the current row passes; an id or a bundle row is named. */
+    {
+        static const char now[] = ENGINE_HEAD MEMBER(",\"mods\":" MODS) "}";
+        static const char id_row[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"id\":\"a.b\",\"version\":\"1\",\"size\":1}]") "}";
+        static const char bundle_row[] = ENGINE_HEAD MEMBER(",\"mods\":[" "{\"mod\":\"aaaabbbb@x\",\"size\":1},"
+                                                            "{\"bundle\":\"x\",\"size\":1}]") "}";
+        static const char names_only[] = ENGINE_HEAD MEMBER(",\"mods\":[{\"mod\":\"aaaabbbb@x\",\"names\":[\"id\",\"bundle\"]}]") "}";
+        CHECK(sh_map_old_shape(now, sizeof now - 1) == SH_MAP_OLD_NONE);
+        CHECK(sh_map_old_shape(id_row, sizeof id_row - 1) == SH_MAP_OLD_ROWS);
+        CHECK(sh_map_old_shape(bundle_row, sizeof bundle_row - 1) == SH_MAP_OLD_ROWS);
+        CHECK(sh_map_old_shape(names_only, sizeof names_only - 1) == SH_MAP_OLD_NONE);
+    }
+    CHECK(!strcmp(SH_MAP_OLD_REFUSAL, "This map was saved in a format this version does not read."));
+}
+
 int main(void)
 {
     printf("map_carrier_test\n");
@@ -240,6 +282,7 @@ int main(void)
     placement();
     malformed();
     readers();
+    old_shapes();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

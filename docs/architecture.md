@@ -106,11 +106,17 @@ moves the saved bytes unchanged, and a vanilla editor save drops the member.
 
 Load: every parse the `DeserializeFromJson` detour sees (`rawmap.c`
 `prepare_map_buffer`: My Maps, a published read, a joiner's download, a rawmap)
-has each family read its part from the raw text -- the member's part when it
-has one, else that family's legacy string variables (`smpmod1.`,
-`smp.render.v1`, `smp.bounds.v1`, `smnav1.`), which are removed -- and the
-retired `smpprod1.`, `smpkg.`, `smpbind.` and `smpref.` rows are removed as
-before. The member is stripped last, so the engine never sees it; a member that
+first asks `sh_map_old_shape` (`map_carrier.c`) whether the text is in an
+earlier shape: a `variables.string` name in one of the families earlier builds
+wrote (`smpkg.`, `smpbind.`, `smpref.`, `smpmod1.`, `smpprod1.`,
+`smp.render.v1`, `smp.bounds.v1`, `smnav1.`), or a member row naming an `id`
+or a `bundle`. Such a map is refused before anything reads it: the engine never
+parses it (the detour answers a failed parse), the open map keeps its settings
+and manifest, the text is not changed, one `CARRIER: map refused:` line is
+logged and the load's refusal note is "This map was saved in a format this
+version does not read." (`sh_modmanifest_load_refuse`), which the player hears
+as the other refusals are. Otherwise each family reads its part from the
+member. The member is stripped last, so the engine never sees it; a member that
 does not read (not an object, a format other than 1, a part of the wrong type,
 two members) is logged as refused, read as absent and still removed, and the
 map loads. One `CARRIER: map read:` line names the parts a map carries.
@@ -120,9 +126,12 @@ settings, navigation and manifest steps each put their part with
 `sh_carrier_put`; the member is written compact and last at the root, with its
 parts in the order mods, settings, nav. No step writes a variable or touches
 `variables.allocCount`. A map with nothing to carry has no member and saves as
-exactly the engine's bytes. A legacy settings row an author's variable follows
-cannot be removed without moving that variable's index, so it stays and is
-rewritten to the value that reads as off; the member carries the setting.
+exactly the engine's bytes.
+
+Earlier shapes are the installer's store tool's: the readers of every family
+above and the writer of the current member live in `map_old.c` (with
+`map_legacy_payload.c`), built only by `src/store/build.ps1` and never linked
+into the DLL (`map_old.h` describes each family and the conversion).
 
 Navigation chunks: the engine's lexer sees the member only where Snapmap+ is
 not installed. Measured live on Vulkan, an undeclared root member holding one
@@ -138,18 +147,13 @@ panel, in the Snapmap+ tab. The Unlock View Distance group owns an
 Apply/Cancel draft (one toggle) tied to the map open in the editor. The two
 built-in map settings are held by `map_settings.c` as the open map's state,
 never in the engine's variable lists: every map parse reads them from the map's
-member (`"settings":{"render":...,"bounds":...}`, see The map carrier) or, in a
-map an earlier build saved, from its `smp.render.v1` / `smp.bounds.v1` string
-variables, which are removed before the engine parses, so the Toybox variables
-list never shows them; every save writes them into the member. On saves
-`render` = `4;0`; Off saves nothing. A legacy row an author's variable follows
-keeps its index: it stays in place, is read when the member has no settings,
-and is rewritten at the first save to the value that reads as off (`4;8192`,
-`1;0`), the member carrying the setting. Applying a
+member (`"settings":{"render":...,"bounds":...}`, see The map carrier), so the
+Toybox variables list never shows them; every save writes them into the
+member. On saves `render` = `4;0`; Off saves nothing. Applying a
 change marks the map modified with one undo step; undo does not revert it.
 Versions 1 to 4 stored a distance: 8192 and disabled version 2 read as off, any
-other distance as on, and an on value saves as `4;0`. Malformed or duplicate
-metadata reads as off. Map deserialization clears the previous runtime
+other distance as on, and an on value saves as `4;0`. A value or a settings
+part that does not read is off. Map deserialization clears the previous runtime
 selection and selects the parsed map's settings; editor-to-play conversion
 selects the open map's. A locked value copy crosses to rendering at
 the blended environment's single maxViewDistance read: off returns the native
@@ -685,11 +689,12 @@ These backend files share the work:
   decision and `sh_mods held`.
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
-  carrier); it still reads and removes the legacy `smpmod1.<index>.<count>`
-  string variables earlier builds wrote, and the next save converts them.
-  `modlegacy.c` owns the retired `smpkg.` carriers, as below. A load and a save also remove any
-  `smpprod1.<version>` string variable an earlier development build recorded
-  (one log line per map); nothing writes or reads one.
+  carrier). A row is `{"mod":"<salt>@<build hash>","name","version","size",
+  "names":[...],"attached"?,"choices"?}`: the salt names the mod, the hash its
+  build, and `name` and `version` are the author's, for display. Rows merge by
+  salt and build; a row naming an `id` or a `bundle` does not parse (the parse
+  detour has already refused such a map). The display name of a placed mod's
+  row comes from the build that serves it at the save (the row resolver).
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
   folder (two folders declaring one id both flagged, a package a map delivered
   listed like any other) with what each carries, marks each installed or
@@ -831,29 +836,12 @@ the copy's hash as an alias of it. A folder built again in place with new
 content (the rebuild rule, `sh_mods build`, an install of a folder of the store
 itself or a migration's target) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
-current one. An author's own map follows their own folder with no prompt
-(owner 2026-11-09; `sh_modserve_row_follow`, bound through
-`sh_modmanifest_set_follow`): at every editor load (a map opened in the
-editor, a My Maps play) a row whose hash is an alias of a folder of this
-machine's own (product block origin by-hand or none, `install` or
-`migration`) is rewritten to that folder's current build before the
-listing, with one `MODS: map: <key>: follows its own folder` line; the Mods
-tab then shows it and the next save writes it, as the save already writes
-rows from the serving index. An alias of a folder the product received with
-a map (`imported`, `download`, `delivery`) still serves the pin but never
-rewrites it, and a build installed beside another of its key (no alias) is
-never moved: a downloaded map keeps exactly what it pins. A published map this
-machine published is treated at launch like a My Maps load (owner 2026-11-10):
-when the published gate sees its item (a claim of this machine's is keyed by the
-item, `modsync_claim_lookup`, or the record's `links` section names it,
-`sh_modpublish_item_linked`), each row of the current manifest whose key one of
-this machine's own folders builds is rewritten to that folder's current build
-(`sh_modmanifest_current_follow` with `sh_modserve_row_follow_own`: the newest
-admitted, non-legacy own build of the key) before anything counts what is
-missing, with one `MODS: map: <key>: follows its own folder, your published map
-'<item>' (<old16> -> <new16>); nothing is downloaded for it` line, so nothing is
-fetched for those rows and the launch's listing names the own build. A key no
-own folder builds is fetched as for any map, and a stranger's map is unchanged. There is no
+current one. An author's own map follows their own root folders with no prompt
+(owner 2026-11-09, 2026-11-10): every row is activated through the build
+`sh_modserve_row_build` answers for it, which for an editor load, a My Maps play
+and a published map this machine published is the root folder of the row's
+salt whatever hash the row pins, and the next save writes that build's hash, as
+the save already writes rows from the serving index. There is no
 upgrade action. The aliases stay flat: an alias naming the old hash is re-pointed
 at the new one, so one hop always resolves. After each pass of the rebuild rule
 the store drops every alias whose target no folder builds to any more (a
@@ -1700,30 +1688,11 @@ start again), or not applied yet. Packages converted from the
 retired formats keep only the two blacklist gates (below): their requirements
 were never accepted by a player installing them.
 
-On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
-A complete carrier whose ZIP and `package.json` read is unpacked once into an
-ordinary mod folder `mods\<id>\` (older `decls/`, `images/` and `shaders/`
-layouts moved under `assets/`; the package's keys become the author block, the
-legacy record and its grandfathered shadows seed the product block), built into
-a bundle and named by a manifest row; a conversion an installed mod of the same
-id already serves is dropped and that mod answers;
-the serving table is then rebuilt when that bundle is not in it yet, so the same
-parse can activate it. A first-generation package served every file under
-`assets/`; a file a bundle cannot carry (a type outside the bundle whitelist,
-such as the `.materials.txt` sidecars every beta.19 model pack shipped or a
-`.bswf` movie outside `generated/swf/`, an empty file, a path the request rules refuse) is left out and
-counted on the `LEGACY: unpacked` line instead of refusing the package, and a
-cvar requirement other than the two supported blacklist gates is left out the
-same way. A beta.16-19 carrier names its tree (`smpkg.delivery.<tree>`), so
-before converting one the converter also looks for a mod folder whose
-`mod.json` legacy record has that key (or the carrier's digest) and for a
-bundle the overrides migration built from the same tree (the record's
-`migration` section, `trees`); either answers the carrier without a second
-copy. Any other carrier, and the unreleased `smpbind.` and
-`smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
-the navigation strip, `modmanifest.c` reads the manifest rows (the member's
-`mods`, else the legacy `smpmod1.` rows, which it removes) before the engine
-parses the map, and activates the bundles they name.
+On every parse the `DeserializeFromJson` detour sees, a map in an earlier
+shape (a retired package carrier among them) is refused first (The map
+carrier); the parse never converts or installs anything. `modmanifest.c` reads
+the manifest rows from the member's `mods` part before the engine parses the
+map, and activates the builds that serve them.
 The editor palette is built once per process, and the map validator
 (`RepairAndMigrate`) looks every placed entity up in it, so after activation
 the same step checks the named bundles' editor rows against the built palette.
@@ -1744,8 +1713,8 @@ editor-time content, see the asset rule) and each bundle their needs reach,
 and one per map-level row of the current manifest;
 with an empty table, no rows in the map and no map-level row
 it returns at once and the save is the engine's own bytes. A map-level row is
-written for the build that serves its mod (the bundle resolver modui.c binds,
-`sh_modserve_bundle_serving`), and the current manifest follows the rename; a
+written for the build that serves its mod (the row resolver modui.c binds,
+`sh_modserve_row_build`), and the current manifest follows the rename; a
 row of a mod that is not installed is kept as it is.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
@@ -1996,10 +1965,9 @@ the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
   first-generation packages (hell guard, spider mastermind, rocks, Olivia):
   their other files serve only where a map's row declares them, as every
   mod's do (owner 2026-11-09: the grandfathered serving rule is gone, and
-  nothing a player reads says legacy; a package converts at install or map
-  load through `modlegacy.c` and `modmigrate.c`, a folder built under earlier
-  builder rules rebuilds at boot, and a map with string-variable rows
-  migrates at its next save);
+  nothing a player reads says legacy; a package converts at install through
+  `modlegacy.c` and `modmigrate.c`, a folder built under earlier builder
+  rules rebuilds at boot, and a map in an earlier shape is refused at load);
 - otherwise, in the editor and with no map open: the names under its key, for
   the one build of the key that serves with no map (the player's own folder,
   else the newest; the Toybox offers its rows; placing one
@@ -2479,7 +2447,7 @@ like a placed mod's.
 ### Published maps and missing mods
 
 A published map is native by default: the product touches its launch only when
-its text carries a manifest row (in its member, or a legacy `smpmod1.` row) the asset rule does not find served (no
+its text carries a manifest row (in its member) the asset rule does not find served (no
 installed folder at the row's hash, also when the key is installed at another
 build, or one that lacks a name the row lists). Everything else reaches the
 engine unchanged: vanilla maps, and maps whose rows the installed folders at
