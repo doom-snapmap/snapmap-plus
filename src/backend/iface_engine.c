@@ -18,6 +18,7 @@
 #include "engine_globals.h"
 #include "backend_log.h"
 #include "typeinfo.h"
+#include "decl_text.h"
 #include "preview.h"
 #include "imgpreview.h"
 #include "megapreview.h"
@@ -847,7 +848,41 @@ static const char *slot_get_displayname(sh_iface *self, int id, char *buf, int c
     return buf;
 }
 
-/* Copy canonical source text used by Save to Decl. */
+/* Reduce a whole prepared text in buf to the entity's own state: the
+ * prepared text merges the inherit chain in, so without this the Decl Text
+ * pane shows the inherit's members as the entity's own and Save to Decl
+ * writes them back, which keeps the old inherit's values after the inherit
+ * changes. Members equal to the inherit's prepared text are dropped, as the
+ * engine drops them when it reads a saved entity. Any failure keeps buf. */
+static void declsource_own_state(void *defsub, char *buf, int len)
+{
+    const char *inherit = NULL;
+    __try { inherit = *(const char * const *)((const uint8_t *)defsub + DEFSUB_INHERIT_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { inherit = NULL; }
+    char name[512];
+    name[0] = '\0';
+    if (inherit) {
+        __try { lstrcpynA(name, inherit, (int)sizeof name); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { name[0] = '\0'; }
+    }
+    if (!name[0]) return;
+    size_t pcap = 4u * 1024u * 1024u;
+    char *parent = (char *)malloc(pcap);
+    char *own = (char *)malloc((size_t)len + 1u);
+    if (parent && own) {
+        size_t plen = sh_typeinfo_inherit_text(name, parent, pcap);
+        size_t olen = 0;
+        if (plen > 0 &&
+            sh_decl_text_own_state((const unsigned char *)buf, (size_t)len,
+                                   (const unsigned char *)parent, plen,
+                                   own, (size_t)len + 1u, &olen))
+            memcpy(buf, own, olen + 1u);
+    }
+    free(parent);
+    free(own);
+}
+
+/* Copy the entity's own decl text, which Save to Decl writes back. */
 static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
@@ -859,13 +894,16 @@ static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int ca
     if (!ie_read_s32((const uint8_t *)defsub + DEFSUB_SRC_LEN_OFF, &len)) return buf;
     if (!ie_read_ptr((const uint8_t *)defsub + DEFSUB_SRC_PTR_OFF, &data) || data == NULL) return buf;
     if (len <= 0) return buf;
+    int whole = len <= cap - 1;
     if (len > cap - 1) len = cap - 1;
     __try {
         const char *p = (const char *)data;
         int i = 0;
         for (; i < len; i++) buf[i] = p[i];
         buf[i] = '\0';
-    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; whole = 0; }
+    /* A truncated copy stays as it is, so a growing caller still sees it fill. */
+    if (whole) declsource_own_state(defsub, buf, len);
     return buf;
 }
 
