@@ -2913,14 +2913,15 @@ static void ui_budget_poll()
 
 /* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
  * document when the tab opens and on Refresh (a modsAction rescan; modsList only from the
- * mockup), and for an action (modsAction); nothing polls. Every slot operation that reads or changes the store runs on DOOM's main thread, so it
- * goes through run_on_main, from a short-lived worker thread rather than this one: an install
- * rehashes every file and can take seconds, and the window must keep painting meanwhile. While it
- * runs, run_on_main is occupied, so other edits from this window are refused as when the game is
- * busy. The worker touches no page state; it hands its documents back through g_mods_done and the
- * think loop posts them (ui_mods_finish), the same handoff as the rawmap picker. Each job ends
- * with a fresh document, so the list follows every action without being asked. */
-#define UI_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
+ * mockup), and for an action (modsAction); nothing polls. Each job runs on a short-lived worker
+ * thread rather than this one. Install, New mod and Refresh do their file work (copies, salts,
+ * builds, which can take minutes) on that worker, off DOOM's main thread, with no time limit; only
+ * their game part (APPLY) and every other operation run on DOOM's main thread through
+ * run_on_main. The worker touches no page state: it reports its phase through g_mods_phase, which
+ * the think loop posts as modsProgress, and hands its documents back through g_mods_done, which
+ * the think loop posts (ui_mods_finish), the same handoff as the rawmap picker. Each job ends with
+ * a fresh document, so the list follows every action without being asked. */
+#define UI_MODS_START_MS   8000   /* how long a job waits for the game to start a main-thread call */
 #define UI_MODS_DOC_MAX    (64 * 1024 * 1024)
 
 struct UiModsJob {
@@ -2931,11 +2932,15 @@ struct UiModsJob {
     int         list_rc;
     unsigned    list_gen;  /* the backend's generation when the document was built */
     bool        pushed;    /* a document the page did not ask for (ui_mods_push_tick) */
+    bool        apply_pending;   /* the file work landed; the game did not start its part in time */
     std::string run_doc, list_doc;
 };
 static UiModsJob    g_mods_job;
 static volatile LONG g_mods_busy = 0;
 static volatile LONG g_mods_done = 0;
+/* The running job's phase for the page: 0 none, 1 the file work, 2 the game's part. */
+static volatile LONG g_mods_phase = 0;
+static LONG          g_mods_phase_posted = 0;
 /* The pushed refresh: once the page has asked for anything (modsList, or any modsAction, which
  * is all the shipped page sends), a change the window did not make
  * (a console verb, `sh_mods map add` or `uninstall`, the undo clear an Uninstall owes) moves the
@@ -3051,6 +3056,12 @@ static bool ui_pick_mod_folder(std::wstring &out)
 
 static bool ui_mods_read_only(int action);   /* fwd: below the action names */
 
+/* The actions whose file work runs on the worker itself (modui.h): never through run_on_main. */
+static bool ui_mods_file_action(int action)
+{
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN;
+}
+
 static DWORD WINAPI ui_mods_thread(LPVOID)
 {
     UiModsJob &job = g_mods_job;
@@ -3064,7 +3075,26 @@ static DWORD WINAPI ui_mods_thread(LPVOID)
         if (ok) job.arg = sh_webview_json::to_utf8(picked);
         else job.run_rc = -3;
     }
-    if (job.action && job.run_rc != -3) {
+    if (job.action && job.run_rc != -3 && ui_mods_file_action(job.action)) {
+        sh_mods_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODS_RUN;
+        call.action = job.action;
+        call.arg = job.arg.c_str();
+        InterlockedExchange(&g_mods_phase, 1);
+        job.run_rc = (ui_mods_slot(&call) == 1 && ui_mods_fetch(job.run_doc)) ? 1 : 0;
+        if (job.run_rc == 1 && job.run_doc.find("\"apply\":true") != std::string::npos) {
+            /* The game's part: the serving index and the refresh, on DOOM's main thread. */
+            UiModsMain m;
+            std::string done;
+            memset(&m, 0, sizeof m);
+            m.call.op = SH_MODS_RUN;
+            m.call.action = SH_MODS_ACT_APPLY;
+            InterlockedExchange(&g_mods_phase, 2);
+            if (ui_mods_on_main(&m) && m.rc == 1 && ui_mods_fetch(done)) job.run_doc = done;
+            else job.apply_pending = true;
+        }
+    } else if (job.action && job.run_rc != -3) {
         UiModsMain m;
         memset(&m, 0, sizeof m);
         m.call.op = SH_MODS_RUN;
@@ -3091,7 +3121,6 @@ static const wchar_t *ui_mods_action_name(int action)
     case SH_MODS_ACT_INSTALL:     return L"install";
     case SH_MODS_ACT_RESCAN:      return L"rescan";
     case SH_MODS_ACT_PALETTE:     return L"palette";
-    case SH_MODS_ACT_REBUILD:     return L"rebuild";
     case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
     case SH_MODS_ACT_MAP_REMOVE:         return L"mapRemoveMod";
@@ -3116,7 +3145,6 @@ static int ui_mods_action_code(const std::wstring &name)
     if (name == L"install")    return SH_MODS_ACT_INSTALL;
     if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
     if (name == L"palette")    return SH_MODS_ACT_PALETTE;
-    if (name == L"rebuild")    return SH_MODS_ACT_REBUILD;
     if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
     if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
     if (name == L"mapRemoveMod")        return SH_MODS_ACT_MAP_REMOVE;
@@ -3171,6 +3199,7 @@ static bool ui_mods_begin(int action, bool pick, const std::string &arg)
     g_mods_job.pick = pick;
     g_mods_job.arg = arg;
     g_mods_job.pushed = false;
+    g_mods_job.apply_pending = false;
     g_mods_job.list_gen = 0;
     g_mods_job.run_doc.clear();
     g_mods_job.list_doc.clear();
@@ -3199,11 +3228,12 @@ static void ui_mods_finish()
         if (job.run_rc == -3)
             ui_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
         else if (job.run_rc == 1)
-            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
+            ui_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name +
+                         (job.apply_pending ? L"\",\"applyPending\":true,\"data\":" : L"\",\"data\":"), job.run_doc, L"}");
         else if (job.run_rc == -1)
-            ui_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
+            ui_mods_post_result(name, false, L"The game did not take the request. Try again with the editor open.", nullptr);
         else
-            ui_mods_post_result(name, false, L"The mods store refused this action. Refresh the tab and try again; if it keeps failing, use Send feedback.", nullptr);
+            ui_mods_post_result(name, false, L"Snapmap+ could not do that. Try again; if it keeps failing, use Send feedback.", nullptr);
         char l[160];
         _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
         ui_log(l);
@@ -3222,8 +3252,22 @@ static void ui_mods_finish()
         : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
     job.run_doc.clear();
     job.list_doc.clear();
+    InterlockedExchange(&g_mods_phase, 0);
+    g_mods_phase_posted = 0;
     InterlockedExchange(&g_mods_done, 0);
     InterlockedExchange(&g_mods_busy, 0);
+}
+
+/* The running job's phase, on the UI thread: the page shows what it is doing (modsProgress). */
+static void ui_mods_progress_tick()
+{
+    LONG phase = InterlockedCompareExchange(&g_mods_phase, 0, 0);
+    if (!phase || phase == g_mods_phase_posted || InterlockedCompareExchange(&g_mods_done, 0, 0)) return;
+    g_mods_phase_posted = phase;
+    std::wstring m = L"{\"kind\":\"modsProgress\",\"action\":\"";
+    m += ui_mods_action_name(g_mods_job.action);
+    m += phase == 1 ? L"\",\"phase\":\"files\"}" : L"\",\"phase\":\"game\"}";
+    ui_post_json(m.c_str());
 }
 
 /* The prefabs folder watcher (folder_watch.h). One thread watches the prefabs folder
@@ -4503,6 +4547,7 @@ static void ui_think_loop()
         LeaveCriticalSection(&g_loop->mtx);
         /* The prefabs folder watcher: the Prefabs list follows the disk. */
         ui_watch_tick();
+        ui_mods_progress_tick();
         ui_mods_push_tick();
 
         if (did_save) {

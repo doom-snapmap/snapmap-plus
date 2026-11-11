@@ -1,6 +1,6 @@
 /* The Mods tab: the player's mods and the mods downloaded maps brought, and the selected mod's
    details, with the few actions a player uses (install a folder, make a new mod, refresh, open the
-   mods folder, use a mod in the open map or remove it from the map, rebuild, uninstall). Browser
+   mods folder, use a mod in the open map or remove it from the map, uninstall). Browser
    global + CommonJS test export. Pure ASCII.
 
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread
@@ -45,12 +45,14 @@ var modsTab = (function () {
   var IN_MAP_GLYPH = {tone: 'map', icon: 'map', label: IN_MAP_TEXT};
   /* There is no folder watcher: Refresh is how a changed mod is read again. */
   var REFRESH_TEXT = "After you change a mod's files, press Refresh to see the change.";
+  /* An action whose files landed while the game did not take its part (the host's applyPending). */
+  var APPLY_PENDING_TEXT = 'The game has not taken the change yet; press Refresh to bring it in.';
   var EMPTY_TEXT = 'No mods yet. Make your own with New mod, or install a mod folder with the download button.';
   /* The two *Preview actions are dry runs that answer with the consequence list the confirmation
      shows. mapAddMod attaches the selected mod to the open map without placing anything (a
      map-level row); it removes nothing, so it has no dry run. Uninstall moves the folder to the
      Windows Recycle Bin. */
-  var ACTIONS = ['install', 'rescan', 'openFolder', 'rebuild', 'mapAddMod',
+  var ACTIONS = ['install', 'rescan', 'openFolder', 'mapAddMod',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'chooseRegistry',
                  'modFiles', 'modFileText', 'newMod'];
   /* The Files view's two reads change nothing: the host answers them without a fresh document. */
@@ -108,7 +110,6 @@ var modsTab = (function () {
   var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
   var PLACE_USE_TITLE = 'This mod came with a downloaded map; only that map uses it';
-  var PLACE_REBUILD_TITLE = 'This mod came with a downloaded map and is kept exactly as that map needs it';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
@@ -621,8 +622,10 @@ var modsTab = (function () {
       s.textContent = str(text);
       s.className = 'mods-status' + (tone ? ' ' + tone : '');
     }
-    var BUSY_TEXT = {install: 'Installing...', rescan: 'Reading the mods folder...',
-                     rebuild: 'Building the mod again...',
+    /* Install, New mod and Refresh build off the game's thread for as long as it takes; the host
+       says when the game takes the change (modsProgress, phase "game"). */
+    var GAME_PHASE_TEXT = 'Bringing the change into the game...';
+    var BUSY_TEXT = {install: 'Installing and building...', rescan: 'Reading your mods and building what changed...',
                      mapRemoveModPreview: 'Reading what removing it changes...', uninstallPreview: 'Reading what uninstalling it changes...',
                      mapRemoveMod: 'Removing the mod from the map...', uninstall: 'Uninstalling...',
                      mapAddMod: 'Adding the mod to the map...', chooseRegistry: 'Saving the choice...',
@@ -636,16 +639,10 @@ var modsTab = (function () {
 
     function renderButtons() {
       var b = selectedMod(), sel = !!b;
-      ['modsInstallBtn', 'modsFolderBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn', 'modsRebuildBtn'].forEach(function (id) {
+      ['modsInstallBtn', 'modsFolderBtn', 'modsNewBtn', 'modsRefreshBtn', 'modsUninstallBtn'].forEach(function (id) {
         var n = byId(id);
-        if (n) n.disabled = !!busy || (!sel && (id === 'modsUninstallBtn' || id === 'modsRebuildBtn'));
+        if (n) n.disabled = !!busy || (!sel && id === 'modsUninstallBtn');
       });
-      /* A downloaded map's mod is kept exactly as that map needs it: it is not rebuilt. */
-      var rb = byId('modsRebuildBtn');
-      if (rb) {
-        if (sel && b.place) rb.disabled = true;
-        rb.title = sel && b.place ? PLACE_REBUILD_TITLE : 'Build the selected mod again from its folder';
-      }
       /* Files, the details head's left-most button (owner 2026-11-09), needs only a selection. */
       var fb = byId('modsFilesBtn');
       if (fb) fb.disabled = !sel;
@@ -683,7 +680,7 @@ var modsTab = (function () {
     function setBusy(action) {
       busy = action || '';
       renderButtons();
-      if (busy && !(busy === 'rescan' && quiet)) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
+      if (busy) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
     }
 
     /* ---- the list: two kinds of groups, every row shown mounted. "Your mods" holds the player's
@@ -1598,8 +1595,10 @@ var modsTab = (function () {
       env.post(m);
       return true;
     }
-    /* Reread the folder: a rescan, which the host follows with a fresh document. Quiet: its result
-       only shows when it fails. A running action already ends with a fresh document. */
+    /* Refresh, the one rescan: every changed folder is built again and the change brought into the
+       game; the host follows it with a fresh document. Quiet: its result shows only when it failed
+       or when a change still needs something (a restart, the next map open). A running action
+       already ends with a fresh document. */
     function refresh() {
       if (busy || waiting) return false;
       waiting = true;
@@ -1620,8 +1619,6 @@ var modsTab = (function () {
       } else {
         model = normalize(d.data);
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
-        /* A pushed document (a console verb changed the store or the open map) keeps the status line. */
-        if (!busy && !d.pushed) setStatus('', '');
       }
       renderAll();
     }
@@ -1634,11 +1631,14 @@ var modsTab = (function () {
       quiet = false;
       setBusy('');
       if (action === 'install' && data.cancelled) { setStatus('', ''); return; }
+      /* The file work landed but the game did not take its part yet: Refresh brings it in. */
+      if (d.applyPending) message = (message ? message + ' ' : '') + APPLY_PENDING_TEXT;
       if (wasQuiet) {
         /* A failed rescan is followed by a document unless the host cannot reach the backend at all. */
         waiting = false;
         if (!ok && !loaded) { loaded = true; lastError = message || 'The mods list is unavailable.'; renderAll(); }
-        if (!ok) setStatus(message, 'err');
+        setStatus(message, ok ? (message ? 'ok' : '') : 'err');
+        if (message) env.toast(message, ok ? 'ok' : 'err');
         return;
       }
       if (action === 'mapRemoveModPreview' || action === 'uninstallPreview') {
@@ -1692,7 +1692,6 @@ var modsTab = (function () {
       });
       on('modsMapModal', 'keydown', onModalKey);
       on('modsMapModal', 'mousedown', function (e) { if (e.target === byId('modsMapModal')) closeMap(); });
-      on('modsRebuildBtn', 'click', function () { var b = selectedMod(); if (b && !b.place) act('rebuild', b.key); });
       on('modsRefreshBtn', 'click', function () { refresh(); });
       on('modsFilesBtn', 'click', function () { var b = selectedMod(); if (b) openFiles(b.key, byId('modsFilesBtn')); });
       on('modsFilesModal', 'keydown', onFilesKey);
@@ -1738,6 +1737,7 @@ var modsTab = (function () {
         if (!d || typeof d !== 'object') return false;
         if (d.kind === 'mods') { onMods(d); return true; }
         if (d.kind === 'modsActionResult') { onResult(d); return true; }
+        if (d.kind === 'modsProgress') { if (busy && d.phase === 'game') setStatus(GAME_PHASE_TEXT, 'busy'); return true; }
         return false;
       },
       state: function () {
@@ -1751,6 +1751,7 @@ var modsTab = (function () {
   }
 
   return {STATES: STATES, STATUS: STATUS, ACTIONS: ACTIONS, YOUR_MODS: YOUR_MODS, READY_TEXT: READY_TEXT, REFRESH_TEXT: REFRESH_TEXT,
+          APPLY_PENDING_TEXT: APPLY_PENDING_TEXT,
           EMPTY_TEXT: EMPTY_TEXT, BORROWS_NOTE: BORROWS_NOTE, NEEDS_NOTE: NEEDS_NOTE, EDITOR_ONLY_NOTE: EDITOR_ONLY_NOTE,
           IN_MAP_TEXT: IN_MAP_TEXT, IN_MAP_GLYPH: IN_MAP_GLYPH, compareMods: compareMods, placeText: placeText,
           sameFilesText: sameFilesText, bareName: bareName, COPY_ID_TITLE: COPY_ID_TITLE,

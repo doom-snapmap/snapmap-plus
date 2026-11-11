@@ -5,8 +5,7 @@
  * state), the main-thread refusal, Refresh's result, an install through the
  * tab, a hand-made folder salted at Refresh, a copy made a mod of its own, the
  * informational same-files hint, the plain causes of a failed build and of
- * folders in an earlier shape, a downloaded map's place group, Rebuild (a
- * place folder refused), the open map's rows by salt with the asset rule's
+ * folders in an earlier shape, a downloaded map's place group, the open map's rows by salt with the asset rule's
  * states, Use in this map, Remove from map and Uninstall with their dry runs
  * against a fake editor, the console verbs with their --yes gate, the Files
  * view, New mod (the message saying Refresh picks up edits), the doctor, the
@@ -846,7 +845,8 @@ int main(int argc, char **argv)
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
     CHECK(sh_modui_list() == -1);
-    CHECK(sh_modui_run(SH_MODS_ACT_RESCAN, NULL) == -1);
+    CHECK(sh_modui_run(SH_MODS_ACT_MAP_ADD, "x") == -1);
+    CHECK(sh_modui_run(SH_MODS_ACT_UNINSTALL, "x") == -1);
     CHECK(sh_modui_doctor(0, doctor_line, NULL) == -1);
     {
         sh_mods_call call;
@@ -860,20 +860,43 @@ int main(int argc, char **argv)
     }
     g_main = 1;
 
-    printf("-- Refresh: the result carries what the refresh did in the game\n");
+    printf("-- Refresh: always says what a change still needs (a restart, the next map open), else nothing\n");
     g_refresh_mode = 1;
     g_refreshes = 0;
     doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
     CHECK(g_refreshes == 1);
-    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true"));
-    CHECK(has(doc, "In the game: 3 decl(s) re-parsed, 1 model(s) and image(s) reloaded."));
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"Some of the changes take effect only after you restart DOOM.\""));
     CHECK(has(doc, "\"refresh\":{\"reparsed\":3,\"reloaded\":1,\"needsMapReload\":2,\"needsRestart\":1,"));
+    CHECK(!has(doc, "decl(s)") && !has(doc, "\"note\"") && doc_prose_ok(doc));
+    free(doc);
+    g_refresh_mode = 2;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"message\":\"Some of the changes take effect when you are back in the editor.\""));
     free(doc);
     g_refresh_mode = 0;
     doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
-    CHECK(has(doc, "Mods folder read again: 0 mods in use."));
-    CHECK(!has(doc, "In the game:") && doc_prose_ok(doc));
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"\"") && doc_prose_ok(doc));
     free(doc);
+
+    printf("-- off the main thread: the file work runs there with no time limit, the game's part waits for APPLY\n");
+    g_main = 0;
+    g_refreshes = 0;
+    g_refresh_mode = 1;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"\"") && has(doc, "\"apply\":true"));
+    CHECK(g_refreshes == 0 && !has(doc, "\"refresh\""));
+    free(doc);
+    CHECK(sh_modui_run(SH_MODS_ACT_APPLY, NULL) == -1);   /* the game's part is the main thread's */
+    g_main = 1;
+    doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+    CHECK(g_refreshes == 1);
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true,\"message\":\"Some of the changes take effect only after you restart DOOM.\""));
+    CHECK(has(doc, "\"refresh\":{") && !has(doc, "\"apply\""));
+    free(doc);
+    doc = run_doc(SH_MODS_ACT_APPLY, NULL);   /* nothing owed */
+    CHECK(has(doc, "\"action\":\"apply\",\"ok\":true") && g_refreshes == 1);
+    free(doc);
+    g_refresh_mode = 0;
     {
         sh_modui_engine e;
         memset(&e, 0, sizeof e);
@@ -881,13 +904,14 @@ int main(int argc, char **argv)
         sh_modui_bind(&e);   /* no rescan bound in a SH_MODUI_PURE build */
         g_refreshes = 0;
         doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
-        CHECK(has(doc, "\"ok\":false") && !has(doc, "\"refresh\"") && g_refreshes == 0);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"The game cannot read the mods folder again from here.\""));
+        CHECK(!has(doc, "\"refresh\"") && g_refreshes == 0);
         free(doc);
         bind_fakes();
     }
     /* the retired action numbers (verify, prune, remove, migrate, the recycle bin's) are unknown */
     {
-        static const int retired[] = { 2, 5, 6, 7, 8, 14, 15, 17, 19 };
+        static const int retired[] = { 2, 5, 6, 7, 8, 9, 14, 15, 17, 19 };
         int r;
         for (r = 0; r < (int)(sizeof retired / sizeof retired[0]); r++) {
             doc = run_doc(retired[r], NULL);
@@ -1002,11 +1026,6 @@ int main(int argc, char **argv)
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);
-        /* Rebuild says the same plain sentence, and the folder serves nothing. */
-        doc = run_doc(SH_MODS_ACT_REBUILD, "broken");
-        CHECK(has(doc, "\"ok\":false,\"message\":\"Broken was not rebuilt. This mod could not be built: "));
-        CHECK(doc_prose_ok(doc));
-        free(doc);
         /* The Files view names the cause too, plainly. */
         doc = run_doc(SH_MODS_ACT_FILES, "broken");
         CHECK(has(doc, "\"ok\":true") && has(doc, "\"cause\":\"This mod could not be built: ") && doc_prose_ok(doc));
@@ -1060,10 +1079,6 @@ int main(int argc, char **argv)
         }
         CHECK(doc_prose_ok(doc));
         union_add(doc);
-        free(doc);
-        doc = run_doc(SH_MODS_ACT_REBUILD, name);
-        CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy came with the map Hell Arena and is kept exactly as that map "
-                       "needs it, so it is not rebuilt.\""));
         free(doc);
         open_test_map();
         doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
@@ -1277,20 +1292,18 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "   ");
         CHECK(has(doc, "\"ok\":false,\"message\":\"No mod was created: "));
         free(doc);
-        g_busy = "Play is running";
+        /* Off the main thread (the window's worker): made and built there, finished by APPLY. */
+        g_main = 0;
         doc = run_doc(SH_MODS_ACT_NEW_MOD, "Later");
-        CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: Play is running.\""));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") && has(doc, "\"apply\":true"));
         free(doc);
-        g_busy = NULL;
+        g_main = 1;
+        doc = run_doc(SH_MODS_ACT_APPLY, NULL);
+        CHECK(has(doc, "\"action\":\"newMod\",\"ok\":true,\"message\":\"Created Later in mods\\\\Later.") &&
+              has(doc, "\"key\":\"Later\"") && !has(doc, "\"apply\""));
+        free(doc);
     }
 
-    printf("-- Rebuild of one of your mods\n");
-    doc = run_doc(SH_MODS_ACT_REBUILD, "twin_b");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt Twin B: nothing changed.\""));
-    free(doc);
-    doc = run_doc(SH_MODS_ACT_REBUILD, "nobody");
-    CHECK(has(doc, "\"ok\":false,\"message\":\"That mod is no longer installed.\""));
-    free(doc);
 
     printf("-- an organizing folder: its mods name it as their group\n");
     {

@@ -79,7 +79,7 @@ The header defines the complete ABI. These are the main entry points:
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
-| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder, STORE says whether a store write holds the store lock. See [Mods tab](#mods-tab). |
+| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), except the file work of Install, New mod and Refresh, which the window runs on its own worker with no time limit before APPLY brings the change into the game; FETCH copies it on any thread, ROOT returns the store folder, STORE says whether a store write holds the store lock. See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
@@ -378,8 +378,8 @@ informational hint "Carries N files that <name> also carries. They stay two sepa
 
 The head actions are, left to right, Files (`folder-tree`), Use in this map (Remove from map once
 the open map uses the mod; shown only while a map is open; never for a folder of editor tweaks only;
-disabled for a mod that needs attention and for a downloaded map's mod, which serves only its map),
-Rebuild (disabled for a downloaded map's mod: it is kept exactly as its map needs it) and Uninstall.
+disabled for a mod that needs attention and for a downloaded map's mod, which serves only its map)
+and Uninstall. Refresh is the one action that builds: there is no Rebuild.
 Use in this map sends `mapAddMod` (no dry run: it deletes nothing). With nothing selected the pane
 explains how mods work.
 
@@ -500,10 +500,9 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 
 | Action | Meaning |
 |---|---|
-| `rescan` | Refresh: the scan (new folders get their salt, copies a salt of their own, changed folders are built), the serving index, and what changed brought into the running game. |
+| `rescan` | Refresh: the scan (new folders get their salt, copies a salt of their own, changed folders are built), the serving index, and what changed brought into the running game. Its message is only the sentence a change still needs ("Some of the changes take effect only after you restart DOOM.", "... when you next open the map.", "... when you are back in the editor."), shown even though Refresh is otherwise quiet. |
 | `install` | Install one or more folders (the native picker). |
 | `openFolder` | The host's own: opens the mods folder, or with `arg` that folder under it. |
-| `rebuild` | Build one of the player's own folders again (as `sh_mods build`; a refused build is written into its block and the folder serves nothing until fixed), then rescan. A downloaded map's mod is refused. |
 | `mapAddMod` | Attach the mod to the open map without placing anything (a map-level row for its build); the next save writes it. A downloaded map's mod is refused. |
 | `chooseRegistry` | `"<slot>\t<salt>"` (an empty salt clears): the open map's choice of whose edit serves that slot. |
 | `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |

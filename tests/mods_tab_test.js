@@ -76,10 +76,10 @@ class FakeNode {
   }
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
-             'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsRefreshBtn',
+             'modsFolderBtn', 'modsNewBtn', 'modsUninstallBtn', 'modsRefreshBtn',
              'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsUseBtn', 'modsFilesBtn', 'modsFilesModal', 'modsFilesHost',
              'modsNewModal', 'modsNewName', 'modsNewNote', 'modsNewCancel', 'modsNewCreate'];
-const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
+const GONE = ['modsRebuildBtn', 'modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn', 'modsMigrateBtn', 'modsVerifyBtn'];
 const str = v => typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v));
 const num = v => { const n = Number(v); return isFinite(n) ? n : 0; };
@@ -216,11 +216,7 @@ function standIn(initial, folders) {
     }
     var r = mapModOf(key), b = modOf(key);
     if (a === 'rescan') msg = '';
-    else if (a === 'rebuild') {
-      if (!b) { ok = false; msg = 'That mod is no longer installed.'; }
-      else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ' and is kept exactly as that map needs it, so it is not rebuilt.'; }
-      else msg = 'Rebuilt ' + nameOf(key) + ': nothing changed.';
-    } else if (a === 'mapAddMod') {
+    else if (a === 'mapAddMod') {
       if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
       else if (!b) { ok = false; msg = key + ' is not installed.'; }
       else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ', so only that map uses it.'; }
@@ -321,7 +317,7 @@ function modalText(h) { return h.nodes.modsMapHost.textContent; }
 function modalButtons(h) { return h.nodes.modsMapHost.tags('button').filter(b => !/mods-map-close/.test(b.className)); }
 /* As the host answers a rescan: its result, then the document. */
 function answer(h, data) {
-  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: 'Mods folder read again.'}});
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', data: {action: 'rescan', ok: true, message: ''}});
   h.ui.onMessage({kind: 'mods', data: data});
 }
 function shown(h, data) { h.ui.show(); if (!h.ui.state().loaded) answer(h, data || v4); }
@@ -383,8 +379,8 @@ test('formatting: sizes, the row line', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
-  assert.deepEqual(modsTab.actionMessage('rebuild', 'alex.r2-imp'), {cmd: 'modsAction', action: 'rebuild', arg: 'alex.r2-imp'});
-  for (const gone of ['migrate', 'verify', 'remove', 'pruneList', 'pruneApply', 'palette'])
+  assert.deepEqual(modsTab.actionMessage('mapAddMod', 'alex.r2-imp'), {cmd: 'modsAction', action: 'mapAddMod', arg: 'alex.r2-imp'});
+  for (const gone of ['migrate', 'verify', 'remove', 'pruneList', 'pruneApply', 'palette', 'rebuild'])
     assert.equal(modsTab.actionMessage(gone), null, gone + ' is not a page action');
 });
 
@@ -414,9 +410,8 @@ test('the vocabulary: no salt, hash, bundle, key, pointer, surface, legacy, migr
   h.nodes.modsMapHost.all('mods-map-row')[0].tags('button').find(x => x.textContent === 'Remove from map').click();
   check('the confirmation');
   h.ui.closeMap();
-  h.ui.select('alex.r2-imp');
-  h.nodes.modsRebuildBtn.click();
-  check('after Rebuild');
+  h.nodes.modsRefreshBtn.click();
+  check('after Refresh');
   /* the page's own texts */
   const own = [modsTab.READY_TEXT, modsTab.REFRESH_TEXT, modsTab.EMPTY_TEXT, modsTab.BORROWS_NOTE, modsTab.NEEDS_NOTE,
                modsTab.EDITOR_ONLY_NOTE, modsTab.NEW_MOD_HINT, modsTab.COPY_ID_TITLE, modsTab.NOTHING_CHANGED_TEXT,
@@ -591,8 +586,6 @@ test('details: a downloaded map\'s mod: where it came from, not rebuilt, not use
   h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
   assert.match(section(h, 'about').textContent, /Came with Hell Guard Arena/);
   assert.match(section(h, 'changes').textContent, /Replaces 1 game file for the maps that use it\./);
-  assert.equal(h.nodes.modsRebuildBtn.disabled, true);
-  assert.match(h.nodes.modsRebuildBtn.title, /came with a downloaded map/);
   assert.equal(h.nodes.modsUseBtn.disabled, true);
   assert.match(h.nodes.modsUseBtn.title, /only that map uses it/);
   assert.equal(section(h, 'sharing'), undefined, 'your published maps do not use a downloaded copy');
@@ -638,15 +631,19 @@ test('the header and the details head: the buttons the tab has, and no others', 
   const h = harness();
   shown(h);
   assert.equal(h.nodes.modsNewBtn.style.display || '', '', 'New mod always shows');
-  assert.equal(h.nodes.modsRebuildBtn.disabled, true, 'nothing selected');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, true, 'nothing selected');
   h.ui.select('alex.r2-imp');
-  assert.equal(h.nodes.modsRebuildBtn.disabled, false);
-  h.nodes.modsRebuildBtn.click();
-  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'rebuild', arg: 'alex.r2-imp'});
-  assert.equal(h.ui.state().busy, 'rebuild');
+  assert.equal(h.nodes.modsUninstallBtn.disabled, false);
+  h.nodes.modsRefreshBtn.click();
+  assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'rescan'});
+  assert.equal(h.ui.state().busy, 'rescan');
   assert.ok(h.nodes.modsInstallBtn.disabled && h.nodes.modsRefreshBtn.disabled, 'held while busy');
-  h.ui.onMessage({kind: 'modsActionResult', action: 'rebuild', ok: true, message: 'Rebuilt R2 Imp copy: nothing changed.', data: {}});
+  assert.equal(h.nodes.modsStatus.textContent, 'Reading your mods and building what changed...', 'a build shows its progress');
+  h.ui.onMessage({kind: 'modsProgress', action: 'rescan', phase: 'game'});
+  assert.equal(h.nodes.modsStatus.textContent, 'Bringing the change into the game...');
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', ok: true, message: '', data: {}});
   assert.equal(h.ui.state().busy, '');
+  assert.equal(h.nodes.modsStatus.textContent, '', 'a Refresh with nothing left to do says nothing');
   h.nodes.modsInstallBtn.click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'install'});
   h.ui.onMessage({kind: 'modsActionResult', action: 'install', ok: false, data: {cancelled: true}});
@@ -655,6 +652,24 @@ test('the header and the details head: the buttons the tab has, and no others', 
   h.ui.select('campaign-interactables\\doors');
   h.nodes.modsDetail.all('mods-link')[0].click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'openFolder', arg: 'campaign-interactables\\doors'});
+});
+test('Refresh shows what a change still needs, even when quiet; a game part that did not run says so', () => {
+  const h = harness();
+  shown(h);
+  h.nodes.modsRefreshBtn.click();
+  const sentence = 'Some of the changes take effect only after you restart DOOM.';
+  h.ui.onMessage({kind: 'modsActionResult', action: 'rescan', ok: true, message: sentence,
+                  data: {refresh: {needsRestart: 1, needsMapReload: 0}}});
+  assert.equal(h.nodes.modsStatus.textContent, sentence);
+  assert.deepEqual(h.toasts.pop(), {text: sentence, kind: 'ok'});
+  h.ui.onMessage({kind: 'mods', data: v4});
+  assert.equal(h.nodes.modsStatus.textContent, sentence, 'the document that follows keeps the sentence');
+  h.nodes.modsNewBtn.click();
+  h.nodes.modsNewName.value = 'Late';
+  h.nodes.modsNewCreate.click();
+  h.ui.onMessage({kind: 'modsActionResult', action: 'newMod', applyPending: true, ok: true, message: 'Created Late in mods\\Late.',
+                  data: {key: 'Late'}});
+  assert.equal(h.toasts.pop().text, 'Created Late in mods\\Late. ' + modsTab.APPLY_PENDING_TEXT);
 });
 test('the map modal: the open map\'s details and mods, in plain words', () => {
   const h = live();
@@ -836,7 +851,6 @@ test('the fake host answers as the host does', () => {
   assert.notEqual(r[1].data, v4, 'a copy, never the original');
   assert.deepEqual(store({cmd: 'modsAction', action: 'openFolder'}), []);
   assert.equal(store({cmd: 'modsAction', action: 'install'})[0].ok, false);
-  assert.equal(store({cmd: 'modsAction', action: 'rebuild', arg: 'maps\\Hell Guard Arena\\Hell Guards'})[0].ok, false);
   assert.deepEqual(store({cmd: 'modsAction', action: 'uninstallPreview', arg: 'maps\\Hell Guard Arena\\Hell Guards'})[0].data.preview.editorRows,
     ['Hell Guard (hammer)', 'Hell Guard (shield)', 'Hell Guard (fist)']);
   assert.equal(v4.mods.length, 8, 'the fixture is untouched');
@@ -868,10 +882,10 @@ test('page contract', () => {
     assert.match(actions, new RegExp('<button type="button" class="btn (primary )?icon icon-button( mods-attn)?" id="' + id + '"'), id + ' is a panel icon button');
   for (const [id, ic] of [['modsFolderBtn', 'folder-open'], ['modsNewBtn', 'folder-plus'], ['modsInstallBtn', 'download'], ['modsMapBtn', 'map'], ['modsRefreshBtn', 'refresh-cw']])
     assert.match(panel, new RegExp('id="' + id + '"[^>]*>(<svg class="ui-icon"[^>]*><use href="#icon-' + ic + '">)'), id + ' is the ' + ic + ' icon');
-  assert.match(panel, /id="modsRefreshBtn" title="Refresh: read the mods folder again, after you change a mod's files"/);
+  assert.match(panel, /id="modsRefreshBtn" title="Refresh: after you change a mod's files, build them again and bring the change into the game"/);
   const detailHead = panel.slice(panel.indexOf('<span class="panel-title">Mod Details</span>'), panel.indexOf('id="modsDetail"'));
   assert.deepEqual((detailHead.match(/<button [^>]*id="(\w+)"/g) || []).map(t => t.match(/id="(\w+)"/)[1]),
-                   ['modsFilesBtn', 'modsUseBtn', 'modsRebuildBtn', 'modsUninstallBtn']);
+                   ['modsFilesBtn', 'modsUseBtn', 'modsUninstallBtn']);
   assert.ok(!/migrat|verify/i.test(panel), 'no Migrate and no Verify in the tab');
   assert.match(html, /id="modsList" role="listbox" tabindex="0"/);
   assert.equal(html.split('<script src="mods_tab.js"></script>').length, 2, 'one module tag');

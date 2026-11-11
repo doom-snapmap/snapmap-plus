@@ -69,11 +69,16 @@ static void mu_log(const char *fmt, ...)
 /* ------------------------------------------------------------------ product defaults */
 
 #ifndef SH_MODUI_PURE
+static int mu_on_main(void);
+
 static int mu_default_stock(const char *request)
 {
     static int probed;   /* 0 unprobed, 1 ok, -1 unavailable */
     unsigned char *body = NULL;
     size_t len = 0;
+    /* Off the main thread (a build the window runs on its worker) only the
+     * installed archives answer: the engine's provider is the main thread's. */
+    if (!mu_on_main()) return sh_modstock_exists(request);
     if (probed == 0) {
         __try { body = sh_overrides_read_engine_resource(MU_STOCK_PROBE, &len); }
         __except (EXCEPTION_EXECUTE_HANDLER) { body = NULL; }
@@ -2131,7 +2136,7 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_INSTALL: return "install";
     case SH_MODS_ACT_RESCAN: return "rescan";
     case SH_MODS_ACT_PALETTE: return "palette";
-    case SH_MODS_ACT_REBUILD: return "rebuild";
+    case SH_MODS_ACT_APPLY: return "apply";
     case SH_MODS_ACT_UNINSTALL: return "uninstall";
     case SH_MODS_ACT_UNINSTALL_PREVIEW: return "uninstallPreview";
     case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
@@ -2183,18 +2188,16 @@ static int mu_stock_exists(void *context, const char *request)
     return r;
 }
 
-/* The rebuild rule, the serving index, then the refresh of what changed
- * under the running game (*rf filled when non-NULL; state -1: not run). */
-static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
+/* The file part of a rescan, on any thread: the rebuild rule (sh_ms_sync: a
+ * new folder gets its salt, a folder whose tree changed is built again), then
+ * each mod's builder warnings in the log. */
+static void mu_sync(void)
 {
-    const sh_modui_engine *e = mu_engine();
     sh_ms_sync_stats sync;
     sh_mb_resolver r;
     mu_stock stock = { 0 };
-    int n;
-    if (rf) { memset(rf, 0, sizeof *rf); rf->state = -1; }
-    if (!e->rescan) { strncpy_s(note, cap, "the mods folder cannot be read again from here", _TRUNCATE); return -1; }
-    /* The rebuild rule first: a folder whose tree changed is built again. */
+    sh_ms_list l;
+    size_t i;
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
@@ -2202,33 +2205,61 @@ static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
     if (sh_ms_sync(&r, &sync) && (sync.rebuilt || sync.failed || sync.salted || sync.resalted))
         mu_log("rescan: %u new mod(s), %u copy(ies) made mods of their own, %u folder(s) built, %u refused (%llu ms)",
                sync.salted, sync.resalted, sync.rebuilt, sync.failed, sync.ms);
+    InterlockedIncrement(&g_gen);
+    if (!sh_ms_enumerate(&l)) return;
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *x = &l.items[i];
+        if (x->loaded && x->bundle.warnings)
+            mu_log("rescan: mods\\%s: %u warning(s), first: %s", x->name, x->bundle.warnings, x->bundle.first_warning);
+    }
+    sh_ms_list_free(&l);
+}
+
+/* The game's part, on the main thread: the serving index read again, then
+ * what changed brought into the running game (*rf; state -1 when that did not
+ * run). Returns the mods in use, or -1 with the plain reason in `why`. */
+static int mu_apply(sh_modserve_refresh *rf, char *why, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    int n;
+    memset(rf, 0, sizeof *rf);
+    rf->state = -1;
+    why[0] = 0;
+    if (!e->rescan) {
+        strncpy_s(why, cap, "The game cannot read the mods folder again from here.", _TRUNCATE);
+        return -1;
+    }
     n = e->rescan();
     InterlockedIncrement(&g_gen);
-    {
-        /* Each mod's builder warnings, one line per mod, as the build says them. */
-        sh_ms_list l;
-        size_t i;
-        if (sh_ms_enumerate(&l)) {
-            for (i = 0; i < l.count; i++) {
-                const sh_ms_entry *x = &l.items[i];
-                if (x->loaded && x->bundle.warnings)
-                    mu_log("rescan: mods\\%s: %u warning(s), first: %s", x->name, x->bundle.warnings, x->bundle.first_warning);
-            }
-            sh_ms_list_free(&l);
-        }
+    if (n < 0) {
+        strncpy_s(why, cap, "Snapmap+ could not read the mods folder; press Refresh to try again.", _TRUNCATE);
+        return -1;
     }
-    if (n < 0) strncpy_s(note, cap, "Snapmap+ could not read the mods folder; press Refresh to try again", _TRUNCATE);
-    else _snprintf_s(note, cap, _TRUNCATE, "%d mod%s in use", n, n == 1 ? "" : "s");
-    if (n >= 0 && e->refresh) {
-        sh_modserve_refresh local;
-        sh_modserve_refresh *out = rf ? rf : &local;
-        memset(out, 0, sizeof *out);
-        out->state = e->refresh(out);
-    }
+    if (e->refresh) rf->state = e->refresh(rf);
+    mu_log("rescan: %d mod(s) in use; in the game: %s", n, rf->state < 0 ? "no refresh bound" : rf->note);
     return n;
 }
 
-static int mu_rescan(char *note, size_t cap) { return mu_rescan_refresh(note, cap, NULL); }
+/* Both, on the main thread (an uninstall). */
+static int mu_rescan(sh_modserve_refresh *rf, char *why, size_t cap)
+{
+    mu_sync();
+    return mu_apply(rf, why, cap);
+}
+
+/* What the player must still do for a change to show, as one sentence, or
+ * "" when it shows now. */
+static void mu_refresh_sentence(const sh_modserve_refresh *rf, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!rf || rf->state < 0) return;
+    if (rf->needs_restart > 0)
+        strncpy_s(out, cap, "Some of the changes take effect only after you restart DOOM.", _TRUNCATE);
+    else if (rf->needs_map_reload > 0)
+        strncpy_s(out, cap, "Some of the changes take effect when you next open the map.", _TRUNCATE);
+    else if (rf->state == 2 || rf->pending > 0)
+        strncpy_s(out, cap, "Some of the changes take effect when you are back in the editor.", _TRUNCATE);
+}
 
 /* "refresh":{reparsed, reloaded, needsMapReload, needsRestart, note} plus
  * what is still pending and whether it was deferred. */
@@ -2242,8 +2273,89 @@ static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
     mu_knum(b, "needsRestart", (unsigned)(rf->needs_restart < 0 ? 0 : rf->needs_restart), 0);
     mu_knum(b, "pending", (unsigned)(rf->pending < 0 ? 0 : rf->pending), 0);
     mu_kbool(b, "deferred", rf->state == 2, 0);
-    mu_kstr(b, "note", rf->note, 0);
     mu_putn(b, "}", 1);
+}
+
+/* ---- the file actions: Install, New mod, Refresh and Add to my mods */
+
+/* Their file work (copies, salts, builds) runs on the calling thread, which
+ * may be the window's worker rather than the game's main thread, and nothing
+ * calls it failed for taking long. The game's part (mu_apply) is the main
+ * thread's: off it, the result is kept here and "apply": true asks for
+ * SH_MODS_ACT_APPLY, which finishes it with what the game did. On the main
+ * thread both run in one call. */
+static int  g_owed_action;
+static int  g_owed_ok;
+static char g_owed_msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900];
+static char *g_owed_extra;
+
+static int mu_file_action(int action)
+{
+    return action == SH_MODS_ACT_INSTALL || action == SH_MODS_ACT_NEW_MOD || action == SH_MODS_ACT_RESCAN;
+}
+
+/* The finished result: the action's message, then the sentence a change
+ * still needs (or why the game could not take it), its own members and what
+ * the game did. */
+static int mu_finish(int action, int ok, const char *msg, const char *extra, const sh_modserve_refresh *rf, const char *why)
+{
+    char sentence[300], full[sizeof g_owed_msg + 320];
+    mu_buf b;
+    memset(&b, 0, sizeof b);
+    mu_refresh_sentence(rf, sentence, sizeof sentence);
+    _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s%s", msg ? msg : "", msg && msg[0] && (why[0] || sentence[0]) ? " " : "",
+                why[0] ? why : sentence);
+    mu_result_head(&b, action, ok, full);
+    if (extra) mu_puts(&b, extra);
+    if (rf->state >= 0) mu_put_refresh(&b, rf);
+    return mu_result_tail(&b);
+}
+
+/* A file action's result: with `changed` the game's part follows, at once on
+ * the main thread, else owed ("apply": true). A failed game part fails a
+ * Refresh, whose whole point it is; an install that landed stays installed. */
+static int mu_file_result(int action, int ok, const char *msg, mu_buf *extra, int changed)
+{
+    sh_modserve_refresh rf;
+    char why[200] = "";
+    const char *members = extra->p && !extra->oom ? extra->p : NULL;
+    int r;
+    memset(&rf, 0, sizeof rf);
+    rf.state = -1;
+    if (changed && !mu_on_main()) {
+        mu_buf b;
+        memset(&b, 0, sizeof b);
+        free(g_owed_extra);
+        g_owed_extra = members ? _strdup(members) : NULL;
+        g_owed_action = action;
+        g_owed_ok = ok;
+        strncpy_s(g_owed_msg, sizeof g_owed_msg, msg ? msg : "", _TRUNCATE);
+        mu_result_head(&b, action, ok, msg ? msg : "");
+        if (members) mu_puts(&b, members);
+        mu_kbool(&b, "apply", 1, 0);
+        free(extra->p);
+        return mu_result_tail(&b);
+    }
+    if (changed && mu_apply(&rf, why, sizeof why) < 0 && action == SH_MODS_ACT_RESCAN) ok = 0;
+    r = mu_finish(action, ok, msg, members, &rf, why);
+    free(extra->p);
+    return r;
+}
+
+/* SH_MODS_ACT_APPLY, on the main thread: the game's part of the file action
+ * that ran on the worker. */
+static int mu_apply_owed(void)
+{
+    sh_modserve_refresh rf;
+    char why[200] = "";
+    int r, ok = g_owed_ok;
+    if (!g_owed_action) return mu_simple_result(SH_MODS_ACT_APPLY, 1, "");
+    if (mu_apply(&rf, why, sizeof why) < 0 && g_owed_action == SH_MODS_ACT_RESCAN) ok = 0;
+    r = mu_finish(g_owed_action, ok, g_owed_msg, g_owed_extra, &rf, why);
+    g_owed_action = 0;
+    free(g_owed_extra);
+    g_owed_extra = NULL;
+    return r;
 }
 
 static int mu_absolute(const char *folder)
@@ -2281,14 +2393,14 @@ static int mu_install_one(const char *folder)
     sh_mb_bundle bd;
     mu_stock stock = { 0 };
     char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200], name[300],
-         msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160];
+         msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900];
     int ok, rows = 0;
     size_t k;
-    mu_buf b;
-    memset(&b, 0, sizeof b);
+    mu_buf x;
+    memset(&x, 0, sizeof x);
     mu_log("install %s: building", folder);
     memset(&st, 0, sizeof st);
-    key[0] = cause[0] = note[0] = plain[0] = 0;
+    key[0] = cause[0] = plain[0] = 0;
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mu_stock_exists;
@@ -2305,7 +2417,7 @@ static int mu_install_one(const char *folder)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not installed. %s", name, plain);
     } else {
         mu_log("install %s: installed as mods\\%s (salt %s, build %s)", folder, key, bd.id, bd.hash);
-        mu_rescan(note, sizeof note);
+        mu_sync();
         if (st.present)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is already installed.", name);
         else if (st.resalted)
@@ -2315,19 +2427,17 @@ static int mu_install_one(const char *folder)
             _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", name, rows ? "; its Toybox rows are in the palette" : "");
     }
     mu_record_note(msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
-    mu_kstr(&b, "key", ok ? key : "", 0);
-    mu_kstr(&b, "cause", ok ? "" : plain, 0);
-    mu_knum(&b, "files", bd.file_count, 0);
-    mu_knum(&b, "size", bd.total_size, 0);
-    mu_knum(&b, "editorRows", (unsigned)rows, 0);
-    mu_knum(&b, "warnings", bd.warnings, 0);
-    mu_kbool(&b, "replaced", st.replaced, 0);
-    mu_kbool(&b, "inPlace", st.in_place, 0);
-    mu_kbool(&b, "stockUnchecked", stock.unavailable, 0);
-    mu_kstr(&b, "index", note, 0);
+    mu_kstr(&x, "key", ok ? key : "", 0);
+    mu_kstr(&x, "cause", ok ? "" : plain, 0);
+    mu_knum(&x, "files", bd.file_count, 0);
+    mu_knum(&x, "size", bd.total_size, 0);
+    mu_knum(&x, "editorRows", (unsigned)rows, 0);
+    mu_knum(&x, "warnings", bd.warnings, 0);
+    mu_kbool(&x, "replaced", st.replaced, 0);
+    mu_kbool(&x, "inPlace", st.in_place, 0);
+    mu_kbool(&x, "stockUnchecked", stock.unavailable, 0);
     sh_mb_free(&bd);
-    return mu_result_tail(&b);
+    return mu_file_result(SH_MODS_ACT_INSTALL, ok, msg, &x, ok);
 }
 
 /* The install action's argument: one or more absolute folders, separated by
@@ -2361,12 +2471,12 @@ static int mu_install(const char *arg)
     mu_bulk_item *items = NULL;
     size_t n = 0, cap = 0, i, picked = 0;
     const char *p = arg ? arg : "";
-    char first_key[SH_MS_NAME_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900], note[160] = "",
+    char first_key[SH_MS_NAME_MAX + 1] = "", msg[SH_MB_CAUSE_MAX + MAX_PATH * 4 + 900],
          refused_first[SH_MB_CAUSE_MAX + 600] = "";
     unsigned installed = 0, refused = 0, rows = 0;
     int rc, single_mod = 0;
-    mu_buf b, items_json;
-    memset(&b, 0, sizeof b);
+    mu_buf x, items_json;
+    memset(&x, 0, sizeof x);
     memset(&items_json, 0, sizeof items_json);
     sh_mb_record_why_clear();
 
@@ -2464,7 +2574,7 @@ static int mu_install(const char *arg)
         sh_mb_free(&bd);
     }
     mu_putn(&items_json, "]", 1);
-    if (installed) mu_rescan(note, sizeof note);
+    if (installed) mu_sync();
     if (installed && !refused)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %u mod%s%s.", installed, installed == 1 ? "" : "s",
                     rows ? "; their Toybox rows are in the palette" : "");
@@ -2475,18 +2585,16 @@ static int mu_install(const char *arg)
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing was installed. %s%s", refused_first,
                     refused > 1 ? " The log names the others." : "");
     mu_record_note(msg, sizeof msg);
-    mu_result_head(&b, SH_MODS_ACT_INSTALL, installed > 0, msg);
-    mu_kstr(&b, "key", first_key, 0);
-    mu_knum(&b, "installedCount", installed, 0);
-    mu_knum(&b, "refusedCount", refused, 0);
-    mu_knum(&b, "editorRows", rows, 0);
-    mu_key(&b, "items", 0);
-    mu_putn(&b, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
-    mu_kstr(&b, "index", note, 0);
+    mu_kstr(&x, "key", first_key, 0);
+    mu_knum(&x, "installedCount", installed, 0);
+    mu_knum(&x, "refusedCount", refused, 0);
+    mu_knum(&x, "editorRows", rows, 0);
+    mu_key(&x, "items", 0);
+    mu_putn(&x, items_json.p && !items_json.oom ? items_json.p : "[]", items_json.p && !items_json.oom ? items_json.len : 2);
     for (i = 0; i < n; i++) free(items[i].folder);
     free(items);
     free(items_json.p);
-    return mu_result_tail(&b);
+    return mu_file_result(SH_MODS_ACT_INSTALL, installed > 0, msg, &x, installed > 0);
 }
 
 /* ---- verify */
@@ -2543,7 +2651,6 @@ typedef struct mu_removal {
     char deleted[SH_MS_NAME_MAX + 1];   /* the last folder removed (its name in mods\) */
     size_t outright;             /* removed folders the Recycle Bin could not take, so deleted */
     char outright_why[200];      /* why the bin could not take the first of them */
-    char note[160];              /* the rescan's note */
 } mu_removal;
 
 static const char *mu_entry_title(const sh_ms_entry *s);
@@ -2581,7 +2688,11 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
             mu_log("remove %s: mods\\%s moved to the Recycle Bin", e->name, mu_leaf(e->folder));
         }
     }
-    if (out->removed) mu_rescan(out->note, sizeof out->note);
+    if (out->removed) {
+        sh_modserve_refresh rf;
+        char why[200];
+        if (mu_rescan(&rf, why, sizeof why) < 0) mu_log("uninstall: %s", why);
+    }
     modstore_unlock();
 }
 
@@ -2996,6 +3107,8 @@ static int mu_scope_listed(char (*out)[SH_MODMANIFEST_HASH_CAP], int cap)
 static void mu_scope_hook(const sh_modmanifest_list *rows, const char *const *names, size_t name_count, int when)
 {
     int changed;
+    /* A map was opened: an open Mods tab gets a fresh document (the window's pushed refresh). */
+    if (when == SH_MODSERVE_AT_LOAD) InterlockedIncrement(&g_gen);
     if (!sh_modserve_scope_enabled()) return;
     if (when == SH_MODSERVE_AT_LOAD) InterlockedExchange(&g_scope_editor, 0);
     changed = mu_listing_set(rows, names, name_count, 1);
@@ -3127,6 +3240,7 @@ static void mu_scope_tick(int editor_map)
             /* The rows go with the listing: a hub launch or a Play entry must
              * not read the editor map's manifest as its own. */
             InterlockedExchange(&g_scope_editor, 0);
+            InterlockedIncrement(&g_gen);
             sh_modmanifest_current_close();
             mu_settings_close();
             (void)sh_modserve_scope_set_place(NULL, 1);
@@ -3858,106 +3972,6 @@ static int mu_choose(const char *slot, const char *key, const mu_out *o)
     return mu_simple_result(action, r >= 0, msg);
 }
 
-/* ---- rebuild */
-
-/* Build one folder of the player's own mods again from its files (as
- * 'sh_mods build'), write its block (the cause of a refused build included:
- * the folder serves nothing until fixed), then rescan so the game serves the
- * new build. A folder a map brought is kept as that map needs it and is not
- * built here. */
-static int mu_rebuild(const char *key)
-{
-    mu_model m;
-    sh_mb_resolver r;
-    sh_mb_bundle bd;
-    mu_stock stock = { 0 };
-    char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200], msg[SH_MB_CAUSE_MAX + 800], note[160],
-         before[SH_MB_HASH_HEX + 1] = "", name[300], salt[SH_SALT_LEN + 1] = "";
-    int entry = -1, ok, built = 0;
-    size_t i;
-    memset(&bd, 0, sizeof bd);
-    if (!key || !key[0]) return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "Select a mod to rebuild.");
-    if (mu_busy(cause, sizeof cause)) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
-    if (entry < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "That mod is no longer installed."); }
-    {
-        char *n = mu_folder_name(&m.list.items[entry]);
-        strncpy_s(name, sizeof name, n ? n : mu_leaf(m.list.items[entry].folder), _TRUNCATE);
-        free(n);
-    }
-    if (m.list.items[entry].place[0]) {
-        char title[400];
-        mu_place_title(&m.list.items[entry], title, sizeof title);
-        mu_model_free(&m);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s and is kept exactly as that map needs it, so it is "
-                    "not rebuilt.", name, title);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    strncpy_s(folder, sizeof folder, m.list.items[entry].folder, _TRUNCATE);
-    if (m.list.items[entry].loaded) strncpy_s(before, sizeof before, m.list.items[entry].bundle.hash, _TRUNCATE);
-    cause[0] = plain[0] = 0;
-    /* A new folder gets its salt first (its references follow), as the scan does. */
-    if (sh_ms_assign_salt(folder, mu_leaf(folder), salt, cause, sizeof cause) < 0) {
-        mu_model_free(&m);
-        mu_log("rebuild %s: refused: %s", key, cause);
-        mu_plain_cause(NULL, NULL, cause, plain, sizeof plain);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not rebuilt. %s", name, plain);
-        InterlockedIncrement(&g_gen);
-        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
-    }
-    r.installed = sh_ms_request_exists;
-    r.installed_context = &m.list;
-    r.stock = mu_stock_exists;
-    r.stock_context = &stock;
-    mu_log("rebuild %s: building", key);
-    ok = built = sh_mb_build(folder, NULL, &r, &bd);
-    if (!ok) strncpy_s(cause, sizeof cause, bd.first_cause[0] ? bd.first_cause : "the mod could not be built", _TRUNCATE);
-    modstore_lock();
-    if (ok) {
-        ok = sh_mb_write(&bd, folder, cause, sizeof cause);
-        if (ok) sh_ms_note_build(folder, &bd);
-    } else if (sh_salt_valid(bd.id, strlen(bd.id))) {
-        /* A refused build is the folder's state (ONE-SHAPE rule 2): its block
-         * records the cause and the folder serves nothing until fixed. */
-        char why[SH_MB_CAUSE_MAX];
-        if (!sh_mb_write_failed(&bd, folder, why, sizeof why)) mu_log("rebuild %s: the cause could not be written: %s", key, why);
-    }
-    modstore_unlock();
-    if (!ok) sh_ms_note_build_failure(folder, cause);
-    mu_model_free(&m);
-    note[0] = 0;
-    if (!ok) {
-        mu_log("rebuild %s: refused: %s", key, cause);
-        mu_plain_cause(NULL, NULL, cause, plain, sizeof plain);
-        mu_rescan(note, sizeof note);
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not rebuilt. %s", name, plain);
-    } else {
-        int same = !strcmp(before, bd.hash);
-        mu_log("rebuild %s: %s, build %s%s", key, bd.id, bd.hash, same ? " (unchanged)" : "");
-        if (bd.warnings) mu_log("rebuild %s: %u warning(s), first: %s", key, bd.warnings, bd.first_warning);
-        mu_rescan(note, sizeof note);
-        if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed.", name);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s; the game uses the new files now.", name);
-    }
-    InterlockedIncrement(&g_gen);
-    {
-        mu_buf b;
-        memset(&b, 0, sizeof b);
-        mu_result_head(&b, SH_MODS_ACT_REBUILD, ok, msg);
-        mu_kstr(&b, "key", key, 0);
-        mu_kstr(&b, "cause", ok ? "" : plain, 0);
-        mu_knum(&b, "warnings", ok ? bd.warnings : 0, 0);
-        mu_kstr(&b, "index", note, 0);
-        sh_mb_free(&bd);
-        (void)built;
-        return mu_result_tail(&b);
-    }
-}
-
 /* ---- the Files view (read-only) and New mod */
 
 #define MU_FILES_MAX  8192u              /* files listed per mod folder; "truncated" says when there are more */
@@ -4279,16 +4293,13 @@ static int mu_new_mod(const char *name)
 {
     const int action = SH_MODS_ACT_NEW_MOD;
     char salt[SH_MB_ID_MAX + 1], folder[MAX_PATH * 4], example[MAX_PATH], cause[SH_MB_CAUSE_MAX], plain[SH_MB_CAUSE_MAX + 200],
-         msg[SH_MB_CAUSE_MAX + 600], note[160], key[SH_MS_NAME_MAX + 1] = "";
+         msg[SH_MB_CAUSE_MAX + 600], key[SH_MS_NAME_MAX + 1] = "";
     sh_ms_list l;
     const sh_ms_entry *e = NULL;
     int ok;
     size_t i;
-    mu_buf b;
-    if (mu_busy(cause, sizeof cause)) {
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
-        return mu_simple_result(action, 0, msg);
-    }
+    mu_buf x;
+    memset(&x, 0, sizeof x);
     if (!sh_ms_new_mod_example(name, salt, folder, sizeof folder, example, sizeof example, cause, sizeof cause)) {
         mu_log("new mod: refused: %s", cause);
         mu_plain(NULL, NULL, cause, plain, sizeof plain);
@@ -4297,7 +4308,7 @@ static int mu_new_mod(const char *name)
         return mu_simple_result(action, 0, msg);
     }
     mu_log("new mod: %s (salt %s) with its example %s", folder, salt, example);
-    mu_rescan(note, sizeof note);
+    mu_sync();
     ok = sh_ms_enumerate(&l);
     for (i = 0; ok && i < l.count && !e; i++)
         if (l.items[i].folder && !_stricmp(l.items[i].folder, folder)) e = &l.items[i];
@@ -4311,14 +4322,10 @@ static int mu_new_mod(const char *name)
         mu_plain_cause(NULL, e, e ? e->cause : "not built yet", plain, sizeof plain);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Created %s in mods\\%s, but it cannot be used yet. %s", name, key, plain);
     }
-    InterlockedIncrement(&g_gen);
-    memset(&b, 0, sizeof b);
-    mu_result_head(&b, action, 1, msg);
-    mu_kstr(&b, "key", key, 0);
-    mu_kstr(&b, "file", example, 0);
-    mu_kstr(&b, "index", note, 0);
+    mu_kstr(&x, "key", key, 0);
+    mu_kstr(&x, "file", example, 0);
     if (ok) sh_ms_list_free(&l);
-    return mu_result_tail(&b);
+    return mu_file_result(action, 1, msg, &x, 1);
 }
 
 /* ---- the console verbs */
@@ -4535,7 +4542,8 @@ int sh_modui_run(int action, const char *arg)
 {
     const sh_modui_engine *e = mu_engine();
     char note[160];
-    if (!mu_on_main()) return -1;
+    /* Off the main thread only the file actions run, and only their file part. */
+    if (!mu_on_main() && !mu_file_action(action)) return -1;
     /* Reading a mod's files needs no engine hook; every other action does. */
     if (action != SH_MODS_ACT_FILES && action != SH_MODS_ACT_FILE_TEXT &&
         sh_feature_refusal(SH_FEATURE_MODS, note, sizeof note))
@@ -4544,23 +4552,15 @@ int sh_modui_run(int action, const char *arg)
     case SH_MODS_ACT_INSTALL:
         return mu_install(arg);
     case SH_MODS_ACT_RESCAN: {
-        int n;
-        char msg[520];
-        sh_modserve_refresh rf;
-        mu_buf b;
-        note[0] = 0;
-        n = mu_rescan_refresh(note, sizeof note, &rf);
-        mu_log("rescan: %s", note);
-        if (n >= 0 && rf.state > 0)
-            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder read again: %s. In the game: %s.", note, rf.note);
-        else if (n >= 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder read again: %s.", note);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s.", note);
-        if (n < 0 || rf.state < 0) return mu_simple_result(action, n >= 0, msg);
-        memset(&b, 0, sizeof b);
-        mu_result_head(&b, action, 1, msg);
-        mu_put_refresh(&b, &rf);
-        return mu_result_tail(&b);
+        /* Refresh: every changed folder built again, then the game's part.
+         * Its message is only the sentence a change still needs. */
+        mu_buf x;
+        memset(&x, 0, sizeof x);
+        mu_sync();
+        return mu_file_result(action, 1, "", &x, 1);
     }
+    case SH_MODS_ACT_APPLY:
+        return mu_apply_owed();
     case SH_MODS_ACT_PALETTE: {
         int r;
         if (!e->palette_rebuild) return mu_simple_result(action, 0, "The editor palette cannot be rebuilt from here.");
@@ -4571,8 +4571,6 @@ int sh_modui_run(int action, const char *arg)
             ? "Editor palette rebuilt; new mod rows are in the editor."
             : "Palette not rebuilt: open a map in the editor and release any held entity or wire, then try again.");
     }
-    case SH_MODS_ACT_REBUILD:
-        return mu_rebuild(arg);
     case SH_MODS_ACT_UNINSTALL:
     case SH_MODS_ACT_UNINSTALL_PREVIEW:
     case SH_MODS_ACT_MAP_REMOVE:

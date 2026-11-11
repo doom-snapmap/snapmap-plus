@@ -26,20 +26,23 @@
  *             record's links and claims), the search tag, and one entry per
  *             mod it uses with the entities that use it and the wires and
  *             Timelines pointing at them (modmap.h)
- * The actions are install a folder, rebuild one, uninstall one (the open map
- * cleaned of it first), attach a mod to the open map (a map-level row,
- * modmanifest.h) and remove a mod from it, their dry runs, the registry
- * choice, rescan (the tab's Refresh: there is no folder watcher, so Refresh
- * is how edits are picked up), New mod, the read-only Files view, and the
- * palette rebuild. What the tab does not show (every
- * folder's state, conflicts with their winners, the game files mods replace,
- * verification) is printed by sh_modui_doctor, the `sh_mods doctor` verb.
+ * The actions are install, uninstall one folder (the open map cleaned of it
+ * first), attach a mod to the open map (a map-level row, modmanifest.h) and
+ * remove a mod from it, their dry runs, the registry choice, Refresh (the one
+ * rescan: there is no folder watcher, so Refresh builds every changed folder
+ * and brings the change into the game), New mod, the read-only Files view,
+ * and the palette rebuild. What the tab does not show (every folder's state,
+ * conflicts with their winners, the game files mods replace, verification)
+ * is printed by sh_modui_doctor, the `sh_mods doctor` verb.
  *
  * Threads: every operation except FETCH and ROOT runs on DOOM's main thread
- * (the frontend calls the slot inside run_on_main), serialized with the
- * sh_mods console command and the map-load conversion that also use the store.
- * The document and the action result are kept in one buffer that FETCH copies
- * on any thread.
+ * (the frontend calls the slot inside run_on_main), except the file part of
+ * Install, New mod and Refresh: the window runs those on its own worker, so a
+ * build never holds the game, and then asks for SH_MODS_ACT_APPLY on the main
+ * thread. The store lock serializes their file work with the sh_mods console
+ * command and the map-load conversion that also use the store. The document
+ * and the action result are kept in one buffer that FETCH copies on any
+ * thread.
  *
  * File work only, apart from the bound engine operations below. */
 #ifndef SNAPMAP_PLUS_MODUI_H
@@ -161,7 +164,12 @@ int  sh_modui_list(void);
 /* Run one action (SH_MODS_ACT_*) and keep its result document
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
  * INSTALL (absolute; several separated by newlines), a row's key (its folder
- * name under mods\) for REBUILD, UNINSTALL and the map actions. UNINSTALL, in
+ * name under mods\) for UNINSTALL and the map actions. INSTALL, NEW_MOD and
+ * RESCAN may be called off the main thread: their file work runs there and
+ * their result carries "apply": true until SH_MODS_ACT_APPLY, on the main
+ * thread, brings the change into the game and answers the finished result
+ * (its message ends with the one sentence a change still needs: a restart,
+ * the next map open, or the return to the editor). UNINSTALL, in
  * order: the open map's
  * entities of the mod through the native delete (refused, with nothing
  * deleted, while Play runs, a map loads or the editor is busy), the open
