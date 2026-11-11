@@ -750,16 +750,21 @@ These backend files share the work:
   `group`) and each downloaded map's in that map's place (`place`,
   `placeTitle`), with what each adds, changes and borrows from the game, marks
   each ready or needing attention with one plain sentence saying what is wrong
-  and what to do (`mu_plain_cause`: the builder's shape and build causes and
-  the store's are rewritten for the page, and `mu_plain` keeps salts, hashes
-  and the internal words out of every sentence a player reads), says when
-  another of the player's mods carries at least half of a mod's files at
-  equal bytes (`sameFilesAs`, informational: two mods stay two mods),
-  describes the open map and the mods it uses, and runs Install, Rebuild (the
-  player's own folders only), Uninstall, Use in this map, Remove from map,
-  their dry runs, the registry choice and Refresh on the main thread, as in
-  [The Mods tab's map scope](#the-mods-tabs-map-scope). There is no Migrate,
-  no folder watcher and no build list. What the tab does not show, every
+  and what to do (each cause is written plainly where it is raised;
+  `mu_plain_cause` adds the next step for the causes the window knows one
+  for, and an earlier shape gets the one sentence that sends the author to
+  the installer), says when another of the player's mods carries at least
+  half of a mod's files at equal bytes (`sameFilesAs`, informational: two
+  mods stay two mods), describes the open map and the mods it uses, and runs
+  Install (folders or ZIPs), New mod, Refresh and Add to my mods (a
+  downloaded map's mod copied to the root), whose file work runs on the
+  window's worker with no time limit while only their game part
+  (`SH_MODS_ACT_APPLY`) runs on the main thread, and Uninstall, Use in this
+  map, Remove from map, their dry runs and the registry choice on the main
+  thread, as in [The Mods tab's map scope](#the-mods-tabs-map-scope). There
+  is no Migrate, no Rebuild (Refresh builds every changed folder), no folder
+  watcher and no build list. The window never sets where a map finds its
+  mods. What the tab does not show, every
   folder's state, conflicts with their winners, the game files mods replace
   and verification, it prints as `sh_mods doctor [verify]` (see
   [WebView UI](webview-ui.md#mods-tab)). Its Files view reads only:
@@ -1014,9 +1019,9 @@ file cannot be read is refused with the same kind of line. A record that is
 not JSON is moved aside as `snapmap-plus.json.unreadable-<time>` when a
 section is written, and a new one started; the line names the aside file.
 The player reads the same failure where they acted: install and uninstall in
-the Mods tab (and their console verbs) add "Some of its bookkeeping was not
-saved: <file> could not be used (<why>); close the program holding it ... and
-try again" to their result, and a publish whose claim could not be saved
+the Mods tab (and their console verbs) add "Snapmap+ could not update its
+records: <file> could not be used (<why>); close any program using that file
+and try again." to their result, and a publish whose claim could not be saved
 shows that sentence as its upload cause (`sh_mb_record_why`).
 
 Removal goes to the Windows Recycle Bin. Uninstall, Remove and the removal of
@@ -2877,9 +2882,12 @@ ten seconds); without a delete it clears at once. A build where the push does
 not decode refuses Uninstall while a map is open. The rescan's refresh rebuilds
 the palette without the mod's editor rows and, when the editor refuses the
 rebuild because the delete is still committing, retries it once the editor is
-free. Closed maps are not edited. Remove from map, Uninstall and Rebuild are
-refused while Play runs or a map loads (the editor's deactivation reason, the
-engine's load state).
+free. Closed maps are not edited. Remove from map and Uninstall are refused
+while Play runs or a map loads (the editor's deactivation reason, the engine's
+load state). Remove from map never leaves objects without their row: with
+placed entities the row (and with the last mod the search tag) is dropped by
+the same tick once the delete has committed and a fresh read of the map finds
+none of the mod's objects; objects still there keep their row.
 
 Accuracy: the page renders only from the documents the backend returns. Each
 action is answered with its result and then a fresh document whose map object
@@ -2888,9 +2896,10 @@ run computed and the modal redraws from what the backend found afterwards.
 The console verbs `sh_mods map`, `sh_mods map add "<mod folder>"`, `sh_mods map
 remove "<mod folder>" [--yes]` and `sh_mods uninstall "<mod folder>" [--yes]`
 share the dry runs and the actions and name mods by their names and folders;
-the console's uninstall removes every folder of the mod it names (the player's
-own and the copies maps brought, `mu_uninstall_targets`), where the tab names
-one folder. Adding a mod to the map changes the current manifest only; the
+an uninstall, from the tab or the console, removes the one folder it names (the
+console takes the player's own before a map's copy, `mu_uninstall_target`), and
+another folder of the same mod stays. Adding a mod to the map changes the
+current manifest only; the
 next save writes its row, so it publishes, downloads and carries the `mods` tag
 like a placed mod's.
 
