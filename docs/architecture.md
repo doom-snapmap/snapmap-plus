@@ -619,8 +619,7 @@ These backend files share the work:
   both archives hold is SnapMap's own and adds nothing; a name no archive
   holds is resolved as before). A decl added this way is scanned for its own
   needs; what it names and no archive holds is the game's own hole and is not
-  reported. The walk stops at the file cap or the 1 MiB manifest cap with an
-  error naming the first need past it, and the build notes "N game files
+  reported. There is no file or manifest cap; the build notes "N game files
   borrowed for completeness". Another installed mod pointing at the same
   campaign file does not settle a need: that mod is served only where a map
   declares it, so each bundle carries its own pointers. (Until rules 5 the
@@ -1290,8 +1289,7 @@ installed resource path and `sha256` the hash of the installed bytes
 bytes equal installed content, and an author writes one in the descriptor's
 `stock` object (`{"<request>": {"source": "<installed path>", "sha256":
 "<optional>"}}`, the hash filled in by the builder) to alias installed content
-under a mod name. Pointers do not count toward the 64 MiB and 256 MiB caps and
-the extension whitelist does not apply to them, because nothing is carried
+under a mod name. The extension whitelist does not apply to pointers, because nothing is carried
 for them; an upload never sends their bytes, so a converted package or a
 copy-of-stock mod uploads only its authored and edited files. An install keeps
 every file of the folder it installs, a copy of a game file included (the
@@ -1699,8 +1697,16 @@ feature.
   Entities tab names a Script node's script and offers its mod's input and
   output names from the same member. The player's setting `mods.scripted_maps`
   (`sh_modui_scripted_maps_allowed`) and the download approval's sentence
-  (`sh_modui_scripts_approval`) are for the download gate, which needs the
-  store to say which missing builds carry scripts before it asks.
+  (`sh_modui_scripts_approval`) serve the download gate: the store's index
+  records each build's script count (checked against the archive's `.lua`
+  entries and the block's `scripts.files`) and `HEAD` answers it, so before
+  the one question the gate knows. The question then ends "These mods include
+  scripts (N files). Scripts run only inside this map and cannot read or
+  change your files. Download and install now?"; with the setting off the map
+  is not downloaded or played and the player reads `SH_MODUI_SCRIPTS_OFF`. A
+  rawmap or prefab ZIP import whose carried mods have scripts is refused with
+  the same sentence while the setting is off and installs nothing
+  (`modexport.c` me_install).
 - **Registration.** `on.spawn / think / remove / damage / death (name, fn)`,
   `on.anim(name, notify, fn)`, `on.input(node name, fn)`, `on.map_start /
   map_end(fn)`. Names are mod-relative (`"ai/tyrant"` is
@@ -3127,8 +3133,7 @@ bridge's install (`sh_modstock_set_install`):
   several such children and a ZIP are skipped with the reason (every other
   file, and a folder with no descriptor and no package child, is the loose
   layer below); a folder over
-  512 MiB or 8192 files is skipped before it is read, and one whose carried part
-  is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
+  512 MiB or 8192 files is skipped before it is read;
 - a file byte-identical to installed game content becomes a stock pointer (see
   above): its file stays in the folder and an upload never sends it. Each
   folder's line says `N file(s), P of them stock pointer(s) to installed
@@ -3395,7 +3400,8 @@ or a launched Play is over.
 The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
 completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
 the modsync worker that asks the store about each missing bundle
-(`modsync_probe_build`: `HEAD /mods/build/<hash>`; whether a borrow names game
+(`modsync_probe_build`: `HEAD /mods/build/<hash>`, which also says how many
+script files the build carries; whether a borrow names game
 bytes this machine lacks is learned when the archive is unpacked, as the
 fetch's `MODNET_E_GAME`). One function,
 `sh_modpub_gate_decide`, then decides each bundle from three facts: what the
@@ -3867,14 +3873,32 @@ The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
 `/mods/build/<hash>`, holding the folder's `mod.json`, the whole file, and
 `assets/<request>` for every carried file its block lists. Stock pointers are
 never in it: their bytes are the player's own game. `modnet.c` speaks the
-routes: `HEAD` (held, with the archive's size, or 404, or 451), `PUT`
+routes: `HEAD` (held, with the archive's size and `X-Mod-Scripts`, the
+number of script files the build carries, or 404, or 451), `PUT`
 (`application/zip`, Content-Length, streamed from a file; 201 new, 200
-already held, 422 with the store's first cause), `GET` (streamed to a file,
-at most 96 MiB), `POST /mods/claim` (`{"builds": [...], "ref", "secret"?}`,
-one claim per published item, 409 when a build is not stored) and
-`POST /mods/release`, after which the store deletes every build no claim
-names. There is no blob store and no manifest of its own: two mods with the
-same files are two archives.
+already held, 422 with the store's first cause), `GET` (streamed to a file a
+chunk at a time with progress, of any size), `POST /mods/claim`
+(`{"builds": [...], "ref", "secret"?}`, one claim per published item, any
+number of builds, 409 when a build is not stored) and `POST /mods/release`,
+after which the store deletes every build no claim names. There is no blob
+store and no manifest of its own: two mods with the same files are two
+archives.
+
+Nothing limits a build (DECISIONS 26). One request body is the platform's
+limit (100 MB on the Worker's plan), so an archive larger than one part
+(`MODNET_PART_SIZE`, 95 MiB, the Worker's `PART_SIZE`) goes up in parts:
+`POST /mods/build/<hash>/parts {"size"}` starts the upload or resumes the one
+of that build and size and answers `{"partSize", "parts", "have"}`; `PUT
+/mods/build/<hash>/parts/<n>` (`application/octet-stream`, `X-Build-Size`)
+sends part n, each but the last exactly `partSize` bytes, read from the
+archive file at its offset; `POST /mods/build/<hash>/complete {"size"}` joins
+them, and the store checks the whole archive by the same rules as a
+one-request upload before it serves it (the answer waits up to 15 minutes
+for that read). A part the store holds is never sent again: a failed part
+starts the upload again (up to four starts in one call) and the store's
+answer names what it holds, and a later publish resumes the same way. The
+only bound left is the archive form's: no ZIP64, so at most 65,535 entries
+and 4 GiB.
 
 Upload (`modsync_upload_builds`) takes the map's rows as `<salt>@<hash>`. Each
 build is found in the mods folder (a root folder at that hash first, else a
@@ -3884,15 +3908,17 @@ publish it", and a salt the machine lacks with "the map uses a mod this machine
 does not have". HEAD asks whether the store holds it; only when it does not is
 the archive written to a temporary file (`modsync_write_archive`: every file
 read and checked against the block, "<name>: <file> changed since the mod was
-built; open the Mods tab and Refresh" otherwise) and PUT. An archive over
-96 MiB, the Worker plan's request body limit less a margin, is refused before
-anything is sent: "<name>: this mod is too large to publish (N MB; the limit is
-96 MB)". Then one claim names every build.
+built; open the Mods tab and Refresh" otherwise) and sent, in one request or
+in parts. A mod the archive form cannot hold is refused before anything is
+sent: "<name>: this mod is too large to publish (N MB in F files); a published
+mod's archive holds at most 4 GB and 65,535 files". Then one claim names every
+build, however many the map names.
 
 Download (`modsync_fetch_build_for(row, place)`): when the root holds the
 row's salt at the row's hash, or the map's place holds it, nothing is
-fetched. Otherwise the archive is fetched to a temporary file and
-`modsync_install_archive` installs it: its `mod.json` must load and name the
+fetched. Otherwise the archive is streamed to a temporary file (the hold
+prints "Downloading <mod> (i of n): x of y MB, p%." on the console every two
+seconds) and `modsync_install_archive` installs it: its `mod.json` must load and name the
 row's salt and build hash, every carried file must be an entry with the size
 and SHA-256 the block records, no other entry may be present, and every stock
 pointer must resolve against the installed game (`MODNET_E_GAME` otherwise).
