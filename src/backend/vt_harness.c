@@ -119,20 +119,20 @@ static void rec_print(int k, uint8_t *r)
     rd_i32(r + SH_VT_REC_GRID, &grid);
     rd_i16(r + SH_VT_REC_LEVELS, &levels);
     rd_i32(r + SH_VT_REC_TEXELS, &texels);
-    rd_i32(r + SH_VT_REC_STREAMED, &refd);
+    rd_i32(r + SH_VT_REC_SOURCE, &refd);
     rd_ptr(r + SH_VT_REC_OWNER, &owner);
     rd_ptr(r + SH_VT_REC_PAGESFILE, &pages);
     rd_ptr(r + SH_VT_REC_READER, &reader);
     rd_ptr(r + SH_VT_REC_MEGA2, &mega2);
-    rd_ptr(r + SH_VT_REC_PAGETABLE, &pt);
+    rd_ptr(r + SH_VT_REC_CACHE, &pt);
     rd_ptr(r + SH_VT_REC_PTIMAGE, &ptimg);
     rd_ptr(r + SH_VT_REC_HOSTPT, &host);
     if (pt) rd_i32(pt, &flavor);
     if (owner) rd_i32((uint8_t *)owner + OWNER_COUNT, &rows);
     if (!name[0] && !path[0] && !type) { vt_line("  [%2d] free", k); return; }
-    vt_line("  [%2d] %s'%s' type %d flavor %d path '%s'", k, tag, name, type, flavor, path);
+    vt_line("  [%2d] %s'%s' type %d cache flavor %d path '%s'", k, tag, name, type, flavor, path);
     vt_line("       reader %s (mega2 %p, pages file %p, reader %p); header magic 0x%08X grid %d levels %d "
-            "texels %d; page table %p image %p host %p; table rows %d; streamed %d",
+            "texels %d; cache %p page-table image %p host %p; table rows %d; source %d",
             mega2 ? "mega2" : pages ? ".pages" : reader ? "other" : "none", mega2, pages, reader,
             (unsigned)magic, grid, (int)levels, texels, pt, ptimg, host, rows, refd);
 }
@@ -194,7 +194,7 @@ static int do_release(vt_call *c)
     unsigned fault = 0;
     if (k < 0) { vt_line("release: no record named '%s'", c->name); return 0; }
     if (sh_modvt_record_owner(k)) {
-        vt_line("release: record %d '%s' belongs to an installed mod; it is released when that mod is removed", k, c->name);
+        vt_line("release: record %d '%s' is a mod's texture board; it is released when its mod is no longer served", k, c->name);
         return 0;
     }
     if (!((g_mine >> k) & 1)) { vt_line("release: record %d '%s' was not made by 'sh_vt register'; refused", k, c->name); return 0; }
@@ -433,11 +433,10 @@ void h_sh_vt(idCmdArgs *a)
     if (!verb || !*verb || !_stricmp(verb, "help") || !strcmp(verb, "?")) { sh_printf("%s\n", SH_VT_CMD_HELP); return; }
     if (!_stricmp(verb, "status")) {
         int bound = sh_modvt_engine_bound(), vk = sh_modvt_engine_vulkan();
-        vt_line("status: records %s, renderer %s, VT system %p (%s), table +0x%X, sh_vt records 0x%08X, "
-                "flavor auto %d", bound ? "bound" : "unavailable",
-                vk == 1 ? "Vulkan" : vk == 0 ? "OpenGL" : "unknown", sh_modvt_engine_sys(),
-                bound && sh_modvt_engine_ready() ? "up" : "not up", sh_modvt_engine_table(), g_mine,
-                bound ? sh_modvt_engine_flavor() : -1);
+        vt_line("status: records %s, renderer %s, VT system %p (%s), table +0x%X, sh_vt records 0x%08X",
+                bound ? "bound" : "unavailable", vk == 1 ? "Vulkan" : vk == 0 ? "OpenGL" : "unknown",
+                sh_modvt_engine_sys(), bound && sh_modvt_engine_ready() ? "up" : "not up", sh_modvt_engine_table(),
+                g_mine);
         sh_modvt_print_status();
         return;
     }
@@ -471,7 +470,7 @@ void h_sh_vt(idCmdArgs *a)
                     return;
                 }
                 c.flavor = (int)flavor;
-            } else c.flavor = sh_modvt_engine_flavor();
+            } else c.flavor = SH_MODVT_FLAVOR;
         }
         run_main(&c);
         return;

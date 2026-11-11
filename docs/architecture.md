@@ -838,10 +838,11 @@ These backend files share the work:
 - `modsound.c` delivers the Wwise sound banks bundles carry, and loads the
   stock banks SnapMap skips that a declared mod's sound events need, with
   `modbankinfo.c` reading the game's bank index, as in [Mod sounds](#mod-sounds).
-- `modvt.c` registers each private virtual-texture family a bundle carries
-  (`virtualtextures/mods/<salt>/<family>_sq<N>.mega2`, the builder's only form of
-  `.mega2`) as one page-source record, as in
-  [Mod virtual-texture families](#mod-virtual-texture-families).
+- `modvt.c` gives each virtual-texture board a mod carries
+  (`virtualtextures/mods/<salt>/<name>_sq<N>.mega2`, the builder's only form of
+  `.mega2`) its own page-source record on the game's material page cache and
+  feeds it to the stock lit programs, as in
+  [Mod virtual-texture boards](#mod-virtual-texture-boards).
 - `companion.c` reads the `companions` key of every admitted bundle's author
   block and `companion_engine.c` spawns them, as in
   [Owner-bound companions](#owner-bound-companions).
@@ -2247,58 +2248,83 @@ names the module places it. The module decl's bounds decide the placement
 limit check; for a multiplayer map they cover the arena, so it fits the native
 16000 bound at the origin.
 
-### Mod virtual-texture families
+### Mod virtual-texture boards
 
-A material binds to a virtual-texture family only when a page-source record
-with exactly the material's `landpagefile` name exists when the material is
-parsed; otherwise the engine classifies it as a unique family and it draws
-with default images. The engine creates such a record for a private family on
-no path of its own and never reads a private family's `.vmtr` rows, so
-`modvt.c` calls `idVirtualTexture::SetSource(record, "mods/<salt>/<family>",
-"virtualtextures/mods/<salt>/<family>.pages", flavor, 2, 0, NULL)` per family.
-SetSource's mega2 loader opens the served `_sq1` to `_sq16` members through the
-provider; no `.pages` file is needed, and materials carry an explicit
-`virtualmapping` instead of rows.
-The families are read from the build each path is served from for the loaded
-map (`sh_modserve_each_served_here`): a map that brought its own copy of a
-salt pages that copy's members, never the root folder's; with no map open the
-root folder's build serves.
+A mod's lit materials draw from the mod's own virtual-texture board: its own
+mega2 family (`virtualtextures/mods/<salt>/<name>_sq<N>.mega2`), named by the
+materials' `landpagefile "mods/<salt>/<name>"`, read by the stock `skinvmtr`
+and `skinvmtrwounds` render programs unmodified. Nothing of a mod goes into the
+game's own board, and no game file changes.
 
-- Thread and time: DOOM's main thread, inside process heap 0, once the VT
-  system has built record 1 (`_vmtr`). The serving index calls a listener after
-  every table it publishes; on the main thread (`sh_mods install`, rescan) the
-  families are registered at once, on another thread (boot, a fetch, a
-  migration) at the next decl registration pass. Every pass (the editor
-  palette build, a map's activation) registers first and then parses, so no
-  material of a bundle is parsed before its family's record exists. A sync is
-  idempotent.
-- Records: 32 slots, records 1 to 31. Record 31 is never taken
-  (VirtualTextureForMaterial releases it on any lookup miss), no record the
-  product did not create is touched, and a family that finds 1 to 30 in use is
-  refused with one `VT:` line. Each record costs about 14 MB (11,184,810 bytes
-  of host page table for the fixed 12 levels, the reader's index and the
-  page-table image; 13.9 MB measured on Vulkan).
-- Release: when a family's bundle leaves the index (or another build replaces
-  it) and no registration pass has run since the family was registered, its
-  record is released. After a pass its materials may hold the record, and the
-  decls stay registered for the process, so the record is kept until DOOM
-  exits, with one line.
-- Renderers: a material bound to the family carries flavor 2, and
-  VirtualTextureForMaterial matches a record only with the same flavor, so the
-  record is registered with flavor 2. SetSource then gives it the VT system's
-  `UniqueVmtrs` physical page cache, which the VT start-up builds and the
-  per-frame update services on both renderers: the family's pages are
-  requested, read through the member, decoded and uploaded as the stock
-  families' are (VK cache sys+0xFEB0, GL sys+0x11870). Only on OpenGL with
-  `GL_AMD_sparse_texture` loaded and `vt_enablePRT` set (default 0) does the
-  engine's lookup turn the flavor into 4 (a sparse cache of the record's own);
-  the product makes the same test and registers with 4 then. A binding that
-  cannot decode that test on OpenGL is not bound.
+Those programs read only the `vmtr*` render parameters. The renderer sets them
+once per view from the game's own board (record 1: VK 0x1417B3D70, GL
+0x1417B5000), and before each material's draws it pushes the material's
+parameter block over the view values and rolls it back afterwards (VK
+0x141A33680, GL 0x141A4C564 and three siblings). `modvt.c` therefore gives each
+board three things, on both renderers:
+
+- A page-source record of its own: `idVirtualTexture::SetSource(record,
+  "mods/<salt>/<name>", "virtualtextures/mods/<salt>/<name>.pages", 2, 2, 0,
+  NULL)`. SetSource's mega2 loader opens the served members through the
+  provider (no `.pages` file is needed) and allocates the board's host page
+  table and page-table image; the board owns a whole 2048 x 2048-page address
+  space and its own feedback source (the record index).
+- The record pointed at the material-format page cache, the pool of resident
+  pages the game's own board uses (record 1's cache, flavor 0, VK sys+0xFCA0,
+  GL sys+0x115A0): only that cache has the three-layer page array lit
+  programs sample. The pointer is written right after SetSource, with the VT
+  system's jobs synchronised, before any material is bound to the record.
+- Two detours. The material binder (`VtMaterialBind`), after the engine's own
+  writes, also sets `vmtrPageTableMap` (the board's page-table image) and
+  `vmtrFeedbackFloat` (its feedback word) in the parameter block of a material
+  bound to a board, so the material's draws read the board. The handles are
+  the renderParm decls of those names (`DeclFind`). VirtualTextureForMaterial
+  (`VtForMaterial`, called by the material rebind) returns the board's record
+  for a material whose `landpagefile` names it; the engine's own lookup also
+  compares the record's cache flavor with the material's, which no longer agree.
+
+A stock material is never bound to a board record, so its parameters and
+record 1 are untouched (the native test proves both byte for byte with boards
+registered). The material parser binds a material to the record whose name
+equals its `landpagefile`, by name alone, so a board's record must exist before
+its materials are parsed.
+
+- Which boards: one per board name the loaded map serves, read from the build
+  each path is served from (`sh_modserve_each_served_here`): a map that brought
+  its own copy of a salt pages that copy, never the root folder's; in the
+  editor, the root folder's builds the Toybox shows.
+- When: DOOM's game thread only, once the VT start-up has built record 1.
+  Registration runs at the start of every decl registration pass (the editor
+  palette build, a map's activation), before the pass parses any material.
+  Release is queued to the next frame boundary (`sh_modvt_frame`, called after
+  every native frame by the main-thread tick), never inside a pass or a load:
+  the VT system's jobs are synchronised first and the record is then released,
+  exactly the pair SetSource itself starts with, so no transcode or upload of
+  the board is in flight and its pages leave the shared cache. A board served
+  again takes its earlier record when free, and every material bound to it
+  before is bound again at once (index, binder through its detour, block copy),
+  so its parameter block never keeps the released page table. An index rebuilt
+  on any thread only marks a sync for the next frame boundary.
+- How many: the record table has 32 slots and the feedback word a 5-bit source,
+  so the engine has records 1 to 31. Record 1 is the game's own board, record 31
+  is reused by the engine on every lookup miss, and each map's own unique
+  families (the hub, module palettes) hold some of the rest; the boards take
+  what is free among 2 to 30. A board that finds none is refused with one `VT:`
+  line and the player is told, once, "DOOM has no room for another mod texture
+  board on this map, so <mod> draws with plain textures; a map with fewer mods
+  that carry their own textures avoids this." Each board costs about 14 MB of
+  host memory (11,184,810 bytes of host page table, the reader's index and the
+  page-table image); its resident pages share the game's page pool.
+- Failure: any of the five engine sites (`VtSetSource`, `VtForMaterial`,
+  `VtMaterialBind`, `VtMaterialRebind`, `DeclFind`) that does not match its
+  signature, or a decode that does not cross-check (the rebind must call the
+  signed lookup and binder), leaves every site as shipped and turns "mod
+  virtual textures on lit materials" off in the features line.
 - `sh_vt` (`vt_harness.c`) is the diagnostic on the same binding, built only
-  into the diagnostic build (`build.ps1 -Diag`): `list` marks the product's
-  records `(product)`, `sync` runs a sync, and its manual `register`/`release`
-  never touch a product record. The member format is
-  [vt-baker.md](vt-baker.md).
+  into the diagnostic build (`build.ps1 -Diag`): `list` marks the boards
+  `(product)` and shows each record's cache flavor (0 for a board), `sync` runs
+  a sync with its releases, and its manual `register`/`release` never touch a
+  board. The member format is [vt-baker.md](vt-baker.md).
 
 A mod's `hud` key (the author block of `mod.json`) selects how
 the stock ammo widget shows a weapon (`modhud.c`; the object is
