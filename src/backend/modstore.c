@@ -1181,6 +1181,10 @@ static int ms_new_salt(char out[SH_SALT_LEN + 1], const char *also)
     return ok;
 }
 
+/* sh_ms_assign_salt_as: the salt the next salting takes instead of a new one
+ * (under the store lock). */
+static char g_ms_fixed_salt[SH_SALT_LEN + 1];
+
 /* The salting's plan (sh_ms_assign_salt): every file of the folder read and
  * rewritten in memory first, mods/<from>/ to mods/<salt>/ in texts and in the
  * folder segments of paths under assets/; a binary file naming mods/<from>/
@@ -1408,7 +1412,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     src = sh_mb_wpath(folder);
     if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, ccap, "out of memory"); goto done; }
     parent[slash - src] = 0;
-    if (!ms_new_salt(salt, from)) { ms_cause(cause, ccap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
+    if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
+    else if (!ms_new_salt(salt, from)) { ms_cause(cause, ccap, "no new salt could be drawn (the system's random generator failed)"); goto done; }
     r.leaf = from;
     r.key = salt;
     /* Read and rewrite everything in memory first. */
@@ -1598,6 +1603,19 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
     }
     if (r < 0) ms_note_cause(folder, cause);
     else if (r > 0) ms_note_cause(folder, NULL);
+    modstore_unlock();
+    return r;
+}
+
+int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char *cause, size_t ccap)
+{
+    char got[SH_SALT_LEN + 1];
+    int r;
+    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, ccap, "no salt given") - 1;
+    modstore_lock();
+    strcpy_s(g_ms_fixed_salt, sizeof g_ms_fixed_salt, salt);
+    r = sh_ms_assign_salt(folder, from, got, cause, ccap);
+    g_ms_fixed_salt[0] = 0;
     modstore_unlock();
     return r;
 }

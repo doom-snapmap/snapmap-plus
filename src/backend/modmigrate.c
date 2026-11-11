@@ -95,6 +95,8 @@ void sh_modmigrate_set_data_root(const char *root)
 
 static int mg_data_root(char *out, size_t cap)
 {
+    /* A delivered package converted here takes its salt from the store. */
+    sh_modlegacy_set_salter(sh_ms_assign_salt);
     AcquireSRWLockShared(&g_mg_lock);
     strncpy_s(out, cap, g_mg_root, _TRUNCATE);
     ReleaseSRWLockShared(&g_mg_lock);
@@ -521,10 +523,33 @@ static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id,
     sh_json_object_free(&o);
 }
 
+/* Whether the migration record's trees give `tree` to the store folder
+ * `name` (an earlier pass made it from this tree). */
+static int mg_tree_folder_is(const char *mods, const char *tree, const char *name)
+{
+    char *text = NULL, want[MAX_PATH * 2], *esc = NULL;
+    int mine = 0;
+    size_t i, w = 0;
+    if (!tree[0] || sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
+    esc = (char *)malloc(strlen(name) * 2 + 1);
+    if (esc) {
+        for (i = 0; name[i]; i++) {
+            if (name[i] == '"') esc[w++] = '\\';
+            esc[w++] = name[i] == '\\' ? '/' : name[i];
+        }
+        esc[w] = 0;
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"%s\"", tree, esc);
+        mine = strstr(text, want) != NULL;
+    }
+    free(esc);
+    free(text);
+    return mine;
+}
+
 /* The store folder for an authored package: mods\<its overrides folder
- * name>, the same folder again on a repeated pass (its legacy record names
- * this tree or this overrides folder), else that name with the tree's first
- * 8 hex when another mod holds it. */
+ * name>, the same folder again on a repeated pass (the migration record's
+ * trees give this tree to it), else that name with the tree's first 8 hex
+ * when another mod holds it. */
 static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t cap)
 {
     const char *leaf = strrchr(it->name, '/');
@@ -533,8 +558,6 @@ static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t
     for (round = 0; round < 3; round++) {
         char folder[MAX_PATH * 4], mods[MAX_PATH * 4];
         wchar_t *w;
-        sh_mb_bundle b;
-        int mine = 0;
         DWORD a;
         if (round == 0) strncpy_s(out, cap, leaf, _TRUNCATE);
         else _snprintf_s(out, cap, _TRUNCATE, "%s-%.*s", leaf, round == 1 ? 8 : 16, it->tree);
@@ -544,10 +567,7 @@ static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t
         a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
         free(w);
         if (a == INVALID_FILE_ATTRIBUTES) return;
-        if (sh_mb_load_folder(folder, &b) && b.extra)
-            mine = (it->tree[0] && strstr(b.extra, it->tree)) != 0;
-        sh_mb_free(&b);
-        if (mine) return;
+        if (mg_tree_folder_is(mods, it->tree, out)) return;
     }
 }
 
@@ -558,9 +578,10 @@ static unsigned long long g_mg_pointer_bytes;
 
 /* modlegacy's builder for a delivered package: the normal builder over the
  * installed bundles, without the game's resource reader (the store tool
- * runs without the engine; in the game the pass runs on a worker).
- * Copies of installed content still become stock pointers: the stock bridge
- * reads the installed archives from disk, not through the engine. */
+ * runs without the engine). Copies of installed content still become stock
+ * pointers: the stock bridge reads the installed archives from disk, not
+ * through the engine. A migrated package is content the product received,
+ * so its replacements are kept (sh_mb_keep_replacements_here). */
 static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
 {
     char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
@@ -579,18 +600,63 @@ static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
     r.installed_context = &list;
     r.stock = NULL;
     r.stock_context = NULL;
-    if (!sh_mb_build(folder, &r, &b)) {
+    sh_mb_keep_replacements_here(1);
+    if (!sh_mb_build(folder, NULL, &r, &b)) {
         if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
     } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {
         if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
     } else {
         ok = 1;
-        sh_ms_cache_note(folder, b.hash);   /* built from its current tree */
         g_mg_pointers = b.stock_count;
         g_mg_pointer_bytes = b.stock_bytes;
     }
+    sh_mb_keep_replacements_here(0);
     sh_mb_free(&b);
     sh_ms_list_free(&list);
+    return ok;
+}
+
+/* Salt a staged folder from the package id its files are named by
+ * (mods/<id>/), then install it at the root as `target` under the current
+ * rules, keeping its replacements (content the product received). */
+static int mg_install_staged(const char *stage_u8, const char *from, const char *target, char *key, size_t key_cap,
+                             sh_ms_install_stats *st, sh_mb_bundle *b, char *cause, size_t cause_cap)
+{
+    char salt[SH_SALT_LEN + 1], root[MAX_PATH * 4], folder[MAX_PATH * 4];
+    int ok, again = 0;
+    /* Moved again into the folder an earlier pass made: it keeps its salt. */
+    if (sh_ms_root(root, sizeof root)) {
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", root, target);
+        if (sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT) {
+            wchar_t *w = sh_mb_wpath(folder);
+            char *text = NULL;
+            size_t n = 0;
+            if (w) {
+                char *u = sh_mb_utf8(w);
+                char mj[MAX_PATH * 4];
+                _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", u ? u : folder);
+                text = (char *)sh_mb_read_file(mj, 16u << 20, &n);
+                free(u);
+            }
+            free(w);
+            if (text) {
+                const char *at = strstr(text, "\"salt\"");
+                at = at ? strchr(at + 6, '"') : NULL;
+                if (at && sh_salt_valid(at + 1, SH_SALT_LEN) && at[1 + SH_SALT_LEN] == '"') {
+                    memcpy(salt, at + 1, SH_SALT_LEN);
+                    salt[SH_SALT_LEN] = 0;
+                    again = 1;
+                }
+            }
+            free(text);
+        }
+    }
+    if (again ? sh_ms_assign_salt_as(stage_u8, from, salt, cause, cause_cap) < 0
+              : sh_ms_assign_salt(stage_u8, from, salt, cause, cause_cap) < 0)
+        return 0;
+    sh_mb_keep_replacements_here(1);
+    ok = sh_ms_install_as(stage_u8, target, NULL, key, key_cap, st, b, cause, cause_cap);
+    sh_mb_keep_replacements_here(0);
     return ok;
 }
 
@@ -733,7 +799,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         it->outcome = v.files ? SH_MODMIGRATE_CONVERTED : SH_MODMIGRATE_REUSED;
         strncpy_s(it->id, sizeof it->id, v.id, _TRUNCATE);
         strncpy_s(it->version, sizeof it->version, v.version, _TRUNCATE);
-        strncpy_s(it->bundle, sizeof it->bundle, v.bundle, _TRUNCATE);
+        strncpy_s(it->bundle, sizeof it->bundle, v.build, _TRUNCATE);
         it->bundle_files = v.files;
         it->left_out = v.skipped;
         it->movies = v.movies;
@@ -779,7 +845,8 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         memset(&b, 0, sizeof b);
         memset(&st, 0, sizeof st);
         t1 = GetTickCount64();
-        installed = stage_u8 && sh_ms_install_as(stage_u8, target, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+        installed = stage_u8 && mg_install_staged(stage_u8, v.id[0] ? v.id : id, target, key, sizeof key, &st, &b, cause,
+                                                  sizeof cause);
         it->ms_store = GetTickCount64() - t1;
         free(stage_u8);
         mg_rmtree(wstage);
@@ -1669,6 +1736,7 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
     sh_json_object root = {0}, strings = {0}, en = {0};
     char *u = sh_mb_utf8(modjson), *text, *s = NULL, *e = NULL, *out = NULL;
     const char *p, *raw;
+    char prefix[SH_SALT_LEN + 2] = "";
     size_t n = 0, i, k, outn = 0;
     unsigned added = 0;
     int ok = 0;
@@ -1685,8 +1753,28 @@ static int mg_merge_strings(const wchar_t *modjson, const sh_json_object *pairs,
     if (raw && (raw[0] != '{' || !sh_json_parse_object(raw, strlen(raw), 63, &strings))) goto bad;
     raw = sh_json_object_get(&strings, "en");
     if (raw && (raw[0] != '{' || !sh_json_parse_object(raw, strlen(raw), 62, &en))) goto bad;
+    {
+        /* A salted folder's keys are "<salt>_<key>" (a folder still in an
+         * earlier shape is prefixed when the store tool converts it). */
+        sh_json_object block = {0};
+        const char *sv;
+        raw = sh_json_object_get(&root, SH_MB_BLOCK_KEY);
+        if (raw && raw[0] == '{' && sh_json_parse_object(raw, strlen(raw), 61, &block) &&
+            (sv = sh_json_object_get(&block, "salt")) != NULL && sv[0] == '"' && sh_salt_valid(sv + 1, strcspn(sv + 1, "\"")) &&
+            sv[1 + SH_SALT_LEN] == '"')
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%.8s_", sv + 1);
+        sh_json_object_free(&block);
+    }
     for (i = 0; i < pairs->count; i++) {
-        const sh_json_member *m = &pairs->members[i];
+        const sh_json_member *m0 = &pairs->members[i];
+        sh_json_member pm = *m0;
+        const sh_json_member *m = &pm;
+        char keyed[SH_SALT_LEN + 2 + 512];
+        if (prefix[0] && _strnicmp(m0->key, prefix, SH_SALT_LEN + 1)) {
+            _snprintf_s(keyed, sizeof keyed, _TRUNCATE, "%s%.*s", prefix, (int)m0->key_length, m0->key);
+            pm.key = keyed;
+            pm.key_length = strlen(keyed);
+        }
         for (k = 0; k < en.count && _stricmp(en.members[k].key, m->key); k++) {}
         if (k < en.count) {
             char *have = mg_decode(en.members[k].value_json), *want = mg_decode(m->value_json);
@@ -1733,19 +1821,19 @@ done:
     return ok;
 }
 
-/* The package.json the converter reads for the loose layer: the mod's id and
- * name and, when the document is due, its keys as strings.en. With `block`,
- * the mod.json of a folder with no loose files: the migration's origin in a
- * product block the build completes. */
+/* The package.json the converter reads for the loose layer (and the mod.json
+ * of a folder with no loose files): the mod's name and, when the document is
+ * due, its keys as strings.en. The author's part only: the salting prefixes
+ * the keys (`<salt>_<key>`) and the build writes the block. */
 static char *mg_loose_descriptor(const mg_loose *l, int with_strings, int block, size_t *n)
 {
     sh_json_object d = {0}, strings = {0};
     char *en = NULL, *s = NULL, *out = NULL;
-    if (sh_json_object_set(&d, "id", "\"" MG_LOOSE_FOLDER "\"", 1) && sh_json_object_set(&d, "name", "\"My overrides\"", 1) &&
+    (void)block;
+    if (sh_json_object_set(&d, "name", "\"My overrides\"", 1) &&
         (!with_strings ||
          ((en = sh_json_serialize_object(&l->pairs, 4, NULL)) != NULL && sh_json_object_set(&strings, "en", en, 2) &&
-          (s = sh_json_serialize_object(&strings, 2, NULL)) != NULL && sh_json_object_set(&d, "strings", s, 3))) &&
-        (!block || sh_json_object_set(&d, SH_MB_BLOCK_KEY, "{\"format\": 1, \"origin\": \"" SH_MB_ORIGIN_MIGRATION "\"}", 2)))
+          (s = sh_json_serialize_object(&strings, 2, NULL)) != NULL && sh_json_object_set(&d, "strings", s, 3))))
         out = sh_json_serialize_object(&d, 0, n);
     free(en);
     free(s);
@@ -1883,7 +1971,8 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
             memset(&b, 0, sizeof b);
             memset(&ist, 0, sizeof ist);
             stage_u8 = sh_mb_utf8(wstage);
-            if (!stage_u8 || !sh_ms_install_as(stage_u8, MG_LOOSE_FOLDER, NULL, key, sizeof key, &ist, &b, cause, sizeof cause)) {
+            if (!stage_u8 || !mg_install_staged(stage_u8, MG_LOOSE_FOLDER, MG_LOOSE_FOLDER, key, sizeof key, &ist, &b, cause,
+                                                sizeof cause)) {
                 mg_log("MODS: migration: mods\\" MG_LOOSE_FOLDER "\\ was not made: %s", cause[0] ? cause : "the store refused it");
                 st->files_failed++;
             } else {

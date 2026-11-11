@@ -173,6 +173,11 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * object). A refusal of a store folder is also recorded as its build cause. */
 int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
 
+/* sh_ms_assign_salt with `salt` instead of a new one: the store tool's
+ * overrides migration, moving a package again into the folder an earlier
+ * pass made of it, keeps that folder's identity. */
+int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char *cause, size_t cause_cap);
+
 /* The same salting written to a new folder `dest` (it must not exist; files
  * the salting does not rewrite are hard-linked), with `modjson` (a fresh
  * author text: no block, no retired key) in place of the folder's own

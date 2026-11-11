@@ -6,8 +6,10 @@
  * the campaign's three carrier maps when they are present.
  *
  * The bundle builder (modbundle_build_folder) is replaced by a double that
- * completes mod.json's product block from the unpacked tree, keeping the
- * converter's seed (legacy record, shadows, origin). The carrier maps are not in
+ * completes mod.json's product block (format 2) from the unpacked tree, and
+ * the salting (sh_modlegacy_set_salter) by one that writes the salt block, so
+ * a conversion is the one shape: no id, no legacy record, no product seed.
+ * The carrier maps are not in
  * the repository (their packages hold game files); set SH_MODLEGACY_FIXTURES
  * to their folder to add the integration pass; it is skipped otherwise. */
 #define WIN32_LEAN_AND_MEAN
@@ -18,11 +20,13 @@
 
 #include "../src/backend/modlegacy.h"
 #include "../src/backend/modmanifest.h"
+#include "../src/backend/modbundle.h"
 
 /* mod_seam_stub.c: the serving layer's stand-ins. */
 extern int g_mod_stub_rescans;
 #include "../src/backend/map_legacy_payload.h"
 #include "../src/backend/map_shards.h"
+#include "../src/backend/map_old.h"
 #include "../src/backend/map_carrier.h"
 #include "../src/backend/config_json.h"
 
@@ -176,9 +180,8 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
         size_t text_len = 0;
         if (seed) sh_json_parse_object(seed, strlen(seed), 24, &block);
         _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", hash);
-        sh_json_object_set(&block, "format", "1", 4);
-        sh_json_object_set(&block, "build", "1", 4);
-        sh_json_object_set(&block, "bundle", quoted, 4);
+        sh_json_object_set(&block, "format", "2", 4);
+        sh_json_object_set(&block, "build", quoted, 4);
         sh_json_object_set(&block, "files", out.p, 8);
         block_text = sh_json_serialize_object(&block, 2, NULL);
         sh_json_object_set(&o, "snapmap-plus", block_text, 24);
@@ -193,6 +196,24 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
     free(version);
     free(desc);
     sh_json_object_free(&o);
+    return 1;
+}
+
+/* The salting: a salt block written into mod.json (a package carries no mods/<id>/ names). */
+static unsigned g_salts;
+static int test_salter(const char *folder, const char *from, char salt_out[9], char *cause, size_t cap)
+{
+    char path[MAX_PATH * 2], salt[16];
+    size_t len = 0, out_len = 0;
+    char *text, *out;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+    text = read_all(path, &len);
+    _snprintf_s(salt, sizeof salt, _TRUNCATE, "t%07u", ++g_salts);
+    out = text ? sh_mb_salt_modjson(text, len, from, salt, &out_len) : NULL;
+    free(text);
+    if (!out || !write_all(path, out, out_len)) { free(out); strncpy_s(cause, cap, "test salting failed", _TRUNCATE); return -1; }
+    free(out);
+    strcpy_s(salt_out, 9, salt);
     return 1;
 }
 
@@ -647,7 +668,7 @@ static void left_out_members(void)
     char *map, *out, path[MAX_PATH * 2], *text;
     sh_modlegacy_verdict v[2], first;
     int builds;
-    printf("-- members a bundle cannot carry are left out; a delivery key memoises across encodings\n");
+    printf("-- members a bundle cannot carry are left out; another encoding of one tree converts again\n");
     sh_modlegacy_reset();
     reset_counts();
     zip = zip_build(m, 4, 0, &zn);
@@ -667,7 +688,8 @@ static void left_out_members(void)
     if (out) HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, map);
     /* The same tree in another ZIP (the decl stored instead of deflated): a new
-     * digest, the same key; a fresh process finds the folder by its key. */
+     * digest; the one shape keeps no delivery key, so it converts again into a
+     * folder of its own (the store tool converts a map once). */
     {
         zmember m2[4];
         memcpy(m2, m, sizeof m2);
@@ -679,8 +701,8 @@ static void left_out_members(void)
     map = carrier_map(BASE_MAP, KEY, zip2, zn2, 8192, -1, -1, NULL, &mn);
     out = sh_modlegacy_process(map, mn, &on);
     CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
-          strcmp(v[0].digest, first.digest) && !strcmp(v[0].folder, first.folder) && !strcmp(v[0].bundle, first.bundle));
-    CHECK(g_build_calls == builds);
+          strcmp(v[0].digest, first.digest) && strcmp(v[0].salt, first.salt));
+    CHECK(g_build_calls == builds + 1);
     if (out) HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, map);
     free(zip);
@@ -710,9 +732,9 @@ static void convert_era_c(void)
      * once so the activation later in the same parse can see it. */
     CHECK(g_mod_stub_rescans == rescans + 1);
     CHECK(sh_modlegacy_last_report(v, 4) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT && v[0].layout == 'C');
-    CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") && !strncmp(v[0].version, "legacy-", 7) &&
-          !strcmp(v[0].version + 7, digest) && v[0].key_form == SH_LEGACY_KEY_DELIVERY && v[0].files == 3);
-    CHECK(v[0].shadows == 2);   /* the namespaced icon is not a shadow */
+    CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") && strncmp(v[0].version, "legacy-", 7) &&
+          v[0].key_form == SH_LEGACY_KEY_DELIVERY && v[0].files == 3 && v[0].salt[0] == 't');
+    CHECK(v[0].shadows == 2);   /* two names outside mods/<id>/: the namespaced icon is not one */
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\acceptance.r137.mixed-rows", g_root);
     (void)digest;
     CHECK(!_stricmp(v[0].folder, folder));
@@ -723,9 +745,9 @@ static void convert_era_c(void)
         char path[MAX_PATH * 2], *text;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
         text = read_all(path, NULL);
-        CHECK(text && strstr(text, "\"id\": \"acceptance.r137.mixed-rows\"") && strstr(text, "\"name\": \"R137 mixed-rows\""));
-        CHECK(text && strstr(text, "\"shadows\": [\"generated/decls/entitydef/acceptance/r137/speaker_offset.decl\""));
-        CHECK(text && strstr(text, "\"keyForm\": \"delivery\"") && strstr(text, "\"layout\": \"C\""));
+        CHECK(text && !strstr(text, "\"id\"") && strstr(text, "\"name\": \"R137 mixed-rows\""));
+        CHECK(text && !strstr(text, "\"shadows\"") && !strstr(text, "\"legacy\"") && !strstr(text, "keyForm") &&
+              strstr(text, "\"format\": 2") && strstr(text, "\"salt\": \"t"));
         free(text);
     }
     if (out) {
@@ -733,7 +755,8 @@ static void convert_era_c(void)
         CHECK(!strstr(out, "\"smpkg.") && member_rows(out) == 1);
         CHECK(string_rows(out) == 1 && alloc4(out, &count) && count == 1);
         CHECK(strstr(out, "door_label") < strstr(out, "\"snapmap-plus\":{\"format\":1,\"mods\":["));
-        CHECK(sh_modmanifest_read(out, on, &rows, NULL) == 1 && rows.count == 1 && !strcmp(rows.rows[0].bundle, v[0].bundle));
+        CHECK(sh_modmanifest_read(out, on, &rows, NULL) == 1 && rows.count == 1 && !strcmp(rows.rows[0].build, v[0].build) &&
+              !strcmp(rows.rows[0].salt, v[0].salt));
         /* names: the placed inherit the bundle provides, nothing else */
         CHECK(rows.count == 1 && rows.rows[0].name_count == 1 &&
               !strcmp(rows.rows[0].names[0], "acceptance/r137/speaker_offset"));
@@ -747,11 +770,11 @@ static void convert_era_c(void)
     out = sh_modlegacy_process(map, mn, &on);
     CHECK(out && g_memo_lines == 1 && g_build_calls == 0);
     if (out) HeapFree(GetProcessHeap(), 0, out);
-    /* A new session: the installed folder is reused, nothing is rebuilt. */
+    /* A new session converts it again (the store tool reads each map once). */
     sh_modlegacy_reset();
     reset_counts();
     out = sh_modlegacy_process(map, mn, &on);
-    CHECK(out && g_convert_lines == 1 && g_build_calls == 0 && member_rows(out) == 1);
+    CHECK(out && g_convert_lines == 1 && member_rows(out) == 1);
     if (out) HeapFree(GetProcessHeap(), 0, out);
     /* A map that already names the bundle keeps one row for it. */
     {
@@ -813,12 +836,12 @@ static void convert_era_b(void)
         char path[MAX_PATH * 2], *text;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
         text = read_all(path, NULL);
-        CHECK(text && strstr(text, "\"id\": \"testpack\"") && strstr(text, "\"name\": \"testpack\""));
+        CHECK(text && !strstr(text, "\"id\"") && strstr(text, "\"name\": \"testpack\""));
         CHECK(text && strstr(text, "\"g_useResourceBlackList\": \"0\"") && !strstr(text, "sv_cheats"));
         CHECK(text && strstr(text, "\"testpack_title\": \"Foo\""));
         CHECK(text && strstr(text, "\"weapon/testpack/gun\""));
         CHECK(text && strstr(text, "\"description\": \"old pack\"") && !strstr(text, "priority") &&
-              !strstr(text, "override-package") && strstr(text, "\"layout\": \"B\""));
+              !strstr(text, "override-package") && !strstr(text, "\"layout\""));
         free(text);
     }
     /* The placed edit value names the migrated decl: it is the row's name. */
@@ -884,7 +907,7 @@ static void clean_verdicts(void)
     if (out) HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, map);
 
-    /* The builder refuses: cleaned, the unpacked tree is left for the author, the reason names it. */
+    /* The builder refuses: cleaned, nothing is left behind, the reason names it. */
     sh_modlegacy_reset();
     reset_counts();
     g_build_refuse = 1;
@@ -900,7 +923,11 @@ static void clean_verdicts(void)
     out = sh_modlegacy_process(map, mn, &on);
     g_build_refuse = 0;
     CHECK(out && g_clean_lines == 1 && strstr(g_last_clean, "test builder refuses this folder"));
-    CHECK(sh_modlegacy_last_report(v, 4) == 1 && v[0].folder[0] && file_exists_at(v[0].folder, "mod.json"));
+    {
+        char gone[MAX_PATH];
+        _snprintf_s(gone, sizeof gone, _TRUNCATE, "%s\\mods\\local.refused", g_root);
+        CHECK(sh_modlegacy_last_report(v, 4) == 1 && !file_exists_at(gone, "mod.json"));
+    }
     if (out) HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, map);
 
@@ -1023,6 +1050,7 @@ int main(void)
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%ssmp_modlegacy_test_%lu", tmp, GetCurrentProcessId());
     CreateDirectoryA(g_root, NULL);
     sh_modlegacy_set_data_root(g_root);
+    sh_modlegacy_set_salter(test_salter);
 
     header_grammar_per_era();
     zip_reading();
