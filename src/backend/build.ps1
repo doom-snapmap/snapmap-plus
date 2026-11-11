@@ -7,7 +7,7 @@ param(
                            "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_areas.c", "world_area_cell.c", "object_entry.c", "place_anywhere.c", "grid_room_snap.c", "grid_room_edit.c", "raw_deflate.c", "decl_text.c", "decl_tree.c",
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
-                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
+                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
                            "iface_engine.c", "editor_delete.c", "editor_undo.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "prefab_mods.c", "prefab_block.c", "timeline_tile.c", "modserve.c", "modregistry.c", "modregistry_choices.c", "modserve_engine.c", "modtypeinfo.c", "modledger.c", "modswf.c", "modsound.c", "modhud.c", "modhud_scene.c", "modscene_place.c", "modscene_decl.c", "modscene_sigs.c", "modpublished.c", "modpublish.c", "modaction.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
@@ -59,9 +59,10 @@ if ($Sources.Count -eq 1 -and $Sources[0] -match ",") { $Sources = $Sources[0].S
 # Include the optional logger; DllMain arms it when SH_DIAG is defined.
 $defs = ""
 if ($Diag) {
-    $Sources += "../fault_shield/shield_diag.c"
+    # The cs_dontuse / sh_alginfo math overrides exist only in this build.
+    $Sources += "../fault_shield/shield_diag.c", "algo.c"
     $defs = "/DSH_DIAG"
-    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c /DSH_DIAG"
+    Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c +algo.c /DSH_DIAG"
 }
 
 # Compile from this directory with relative paths to avoid cmd quoting issues.

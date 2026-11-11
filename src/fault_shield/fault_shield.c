@@ -67,18 +67,20 @@ static void shield_wait_for_instr(void)
 
 /* Called by the backend bootstrap with the live module range and its
  * signature results; a NULL base skips installation. */
-void shield_install(uint8_t *doom_base, size_t doom_size, const sig_result *results, size_t count)
+int shield_install(uint8_t *doom_base, size_t doom_size, const sig_result *results, size_t count)
 {
+    int armed;
     g_doom_base = doom_base;
     g_doom_size = doom_size;
-    if (g_doom_base == NULL) { shield_raw("shield_install: NULL base -> skipped"); return; }
+    if (g_doom_base == NULL) { shield_raw("shield_install: NULL base -> skipped"); return 0; }
 #ifdef SH_DIAG
     shield_wait_for_instr();
 #endif
-    if (shield_install_hooks(results, count)) shield_raw("shield_install: armed (VEH + frame hook)");
-    else shield_raw("shield_install: FAILED to install hooks");
+    armed = shield_install_hooks(results, count);
+    shield_raw(armed ? "shield_install: armed (VEH + frame hook)" : "shield_install: FAILED to install hooks");
     /* Arm crash capture even if recovery installation failed. This runs outside
      * the loader lock on the bootstrap thread. */
     crash_report_init();
     crash_report_arm_fatal_handlers();
+    return armed;
 }

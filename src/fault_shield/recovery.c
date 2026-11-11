@@ -11,6 +11,7 @@
 #include "../backend/apply_engine.h"
 #include "../backend/engine_dialog.h"
 #include "../backend/patch.h"
+#include "../backend/commands.h"
 #include "fault_record.h"
 #include "hook.h"
 #include "recovery.h"
@@ -327,6 +328,7 @@ static int64_t frame_detour(void *self)
     result = orig_frame(self);
     InterlockedIncrement(&g_frame_seq);
     if (!InterlockedCompareExchange(&g_armed, 0, 0)) sh_apply_prefab_poll_play();
+    sh_commands_main_frame();    /* the first frame registers the console commands */
     return result;
 }
 

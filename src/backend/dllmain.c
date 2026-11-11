@@ -59,13 +59,11 @@
 #include "companion_engine.h"
 #include "typeinfo.h"
 #include "megapreview.h"
-#include "vt_harness.h"
 #include "modvt.h"
 #include "imgpreview.h"
 #include "prefabpreview.h"
 #include "soundpreview.h"
 #include "patch.h"
-#include "algo.h"
 #include "target_any.h"
 #include "wiring_cleandirect.h"
 #include "swf_textedit.h"
@@ -83,6 +81,7 @@
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
 #include "../fault_shield/shield_diag.h"
+#include "algo.h"
 #endif
 
 static uint8_t *g_doom_base = NULL;
@@ -302,8 +301,7 @@ static void install_features(const sig_result *results, size_t db)
          SH_FEATURE_MOD_SCENES, NULL, NULL);
 
     /* Expose live entity reads so navigation sees marks edited since map load. */
-    sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
-                                sh_apply_engine_entity_valid,
+    sh_nav_bake_set_live_editor(sh_apply_engine_entity_valid,
                                 sh_apply_engine_entity_json,
                                 sh_apply_engine_entity_transform, NULL);
     sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
@@ -356,7 +354,6 @@ static void install_features(const sig_result *results, size_t db)
     /* Decode virtual-texture previews from installed files through the signed
      * engine page decoder; no renderer or GPU calls are needed. */
     sh_megapreview_install(results, db, g_doom_base);
-    (void)sh_vt_harness_install(results, db, g_doom_base);
     /* Load installed-resource indexes for file-based image previews and catalogs. */
     sh_imgpreview_install();
     /* Start bounded prefab geometry previews using the installed-resource index. */
@@ -364,8 +361,10 @@ static void install_features(const sig_result *results, size_t db)
     /* Bind editor audio audition and stop functions together. */
     sh_soundpreview_install(results, db, g_doom_base, cmdsys);
 
-    /* Cache math-override dependencies; cs_dontuse remains off until toggled. */
+#ifdef SH_DIAG
+    /* The cs_dontuse math overrides: the diagnostic build only, off until toggled. */
     sh_algo_install(g_doom_base);
+#endif
 
     /* Bind registry enumeration for the visibility-toggle command. */
     sh_target_any_install(get_decls);
@@ -453,7 +452,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     /* The patch primitive and a scratch detour are checked before any engine
      * code is touched; a failure leaves the game exactly as it was. */
     int patching_ok = sh_patch_selftest();
-    sh_algo_selftest();
+#ifdef SH_DIAG
+    if (!sh_algo_selftest()) backend_log("algo: the math override self-test failed");
+#endif
     patching_ok = sh_smoke_run(g_doom_base, results, db, resolve_us / 1000) && patching_ok;
 
     /* Resolve and log all data anchors here so unsupported dependencies are visible. */
@@ -472,7 +473,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     }
 
     /* Arm the resident fault shield after startup resolution. */
-    shield_install(g_doom_base, g_doom_size, results, patching_ok ? db : 0);
+    /* Its Frame hook is the main-thread tick: console registration and the
+     * window's main-thread calls run there. */
+    if (!shield_install(g_doom_base, g_doom_size, results, patching_ok ? db : 0) && patching_ok) {
+        sh_feature_off(SH_FEATURE_CONSOLE, "the main-frame hook is not installed");
+        sh_feature_off(SH_FEATURE_PREFABS, "the main-frame hook is not installed");
+    }
 
     /* The install is done with the mod store: the boot build may start. */
     sh_ms_boot_release();

@@ -59,6 +59,7 @@ static printf_dispatch_fn g_printf      = NULL;
 static void              *g_get_decls   = NULL;
 static const uint8_t     *g_module_base = NULL;
 static volatile LONG      g_installed   = 0;
+static volatile LONG      g_register_pending = 0;   /* set by install, cleared by the first main frame */
 
 /* Keep the original getter bytes while devmode is forced off. */
 static sh_patch_handle    g_devmode_handle;
@@ -93,10 +94,6 @@ const char *cmd_argv(idCmdArgs *a, int n)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* Decode cmdSystem from CmdSystemLea, then an independent global anchor.
- * The last-resort pinned RVA uses the Vulkan filename gate, not a build hash. */
-#define CMDSYS_KNOWN_RVA   SH_RVA(0x2F451C0u, 0x2F8D1C0u)   /* Pinned Vulkan audit/fallback slot, gated by host filename. */
-
 /* Guarded byte reads shared by global decoders and entity handlers. */
 int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
 {
@@ -125,55 +122,12 @@ const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
 
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base)
 {
-
     void *accessor = (void *)sig_addr_by_name(results, n, "CmdSystemLea");
-    if (accessor) {
-        const uint8_t *slot = sh_decode_rip_slot((const uint8_t *)accessor);
-        if (slot) {
-            void *obj = NULL;
-            if (sh_safe_read(slot, (uint8_t *)&obj, sizeof obj) && obj) {
-                char line[128];
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B2: cmdSystem decoded slot=%p -> obj=%p (portable)", (void *)slot, obj);
-                backend_log(line);
-                return obj;
-            }
-        }
-        backend_log("B2: cmdSystem portable decode failed -- trying the signed data-global anchor");
-    }
-    /* Independent anchor survives a detour on the CmdSystemLea prologue. */
-    if (module_base) {
-        glb_status gst = GLB_UNKNOWN_NAME;
-        uintptr_t decoded = glb_resolve(module_base, "cmd_system_slot", &gst);
-        if (decoded) {
-            void *obj = NULL;
-            if (sh_safe_read((const uint8_t *)decoded, (uint8_t *)&obj, sizeof obj) && obj) {
-                char line[128];
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B2: cmdSystem glb slot=%p -> obj=%p (portable)", (void *)decoded, obj);
-                backend_log(line);
-                return obj;
-            }
-        } else {
-            char line[128];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cmdSystem glb anchor unresolved (status=%d)", (int)gst);
-            backend_log(line);
-        }
-    }
-    /* Last resort: pinned Vulkan RVA behind the host filename gate. */
-    if (module_base && sh_host_is_supported_build()) {
-        const uint8_t *slot = module_base + CMDSYS_KNOWN_RVA;
-        void *obj = NULL;
-        if (sh_safe_read(slot, (uint8_t *)&obj, sizeof obj) && obj) {
-            char line[128];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cmdSystem pinned-build fallback *(base+0x55b7280)=%p", obj);
-            backend_log(line);
-            return obj;
-        }
-    }
-    backend_log("B2: cmdSystem UNRESOLVED -- commands cannot fire");
+    const uint8_t *slot = accessor ? sh_decode_rip_slot((const uint8_t *)accessor) : NULL;
+    void *obj = NULL;
+    (void)module_base;
+    if (slot && sh_safe_read(slot, (uint8_t *)&obj, sizeof obj) && obj) return obj;
+    backend_log("commands: the console command system was not found");
     return NULL;
 }
 
@@ -576,6 +530,7 @@ static void lr_buf_append(lr_buf *b, const char *s)
     b->data[b->len]   = '\0';
 }
 
+#ifdef SH_DIAG
 /* Print what the resource layer serves for one engine path (a generated Grid
  * Room variant, a built-in default or the installed original): its length and,
  * when a match string is given, every line of those bytes that contains it.
@@ -611,6 +566,7 @@ static void h_sh_resread(idCmdArgs *a)
     }
     HeapFree(GetProcessHeap(), 0, body);
 }
+#endif
 
 /* List resource names with optional substring filtering and clipboard copy. */
 static void h_sh_listres(idCmdArgs *a)
@@ -785,6 +741,7 @@ static void h_reenable_devmode(idCmdArgs *a)
         sh_printf("sh_reenable_devmode: %s -- restore failed\n", sh_patch_status_str(st));
 }
 
+#ifdef SH_DIAG
 /* Log render trace varargs through a replacement no-op sink. Start-only: the
  * detour and file remain active for the process lifetime, with no trampoline call. */
 #define RENDERLOG_SIG_NAME   "RenderLogStub"
@@ -870,13 +827,7 @@ static void h_cs_start_render_logging(idCmdArgs *a)
     }
     sh_printf("cs_start_render_logging: render-log hook installed.\n");
 }
-
-/* Shared help/refusal wrapper for unimplemented commands. */
-#define STUB_HANDLER(fn, help_text)                                              \
-    static void fn(idCmdArgs *a) {                                              \
-        (void)a;                                                                \
-        sh_printf("%s\n(this command is not available in Snapmap+)\n", help_text); \
-    }
+#endif
 
 /* Model compilation and render-debug commands. Engine calls resolve at use.
  * Debug traps, machine-specific dumps, and unsupported mutators are refused. */
@@ -1043,6 +994,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
         sh_printf("sh_genbmodel: '%s' could not be generated; nothing was written.\n", input);
 }
 
+#ifdef SH_DIAG
 /* Render inspection uses signed render-world anchors; showcursor writes one
  * signed editor-object field. Other toggles are local diagnostics. Unsupported
  * mutators and the original debugger/machine-specific dump paths are refused. */
@@ -1116,7 +1068,7 @@ static int dr_showcursor(void)
     if (!g_module_base) return 0;
     uintptr_t editor = glb_resolve(g_module_base, "editor_singleton", NULL);
     if (!editor) {
-        backend_log("B2: sh_debugrender showcursor declined -- editor_singleton unresolved on this build");
+        backend_log("sh_debugrender: showcursor declined -- editor_singleton is unresolved");
         return 0;
     }
     __try {
@@ -1198,6 +1150,7 @@ static void h_sh_debugrender(idCmdArgs *a)
 
     sh_printf("sh_debugrender: unknown sub-op '%s'.\n", sub);
 }
+#endif
 
 /* Dispatch sh subcommands inline on the engine main thread. Backend handlers
  * can serialize, edit, commit, select, and toast at this command-execution point;
@@ -1244,6 +1197,7 @@ static void h_sh_dispatch(idCmdArgs *a)
     }
 }
 
+#ifdef SH_DIAG
 /* Export engine event names, numbers, and argument specs as C defines.
  * Reach evMgr through declMgr vtable +0x90, then count/name/find through
  * +0x28/+0x20/+0x10. Event records hold name@+0, fspec@+0x10, eventnum@+0x34.
@@ -1501,6 +1455,7 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
     else
         sh_printf("cs_dumpeventdefs: %u event defs generated (file write failed).\n", emitted);
 }
+#endif
 
 /* Entity handlers share this command ABI. */
 void h_sh_dumpdef(idCmdArgs *a);
@@ -1521,9 +1476,11 @@ void h_cs_fieldinfo(idCmdArgs *a);
 void h_sh_type(idCmdArgs *a);
 void h_sh_validclasses(idCmdArgs *a);
 
-/* Optional math overrides and status reporting. */
+#ifdef SH_DIAG
+/* Engine-math precision overrides (algo.c). */
 void h_cs_dontuse(idCmdArgs *a);
 void h_alginfo(idCmdArgs *a);
+#endif
 
 /* Palette visibility toggle. */
 void h_target_any(idCmdArgs *a);
@@ -1537,6 +1494,7 @@ typedef struct cmd_entry {
 
 static void h_sh_help(idCmdArgs *a);
 
+#ifdef SH_DIAG
 /* Raise a diagnostic dialog. Join remaining arguments to preserve message spaces. */
 static void h_sh_dialogtest(idCmdArgs *a)
 {
@@ -1611,6 +1569,7 @@ static void h_sh_dialogdump(idCmdArgs *a)
     (void)a;
     sh_engine_dialog_dump(sh_printf);
 }
+#endif
 
 /* Report served baked navigation and reasons for falling back to shipped data. */
 static void h_sh_navmesh(idCmdArgs *a)
@@ -1632,6 +1591,11 @@ static void h_sh_navmesh(idCmdArgs *a)
                   hooked ? "watched" : "NOT watched -- the edit hook did not install");
         return;
     }
+    if (verb && _stricmp(verb, "detail") == 0) {
+        sh_nav_bake_report_detail(sh_printf);
+        return;
+    }
+#ifdef SH_DIAG
     if (verb && _stricmp(verb, "marks") == 0) {
         const char *howmany = cmd_argv(a, 2);
         int n = howmany ? atoi(howmany) : 4;
@@ -1647,6 +1611,7 @@ static void h_sh_navmesh(idCmdArgs *a)
                       "navigation.\n");
         return;
     }
+#endif
     sh_navmesh_report(sh_printf);
     sh_printf("navigation: the last Play read its boxes from %s.\n",
               sh_apply_engine_nav_build_source());
@@ -1719,6 +1684,7 @@ static void h_sh_gridsize(idCmdArgs *a)
         sh_printf("%s\n", sh_grid_native_last_message());
 }
 
+#ifdef SH_DIAG
 /* Take our resource layer back out, so the engine's own cost can be measured
  * without it. One way: the editor's own resources go with it, so the session is
  * for measuring, not for editing. */
@@ -1731,10 +1697,10 @@ static void h_sh_overrides_off(idCmdArgs *a)
     else
         sh_printf("Resource layer was not installed.\n");
 }
+#endif
 
 static const cmd_entry CMD_TABLE[] = {
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
-    { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_type",             (void *)h_sh_type,     "Dumps a types (enum/class) fields to the console and copies the text to your clipboard." },
     { "sh_validclasses",     (void *)h_sh_validclasses,"sh_validclasses <inherit> -- lists the engine-valid classNames for an inherit (the classes deriving from its base type Y; the class-dropdown enumerator)." },
@@ -1746,24 +1712,12 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_smp",              (void *)h_sh_smp,      "sh_smp \"smp:<command> ...\" runs a String Set command on player1 (playtest); sh_smp on|off|status switches String Set commands" },
     { "sh_event",            (void *)h_sh_event,    "sh_event info <name> | list [filter] prints the live engine event registry (number, format, argument types and names)" },
     { "sh_dumpdef",          (void *)h_sh_dumpdef,  "sh_dumpdef <entity name>, dumps the entitydef of an existing ingame entity" },
-    { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"Internal type-field diagnostic -- you dont need this" },
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
     { "sh_target_any",       (void *)h_target_any,  "Toggles targetting for entities. Reveals / re-hides the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette." },
-    { "sh_dialogtest",       (void *)h_sh_dialogtest, "[gdmid] [buttonset] [text...] raise the engine's own dialog carrying this text (diagnostic)" },
-    { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
-    { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
-    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
     { SH_MODCMD_NAME,        (void *)h_sh_mods,     SH_MODCMD_HELP },
-    { SH_VT_CMD_NAME,        (void *)h_sh_vt,       SH_VT_CMD_HELP },
     { SH_PREFAB_CMD_NAME,    (void *)h_sh_prefab,   SH_PREFAB_CMD_HELP },
-    { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
-    { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
-    { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },
-    { "sh_superscriptop",    (void *)h_sh_superscriptop,"Internal/dev: dump engine event definitions for SuperScript" },
-    { "cs_dumpeventdefs",    (void *)h_cs_dumpeventdefs,"Internal/dev: dumps all eventdefs to a file (for the wiki)" },
-    { "cs_start_render_logging", (void *)h_cs_start_render_logging, "Sets up the renderlog hook " },
     { "sh_spawninfo",        (void *)h_sh_spawninfo,"Generate spawnOrientation/spawnPosition from current position in map" },
     { "sh",                  (void *)h_sh_dispatch, "Dispatches a Snapmap+ command" },
 
@@ -1773,10 +1727,27 @@ static const cmd_entry CMD_TABLE[] = {
     { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
-      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh marks [count]' marks boxes red like a refused bake; 'sh_navmesh marks 0' clears them. 'sh_navmesh reads' counts what the editor has cost it." },
+      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh reads' counts what the editor has cost it; 'sh_navmesh detail' adds the bake's internal state." },
 
     { "sh_gridsize",         (void *)h_sh_gridsize,
       "sh_gridsize [instance] prints the selected Grid Room's size; 'sh_gridsize templates' lists the module entity templates of the stock modern room and each resized variant; 'sh_gridsize <x> <y> <z> [instance]' resizes it through the same path as the room's properties and prints the result or the reason it was limited or refused." },
+
+#ifdef SH_DIAG
+    /* Developer diagnostics: the diagnostic build only. */
+    { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
+    { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"Diagnostic: print the type fields the reflection layer reads." },
+    { "sh_dialogtest",       (void *)h_sh_dialogtest, "[gdmid] [buttonset] [text...] raise the engine's own dialog carrying this text (diagnostic)" },
+    { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
+    { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
+    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
+    { SH_VT_CMD_NAME,        (void *)h_sh_vt,       SH_VT_CMD_HELP },
+    { "sh_alginfo",          (void *)h_alginfo,     "Diagnostic: print the engine-math precision overrides and their state." },
+    { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
+    { "cs_dontuse",          (void *)h_cs_dontuse,  "Diagnostic: switch the engine-math precision overrides on or off." },
+    { "sh_superscriptop",    (void *)h_sh_superscriptop,"Internal/dev: dump engine event definitions for SuperScript" },
+    { "cs_dumpeventdefs",    (void *)h_cs_dumpeventdefs,"Internal/dev: dumps all eventdefs to a file (for the wiki)" },
+    { "cs_start_render_logging", (void *)h_cs_start_render_logging, "Sets up the renderlog hook " },
+#endif
 
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };
@@ -1815,8 +1786,8 @@ static void h_sh_help(idCmdArgs *a)
 /* Resolve list growth from AddCommand's LEA RCX,[RSI+8]; CALL rel32.
  * Generic idList instantiations share their bytes, so use this relationship
  * rather than a direct signature or raw RVA. */
-#define IDLIST_GROW_RVA     SH_RVA(0xFE18D0u, 0x1724F20u)   /* pinned-build value -- cross-check only, never used to locate */
 typedef void (*idlist_grow_fn)(void *idlist);
+static idlist_grow_fn g_idlist_grow;
 
 /* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found
  * within the scanned window or the decoded target lands outside the DOOM module. */
@@ -1839,17 +1810,9 @@ static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *mo
         /* Validate callable addresses against the mapped image. */
         uint8_t probe;
         if (tgt < module_base || !sh_safe_read(tgt, &probe, 1)) return NULL;
-
-        char l[160];
-        uintptr_t rva = (uintptr_t)(tgt - module_base);
-        _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "B2: idList-grow decoded from AddCommand+0x%X -> rva=0x%llX (pinned 0x%X)%s",
-                    i, (unsigned long long)rva, IDLIST_GROW_RVA,
-                    rva == IDLIST_GROW_RVA ? "" : " MISMATCH -- trusting the decode");
-        backend_log(l);
         return (idlist_grow_fn)tgt;
     }
-    backend_log("B2: idList-grow call site NOT found in AddCommand; command-unlock insert skipped");
+    backend_log("commands: the list-growth call was not found in AddCommand; no developer-list backfill");
     return NULL;
 }
 
@@ -1925,36 +1888,16 @@ static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
     return n;
 }
 
-/* Hook later registrations and backfill existing commands once. */
-static void sh_command_unlock_install(void *cmdsys, void *add_command, const uint8_t *module_base)
+/* Later registrations inherit the exposure flags through the AddCommand
+ * detour. The detour is committed with the game's other threads suspended
+ * (code_patch), so this is safe from the bootstrap thread. */
+static int command_unlock_detour(void *add_command)
 {
-    if (cmdsys == NULL || add_command == NULL) {
-        backend_log("B2: command-unlock SKIPPED -- cmdsys/AddCommand unresolved");
-        return;
-    }
-    idlist_grow_fn grow = sh_decode_idlist_grow(add_command, module_base);
-
-    /* Future registrations inherit exposure flags. */
-    if (g_addcmd_tramp && !hook_is_installed((void *)g_addcmd_tramp) &&
+    if (g_addcmd_tramp) return hook_is_installed((void *)g_addcmd_tramp);
+    g_addcmd_tramp = (add_command6_fn)hook_prepare(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
+    if (g_addcmd_tramp && hook_commit((void *)g_addcmd_tramp) != B2_PATCH_OK &&
         hook_unpatch((void *)g_addcmd_tramp)) g_addcmd_tramp = NULL;
-    if (!g_addcmd_tramp) {
-        g_addcmd_tramp = (add_command6_fn)hook_prepare(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
-        if (g_addcmd_tramp && hook_commit((void *)g_addcmd_tramp) != B2_PATCH_OK &&
-            hook_unpatch((void *)g_addcmd_tramp)) g_addcmd_tramp = NULL;
-    }
-    if (hook_is_installed((void *)g_addcmd_tramp)) {
-        backend_log("B2: command-unlock -- AddCommand detour installed (flags|6 on every registration)");
-    } else {
-        backend_log("B2: command-unlock -- AddCommand detour FAILED (one-time pass still runs)");
-    }
-
-    /* Backfill existing commands. */
-    uint32_t walked = command_unlock_pass((uint8_t *)cmdsys, grow);
-    char line[160];
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: command-unlock APPLIED -- %u commands now in DEV table + cheat-exempt (god/noclip/give stay usable after dev mode toggles)",
-        walked);
-    backend_log(line);
+    return g_addcmd_tramp && hook_is_installed((void *)g_addcmd_tramp);
 }
 
 /* flags=2 grants cheat exemption; AddCommand adds developer membership (4).
@@ -1972,30 +1915,36 @@ static int register_cmd(const cmd_entry *e)
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
                         const uint8_t *module_base)
 {
+    if (!add_command) { backend_log("commands: off -- AddCommand is unresolved"); return 0; }
+    if (!printf_disp) { backend_log("commands: off -- Printf is unresolved"); return 0; }
+    if (!cmdsys)      { backend_log("commands: off -- the command system is unresolved"); return 0; }
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
-
-    if (!add_command) { backend_log("B2: commands SKIPPED -- AddCommand unresolved"); return 0; }
-    if (!printf_disp) { backend_log("B2: commands SKIPPED -- Printf unresolved"); return 0; }
-    if (!cmdsys)      { backend_log("B2: commands SKIPPED -- cmdSystem unresolved"); return 0; }
 
     g_add_command = (add_command_fn)add_command;
     g_cmdsys      = cmdsys;
     g_printf      = (printf_dispatch_fn)printf_disp;
     g_get_decls   = get_decls;
     g_module_base = module_base;
+    g_idlist_grow = sh_decode_idlist_grow(add_command, module_base);
+    if (!command_unlock_detour(add_command))
+        backend_log("commands: the AddCommand detour did not install; later engine commands keep their flags");
+    InterlockedExchange(&g_register_pending, 1);
+    return 1;
+}
 
+/* The engine's command lists are its main thread's: registration and the
+ * developer-list backfill both run here, once, on the first frame. */
+void sh_commands_main_frame(void)
+{
+    if (InterlockedCompareExchange(&g_register_pending, 0, 1) != 1) return;
     int n = 0;
     for (int i = 0; i < CMD_COUNT; i++)
         if (register_cmd(&CMD_TABLE[i])) n++;
     (void)sh_modcmd_register();   /* logs the mods store root for sh_mods */
-
+    uint32_t walked = command_unlock_pass((uint8_t *)g_cmdsys, g_idlist_grow);
     char line[160];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: registered %d/%d console commands (cmdsys=%p add=%p printf=%p)",
-        n, CMD_COUNT, cmdsys, add_command, printf_disp);
+        "commands: registered %d/%d console commands; %u engine commands usable in and out of developer mode",
+        n, CMD_COUNT, walked);
     backend_log(line);
-
-    /* Apply exposure to both current commands and future engine registrations. */
-    sh_command_unlock_install(g_cmdsys, (void *)g_add_command, g_module_base);
-    return n;
 }
