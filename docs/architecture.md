@@ -2312,11 +2312,18 @@ its materials are parsed.
   before it releases records when a map unloads.
   Registration runs at the start of every decl registration pass (the editor
   palette build, a map's activation), before the pass parses any material.
-  Release is queued to the next frame boundary (`sh_modvt_frame`, called after
-  every native frame by the main-thread tick), never inside a pass or a load:
-  the VT system's jobs are synchronised first and the record is then released,
-  exactly the pair SetSource itself starts with, so no transcode or upload of
-  the board is in flight and its pages leave the shared cache. A board served
+  Every other change (a board an index change, boot or Refresh brings, a
+  release, a rebind) is queued to the one point of the frame where the engine
+  changes VT state itself: EndFrame syncs the render thread (renderSystem
+  vtable +0x80) and then calls the VT frame update (`VtFrameCall`, VK
+  0x1558A79, GL 0x1559E29); a detour on that update runs the queued sync
+  before the engine's own update. A release synchronises the VT system's jobs
+  and then calls Release, the pair SetSource itself starts with, so no
+  transcode or upload of the board is in flight and its pages leave the shared
+  cache. (Changes made from the product's own after-frame tick raced the
+  render thread: live, a boot registration faulted on OpenGL in the per-cache
+  pass the render thread runs, reading a named record whose cache SetSource
+  had not set yet.) A board served
   again takes its earlier record when free, and every material bound to it
   before is bound again at once (index, binder through its detour, block copy),
   so its parameter block never keeps the released page table. An index rebuilt

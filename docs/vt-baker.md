@@ -10,9 +10,9 @@ ones. This document is the contract between a tool that writes such a family
 (`src/backend/modvt.c`, `src/backend/modbundle.c`). Everything here is for
 build 13954591 on both executables unless marked.
 
-Status: the file layout, the material text and the registration are confirmed
-in game on Vulkan; drawing a board with the stock lit programs (the product's
-board binding) is not yet confirmed in game. The
+Status: the file layout, the material text, the registration and the drawing
+of a board with the stock lit programs are confirmed in game on Vulkan and
+OpenGL (the Tyrant beside a stock Baron, two boards at once). The
 plane contents are confirmed by decoding stock pages, except the split of the
 normal across the two alpha channels, which is inferred. Whether the page
 codec is standard JPEG XR is not settled, so a new encoder must pass the
@@ -207,8 +207,8 @@ hold, with no cap of Snapmap+'s own.
   record 31 use some, and boards take the rest among 2 to 30. A board that
   finds none is refused with one `VT:` log line and the player is told in one
   sentence.
-- A board the loaded map no longer uses is released at the next frame; served
-  again, its materials are bound to it again.
+- A board the loaded map no longer uses is released at the engine's next VT
+  frame update; served again, its materials are bound to it again.
 - `vt_reloadMega2Vmtrs` does not reload a served board.
 
 ## Validation

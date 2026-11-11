@@ -26,6 +26,9 @@
  *                     are checked to read record 1 and call the binder's feedback function.
  *   JobsWaitAll       idParallelJobManagerLocal's wait for every job list, VK 0x31BF50, GL 0x31BAE0,
  *                     and the job manager it is given (VK 0x5842040).
+ *   VtFrameCall       the site in EndFrame, VK 0x1558A79, GL 0x1559E29, right after the render-thread
+ *                     sync: LEA RCX,[sys] (checked); CALL the VT frame update (VK 0x17E7AE0,
+ *                     GL 0x17E89B0), detoured: boards change there, before the engine's update.
  * SetSource and Release run the VT system's synchronisation and allocate from
  * the current heap, so they are called on the main thread inside process heap
  * 0 (the page tables live as long as the record).
@@ -602,6 +605,24 @@ uint32_t sh_modvt_decode_jobs(const uint8_t *code, size_t len, uint32_t rva)
     return mv_target(rva, 0x2E, 7, code, 0x31);
 }
 
+/* MOVZX R8D,BPL; CALL [RAX+0x80]; LEA RCX,[sys]; CALL update. */
+int sh_modvt_decode_frame_call(const uint8_t *code, size_t len, uint32_t rva, uint32_t *sys_rva, uint32_t *update_rva)
+{
+    if (sys_rva) *sys_rva = 0;
+    if (update_rva) *update_rva = 0;
+    if (!code || !sys_rva || !update_rva || len < 0x16 || memcmp(code + 4, "\xFF\x90\x80\x00\x00\x00\x48\x8D\x0D", 9) ||
+        code[0x11] != 0xE8)
+        return 0;
+    *sys_rva = mv_target(rva, 0x0A, 7, code, 0x0D);
+    *update_rva = mv_target(rva, 0x11, 5, code, 0x12);
+    return 1;
+}
+
+int sh_modvt_frame_head_ok(const uint8_t *code, size_t len)
+{
+    return code && len >= 15 && !memcmp(code, "\x48\x89\x5C\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xEC\x50", 15);
+}
+
 #ifndef SH_MODVT_PURE
 /* ================================================================== engine */
 #include "signatures.h"
@@ -622,6 +643,7 @@ typedef char (*mv_setsource_fn)(void *rec, const char *name, const char *path, i
 typedef void (*mv_record_fn)(void *rec);
 typedef void (*mv_sys_fn)(void *sys);
 typedef void (*mv_waitall_fn)(void *jobs);
+typedef void (*mv_frame_fn)(void *sys);
 typedef void *(*mv_vf_fn)(void *sys, void *material);
 typedef void (*mv_bind_fn)(void *parms, void *rec);
 typedef void (*mv_copy_fn)(void *material);
@@ -639,6 +661,7 @@ static mv_copy_fn g_copy;
 static const int32_t *g_vt_off;
 static mv_vf_fn g_vf_tramp;
 static mv_bind_fn g_bind_tramp;
+static mv_frame_fn g_frame_tramp;
 static sh_modvt_bind_ops g_bind_ops;
 static volatile LONG g_handles;      /* 0 not tried, 1 found, -1 missing */
 static uint8_t *g_sys;
@@ -973,10 +996,13 @@ void sh_modvt_before_pass(const char *phase)
     mv_sync_now(phase, 0);
 }
 
-void sh_modvt_frame(void)
+/* The VT frame update, in EndFrame right after the render-thread sync: the
+ * point the engine changes VT state itself. A queued sync runs first. */
+static void mv_frame_detour(void *sys)
 {
-    if (!g_bound || !InterlockedCompareExchange(&g_pending, 0, 0) || sh_modvt_engine_on_main() != 1) return;
-    mv_sync_now("frame", 1);
+    if (g_bound && InterlockedCompareExchange(&g_pending, 0, 0) && sh_modvt_engine_on_main() == 1)
+        mv_sync_now("frame", 1);
+    g_frame_tramp(sys);
 }
 
 void sh_modvt_print_status(void)
@@ -1019,10 +1045,11 @@ static const sig_result *mv_clean(const sig_result *r, size_t n, const char *nam
 int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     static const char *const names[] = { "VtSetSource", "VtForMaterial", "VtMaterialBind", "VtMaterialRebind",
-                                         "VtViewPageTable", "VtViewFeedback", "JobsWaitAll" };
-    const sig_result *s[7];
+                                         "VtViewPageTable", "VtViewFeedback", "JobsWaitAll", "VtFrameCall" };
+    const sig_result *s[8];
     const sh_build_identity *id = sh_host_identity();
-    uint8_t sc[0xC0], vc[0xC0], bc[0xC0], rc[0x70], relc[0x50], pc[0x20], fc[0x20], jc[0x40];
+    uint8_t sc[0xC0], vc[0xC0], bc[0xC0], rc[0x70], relc[0x50], pc[0x20], fc[0x20], jc[0x40], tc[0x20], uc[0x10];
+    uint32_t frame_sys = 0, frame_update = 0;
     sh_modvt_layout l;
     sh_modvt_binder b;
     sh_modvt_rebind rb;
@@ -1032,7 +1059,7 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
     g_echo = mv_echo;
     g_vulkan = id ? id->vulkan : -1;
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
-    for (i = 0; i < 7; ++i)
+    for (i = 0; i < 8; ++i)
         if ((s[i] = mv_clean(results, count, names[i])) == NULL) {
             mv_log("boards unavailable: %s is not a clean signature match", names[i]);
             return 0;
@@ -1047,12 +1074,15 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
         !mv_rd_code(module_base + l.release_rva, relc, sizeof relc) || !sh_modvt_release_head_ok(relc, sizeof relc) ||
         !sh_modvt_decode_binder(bc, sizeof bc, s[2]->rva, &b) || !sh_modvt_decode_rebind(rc, sizeof rc, s[3]->rva, &rb) ||
         !mv_rd_code((const uint8_t *)s[4]->addr, pc, sizeof pc) || !mv_rd_code((const uint8_t *)s[5]->addr, fc, sizeof fc) ||
-        !mv_rd_code((const uint8_t *)s[6]->addr, jc, sizeof jc) ||
+        !mv_rd_code((const uint8_t *)s[6]->addr, jc, sizeof jc) || !mv_rd_code((const uint8_t *)s[7]->addr, tc, sizeof tc) ||
+        !sh_modvt_decode_frame_call(tc, sizeof tc, s[7]->rva, &frame_sys, &frame_update) ||
+        !mv_rd_code(module_base + frame_update, uc, sizeof uc) || !sh_modvt_frame_head_ok(uc, sizeof uc) ||
+        frame_sys != l.sys_rva ||
         !sh_modvt_decode_view(pc, sizeof pc, s[4]->rva, fc, sizeof fc, s[5]->rva, &v) ||
         !(jobs = sh_modvt_decode_jobs(jc, sizeof jc, s[6]->rva)) || rb.sys_rva != l.sys_rva || rb.vf_rva != s[1]->rva ||
         rb.binder_rva != s[2]->rva || v.feedback_fn_rva != b.feedback_rva) {
         mv_log("boards unavailable: the VT system, its record table, Release, the binder's setters, the rebind, the "
-               "per-view handles or the job manager could not be decoded from the signed code");
+               "per-view handles, the job manager or the VT frame update could not be decoded from the signed code");
         return 0;
     }
     g_sys = (uint8_t *)module_base + l.sys_rva;
@@ -1076,10 +1106,13 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
      * which the trampoline rewrites. */
     g_vf_tramp = (mv_vf_fn)hook_prepare_rip_load((void *)s[1]->addr, (void *)mv_vf_detour, 18, 11);
     g_bind_tramp = (mv_bind_fn)hook_prepare_rip_load((void *)s[2]->addr, (void *)mv_bind_detour, 17, 10);
-    if (!g_vf_tramp || !g_bind_tramp || hook_commit((void *)g_vf_tramp) != B2_PATCH_OK ||
-        hook_commit((void *)g_bind_tramp) != B2_PATCH_OK) {
-        mv_log("boards unavailable: the material lookup and binder detours could not be installed (%s)",
+    /* The frame update's 15-byte prologue is whole and position independent. */
+    g_frame_tramp = (mv_frame_fn)hook_prepare((void *)(module_base + frame_update), (void *)mv_frame_detour, 15);
+    if (!g_vf_tramp || !g_bind_tramp || !g_frame_tramp || hook_commit((void *)g_vf_tramp) != B2_PATCH_OK ||
+        hook_commit((void *)g_bind_tramp) != B2_PATCH_OK || hook_commit((void *)g_frame_tramp) != B2_PATCH_OK) {
+        mv_log("boards unavailable: the material lookup, binder and frame update detours could not be installed (%s)",
                hook_last_failure());
+        if (g_frame_tramp && hook_unpatch((void *)g_frame_tramp)) g_frame_tramp = NULL;
         if (g_bind_tramp && hook_unpatch((void *)g_bind_tramp)) g_bind_tramp = NULL;
         if (g_vf_tramp && hook_unpatch((void *)g_vf_tramp)) g_vf_tramp = NULL;
         return 0;

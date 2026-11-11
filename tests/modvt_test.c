@@ -338,6 +338,19 @@ static void decode_helpers(void)
             memcpy(jb + 0x2E, "\x48\x8D\x0D\xBB\x60\x52\x05\xE8", 8);
             CHECK(sh_modvt_decode_jobs(jb, sizeof jb, 0x31BF50u) == 0x5842040u);
         }
+        /* EndFrame's VT frame-update site (VK 0x1558A79) and the update's prologue. */
+        {
+            static const unsigned char fcall[] = { 0x44, 0x0F, 0xB6, 0xC5, 0xFF, 0x90, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8D,
+                                                   0x0D, 0xB6, 0x7E, 0x18, 0x05, 0xE8, 0x51, 0xF0, 0x28, 0x00 };
+            static const unsigned char head[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48,
+                                                  0x83, 0xEC, 0x50 };
+            uint32_t fsys = 0, fupd = 0;
+            CHECK(sh_modvt_decode_frame_call(fcall, sizeof fcall, 0x1558A79u, &fsys, &fupd) == 1 && fsys == 0x66E0940u &&
+                  fupd == 0x17E7AE0u);
+            CHECK(sh_modvt_decode_frame_call(fcall + 1, sizeof fcall - 1, 0x1558A7Au, &fsys, &fupd) == 0);
+            CHECK(sh_modvt_frame_head_ok(head, sizeof head) && !sh_modvt_frame_head_ok(head, 14) &&
+                  !sh_modvt_frame_head_ok(fcall, sizeof fcall));
+        }
         /* Binder: CALL at +0x4E and +0x66, the texture setter after them. */
         memset(bd, 0x90, sizeof bd);
         CHECK(sh_modvt_decode_binder(bd, sizeof bd, 0x2000, &b) == 0);
@@ -694,7 +707,8 @@ static void image(const char *path)
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
     static sig_result results[SIG_RESULTS_MAX];
-    const sig_result *ss, *vf, *bd, *rb, *vp, *vb, *jw;
+    const sig_result *ss, *vf, *bd, *rb, *vp, *vb, *jw, *fc;
+    uint32_t fsys = 0, fupd = 0;
     sh_modvt_layout l;
     sh_modvt_binder b;
     sh_modvt_rebind r;
@@ -718,8 +732,12 @@ static void image(const char *path)
     vp = find_sig(results, total, "VtViewPageTable");
     vb = find_sig(results, total, "VtViewFeedback");
     jw = find_sig(results, total, "JobsWaitAll");
-    CHECK(ss && vf && bd && rb && vp && vb && jw);
-    if (!ss || !vf || !bd || !rb || !vp || !vb || !jw) { free(base); return; }
+    fc = find_sig(results, total, "VtFrameCall");
+    CHECK(ss && vf && bd && rb && vp && vb && jw && fc);
+    if (!ss || !vf || !bd || !rb || !vp || !vb || !jw || !fc) { free(base); return; }
+    CHECK(fc->rva == (vk ? 0x1558A79u : 0x1559E29u));
+    CHECK(sh_modvt_decode_frame_call(base + fc->rva, 0x20, fc->rva, &fsys, &fupd) == 1 &&
+          fupd == (vk ? 0x17E7AE0u : 0x17E89B0u) && fupd + 0x10 <= sz && sh_modvt_frame_head_ok(base + fupd, 0x10));
     CHECK(vp->rva == (vk ? 0x17B4578u : 0x17B5808u) && vb->rva == (vk ? 0x17B4643u : 0x17B58D3u) &&
           jw->rva == (vk ? 0x31BF50u : 0x31BAE0u));
     CHECK(ss->rva == (vk ? 0x185AC30u : 0x185BC90u));
@@ -738,7 +756,8 @@ static void image(const char *path)
            b.set_texture_rva, r.copy_rva, r.vt_off_rva, v.pagetable_handle_rva, v.feedback_handle_rva,
            v.feedback_rec_rva, jobs);
     /* The cross-checks the install makes. */
-    CHECK(r.sys_rva == l.sys_rva && r.vf_rva == vf->rva && r.binder_rva == bd->rva && v.feedback_fn_rva == b.feedback_rva);
+    CHECK(r.sys_rva == l.sys_rva && r.vf_rva == vf->rva && r.binder_rva == bd->rva && v.feedback_fn_rva == b.feedback_rva &&
+          fsys == l.sys_rva);
     if (vk) {
         CHECK(l.sys_rva == 0x66E0940u && l.sync_rva == 0x17E59F0u && l.release_rva == 0x1859480u && l.table_off == 0x8B00u);
         CHECK(b.feedback_rva == 0x1859780u && b.set_vec4_rva == 0x15B9560u && b.set_texture_rva == 0x15B93C0u &&

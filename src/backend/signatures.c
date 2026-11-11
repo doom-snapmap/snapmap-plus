@@ -907,6 +907,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 33 DB 48 89 7C 24 38 48 8B F9 39 99 20 2C 00 00 7E 35 48 89 74 24 30 8B F3 90 "
       "48 8B 87 18 2C 00 00 48 8B 0C 06 0F B7 11 48 8D 0D ?? ?? ?? ?? E8",
       0x31BF50u, 0x31BAE0u },
+    { "VtFrameCall",        /* site in idRenderSystemLocal's EndFrame: MOVZX R8D,BPL; CALL [RAX+0x80] (sync the
+                             * render thread); LEA RCX,[VT system]; CALL the VT frame update; INC [RBX+0x10].
+                             * modvt.c detours the update it calls. */
+      "44 0F B6 C5 FF 90 80 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? FF 43 10",
+      0x1558A79u, 0x1559E29u },
     { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",

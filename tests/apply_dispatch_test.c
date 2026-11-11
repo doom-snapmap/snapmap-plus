@@ -9,7 +9,6 @@
 void sh_modpublished_poll(void) {}
 void sh_modpublish_poll(void) {}
 void sh_rawmap_poll_main(void) {}
-void sh_modvt_frame(void) {}
 int sh_modui_poll_due(void) { return 0; }
 int sh_modui_poll_main(void *context) { (void)context; return 0; }
 
