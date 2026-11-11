@@ -235,6 +235,7 @@ int sh_script_hooks_reload(void)
 #include "../companion_engine.h"
 #include "../../fault_shield/load_screen_stop.h"
 #include "script_source.h"
+#include "script_api_common.h"
 
 #define LOG_LINES_MAX            64
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
@@ -265,7 +266,7 @@ static volatile LONG g_full_logged;
 static int           g_log_lines;
 static int           g_vtable_checked;   /* 1 verified, -1 refused */
 static double        g_time;             /* seconds of script frames this Play */
-static LARGE_INTEGER g_last_frame;       /* the previous script frame */
+static LARGE_INTEGER g_last_frame;       /* the previous script frame's game milliseconds + 1 */
 
 static void hooks_log(const char *fmt, ...)
 {
@@ -407,16 +408,24 @@ static int prologue_ok(void)
     return same;
 }
 
-/* The frame time: the wall time since the previous script frame (0 for the
- * first). The game's own clock is the entity API's to adopt. */
+/* The frame time from the game clock (idGameLocal vtable +0x220, the
+ * scripts' game time, script_api_common.h): the game milliseconds since the
+ * previous script frame (0 for the first). g_last_frame holds the previous
+ * frame's game milliseconds plus one (0: none yet). An unreadable clock is
+ * said once and script time stands still for that frame. */
 static double frame_seconds(void)
 {
-    LARGE_INTEGER now, freq;
+    static volatile LONG logged;
+    int ms = 0;
     double dt = 0;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    if (g_last_frame.QuadPart && freq.QuadPart) dt = (double)(now.QuadPart - g_last_frame.QuadPart) / (double)freq.QuadPart;
-    g_last_frame = now;
+    if (!sh_script_api_now_ms(&ms)) {
+        if (!InterlockedExchange(&logged, 1))
+            hooks_log("Mod scripts: the game clock could not be read, so script time does not advance this frame.");
+        return 0;
+    }
+    if (g_last_frame.QuadPart && (LONGLONG)ms + 1 >= g_last_frame.QuadPart)
+        dt = (double)((LONGLONG)ms + 1 - g_last_frame.QuadPart) / 1000.0;
+    g_last_frame.QuadPart = (LONGLONG)ms + 1;
     g_time += dt;
     return dt;
 }
@@ -451,6 +460,7 @@ static void run_tick(void)
         g_started = 1;
         g_frame++;
         dt = frame_seconds();
+        sh_script_api_frame();
         __try {
             sh_script_tick(g_time, dt);
         } __except (av_only(GetExceptionCode())) {
@@ -644,7 +654,6 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
 {
     sig_result r[SH_SCRIPT_SIG_COUNT];
     int i;
-    (void)results; (void)count;
     if (g_resolved) return 1;
     if (!module_base) return 0;
     for (i = 0; i < SH_SCRIPT_SIG_COUNT; i++) {
@@ -674,6 +683,7 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
         return 0;
     }
     sh_script_handles_set_resolver(resolve_spawn_id);
+    (void)sh_script_api_install(results, count, module_base);   /* logs its own line when it cannot */
     sh_script_source_install();
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
     sh_load_screen_stop_set_map_end(sh_script_hooks_map_cancel);

@@ -907,16 +907,12 @@ The backend also carries **mod scripts**: a mod's `assets\mods\<salt>\scripts\*.
 on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, step budgets and a
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
 Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
-`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps time (`now`, `after`, `every`, `run`,
-`wait`) and writes the mod's script log (`print`, `warn`); the entity, AI, combat and logic calls,
-and the hooks that deliver damage, death, animation notifies and Script node inputs, come with the
-work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
-A script is checked when its mod builds: a syntax error, compiled Lua, a file over 256 KB, more
-than 64 files or 1 MB of scripts, a `require` of a file the mod does not carry or a name of another
-mod refuses the build with the file and line on the mod's row, and the build records which of the
-mod's entities and Script node names its scripts handle. Scripts travel with the mod everywhere it
-goes (publish, download, rawmap and prefab exports, installs); a Play runs the scripts as they were
-built at the last Refresh.
+`on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps game time (`now`, `after`, `every`, `run`,
+`wait`), writes the mod's script log (`print`, `warn`), and works with entities and the world:
+`spawn` its own entities, read any entity's position, facing, velocity, health and animation, move,
+turn, push, heal, animate and remove its own, heal players, find `players()` and `entities_near`,
+and `trace` lines through the world. The AI, combat and logic calls, and the hooks that deliver
+damage, death, animation notifies and Script node inputs, come with the work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing

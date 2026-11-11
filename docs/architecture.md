@@ -1601,6 +1601,56 @@ scripting work that follows. `tests/script_sandbox_test.c` covers the runtime
 without the game; `tests/modscript_test.c` the builder's checks, the static
 pass, the serving index and the archives.
 
+### Mod scripts: entity, animation and world calls
+
+`script_api_entity.c` and `script_api_world.c` add the version 1 calls;
+`script_api_common.{c,h}` holds what every API module shares. Reads work on any
+entity; a call that changes an entity works only on the mod's own (the handle
+table records it under the mod: placed from its entityDefs or spawned by its
+scripts), except that any mod may heal a player. A removed entity answers nil.
+Every argument is checked before the engine is touched, and every refusal is
+one plain sentence at the calling script line (it stops the mod's scripts for
+the map, as any error does).
+
+- **Calls.** `spawn(def, pos, [yaw])` (own entityDefs only; at most 64 live and
+  16 a second per mod), `players()`; `e:pos()`, `e:set_pos(v)`, `e:yaw()`,
+  `e:set_yaw(deg)`, `e:axis()` (forward, left, up), `e:velocity()`,
+  `e:set_velocity(v)`, `e:health()`, `e:set_health(n)`, `e:alive()`,
+  `e:def()` (the mod's own names as the script writes them), `e:distance(other)`,
+  `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
+  `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
+  `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
+  `entities_near(pos, radius)` (nearest first, at most 256) and
+  `trace(from, to, [radius], [ignore])`. Positions are tables `{x, y, z}`; an
+  entity stands for its position wherever a position is asked for.
+- **Engine.** Every call goes through one table of engine operations
+  (`sh_script_engine`), filled at boot by `sh_script_api_install` from private
+  signatures (`script_api_sigs.c`, checked on both executables by
+  `tests/script_api_sigs_test.c`) and faked by `tests/script_api_test.c`.
+  Positions and axes are the physics' (`+0x808`, vtable `+0x80`/`+0x88`) and are
+  set the way the engine's setOrigin event sets them (SetOrigin, SetAxis,
+  UpdateVisuals). Velocity, player health, view angles and removal are the
+  engine's own events (`ProcessEventArgs`, or `PostEventArgs` for commands).
+  An idAI2's health is its idAIHealth (`+0x2B290`): healing goes through the
+  engine's Heal, lowering writes the field and never reaches 0 (death comes
+  from damage). Spawning is idTarget_Spawn's create, pose and finish. A trace
+  is the game's trace query run at once, with the SnapMap laser hazard's
+  contents mask; a radius makes the line thick (nine parallel traces, the
+  nearest hit wins).
+- **Animation.** On an idAI2, requests are `ssaction_ChangeAnimState(Via)` and
+  `ssaction_ForceAnimState` (idAI2 does not handle the stock
+  `changeAnimState` events; the ssaction ones act while the AI is parked in its
+  script state). A bare state name takes the AI's current subweb.
+  `anim_current` reads the animWeb's current node (`+0x225C8` web, `+0x2271C`
+  node index). `anim_event` (DEST_BLEND_START, DEST_REACHED,
+  VIA_BLEND_IN_START, VIA_BLEND_OUT_START, FINISHED) and `anim_finished` are
+  that node, observed every frame (`sh_script_api_frame`, before the tick)
+  against the last request. Other entities use the stock `changeAnimState`,
+  `forceAnimState` and `animState_IsFinished` events.
+- **Time.** `now()` and the timers run on the game clock (idGameLocal vtable
+  `+0x220`, milliseconds): the tick passes the game time since the Play's
+  first script frame.
+
 ### Mod scripts: the engine side
 
 `src/backend/script/script_hooks.c` connects mod scripts to the engine; the
