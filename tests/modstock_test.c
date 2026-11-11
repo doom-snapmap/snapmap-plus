@@ -11,9 +11,8 @@
  *   the builder: carried copies become pointers (no blob, no size in the
  *     canonical text, not in the size total), a type outside the whitelist
  *     that is installed content becomes a pointer instead of a refusal, the
- *     descriptor's "stock" object (hash filled by the builder, a wrong hash,
- *     an absent source, a carried copy with other bytes, no reader), and the
- *     manifest loads back with the same hash;
+ *     retired author "stock" object refuses the folder, and the manifest
+ *     loads back with the same hash;
  *   the store: no blob and no tree file for a pointer, verification resolves
  *     pointers, and fails with the first cause against D2;
  *   the store client: an upload sends only carried blobs (loopback stub), a
@@ -23,8 +22,8 @@
  *     gains it as a pointer, transitively (animWeb -> md6Def -> mesh and
  *     skeleton), stable across a rebuild; snap_gameresources names gain
  *     nothing; a name no archive holds still fails; the file cap fails by name;
- *     derived again by every build (a pointer whose need is gone is dropped,
- *     an author stock entry stays); an effect gains its campaign-only
+ *     derived again by every build (a pointer whose need is gone is dropped);
+ *     an effect gains its campaign-only
  *     particle, ribbon, their materials and a transparency atlas, an
  *     entityDef its movie and the movie's atlas, and a virtual-textured
  *     material with an installed row no image;
@@ -132,7 +131,7 @@ static void test_bridge(const char *d1)
     hex_of(IMG_B, sizeof IMG_B, h);
     CHECK(sh_modstock_match(P_IMAGE, sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_OK && !strcmp(src, P_IMAGE));
     /* A renamed copy: same size and extension elsewhere. */
-    CHECK(sh_modstock_match("generated/image/mods/t.stock/b_copy.bimage", sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(sh_modstock_match("generated/image/mods/tstock00/b_copy.bimage", sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_OK &&
           !strcmp(src, P_IMAGE));
     /* The other container's bytes at the same path. */
     hex_of(IMG_B2, sizeof IMG_B2, h);
@@ -151,7 +150,7 @@ static void test_bridge(const char *d1)
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     /* Content no entry holds. */
     hex_of(OWN, sizeof OWN, h);
-    CHECK(sh_modstock_match("generated/image/mods/t.stock/own.bimage", sizeof OWN, h, src, sizeof src) == SH_MB_STOCK_ABSENT);
+    CHECK(sh_modstock_match("generated/image/mods/tstock00/own.bimage", sizeof OWN, h, src, sizeof src) == SH_MB_STOCK_ABSENT);
     /* identify takes SnapMap's own container first. */
     CHECK(sh_modstock_identify(P_IMAGE, got, &size) == SH_MB_STOCK_OK && size == sizeof IMG_B2);
     hex_of(IMG_B2, sizeof IMG_B2, h);
@@ -205,24 +204,23 @@ static const sh_mb_file *find(const sh_mb_bundle *b, const char *request)
     return NULL;
 }
 
-#define REQ_ALIAS "generated/decls/entitydef/mods/t.stock/alias.decl"
-#define REQ_COPY  "generated/image/mods/t.stock/b_copy.bimage"
-#define REQ_OWN   "generated/image/mods/t.stock/own.bimage"
-#define REQ_TOME  "maps/mods/t.stock/world.tome"
+#define REQ_COPY  "generated/image/mods/tstock00/b_copy.bimage"
+#define REQ_OWN   "generated/image/mods/tstock00/own.bimage"
+#define REQ_TOME  "maps/mods/tstock00/world.tome"
+#define SALT_STOCK "tstock00"
 
-static void make_mod(const char *dir, const char *stock_json)
+static void make_mod(const char *dir, const char *extra_json)
 {
     char desc[1024];
     _snprintf_s(desc, sizeof desc, _TRUNCATE,
-                "{\"id\":\"t.stock\",\"name\":\"Stock test\",\"shadows\":[\"" P_IMAGE "\"]%s}", stock_json ? stock_json : "");
+                "{\"name\":\"Stock test\"%s,\"snapmap-plus\":{\"format\":2,\"salt\":\"" SALT_STOCK "\"}}",
+                extra_json ? extra_json : "");
     mt_write(dir, "mod.json", desc);
     put_rel(dir, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
     put_rel(dir, "assets\\" REQ_COPY, IMG_B, sizeof IMG_B);
     put_rel(dir, "assets\\" REQ_OWN, OWN, sizeof OWN);
     put_rel(dir, "assets\\" REQ_TOME, TOME_T, sizeof TOME_T);
 }
-
-#define ALIAS_JSON ",\"stock\":{\"" REQ_ALIAS "\":{\"source\":\"" P_DECL "\"}}"
 
 static void test_builder(const char *tmp)
 {
@@ -231,26 +229,21 @@ static void test_builder(const char *tmp)
     const sh_mb_file *f;
 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod1", tmp);
-    make_mod(dir, ALIAS_JSON);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b));
+    make_mod(dir, NULL);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b));
     if (b.errors) fprintf(stderr, "  build refused: %s\n", b.first_cause);
-    CHECK(b.file_count == 5 && b.stock_count == 4 && b.total_size == sizeof OWN);
-    CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T + (sizeof DECL_A - 1));
+    CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof OWN);
+    CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T);
     f = find(&b, REQ_COPY);
     CHECK(f && f->stock && f->stock_source && !strcmp(f->stock_source, P_IMAGE));
-    /* Additive mods: the installed bytes at the game's own name are a surface,
-     * not a shadow, whatever the descriptor's old "shadows" said. */
+    /* The installed bytes at the game's own name are a surface, not a shadow. */
     f = find(&b, P_IMAGE);
     CHECK(f && f->stock && !f->shadowed && f->cls == SH_MB_CLASS_SURFACE && b.shadow_count == 0);
     f = find(&b, REQ_COPY);
     CHECK(f && f->cls == SH_MB_CLASS_BORROW);
-    CHECK(b.classes.surfaces == 1 && b.classes.borrows == 3 && b.classes.adds == 1);
+    CHECK(b.classes.surfaces == 1 && b.classes.borrows == 2 && b.classes.adds == 1);
     f = find(&b, REQ_TOME);   /* .tome is outside the whitelist, but it is installed content */
     CHECK(f && f->stock && !strcmp(f->stock_source, P_TOME));
-    f = find(&b, REQ_ALIAS);
-    CHECK(f && f->stock && f->is_decl && !strcmp(f->stock_source, P_DECL));
-    hex_of(DECL_A, sizeof DECL_A - 1, h);
-    CHECK(f && !strcmp(f->blob, h));
     f = find(&b, REQ_OWN);
     CHECK(f && !f->stock);
     /* Canonical form: a pointer has stock and neither blob nor size. */
@@ -264,64 +257,43 @@ static void test_builder(const char *tmp)
         char path[MAX_PATH * 2];
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
         CHECK(sh_mb_load(path, &back));
-        CHECK(!strcmp(back.hash, b.hash) && back.stock_count == 4 && back.total_size == sizeof OWN);
+        CHECK(!strcmp(back.hash, b.hash) && back.stock_count == 3 && back.total_size == sizeof OWN);
         f = find(&back, REQ_TOME);
         CHECK(f && f->stock && f->size == 0 && !strcmp(f->stock_source, P_TOME));
         sh_mb_free(&back);
     }
-    sh_mb_free(&b);
-    /* A rebuild of the same content keeps its build number. */
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.build == 1);
-    sh_mb_free(&b);
+    {
+        /* A rebuild of the same content keeps its hash. */
+        char h1[65];
+        strcpy_s(h1, sizeof h1, b.hash);
+        sh_mb_free(&b);
+        CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && !strcmp(b.hash, h1));
+        sh_mb_free(&b);
+    }
 
-    /* Refusals. */
+    /* Refusals. The author's "stock" object is a retired key. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod2", tmp);
-    make_mod(dir, ",\"stock\":{\"" REQ_ALIAS "\":{\"source\":\"" P_DECL "\",\"sha256\":"
-                  "\"1111111111111111111111111111111111111111111111111111111111111111\"}}");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "with other bytes (a different game revision)");
-    sh_mb_free(&b);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod3", tmp);
-    make_mod(dir, ",\"stock\":{\"" REQ_ALIAS "\":{\"source\":\"generated/decls/entitydef/none.decl\"}}");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "which this game does not have");
-    sh_mb_free(&b);
-    /* Declared over a carried file with other bytes: the entry is ignored and
-     * the file's bytes decide (an addition). */
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod4", tmp);
     make_mod(dir, ",\"stock\":{\"" REQ_OWN "\":{\"source\":\"" P_IMAGE "\"}}");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b));
-    f = find(&b, REQ_OWN);
-    CHECK(f && !f->stock && f->cls == SH_MB_CLASS_ADD);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
+    CHECK_CAUSE(b, "mod.json uses \"stock\", which this version does not read");
     sh_mb_free(&b);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod5", tmp);   /* a .tome that is not installed content */
     make_mod(dir, NULL);
-    put_rel(dir, "assets\\maps\\mods\\t.stock\\other.tome", OWN, sizeof OWN);
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "assets/maps/mods/t.stock/other.tome is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a stock pointer");
-    sh_mb_free(&b);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod6", tmp);
-    make_mod(dir, ",\"stock\":{\"assets/x.decl\":{\"source\":\"" P_DECL "\"}}");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "must be a request path, without assets/");
+    put_rel(dir, "assets\\maps\\mods\\tstock00\\other.tome", OWN, sizeof OWN);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
+    CHECK_CAUSE(b, "assets/maps/mods/tstock00/other.tome is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a stock pointer");
     sh_mb_free(&b);
 
-    /* Without a reader: nothing becomes a pointer and a declared one is refused.
-     * The files at game names are then carried replacements, so these cases
-     * build as received content (sh_mb_keep_replacements_here; the refusal is modbundle_test's). */
+    /* Without a reader nothing becomes a pointer. The files at game names
+     * are then carried replacements, so this case builds as received content
+     * (sh_mb_keep_replacements_here; the refusal is modbundle_test's). */
     sh_mb_set_stock_ops(NULL);
     sh_mb_keep_replacements_here(1);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod7", tmp);
     make_mod(dir, NULL);
     mt_delete(dir, "assets\\" REQ_TOME);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.stock_count == 0 && b.total_size == sizeof IMG_B * 2 + sizeof OWN);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.stock_count == 0 && b.total_size == sizeof IMG_B * 2 + sizeof OWN);
     CHECK(b.canonical && !strstr(b.canonical, "\"stock\""));
-    sh_mb_free(&b);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod8", tmp);
-    make_mod(dir, ALIAS_JSON);
-    mt_delete(dir, "assets\\" REQ_TOME);
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "installed-content reader is unavailable");
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(0);
     sh_modstock_register();
@@ -330,11 +302,11 @@ static void test_builder(const char *tmp)
      * is a lower-cased path. */
     {
         static const char *const bad[] = {
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/t.stock/b_copy\",\"type\":\"image\"},"
+            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
             "\"request\":\"" REQ_COPY "\",\"size\":300,\"stock\":{\"sha256\":\"%s\",\"source\":\"" P_IMAGE "\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/t.stock/b_copy\",\"type\":\"image\"},"
+            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
             "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"Generated/Image/Stock/B.bimage\"}}",
-            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/t.stock/b_copy\",\"type\":\"image\"},"
+            "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\",\"provides\":{\"name\":\"mods/tstock00/b_copy\",\"type\":\"image\"},"
             "\"request\":\"" REQ_COPY "\",\"stock\":{\"sha256\":\"%s\",\"source\":\"../x.bimage\"}}",
         };
         int k;
@@ -342,7 +314,7 @@ static void test_builder(const char *tmp)
         for (k = 0; k < 3; k++) {
             char file[1024], text[2048];
             _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
-            _snprintf_s(text, sizeof text, _TRUNCATE, "{\"build\":1,\"bundle\":\"%s\",\"files\":[%s],\"format\":1,\"id\":\"t.stock\","
+            _snprintf_s(text, sizeof text, _TRUNCATE, "{\"bundle\":\"%s\",\"files\":[%s],\"format\":2,\"id\":\"" SALT_STOCK "\","
                         "\"name\":\"x\",\"version\":\"0.0.0\"}", h, file);
             CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
             CHECK(strstr(b.first_cause, "stock") != NULL);
@@ -390,7 +362,7 @@ static void make_install3(const char *d3)
 
 static void l1c_mod(const char *dir, const char *rel, const char *text)
 {
-    mt_write(dir, "mod.json", "{\"id\":\"t.l1c\",\"name\":\"L1c test\"}");
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tl1c0000\"},\"name\":\"L1c test\"}");
     mt_write(dir, rel, text);
 }
 
@@ -417,29 +389,29 @@ static void test_renamed_names_dead(const char *tmp)
     sh_modstock_set_install(d3);
     /* A renamed copy past 64 same-size candidates is found (budget only). */
     hex_of(LATE_B, sizeof LATE_B, h);
-    CHECK(sh_modstock_match("generated/image/mods/t.l1c/q/elsewhere.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/q/elsewhere.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_LATE));
     /* The de-namespaced path is tried first, under either key spelling. */
-    CHECK(sh_modstock_match("generated/image/mods/t_l1c/z/late.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/z/late.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_LATE));
     /* A name both archives hold with other bytes: the variant whose bytes the
      * copy has is the one named, whichever archive holds it. */
     hex_of(TWO_CAMP, sizeof TWO_CAMP, h);
-    CHECK(sh_modstock_match("generated/image/mods/t.l1c/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_TWO) && sh_modstock_verify(src, h, &size) == SH_MB_STOCK_OK && size == 300);
     hex_of(TWO_SNAP, sizeof TWO_SNAP, h);
-    CHECK(sh_modstock_match("generated/image/mods/t.l1c/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_TWO));
     /* Bytes no row holds stay absent, and the source is left empty. */
     hex_of(D3_IMG[0], 299, h);
-    CHECK(sh_modstock_match("generated/image/mods/t.l1c/a/000.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_ABSENT && !src[0]);
+    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/a/000.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_ABSENT && !src[0]);
 
     /* An md6 collision model name resolves to generated/model/, as the game ships it. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\entitydef\\mods\\t.l1c\\death.decl",
+    l1c_mod(dir, "assets\\generated\\decls\\entitydef\\mods\\tl1c0000\\death.decl",
             "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
     /* Only the campaign archive holds it here, so it is brought along. */
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
     if (b.errors) fprintf(stderr, "  collision model: %s\n", b.first_cause);
     f = find(&b, D3_COLLISION);
     CHECK(f && f->stock && f->closure && b.stock_count == 1);
@@ -448,33 +420,33 @@ static void test_renamed_names_dead(const char *tmp)
     /* A copied stock md6Def keeping a clip no archive holds: a warning naming
      * the stock decl, not an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c2", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\x.md6.decl",
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\x.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// namespaced copy\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.needs.unresolved == 1);
     CHECK(strstr(b.first_warning, "names anim md6/m/dead.md6anim, which no archive holds; the game's own " D3_MD6
                                   " names it too") != NULL);
-    f = find(&b, "generated/decls/md6def/mods/t.l1c/m/x.md6.decl");
+    f = find(&b, "generated/decls/md6def/mods/tl1c0000/m/x.md6.decl");
     CHECK(f && !f->stock && f->cls == SH_MB_CLASS_ADD);
     sh_mb_free(&b);
     /* The same text byte for byte under another stem is a borrow: its text is
      * the game's, and the warning names its source. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c3", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\other.md6.decl", MD6_STOCK);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 1);
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\other.md6.decl", MD6_STOCK);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 1);
     CHECK(strstr(b.first_warning, "the game's own " D3_MD6 " names it too") != NULL);
     sh_mb_free(&b);
     /* A dead name only the mod introduces stays an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c4", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\x.md6.decl",
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\x.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t}\r\n\tanim \"md6/m/mine.md6anim\" {\r\n\t}\r\n}\r\n");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1 && b.warnings == 1);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 1 && b.warnings == 1);
     CHECK_CAUSE(b, "needs anim md6/m/mine.md6anim, which resolves to nothing");
     sh_mb_free(&b);
     /* With no stock decl of that stem, a dead clip is the mod's own: an error. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c5", tmp);
-    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\t.l1c\\m\\y.md6.decl",
+    l1c_mod(dir, "assets\\generated\\decls\\md6def\\mods\\tl1c0000\\m\\y.md6.decl",
             "{\r\n\tanim \"md6/m/dead.md6anim\" {\r\n\t\t// not a copy of y\r\n\t}\r\n}\r\n");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b));
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
     CHECK_CAUSE(b, "needs anim md6/m/dead.md6anim, which resolves to nothing");
     sh_mb_free(&b);
 }
@@ -492,7 +464,7 @@ static void test_renamed_names_dead(const char *tmp)
 #define K_SKL    "generated/skeleton/k/wall.bmd6skl"
 #define K_SNAP   "generated/image/k/snap.bimage"
 #define K_BOTH   "generated/image/k/both.bimage"
-#define K_WEB    "assets\\generated\\decls\\animweb\\mods\\t.close\\station.decl"
+#define K_WEB    "assets\\generated\\decls\\animweb\\mods\\tclose00\\station.decl"
 static const char K_MD6_TEXT[] = "{\r\n\tmesh = \"k/wall.md6mesh\";\r\n\tskeleton = \"k/wall.md6skl\";\r\n"
                                  "\tanim \"k/gone.md6anim\" {\r\n\t}\r\n}\r\n";
 /* The engine's own animWeb form, as designsystems/med_station_heal holds it. */
@@ -545,9 +517,9 @@ static void test_campaign_closure(const char *tmp)
      * pointers at the game's own paths, surfaces carried by nothing; the
      * md6Def's clip no archive holds is the game's own hole, not the mod's. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close1", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, K_WEB_TEXT);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  closure: %s\n", b.first_cause);
     CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof K_WEB_TEXT - 1);
     CHECK(b.stock_bytes == sizeof K_MD6_TEXT - 1 + sizeof K_MESH_B + sizeof K_SKL_B);
@@ -563,61 +535,56 @@ static void test_campaign_closure(const char *tmp)
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
-    /* The product block records them as pointers with no file; a rebuild
-     * carries them forward and keeps the hash and the note. */
+    /* The builder block marks them as derived pointers; a rebuild derives
+     * them again and keeps the hash and the note. */
     {
         size_t len = 0;
         unsigned char *text;
         char path[MAX_PATH * 2];
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
         text = sh_mb_read_file(path, 1 << 20, &len);
-        CHECK(text && strstr((const char *)text, "\"source\": \"" K_MESH "\"") && strstr((const char *)text, "\"inAssets\": false"));
+        CHECK(text && strstr((const char *)text, "\"source\": \"" K_MESH "\"") && strstr((const char *)text, "\"closure\": true") &&
+              !strstr((const char *)text, "inAssets"));
         if (text) HeapFree(GetProcessHeap(), 0, text);
     }
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0 && !strcmp(b.hash, hash) && b.stock_count == 3);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0 && !strcmp(b.hash, hash) && b.stock_count == 3);
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
     sh_mb_free(&b);
 
     /* Names SnapMap loads on its own (snap_gameresources, or both archives)
      * gain nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close2", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
-    mt_write(dir, "assets\\generated\\decls\\material\\mods\\t.close\\m.decl",
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
+    mt_write(dir, "assets\\generated\\decls\\material\\mods\\tclose00\\m.decl",
              "{\r\n\tdiffusemap = \"k/snap\";\r\n\tspecularmap = \"k/both\";\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 && b.needs.stock == 2);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 && b.needs.stock == 2);
     CHECK(!has_note(&b, "borrowed for completeness"));
     sh_mb_free(&b);
 
     /* A name no archive holds still fails as before. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close3", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, "{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k/none.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.file_count == 1);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.file_count == 1);
     CHECK_CAUSE(b, "needs md6Def k/none.md6, which resolves to nothing");
     sh_mb_free(&b);
 
-    /* The file cap: 4095 declared pointers and the animWeb fill it, so the
+    /* The file cap: 4095 carried images and the animWeb fill it, so the
      * first name the closure would add fails the build, by name. */
     {
-        size_t cap = 96u * 4096u + 256u, w;
-        char *desc = (char *)malloc(cap);
         unsigned n;
-        CHECK(desc != NULL);
-        if (desc) {
-            w = (size_t)_snprintf_s(desc, cap, _TRUNCATE, "{\"id\":\"t.close\",\"name\":\"Closure test\",\"stock\":{");
-            for (n = 0; n < SH_MB_MAX_FILES - 1; n++)
-                w += (size_t)_snprintf_s(desc + w, cap - w, _TRUNCATE, "%s\"generated/image/mods/t.close/%04u.bimage\":"
-                                         "{\"source\":\"" K_SNAP "\"}", n ? "," : "", n);
-            _snprintf_s(desc + w, cap - w, _TRUNCATE, "}}");
-            _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close4", tmp);
-            mt_write(dir, "mod.json", desc);
-            mt_write(dir, K_WEB, K_WEB_TEXT);
-            CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-            CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign archives hold; bringing it along would take "
-                           "the bundle past 4096 files");
-            sh_mb_free(&b);
-            free(desc);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close4", tmp);
+        mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
+        for (n = 0; n < SH_MB_MAX_FILES - 1; n++) {
+            char rel[96];
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\tclose00\\%04u.bimage", n);
+            mt_write(dir, rel, "img");
         }
+        mt_write(dir, K_WEB, K_WEB_TEXT);
+        CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b));
+        CHECK_CAUSE(b, "needs md6Def k/wall.md6, which only the campaign archives hold; bringing it along would take "
+                       "the bundle past 4096 files");
+        sh_mb_free(&b);
     }
 }
 
@@ -634,10 +601,10 @@ static void test_closure_recomputed(const char *tmp)
     sh_modstock_set_install(d4);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\close5", tmp);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
-    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\"}");
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, K_WEB_TEXT);
-    mt_write(dir, "assets\\generated\\decls\\material\\mods\\t.close\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
+    mt_write(dir, "assets\\generated\\decls\\material\\mods\\tclose00\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
@@ -645,66 +612,21 @@ static void test_closure_recomputed(const char *tmp)
     text = sh_mb_read_file(path, 1 << 20, &len);
     CHECK(text && strstr((const char *)text, "\"closure\": true") && strstr((const char *)text, K_MD6));
     if (text) HeapFree(GetProcessHeap(), 0, text);
-    /* An unchanged rebuild derives the same set: same hash and build. */
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3 && !strcmp(b.hash, hash) && b.build == 1);
+    /* An unchanged rebuild derives the same set: same hash. */
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3 && !strcmp(b.hash, hash));
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     sh_mb_free(&b);
     /* The animWeb is removed: nothing needs the chain, so it is gone. */
     mt_delete(dir, K_WEB);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
-          strcmp(b.hash, hash) != 0 && b.build == 2);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
+          strcmp(b.hash, hash) != 0);
     CHECK(!find(&b, K_MD6) && !find(&b, K_MESH) && !find(&b, K_SKL) && !has_note(&b, "borrowed for completeness"));
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     sh_mb_free(&b);
     text = sh_mb_read_file(path, 1 << 20, &len);
     CHECK(text && !strstr((const char *)text, K_MD6) && !strstr((const char *)text, "\"closure\""));
     if (text) HeapFree(GetProcessHeap(), 0, text);
-    /* A folder built by rules 3, which wrote no mark: its pointers at the
-     * game's own path to campaign-only content are derived again too. */
-    mt_write(dir, K_WEB, K_WEB_TEXT);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
-    sh_mb_free(&b);
-    text = sh_mb_read_file(path, 1 << 20, &len);
-    CHECK(text != NULL);
-    if (text) {
-        char *t3 = (char *)malloc(len + 1), *q;
-        size_t n3 = 0, j;
-        const char *mark = "\"closure\": true";
-        CHECK(t3 != NULL);
-        /* Cut each mark with the comma and line break before it. */
-        for (j = 0; t3 && j < len; j++) {
-            if (len - j >= strlen(mark) && !memcmp(text + j, mark, strlen(mark))) {
-                while (n3 && t3[n3 - 1] != ',') n3--;
-                if (n3) n3--;
-                j += strlen(mark) - 1;
-                continue;
-            }
-            t3[n3++] = (char)text[j];
-        }
-        if (t3) {
-            char rules[32];
-            t3[n3] = 0;
-            _snprintf_s(rules, sizeof rules, _TRUNCATE, "\"rules\": %d", SH_MB_RULES);
-            q = strstr(t3, rules);
-            CHECK(q && !strstr(t3, "closure"));
-            if (q) q[9] = '3';
-            mt_write(dir, "mod.json", t3);
-            free(t3);
-        }
-        HeapFree(GetProcessHeap(), 0, text);
-    }
-    mt_delete(dir, K_WEB);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && !find(&b, K_MD6) && !find(&b, K_MESH));
-    sh_mb_free(&b);
-    /* An author stock entry is the author's: it stays when nothing needs it. */
-    mt_write(dir, "mod.json", "{\"id\":\"t.close\",\"name\":\"Closure test\",\"stock\":{\"" K_MESH "\":{\"source\":\"" K_MESH "\"}}}");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && find(&b, K_MESH) && !find(&b, K_MESH)->closure);
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
-    sh_mb_free(&b);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && find(&b, K_MESH));
-    sh_mb_free(&b);
 }
 
 /* ------------------------------------- effects, movies and images ---- */
@@ -785,14 +707,14 @@ static void test_closure_effects(const char *tmp)
      * materials they draw with and the transparency atlas one names; a
      * particle SnapMap holds adds nothing. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx1", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Effect test\"}");
-    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\t.fx\\glow.decl",
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Effect test\"}");
+    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\tfx00000\\glow.decl",
              "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 3;\r\n"
              "\t\t\titem[0] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/eyes\";\r\n\t\t\t}\r\n"
              "\t\t\titem[1] = {\r\n\t\t\t\ttype = \"FX_RIBBON\";\r\n\t\t\t\tdeclRibbon = \"k_trail\";\r\n\t\t\t}\r\n"
              "\t\t\titem[2] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/snapsparks\";\r\n\t\t\t}\r\n"
              "\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0);
     if (b.errors) fprintf(stderr, "  effects: %s\n", b.first_cause);
     CHECK(b.stock_count == 5 && b.file_count == 6);
     for (i = 0; i < 5; i++) {
@@ -805,10 +727,10 @@ static void test_closure_effects(const char *tmp)
     /* An entityDef whose guiData names a campaign-only movie gains the cooked
      * movie and its atlas. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\swf1", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Movie test\"}");
-    mt_write(dir, "assets\\generated\\decls\\entitydef\\mods\\t.fx\\panel.decl",
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Movie test\"}");
+    mt_write(dir, "assets\\generated\\decls\\entitydef\\mods\\tfx00000\\panel.decl",
              "{\r\n\tedit = {\r\n\t\tguiData = {\r\n\t\t\tswfFile = \"swf/k/panel.swf\";\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 2);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 2);
     f = find(&b, E_SWF);
     CHECK(f && f->closure && f->ptype && !strcmp(f->ptype, "swf"));
     f = find(&b, E_SWFIMG);
@@ -818,20 +740,20 @@ static void test_closure_effects(const char *tmp)
     /* A virtual-textured material with an installed row gains no image (the
      * engine samples its pages); one without a row gains its image. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\vt1", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Virtual texture test\"}");
-    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\t.fx\\a.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat\";\r\n\t}\r\n}\r\n");
-    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\t.fx\\b.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat2\";\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Virtual texture test\"}");
+    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\tfx00000\\a.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat\";\r\n\t}\r\n}\r\n");
+    mt_write(dir, "assets\\generated\\decls\\ribbon\\mods\\tfx00000\\b.decl", "{\r\n\tedit = {\r\n\t\tmaterial = \"k/vtmat2\";\r\n\t}\r\n}\r\n");
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0);
     CHECK(find(&b, E_VT) && find(&b, E_VT2) && !find(&b, E_VTIMG) && find(&b, E_VT2IMG) && b.stock_count == 3);
     sh_mb_free(&b);
 
     /* A particle no archive holds is reported, not refused. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\fx2", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.fx\",\"name\":\"Effect test\"}");
-    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\t.fx\\gone.decl",
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tfx00000\"},\"name\":\"Effect test\"}");
+    mt_write(dir, "assets\\generated\\decls\\fx\\mods\\tfx00000\\gone.decl",
              "{\r\n\tedit = {\r\n\t\tevents = {\r\n\t\t\tnum = 1;\r\n"
              "\t\t\titem[0] = {\r\n\t\t\t\tdeclPrt = \"k/none\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 1 && b.stock_count == 0);
     CHECK(strstr(b.first_warning, "names particle k/none, which no archive holds") != NULL);
     sh_mb_free(&b);
 }
@@ -919,28 +841,28 @@ static void test_whole_models(const char *tmp)
     sh_modstock_set_install(d6);
 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model1", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.model\",\"name\":\"Model test\"}");
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tmodel00\"},\"name\":\"Model test\"}");
     /* A carried md6Def naming SnapMap's mesh. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\card.md6.decl",
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\card.md6.decl",
              "{\r\n\tinit {\r\n\t\tmesh \"s6/card.md6mesh\"\r\n\t}\r\n}\r\n");
     /* One naming the mod's own mesh, whose header names SnapMap's skeleton. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\own.md6.decl",
-             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/t.model/own.md6mesh\"\r\n\t}\r\n}\r\n");
-    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\t.model\\own.bmd6model", OWN6_MESH_B, sizeof OWN6_MESH_B);
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\own.md6.decl",
+             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/tmodel00/own.md6mesh\"\r\n\t}\r\n}\r\n");
+    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\tmodel00\\own.bmd6model", OWN6_MESH_B, sizeof OWN6_MESH_B);
     /* One whose mesh names a skeleton nothing holds: nothing is added for it. */
-    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\t.model\\none.md6.decl",
-             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/t.model/none.md6mesh\"\r\n\t}\r\n}\r\n");
-    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\t.model\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    mt_write(dir, "assets\\generated\\decls\\md6def\\mods\\tmodel00\\none.md6.decl",
+             "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/tmodel00/none.md6mesh\"\r\n\t}\r\n}\r\n");
+    put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\tmodel00\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  models: %s\n", b.first_cause);
     CHECK(b.stock_count == 0 && b.file_count == 5);
-    f = find(&b, "generated/decls/md6def/mods/t.model/card.md6.decl");
+    f = find(&b, "generated/decls/md6def/mods/tmodel00/card.md6.decl");
     CHECK(f && f->need_count == 3 && has_need(f, "baseModel", "s6/card.md6mesh") &&
           has_need(f, "skeleton", "s6/card.md6skl") && has_need(f, "anim", "s6/card.md6skl/_default.md6anim"));
-    f = find(&b, "generated/decls/md6def/mods/t.model/own.md6.decl");
+    f = find(&b, "generated/decls/md6def/mods/tmodel00/own.md6.decl");
     CHECK(f && f->need_count == 3 && has_need(f, "skeleton", "s6/card.md6skl") &&
           has_need(f, "anim", "s6/card.md6skl/_default.md6anim"));
-    f = find(&b, "generated/decls/md6def/mods/t.model/none.md6.decl");
+    f = find(&b, "generated/decls/md6def/mods/tmodel00/none.md6.decl");
     CHECK(f && f->need_count == 1);
     CHECK(b.needs.stock == 5 && b.needs.local == 2 && b.needs.unresolved == 0);
     CHECK(b.canonical && strstr(b.canonical, "s6/card.md6skl/_default.md6anim") != NULL);
@@ -949,10 +871,10 @@ static void test_whole_models(const char *tmp)
     /* A campaign-only md6Def naming only its mesh: the closure brings the
      * mesh, the skeleton the mesh names and its default clip. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\model2", tmp);
-    mt_write(dir, "mod.json", "{\"id\":\"t.model\",\"name\":\"Model test\"}");
-    mt_write(dir, "assets\\generated\\decls\\animweb\\mods\\t.model\\door.decl",
+    mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tmodel00\"},\"name\":\"Model test\"}");
+    mt_write(dir, "assets\\generated\\decls\\animweb\\mods\\tmodel00\\door.decl",
              "// the mod's web\r\n{\r\n\tprops {\r\n\t\tmodelInfos {\r\n\t\t\t\"k6/door.md6\" \"\"\r\n\t\t}\r\n\t}\r\n}\r\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 4);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 4);
     f = find(&b, M6_MD6);
     CHECK(f && f->closure && has_need(f, "skeleton", "k6/door.md6skl") && has_need(f, "anim", "k6/door.md6skl/_default.md6anim"));
     CHECK(find(&b, M6_MESH) && find(&b, M6_SKL) && find(&b, M6_DEF) && find(&b, M6_DEF)->closure);
@@ -985,14 +907,14 @@ static void test_closure_store_path(const char *tmp)
     _snprintf_s(surf, sizeof surf, _TRUNCATE, "%s\\surf", store);
     CHECK(sh_ms_set_root(store));
     /* An installed mod that already points at the door's model. */
-    mt_write(other, "mod.json", "{\"id\":\"t.other6\",\"name\":\"Other\",\"stock\":{"
+    mt_write(other, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tother06\"},\"name\":\"Other\",\"stock\":{"
              "\"" M6_MD6 "\":{\"source\":\"" M6_MD6 "\"},\"" M6_MESH "\":{\"source\":\"" M6_MESH "\"},"
              "\"" M6_SKL "\":{\"source\":\"" M6_SKL "\"},\"" M6_DEF "\":{\"source\":\"" M6_DEF "\"}}}");
-    put_rel(other, "assets/generated/image/mods/t.other6/own.bimage", S6_SKL_B, 8);
+    put_rel(other, "assets/generated/image/mods/tother06/own.bimage", S6_SKL_B, 8);
     CHECK(sh_ms_install_from_folder(other, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
     /* The hand-made folder: the game's animWeb, byte for byte. */
-    mt_write(surf, "mod.json", "{\"id\":\"t.surf6\",\"name\":\"Surface\"}");
+    mt_write(surf, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tsurf006\"},\"name\":\"Surface\"}");
     put_rel(surf, "assets\\" M6_WEB, M6_WEB_TEXT, sizeof M6_WEB_TEXT - 1);
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
     CHECK(sh_mb_load_folder(surf, &b) && b.rules == SH_MB_RULES && b.file_count == 5 && b.stock_count == 5);
@@ -1067,11 +989,11 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     sh_modstock_set_install(d1);
     _snprintf_s(store, sizeof store, _TRUNCATE, "%s\\store", tmp);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src1", tmp);
-    make_mod(dir, ALIAS_JSON);
+    make_mod(dir, NULL);
     CHECK(sh_ms_set_root(store));
     CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
-    CHECK(st.stock_files == 4 && st.copied == 1);
+    CHECK(st.stock_files == 3 && st.copied == 1);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
     /* The store folder holds the one carried file; the pointers are in its mod.json only. */
@@ -1081,20 +1003,18 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         char *text;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, key);
         text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
-        CHECK(text && strstr(text, "\"inAssets\": false") && strstr(text, "\"source\": \"" P_IMAGE "\""));
+        CHECK(text && strstr(text, "\"source\": \"" P_IMAGE "\"") && !strstr(text, "inAssets"));
         free(text);
     }
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\" REQ_COPY, store, key);
     { char *q; for (q = path; *q; q++) if (*q == '/') *q = '\\'; }
     CHECK(!mt_exists(path));
-    CHECK(sh_ms_verify(key, &vs, cause, sizeof cause) && vs.files == 5 && vs.pointers == 4);
+    CHECK(sh_ms_verify(key, &vs, cause, sizeof cause) && vs.files == 4 && vs.pointers == 3);
 
     /* Serving: the pointer is answered with the installed bytes. */
     CHECK(sh_modserve_index_build(store) == 1);
     CHECK(sh_modserve_lookup(REQ_COPY, &hit) && hit.is_stock && !strcmp(hit.stock_source, P_IMAGE));
     CHECK(sh_modserve_open(REQ_COPY, &bytes, &len) == 1 && len == sizeof IMG_B && !memcmp(bytes, IMG_B, len));
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(sh_modserve_open(REQ_ALIAS, &bytes, &len) == 1 && len == sizeof DECL_A - 1 && !memcmp(bytes, DECL_A, len));
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     CHECK(sh_modserve_open(REQ_OWN, &bytes, &len) == 1 && len == sizeof OWN);
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
@@ -1105,7 +1025,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     {
         char other[MAX_PATH * 2];
         _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\src2", tmp);
-        mt_write(other, "mod.json", "{\"id\":\"t.other\",\"name\":\"Other\",\"shadows\":[\"" P_IMAGE "\"]}");
+        mt_write(other, "mod.json", "{\"name\":\"Other\",\"snapmap-plus\":{\"format\":2,\"salt\":\"tother00\"}}");
         put_rel(other, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
         sh_mb_set_stock_ops(NULL);
         sh_mb_keep_replacements_here(1);   /* carried at a game name: a replacement */
@@ -1123,7 +1043,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
      * pointer it cannot answer falls through to the engine. */
     sh_modstock_set_install(d2);
     CHECK(!sh_ms_verify(key, &vs, cause, sizeof cause));
-    CHECK(strstr(cause, "assets/" REQ_ALIAS " points at installed content " P_DECL ", which this game does not have") != NULL);
+    CHECK(strstr(cause, " points at installed content ") != NULL);
     CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in mod.json */
     sh_modstock_set_install(d1);
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));
@@ -1144,7 +1064,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         hex_of(OWN, sizeof OWN, own);
         hex_of(IMG_B, sizeof IMG_B, img);
         CHECK(modsync_upload_bundles(one, 1, "map-stock", NULL, &ss));
-        CHECK(ss.blobs_total == 1 && ss.stock_files == 4 && stub_has_blob(own) && !stub_has_blob(img) && stub_has_bundle(hash));
+        CHECK(ss.blobs_total == 1 && ss.stock_files == 3 && stub_has_blob(own) && !stub_has_blob(img) && stub_has_bundle(hash));
     }
     /* Download into an empty store: one blob fetched, pointers resolved. */
     _snprintf_s(store2, sizeof store2, _TRUNCATE, "%s\\store2", tmp);
@@ -1166,7 +1086,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     {
         int gets = g_stub.blob_gets;
         CHECK(!modsync_fetch_bundle(hash, NULL, &ss));
-        CHECK(strstr(ss.cause, "refused: assets/" REQ_ALIAS " points at installed content") != NULL);
+        CHECK(strstr(ss.cause, " points at installed content") != NULL);
         CHECK(g_stub.blob_gets == gets);
     }
     {
@@ -1186,7 +1106,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
             CHECK(bs.calls == 0 && strstr(cause, "refused:") != NULL);
             sh_modstock_set_install(d1);
             CHECK(modsync_install_manifest(e->bundle.canonical, e->bundle.canonical_len, hash, serve_blob, &bs, &info, cause, sizeof cause));
-            CHECK(bs.calls == 1 && info.blobs_fetched == 1 && info.stock_files == 4);
+            CHECK(bs.calls == 1 && info.blobs_fetched == 1 && info.stock_files == 3);
         }
         sh_ms_list_free(&l);
     }
@@ -1400,7 +1320,7 @@ static void test_text_identity(const char *tmp)
     r7_write_bytes(dir, R7_TW_PBIN, pbin);
     r7_write_bytes(dir, R7_TW_PVS, vs);
     r7_write_bytes(dir, R7_TW_PFS, fs);
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0);
     if (b.errors) fprintf(stderr, "  text identity: %s\n", b.first_cause);
     CHECK(b.file_count == 8 && b.stock_count == 8 && b.total_size == 0 && b.classes.surfaces == 8 && !b.edits);
     f = find(&b, R7_TW_PERM);
@@ -1417,7 +1337,7 @@ static void test_text_identity(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text2", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
     r7_write_lf(dir, R7_SNAP_DEF, R7_DEF, "\n");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && b.classes.surfaces == 1);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 1 && b.classes.surfaces == 1);
     f = find(&b, R7_SNAP_DEF);
     hex_of(R7_DEF, sizeof R7_DEF - 1, sha);
     CHECK(f && f->stock && !strcmp(f->blob, sha) && f->cls == SH_MB_CLASS_SURFACE);
@@ -1427,7 +1347,7 @@ static void test_text_identity(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\text3", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
     r7_write_lf(dir, R7_SNAP_DEF, "{\n\tinherit = \"prop\";\n\tedit = {\n\t\tsize = 8;\n\t}\n}\n", "");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && b.edit_files == 1 && b.classes.edits == 1);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && b.edit_files == 1 && b.classes.edits == 1);
     if (b.errors) fprintf(stderr, "  edited copy: %s\n", b.first_cause);
     f = find(&b, R7_SNAP_DEF);
     CHECK(f && !f->stock && f->edited && f->edit && strstr(f->edit, "\"set\"") != NULL);
@@ -1439,7 +1359,7 @@ static void test_text_identity(const char *tmp)
     mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
     r7_write_lf(dir, R7_TW_PERM, "{\n\tpermutations {\n\t\tdefault AMD_VK_EXTENSIONS\n\t}\n\tstate {\n"
                                  "\t\tblend GL_ONE GL_SRC_ALPHA\n\t}\n}\n", "");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 1);
     CHECK_CAUSE(b, "edits the game's render-program permutation " R7_TW_PERM);
     CHECK(!strstr(b.first_cause, "a binary"));
     sh_mb_free(&b);
@@ -1466,7 +1386,7 @@ static void test_shader_closure(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade1", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
     r7_write_lf(dir, "generated/decls/material/mods/shade1/water.decl", "{\nstageprogram\ttw\n}\n", "");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
     if (b.errors) fprintf(stderr, "  shader closure: %s\n", b.first_cause);
     CHECK(b.file_count == 9 && b.stock_count == 8);
     for (i = 0; i < sizeof whole / sizeof whole[0]; i++) {
@@ -1480,10 +1400,10 @@ static void test_shader_closure(const char *tmp)
     /* Stable: a rebuild after writing mod.json derives the same set and hash. */
     {
         char cause[SH_MB_CAUSE_MAX], hash[65];
-        CHECK(sh_mb_build(dir, &RESOLVER, &b) && sh_mb_write(&b, dir, cause, sizeof cause));
+        CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && sh_mb_write(&b, dir, cause, sizeof cause));
         memcpy(hash, b.hash, sizeof hash);
         sh_mb_free(&b);
-        CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 8 && !strcmp(b.hash, hash));
+        CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 8 && !strcmp(b.hash, hash));
         sh_mb_free(&b);
     }
 
@@ -1491,7 +1411,7 @@ static void test_shader_closure(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade2", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
     r7_write_lf(dir, "generated/decls/material/mods/shade2/glass.decl", "{\nstageprogram\tsw\n}\n", "");
-    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
+    CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
           b.needs.stock == 1);
     f = find(&b, "generated/decls/material/mods/shade2/glass.decl");
     CHECK(f && f->need_count == 1 && has_need(f, "renderProg", "sw"));
@@ -1503,7 +1423,7 @@ static void test_shader_closure(const char *tmp)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade3", tmp);
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
     r7_write_lf(dir, "generated/decls/material/mods/shade3/broken.decl", "{\nstageprogram\ttp\n}\n", "");
-    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1);
+    CHECK(!sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 1);
     CHECK_CAUSE(b, "uses the campaign render program tp, but no archive holds its "
                    "generated/renderprogs/permutations/tp_0000000000000001_pc_vulkan.bin");
     sh_mb_free(&b);

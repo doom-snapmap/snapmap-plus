@@ -136,8 +136,10 @@ Client-side only; no map data changes.
 
 A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding `mod.json` and an `assets\` tree of
 already-cooked idTech 6 files at the paths the game asks for. Converting assets from other games is
-Doomforge's job, not this product's. New names live under `mods/<id>/`; a stock file the mod replaces
-is listed in `shadows`. A shadow may keep a name the stock text already carries and the game ships
+Doomforge's job, not this product's. Each mod has a salt, eight letters and digits it is given once,
+the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, and every `strings` key
+starts with `mods/<salt>/`. The folder's name is yours and you can rename it at any time. A stock file
+the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.
 
@@ -149,19 +151,22 @@ text with your edits and those of every other mod it uses, so two mods that add 
 body both apply. A copy that differs from the game's only in line endings (CRLF or LF, a final newline)
 is the game's own file and is borrowed, not edited. A copy that does not read as a decl is refused with
 the line it stops at, and a binary at a game name with other bytes (a model, an image) is refused: put
-it under `mods/<key>/` and point your decls at it, or delete your copy and the mod borrows the game's. A render program's permutation decl is text, but an
+it under `mods/<salt>/` and point your decls at it, or delete your copy and the mod borrows the game's. A render program's permutation decl is text, but an
 edited one is refused too, since the game file cannot be generated per map: delete the copy, or ship
-your program whole under `mods/<key>/`. A material that names a shader only the campaign ships
+your program whole under `mods/<salt>/`. A material that names a shader only the campaign ships
 brings the shader's whole program along from the player's install (its decl, compiled files and
-permutations), so a mod of just that material works. The keys `player`, `extends` and `replaces` of earlier releases are ignored,
-and a partial file they named is refused with "put the whole edited copy of <game file> at its game
-name". Mods you download or import are never refused on their files. A map whose mods need Snapmap+ features records the version it needs.
+permutations), so a mod of just that material works. Mods you download or import are never refused
+on their files. A map whose mods need Snapmap+ features records the version it needs.
 
-- `mod.json` is yours except for one member, `"snapmap-plus"`, which the product writes when it
-  builds the folder (the files, their hashes, the bundle hash and whether it verified). Everything
-  else in the file (id, name, version, description, author, strings, requirements, hud, any key of
-  your own) is never reformatted or reordered. A `package.json` works too and becomes `mod.json` at
-  its first build. Everything about mods is in `mods\`: the folders and one product file,
+- `mod.json` is yours except for one member, `"snapmap-plus"`, which the product writes: the salt
+  when it first sees the folder, then at every build the files, their hashes and the build hash, or
+  the cause while the build fails (the folder then serves nothing until fixed). Everything else in
+  the file (name, version, description, author, homepage, strings, requirements, hud, companions,
+  any key of your own) is never reformatted or reordered. A folder in a shape this version does not
+  read (a `package.json`, a `mod.json` built by an earlier version, or one using `id`, `key`,
+  `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes` or `schema`) is
+  listed with "This mod folder is not in a shape Snapmap+ can build:" and the cause, and serves
+  nothing. Everything about mods is in `mods\`: the folders and one product file,
   `snapmap-plus.json` (publish claims, the migration record, the build cache).
 - A folder you drop into `mods\` keeps its name and is built when the Mods tab opens (or on
   `sh_mods rescan`); a folder whose files or `mod.json` changed is built again the same way.
@@ -210,9 +215,7 @@ name". Mods you download or import are never refused on their files. A map whose
   bundle names it as a stock pointer to the installed file (any archive, the `.patch` store
   included, or a loose file such as a `.pages`), and it is read from your install when the game
   asks for it. `sh_mods build` and `sh_mods install` say how many files are installed content; the
-  Mods tab shows them as "from the installed game". A descriptor's `stock` object
-  (`{"<request path>": {"source": "<installed path>"}}`) names installed content under a mod's own
-  name without copying it. A player whose game lacks that content, or holds a different revision
+  Mods tab shows them as "from the installed game". A player whose game lacks that content, or holds a different revision
   of it, is told so and the mod is not installed.
 - A mod that borrows campaign content brings along everything that content needs. SnapMap loads
   only its own archive, so when a mod's decls name a model, mesh, skeleton, clip, effect, screen

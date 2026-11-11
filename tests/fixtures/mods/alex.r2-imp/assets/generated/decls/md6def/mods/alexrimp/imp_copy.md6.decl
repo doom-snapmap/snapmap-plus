@@ -1,6 +1,6 @@
 {
 	init {
-		mesh "md6/mods/alex.r2-imp/imp_copy_b/assets/mesh/imp_copy_b.md6mesh"
+		mesh "md6/mods/alexrimp/imp_copy/assets/mesh/imp_copy.md6mesh"
 		offset ( 0 0 0 )
 		calcRefBoundsFromJoints 0
 	}
@@ -9,7 +9,7 @@
 	jointGroups {
 	}
 	events {
-		anim "md6/mods/alex.r2-imp/imp_copy/motion/rage_taunt.md6anim" {
+		anim "md6/characters/monsters/imp/base/motion/combat/rage_taunt.md6anim" {
 			event "ae_playAIVO" {
 				frame 3
 				row 0
@@ -18,7 +18,7 @@
 				aiVoiceOver "imp"
 			}
 		}
-		anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward01.md6anim" {
+		anim "md6/characters/monsters/imp/base/motion/combat/meleeforward01.md6anim" {
 			event "ae_playAIVO" {
 				frame 4
 				row 3
@@ -33,7 +33,7 @@
 				sound "play_imp_melee_swing"
 			}
 		}
-		anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward02.md6anim" {
+		anim "md6/characters/monsters/imp/base/motion/combat/meleeforward02.md6anim" {
 			event "ae_playAIVO" {
 				frame 4
 				row 3
@@ -55,25 +55,25 @@
 			flags {
 				forceLoad
 			}
-			anim "md6/mods/alex.r2-imp/imp_copy/motion/idle.md6anim"
+			anim "md6/characters/monsters/imp/base/motion/combat/idle.md6anim"
 		}
 		alias {
 			name "hover/hover_variant_1"
 			flags {
 				forceLoad
 			}
-			anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward01.md6anim"
+			anim "md6/characters/monsters/imp/base/motion/combat/meleeforward01.md6anim"
 		}
 		alias {
 			name "hover/hover_variant_2"
 			flags {
 				forceLoad
 			}
-			anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward02.md6anim"
+			anim "md6/characters/monsters/imp/base/motion/combat/meleeforward02.md6anim"
 		}
 		alias {
 			name "placed/placed"
-			anim "md6/mods/alex.r2-imp/imp_copy/motion/rage_taunt.md6anim"
+			anim "md6/characters/monsters/imp/base/motion/combat/rage_taunt.md6anim"
 		}
 	}
 	props {

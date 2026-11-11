@@ -3,12 +3,12 @@
 	edit = {
 		sortPriority = 80;
 		navMeshType = "NAVMESH_TYPE_48";
-		previewImage = "mods/alex.r2-imp/imp_icon";
+		previewImage = "mods/alexrimp/imp_icon";
 		displayNameTag = "#str_snapentity_demon_imp";
 		displayDescriptionTag = "#str_snapentity_demon_imp_disp_desc";
-		entityDef = "mods/alex.r2-imp/imp_copy";
+		entityDef = "mods/alexrimp/imp_copy";
 		renderInfo = {
-			renderModelName = "mods/alex.r2-imp/imp_copy_b.md6";
+			renderModelName = "mods/alexrimp/imp_copy_b.md6";
 			alwaysDrawBounds = false;
 			alwaysDrawLabel = false;
 			size = {

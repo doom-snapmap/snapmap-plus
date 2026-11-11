@@ -439,9 +439,8 @@ Installer updates and uninstall preserve player configuration.
 ## Mods
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
-holding `mod.json` and an `assets/` tree at the engine's own request paths
-(a `package.json` is accepted until the folder's first build turns it into
-`mod.json`). Mods reach other machines two ways: a published map's
+holding `mod.json` and an `assets/` tree at the engine's own request paths.
+Mods reach other machines two ways: a published map's
 bundles are uploaded to the Community API's mod store when the map is published,
 and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
@@ -462,13 +461,16 @@ These backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
-  structural rules, and the canonical manifest whose SHA-256 is the bundle hash.
-  It reads and writes `mod.json` and the product record (below). New names live
-  under `mods/<key>/`; raw files and skins decls may spell the key the way the
-  engine derives binary names (`-` becomes `_`). Every file is classified from
-  its path and bytes: an addition or a borrow (a stock pointer) under the key,
+  structural rules, and the canonical manifest whose SHA-256 is the build hash.
+  It reads and writes `mod.json` and the product record (below). A mod's
+  identity is its salt (`modsalt.c`): eight characters `[a-z][a-z0-9]{7}`
+  given once, recorded in the builder block, never read from the folder's
+  name, which is the author's to change at any time. New names live under
+  `mods/<salt>/` (a salt has one spelling in decl text and cooked paths), and
+  every strings key starts with `mods/<salt>/`. Every file is classified from
+  its path and bytes: an addition or a borrow (a stock pointer) under the salt,
   editor-only types included (a Toybox row travels with its mod), an editor
-  tweak (an editor-only type outside the key), a surface (the game's own bytes
+  tweak (an editor-only type outside the salt), a surface (the game's own bytes
   at the game's own name, served from the player's disk, never carried and
   never refused; SnapMap's provider cannot see campaign-only content without
   it), or a replacement (any other file at a game name). Whether a file is
@@ -490,53 +492,50 @@ These backend files share the work:
   `generated/decls/` only (`ms_registry_files`), and a permutation is opened
   with its program's cooked `.bin` and SPIR-V, so the author either deletes
   the copy (the mod borrows the game's) or ships a whole program under
-  `mods/<key>/`. Of the 494 permutation decls the installed archives hold,
-  324 parse as decl trees; the rest carry HLSL with `=` at statement level. The retired author keys `player`,
-  `extends` and `replaces` are ignored with one line each; a partial they name
-  is refused with "this is a partial; put the whole edited copy of <game file>
-  at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
-  below, rules 4 its effects, movies and atlases, rules 5 a closure no
-  other installed mod stands in for, rules 6 whole models and rules 7
-  textual identity of decl-grammar files and a material's whole render
-  program, so every installed folder is built again once.
-  The author keys `shadows`, `stock`
-  and `scope` are accepted and ignored (an author `stock` entry with no file
-  still builds a pointer and is reported), so an existing mod keeps its hash.
-  The key is the author `id` when present (deprecated), else the product
-  block's `key`, else (a folder outside the store, built with `sh_mods
-  build`) the folder's own name. `sh_mods new "<name>"` makes a folder under
-  a generated key (`sh_mb_key_generate`: a slug with `_` and four random
-  characters, never `-`, so decl text and cooked paths spell it alike). The
-  Mods tab's New mod (`sh_ms_new_mod_example`) writes the same folder with an
-  example that places and plays untouched: an entityDef
-  `mods/<key>/example_crate` with the game's SnapMap `crate01` model, its
-  Toybox row (`snapEditorEntityDef`, nothing binary: the game's
+  `mods/<salt>/`. Of the 494 permutation decls the installed archives hold,
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. Rules 8 (`SH_MB_RULES`) is
+  `mod.json` format 2, so every own folder is built again once.
+
+  `mod.json` format 2: the author's part is every member but `snapmap-plus`
+  (`name`, `version`, `description`, `author`, `homepage`, `requirements`,
+  `strings`, `hud`, `companions`; any other key is kept in the manifest's
+  `extra`); the builder block holds `format` 2, `salt`, `rules`, `built`
+  (the first successful build of that salt in that folder), `tree` (the
+  rebuild rule's tree hash, `sh_mb_tree_hash`), `build` (the build hash),
+  `cause` (while a build fails or a verification found one), `warnings`, the
+  derived `classes`, `editor`, `registries`, `edits`, `shadows`, and the
+  `files` and `stock` lists (a pointer the campaign-only closure derived is
+  marked `"closure": true`). A failed build writes the block with `format`,
+  `salt`, `rules`, `built`, `tree` and `cause` only (`sh_mb_write_failed`):
+  the folder serves nothing until fixed and the load says "not built:
+  <cause>". The canonical manifest has `format` 2 and `id` the salt; there is
+  no build counter. Any other shape is refused with "This mod folder is not
+  in a shape Snapmap+ can build: <cause>" (`SH_MB_SHAPE`,
+  `sh_mb_descriptor_state`): `package.json`, a block of an earlier format, a
+  format-2 block without a salt, or a retired author key (`id`, `key`,
+  `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`,
+  `composes`, `schema`, a `hud` `schema`); so is a folder whose files lie
+  under `mods/<x>/` for another `x` than its salt (`sh_mb_salt_paths_check`).
+  `sh_mb_build` takes the salt from the block, or from its caller for a folder
+  not salted yet; `sh_mb_salt_modjson` writes the block a first scan gives a
+  folder (`{"format": 2, "salt": ...}`) and rewrites the author's own
+  references to `mods/<from>/` (`sh_mb_rekey_text`, `sh_mb_rekey_path`: the
+  folder's leaf, or a copy's old salt). The readers of earlier shapes live
+  only in the store tool (`modbundle_old.c`, `sh_mb_old_load`), which converts
+  existing folders once at update; the game DLL never links them. The Mods
+  tab's New mod writes an example that places and plays untouched: an
+  entityDef `mods/<salt>/example_crate` with the game's SnapMap `crate01`
+  model, its Toybox row (`snapEditorEntityDef`, nothing binary: the game's
   `prop/new/crate01` row field for field but its names and its `entityDef`,
   so it names no `renderInfo.renderModelName`, which only rows whose entity
-  has no model of its own carry) and the row's strings in
-  the author block, then rescans, so its first build runs at once and keeps
-  the key its block records. A
-  store folder with neither an `id` nor a block `key` gets one the same way
-  at its first build (`sh_ms_first_key`, run before every in-place build: the
-  rescan, `sh_mods build` and `rebuild`, the tab's Rebuild): under the store
-  lock, its references to `mods/<folder>/` (decl text, `mod.json`, folder
-  segments after `mods` under `assets/`, written or cooked) are rewritten in
-  memory, the result is staged beside it with unchanged files hard-linked,
-  and two renames swap it in, the second undone on failure; any read or
-  rename failure, or a binary file naming the folder, leaves it untouched and
-  refuses that folder alone. The record's `renamed` section keeps the old
-  name and the count for the Mods tab. An unbuilt folder serves nothing, so
-  the rename never races a serve. An install from elsewhere of such a folder
-  copies it in under a generated key the same way. A bundle
-  with a `legacy` record (a converted first-generation package) keeps its
-  declared shadows and the rules of before, and its unresolved needs only warn.
-  In any other bundle a need that resolves to nothing fails the build, with
+  has no model of its own carry) and the row's strings in the author's part.
+  A need that resolves to nothing fails the build, with
   three exceptions that only warn: an image (stock materials name
   virtual-texture sources with no standalone image), a need of a replacement,
   and a need the game's own text also names ("names <x>, which no archive
   holds; the game's own <decl> names it too"). That last one covers a stock
-  pointer (its text is the installed text) and a carried decl under the key
-  whose stock twin, the installed decl at its request with `mods/<key>/` cut
+  pointer (its text is the installed text) and a carried decl under the salt
+  whose stock twin, the installed decl at its request with `mods/<salt>/` cut
   (`sh_mb_strip_key`), names the same resource: shipped md6Defs keep event
   and alias blocks of clips no archive holds, so a copy of one builds without
   dropping them. A need only the mod introduces stays an error. A model name
@@ -550,7 +549,7 @@ These backend files share the work:
   content only `gameresources` holds would leave a hole (issue 132's
   `designsystems/med_station_heal` naming `wallhealthstation.md6`). Each
   such name a file needs, at any depth through the decls brought along, is
-  added as a pointer at the game's own path (a surface, `inAssets: false`,
+  added as a pointer at the game's own path (a surface, `"closure": true`,
   nothing carried or uploaded), found with `sh_mb_stock_container` (a name
   both archives hold is SnapMap's own and adds nothing; a name no archive
   holds is resolved as before). A decl added this way is scanned for its own
@@ -747,19 +746,15 @@ These backend files share the work:
   a copy to My Maps that the map service would reject, as in
   [Publishing a map with mods](#publishing-a-map-with-mods).
 
-The store. A folder is `mod.json` plus `assets\`. `mod.json` has
-two blocks in one object: every key but `snapmap-plus` is the author's (id,
-name, version, description, author, strings, requirements, hud, and any other key, kept and carried as the manifest's
-`extra`; the retired shadows, stock and scope, and the retired intent keys player, extends and replaces, are read as
-above), and
-`snapmap-plus` is the product's, the whole built manifest: format, key, build,
-bundle hash, built time, validated and cause, origin (`by-hand` for a folder
-the author made), a converted package's legacy record, the derived `classes`
-counts (`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
+The store. A folder is `mod.json` plus `assets\`. `mod.json` is format 2
+(above): every key but `snapmap-plus` is the author's, and `snapmap-plus` is
+the builder's, the whole built manifest with its salt, rules, built time,
+tree hash, build hash, cause while failing, the derived `classes` counts
+(`adds`, `borrows`, `edits`, `replaces`, `editor`, `surfaces`: an edited copy of a game file
 counts under `edits`, never `replaces`, which is only what a folder the product received replaces;
 the build and `sh_mods list` lines print them the same way), `editor` (the editor tweaks' request paths), `registries` (banks,
 conductor, strings), `edits` (the derived edits of each decl at a game name), shadows, `files` (path, sha256, size, provides, needs) and
-`stock` (pointers; `"inAssets": false` when no file stands behind one). When a
+`stock` (pointers; `"closure": true` on those the campaign-only closure derived). When a
 rebuild fails, `mod.json` is left as it was, so the last good build keeps
 serving, and the store records the failure on the folder (`sh_mods list`:
 "build failed: <cause>; the last working version keeps serving (kept in <path>)"); a folder that
@@ -1439,9 +1434,10 @@ the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`
 contract: `{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
 `weapon` removes the multiplayer mode's forced numeric display for that weapon,
 so a nonpositive capacity shows the widget's infinity frame; no ammunition,
-decl or widget field changes. Rules are read at startup from every admitted
-bundle, installed or legacy; identical rules compose and conflicting ones
-refuse the whole table with both bundle ids logged. The widget update's one
+decl or widget field changes. The object is exactly `{"weapons": ...}`. Rules
+are read at startup from every admitted build under `mods\` (organizing
+folders and the maps' places included); identical rules compose and
+conflicting ones refuse the whole table with both salts logged. The widget update's one
 call to the mode predicate (`WeaponHudModeCall`, `WeaponHudGameMode`) has its
 aligned rel32 swapped to a near relay that passes the widget, whose weapon decl
 is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
