@@ -398,7 +398,7 @@ int main(int argc, char **argv)
         /* Written by hand: the export itself refuses a row it cannot carry. */
         store_at(a_root);
         CHECK(m3 && !modexport_write(m3, strlen(m3), zip2, &st, cause, sizeof cause) &&
-              strstr(cause, "needs Ghost (ghostmod@9999999999999999), which is not installed"));
+              strstr(cause, "this map uses Ghost, which is not installed or does not build") && !strstr(cause, "ghostmod"));
         {
             sh_zip_reader r;
             const char *nm[16];
@@ -536,18 +536,20 @@ int main(int argc, char **argv)
 
     printf("-- the rawmap hooks: process-heap text recording the ZIP's place\n");
     {
-        char h[MAX_PATH], acp[MAX_PATH * 2];
+        char h[MAX_PATH], utf8[MAX_PATH * 3];
         unsigned bundles = 0;
         char *heap;
         _snprintf_s(h, sizeof h, _TRUNCATE, "%s\\h", tmp);
         store_at(a_root);
-        _snprintf_s(acp, sizeof acp, _TRUNCATE, "%s\\hooked.zip", tmp);
-        CHECK(map && modexport_write_text_report(map, strlen(map), acp, &bundles, cause, sizeof cause) > 0 && bundles == 2);
+        /* A name no ANSI code page spells: the hooks take UTF-8. */
+        _snprintf_s(utf8, sizeof utf8, _TRUNCATE, "%s\\hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5.zip", tmp);
+        CHECK(map && modexport_write_text_report(map, strlen(map), utf8, &bundles, cause, sizeof cause) > 0 && bundles == 2);
+        CHECK(modexport_validate_source(utf8, cause, (int)sizeof cause) && !strcmp(cause, "ok"));
         store_at(h);
-        heap = modexport_read_text_report(acp, &len, cause, sizeof cause);
-        CHECK(heap && recorded_as(heap, len, map, "hooked"));
+        heap = modexport_read_text_report(utf8, &len, cause, sizeof cause);
+        CHECK(heap && recorded_as(heap, len, map, "hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5"));
         if (heap) HeapFree(GetProcessHeap(), 0, heap);
-        CHECK(entry_at("maps\\hooked\\Pink Imp", rows[0].build));
+        CHECK(entry_at("maps\\hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5\\Pink Imp", rows[0].build));
     }
 
     printf("-- an import that would replace another build in its place takes a place of its own\n");

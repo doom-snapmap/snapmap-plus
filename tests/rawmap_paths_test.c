@@ -1,12 +1,10 @@
 /* rawmap_paths_test -- where a rawmap save actually goes, driven directly.
  *
- * Written because a claim about it was disputed and prose is not evidence. The disagreement was
- * about stickiness: after naming a destination ("Save Rawmap As", `sh_rawmaps save <path>`), does
- * that file become the place every later save goes? It did, and it should not have. These tests
- * drive the same functions the console and the File menu call, and check the bytes on disk.
- *
- * The rule under test, in one sentence: a named destination applies to ONE write and is spent by it;
- * the only durable way to move the destination is the "Use Rawmap as Save Path" toggle.
+ * These tests drive the same functions the console and the File menu call and check the bytes on
+ * disk: a destination chosen with Save Rawmap As belongs to the open map and later saves of it go
+ * there; opening another map clears it. A ZIP's import and every export run on the transport
+ * thread and are taken by the main tick; every path is UTF-8 (the export seam's stand-in refuses a
+ * path that is not).
  *
  * No hooks, no engine, no editor -- the rules are decisions about two strings and one file write,
  * and they can be checked without a game running.
@@ -629,7 +627,10 @@ static void large_sources_use_native_lengths(void)
     CloseHandle(file);
     CHECK(sh_rawmap_validate_source(path, message, sizeof(message)));
     CHECK(sh_rawmap_swap_set_source(path));
-    body = read_source_file_why(&length, NULL, 0);
+    {
+        int importing = 0;
+        body = read_source_file_why(&length, NULL, 0, &importing);
+    }
     CHECK(body && length == (size_t)1040 * sizeof(block) + 2);
     if (body) {
         CHECK(body[0] == '{' && body[length - 1] == '}' && !body[length]);
@@ -938,6 +939,22 @@ static void mods_end(void)
 
 static void ticks(int n) { for (int i = 0; i < n; i++) sh_modpublished_poll(); }
 
+/* Wait for the transport thread and let the main tick take its result. */
+static void transport_settle(void)
+{
+    for (int i = 0; i < 5000 && InterlockedCompareExchange(&g_rt.state, 0, 0) == RT_RUNNING; i++) Sleep(1);
+    sh_rawmap_poll_main();
+}
+
+/* A load of a ZIP: the import off the main thread, then the load again. */
+static int prepare_zip(char *why, int cap)
+{
+    int rc = sh_rawmap_prepare_reload(why, cap);
+    if (rc || !strstr(why, "it opens when that is done")) return rc;
+    transport_settle();
+    return sh_rawmap_prepare_reload(why, cap);
+}
+
 static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
 {
     char staged[MAX_PATH], why[256];
@@ -1022,8 +1039,7 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
     mods_end();
 }
 
-/* V12: a held rawmap ZIP was imported at the hold and again at the resume, so
- * every import line was printed twice. The resume parses the bytes the hold
+/* A held rawmap ZIP is imported once: the resume parses the bytes the hold
  * checked; a later load of the same file imports it again. */
 static void a_held_zip_is_imported_once(void)
 {
@@ -1031,10 +1047,15 @@ static void a_held_zip_is_imported_once(void)
     printf("\n-- a rawmap ZIP held for its mods is imported once; the resumed load reuses that import\n");
     mods_begin();
     R.store = 1;
-    CHECK(temp_path("rawmap_held_once.zip", staged, sizeof staged));
+    CHECK(write_file("rawmap_held_once.zip", "PK", staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     g_mod_stub_import_text = MOD_MAP;
     g_mod_stub_import_calls = 0;
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(strstr(why, "Importing rawmap_held_once.zip and its mods; it opens when that is done.") != NULL);
+    CHECK(sh_rawmap_transport_busy());
+    transport_settle();
+    CHECK(!sh_rawmap_transport_busy());
     CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
     CHECK(g_mod_stub_import_calls == 1);
@@ -1048,7 +1069,7 @@ static void a_held_zip_is_imported_once(void)
     CHECK(g_mod_stub_import_calls == 1);
     sh_rawmap_reload_done(0, 0);
     /* The next load of the file is a new load: imported again. */
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_mod_stub_import_calls == 2);
+    CHECK(prepare_zip(why, (int)sizeof why) == 1 && g_mod_stub_import_calls == 2);
     sh_rawmap_reload_done(0, 0);
 
     printf("-- a hold that never resumed: the next load imports the file again\n");
@@ -1057,10 +1078,10 @@ static void a_held_zip_is_imported_once(void)
     R.fetches = R.resumes = 0;
     sh_modpub_test_reset();
     sh_modpub_test_set_ops(&RAWMAP_OPS);
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 3);
+    CHECK(prepare_zip(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 3);
     ticks(4);
     CHECK(R.resumes == 0);
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 4);
+    CHECK(prepare_zip(why, (int)sizeof why) == 0 && g_mod_stub_import_calls == 4);
     ticks(4);
     g_mod_stub_import_text = NULL;
     sh_rawmap_swap_set_source(NULL);
@@ -1166,12 +1187,13 @@ static void a_refused_zip_tells_the_player_why(void)
     strcpy_s(g_mod_stub_import_cause, sizeof g_mod_stub_import_cause, cause);
     _snprintf_s(want, sizeof want, _TRUNCATE, "shared-map.zip was not opened: %s.", cause);
     CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
-    CHECK(!strcmp(why, want));
-    CHECK(strstr(why, "backend log") == NULL);
+    CHECK(!strcmp(why, "Importing shared-map.zip and its mods; it opens when that is done."));
     CHECK(g_prepared == NULL && !g_in_reload);
-    sh_rawmap_poll_main();
-    CHECK(R.prints == 1 && !strcmp(R.print, want));
-    CHECK(R.toasts == 1 && !strcmp(R.toast, want));
+    sh_rawmap_poll_main();   /* the import note */
+    transport_settle();      /* the refusal, whole */
+    CHECK(R.prints == 2 && !strcmp(R.print, want) && strstr(R.print, "backend log") == NULL);
+    CHECK(R.toasts == 2 && !strcmp(R.toast, want));
+    CHECK(g_prepared == NULL && !g_in_reload);
 
     printf("-- a .json that is missing: Windows' reason, worded\n");
     CHECK(temp_path("no-such-map.json", staged, sizeof staged));
@@ -1203,12 +1225,12 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     g_mod_stub_export_calls = 0;
     g_mod_stub_export_result = 4321;
     CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
+    CHECK(R.toasts == 0);                       /* never from inside the save itself */
+    transport_settle();                         /* the export ran off the main thread */
     CHECK(g_mod_stub_export_calls == 1 && sh_rawmap_companion_zip_path(target, zip, sizeof zip) &&
           !_stricmp(g_mod_stub_export_path, zip));
     sh_rawmap_last_save(&last);
     CHECK(!_stricmp(last.json, target) && !_stricmp(last.zip, zip) && last.zip_bytes == 4321 && last.mods == 1);
-    CHECK(R.toasts == 0);                       /* never from inside the save itself */
-    sh_rawmap_poll_main();
     CHECK(R.toasts == 1 && R.prints == 1 &&
           !strcmp(R.toast, "This map uses 1 mod; share rawmap_share.zip, the .json alone will not load for others.") &&
           !strcmp(R.print, R.toast));
@@ -1224,7 +1246,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     printf("-- an export that cannot be written says so, and the .json is still written\n");
     g_mod_stub_export_result = 0;
     CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
-    sh_rawmap_poll_main();
+    transport_settle();
     CHECK(!strcmp(R.toast, "This map uses 1 mod, but rawmap_share.zip could not be written (the rawmap export is not "
                            "linked into this test). The .json alone will not load for others."));
     sh_rawmap_last_save(&last);
@@ -1239,19 +1261,48 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(g_mod_stub_export_calls == 0 && R.toasts == 0 && !last.zip[0] && last.mods == 0 && last.json[0]);
 
     DeleteFileA(target);
-    mods_end();
-}
 
-static void the_retired_every_load_switch_is_refused(void)
-{
-    sh_rawmap_configure_fn configure = NULL;
-    char message[192];
-    printf("\n-- the retired every-load switch is refused in plain words\n");
-    clean_state();
-    sh_rawmap_get_slots(NULL, &configure, NULL);
-    CHECK(!configure(NULL, NULL, NULL, 1, message, sizeof message));
-    CHECK(strstr(message, "File > Load Rawmap") != NULL);
-    CHECK(!configure(NULL, NULL, NULL, 0, message, sizeof message));
+    printf("-- every path is UTF-8 to the export: a non-ASCII folder saves and imports\n");
+    {
+        char dir[SH_RAWMAP_PATH_MAX], json[SH_RAWMAP_PATH_MAX], why[512];
+        wchar_t wdir[MAX_PATH];
+        CHECK(temp_path("caf\xc3\xa9 \xe2\x80\x94 maps", dir, sizeof dir));
+        CHECK(sh_rawmap_path_wide(dir, wdir, MAX_PATH));
+        CreateDirectoryW(wdir, NULL);
+        _snprintf_s(json, sizeof json, _TRUNCATE, "%s\\arena.json", dir);
+        CHECK(sh_rawmap_set_save_target(json));
+        g_mod_stub_export_calls = 0;
+        g_mod_stub_export_result = 99;
+        CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
+        transport_settle();
+        sh_rawmap_last_save(&last);
+        CHECK(g_mod_stub_export_calls == 1 && last.zip_bytes == 99);   /* the stand-in found the folder by its UTF-8 name */
+        _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\arena.zip", dir);
+        CHECK(!strcmp(g_mod_stub_export_path, zip));
+        {
+            wchar_t wz[MAX_PATH];
+            HANDLE h;
+            CHECK(sh_rawmap_path_wide(zip, wz, MAX_PATH));
+            h = CreateFileW(wz, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            CHECK(h != INVALID_HANDLE_VALUE);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            g_mod_stub_import_text = ENGINE_MAP;
+            CHECK(sh_rawmap_swap_set_source(zip));
+            CHECK(prepare_zip(why, (int)sizeof why) == 1 && g_prepared && strstr(g_prepared, "ENGINE_MARK"));
+            sh_rawmap_reload_done(0, 0);
+            g_mod_stub_import_text = NULL;
+            sh_rawmap_swap_set_source(NULL);
+            DeleteFileW(wz);
+        }
+        _snprintf_s(json, sizeof json, _TRUNCATE, "%s\\arena.json", dir);
+        {
+            wchar_t wj[MAX_PATH];
+            if (sh_rawmap_path_wide(json, wj, MAX_PATH)) DeleteFileW(wj);
+        }
+        RemoveDirectoryW(wdir);
+        g_mod_stub_export_result = 0;
+    }
+    mods_end();
 }
 
 /* A load path is a file to open now through the reload, never a replacement for any
@@ -1316,7 +1367,10 @@ static void a_unicode_path_is_read_and_written(void)
     CHECK(GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES);
     CHECK(sh_rawmap_validate_source(path, why, (int)sizeof why) == 1 && !why[0]);
     CHECK(sh_rawmap_swap_set_source(path));
-    text = read_source_file_why(&len, why, sizeof why);
+    {
+        int importing = 0;
+        text = read_source_file_why(&len, why, sizeof why, &importing);
+    }
     CHECK(text != NULL && len == sizeof BODY - 1);
     if (text) { memcpy(out, text, len < sizeof out - 1 ? len : sizeof out - 1); HeapFree(GetProcessHeap(), 0, text); }
     CHECK(!strcmp(out, BODY));
@@ -1345,7 +1399,6 @@ int main(void)
     looks_like_rawmap_tells_them_apart();
     refused_menu_save_changes_nothing();
     missing_overwrite_protection_refuses_opening(archive);
-    the_retired_every_load_switch_is_refused();
     a_load_path_never_replaces_another_parse(archive);
     a_unicode_path_is_read_and_written();
     an_existing_scratch_file_survives();

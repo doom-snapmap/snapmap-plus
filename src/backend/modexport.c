@@ -166,21 +166,24 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
                         size_t cap)
 {
     const sh_mb_bundle *b = &e->bundle;
+    const char *label = b->name && b->name[0] ? b->name : e->name;
     char name[SH_ZIP_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
     int same;
+    /* Read without the store lock: every file is checked against the build
+     * the listing named, so a folder changed meanwhile refuses the export. */
     me_join_native(path, sizeof path, e->folder, "mod.json");
     bytes = sh_mb_read_file(path, ME_MODJSON_MAX, &blen);
-    if (!bytes) return me_cause(cause, cap, "mods\\%s\\mod.json cannot be read", e->name);
+    if (!bytes) return me_cause(cause, cap, "%s's mod.json cannot be read. Press Refresh in the Mods tab to see why", label);
     memset(&check, 0, sizeof check);
     same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
     sh_mb_free(&check);
     if (!same) {
         free(bytes);
-        return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; press Refresh and export again",
-                        e->name);
+        return me_cause(cause, cap, "%s changed since Snapmap+ last read it. Press Refresh in the Mods tab, then save again",
+                        label);
     }
     _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", folder);
     sh_zip_writer_add(w, name, bytes, blen);
@@ -194,7 +197,9 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
             sh_mb_sha256_hex(bytes, blen, actual);
             if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
         }
-        if (!bytes) return me_cause(cause, cap, "mods\\%s\\%s is missing or damaged (run sh_mods doctor verify)", e->name, f->path);
+        if (!bytes)
+            return me_cause(cause, cap, "%s's file %s is missing or changed. Press Refresh in the Mods tab, then save again",
+                            label, f->path);
         _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", folder, f->path);
         sh_zip_writer_add(w, name, bytes, blen);
         free(bytes);
@@ -287,16 +292,16 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     modstore_lock();
     locked = 1;
     listed = sh_ms_enumerate(&l);
-    if (!listed) { me_cause(cause, cap, "the mods store cannot be listed"); goto done; }
+    if (!listed) { me_cause(cause, cap, "the mods folder cannot be read. Check that it exists, then press Refresh in the Mods tab"); goto done; }
     picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
     if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
     /* Each row at its build, else the root folder of its salt. */
     for (i = 0; i < rows.count; i++) {
         int how = me_pick_row(&l, &rows.rows[i], pl->place, &picked[i]);
         if (!how) {
-            me_cause(cause, cap, "the %s needs %s (%s@%.16s), which is not installed or failed verification",
-                     prefab ? "prefab" : "map", rows.rows[i].name[0] ? rows.rows[i].name : rows.rows[i].salt,
-                     rows.rows[i].salt, rows.rows[i].build);
+            me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the Mods "
+                     "tab, or remove it from the %s", prefab ? "prefab" : "map",
+                     rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
             goto done;
         }
         if (how == 2) moved++;
@@ -334,7 +339,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             moved_map = sh_modmanifest_write(map_json, len, &fixed, &map_len, err, sizeof err);
             if (!moved_map) {
                 sh_modmanifest_list_free(&fixed);
-                me_cause(cause, cap, "the map's rows could not be moved to the current builds: %s", err[0] ? err : "unknown");
+                me_cause(cause, cap, "the map's list of mods could not be updated (%s). Save the map again", err[0] ? err : "out of memory");
                 goto done;
             }
             map_json = moved_map;
@@ -348,14 +353,19 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
         if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
         for (i = 0; i < rows.count; i++)
             if (!me_pick_row(&l, &rows.rows[i], pl->place, &picked[i])) {
-                me_cause(cause, cap, "%s is not installed", rows.rows[i].salt);
+                me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the "
+                         "Mods tab, or remove it from the %s", prefab ? "prefab" : "map",
+                         rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
                 goto done;
             }
     }
     st->bundles = (unsigned)rows.count;
+    /* The builds are chosen: the files are read without the store lock. */
+    modstore_unlock();
+    locked = 0;
     if (prefab && pl->text_for) {
         prefab_text = pl->text_for(pl->ctx, &rows, moved > 0, &len);
-        if (!prefab_text || !len || len > MODEXPORT_PREFAB_MAX) { me_cause(cause, cap, "the prefab's mods could not be written into it"); goto done; }
+        if (!prefab_text || !len || len > MODEXPORT_PREFAB_MAX) { me_cause(cause, cap, "the prefab's export could not be written. Export it again"); goto done; }
         map_json = prefab_text;
         st->map_bytes = len;
     }
@@ -960,15 +970,14 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
     sh_ms_place place;
     char root[MAX_PATH * 4], stage[MAX_PATH * 4] = "";
     size_t i, left = 0;
-    int ok = 0, progress, staged = 0;
+    int ok = 0, progress, staged = 0, locked = 0;
     const char *what = me_kind_word(im->kind);
 
     st->bundles = (unsigned)im->nc;
     st->entries = (unsigned)im->zr.n;
     st->zip_bytes = im->zr.size;
     if (!im->nc) return 1;
-    modstore_lock();
-    if (!sh_ms_root(root, sizeof root)) { me_cause(cause, cap, "the mods folder cannot be resolved"); goto done; }
+    if (!sh_ms_root(root, sizeof root)) return me_cause(cause, cap, "the mods folder cannot be resolved");
     for (i = 0; i < im->nc; i++) {
         me_carry *c = &im->c[i];
         if (me_carry_served(c, rows, dir)) {
@@ -981,10 +990,14 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
     }
     if (!left) { ok = 1; goto done; }
 
+    /* The files are copied out of the export without the store lock: a large
+     * import never holds up a save, a download or a build. */
     if (!me_stage_root(stage, sizeof stage)) { me_cause(cause, cap, "no temporary folder could be made for the export's mods"); goto done; }
     staged = 1;
     for (i = 0; i < im->nc; i++)
         if (!im->c[i].present && !me_stage(im, &im->c[i], stage, i, st, cause, cap)) goto done;
+    modstore_lock();
+    locked = 1;
 
     place.title = im->place_title;
     place.map_id = im->place_key;
@@ -1055,7 +1068,7 @@ rollback:
     me_rollback(im, root);
     st->bundles_installed = 0;
 done:
-    modstore_unlock();
+    if (locked) modstore_unlock();
     if (staged) {
         wchar_t *w = sh_mb_wpath(stage);
         if (w) { me_rmtree(w); free(w); }
@@ -1237,31 +1250,19 @@ done:
 
 /* ------------------------------------------------------------ rawmap ---- */
 
-static int me_acp_to_utf8(const char *acp, char *out, size_t cap)
-{
-    wchar_t wide[MAX_PATH * 2];
-    if (!acp || !acp[0] || !MultiByteToWideChar(CP_ACP, 0, acp, -1, wide, MAX_PATH * 2)) return 0;
-    return WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)cap, NULL, NULL) > 0;
-}
-
-unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp)
+unsigned long long modexport_write_text(const char *data, size_t len, const char *path)
 {
     char cause[MODEXPORT_CAUSE_MAX];
-    return modexport_write_text_report(data, len, path_acp, NULL, cause, sizeof cause);
+    return modexport_write_text_report(data, len, path, NULL, cause, sizeof cause);
 }
 
-unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
                                                unsigned *bundles, char *cause_out, size_t cause_cap)
 {
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     if (bundles) *bundles = 0;
     if (cause_out && cause_cap) cause_out[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        me_log("MODS: export: the destination path is not usable");
-        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, "the destination path is not usable", _TRUNCATE);
-        return 0;
-    }
     if (!modexport_write(data, len, path, &st, cause, sizeof cause)) {
         me_log("MODS: export %s: refused: %s", path, cause);
         if (bundles) *bundles = st.bundles;
@@ -1274,26 +1275,14 @@ unsigned long long modexport_write_text_report(const char *data, size_t len, con
     return st.zip_bytes;
 }
 
-char *modexport_read_text(const char *path_acp, size_t *out_len)
-{
-    return modexport_read_text_report(path_acp, out_len, NULL, 0);
-}
-
-char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause_out, size_t cause_cap)
+char *modexport_read_text_report(const char *path, size_t *out_len, char *cause_out, size_t cause_cap)
 {
     modexport_stats st;
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     char *text, *heap;
     size_t len = 0;
     if (out_len) *out_len = 0;
     if (cause_out && cause_cap) cause_out[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        me_log("MODS: import: the source path is not usable");
-        if (cause_out && cause_cap)
-            strncpy_s(cause_out, cause_cap, "its path cannot be used; move it to a folder whose name has only plain letters",
-                      _TRUNCATE);
-        return NULL;
-    }
     text = modexport_read(path, &len, &st, cause, sizeof cause);
     if (!text) {
         me_log("MODS: import %s: refused: %s", path, cause);
@@ -1311,15 +1300,11 @@ char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *ca
     return heap;
 }
 
-int modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity)
+int modexport_validate_source(const char *path, char *out_msg, int msg_capacity)
 {
-    char path[MAX_PATH * 4], cause[MODEXPORT_CAUSE_MAX];
+    char cause[MODEXPORT_CAUSE_MAX];
     int ok;
     if (out_msg && msg_capacity > 0) out_msg[0] = 0;
-    if (!me_acp_to_utf8(path_acp, path, sizeof path)) {
-        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, "no path given", _TRUNCATE);
-        return 0;
-    }
     ok = modexport_probe(path, cause, sizeof cause);
     if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : cause, _TRUNCATE);
     return ok;

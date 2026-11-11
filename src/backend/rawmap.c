@@ -54,7 +54,7 @@ static volatile LONG g_load_generation = 0;
 static SRWLOCK g_paths_lock = SRWLOCK_INIT;
 
 /* Load source override; otherwise %LOCALAPPDATA%/snapmap-plus/rawmap.json. */
-static char g_src_path[MAX_PATH] = {0};
+static char g_src_path[SH_RAWMAP_PATH_MAX] = {0};
 
 int sh_rawmap_path_wide(const char *utf8, wchar_t *out, size_t cap)
 {
@@ -94,7 +94,7 @@ static HANDLE path_open_read(const char *utf8)
 static void default_rawmap_path(char *out, size_t cap)
 {
     wchar_t base[MAX_PATH];
-    char root[MAX_PATH];
+    char root[SH_RAWMAP_PATH_MAX];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base)) &&
         sh_rawmap_path_utf8(base, root, sizeof root))
         _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\rawmap.json", root);
@@ -120,7 +120,7 @@ static void rawmap_tell(const char *text);
 static SRWLOCK g_held_lock = SRWLOCK_INIT;
 static char *g_held;                   /* process heap */
 static size_t g_held_len;
-static char g_held_path[MAX_PATH];
+static char g_held_path[SH_RAWMAP_PATH_MAX];
 static int g_held_ready;
 
 static void held_keep(char *text, size_t len, const char *path)
@@ -161,24 +161,31 @@ static char *held_take(const char *path, size_t *out_len)
     return p;
 }
 
+static int transport_start_import(const char *path, char *why, size_t why_cap);
+
 /* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
- * failure, with the reason and next step in `why` when one is given.
+ * failure, with the reason and next step in `why` when one is given. A .zip
+ * not imported yet starts its import off the game's thread (*importing set,
+ * NULL returned); the load opens again when it is done.
  */
-static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap)
+static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap, int *importing)
 {
-    char buf_path[MAX_PATH];
+    char buf_path[SH_RAWMAP_PATH_MAX];
     char *held;
     resolve_source_path(buf_path, sizeof buf_path);
     const char *path = buf_path;
     if (why && why_cap) why[0] = '\0';
     held = held_take(path, out_len);
     if (held) {
-        char line[MAX_PATH + 96];
+        char line[SH_RAWMAP_PATH_MAX + 96];
         _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: %s: the resumed load uses the map its hold read; not read again", path);
         backend_log(line);
         return held;
     }
-    if (modexport_is_zip_path(path)) return modexport_read_text_report(path, out_len, why, why_cap);
+    if (modexport_is_zip_path(path)) {
+        *importing = transport_start_import(path, why, why_cap);
+        return NULL;
+    }
 
     HANDLE h = path_open_read(path);
     if (h == INVALID_HANDLE_VALUE) {
@@ -313,7 +320,7 @@ static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map was substituted
  * the editor had open, whose id the edit keeps until the first save, so the
  * Mods tab and `sh_mods map` ask this, not the edit's id (sh_rawmap_open_unsaved). */
 static SRWLOCK g_open_lock = SRWLOCK_INIT;
-static char g_open_name[MAX_PATH];
+static char g_open_name[SH_RAWMAP_PATH_MAX];
 static volatile LONG g_open_unsaved = 0;
 /* The saved-map id the swap's map borrowed, read from the edit the first time
  * the branch answer is asked; "" until then. While the edit still holds it the
@@ -594,7 +601,7 @@ static void rawmap_diag_note(int new_seq, const char *state, const char *path, i
 
 static char *g_prepared;               /* process heap; the text the reload checked */
 static size_t g_prepared_len;
-static char g_prepared_path[MAX_PATH];
+static char g_prepared_path[SH_RAWMAP_PATH_MAX];
 static volatile LONG g_in_reload;      /* 1 between sh_rawmap_prepare_reload and _done */
 
 static void rawmap_base_name(const char *path, char *out, size_t cap)
@@ -643,21 +650,29 @@ static void prepared_drop(void)
 
 int sh_rawmap_prepare_reload(char *why, int cap)
 {
-    char path[MAX_PATH], name[MAX_PATH], cause[MODEXPORT_CAUSE_MAX], sentence[MODEXPORT_CAUSE_MAX + MAX_PATH];
+    char path[SH_RAWMAP_PATH_MAX], name[SH_RAWMAP_PATH_MAX], cause[MODEXPORT_CAUSE_MAX], sentence[MODEXPORT_CAUSE_MAX + MAX_PATH];
     char place[SH_MODPUB_PLACE_CAP];
     sh_modmanifest_list rows;
     size_t len = 0, missing;
     char *text;
-    int held;
+    int held, importing = 0;
 
     if (why && cap > 0) why[0] = '\0';
     prepared_drop();
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
-    /* A .zip is imported here: its mods install before the rows are counted. */
-    text = read_source_file_why(&len, cause, sizeof cause);
+    /* A .zip is imported off the game's thread first: its mods install before
+     * the rows are counted, and the load opens again when the import is done. */
+    text = read_source_file_why(&len, cause, sizeof cause, &importing);
+    if (text == NULL && importing) {
+        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "Importing %s and its mods; it opens when that is done.", name);
+        rawmap_tell(sentence);
+        RAWMAP_DIAG(0, "importing", path, 0, sentence, 0, 0);
+        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
+        return 0;
+    }
     if (text == NULL) {
-        char line[MAX_PATH + MODEXPORT_CAUSE_MAX + 96];
+        char line[SH_RAWMAP_PATH_MAX + MODEXPORT_CAUSE_MAX + 96];
         if (!cause[0]) strcpy_s(cause, sizeof cause, "the file could not be read; try again");
         _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: open refused -- %s was not opened: %s", path, cause);
         backend_log(line);
@@ -680,7 +695,7 @@ int sh_rawmap_prepare_reload(char *why, int cap)
         return 0;
     }
     if (missing) {
-        char line[MAX_PATH + 128];
+        char line[SH_RAWMAP_PATH_MAX + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "RAWMAP: open held -- %s names %u mod(s) that are not installed; the engine never sees it",
                     path, (unsigned)missing);
@@ -708,7 +723,7 @@ int sh_rawmap_prepare_reload(char *why, int cap)
 
 void sh_rawmap_reload_done(int rc, int faulted)
 {
-    char name[MAX_PATH], text[MAX_PATH + 160];
+    char name[SH_RAWMAP_PATH_MAX], text[SH_RAWMAP_PATH_MAX + 160];
     rawmap_base_name(g_prepared_path, name, sizeof name);
     InterlockedExchange(&g_in_reload, 0);
     RAWMAP_DIAG(0, faulted ? "faulted" : rc ? "failed" : "opened", g_prepared_path, rc, "", g_prepared_len, -1);
@@ -727,7 +742,7 @@ void sh_rawmap_reload_done(int rc, int faulted)
 
 int sh_rawmap_reopen_after_mods(char *note, size_t cap)
 {
-    char path[MAX_PATH], name[MAX_PATH], msg[192] = "", line[MAX_PATH + 256];
+    char path[SH_RAWMAP_PATH_MAX], name[SH_RAWMAP_PATH_MAX], msg[192] = "", line[SH_RAWMAP_PATH_MAX + 256];
     if (note && cap) note[0] = '\0';
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
@@ -806,7 +821,7 @@ static int sh_deser_detour(const char *json, void *out_map)
     sh_nav_bake_map_opened();
 
     if (rawmap_parse_is_reload(g_parse_kind)) {
-        char line[MAX_PATH + 96], name[MAX_PATH];
+        char line[SH_RAWMAP_PATH_MAX + 96], name[SH_RAWMAP_PATH_MAX];
         unsigned long n;
         int rc;
         if (g_prepared == NULL) {
@@ -875,7 +890,7 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
 
 int sh_rawmap_swap_set_source(const char *path)
 {
-    if (path && strlen(path) >= MAX_PATH) return 0;
+    if (path && strlen(path) >= SH_RAWMAP_PATH_MAX) return 0;
     AcquireSRWLockExclusive(&g_paths_lock);
     strcpy_s(g_src_path, sizeof g_src_path, path ? path : "");
     ReleaseSRWLockExclusive(&g_paths_lock);
@@ -1030,12 +1045,15 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
     InterlockedExchange(&g_tell_pending, 1);
 }
 
+static void transport_poll(void);
+
 void sh_rawmap_poll_main(void)
 {
     char text[sizeof g_tell];
     const char *title;
     void (*toast)(const char *, const char *) = g_notify_toast;
     void (*print)(const char *) = g_notify_print;
+    transport_poll();
     if (!InterlockedExchange(&g_tell_pending, 0)) return;
     AcquireSRWLockShared(&g_tell_lock);
     strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
@@ -1080,55 +1098,211 @@ int sh_rawmap_companion_zip_path(const char *json_path, char *out, size_t cap)
     return 1;
 }
 
-/* After a rawmap write to `path` succeeded: record it, and for a map that names
- * mods write the export beside a JSON and say which file to share. A map with
- * no mods writes only the JSON, as it always has. `data` may be engine memory;
- * the caller guards the read. */
+/* ------------------------------------------------------------ transport off the game's thread
+ * A rawmap ZIP's import, a .zip save and the companion .zip beside a .json
+ * save read and write every file of the map's mods: they run on a thread of
+ * their own, one at a time, never on DOOM's. The main tick
+ * (sh_rawmap_poll_main) takes the result: an import holds its text for the
+ * load it opens again; an export records the save report and says which
+ * file to share. Neither changes what the open map serves. */
+enum { RT_IDLE = 0, RT_RUNNING = 1, RT_DONE = 2 };
+enum { RT_IMPORT = 1, RT_EXPORT_DIRECT = 2, RT_EXPORT_BESIDE = 3 };
+static struct {
+    volatile LONG state;
+    int kind;
+    char path[SH_RAWMAP_PATH_MAX];
+    char *data;                       /* process heap: an export's map, an import's result */
+    size_t len;
+    unsigned mods;
+    unsigned long long json_bytes, bytes;
+    char json[SH_RAWMAP_PATH_MAX];    /* a companion export's .json */
+    char cause[MODEXPORT_CAUSE_MAX];
+} g_rt;
+
+static DWORD WINAPI transport_main(void *unused)
+{
+    (void)unused;
+    if (g_rt.kind == RT_IMPORT) {
+        g_rt.data = modexport_read_text_report(g_rt.path, &g_rt.len, g_rt.cause, sizeof g_rt.cause);
+    } else {
+        g_rt.bytes = modexport_write_text_report(g_rt.data, g_rt.len, g_rt.path, NULL, g_rt.cause, sizeof g_rt.cause);
+    }
+    MemoryBarrier();
+    InterlockedExchange(&g_rt.state, RT_DONE);
+    return 0;
+}
+
+int sh_rawmap_transport_busy(void)
+{
+    return InterlockedCompareExchange(&g_rt.state, 0, 0) != RT_IDLE;
+}
+
+/* Start a job on its thread (main thread). 1 started; 0 with `why` when one
+ * is running or the thread could not start. `data` (process heap) is the
+ * job's from here. */
+static int transport_start(int kind, const char *path, char *data, size_t len, char *why, size_t why_cap)
+{
+    HANDLE t;
+    if (InterlockedCompareExchange(&g_rt.state, RT_RUNNING, RT_IDLE) != RT_IDLE) {
+        if (data) HeapFree(GetProcessHeap(), 0, data);
+        if (why && why_cap)
+            strncpy_s(why, why_cap, "Snapmap+ is still importing or exporting another map; try again when it is done",
+                      _TRUNCATE);
+        return 0;
+    }
+    g_rt.kind = kind;
+    strncpy_s(g_rt.path, sizeof g_rt.path, path, _TRUNCATE);
+    g_rt.data = data;
+    g_rt.len = len;
+    g_rt.bytes = 0;
+    g_rt.cause[0] = 0;
+    t = CreateThread(NULL, 0, transport_main, NULL, 0, NULL);
+    if (!t) {
+        if (data) HeapFree(GetProcessHeap(), 0, data);
+        g_rt.data = NULL;
+        InterlockedExchange(&g_rt.state, RT_IDLE);
+        if (why && why_cap) strncpy_s(why, why_cap, "the game could not start the work; restart DOOM and try again", _TRUNCATE);
+        return 0;
+    }
+    CloseHandle(t);
+    return 1;
+}
+
+static int transport_start_import(const char *path, char *why, size_t why_cap)
+{
+    return transport_start(RT_IMPORT, path, NULL, 0, why, why_cap);
+}
+
+/* A copy of `data` for an export job, or NULL. */
+static char *transport_copy(const char *data, size_t len)
+{
+    char *copy = (char *)HeapAlloc(GetProcessHeap(), 0, len + 1);
+    if (copy) { memcpy(copy, data, len); copy[len] = 0; }
+    return copy;
+}
+
+static void report_set(sh_rawmap_save_report *r)
+{
+    AcquireSRWLockExclusive(&g_report_lock);
+    r->sequence = g_report.sequence + 1;
+    g_report = *r;
+    ReleaseSRWLockExclusive(&g_report_lock);
+}
+
+/* The main tick's part: a finished job's result. */
+static void transport_poll(void)
+{
+    char name[SH_RAWMAP_PATH_MAX], text[MODEXPORT_CAUSE_MAX + SH_RAWMAP_PATH_MAX + 160], msg[192] = "";
+    if (InterlockedCompareExchange(&g_rt.state, 0, 0) != RT_DONE) return;
+    MemoryBarrier();
+    rawmap_base_name(g_rt.path, name, sizeof name);
+    if (g_rt.kind == RT_IMPORT) {
+        if (!g_rt.data) {
+            if (!g_rt.cause[0]) strcpy_s(g_rt.cause, sizeof g_rt.cause, "the file could not be read; try again");
+            _snprintf_s(text, sizeof text, _TRUNCATE, "%s was not opened: %s.", name, g_rt.cause);
+            rawmap_tell(text);
+        } else {
+            /* The load opens again and parses exactly what was imported. */
+            held_keep(g_rt.data, g_rt.len, g_rt.path);
+            held_mark_ready(g_rt.path);
+            g_rt.data = NULL;
+            if (!sh_editor_frame_request_reload(msg, (int)sizeof msg)) {
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "%s and its mods are imported, but it could not be opened now (%s). Load it again from "
+                            "File > Load Rawmap.", name, msg[0] ? msg : "the editor is busy");
+                rawmap_tell(text);
+            }
+        }
+    } else {
+        sh_rawmap_save_report r;
+        memset(&r, 0, sizeof r);
+        r.mods = g_rt.mods;
+        strncpy_s(r.zip, sizeof r.zip, g_rt.path, _TRUNCATE);
+        r.zip_bytes = g_rt.bytes;
+        if (g_rt.kind == RT_EXPORT_BESIDE) {
+            strncpy_s(r.json, sizeof r.json, g_rt.json, _TRUNCATE);
+            r.json_bytes = g_rt.json_bytes;
+        }
+        if (!g_rt.bytes) {
+            strncpy_s(r.zip_error, sizeof r.zip_error, g_rt.cause[0] ? g_rt.cause : "the export could not be written",
+                      _TRUNCATE);
+            if (g_rt.kind == RT_EXPORT_BESIDE)
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "This map uses %u mod%s, but %s could not be written (%s). The .json alone will not load "
+                            "for others.", r.mods, r.mods == 1 ? "" : "s", name, r.zip_error);
+            else
+                _snprintf_s(text, sizeof text, _TRUNCATE, "%s could not be written: %s.", name, r.zip_error);
+        } else if (g_rt.kind == RT_EXPORT_BESIDE)
+            _snprintf_s(text, sizeof text, _TRUNCATE,
+                        "This map uses %u mod%s; share %s, the .json alone will not load for others.", r.mods,
+                        r.mods == 1 ? "" : "s", name);
+        else if (r.mods)
+            _snprintf_s(text, sizeof text, _TRUNCATE, "This map uses %u mod%s; %s carries %s, so share that one file.",
+                        r.mods, r.mods == 1 ? "" : "s", name, r.mods == 1 ? "it" : "them");
+        else
+            _snprintf_s(text, sizeof text, _TRUNCATE, "Saved the open map to %s.", name);
+        report_set(&r);
+        rawmap_tell(text);
+        if (g_rt.data) HeapFree(GetProcessHeap(), 0, g_rt.data);
+        g_rt.data = NULL;
+    }
+    InterlockedExchange(&g_rt.state, RT_IDLE);
+}
+
+/* The mods a map's text names. */
+static unsigned rawmap_mods_of(const char *data, size_t len)
+{
+    sh_modmanifest_list rows;
+    unsigned rejected = 0, n;
+    memset(&rows, 0, sizeof rows);
+    sh_modmanifest_read(data, len, &rows, &rejected);
+    n = (unsigned)rows.count;
+    sh_modmanifest_list_free(&rows);
+    return n;
+}
+
+/* A .zip save: its export starts off the game's thread. 1 when it started,
+ * else 0 with `why`. */
+static int rawmap_write_zip(const char *data, size_t len, const char *path, char *why, size_t why_cap)
+{
+    char *copy = transport_copy(data, len);
+    unsigned mods = rawmap_mods_of(data, len);
+    if (!copy) { strncpy_s(why, why_cap, "the game ran out of memory; restart DOOM and save again", _TRUNCATE); return 0; }
+    if (!transport_start(RT_EXPORT_DIRECT, path, copy, len, why, why_cap)) return 0;
+    g_rt.mods = mods;
+    return 1;
+}
+
+/* After a .json rawmap write to `path` succeeded: record it, and for a map
+ * that names mods start the export beside it (said when it is done). A map
+ * with no mods writes only the JSON, as it always has. `data` may be engine
+ * memory; the caller guards the read. */
 static void rawmap_after_write(const char *data, size_t len, const char *path, unsigned long long wrote)
 {
     sh_rawmap_save_report r;
-    sh_modmanifest_list rows;
-    unsigned rejected = 0;
-    char name[MAX_PATH], text[600];
+    char name[SH_RAWMAP_PATH_MAX], text[600], why[200] = "", *copy;
 
     memset(&r, 0, sizeof r);
-    memset(&rows, 0, sizeof rows);
-    sh_modmanifest_read(data, len, &rows, &rejected);
-    r.mods = (unsigned)rows.count;
-    sh_modmanifest_list_free(&rows);
-
-    if (modexport_is_zip_path(path)) {
-        strncpy_s(r.zip, sizeof r.zip, path, _TRUNCATE);
-        r.zip_bytes = wrote;
-        rawmap_base_name(path, name, sizeof name);
-        if (r.mods) {
-            _snprintf_s(text, sizeof text, _TRUNCATE, "This map uses %u mod%s; %s carries %s, so share that one file.",
-                        r.mods, r.mods == 1 ? "" : "s", name, r.mods == 1 ? "it" : "them");
-            rawmap_tell(text);
+    r.mods = rawmap_mods_of(data, len);
+    strncpy_s(r.json, sizeof r.json, path, _TRUNCATE);
+    r.json_bytes = wrote;
+    if (r.mods && sh_rawmap_companion_zip_path(path, r.zip, sizeof r.zip)) {
+        copy = transport_copy(data, len);
+        if (copy && transport_start(RT_EXPORT_BESIDE, r.zip, copy, len, why, sizeof why)) {
+            g_rt.mods = r.mods;
+            strncpy_s(g_rt.json, sizeof g_rt.json, path, _TRUNCATE);
+            g_rt.json_bytes = wrote;
+            return;   /* the report is the export's, when it is done */
         }
-    } else {
-        strncpy_s(r.json, sizeof r.json, path, _TRUNCATE);
-        r.json_bytes = wrote;
-        if (r.mods && sh_rawmap_companion_zip_path(path, r.zip, sizeof r.zip)) {
-            rawmap_base_name(r.zip, name, sizeof name);
-            r.zip_bytes = modexport_write_text_report(data, len, r.zip, NULL, r.zip_error, sizeof r.zip_error);
-            if (r.zip_bytes) {
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "This map uses %u mod%s; share %s, the .json alone will not load for others.",
-                            r.mods, r.mods == 1 ? "" : "s", name);
-            } else {
-                if (!r.zip_error[0]) strcpy_s(r.zip_error, sizeof r.zip_error, "the export could not be written");
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "This map uses %u mod%s, but %s could not be written (%s). The .json alone will not "
-                            "load for others.", r.mods, r.mods == 1 ? "" : "s", name, r.zip_error);
-            }
-            rawmap_tell(text);
-        }
+        if (!copy) strcpy_s(why, sizeof why, "the game ran out of memory");
+        rawmap_base_name(r.zip, name, sizeof name);
+        strncpy_s(r.zip_error, sizeof r.zip_error, why, _TRUNCATE);
+        _snprintf_s(text, sizeof text, _TRUNCATE,
+                    "This map uses %u mod%s, but %s was not written (%s). The .json alone will not load for others.",
+                    r.mods, r.mods == 1 ? "" : "s", name, why);
+        rawmap_tell(text);
     }
-    AcquireSRWLockExclusive(&g_report_lock);
-    r.sequence = g_report.sequence + 1;
-    g_report = r;
-    ReleaseSRWLockExclusive(&g_report_lock);
+    report_set(&r);
 }
 
 /* WHERE SAVES GO.
@@ -1140,7 +1314,7 @@ static void rawmap_after_write(const char *data, size_t len, const char *path, u
  * The lifetime is the point. A rawmap someone downloads and opens is an archive
  * entry, so nothing about opening one may aim a save at it -- only picking it in
  * Save As does that, for the map in front of them, and not for the next one. */
-static char g_save_target[MAX_PATH] = {0};
+static char g_save_target[SH_RAWMAP_PATH_MAX] = {0};
 
 /* Defined further down, next to the status JSON that is its other caller. */
 static int json_escape_into(char *out, size_t cap, const char *src);
@@ -1168,7 +1342,7 @@ static int dest_dir_part(const char *path, char *out, size_t cap)
  * because CreateDirectory makes one level at a time. Returns 1 when the folder exists afterwards. */
 static int ensure_dir(const char *dir)
 {
-    char work[MAX_PATH];
+    char work[SH_RAWMAP_PATH_MAX];
     size_t i, n;
     DWORD attr;
 
@@ -1221,7 +1395,7 @@ static int ensure_dir(const char *dir)
  * Deliberately unchecked: the extension. Where someone keeps their own maps is theirs to decide. */
 static int dest_folder_is_usable(const char *path, char *out_msg, int msg_capacity)
 {
-    char dir[MAX_PATH];
+    char dir[SH_RAWMAP_PATH_MAX];
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
     if (path == NULL || path[0] == '\0') return 0;
@@ -1301,9 +1475,9 @@ int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacit
  * file in DOOM's own install folder. */
 int sh_rawmap_set_save_target(const char *path)
 {
-    char chosen[MAX_PATH] = "", dflt[MAX_PATH];
+    char chosen[SH_RAWMAP_PATH_MAX] = "", dflt[SH_RAWMAP_PATH_MAX];
     if (path && path[0]) {
-        if (strlen(path) >= MAX_PATH || !dest_folder_is_usable(path, NULL, 0)) return 0;
+        if (strlen(path) >= SH_RAWMAP_PATH_MAX || !dest_folder_is_usable(path, NULL, 0)) return 0;
         default_rawmap_path(dflt, sizeof dflt);
         if (_stricmp(path, dflt) != 0) strcpy_s(chosen, sizeof chosen, path);
     }
@@ -1442,7 +1616,8 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
     int len = 0;
     const char *data = NULL;
     unsigned char rc = 0;
-    int laid_out = 0;
+    int laid_out = 0, zip_started = 0;
+    char zip_why[200] = "";
     DWORD write_error = 0;
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
@@ -1490,9 +1665,15 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
                 char *shaped = sh_cvar_value_int(B2_CVAR_SH_PRETTY_ON, 0)
                              ? pretty_copy(data, (size_t)len, &shaped_len) : NULL;
                 laid_out = (shaped != NULL);
-                wrote = laid_out ? write_file_atomic(shaped, shaped_len, destination, &write_error)
-                                 : write_file_atomic(data, (size_t)len, destination, &write_error);
-                if (wrote) rawmap_after_write(data, (size_t)len, destination, wrote);
+                if (modexport_is_zip_path(destination)) {
+                    /* The export reads every mod file: off the game's thread. */
+                    zip_started = rawmap_write_zip(data, (size_t)len, destination, zip_why, sizeof zip_why);
+                    wrote = zip_started ? (unsigned long long)len : 0;
+                } else {
+                    wrote = laid_out ? write_file_atomic(shaped, shaped_len, destination, &write_error)
+                                     : write_file_atomic(data, (size_t)len, destination, &write_error);
+                    if (wrote) rawmap_after_write(data, (size_t)len, destination, wrote);
+                }
                 if (shaped != NULL) HeapFree(GetProcessHeap(), 0, shaped);
             }
         }
@@ -1512,8 +1693,12 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
                                "DOOM could not write this map out; nothing was saved", _TRUNCATE);
         return 0;
     }
+    if (wrote == 0 && modexport_is_zip_path(destination)) {
+        if (out_msg) _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE, "%s was not written: %s", destination, zip_why);
+        return 0;
+    }
     if (wrote == 0) {
-        char line[MAX_PATH + 128];
+        char line[SH_RAWMAP_PATH_MAX + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "RAWMAP: live serialize produced %d bytes but the write to %s failed (error %lu)",
                     len, destination, (unsigned long)write_error);
@@ -1527,13 +1712,15 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
     InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
     InterlockedIncrement(&g_save_count);
     {
-        char line[MAX_PATH + 128];
+        char line[SH_RAWMAP_PATH_MAX + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "RAWMAP: saved %llu bytes from the open map -> %s%s", wrote, destination,
                     laid_out ? " [pretty]" : "");
         backend_log(line);
         if (out_msg)
-            _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE, "Saved the open map to %s.", destination);
+            _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                        zip_started ? "Writing the open map and its mods to %s; Snapmap+ says when it is done."
+                                    : "Saved the open map to %s.", destination);
     }
     if (out_bytes) *out_bytes = wrote;
     return 1;
@@ -1592,7 +1779,7 @@ int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map)
 static unsigned long long write_file_atomic(const char *data, size_t len, const char *path, DWORD *out_error)
 {
     static volatile LONG sequence;
-    char dir[MAX_PATH];
+    char dir[SH_RAWMAP_PATH_MAX];
     wchar_t wpath[MAX_PATH], temp[MAX_PATH];
     size_t total = 0;
     HANDLE h = INVALID_HANDLE_VALUE;
@@ -1606,7 +1793,6 @@ static unsigned long long write_file_atomic(const char *data, size_t len, const 
         if (out_error) *out_error = GetLastError() ? GetLastError() : ERROR_PATH_NOT_FOUND;
         return 0;
     }
-    if (modexport_is_zip_path(path)) return modexport_write_text(data, len, path);
     /* CREATE_NEW never truncates someone else's scratch file. Separate writers
      * must own separate temporaries until each publishes its complete result. */
     for (attempt = 0; attempt < 64; ++attempt) {
@@ -1645,9 +1831,13 @@ static unsigned long long write_file_atomic(const char *data, size_t len, const 
  * of what actually reaches disk. Compiled out of shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len)
 {
-    char path[MAX_PATH];
+    char path[SH_RAWMAP_PATH_MAX];
     unsigned long long wrote;
     resolve_dest_path(path, sizeof path);
+    if (modexport_is_zip_path(path)) {
+        char why[200];
+        return rawmap_write_zip(data, len, path, why, sizeof why) ? len : 0;
+    }
     wrote = write_file_atomic(data, len, path, NULL);
     if (wrote) rawmap_after_write(data, len, path, wrote);   /* as Save Rawmap does */
     return wrote;
@@ -2155,7 +2345,7 @@ void sh_rawmap_get_paths(char *load_out, int load_cap, char *save_out, int save_
 
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity)
 {
-    char path[MAX_PATH];
+    char path[SH_RAWMAP_PATH_MAX];
     if (!sh_rawmap_load_is_safe()) {
         if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, RAWMAP_OPEN_UNSAFE, _TRUNCATE);
         return 0;
@@ -2191,7 +2381,7 @@ int sh_rawmap_open_now(const char *path, char *out_msg, int msg_capacity)
     {
         int queued = sh_editor_frame_request_reload(out_msg, msg_capacity);
 #ifdef SH_DIAG
-        char src[MAX_PATH];
+        char src[SH_RAWMAP_PATH_MAX];
         resolve_source_path(src, sizeof src);
         RAWMAP_DIAG(1, queued ? "queued" : "refused", src, 0, queued || !out_msg ? "" : out_msg, 0, 0);
 #endif
@@ -2205,7 +2395,7 @@ static struct {
     unsigned long opens, seq;
     int faulted, rc, mods;
     size_t bytes;
-    char state[16], path[MAX_PATH], reason[MODEXPORT_CAUSE_MAX + MAX_PATH];
+    char state[16], path[SH_RAWMAP_PATH_MAX], reason[MODEXPORT_CAUSE_MAX + MAX_PATH];
 } g_diag;
 
 /* new_seq starts a request (sh_rawmap_open_now); later notes update it. mods < 0 keeps the count. */
@@ -2230,7 +2420,7 @@ static void rawmap_diag_note(int new_seq, const char *state, const char *path, i
 
 int sh_rawmap_diag_status(char *out, size_t cap)
 {
-    char path[MAX_PATH * 2], reason[sizeof g_diag.reason * 2];
+    char path[SH_RAWMAP_PATH_MAX * 2], reason[sizeof g_diag.reason * 2];
     int n, pending;
     if (!out || !cap) return -1;
     AcquireSRWLockShared(&g_diag_lock);
@@ -2249,10 +2439,10 @@ int sh_rawmap_diag_status(char *out, size_t cap)
 
 static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
-    char load_path[MAX_PATH], save_path[MAX_PATH];
-    char load_esc[MAX_PATH * 2], save_esc[MAX_PATH * 2], target_esc[MAX_PATH * 2];
-    char json_esc[MAX_PATH * 2], zip_esc[MAX_PATH * 2], err_esc[512];
-    char target[MAX_PATH] = "";
+    char load_path[SH_RAWMAP_PATH_MAX], save_path[SH_RAWMAP_PATH_MAX];
+    char load_esc[SH_RAWMAP_PATH_MAX * 2], save_esc[SH_RAWMAP_PATH_MAX * 2], target_esc[SH_RAWMAP_PATH_MAX * 2];
+    char json_esc[SH_RAWMAP_PATH_MAX * 2], zip_esc[SH_RAWMAP_PATH_MAX * 2], err_esc[512];
+    char target[SH_RAWMAP_PATH_MAX] = "";
     sh_rawmap_save_report last;
     int written, tail;
 
@@ -2311,12 +2501,6 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         sh_feature_refusal(SH_FEATURE_RAWMAPS, out_msg, (size_t)msg_capacity))
         return 0;
 
-    if (arm == 0 || arm == 1) {
-        if (out_msg && msg_capacity > 0)
-            strncpy_s(out_msg, (size_t)msg_capacity,
-                      "Rawmaps no longer apply to every map; use File > Load Rawmap to open one", _TRUNCATE);
-        return 0;
-    }
     if (load_path != NULL) {
         if (load_path[0] == '\0') {
             sh_rawmap_swap_set_source(NULL);          /* empty = restore the default */
@@ -2349,7 +2533,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
     /* 3 pins whatever the save path already resolves to, so ticking never
      * moves the destination -- it only makes the current one stick. 4 releases it. */
     if (arm == 3) {
-        char now[MAX_PATH] = "";
+        char now[SH_RAWMAP_PATH_MAX] = "";
         resolve_dest_path(now, sizeof now);
         if (now[0]) sh_rawmap_set_save_target(now);
     }

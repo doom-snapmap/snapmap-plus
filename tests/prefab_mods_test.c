@@ -1127,7 +1127,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);
         CHECK(sh_prefab_mods_export(p3, NULL, "Ghost", z3, msg, sizeof msg) == -1 &&
-              strstr(msg, "Prefab Ghost was not exported: the prefab needs ghost.mod (ghostmod@") && strstr(msg, "not installed") &&
+              strstr(msg, "Prefab Ghost was not exported: this prefab uses ghost.mod, which is not installed") &&
+              !strstr(msg, "ghostmod@") &&
               !mt_exists(z3));
     }
 

@@ -39,7 +39,8 @@
  * earlier shape, a map in an earlier shape, a prefab whose rows name "id" and
  * "bundle") is refused with MODEXPORT_EARLIER and installs nothing.
  *
- * File work only, no network. Paths are UTF-8 unless marked ACP.
+ * File work only, no network. Every path is UTF-8, opened through the wide
+ * Windows calls.
  */
 #ifndef SNAPMAP_PLUS_MODEXPORT_H
 #define SNAPMAP_PLUS_MODEXPORT_H
@@ -138,26 +139,25 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
 void modexport_set_stock(sh_mb_exists_fn stock, void *ctx);
 
 /* ---------------------------------------------- rawmap file hooks ---- */
-/* The rawmap layer (rawmap.c) calls these for a path ending in .zip. Paths
- * are in the ANSI code page, as the rawmap layer's own are. Each logs one
- * MODS: line with byte counts and the time taken. */
+/* The rawmap layer (rawmap.c) calls these for a path ending in .zip (UTF-8,
+ * as every rawmap path is). Each logs one MODS: line with byte counts and the
+ * time taken. */
 
 /* The writer: returns the ZIP's byte count, 0 on failure. */
-unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp);
+unsigned long long modexport_write_text(const char *data, size_t len, const char *path);
 /* The same writer for a caller that reports the outcome itself: *bundles
  * (optional) receives the mods the map's rows name, and on failure `cause`
-
  * says why (a mod the map names is not installed, the folder is not
  * writable). */
-unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path_acp,
+unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
                                                unsigned *bundles, char *cause, size_t cause_cap);
-/* The reader: a NUL-terminated process-heap buffer (HeapFree), or NULL. */
-char *modexport_read_text(const char *path_acp, size_t *out_len);
-/* The same reader for a caller that tells the player: on failure `cause`
- * (MODEXPORT_CAUSE_MAX is room enough) says why, in the importer's words. */
-char *modexport_read_text_report(const char *path_acp, size_t *out_len, char *cause, size_t cause_cap);
+/* The reader for a caller that tells the player: the map text as
+ * modexport_read returns it (its place recorded), in a NUL-terminated
+ * process-heap buffer (HeapFree), or NULL with the importer's words in
+ * `cause` (MODEXPORT_CAUSE_MAX is room enough). */
+char *modexport_read_text_report(const char *path, size_t *out_len, char *cause, size_t cause_cap);
 /* The source check: 1 when the export can be loaded, else 0 with a reason. */
-int   modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity);
+int   modexport_validate_source(const char *path, char *out_msg, int msg_capacity);
 
 /* ---------------------------------------------- received builds ---- */
 /* Fetch the row's build from the mod store (modsync_fetch_build_for) to
