@@ -564,12 +564,23 @@ static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t
 static unsigned g_mg_pointers;
 static unsigned long long g_mg_pointer_bytes;
 
+/* Whether the game holds `request`, from the installed archives the stock
+ * bridge reads from disk (the store tool runs without the engine): 1 yes, 0
+ * no, -1 when no DOOM folder was given. A file outside the mod's namespace
+ * must replace a game file, which only this can confirm. */
+static int mg_stock(void *context, const char *request)
+{
+    char where[64];
+    (void)context;
+    if (!sh_mb_stock_available()) return -1;
+    return sh_mb_stock_container(request, NULL, where, sizeof where) ? 1 : 0;
+}
+
 /* modlegacy's builder for a delivered package: the normal builder over the
- * installed bundles, without the game's resource reader (the store tool
- * runs without the engine). Copies of installed content still become stock
- * pointers: the stock bridge reads the installed archives from disk, not
- * through the engine. A migrated package is content the product received,
- * so its replacements are kept (sh_mb_keep_replacements_here). */
+ * installed bundles and the game's files read from the install (mg_stock).
+ * Copies of installed content become stock pointers. A migrated package is
+ * content the product received, so its replacements are kept
+ * (sh_mb_keep_replacements_here). */
 static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
 {
     char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
@@ -586,7 +597,7 @@ static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     r.installed = sh_ms_request_exists;
     r.installed_context = &list;
-    r.stock = NULL;
+    r.stock = mg_stock;
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
     if (!sh_mb_build(folder, NULL, &r, &b)) {
@@ -643,7 +654,11 @@ static int mg_install_staged(const char *stage_u8, const char *from, const char 
               : sh_ms_assign_salt(stage_u8, from, salt, cause, cause_cap) < 0)
         return 0;
     sh_mb_keep_replacements_here(1);
-    ok = sh_ms_install_as(stage_u8, target, NULL, key, key_cap, st, b, cause, cause_cap);
+    {
+        /* The game's files decide what a file outside the mod's namespace replaces. */
+        static const sh_mb_resolver game = { NULL, NULL, mg_stock, NULL };
+        ok = sh_ms_install_as(stage_u8, target, &game, key, key_cap, st, b, cause, cause_cap);
+    }
     sh_mb_keep_replacements_here(0);
     return ok;
 }
