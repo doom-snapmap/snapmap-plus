@@ -527,10 +527,13 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   names the command to run again by hand (`snapmap-plus-store migrate "<folder>"`, with DOOM closed).
   `snapmap-plus migrate` runs the same check and migrate on its own, without reinstalling, which is
   how a package dropped into `overrides\` after the first conversion gets moved. The same run
-  converts, once, every mod folder and saved map an earlier release wrote: each folder of an
-  earlier shape gets its salt, its own `mods/<old key>/` paths and strings follow it and it is
-  built (a folder that cannot be, for example one whose binary file names its old key, is left as
-  it was with its cause), second builds Snapmap+ made of one mod and `mods\.builds\` go to the
+  converts every mod folder and saved map of an earlier release it finds, each time it runs (so a
+  folder of an earlier release copied in later is converted by running the installer again): each
+  folder of an earlier shape gets its salt, its own `mods/<old key>/` paths and strings follow it
+  and it is built (a folder that does not build, for example one whose binary file names its old
+  key, is still converted, with the cause shown in the Mods tab until it is fixed; files beside
+  `mod.json` and `assets\` stay as they are; a run stopped part way loses nothing), extra copies
+  Snapmap+ made of one mod and `mods\.builds\` go to the
   Recycle Bin, and the maps in My Maps, `rawmap.json` and the prefabs have their mod rows and
   placed names rewritten to the salts, each with a copy of the file as it was beside it
   (`<name>.before-snapmap-plus-1.0`); a map naming a mod nothing provides is left untouched. Everything it

@@ -907,7 +907,7 @@ or New mod; there is no folder watcher. Under the store lock it:
 A folder in an earlier shape (a format-1 block, `package.json`, a retired
 author key) is listed with its plain reason ("This mod folder is not in a shape
 Snapmap+ can build: ...") and nothing in it is written; the installer's store
-tool converts those once, at update.
+tool converts every such folder it finds each time it runs.
 
 Places (rule 4). A build the product receives for a map lives in the map's
 place, `mods\maps\<segment>\<mod name>\`: the segment is `sh_ms_title_segment`
@@ -1094,23 +1094,35 @@ game reads only the current shape. Folders: every folder of `mods\` outside
 `mods\maps\` whose `mod.json` is an earlier shape (`sh_mb_old_is_old`, or a
 `package.json` alone) has its old key (author `id`, else the block's `key`,
 else its name). Of several folders of one key, the player's own are kept and
-the second builds the product made (`<key>@<hash16>`, those under `downloads\`
+the extra copies the product made (`<key>@<hash16>`, those under `downloads\`
 or `imports\`) go to the Recycle Bin once a kept one is converted; with only
-product-made ones the newest is kept. A kept folder's author part is cut free of
-the block, the retired author keys and a hud `schema` (every other byte kept),
+product-made ones the one that held the key first is kept. Which folder holds
+a key is read from the record (the `converted` record's folder for the key,
+else the folder named after the key, else the first by path), never from a
+`built` time (DECISIONS 15). A kept folder's author part is cut free of the
+block, the retired author keys and a hud `schema` (every other byte kept),
 salted into `<name>.staging-<pid>` by `sh_ms_salt_copy` with `from` the old key
 (the same rewrite as the first scan's: paths, texts, strings keys
-`<salt>_<key>` and their `#str_` references), built there by the real builder
-over the store's installed bundles and the game's archives (`sh_modstock_exists`,
-replacements kept), and swapped in under its own name only when the build
-succeeds; the folder as it was goes to the Recycle Bin. A folder that cannot be
-converted is left exactly as it was, its cause printed, and its tree hash kept in
-the record so `check` lists it without counting it as work until it changes.
-Folders that need another one's names are tried again after it. The record
-section `converted` keeps `keys` (old key to salt), `builds` (every old build
-hash to its salt: the folders', the removed second builds', `.builds\`
-snapshots' and the retired `aliases`), `folders`, `refused` and `maps` (maps
-left as they were, by content hash). Maps: every `SNAPMAPS<id>\map.decl` of
+`<salt>_<key>` and their `#str_` references) from a view of `mod.json` and
+`assets\` only, its sound banks renamed `<salt>_<name>` with their BKHD id,
+every other file beside them copied unchanged (DECISIONS 16), and built there
+by the real builder over the store's installed bundles and the game's archives
+(`sh_modstock_exists`, replacements kept). A build that fails, or a salting the
+folder refuses (the folder is then copied as it is with a fresh salt), is
+written as a failed build (`sh_mb_write_failed`) with the builder's plain cause
+(DECISIONS 14). The work folder is swapped in under the folder's own name and
+the folder as it was goes to the Recycle Bin; only a folder whose descriptor
+does not read is left as it was. Folders that need another one's names are
+tried again after it. The record section `converted` keeps `keys` (old key to
+salt), `builds` (every old build hash to its salt: the folders', the removed
+copies', `.builds\` snapshots' and the retired `aliases`), `folders`,
+`pending`, `refused` and `maps` (maps left as they were, by content hash). It
+is written after every folder and every map; a folder's row is `pending` from
+just before its swap to just after, so a run stopped anywhere resumes: the
+next run puts back a `<name>.old-<pid>` whose folder is missing, removes work
+folders, and commits a pending row whose folder carries its salt. The whole run
+holds the mods folder's named lock (`src/common/store_lock.h`, DECISIONS 19),
+and every run looks at every folder and map again (DECISIONS 21). Maps: every `SNAPMAPS<id>\map.decl` of
 `Saved Games\id Software\DOOM\base\savegame.user` (`store_saves.c`; both
 renderers share it, `--saves` names another for tests), the data folder's
 `rawmap.json` and every prefab under `prefabs\`. A text of an earlier shape
@@ -1125,7 +1137,13 @@ kept, the text deflated by `store_deflate.c` and read back before anything is
 written) and its `map.decl.verify` signed again (HMAC-SHA256 keyed by the
 sidecar's own salt and the id the game binds saves to) only after the present
 sidecar verifies with a candidate id (the account folder's name, or that id
-with its instance field cleared); `game.details` is left as it is. A map
+with its instance field cleared); `game.details` is left as it is. The new
+`map.decl.verify` and `map.decl` are written beside them first and then put in
+place map first, so a run stopped in between leaves only the new signature
+beside the new map, which the next run puts in place. A settings variable an
+author's variable follows keeps its index under the name `unused` with an empty
+value, its setting moved into the member, so no converted map carries a name
+the game's earlier-format check refuses. A map
 naming a key no converted folder provides, or whose signature matches no
 candidate, is left untouched with its cause. Last, `mods\.builds\` goes to the
 Recycle Bin and the record's retired sections (`cache`, `aliases`, `snapshots`,
