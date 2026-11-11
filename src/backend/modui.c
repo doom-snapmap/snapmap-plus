@@ -4587,41 +4587,6 @@ static int mu_file_text(const char *arg)
 
 /* ---- Add to my mods */
 
-/* Copy the tree `from` into `to` (wide long paths), real files only (links
- * are not followed). 1 when every file was copied. */
-static int mu_copy_tree(const wchar_t *from, const wchar_t *to, int depth)
-{
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    size_t nf = wcslen(from), nt = wcslen(to);
-    wchar_t *pattern;
-    int ok = 1;
-    if (depth > 32 || (!CreateDirectoryW(to, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)) return 0;
-    pattern = (wchar_t *)malloc((nf + 3) * sizeof *pattern);
-    if (!pattern) return 0;
-    _snwprintf_s(pattern, nf + 3, _TRUNCATE, L"%ls\\*", from);
-    h = FindFirstFileW(pattern, &fd);
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
-    do {
-        size_t nl = wcslen(fd.cFileName);
-        wchar_t *a, *b;
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-            continue;
-        a = (wchar_t *)malloc((nf + nl + 2) * sizeof *a);
-        b = (wchar_t *)malloc((nt + nl + 2) * sizeof *b);
-        if (a && b) {
-            _snwprintf_s(a, nf + nl + 2, _TRUNCATE, L"%ls\\%ls", from, fd.cFileName);
-            _snwprintf_s(b, nt + nl + 2, _TRUNCATE, L"%ls\\%ls", to, fd.cFileName);
-            ok = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? mu_copy_tree(a, b, depth + 1) : sh_ms_copy_file(a, b);
-        } else ok = 0;
-        free(a);
-        free(b);
-    } while (ok && FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
-}
-
 /* Remove a tree this file made (wide long path), links removed and never followed. */
 static void mu_remove_tree(const wchar_t *dir)
 {
@@ -4651,41 +4616,6 @@ static void mu_remove_tree(const wchar_t *dir)
         FindClose(h);
     }
     RemoveDirectoryW(dir);
-}
-
-/* For integration (modui.h): the store's install of a folder of the store
- * (a mod a map brought) at the root, until the store side provides it. The
- * folder is copied outside the store first, so the install takes it as a mod
- * from elsewhere: every file it holds is copied to mods\<its name> and built
- * under its own salt (nothing is dropped). */
-int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
-                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap)
-{
-    wchar_t tmp[MAX_PATH + 1];
-    char *tmpu, work[MAX_PATH * 4 + 64], copy[MAX_PATH * 4 + 320];
-    wchar_t *src = NULL, *wwork = NULL, *wcopy = NULL;
-    int ok = 0;
-    if (cause && cause_cap) cause[0] = 0;
-    if (!GetTempPathW(MAX_PATH, tmp) || (tmpu = sh_mb_utf8(tmp)) == NULL) {
-        strncpy_s(cause, cause_cap, "the temporary folder cannot be found", _TRUNCATE);
-        return 0;
-    }
-    _snprintf_s(work, sizeof work, _TRUNCATE, "%ssnapmap-plus-add-%lu-%llu", tmpu, GetCurrentProcessId(), GetTickCount64());
-    free(tmpu);
-    _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\%s", work, mu_leaf(folder));
-    src = sh_mb_wpath(folder);
-    wwork = sh_mb_wpath(work);
-    wcopy = sh_mb_wpath(copy);
-    if (!src || !wwork || !wcopy) strncpy_s(cause, cause_cap, "out of memory", _TRUNCATE);
-    else if (!CreateDirectoryW(wwork, NULL) || !mu_copy_tree(src, wcopy, 0))
-        _snprintf_s(cause, cause_cap, _TRUNCATE, "its files could not be copied (error %lu); close any program using them",
-                    GetLastError());
-    else ok = sh_ms_install_from_folder(copy, resolver, name_out, name_cap, stats, bundle_out, cause, cause_cap);
-    if (wwork) mu_remove_tree(wwork);
-    free(src);
-    free(wwork);
-    free(wcopy);
-    return ok;
 }
 
 /* addToMine (arg: a folder of a downloaded map's mods): copy it to the root

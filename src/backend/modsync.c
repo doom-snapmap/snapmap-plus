@@ -776,6 +776,95 @@ static void msy_note_place(const sh_ms_place *place, const char *rel)
     if (place && rel && rel[0]) (void)sh_ms_place_note(place, rel);
 }
 
+/* Unpack the verified build `b` of `zr` into `dir` (created already): every
+ * carried file checked against its hash, then mod.json. 1, else 0 with the
+ * cause (info->mismatch for damaged bytes). */
+static int msy_unpack(sh_zip_reader *zr, const sh_mb_bundle *bp, const char *dir, const unsigned char *modjson,
+                      size_t modjson_len, modsync_install_info *info, char *cause, size_t cap)
+{
+    size_t i;
+    for (i = 0; i < bp->file_count; i++) {
+        const sh_mb_file *f = &bp->files[i];
+        char entry[SH_MB_REQUEST_MAX + 16], dst[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], why[256];
+        unsigned char *bytes;
+        size_t len = 0;
+        long idx;
+        if (f->stock) continue;   /* never carried: the installed game holds it */
+        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", f->request);
+        idx = sh_zip_reader_find(zr, entry);
+        why[0] = 0;
+        bytes = idx < 0 ? NULL : sh_zip_reader_read(zr, idx, (size_t)f->size, &len, why, sizeof why);
+        if (bytes) sh_mb_sha256_hex(bytes, len, actual);
+        if (!bytes || len != f->size || strcmp(actual, f->blob) != 0) {
+            free(bytes);
+            info->mismatch = 1;
+            return msy_cause(cause, cap, MSY_MISMATCH " (%s %s)", f->path, why[0] ? why : "differs from its mod.json");
+        }
+        msy_join(dst, sizeof dst, dir, f->path);
+        {
+            char parent[MAX_PATH * 4], *slash;
+            strcpy_s(parent, sizeof parent, dst);
+            slash = strrchr(parent, '\\');
+            if (slash) { *slash = 0; msy_mkdirs(parent); }
+        }
+        if (!msy_write_file(dst, bytes, len, 0)) {
+            DWORD e = GetLastError();
+            free(bytes);
+            return msy_cause(cause, cap, "cannot write %s: %s", f->path, sh_reason_win32(e, dst, len));
+        }
+        free(bytes);
+        info->files++;
+        info->bytes += len;
+    }
+    {
+        char mj[MAX_PATH * 4];
+        msy_join(mj, sizeof mj, dir, "mod.json");
+        if (!msy_write_file(mj, modjson, modjson_len, 0))
+            return msy_cause(cause, cap, "cannot write mod.json for %s: %s", info->name, sh_reason_win32(GetLastError(), mj, 0));
+    }
+    return 1;
+}
+
+/* A received build for a map without a place: unpacked into a folder of this
+ * process's own outside the store, then installed at the root as the
+ * player's own mod (sh_ms_install_to_root), and the unpacked copy removed. */
+static int msy_install_root(sh_zip_reader *zr, const sh_mb_bundle *bp, const unsigned char *modjson, size_t modjson_len,
+                            modsync_install_info *info, char *cause, size_t cap)
+{
+    static volatile long counter;
+    wchar_t tmp[MAX_PATH + 1], *wtmp = NULL, *wwork = NULL;
+    char *utmp, work[MAX_PATH * 4], dir[MAX_PATH * 4], seg[128], name[SH_MS_NAME_MAX + 1];
+    sh_ms_install_stats st;
+    int ok = 0;
+    DWORD n = GetTempPathW(MAX_PATH + 1, tmp);
+    if (!n || n > MAX_PATH || !(utmp = sh_mb_utf8(tmp))) return msy_cause(cause, cap, "the temporary folder cannot be found");
+    _snprintf_s(work, sizeof work, _TRUNCATE, "%ssnapmap-plus-fetch.staging-%lu-%ld", utmp, GetCurrentProcessId(),
+                InterlockedIncrement(&counter));
+    free(utmp);
+    if (!sh_ms_title_segment(info->name, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "mod");
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", work, seg);
+    wtmp = sh_mb_wpath(work);
+    if (wtmp) {
+        wchar_t *slash = wcsrchr(wtmp, L'\\');
+        wwork = _wcsdup(wtmp);
+        if (slash && wwork) wwork[slash - wtmp] = 0;   /* the temporary folder: what the removal stays inside */
+    }
+    if (!wtmp || !wwork) msy_cause(cause, cap, "out of memory");
+    else if (!msy_mkdirs(dir)) msy_cause(cause, cap, "cannot create %s: %s", dir, sh_reason_win32(GetLastError(), dir, 0));
+    else if (msy_unpack(zr, bp, dir, modjson, modjson_len, info, cause, cap)) {
+        memset(&st, 0, sizeof st);
+        if (sh_ms_install_to_root(dir, NULL, name, sizeof name, &st, NULL, cause, cap)) {
+            strncpy_s(info->rel, sizeof info->rel, name, _TRUNCATE);
+            info->already_installed = st.present;
+            ok = 1;
+        }
+    }
+    if (wtmp && wwork) msy_rmtree_w(wtmp, wwork, 1);
+    free(wtmp);
+    free(wwork);
+    return ok;
+}
+
 int modsync_install_archive(const char *archive, const char *salt, const char *hash, const sh_ms_place *place,
                             modsync_install_info *info, char *cause, size_t cap)
 {
@@ -795,7 +884,7 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
     if (cause && cap) cause[0] = 0;
     if (!archive || !modnet_valid_hash(hash) || (salt && salt[0] && !sh_salt_valid(salt, strlen(salt))))
         return msy_cause(cause, cap, "bad argument");
-    if (!place || !place->title || !place->title[0]) return msy_cause(cause, cap, "a received build needs a map's place");
+    if (place && (!place->title || !place->title[0])) return msy_cause(cause, cap, "a received build needs a map's place");
     if (!sh_zip_reader_open(&zr, archive, one, sizeof one)) {
         info->mismatch = 1;
         return msy_cause(cause, cap, MSY_MISMATCH " (%s)", one);
@@ -823,6 +912,10 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
             goto done;
         }
         info->stock_files++;
+    }
+    if (!place) {
+        ok = msy_install_root(&zr, &b, modjson, modjson_len, info, cause, cap);
+        goto done;
     }
 
     modsync_store_lock();
@@ -860,49 +953,7 @@ int modsync_install_archive(const char *archive, const char *salt, const char *h
      * process's own. */
     modsync_store_unlock();
     locked = 0;
-    for (i = 0; i < b.file_count; i++) {
-        const sh_mb_file *f = &b.files[i];
-        char entry[SH_MB_REQUEST_MAX + 16], dst[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], why[256];
-        unsigned char *bytes;
-        size_t len = 0;
-        long idx;
-        if (f->stock) continue;   /* never carried: the installed game holds it */
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", f->request);
-        idx = sh_zip_reader_find(&zr, entry);
-        why[0] = 0;
-        bytes = idx < 0 ? NULL : sh_zip_reader_read(&zr, idx, (size_t)f->size, &len, why, sizeof why);
-        if (bytes) sh_mb_sha256_hex(bytes, len, actual);
-        if (!bytes || len != f->size || strcmp(actual, f->blob) != 0) {
-            free(bytes);
-            info->mismatch = 1;
-            msy_cause(cause, cap, MSY_MISMATCH " (%s %s)", f->path, why[0] ? why : "differs from its mod.json");
-            goto unstage;
-        }
-        msy_join(dst, sizeof dst, staging, f->path);
-        {
-            char parent[MAX_PATH * 4], *slash;
-            strcpy_s(parent, sizeof parent, dst);
-            slash = strrchr(parent, '\\');
-            if (slash) { *slash = 0; msy_mkdirs(parent); }
-        }
-        if (!msy_write_file(dst, bytes, len, 0)) {
-            DWORD e = GetLastError();
-            free(bytes);
-            msy_cause(cause, cap, "cannot write %s: %s", f->path, sh_reason_win32(e, dst, len));
-            goto unstage;
-        }
-        free(bytes);
-        info->files++;
-        info->bytes += len;
-    }
-    {
-        char mj[MAX_PATH * 4];
-        msy_join(mj, sizeof mj, staging, "mod.json");
-        if (!msy_write_file(mj, modjson, modjson_len, 0)) {
-            msy_cause(cause, cap, "cannot write mod.json for %s: %s", rel, sh_reason_win32(GetLastError(), mj, 0));
-            goto unstage;
-        }
-    }
+    if (!msy_unpack(&zr, &b, staging, modjson, modjson_len, info, cause, cap)) goto unstage;
     modsync_store_lock();
     locked = 1;
     if (modsync_find_installed(b.id, hash, place, NULL, 0)) {   /* another thread finished it meanwhile */
@@ -1191,9 +1242,43 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
     memset(st, 0, sizeof *st);
     if (!row || !sh_salt_valid(row->salt, strlen(row->salt)) || !modnet_valid_hash(row->build))
         return msy_stats_fail(st, MODNET_E_ARG, "not a <salt>@<build hash> row");
-    if (!place || !place->title || !place->title[0]) return msy_stats_fail(st, MODNET_E_ARG, "a download needs a map's place");
+    if (place && (!place->title || !place->title[0])) return msy_stats_fail(st, MODNET_E_ARG, "a download needs a map's place");
     st->builds = 1;
-    if (modsync_find_installed(row->salt, row->build, place, folder, sizeof folder)) {
+    if (!place) {
+        /* The root: a root folder at the row's hash serves it; a map's place
+         * holding this very build is installed at the root from there. */
+        sh_ms_list l;
+        const sh_ms_entry *e = NULL;
+        int served = 0;
+        memset(&l, 0, sizeof l);
+        modsync_store_lock();
+        if (sh_ms_enumerate(&l) && (e = msy_locate(&l, row->salt, row->build, NULL)) != NULL) {
+            served = !msy_in_places(e);
+            strncpy_s(folder, sizeof folder, e->folder, _TRUNCATE);
+        }
+        sh_ms_list_free(&l);
+        modsync_store_unlock();
+        if (e && served) {
+            if (msy_root(root, sizeof root)) msy_rel_of(root, folder, st->folder, sizeof st->folder);
+            st->already_installed = 1;
+            st->ms = msy_now_ms() - t0;
+            return 1;
+        }
+        if (e) {
+            sh_ms_install_stats is;
+            char name[SH_MS_NAME_MAX + 1];
+            memset(&is, 0, sizeof is);
+            if (!sh_ms_install_to_root(folder, NULL, name, sizeof name, &is, NULL, cause, sizeof cause))
+                return msy_stats_fail(st, MODNET_E_REFUSED, "%s", cause);
+            strncpy_s(st->folder, sizeof st->folder, name, _TRUNCATE);
+            st->builds_created = 1;
+            if (sh_modserve_index_rescan() < 0)
+                msy_log("MODS: %.16s: installed in mods\\%s, but the serving index could not be rebuilt", row->build, name);
+            st->ms = msy_now_ms() - t0;
+            st->code = MODNET_OK;
+            return 1;
+        }
+    } else if (modsync_find_installed(row->salt, row->build, place, folder, sizeof folder)) {
         /* The root at the row's hash, or this map's place, serves it. */
         if (msy_root(root, sizeof root)) {
             char rel[MODSYNC_FOLDER_MAX];

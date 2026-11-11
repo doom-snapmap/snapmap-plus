@@ -326,22 +326,6 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
  * Each is declared here with the exact signature the window calls; where a
  * thin implementation lives in modui.c until the owning side provides it, the
  * owner's definition replaces it at integration. */
-struct sh_mb_resolver;
-struct sh_mb_bundle;
-struct sh_ms_install_stats;
-
-/* Install a folder of the store (a mod a downloaded map or an imported ZIP
- * brought, mods\maps\<map>\<mod>) at the root of mods\ as one of the player's
- * own mods, as sh_ms_install_from_folder installs a folder from elsewhere:
- * every file it holds copied to mods\<its name> (" (2)" when taken) under its
- * own salt, built, the source untouched. Returns 1 with the folder name under
- * mods\, else 0 with the plain cause. Any thread; takes the store lock. Add
- * to my mods calls it; placing a prefab installs its mods at the root by
- * the same step. Thin implementation: modui.c (copies the folder outside the
- * store, then installs that copy). */
-int sh_ms_install_to_root(const char *folder, const struct sh_mb_resolver *resolver, char *name_out, size_t name_cap,
-                          struct sh_ms_install_stats *stats, struct sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
-
 /* How many of the player's saved maps record `place` ("maps\<segment>") as
  * where they find their mods (the saved map's record), or -1 when it cannot be
  * told. The Mods tab's short view of a downloaded map's mods says whether the

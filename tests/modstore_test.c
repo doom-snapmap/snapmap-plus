@@ -1389,6 +1389,46 @@ static void test_ordinary_names(const char *tmp)
     CHECK(entry_of("sorted\\blobs", salt, NULL, &usable) && usable && salt[0]);
 }
 
+/* sh_ms_install_to_root: a map's place copied to the root under its salt;
+ * the place keeps its copy; the root's own folder of a salt stays theirs. */
+static void test_install_to_root(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], place[MAX_PATH * 2], salt[SH_SALT_LEN + 1], hash[65], s2[SH_SALT_LEN + 1],
+        h2[65], name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    sh_ms_sync_stats ss;
+    sh_ms_install_stats st;
+    int usable;
+    printf("-- install to root: a map's mod becomes the player's own under the same salt\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\toroot\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\crate", root);
+    make_small_mod(dir, "crate");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    CHECK(entry_of("crate", salt, hash, &usable) && usable);
+    /* The root's own folder is not a source. */
+    CHECK(!sh_ms_install_to_root(dir, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+          strstr(cause, "already one of your mods"));
+    /* Moved into a map's place, it installs at the root from there. */
+    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep", root);
+    mt_mkdirs_for(place);
+    CreateDirectoryA(place, NULL);
+    _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep\\crate", root);
+    CHECK(MoveFileA(dir, place));
+    CHECK(sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) && !st.present);
+    if (cause[0]) printf("   %s\n", cause);
+    CHECK(!strcmp(name, "crate") && mt_has(place, "mod.json"));
+    CHECK(entry_of("crate", s2, h2, &usable) && usable && !strcmp(s2, salt) && !strcmp(h2, hash));
+    /* Again: the root folder at this build is the install. */
+    CHECK(sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) && st.present &&
+          !strcmp(name, "crate"));
+    /* The player's own folder changed: it stays theirs. */
+    mt_write(dir, "assets\\generated\\image\\mods\\crate\\b.bimage", "the player's own second image");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
+    CHECK(!sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+          strstr(cause, "your mods already hold") && strstr(cause, "mods\\crate"));
+    printf("   %s\n", cause);
+}
+
 static void test_nested(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH], cause[300], name[SH_MS_NAME_MAX + 1];
@@ -1480,6 +1520,7 @@ int main(int argc, char **argv)
     test_nested(tmp);
     test_ordinary_names(tmp);
     test_rehome(tmp);
+    test_install_to_root(tmp);
     test_boot_sync(fixture, tmp);
     test_boot_release(tmp);
     sh_ms_set_root(NULL);

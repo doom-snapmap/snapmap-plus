@@ -303,6 +303,19 @@ int  sh_ms_install_placed(const char *folder, const sh_ms_place *place,
                           const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                           sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 
+/* Install a built folder at the root of mods\ as one of the player's own
+ * mods, keeping its salt: a folder of a map's place (Add to my mods, a
+ * placed prefab whose mod a map brought) or a received build unpacked
+ * outside the store (a download for a map without a place). Every file it
+ * holds is copied to mods\<its name> (" (2)" when taken) and verified; the
+ * source is only read. A root folder of the salt at this very build is the
+ * install (stats->present); at another build the install is refused, since
+ * the player's own folder of a mod stays theirs. Returns 1 with the folder
+ * name under mods\, else 0 with the plain cause. Any thread; takes the store
+ * lock. */
+int  sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                           sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+
 typedef struct sh_ms_verify_stats {
     unsigned files, bytes_mb, entries;
     unsigned pointers;          /* of files, stock pointers resolved against the installed game */

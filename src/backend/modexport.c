@@ -1312,41 +1312,6 @@ int modexport_validate_source(const char *path, char *out_msg, int msg_capacity)
 
 /* ------------------------------------------------------------ received builds */
 
-/* A build fetched for a map without a place lands in a place of its own,
- * mods\maps\<salt>\, and its folder then moves to the root under a free name
- * (mods\<its folder name>, " (2)" ...); the emptied place goes with its record
- * entry. The root does not hold the salt, or the row would have been served.
- * 1 with `out` the folder under mods\, else 0 with the folder left where it
- * was. */
-static int me_root_adopt(const char *rel, char *out, size_t cap)
-{
-    char root[MAX_PATH * 4], from[MAX_PATH * 4], to[MAX_PATH * 4], leaf[MAX_PATH * 4], dir[MAX_PATH * 4];
-    const char *slash = strrchr(rel, '\\');
-    wchar_t *wfrom = NULL, *wto = NULL;
-    int i, ok = 0;
-    if (!slash || !sh_ms_root(root, sizeof root)) return 0;
-    strncpy_s(leaf, sizeof leaf, slash + 1, _TRUNCATE);
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%.*s", root, (int)(slash - rel), rel);
-    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", root, rel);
-    if (!(wfrom = sh_mb_wpath(from))) return 0;
-    modstore_lock();
-    for (i = 1; i < 64 && !ok; i++) {
-        if (i == 1) _snprintf_s(out, cap, _TRUNCATE, "%s", leaf);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s (%d)", leaf, i);
-        _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", root, out);
-        free(wto);
-        if (!(wto = sh_mb_wpath(to))) break;
-        if (GetFileAttributesW(wto) != INVALID_FILE_ATTRIBUTES) continue;
-        if (!MoveFileExW(wfrom, wto, 0)) break;
-        ok = 1;
-    }
-    modstore_unlock();
-    free(wfrom);
-    free(wto);
-    if (ok) (void)sh_ms_remove_folder(dir);
-    return ok;
-}
-
 int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const modnet_io *io, modsync_stats *st,
                           char *where, size_t where_cap)
 {
@@ -1361,27 +1326,9 @@ int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, cons
         at.title = title;
         at.map_id = key;
         (void)sh_ms_place_note(&at, place);
-    } else {
-        /* A place of the build's own for the download, emptied into the root. */
-        strncpy_s(title, sizeof title, row->salt, _TRUNCATE);
-        _snprintf_s(key, sizeof key, _TRUNCATE, "fetch:%s", row->salt);
-        at.title = title;
-        at.map_id = key;
     }
-    if (!modsync_fetch_build_for(row, &at, io, st)) return 0;
+    /* Without a place the build installs at the root, as the player's own mod. */
+    if (!modsync_fetch_build_for(row, segment ? &at : NULL, io, st)) return 0;
     if (where && where_cap) strncpy_s(where, where_cap, st->folder, _TRUNCATE);
-    if (!segment && !st->editor_only && st->folder[0] &&
-        !_strnicmp(st->folder, SH_MODSERVE_PLACES "\\", sizeof SH_MODSERVE_PLACES)) {
-        char adopted[MAX_PATH * 4];
-        if (!me_root_adopt(st->folder, adopted, sizeof adopted)) {
-            _snprintf_s(st->cause, sizeof st->cause, _TRUNCATE,
-                        "%s was downloaded to mods\\%s but could not be moved into mods\\; move it there by hand",
-                        row->name[0] ? row->name : "the mod", st->folder);
-            st->code = MODNET_E_REFUSED;
-            return 0;
-        }
-        if (where && where_cap) strncpy_s(where, where_cap, adopted, _TRUNCATE);
-        if (sh_modserve_index_rescan() < 0) me_log("MODS: %s moved to mods\\%s, but the serving index could not be rebuilt", row->name, adopted);
-    }
     return 1;
 }

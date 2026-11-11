@@ -162,6 +162,51 @@ int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *s
     return 0;
 }
 
+int sh_ms_title_segment(const char *title, char *out, size_t cap)
+{
+    strncpy_s(out, cap, title, _TRUNCATE);
+    return out[0] != 0;
+}
+
+/* The store's install at the root, as modstore.c does it: a built folder
+ * copied to mods\<its leaf> under its salt; a root folder of the salt is the
+ * install at this build and a refusal at another. */
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cap)
+{
+    sh_mb_bundle b;
+    sh_ms_list l;
+    size_t i;
+    const char *leaf = strrchr(folder, '\\') ? strrchr(folder, '\\') + 1 : folder;
+    char to[MAX_PATH * 2];
+    int ok = 0;
+    (void)resolver;
+    (void)bundle_out;
+    if (stats) memset(stats, 0, sizeof *stats);
+    memset(&b, 0, sizeof b);
+    if (!sh_mb_load_folder(folder, &b)) { strncpy_s(cause, cap, "it was never built", _TRUNCATE); return 0; }
+    sh_ms_enumerate(&l);
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        if (strchr(e->name, '\\') || !e->loaded || strcmp(e->bundle.id, b.id)) continue;
+        if (!strcmp(e->bundle.hash, b.hash)) {
+            strncpy_s(name_out, name_cap, e->name, _TRUNCATE);
+            if (stats) stats->present = 1;
+            ok = 1;
+        } else _snprintf_s(cause, cap, _TRUNCATE, "your mods already hold %s in mods\\%s", b.name ? b.name : b.id, e->name);
+        sh_ms_list_free(&l);
+        sh_mb_free(&b);
+        return ok;
+    }
+    sh_ms_list_free(&l);
+    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", g_root, leaf);
+    ok = !mt_exists(to) && mt_copy_tree(folder, to);
+    if (ok) strncpy_s(name_out, name_cap, leaf, _TRUNCATE);
+    else strncpy_s(cause, cap, "it could not be copied", _TRUNCATE);
+    sh_mb_free(&b);
+    return ok;
+}
+
 int sh_ms_place_note(const sh_ms_place *place, const char *folder)
 {
     g_notes++;
@@ -680,8 +725,47 @@ int main(void)
             /* Missing from the store. */
             row_of(&row, "betab002", hb);
             CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st) && st.code == MODNET_E_NOT_FOUND);
-            /* A row without a place, or not a row. */
-            CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_ARG);
+            CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_NOT_FOUND);
+        }
+
+        /* ---- the root (a map without a place): installed as the player's own mod, never moved ---- */
+        {
+            char rootdir[MAX_PATH * 2], placedir[MAX_PATH * 2], *mj;
+            int gets0;
+            size_t ml = 0;
+            /* A map's place holds this very build: installed at the root from there, nothing fetched. */
+            row_of(&row, "rocks003", hr);
+            gets0 = g_stub.build_gets;
+            CHECK(modsync_fetch_build_for(&row, NULL, NULL, &st) && !st.already_installed && g_stub.build_gets == gets0);
+            CHECK(!strcmp(st.folder, "Rocks"));
+            _snprintf_s(rootdir, sizeof rootdir, _TRUNCATE, "%s\\Rocks", r2);
+            _snprintf_s(placedir, sizeof placedir, _TRUNCATE, "%s\\maps\\Grey Keep\\Rocks\\mod.json", r2);
+            CHECK(mt_exists(placedir));   /* the place keeps its copy */
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\mod.json", rootdir);
+            mj = (char *)sh_mb_read_file(got, 1 << 20, &ml);
+            CHECK(mj && strstr(mj, "rocks003") && strstr(mj, hr));
+            free(mj);
+            /* Again: the root serves it. */
+            CHECK(modsync_fetch_build_for(&row, NULL, NULL, &st) && st.already_installed && !strcmp(st.folder, "Rocks"));
+            /* Nowhere on this machine: downloaded and installed at the root directly (no place is made). */
+            mt_remove_tree(rootdir);
+            _snprintf_s(placedir, sizeof placedir, _TRUNCATE, "%s\\maps\\Grey Keep", r2);
+            mt_remove_tree(placedir);
+            _snprintf_s(placedir, sizeof placedir, _TRUNCATE, "%s\\maps", r2);
+            {
+                int places = count_dirs(placedir);
+                gets0 = g_stub.build_gets;
+                CHECK(modsync_fetch_build_for(&row, NULL, NULL, &st) && !st.already_installed && g_stub.build_gets == gets0 + 1);
+                CHECK(!strcmp(st.folder, "Rocks") && count_dirs(placedir) == places);
+            }
+            _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\mod.json", rootdir);
+            mj = (char *)sh_mb_read_file(got, 1 << 20, &ml);
+            CHECK(mj && strstr(mj, "rocks003") && strstr(mj, hr));
+            free(mj);
+            /* The root holds the salt at another build: the player's own folder stays theirs. */
+            row_of(&row, "alpha001", ha2);
+            CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_REFUSED &&
+                  strstr(st.cause, "your mods already hold"));
         }
 
         /* ---- an editor-only build: recorded, not installed ---- */

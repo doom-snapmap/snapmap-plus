@@ -115,14 +115,18 @@ typedef struct modsync_install_info {
 
 /* Install the archive file `archive` (UTF-8) as the build `hash` of `salt`
  * into `place` (a map's, or a ZIP's): verified (above), unpacked beside its
- * target as <name>.staging-<pid>, then swapped in. Does not rescan the
- * serving index. Takes the store lock. Returns 1 on success. */
+ * target as <name>.staging-<pid>, then swapped in. `place` NULL installs it
+ * at the root as the player's own mod (sh_ms_install_to_root, from a copy
+ * unpacked outside the store). Does not rescan the serving index. Takes the
+ * store lock. Returns 1 on success. */
 int  modsync_install_archive(const char *archive, const char *salt, const char *hash, const struct sh_ms_place *place,
                              modsync_install_info *info, char *cause, size_t cause_cap);
 
-/* Fetch the row's build into `place` and rescan the serving index. Returns 1
- * on success, also when the root (at the row's hash) or the place already
- * holds it (stats->already_installed, nothing fetched). */
+/* Fetch the row's build into `place` (NULL: the root) and rescan the serving
+ * index. Returns 1 on success, also when the root (at the row's hash) or the
+ * place already holds it (stats->already_installed, nothing fetched). For
+ * the root, a map's place that holds this very build is installed from there
+ * without a download. */
 int  modsync_fetch_build_for(const struct sh_modmanifest_row *row, const struct sh_ms_place *place,
                              const modnet_io *io, modsync_stats *stats);
 

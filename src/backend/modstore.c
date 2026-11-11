@@ -780,6 +780,13 @@ static void ms_find_store(ms_found_list *l, const wchar_t *root)
     ms_find_mods(l, root, L"", 0, 1);
 }
 
+/* Whether `path` lies in the places area, mods\maps\<segment>\... */
+static int ms_in_place_area(const wchar_t *path, const wchar_t *root)
+{
+    size_t n = wcslen(root), pl = sizeof SH_MS_PLACES - 1;
+    return ms_inside(path, root) && !_wcsnicmp(path + n + 1, L"" SH_MS_PLACES, pl) && path[n + 1 + pl] == L'\\';
+}
+
 /* `path` is a mod folder of the store: strictly inside the root, holding a
  * descriptor, with no mod folder between it and the root (a folder inside a
  * mod is that mod's content, not a mod), and not mods\maps or a place folder
@@ -2855,7 +2862,11 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
     return 1;
 }
 
-static int ms_install_locked(const char *folder, const char *as_name, const sh_ms_place *place,
+/* `to_root`: sh_ms_install_to_root. The source is a built folder (a map's
+ * place, or a received build unpacked outside the store); it keeps its salt
+ * at the root, and a root folder of that salt is the install only when it
+ * holds this very build. */
+static int ms_install_locked(const char *folder, const char *as_name, const sh_ms_place *place, int to_root,
                              const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                              sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
@@ -2884,7 +2895,11 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     if (_wcsicmp(src, root) == 0) { ms_cause(cause, cap, "that folder is the store itself, not a mod"); goto done; }
     if (!ms_mkdirs(root)) { ms_cause(cause, cap, "cannot create the store folder: %s", ms_why(GetLastError(), NULL, 0, 0)); goto done; }
 
-    if (ms_store_mod_folder(src, root)) {
+    if (to_root && ms_inside(src, root) && !ms_in_place_area(src, root)) {
+        ms_cause(cause, cap, "mods\\%s is already one of your mods", ms_rel(folder));
+        goto done;
+    }
+    if (!to_root && ms_store_mod_folder(src, root)) {
         /* A folder of the store, at any depth: built in place. */
         if (place) { ms_cause(cause, cap, "mods\\%s is already in the store", ms_rel(folder)); goto done; }
         st->in_place = 1;
@@ -2895,7 +2910,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         ok = 1;
         goto done;
     }
-    if (ms_inside(src, root)) {
+    if (!to_root && ms_inside(src, root)) {
         ms_cause(cause, cap, ms_has_descriptor(src) ? "that folder is inside a mod of the store, not a mod itself"
                                                     : "that folder of the store has no mod.json");
         goto done;
@@ -2907,6 +2922,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         free(u);
     }
     state = sh_mb_descriptor_state_why(folder, why, sizeof why);
+    if (to_root && state != SH_MB_DESC_BUILT) { ms_cause(cause, cap, "%s", state == SH_MB_DESC_FRESH ? "it was never built" : why); goto done; }
     if (state == SH_MB_DESC_FRESH) {
         /* A new mod from elsewhere: copied in whole under its own name, salted
          * with its references rewritten (the source is only read), built; a
@@ -2956,7 +2972,11 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     } else {
         const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL, NULL);
         if (as_name && as_name[0]) strncpy_s(name, sizeof name, as_name, _TRUNCATE);
-        else if (here && here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here)) {
+        else if (to_root && here && !(here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here))) {
+            /* One build per salt at the root: the player's own folder of this mod stays theirs. */
+            ms_cause(cause, cap, "your mods already hold %s in mods\\%s", b.name && b.name[0] ? b.name : b.id, here->name);
+            goto done;
+        } else if (here && here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here)) {
             strncpy_s(name, sizeof name, here->name, _TRUNCATE);
             st->present = 1;
             ms_log("MODS: store: %s (salt %s, build %.16s) is already installed as mods\\%s; nothing was copied",
@@ -3076,7 +3096,7 @@ int sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolv
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, as_name, NULL, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, as_name, NULL, 0, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
     modstore_unlock();
     return ok;
 }
@@ -3089,7 +3109,19 @@ int sh_ms_install_placed(const char *folder, const sh_ms_place *place,
     int ok;
     if (!place) return ms_cause(cause, cap, "no map named for the place");
     modstore_lock();
-    ok = ms_install_locked(folder, NULL, place, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, NULL, place, 0, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    modstore_unlock();
+    return ok;
+}
+
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cap)
+{
+    sh_ms_install_stats local;
+    int ok;
+    if (cause && cap) cause[0] = 0;
+    modstore_lock();
+    ok = ms_install_locked(folder, NULL, NULL, 1, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
     modstore_unlock();
     return ok;
 }

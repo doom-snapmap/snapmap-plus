@@ -1129,65 +1129,17 @@ int sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *n
 /* placing a prefab's mods at the root                                   */
 /* ==================================================================== */
 
-/* A copy of a mod folder's tree (its files only: links are not followed). */
-static int pm_copy_tree(const wchar_t *src, const wchar_t *dst, int depth)
-{
-    wchar_t pattern[MAX_PATH * 4], from[MAX_PATH * 4], to[MAX_PATH * 4];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    int ok = 1;
-    if (depth > 16 || (!CreateDirectoryW(dst, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)) return 0;
-    _snwprintf_s(pattern, MAX_PATH * 4, _TRUNCATE, L"%s\\*", src);
-    h = FindFirstFileW(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 1;
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") ||
-            (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-        _snwprintf_s(from, MAX_PATH * 4, _TRUNCATE, L"%s\\%s", src, fd.cFileName);
-        _snwprintf_s(to, MAX_PATH * 4, _TRUNCATE, L"%s\\%s", dst, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = pm_copy_tree(from, to, depth + 1);
-        else ok = sh_ms_copy_file(from, to) == 1;
-    } while (ok && FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
-}
-
-static void pm_remove_tree(const wchar_t *dir, int depth)
-{
-    wchar_t pattern[MAX_PATH * 4], path[MAX_PATH * 4];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    if (depth > 16) return;
-    _snwprintf_s(pattern, MAX_PATH * 4, _TRUNCATE, L"%s\\*", dir);
-    h = FindFirstFileW(pattern, &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-            _snwprintf_s(path, MAX_PATH * 4, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                pm_remove_tree(path, depth + 1);
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(path);
-            else DeleteFileW(path);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    RemoveDirectoryW(dir);
-}
-
 /* Install at the root the build of `row` that a place of the store holds (a
  * downloaded or imported map's mods), when the root holds no folder of its
  * salt (decision 12: the player puts the mod to use in their own maps; the
- * map's download or import was the approval). The place's folder stays as it is: the root gets a copy, read
- * from a staging copy outside the store as any installed folder is. 1
- * installed, 0 nothing to do, -1 with the cause. */
+ * map's download or import was the approval). The place's folder stays as
+ * it is; the root gets a copy under the same salt (sh_ms_install_to_root).
+ * 1 installed, 0 nothing to do, -1 with the cause. */
 static int pm_install_root(const sh_modmanifest_row *row, char *cause, size_t cap)
 {
-    static volatile LONG seq;
     sh_ms_list list;
-    sh_ms_install_stats st;
     const sh_ms_entry *held;
-    char folder[SH_MS_NAME_MAX + 1];
-    wchar_t temp[MAX_PATH], stage[MAX_PATH * 2], copy[MAX_PATH * 3], *src;
+    char folder[MAX_PATH * 4], name[SH_MS_NAME_MAX + 1];
     int r = 0;
     memset(&list, 0, sizeof list);
     if (cause && cap) cause[0] = 0;
@@ -1197,27 +1149,8 @@ static int pm_install_root(const sh_modmanifest_row *row, char *cause, size_t ca
         r = -1;
     } else if ((held = sh_ms_find_salt(&list, row->salt, "*", row->build)) != NULL &&
                !sh_ms_find_salt(&list, row->salt, NULL, NULL)) {
-        r = -1;
-        src = sh_mb_wpath(held->folder);
-        if (!src || !GetTempPathW(MAX_PATH, temp)) {
-            if (cause && cap) strncpy_s(cause, cap, "no folder for its copy could be made", _TRUNCATE);
-        } else {
-            /* The copy keeps the folder's own name: the install names the root folder after it. */
-            const wchar_t *leaf = wcsrchr(src, L'\\') ? wcsrchr(src, L'\\') + 1 : src;
-            _snwprintf_s(stage, MAX_PATH * 2, _TRUNCATE, L"%ssnapmap-plus-prefab-%lu-%ld", temp, GetCurrentProcessId(),
-                         InterlockedIncrement(&seq));
-            _snwprintf_s(copy, MAX_PATH * 3, _TRUNCATE, L"%s\\%s", stage, leaf);
-            if (!CreateDirectoryW(stage, NULL) || !pm_copy_tree(src, copy, 0)) {
-                if (cause && cap) strncpy_s(cause, cap, "its files could not be copied", _TRUNCATE);
-            } else {
-                char *copy8 = sh_mb_utf8(copy);
-                memset(&st, 0, sizeof st);
-                if (copy8 && sh_ms_install_from_folder(copy8, NULL, folder, sizeof folder, &st, NULL, cause, cap)) r = 1;
-                free(copy8);
-            }
-            pm_remove_tree(stage, 0);
-        }
-        free(src);
+        strncpy_s(folder, sizeof folder, held->folder, _TRUNCATE);
+        r = sh_ms_install_to_root(folder, NULL, name, sizeof name, NULL, NULL, cause, cap) ? 1 : -1;
         if (r > 0) (void)sh_modserve_index_rescan();
     }
     sh_ms_list_free(&list);

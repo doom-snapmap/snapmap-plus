@@ -163,8 +163,8 @@ int   modexport_validate_source(const char *path, char *out_msg, int msg_capacit
 /* Fetch the row's build from the mod store (modsync_fetch_build_for) to
  * where a map whose place is `place` finds it (modserve.h): that place's
  * folder of the salt ("maps\<segment>"), or, for "" (the player's own map, a
- * prefab), the root: it is unpacked into a place of its own and its folder
- * moves to mods\<its name>. Worker thread. 1 with `where` its folder under
+ * prefab), the root, where it installs as the player's own mod
+ * (sh_ms_install_to_root). Worker thread. 1 with `where` its folder under
  * mods\ ("" for an editor-only build); 0 with st->code and st->cause. */
 struct modnet_io;
 struct modsync_stats;
