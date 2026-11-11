@@ -394,8 +394,9 @@ static void st_usage(int err)
     st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. The loose files of");
     st_emit(err, "overrides\\ and strings\\strids.json become the mod My overrides (mods\\my-overrides), and overrides\\ and");
     st_emit(err, "strings\\ go to the Recycle Bin once everything in them is in mods\\. Mod folders of earlier releases");
-    st_emit(err, "are converted to this version's shape and built (a folder that cannot be is left as it was, with");
-    st_emit(err, "its cause), and the maps in My Maps, rawmap.json and the prefabs follow them, each file as it was");
+    st_emit(err, "are converted to this version's shape and built (one that does not build yet is converted with");
+    st_emit(err, "its build marked failed and the cause, which the Mods tab shows), and the maps in My Maps,");
+    st_emit(err, "rawmap.json and the prefabs follow them, each file as it was");
     st_emit(err, "kept beside it as <name>" SH_CONV_BACKUP_SUFFIX ". --saves names the folder of My Maps (the account");
     st_emit(err, "folders of Saved Games\\id Software\\DOOM\\base\\savegame.user, found by itself). Close DOOM first.");
 }
