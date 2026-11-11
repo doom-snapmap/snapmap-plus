@@ -313,24 +313,6 @@ static int msy_doc_save(const char *section, const mpj *doc)
     return ok;
 }
 
-/* Record a build whose fetch found only editor-time content: section
- * "editorOnly", keyed by build hash. 1 written. */
-static int msy_editor_only_record(const char *hash, const char *id, const char *name)
-{
-    mpj *doc = msy_doc_load("editorOnly", "editorOnly"), *section, *entry;
-    int ok = 0;
-    if (!doc) return 0;
-    section = mpj_get(doc, "editorOnly");
-    entry = mpj_new(MPJ_OBJ);
-    if (section && entry && mpj_set(entry, "id", mpj_new_str(id ? id : "")) &&
-        mpj_set(entry, "name", mpj_new_str(name ? name : "")) &&
-        mpj_set(entry, "at", mpj_new_int((long long)_time64(NULL))) && mpj_set(section, hash, entry))
-        ok = msy_doc_save("editorOnly", doc);
-    else mpj_free(entry);
-    mpj_free(doc);
-    return ok;
-}
-
 static mpj *msy_hash_array(const char *const *items, int n)
 {
     mpj *arr = mpj_new(MPJ_ARR);
@@ -1301,40 +1283,6 @@ int modsync_fetch_build_for(const sh_modmanifest_row *row, const sh_ms_place *pl
     code = modnet_get_build(row->build, path, &sub, &r);
     msy_absorb(st, &r);
     if (code != MODNET_OK) { st->ms = msy_now_ms() - t0; return msy_stats_fail(st, code, "%s", r.message); }
-    {
-        /* A build of editor-time content only (an author's editor overrides
-         * a map named): nothing in it plays, so nothing is installed. The
-         * record remembers it, and the row is served from now on. */
-        sh_zip_reader zr;
-        sh_mb_bundle b;
-        unsigned char *text = NULL;
-        size_t len = 0;
-        char why[300];
-        int editor = 0;
-        memset(&zr, 0, sizeof zr);
-        memset(&b, 0, sizeof b);
-        if (sh_zip_reader_open(&zr, path, why, sizeof why) &&
-            msy_archive_modjson(&zr, &b, &text, &len, why, sizeof why) &&
-            msy_archive_matches(&zr, &b, row->salt, row->build, why, sizeof why) && sh_mb_editor_only(&b)) {
-            int recorded = msy_editor_only_record(row->build, b.id, b.name);
-            editor = 1;
-            msy_log("MODS: pull %.16s: %s (%s) changes only the editor (%u file(s), no requirements); not installed, "
-                    "the map plays without it%s", row->build, b.name && b.name[0] ? b.name : b.id, b.id,
-                    (unsigned)b.file_count, recorded ? "" : " (the record could not be written; it will be asked again)");
-        }
-        sh_mb_free(&b);
-        free(text);
-        sh_zip_reader_close(&zr);
-        if (editor) {
-            msy_delete_utf8(path);
-            st->editor_only = 1;
-            if (sh_modserve_index_rescan() < 0)
-                msy_log("MODS: pull %.16s: the serving index could not be rebuilt after the record was written", row->build);
-            st->ms = msy_now_ms() - t0;
-            st->code = MODNET_OK;
-            return 1;
-        }
-    }
     ok = modsync_install_archive(path, row->salt, row->build, place, &info, cause, sizeof cause);
     msy_delete_utf8(path);
     strncpy_s(st->folder, sizeof st->folder, info.rel, _TRUNCATE);

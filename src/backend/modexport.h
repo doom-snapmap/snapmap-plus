@@ -165,7 +165,7 @@ int   modexport_validate_source(const char *path, char *out_msg, int msg_capacit
  * folder of the salt ("maps\<segment>"), or, for "" (the player's own map, a
  * prefab), the root, where it installs as the player's own mod
  * (sh_ms_install_to_root). Worker thread. 1 with `where` its folder under
- * mods\ ("" for an editor-only build); 0 with st->code and st->cause. */
+ * mods\; 0 with st->code and st->cause. */
 struct modnet_io;
 struct modsync_stats;
 int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const struct modnet_io *io,

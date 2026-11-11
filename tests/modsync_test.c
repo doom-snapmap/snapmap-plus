@@ -17,8 +17,8 @@
  *   not, a republish replacing the place's build of the salt, two maps
  *   unpacking their own copies, and refusals with nothing placed: an archive
  *   of another build or salt, a corrupted transfer, an extra entry, and a
- *   borrow the game lacks (MODNET_E_GAME); an editor-only build recorded,
- *   not installed.
+ *   borrow the game lacks (MODNET_E_GAME); an editor-tweaks build installed
+ *   like any other; a download for the root installed there directly.
  *
  * The local store and the serving index are stubbed below (the walk, the
  * places, the rescan) so the suite tests this lane's code alone.
@@ -768,15 +768,15 @@ int main(void)
                   strstr(st.cause, "your mods already hold"));
         }
 
-        /* ---- an editor-only build: recorded, not installed ---- */
+        /* ---- an editor-tweaks build a map names: installed like any other ---- */
         {
             sh_ms_place ed = place_of("Editor Map", NULL);
             row_of(&row, "edito005", he);
-            CHECK(modsync_fetch_build_for(&row, &ed, NULL, &st) && st.editor_only);
+            CHECK(modsync_fetch_build_for(&row, &ed, NULL, &st) && st.builds_created == 1);
             _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Editor Map", r2);
-            CHECK(count_dirs(got) == 0);
+            CHECK(count_dirs(got) == 1);
             _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\snapmap-plus.json", r2);
-            CHECK(file_has(got, "\"editorOnly\"") && file_has(got, he));
+            CHECK(!file_has(got, "\"editorOnly\""));
         }
     }
 

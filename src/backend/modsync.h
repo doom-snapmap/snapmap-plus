@@ -67,7 +67,6 @@ typedef struct modsync_stats {
     int reclaimed;                  /* upload: the stored secret replaced the ref's build set */
     int queued;                     /* upload or release: the failure was queued for retry */
     int already_installed;          /* download: nothing was fetched */
-    int editor_only;                /* download: the build changes only the editor; recorded, not installed */
     char folder[MODSYNC_FOLDER_MAX];   /* download: the folder under mods\ that serves the row */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
     char cause[1024];               /* room for a record path and its next step (sh_mb_record_why) */

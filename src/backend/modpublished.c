@@ -1847,10 +1847,7 @@ static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *pla
     g_eng_fetch_hash[0] = 0;
     g_eng_fetch_source[0] = 0;
     if (modexport_fetch_build(row, place, &io, &st, where, sizeof where)) {
-        if (st.editor_only)
-            pub_logf("MODS: %s changes only the editor; the map plays without it, so it was not installed",
-                     row->name[0] ? row->name : row->salt);
-        else if (where[0])
+        if (where[0])
             pub_logf("MODS: %s is served by mods\\%s%s", row->name[0] ? row->name : row->salt, where,
                      st.already_installed ? " (already there)" : "");
         return 0;

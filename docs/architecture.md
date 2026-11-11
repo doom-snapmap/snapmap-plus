@@ -1040,14 +1040,12 @@ editor overrides never become a dependency of a map, vanilla or not. A
 gameplay shadow (an entityDef, a material, a model) still does.
 
 The player side of the same rule: a row is served only by an installed build
-(`sh_modserve_row_served_for`); the serving index no longer reads the record's
-former `editorOnly` section, so a build a map names is installed like any
+(`sh_modserve_row_served_for`), so a build a map names is installed like any
 other (an install drops nothing).
 
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `editorOnly` (bundle hash to id,
-name and when: bundles a map named that change only the editor) and `places`
-(each map's place, above), each section written whole under one lock. The
+`claims`, `links`, `pending`, `migration` and `places` (each map's place,
+above), each section written whole under one lock. The
 build cache, aliases, snapshots and first-build renames of earlier releases
 are gone: the block's `tree` is the rebuild rule's key.
 A record another program holds open is waited for, up to a second. A read
@@ -3820,8 +3818,8 @@ the map". The files are unpacked into `<place folder>.staging-<pid>` beside
 the target (`sh_ms_place_folder`) without the store lock, then swapped in,
 replacing the place's earlier build of the salt; the place is noted in the
 record (`sh_ms_place_note`) and the serving index rescanned. Two maps that
-name one build each unpack their own copy. A build of editor-time content
-only is recorded in the record's `editorOnly` section and not installed.
+name one build each unpack their own copy. Every build a map names is
+installed, editor-tweaks builds included.
 
 ## Module prefabs
 
