@@ -958,6 +958,7 @@ typedef struct me_import {
     size_t nc, cap;
     int kind;                           /* what the export holds */
     int retired;                        /* a map's export in beta.20's bundle form (me_install_retired) */
+    char zip_name[MAX_PATH];            /* the export's file name without its folder and extension: mods\imports\<it>\ */
 } me_import;
 
 static void me_import_free(me_import *im)
@@ -1097,6 +1098,18 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
     *text = NULL;
     *len = 0;
     *idx = -1;
+    if (path) {
+        /* The name its imported mods are grouped under: mods\imports\<name>\. */
+        const char *leaf = path, *c;
+        size_t ln;
+        for (c = path; *c; c++) if (*c == '\\' || *c == '/') leaf = c + 1;
+        ln = strlen(leaf);
+        if (ln > 4 && (!_stricmp(leaf + ln - 4, ".zip") || !_stricmp(leaf + ln - 4, ".json"))) ln -= 4;
+        if (ln > 5 && !_stricmp(leaf + ln - 5, ".json")) ln -= 5;
+        if (ln >= sizeof im->zip_name) ln = sizeof im->zip_name - 1;
+        memcpy(im->zip_name, leaf, ln);
+        im->zip_name[ln] = 0;
+    }
     if (want == ME_KIND_PREFAB && n > 5 && !_stricmp(path + n - 5, ".json")) {
         wchar_t *w = sh_mb_wpath(path), *slash;
         WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -1424,14 +1437,6 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
     return 1;
 }
 
-/* A carried folder name the store may keep: one Windows folder name. */
-static int me_name_safe(const char *name)
-{
-    size_t n = strlen(name);
-    if (!n || name[n - 1] == '.' || name[n - 1] == ' ' || name[0] == ' ') return 0;
-    return strpbrk(name, "<>\"|?*/\\:") == NULL;
-}
-
 /* Remove what this import installed, and only that. */
 static void me_rollback(me_import *im, const char *root)
 {
@@ -1538,27 +1543,27 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, modexport_
             me_carry *c = &im->c[i];
             sh_ms_install_stats is;
             sh_mb_bundle built;
-            char as[SH_MS_NAME_MAX + 1];
-            int same_id = 0, named;
+            sh_ms_place place;
+            int same_id = 0;
             if (c->present || c->installed) continue;
             if (sh_ms_enumerate(&l)) {
                 for (k = 0; k < l.count && !same_id; k++) same_id = l.items[k].loaded && !strcmp(l.items[k].bundle.id, c->b.id);
                 sh_ms_list_free(&l);
             }
-            /* Rule 1: the first build of a key takes the key, every later one
-             * <key>@<hash16> beside it, whatever the export's folder was called. */
-            named = sh_ms_build_folder_name(root, c->b.id, c->b.hash, same_id, as, sizeof as);
-            if (!named || !me_name_safe(as)) {
-                me_cause(cause, cap, "no free folder name for %s at %.16s", c->b.id, c->b.hash);
-                goto rollback;
-            }
-            /* An imported folder is the author's build as it was: its
-             * replacements are kept, never refused (DESIGN-additive 2.8). One
-             * built under earlier rules gets the hash today's rules give, so
-             * the store names it by that hash (and finds it if installed). */
+            /* A build an export carried is the product's to place (DESIGN-
+             * additive A.4, owner 2026-11-10): mods\imports\<export name>\<key>\,
+             * never <key>@<hash16> beside the player's own folders, whatever
+             * the export's folder was called. An imported folder is the
+             * author's build as it was: its replacements are kept, never
+             * refused (DESIGN-additive 2.8). One built under earlier rules
+             * gets the hash today's rules give, so the store names it by that
+             * hash (and finds it if installed). */
+            place.group = SH_MS_GROUP_IMPORTS;
+            place.title = im->zip_name[0] ? im->zip_name : NULL;
+            place.map_id = NULL;
             sh_mb_keep_replacements_here(1);
-            if (!sh_ms_install_with(c->stage, c->earlier_rules ? NULL : as, SH_MS_ORIGIN_IMPORTED, &r, c->stored, sizeof c->stored, &is, &built,
-                                    c->why, sizeof c->why)) {
+            if (!sh_ms_install_placed(c->stage, SH_MS_ORIGIN_IMPORTED, &place, &r, c->stored, sizeof c->stored, &is, &built,
+                                      c->why, sizeof c->why)) {
                 sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
@@ -1706,7 +1711,14 @@ static int me_install_retired(me_import *im, const sh_modmanifest_list *rows, mo
         sh_mb_sha256_hex(text, len, hash);
         if (!me_rows_name(rows, hash)) { free(text); continue; }
         st->bundles++;
-        ok = modsync_install_manifest((const char *)text, len, hash, me_retired_blob, &im->zr, &info, why, sizeof why);
+        {
+            sh_ms_place place;
+            place.group = SH_MS_GROUP_IMPORTS;
+            place.title = im->zip_name[0] ? im->zip_name : NULL;
+            place.map_id = NULL;
+            ok = modsync_install_manifest_for((const char *)text, len, hash, &place, me_retired_blob, &im->zr, &info, why,
+                                              sizeof why);
+        }
         free(text);
         if (!ok) { me_cause(cause, cap, "%.*s in the export does not install: %s", (int)(n - ll - 5), name + 5, why); break; }
         if (info.already_installed) { st->bundles_present++; continue; }

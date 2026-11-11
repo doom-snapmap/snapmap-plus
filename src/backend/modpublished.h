@@ -303,6 +303,13 @@ typedef struct sh_modpub_ops {
      * declared (modui.h sh_modui_scope_launch_refused). Called after
      * drop_ui for every hook but a rawmap load and a prefab placement. */
     void (*launch_refused)(void *c, int hook);
+    /* The fetch, told which map it is for (modsync_fetch_bundle_for: the
+     * build lands under mods\downloads\<title>\<key>\). `title` and `map_id`
+     * may be "". NULL: `fetch` answers alone. Worker thread; 0 ok. */
+    int  (*fetch_for)(void *c, const char *hash, const char *title, const char *map_id, sh_modpub_progress_fn progress,
+                      volatile int *cancel);
+    /* The published item's title from its metadata, else 0. */
+    int  (*metadata_title)(void *c, const void *metadata, char *out, size_t cap);
 } sh_modpub_ops;
 
 /* The decision a hook detour asks for before calling its original. Returns 1

@@ -1469,7 +1469,7 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(has(doc, "{\"v\":3,"));
         CHECK(bundle_has(doc, "alex.req", "\"description\":\"Turns the two blacklists off.\",\"origin\":\"install\","
-                                          "\"migratedFrom\":\"\",\"servedBy\":\"\",\"builtAt\":"));
+                                          "\"migratedFrom\":\"\",\"downloadedFor\":\"\",\"servedBy\":\"\",\"builtAt\":"));
         CHECK(has(doc, "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
         CHECK(bundle_has(doc, key2, "\"counts\":{\"shadows\":0,\"sounds\":0,\"movies\":0,\"modules\":0,\"vt\":0"));
         CHECK(has(doc, "\"editorRowNames\":[\"mods/alex.r2-imp/imp_copy\",\"mods/alex.r2-imp/imp_copy_b\"]"));

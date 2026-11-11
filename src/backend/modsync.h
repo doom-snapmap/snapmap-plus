@@ -23,9 +23,9 @@
  * fetched and verified against its hash; a borrow the installed game lacks
  * refuses it before anything is fetched (MODNET_E_GAME, the source named);
  * each file is copied from an installed mod that holds the same bytes, else
- * fetched, and verified; the folder <data>\mods\<key>\ for the first build of
- * its key, else <key>@<hash16> beside the others (sh_ms_build_folder_name),
- * gets mod.json (an author block from the manifest and the product block,
+ * fetched, and verified; the folder <data>\mods\downloads\<map title>\<key>\
+ * (sh_ms_placed_folder_name; no hash in its name, never beside the player's
+ * own folders) gets mod.json (an author block from the manifest and the product block,
  * origin "download") and assets\, is verified by sh_ms_verify, and the
  * serving index is rebuilt. Nothing installed is replaced. A bundle whose
  * content an installed mod of the same key already serves is not stored
@@ -81,8 +81,15 @@ int  modsync_upload_bundles(const char *const *bundle_hashes, int n, const char 
                             const modnet_io *io, modsync_stats *stats);
 
 /* Download one bundle by hash into the local store and rescan the serving
- * index. Returns 1 on success (including already installed). */
+ * index. Returns 1 on success (including already installed). The build is
+ * placed under mods\downloads\ (sh_ms_placed_folder_name). */
 int  modsync_fetch_bundle(const char *bundle_hash, const modnet_io *io, modsync_stats *stats);
+/* The same, for a map: placed as mods\downloads\<map title>\<key>\, and the
+ * record's "downloads" section notes the folder that serves the map (a new
+ * one, or one already present anywhere in the store). `map_title` and
+ * `map_id` may be NULL. */
+int  modsync_fetch_bundle_for(const char *bundle_hash, const char *map_title, const char *map_id, const modnet_io *io,
+                              modsync_stats *stats);
 
 /* Release the claim stored for ref and forget it (also when the store no
  * longer knows the claim). A pending upload for ref is dropped. Returns 1 on
@@ -137,6 +144,13 @@ typedef struct modsync_install_info {
 int  modsync_install_manifest(const char *canonical, size_t len, const char *hash,
                               modsync_blob_source_fn source, void *context,
                               modsync_install_info *info, char *cause, size_t cause_cap);
+/* The same, placed by `place` (modstore.h; NULL: under mods\downloads\ with no
+ * title). A place in the downloads group also notes the map in the record's
+ * "downloads" section, for a new folder or one already present. */
+struct sh_ms_place;
+int  modsync_install_manifest_for(const char *canonical, size_t len, const char *hash, const struct sh_ms_place *place,
+                                  modsync_blob_source_fn source, void *context,
+                                  modsync_install_info *info, char *cause, size_t cause_cap);
 
 /* The installed, usable bundle with this hash: 1 and its folder (UTF-8),
  * else 0. */

@@ -631,6 +631,35 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
                              modsync_blob_source_fn source, void *ctx,
                              modsync_install_info *info, char *cause, size_t cap)
 {
+    return modsync_install_manifest_for(canonical, len, hash, NULL, source, ctx, info, cause, cap);
+}
+
+/* The folder `full` (absolute) under the store root `root`, as its name under mods\. */
+static void msy_rel_of(const char *root, const char *full, char *out, size_t cap)
+{
+    size_t rl;
+    if (!strncmp(root, "\\\\?\\", 4)) root += 4;   /* either may carry the long-path prefix */
+    if (!strncmp(full, "\\\\?\\", 4)) full += 4;
+    rl = strlen(root);
+    while (rl && (root[rl - 1] == '\\' || root[rl - 1] == '/')) rl--;
+    if (!_strnicmp(full, root, rl) && (full[rl] == '\\' || full[rl] == '/')) strncpy_s(out, cap, full + rl + 1, _TRUNCATE);
+    else strncpy_s(out, cap, strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full, _TRUNCATE);
+}
+
+/* The map a download serves, noted in the record (downloads group only). */
+static void msy_note_map(const sh_ms_place *place, const char *rel)
+{
+    if (!place || !place->group || strcmp(place->group, SH_MS_GROUP_DOWNLOADS)) return;
+    if ((place->title && place->title[0]) || (place->map_id && place->map_id[0]))
+        (void)sh_ms_downloads_note(place->map_id, place->title, rel);
+}
+
+int modsync_install_manifest_for(const char *canonical, size_t len, const char *hash, const sh_ms_place *place_in,
+                                 modsync_blob_source_fn source, void *ctx,
+                                 modsync_install_info *info, char *cause, size_t cap)
+{
+    static const sh_ms_place DOWNLOADS = { SH_MS_GROUP_DOWNLOADS, NULL, NULL };
+    const sh_ms_place *place = place_in && place_in->group && place_in->group[0] ? place_in : &DOWNLOADS;
     modsync_install_info local;
     sh_mb_bundle b;
     sh_ms_list list;
@@ -686,7 +715,8 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     if (!msy_root(root, sizeof root)) { msy_cause(cause, cap, "the store folder cannot be resolved"); goto done; }
     /* Installed already, in whatever folder (a hand-built mod is built in place). */
     if (modsync_find_installed(hash, final, sizeof final)) {
-        strncpy_s(info->rel, sizeof info->rel, strrchr(final, '\\') ? strrchr(final, '\\') + 1 : final, _TRUNCATE);
+        msy_rel_of(root, final, info->rel, sizeof info->rel);
+        msy_note_map(place, info->rel);
         info->already_installed = 1;
         ok = 1;
         goto done;
@@ -705,20 +735,21 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         msy_log("MODS: pull %.16s: %s serves the same content; recorded as an alias of %.16s, nothing stored", hash,
                 e->name, e->bundle.hash);
         strncpy_s(info->rel, sizeof info->rel, e->name, _TRUNCATE);
+        msy_note_map(place, info->rel);
         info->already_installed = 1;
         ok = 1;
         goto done;
     }
-    /* Install by hash, rule 1 (DESIGN-additive 4): the first build of a key
-     * takes the key as its folder name, every later one <key>@<hash16>
-     * beside it; nothing installed is replaced. */
-    {
-        int key_installed = 0;
-        for (i = 0; listed && i < list.count && !key_installed; i++)
-            key_installed = list.items[i].loaded && !strcmp(list.items[i].bundle.id, b.id);
-        named = sh_ms_build_folder_name(root, b.id, hash, key_installed, name, sizeof name);
+    /* Install by hash (DESIGN-additive 4, A.4): a build the product received
+     * goes under its group's organizing folder, <group>\<title>\<key>, never
+     * as <key>@<hash16> beside the player's own folders; nothing installed is
+     * replaced. */
+    named = sh_ms_placed_folder_name(root, place, b.id, hash, name, sizeof name);
+    if (!named) {
+        msy_cause(cause, cap, "no free folder for %s under mods\\%s (is mods\\%s itself a mod folder? rename it)", b.id,
+                  place->group, place->group);
+        goto done;
     }
-    if (!named) { msy_cause(cause, cap, "no free folder for %s at %.16s in the store", b.id, hash); goto done; }
     replace = named == 2;   /* the same bundle, damaged or unbuilt: placed again */
     strncpy_s(info->rel, sizeof info->rel, name, _TRUNCATE);
     _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, name);
@@ -796,6 +827,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         }
     }
     sh_ms_cache_note(final, hash);
+    msy_note_map(place, name);
     ok = 1;
 done:
     modsync_store_unlock();
@@ -1190,6 +1222,13 @@ static int msy_net_source(void *ctx, const char *sha, unsigned long long size, u
 
 int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *stats)
 {
+    return modsync_fetch_bundle_for(hash, NULL, NULL, io, stats);
+}
+
+int modsync_fetch_bundle_for(const char *hash, const char *map_title, const char *map_id, const modnet_io *io,
+                             modsync_stats *stats)
+{
+    sh_ms_place place;
     modsync_stats local;
     modsync_stats *st = stats ? stats : &local;
     modsync_install_info info;
@@ -1203,7 +1242,20 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     memset(st, 0, sizeof *st);
     if (!modnet_valid_hash(hash)) return msy_stats_fail(st, MODNET_E_ARG, "not a 64-hex bundle hash");
     st->bundles = 1;
+    place.group = SH_MS_GROUP_DOWNLOADS;
+    place.title = map_title;
+    place.map_id = map_id;
     if (modsync_find_installed(hash, folder, sizeof folder)) {
+        /* Present anywhere in the store: not stored again; the record notes
+         * that this map is served by that folder. */
+        char root[MAX_PATH * 4], rel[SH_MS_NAME_MAX + 1];
+        if (msy_root(root, sizeof root)) {
+            msy_rel_of(root, folder, rel, sizeof rel);
+            strncpy_s(st->key, sizeof st->key, rel, _TRUNCATE);
+            modsync_store_lock();
+            msy_note_map(&place, rel);
+            modsync_store_unlock();
+        }
         st->already_installed = 1;
         st->ms = msy_now_ms() - t0;
         return 1;
@@ -1250,7 +1302,7 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
     src.prog = &prog;
     src.st = st;
     src.code = MODNET_OK;
-    ok = modsync_install_manifest(text, len, hash, msy_net_source, &src, &info, cause, sizeof cause);
+    ok = modsync_install_manifest_for(text, len, hash, &place, msy_net_source, &src, &info, cause, sizeof cause);
     free(text);
     strncpy_s(st->key, sizeof st->key, info.rel, _TRUNCATE);
     st->blobs_missing = info.blobs_fetched;

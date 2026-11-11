@@ -246,6 +246,7 @@ test('origins: one plain line per origin', () => {
     'Moved from the old overrides folder (overrides\\hell-guards)');
   assert.equal(modsTab.originText({origin: 'migration', migratedFrom: ''}), 'Moved from the old overrides folder');
   assert.equal(modsTab.originText({origin: 'download'}), 'Downloaded for a map you played');
+  assert.equal(modsTab.originText({origin: 'download', downloadedFor: 'Hell Gate'}), 'Downloaded for Hell Gate');
   assert.equal(modsTab.renamedText({renamedFrom: 'cyberprobe', renamedReferences: 3}),
                'Renamed from cyberprobe; 3 references rewritten');
   assert.equal(modsTab.renamedText({renamedFrom: 'probe', renamedReferences: 1}), 'Renamed from probe; 1 reference rewritten');

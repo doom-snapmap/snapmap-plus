@@ -963,14 +963,15 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.meta.json", libB);
     CHECK(!mt_exists(path));
 
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.door\\mod.json", storeB);
-    CHECK(mt_exists(path));   /* installed under its own name, as a folder from elsewhere is */
+    /* Placed under mods\\imports\\<export name>\\<key> (owner 2026-11-10). */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\imports\\Door export\\test.door\\mod.json", storeB);
+    CHECK(mt_exists(path));
 
     printf("-- importing it again writes nothing\n");
     {
         char mj[MAX_PATH * 2], pj[MAX_PATH * 2];
         _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Door.json", libB);
-        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\test.door\\mod.json", storeB);
+        _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\imports\\Door export\\test.door\\mod.json", storeB);
         CHECK(write_time(pj, &before_p) && write_time(mj, &before_m));
         Sleep(30);
         CHECK(sh_prefab_mods_import(zipA, libB, name, sizeof name, msg, sizeof msg) == 0);
@@ -1417,7 +1418,8 @@ static void gate_end_to_end(const char *tmp)
     CHECK(!sh_modpublished_holding() && F.fetches == 1 && g_e_resumes == 1);
     {
         char beside[SH_MS_KEY_MAX + 1], path[MAX_PATH * 2];
-        _snprintf_s(beside, sizeof beside, _TRUNCATE, "test.twob@%.16s", twob2.bundle);
+        /* A download lands under mods\\downloads\\, never as <key>@<hash16> beside the player's own. */
+        strcpy_s(beside, sizeof beside, "downloads\\test.twob");
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", player, beside);
         CHECK(mt_exists(path));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.twob\\mod.json", player);

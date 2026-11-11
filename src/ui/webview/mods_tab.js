@@ -199,7 +199,7 @@ var modsTab = (function () {
             group: str(b.group),
             /* v3 */
             description: str(b.description), origin: typeof b.origin === 'string' && has(ORIGINS, b.origin) ? b.origin : '',
-            migratedFrom: str(b.migratedFrom), servedBy: str(b.servedBy), builtAt: num(b.builtAt), bundle: str(b.bundle),
+            migratedFrom: str(b.migratedFrom), downloadedFor: str(b.downloadedFor), servedBy: str(b.servedBy), builtAt: num(b.builtAt), bundle: str(b.bundle),
             renamedFrom: str(b.renamedFrom), renamedReferences: num(b.renamedReferences),
             counts: normCounts(b.counts), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: Array.isArray(b.editorRowNames) ? normNames(b.editorRowNames) : null,
@@ -364,6 +364,8 @@ var modsTab = (function () {
 
   function originText(b) {
     if (b.origin === 'migration' && b.migratedFrom) return ORIGINS.migration + ' (' + b.migratedFrom + ')';
+    /* A build downloaded for a map sits in mods\downloads\<map title>\ (owner 2026-11-10). */
+    if (b.origin === 'download' && b.downloadedFor) return 'Downloaded for ' + b.downloadedFor;
     return ORIGINS[b.origin] || ORIGINS[''];
   }
 

@@ -308,8 +308,12 @@ name". Mods you download or import are never refused on their files. A map whose
   lists one row per build under the mod.
 - Mods are installed by hash, whichever way they arrive (the Mods tab's install, `sh_mods install`,
   a rawmap or prefab ZIP, a download for a map): a build you already have is not installed again,
-  and any other build lands as its own folder, the first build of a mod under its key and every
-  later one as `<key>@<first 16 hex of its hash>` beside it. Nothing installed is replaced, and
+  and any other build lands as its own folder. A folder you install sits at the top of `mods\`, the
+  first build of a mod under its key and every later one as `<key>@<first 16 hex of its hash>`
+  beside it. A mod downloaded for a map lives in a folder named after that map,
+  `mods\downloads\<map title>\<key>\`, and a mod a rawmap or prefab ZIP brought in
+  `mods\imports\<ZIP name>\<key>\`; the Mods tab shows those as organizing folders and says
+  "Downloaded for <map title>". Nothing installed is replaced, and
   nothing is ever refused for "same version, different files": the hash is the identity. Each
   folder records where it came from (`origin`: `by-hand`, `install`, `imported`, `download`).
   Uninstalling one build leaves the others.

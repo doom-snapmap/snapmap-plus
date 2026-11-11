@@ -794,13 +794,26 @@ is the mod `local.cyberdemon` named `demon-mods\local.cyberdemon` (its path unde
 `mods\`, which the listing, the console, the Mods tab and `sh_mods build` use; the
 console also takes a nested folder by its own name). Every scan walks the same way:
 the store listing (`sh_ms_enumerate`), the rebuild rule and the serving scan at boot.
-The product itself never nests. Installs, imports and downloads place folders by hash
-(rule 1 of DESIGN-additive 4, `sh_ms_build_folder_name`): the first build of a key is
-`<key>` at the root, every later build `<key>@<first 16 hex of its bundle hash>` beside
-it (`-2`, `-3` ... when that is taken); a build already installed is not installed again
+An install of a folder from elsewhere places it by hash (rule 1 of DESIGN-additive 4,
+`sh_ms_build_folder_name`): the first build of a key is `<key>` at the root, every later
+build `<key>@<first 16 hex of its bundle hash>` beside it (`-2`, `-3` ... when that is
+taken). A build the product receives for a map is never placed beside the player's own
+folders (owner 2026-11-10, `sh_ms_placed_folder_name`): a download goes under an
+organizing folder named after the map, `mods\downloads\<map title>\<key>\` (the title
+made a folder name by `sh_ms_title_segment`: the characters Windows refuses dropped, at
+most 60 bytes, a device name given a `_`; ` (<map id>)` appended only when the record's
+`downloads` section already gives that title folder to another map of the same title;
+with no title, `mods\downloads\<key>\`), and a build a rawmap or prefab ZIP carried goes
+under `mods\imports\<ZIP name>\<key>\` by the same rule; a later build there is `<key>-2`,
+`-3` .... No hash names a visible folder: `.builds\` (hidden) is the only place one
+appears. A build already installed anywhere is not installed again
 (`sh_ms_install_stats.present`), and nothing installed is replaced, so "same version,
 other files" is never a refusal. Each records its `origin` (`install`, `imported` for a
-rawmap or prefab ZIP, `download`). A migration's named target keeps the older rule
+rawmap or prefab ZIP, `download`). A download notes the map it was fetched for in the
+record's `downloads` section (`sh_ms_downloads_note`: map id, or `title:<segment>`, to the
+title and the folders that serve it), also when the build was already present elsewhere
+in the store, so the Mods tab says "Downloaded for <map title>" (`downloadedFor`,
+`sh_ms_downloaded_for`, else the title folder's name). A migration's named target keeps the older rule
 (`<id>`, else `<id>@<version>`), and the upgrade's renames leave nested folders where
 they are. A package a map
 delivered without a version gets one
@@ -890,8 +903,9 @@ download an author's editor overrides again.
 
 `mods\snapmap-plus.json` is the product's one record:
 `claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
-`aliases` and `editorOnly` (bundle hash to id, name and when: bundles a map
-named that change only the editor), each section written whole under one lock.
+`aliases`, `editorOnly` (bundle hash to id, name and when: bundles a map
+named that change only the editor) and `downloads` (the maps downloaded builds were
+fetched for, above), each section written whole under one lock.
 A record another program holds open is waited for, up to a second. A read
 that still fails logs `MODS: record: cannot read <file> (<why>)`, and that
 section is not written until a read of it succeeds again, so a
@@ -910,7 +924,9 @@ covered builds move the folder there (`sh_ms_delete_mod_folder`: a direct
 child of the store root, under the store lock, through `SHFileOperationW`
 `FO_DELETE` with `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT |
 FOF_NOERRORUI | FOF_NORECURSEREPARSE`, a double-NUL-terminated plain path,
-reparse points moved as themselves and never entered), drop its aliases once
+reparse points moved as themselves and never entered; a folder under
+`downloads\` or `imports\` takes its emptied title and group folders with it and
+leaves the record's `downloads` section), drop its aliases once
 no folder of its id remains (`sh_ms_alias_forget`), and rescan; the build cache
 follows at that rescan. `sh_ms_remove_folder`, which the store upgrade and an
 import's rollback use, takes the same route under the same lock. The shell is
@@ -2571,10 +2587,11 @@ abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled. After No, a hold that
 asked for one row shows that row's sentence and "The map was not loaded."
 (for example "This map uses Hell Guards (local.hell-guard), which is not
-installed. The map was not loaded."). The download lands by hash (rule 1):
-under its key when no folder of the key is installed, else beside them as
-`<key>@<hash16>`, never over one; the resume checks every row against the asset
-rule again.
+installed. The map was not loaded."). The download lands by hash under
+`mods\downloads\<map title>\<key>\` (`modsync_fetch_bundle_for`; the title is the
+published item's, an idStr at metadata +0x398 beside the id at +0 and the revision at
++0x30, a rawmap's file name, a prefab's name), never over a folder; the resume
+checks every row against the asset rule again.
 
 ### Rawmaps that name mods
 
@@ -2625,8 +2642,8 @@ bundle hash the row declares, as that build is installed:
 
 ```
 <name>.json                the map text, its snapmap-plus member included, named after the ZIP
-mods/<folder>/mod.json     the store folder's own name (<key>, or <key>@<hash16> for a
-mods/<folder>/assets/...   later build of the key), byte for byte
+mods/<folder>/mod.json     the store folder's name under mods\ (<key>, imports/<ZIP name>/<key>,
+mods/<folder>/assets/...   downloads/<map title>/<key>, or an author's organizing folders), byte for byte
 ```
 
 Entry names separate with `/` only, as the ZIP format requires: a mod in an
@@ -2664,10 +2681,10 @@ carried folder no row names is left out):
 - each remaining folder is copied out of the ZIP into a temporary folder (with
   the bytes of a pointer the folder held filled from this player's own game)
   and installed from there as any folder from elsewhere is
-  (`sh_ms_install_with`, origin `imported`: built, copied into the store,
-  verified) under rule 1: its key when no folder of the key is installed and
-  that name is free, else `<key>@<hash16>` beside the installed builds, never
-  over one, whatever the carried folder was called and whatever its version.
+  (`sh_ms_install_placed`, origin `imported`: built, copied into the store,
+  verified) as `mods\imports\<ZIP name>\<key>\` (`<key>-2` ... when another build
+  holds that name), never beside the player's own folders and never over one,
+  whatever the carried folder was called and whatever its version.
   Same version with other files is not a refusal. A mod that needs another
   carried mod is built after it;
 - the built bundle hash must equal the one the carried `mod.json` names;
@@ -2845,8 +2862,7 @@ takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
 carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
 names a bundle the block's rows name, exactly as a map's import does (see
 [Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when the store holds
-its hash, installed by hash under rule 1 otherwise (its key, or `<key>@<hash16>`
-beside the installed builds), and removed again when it does not build to the hash its own
+its hash, installed by hash under `mods\imports\<ZIP name>\<key>\` otherwise, and removed again when it does not build to the hash its own
 `mod.json` names; a carried folder no row names is left out. It then rescans and adds the prefab under the `.json`'s file
 name. A prefab of that name with the same bytes is left alone (an
 import that finds everything already there writes nothing); one with other bytes
