@@ -239,14 +239,16 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   call-site relay on an owned synthetic caller under a concurrent thread; with
   the executables, that the HUD call decodes to the predicate at an aligned
   rel32 with the widget in RBX.
-- `modshadow_test.c` measures those rules on a player's real retired
-  `overrides\` tree: `SH_MODSHADOW_DATA` names a scratch data root holding a
-  copy of it and `SH_MODSHADOW_GAME_NAMES` a `type<TAB>name` list of
-  `snap_gameresources`; the migration builds the tree, the index resolves its
-  conflicts, and the editor plan and every bundle's gameplay plan run against a
-  registry that knows those names. It prints each conflict and, per bundle,
-  every animWeb withdrawn. Skipped without the two variables (the tree holds
-  game files); `SH_MODSHADOW_DUMP` names a folder for the composed texts.
+- `modshadow_test.c` measures those rules on a player's real mod store in the
+  one shape: `SH_MODSHADOW_DATA` names a data root holding `mods\` (a copy the
+  store tool converted; it is only read), `SH_MODSHADOW_GAME_NAMES` a
+  `type<TAB>name` list of `snap_gameresources` and `SH_MODSHADOW_DOOM` the
+  install (default `D:\SteamLibrary\steamapps\common\DOOM`); the index
+  resolves its conflicts, the boss mods' encounters are checked to reach the
+  generated conductor, and the editor plan and every bundle's gameplay plan run
+  against a registry that knows those names. It prints each conflict and, per
+  bundle, every animWeb withdrawn. Skipped without the two variables (the store
+  holds game files); `SH_MODSHADOW_DUMP` names a folder for the composed texts.
 - `webview_profile_test.cpp` checks where the companion window's WebView2
   profile goes (`webview_profile.h`): created under `cache\webview2`, an older
   top-level `webview2` folder renamed into it with the same files, an old
