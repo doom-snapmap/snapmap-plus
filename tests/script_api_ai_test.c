@@ -454,6 +454,20 @@ static void test_move_state(void)
     sh_ai_move m;
     memset(&m, 0, sizeof m);
     sh_ai_move_issue(&m, 10);
+    /* a forced via: wait for the node, ask for the destination once it plays, done when the destination plays */
+    CHECK(sh_ai_force_via_next(0, 0, 10, 600) == SH_AI_FORCE_VIA_WAIT);
+    CHECK(sh_ai_force_via_next(0, 0, 601, 600) == SH_AI_FORCE_VIA_DONE);            /* never seen: given up */
+    CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN, 0, 3, 600) == SH_AI_FORCE_VIA_ASK_DEST);
+    CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN, 1, 5000, 600) == SH_AI_FORCE_VIA_WAIT);   /* a long clip is waited for */
+    CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN | SH_SCRIPT_ANIM_VIA_OUT, 0, 9, 600) == SH_AI_FORCE_VIA_ASK_DEST);
+    CHECK(sh_ai_force_via_next(SH_SCRIPT_ANIM_VIA_IN | SH_SCRIPT_ANIM_DEST, 1, 9, 600) == SH_AI_FORCE_VIA_DONE);
+    /* a parked demon stays the script's except while dead, or while a pain reaction is asked for or playing */
+    CHECK(sh_ai_park_holds(1, 0, 0) == 1);
+    CHECK(sh_ai_park_holds(0, 0, 0) == 0);          /* dead: the engine's dying cycle takes it */
+    CHECK(sh_ai_park_holds(1, 1, 0) == 0);          /* this frame's damage asked for a pain */
+    CHECK(sh_ai_park_holds(1, 0, 6) == 0);          /* PAIN_FALTER is playing */
+    CHECK(sh_ai_park_holds(1, 0, 9) == 0);          /* PAIN_STAGGER is playing */
+    CHECK(sh_ai_park_holds(0, 1, 6) == 0);
     CHECK(sh_ai_move_step(&m, 0, 10) == SH_AI_MOVE_RUNNING);   /* the command takes effect next think */
     CHECK(sh_ai_move_step(&m, 1, 11) == SH_AI_MOVE_RUNNING);
     CHECK(sh_ai_move_step(&m, 3, 20) == SH_AI_MOVE_RUNNING);

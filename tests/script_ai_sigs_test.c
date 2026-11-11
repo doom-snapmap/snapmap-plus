@@ -125,6 +125,13 @@ static void check_image(const char *path)
         CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
         CHECK(!memcmp(base + rva[SH_AI_SIG_IS_RUNNING_SCRIPT], k_ai_irs_prologue, SH_AI_IRS_STOLEN));
     }
+    if (rva[SH_AI_SIG_MOVE_TRANSITION]) {
+        unsigned flags = 0;
+        size_t b = sh_x64_stolen_boundary(base + rva[SH_AI_SIG_MOVE_TRANSITION], 64, 14, 48, &flags);
+        CHECK(b == SH_AI_MOVE_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        CHECK(!memcmp(base + rva[SH_AI_SIG_MOVE_TRANSITION], k_ai_move_prologue, SH_AI_MOVE_STOLEN));
+    }
 
     /* The path site's targets. */
     if (rva[SH_AI_SIG_PATH_SITE]) {

@@ -138,6 +138,23 @@ typedef struct sh_ai_move {
     int      seen;        /* a status other than 0 was seen since the command */
     uint32_t issued;      /* frame of the command */
 } sh_ai_move;
+/* What a forced via needs this frame, from what the web was seen doing
+ * (SH_SCRIPT_ANIM_* flags of the request), whether its destination was asked
+ * already, and the frames since it was issued. The destination is asked as
+ * soon as the forced node is seen playing: a forced clip holds its last frame
+ * until the web is asked to go somewhere. Pure. */
+enum { SH_AI_FORCE_VIA_WAIT, SH_AI_FORCE_VIA_ASK_DEST, SH_AI_FORCE_VIA_DONE };
+int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue, uint32_t give_up_frames);
+
+/* 1 while a parked demon stays the script's: the engine's FSM is told a
+ * script is running, so it starts no behaviour of its own. The engine keeps
+ * two things: death (a dead demon goes to its dying cycle, ragdoll and
+ * removal as any demon does) and pain (the frame's damage asked for a pain
+ * reaction, or one is playing: the engine's own pain cycle picks and plays
+ * the clip, and the script hears of it through on.pain). The demon is the
+ * script's again when the reaction is over. Pure. */
+int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction);
+
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame);
 /* Feed the status read at `frame`; returns the move's state. */
 int  sh_ai_move_step(sh_ai_move *m, int status, uint32_t frame);
@@ -381,6 +398,7 @@ enum sh_ai_sig {
     SH_AI_SIG_ANIM_DELTA,          /* an animation's total root motion */
     SH_AI_SIG_WEAPON_IN_SLOT,      /* the weapon in an equip slot (the demon, equipSlot_t) */
     SH_AI_SIG_INVENTORY_ITEM,      /* inventory item by index (the inventory list, index) */
+    SH_AI_SIG_MOVE_TRANSITION,     /* the move system's transition query (detoured) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -435,6 +453,18 @@ size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const
 static const uint8_t k_ai_irs_prologue[SH_AI_IRS_STOLEN] = {
     0x40, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0x81, 0xC0, 0x3B, 0x02, 0x00, 0x48, 0x8B, 0xF1
 };
+
+/* The move transition detour window: push rbp, rsi, rdi, r12-r15;
+ * lea rbp,[rsp-0x1640] (whole, position-independent). The turn on the spot
+ * is kind 3; byte 0x102 bit 0 of the request lets its clip query take a clip
+ * whose root travels (the engine's own "allow transition overshoot"). */
+#define SH_AI_MOVE_STOLEN 20
+static const uint8_t k_ai_move_prologue[SH_AI_MOVE_STOLEN] = {
+    0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+    0x48, 0x8D, 0xAC, 0x24, 0xC0, 0xE9, 0xFF, 0xFF
+};
+#define SH_AI_MOVE_KIND_TURN       3
+#define SH_AI_MOVE_REQ_OVERSHOOT   0x102u
 
 /* idAI2 offsets the calls read (both renderers, 13954591). */
 #define SH_AI_OFF_MOVE_FSM        0x23198u  /* move FSM pointer; status int at +0xD20 */

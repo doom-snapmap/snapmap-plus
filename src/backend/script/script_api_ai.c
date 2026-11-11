@@ -118,6 +118,18 @@ int sh_ai_event_format_ok(int ev, const char *registry_format)
     return strcmp(SH_AI_EVENTS[ev].format, registry_format) == 0;
 }
 
+int sh_ai_force_via_next(unsigned flags, int asked, uint32_t frames_since_issue, uint32_t give_up_frames)
+{
+    if (flags & SH_SCRIPT_ANIM_DEST) return SH_AI_FORCE_VIA_DONE;
+    if (flags & SH_SCRIPT_ANIM_VIA_IN) return asked ? SH_AI_FORCE_VIA_WAIT : SH_AI_FORCE_VIA_ASK_DEST;
+    return frames_since_issue > give_up_frames ? SH_AI_FORCE_VIA_DONE : SH_AI_FORCE_VIA_WAIT;
+}
+
+int sh_ai_park_holds(int alive, int pain_requested, int pain_reaction)
+{
+    return alive && !pain_requested && pain_reaction == SH_COMBAT_PAIN_NONE;
+}
+
 void sh_ai_move_issue(sh_ai_move *m, uint32_t frame)
 {
     m->state = SH_AI_MOVE_RUNNING;
@@ -1692,6 +1704,7 @@ typedef struct ai_force_via {
     char *dest;              /* malloc'd node names */
     char *via;
     uint32_t issued;
+    int asked;               /* the destination was asked of the web */
 } ai_force_via;
 /* One per demon with a forced via standing; the list grows. Game thread. */
 static ai_force_via *g_force_via;
@@ -1706,8 +1719,9 @@ static void force_via_drop(int i)
 
 static void force_via_reset(void) { while (g_nforce) force_via_drop(g_nforce - 1); }
 
-/* Every frame: a forced via whose node has played and ended hands the web
- * to the destination (ssaction_ChangeAnimState). */
+/* Every frame: once a forced via node plays, the web is asked for the
+ * destination (ssaction_ChangeAnimState) and goes there when the clip ends
+ * (sh_ai_force_via_next). */
 static uint32_t g_seen_frame;
 
 static void force_via_step(void)
@@ -1735,16 +1749,19 @@ static void force_via_step(void)
             continue;
         }
         flags = sh_script_api_anim_flags(f->handle, ai, &requested);
-        if (flags & SH_SCRIPT_ANIM_DEST) { force_via_drop(i--); continue; }
-        if (flags & SH_SCRIPT_ANIM_VIA_OUT) {
-            char *to = f->dest;
-            sh_script_handle h = f->handle;
-            f->dest = NULL;
+        switch (sh_ai_force_via_next(flags, f->asked, g_engine->frame() - f->issued, AI_FORCE_VIA_FRAMES)) {
+        case SH_AI_FORCE_VIA_DONE:
             force_via_drop(i--);
-            (void)sh_script_ai_anim(ai, h, to, NULL, 0, 0);
-            free(to);
-        } else if (!(flags & SH_SCRIPT_ANIM_VIA_IN) && g_engine->frame() - f->issued > AI_FORCE_VIA_FRAMES) {
-            force_via_drop(i--);
+            break;
+        case SH_AI_FORCE_VIA_ASK_DEST:
+            /* The forced node plays: the destination is asked now, so the web
+             * leaves the node for it when the clip ends. A forced clip the web
+             * is not asked to leave holds its last frame for good. */
+            f->asked = 1;
+            (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, 0, 0);
+            break;
+        default:
+            break;
         }
     }
 }
@@ -2494,6 +2511,24 @@ typedef struct { void *volatile ai; volatile LONG spawn_id; } ai_parked;
 static ai_parked g_parked[AI_PARKED_MAX];
 static volatile LONG g_parked_used;   /* slots below this were ever used */
 
+/* What the engine's FSM is told about a parked demon this tick
+ * (sh_ai_park_holds): the demon's own fields, read as the FSM threads read
+ * them. Unreadable fields leave it parked. */
+#define AI_HEALTH_CUR        (0x2B290u + 0x1Cu)  /* idAI2: idAIHealth +0x2B290, current +0x1C (script_api_common.c) */
+#define AI_PAIN_JOINT_GROUP  0x8510u             /* idAI2: this frame's pain request, -1 when none (idAIDamageInfo;
+                                                  * VK 0x140403DD0 / GL its twin read it as [0x10A2]) */
+static int parked_now(void *ai)
+{
+    float health = 1.0f;
+    int group = -1, reaction = SH_COMBAT_PAIN_NONE;
+    __try {
+        health = *(const float *)((const uint8_t *)ai + AI_HEALTH_CUR);
+        group = *(const int *)((const uint8_t *)ai + AI_PAIN_JOINT_GROUP);
+        reaction = *(const int *)((const uint8_t *)ai + SH_COMBAT_AI_PAIN);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
+    return sh_ai_park_holds(!(health <= 0.0f), group >= 0, reaction);
+}
+
 /* IsRunningScript(ai): true for a parked demon whose spawn id still matches
  * (the same entity, not a new one in its memory), else the engine's answer.
  * FSM worker threads; reads only. */
@@ -2503,10 +2538,63 @@ static uint64_t irs_detour(void *ai)
     for (i = 0; i < used; i++) {
         if (g_parked[i].ai == ai && ai) {
             uint32_t id = spawn_id_of(ai);
-            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id) return 1;
+            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id)
+                return (uint64_t)parked_now(ai);
         }
     }
     return g_irs_orig(ai);
+}
+
+/* The move system's transition query (job threads). A parked demon turns on
+ * the spot with its own clips, stepping ones too: the engine's query rejects
+ * a turn clip whose root travels (its overshoot rule, made for a goal the
+ * demon must stop at), and the request carries the engine's own bit that
+ * lifts the rule. It is set for the turn of a demon a script drives; every
+ * other move, and every demon no script drives, is the engine's as it was. */
+typedef int (*ai_move_fn)(void *move, void *request, void *out, int kind);
+static ai_move_fn g_move_target, g_move_orig;
+
+static int demon_is_parked(void *ai)
+{
+    int i, used = (int)g_parked_used;
+    for (i = 0; i < used; i++) {
+        if (g_parked[i].ai == ai && ai) {
+            uint32_t id = spawn_id_of(ai);
+            if (id != SH_SCRIPT_SPAWN_ID_NONE && id == (uint32_t)g_parked[i].spawn_id) return 1;
+        }
+    }
+    return 0;
+}
+
+static int move_detour(void *move, void *request, void *out, int kind)
+{
+    if (kind == SH_AI_MOVE_KIND_TURN && move && request) {
+        __try {
+            void *ai = *(void *const *)move;
+            if (demon_is_parked(ai)) *((uint8_t *)request + SH_AI_MOVE_REQ_OVERSHOOT) |= 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    return g_move_orig(move, request, out, kind);
+}
+
+/* Committed with the park hook. Without it a script's face() still turns a
+ * demon whose turn clips stay in place. */
+static void commit_move_detour(void)
+{
+    void *tramp;
+    if (g_move_orig || !g_move_target) return;
+    if (memcmp((const void *)g_move_target, k_ai_move_prologue, SH_AI_MOVE_STOLEN) != 0) { g_move_target = NULL; return; }
+    tramp = hook_prepare((void *)g_move_target, (void *)move_detour, SH_AI_MOVE_STOLEN);
+    if (!tramp) { g_move_target = NULL; return; }
+    g_move_orig = (ai_move_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_move_orig = NULL;
+        g_move_target = NULL;
+        ai_log("Mod scripts: the turn hook could not be installed; a demon whose turn clips step is not turned by "
+               "face() in this session.");
+        return;
+    }
+    ai_log("SCRIPTS: turn hook installed at %p", (void *)g_move_target);
 }
 
 static int commit_detour(void)
@@ -2535,6 +2623,7 @@ static int commit_detour(void)
         return 0;
     }
     ai_log("SCRIPTS: demon park hook installed at %p", (void *)g_irs_target);
+    commit_move_detour();
     return 1;
 }
 
@@ -3024,6 +3113,7 @@ int sh_script_ai_install(const uint8_t *module_base)
                    "it is unavailable in this session.", SH_AI_SIGNATURES[i].name);
         }
     }
+    g_move_target = (ai_move_fn)r[SH_AI_SIG_MOVE_TRANSITION].addr;
     if (r[SH_AI_SIG_RECOIL_PLAY].addr) g_recoil_site = (uint8_t *)r[SH_AI_SIG_RECOIL_PLAY].addr;
     else g_live.set_recoil = NULL;
     if ((site = (const uint8_t *)r[SH_AI_SIG_NEXT_PULL].addr) != NULL) {

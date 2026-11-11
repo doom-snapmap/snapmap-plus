@@ -112,6 +112,12 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 83 EC 28 85 D2 78 4F 3B 51 08 7D 4A 48 89 5C 24 20 48 63 DA 48 C1 E3 05 48 03 19 8B 03 48 8D 53 04 "
       "3B 02 75 1B 3D FE FF FF 01 74 1C 48 83 7B 08 00 75 15 48 83 3D",
       0xEEDC50u, 0xEED200u },
+    { "AiMoveTransition",    /* the move system's transition query for a request: (move, request, out, kind);
+                             * kind 3 is the turn on the spot, whose clip query rejects root travel unless the
+                             * request's bit 0x102.0 allows it */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C0 E9 FF FF B8 40 17 00 00 E8 ?? ?? ?? ?? 48 2B E0 "
+      "48 C7 45 08 FE FF FF FF",
+      0x4FC0B0u, 0x4FADE0u },
     { NULL, NULL, 0, 0 }
 };
 
