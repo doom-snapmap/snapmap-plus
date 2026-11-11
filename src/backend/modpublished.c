@@ -9,15 +9,14 @@
  *                  itself would have done to the screen first (OnSnapPlay
  *                  clears its wait dialog and hides the progress widget)
  *   PROBING        the denial gate (modpublished.h): a worker job asks the
- *                  store about every missing bundle; sh_modpub_gate_decide
- *                  decides each, and any denial drops the hold with its
- *                  cause's sentence before the player is asked anything; a
- *                  row of the player's own content it substitutes leaves the
- *                  missing list (served by its key's installed build), and
- *                  when none is left the hold resumes at once
+ *                  store about every missing build (HEAD of its archive);
+ *                  sh_modpub_gate_decide decides each, and any denial drops
+ *                  the hold with its cause's sentence before the player is
+ *                  asked anything
  *   RAISE          next ticks: wait until the dialog surface is idle, then ask
  *   ASKING         poll the answer
- *   FETCHING       Yes: one worker job fetches every missing bundle in turn
+ *   FETCHING       Yes: one worker job fetches every missing build in turn
+ *                  into the map's place
  *   (resume)       the job is done, on a main tick: rescan the index, check
  *                  every row is served (the asset rule), re-check the owner and (joiner)
  *                  the lobby host's item, activate, parse the retained text into
@@ -51,8 +50,8 @@
 #include "modmanifest.h"
 
 /* The fetch and the worker come from modsync.c and modnet.c: the fetch
- * downloads the bundle manifest and every blob it names, verifies them by
- * hash and installs the bundle into <data>\mods, stopping early when the
+ * downloads the build's archive, verifies it against the row and unpacks it
+ * into the map's place under <data>\mods\maps\, stopping early when the
  * cancel flag becomes nonzero; the job helper runs one job at a time on a
  * worker thread. Both are adapted below, inside the engine section. */
 #ifndef SH_MODPUBLISHED_PURE
@@ -67,7 +66,7 @@
 #define PUB_PROGRESS_MS     2000ull
 #define PUB_SEEN_MAX        16
 #define PUB_ID_CAP          96
-#define PUB_TITLE_CAP       160     /* a map's title, as its downloads folder is named after it */
+#define PUB_TITLE_CAP       160     /* a map's title, as its place is named after it */
 #define PUB_TEXT_CAP        256     /* the native dialog body */
 #define PUB_CAUSE_CAP       400     /* the asset rule's sentence for one row */
 
@@ -149,11 +148,10 @@ static void pub_notes_gated(void)
 static volatile LONG g_parse_sequence;
 static volatile LONG g_resuming;       /* our own parse and original call are running */
 
-/* The asset rule (modserve.h sh_modserve_row_served): a row is served when an
- * installed folder at its bundle hash (or an alias of it) provides every
- * name it lists; a folder of the key at another hash is another build and
- * does not serve it (modserve.h, "installed at another build"). `subject` is
- * the word the cause uses ("map", "prefab"). */
+/* The asset rule (modserve.h sh_modserve_row_served_for): a row is served
+ * when the build sh_modserve_row_build names for it in the map's context
+ * provides every name it lists. `subject` is the word the cause uses ("map",
+ * "prefab"). */
 static int pub_row_state(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
 {
     if (cause && cap) cause[0] = 0;
@@ -173,15 +171,6 @@ static size_t pub_count_missing(const sh_modmanifest_list *rows)
     return missing;
 }
 
-int sh_modpub_row_substitute(const sh_modmanifest_row *row, char *hash, size_t hash_cap);
-static int pub_is_own(int hook);
-
-/* Served, or (the player's own content) served by the build the gate
- * substituted for it this session. */
-static int pub_row_served_for(int hook, const sh_modmanifest_row *row)
-{
-    return pub_row_served(row) || (pub_is_own(hook) && sh_modpub_row_substitute(row, NULL, 0));
-}
 
 static void pub_record_clear(pub_record *r)
 {
@@ -248,17 +237,18 @@ static void pub_seen_note(const char *id, const char *revision, const char *titl
 typedef struct pub_job {
     struct pub_job *next;
     size_t count;
-    char title[PUB_TITLE_CAP], map_id[PUB_ID_CAP];   /* the map the fetch is for (its downloads folder) */
+    char title[PUB_TITLE_CAP], map_id[PUB_ID_CAP];   /* the map the fetch is for (its place) */
     char (*hashes)[SH_MODMANIFEST_HASH_CAP];
-    char (*ids)[SH_MODMANIFEST_ID_CAP];
+    char (*salts)[SH_MODMANIFEST_SALT_CAP];
+    char (*names)[SH_MODMANIFEST_DISPLAY_CAP];      /* the row's name, else its salt */
     volatile int cancel;
     volatile LONG done;
     volatile LONG current;               /* index being fetched */
     volatile LONG64 progress_done, progress_total;
     int failed_index;                    /* -1 when every fetch returned 0 */
     int failed_code;
-    int probe;                           /* ask the store (store_probe, else store_has) instead of fetching */
-    sh_modpub_probe *probes;             /* probe: the store's answer per bundle */
+    int probe;                           /* ask the store (store_probe) instead of fetching */
+    sh_modpub_probe *probes;             /* probe: the store's answer per build */
 } pub_job;
 
 static pub_job *volatile g_running_job;  /* the job the worker is in (progress target) */
@@ -268,7 +258,8 @@ static void pub_job_free(pub_job *job)
 {
     if (!job) return;
     free(job->hashes);
-    free(job->ids);
+    free(job->salts);
+    free(job->names);
     free(job->probes);
     free(job);
 }
@@ -293,11 +284,8 @@ static void pub_job_main(void *context)
             if (job->cancel) { job->failed_index = (int)i; job->failed_code = -2; break; }
             InterlockedExchange(&job->current, (LONG)i);
             memset(&job->probes[i], 0, sizeof job->probes[i]);
-            if (g_ops.store_probe) {
-                job->probes[i].found = g_ops.store_probe(g_ops.context, job->hashes[i], &job->cancel, &job->probes[i]);
-            } else {
-                job->probes[i].found = g_ops.store_has ? g_ops.store_has(g_ops.context, job->hashes[i], &job->cancel) : -1;
-            }
+            job->probes[i].found = g_ops.store_probe ?
+                g_ops.store_probe(g_ops.context, job->hashes[i], &job->cancel, &job->probes[i]) : -1;
             if (job->probes[i].found > 0) job->probes[i].found = SH_MODPUB_STORE_HAS;
             else if (job->probes[i].found < 0) job->probes[i].found = SH_MODPUB_STORE_UNREACHABLE;
         }
@@ -307,14 +295,18 @@ static void pub_job_main(void *context)
     }
     g_running_job = job;
     for (size_t i = 0; i < job->count; i++) {
+        sh_modmanifest_row row;
         int rc;
         if (job->cancel) { job->failed_index = (int)i; job->failed_code = -2; break; }
         InterlockedExchange(&job->current, (LONG)i);
         InterlockedExchange64(&job->progress_done, 0);
         InterlockedExchange64(&job->progress_total, 0);
-        rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, job->hashes[i], job->title, job->map_id, pub_progress,
-                                               &job->cancel)
-             : g_ops.fetch ? g_ops.fetch(g_ops.context, job->hashes[i], pub_progress, &job->cancel) : -1;
+        memset(&row, 0, sizeof row);
+        strcpy_s(row.salt, sizeof row.salt, job->salts[i]);
+        strcpy_s(row.build, sizeof row.build, job->hashes[i]);
+        strcpy_s(row.name, sizeof row.name, job->names[i]);
+        rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, &row, job->title, job->map_id, pub_progress, &job->cancel)
+                             : -1;
         if (rc != 0) { job->failed_index = (int)i; job->failed_code = rc; break; }
     }
     g_running_job = NULL;
@@ -342,21 +334,19 @@ typedef struct pub_hold {
     unsigned long long token;
     void *metadata;                      /* owned copy, completions only */
     char id[PUB_ID_CAP], revision[PUB_ID_CAP];
-    char title[PUB_TITLE_CAP];           /* the map's title: its downloads go to mods\downloads\<title>\ */
+    char title[PUB_TITLE_CAP];           /* the map's title: its fetches go to mods\maps\<title>\ */
+    char map_id[PUB_ID_CAP];             /* the place's record key: the item id, "zip:<file>", or "" */
     char *text;                          /* owned, completions and local play */
     size_t length;
     sh_modmanifest_list rows;
     size_t missing_count;
     size_t *missing;                     /* indexes into rows */
-    char (*other)[SH_MODMANIFEST_HASH_CAP];   /* per missing row: the key's installed other build, "" */
-    char (*other_name)[128];             /* per missing row: that build's display name, "" */
     sh_modpub_probe *probes;             /* per missing row: the store's answer (after PROBING) */
-    unsigned long long missing_bytes;
+    unsigned long long missing_bytes;    /* the rows' sizes, then (after PROBING) the archives' */
     int ticket;
     int waited;
     pub_job *job;
     ULONGLONG progress_at;
-    size_t substituted;                  /* rows the gate served by the installed build of their key */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -369,45 +359,12 @@ static const char *pub_thing(int hook) { return pub_is_prefab(hook) ? "prefab" :
 static const char *pub_not_done(int hook) { return pub_is_prefab(hook) ? "The prefab was not placed." : "The map was not loaded."; }
 /* A hold the rawmap layer or a prefab started: no engine completion behind it. */
 static int pub_is_local(int hook) { return hook == SH_MODPUB_RAWMAP_LOAD || hook == SH_MODPUB_PREFAB_PLACE; }
-/* The player's own content: the gate substitutes the installed build of a key
- * whose declared build cannot be obtained (modpublished.h, SUBSTITUTE). */
-static int pub_is_own(int hook) { return hook == SH_MODPUB_LOCAL_OFFLINE || pub_is_local(hook); }
 
-/* The substitutions the gate made this session: declared build -> installed
- * build of the same key. Main thread. */
-#define PUB_SUBST_MAX 32
-typedef struct pub_subst { char from[SH_MODMANIFEST_HASH_CAP], to[SH_MODMANIFEST_HASH_CAP]; } pub_subst;
-static pub_subst g_pub_subst[PUB_SUBST_MAX];
-static unsigned g_pub_subst_next;
-
-static void pub_subst_add(const char *from, const char *to)
+/* The map's serving context (modpublished.h, the scope_place op): its place
+ * and whether it is the player's own, set before any row is counted. */
+static void pub_scope(const char *title, const char *map_id, int own)
 {
-    size_t i;
-    if (!from || !from[0] || !to || !to[0]) return;
-    for (i = 0; i < PUB_SUBST_MAX; i++)
-        if (!strcmp(g_pub_subst[i].from, from)) { strcpy_s(g_pub_subst[i].to, sizeof g_pub_subst[i].to, to); return; }
-    i = g_pub_subst_next++ % PUB_SUBST_MAX;
-    strcpy_s(g_pub_subst[i].from, sizeof g_pub_subst[i].from, from);
-    strcpy_s(g_pub_subst[i].to, sizeof g_pub_subst[i].to, to);
-}
-
-int sh_modpub_row_substitute(const sh_modmanifest_row *row, char *hash, size_t hash_cap)
-{
-    char other[SH_MODMANIFEST_HASH_CAP] = "", name[128];
-    size_t i;
-    if (hash && hash_cap) hash[0] = 0;
-    if (!row || !row->bundle[0] || !g_ops_set) return 0;
-    for (i = 0; i < PUB_SUBST_MAX; i++) {
-        if (strcmp(g_pub_subst[i].from, row->bundle)) continue;
-        /* Still the key's installed build: an uninstall or a newer install
-         * makes the gate decide again. */
-        if (!g_ops.other_build || !g_ops.other_build(g_ops.context, row, other, sizeof other, name, sizeof name) ||
-            strcmp(other, g_pub_subst[i].to))
-            return 0;
-        if (hash && hash_cap) strcpy_s(hash, hash_cap, g_pub_subst[i].to);
-        return 1;
-    }
-    return 0;
+    if (g_ops.scope_place) g_ops.scope_place(g_ops.context, title ? title : "", map_id ? map_id : "", own);
 }
 
 /* A refused launch leaves nothing declared (ADD-V4a H3). */
@@ -516,14 +473,6 @@ void sh_modpublished_compose_question(char *out, size_t cap, const char *const *
 int sh_modpub_gate_decide(const sh_modpub_gate_facts *f)
 {
     if (!f) return SH_MODPUB_GATE_UNREACHABLE;
-    /* The author's own map in the editor: the installed build of the key
-     * serves (DESIGN-additive 2.5), whatever the store would say. */
-    if (f->editor && f->other_build) return SH_MODPUB_GATE_SUBSTITUTE;
-    /* The player's own content (a My Maps play, a rawmap, a prefab) whose
-     * declared build cannot be obtained: the installed build serves, as the
-     * editor serves it. A build the store has is fetched instead. */
-    if (f->own && f->other_build && !(f->store == SH_MODPUB_STORE_HAS && !f->game_lacks))
-        return SH_MODPUB_GATE_SUBSTITUTE;
     /* A placeholder system (DESIGN-additive 7, phase 6) answers here, with a
      * verdict of its own, before any denial below. */
     if (f->store == SH_MODPUB_STORE_HAS) return f->game_lacks ? SH_MODPUB_GATE_GAME_REVISION : SH_MODPUB_GATE_OBTAIN;
@@ -568,36 +517,28 @@ void sh_modpub_gate_wording(int verdict, const char *subject, const char *title,
     if (prefab && strlen(out) + 28 < cap) strcat_s(out, cap, " The prefab was not placed.");
 }
 
+static void pub_title(char *out, size_t cap, const sh_modmanifest_row *row);
+
 int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
                                 char *why, size_t why_cap)
 {
-    sh_modpub_gate_facts facts;
-    char other[SH_MODMANIFEST_HASH_CAP] = "", name[128] = "", title[300];
-    int verdict;
+    char title[SH_MODMANIFEST_DISPLAY_CAP];
     if (hash_out && hash_cap) hash_out[0] = 0;
     if (why && why_cap) why[0] = 0;
     if (!row || !g_ops_set) return 0;
-    memset(&facts, 0, sizeof facts);
-    facts.editor = 1;
-    facts.store = SH_MODPUB_STORE_ABSENT;   /* not asked: an editor open holds nothing */
-    facts.other_build = g_ops.other_build && g_ops.other_build(g_ops.context, row, other, sizeof other, name, sizeof name) &&
-                        other[0];
-    verdict = sh_modpub_gate_decide(&facts);
-    if (verdict == SH_MODPUB_GATE_SUBSTITUTE) {
-        if (hash_out && hash_cap) strcpy_s(hash_out, hash_cap, other);
-        return 1;
-    }
+    /* The editor opens the author's own map: its rows follow the root
+     * folders (sh_modserve_row_build), so a row nothing serves names a salt
+     * no root folder holds. Nothing substitutes for it. */
     if (why && why_cap) {
-        const char *key = row->id[0] ? row->id : row->bundle;
-        if (name[0] && _stricmp(name, key)) _snprintf_s(title, sizeof title, _TRUNCATE, "%s (%s)", name, key);
-        else _snprintf_s(title, sizeof title, _TRUNCATE, "%s", key);
+        const char *key = row->salt;
+        pub_title(title, sizeof title, row);
         /* The store was not asked, so the note says only what this computer
          * knows; the gate's words ("no longer available", "never published")
          * are said where the store is asked, at Play. A map whose placed
          * entities use the mod is refused by the engine's validator (its
          * damaged-save dialog, which the save guard dismisses), so the
          * sentence says the editor cannot open it and is also the notice;
-         * it fits the dialog body, else the key alone names the mod. */
+         * it fits the dialog body, else the salt alone names the mod. */
         if (placed) {
             int k;
             for (k = 0; k < 2; k++) {
@@ -613,20 +554,16 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
     return 0;
 }
 
-/* "<name> (<key>)", or the key when no name is known or it is the key. */
-static void pub_title(char *out, size_t cap, const sh_modmanifest_row *row, const char *known)
+/* The mod as the player knows it: the row's name (the author's, as the map
+ * recorded it), else its salt. */
+static void pub_title(char *out, size_t cap, const sh_modmanifest_row *row)
 {
-    char name[128] = "";
-    const char *key = row->id[0] ? row->id : row->bundle;
-    if (known && known[0]) strncpy_s(name, sizeof name, known, _TRUNCATE);
-    else if (g_ops.mod_name && !g_ops.mod_name(g_ops.context, row, name, sizeof name)) name[0] = 0;
-    if (name[0] && _stricmp(name, key)) _snprintf_s(out, cap, _TRUNCATE, "%s (%s)", name, key);
-    else _snprintf_s(out, cap, _TRUNCATE, "%s", key);
+    _snprintf_s(out, cap, _TRUNCATE, "%s", row->name[0] ? row->name : row->salt[0] ? row->salt : "a mod");
 }
 
-/* Was the map (or this bundle) published? Every map-service hook is; a My
+/* Was the map (or this build) published? Every map-service hook is; a My
  * Maps map, a rawmap or a prefab only when a claim this machine holds names
- * the bundle (it was published from here and not unpublished). */
+ * the build (it was published from here and not unpublished). */
 static int pub_published(int hook, const sh_modmanifest_row *row)
 {
     switch (hook) {
@@ -635,7 +572,7 @@ static int pub_published(int hook, const sh_modmanifest_row *row)
     case SH_MODPUB_OFFLINE_LAUNCH:
         return 1;
     default:
-        return g_ops.claimed && row->bundle[0] && g_ops.claimed(g_ops.context, row->bundle);
+        return g_ops.claimed && row->build[0] && g_ops.claimed(g_ops.context, row->build);
     }
 }
 
@@ -651,23 +588,23 @@ static int pub_fetch_answer(int code)
     }
 }
 
-/* The missing bundles' display names (ids), malloc'd array of borrowed
- * pointers, or NULL. */
+/* The missing builds' display names (the rows' names, else their salts),
+ * malloc'd array of borrowed pointers, or NULL. */
 static const char **pub_missing_names(const pub_hold *h)
 {
     const char **names = calloc(h->missing_count ? h->missing_count : 1, sizeof(*names));
     if (!names) return NULL;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        names[i] = row->id[0] ? row->id : row->bundle;
+        names[i] = row->name[0] ? row->name : row->salt;
     }
     return names;
 }
 
-/* The question: the ordinary download approval, "This map needs N mod(s):
- * <names> (<size>). Download and install now?". Another installed build of a
- * key is never mentioned: the download lands beside it by hash and the map
- * gets exactly what it pins (owner 2026-11-09). */
+/* The question: the one download approval per map, "This map needs N
+ * mod(s): <names> (<size>). Download and install now?", the size the
+ * archives' total the store reported. The download lands in the map's own
+ * place, so the map gets exactly the builds it pins. */
 static void pub_hold_question(const pub_hold *h, char *out, size_t cap)
 {
     const char **names = pub_missing_names(h);
@@ -687,8 +624,6 @@ static void pub_hold_free(void)
     if (h->metadata && g_ops.metadata_free) g_ops.metadata_free(g_ops.context, h->metadata);
     free(h->text);
     free(h->missing);
-    free(h->other);
-    free(h->other_name);
     free(h->probes);
     sh_modmanifest_list_free(&h->rows);
     memset(h, 0, sizeof(*h));
@@ -759,7 +694,10 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     if (!parsed || !sh_modmanifest_current(&rows)) { sh_modmanifest_list_free(&rows); return; }
     g_record.rows = rows;
     g_record.missing = pub_count_missing(&g_record.rows);
-    if (g_record.missing && text) {
+    /* The text is kept for every map with rows: the gate that takes the
+     * parse sets the map's own context (its place, own or not), in which a
+     * row the parse found served may be missing. */
+    if (text) {
         size_t length = strlen(text);
         g_record.text = malloc(length + 1);
         if (g_record.text) { memcpy(g_record.text, text, length + 1); g_record.length = length; }
@@ -796,9 +734,8 @@ static int pub_is_launch(int hook)
     return hook == SH_MODPUB_LOBBY_LAUNCH || hook == SH_MODPUB_OFFLINE_LAUNCH;
 }
 
-/* A rawmap's or prefab's name as its downloads folder is titled: the file
- * name without its folder and its .json/.zip extension. Static storage,
- * main thread. */
+/* A rawmap's or prefab's name as its place is titled: the file name without
+ * its folder and its .json/.zip extension. Static storage, main thread. */
 static const char *pub_leaf_stem(const char *name)
 {
     static char stem[PUB_TITLE_CAP];
@@ -816,9 +753,12 @@ static const char *pub_leaf_stem(const char *name)
     return stem;
 }
 
-/* Build the hold from rows (copied) and, when given, the record's text (moved). */
+/* Build the hold from rows (copied) and, when given, the record's text
+ * (moved). The caller has set the map's serving context; `map_id` is the
+ * key of its place (the fetch's destination). */
 static int pub_hold_begin(int hook, void *owner, const void *metadata, void *extra, const char *id,
-                          const char *revision, const char *title, const sh_modmanifest_list *rows, pub_record *record)
+                          const char *revision, const char *title, const char *map_id, const sh_modmanifest_list *rows,
+                          pub_record *record)
 {
     pub_hold *h = &g_hold;
     if (h->state != HOLD_IDLE) pub_abandon("a newer map launch replaced it");
@@ -827,24 +767,16 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
     for (size_t i = 0; i < h->rows.count; i++) {
-        if (pub_row_served_for(hook, &h->rows.rows[i])) continue;
+        if (pub_row_served(&h->rows.rows[i])) continue;
         h->missing[h->missing_count++] = i;
         h->missing_bytes += h->rows.rows[i].size;
     }
     if (!h->missing_count) { pub_hold_free(); return 0; }
-    h->other = calloc(h->missing_count, sizeof(*h->other));
-    h->other_name = calloc(h->missing_count, sizeof(*h->other_name));
-    if (!h->other || !h->other_name) goto nomem;
-    for (size_t i = 0; i < h->missing_count && g_ops.other_build; i++)
-        if (!g_ops.other_build(g_ops.context, &h->rows.rows[h->missing[i]], h->other[i], sizeof h->other[i],
-                               h->other_name[i], sizeof h->other_name[i])) {
-            h->other[i][0] = 0;
-            h->other_name[i][0] = 0;
-        }
     h->hook = hook; h->owner = owner; h->extra = extra;
     if (id) strcpy_s(h->id, sizeof h->id, id);
     if (revision) strcpy_s(h->revision, sizeof h->revision, revision);
     if (title) strncpy_s(h->title, sizeof h->title, title, _TRUNCATE);
+    if (map_id) strncpy_s(h->map_id, sizeof h->map_id, map_id, _TRUNCATE);
     h->token = g_ops.hold_token ? g_ops.hold_token(g_ops.context, hook, owner, extra) : 0;
     if (record) {
         if (!record->text) goto nomem;
@@ -890,8 +822,9 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
                      "so it is not gated", id ? id : "", revision ? revision : "");
             return 1;
         }
+        pub_scope(seen->title, id, g_ops.own_item && g_ops.own_item(g_ops.context, id));
         if (!seen->rows.count || !pub_count_missing(&seen->rows)) return 1;
-        begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, seen->title, &seen->rows, NULL);
+        begun = pub_hold_begin(hook, owner, NULL, NULL, id, revision, seen->title, id, &seen->rows, NULL);
         if (begun <= 0) {
             if (begun < 0) {
                 pub_log("MODS: the cached lobby map needs mods and could not be held; it is refused");
@@ -936,17 +869,16 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
     if (pub_is_completion(hook) && g_ops.metadata_title &&
         !g_ops.metadata_title(g_ops.context, metadata, title, sizeof title))
         title[0] = 0;
-    /* The author's own published map follows their own folders, as a My
-     * Maps load does (DESIGN-additive A.4, owner 2026-11-10): its rows are
-     * rewritten to the builds this machine's own folders serve before
-     * anything counts what is missing, so nothing is fetched for them. A
-     * stranger's map keeps exactly what it pins. */
-    if (pub_is_completion(hook) && item[0] && record->rows.count && g_ops.own_item && g_ops.follow_own &&
-        g_ops.own_item(g_ops.context, item) && g_ops.follow_own(g_ops.context, item) > 0) {
-        sh_modmanifest_list_free(&record->rows);
-        (void)sh_modmanifest_current(&record->rows);
-        record->missing = pub_count_missing(&record->rows);
-    }
+    /* The map's context before anything counts what is missing (ONE-SHAPE
+     * rule 4): a published map is served from its own place, and the
+     * author's own published map follows the root folders, as a My Maps play
+     * does (own maps always follow the root); a stranger's map keeps exactly
+     * the builds it pins. */
+    if (pub_is_completion(hook))
+        pub_scope(title, item, item[0] && g_ops.own_item && g_ops.own_item(g_ops.context, item));
+    else if (hook == SH_MODPUB_LOCAL_OFFLINE)
+        pub_scope(NULL, NULL, 1);
+    record->missing = pub_count_missing(&record->rows);
     if (pub_is_completion(hook)) pub_seen_note(item, rev, title, &record->rows);
     if (!record->rows.count || !record->missing) {
         pub_record_clear(record);   /* consumed */
@@ -960,7 +892,7 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_record_clear(record);
         return 1;
     }
-    begun = pub_hold_begin(hook, owner, metadata, extra, item, rev, title, &record->rows, record);
+    begun = pub_hold_begin(hook, owner, metadata, extra, item, rev, title, item, &record->rows, record);
     pub_record_clear(record);
     if (begun < 0) {
         /* Never hand the engine a map whose mods are absent: it ends in the
@@ -998,7 +930,7 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
              record->sequence, record->map, (unsigned)missing);
     if (hook == SH_MODPUB_LOBBY_LAUNCH)
-        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", NULL, &record->rows, record);
+        begun = pub_hold_begin(hook, manager, NULL, extra, "", "", NULL, NULL, &record->rows, record);
     pub_record_clear(record);
     if (begun > 0) {
         pub_logf("MODS: %s needs %u missing mod(s) (%llu bytes); held for the player's answer", pub_hook_name(hook),
@@ -1041,16 +973,29 @@ static void pub_poll_notice(void)
     g_notice[0] = 0;
 }
 
+/* The job's per-build arrays from the hold's missing rows. 1, or 0 out of
+ * memory. */
+static int pub_job_rows(pub_job *job, const pub_hold *h)
+{
+    job->count = h->missing_count;
+    job->hashes = calloc(job->count ? job->count : 1, sizeof(*job->hashes));
+    job->salts = calloc(job->count ? job->count : 1, sizeof(*job->salts));
+    job->names = calloc(job->count ? job->count : 1, sizeof(*job->names));
+    if (!job->hashes || !job->salts || !job->names) return 0;
+    for (size_t i = 0; i < job->count; i++) {
+        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
+        strcpy_s(job->hashes[i], sizeof job->hashes[i], row->build);
+        strcpy_s(job->salts[i], sizeof job->salts[i], row->salt);
+        strcpy_s(job->names[i], sizeof job->names[i], row->name[0] ? row->name : row->salt);
+    }
+    return 1;
+}
+
 static void pub_start_fetch(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = calloc(1, sizeof(*job));
-    if (job) {
-        job->count = h->missing_count;
-        job->hashes = calloc(job->count, sizeof(*job->hashes));
-        job->ids = calloc(job->count, sizeof(*job->ids));
-    }
-    if (!job || !job->hashes || !job->ids) {
+    if (!job || !pub_job_rows(job, h)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded (out of memory). %s",
                     pub_thing(h->hook), pub_not_done(h->hook));
@@ -1059,12 +1004,7 @@ static void pub_start_fetch(void)
         return;
     }
     strncpy_s(job->title, sizeof job->title, h->title, _TRUNCATE);
-    if (!pub_is_local(h->hook)) strncpy_s(job->map_id, sizeof job->map_id, h->id, _TRUNCATE);
-    for (size_t i = 0; i < job->count; i++) {
-        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        strcpy_s(job->hashes[i], sizeof job->hashes[i], row->bundle);
-        strcpy_s(job->ids[i], sizeof job->ids[i], row->id[0] ? row->id : row->bundle);
-    }
+    strncpy_s(job->map_id, sizeof job->map_id, h->map_id, _TRUNCATE);
     h->job = job;
     h->state = HOLD_FETCHING;
     h->progress_at = GetTickCount64();
@@ -1079,70 +1019,6 @@ static void pub_start_fetch(void)
     pub_logf("MODS: downloading %u mod(s) for '%s'", (unsigned)job->count, h->id[0] ? h->id : "local map");
 }
 
-/* Drop the missing rows `drop` marks from the hold's per-row arrays (the
- * rows themselves stay: a resume activates and hands on all of them). */
-static void pub_hold_keep(const unsigned char *drop)
-{
-    pub_hold *h = &g_hold;
-    size_t i, n = 0;
-    h->missing_bytes = 0;
-    for (i = 0; i < h->missing_count; i++) {
-        if (drop[i]) continue;
-        if (n != i) {
-            h->missing[n] = h->missing[i];
-            if (h->other) memcpy(h->other[n], h->other[i], sizeof h->other[n]);
-            if (h->other_name) memcpy(h->other_name[n], h->other_name[i], sizeof h->other_name[n]);
-            if (h->probes) h->probes[n] = h->probes[i];
-        }
-        h->missing_bytes += h->rows.rows[h->missing[n]].size;
-        n++;
-    }
-    h->missing_count = n;
-}
-
-/* The rows the gate decided SUBSTITUTE: remembered for the session, said
- * once each on the console, and no longer missing. Returns how many. */
-static size_t pub_substitute(const int *verdicts)
-{
-    pub_hold *h = &g_hold;
-    unsigned char *drop = calloc(h->missing_count ? h->missing_count : 1, 1);
-    size_t i, n = 0;
-    if (!drop) return 0;
-    for (i = 0; i < h->missing_count; i++) {
-        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        const char *key = row->id[0] ? row->id : row->bundle;
-        char line[600];
-        if (verdicts[i] != SH_MODPUB_GATE_SUBSTITUTE || !h->other || !h->other[i][0]) continue;
-        pub_subst_add(row->bundle, h->other[i]);
-        if (pub_is_prefab(h->hook))
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s '%s': %s: uses the installed mod; the placement adds it to the "
-                        "map", pub_hook_name(h->hook), h->id, key);
-        else
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s: uses the installed mod; the next save of the map records it",
-                        pub_hook_name(h->hook), key);
-        pub_print(line);
-        pub_logf("MODS: %s (declared %.16s, not installed; serving %.16s)", line, row->bundle, h->other[i]);
-        drop[i] = 1;
-        n++;
-    }
-    if (n) pub_hold_keep(drop);
-    h->substituted += n;
-    free(drop);
-    return n;
-}
-
-/* After a rescan: the missing rows that are served now (fetched) or by a
- * substitution leave the hold's list. */
-static void pub_hold_settle(void)
-{
-    pub_hold *h = &g_hold;
-    unsigned char *drop = calloc(h->missing_count ? h->missing_count : 1, 1);
-    size_t i;
-    if (!drop) return;
-    for (i = 0; i < h->missing_count; i++) drop[i] = (unsigned char)pub_row_served_for(h->hook, &h->rows.rows[h->missing[i]]);
-    pub_hold_keep(drop);
-    free(drop);
-}
 
 static void pub_resume(size_t installed);
 
@@ -1169,27 +1045,10 @@ static void pub_finish(void)
             facts.store = pub_fetch_answer(job->failed_code);
             facts.game_lacks = job->failed_code == PUB_NET_GAME;
             facts.published = pub_published(h->hook, row);
-            facts.other_build = h->other && h->other[at][0];
-            facts.own = pub_is_own(h->hook);
             if (facts.game_lacks && g_ops.fetch_detail &&
                 !g_ops.fetch_detail(g_ops.context, job->hashes[job->failed_index], detail, sizeof detail))
                 detail[0] = 0;
-            if (verdicts && (verdicts[at] = sh_modpub_gate_decide(&facts)) == SH_MODPUB_GATE_SUBSTITUTE) {
-                /* The build the store listed could not be fetched: the
-                 * player's own content goes on with the installed build. The
-                 * rows fetched before it install now; any after it are
-                 * fetched again on their own. */
-                for (size_t i = 0; i < h->missing_count; i++) if (i != at) verdicts[i] = SH_MODPUB_GATE_OBTAIN;
-                (void)pub_substitute(verdicts);
-                free(verdicts);
-                pub_job_free(job);
-                h->job = NULL;
-                if (g_ops.rescan) (void)g_ops.rescan(g_ops.context);
-                pub_hold_settle();
-                if (!h->missing_count) pub_resume(at);
-                else pub_start_fetch();
-                return;
-            }
+            if (verdicts) verdicts[at] = sh_modpub_gate_decide(&facts);
             if (verdicts && verdicts[at] != SH_MODPUB_GATE_OBTAIN) {
                 if (h->probes) h->probes[at].code = job->failed_code;
                 pub_deny(verdicts, h->probes, detail, cause);
@@ -1199,7 +1058,7 @@ static void pub_finish(void)
             free(verdicts);
         }
         _snprintf_s(line, sizeof line, _TRUNCATE, "Could not download the mod %s. %s",
-                    job->ids[job->failed_index], pub_not_done(h->hook));
+                    job->names[job->failed_index], pub_not_done(h->hook));
         pub_drop(line, cause);
         return;
     }
@@ -1208,16 +1067,16 @@ static void pub_finish(void)
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         if (pub_row_state(row, pub_thing(h->hook), cause, sizeof cause) == SH_MODPUB_ROW_SERVED) continue;
         _snprintf_s(line, sizeof line, _TRUNCATE, "The mod %s was downloaded but could not be installed.%s%s %s",
-                    row->id[0] ? row->id : row->bundle, cause[0] ? " " : "", cause, pub_not_done(h->hook));
+                    row->name[0] ? row->name : row->salt, cause[0] ? " " : "", cause, pub_not_done(h->hook));
         pub_drop(line, "a fetched row is not served");
         return;
     }
     pub_resume(h->missing_count);
 }
 
-/* The hold's mods are in place (fetched and installed, or served by the
- * installed build the gate substituted): the load goes on. `installed` is
- * the number of mods the fetch installed, for the log line. */
+/* The hold's mods are in place (fetched into the map's place): the load goes
+ * on. `installed` is the number of mods the fetch installed, for the log
+ * line. */
 static void pub_resume(size_t installed)
 {
     pub_hold *h = &g_hold;
@@ -1233,8 +1092,8 @@ static void pub_resume(size_t installed)
             return;
         }
         g_prefab_ready(h->id, &h->rows);
-        pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed and %u served by the installed build",
-                 pub_hook_name(h->hook), h->id, (unsigned)installed, (unsigned)h->substituted);
+        pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook), h->id,
+                 (unsigned)installed);
         pub_hold_free();
         return;
     }
@@ -1268,8 +1127,8 @@ static void pub_resume(size_t installed)
                  "the resume did not reach the original");
         return;
     }
-    pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed and %u served by the installed build",
-             pub_hook_name(h->hook), h->id[0] ? h->id : "local map", (unsigned)installed, (unsigned)h->substituted);
+    pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook),
+             h->id[0] ? h->id : "local map", (unsigned)installed);
     pub_hold_free();
 }
 
@@ -1280,12 +1139,13 @@ static void pub_print(const char *line)
     if (g_ops.print) g_ops.print(g_ops.context, line);
 }
 
-/* "id version" for a row, the way the refusal names a mod. */
+/* "name version" for a row, the way the refusal names a mod (the salt when
+ * the row has no name). */
 static void pub_row_label(char *out, size_t cap, const sh_modmanifest_row *row)
 {
-    if (row->id[0] && row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", row->id, row->version);
-    else if (row->id[0]) _snprintf_s(out, cap, _TRUNCATE, "%s", row->id);
-    else _snprintf_s(out, cap, _TRUNCATE, "bundle %.16s", row->bundle);
+    const char *name = row->name[0] ? row->name : row->salt;
+    if (row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", name, row->version);
+    else _snprintf_s(out, cap, _TRUNCATE, "%s", name);
 }
 
 /* mode 0: the store lacks them; 1: the store could not be reached; 2 (a
@@ -1348,14 +1208,34 @@ size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_
     if (!g_ops_set || !text || !length) return 0;
     sh_modmanifest_read(text, length, rows, &rejected);
     if (!rows->count) return 0;
-    /* A row the gate substituted this session is served (a rawmap's reopen). */
     missing = 0;
     for (size_t i = 0; i < rows->count; i++)
-        if (!pub_row_served_for(SH_MODPUB_RAWMAP_LOAD, &rows->rows[i])) missing++;
+        if (!pub_row_served(&rows->rows[i])) missing++;
     return missing;
 }
 
-#define PUB_LABEL_CAP (SH_MODMANIFEST_ID_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
+/* A rawmap's place: "zip:<file name>" for a ZIP (the place its import filled,
+ * modexport.h), else its title alone. */
+static void pub_rawmap_place(const char *source, char *map_id, size_t cap)
+{
+    const char *leaf = source, *c;
+    size_t n;
+    map_id[0] = 0;
+    if (!source || !source[0]) return;
+    for (c = source; *c; c++) if (*c == '\\' || *c == '/') leaf = c + 1;
+    n = strlen(leaf);
+    if (n > 4 && !_stricmp(leaf + n - 4, ".zip")) _snprintf_s(map_id, cap, _TRUNCATE, "zip:%s", leaf);
+}
+
+void sh_modpub_rawmap_source(const char *source)
+{
+    char map_id[PUB_ID_CAP + 8];
+    if (!g_ops_set) return;
+    pub_rawmap_place(source, map_id, sizeof map_id);
+    pub_scope(pub_leaf_stem(source), map_id, 1);
+}
+
+#define PUB_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
 
 /* One row's refusal notice: the asset rule's sentence, what did not happen,
  * and where the mod can come from. Kept only when it fits the dialog body. */
@@ -1431,7 +1311,7 @@ static void pub_rawmap_refuse(int hook, const char *source, const sh_modmanifest
 
 int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
 {
-    char name[PUB_ID_CAP] = "";
+    char name[PUB_ID_CAP] = "", map_id[PUB_ID_CAP + 8] = "";
     int begun;
     if (!rows || !rows->count) return 0;
     if (source) strncpy_s(name, sizeof name, source, _TRUNCATE);
@@ -1446,7 +1326,11 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source)
         }
         return -1;
     }
-    begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", pub_leaf_stem(name), rows, NULL);
+    /* The rawmap's own context: the author follows the root folders, and the
+     * builds its import or an earlier hold put in its place serve it. */
+    pub_rawmap_place(name, map_id, sizeof map_id);
+    pub_scope(pub_leaf_stem(name), map_id, 1);
+    begun = pub_hold_begin(SH_MODPUB_RAWMAP_LOAD, NULL, NULL, NULL, name, "", pub_leaf_stem(name), map_id, rows, NULL);
     if (begun == 0) return 0;
     if (begun < 0) {
         pub_notice("This map needs mods that could not be prepared. The map was not loaded.");
@@ -1481,7 +1365,9 @@ int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
     if (!g_ops_set) return -2;
     if (!pub_on_main()) return -1;
     if (name) strncpy_s(nm, sizeof nm, name, _TRUNCATE);
-    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", pub_leaf_stem(nm), rows, NULL);
+    /* The caller (prefab_mods.c) set the placement's context: the open map's
+     * root folders, and the place the prefab's import filled. */
+    begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", pub_leaf_stem(nm), NULL, rows, NULL);
     if (begun <= 0) return begun;
     g_hold.state = HOLD_PROBING;
     pub_logf("MODS: prefab '%s' needs %u missing mod(s) (%llu bytes); asking the mod store for them", nm,
@@ -1497,24 +1383,16 @@ static void pub_start_probe(void)
     pub_hold *h = &g_hold;
     pub_job *job = calloc(1, sizeof(*job));
     if (job) {
-        job->count = h->missing_count;
         job->probe = 1;
-        job->hashes = calloc(job->count, sizeof(*job->hashes));
-        job->ids = calloc(job->count, sizeof(*job->ids));
-        job->probes = calloc(job->count, sizeof(*job->probes));
+        job->probes = calloc(h->missing_count ? h->missing_count : 1, sizeof(*job->probes));
     }
-    if (!job || !job->hashes || !job->ids || !job->probes) {
+    if (!job || !job->probes || !pub_job_rows(job, h)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "This %s needs mods that could not be prepared. %s", pub_thing(h->hook),
                     pub_not_done(h->hook));
         pub_job_free(job);
         pub_drop(line, "no memory for the store check");
         return;
-    }
-    for (size_t i = 0; i < job->count; i++) {
-        const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        strcpy_s(job->hashes[i], sizeof job->hashes[i], row->bundle);
-        strcpy_s(job->ids[i], sizeof job->ids[i], row->id[0] ? row->id : row->bundle);
     }
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
         pub_job_free(job);
@@ -1543,15 +1421,13 @@ static void pub_deny(const int *verdicts, const sh_modpub_probe *probes, const c
     size_t denied = 0;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        char title[300];
-        const char *source;
-        if (verdicts[i] == SH_MODPUB_GATE_OBTAIN || verdicts[i] == SH_MODPUB_GATE_SUBSTITUTE) continue;
-        pub_title(title, sizeof title, row, probes && probes[i].name[0] ? probes[i].name : h->other_name[i]);
-        source = probes && probes[i].source[0] ? probes[i].source : detail;
-        sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), title, source, probes ? probes[i].code : 0, line,
+        char title[SH_MODMANIFEST_DISPLAY_CAP];
+        if (verdicts[i] == SH_MODPUB_GATE_OBTAIN) continue;
+        pub_title(title, sizeof title, row);
+        sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), title, detail, probes ? probes[i].code : 0, line,
                                sizeof line);
         pub_print(line);
-        pub_logf("MODS: denied (cause %d, bundle %.16s): %s", verdicts[i], row->bundle, line);
+        pub_logf("MODS: denied (cause %d, %s@%.16s): %s", verdicts[i], row->salt, row->build, line);
         if (!denied++) strncpy_s(notice, sizeof notice, line, _TRUNCATE);
     }
     if (denied > 1) {
@@ -1587,22 +1463,18 @@ static void pub_probe_finish(void)
         if (job->failed_index >= 0 && (size_t)job->failed_index <= i) h->probes[i].found = SH_MODPUB_STORE_UNREACHABLE;
         memset(&facts, 0, sizeof facts);
         facts.store = h->probes[i].found;
-        facts.game_lacks = h->probes[i].game_lacks;
         facts.published = pub_published(h->hook, row);
-        facts.other_build = h->other && h->other[i][0];
-        facts.own = pub_is_own(h->hook);
         verdicts[i] = sh_modpub_gate_decide(&facts);
-        if (verdicts[i] != SH_MODPUB_GATE_OBTAIN && verdicts[i] != SH_MODPUB_GATE_SUBSTITUTE) denied++;
+        if (verdicts[i] != SH_MODPUB_GATE_OBTAIN) denied++;
     }
     if (denied) {
         pub_deny(verdicts, h->probes, NULL, "the gate denied the launch");
-    } else if (pub_substitute(verdicts) && !h->missing_count) {
-        /* Every missing row is served by its key's installed build: nothing
-         * to ask or fetch. */
-        pub_job_free(job);
-        h->job = NULL;
-        pub_resume(0);
     } else {
+        /* The question names the size the store reported for each archive
+         * (the row's own size when it reported none). */
+        h->missing_bytes = 0;
+        for (size_t i = 0; i < h->missing_count; i++)
+            h->missing_bytes += h->probes[i].size ? h->probes[i].size : h->rows.rows[h->missing[i]].size;
         pub_logf("MODS: the mod store holds all %u missing mod(s) of the %s of '%s'", (unsigned)h->missing_count,
                  pub_hook_name(h->hook), h->id[0] ? h->id : "local map");
         pub_job_free(job);
@@ -1686,7 +1558,8 @@ void sh_modpublished_poll(void)
                 long long done = InterlockedCompareExchange64(&job->progress_done, 0, 0);
                 long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
                 h->progress_at = now;
-                pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->ids[current],
+                pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->names[current],
+
                          current + 1, (unsigned)job->count, done / 1048576.0, total / 1048576.0);
             }
             break;
@@ -1722,8 +1595,6 @@ void sh_modpub_test_reset(void)
         pub_job_free(job);
     }
     pub_record_clear(&g_record);
-    memset(g_pub_subst, 0, sizeof g_pub_subst);
-    g_pub_subst_next = 0;
     g_prefab_ready = NULL;
     for (size_t i = 0; i < PUB_SEEN_MAX; i++) sh_modmanifest_list_free(&g_seen[i].rows);
     memset(g_seen, 0, sizeof g_seen);
@@ -1953,10 +1824,15 @@ C_ASSERT(PUB_NET_CANCELLED == MODNET_E_CANCELLED && PUB_NET_HTTP == MODNET_E_HTT
 C_ASSERT(PUB_NET_NOT_FOUND == MODNET_E_NOT_FOUND && PUB_NET_RATE == MODNET_E_RATE && PUB_NET_BLOCKED == MODNET_E_BLOCKED);
 C_ASSERT(PUB_NET_UNAVAILABLE == MODNET_E_UNAVAILABLE && PUB_NET_GAME == MODNET_E_GAME);
 
-static int eng_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, volatile int *cancel)
+/* Fetch the row's build into the map's place (modsync.h): the archive is
+ * fetched, verified against the row and unpacked under
+ * mods\maps\<title>\<mod name>\. */
+static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *title, const char *map_id,
+                         sh_modpub_progress_fn progress, volatile int *cancel)
 {
     modnet_io io;
     modsync_stats st;
+    sh_ms_place place;
     (void)c;
     memset(&io, 0, sizeof io);
     memset(&st, 0, sizeof st);
@@ -1964,41 +1840,20 @@ static int eng_fetch(void *c, const char *hash, sh_modpub_progress_fn progress, 
     io.progress = (modnet_progress_fn)progress;
     g_eng_fetch_hash[0] = 0;
     g_eng_fetch_source[0] = 0;
-    if (modsync_fetch_bundle(hash, &io, &st)) {
+    place.title = title && title[0] ? title : row->name[0] ? row->name : row->salt;
+    place.map_id = map_id && map_id[0] ? map_id : NULL;
+    if (modsync_fetch_build_for(row, &place, &io, &st)) {
         if (st.editor_only)
-            pub_logf("MODS: %.16s changes only the editor; the map plays without it, so it was not installed", hash);
+            pub_logf("MODS: %s@%.16s changes only the editor; the map plays without it, so it was not installed",
+                     row->salt, row->build);
+        else if (st.folder[0])
+            pub_logf("MODS: %s@%.16s is served by mods\\%s%s", row->salt, row->build, st.folder,
+                     st.already_installed ? " (already there)" : "");
         return 0;
     }
-    pub_logf("fetch %.16s failed: %s", hash, st.cause[0] ? st.cause : modnet_code_text(st.code));
+    pub_logf("MODS: fetch of %s@%.16s failed: %s", row->salt, row->build, st.cause[0] ? st.cause : modnet_code_text(st.code));
     if (st.game_lacks) {
-        strncpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, hash, _TRUNCATE);
-        strncpy_s(g_eng_fetch_source, sizeof g_eng_fetch_source, st.game_source, _TRUNCATE);
-    }
-    return st.code ? st.code : -1;
-}
-
-static int eng_fetch_for(void *c, const char *hash, const char *title, const char *map_id, sh_modpub_progress_fn progress,
-                         volatile int *cancel)
-{
-    modnet_io io;
-    modsync_stats st;
-    (void)c;
-    memset(&io, 0, sizeof io);
-    memset(&st, 0, sizeof st);
-    io.cancel = (volatile long *)cancel;
-    io.progress = (modnet_progress_fn)progress;
-    g_eng_fetch_hash[0] = 0;
-    g_eng_fetch_source[0] = 0;
-    if (modsync_fetch_bundle_for(hash, title && title[0] ? title : NULL, map_id && map_id[0] ? map_id : NULL, &io, &st)) {
-        if (st.editor_only)
-            pub_logf("MODS: %.16s changes only the editor; the map plays without it, so it was not installed", hash);
-        else if (st.key[0])
-            pub_logf("MODS: %.16s is served by mods\\%s%s", hash, st.key, st.already_installed ? " (already in the store)" : "");
-        return 0;
-    }
-    pub_logf("fetch %.16s failed: %s", hash, st.cause[0] ? st.cause : modnet_code_text(st.code));
-    if (st.game_lacks) {
-        strncpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, hash, _TRUNCATE);
+        strncpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, row->build, _TRUNCATE);
         strncpy_s(g_eng_fetch_source, sizeof g_eng_fetch_source, st.game_source, _TRUNCATE);
     }
     return st.code ? st.code : -1;
@@ -2019,23 +1874,21 @@ static int eng_own_item(void *c, const char *item)
     return item && item[0] && (modsync_claim_lookup(item, NULL, NULL) || sh_modpublish_item_linked(item));
 }
 
-/* A row of an own published map: the build its key's own folder serves. */
-static int eng_follow_own_row(const char *bundle_hash, const char *id, sh_modmanifest_row *out)
+/* The map's serving context: the place the record gives the map, else the
+ * one its title names (sh_ms_place_dir), and whether it is the player's own. */
+static void eng_scope_place(void *c, const char *title, const char *map_id, int own)
 {
-    sh_modserve_bundle_ref ref;
-    if (!out || !sh_modserve_row_follow_own(id, bundle_hash, &ref)) return 0;
-    if (strlen(ref.id) >= sizeof out->id || strlen(ref.version) >= sizeof out->version) return 0;
-    strcpy_s(out->id, sizeof out->id, ref.id);
-    strcpy_s(out->version, sizeof out->version, ref.version);
-    strcpy_s(out->bundle, sizeof out->bundle, ref.hash);
-    out->size = ref.size;
-    return 1;
-}
-
-static int eng_follow_own(void *c, const char *item)
-{
+    char dir[SH_MODSERVE_PLACE_CAP] = "";
     (void)c;
-    return sh_modmanifest_current_follow(eng_follow_own_row, item);
+    if (map_id && map_id[0] && sh_ms_place_of(map_id, dir, sizeof dir, NULL, 0)) {
+        /* noted: the record's place */
+    } else if (title && title[0]) {
+        sh_ms_place place;
+        place.title = title;
+        place.map_id = map_id && map_id[0] ? map_id : NULL;
+        if (!sh_ms_place_dir(&place, dir, sizeof dir)) dir[0] = 0;
+    }
+    (void)sh_modserve_scope_set_place(dir, own);
 }
 
 static int eng_fetch_detail(void *c, const char *hash, char *out, size_t cap)
@@ -2304,83 +2157,28 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
     return ran;
 }
 
-/* GET /mods/bundle/<hash>: the manifest is small (at most 1 MB) and is what a
- * fetch reads first, so a 404 here is the fetch's own first refusal. 451 (on
- * the takedown list) is as absent as 404 for the player. */
-static int eng_store_has(void *c, const char *hash, volatile int *cancel)
-{
-    modnet_io io;
-    modnet_result r;
-    char *text = NULL;
-    size_t len = 0;
-    int code;
-    (void)c;
-    memset(&io, 0, sizeof io);
-    memset(&r, 0, sizeof r);
-    io.cancel = (volatile long *)cancel;
-    code = modnet_get_bundle(hash, &text, &len, &io, &r);
-    free(text);
-    if (code == MODNET_OK) return 1;
-    pub_logf("MODS: store check of %.16s: %s", hash, modnet_code_text(code));
-    if (code == MODNET_E_NOT_FOUND || code == MODNET_E_BLOCKED) return 0;
-    return -1;
-}
-
 static void eng_print(void *c, const char *line) { (void)c; if (line) sh_printf("%s\n", line); }
 
-/* The gate's probe: the bundle manifest from the store and its borrows
- * checked against this player's game (modsync.h). */
+/* The gate's probe: HEAD of the build's archive (modsync.h). Whether its
+ * borrows resolve against this game is learned when it is installed. */
 static int eng_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
 {
     modnet_io io;
     modsync_probe p;
     (void)c;
     memset(&io, 0, sizeof io);
+    memset(&p, 0, sizeof p);
     io.cancel = (volatile long *)cancel;
-    (void)modsync_probe_bundle(hash, &io, &p);
+    (void)modsync_probe_build(hash, &io, &p);
     memset(out, 0, sizeof *out);
     out->found = p.found > 0 ? SH_MODPUB_STORE_HAS : p.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
     out->code = p.found < 0 ? p.code : 0;
-    out->game_lacks = p.game_lacks;
-    strncpy_s(out->source, sizeof out->source, p.source, _TRUNCATE);
-    strncpy_s(out->name, sizeof out->name, p.name, _TRUNCATE);
+    out->size = p.found > 0 ? p.size : 0;
     if (p.found <= 0) pub_logf("MODS: store check of %.16s: %s", hash, modnet_code_text(p.code));
-    else if (p.game_lacks) pub_logf("MODS: store check of %.16s: held, but %s", hash, p.cause);
     return out->found;
 }
 
 static int eng_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
-
-/* A display name of the row's key from the installed folders (any build). */
-static int eng_mod_name(void *c, const sh_modmanifest_row *row, char *out, size_t cap)
-{
-    sh_ms_list l;
-    int found = 0;
-    (void)c;
-    if (!row || !row->id[0] || !out || !cap) return 0;
-    modstore_lock();
-    if (sh_ms_enumerate(&l)) {
-        for (size_t i = 0; i < l.count && !found; i++) {
-            const sh_ms_entry *e = &l.items[i];
-            if (!e->loaded || _stricmp(e->bundle.id, row->id) || !e->bundle.name || !e->bundle.name[0]) continue;
-            strncpy_s(out, cap, e->bundle.name, _TRUNCATE);
-            found = 1;
-        }
-        sh_ms_list_free(&l);
-    }
-    modstore_unlock();
-    return found;
-}
-
-static int eng_other_build(void *c, const sh_modmanifest_row *row, char *hash, size_t hash_cap, char *name,
-                           size_t name_cap)
-{
-    sh_modserve_bundle_ref ref;
-    if (!sh_modserve_row_other_build(row, &ref)) return 0;
-    strncpy_s(hash, hash_cap, ref.hash, _TRUNCATE);
-    if (!eng_mod_name(c, row, name, name_cap)) name[0] = 0;
-    return 1;
-}
 
 /* The gate refused a launch: the map scope declares nothing of it. */
 static void eng_launch_refused(void *c, int hook)
@@ -2395,10 +2193,10 @@ static void eng_launch_refused(void *c, int hook)
 
 static const sh_modpub_ops ENG_OPS = {
     NULL, eng_on_main, eng_row_state, eng_rescan, eng_activate, eng_can_ask, eng_ask, eng_poll,
-    eng_release, eng_worker_run, eng_fetch, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
+    eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
-    eng_store_has, eng_print, eng_store_probe, eng_claimed, eng_other_build, eng_mod_name,
-    eng_fetch_detail, eng_launch_refused, eng_fetch_for, eng_metadata_title, eng_own_item, eng_follow_own
+    eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
+    eng_own_item, eng_scope_place
 };
 
 /* ------------------------------------------------------------ detours */
