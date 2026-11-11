@@ -952,7 +952,9 @@ static int nav_parse_header(const char *p, size_t plen, nav_hdr *h)
 #define MO_PRODUCT_MAGIC     "smpprod1."
 #define MO_PRODUCT_MAGIC_LEN 9
 #define MO_VALUE_WINDOW   4096
-#define MO_MAX_ROWS       SH_MODMANIFEST_MAX_ROWS
+/* The earlier shape's own bounds: a map saved before 1.0 never held more. */
+#define MO_MAX_ROWS       4096u
+#define MO_MAX_NAMES      256u
 
 static void mo_row_free(sh_map_old_row *row)
 {
@@ -1043,7 +1045,7 @@ static int mo_parse_row(const char *json, size_t length, sh_map_old_row *out)
         int r;
         while ((r = mo_array_next(&cursor, end, &elem, &elem_len)) == 1) {
             char *name;
-            if (*elem != '"' || out->name_count >= SH_MODMANIFEST_MAX_NAMES) continue;
+            if (*elem != '"' || out->name_count >= MO_MAX_NAMES) continue;
             name = mo_decode(elem, elem_len);
             if (name && strlen(name) <= SH_MODMANIFEST_NAME_MAX && !mo_row_add_name(out, name)) r = -1;
             free(name);
@@ -1536,7 +1538,7 @@ char *sh_map_old_write(const char *json, size_t len, const sh_map_old *old,
     /* 1. Every earlier variable goes. */
 #define MO_STRIP(magic, filter) do { \
         next = sh_shard_strip(cur ? cur : json, cur_len, magic, strlen(magic), filter, NULL, \
-                              (size_t)SH_MODMANIFEST_MAX_ROWS * 64u, &next_len, &elements, &runs, &failed); \
+                              (size_t)MO_MAX_ROWS * 64u, &next_len, &elements, &runs, &failed); \
         if (failed) { MO_ERR("the map's variables do not read"); goto fail; } \
         mo_take(&cur, &cur_len, next, next_len); \
     } while (0)

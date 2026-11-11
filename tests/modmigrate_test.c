@@ -5,7 +5,7 @@
  * id; a delivered map-<16 hex>\<package>; a stray ZIP; a folder without a
  * descriptor holding one package one level down (migrated) and one holding
  * two (skipped); a folder over the size cap and
- * one over the bundle cap; an empty override-backups folder. Checks the store, the record, the log lines,
+ * one the old bundle cap refused, which now builds; an empty override-backups folder. Checks the store, the record, the log lines,
  * that overrides\ is byte-for-byte unchanged, that a second pass does nothing
  * and --again repeats it identically, that a map carrying the same delivery
  * (or the same authored tree) is answered by the migrated bundle without a
@@ -414,8 +414,8 @@ static void full_pass(const char *root)
     CHECK(sh_modmigrate_run(0, &st) == 1);
     printf("  %u entries: %u built, %u converted, %u reused, %u skipped, %u refused, %u duplicate(s), %llu ms\n",
            st.entries, st.built, st.converted, st.reused, st.skipped, st.refused, st.duplicates, st.ms);
-    CHECK(st.entries == 10 && st.built == 5 && st.converted == 1 && st.reused == 0 && st.skipped == 3 &&
-          st.refused == 1 && st.duplicates == 1 && st.pending == 0);
+    CHECK(st.entries == 10 && st.built == 6 && st.converted == 1 && st.reused == 0 && st.skipped == 3 &&
+          st.refused == 0 && st.duplicates == 1 && st.pending == 0);
     CHECK(st.backups_removed == 1 && !exists(path));
 
     /* overrides\ is exactly as it was. */
@@ -482,7 +482,7 @@ static void full_pass(const char *root)
     CHECK(entry_has(record, "huge", "\"kind\":\"package\"", "\"outcome\":\"skipped\""));
     CHECK(record && strstr(record, "holds 2 package folders one level down (the first is twodesc\\\\"));
     CHECK(record && !strstr(record, "\"nodesc/inner\"") && strstr(record, "\":\"pack-c\""));   /* pack-c's tree */
-    CHECK(entry_has(record, "big", "\"outcome\":\"refused\"", NULL));
+    CHECK(!entry_has(record, "big", "\"outcome\":\"refused\"", NULL));   /* no size limit on a mod */
     CHECK(bundle_of(mods, "inner", &b) == 1);
     sh_mb_free(&b);
     CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: moved into mods\\inner,") != NULL &&
@@ -491,15 +491,13 @@ static void full_pass(const char *root)
     CHECK(record && strstr(record, tree_d));
     CHECK(strstr(g_log, "MODS: migration: overrides\\stray.zip: skipped -- it is a ZIP archive") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\huge: skipped -- it holds at least") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\big: refused -- it would hold at least 1 file(s) and 300 MiB, "
-                        "more than one mod can hold") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: moved into mods\\dupe-b,") != NULL &&
           strstr(g_log, "duplicate id local.dupe (also overrides\\dupe-a), both kept") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: a package a map delivered, moved into "
                         "mods\\doors,") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: moved into mods\\pack-c,") != NULL &&
           strstr(g_log, "1 file(s) a mod cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: 10 entries in overrides: 5 built, 1 delivered converted") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: 10 entries in overrides: 6 built, 1 delivered converted") != NULL);
     free(record);
 
     /* A map carrying the same delivery is answered by the migrated folder: no
@@ -541,7 +539,7 @@ static void full_pass(const char *root)
     /* --again repeats it: the same bundles, same builds, the same folders. */
     g_log[0] = 0;
     CHECK(sh_modmigrate_run(1, &st) == 1);
-    CHECK(st.built == 5 && st.reused == 1 && st.converted == 0 && st.skipped == 3 && st.refused == 1 && st.duplicates == 1);
+    CHECK(st.built == 6 && st.reused == 1 && st.converted == 0 && st.skipped == 3 && st.refused == 0 && st.duplicates == 1);
     CHECK(bundle_of(mods, "pack-c", &b) == 1 && hash_c && !strcmp(b.hash, hash_c));
     sh_mb_free(&b);
     CHECK(bundle_of(mods, dupe_b_key, &b) == 1);
@@ -552,7 +550,7 @@ static void full_pass(const char *root)
         memset(&list, 0, sizeof list);
         CHECK(sh_ms_enumerate(&list) == 1);
         for (i = 0; i < list.count; i++) if (list.items[i].loaded) bundles++;
-        CHECK(bundles == 6);
+        CHECK(bundles == 7);
         sh_ms_list_free(&list);
     }
     snapshot_dir(ov, "", &after);

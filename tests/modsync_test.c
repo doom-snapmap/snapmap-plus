@@ -486,7 +486,7 @@ int main(void)
     CHECK(!modsync_upload_builds(list, 1, "item-4", NULL, &st));
     CHECK(strstr(st.cause, "changed since the mod was built; open the Mods tab and Refresh") && g_stub.build_puts == before && !st.queued);
     CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
-    /* Over 96 MiB: the plain refusal, before any request. */
+    /* Larger than one request: sent in parts, then claimed like any other. */
     {
         static const char *const BIG_FILES[] = { "assets/generated/image/mods/hugee006/one.bimage",
                                                  "assets/generated/image/mods/hugee006/two.bimage", NULL };
@@ -517,10 +517,41 @@ int main(void)
         }
         mod_of(mbig, "hugee006", hbig);
         list[0] = mbig;
-        before = g_stub.build_puts;
-        CHECK(!modsync_upload_builds(list, 1, "item-huge", NULL, &st));
-        CHECK(st.code == MODNET_E_TOO_LARGE && !st.queued && g_stub.build_puts == before);
-        CHECK(strstr(st.cause, "Huge: this mod is too large to publish (99 MB; the limit is 96 MB)") != NULL);
+        before = g_stub.part_puts;
+        CHECK(modsync_upload_builds(list, 1, "item-huge", NULL, &st));
+        CHECK(st.code == MODNET_OK && g_stub.part_puts == before + 2 && stub_has_build(hbig) && st.builds_sent == 1);
+        CHECK(modsync_release("item-huge", NULL, &st) && !stub_has_build(hbig));
+        mt_remove_tree(dir);
+    }
+    /* No file count: a mod of 20,000 small files builds, uploads and is
+     * claimed. */
+    {
+        char hmany[65], mmany[80], rel[MAX_PATH];
+        int i;
+        DWORD t0 = GetTickCount();
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\many", r1);
+        mt_write(dir, "mod.json", "{\"name\":\"Many\"}");
+        for (i = 0; i < 20000; i++) {
+            char body[48];
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\manyf007\\f%05d.decl", i);
+            _snprintf_s(body, sizeof body, _TRUNCATE, "entityDef f%05d {}\n", i);
+            mt_write(dir, rel, body);
+        }
+        {
+            sh_mb_bundle b;
+            char why[SH_MB_CAUSE_MAX];
+            memset(&b, 0, sizeof b);
+            CHECK(sh_mb_build(dir, "manyf007", NULL, &b) && sh_mb_write(&b, dir, why, sizeof why) && b.file_count == 20000);
+            if (b.first_cause[0]) fprintf(stderr, "  many: %s\n", b.first_cause);
+            strcpy_s(hmany, sizeof hmany, b.hash);
+            sh_mb_free(&b);
+        }
+        mod_of(mmany, "manyf007", hmany);
+        list[0] = mmany;
+        CHECK(modsync_upload_builds(list, 1, "item-many", NULL, &st) && stub_has_build(hmany));
+        if (st.cause[0]) fprintf(stderr, "  many: %s\n", st.cause);
+        CHECK(modsync_release("item-many", NULL, &st) && !stub_has_build(hmany));
+        printf("modsync_test: 20,000 files built, archived and uploaded in %lu ms\n", GetTickCount() - t0);
         mt_remove_tree(dir);
     }
 
@@ -571,7 +602,12 @@ int main(void)
     /* ---- the gate's probe ---- */
     {
         modsync_probe p;
-        CHECK(modsync_probe_build(hr, NULL, &p) == 1 && p.size > 0);
+        CHECK(modsync_probe_build(hr, NULL, &p) == 1 && p.size > 0 && p.scripts == 0);
+        /* The store's answer says how many scripts the build carries. */
+        EnterCriticalSection(&g_stub.cs);
+        stub_find(g_stub.builds, g_stub.nbuilds, hr)->scripts = 3;
+        LeaveCriticalSection(&g_stub.cs);
+        CHECK(modsync_probe_build(hr, NULL, &p) == 1 && p.scripts == 3);
         CHECK(modsync_probe_build(ha, NULL, &p) == 0 && p.code == MODNET_E_NOT_FOUND);
         stub_fail_next("HEAD /mods/build/", 451);
         CHECK(modsync_probe_build(hr, NULL, &p) == 0 && p.code == MODNET_E_BLOCKED);

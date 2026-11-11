@@ -506,7 +506,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         }
         goto out;
     }
-    text = ms_read_text(bj, SH_MB_MANIFEST_MAX + 65536, &len);
+    text = ms_read_text(bj, (size_t)-1, &len);
     if (text) {
         mpj *j = mpj_parse(text, len);
         const mpj *v = j ? mpj_get(j, "build") : NULL;

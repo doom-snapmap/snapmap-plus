@@ -4,16 +4,20 @@
  * A small Winsock HTTP/1.1 server on a thread, one request per connection
  * (Connection: close), implementing the routes of the Worker
  * (snapmap-web api/mods_store.js, ONE-SHAPE rule 5) the client uses:
- * HEAD, PUT and GET /mods/build/<hash>, POST /mods/claim and /mods/release.
- * It checks what the Worker checks that the flows can reach: Content-Type
- * application/zip on a build PUT (415), Content-Length present (411), at most
- * 96 MiB (413), and the archive itself (422): a ZIP the product's reader
- * opens, holding mod.json whose build is the path's hash and one
- * assets/<request> entry per carried file its block lists, nothing else. A
- * claim names stored builds (409), a re-claim needs the secret (403), a
- * release of an unknown claim is 404; a release deletes every build no live
- * claim names any more. Counters and fault switches let the tests observe
- * the exchange and inject failures.
+ * HEAD, PUT and GET /mods/build/<hash>, the upload in parts (POST
+ * /mods/build/<hash>/parts, PUT .../parts/<n> with X-Build-Size, POST
+ * /mods/build/<hash>/complete), POST /mods/claim and /mods/release. It checks
+ * what the Worker checks that the flows can reach: Content-Type
+ * application/zip on a build PUT (415), Content-Length present (411), one
+ * request at most one part (413), parts of exactly the part size but the
+ * last, and the archive itself (422): a ZIP the product's reader opens,
+ * holding mod.json whose build is the path's hash and one assets/<request>
+ * entry per carried file its block lists, nothing else. GET and HEAD say how
+ * many scripts a build carries (X-Mod-Scripts). A claim names stored builds
+ * (409), any number of them; a re-claim needs the secret (403), a release of
+ * an unknown claim is 404; a release deletes every build no live claim names
+ * any more. Counters and fault switches let the tests observe the exchange
+ * and inject failures.
  *
  * Requires ws2_32.lib, modzip.c (and raw_deflate.c) and modbundle.c. */
 #ifndef SNAPMAP_PLUS_MOD_STORE_STUB_H
@@ -31,13 +35,13 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define STUB_MAX_OBJECTS 256
-#define STUB_MAX_CLAIMS  64
-#define STUB_MAX_BODY    (100u * 1024u * 1024u)
-#define STUB_MAX_ARCHIVE (96u * 1024u * 1024u)
+#define STUB_MAX_BODY    (100u * 1000u * 1000u)          /* the platform's request body limit */
+#define STUB_PART_SIZE   (95ull * 1024u * 1024u)          /* the Worker's PART_SIZE */
 
-typedef struct stub_obj { char hash[65]; unsigned char *bytes; size_t len; } stub_obj;
-typedef struct stub_claim { char id[33], ref[260], secret[65]; char builds[32][65]; int nb; int live; } stub_claim;
+typedef struct stub_obj { char hash[65]; unsigned char *bytes; size_t len; unsigned scripts; } stub_obj;
+typedef struct stub_claim { char id[33], ref[260], secret[65]; char (*builds)[65]; int nb; int live; } stub_claim;
+/* An upload in parts: the archive being assembled and which parts arrived. */
+typedef struct stub_upload { char hash[65]; unsigned long long size; unsigned parts; unsigned char *bytes, *have; } stub_upload;
 
 typedef struct stub_state {
     SOCKET listener;
@@ -45,14 +49,16 @@ typedef struct stub_state {
     int port;
     volatile LONG stop;
     CRITICAL_SECTION cs;
-    stub_obj builds[STUB_MAX_OBJECTS];
-    int nbuilds;
-    stub_claim claims[STUB_MAX_CLAIMS];
-    int nclaims;
+    stub_obj *builds;
+    int nbuilds, cap_builds;
+    stub_claim *claims;
+    int nclaims, cap_claims;
+    stub_upload upload;           /* one upload in parts at a time */
     unsigned counter;
     /* counters */
     int requests, head_calls, build_puts, build_created, build_gets, claim_calls, claim_with_secret, release_calls,
-        builds_deleted;
+        builds_deleted, part_starts, part_puts, part_completes;
+    int part_sent[64];            /* how often each part (1-based, up to 63) was sent */
     /* the last request with a body */
     int last_cl_headers;          /* Content-Length headers seen */
     long long last_cl_value;
@@ -62,7 +68,9 @@ typedef struct stub_state {
     char fail_prefix[48];         /* the next request whose "METHOD path" starts with this ... */
     int fail_status;              /* ... gets this status and a JSON error */
     int corrupt_build_gets;       /* GET build answers with one byte flipped in the middle */
+    int fail_part;                /* the next PUT of this part number answers 503 */
     char trail[8192];             /* "claim <ref>" and "release <ref>" lines, in the order the stub took them */
+    unsigned scripts_header;      /* X-Mod-Scripts of the next answer */
 } stub_state;
 
 static stub_state g_stub;
@@ -89,18 +97,26 @@ static int stub_is_hex(const char *s, size_t n)
     return 1;
 }
 
-/* Every quoted 64-hex string in the array following "key":[ . */
-static int stub_hex_list(const char *body, const char *key, char out[][65], int max)
+/* Every quoted 64-hex string in the array following "key":[ ; *out
+ * (malloc'd) receives them. */
+static int stub_hex_list(const char *body, const char *key, char (**outp)[65])
 {
+    char (*out)[65];
+    int max;
     char needle[64];
     const char *p, *end;
     int n = 0;
     _snprintf_s(needle, sizeof needle, _TRUNCATE, "\"%s\":[", key);
+    *outp = NULL;
     p = strstr(body, needle);
     if (!p) return -1;
     p += strlen(needle);
     end = strchr(p, ']');
     if (!end) return -1;
+    max = (int)((end - p) / 66) + 1;
+    out = (char (*)[65])calloc((size_t)max, 65);
+    if (!out) return -1;
+    *outp = out;
     while (p < end) {
         const char *q = strchr(p, '"');
         if (!q || q >= end) break;
@@ -108,7 +124,7 @@ static int stub_hex_list(const char *body, const char *key, char out[][65], int 
             if (n < max) { memcpy(out[n], q + 1, 64); out[n][64] = 0; }
             n++;
             p = q + 66;
-        } else return -1;
+        } else { free(out); *outp = NULL; return -1; }
         while (p < end && (*p == ',' || *p == ' ')) p++;
     }
     return n;
@@ -144,8 +160,9 @@ static void stub_send_ex(SOCKET s, int status, const char *ctype, const void *bo
     char head[256];
     const char *reason = status == 200 ? "OK" : status == 201 ? "Created" : status == 204 ? "No Content" : "Status";
     int n = _snprintf_s(head, sizeof head, _TRUNCATE,
-                        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-                        status, reason, ctype ? ctype : "application/json", len);
+                        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nX-Mod-Scripts: %u\r\nConnection: close\r\n\r\n",
+                        status, reason, ctype ? ctype : "application/json", len, g_stub.scripts_header);
+    g_stub.scripts_header = 0;
     send(s, head, n, 0);
     if (head_only) return;
     while (len) {
@@ -169,7 +186,8 @@ static void stub_json(SOCKET s, int status, const char *json)
 
 /* The Worker's archive check, on the product's own reader: NULL when the
  * archive is the build `hash`, else the first cause (static text). */
-static const char *stub_check_archive(const char *hash, const unsigned char *body, size_t len, char *why, size_t cap)
+static const char *stub_check_archive(const char *hash, const unsigned char *body, size_t len, char *why, size_t cap,
+                                      unsigned *scripts)
 {
     char path[MAX_PATH], dir[MAX_PATH], cause[256];
     sh_zip_reader zr;
@@ -191,7 +209,8 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
         return why;
     }
     idx = sh_zip_reader_find(&zr, "mod.json");
-    text = idx < 0 ? NULL : sh_zip_reader_read(&zr, idx, 1024 * 1024, &tlen, cause, sizeof cause);
+    *scripts = 0;
+    text = idx < 0 ? NULL : sh_zip_reader_read(&zr, idx, (size_t)-1, &tlen, cause, sizeof cause);
     if (!text) bad = "the archive has no mod.json";
     else if (!sh_mb_load_text((const char *)text, tlen, &b)) {
         _snprintf_s(why, cap, _TRUNCATE, "mod.json: %s", b.first_cause);
@@ -205,6 +224,7 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
         if (sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
     }
     if (!bad && zr.n != carried + 1) bad = "the archive holds entries mod.json does not list";
+    if (!bad) *scripts = b.script_files;
     free(text);
     sh_mb_free(&b);
     sh_zip_reader_close(&zr);
@@ -228,8 +248,145 @@ static void stub_drop_unclaimed(void)
     }
 }
 
+/* A build object, the table grown as needed. */
+static stub_obj *stub_new_build(const char *hash)
+{
+    stub_obj *o;
+    if (g_stub.nbuilds == g_stub.cap_builds) {
+        int cap = g_stub.cap_builds ? g_stub.cap_builds * 2 : 64;
+        stub_obj *grown = (stub_obj *)realloc(g_stub.builds, sizeof *grown * (size_t)cap);
+        if (!grown) return NULL;
+        g_stub.builds = grown;
+        g_stub.cap_builds = cap;
+    }
+    o = &g_stub.builds[g_stub.nbuilds++];
+    memset(o, 0, sizeof *o);
+    strcpy_s(o->hash, sizeof o->hash, hash);
+    return o;
+}
+
+static void stub_upload_free(void)
+{
+    free(g_stub.upload.bytes);
+    free(g_stub.upload.have);
+    memset(&g_stub.upload, 0, sizeof g_stub.upload);
+}
+
+/* The size an upload in parts names: "size":N in a body. */
+static unsigned long long stub_size_of(const char *body)
+{
+    const char *p = strstr(body, "\"size\":");
+    return p ? _strtoui64(p + 7, NULL, 10) : 0;
+}
+
+/* Checks and stores a whole archive; answers 201 or 422. */
+static void stub_store(SOCKET s, const char *hash, const unsigned char *body, size_t blen)
+{
+    char out[512], why[300];
+    unsigned scripts = 0;
+    const char *bad = stub_check_archive(hash, body, blen, why, sizeof why, &scripts);
+    stub_obj *o;
+    if (bad) {
+        strncpy_s(g_stub.last_refusal, sizeof g_stub.last_refusal, bad, _TRUNCATE);
+        _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"%s\"}", bad);
+        stub_json(s, 422, out);
+        return;
+    }
+    o = stub_new_build(hash);
+    if (!o) { stub_json(s, 503, "{\"error\":\"the stub ran out of memory\"}"); return; }
+    o->bytes = (unsigned char *)malloc(blen ? blen : 1);
+    if (blen) memcpy(o->bytes, body, blen);
+    o->len = blen;
+    o->scripts = scripts;
+    g_stub.build_created++;
+    _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu,\"scripts\":%u}", hash, blen, scripts);
+    stub_json(s, 201, out);
+}
+
+/* The state of the upload in parts, as the Worker answers it. */
+static void stub_parts_state(SOCKET s, int status)
+{
+    char out[1024];
+    unsigned i;
+    size_t n = (size_t)_snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%llu,\"partSize\":%llu,\"parts\":%u,\"have\":[",
+                                   g_stub.upload.hash, g_stub.upload.size, STUB_PART_SIZE, g_stub.upload.parts);
+    for (i = 0; i < g_stub.upload.parts; i++)
+        if (g_stub.upload.have[i]) n += (size_t)_snprintf_s(out + n, sizeof out - n, _TRUNCATE, "%s%u", out[n - 1] == '[' ? "" : ",", i + 1);
+    _snprintf_s(out + n, sizeof out - n, _TRUNCATE, "]}");
+    stub_json(s, status, out);
+}
+
+static void stub_parts(SOCKET s, const char *method, const char *hash, const char *rest, const char *ctype,
+                       unsigned long long build_size, const unsigned char *body, size_t blen)
+{
+    stub_upload *u = &g_stub.upload;
+    char out[512];
+    stub_obj *o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
+    if (!strcmp(rest, "/parts") && !strcmp(method, "POST")) {
+        unsigned long long size = stub_size_of((const char *)body);
+        g_stub.part_starts++;
+        if (size < 22) { stub_json(s, 400, "{\"error\":\"The upload names no archive size.\"}"); return; }
+        if (o) {
+            _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu,\"scripts\":%u,\"stored\":true}", hash,
+                        o->len, o->scripts);
+            stub_json(s, 200, out);
+            return;
+        }
+        if (u->bytes && !strcmp(u->hash, hash) && u->size == size) { stub_parts_state(s, 200); return; }
+        stub_upload_free();
+        strcpy_s(u->hash, sizeof u->hash, hash);
+        u->size = size;
+        u->parts = (unsigned)((size + STUB_PART_SIZE - 1) / STUB_PART_SIZE);
+        u->bytes = (unsigned char *)malloc((size_t)size);
+        u->have = (unsigned char *)calloc(u->parts, 1);
+        if (!u->bytes || !u->have) { stub_upload_free(); stub_json(s, 503, "{\"error\":\"the stub ran out of memory\"}"); return; }
+        stub_parts_state(s, 201);
+        return;
+    }
+    if (!strncmp(rest, "/parts/", 7) && !strcmp(method, "PUT")) {
+        unsigned n = (unsigned)strtoul(rest + 7, NULL, 10);
+        unsigned long long at, len;
+        g_stub.part_puts++;
+        if (_stricmp(ctype, "application/octet-stream") != 0) { stub_json(s, 415, "{\"error\":\"A part must be sent as application/octet-stream.\"}"); return; }
+        if (!u->bytes || strcmp(u->hash, hash) || u->size != build_size) {
+            stub_json(s, 404, "{\"error\":\"The mod store has no upload of this build in progress; start it again.\"}");
+            return;
+        }
+        if (n < 1 || n > u->parts) { stub_json(s, 400, "{\"error\":\"The upload has no part with that number.\"}"); return; }
+        if (n < 64) g_stub.part_sent[n]++;
+        if (g_stub.fail_part == (int)n) { g_stub.fail_part = 0; stub_json(s, 503, "{\"error\":\"injected failure 503\"}"); return; }
+        at = STUB_PART_SIZE * (n - 1);
+        len = n < u->parts ? STUB_PART_SIZE : u->size - at;
+        if (blen != len) { stub_json(s, 400, "{\"error\":\"The part is not the length its place in the archive needs.\"}"); return; }
+        memcpy(u->bytes + at, body, blen);
+        u->have[n - 1] = 1;
+        stub_parts_state(s, 200);
+        return;
+    }
+    if (!strcmp(rest, "/complete") && !strcmp(method, "POST")) {
+        unsigned long long size = stub_size_of((const char *)body);
+        unsigned i;
+        g_stub.part_completes++;
+        if (!u->bytes || strcmp(u->hash, hash) || u->size != size) {
+            if (o) {
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu,\"scripts\":%u}", hash, o->len, o->scripts);
+                stub_json(s, 200, out);
+                return;
+            }
+            stub_json(s, 404, "{\"error\":\"The mod store has no upload of this build in progress; start it again.\"}");
+            return;
+        }
+        for (i = 0; i < u->parts; i++)
+            if (!u->have[i]) { stub_parts_state(s, 409); return; }
+        stub_store(s, hash, u->bytes, (size_t)u->size);
+        stub_upload_free();
+        return;
+    }
+    stub_json(s, 405, "{\"error\":\"This address of the mod store does not take that request.\"}");
+}
+
 static void stub_route(SOCKET s, const char *method, const char *path, const char *ctype, int cl_headers,
-                       const unsigned char *body, size_t blen)
+                       unsigned long long build_size, const unsigned char *body, size_t blen)
 {
     char out[4096], probe[48];
     _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s %s", method, path);
@@ -240,18 +397,27 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
         stub_send_ex(s, st, "application/json", out, strlen(out), !strcmp(method, "HEAD"));
         return;
     }
+    if (!strncmp(path, "/mods/build/", 12) && strlen(path) > 76 && stub_is_hex(path + 12, 64)) {
+        char hash[65];
+        memcpy(hash, path + 12, 64);
+        hash[64] = 0;
+        stub_parts(s, method, hash, path + 76, ctype, build_size, body, blen);
+        return;
+    }
     if (!strncmp(path, "/mods/build/", 12) && strlen(path) == 76 && stub_is_hex(path + 12, 64)) {
         const char *hash = path + 12;
         stub_obj *o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
         if (!strcmp(method, "HEAD")) {
             g_stub.head_calls++;
             if (!o) { stub_send_ex(s, 404, "application/json", "{\"error\":\"not found\"}", 21, 1); return; }
+            g_stub.scripts_header = o->scripts;
             stub_send_ex(s, 200, "application/zip", o->bytes, o->len, 1);
             return;
         }
         if (!strcmp(method, "GET")) {
             g_stub.build_gets++;
             if (!o) { stub_json(s, 404, "{\"error\":\"not found\"}"); return; }
+            g_stub.scripts_header = o->scripts;
             if (g_stub.corrupt_build_gets && o->len) {
                 unsigned char *copy = (unsigned char *)malloc(o->len);
                 memcpy(copy, o->bytes, o->len);
@@ -264,58 +430,50 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             return;
         }
         if (!strcmp(method, "PUT")) {
-            const char *bad;
-            char why[300];
             g_stub.build_puts++;
             if (_stricmp(ctype, "application/zip") != 0) { stub_json(s, 415, "{\"error\":\"content-type must be application/zip\"}"); return; }
             if (cl_headers == 0) { stub_json(s, 411, "{\"error\":\"content-length required\"}"); return; }
-            if (blen > STUB_MAX_ARCHIVE) { stub_json(s, 413, "{\"error\":\"the archive is over 96 MiB\"}"); return; }
+            if (blen > STUB_PART_SIZE) { stub_json(s, 413, "{\"error\":\"An archive over 95 MiB goes to the mod store in parts.\"}"); return; }
             if (o) {
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu}", hash, o->len);
+                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu,\"scripts\":%u}", hash, o->len, o->scripts);
                 stub_json(s, 200, out);
                 return;
             }
-            bad = stub_check_archive(hash, body, blen, why, sizeof why);
-            if (bad) {
-                strncpy_s(g_stub.last_refusal, sizeof g_stub.last_refusal, bad, _TRUNCATE);
-                _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"%s\"}", bad);
-                stub_json(s, 422, out);
-                return;
-            }
-            o = &g_stub.builds[g_stub.nbuilds++];
-            strcpy_s(o->hash, sizeof o->hash, hash);
-            o->bytes = (unsigned char *)malloc(blen ? blen : 1);
-            if (blen) memcpy(o->bytes, body, blen);
-            o->len = blen;
-            g_stub.build_created++;
-            _snprintf_s(out, sizeof out, _TRUNCATE, "{\"build\":\"%s\",\"size\":%zu}", hash, blen);
-            stub_json(s, 201, out);
+            stub_store(s, hash, body, blen);
             return;
         }
         stub_json(s, 405, "{\"error\":\"method not allowed\"}");
         return;
     }
     if (!strcmp(method, "POST") && !strcmp(path, "/mods/claim")) {
-        char ref[260], secret[80], list[32][65];
-        int n = stub_hex_list((const char *)body, "builds", list, 32), i, has_secret;
+        char ref[260], secret[80], (*list)[65] = NULL;
+        int n = stub_hex_list((const char *)body, "builds", &list), i, has_secret;
         stub_claim *c = NULL;
         g_stub.claim_calls++;
-        if (!stub_str((const char *)body, "ref", ref, sizeof ref)) { stub_json(s, 400, "{\"error\":\"bad ref\"}"); return; }
-        if (n <= 0) { stub_json(s, 400, "{\"error\":\"no builds\"}"); return; }
+        if (!stub_str((const char *)body, "ref", ref, sizeof ref)) { free(list); stub_json(s, 400, "{\"error\":\"bad ref\"}"); return; }
+        if (n <= 0) { free(list); stub_json(s, 400, "{\"error\":\"no builds\"}"); return; }
         has_secret = stub_str((const char *)body, "secret", secret, sizeof secret);
         if (has_secret) {
             g_stub.claim_with_secret++;
             for (i = 0; i < g_stub.nclaims && !c; i++)
                 if (g_stub.claims[i].live && !strcmp(g_stub.claims[i].ref, ref) && !strcmp(g_stub.claims[i].secret, secret)) c = &g_stub.claims[i];
-            if (!c) { stub_json(s, 403, "{\"error\":\"no claim matches this ref and secret\"}"); return; }
+            if (!c) { free(list); stub_json(s, 403, "{\"error\":\"no claim matches this ref and secret\"}"); return; }
         }
         for (i = 0; i < n; i++)
             if (!stub_find(g_stub.builds, g_stub.nbuilds, list[i])) {
                 _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"unknown builds\",\"missing\":[\"%s\"]}", list[i]);
+                free(list);
                 stub_json(s, 409, out);
                 return;
             }
         if (!c) {
+            if (g_stub.nclaims == g_stub.cap_claims) {
+                int cap = g_stub.cap_claims ? g_stub.cap_claims * 2 : 16;
+                stub_claim *grown = (stub_claim *)realloc(g_stub.claims, sizeof *grown * (size_t)cap);
+                if (!grown) { free(list); stub_json(s, 503, "{\"error\":\"the stub ran out of memory\"}"); return; }
+                g_stub.claims = grown;
+                g_stub.cap_claims = cap;
+            }
             c = &g_stub.claims[g_stub.nclaims++];
             memset(c, 0, sizeof *c);
             c->live = 1;
@@ -323,8 +481,9 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
             stub_hex_of(++g_stub.counter, "claim", c->id, 32);
             stub_hex_of(++g_stub.counter, "secret", c->secret, 64);
         }
-        c->nb = n < 32 ? n : 32;
-        for (i = 0; i < c->nb; i++) strcpy_s(c->builds[i], 65, list[i]);
+        free(c->builds);
+        c->builds = list;   /* the claim keeps the list */
+        c->nb = n;
         stub_trail("claim", ref);
         _snprintf_s(out, sizeof out, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", c->id, c->secret);
         stub_json(s, has_secret ? 200 : 201, out);
@@ -359,6 +518,7 @@ static void stub_serve_one(SOCKET s)
     char *end = NULL, method[8] = "", path[200] = "", ctype[64] = "";
     unsigned char *body = NULL;
     long long cl = -1;
+    unsigned long long build_size = 0;
     int cl_headers = 0;
     size_t have, blen = 0;
     if (!head) return;
@@ -380,6 +540,7 @@ static void stub_serve_one(SOCKET s)
             next = strstr(line, "\r\n");
             if (next) *next = 0;
             if (!_strnicmp(line, "Content-Length:", 15)) { cl_headers++; cl = _atoi64(line + 15); }
+            else if (!_strnicmp(line, "X-Build-Size:", 13)) build_size = _strtoui64(line + 13, NULL, 10);
             else if (!_strnicmp(line, "Content-Type:", 13)) {
                 const char *v = line + 13;
                 while (*v == ' ') v++;
@@ -415,7 +576,7 @@ static void stub_serve_one(SOCKET s)
         strncpy_s(g_stub.last_path, sizeof g_stub.last_path, path, _TRUNCATE);
         strcpy_s(g_stub.last_ctype, sizeof g_stub.last_ctype, ctype);
     }
-    stub_route(s, method, path, ctype, cl_headers, body, blen);
+    stub_route(s, method, path, ctype, cl_headers, build_size, body, blen);
     LeaveCriticalSection(&g_stub.cs);
     free(body);
     free(head);
@@ -464,6 +625,10 @@ static void stub_stop(void)
     closesocket(g_stub.listener);
     if (g_stub.thread) { WaitForSingleObject(g_stub.thread, 5000); CloseHandle(g_stub.thread); }
     for (i = 0; i < g_stub.nbuilds; i++) free(g_stub.builds[i].bytes);
+    for (i = 0; i < g_stub.nclaims; i++) free(g_stub.claims[i].builds);
+    free(g_stub.builds);
+    free(g_stub.claims);
+    stub_upload_free();
     WSACleanup();
 }
 
@@ -496,8 +661,8 @@ static void stub_put_raw(const char *hash, const void *bytes, size_t len)
     stub_obj *o;
     EnterCriticalSection(&g_stub.cs);
     o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
-    if (!o && g_stub.nbuilds < STUB_MAX_OBJECTS) { o = &g_stub.builds[g_stub.nbuilds++]; strcpy_s(o->hash, sizeof o->hash, hash); }
-    else if (o) free(o->bytes);
+    if (!o) o = stub_new_build(hash);
+    else free(o->bytes);
     if (o) {
         o->bytes = (unsigned char *)malloc(len ? len : 1);
         if (len) memcpy(o->bytes, bytes, len);

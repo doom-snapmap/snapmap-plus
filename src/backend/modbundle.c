@@ -25,16 +25,12 @@
 #include "script/script_node.h"   /* the Script node row: its reserved paths, which mods get it */
 #include "store_lock.h"
 
-#define MB_MODJSON_MAX (16u * 1024u * 1024u)   /* a mod.json read at build or load */
+#define MB_ANY_SIZE ((size_t)-1)   /* a read of a whole file, of any size */
 
 #define MB_JSON_DEPTH   32u
 #define MB_WALK_DEPTH   48
 #define MB_SCAN_DEPTH   128
 #define MB_READ_CHUNK   (1u << 20)
-/* With a stock reader, files over the caps or of a type a bundle cannot carry
- * are hashed before they are refused (a stock copy becomes a pointer), so the
- * walk itself stops at this many listed bytes. */
-#define MB_MAX_WALK     (2048ull * 1024u * 1024u)
 
 /* ------------------------------------------------------------ SHA-256 ---- */
 
@@ -2024,7 +2020,7 @@ int sh_mb_descriptor_state_why(const char *folder, char *cause, size_t cap)
     if (cause && cap) cause[0] = 0;
     if (!root) { mb_cause(cause, cap, "This mod folder could not be found; press Refresh"); return SH_MB_DESC_UNREADABLE; }
     p = mb_wjoin(root, L"mod.json");
-    if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
+    if (p) text = mb_read_wfile(p, MB_ANY_SIZE, &len);
     free(p);
     if (!text) {
         p = mb_wjoin(root, L"package.json");
@@ -2182,6 +2178,35 @@ static void mb_scene_needs(sh_mb_bundle *b)
 static int mb_file_cmp(const void *a, const void *b)
 {
     return strcmp(((const sh_mb_file *)a)->path, ((const sh_mb_file *)b)->path);
+}
+
+/* Closure indices by their file's request (qsort_s; context the bundle). */
+static int mb_by_request_cmp(void *ctx, const void *a, const void *b)
+{
+    const sh_mb_bundle *bundle = (const sh_mb_bundle *)ctx;
+    return strcmp(bundle->files[*(const size_t *)a].request, bundle->files[*(const size_t *)b].request);
+}
+
+static int mb_request_ptr_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* 1 when two files of the bundle share a request, -1 out of memory (sorted,
+ * so any count of files is checked in n log n). */
+static int mb_requests_repeat(const sh_mb_bundle *b)
+{
+    const char **req;
+    size_t i;
+    int repeat = 0;
+    if (b->file_count < 2) return 0;
+    req = (const char **)malloc(sizeof *req * b->file_count);
+    if (!req) return -1;
+    for (i = 0; i < b->file_count; i++) req[i] = b->files[i].request;
+    qsort(req, b->file_count, sizeof *req, mb_request_ptr_cmp);
+    for (i = 1; i < b->file_count && !repeat; i++) repeat = strcmp(req[i - 1], req[i]) == 0;
+    free(req);
+    return repeat;
 }
 
 static int mb_str_cmp(const void *a, const void *b)
@@ -2700,18 +2725,6 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 else mb_error(w->b, "file type not allowed: %s", child);
             } else if (size == 0) {
                 mb_error(w->b, "empty file: %s", child);
-            } else if (size > SH_MB_MAX_FILE && !(defer && (deferred = deferred ? deferred : 2))) {
-                mb_error(w->b, "file larger than 64 MiB: %s", child);
-            } else if (w->b->file_count >= SH_MB_MAX_FILES) {
-                mb_error(w->b, "more than %u files under assets/", SH_MB_MAX_FILES);
-                w->stopped = 1;
-            } else if (!defer && w->b->total_size + size > SH_MB_MAX_TOTAL) {
-                mb_error(w->b, "assets/ larger than 256 MiB");
-                w->stopped = 1;
-            } else if (defer && w->b->total_size + size > MB_MAX_WALK) {
-                mb_error(w->b, "assets is larger than %llu MiB, counting copies of game files; split the mod into two",
-                         MB_MAX_WALK >> 20);
-                w->stopped = 1;
             } else if ((f = mb_add_file(w->b)) == NULL) {
                 mb_error(w->b, "out of memory");
             } else {
@@ -3091,7 +3104,7 @@ static unsigned char *mb_rp_bytes(mb_rp *rp, const sh_mb_file *f, size_t *len, i
         full = wrel ? mb_wjoin(rp->root, wrel) : NULL;
         free(wrel);
         if (!full) return NULL;
-        bytes = mb_read_wfile(full, SH_MB_MAX_FILE, len);
+        bytes = mb_read_wfile(full, MB_ANY_SIZE, len);
         free(full);
         if (!bytes) mb_error(rp->b, "cannot read %s to check its render program", f->path);
         return bytes;
@@ -3393,10 +3406,10 @@ static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
     unsigned char *game = NULL, *copy;
     size_t glen = 0, clen = 0;
     wchar_t *full;
-    if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK || size > SH_MB_MAX_FILE) return;
+    if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK) return;
     if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
     full = mb_file_wpath(root, f->path);
-    copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
+    copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
     free(full);
     if (copy && sh_mb_text_same(game, glen, copy, clen)) {
         char *source = mb_strdup(f->request);
@@ -3711,7 +3724,7 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         }
         if (!f->shadowed || !f->is_decl || f->stock || f->is_module || sh_mb_editor_time(f->request)) continue;
         full = mb_file_wpath(root, f->path);
-        copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
+        copy = full ? mb_read_wfile(full, MB_ANY_SIZE, &clen) : NULL;
         free(full);
         if (!copy) { mb_error(b, "cannot read %s", f->path); continue; }
         if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK ||
@@ -3819,7 +3832,7 @@ typedef struct mb_closure {
     const sh_mb_stock_ops *ops;
     const wchar_t *root;
     size_t *by_req;        /* file indices sorted by request */
-    size_t n;
+    size_t n, cap;
     size_t manifest;       /* canonical bytes so far (estimated before the hash and number) */
     unsigned borrowed;     /* files this build added */
     const char *first;     /* the first of them, for the build note */
@@ -3913,7 +3926,7 @@ static int mb_closure_vt_served(mb_closure *c, const sh_mb_file *f, const char *
         free(rel);
         if (wrel) full = mb_wjoin(c->root, wrel);
         free(wrel);
-        if (full) text = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
+        if (full) text = mb_read_wfile(full, MB_ANY_SIZE, &len);
         free(full);
         if (!text) return 0;
     }
@@ -4112,10 +4125,11 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     if (c->ops->identify(c->ops->context, request, sha, &size) != SH_MB_STOCK_OK || strlen(sha) != SH_MB_HASH_HEX ||
         !sh_mb_logical_name(request, type, sizeof type, name, sizeof name))
         return 1;   /* left to the need check, which reports it as before */
-    if (b->file_count >= SH_MB_MAX_FILES) {
-        mb_error(b, "%s needs %s %s, which only the campaign holds; bringing it along would take this mod past %u "
-                 "files, so split the mod into two", by, need->type, need->name, SH_MB_MAX_FILES);
-        return 0;
+    if (c->n == c->cap) {
+        size_t grown_cap = c->cap * 2 + 64, *grown = (size_t *)realloc(c->by_req, sizeof(size_t) * grown_cap);
+        if (!grown) { mb_error(b, "out of memory"); return 0; }
+        c->by_req = grown;
+        c->cap = grown_cap;
     }
     f = mb_add_file(b);
     if (!f) { mb_error(b, "out of memory"); return 0; }
@@ -4152,11 +4166,6 @@ static int mb_closure_add(mb_closure *c, size_t at, const char *request, const s
     if (one.oom) { free(one.p); mb_error(b, "out of memory"); return 0; }
     c->manifest += one.n + 1;
     free(one.p);
-    if (c->manifest > SH_MB_MANIFEST_MAX) {
-        mb_error(b, "%s needs %s %s, which only the campaign holds; this mod already brings so much campaign content "
-                 "that its file list would pass 1 MiB, so split the mod into two", by, need->type, need->name);
-        return 0;
-    }
     memmove(c->by_req + at + 1, c->by_req + at, sizeof(size_t) * (c->n - at));
     c->by_req[at] = idx;
     c->n++;
@@ -4348,14 +4357,11 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wc
     c.root = root;
     c.ops = mb_stock();
     if (!c.ops || !c.ops->container || !c.ops->identify || !c.ops->read) return;
-    c.by_req = (size_t *)malloc(sizeof(size_t) * (SH_MB_MAX_FILES + 1));
+    c.cap = b->file_count + 64;
+    c.by_req = (size_t *)malloc(sizeof(size_t) * c.cap);
     if (!c.by_req) { mb_error(b, "out of memory"); return; }
-    for (i = 0; i < b->file_count && i < SH_MB_MAX_FILES; i++) c.by_req[c.n++] = i;
-    for (i = 1; i < c.n; i++) {
-        size_t v = c.by_req[i], j = i;
-        while (j > 0 && strcmp(b->files[c.by_req[j - 1]].request, b->files[v].request) > 0) { c.by_req[j] = c.by_req[j - 1]; j--; }
-        c.by_req[j] = v;
-    }
+    for (i = 0; i < b->file_count; i++) c.by_req[c.n++] = i;
+    qsort_s(c.by_req, c.n, sizeof *c.by_req, mb_by_request_cmp, b);
     text = mb_emit(b, 1, &len);
     c.manifest = len + SH_MB_HASH_HEX + 20;
     free(text);
@@ -4815,7 +4821,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 
         if (f->is_decl || f->is_module) {
             size_t len = 0;
-            unsigned char *text = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
+            unsigned char *text = mb_read_wfile(full, MB_ANY_SIZE, &len);
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(text, len, f->blob);
             got = len;
@@ -4836,7 +4842,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             /* A bank is read whole: its header must name the id the game will
              * load it as. */
             size_t len = 0;
-            unsigned char *bytes = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
+            unsigned char *bytes = mb_read_wfile(full, MB_ANY_SIZE, &len);
             char stem[SH_MB_BANK_STEM_MAX + 1], cause[SH_MB_CAUSE_MAX];
             if (!bytes) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
             sh_mb_sha256_hex(bytes, len, f->blob);
@@ -4887,8 +4893,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             if (f->deferred == 1 && sh_mb_pointer_only_kind(f->request))
                 mb_error(b, "%s is not the game's own file: a .sbsp, .ambientsh, .tome or .pages file can only be an "
                          "unchanged copy of the game's; delete it", f->path);
-            else if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
-            else mb_error(b, "file larger than 64 MiB: %s", f->path);
+            else mb_error(b, "file type not allowed: %s", f->path);
             continue;
         }
 
@@ -4968,7 +4973,6 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         if (b->files[i].stock) { b->stock_count++; b->stock_bytes += b->files[i].size; }
         else b->total_size += b->files[i].size;
     }
-    if (b->total_size > SH_MB_MAX_TOTAL) mb_error(b, "assets/ larger than 256 MiB");
 
     /* Additive mods: the shadows are derived from the files, so the
      * canonical manifest of a mod that listed exactly its replacements keeps
@@ -5163,8 +5167,6 @@ static void mb_finish(sh_mb_bundle *b)
     free(b->canonical);
     b->canonical = mb_emit(b, 0, &b->canonical_len);
     if (!b->canonical) { mb_error(b, "out of memory"); return; }
-    if (b->canonical_len > SH_MB_MANIFEST_MAX)
-        mb_error(b, "this mod lists too many files for one mod (its file list is over 1 MiB); split it into two");
     sh_mb_sha256_hex(b->canonical, b->canonical_len, b->hash);
 }
 
@@ -5287,7 +5289,7 @@ static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int p
         if (!same) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
         if (closure && closure->t != MBJ_BOOL) { mb_error(b, MB_BLOCK_EDITED); free(expect); return 0; }
     } else if (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
-               (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE) {
+               (sz = _strtoui64(size->s, NULL, 10)) == 0) {
         mb_error(b, MB_BLOCK_EDITED);
         free(expect);
         return 0;
@@ -5343,7 +5345,7 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
     static const char *const bkeys[] = { "build", "built", "cause", "classes", "edits", "editor", "files", "format",
                                          "registries", "rules", "salt", "scripts", "shadows", "stock", "tree", "warnings", NULL };
     const mbj *block, *v, *files, *stock, *bundle, *sh;
-    size_t i, total;
+    size_t i;
     if (root->t != MBJ_OBJ) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     block = mbj_get(root, SH_MB_BLOCK_KEY);
     if (!block || block->t != MBJ_OBJ) {
@@ -5436,24 +5438,20 @@ static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
         mb_error(out, MB_BLOCK_EDITED);
         return 0;
     }
-    total = (files ? files->count : 0) + (stock ? stock->count : 0);
-    if (total > SH_MB_MAX_FILES) { mb_error(out, MB_BLOCK_EDITED); return 0; }
     for (i = 0; files && i < files->count; i++) if (!mb_load_block_file(out, files->items[i], i, 0)) return 0;
     for (i = 0; stock && i < stock->count; i++) if (!mb_load_block_file(out, stock->items[i], i, 1)) return 0;
     qsort(out->files, out->file_count, sizeof(sh_mb_file), mb_file_cmp);
     for (i = 1; i < out->file_count; i++) {
-        size_t k;
         if (strcmp(out->files[i - 1].path, out->files[i].path) == 0) {
             mb_error(out, MB_BLOCK_EDITED);
             return 0;
         }
-        for (k = 0; k < i; k++)
-            if (strcmp(out->files[k].request, out->files[i].request) == 0) {
-                mb_error(out, MB_BLOCK_EDITED);
-                return 0;
-            }
     }
-    if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, MB_BLOCK_EDITED); return 0; }
+    switch (mb_requests_repeat(out)) {
+    case 0: break;
+    case 1: mb_error(out, MB_BLOCK_EDITED); return 0;
+    default: mb_error(out, "out of memory"); return 0;
+    }
     for (i = 0; i < out->file_count; i++) {
         out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
         if (!out->files[i].stock && sh_mb_script_request(out->files[i].request, NULL, NULL) > 0) out->script_files++;
@@ -5491,7 +5489,7 @@ int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
 int sh_mb_load(const char *path, sh_mb_bundle *out)
 {
     size_t len = 0;
-    unsigned char *text = sh_mb_read_file(path, MB_MODJSON_MAX, &len);
+    unsigned char *text = sh_mb_read_file(path, MB_ANY_SIZE, &len);
     int ok = mb_load_modjson((const char *)text, len, out, 1);
     free(text);
     return ok;
@@ -6173,7 +6171,7 @@ int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t c
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
     if (!mod_path) { free(root); return mb_cause(cause, cap, "out of memory"); }
-    existing = mb_read_wfile(mod_path, MB_MODJSON_MAX, &elen);
+    existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
     text = mb_modjson(b, (const char *)existing, elen, &len);
     ok = text && mb_write_wfile(mod_path, text, len);
     if (!ok && text) mb_cause(cause, cap, "cannot write mod.json: %s", sh_reason_win32(GetLastError(), "mod.json", len));
@@ -6197,7 +6195,7 @@ int sh_mb_write_failed(const sh_mb_bundle *b, const char *folder, char *why, siz
     root = folder ? sh_mb_wpath(folder) : NULL;
     if (root) mod_path = mb_wjoin(root, L"mod.json");
     if (!mod_path) { free(root); return mb_cause(why, cap, "out of memory"); }
-    existing = mb_read_wfile(mod_path, MB_MODJSON_MAX, &elen);
+    existing = mb_read_wfile(mod_path, MB_ANY_SIZE, &elen);
     own = existing ? sh_mb_author_bytes((const char *)existing, elen, &own_len, NULL) : NULL;
     if (!own) { mb_cause(why, cap, "mod.json is missing or is not a JSON object"); goto done; }
     mb_puts(&o, "{\"format\":2,\"salt\":");
@@ -6319,8 +6317,8 @@ int sh_mb_build(const char *folder, const char *salt, const sh_mb_resolver *reso
         mb_error(out, "the mod folder has no mod.json");
     } else {
         char cause[SH_MB_CAUSE_MAX];
-        text = mb_read_wfile(desc_mod, MB_MODJSON_MAX, &len);
-        if (!text) mb_error(out, "cannot read mod.json (missing, unreadable or over %u MiB)", MB_MODJSON_MAX >> 20);
+        text = mb_read_wfile(desc_mod, MB_ANY_SIZE, &len);
+        if (!text) mb_error(out, "cannot read mod.json (missing or unreadable)");
         else if (!(rootj = mbj_parse((const char *)text, len, cause, sizeof cause))) mb_error(out, "mod.json: %s", cause);
         else {
             const mbj *block = mbj_get(rootj, SH_MB_BLOCK_KEY), *fmt = NULL, *bs = NULL, *pt;
@@ -6455,7 +6453,7 @@ int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
     if (!root) return 0;
     memset(&l, 0, sizeof l);
     p = mb_wjoin(root, L"mod.json");
-    if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
+    if (p) text = mb_read_wfile(p, MB_ANY_SIZE, &len);
     free(p);
     if (text) own = sh_mb_author_bytes((const char *)text, len, &own_len, NULL);
     if (!own) goto done;
@@ -6585,7 +6583,7 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
     if (!path || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return NULL;
     for (attempt = 0; attempt < 20; attempt++) {
         SetLastError(ERROR_SUCCESS);
-        text = mb_read_wfile(path, 64u * 1024u * 1024u, &len);
+        text = mb_read_wfile(path, MB_ANY_SIZE, &len);
         if (text) break;
         err = GetLastError();
         if (err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
@@ -6596,8 +6594,7 @@ static mbj *mb_record_read(const wchar_t *path, int *state, char *why, size_t wh
         if (why && why_cap) {
             if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION)
                 _snprintf_s(why, why_cap, _TRUNCATE, "another program has it open");
-            else if (err) _snprintf_s(why, why_cap, _TRUNCATE, "Windows error %lu", err);
-            else _snprintf_s(why, why_cap, _TRUNCATE, "it is larger than 64 MiB");
+            else _snprintf_s(why, why_cap, _TRUNCATE, "Windows error %lu", err);
         }
         return NULL;
     }

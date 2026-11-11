@@ -20,8 +20,6 @@
 #include "map_carrier.h"
 #include "modsync.h"
 
-#define ME_INDEX_MAX       (1024u * 1024u)
-
 static int me_cause(char *cause, size_t cap, const char *fmt, ...)
 {
     va_list ap;
@@ -60,8 +58,6 @@ int modexport_is_zip_path(const char *path)
 
 /* ------------------------------------------------------------ helpers --- */
 
-#define ME_MODJSON_MAX   (16u * 1024u * 1024u)
-#define ME_MAX_MODS      256u
 
 static void me_join_native(char *out, size_t cap, const char *dir, const char *rel)
 {
@@ -143,9 +139,8 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
     if (stp) memset(stp, 0, sizeof *stp);
     if (!name || !name[0]) return me_cause(cause, cap, "the prefab has no name");
     n = strlen(name);
-    if (n > 200 || strchr(name, '/') || strchr(name, '\\') || !sh_zip_name_ok(name, n))
+    if (n + sizeof ".json" > SH_ZIP_NAME_MAX || strchr(name, '/') || strchr(name, '\\') || !sh_zip_name_ok(name, n))
         return me_cause(cause, cap, "the prefab's name cannot name a file in the ZIP");
-    if (len > MODEXPORT_PREFAB_MAX) return me_cause(cause, cap, "the prefab is larger than %u bytes", MODEXPORT_PREFAB_MAX);
     _snprintf_s(entry, sizeof entry, _TRUNCATE, "%s.json", name);
     pl.entry = entry;
     pl.text = prefab;
@@ -175,7 +170,7 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
     /* Read without the store lock: every file is checked against the build
      * the listing named, so a folder changed meanwhile refuses the export. */
     me_join_native(path, sizeof path, e->folder, "mod.json");
-    bytes = sh_mb_read_file(path, ME_MODJSON_MAX, &blen);
+    bytes = sh_mb_read_file(path, (size_t)-1, &blen);
     if (!bytes) return me_cause(cause, cap, "%s's mod.json cannot be read. Press Refresh in the Mods tab to see why", label);
     memset(&check, 0, sizeof check);
     same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
@@ -192,7 +187,7 @@ static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry 
         const sh_mb_file *f = &b->files[k];
         if (f->stock) continue;
         me_join_native(path, sizeof path, e->folder, f->path);
-        bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
+        bytes = sh_mb_read_file(path, (size_t)-1, &blen);
         if (bytes) {
             sh_mb_sha256_hex(bytes, blen, actual);
             if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
@@ -278,7 +273,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     memset(&w, 0, sizeof w);
     w.h = INVALID_HANDLE_VALUE;
     if (cause && cap) cause[0] = 0;
-    if (!map_json || !len || len > MODEXPORT_MAP_MAX || !zip_path || !zip_path[0])
+    if (!map_json || !len || !zip_path || !zip_path[0])
         return me_cause(cause, cap, prefab ? "no prefab text or no destination" : "no map text or no destination");
     if (prefab) {
         for (i = 0; i < pl->rows->count; i++)
@@ -365,7 +360,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     locked = 0;
     if (prefab && pl->text_for) {
         prefab_text = pl->text_for(pl->ctx, &rows, moved > 0, &len);
-        if (!prefab_text || !len || len > MODEXPORT_PREFAB_MAX) { me_cause(cause, cap, "the prefab's export could not be written. Export it again"); goto done; }
+        if (!prefab_text || !len) { me_cause(cause, cap, "the prefab's export could not be written. Export it again"); goto done; }
         map_json = prefab_text;
         st->map_bytes = len;
     }
@@ -521,7 +516,7 @@ static int me_retired(const sh_zip_reader *r)
     if (idx >= 0) {
         char ignored[64], type[64];
         size_t len = 0;
-        unsigned char *text = sh_zip_reader_read(r, idx, ME_INDEX_MAX, &len, ignored, sizeof ignored);
+        unsigned char *text = sh_zip_reader_read(r, idx, (size_t)-1, &len, ignored, sizeof ignored);
         int t = text ? sh_prefab_block_top_type((const char *)text, len, type, sizeof type) : -1;
         free(text);
         if (t != 1) return 1;
@@ -617,7 +612,7 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         }
         if (*idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export holds no %s", me_kind_word(want)); }
     }
-    *text = (char *)sh_zip_reader_read(&im->zr, *idx, MODEXPORT_MAP_MAX, len, cause, cap);
+    *text = (char *)sh_zip_reader_read(&im->zr, *idx, (size_t)-1, len, cause, cap);
     if (!*text) { me_import_free(im); return 0; }
     kind = me_classify(*text, *len);
     if (kind != want) {
@@ -631,10 +626,6 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         else me_cause(cause, cap, "this is a map's export, not a prefab's");
         me_open_fail(im, text);
         return 0;
-    }
-    if (want == ME_KIND_PREFAB && *len > MODEXPORT_PREFAB_MAX) {
-        me_open_fail(im, text);
-        return me_cause(cause, cap, "the prefab is larger than %u bytes", MODEXPORT_PREFAB_MAX);
     }
     /* A map in an earlier shape (its variables or rows): nothing is read. */
     if (want == ME_KIND_MAP && sh_map_old_shape(*text, *len) != SH_MAP_OLD_NONE) {
@@ -713,7 +704,7 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         if (!slash || strcmp(slash, "/mod.json")) continue;
         sl = (size_t)(slash - seg);
         if (!sl || sl > SH_MS_NAME_MAX || me_inside_carried(&im->zr, seg, sl)) continue;
-        text = (char *)sh_zip_reader_read(&im->zr, (long)i, ME_MODJSON_MAX, &len, cause, cap);
+        text = (char *)sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause, cap);
         if (!text) return 0;
         memset(&b, 0, sizeof b);
         if (!sh_mb_load_text(text, len, &b)) {
@@ -734,7 +725,6 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
             sh_mb_free(&b);
             continue;
         }
-        if (im->nc >= ME_MAX_MODS) { sh_mb_free(&b); return me_cause(cause, cap, "the export carries too many mods"); }
         if (im->nc == im->cap) {
             size_t c2 = im->cap ? im->cap * 2 : 8;
             me_carry *g = (me_carry *)realloc(im->c, sizeof *g * c2);
@@ -871,7 +861,7 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
             me_log("MODS: import: %s is not part of a mod folder; left out", name);
             continue;
         }
-        bytes = sh_zip_reader_read(&im->zr, (long)i, (size_t)SH_MB_MAX_FILE, &len, cause, cap);
+        bytes = sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause, cap);
         if (!bytes) return 0;
         put = me_put_file(c->stage, rel, bytes, len);
         free(bytes);

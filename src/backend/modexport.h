@@ -55,7 +55,6 @@
 #define MODEXPORT_MAP_FALLBACK "map.json"
 /* The retired index name: an export.json without ~type is that index. */
 #define MODEXPORT_INDEX        "export.json"
-#define MODEXPORT_MAP_MAX      (64u * 1024u * 1024u)
 /* Room for an import or export refusal: a mod named, plus the builder's own
  * cause (SH_MB_CAUSE_MAX), with its file path, whole. */
 #define MODEXPORT_CAUSE_MAX    1024
@@ -104,7 +103,6 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st,
  * idSnapEntityPrefab, or an idSnapMap with a block, is a prefab; an idSnapMap
  * (or an object without ~type) without a block is a map. Each refuses the
  * other's export. */
-#define MODEXPORT_PREFAB_MAX (16u * 1024u * 1024u)
 
 /* The prefab text to carry, given the rows the export carries (`moved` is 1
  * when a row pinned another build and now names the root folder's).
