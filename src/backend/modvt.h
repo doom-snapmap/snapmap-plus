@@ -39,10 +39,15 @@
  * record, and the decls themselves stay registered for the process, so the
  * record is kept until DOOM exits (logged once).
  *
- * Flavor: 2 on Vulkan. On OpenGL the engine turns a material's flavor into 4
- * only when GL_AMD_sparse_texture is present and its cvar is set; then the
- * family registers with flavor 4. Without that, a family is not registered
- * on OpenGL and one line says it cannot be served there.
+ * Flavor: a material bound to the record gets flavor 2, and
+ * VirtualTextureForMaterial matches a record only with the same flavor. With
+ * flavor 2 SetSource gives the record the VT system's UniqueVmtrs physical page
+ * cache, which the VT start-up builds and every frame services on both
+ * renderers; the family pages, decodes and uploads through it as stock
+ * families do through theirs. On OpenGL the engine turns that flavor into 4
+ * (a sparse page cache of the record's own) only when __glewTexStorageSparseAMD
+ * is loaded and vt_enablePRT (default 0) is set; then the family registers with
+ * flavor 4, otherwise with 2.
  */
 #ifndef SH_MODVT_H
 #define SH_MODVT_H
@@ -102,7 +107,7 @@ int sh_modvt_collect(sh_modvt_family *out, int cap);
 typedef struct sh_modvt_ops {
     void *context;
     int (*ready)(void *context);                         /* 1 when record 1 is built */
-    int (*flavor)(void *context);                        /* 2 or 4; 0 when no family can be served */
+    int (*flavor)(void *context);                        /* the flavor a matched material carries: 2 or 4 */
     int (*find)(void *context, const char *name);        /* record 1..31 with that name, else -1 */
     int (*is_free)(void *context, int record);           /* 1 when record (1..30) holds no source */
     int (*set_source)(void *context, int record, const char *name, const char *path, int flavor);
@@ -116,7 +121,7 @@ typedef struct sh_modvt_result {
     int kept;          /* already registered, unchanged */
     int released;      /* released by this sync */
     int held;          /* left the index (or changed) but kept: a pass ran since registration */
-    int refused;       /* not registered: name taken, renderer, table full, or SetSource refused */
+    int refused;       /* not registered: name taken, table full, or SetSource refused */
     int full;          /* of them, because records 1..30 were in use */
     int lost;          /* records the engine no longer held under the family's name */
     int not_ready;     /* 1 when the VT system was not up and nothing was done */
@@ -129,6 +134,12 @@ typedef struct sh_modvt_result {
  * VT system is not ready (nothing is done). */
 int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops, const char *phase,
                   sh_modvt_result *out);
+
+/* The flavor a material bound to a private family carries, so the flavor its
+ * record must be registered with: VirtualTextureForMaterial's own test. On
+ * OpenGL with __glewTexStorageSparseAMD loaded and vt_enablePRT set it is 4;
+ * otherwise (Vulkan, and OpenGL on every other card or setting) 2. */
+int sh_modvt_flavor(int vulkan, uint64_t sparse_ext, int32_t enable_prt);
 
 /* A decl registration pass is about to run: every family registered now may
  * have materials bound to its record from here on. */
@@ -147,13 +158,13 @@ void sh_modvt_reset(void);
 /* ------------------------------------------------------------------ decoding */
 
 /* What modvt reads out of the two signed functions. RVAs are relative to the
- * image base; the GL sparse fields are 0 on Vulkan. */
+ * image base; the GL sparse fields are 0 on Vulkan and required on OpenGL. */
 typedef struct sh_modvt_layout {
     uint32_t sys_rva;          /* the VT system object (LEA RCX at the SetSource head) */
     uint32_t release_rva;      /* Release(record), the second call there */
     uint32_t table_off;        /* record pointer table, from the VT system */
     uint32_t sparse_ext_rva;   /* GL: __glewTexStorageSparseAMD */
-    uint32_t sparse_cvar_rva;  /* GL: the int the sparse test reads with it */
+    uint32_t sparse_cvar_rva;  /* GL: vt_enablePRT's integer, read with it */
 } sh_modvt_layout;
 
 /* "48 8D 0D d32 E8 r32 48 8B CE E8 r32" in code[0..len): offset of the LEA, else -1. */
@@ -168,8 +179,9 @@ int sh_modvt_release_head_ok(const uint8_t *code, size_t len);
 
 /* Decode the layout from SetSource's first bytes (at ss_rva) and
  * VirtualTextureForMaterial's (at vf_rva). `opengl` also decodes the sparse
- * test. Returns 1 when the VT system, Release and the table were found (the
- * caller still checks Release with sh_modvt_release_head_ok), else 0. */
+ * test. Returns 1 when the VT system, Release, the table and (OpenGL) the
+ * sparse test were found (the caller still checks Release with
+ * sh_modvt_release_head_ok), else 0. */
 int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, const uint8_t *vf, size_t vf_len,
                            uint32_t vf_rva, int opengl, sh_modvt_layout *out);
 

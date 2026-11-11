@@ -2047,9 +2047,17 @@ provider; no `.pages` file is needed, and materials carry an explicit
   record is released. After a pass its materials may hold the record, and the
   decls stay registered for the process, so the record is kept until DOOM
   exits, with one line.
-- Renderers: flavor 2 on Vulkan; on OpenGL, flavor 4 when the AMD sparse
-  texture extension and its cvar are both set (the test the engine's own
-  lookup makes), and no registration otherwise.
+- Renderers: a material bound to the family carries flavor 2, and
+  VirtualTextureForMaterial matches a record only with the same flavor, so the
+  record is registered with flavor 2. SetSource then gives it the VT system's
+  `UniqueVmtrs` physical page cache, which the VT start-up builds and the
+  per-frame update services on both renderers: the family's pages are
+  requested, read through the member, decoded and uploaded as the stock
+  families' are (VK cache sys+0xFEB0, GL sys+0x11870). Only on OpenGL with
+  `GL_AMD_sparse_texture` loaded and `vt_enablePRT` set (default 0) does the
+  engine's lookup turn the flavor into 4 (a sparse cache of the record's own);
+  the product makes the same test and registers with 4 then. A binding that
+  cannot decode that test on OpenGL is not bound.
 - `sh_vt` (`vt_harness.c`) is the diagnostic on the same binding, built only
   into the diagnostic build (`build.ps1 -Diag`): `list` marks the product's
   records `(product)`, `sync` runs a sync, and its manual `register`/`release`
