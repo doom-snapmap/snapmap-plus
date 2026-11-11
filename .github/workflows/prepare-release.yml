@@ -10,6 +10,10 @@ on:
       version:
         description: 'Tag to prepare, e.g. v0.2.2-beta.1'
         required: true
+      base:
+        description: 'Tag to compare against (default: the previous tag; for a stable release, the previous stable tag)'
+        required: false
+        default: ''
       dry_run:
         description: 'Save a draft artifact without creating a branch or pull request'
         type: boolean
@@ -40,10 +44,11 @@ jobs:
           # Never interpolate ${{ inputs.* }} straight into a script: a quote in the
           # input would run as shell, in the job that can read the API key.
           VERSION: ${{ inputs.version }}
+          BASE_INPUT: ${{ inputs.base }}
         run: |
           # Validate inputs before requesting a draft.
           set -euo pipefail
-          if ! printf '%s' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+          if ! printf '%s' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$'; then
             echo "::error::'$VERSION' is not a valid tag. Expected v1.2.3 or v1.2.3-beta.4."
             exit 1
           fi
@@ -60,14 +65,24 @@ jobs:
             exit 1
           fi
 
-          case "$VERSION" in
-            # Stable releases compare against the previous stable tag.
-            # Allow git describe to fail when no matching tag exists yet.
-            *-*) BASE=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true) ;;
-            *)   BASE=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' 2>/dev/null || true) ;;
-          esac
+          if [ -n "$BASE_INPUT" ]; then
+            # An explicit base, e.g. the last beta for the first stable release.
+            if ! git rev-parse -q --verify "refs/tags/$BASE_INPUT" >/dev/null; then
+              echo "::error::base '$BASE_INPUT' is not a tag."
+              exit 1
+            fi
+            BASE=$BASE_INPUT
+          else
+            case "$VERSION" in
+              # Stable releases compare against the previous stable tag.
+              # Allow git describe to fail when no matching tag exists yet.
+              *-*) BASE=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true) ;;
+              *)   BASE=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' 2>/dev/null || true) ;;
+            esac
+          fi
           if [ -z "$BASE" ]; then
-            echo "::warning::no comparison tag found; using the full history."
+            echo "::error::no comparison tag found; pass the base input (the first stable release compares against the last beta)."
+            exit 1
           fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -130,8 +145,9 @@ jobs:
           path.write_text(new, encoding="utf-8", newline="\n")
           PY
           rm section.md
-          # Validate the inserted entry before proposing it for review.
-          python3 tools/changelog.py --lint
+          # Validate the inserted entry before proposing it for review. A NEEDS WRITING draft is
+          # proposed so it can be written on the branch; the pull-request lint refuses to merge it.
+          python3 tools/changelog.py --lint --allow-unwritten
 
       # If organization policy blocks PR creation, retain the pushed draft branch
       # and report its compare link in the next step.
