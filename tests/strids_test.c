@@ -82,7 +82,7 @@ typedef struct fake_bundle {
     int edits_off;      /* its edits do not apply now (another map, not declared) */
     int names_off;      /* its own names do not serve now (inert: the map declares another build) */
 } fake_bundle;
-static fake_bundle g_bundles[8];
+static fake_bundle g_bundles[640];
 static int g_nbundles, g_bundle_visits, g_bundle_refuse;
 
 /* The double names each bundle's build by its id. */
@@ -515,6 +515,37 @@ static void test_string_edits(void)
     CHECK(rearm_strings() == 1);
 }
 
+/* The scope check covers every bundle with strings, however many: with 600
+ * mods, a change to the last one's scope still asks for a refresh. */
+static void test_scope_check_many_bundles(void)
+{
+    static fake_bundle many[600];
+    static char ids[600][16], extras[600][96];
+    int i;
+    for (i = 0; i < 600; i++) {
+        _snprintf_s(ids[i], sizeof ids[i], _TRUNCATE, "mny%05d", i);
+        _snprintf_s(extras[i], sizeof extras[i], _TRUNCATE,
+                    "{\"strings\":{\"en\":{\"sh_bv_navigation_desc\":\"E%d\",\"%s_own\":\"Own\"}}}", i, ids[i]);
+        many[i].id = ids[i];
+        many[i].version = "";
+        many[i].place = 0;
+        many[i].admitted = 1;
+        many[i].extra = extras[i];
+        many[i].edits_off = 1;
+        many[i].names_off = 0;
+    }
+    set_bundles(many, 600);
+    CHECK(rearm_strings() == 1);
+    CHECK(value_for("mny00599_own") && !strcmp(value_for("mny00599_own"), "Own"));
+    CHECK(sh_strids_scope_check() == 0);
+    g_bundles[599].edits_off = 0;   /* a map that declares the 600th mod opens */
+    CHECK(sh_strids_scope_check() == 1);
+    CHECK(rearm_strings() == 1);
+    CHECK(sh_strids_scope_check() == 0);
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+}
+
 /* R6: a mod's own strings come from the build that serves the open map. The
  * root's build of salt mmmmmmmm and a downloaded map's build of it both
  * carry mmmmmmmm_title; the map declares its own build, so the root's is
@@ -832,6 +863,7 @@ int main(void)
     test_bundle_layer();
     test_namespaced_keys();
     test_string_edits();
+    test_scope_check_many_bundles();
     test_own_strings_follow_the_build();
     test_rebuilt_table();
     test_failed_refresh_changes_nothing();
