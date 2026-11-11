@@ -30,7 +30,8 @@ can call the wrong interface slot. See [packaging](packaging.md).
 Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
-set (named and unnamed), with the backend's private exports at 200 and up.
+set (named and unnamed) and nothing else. The proxy loads the system `XInput1_4.dll`
+from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other

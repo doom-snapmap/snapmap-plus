@@ -4,7 +4,7 @@
  *
  * build-dir must hold XINPUT1_4.dll. Its exports must be exactly the System32
  * XINPUT1_4.dll ordinal set (named exports under the same names, unnamed ones
- * without a name; DllMain excluded) plus the private exports at 200-202, with
+ * without a name; DllMain excluded) and nothing else, with
  * XInputGetState/XInputSetState at ordinals 2/3. When the system DLL cannot be
  * read, its documented export map is used instead.
  *
@@ -92,9 +92,6 @@ static const export_row k_xinput14[] = {
     {10, "XInputGetAudioDeviceIds"}, {100, ""}, {101, ""}, {102, ""}, {103, ""}, {104, ""},
     {108, ""}, {109, ""}
 };
-static const export_row k_private[] = {
-    {200, "sh_rawmap_swap_is_armed"}, {201, "sh_rawmap_swap_complete_count"}, {202, "sh_rawmap_swap_will_fire"}
-};
 
 static int check_proxy(const char *build_dir)
 {
@@ -128,13 +125,6 @@ static int check_proxy(const char *build_dir)
                    sys_rows[i].name[0] ? sys_rows[i].name : "(unnamed)",
                    mine ? (mine->name[0] ? mine->name : "(unnamed)") : "(missing)");
             bad++;
-        }
-    }
-    for (size_t i = 0; i < sizeof k_private / sizeof k_private[0]; i++) {
-        const export_row *mine = find_ordinal(ours, n_ours, k_private[i].ordinal);
-        expected++;
-        if (!mine || strcmp(mine->name, k_private[i].name) || find_ordinal(sys_rows, n_sys, k_private[i].ordinal)) {
-            printf("BAD private export %s at %u\n", k_private[i].name, k_private[i].ordinal); bad++;
         }
     }
     if (n_ours != expected) { printf("BAD proxy exports %d ordinals, expected %d\n", n_ours, expected); bad++; }
