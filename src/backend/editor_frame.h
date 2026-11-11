@@ -6,21 +6,15 @@
  * made from it re-enters and deadlocks; the vtable work-queue drain (+0x1a0) is reached from the
  * frontend's think loop, which is the UI thread.
  *
- * THE RELOAD ARMS THE SWAP ITSELF. LoadMap takes a saved-map id, and the reload passes one off disk;
- * armed, the id only has to name something loadable, because our bytes are substituted into the
- * parse. Disarmed, the same call would really open that other map and discard unsaved work. So the
- * arm is not optional and is not the caller's to supply: the reload arms around its own LoadMap and
- * restores the previous state on every path out, fault included.
- *
- * A WINDOW, not a one-shot count. The engine parses exactly once per reload [DIRECT: six reloads
- * across two sessions, each a clean arm -> one fire -> disarm], so a one-shot works today and would
- * silently leave the rest of a multi-parse load vanilla if that ever changed. Restoring saved state
- * cannot be wrong by a count. What the request checks instead is sh_rawmap_source_ok, on the click
- * and again on the frame.
+ * OPENING A RAWMAP. LoadMap takes a saved-map id, and the reload passes one off disk. Inside that
+ * one LoadMap call the load detour gives the editor's parse the rawmap's checked text instead of
+ * the borrowed map's (rawmap.c), so the id only has to name something loadable. A request records
+ * the map that was open and the load generation, and is dropped on the frame if either changed: a
+ * reload never outlives the map it was asked for.
  *
  * SAFETY. Every engine read is SEH-guarded, and every precondition is re-checked on the frame we
- * fire from rather than when the request was made. One fault disables the module for the session: a
- * frame hook that can fault once will fault every frame. */
+ * fire from rather than when the request was made. A fault inside LoadMap turns off only the
+ * reload for the session; the other per-frame features keep running. */
 #ifndef BACKEND_EDITOR_FRAME_H
 #define BACKEND_EDITOR_FRAME_H
 
@@ -42,47 +36,26 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
  * overwrites the prologue, so a later signature scan for this function finds nothing. */
 void *sh_editor_frame_target(void);
 
+/* 1 when the editor is live with a loaded map (the editor's state machine running, no shutdown or
+ * transition in progress). The map pointer alone survives leaving the editor. Any thread. */
+int sh_editor_frame_editor_live(void);
+
 /* Could a rawmap save happen right now? 1 = yes, and it changes NOTHING either way -- ask before
  * applying a destination of your own, so a refusal cannot leave the save path moved. */
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);
 
-/* Queue "write the OPEN map to the rawmap file" for the next editor frame. Only QUEUES it: 1 =
- * accepted, with the outcome in the log and the next status refresh; 0 = refused, reason in
- * out_msg (usually no map open, or a build that could not resolve the serializer). */
-int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity);
-
-/* Capture the map and destination together. NULL uses the current save path;
- * an explicit path becomes the target only when that same map services the save. */
+/* Queue "write the OPEN map to a rawmap file" for the next editor frame. NULL uses the current save
+ * path; an explicit path becomes the target only when that same map services the save. 1 = queued,
+ * with the outcome told to the player when it lands; 0 = refused, reason in out_msg. */
 int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity);
 
-/* Request an in-place map reload on the next editor frame. 1 = accepted, 0 = refused (not installed,
- * the staged rawmap is unusable, no loadable saved-map id, a request is already pending, or the
- * module has faulted). `out_msg` always gets a reason fit to show in the UI.
- *
- * Accepted is not a promise: the frame hook re-checks preconditions and may still decline. Poll
- * sh_editor_frame_reload(). */
+/* Could the editor open a rawmap right now? Side-effect free. 1 = yes; 0 with one sentence for the
+ * player in `out_msg`. */
+int sh_editor_frame_can_reload(char *out_msg, int msg_capacity);
+
+/* Queue an in-place reload that opens the load path on the next editor frame. 1 = queued; 0 =
+ * refused with one sentence for the player in `out_msg`. The frame re-checks everything and tells
+ * the player if the open fails. */
 int sh_editor_frame_request_reload(char *out_msg, int msg_capacity);
-
-typedef enum sh_reload_state {
-    SH_RELOAD_IDLE = 0,     /* nothing requested since install */
-    SH_RELOAD_PENDING,      /* queued, waiting for a frame whose preconditions hold */
-    SH_RELOAD_DONE,         /* LoadMap ran and returned success */
-    SH_RELOAD_FAILED        /* LoadMap ran and reported failure, or the attempt faulted */
-} sh_reload_state;
-
-/* Where the most recent reload request got to. `out_msg` (optional) receives the last detail line
- * the module logged about it. */
-sh_reload_state sh_editor_frame_reload(char *out_msg, int msg_capacity);
-
-/* How many editor frames the hook has serviced. Zero after install means the hook is not firing,
- * which separates "our hook never runs" from "the reload was declined". */
-unsigned long sh_editor_frame_ticks(void);
-
-/* The most recently written local SnapMap save folder, and its 20-hex id. `out_id` may be NULL.
- * Returns 1 when a folder was found; touches no engine state and needs no frame.
- *
- * "Most recently written" is a HEURISTIC for "the map you are working on" -- wrong when someone has
- * two maps on the go, so a caller showing the result to a person should name the id. */
-int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id_cap);
 
 #endif /* BACKEND_EDITOR_FRAME_H */

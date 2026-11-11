@@ -1766,8 +1766,9 @@ static void poc_send_material_result(const char *name)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
- * the +0x328/+0x330 slots. Load STAGES a file -- the swap substitutes it into the
- * engine's next map-load parse -- so every string below says "staged", not "loaded".
+ * the +0x328/+0x330 slots. Load opens the picked file in the editor at once, after
+ * the page's confirm; nothing is kept for a later map. Paths cross to the backend
+ * as UTF-8.
  *
  * The picker runs on its own thread. This handler is dispatched from DispatchMessageW
  * inside poc_think_loop, so a modal Show() here would stop editor polling, selection
@@ -1866,15 +1867,14 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
     return !out_path.empty();
 }
 
-/* Report the staged paths + arm state. The backend hands back a JSON fragment (paths are escaped
- * there -- a Windows path is full of backslashes), so this forwards it whole rather than re-encoding
- * field by field. An absent slot means an older backend: report it instead of guessing.
+/* Report the rawmap paths. The backend hands back a UTF-8 JSON fragment (paths are escaped there --
+ * a Windows path is full of backslashes), so this forwards it whole rather than re-encoding field
+ * by field. An absent slot means an older backend: report it instead of guessing.
  *
- * `confirm_file`, when set, asks the page to put the "load it now, or save your work first?" question
- * up before anything opens. It rides on the status message because the file has ALREADY been staged
- * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
- * Open Rawmap as New Map, so there is nothing to hold on to native-side while the person decides. It must
- * arrive already JSON-escaped (escape_wide), like every other path that crosses this boundary. */
+ * `confirm_file`, when set, asks the page to put the "open it now? unsaved edits are discarded"
+ * question up before anything opens. The backend has checked the file and the editor; yes opens it,
+ * and no opens nothing. It must arrive already JSON-escaped (escape_wide), like every other path
+ * that crosses this boundary. */
 /* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
  * forwarded verbatim. */
 static std::wstring poc_widen(const char *utf8)
@@ -1934,8 +1934,8 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Ask the backend to point a side at a chosen file. `load_path`/`save_path` NULL = leave alone,
- * "" = restore that side's default. `arm` is 1/0/-1 as the slot documents. */
+/* Ask the backend to point a side at a chosen file. `load_path`/`save_path` (UTF-8) NULL = leave
+ * alone, "" = restore that side's default. `arm` is the verb code the slot documents. */
 static void poc_rawmap_configure(const char *load_path, const char *save_path, int arm,
                                  const wchar_t *ok_note)
 {
@@ -1944,7 +1944,7 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
         return;
     }
 
-    char msg[192] = "";
+    char msg[1024] = "";
     int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm,
                                              msg, (int)sizeof msg);
     /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
@@ -1958,7 +1958,7 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
     /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
      * what makes this log worth having when someone reports "it did not load my file". */
     {
-        char line[640];
+        char line[2048];
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "rawmap configure: ok=%d arm=%d load=%s save=%s msg=%s",
                     ok, arm,
@@ -2182,19 +2182,16 @@ static void poc_finish_pick()
         return;
     }
 
-    /* STAGE + ARM ONE LOAD (arm = 2). Not the shared gate: setting that left every later map load
-     * substituted as well, and the save shadow rides the same gate, so picking a file to LOAD also
-     * redirected the next save. A one-shot is what the click actually means -- apply this file to
-     * the map I am about to open, and then stop. It spends itself on the substitution, so a load
-     * that cannot read the staged file leaves the arm intact rather than silently eating it. */
+    /* arm = 2: the picked file is the one to open now. The backend checks the file and that the
+     * editor can open it, and refuses at once otherwise; nothing waits for a later map. */
     {
-        char msg[192] = "";
-        int staged = 0;
+        char msg[1024] = "";
+        int accepted = 0;
         if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure) {
-            staged = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
-                                                     msg, (int)sizeof msg);
+            accepted = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
+                                                       msg, (int)sizeof msg);
         }
-        if (!staged) {
+        if (!accepted) {
             /* The backend logs the refusal and prints it to the console (rawmap.c); this is the UI
              * log's line, as the prefab Import's refusal has one. */
             char l[1400];
@@ -2203,8 +2200,8 @@ static void poc_finish_pick()
             poc_send_rawmap_status((L"Refused: " + sh_webview_json::escape_wide(msg)).c_str());
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
-             * offers no "has unsaved changes" query. Answering no leaves the file staged. The
-             * page owns this dialog on purpose -- a native modal here stalls the think loop. */
+             * offers no "has unsaved changes" query. Answering no opens nothing. The page owns
+             * this dialog on purpose -- a native modal here stalls the think loop. */
             poc_send_rawmap_status(L"", base.c_str());
         }
     }
@@ -4099,27 +4096,21 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 }
                 poc_send_navmesh_state();
             } else if (cmd == L"rawmapLoadNow") {
-                /* Ask the backend's editor-frame hook to reload the map, so the staged file opens
-                 * without a trip to the SnapMap menu. The reply is a REQUEST result, not a
-                 * completion -- the reload lands a frame later, and the status refresh that follows
-                 * is what shows whether the swap actually fired. */
+                /* Open the load path now through the backend's editor-frame hook. The reply is a
+                 * REQUEST result; the reload lands a frame later, and a failure there is told by the
+                 * backend's own toast and console line. */
                 if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_load_now) {
-                    poc_send_rawmap_status(L"This build's backend cannot reload the map.");
+                    poc_send_rawmap_status(L"This build's backend cannot open rawmaps.");
                 } else {
-                    char msg[192] = "";
+                    char msg[1024] = "";
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
                     poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
                     poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
                                               : (L"Cannot open: " + sh_webview_json::escape_wide(msg)).c_str());
                 }
             } else if (cmd == L"rawmapArm") {
-                int on = 0; sh_webview_json::get_int(json, L"on", &on);
-                /* Say what it does to the person's maps, not what it does to the detour -- and make
-                 * the OFF message say the menu still works, because the tick's whole hazard is
-                 * reading as the feature's master switch when it is only its scope. */
-                poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
-                                     on ? L"Rawmaps now apply to every map load and save."
-                                        : L"Rawmaps apply to the File menu's own actions only.");
+                /* The every-load switch is retired; the backend refuses it with the sentence. */
+                poc_rawmap_configure(nullptr, nullptr, 1, nullptr);
             } else if (cmd == L"rawmapKeepHere") {
                 /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
                  * DLLs must match slot for slot, and `arm` was already a verb code. Neither

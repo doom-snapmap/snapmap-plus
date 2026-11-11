@@ -30,7 +30,7 @@ can call the wrong interface slot. See [packaging](packaging.md).
 Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
-set (named and unnamed), with the backend's private exports at 200 and up.
+set (named and unnamed) and exports nothing else.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
@@ -2634,20 +2634,20 @@ Loading. `sh_modpub_rawmap_missing` reads the rows and counts those the asset
 rule does not find served (missing or incomplete). The editor reload, which
 both **File > Load Rawmap...** and `sh_rawmaps load` use, checks on its own
 frame before `LoadMap` (`sh_rawmap_prepare_reload` in `ef_service_reload`); the
-text it read, with a `.zip` already imported, is what the parse then uses. Any
-other substitution (a staged file and the next map the player opens, or rawmaps
-on for every load) is checked in the `DeserializeFromJson` detour: a map that
-misses mods is not substituted, the map being opened loads as itself, and the
-hold starts after that parse. Inside a reload window a failed check parses
-nothing rather than the borrowed saved map.
+text it read, with a `.zip` already imported, is what the parse then uses. That
+reload is the only way a rawmap opens: the `DeserializeFromJson` detour replaces
+the text of the editor's parse inside that one `LoadMap` call and of no other
+parse, so a published map, a lobby map or a map opened from My Maps always loads
+as itself. A reload request records the open map and the load generation and is
+dropped on the frame if either changed; nothing is kept for a later map.
 
 The hold (`sh_modpub_rawmap_hold`, hook `SH_MODPUB_RAWMAP_LOAD`) runs the
 denial gate first, as every hold does (see Published maps and missing mods).
 When every missing bundle is obtainable, the player gets the question a My Maps
 launch asks, and Yes fetches and installs them; the resume does not activate
 anything (the rawmap's own parse does) but opens the rawmap again, through a
-reload when the editor can take one and otherwise staged for the next map open,
-with a notice saying so. That reopened load parses the text the hold checked
+reload when the editor can take one; otherwise a notice says to load it again
+from File > Load Rawmap once a map is open in the editor. That reopened load parses the text the hold checked
 (`held_take` in `rawmap.c`), so a `.zip` is imported once, at the hold; any other
 read of the source drops it and reads the file again. Otherwise the load is denied with the gate's
 sentences; the asset rule's sentence for each row comes first on the console.
@@ -2656,8 +2656,7 @@ build where they did not install, nothing is counted missing and rawmaps load as
 before.
 
 Saving. After every rawmap write of a map with at least one row (the File menu's
-Save Rawmap and Save Rawmap As, `sh_rawmaps save`, and the mirror when rawmaps
-are on), the export is written beside the JSON at the same path with `.zip`
+Save Rawmap and Save Rawmap As, and `sh_rawmaps save`), the export is written beside the JSON at the same path with `.zip`
 (`rawmap.json` becomes `rawmap.zip`), through `modexport_write_text_report`. The
 next main tick (`sh_rawmap_poll_main`) shows one toast and one console line:
 "This map uses N mod(s); share <name>.zip, the .json alone will not load for

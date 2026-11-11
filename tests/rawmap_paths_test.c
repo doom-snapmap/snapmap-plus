@@ -67,12 +67,11 @@ void  sh_nav_bake_set_map(const char *json, size_t len) { (void)json; (void)len;
 static int g_maps_opened;
 void  sh_nav_bake_map_opened(void) { g_maps_opened++; }
 
-int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
-{ if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
+{ (void)destination;
+  if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
                                              "stub: no editor in this test", _TRUNCATE);
   return 0; }
-int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
-{ (void)destination; return sh_editor_frame_request_rawmap_save(out_msg, msg_capacity); }
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
 { if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
                                              "stub: no editor in this test", _TRUNCATE);
@@ -81,11 +80,10 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
 { if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
                                              "stub: no editor in this test", _TRUNCATE);
   return 0; }
-int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id_cap)
-{ if (out && cap) out[0] = '\0'; if (out_id && id_cap) out_id[0] = '\0'; return 0; }
-
-/* The console line a staged rawmap prints when it opens in place of a chosen map. */
-void sh_printf(const char *fmt, ...) { (void)fmt; }
+int sh_editor_frame_can_reload(char *out_msg, int msg_capacity)
+{ if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
+                                             "stub: no editor in this test", _TRUNCATE);
+  return 0; }
 
 static int g_pretty_on;   /* sh_pretty_on is the only cvar rawmap.c reads */
 int sh_cvar_value_int(int index, int def) { (void)index; return g_pretty_on ? 1 : def; }
@@ -275,31 +273,6 @@ static void a_bare_word_is_refused(void)
     clean_state();
 }
 
-/* paths_are_default must answer both ways. It tested emptiness once, which is never true after the
- * installers materialize a default, so it was stuck on "not default" forever. */
-static void are_default_answers_both_ways(const char *archive)
-{
-    char picked[MAX_PATH];
-
-    printf("\n-- paths_are_default answers both ways\n");
-
-    clean_state();
-    CHECK(sh_rawmap_paths_are_default() == 1);
-
-    CHECK(sh_rawmap_swap_set_source(archive) == 1);
-    CHECK(sh_rawmap_paths_are_default() == 0);
-    sh_rawmap_swap_set_source(NULL);
-    CHECK(sh_rawmap_paths_are_default() == 1);
-
-    CHECK(temp_path("rawmap_test_export4.json", picked, sizeof picked));
-    CHECK(sh_rawmap_set_save_target(picked) == 1);
-    CHECK(sh_rawmap_paths_are_default() == 0);   /* a chosen file counts as a moved save path */
-    sh_rawmap_set_save_target(NULL);
-    CHECK(sh_rawmap_paths_are_default() == 1);
-
-    clean_state();
-}
-
 /* Picking the usual file is not a choice to keep saves off it, so nothing is held. */
 static void picking_the_usual_file_holds_nothing(void)
 {
@@ -316,7 +289,6 @@ static void picking_the_usual_file_holds_nothing(void)
     printf("   after picking it: target is %s\n", target[0] ? target : "(nothing)");
     CHECK(target[0] == '\0');            /* the tick stays clear */
     CHECK(save_is_default());
-    CHECK(sh_rawmap_paths_are_default() == 1);
 
     clean_state();
 }
@@ -478,7 +450,7 @@ static void refused_menu_save_changes_nothing(void)
     clean_state();
 }
 
-static void missing_overwrite_protection_refuses_staging(const char *archive)
+static void missing_overwrite_protection_refuses_opening(const char *archive)
 {
     sh_rawmap_configure_fn configure = NULL;
     char before[MAX_PATH], after[MAX_PATH], message[192];
@@ -490,8 +462,7 @@ static void missing_overwrite_protection_refuses_staging(const char *archive)
     CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
     sh_rawmap_get_paths(after, sizeof after, NULL, 0);
     CHECK(strcmp(before, after) == 0);
-    CHECK(!sh_rawmap_load_oneshot_pending());
-    CHECK(strstr(message, "overwrite protection") != NULL);
+    CHECK(strstr(message, "overwriting the map a rawmap opens over") != NULL);
     sh_rawmap_set_branch_tag(0);
     CHECK(sh_rawmap_load_is_safe());
     sh_rawmap_set_branch_tag(1);
@@ -547,7 +518,7 @@ static void snapshots_visit_without_save_effects(void)
     clean_state();
 }
 
-static void a_live_export_mirrors_once(void)
+static void a_live_export_writes_once(void)
 {
     char target[MAX_PATH], msg[192];
     unsigned long before = sh_rawmap_save_count();
@@ -559,13 +530,12 @@ static void a_live_export_mirrors_once(void)
     g_ser_orig = fixture_serialize;
     g_idstr_ctor = fixture_idstr_ctor;
     g_idstr_dtor = fixture_idstr_dtor;
-    sh_rawmap_swap_arm(1);
     live_serializations = 0;
     CHECK(sh_rawmap_write_from_live((void *)1, target, msg, sizeof msg, &wrote));
     CHECK(live_serializations == 1 && wrote == sizeof BODY - 1);
     CHECK(sh_rawmap_save_count() == before + 1);
     CHECK(g_snapshot_depth == 0);
-    sh_rawmap_swap_arm(0);
+    CHECK(strstr(msg, "Saved the open map to ") != NULL && strstr(msg, "rawmap_review_live.json") != NULL);
     g_map_to_json = NULL;
     g_ser_orig = NULL;
     g_idstr_ctor = NULL;
@@ -659,7 +629,7 @@ static void large_sources_use_native_lengths(void)
     CloseHandle(file);
     CHECK(sh_rawmap_validate_source(path, message, sizeof(message)));
     CHECK(sh_rawmap_swap_set_source(path));
-    body = read_source_file(&length);
+    body = read_source_file_why(&length, NULL, 0);
     CHECK(body && length == (size_t)1040 * sizeof(block) + 2);
     if (body) {
         CHECK(body[0] == '{' && body[length - 1] == '}' && !body[length]);
@@ -722,7 +692,6 @@ static void earlier_shape_maps_are_refused(void)
     printf("\n-- a map in an earlier shape is refused with the plain sentence; its text is unchanged\n");
     clean_state();
     g_deser_orig = fixture_deser;
-    sh_rawmap_swap_arm(0);
 
     g_parses = 0; log_refused = 0;
     CHECK(sh_deser_detour(LEGACY_MAP, (void *)1) == 0);
@@ -774,7 +743,6 @@ static void a_reload_into_the_same_map_object_is_a_new_map(void)
     printf("\n-- a reload into the same map object is a new map\n");
     clean_state();
     g_deser_orig = fixture_deser;
-    sh_rawmap_swap_arm(0);
     generation = sh_rawmap_load_generation();
     opened = g_maps_opened;
     CHECK(sh_deser_detour(plain, same) == 1);
@@ -785,21 +753,31 @@ static void a_reload_into_the_same_map_object_is_a_new_map(void)
     clean_state();
 }
 
-/* The rawmap load swap substitutes the staged file and refuses it the same way. */
+/* The editor reload's parse: what LoadMap's DeserializeFromJson sees between
+ * sh_rawmap_prepare_reload and sh_rawmap_reload_done. */
+static int open_through_reload(const char *borrowed)
+{
+    char why[1280];
+    int rc;
+    if (!sh_rawmap_prepare_reload(why, (int)sizeof why)) return -1;
+    rc = sh_deser_detour(borrowed, (void *)1);
+    sh_rawmap_reload_done(0, 0);
+    return rc;
+}
+
+/* A rawmap opened through the reload is refused the same way. */
 static void a_staged_rawmap_in_an_earlier_shape_is_refused(void)
 {
     char staged[MAX_PATH];
-    printf("\n-- a staged rawmap in an earlier shape is refused the same way\n");
+    printf("\n-- a rawmap in an earlier shape is refused the same way\n");
     clean_state();
     CHECK(write_file("rawmap_legacy_payload.json", LEGACY_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
     sh_rawmap_set_branch_tag(0);                /* this test installs no IsBranchMap answer */
     g_deser_orig = fixture_deser;
-    sh_rawmap_swap_arm(1);
     g_parses = 0; log_refused = 0;
-    CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"entities\":[]}", (void *)1) == 0);
+    CHECK(open_through_reload("{\"~type\":\"idSnapMap\",\"entities\":[]}") == 0);
     refused_plainly(0, 0);
-    sh_rawmap_swap_arm(0);
     sh_rawmap_set_branch_tag(1);
     g_deser_orig = NULL;
     DeleteFileA(staged);
@@ -820,21 +798,17 @@ static void a_rawmap_open_is_unsaved_until_its_first_save(void)
     sh_rawmap_set_branch_tag(0);
     g_deser_orig = fixture_deser;
     CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
-    sh_rawmap_swap_arm(1);
-    CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"entities\":[{}]}", (void *)1) == 1);
+    CHECK(open_through_reload("{\"~type\":\"idSnapMap\",\"entities\":[{}]}") == 1);
     CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_open_unsaved.json"));
     /* An export of the live map (a snapshot) is not a save. */
     g_ser_orig = fixture_serialize;
     CHECK(sh_rawmap_snapshot(fixture_map_to_json, (void *)1, str));
     CHECK(sh_rawmap_open_unsaved(NULL, 0));
     /* The first save names it. */
-    sh_rawmap_swap_arm(0);
     CHECK(sh_ser_detour((void *)1, str, 1) == 1);
     CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
     /* Opened again, then the engine's own map: that map is itself. */
-    sh_rawmap_swap_arm(1);
-    CHECK(sh_deser_detour(plain, (void *)1) == 1 && sh_rawmap_open_unsaved(NULL, 0));
-    sh_rawmap_swap_arm(0);
+    CHECK(open_through_reload(plain) == 1 && sh_rawmap_open_unsaved(NULL, 0));
     CHECK(sh_deser_detour(plain, (void *)1) == 1 && !sh_rawmap_open_unsaved(NULL, 0));
     g_ser_orig = NULL;
     sh_rawmap_set_branch_tag(1);
@@ -850,7 +824,6 @@ static void saves_carry_no_package_payload(void)
     printf("\n-- a save keeps the engine's own bytes\n");
     clean_state();
     g_ser_orig = fixture_serialize;
-    sh_rawmap_swap_arm(0);
     CHECK(sh_ser_detour((void *)1, str, 1) == 1);
     CHECK(*(const char *const *)(str + IDSTR_DATA_OFF) == BODY);
     CHECK(*(const int *)(str + IDSTR_LEN_OFF) == (int)(sizeof BODY - 1));
@@ -946,8 +919,6 @@ static void mods_end(void)
     sh_rawmap_set_notify(NULL, NULL);
     sh_modpub_test_reset();
     sh_modpub_test_set_ops(NULL);
-    InterlockedExchange(&g_swap_oneshot, 0);
-    sh_rawmap_swap_arm(0);
     clean_state();
 }
 
@@ -955,20 +926,18 @@ static void ticks(int n) { for (int i = 0; i < n; i++) sh_modpublished_poll(); }
 
 static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
 {
-    char staged[MAX_PATH];
+    char staged[MAX_PATH], why[256];
     unsigned long swaps;
     printf("\n-- a rawmap whose mods are missing and not in the store is refused before the engine parses it\n");
     mods_begin();
     R.store = 0;
     CHECK(write_file("rawmap_mods_missing.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    sh_rawmap_load_arm_once();
     swaps = sh_rawmap_swap_count();
     g_parses = 0;
-    CHECK(sh_deser_detour(ENGINE_MAP, (void *)1) == 1);
-    CHECK(g_parses == 1 && strcmp(g_parsed, ENGINE_MAP) == 0);   /* the map being opened, as itself */
-    CHECK(strstr(g_parsed, "RAWMAP_MARK") == NULL && sh_rawmap_swap_count() == swaps);
-    CHECK(!sh_rawmap_load_oneshot_pending());   /* this load's arm is spent: no surprise later */
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
+    CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
     CHECK(sh_modpub_test_state() == 4 && R.prints == 1);
     CHECK(strstr(R.print, "Rawmap rawmap_mods_missing.json needs 1 mod you do not have") != NULL);
     ticks(4);
@@ -977,17 +946,6 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed and was never published. "
                            "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
-
-    printf("-- the editor reload refuses on its own frame, before LoadMap\n");
-    {
-        char why[256];
-        R.prints = 0;
-        CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
-        CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
-        CHECK(g_prepared == NULL && !g_in_reload);
-        ticks(4);
-        CHECK(strstr(R.print, "This map needs test.alpha, which") && strstr(R.print, "rawmap ZIP"));
-    }
     DeleteFileA(staged);
     mods_end();
 }
@@ -1007,9 +965,9 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
     R.answer = 1;
     ticks(3);
     CHECK(R.fetches == 1 && R.installed && R.resumes == 1 && R.resume_hook == SH_MODPUB_RAWMAP_LOAD);
-    /* No editor in this test, so the reopen stages it for the next map open and says so. */
-    CHECK(sh_rawmap_load_oneshot_pending());
-    CHECK(!strcmp(R.resume_note, "The mods are installed. Open any map and it opens as rawmap_mods_offer.json."));
+    /* No editor in this test, so nothing opens and the note says how to load it again. */
+    CHECK(!strcmp(R.resume_note, "The mods are installed. Open a map in the editor, then load "
+                                 "rawmap_mods_offer.json again from File > Load Rawmap."));
 
     printf("-- with the mods installed the reload keeps the bytes it checked for the parse\n");
     CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && g_in_reload);
@@ -1018,14 +976,12 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
         unsigned long swaps = sh_rawmap_swap_count();
         /* The file changes between the check and the parse: the checked bytes are parsed. */
         CHECK(write_file("rawmap_mods_offer.json", ENGINE_MAP, again, sizeof again));
-        sh_rawmap_swap_arm(1);                  /* the reload's own arm window */
         g_parses = 0;
         CHECK(sh_deser_detour("{\"~type\":\"idSnapMap\",\"name\":\"BORROWED\"}", (void *)1) == 1);
         CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL && strstr(g_parsed, "snapmap-plus") == NULL);
-        CHECK(sh_rawmap_swap_count() == swaps + 1 && g_prepared == NULL);
-        sh_rawmap_swap_arm(0);
-        sh_rawmap_reload_done();
-        CHECK(!g_in_reload);
+        CHECK(sh_rawmap_swap_count() == swaps + 1 && g_prepared != NULL);
+        sh_rawmap_reload_done(0, 0);
+        CHECK(!g_in_reload && g_prepared == NULL);
     }
     DeleteFileA(staged);
     mods_end();
@@ -1055,10 +1011,10 @@ static void a_held_zip_is_imported_once(void)
     /* The reopened load: the hold's bytes, not a second import. */
     CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && strstr(g_prepared, "RAWMAP_MARK"));
     CHECK(g_mod_stub_import_calls == 1);
-    sh_rawmap_reload_done();
+    sh_rawmap_reload_done(0, 0);
     /* The next load of the file is a new load: imported again. */
     CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_mod_stub_import_calls == 2);
-    sh_rawmap_reload_done();
+    sh_rawmap_reload_done(0, 0);
 
     printf("-- a hold that never resumed: the next load imports the file again\n");
     R.installed = 0;
@@ -1079,21 +1035,20 @@ static void a_held_zip_is_imported_once(void)
 static void a_rawmap_whose_mods_are_installed_loads(void)
 {
     char staged[MAX_PATH];
-    printf("\n-- a rawmap whose mods are installed is substituted as before\n");
+    printf("\n-- a rawmap whose mods are installed opens\n");
     mods_begin();
     R.installed = 1;
     CHECK(write_file("rawmap_mods_ok.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    sh_rawmap_load_arm_once();
     g_parses = 0;
-    CHECK(sh_deser_detour(ENGINE_MAP, (void *)1) == 1);
+    CHECK(open_through_reload(ENGINE_MAP) == 1);
     CHECK(g_parses == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
     CHECK(!sh_modpublished_holding() && R.prints == 0 && R.asks == 0);
     DeleteFileA(staged);
     mods_end();
 }
 
-/* ADD-L6 F2: a rawmap opened over a map that pins a build takes the rawmap's
+/* A rawmap opened over a map that pins a build takes the rawmap's
  * own rows, never the borrowed map's, and once its first save gave it its
  * own saved-map id the next Save writes that map instead of asking again. */
 static char g_fake_edit_id[64];
@@ -1115,15 +1070,13 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     R.installed = 1;
     sh_rawmap_set_edit_id_reader(fake_edit_id);
     /* The editor has a map open whose row pins a build. */
-    sh_rawmap_swap_arm(0);
     CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1);
     CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
     sh_modmanifest_list_free(&cur);
     /* A rawmap without rows opened over it: none of the borrowed map's rows stays. */
     CHECK(write_file("rawmap_own_rows.json", plain, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    sh_rawmap_load_arm_once();
-    CHECK(sh_deser_detour(MOD_MAP, (void *)1) == 1 && !strcmp(g_parsed, plain));
+    CHECK(open_through_reload(MOD_MAP) == 1 && !strcmp(g_parsed, plain));
     CHECK(sh_modmanifest_current(&cur) == 0);
     sh_modmanifest_list_free(&cur);
     CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_own_rows.json"));
@@ -1144,8 +1097,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     /* A rawmap with a row opened over a map: exactly its rows, and a fresh borrow. */
     CHECK(write_file("rawmap_own_rows2.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    sh_rawmap_load_arm_once();
-    CHECK(sh_deser_detour(plain, (void *)1) == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
+    CHECK(open_through_reload(plain) == 1 && strstr(g_parsed, "RAWMAP_MARK") != NULL);
     CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A));
     sh_modmanifest_list_free(&cur);
     sh_rawmap_set_branch_tag(1);
@@ -1154,7 +1106,6 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "BORROWED00000000000C");
     CHECK(sh_isbranch_detour(NULL) == 1);
     /* A browser load of another map: the engine's map, itself. */
-    sh_rawmap_swap_arm(0);
     CHECK(sh_deser_detour(plain, (void *)1) == 1);
     CHECK(!sh_rawmap_open_unsaved(NULL, 0) && sh_isbranch_detour(NULL) == 0);
     sh_rawmap_set_edit_id_reader(NULL);
@@ -1256,6 +1207,88 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     mods_end();
 }
 
+static void the_retired_every_load_switch_is_refused(void)
+{
+    sh_rawmap_configure_fn configure = NULL;
+    char message[192];
+    printf("\n-- the retired every-load switch is refused in plain words\n");
+    clean_state();
+    sh_rawmap_get_slots(NULL, &configure, NULL);
+    CHECK(!configure(NULL, NULL, NULL, 1, message, sizeof message));
+    CHECK(strstr(message, "File > Load Rawmap") != NULL);
+    CHECK(!configure(NULL, NULL, NULL, 0, message, sizeof message));
+}
+
+/* A load path is a file to open now through the reload, never a replacement for any
+ * other parse: a published read, a lobby map, or a map opened from My Maps loads as
+ * itself, and nothing waits for a later map. */
+static void a_load_path_never_replaces_another_parse(const char *archive)
+{
+    static const char engine[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"name\":\"ENGINE_MARK\"}";
+    sh_rawmap_configure_fn configure = NULL;
+    char message[192];
+    unsigned long swaps;
+    printf("\n-- a load path never replaces another parse, and Load at the menu is refused at once\n");
+    clean_state();
+    sh_rawmap_set_branch_tag(0);
+    g_deser_orig = fixture_deser;
+    CHECK(sh_rawmap_swap_set_source(archive));
+    swaps = sh_rawmap_swap_count();
+    g_parses = 0;
+    CHECK(sh_deser_detour(engine, (void *)1) == 1);
+    CHECK(g_parses == 1 && !strcmp(g_parsed, engine) && sh_rawmap_swap_count() == swaps);
+    /* Load Rawmap with no live editor: refused now, the load path unchanged. */
+    sh_rawmap_swap_set_source(NULL);
+    sh_rawmap_get_slots(NULL, &configure, NULL);
+    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
+    CHECK(strstr(message, "no editor") != NULL);
+    {
+        char load[MAX_PATH], dflt[MAX_PATH];
+        sh_rawmap_get_paths(load, (int)sizeof load, NULL, 0);
+        sh_rawmap_get_default_paths(dflt, (int)sizeof dflt, NULL, 0);
+        CHECK(!_stricmp(load, dflt));
+    }
+    CHECK(!sh_rawmap_open_now(archive, message, sizeof message));
+    /* Inside a reload whose checked text is gone the borrowed map is never parsed. */
+    InterlockedExchange(&g_in_reload, 1);
+    g_parses = 0;
+    CHECK(sh_deser_detour(engine, (void *)1) == 0 && g_parses == 0);
+    InterlockedExchange(&g_in_reload, 0);
+    g_deser_orig = NULL;
+    sh_rawmap_set_branch_tag(1);
+    clean_state();
+}
+
+/* A path outside the ANSI code page is read, validated and written: paths are UTF-8
+ * with the wide file calls. */
+static void a_unicode_path_is_read_and_written(void)
+{
+    /* "rawmap-" + U+00E9 + U+4E16 + ".json" in UTF-8 */
+    static const char name[] = "rawmap-\xC3\xA9\xE4\xB8\x96.json";
+    char dir[MAX_PATH], path[MAX_PATH], why[256], out[64] = {0};
+    wchar_t wpath[MAX_PATH];
+    unsigned long long wrote;
+    size_t len = 0;
+    char *text;
+    printf("\n-- a non-ASCII path reads and writes\n");
+    clean_state();
+    CHECK(GetTempPathA((DWORD)sizeof dir, dir) != 0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s%s", dir, name);
+    CHECK(sh_rawmap_set_save_target(path) == 1);
+    wrote = sh_rawmap_test_write(BODY, sizeof BODY - 1);
+    CHECK(wrote == sizeof BODY - 1);
+    CHECK(sh_rawmap_path_wide(path, wpath, MAX_PATH));
+    CHECK(GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES);
+    CHECK(sh_rawmap_validate_source(path, why, (int)sizeof why) == 1 && !why[0]);
+    CHECK(sh_rawmap_swap_set_source(path));
+    text = read_source_file_why(&len, why, sizeof why);
+    CHECK(text != NULL && len == sizeof BODY - 1);
+    if (text) { memcpy(out, text, len < sizeof out - 1 ? len : sizeof out - 1); HeapFree(GetProcessHeap(), 0, text); }
+    CHECK(!strcmp(out, BODY));
+    DeleteFileW(wpath);
+    clean_state();
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -1274,12 +1307,14 @@ int main(void)
     a_bare_word_is_refused();
     picking_the_usual_file_holds_nothing();
     picking_the_usual_file_releases_a_chosen_one();
-    are_default_answers_both_ways(archive);
     looks_like_rawmap_tells_them_apart();
     refused_menu_save_changes_nothing();
-    missing_overwrite_protection_refuses_staging(archive);
+    missing_overwrite_protection_refuses_opening(archive);
+    the_retired_every_load_switch_is_refused();
+    a_load_path_never_replaces_another_parse(archive);
+    a_unicode_path_is_read_and_written();
     an_existing_scratch_file_survives();
-    a_live_export_mirrors_once();
+    a_live_export_writes_once();
     a_live_export_is_pretty_when_asked();
     snapshots_visit_without_save_effects();
     large_sources_use_native_lengths();
