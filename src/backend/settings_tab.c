@@ -507,7 +507,9 @@ int sh_settings_tab_install(const sig_result *results,size_t count)
         *originals[i]=hook_prepare((void*)address,handlers[i],stolen[i]);if(!*originals[i])goto fail;
     }
     for(i=0;i<6;i++)if(hook_commit(*originals[i])!=B2_PATCH_OK)goto fail;
-    if(!sh_grid_editor_set_property_handler(changed))goto fail;
+    /* The property-change detour is shared with the Grid Room inspector and
+     * installs on its own, so the tab does not depend on that inspector. */
+    if(!sh_native_property_hook_install(results,count)||!sh_grid_editor_set_property_handler(changed))goto fail;
     /* Without the third category the rows go to the end of category 0: rows
      * injected before its native title would push that title over them. */
     g_mode=SH_SETTINGS_TAB_GROUP_END;
