@@ -398,7 +398,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   before it asks: "These mods include scripts (N files). Scripts run only inside this map and
   cannot read or change your files.". With "Play maps whose mods include scripts" turned off in the
   Mods tab, such a map is neither downloaded nor played: "This map's mods include scripts, which you
-  turned off in the Mods tab; turn on "Play maps whose mods include scripts" there to play it." A
+  turned off. To play it, open any map in the editor and turn on "Play maps whose mods include scripts"
+  in the Mods tab of the Snapmap+ window." A
   map that was downloaded with its scripts while the setting was on does not play either once it is
   off, with the same sentence; your own maps always play. A
   rawmap or prefab ZIP whose mods include scripts is refused at import with the same sentence while

@@ -337,8 +337,8 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
  * setting is off, and installs nothing. The Mods tab offers the setting
  * ("mods.scripted_maps", on by default). */
 #define SH_MODUI_SCRIPTS_OFF \
-    "This map's mods include scripts, which you turned off in the Mods tab; turn on \"Play maps whose mods include " \
-    "scripts\" there to play it."
+    "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on " \
+    "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."
 void sh_modui_scripts_approval(unsigned files, char *out, size_t cap);
 int  sh_modui_scripted_maps_allowed(void);
 

@@ -386,8 +386,8 @@ knows, before it asks, that the map's mods carry scripts.
 **The setting for scripts from downloaded maps.** Under the list: a checkbox "Play maps whose mods
 include scripts" (on by default, `mods.scripted_maps`) with its sentence, "When this is off,
 Snapmap+ refuses a map whose mods include scripts before it downloads anything." The refusal is the
-download gate's ("This map's mods include scripts, which you turned off in the Mods tab; turn on
-"Play maps whose mods include scripts" there to play it.", `SH_MODUI_SCRIPTS_OFF`), read through
+download gate's ("This map's mods include scripts, which you turned off. To play it, open any map in the
+editor and turn on "Play maps whose mods include scripts" in the Mods tab of the Snapmap+ window.", `SH_MODUI_SCRIPTS_OFF`), read through
 `sh_modui_scripted_maps_allowed`.
 
 **The Entities tab.** For a selected entity of a mod with scripts the editor shows one line under its

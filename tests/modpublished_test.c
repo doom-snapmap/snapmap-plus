@@ -1089,9 +1089,9 @@ static void scripts_off_at_launch(void)
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
     CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
     CHECK(F.served_scripts_calls == 1 && F.store_calls == 0 && F.fetch_calls == 0 && F.resumes == 0 && F.drop_ui == 1);
-    CHECK(!strcmp(sh_modpub_test_notice(), "This map's mods include scripts, which you turned off in the Mods tab; turn on "
-                                           "\"Play maps whose mods include scripts\" there to play it."));
-    CHECK(strstr(F.prints_all, "turned off in the Mods tab") != NULL);
+    CHECK(!strcmp(sh_modpub_test_notice(), "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on "
+                                           "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."));
+    CHECK(strstr(F.prints_all, "which you turned off. To play it") != NULL);
     /* A map without scripts in its place still launches with the setting off. */
     reset();
     F.titled = 1;
@@ -1233,9 +1233,9 @@ static void scripts_and_the_setting(void)
     tick(1);
     tick_until_idle();
     CHECK(F.store_calls == 1 && F.fetch_calls == 0 && F.resumes == 0);
-    CHECK(!strcmp(F.last_ask, "This map's mods include scripts, which you turned off in the Mods tab; turn on \"Play "
-                              "maps whose mods include scripts\" there to play it."));
-    CHECK(strstr(F.prints_all, "turned off in the Mods tab") != NULL);
+    CHECK(!strcmp(F.last_ask, "This map's mods include scripts, which you turned off. To play it, open any map in the editor and turn on "
+                              "\"Play maps whose mods include scripts\" in the Mods tab of the Snapmap+ window."));
+    CHECK(strstr(F.prints_all, "which you turned off. To play it") != NULL);
 
     /* Off, but the builds carry no scripts: asked as always. */
     reset();
