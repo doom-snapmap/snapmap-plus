@@ -1074,6 +1074,79 @@ int modnet_release(const char *claim, const char *secret, const modnet_io *io, m
     return mn_end(r, t0, code);
 }
 
+int modnet_report_asked(const char *hash, const char *request, const char *by, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    mn_buf body = {0};
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    char *route;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (!modnet_valid_hash(hash) || !request || !request[0]) return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    mn_puts(&body, "{\"by\":");
+    mn_put_json_string(&body, by ? by : "");
+    mn_puts(&body, ",\"request\":");
+    mn_put_json_string(&body, request);
+    mn_puts(&body, "}");
+    route = sh_textf("/mods/build/%s/asked", hash);
+    if (body.bad || !route) { free(body.p); free(route); return mn_end(r, t0, mn_fail(r, MODNET_E_NOMEM, NULL)); }
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = route;
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body.p;
+    q.body_len = body.n;
+    q.max_response = MN_SMALL_BODY;
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    if (code == MODNET_OK && r->status != 204 && r->status != 200) code = mn_status_fail(r, resp, rlen, "asked");
+    free(resp);
+    free(body.p);
+    free(route);
+    return mn_end(r, t0, code);
+}
+
+int modnet_list_asked(const char *claim, const char *secret, char **json, const modnet_io *io, modnet_result *r)
+{
+    modnet_result local;
+    char body[160];
+    unsigned char *resp = NULL;
+    size_t rlen = 0;
+    mn_req q;
+    double t0;
+    int code;
+    if (!r) r = &local;
+    mn_begin(r, &t0);
+    if (json) *json = NULL;
+    if (!json || !mn_valid_hex(claim, MODNET_CLAIM_HEX) || !modnet_valid_hash(secret))
+        return mn_end(r, t0, mn_fail(r, MODNET_E_ARG, NULL));
+    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"claim\":\"%s\",\"secret\":\"%s\"}", claim, secret);
+    memset(&q, 0, sizeof q);
+    q.verb = L"POST";
+    q.route = "/mods/asked";
+    q.content_type = "application/json";
+    q.body = (const unsigned char *)body;
+    q.body_len = strlen(body);
+    q.max_response = ~0ull;   /* as many as players asked for */
+    code = mn_exchange(&q, &resp, &rlen, io, r);
+    SecureZeroMemory(body, sizeof body);
+    if (code == MODNET_OK && r->status != 200) code = mn_status_fail(r, resp, rlen, "asked");
+    else if (code == MODNET_OK) {
+        char *text = (char *)malloc(rlen + 1);
+        if (!text) code = mn_fail(r, MODNET_E_NOMEM, NULL);
+        else {
+            if (rlen) memcpy(text, resp, rlen);
+            text[rlen] = 0;
+            *json = text;
+        }
+    }
+    free(resp);
+    return mn_end(r, t0, code);
+}
+
 /* ------------------------------------------------------------ jobs ------ */
 
 static SRWLOCK g_job_lock = SRWLOCK_INIT;

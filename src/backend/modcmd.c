@@ -790,6 +790,7 @@ int sh_modcmd_register(void)
 {
     const char *root = sh_ms_root();
     modexport_set_stock(mc_import_stock, NULL);
+    modsync_set_stock(mc_import_stock, NULL);   /* the publish save's cut of a mod (modsync_cut_row) */
     sh_modserve_set_build_cause(sh_ms_build_cause);
     if (root) mc_line("MODS: sh_mods ready; store %s", root);
     else mc_line("MODS: sh_mods ready; the store folder cannot be resolved");

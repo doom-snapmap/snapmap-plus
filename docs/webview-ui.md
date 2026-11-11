@@ -570,6 +570,7 @@ Per entry of `mods`:
 | `"editorRows"`, `"editorRowNames"` | number, string[] | The Toybox rows it adds and their display names (strings resolved, else the decl name without the mod's namespace). |
 | `"folder"`, `"group"` | string | The folder's own name, and the organizing folder it sits in at the root ("" at the top and for a map's mods). |
 | `"place"`, `"placeTitle"` | string | For a mod a downloaded map brought: its place `maps\<segment>` and the map's name; "" for the player's own. |
+| `"part"` | boolean | For a mod a downloaded map brought: true when it holds only the files that map uses (a published map's own part of the mod), so it has no Add to my mods. |
 | `"requirements"` | object | The builder's canonical `{commands?: {activate?, deactivate?}, cvars: {name: "value"}}`. |
 | `"facts"` | object | For a built mod: `{adds, borrows, surfaces, editor, replaces, editorOnly, editorTweaks, replacements: [{path, edits}], edits: [{file, ops, set, remove, list, keyed, bag, drop}], registries, stockBanks?}`; `registries.stringEdits` lists the game strings the mod changes (shown as "Changes the text of N game strings"). |
 | `"borrows"` | object | For a built mod: `{paths: [the game file each borrowed file reads], count}`. |
@@ -584,7 +585,9 @@ Per entry of `mods`:
 state, cause, key, nameCount, names, attached}`: `state` active, incomplete, skipped or missing,
 `cause` the plain refusal) and `placed` (`{salt, build, size, key, viaNeeds, inManifest,
 nameCount, names}`), and while a map is open in the editor adds `name`, `saved`, `published`
-(`{state, at}`), `uploaded` (`{claimed, at}`), `mods` (one `{key, salt, name,
+(`{state, at}`), `uploaded` (`{claimed, at}`), `"asked"` (for a published map: `{mod, request, by}` per file
+of a mod the map carried only part of that a player's game asked for and did not get, shown as "Missing for
+players"), `mods` (one `{key, salt, name,
 state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds,
 "attached", nothingPlaced, build}` per mod the map uses), `"vanilla"` and `registryClashes`
 (`{slot, providers: [{id: salt, name}], chosen, serving}`).

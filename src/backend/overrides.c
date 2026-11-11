@@ -771,6 +771,9 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
             if (s) return s;
             HeapFree(GetProcessHeap(), 0, bytes);
+        } else {
+            /* A file a map's own part of a mod left out: noted, never a silent hole. */
+            (void)sh_modserve_note_miss(name);
         }
     }
     if (mode < 2 && name != NULL) {

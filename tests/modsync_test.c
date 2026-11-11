@@ -421,6 +421,180 @@ static const char *const C_BYTES[] = { "gamma bytes", NULL };
 static const char *const E_FILES[] = { "assets/generated/decls/snapeditorentitydef/func/rotate.decl", NULL };
 static const char *const E_BYTES[] = { "{ entityDef \"func/rotate\" }", NULL };
 
+/* ---------------------------------------- part of a build (modslice.h) ---- */
+
+static const char *const P_FILES[] = {
+    "assets/generated/decls/entitydef/mods/pkpart01/crate.decl",
+    "assets/generated/image/mods/pkpart01/crate_icon.bimage",
+    "assets/generated/decls/entitydef/mods/pkpart01/barrel.decl",
+    "assets/generated/image/mods/pkpart01/barrel_icon.bimage",
+    "assets/generated/image/mods/pkpart01/unused.bimage",
+    NULL
+};
+#define P_BARREL_ICON "generated/image/mods/pkpart01/barrel_icon.bimage"
+static char g_barrel_bytes[4096], g_unused_bytes[8192];
+static const char *P_BYTES[] = {
+    "{ edit = { icon = \"mods/pkpart01/crate_icon\"; } }",
+    "crate icon bytes",
+    "{ edit = { icon = \"mods/pkpart01/barrel_icon\"; } }",
+    g_barrel_bytes,
+    g_unused_bytes,
+    NULL
+};
+/* The game holds every name outside mods/. */
+static int game_names(void *context, const char *request) { (void)context; return strstr(request, "mods/") ? 0 : 1; }
+
+static int dir_exists(const char *root, const char *rel)
+{
+    char path[MAX_PATH * 2];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, rel);
+    return mt_exists(path);
+}
+
+static void test_parts(const char *tmp)
+{
+    char author[MAX_PATH * 2], player[MAX_PATH * 2], whole_root[MAX_PATH * 2], own[MAX_PATH * 2], dir[MAX_PATH * 2];
+    char hp[65], cut[65], again[65], mod[80], rel[200], got[MAX_PATH * 2], *why = NULL, **asked = NULL;
+    const char *names[] = { "mods/pkpart01/crate" }, *list[1];
+    sh_mb_resolver none = { NULL, NULL, game_names, NULL };
+    sh_modmanifest_row row;
+    sh_ms_place arena = place_of("Arena", "item-part");
+    modsync_stats st;
+    size_t n;
+    int has = 0, gets;
+    printf("-- part of a build: cut at the publish save, one archive, a map's place\n");
+    g_log_n = 0;
+    g_log[0] = 0;
+    memset(g_barrel_bytes, 'b', sizeof g_barrel_bytes - 1);
+    memset(g_unused_bytes, 'u', sizeof g_unused_bytes - 1);
+    _snprintf_s(author, sizeof author, _TRUNCATE, "%s\\parts-author\\mods", tmp);
+    _snprintf_s(player, sizeof player, _TRUNCATE, "%s\\parts-player\\mods", tmp);
+    _snprintf_s(whole_root, sizeof whole_root, _TRUNCATE, "%s\\parts-whole\\mods", tmp);
+    _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\parts-own\\mods", tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\x", player); mt_mkdirs_for(dir);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\x", own); mt_mkdirs_for(dir);
+    use_root(author);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Pack", author);
+    CHECK(make_mod(dir, "pkpart01", "Pack", P_FILES, P_BYTES, &none, hp));
+    modsync_set_stock(game_names, NULL);
+
+    /* The publish save's cut: the crate's files, named by the build they came from. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "pkpart01");
+    strcpy_s(row.build, sizeof row.build, hp);
+    row.names = (char **)names;   /* borrowed: never freed */
+    row.name_count = 1;
+    row.size = 4096 + 100;
+    CHECK(modsync_cut_row(&row, NULL, 0, &why) == 1);
+    if (why) { fprintf(stderr, "cut: %s\n", why); free(why); why = NULL; }
+    CHECK(!strcmp(row.of, hp) && strcmp(row.build, hp) && row.size < 200);
+    strcpy_s(cut, sizeof cut, row.build);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s\\" SH_MB_SLICE_SOURCE, cut);
+    CHECK(dir_exists(author, rel));
+    CHECK(strstr(g_log, "MODS: publish: Pack: the map uses 2 of its 5 files"));
+    if (!strstr(g_log, "MODS: publish: Pack: the map uses 2 of its 5 files")) fprintf(stderr, "log: %s\n", g_log);
+
+    /* Uploaded like a build, source.json beside mod.json; the staged folder goes once claimed. */
+    mod_of(mod, "pkpart01", cut);
+    list[0] = mod;
+    CHECK(modsync_upload_builds(list, 1, "item-part", NULL, &st) && st.builds_sent == 1);
+    CHECK(stored_entries(cut, SH_MB_SLICE_SOURCE, &has) == 4 && has);
+    CHECK(stored_entries(cut, "assets/" P_BARREL_ICON, &has) == 4 && !has);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s", cut);
+    CHECK(!dir_exists(author, rel));
+    /* A second map that places the crate: one hash, nothing sent. */
+    strcpy_s(row.build, sizeof row.build, hp);
+    row.of[0] = 0;
+    CHECK(modsync_cut_row(&row, NULL, 0, NULL) == 1 && !strcmp(row.build, cut));
+    CHECK(modsync_upload_builds(list, 1, "item-part-2", NULL, &st) && st.builds_present == 1 && st.builds_sent == 0);
+
+    /* A player: downloaded into the map's place, verified against "of" and source.json. */
+    use_root(player);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "pkpart01");
+    strcpy_s(row.build, sizeof row.build, cut);
+    strcpy_s(row.of, sizeof row.of, hp);
+    row.size = 100;
+    gets = g_stub.build_gets;
+    CHECK(modsync_fetch_build_for(&row, &arena, NULL, &st) && st.builds_created == 1 && g_stub.build_gets == gets + 1);
+    _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\" SH_MB_SLICE_SOURCE, player);
+    CHECK(mt_exists(got));
+    _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\mod.json", player);
+    CHECK(file_has(got, "\"slice-of\": \"") && file_has(got, hp));
+    _snprintf_s(got, sizeof got, _TRUNCATE, "%s\\maps\\Arena\\Pack\\assets\\generated\\image\\mods\\pkpart01\\barrel_icon.bimage",
+                player);
+    CHECK(!mt_exists(got));
+    /* A row whose "of" the archive does not name is refused, nothing placed. */
+    use_root(own);
+    {
+        sh_modmanifest_row bad = row;
+        sh_ms_place other = place_of("Other", "item-x");
+        memset(bad.of, 'e', 64);
+        CHECK(!modsync_fetch_build_for(&bad, &other, NULL, &st) && st.code == MODNET_E_HASH && strstr(modsync_cause(&st), "not part of"));
+        CHECK(!dir_exists(own, "maps\\Other\\Pack"));
+    }
+    /* The player's own maps hold whole mods only: no download, one sentence. */
+    gets = g_stub.build_gets;
+    CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_REFUSED && g_stub.build_gets == gets);
+    CHECK(strstr(modsync_cause(&st), "only in part") && strstr(modsync_cause(&st), "My Maps"));
+    /* The root holding the whole build it was cut from serves the row: nothing is fetched. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Pack", whole_root);
+    mt_mkdirs_for(dir);
+    {
+        char from[MAX_PATH * 2];
+        _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\Pack", author);
+        CHECK(mt_copy_tree(from, dir));
+    }
+    use_root(whole_root);
+    gets = g_stub.build_gets;
+    CHECK(modsync_fetch_build_for(&row, &arena, NULL, &st) && st.already_installed && g_stub.build_gets == gets &&
+          !strcmp(st.folder, "Pack"));
+
+    /* A file the part left out that a player's game asked for: told to the store ... */
+    CHECK(modnet_report_asked(cut, P_BARREL_ICON, "mods/pkpart01/barrel", NULL, NULL) == MODNET_OK);
+    CHECK(g_stub.asked_reports == 1 && !strcmp(g_stub.asked_hash, cut) && !strcmp(g_stub.asked_request, P_BARREL_ICON));
+    /* ... kept for the author beside the published map, and carried by the next publish. */
+    use_root(author);
+    _snprintf_s(g_stub.asked_list, sizeof g_stub.asked_list, _TRUNCATE,
+                "[{\"build\":\"%s\",\"salt\":\"pkpart01\",\"request\":\"%s\",\"by\":\"mods/pkpart01/barrel\"}]", cut,
+                P_BARREL_ICON);
+    CHECK(modsync_asked_refresh(NULL) >= 1);
+    n = modsync_asked_for("pkpart01", &asked);
+    CHECK(n == 1 && !strcmp(asked[0], P_BARREL_ICON));
+    modsync_asked_free(asked, n);
+    n = modsync_asked_of_ref("item-part", &asked);
+    CHECK(n == 1 && !strcmp(asked[0], "pkpart01\t" P_BARREL_ICON "\tmods/pkpart01/barrel"));
+    modsync_asked_free(asked, n);
+    n = modsync_asked_for("pkpart01", &asked);
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "pkpart01");
+    strcpy_s(row.build, sizeof row.build, hp);
+    row.names = (char **)names;
+    row.name_count = 1;
+    CHECK(modsync_cut_row(&row, (const char *const *)asked, n, &why) == 1 && strcmp(row.build, cut));
+    if (why) { fprintf(stderr, "cut with what was asked: %s\n", why); free(why); why = NULL; }
+    strcpy_s(again, sizeof again, row.build);
+    modsync_asked_free(asked, n);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s\\assets\\" "generated\\image\\mods\\pkpart01\\barrel_icon.bimage", again);
+    CHECK(dir_exists(author, rel));
+    /* The launch removes a staged folder no queued upload names (one an earlier session left);
+     * a cut this session staged for a publish still under way stays. */
+    {
+        char left[65];
+        memset(left, 'd', 64);
+        left[64] = 0;
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\" MODSYNC_SLICES "\\%s", author, left);
+        mt_write(dir, "mod.json", "{}");
+        CHECK(modsync_slices_tidy() == 1);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s", left);
+        CHECK(!dir_exists(author, rel));
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, MODSYNC_SLICES "\\%s", again);
+        CHECK(dir_exists(author, rel));
+    }
+    g_stub.asked_list[0] = 0;
+    modsync_set_stock(NULL, NULL);
+}
+
 int main(void)
 {
     char url[64], tmp[MAX_PATH], r1[MAX_PATH * 2], r2[MAX_PATH * 2], dir[MAX_PATH * 2], path[MAX_PATH * 2];
@@ -861,6 +1035,8 @@ int main(void)
             CHECK(!file_has(got, "\"editorOnly\""));
         }
     }
+
+    test_parts(tmp);
 
     /* No secret reaches the log. */
     {

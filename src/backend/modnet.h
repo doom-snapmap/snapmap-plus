@@ -171,6 +171,19 @@ int  modnet_claim(const char *ref, const char *const *builds, int n, const char 
  * names any more at once. */
 int  modnet_release(const char *claim, const char *secret, const modnet_io *io, modnet_result *r);
 
+/* A published map that uses part of a mod carries only the files it was
+ * found to need (modslice.h). POST /mods/build/<hash>/asked
+ * {"request","by"} tells the store a player's game asked that build for a
+ * file it lacks (`by`, the load that asked, may be ""); 204 is success, 404
+ * a build the store does not hold or one that is whole. Nothing about the
+ * player is sent. */
+int  modnet_report_asked(const char *hash, const char *request, const char *by, const modnet_io *io, modnet_result *r);
+
+/* POST /mods/asked {"claim","secret"}: what players asked for of the builds
+ * a claim names, {"asked":[{"build","salt","request","by"}...]}. MODNET_OK
+ * with the answer's text in *json (malloc'd; free), of any size. */
+int  modnet_list_asked(const char *claim, const char *secret, char **json, const modnet_io *io, modnet_result *r);
+
 /* ------------------------------------------------------------ jobs ---- */
 
 /* A job body: runs on the worker thread with the io the helper owns (its

@@ -342,6 +342,20 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   published copy stays available, and releases them only when the game reports that copy is no
   longer published (for example after an unpublish from another machine). A published map over the
   limit cannot be copied to My Maps.
+- A published map carries only the files of a mod it uses: the publish works out, from what the map
+  places, which files of each mod it needs (following every name their text and binary files spell,
+  with whatever the game finds by number, the files a mod edits of the game, and a texture board,
+  the sound banks or a module whole), proves that those files build on their own, and uploads just
+  them; a player downloads that much into the map's own folder. The question says it in sizes: "This
+  map uses 2 mods and needs 1.2 MB of their 147.0 MB of files. Upload those to the mod store so other
+  players can download them? You are asked this only once." A mod with scripts, a mod the map uses as a
+  whole (Use in this map), and a map whose share of a mod, with the list of the mod's files that goes
+  with it, would come to more than three quarters of the mod take the whole mod. Two maps that need the same files of a mod share one upload. Your own maps always use your whole
+  mods. A player who has the whole mod at the same build downloads nothing. The files one map uses stay
+  with that map: they cannot be added to your own mods, and a copy of such a map in My Maps says it needs
+  the whole mod. If a player's game asks for a file the map did not carry, the map goes on without it,
+  the store keeps the file's name for you, and the Mods tab's map view lists it under "Missing for
+  players" beside your published map; publishing the map again carries it.
 - The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
 - A mod is its salt, eight characters in its `mod.json`, never its folder name, which you may

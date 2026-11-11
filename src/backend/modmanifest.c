@@ -432,6 +432,13 @@ int sh_modmanifest_parse_value(const char *json, size_t length, sh_modmanifest_r
             goto done;
         }
     }
+    if (sh_json_object_get(&object, "of")) {
+        if (!mm_member_text(&object, "of", out->of, sizeof out->of, 1) ||
+            !sh_modmanifest_valid_hash(out->of, strlen(out->of))) {
+            MM_ERR("row '%s' has no valid source build", out->salt);
+            goto done;
+        }
+    }
     if (!mm_member_heap(&object, "name", &out->name, 0)) {
         MM_ERR("row '%s' has no valid name", out->salt); goto done;
     }
@@ -493,6 +500,11 @@ char *sh_modmanifest_format_value(const sh_modmanifest_row *row, size_t *out_len
     mm_put(&t, row->salt, strlen(row->salt));
     mm_put(&t, "@", 1);
     mm_put(&t, row->build, strlen(row->build));
+    if (row->of[0]) {
+        if (!sh_modmanifest_valid_hash(row->of, strlen(row->of))) { free(t.p); return NULL; }
+        mm_put(&t, "\",\"of\":\"", 8);
+        mm_put(&t, row->of, strlen(row->of));
+    }
     mm_put(&t, "\",\"name\":", 9);
     mm_put_quoted(&t, sh_modmanifest_row_name(row));
     _snprintf_s(number, sizeof number, _TRUNCATE, ",\"size\":%llu", row->size);
@@ -1286,6 +1298,9 @@ void sh_modmanifest_set_scope(sh_modmanifest_scope_fn scope, int (*armed)(void))
 
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve) { g_resolve = resolve; }
 
+static sh_modmanifest_slice_fn volatile g_slicer;
+void sh_modmanifest_set_slicer(sh_modmanifest_slice_fn slicer) { g_slicer = slicer; }
+
 /* The load's listing: the rows, and the placed names when the hook asks. */
 static void mm_scope_load(const char *json, size_t length, const sh_modmanifest_list *rows)
 {
@@ -1538,6 +1553,15 @@ static char *mm_prepare_rows(const char *json, size_t length, size_t *out_length
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;
 
+/* A copy of every row of `from` into `to` (empty). 0 when memory runs out. */
+static int mm_copy_list(sh_modmanifest_list *to, const sh_modmanifest_list *from)
+{
+    size_t i;
+    for (i = 0; i < from->count; i++)
+        if (!sh_modmanifest_list_add(to, &from->rows[i])) { sh_modmanifest_list_free(to); return 0; }
+    return 1;
+}
+
 static void mm_save_visit(void *context, const char *bundle_id, const char *bundle_hash, unsigned long long size,
                           const char *name)
 {
@@ -1630,7 +1654,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     size_t count, i, written = 0;
     int failed = 0, stale;
     mm_save_ctx ctx;
-    sh_modmanifest_list attached;
+    sh_modmanifest_list attached, whole;
     sh_modmanifest_scope_fn scope = g_scope;
     char *out = NULL;
     char err[192] = "", *line, *described;
@@ -1638,6 +1662,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     if (out_length) *out_length = 0;
     if (!json || !length) return NULL;
     memset(&ctx, 0, sizeof ctx);
+    memset(&whole, 0, sizeof whole);
     stale = mm_carries_rows(json, length);
     /* No installed bundle serves anything, the map carries no rows and no
      * map-level mod: the save is the engine's own bytes, without walking the
@@ -1673,6 +1698,23 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     for (i = 0; i < ctx.list.count; i++)
         if (ctx.list.rows[i].name_count > 1)
             qsort(ctx.list.rows[i].names, ctx.list.rows[i].name_count, sizeof(char *), mm_cstr_cmp);
+    /* A publish's save names, for each mod the map uses only part of, the
+     * cut of the files it needs; the open map keeps the whole builds. */
+    {
+        sh_modmanifest_slice_fn slicer = g_slicer;
+        size_t cut = 0;
+        if (slicer) {
+            if (!mm_copy_list(&whole, &ctx.list)) ctx.failed = 1;
+            for (i = 0; !ctx.failed && i < ctx.list.count; i++) cut += slicer(&ctx.list.rows[i]) == 1;
+        }
+        if (ctx.failed) {
+            backend_log("MODS: save manifest skipped -- out of memory");
+            sh_modmanifest_list_free(&ctx.list);
+            sh_modmanifest_list_free(&whole);
+            return NULL;
+        }
+        if (cut) qsort(ctx.list.rows, ctx.list.count, sizeof *ctx.list.rows, mm_row_order);
+    }
     out = sh_modmanifest_write(json, length, &ctx.list, &written, err, sizeof err);
     described = mm_describe(&ctx.list);
     if (out) {
@@ -1690,7 +1732,8 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     /* The open map's record is what it now saves: `sh_mods map`, the Mods tab
      * and the next listing read these rows, not the ones it was loaded with
      * (a map opened from a rawmap had none). */
-    if (out) mm_set_current(&ctx.list);
+    if (out) mm_set_current(whole.count ? &whole : &ctx.list);
     sh_modmanifest_list_free(&ctx.list);
+    sh_modmanifest_list_free(&whole);
     return out;
 }

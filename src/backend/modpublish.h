@@ -7,6 +7,10 @@
  *   save          the SerializeToJson detour (rawmap.c) reports the final
  *                 saved text: its length, its manifest rows and whether it
  *                 carries the snapmap-plus member
+ *   publish save  the save PublishStart starts names, for each mod the map
+ *                 uses only part of, the cut of the files it needs
+ *                 (modslice.h, modsync_cut_row through the manifest's slicer
+ *                 seam); every other save, export and copy names whole builds
  *   PublishAfterSave  (the Save state's callback, before the first request)
  *                 no rows: the engine continues unchanged. Rows: a text over
  *                 the service bound (10,485,760 bytes) is refused through
@@ -142,8 +146,13 @@ void sh_modpublish_launch(void);
 int  sh_modpublish_holding(void);
 
 /* "This map uses N mod(s) (size). Upload them to the mod store so other
- * players can download them? You are asked this only once.", under 256 bytes. */
-void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigned long long bytes);
+ * players can download them? You are asked this only once.", under 256 bytes.
+ * When the map uses only part of a mod (`whole`, the mods' bytes with those
+ * counted whole, is more than `bytes`, what goes up): "This map uses N mod(s)
+ * and needs <bytes> of their <whole> of files. Upload those to the mod store
+ * so other players can download them? You are asked this only once." */
+void sh_modpublish_compose_question(char *out, size_t cap, size_t count, unsigned long long bytes,
+                                    unsigned long long whole);
 
 /* Byte counts as the notices print them: "1 byte", "512 bytes", "12.3 MB". */
 void sh_modpublish_size_text(char *out, size_t cap, unsigned long long bytes);
@@ -169,7 +178,7 @@ typedef struct sh_modpublish_ops {
     /* The first-time upload question (the only ask site). Returns a dialog
      * ticket polled with poll(), 0 when it could not be raised. NULL uses
      * ask() with the Yes/No dialog. */
-    int  (*upload_question)(void *c, void *editor, size_t count, unsigned long long bytes);
+    int  (*upload_question)(void *c, void *editor, size_t count, unsigned long long bytes, unsigned long long whole);
     void (*log)(void *c, const char *line);
     /* Add `tag` to a saved-map model's tags (idLocalSavedMapModel, tags at
      * +0x1A0) when absent: 1 added, 0 present, -1 failed. Called from the

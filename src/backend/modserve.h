@@ -910,6 +910,25 @@ typedef struct sh_modserve_bundle_ref {
 } sh_modserve_bundle_ref;
 /* Filled refs hold malloc'd text: release each with sh_modserve_bundle_ref_free. */
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
+
+/* A published map that uses part of a mod (modslice.h) carries only the
+ * files its cut found it needs. A file the game then asks for that the cut
+ * left out is a defect of the cut: the map plays on if the game can, and
+ * the asked name is recorded. The provider (overrides.c) calls
+ * sh_modserve_note_miss with every request it found nowhere; one under
+ * mods/<salt>/ of a mod the open map declares by a cut is noted once per map,
+ * with the name of the load that asked for it when the main thread's open
+ * loads say (`by`, else ""), logged:
+ *   MODS: <mod name> came with this map without <request>, which <by> asked for; the map goes on without it
+ * and handed to the bound reporter (modpublished.c: the store keeps it for
+ * the map's author, who sees it beside the published map and corrects it by
+ * publishing again). Returns 1 when noted now, 0 otherwise. Any thread. */
+typedef void (*sh_modserve_miss_fn)(const char *salt, const char *cut_hash, const char *request, const char *by);
+void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn);
+int  sh_modserve_note_miss(const char *request);
+/* The misses noted since the process started: one "<mod name>: <request>"
+ * line each (sh_mods status). Returns the count. */
+int  sh_modserve_misses_report(sh_modserve_line_fn fn, void *context);
 int sh_modserve_row_build_in(const struct sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out);
 void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref);
 

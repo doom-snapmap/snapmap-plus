@@ -73,6 +73,11 @@ typedef struct stub_state {
     int fail_part;                /* the next PUT of this part number answers 503 */
     char trail[8192];             /* "claim <ref>" and "release <ref>" lines, in the order the stub took them */
     unsigned scripts_header;      /* X-Mod-Scripts of the next answer */
+    /* What players asked for (POST /mods/build/<hash>/asked): the count and the last one;
+     * POST /mods/asked answers asked_list ("[]" when empty). */
+    int asked_reports;
+    char asked_hash[65], asked_request[400], asked_by[400];
+    char asked_list[4096];
 } stub_state;
 
 static stub_state g_stub;
@@ -226,7 +231,9 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
         if (!entry || sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
         free(entry);
     }
-    if (!bad && zr.n != carried + 1) bad = "the archive holds entries mod.json does not list";
+    /* Part of a build carries the source build's canonical manifest too. */
+    if (!bad && b.slice_of[0] && sh_zip_reader_find(&zr, SH_MB_SLICE_SOURCE) < 0) bad = "part of a build without its source";
+    if (!bad && zr.n != carried + 1 + (b.slice_of[0] ? 1 : 0)) bad = "the archive holds entries mod.json does not list";
     if (!bad) *scripts = b.script_files;
     free(text);
     sh_mb_free(&b);
@@ -398,6 +405,22 @@ static void stub_route(SOCKET s, const char *method, const char *path, const cha
         g_stub.fail_prefix[0] = 0;
         _snprintf_s(out, sizeof out, _TRUNCATE, "{\"error\":\"injected failure %d\"}", st);
         stub_send_ex(s, st, "application/json", out, strlen(out), !strcmp(method, "HEAD"));
+        return;
+    }
+    if (!strcmp(method, "POST") && !strncmp(path, "/mods/build/", 12) && strlen(path) == 82 && stub_is_hex(path + 12, 64) &&
+        !strcmp(path + 76, "/asked")) {
+        g_stub.asked_reports++;
+        memcpy(g_stub.asked_hash, path + 12, 64);
+        g_stub.asked_hash[64] = 0;
+        if (!stub_find(g_stub.builds, g_stub.nbuilds, g_stub.asked_hash)) { stub_json(s, 404, "{\"error\":\"not found\"}"); return; }
+        stub_str((const char *)body, "request", g_stub.asked_request, sizeof g_stub.asked_request);
+        if (!stub_str((const char *)body, "by", g_stub.asked_by, sizeof g_stub.asked_by)) g_stub.asked_by[0] = 0;
+        stub_send(s, 204, "application/json", "", 0);
+        return;
+    }
+    if (!strcmp(method, "POST") && !strcmp(path, "/mods/asked")) {
+        _snprintf_s(out, sizeof out, _TRUNCATE, "{\"asked\":%s}", g_stub.asked_list[0] ? g_stub.asked_list : "[]");
+        stub_json(s, 200, out);
         return;
     }
     if (!strncmp(path, "/mods/build/", 12) && strlen(path) > 76 && stub_is_hex(path + 12, 64)) {

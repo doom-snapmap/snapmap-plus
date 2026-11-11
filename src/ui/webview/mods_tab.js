@@ -354,6 +354,8 @@ var modsTab = (function () {
             group: str(b.group),
             /* a downloaded map's place ("maps\<segment>") and the map's name; "" for the player's own */
             place: str(b.place), placeTitle: str(b.placeTitle),
+            /* only the files of the mod that map uses: it stays with that map */
+            part: bool(b.part),
             description: str(b.description), cvars: normCvars(b.requirements), commands: normCommands(b.requirements),
             editorRowNames: normNames(b.editorRowNames),
             publishedMaps: b.publishedMaps === undefined || b.publishedMaps === null ? -1 : num(b.publishedMaps),
@@ -423,6 +425,9 @@ var modsTab = (function () {
     var pub = obj(m.published), up = obj(m.uploaded);
     return {open: open, name: str(m.name), saved: num(m.saved), entities: num(m.entities),
             published: pub ? {state: str(pub.state), at: num(pub.at)} : null,
+            /* what players of the published map asked for and did not get */
+            asked: arr(m.asked).map(function (a) { a = obj(a) || {}; return {mod: str(a.mod), request: str(a.request), by: str(a.by)}; })
+              .filter(function (a) { return a.request; }),
             uploaded: up ? {claimed: bool(up.claimed), at: num(up.at)} : null,
             mods: Array.isArray(m.mods) ? m.mods.map(normMapMod) : null,
             vanilla: typeof m.vanilla === 'boolean' ? m.vanilla : null,
@@ -856,11 +861,21 @@ var modsTab = (function () {
       return null;
     }
     function editorOnly(b) { return !!(b && b.facts && b.facts.editorOnly); }
+    /* One plain sentence for a file a published map did not carry and a player's game asked for. */
+    function missingSentence(a) {
+      return 'Players of this map were missing ' + a.request + ' from ' + (a.mod || 'one of its mods') +
+        (a.by ? ', which ' + a.by + ' asks for' : '') + '. Publish the map again and it goes with the map.';
+    }
     function renderUse() {
       var u = byId('modsUseBtn');
       if (!u) return;
       var b = selectedMod(), m = model.map, open = loaded && !!m && m.open && !!m.mods;
-      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it. */
+      /* A downloaded map's mod: Add to my mods copies it to the root, where your own maps use it.
+         One that holds only the files its map uses has no action: it stays with that map. */
+      if (b && b.place && b.part) {
+        u.style.display = 'none';
+        return;
+      }
       if (b && b.place) {
         u.style.display = '';
         u.textContent = 'Add to my mods';
@@ -1373,6 +1388,13 @@ var modsTab = (function () {
       if (m.uploaded) field(det, 'Its mods', m.uploaded.claimed
         ? 'Uploaded with the published map' + (m.uploaded.at ? ' (' + formatDate(m.uploaded.at) + ')' : '')
         : 'Not uploaded');
+      /* A file of a mod the published map did not carry, which a player's game asked for. */
+      if (m.asked.length) {
+        var ak = section(body, 'asked', 'Missing for players');
+        m.asked.forEach(function (a) {
+          ak.appendChild(el('div', 'mods-line mods-warning', missingSentence(a)));
+        });
+      }
       if (m.mods) {
         var total = m.mods.reduce(function (a, r) { return a + r.size; }, 0);
         field(det, 'Mods', plural(m.mods.length, 'mod') + (m.mods.length ? ', ' + formatSize(total) + ' for a player to download' : ''));

@@ -3,7 +3,7 @@
  * member's grammar once).
  *
  * A row is the compact JSON
- * {"mod":"<salt>@<build hash>","name","size","names":[...],"attached"?,"choices"?}
+ * {"mod":"<salt>@<build hash>","of"?,"name","size","names":[...],"attached"?,"choices"?}
  * where "mod" names the mod by its salt (the eight characters in its
  * mod.json's "snapmap-plus" block) and the build by the SHA-256 of its
  * canonical manifest, which itself records the salt, so a build verified
@@ -18,7 +18,11 @@
  * (the first row naming a slot wins). "attached": true marks a map-level row:
  * the mod was attached to the map (the Mods tab's Use in this map, `sh_mods
  * map add`) without placing anything, so the map keeps the row whatever it
- * places. Rows never carry asset bytes, and merge by salt and build.
+ * places. "of": a published map names, for a mod it uses only part of, the
+ * build of the files it needs (modslice.h), cut from the build "of" names: the
+ * root folder of the salt at that build serves the row as well as the cut
+ * does. Only the publish save writes it (sh_modmanifest_set_slicer). Rows
+ * never carry asset bytes, and merge by salt and build.
  *
  * A row object with an "id" or "bundle" member is an earlier shape and does
  * not parse; the parse detour refuses a map carrying one before any of this
@@ -49,6 +53,7 @@
 typedef struct sh_modmanifest_row {
     char salt[SH_MODMANIFEST_SALT_CAP];          /* the mod */
     char build[SH_MODMANIFEST_HASH_CAP];         /* its canonical manifest's SHA-256 */
+    char of[SH_MODMANIFEST_HASH_CAP];            /* the build this one was cut from ("of"), "" for a whole build */
     char *name;            /* display only: malloc'd, NULL for none (sh_modmanifest_row_name) */
     unsigned long long size;
     char **names;          /* malloc'd strings; owned by the row */
@@ -174,6 +179,15 @@ void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed);
  * the placed names gave takes its name from it. */
 typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh_modmanifest_row *out);
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
+
+/* The publish save's cut (modpublish.c binds it): called for every row a
+ * save writes, after the map scope has seen the rows. 1 when it replaced the
+ * row's build, size and "of" with a cut of the build that the map needs; 0
+ * leaves the row naming the whole build (every save but a publish's, and a
+ * publish's row that ships whole). The open map's own record keeps the whole
+ * builds either way. NULL unbinds. */
+typedef int (*sh_modmanifest_slice_fn)(sh_modmanifest_row *row);
+void sh_modmanifest_set_slicer(sh_modmanifest_slice_fn slicer);
 
 /* An editor open of the author's own map whose row pins a build that no
  * place serves: another build of the same salt

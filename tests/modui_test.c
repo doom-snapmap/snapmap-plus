@@ -24,6 +24,8 @@
 
 #include "snapmap_plus_iface.h"
 #include "modui.h"
+/* Any build hash: the asked list names the build a player lacked a file of. */
+#define HASH1_FOR_ASKED "1111111111111111111111111111111111111111111111111111111111111111"
 #include "modstore.h"
 #include "modserve.h"
 #include "modmanifest.h"
@@ -1451,6 +1453,19 @@ int main(int argc, char **argv)
     doc = list_doc();
     CHECK(has(doc, "\"name\":\"Imp Arena\",\"saved\":"));
     CHECK(has(doc, "\"published\":{\"state\":\"published\",\"at\":1793164563},\"uploaded\":{\"claimed\":true,"));
+    CHECK(has(doc, "\"asked\":[]"));   /* nothing a player lacked */
+    free(doc);
+    /* A file of the mod the published map did not carry, which a player's game asked for:
+     * listed beside the published map, the mod named by its name. */
+    CHECK(sh_mb_record_put(g_root, "asked", "{\"item123\":[{\"salt\":\"alexrimp\",\"build\":\"" HASH1_FOR_ASKED "\","
+                                            "\"request\":\"generated/image/mods/alexrimp/glow.bimage\",\"by\":\"mods/alexrimp/imp\"}],"
+                                            "\"other-item\":[{\"salt\":\"alexrimp\",\"build\":\"" HASH1_FOR_ASKED "\","
+                                            "\"request\":\"generated/image/mods/alexrimp/elsewhere.bimage\",\"by\":\"\"}]}"));
+    doc = list_doc();
+    CHECK(has(doc, "\"asked\":[{\"mod\":\"R2 Imp copy\",\"request\":\"generated/image/mods/alexrimp/glow.bimage\","
+                   "\"by\":\"mods/alexrimp/imp\"}]"));
+    CHECK(!has(doc, "elsewhere.bimage"));   /* another published map's */
+    CHECK(sh_mb_record_put(g_root, "asked", NULL));
     CHECK(bundle_has(doc, "alex.r2-imp", "\"state\":\"ready\"") && row_has(doc, "alex.r2-imp", "\"publishedMaps\":1"));
     CHECK(has(doc, "\"mods\":[{\"key\":\"alex.r2-imp\",\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\","
                    "\"state\":\"installed\",\"placedEntities\":["));
