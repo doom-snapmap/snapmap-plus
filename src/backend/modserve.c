@@ -4901,9 +4901,12 @@ static void ms_aset_del(ms_aset *s, uintptr_t key)
     }
 }
 
-/* 1 when a keep may raise `res`; 0 (counted, named) when the map's heap owns it. */
-static int ms_keepable(const unsigned char *res)
+/* The keepability rule (modserve.h): 1 when `resource` may be kept; 0
+ * (counted and named for the next left_to_map) when its last load ran with a
+ * map's heap selected. */
+int sh_modserve_keepable(const void *resource)
 {
+    const unsigned char *res = (const unsigned char *)resource;
     const char *name;
     size_t at;
     if (!ms_aset_has(&g_mapheap, (uintptr_t)res)) return 1;
@@ -4913,6 +4916,19 @@ static int ms_keepable(const unsigned char *res)
     if (name && at + strlen(name) + 3 < sizeof g_left_first)
         _snprintf_s(g_left_first + at, sizeof g_left_first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
     return 0;
+}
+
+/* Every write that keeps a resource for the session goes through here. */
+int sh_modserve_keep(void *resource)
+{
+    unsigned char *res = (unsigned char *)resource;
+    if (!res) return 0;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 4) {
+        if (!sh_modserve_keepable(res)) return 0;
+        *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    }
+    sh_modserve_kept_add(res);
+    return 1;
 }
 
 unsigned sh_modserve_left_to_map(char *names, size_t cap)
@@ -4963,9 +4979,7 @@ static void ms_raise_one(void *context, const unsigned char *list, unsigned char
     if (r->w->n && bsearch(&key, r->w->res, r->w->n, sizeof(uintptr_t), ms_uptr_cmp)) return;
     r->out->created++;
     if (*(unsigned *)(res + MS_RES_LEVEL) == 4) sh_modserve_kept_add(res);
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !sh_modserve_keep(res)) return;
     r->out->raised++;
     for (c = 0; c < r->ncls && r->cls[c].list != list; ++c) {}
     if (c == r->ncls && r->ncls < 64) { r->cls[c].list = list; r->cls[c].n = 0; r->ncls++; }
@@ -5118,9 +5132,7 @@ static void ms_lookups_raise_one(void *context, const unsigned char *list, unsig
     (void)list;
     if (g_lookups[ms_lookup_slot(g_lookups, g_lookups_cap, (uintptr_t)res)] != (uintptr_t)res) return;
     out->live++;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !sh_modserve_keep(res)) return;
     out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(out->first);
@@ -5213,7 +5225,7 @@ int sh_modserve_attrib_keep(void *resource)
     int raised = 0;
     if (!r || !ms_aset_has(&g_kept, (uintptr_t)r)) return 0;
     __try {
-        if (*(unsigned *)(r + MS_RES_LEVEL) == 1 && ms_keepable(r)) { *(unsigned *)(r + MS_RES_LEVEL) = 4; raised = 1; }
+        if (*(unsigned *)(r + MS_RES_LEVEL) == 1) raised = sh_modserve_keep(r);
     } __except (EXCEPTION_EXECUTE_HANDLER) { raised = 0; }
     g_attrib_raised_at_load += (unsigned)raised;
     return raised;
@@ -5288,8 +5300,7 @@ static void ms_attrib_raise_one(void *context, const unsigned char *list, unsign
     const char *name;
     size_t at;
     (void)list;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_aset_has(&g_kept, (uintptr_t)res) || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_aset_has(&g_kept, (uintptr_t)res) || !sh_modserve_keep(res)) return;
     out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(out->first);
@@ -5444,9 +5455,7 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
     ms_holds_walk *w = (ms_holds_walk *)context;
     const char *name;
     size_t at;
-    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !sh_modserve_keep(res)) return;
     w->out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(w->out->first);
@@ -5604,7 +5613,7 @@ static void ms_held_model_one(void *context, const unsigned char *list, unsigned
      * process heap 0: the holds raise keeps it. The default box (the engine's
      * model for a file it could not read: loaded where the file was not
      * served, report X2), or one whose load allocated from a map heap
-     * (ms_keepable), is loaded again. */
+     * (sh_modserve_keepable), is loaded again. */
     if (state & (MS_RES_FAILED | MS_RES_DEFAULT)) w->load[i] = 1;
     else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4) w->load[i] = 0;
     else w->load[i] = ms_aset_has(&g_mapheap, (uintptr_t)res) ? 1 : 0;

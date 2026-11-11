@@ -462,6 +462,16 @@ typedef struct sh_modserve_attrib {
     int overflow;         /* a set reached its bound since the previous close */
     char first[300];      /* the names this close raised, first ones */
 } sh_modserve_attrib;
+/* The keepability rule. Nothing raises a resource to level 4 except
+ * sh_modserve_keep, and it raises only what sh_modserve_keepable allows: a
+ * resource whose last load ran with a map's heap selected is never kept,
+ * since raising its level keeps the object but not what that heap held for it
+ * (the next Play load frees the heap). `keepable` counts and names each
+ * refusal for sh_modserve_left_to_map. `keep` raises `resource` to 4 and adds
+ * it to the kept set; 1 kept (or already at 4), 0 left at the engine's level.
+ * Main thread. */
+int  sh_modserve_keepable(const void *resource);
+int  sh_modserve_keep(void *resource);
 void sh_modserve_kept_add(const void *resource);
 int  sh_modserve_kept_has(const void *resource);
 int  sh_modserve_attrib_note(const void *parent, const void *child);

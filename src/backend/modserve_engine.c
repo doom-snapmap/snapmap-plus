@@ -409,17 +409,21 @@ static int op_load(void *context, const char *type, const char *name, int persis
             }
             if (!refused && !(state & 1)) {
                 /* A new identity with no consumers takes the native source load
-                 * once, at the persistent level, as timeline_tile.c does. */
+                 * once, at the persistent level, as timeline_tile.c does. Only
+                 * a step that keeps its decl joins the kept set first, so what
+                 * its load loads is kept with it; a map step's load is not. */
                 *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
-                sh_modserve_kept_add(d);
+                if (persist) sh_modserve_kept_add(d);
                 d[RES_STATE_OFF] = (unsigned char)(state & ~2);
                 g_generic_load(decl);
                 state = d[RES_STATE_OFF];
                 refused = me_refused(before, type, name);
             }
-            /* Editor rows stay through map purges; everything else returns to
-             * the engine's own level (1), which the next map unload purges. */
-            *(unsigned *)(d + RES_LIFETIME_OFF) = persist ? 4u : lifetime;
+            /* Editor rows stay through map purges (by the keepability rule);
+             * everything else returns to the engine's own level (1), which the
+             * next map unload purges. */
+            *(unsigned *)(d + RES_LIFETIME_OFF) = lifetime;
+            if (persist) (void)sh_modserve_keep(d);
             *out_state = state;
             *out_lifetime = *(unsigned *)(d + RES_LIFETIME_OFF);
             ok = refused ? SH_MODSERVE_LOAD_REFUSED : (state & 3) == 0;
@@ -776,8 +780,11 @@ static int me_held_one(void *context, const char *name, void *resource)
             me_held_note(r->bad, sizeof r->bad, name);
             return 1;
         }
-        *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
-        sh_modserve_kept_add(d);
+        if (!sh_modserve_keep(d)) {
+            r->failed++;
+            me_held_note(r->bad, sizeof r->bad, name);
+            return 1;
+        }
         if (resource) r->reloaded++; else r->loaded++;
         me_held_note(r->first, sizeof r->first, name);
     } __except (me_fault_filter(GetExceptionCode())) {
@@ -2069,6 +2076,7 @@ static void op_sources_published(void *context)
 typedef struct me_keep {
     int kept, permanent, created, missing, loaded;
     int older;                            /* kept from level 1 although it predates the watermark */
+    int left;                             /* left at level 1 by the keepability rule */
     const sh_modserve_watermark *mark;    /* the pass's watermark, or NULL */
 } me_keep;
 
@@ -2107,8 +2115,15 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
                        "and keeping it without the resources its parse created would outlive them", type, name, row);
                 return;
             }
-            *(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) = 4;
-            sh_modserve_kept_add(decl);
+            /* The keepability rule: a decl whose load ran with a map's heap
+             * selected (an in-editor reload after a Play exit) stays at the
+             * engine's level; the next load recreates it whole. */
+            if (!sh_modserve_keep(decl)) {
+                k->left++;
+                me_log("editor: %s '%s' left at level 1 (editor row '%s' points at it): its load ran with the map's heap "
+                       "selected, so keeping it would outlive what that heap holds for it", type, name, row);
+                return;
+            }
             k->kept++;
             if (older)
                 me_log("editor: %s '%s' kept for the session (editor row '%s' points at it); it was created at level 1 "
@@ -2125,7 +2140,7 @@ static void me_keep_rows(const char *phase)
 {
     sh_modserve_plan plan;
     me_closure c;
-    me_keep keep = { 0, 0, 0, 0, 0, 0, NULL };
+    me_keep keep = { 0 };
     sh_process_heap_scope heap = { 0 };
     int refs = 0;
     if (!g_bound || me_on_main() != 1 || g_mark_depth) return;
@@ -2185,7 +2200,7 @@ static int me_editor_rows(const char *phase, int first, int *todo)
         g_refresh_part = part;
     }
     {
-        me_keep keep = { 0, 0, 0, 0, 0, 0, NULL };
+        me_keep keep = { 0 };
         sh_process_heap_scope heap = { 0 };
         int refs = 0;
         keep.mark = mark.ok ? &mark : NULL;

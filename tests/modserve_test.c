@@ -5093,6 +5093,17 @@ static void test_load_attribution(void)
         CHECK(sh_modserve_attrib_close(&head, 0, &out) == 1 && out.raised == 0 && gore.level == 1);
         CHECK(sh_modserve_left_to_map(left, sizeof left) == 2 && strstr(left, "right_bloody.md6skl"));
         CHECK(sh_modserve_left_to_map(left, sizeof left) == 0 && !left[0]);
+        /* The one keep every level write uses refuses it and names it, and
+         * keeps a resource no map heap owns. */
+        CHECK(!sh_modserve_keepable(&gore) && sh_modserve_keep(&gore) == 0 && gore.level == 1);
+        CHECK(sh_modserve_left_to_map(left, sizeof left) == 2 && strstr(left, "right_bloody.md6skl"));
+        {
+            static kh_res plain;
+            plain.name = "models/plain"; plain.level = 1;
+            CHECK(sh_modserve_keepable(&plain) && sh_modserve_keep(&plain) == 1 && plain.level == 4 &&
+                  sh_modserve_kept_has(&plain));
+            CHECK(sh_modserve_keep(&plain) == 1 && plain.level == 4 && sh_modserve_left_to_map(NULL, 0) == 0);
+        }
         /* The holds by name and a pass's lookups leave it too. */
         sh_modserve_lookups_open();
         sh_modserve_lookups_note(&gore);

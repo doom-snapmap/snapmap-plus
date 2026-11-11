@@ -2073,12 +2073,25 @@ gore md6Defs, meshes and skeletons with a map heap selected, and the next
 Play load releases that heap: the skeleton the holds-by-name raise had
 lifted to level 4 kept its object and lost its joints, and the chainsaw
 pickup's attachment animator read them (G1, VK 0x16f7f0b; 2 of 2 before
-this rule). So the load hook records the heap each load runs with, and no
-keep (watermark, holds, lookups, attribution) raises a resource whose last
-load ran with a heap other than 0: it stays at level 1, the purge frees it
-whole and the next load recreates it. A load in heap 0 clears the mark. A
-log line `<phase>: N keep(s) left at level 1 because the map's heap holds
-what their load allocated` names them.
+this rule). So the load hook records the heap each load runs with, and a
+resource whose last load ran with a heap other than 0 stays at level 1: the
+purge frees it whole and the next load recreates it. A load in heap 0 clears
+the mark. A log line `<phase>: N keep(s) left at level 1 because the map's
+heap holds what their load allocated` names them.
+
+The keepability invariant: nothing raises a resource to level 4 except
+`sh_modserve_keep`, and it raises only a resource `sh_modserve_keepable`
+allows, one whose last load did not run with a map's heap selected. Every
+keep goes through that one call: the watermark, the holds by name, the
+recorded lookups, the attribution, the engine side's keep of an editor row's
+animWeb or material (`me_keep_ref`), a kept step's decl after its load
+(`op_load`) and a held render model (`me_held_one`). Only a step that keeps
+its decl (an editor row's closure) joins the kept set before its native load;
+a map pass's decls return to the engine's level after it and nothing they
+load is kept, so a mod without editor rows is never made permanent by the
+next Play entry. The one other level write is the native load of a new
+identity at level 4, which `op_load` sets back to the engine's level as soon
+as the load returns.
 
 A kept decl's render models are loaded by the product itself, in process heap
 0, while their files serve (`sh_modserve_held_models`, `me_hold_models`, run at
