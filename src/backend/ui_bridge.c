@@ -17,12 +17,18 @@ static sh_iface *g_iface = NULL;
 static sh_ui_argblock g_argblock;
 static void          *g_ui_out_slot = NULL;   /* receives the frontend's loop-state obj address */
 
-/* Stable synthetic argv for the frontend startup ABI. argv[1] carries the game
- * identity ("--game=DOOM 2016 build ..."), the single string every report uses;
- * the frontend reads it instead of identifying the executable itself. */
+/* Stable synthetic argv for the frontend startup ABI: the backend's release
+ * version ("--version=v1.0.0", or "dev" for a local build), which the window
+ * matches against its own when it loads, and the game identity ("--game=DOOM
+ * 2016 build ..."), the single string every report uses; the frontend reads it
+ * instead of identifying the executable itself. */
+#ifndef SNAPMAP_PLUS_VERSION
+#define SNAPMAP_PLUS_VERSION "dev"
+#endif
 static char  g_argv0[] = "snapmap-plus";
+static char  g_argv_version[] = "--version=" SNAPMAP_PLUS_VERSION;
 static char  g_argv_game[sizeof "--game=" + SH_GAME_IDENTITY_MAX];
-static char *g_argv[]  = { g_argv0, g_argv_game, NULL };
+static char *g_argv[]  = { g_argv0, g_argv_version, g_argv_game, NULL };
 
 /* Keep the frontend module loaded for its thread lifetime. */
 static HMODULE g_ui_dll = NULL;
@@ -65,7 +71,7 @@ int sh_ui_bridge_install(void)
         if (sh_host_game_identity(game, sizeof game))
             _snprintf_s(g_argv_game, sizeof g_argv_game, _TRUNCATE, "--game=%s", game);
     }
-    g_argblock.argc     = g_argv_game[0] ? 2 : 1;
+    g_argblock.argc     = g_argv_game[0] ? 3 : 2;
     g_argblock.argv     = g_argv;
     g_argblock.iface    = g_iface;
 
