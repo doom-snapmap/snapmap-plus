@@ -907,9 +907,13 @@ on the host, in one sandboxed Lua 5.4 state per mod per map, with a memory cap, 
 plain stop line naming the file and line; a script that fails or runs away stops only its own mod.
 Version 1 so far registers handlers (`on.spawn`, `on.think`, `on.remove`, `on.damage`, `on.death`,
 `on.anim`, `on.input`, `on.map_start`, `on.map_end`), keeps time (`now`, `after`, `every`, `run`,
-`wait`) and writes the mod's script log (`print`, `warn`); the entity, AI, combat and logic calls,
-and the hooks that deliver damage, death, animation notifies and Script node inputs, come with the
-work that follows. Placed and spawned entities of a scripted mod receive `spawn` and `think` now.
+`wait`) and writes the mod's script log (`print`, `warn`). A mod whose scripts handle an input gets
+a "Script" node in its Toybox category: a wire into a node runs the script's `on.input` handler for
+the node's name, `node(name):fire()` raises On Fired on the mod's nodes of that name, and
+`vars.get` / `vars.set` read and write the map's Integer, Number, Boolean and String variables so
+wired logic reacts. The entity, AI and combat calls, and the hooks that deliver damage, death and
+animation notifies, come with the work that follows. Placed and spawned entities of a scripted mod
+receive `spawn` and `think` now.
 `sh_scripts` reports each mod's scripts; see [Mod scripts](architecture.md#mod-scripts).
 
 ## Not user-facing
