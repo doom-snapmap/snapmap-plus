@@ -731,8 +731,10 @@ These backend files share the work:
   The table serves only after a boot self-check that builds three of the
   game's own cached types the product's way and finds them equal node for
   node; one `MODS: typeinfo:` line per boot says how many mod rows resolve
-  through the table. An entityDef whose served bytes change at a refresh
-  loses its entry and is rebuilt at its next use.
+  through the table. An entityDef re-parsed from other bytes (a refresh, a
+  map that serves its own copy of the salt) loses its entry and is rebuilt at
+  its next use; the old tree is never freed, since the lookup handed the
+  engine the tree itself and the engine may still hold it.
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
   decision and `sh_mods held`.

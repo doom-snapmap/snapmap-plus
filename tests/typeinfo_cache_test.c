@@ -108,17 +108,17 @@ int main(void)
     CHECK(t.count == 3 && sh_typeinfo_table_find(&t, k3) == NULL);
     CHECK(sh_typeinfo_table_find(&t, k0) == trees[0] && sh_typeinfo_table_find(&t, k5) == trees[5]);
 
-    /* Remove by name: the decl-name rule ignores case; every match goes. */
+    /* Forget by name: the decl-name rule ignores case; every match goes, and
+     * no tree is destroyed (the engine may hold the one the lookup returned). */
     CHECK(sh_typeinfo_table_insert(&t, k3, trees[3]) == 1);
     g_ndestroyed = 0;
-    CHECK(sh_typeinfo_table_remove_name(&t, "Mods/X/One", note_destroy, NULL) == 2);
-    CHECK(g_ndestroyed == 2);
-    CHECK((g_destroyed[0] == trees[2] && g_destroyed[1] == trees[3]) || (g_destroyed[0] == trees[3] && g_destroyed[1] == trees[2]));
+    CHECK(sh_typeinfo_table_forget_name(&t, "Mods/X/One") == 2);
+    CHECK(g_ndestroyed == 0);
     CHECK(t.count == 2 && sh_typeinfo_table_find(&t, k2) == NULL && sh_typeinfo_table_find(&t, k3) == NULL);
-    CHECK(sh_typeinfo_table_remove_name(&t, "nobody", note_destroy, NULL) == 0);
-    CHECK(sh_typeinfo_table_remove_name(&t, "", note_destroy, NULL) == 0);
-    CHECK(sh_typeinfo_table_remove_name(&t, NULL, note_destroy, NULL) == 0);
-    CHECK(g_ndestroyed == 2);
+    CHECK(sh_typeinfo_table_forget_name(&t, "nobody") == 0);
+    CHECK(sh_typeinfo_table_forget_name(&t, "") == 0);
+    CHECK(sh_typeinfo_table_forget_name(&t, NULL) == 0);
+    CHECK(g_ndestroyed == 0);
 
     /* Free destroys what is left. */
     g_ndestroyed = 0;

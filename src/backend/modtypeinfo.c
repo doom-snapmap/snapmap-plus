@@ -91,15 +91,13 @@ void *sh_typeinfo_table_remove(sh_typeinfo_table *t, const void *key)
     return (i < t->count && t->entries[i].key == key) ? tt_take(t, i) : NULL;
 }
 
-int sh_typeinfo_table_remove_name(sh_typeinfo_table *t, const char *name,
-                                  void (*destroy)(void *context, void *tree), void *context)
+int sh_typeinfo_table_forget_name(sh_typeinfo_table *t, const char *name)
 {
     int i, removed = 0;
     if (!t || !t->entries || !name || !name[0]) return 0;
     for (i = 0; i < t->count;) {
         if (!_stricmp((const char *)t->entries[i].key, name)) {
-            void *tree = tt_take(t, i);
-            if (destroy) destroy(context, tree);
+            (void)tt_take(t, i);
             removed++;
         } else {
             i++;
@@ -297,7 +295,7 @@ static void *ti_build(const void *key, char *why, size_t cap)
     void *decl = NULL, *game = NULL, *entity = NULL, *obj = NULL, *tree = NULL;
     ti_create_fn create;
     ti_write_fn write;
-    ti_destroy_fn destroy;
+    ti_destroy_fn destroy = NULL;
     int ok = 0;
     why[0] = '\0';
     if (!sh_process_heap_enter(&g_heap, &heap)) {
@@ -327,19 +325,27 @@ static void *ti_build(const void *key, char *why, size_t cap)
                     memcpy(obj, state, TT_STATE_BYTES);
                     g_tt_open(obj);
                     write(game, entity, obj, 1);
-                    destroy(game, entity);
-                    entity = NULL;
+                    {
+                        void *e = entity;
+                        entity = NULL;   /* destroyed once, even if the destroy faults */
+                        destroy(game, e);
+                    }
                     g_tt_finish(obj);
                     g_tree_text(tree, obj);
                     ok = 1;
                 }
-                if (entity) { destroy(game, entity); entity = NULL; }
+                if (entity) { void *e = entity; entity = NULL; destroy(game, e); }
             }
         }
     } __except (ti_av_only(GetExceptionCode())) {
         _snprintf_s(why, cap, _TRUNCATE, "access violation while building it (%s)",
                     obj ? "writing or parsing the entity's state" : entity ? "creating the entity" : "finding the decl");
         ok = 0;
+    }
+    /* A fault while its state was written leaves the default entity alive. */
+    if (entity && destroy) {
+        __try { destroy(game, entity); }
+        __except (ti_av_only(GetExceptionCode())) { }
     }
     if (obj) {
         __try { g_tt_dtor(obj); }
@@ -645,7 +651,7 @@ void sh_modtypeinfo_decl_changed(const char *type, const char *name)
 {
     int removed;
     if (!g_installed || !type || !name || _stricmp(type, "entityDef") || ti_on_main() != 1) return;
-    removed = sh_typeinfo_table_remove_name(&g_table, name, ti_tree_free, NULL);
-    if (removed) ti_log("MODS: typeinfo: the default tree of entityDef %s is dropped with its changed bytes; rebuilt at its next use", name);
+    removed = sh_typeinfo_table_forget_name(&g_table, name);
+    if (removed) ti_log("MODS: typeinfo: the default tree of entityDef %s is rebuilt at its next use (its bytes changed)", name);
 }
 #endif
