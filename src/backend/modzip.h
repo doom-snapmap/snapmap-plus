@@ -4,11 +4,17 @@
  *
  * The writer stores every entry (method 0) with its CRC-32, a fixed DOS time
  * (1980-01-01, so the same content is byte-identical) and the UTF-8 flag on a
- * non-ASCII name. No ZIP64: at most 65535 entries and 4 GiB. The reader
- * trusts no field of an archive: at open it checks the end record, the
- * directory's bounds, and for every entry the method (stored (0) or deflate
- * (8) only), the encryption flag, ZIP64 size markers, a stored entry's equal
- * sizes, a local record and data that lie before the directory, a name
+ * non-ASCII name. It writes ZIP64 records exactly where a value does not fit
+ * the classic field (an entry of 4 GiB or more, an offset past 4 GiB, 65,535
+ * entries or more, a directory past 4 GiB), so an archive of any size and any
+ * number of files can be written, and an archive that fits is the ordinary
+ * ZIP it always was. The reader reads both. It trusts no field of an archive:
+ * at open it checks the end record, the ZIP64 locator and end record when the
+ * classic fields point to them, the directory's bounds, and for every entry
+ * the method (stored (0) or deflate (8) only), the encryption flag, the ZIP64
+ * extra field a marker needs (well formed, holding exactly the values the
+ * markers ask for), a stored entry's equal sizes, a local record and data
+ * that lie before the directory, a name
  * without NUL that sh_zip_name_ok accepts, and no two names that differ only
  * in case; anything else refuses the whole archive with one sentence ending
  * "Ask whoever shared it to export it again". A read then checks the local
@@ -22,14 +28,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* A name's bytes: the request paths a mod carries are far shorter
+ * (SH_MB_REQUEST_MAX), so a name over this is not one Snapmap+ wrote. */
 #define SH_ZIP_NAME_MAX     1024u
-#define SH_ZIP_MAX_ENTRIES  65535u
-#define SH_ZIP_LIMIT        0xFFFFFFFFull
 #define SH_ZIP_METHOD_FILE  0xFFFFu   /* a folder reader's entry (r->dir set): read from the file */
 
 /* ------------------------------------------------------------ writer ---- */
 
-typedef struct sh_zip_went { char *name; uint32_t crc, size, offset; unsigned flags; } sh_zip_went;
+typedef struct sh_zip_went { char *name; uint32_t crc; uint64_t size, offset; unsigned flags; } sh_zip_went;
 
 typedef struct sh_zip_writer {
     HANDLE h;                  /* INVALID_HANDLE_VALUE when no file is open */
@@ -61,7 +67,8 @@ void sh_zip_writer_free(sh_zip_writer *w);
 typedef struct sh_zip_rentry {
     char *name;
     unsigned method, flags;
-    uint32_t crc, csize, usize, lho;
+    uint32_t crc;
+    uint64_t csize, usize, lho;
 } sh_zip_rentry;
 
 typedef struct sh_zip_reader {
@@ -83,7 +90,7 @@ int  sh_zip_name_ok(const char *s, size_t n);
 int  sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t cap);
 
 /* A folder reader's entry (r->dir set by the caller): `name` relative to the
- * folder, '/'-separated. Returns 1; 0 when out of memory or over the limits.
+ * folder, '/'-separated. Returns 1; 0 when out of memory.
  * sh_zip_reader_sort indexes the entries once they are all added. */
 int  sh_zip_reader_add(sh_zip_reader *r, const char *name, unsigned long long size);
 

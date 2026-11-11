@@ -609,7 +609,6 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
     char mj[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
     unsigned char *text = NULL;
     size_t text_len = 0, i;
-    unsigned long long carried = 0;
     sh_mb_bundle b;
     sh_zip_writer w;
     wchar_t *wout = NULL;
@@ -639,18 +638,7 @@ int modsync_write_archive(const char *folder, const char *hash, const char *out_
         msy_cause(cause, cap, "%s does not build: %s", label, b.state_cause[0] ? b.state_cause : "see the Mods tab");
         goto done;
     }
-    for (i = 0; i < b.file_count; i++) {
-        if (b.files[i].stock) { if (pointers) (*pointers)++; continue; }
-        carried += b.files[i].size;
-    }
-    /* The archive form, not a limit of the store: a ZIP without ZIP64 holds
-     * at most 65,535 entries and 4 GiB. */
-    if (carried + text_len + 1024ull * (b.file_count + 1) > SH_ZIP_LIMIT || b.file_count + 1 > SH_ZIP_MAX_ENTRIES) {
-        if (code) *code = MODNET_E_TOO_LARGE;
-        msy_cause(cause, cap, "%s: this mod is too large to publish (%u MB in %u files); a published mod's archive "
-                  "holds at most 4 GB and 65,535 files", label, msy_mb(carried + text_len), (unsigned)b.file_count);
-        goto done;
-    }
+    for (i = 0; i < b.file_count; i++) if (b.files[i].stock && pointers) (*pointers)++;
     wout = sh_mb_wpath(out_path);
     if (!wout || !sh_zip_writer_open(&w, wout)) {
         msy_cause(cause, cap, "cannot write the archive %s: %s", out_path, sh_reason_win32(GetLastError(), out_path, 0));

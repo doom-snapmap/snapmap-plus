@@ -19,8 +19,8 @@
  *   POST /mods/build/<hash>/complete {"size"} joins them, and the store checks
  *        the whole archive by the same rules as a one-request upload.
  * The store's answers say how many scripts a build carries (X-Mod-Scripts on
- * GET and HEAD, "scripts" in an upload's answer). The only bound left is the
- * archive form's: no ZIP64, so at most 65,535 entries and 4 GiB (modzip.h).
+ * GET and HEAD, "scripts" in an upload's answer). An archive past 4 GiB or
+ * 65,535 entries is ZIP64 (modzip.h), which the store reads too.
  *
  * Transport: WinHTTP, one process-wide session. The base URL is the product
  * setting "mods.store" (config.c; default https://api.snapmapplus.com). HTTPS

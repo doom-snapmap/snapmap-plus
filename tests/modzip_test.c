@@ -6,7 +6,10 @@
  * an encrypted entry, ZIP64 size markers, a local record or data past the
  * directory, a stored entry whose sizes differ, a NUL in a name, two names
  * that differ only in case, a directory larger than its entries, a huge
- * declared size) are opened and every entry they admit is read. Nothing may
+ * declared size) are opened and every entry they admit is read. A ZIP64
+ * archive as another tool writes it reads back and gets the same truncation,
+ * byte and random damage; the writer past 65,535 entries (and, with
+ * SH_ZIP_LARGE=1, past 4 GiB) writes ZIP64 records the reader reads. Nothing may
  * crash or hang; every refusal is one sentence, and a refusal of the
  * archive's structure names the next step. */
 #define WIN32_LEAN_AND_MEAN
@@ -215,6 +218,216 @@ static void fuzz(void)
     free(z);
 }
 
+/* ---------------------------------------------------------------- ZIP64 */
+
+static unsigned crc32_of(const unsigned char *p, size_t n)
+{
+    unsigned c = 0xFFFFFFFFu, k;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        c ^= p[i];
+        for (k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+static void put64(unsigned char *p, unsigned long long v) { put32(p, (unsigned)v); put32(p + 4, (unsigned)(v >> 32)); }
+
+/* The two entries of the good archive written as another tool writes ZIP64:
+ * "a.txt" with its sizes as markers and the values in its local and central
+ * ZIP64 extras, "dir/b.txt" with its local record offset as a marker, and the
+ * ZIP64 end record and locator ahead of an end record of markers. */
+static unsigned char *g_z64;
+static size_t g_z64_len;
+
+static void build_zip64(void)
+{
+    unsigned char *z = (unsigned char *)calloc(1, 1024);
+    size_t at = 0, lho_a, lho_b, cd, cd_size, end64;
+    unsigned crc_a = crc32_of((const unsigned char *)"hello", 5), crc_b = crc32_of((const unsigned char *)"abc", 3);
+    /* a.txt */
+    lho_a = at;
+    put32(z + at, 0x04034b50u); put16(z + at + 4, 45); put16(z + at + 12, 0x21); put32(z + at + 14, crc_a);
+    put32(z + at + 18, 0xFFFFFFFFu); put32(z + at + 22, 0xFFFFFFFFu); put16(z + at + 26, 5); put16(z + at + 28, 20);
+    at += 30;
+    memcpy(z + at, "a.txt", 5); at += 5;
+    put16(z + at, 1); put16(z + at + 2, 16); put64(z + at + 4, 5); put64(z + at + 12, 5); at += 20;
+    memcpy(z + at, "hello", 5); at += 5;
+    /* dir/b.txt */
+    lho_b = at;
+    put32(z + at, 0x04034b50u); put16(z + at + 4, 20); put16(z + at + 12, 0x21); put32(z + at + 14, crc_b);
+    put32(z + at + 18, 3); put32(z + at + 22, 3); put16(z + at + 26, 9);
+    at += 30;
+    memcpy(z + at, "dir/b.txt", 9); at += 9;
+    memcpy(z + at, "abc", 3); at += 3;
+    /* the directory */
+    cd = at;
+    put32(z + at, 0x02014b50u); put16(z + at + 4, 45); put16(z + at + 6, 45); put16(z + at + 14, 0x21);
+    put32(z + at + 16, crc_a); put32(z + at + 20, 0xFFFFFFFFu); put32(z + at + 24, 0xFFFFFFFFu); put16(z + at + 28, 5);
+    put16(z + at + 30, 28); put32(z + at + 42, 0xFFFFFFFFu);
+    at += 46;
+    memcpy(z + at, "a.txt", 5); at += 5;
+    put16(z + at, 1); put16(z + at + 2, 24); put64(z + at + 4, 5); put64(z + at + 12, 5); put64(z + at + 20, lho_a); at += 28;
+    put32(z + at, 0x02014b50u); put16(z + at + 4, 45); put16(z + at + 6, 45); put16(z + at + 14, 0x21);
+    put32(z + at + 16, crc_b); put32(z + at + 20, 3); put32(z + at + 24, 3); put16(z + at + 28, 9);
+    put16(z + at + 30, 12); put32(z + at + 42, 0xFFFFFFFFu);
+    at += 46;
+    memcpy(z + at, "dir/b.txt", 9); at += 9;
+    put16(z + at, 1); put16(z + at + 2, 8); put64(z + at + 4, lho_b); at += 12;
+    cd_size = at - cd;
+    /* the ZIP64 end record and locator */
+    end64 = at;
+    put32(z + at, 0x06064b50u); put64(z + at + 4, 44); put16(z + at + 12, 45); put16(z + at + 14, 45);
+    put64(z + at + 24, 2); put64(z + at + 32, 2); put64(z + at + 40, cd_size); put64(z + at + 48, cd); at += 56;
+    put32(z + at, 0x07064b50u); put64(z + at + 8, end64); put32(z + at + 16, 1); at += 20;
+    /* the end record, every field a marker */
+    put32(z + at, 0x06054b50u); put16(z + at + 8, 0xFFFF); put16(z + at + 10, 0xFFFF);
+    put32(z + at + 12, 0xFFFFFFFFu); put32(z + at + 16, 0xFFFFFFFFu); at += 22;
+    g_z64 = z;
+    g_z64_len = at;
+}
+
+static void zip64_reads(void)
+{
+    char cause[512];
+    sh_zip_reader r;
+    size_t n = 0, i, k;
+    unsigned seed = 777;
+    unsigned char *b, *z;
+    printf("-- a ZIP64 archive another tool wrote reads back; its damage is refused like any other\n");
+    build_zip64();
+    CHECK(spit(g_z64, g_z64_len));
+    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == 2);
+    if (r.n == 2) {
+        b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "a.txt"), 16, &n, cause, sizeof cause);
+        CHECK(b && n == 5 && !memcmp(b, "hello", 5));
+        free(b);
+        b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "dir/b.txt"), 16, &n, cause, sizeof cause);
+        CHECK(b && n == 3 && !memcmp(b, "abc", 3));
+        free(b);
+    }
+    sh_zip_reader_close(&r);
+    /* Every truncation, every one-byte change, random damage: no crash, and
+     * every refusal is one sentence. */
+    z = (unsigned char *)malloc(g_z64_len);
+    for (i = 0; i < g_z64_len; i++) { CHECK(spit(g_z64, i)); (void)exercise(cause, sizeof cause); }
+    for (i = 0; i < g_z64_len; i++) {
+        static const unsigned char vals[] = {0x00, 0x01, 0x08, 0x10, 0x7F, 0x80, 0xFE, 0xFF};
+        for (k = 0; k < sizeof vals; k++) {
+            memcpy(z, g_z64, g_z64_len);
+            if (z[i] == vals[k]) continue;
+            z[i] = vals[k];
+            CHECK(spit(z, g_z64_len));
+            (void)exercise(cause, sizeof cause);
+        }
+    }
+    for (i = 0; i < 4000; i++) {
+        memcpy(z, g_z64, g_z64_len);
+        for (k = 0; k < 6; k++) {
+            seed = seed * 1103515245u + 12345u;
+            z[(seed >> 8) % g_z64_len] = (unsigned char)(seed >> 20);
+        }
+        CHECK(spit(z, g_z64_len));
+        (void)exercise(cause, sizeof cause);
+    }
+    /* Particular damage: a marker without its extra value, an extra holding
+     * more than the markers ask, a locator pointing elsewhere. */
+    {
+        size_t cd = 0;
+        for (i = 0; i + 4 <= g_z64_len; i++)
+            if (g_z64[i] == 0x50 && g_z64[i + 1] == 0x4b && g_z64[i + 2] == 1 && g_z64[i + 3] == 2) { cd = i; break; }
+        memcpy(z, g_z64, g_z64_len);
+        put16(z + cd + 46 + 5 + 2, 16);   /* a.txt's central extra now leaves the offset out */
+        CHECK(spit(z, g_z64_len) && !exercise(cause, sizeof cause) && strstr(cause, "file list is damaged"));
+        memcpy(z, g_z64, g_z64_len);
+        put32(z + cd + 20, 5);            /* a.txt's compressed size is no marker, the extra still holds it */
+        CHECK(spit(z, g_z64_len) && !exercise(cause, sizeof cause) && strstr(cause, "file list is damaged"));
+        memcpy(z, g_z64, g_z64_len);
+        put64(z + g_z64_len - 22 - 20 + 8, 3);   /* the locator points into the data */
+        CHECK(spit(z, g_z64_len) && !exercise(cause, sizeof cause) && strstr(cause, "file list is damaged"));
+        memcpy(z, g_z64, g_z64_len);
+        put32(z + g_z64_len - 22 - 20 + 16, 2);  /* two disks */
+        CHECK(spit(z, g_z64_len) && !exercise(cause, sizeof cause) && strstr(cause, "split across several files"));
+    }
+    free(z);
+    free(g_z64);
+}
+
+/* The writer past 65,535 entries: ZIP64 end records, read back whole. */
+static void zip64_many(void)
+{
+    sh_zip_writer w;
+    sh_zip_reader r;
+    wchar_t wp[MAX_PATH];
+    char cause[512], name[32];
+    unsigned char *z, *b;
+    size_t len = 0, n = 0;
+    unsigned i;
+    printf("-- 70,000 entries: the writer ends the archive with ZIP64 records, the reader reads every entry\n");
+    MultiByteToWideChar(CP_UTF8, 0, g_path, -1, wp, MAX_PATH);
+    CHECK(sh_zip_writer_open(&w, wp));
+    for (i = 0; i < 70000; i++) {
+        _snprintf_s(name, sizeof name, _TRUNCATE, "f/%05u.txt", i);
+        if (!sh_zip_writer_add(&w, name, name, strlen(name))) break;
+    }
+    CHECK(i == 70000 && sh_zip_writer_finish(&w));
+    sh_zip_writer_free(&w);
+    z = slurp(g_path, &len);
+    CHECK(z && len > 98);
+    if (z) {
+        CHECK(z[len - 22 + 8] == 0xFF && z[len - 22 + 9] == 0xFF);             /* the end record's count: a marker */
+        CHECK(z[len - 42] == 0x50 && z[len - 41] == 0x4b && z[len - 40] == 6 && z[len - 39] == 7);   /* the locator */
+        free(z);
+    }
+    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == 70000);
+    b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "f/69999.txt"), 64, &n, cause, sizeof cause);
+    CHECK(b && n == 11 && !memcmp(b, "f/69999.txt", 11));
+    free(b);
+    sh_zip_reader_close(&r);
+    /* A small archive stays the ordinary ZIP it always was. */
+    CHECK(sh_zip_writer_open(&w, wp) && sh_zip_writer_add(&w, "a.txt", "hello", 5) && sh_zip_writer_finish(&w));
+    sh_zip_writer_free(&w);
+    z = slurp(g_path, &len);
+    CHECK(z && len == 22 + 46 + 5 + 30 + 5 + 5);
+    free(z);
+}
+
+/* Past 4 GiB of data (set SH_ZIP_LARGE=1; writes about 4.3 GB to the temp
+ * folder): the offsets past 4 GiB go in the ZIP64 extras and end record. */
+static void zip64_large(void)
+{
+    sh_zip_writer w;
+    sh_zip_reader r;
+    wchar_t wp[MAX_PATH];
+    char cause[512], name[32], flag[8];
+    unsigned char *block, *b;
+    size_t n = 0, size = 64u << 20;
+    unsigned i, count = 66;
+    if (!GetEnvironmentVariableA("SH_ZIP_LARGE", flag, sizeof flag) || strcmp(flag, "1")) {
+        printf("  [skip] a ZIP past 4 GiB (set SH_ZIP_LARGE=1)\n");
+        return;
+    }
+    printf("-- past 4 GiB: offsets in ZIP64 extras, read back\n");
+    block = (unsigned char *)malloc(size);
+    for (i = 0; i < size; i++) block[i] = (unsigned char)(i * 7);
+    MultiByteToWideChar(CP_UTF8, 0, g_path, -1, wp, MAX_PATH);
+    CHECK(sh_zip_writer_open(&w, wp));
+    for (i = 0; i < count; i++) {
+        _snprintf_s(name, sizeof name, _TRUNCATE, "big/%02u.bin", i);
+        block[0] = (unsigned char)i;
+        if (!sh_zip_writer_add(&w, name, block, size)) break;
+    }
+    CHECK(i == count && sh_zip_writer_finish(&w) && w.off > (4ull << 30));
+    sh_zip_writer_free(&w);
+    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == count);
+    b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "big/65.bin"), size, &n, cause, sizeof cause);
+    block[0] = 65;
+    CHECK(b && n == size && !memcmp(b, block, size) && r.e[sh_zip_reader_find(&r, "big/65.bin")].lho > (4ull << 30));
+    free(b);
+    sh_zip_reader_close(&r);
+    free(block);
+}
+
 int main(void)
 {
     char tmp[MAX_PATH], cause[512];
@@ -237,6 +450,9 @@ int main(void)
     hostile();
     case_twins();
     fuzz();
+    zip64_reads();
+    zip64_many();
+    zip64_large();
     DeleteFileA(g_path);
     free(g_good);
     printf("modzip_test: %d checks, %d failed\n", g_checks, g_failed);

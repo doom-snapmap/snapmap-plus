@@ -16,7 +16,8 @@
  * author's folder holds under assets/ is left out and the importer reads
  * those bytes from its own game. Entries are stored (method 0); the reader
  * also accepts deflate (8), so a file repacked by another tool still imports.
- * No ZIP64: an export is limited to 65535 entries and 4 GiB.
+ * The writer uses ZIP64 records where a value needs them (modzip.h), so an
+ * export has no size or file-count bound of its own.
  *
  * Export: each row's mod is carried from the usable folder of its salt at
  * exactly the row's build (the root's, else a map's place), else from the

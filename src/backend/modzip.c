@@ -1,4 +1,4 @@
-/* modzip.c -- see modzip.h. Moved from modexport.c unchanged in behaviour. */
+/* modzip.c -- see modzip.h. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +11,14 @@
 #include "raw_deflate.h"
 #include "plain_reason.h"
 
-#define ZIP_CD_MAX         (16u * 1024u * 1024u)
+#define ZIP_SIG_LOCAL      0x04034b50u
+#define ZIP_SIG_CENTRAL    0x02014b50u
+#define ZIP_SIG_END        0x06054b50u
+#define ZIP_SIG_END64      0x06064b50u
+#define ZIP_SIG_LOCATOR64  0x07064b50u
+#define ZIP_X64            0x0001u     /* the ZIP64 extra field's id */
+#define ZIP_M32            0xFFFFFFFFull   /* a 32-bit field's ZIP64 marker */
+#define ZIP_M16            0xFFFFu         /* a 16-bit field's ZIP64 marker */
 #define ZIP_DOS_DATE       0x0021u     /* 1980-01-01: archives of the same content are byte-identical */
 #define ZIP_DOS_TIME       0x0000u
 #define ZIP_FLAG_UTF8      0x0800u
@@ -61,11 +68,13 @@ static void zip_put32(unsigned char *p, uint32_t v)
 {
     p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
+static void zip_put64(unsigned char *p, uint64_t v) { zip_put32(p, (uint32_t)v); zip_put32(p + 4, (uint32_t)(v >> 32)); }
 static unsigned zip_get16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static uint32_t zip_get32(const unsigned char *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+static uint64_t zip_get64(const unsigned char *p) { return (uint64_t)zip_get32(p) | ((uint64_t)zip_get32(p + 4) << 32); }
 
 static int zip_ascii(const char *s)
 {
@@ -101,17 +110,14 @@ int sh_zip_writer_open(sh_zip_writer *w, const wchar_t *path)
 
 int sh_zip_writer_add(sh_zip_writer *w, const char *name, const void *data, size_t len)
 {
-    unsigned char hdr[30];
+    unsigned char hdr[30], x64[20];
     size_t nl = strlen(name);
+    int big = (uint64_t)len >= ZIP_M32;   /* the sizes go in the ZIP64 extra field */
     sh_zip_went *e;
     if (w->failed) return 0;
-    if (w->n >= SH_ZIP_MAX_ENTRIES || nl == 0 || nl > SH_ZIP_NAME_MAX) {
+    if (nl == 0 || nl > SH_ZIP_NAME_MAX) {
         w->failed = 1;
-        return zip_cause(w->cause, sizeof w->cause, w->n >= SH_ZIP_MAX_ENTRIES ? "more than 65535 files" : "a file name is too long");
-    }
-    if (w->off + 30 + nl + len + 46 + nl + 22 >= SH_ZIP_LIMIT) {
-        w->failed = 1;
-        return zip_cause(w->cause, sizeof w->cause, "the export would exceed 4 GiB");
+        return zip_cause(w->cause, sizeof w->cause, "a file name is too long");
     }
     if (w->n == w->cap) {
         size_t c2 = w->cap ? w->cap * 2 : 64;
@@ -124,60 +130,93 @@ int sh_zip_writer_add(sh_zip_writer *w, const char *name, const void *data, size
     e->name = _strdup(name);
     if (!e->name) { w->failed = 1; return zip_cause(w->cause, sizeof w->cause, "out of memory"); }
     e->crc = zip_crc32((const unsigned char *)data, len);
-    e->size = (uint32_t)len;
-    e->offset = (uint32_t)w->off;
+    e->size = (uint64_t)len;
+    e->offset = w->off;
     e->flags = zip_ascii(name) ? 0 : ZIP_FLAG_UTF8;
     w->n++;
-    zip_put32(hdr, 0x04034b50u);
-    zip_put16(hdr + 4, 20);
+    zip_put32(hdr, ZIP_SIG_LOCAL);
+    zip_put16(hdr + 4, big ? 45 : 20);
     zip_put16(hdr + 6, e->flags);
     zip_put16(hdr + 8, 0);
     zip_put16(hdr + 10, ZIP_DOS_TIME);
     zip_put16(hdr + 12, ZIP_DOS_DATE);
     zip_put32(hdr + 14, e->crc);
-    zip_put32(hdr + 18, e->size);
-    zip_put32(hdr + 22, e->size);
+    zip_put32(hdr + 18, big ? (uint32_t)ZIP_M32 : (uint32_t)len);
+    zip_put32(hdr + 22, big ? (uint32_t)ZIP_M32 : (uint32_t)len);
     zip_put16(hdr + 26, (unsigned)nl);
-    zip_put16(hdr + 28, 0);
-    return zip_wraw(w, hdr, sizeof hdr) && zip_wraw(w, name, nl) && zip_wraw(w, data, len);
+    zip_put16(hdr + 28, big ? sizeof x64 : 0);
+    zip_put16(x64, ZIP_X64);
+    zip_put16(x64 + 2, 16);
+    zip_put64(x64 + 4, e->size);
+    zip_put64(x64 + 12, e->size);
+    return zip_wraw(w, hdr, sizeof hdr) && zip_wraw(w, name, nl) && (!big || zip_wraw(w, x64, sizeof x64)) &&
+           zip_wraw(w, data, len);
 }
 
 int sh_zip_writer_finish(sh_zip_writer *w)
 {
-    unsigned char hdr[46], end[22];
-    unsigned long long cd = w->off;
+    unsigned char hdr[46], x64[4 + 24], end[22], end64[56], loc[20];
+    unsigned long long cd = w->off, cd_size, end64_at;
     size_t i;
+    int z64;
     for (i = 0; i < w->n && !w->failed; i++) {
         const sh_zip_went *e = &w->e[i];
         size_t nl = strlen(e->name);
-        zip_put32(hdr, 0x02014b50u);
-        zip_put16(hdr + 4, 20);
-        zip_put16(hdr + 6, 20);
+        int big = e->size >= ZIP_M32, past = e->offset >= ZIP_M32;
+        unsigned xl = (big ? 16u : 0u) + (past ? 8u : 0u), at = 4;
+        zip_put32(hdr, ZIP_SIG_CENTRAL);
+        zip_put16(hdr + 4, xl ? 45 : 20);
+        zip_put16(hdr + 6, xl ? 45 : 20);
         zip_put16(hdr + 8, e->flags);
         zip_put16(hdr + 10, 0);
         zip_put16(hdr + 12, ZIP_DOS_TIME);
         zip_put16(hdr + 14, ZIP_DOS_DATE);
         zip_put32(hdr + 16, e->crc);
-        zip_put32(hdr + 20, e->size);
-        zip_put32(hdr + 24, e->size);
+        zip_put32(hdr + 20, big ? (uint32_t)ZIP_M32 : (uint32_t)e->size);
+        zip_put32(hdr + 24, big ? (uint32_t)ZIP_M32 : (uint32_t)e->size);
         zip_put16(hdr + 28, (unsigned)nl);
-        zip_put16(hdr + 30, 0);
+        zip_put16(hdr + 30, xl ? xl + 4 : 0);
         zip_put16(hdr + 32, 0);
         zip_put16(hdr + 34, 0);
         zip_put16(hdr + 36, 0);
         zip_put32(hdr + 38, 0);
-        zip_put32(hdr + 42, e->offset);
-        if (!zip_wraw(w, hdr, sizeof hdr) || !zip_wraw(w, e->name, nl)) return 0;
+        zip_put32(hdr + 42, past ? (uint32_t)ZIP_M32 : (uint32_t)e->offset);
+        /* The ZIP64 extra holds the values whose fields carry the marker, in
+         * the order the format fixes: uncompressed, compressed, offset. */
+        zip_put16(x64, ZIP_X64);
+        zip_put16(x64 + 2, xl);
+        if (big) { zip_put64(x64 + at, e->size); zip_put64(x64 + at + 8, e->size); at += 16; }
+        if (past) zip_put64(x64 + at, e->offset);
+        if (!zip_wraw(w, hdr, sizeof hdr) || !zip_wraw(w, e->name, nl) || (xl && !zip_wraw(w, x64, xl + 4))) return 0;
     }
     if (w->failed) return 0;
-    if (w->off >= SH_ZIP_LIMIT) { w->failed = 1; return zip_cause(w->cause, sizeof w->cause, "the export would exceed 4 GiB"); }
-    zip_put32(end, 0x06054b50u);
+    cd_size = w->off - cd;
+    z64 = w->n >= ZIP_M16 || cd_size >= ZIP_M32 || cd >= ZIP_M32;
+    if (z64) {
+        end64_at = w->off;
+        zip_put32(end64, ZIP_SIG_END64);
+        zip_put64(end64 + 4, sizeof end64 - 12);
+        zip_put16(end64 + 12, 45);
+        zip_put16(end64 + 14, 45);
+        zip_put32(end64 + 16, 0);
+        zip_put32(end64 + 20, 0);
+        zip_put64(end64 + 24, w->n);
+        zip_put64(end64 + 32, w->n);
+        zip_put64(end64 + 40, cd_size);
+        zip_put64(end64 + 48, cd);
+        zip_put32(loc, ZIP_SIG_LOCATOR64);
+        zip_put32(loc + 4, 0);
+        zip_put64(loc + 8, end64_at);
+        zip_put32(loc + 16, 1);
+        if (!zip_wraw(w, end64, sizeof end64) || !zip_wraw(w, loc, sizeof loc)) return 0;
+    }
+    zip_put32(end, ZIP_SIG_END);
     zip_put16(end + 4, 0);
     zip_put16(end + 6, 0);
-    zip_put16(end + 8, (unsigned)w->n);
-    zip_put16(end + 10, (unsigned)w->n);
-    zip_put32(end + 12, (uint32_t)(w->off - cd));
-    zip_put32(end + 16, (uint32_t)cd);
+    zip_put16(end + 8, w->n >= ZIP_M16 ? (unsigned)ZIP_M16 : (unsigned)w->n);
+    zip_put16(end + 10, w->n >= ZIP_M16 ? (unsigned)ZIP_M16 : (unsigned)w->n);
+    zip_put32(end + 12, cd_size >= ZIP_M32 ? (uint32_t)ZIP_M32 : (uint32_t)cd_size);
+    zip_put32(end + 16, cd >= ZIP_M32 ? (uint32_t)ZIP_M32 : (uint32_t)cd);
     zip_put16(end + 20, 0);
     return zip_wraw(w, end, sizeof end);
 }
@@ -293,14 +332,83 @@ static int zip_damaged(sh_zip_reader *r, unsigned char *cd, char *cause, size_t 
     return zip_cause(cause, cap, "the export's file list is damaged" ZIP_AGAIN);
 }
 
+/* The ZIP64 values of an entry whose classic fields carry the marker: the
+ * extra field `x` (xl bytes) must be well formed, and its ZIP64 record must
+ * hold exactly the values the markers ask for, in the format's order
+ * (uncompressed, compressed, local record offset). 1, else 0. */
+static int zip_entry64(sh_zip_rentry *e, int want_usize, int want_csize, int want_lho, const unsigned char *x, unsigned xl)
+{
+    unsigned at = 0, need = (want_usize ? 8u : 0u) + (want_csize ? 8u : 0u) + (want_lho ? 8u : 0u);
+    int seen = 0;
+    while (at < xl) {
+        unsigned id, len;
+        if (xl - at < 4) return 0;
+        id = zip_get16(x + at);
+        len = zip_get16(x + at + 2);
+        if (len > xl - at - 4) return 0;
+        if (id == ZIP_X64) {
+            const unsigned char *v = x + at + 4;
+            if (seen || len != need || !need) return 0;
+            seen = 1;
+            if (want_usize) { e->usize = zip_get64(v); v += 8; }
+            if (want_csize) { e->csize = zip_get64(v); v += 8; }
+            if (want_lho) e->lho = zip_get64(v);
+        }
+        at += 4 + len;
+    }
+    return seen == (need != 0);
+}
+
+/* The end of the directory: the classic end record at `found` in the tail
+ * (the archive's last tail_n bytes) and, when it points to them, the ZIP64
+ * locator and end record. 1 with the entry count, the directory's size and
+ * offset, and where the records after the directory start; 0 damaged, -1 a
+ * split archive. */
+static int zip_find_dir(sh_zip_reader *r, const unsigned char *tail, size_t tail_n, size_t found, uint64_t *entries,
+                        uint64_t *cd_size, uint64_t *cd_off, uint64_t *dir_end)
+{
+    unsigned long long end_at = r->size - tail_n + found;
+    unsigned disk = zip_get16(tail + found + 4), cd_disk = zip_get16(tail + found + 6);
+    unsigned on_disk = zip_get16(tail + found + 8), total = zip_get16(tail + found + 10);
+    uint32_t size32 = zip_get32(tail + found + 12), off32 = zip_get32(tail + found + 16);
+    unsigned char loc[20], end64[56];
+    uint64_t at64, rec;
+    if (disk != 0 || cd_disk != 0 || on_disk != total) return -1;
+    *entries = total;
+    *cd_size = size32;
+    *cd_off = off32;
+    *dir_end = end_at;
+    if (end_at < 20 || !zip_read_at(r->h, end_at - 20, loc, sizeof loc) || zip_get32(loc) != ZIP_SIG_LOCATOR64) {
+        /* No ZIP64 records: the classic fields may not carry a marker. */
+        return total != ZIP_M16 && size32 != ZIP_M32 && off32 != ZIP_M32;
+    }
+    if (zip_get32(loc + 4) != 0 || zip_get32(loc + 16) != 1) return -1;
+    at64 = zip_get64(loc + 8);
+    if (at64 + sizeof end64 > end_at - 20 || !zip_read_at(r->h, at64, end64, sizeof end64) ||
+        zip_get32(end64) != ZIP_SIG_END64)
+        return 0;
+    rec = zip_get64(end64 + 4);
+    if (rec < sizeof end64 - 12 || at64 + 12 + rec != end_at - 20) return 0;
+    if (zip_get32(end64 + 16) != 0 || zip_get32(end64 + 20) != 0 || zip_get64(end64 + 24) != zip_get64(end64 + 32)) return -1;
+    *entries = zip_get64(end64 + 32);
+    *cd_size = zip_get64(end64 + 40);
+    *cd_off = zip_get64(end64 + 48);
+    *dir_end = at64;
+    /* A classic field either holds the value or the marker. */
+    if ((total != ZIP_M16 && total != *entries) || (size32 != ZIP_M32 && size32 != *cd_size) ||
+        (off32 != ZIP_M32 && off32 != *cd_off))
+        return 0;
+    return 1;
+}
+
 int sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t cap)
 {
     wchar_t *w = sh_mb_wpath(path);
     LARGE_INTEGER sz;
     unsigned char tail[65557], *cd = NULL;
-    size_t tail_n, i, pos, found = (size_t)-1;
-    uint32_t cd_size, cd_off;
-    unsigned entries;
+    size_t tail_n, pos, found = (size_t)-1;
+    uint64_t entries = 0, cd_size = 0, cd_off = 0, dir_end = 0, i, at;
+    int dir;
     memset(r, 0, sizeof *r);
     r->h = w ? CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
     free(w);
@@ -313,68 +421,75 @@ int sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t c
     tail_n = r->size < sizeof tail ? (size_t)r->size : sizeof tail;
     if (!zip_read_at(r->h, r->size - tail_n, tail, tail_n)) { sh_zip_reader_close(r); return zip_cause(cause, cap, "cannot read the export"); }
     for (pos = tail_n - 22 + 1; pos-- > 0;) {
-        if (zip_get32(tail + pos) == 0x06054b50u && pos + 22 + zip_get16(tail + pos + 20) == tail_n) { found = pos; break; }
+        if (zip_get32(tail + pos) == ZIP_SIG_END && pos + 22 + zip_get16(tail + pos + 20) == tail_n) { found = pos; break; }
     }
     if (found == (size_t)-1) {
         sh_zip_reader_close(r);
         return zip_cause(cause, cap, "the export is not a ZIP file (no end record)" ZIP_AGAIN);
     }
-    entries = zip_get16(tail + found + 10);
-    cd_size = zip_get32(tail + found + 12);
-    cd_off = zip_get32(tail + found + 16);
-    if (zip_get16(tail + found + 4) != 0 || zip_get16(tail + found + 6) != 0 || zip_get16(tail + found + 8) != entries ||
-        entries == 0xFFFF || cd_off == 0xFFFFFFFFu || cd_size == 0xFFFFFFFFu) {
+    dir = zip_find_dir(r, tail, tail_n, found, &entries, &cd_size, &cd_off, &dir_end);
+    if (dir < 0) {
         sh_zip_reader_close(r);
-        return zip_cause(cause, cap, "the export is a split or ZIP64 archive, which is not supported" ZIP_AGAIN);
+        return zip_cause(cause, cap, "the export is split across several files, which is not supported" ZIP_AGAIN);
     }
-    /* The directory lies whole before the end record, and every entry's
-     * record and data before the directory. */
-    if ((unsigned long long)cd_off + cd_size > r->size - tail_n + found || cd_size > ZIP_CD_MAX ||
-        (unsigned long long)entries * 46u > cd_size)
+    /* The directory lies whole before the records that end it, and every
+     * entry's record and data before the directory. Each entry takes at
+     * least 46 bytes of it, which bounds the count before anything is
+     * allocated. */
+    if (!dir || cd_off > dir_end || cd_size > dir_end - cd_off || entries > cd_size / 46u || (size_t)cd_size != cd_size)
         return zip_damaged(r, NULL, cause, cap);
-    cd = (unsigned char *)malloc(cd_size ? cd_size : 1);
-    r->e = (sh_zip_rentry *)calloc(entries ? entries : 1, sizeof *r->e);
-    if (!cd || !r->e || !zip_read_at(r->h, cd_off, cd, cd_size)) {
+    cd = (unsigned char *)malloc(cd_size ? (size_t)cd_size : 1);
+    r->e = (sh_zip_rentry *)calloc(entries ? (size_t)entries : 1, sizeof *r->e);
+    if (!cd || !r->e || !zip_read_at(r->h, cd_off, cd, (size_t)cd_size)) {
         free(cd);
         sh_zip_reader_close(r);
         return zip_cause(cause, cap, "cannot read the export's file list");
     }
-    for (i = 0, pos = 0; i < entries; i++) {
+    for (i = 0, at = 0; i < entries; i++) {
         sh_zip_rentry *e = &r->e[i];
-        unsigned nl, xl, cl;
-        if (pos + 46 > cd_size || zip_get32(cd + pos) != 0x02014b50u) return zip_damaged(r, cd, cause, cap);
-        e->flags = zip_get16(cd + pos + 8);
-        e->method = zip_get16(cd + pos + 10);
-        e->crc = zip_get32(cd + pos + 16);
-        e->csize = zip_get32(cd + pos + 20);
-        e->usize = zip_get32(cd + pos + 24);
-        nl = zip_get16(cd + pos + 28);
-        xl = zip_get16(cd + pos + 30);
-        cl = zip_get16(cd + pos + 32);
-        e->lho = zip_get32(cd + pos + 42);
-        if ((size_t)pos + 46 + nl + xl + cl > cd_size) return zip_damaged(r, cd, cause, cap);
+        unsigned nl, xl, cl, disk;
+        int m_usize, m_csize, m_lho;
+        if (at + 46 > cd_size || zip_get32(cd + at) != ZIP_SIG_CENTRAL) return zip_damaged(r, cd, cause, cap);
+        e->flags = zip_get16(cd + at + 8);
+        e->method = zip_get16(cd + at + 10);
+        e->crc = zip_get32(cd + at + 16);
+        e->csize = zip_get32(cd + at + 20);
+        e->usize = zip_get32(cd + at + 24);
+        nl = zip_get16(cd + at + 28);
+        xl = zip_get16(cd + at + 30);
+        cl = zip_get16(cd + at + 32);
+        disk = zip_get16(cd + at + 34);
+        e->lho = zip_get32(cd + at + 42);
+        if (at + 46 + nl + xl + cl > cd_size) return zip_damaged(r, cd, cause, cap);
+        m_usize = e->usize == ZIP_M32;
+        m_csize = e->csize == ZIP_M32;
+        m_lho = e->lho == ZIP_M32;
+        if (disk != 0) {
+            free(cd);
+            sh_zip_reader_close(r);
+            return zip_cause(cause, cap, "the export is split across several files, which is not supported" ZIP_AGAIN);
+        }
         /* Every field a later read trusts is checked here, once: the method
          * (stored or deflate only; a folder reader's marker never comes from
-         * a file), no encryption, sizes that are not ZIP64 markers, a stored
-         * entry's two sizes equal, and its local record inside the archive
-         * before the directory. */
+         * a file), no encryption, the ZIP64 values a marker asks for, a
+         * stored entry's two sizes equal, and its local record inside the
+         * archive before the directory. */
         if (e->flags & 1) {
             free(cd);
             sh_zip_reader_close(r);
             return zip_cause(cause, cap, "the export holds an encrypted file, which Snapmap+ cannot read" ZIP_AGAIN);
         }
-        if ((e->method != 0 && e->method != 8) || e->csize == 0xFFFFFFFFu || e->usize == 0xFFFFFFFFu ||
-            e->lho == 0xFFFFFFFFu) {
+        if (e->method != 0 && e->method != 8) {
             free(cd);
             sh_zip_reader_close(r);
             return zip_cause(cause, cap, "the export holds a file packed in a way Snapmap+ cannot read" ZIP_AGAIN);
         }
-        if ((e->method == 0 && e->csize != e->usize) ||
-            (unsigned long long)e->lho + 30 + nl + (unsigned long long)e->csize > cd_off)
+        if (!zip_entry64(e, m_usize, m_csize, m_lho, cd + at + 46 + nl, xl) || (e->method == 0 && e->csize != e->usize) ||
+            e->lho > cd_off || e->csize > cd_off - e->lho || 30ull + nl > cd_off - e->lho - e->csize)
             return zip_damaged(r, cd, cause, cap);
         e->name = (char *)malloc(nl + 1);
         if (!e->name) { free(cd); sh_zip_reader_close(r); return zip_cause(cause, cap, "out of memory"); }
-        memcpy(e->name, cd + pos + 46, nl);
+        memcpy(e->name, cd + at + 46, nl);
         e->name[nl] = 0;
         r->n++;
         if (memchr(e->name, 0, nl) || !sh_zip_name_ok(e->name, nl)) {
@@ -389,7 +504,7 @@ int sh_zip_reader_open(sh_zip_reader *r, const char *path, char *cause, size_t c
                             "'..' step, a backslash, a colon or a control character); it was not imported. Export it "
                             "again with Snapmap+, or remove that entry from the ZIP", shown, nl >= sizeof shown ? "..." : "");
         }
-        pos += 46 + nl + xl + cl;
+        at += 46 + nl + xl + cl;
     }
     free(cd);
     return sh_zip_reader_sort(r, cause, cap);
@@ -463,20 +578,24 @@ unsigned char *sh_zip_reader_read(const sh_zip_reader *r, long idx, size_t max, 
     e = &r->e[idx];
     /* A folder reader's entries are its own; an archive's were checked at open. */
     if (r->dir) return zip_read_dir_entry(r, e, max, out_len, cause, cap);
-    if (e->usize > max) { zip_cause(cause, cap, "%s is larger than %zu bytes", e->name, max); return NULL; }
-    if (!zip_read_at(r->h, e->lho, lh, sizeof lh) || zip_get32(lh) != 0x04034b50u) {
+    if (e->usize > max || (size_t)e->usize != e->usize || (size_t)e->csize != e->csize) {
+        zip_cause(cause, cap, "%s is larger than %zu bytes", e->name, max);
+        return NULL;
+    }
+    if (!zip_read_at(r->h, e->lho, lh, sizeof lh) || zip_get32(lh) != ZIP_SIG_LOCAL) {
         zip_cause(cause, cap, "%s is damaged" ZIP_AGAIN, e->name);
         return NULL;
     }
     data = (unsigned long long)e->lho + 30 + zip_get16(lh + 26) + zip_get16(lh + 28);
-    if (data + e->csize > r->size) { zip_cause(cause, cap, "%s is damaged" ZIP_AGAIN, e->name); return NULL; }
+    if (data > r->size || e->csize > r->size - data) { zip_cause(cause, cap, "%s is damaged" ZIP_AGAIN, e->name); return NULL; }
     dst = (unsigned char *)malloc((size_t)e->usize + 1);
     if (!dst) { zip_cause(cause, cap, "out of memory"); return NULL; }
     if (e->method == 0) {
-        if (!zip_read_at(r->h, data, dst, e->usize)) { free(dst); zip_cause(cause, cap, "cannot read %s", e->name); return NULL; }
+        if (!zip_read_at(r->h, data, dst, (size_t)e->usize)) { free(dst); zip_cause(cause, cap, "cannot read %s", e->name); return NULL; }
     } else {
-        src = (unsigned char *)malloc(e->csize ? e->csize : 1);
-        if (!src || !zip_read_at(r->h, data, src, e->csize) || !sh_inflate_raw_exact(src, e->csize, dst, e->usize)) {
+        src = (unsigned char *)malloc(e->csize ? (size_t)e->csize : 1);
+        if (!src || !zip_read_at(r->h, data, src, (size_t)e->csize) ||
+            !sh_inflate_raw_exact(src, (size_t)e->csize, dst, (size_t)e->usize)) {
             free(src);
             free(dst);
             zip_cause(cause, cap, "%s does not decompress" ZIP_AGAIN, e->name);
@@ -484,9 +603,9 @@ unsigned char *sh_zip_reader_read(const sh_zip_reader *r, long idx, size_t max, 
         }
         free(src);
     }
-    if (zip_crc32(dst, e->usize) != e->crc) { free(dst); zip_cause(cause, cap, "%s fails its checksum" ZIP_AGAIN, e->name); return NULL; }
+    if (zip_crc32(dst, (size_t)e->usize) != e->crc) { free(dst); zip_cause(cause, cap, "%s fails its checksum" ZIP_AGAIN, e->name); return NULL; }
     dst[e->usize] = 0;
-    if (out_len) *out_len = e->usize;
+    if (out_len) *out_len = (size_t)e->usize;
     return dst;
 }
 
@@ -494,7 +613,7 @@ unsigned char *sh_zip_reader_read(const sh_zip_reader *r, long idx, size_t max, 
 int sh_zip_reader_add(sh_zip_reader *r, const char *name, unsigned long long size)
 {
     sh_zip_rentry *e;
-    if (!r->dir || !name || r->n >= SH_ZIP_MAX_ENTRIES || size > SH_ZIP_LIMIT) return 0;
+    if (!r->dir || !name) return 0;
     if (r->n == r->cap) {
         size_t c2 = r->cap ? r->cap * 2 : 64;
         sh_zip_rentry *g = (sh_zip_rentry *)realloc(r->e, sizeof *g * c2);
@@ -507,7 +626,7 @@ int sh_zip_reader_add(sh_zip_reader *r, const char *name, unsigned long long siz
     e->name = _strdup(name);
     if (!e->name) return 0;
     e->method = SH_ZIP_METHOD_FILE;
-    e->usize = (uint32_t)size;
+    e->usize = size;
     r->n++;
     return 1;
 }
