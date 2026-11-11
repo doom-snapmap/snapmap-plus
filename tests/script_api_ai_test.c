@@ -356,6 +356,7 @@ static void test_commands(void)
         "    self:equip(2)\n"
         "    self:laser('laser_sources', true)\n"
         "    self:laser_sweep('rain')\n"
+        "    self:laser_state('main_beam', false)\n"
         "    self:focus_tag('focus_aim_idle')\n"
         "    self:focus_tag(nil)\n"
         "    self:stop()\n"
@@ -382,7 +383,8 @@ static void test_commands(void)
     CHECK(strstr(g_events, "1:setPlayerEnemy(0)\n1:setEnemy(e2,1)\n") != NULL);
     CHECK(strstr(g_events, "1:setFocus(e2,1,1,3)\n1:clearAimFocus()\n") != NULL);
     CHECK(strstr(g_events, "1:pullTriggerRight()\n1:releaseTriggerRight()\n1:equipInventoryItemByIndex(2)\n") != NULL);
-    CHECK(strstr(g_events, "1:setLaserState(1,laser_sources)\n1:ae_startLaserSweep(noanim,rain)\n") != NULL);
+    CHECK(strstr(g_events, "1:setLaserState(1,laser_sources)\n1:ae_startLaserSweep(noanim,rain)\n"
+                           "1:ae_setLaserState(noanim,0,main_beam)\n") != NULL);
     CHECK(strstr(g_events, "1:ae_setOverrideFocusTagName(noanim,0,focus_aim_idle)\n1:ae_clearOverrideFocusTag(noanim,0)\n") != NULL);
     CHECK(strstr(g_events, "1:ssaction_Idle(0,1)\n") != NULL);
     sh_script_map_end();
@@ -514,6 +516,24 @@ static void test_refusals(void)
     expect_stop("ent(2):enemy()", "\"enemy\" works only on this mod's own demons");
 }
 
+static void test_turn_done(void)
+{
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then print('t0 ' .. tostring(self:turn_done())) self:face(ent(2)) end\n"
+        "  print('t' .. step .. ' ' .. tostring(self:turn_done()))\n"
+        "  if step == 3 then self:face({x = 0, y = -50, z = 0}) print('tp ' .. tostring(self:turn_done())) end\n"
+        "end)\n"));
+    tick();                          /* facing 0, the player at 45 degrees */
+    g_ent[1].yaw = 40; tick();       /* within 10 degrees */
+    g_ent[1].yaw = -90; tick();      /* then a position straight to its right */
+    CHECK(strstr(log_of("aaaaaaaa"), "t0 true\nt1 false\nt2 true\nt3 false\ntp true\n") != NULL);
+    sh_script_map_end();
+}
+
 static void test_removed_and_unavailable(void)
 {
     CHECK(start(
@@ -544,7 +564,7 @@ static void test_removed_and_unavailable(void)
 int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
-    CHECK(sh_script_ai_register() == 24);
+    CHECK(sh_script_ai_register() == 26);
     sh_script_ai_set_engine(&g_fake);
     sh_script_handles_set_resolver(fake_resolve);
 
@@ -556,6 +576,7 @@ int main(int argc, char **argv)
     test_move_done_and_follow();
     test_queries();
     test_refusals();
+    test_turn_done();
     test_removed_and_unavailable();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);

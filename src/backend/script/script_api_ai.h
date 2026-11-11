@@ -74,6 +74,7 @@ enum sh_ai_ev {
     SH_AI_EV_CLEAR_FOCUS_TAG,        /* ae_clearOverrideFocusTag   4i    */
     SH_AI_EV_SET_SCRIPT_ABORT,       /* setScriptAbort             bb    */
     SH_AI_EV_SET_SCRIPT_ABORT_FLAGS, /* setScriptAbortFlags        bb    */
+    SH_AI_EV_AE_SET_LASER_STATE,     /* ae_setLaserState           4bs   */
     SH_AI_EV_COUNT
 };
 

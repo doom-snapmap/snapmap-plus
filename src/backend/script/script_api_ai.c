@@ -57,6 +57,7 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "ae_clearOverrideFocusTag",    "4i" },
     { "setScriptAbort",              "bb" },
     { "setScriptAbortFlags",         "bb" },
+    { "ae_setLaserState",            "4bs" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -152,7 +153,12 @@ typedef struct ai_rec {
     int        has_dest;
     float      dest[3];
     float      tolerance;
+    int        facing;           /* a face order is standing: 1 an entity, 2 a position */
+    sh_script_handle face_ent;
+    float      face_pos[3];
 } ai_rec;
+
+#define AI_TURN_DONE_DEG 10.0f   /* turn_done: facing within this many degrees of the face target */
 
 static ai_rec g_recs[AI_RECORDS_MAX];
 static const sh_script_ai_engine *g_engine;
@@ -508,7 +514,10 @@ static int l_face(lua_State *L)
     if (ent) {
         sh_ai_arg a[4];
         a[0] = arg_e(ent); a[1] = arg_b(0); a[2] = arg_b(1); a[3] = arg_i(SH_AI_AIMPOINT_CENTER);
-        run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL);
+        if (run(ai, SH_AI_EV_SET_FOCUS, a, 4, NULL)) {
+            r->facing = 1;
+            r->face_ent = g_engine->handle_of(ent);
+        }
     } else {
         float at[3], dir[3];
         double len;
@@ -524,9 +533,34 @@ static int l_face(lua_State *L)
             r->has_dest = 1;
             memcpy(r->dest, at, sizeof at);
             r->tolerance = 0;
+            r->facing = 2;
+            memcpy(r->face_pos, p, sizeof p);
         }
     }
     return 0;
+}
+
+/* ai:turn_done() -> the demon faces its last face() target within
+ * AI_TURN_DONE_DEG degrees (true when no face order stands; nil while the
+ * target entity is gone). Made of the facing and the target's position:
+ * 2016's turn has no completion flag a script can read. */
+static int l_turn_done(lua_State *L)
+{
+    sh_script_handle h = 0;
+    void *ai = self_ai(L, "turn_done", &h);
+    ai_rec *r;
+    float at[3], to[3], yaw;
+    if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
+    if (!r->facing) { lua_pushboolean(L, 1); return 1; }
+    if (r->facing == 1) {
+        void *t = g_engine->entity(r->face_ent);
+        if (!t || !g_engine->origin(t, to)) { lua_pushnil(L); return 1; }
+    } else {
+        memcpy(to, r->face_pos, sizeof to);
+    }
+    if (!g_engine->origin(ai, at) || !g_engine->yaw(ai, &yaw)) { lua_pushnil(L); return 1; }
+    lua_pushboolean(L, fabsf(sh_ai_angle_to(at, yaw, to)) <= AI_TURN_DONE_DEG);
+    return 1;
 }
 
 /* ai:aim_at(e) aims the weapon at an entity; ai:aim_at(nil) stops aiming. */
@@ -826,6 +860,24 @@ static int l_laser(lua_State *L)
     return 0;
 }
 
+/* ai:laser_state(tag, on): the frame-command form of the same request
+ * (ae_setLaserState), as the attack clips send it. */
+static int l_laser_state(lua_State *L)
+{
+    sh_script_handle h = 0;
+    const char *tag = check_tag(L, 2, "laser_state", "a laser tag");
+    int on;
+    void *ai;
+    sh_ai_arg a[3];
+    luaL_checkany(L, 3);
+    on = lua_toboolean(L, 3);
+    ai = self_ai(L, "laser_state", &h);
+    if (!ai || !park(ai, h)) return 0;
+    a[0] = arg_anim(); a[1] = arg_b(on); a[2] = arg_s('s', tag);
+    run(ai, SH_AI_EV_AE_SET_LASER_STATE, a, 3, NULL);
+    return 0;
+}
+
 /* ai:laser_sweep(name) starts the named sweep of the demon's laser targeter decl. */
 static int l_laser_sweep(lua_State *L)
 {
@@ -913,6 +965,7 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "equip", l_equip },               { "laser", l_laser },
     { "laser_sweep", l_laser_sweep },   { "focus_tag", l_focus_tag },
     { "anim_state", l_anim_state },     { "anim_force", l_anim_force },
+    { "turn_done", l_turn_done },       { "laser_state", l_laser_state },
 };
 
 int sh_script_ai_register(void)
