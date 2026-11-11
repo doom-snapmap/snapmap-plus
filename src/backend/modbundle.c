@@ -1472,7 +1472,14 @@ int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQ
     }
     if (mb_ieq_n(type, tl, "image")) {
         if (mb_iends(name, nl, ".bimage")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);
-        return mb_binary_name("generated", "image", name, "bimage", out[0], SH_MB_REQUEST_MAX + 1);
+        if (mb_binary_name("generated", "image", name, "bimage", out[k], SH_MB_REQUEST_MAX + 1)) k++;
+        /* A mod's own decal image may sit in the decal atlas folder only: when
+         * a decal material loads, the engine puts its images into its decal
+         * atlas itself (generated/decalatlas/mods/<salt>/...). */
+        if (k && k < max && nl > 5 && !_strnicmp(name, "mods/", 5) &&
+            mb_binary_name("generated", "decalatlas", name, "bimage", out[k], SH_MB_REQUEST_MAX + 1))
+            k++;
+        return k;
     }
     if (mb_ieq_n(type, tl, "model")) {
         if (mb_iends(name, nl, ".bmodel")) return mb_own_name(name, out[0], SH_MB_REQUEST_MAX + 1);

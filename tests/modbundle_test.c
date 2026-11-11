@@ -243,6 +243,9 @@ static void test_need_requests(void)
     nr("anim", "md6/x/a.md6skl/_default.md6anim", 2, "cooked/anim/md6/x/a.md6skl/_default.bmd6anim",
        "generated/anim/md6/x/a.md6skl/_default.bmd6anim");
     nr("image", "models/monsters/imp/imp.tga", 1, "generated/image/models/monsters/imp/imp.bimage", NULL);
+    /* A mod's own image: the image folder, else the decal atlas folder. */
+    nr("image", "mods/alexrimp/decals/blood.tga", 2, "generated/image/mods/alexrimp/decals/blood.bimage",
+       "generated/decalatlas/mods/alexrimp/decals/blood.bimage");
     nr("image", "env/black_px", 1, "generated/image/env/black_px.bimage", NULL);
     nr("model", "models/a/b.lwo", 2, "cooked/model/models/a/b.bmodel", "generated/model/models/a/b.bmodel");
     /* An md6 collision model ships only under generated/model/ (13954591). */
@@ -954,6 +957,17 @@ static void m_req_general(const char *f)
                                  "\"activate\":[\"  echo hi \",\"bind x \\\"say hi\\\"\"]},"
                                  "\"cvars\":{\"r_label\":\"two words\",\"g_god\":true,\"com_maxFps\":120,\"g_off\":false}}"));
 }
+/* The material's own image carried only in the decal atlas folder. */
+static void m_decal_only(const char *f)
+{
+    char from[MAX_PATH * 2], to[MAX_PATH * 2];
+    _snprintf_s(from, sizeof from, _TRUNCATE, "%s%cassets%cgenerated%cimage%cmods%calexrimp%cimp_icon.bimage", f, 92, 92, 92,
+                92, 92, 92, 92);
+    _snprintf_s(to, sizeof to, _TRUNCATE, "%s%cassets%cgenerated%cdecalatlas%cmods%calexrimp%cimp_icon.bimage", f, 92, 92,
+                92, 92, 92, 92, 92);
+    mt_mkdirs_for(to);
+    CHECK(MoveFileA(from, to));
+}
 static void m_bad_home(const char *f) { mt_write(f, "mod.json", DESC(",\"homepage\":\"ftp://x\"")); }
 static void m_both(const char *f) { mt_write(f, "package.json", DESC("")); }
 static void m_no_desc(const char *f) { mt_delete(f, "mod.json"); }
@@ -1175,6 +1189,10 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_line, &RESOLVER, "requirements.commands.activate[0] must be one console command");
     refused(fixture, tmp, m_bad_line_ctrl, &RESOLVER, "requirements.commands.deactivate[0] must be one console command");
     refused(fixture, tmp, m_bad_line_key, &RESOLVER, "requirements.commands key start is not supported");
+    accepted(fixture, tmp, m_decal_only, &b);
+    CHECK(b.needs.unresolved == 0 && find_file(&b, "generated/decalatlas/mods/" SALT "/imp_icon.bimage") &&
+          !find_file(&b, "generated/image/mods/" SALT "/imp_icon.bimage"));
+    sh_mb_free(&b);
     accepted(fixture, tmp, m_many_reqs, &b);
     CHECK(b.requirements && strstr(b.requirements, "\"echo line 299 ") &&
           strstr(b.requirements, "\"sh_a_cvar_name_longer_than_sixty_four_characters_for_the_test_199\":\""));
