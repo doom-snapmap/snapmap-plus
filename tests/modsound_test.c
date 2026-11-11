@@ -24,6 +24,7 @@
  * the cookie to the engine's, once per process, the log line, Wwise not up,
  * a refusal, a callback after the wait); on the images, the four stock-bank
  * signatures and the cookie site decoding to them. Run via run-tests.ps1. */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -620,16 +621,16 @@ static void build_expect(int ok, const char *cause_part)
     int r = sh_mb_build(g_dir, SALT, &resolver, &b);
     CHECK(r == ok);
     if (!ok) {
-        CHECK(strstr(b.first_cause, cause_part) != NULL);
-        if (!strstr(b.first_cause, cause_part)) printf("  cause: %s\n", b.first_cause);
-    } else if (!r) printf("  build: %s\n", b.first_cause);
+        CHECK(strstr(sh_mb_first_cause(&b), cause_part) != NULL);
+        if (!strstr(sh_mb_first_cause(&b), cause_part)) printf("  cause: %s\n", sh_mb_first_cause(&b));
+    } else if (!r) printf("  build: %s\n", sh_mb_first_cause(&b));
     sh_mb_free(&b);
 }
 
 static void test_builder(void)
 {
     static const sh_mb_resolver resolver = { NULL, NULL, NULL, NULL };
-    char tmp[MAX_PATH], cause[SH_MB_CAUSE_MAX], t[64], n[512];
+    char tmp[MAX_PATH], cause[HO_TEXT], t[64], n[512];
     const sh_mb_file *f;
     sh_mb_bundle b;
     uint8_t head[16];
@@ -640,36 +641,36 @@ static void test_builder(void)
     CHECK(sh_mb_fnv1_lower("p6probe_sfx", 11) == 3604064235u);
 
     CHECK(sh_mb_extension_allowed("sound/soundbanks/pc/p6probes_sfx.bnk"));
-    CHECK(sh_mb_logical_name("sound/soundbanks/pc/p6probes_sfx.bnk", t, sizeof t, n, sizeof n) &&
+    CHECK(HO(n, sh_mb_logical_name("sound/soundbanks/pc/p6probes_sfx.bnk", t, HO_P(0))) &&
           !strcmp(t, "soundBank") && !strcmp(n, "sound/soundbanks/pc/p6probes_sfx.bnk"));
-    CHECK(sh_mb_logical_name("generated/decls/sound/mods/p6probes/p6probes_far.decl", t, sizeof t, n, sizeof n) &&
+    CHECK(HO(n, sh_mb_logical_name("generated/decls/sound/mods/p6probes/p6probes_far.decl", t, HO_P(0))) &&
           !strcmp(t, "sound") && !strcmp(n, "mods/p6probes/p6probes_far"));
 
-    CHECK(sh_mb_bank_rule("sound/soundbanks/pc/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes.x_growls.bnk", "p6probes", cause, sizeof cause) &&
+    CHECK(HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes_sfx.bnk", "p6probes", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes.x_growls.bnk", "p6probes", HO_P(0))) &&
           strstr(cause, "letters, digits"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "must start with this mod folder's name and _"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_.bnk", "p6probes", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_spider.bnk", "p6probes", cause, sizeof cause) && strstr(cause, "_sp"));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_x_snapmaps.bnk", "p6probes", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/p6probes_initial.bnk", "p6probes", cause, sizeof cause));
-    CHECK(!sh_mb_bank_rule("sound/soundbanks/pc/english(us)/p6probes_vo.bnk", "p6probes", cause, sizeof cause) &&
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/doom_ui.bnk", "p6probes", HO_P(0))) && strstr(cause, "must start with this mod folder's name and _"));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes_.bnk", "p6probes", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes_spider.bnk", "p6probes", HO_P(0))) && strstr(cause, "_sp"));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes_x_snapmaps.bnk", "p6probes", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/p6probes_initial.bnk", "p6probes", HO_P(0))));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/soundbanks/pc/english(us)/p6probes_vo.bnk", "p6probes", HO_P(0))) &&
           strstr(cause, "a sound bank goes in sound/soundbanks/pc/"));
-    CHECK(!sh_mb_bank_rule("sound/mods/p6probes/p6probes_sfx.bnk", "p6probes", cause, sizeof cause));
+    CHECK(!HO(cause, sh_mb_bank_rule("sound/mods/p6probes/p6probes_sfx.bnk", "p6probes", HO_P(0))));
 
     memcpy(head, "BKHD", 4);
     { uint32_t v = 16; memcpy(head + 4, &v, 4); v = 0x71; memcpy(head + 8, &v, 4); v = 3604064235u; memcpy(head + 12, &v, 4); }
-    CHECK(!sh_mb_bank_header_ok(head, 16, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "cut short"));
+    CHECK(!HO(cause, sh_mb_bank_header_ok(head, 16, "p6probe_sfx", HO_P(0))) && strstr(cause, "cut short"));
     {
         uint8_t full[24];
         memcpy(full, head, 16);
         memset(full + 16, 0, 8);
-        CHECK(sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause));
-        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", cause, sizeof cause) && strstr(cause, "Snapmap+ corrects the id"));
+        CHECK(HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", HO_P(0))));
+        CHECK(!HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx2", HO_P(0))) && strstr(cause, "Snapmap+ corrects the id"));
         full[8] = 0x78;
-        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "version 120"));
+        CHECK(!HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", HO_P(0))) && strstr(cause, "version 120"));
         full[0] = 'X';
-        CHECK(!sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", cause, sizeof cause) && strstr(cause, "is not a Wwise sound bank"));
+        CHECK(!HO(cause, sh_mb_bank_header_ok(full, sizeof full, "p6probe_sfx", HO_P(0))) && strstr(cause, "is not a Wwise sound bank"));
     }
 
     GetTempPathA(sizeof tmp, tmp);
@@ -680,7 +681,7 @@ static void test_builder(void)
     put(ENT, "{\n\tinherit = \"speaker\";\n\tedit = {\n\t\tsoundShader = \"mods/p6probes/p6probes_far\";\n"
              "\t\twaitForTrigger = false;\n\t}\n}\n");
     CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
-    if (b.errors) printf("  build: %s\n", b.first_cause);
+    if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     f = find_file(&b, "sound/soundbanks/pc/p6probes_sfx.bnk");
     CHECK(f && !strcmp(f->ptype, "soundBank") && f->size == 24 && !f->stock);
     f = find_file(&b, "generated/decls/sound/mods/p6probes/p6probes_far.decl");
@@ -697,7 +698,7 @@ static void test_builder(void)
     sh_mb_set_bank_need(sh_mbi_bundle_need);
     put(SNDSP, "{\n\tinherit = \"default\";\n}\n");
     CHECK(sh_mb_build(g_dir, SALT, &resolver, &b));
-    if (b.errors) printf("  build: %s\n", b.first_cause);
+    if (b.errors) printf("  build: %s\n", sh_mb_first_cause(&b));
     CHECK(b.registries && !strncmp(b.registries, "{\"banks\":[\"doom_weapon_sp.bnk\"]", 31));
     if (b.registries) printf("  registries: %s\n", b.registries);
     {
@@ -776,7 +777,7 @@ static void test_fixture(const char *folder)
     size_t i, k, banks = 0, sounds = 0;
     int ok = sh_mb_build(folder, NULL, &resolver, &b);
     CHECK(ok);
-    if (!ok) printf("  fixture: %s\n", b.first_cause);
+    if (!ok) printf("  fixture: %s\n", sh_mb_first_cause(&b));
     for (i = 0; i < b.file_count; i++) {
         const sh_mb_file *f = &b.files[i];
         printf("  %-11s %-44s %8llu", f->ptype, f->pname, f->size);

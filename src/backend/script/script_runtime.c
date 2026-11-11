@@ -10,6 +10,7 @@
  *
  * A stopped or ended mod's state is closed at once, at the top of the tick,
  * map start or map end, never from inside a call into Lua. */
+#include "../../common/text.h"
 #include "script_internal.h"
 #include "script_reason.h"
 #include "script_compile.h"
@@ -127,7 +128,7 @@ void shs_log(shs_mod *m, const char *line)
     console = (char *)malloc(cn);
     if (!console) return;
     if (is_stop) memcpy(console, line, n + 1);
-    else _snprintf_s(console, cn, _TRUNCATE, "Script (%s): %s", m->name, line);
+    else sprintf_s(console, cn, "Script (%s): %s", m->name, line);
 #ifndef SH_SCRIPT_PURE
     backend_log(console);
 #endif
@@ -168,9 +169,20 @@ static void *shs_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 /* ------------------------------------------------------------- bounds */
 
+/* luaL_where with the script's file whole ("" for a line that is not a script's). */
+static void push_where(lua_State *L, int level)
+{
+    char *file = NULL;
+    int line = 0;
+    sh_script_where_line(L, level, &file, &line);
+    if (file) lua_pushfstring(L, "%s:%d: ", file, line);
+    else lua_pushliteral(L, "");
+    free(file);
+}
+
 int shs_raise_stop(lua_State *L, int level)
 {
-    luaL_where(L, level);
+    push_where(L, level);
     lua_pushstring(L, "stopped");
     lua_concat(L, 2);
     return lua_error(L);
@@ -204,11 +216,22 @@ void shs_match_step(lua_State *L)
 /* The count hook: every SH_SCRIPT_HOOK_STRIDE instructions, in every
  * coroutine of the state, it only reads the clock. In a hook, level 0 is the
  * running Lua function. */
+/* A function's file as the product named its chunk ("=scripts\x.lua"),
+ * whole: Lua's short_src is cut to LUA_IDSIZE. */
+static const char *src_name(const lua_Debug *ar)
+{
+    return ar->source && ar->source[0] == '=' ? ar->source + 1 : ar->short_src;
+}
+
 static void shs_hook(lua_State *L, lua_Debug *ar)
 {
     shs_mod *m = shs_mod_of(L);
     if (m->stop < 0 && lua_getinfo(L, "Sl", ar)) {
-        copyz(m->last_src, sizeof m->last_src, ar->short_src);
+        const char *src = src_name(ar);
+        if (!m->last_src || strcmp(m->last_src, src)) {
+            free(m->last_src);
+            m->last_src = _strdup(src);
+        }
         m->last_line = ar->currentline;
     }
     if (over_bound(m)) shs_raise_stop(L, 0);
@@ -218,7 +241,8 @@ void shs_call_reset(shs_mod *m)
 {
     m->pattern_steps = 0;
     m->wall_start = qpc();
-    m->last_src[0] = 0;
+    free(m->last_src);
+    m->last_src = NULL;
     m->last_line = 0;
 }
 
@@ -238,11 +262,11 @@ void shs_where_from(shs_mod *m, lua_State *L, int first)
 {
     lua_Debug ar;
     int level;
-    if (m->err_file[0]) return;
+    if (m->err_file) return;
     for (level = first; lua_getstack(L, level, &ar); level++) {
         if (!lua_getinfo(L, "Sl", &ar)) break;
-        if (ar.currentline > 0 && starts(ar.short_src, "scripts\\")) {
-            copyz(m->err_file, sizeof m->err_file, ar.short_src);
+        if (ar.currentline > 0 && starts(src_name(&ar), "scripts\\")) {
+            m->err_file = _strdup(src_name(&ar));
             m->err_line = ar.currentline;
             return;
         }
@@ -253,9 +277,9 @@ static int shs_msgh(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
     const char *msg = lua_isstring(L, 1) ? lua_tostring(L, 1) : NULL;
-    if (!m->err_file[0]) {
-        if (msg) sh_script_split_where(msg, m->err_file, sizeof m->err_file, &m->err_line);
-        if (!m->err_file[0]) shs_where_from(m, L, 1);
+    if (!m->err_file) {
+        shs_where_msg(m, msg);
+        if (!m->err_file) shs_where_from(m, L, 1);
     }
     lua_settop(L, 1);
     return 1;
@@ -265,47 +289,77 @@ static void close_mod(shs_mod *m, int status);
 
 static void stop_line(shs_mod *m, const char *file, int line, const char *what, const char *todo)
 {
-    char disp[SHS_PATH_CAP], *text;
-    size_t i, cap;
-    copyz(disp, sizeof disp, file);
+    char *disp = _strdup(file ? file : ""), *text;
+    size_t i;
+    if (!disp) return;
     for (i = 0; disp[i]; i++) if (disp[i] == '/') disp[i] = '\\';
-    cap = strlen(m->name) + strlen(disp) + strlen(what) + (todo ? strlen(todo) : 0) + 64;
-    text = (char *)malloc(cap);   /* the line whole, whatever the script's error said */
+    text = sh_script_stop_text(m->name, disp, line, what ? what : "stopped", todo);   /* the line whole */
+    free(disp);
     if (!text) return;
-    sh_script_stop_text(m->name, disp, line, what, todo, text, cap);
     shs_log(m, text);
     free(text);
+}
+
+/* Lua names a chunk in its messages cut to LUA_IDSIZE - 1 bytes (the
+ * vendored Lua's luaO_chunkid): a message's file is taken only when it is
+ * shorter than that, so it is whole; else the stack says where. */
+static char *msg_file(const char *msg, int *line, const char **rest)
+{
+    char *file = NULL;
+    const char *r = sh_script_split_where(msg, &file, line);
+    if (rest) *rest = r;
+    if (file && strlen(file) >= LUA_IDSIZE - 1) { free(file); file = NULL; *line = 0; }
+    return file;
+}
+
+void sh_script_where_line(lua_State *L, int level, char **file, int *line)
+{
+    lua_Debug ar;
+    *file = NULL;
+    *line = 0;
+    if (lua_getstack(L, level, &ar) && lua_getinfo(L, "Sl", &ar) && ar.currentline > 0 &&
+        starts(src_name(&ar), "scripts\\")) {
+        *file = _strdup(src_name(&ar));
+        *line = ar.currentline;
+    }
+}
+
+void shs_where_msg(shs_mod *m, const char *msg)
+{
+    int line = 0;
+    char *file;
+    if (m->err_file || !msg) return;
+    file = msg_file(msg, &line, NULL);
+    if (file) { m->err_file = file; m->err_line = line; }
 }
 
 /* Word and log the stop of a failed call; the error object is on L's top. */
 static void stop_from_error(shs_mod *m, lua_State *L, int status)
 {
-    char todo[200], file[SHS_PATH_CAP], *what;
+    char *todo = NULL, *file = NULL, *what = NULL;
     int line = 0;
     const char *msg = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    /* the plain sentence keeps the script's own error text whole */
-    size_t what_cap = (msg ? strlen(msg) : 0) + 1024;
-    what = (char *)malloc(what_cap);
-    if (!what) return;
-    file[0] = 0;
     if (status == LUA_ERRMEM && m->stop < 0) m->stop = SH_SCRIPT_STOP_MEMORY;
     if (m->stop >= 0) {
-        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, what, what_cap, todo, sizeof todo);
-        if (m->err_file[0]) { copyz(file, sizeof file, m->err_file); line = m->err_line; }
-        else if (msg) sh_script_split_where(msg, file, sizeof file, &line);
-        if (!file[0] && m->last_src[0]) { copyz(file, sizeof file, m->last_src); line = m->last_line; }
+        sh_script_reason_stop(m->stop, (unsigned long long)g_limits.wall_ms, &what, &todo);
+        if (m->err_file) { file = _strdup(m->err_file); line = m->err_line; }
+        else if (msg) file = msg_file(msg, &line, NULL);
+        if (!file && m->last_src) { file = _strdup(m->last_src); line = m->last_line; }
     } else if (msg) {
-        const char *text = sh_script_split_where(msg, file, sizeof file, &line);
-        if (m->err_file[0]) { copyz(file, sizeof file, m->err_file); line = m->err_line; }
-        sh_script_reason(text, what, what_cap, todo, sizeof todo);
+        const char *text = msg;
+        file = msg_file(msg, &line, &text);
+        if (m->err_file) { free(file); file = _strdup(m->err_file); line = m->err_line; }
+        sh_script_reason(text, &what, &todo);
     } else {
-        copyz(file, sizeof file, m->err_file);
+        file = m->err_file ? _strdup(m->err_file) : NULL;
         line = m->err_line;
-        copyz(what, what_cap, "the script raised an error whose value is not text");
-        copyz(todo, sizeof todo, "Give error(...) a text that says what went wrong");
+        what = _strdup("the script raised an error whose value is not text");
+        todo = _strdup("Give error(...) a text that says what went wrong");
     }
     stop_line(m, file, line, what, todo);
     free(what);
+    free(todo);
+    free(file);
 }
 
 /* Run the C job `job` with `ud` as one protected call. 1 when it returned,
@@ -319,7 +373,8 @@ static int run_job(shs_mod *m, lua_CFunction job, void *ud)
     lua_pushcfunction(L, shs_msgh);
     lua_pushcfunction(L, job);
     lua_pushlightuserdata(L, ud);
-    m->err_file[0] = 0;
+    free(m->err_file);
+    m->err_file = NULL;
     m->err_line = 0;
     call_begin(m);
     status = lua_pcall(L, 1, 0, base + 1);
@@ -475,14 +530,14 @@ int sh_script_owns_entity(lua_State *L, uint64_t handle)
 
 int sh_script_refuse(lua_State *L, const char *fmt, ...)
 {
-    char text[400];
+    char *text;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(text, sizeof text, _TRUNCATE, fmt, ap);
+    text = sh_vtextf(fmt, ap);
     va_end(ap);
-    text[sizeof text - 1] = 0;
-    luaL_where(L, 1);
-    lua_pushstring(L, text);
+    push_where(L, 1);
+    lua_pushstring(L, text ? text : "out of memory");
+    free(text);
     lua_concat(L, 2);
     return lua_error(L);
 }
@@ -840,16 +895,21 @@ typedef struct { const char *relpath; const char *text; size_t len; } shs_file_j
 
 int shs_load_file(lua_State *L, shs_mod *m, const char *relpath)
 {
-    char chunk[SHS_PATH_CAP + 2], *text = NULL;
+    char *chunk, *text = NULL;
     size_t len = 0, i;
     int r, status;
-    _snprintf_s(chunk, sizeof chunk, _TRUNCATE, "=scripts\\%s", relpath);
-    chunk[sizeof chunk - 1] = 0;
+    lua_pushfstring(L, "=scripts\\%s", relpath);   /* the chunk name, whole, held on the stack */
+    chunk = (char *)lua_tostring(L, -1);
     for (i = 0; chunk[i]; i++) if (chunk[i] == '/') chunk[i] = '\\';
-    if (!m->source || !m->source->read) { lua_pushfstring(L, "%s: the file could not be read", chunk + 1); return LUA_ERRFILE; }
+    if (!m->source || !m->source->read) {
+        lua_pushfstring(L, "%s: the file could not be read", chunk + 1);
+        lua_remove(L, -2);
+        return LUA_ERRFILE;
+    }
     r = m->source->read(m->source->context, m->salt, relpath, &text, &len);
     if (r <= 0) {
         lua_pushfstring(L, r == 0 ? "%s: the file is not in this mod" : "%s: the file could not be read", chunk + 1);
+        lua_remove(L, -2);
         return LUA_ERRFILE;
     }
     {
@@ -858,6 +918,7 @@ int shs_load_file(lua_State *L, shs_mod *m, const char *relpath)
         if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) { t += 3; n -= 3; }
         status = luaL_loadbufferx(L, t, n, chunk, "t");
     }
+    lua_remove(L, -2);   /* the chunk name; the loaded function or the error stays on top */
     if (m->source->release) m->source->release(m->source->context, text);
     return status;
 }
@@ -883,15 +944,26 @@ static int job_list(lua_State *L)
 
 /* Read the entry file's text once for the api check (a refusal is a stop
  * with the file and line, before anything runs). */
+static int check_api_file(shs_mod *m, const char *relpath, const char *file);
+
 static int check_api(shs_mod *m, const char *relpath)
 {
-    char *text = NULL, file[160];
-    size_t len = 0, i;
+    char *file;
+    size_t i;
+    int ok;
+    if (!(file = sh_textf("scripts\\%s", relpath))) return 0;
+    for (i = 0; file[i]; i++) if (file[i] == '/') file[i] = '\\';
+    ok = check_api_file(m, relpath, file);
+    free(file);
+    return ok;
+}
+
+static int check_api_file(shs_mod *m, const char *relpath, const char *file)
+{
+    char *text = NULL;
+    size_t len = 0;
     long version = 0;
     int line = 1, r, ok;
-    _snprintf_s(file, sizeof file, _TRUNCATE, "scripts\\%s", relpath);
-    file[sizeof file - 1] = 0;
-    for (i = 0; file[i]; i++) if (file[i] == '/') file[i] = '\\';
     r = m->source->read(m->source->context, m->salt, relpath, &text, &len);
     if (r <= 0) {
         stop_line(m, file, 0, "the file could not be read, so this mod's scripts did not run",
@@ -1131,9 +1203,13 @@ int sh_script_map_prepare(const sh_script_mod_desc *mods, int n, const sh_script
         AcquireSRWLockExclusive(&g_lock);
         log_free(m);
         free(m->stop_line);
+        free(m->name);
+        free(m->last_src);
+        free(m->err_file);
         memset(m, 0, sizeof *m);
         copyz(m->salt, sizeof m->salt, salt);
-        copyz(m->name, sizeof m->name, mods[i].name && mods[i].name[0] ? mods[i].name : salt);
+        m->name = _strdup(mods[i].name && mods[i].name[0] ? mods[i].name : salt);
+        if (!m->name) { m->salt[0] = 0; ReleaseSRWLockExclusive(&g_lock); continue; }
         m->in_map = 1;
         m->stop = -1;
         m->hook = -1;
@@ -1656,16 +1732,6 @@ int sh_script_status(const char *salt)
     return st;
 }
 
-int sh_script_stop_line(const char *salt, char *out, size_t cap)
-{
-    char *line = sh_script_stop_line_dup(salt);
-    if (cap) out[0] = 0;
-    if (!line) return 0;
-    copyz(out, cap, line);
-    free(line);
-    return 1;
-}
-
 char *sh_script_stop_line_dup(const char *salt)
 {
     int i;
@@ -1723,6 +1789,13 @@ size_t sh_script_bytes_in_use(void)
     return total;
 }
 
+void sh_script_mod_info_free(sh_script_mod_info *info)
+{
+    if (!info) return;
+    free(info->name);
+    info->name = NULL;
+}
+
 int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out)
 {
     int i, found = 0;
@@ -1734,7 +1807,7 @@ int sh_script_mod_info_get(const char *salt, sh_script_mod_info *out)
         if (!m->salt[0] || _stricmp(m->salt, salt) != 0) continue;
         if (!m->log && m->status == SH_SCRIPT_NONE && !m->prepared) continue;
         copyz(out->salt, sizeof out->salt, m->salt);
-        copyz(out->name, sizeof out->name, m->name);
+        out->name = _strdup(m->name);
         out->status = m->status;
         out->waiting = m->prepared && !m->L;
         out->files = m->files_found;
@@ -1795,18 +1868,20 @@ int sh_script_check_files(const char *salt, const char *name, const sh_script_so
     if (!L) { free(tmp); list_free(&files); return -1; }
     tmp->stop = -1;
     for (i = 0; i < files.n; i++) {
-        char *text = NULL, file[SHS_PATH_CAP], chunk[SHS_PATH_CAP + 2];
+        char *text = NULL, *chunk, *file;
         size_t len = 0, k;
         long version = 0;
         int line = 1, r, status;
         const char *t;
-        _snprintf_s(file, sizeof file, _TRUNCATE, "scripts\\%s", files.names[i]);
-        file[sizeof file - 1] = 0;
-        for (k = 0; file[k]; k++) if (file[k] == '/') file[k] = '\\';
-        _snprintf_s(chunk, sizeof chunk, _TRUNCATE, "=%s", file);
-        chunk[sizeof chunk - 1] = 0;
+        if (!(chunk = sh_textf("=scripts\\%s", files.names[i]))) continue;
+        for (k = 0; chunk[k]; k++) if (chunk[k] == '/') chunk[k] = '\\';
+        file = chunk + 1;
         r = source->read(source->context, salt, files.names[i], &text, &len);
-        if (r <= 0) { check_line(fn, context, mod, file, 0, "the file could not be read", "Press Refresh in the Mods tab"); continue; }
+        if (r <= 0) {
+            check_line(fn, context, mod, file, 0, "the file could not be read", "Press Refresh in the Mods tab");
+            free(chunk);
+            continue;
+        }
         t = text;
         if (len >= 4 && memcmp(text, "\x1bLua", 4) == 0) {
             check_line(fn, context, mod, file, 0, "the file is compiled Lua, not script text", "Put the .lua source text in the file");
@@ -1818,16 +1893,20 @@ int sh_script_check_files(const char *salt, const char *name, const sh_script_so
             status = luaL_loadbufferx(L, t, m, chunk, "t");
             if (status == LUA_OK) ok++;
             else {
-                char what[320], todo[200], where[SHS_PATH_CAP];
+                char *what = NULL, *todo = NULL, *where = NULL;
                 int ln = 0;
                 const char *msg = lua_tostring(L, -1);
-                const char *rest = sh_script_split_where(msg ? msg : "", where, sizeof where, &ln);
-                sh_script_reason(rest, what, sizeof what, todo, sizeof todo);
-                check_line(fn, context, mod, file, ln, what, todo);
+                const char *rest = sh_script_split_where(msg ? msg : "", &where, &ln);
+                sh_script_reason(rest, &what, &todo);
+                check_line(fn, context, mod, file, ln, what ? what : "the file does not compile", todo);
+                free(what);
+                free(todo);
+                free(where);
             }
             lua_settop(L, 0);
         }
         if (source->release) source->release(source->context, text);
+        free(chunk);
     }
     lua_close(L);
     free(tmp);

@@ -20,6 +20,7 @@
 #include "apply_engine.h"
 #include "modstock.h"
 #include "modui.h"
+#include "../common/text.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
  * installed-resource reader works before its answers are trusted. */
@@ -27,13 +28,15 @@
 
 static void mc_line(const char *fmt, ...)
 {
-    char line[1024];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
+    if (!line) return;
     backend_log(line);
     sh_printf("%s\n", line);
+    free(line);
 }
 
 /* 1 present, 0 absent, -1 the reader faulted. */
@@ -76,11 +79,15 @@ static void mc_stock_line(const char *verb, const char *folder, const sh_mb_bund
                 folder, b->stock_count, b->stock_bytes);
 }
 
-/* Rejoin a path the console split into several tokens. */
-static void mc_join_args(idCmdArgs *a, int from, char *out, size_t cap)
+/* Rejoin a path the console split into several tokens (malloc'd; "" when
+ * there is none, NULL when memory runs out). */
+static char *mc_join_args(idCmdArgs *a, int from)
 {
     int n = cmd_argc(a), i;
-    size_t w = 0;
+    size_t w = 0, cap = 1;
+    char *out;
+    for (i = from; i < n; i++) cap += (cmd_argv(a, i) ? strlen(cmd_argv(a, i)) : 0) + 1;
+    if (!(out = (char *)malloc(cap))) return NULL;
     out[0] = 0;
     for (i = from; i < n; i++) {
         const char *t = cmd_argv(a, i);
@@ -88,22 +95,23 @@ static void mc_join_args(idCmdArgs *a, int from, char *out, size_t cap)
         if (!t) continue;
         len = strlen(t);
         /* No separator around a ':' token: "C" ":" "\x" is one drive path. */
-        if (w && t[0] != ':' && out[w - 1] != ':' && w + 1 < cap) out[w++] = ' ';
-        if (w + len >= cap) break;
+        if (w && t[0] != ':' && out[w - 1] != ':') out[w++] = ' ';
         memcpy(out + w, t, len);
         w += len;
         out[w] = 0;
     }
+    return out;
 }
 
-static int mc_resolve_folder(const char *arg, char *out, size_t cap)
+/* The folder `arg` names: itself when absolute, else under the store root
+ * (malloc'd); NULL when the root cannot be resolved. */
+static char *mc_resolve_folder(const char *arg)
 {
-    char root[MAX_PATH * 4];
+    const char *root;
     int absolute = (arg[0] && arg[1] == ':') || arg[0] == '\\' || arg[0] == '/';
-    if (absolute) { strncpy_s(out, cap, arg, _TRUNCATE); return 1; }
-    if (!sh_ms_root(root, sizeof root)) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", root, arg);
-    return 1;
+    if (absolute) return _strdup(arg);
+    if (!(root = sh_ms_root())) return NULL;
+    return sh_textf("%s\\%s", root, arg);
 }
 
 /* The serving index reads mod.json at boot and on rescan only, so a bundle
@@ -125,9 +133,9 @@ static void mc_rescan(const char *why)
 /* 1 when `folder` is inside the store root (a bundle the index will read). */
 static int mc_in_store(const char *folder)
 {
-    char root[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     size_t n;
-    if (!sh_ms_root(root, sizeof root)) return 0;
+    if (!root) return 0;
     n = strlen(root);
     return n && !_strnicmp(folder, root, n) && (folder[n] == '\\' || folder[n] == '/');
 }
@@ -144,7 +152,7 @@ static void mc_needs_line(const char *verb, const char *folder, const sh_mb_bund
             verb, mc_name(b, folder), b->needs.total, b->needs.local, b->needs.installed,
             b->needs.stock, b->needs.unresolved);
     if (b->warnings)
-        mc_line("MODS: %s %s: %u warning(s), first: %s", verb, mc_name(b, folder), b->warnings, b->first_warning);
+        mc_line("MODS: %s %s: %u warning(s), first: %s", verb, mc_name(b, folder), b->warnings, sh_mb_first_warning(b));
 }
 
 /* The classes and the builder's report lines (additive mods). */
@@ -157,16 +165,18 @@ static void mc_classes_line(const char *verb, const char *folder, const sh_mb_bu
     for (i = 0; i < b->note_count; i++) mc_line("MODS: %s %s: %s", verb, folder, b->notes[i]);
 }
 
-/* The folder's own name (its last path segment) in `out`. */
-static void mc_leaf(const char *folder, char *out, size_t cap)
+/* The folder's own name (its last path segment), malloc'd. */
+static char *mc_leaf(const char *folder)
 {
     const char *leaf = folder, *p;
+    char *out;
     size_t n;
     for (p = folder; *p; p++)
         if ((*p == '\\' || *p == '/') && p[1] && p[1] != '\\' && p[1] != '/') leaf = p + 1;
-    strncpy_s(out, cap, leaf, _TRUNCATE);
+    if (!(out = _strdup(leaf))) return NULL;
     n = strlen(out);
     while (n && (out[n - 1] == '\\' || out[n - 1] == '/')) out[--n] = 0;
+    return out;
 }
 
 /* A folder with no builder block is a new mod: it gets its salt before its
@@ -175,20 +185,25 @@ static void mc_leaf(const char *folder, char *out, size_t cap)
  * salt is left as it is. 0 when refused. */
 static int mc_assign_salt(const char *verb, const char *folder)
 {
-    char leaf[MAX_PATH * 4], salt[9], cause[SH_MB_CAUSE_MAX];
-    mc_leaf(folder, leaf, sizeof leaf);
+    char *leaf = mc_leaf(folder), salt[9], *cause = NULL;
+    int r = 1;
     salt[0] = 0;
-    switch (sh_ms_assign_salt(folder, leaf, salt, cause, sizeof cause)) {
+    if (!leaf) { mc_line("MODS: %s %s: refused: out of memory", verb, folder); return 0; }
+    switch (sh_ms_assign_salt(folder, leaf, salt, &cause)) {
     case -1:
-        mc_line("MODS: %s %s: refused: %s", verb, folder, cause);
-        return 0;
+        mc_line("MODS: %s %s: refused: %s", verb, folder, cause ? cause : "out of memory");
+        r = 0;
+        break;
     case 1:
         mc_line("MODS: %s %s: a new mod: salt %s; its files under mods/%s/ now read mods/%s/", verb, folder, salt, leaf,
                 salt);
-        return 1;
+        break;
     default:
-        return 1;
+        break;
     }
+    free(cause);
+    free(leaf);
+    return r;
 }
 
 static void mc_build(const char *folder_in)
@@ -197,9 +212,9 @@ static void mc_build(const char *folder_in)
     sh_mb_resolver r;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
-    char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
+    char *cause = NULL;
+    const char *folder = folder_in;
     int listed;
-    strncpy_s(folder, sizeof folder, folder_in, _TRUNCATE);
     if (!mc_assign_salt("build", folder)) return;
     listed = sh_ms_enumerate(&list);
     if (!listed) memset(&list, 0, sizeof list);
@@ -218,8 +233,8 @@ static void mc_build(const char *folder_in)
         if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
         /* A folder that fails to build serves nothing until it is fixed. */
         mc_line("MODS: build %s: does not build (%u error(s)), first: %s; the folder serves nothing until it builds",
-                folder, b.errors, b.first_cause);
-        if (mc_in_store(folder)) sh_ms_note_build_failure(folder, b.first_cause);
+                folder, b.errors, sh_mb_first_cause(&b));
+        if (mc_in_store(folder)) sh_ms_note_build_failure(folder, sh_mb_first_cause(&b));
         sh_mb_free(&b);
         sh_ms_list_free(&list);
         return;
@@ -229,8 +244,8 @@ static void mc_build(const char *folder_in)
     mc_needs_line("build", folder, &b);
     mc_stock_line("build", folder, &b);
     mc_classes_line("build", folder, &b);
-    if (!sh_mb_write(&b, folder, cause, sizeof cause))
-        mc_line("MODS: build %s: valid but not written: %s", folder, cause);
+    if (!sh_mb_write(&b, folder, &cause))
+        mc_line("MODS: build %s: valid but not written: %s", folder, cause ? cause : "out of memory");
     else {
         mc_line("MODS: build %s: the build is written to mod.json's \"snapmap-plus\" block", folder);
         if (mc_in_store(folder)) {
@@ -238,6 +253,7 @@ static void mc_build(const char *folder_in)
             mc_rescan("build");
         }
     }
+    free(cause);
     sh_mb_free(&b);
     sh_ms_list_free(&list);
 }
@@ -248,14 +264,14 @@ static void mc_install_one(const char *folder, int rescan)
     sh_ms_install_stats st;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
-    char name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char *name = NULL, *cause = NULL;
     int ok;
     mc_line("MODS: install %s: building", folder);
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
-    ok = sh_ms_install_from_folder(folder, &r, name, sizeof name, &st, &b, cause, sizeof cause);
+    ok = sh_ms_install_from_folder(folder, &r, &name, &st, &b, &cause);
     if (b.id[0]) {
         mc_line("MODS: install %s: %s, %zu file(s), %llu byte(s)%s", folder, mc_name(&b, folder), b.file_count,
                 b.total_size, b.errors ? "" : ", mod.json written");
@@ -266,11 +282,13 @@ static void mc_install_one(const char *folder, int rescan)
         mc_line("MODS: install %s: %u file(s) copied into the store%s", folder, st.copied,
                 st.replaced ? ", replacing the earlier build" : "");
     if (st.in_place && ok) mc_line("MODS: install %s: already in the store; built in place", folder);
-    if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause);
+    if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause ? cause : "out of memory");
     else {
         mc_line("MODS: install %s: installed and verified as mods\\%s", folder, name);
         if (rescan) mc_rescan("install");
     }
+    free(name);
+    free(cause);
     sh_mb_free(&b);
 }
 
@@ -311,9 +329,9 @@ static void mc_sync(void)
 static void mc_list(void)
 {
     sh_ms_list list;
-    char root[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     size_t i;
-    if (!sh_ms_root(root, sizeof root)) { mc_line("MODS: list: the store folder cannot be resolved"); return; }
+    if (!root) { mc_line("MODS: list: the store folder cannot be resolved"); return; }
     if (!sh_ms_enumerate(&list)) { mc_line("MODS: list: %s cannot be read", root); return; }
     mc_line("MODS: list: %zu mod folder(s) under %s", list.count, root);
     for (i = 0; i < list.count; i++) {
@@ -388,26 +406,27 @@ static void mc_copystock(const char *request, const char *dest)
 static void mc_verify(const char *key)
 {
     sh_ms_verify_stats st;
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     int ok;
     mc_line("MODS: verify %s: rehashing", key);
-    ok = sh_ms_verify(key, &st, cause, sizeof cause);
+    ok = sh_ms_verify(key, &st, &cause);
     mc_line("MODS: verify %s: %u folder(s), %u file(s) (%u stock pointer(s)), %u MiB checked", key, st.entries,
             st.files, st.pointers, st.bytes_mb);
     if (ok) mc_line("MODS: verify %s: pass", key);
-    else mc_line("MODS: verify %s: FAILED: %s", key, cause);
+    else mc_line("MODS: verify %s: FAILED: %s", key, cause ? cause : "out of memory");
+    free(cause);
 }
 
 /* ------------------------------------------------------- store client ---- */
 
 /* Console lines from the network worker. Each is logged at once; the
  * console prints them on DOOM's main thread (the main-thread call slot),
- * or at the next sh_mods command when that slot is busy or unavailable. */
-#define MC_OUTBOX_LINES 64
+ * or at the next sh_mods command when that slot is busy or unavailable.
+ * The queue holds every line until it is printed. */
 static CRITICAL_SECTION g_mc_out_cs;
 static INIT_ONCE g_mc_out_once = INIT_ONCE_STATIC_INIT;
-static char g_mc_out[MC_OUTBOX_LINES][1536];
-static int  g_mc_out_n, g_mc_out_dropped;
+static char **g_mc_out;
+static size_t g_mc_out_n, g_mc_out_cap;
 
 static BOOL CALLBACK mc_out_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
 {
@@ -419,13 +438,11 @@ static BOOL CALLBACK mc_out_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
 /* Print every queued line. Console thread or main thread only. */
 static void mc_outbox_flush(void)
 {
-    int i;
+    size_t i;
     InitOnceExecuteOnce(&g_mc_out_once, mc_out_init, NULL, NULL);
     EnterCriticalSection(&g_mc_out_cs);
-    if (g_mc_out_dropped) sh_printf("MODS: (%d earlier line(s) are only in the backend log)\n", g_mc_out_dropped);
-    for (i = 0; i < g_mc_out_n; i++) sh_printf("%s\n", g_mc_out[i]);
+    for (i = 0; i < g_mc_out_n; i++) { sh_printf("%s\n", g_mc_out[i]); free(g_mc_out[i]); }
     g_mc_out_n = 0;
-    g_mc_out_dropped = 0;
     LeaveCriticalSection(&g_mc_out_cs);
 }
 
@@ -438,23 +455,25 @@ static int mc_outbox_flush_main(void *ctx)
 
 static void mc_async_line(const char *fmt, ...)
 {
-    char line[sizeof g_mc_out[0]];
+    char *line;
     va_list ap;
     sh_run_on_main_fn run = NULL;
     int res = 0;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
+    if (!line) return;
     backend_log(line);
     InitOnceExecuteOnce(&g_mc_out_once, mc_out_init, NULL, NULL);
     EnterCriticalSection(&g_mc_out_cs);
-    if (g_mc_out_n == MC_OUTBOX_LINES) {
-        memmove(g_mc_out[0], g_mc_out[1], sizeof g_mc_out[0] * (MC_OUTBOX_LINES - 1));
-        g_mc_out_n--;
-        g_mc_out_dropped++;
+    if (g_mc_out_n == g_mc_out_cap) {
+        size_t cap = g_mc_out_cap ? g_mc_out_cap * 2 : 64;
+        char **grown = (char **)realloc(g_mc_out, cap * sizeof *grown);
+        if (grown) { g_mc_out = grown; g_mc_out_cap = cap; }
     }
-    strcpy_s(g_mc_out[g_mc_out_n++], sizeof g_mc_out[0], line);
+    if (g_mc_out_n < g_mc_out_cap) { g_mc_out[g_mc_out_n++] = line; line = NULL; }
     LeaveCriticalSection(&g_mc_out_cs);
+    free(line);   /* only when the queue could not grow: the line is in the backend log */
     /* Printed on the main thread when its call slot takes the request within
      * 1.5 s; otherwise the next sh_mods command prints it. */
     sh_apply_engine_get_run_on_main(&run);
@@ -470,8 +489,8 @@ typedef struct mc_job {
     mc_job_kind kind;
     char verb[16];
     char mod[MODSYNC_MOD_MAX + 1];   /* push: "<salt>@<build hash>" */
-    char label[SH_MS_NAME_MAX + 1];
-    char ref[4 * MODNET_REF_MAX + 1];
+    char *label;                     /* push: the folder under mods\\ (malloc'd) */
+    char *ref;                       /* malloc'd */
     unsigned last_quarter;
     ULONGLONG started;
 } mc_job;
@@ -513,13 +532,14 @@ static int mc_job_run(void *ctx, const modnet_io *io)
                           st.reclaimed ? "its claim renewed" : "claimed");
         else
             mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
-                          st.cause, st.queued ? "; queued for 'sh_mods retry'" : "");
+                          modsync_cause(&st), st.queued ? "; queued for 'sh_mods retry'" : "");
         break;
     }
     case MC_JOB_RELEASE:
         ok = modsync_release(j->ref, io, &st);
-        if (ok) mc_async_line("MODS: release: released in %.0f ms%s%s", st.ms, st.cause[0] ? "; " : "", st.cause);
-        else mc_async_line("MODS: release: FAILED: %s", st.cause);
+        if (ok) mc_async_line("MODS: release: released in %.0f ms%s%s", st.ms, modsync_cause(&st)[0] ? "; " : "",
+                              modsync_cause(&st));
+        else mc_async_line("MODS: release: FAILED: %s", modsync_cause(&st));
         break;
     case MC_JOB_RETRY: {
         unsigned done = 0, dropped = 0;
@@ -542,7 +562,11 @@ static void mc_job_launch(const mc_job *spec)
         mc_line("MODS: %s: '%s' is still running; wait for it or run 'sh_mods cancel'", spec->verb, busy);
         return;
     }
+    free(g_mc_job.label);
+    free(g_mc_job.ref);
     g_mc_job = *spec;
+    g_mc_job.label = spec->label ? _strdup(spec->label) : NULL;
+    g_mc_job.ref = spec->ref ? _strdup(spec->ref) : NULL;
     g_mc_job.last_quarter = 0;
     g_mc_job.started = GetTickCount64();
     started = modnet_job_start(spec->verb, mc_job_run, NULL, mc_job_progress, &g_mc_job, &g_mc_job);
@@ -554,7 +578,7 @@ static void mc_job_launch(const mc_job *spec)
 /* A usable built mod named by its folder under mods\, its salt, or
  * "<salt>@<build hash>": "<salt>@<hash>" in mod, its folder in label. A root
  * folder answers first. */
-static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char *label, size_t label_cap)
+static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char **label)
 {
     char salt[MODSYNC_SALT_HEX + 1], hash[MODNET_HASH_HEX + 1];
     sh_ms_list l;
@@ -568,8 +592,7 @@ static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char *
                 if (!sh_ms_entry_usable(e) || (pass == 0) != (e->place[0] == 0)) continue;
                 if (exact ? (!strcmp(e->salt, salt) && !strcmp(e->bundle.hash, hash)) : sh_ms_entry_matches(e, name)) {
                     _snprintf_s(mod, MODSYNC_MOD_MAX + 1, _TRUNCATE, "%s@%s", e->salt, e->bundle.hash);
-                    strncpy_s(label, label_cap, e->name, _TRUNCATE);
-                    found = 1;
+                    found = (*label = _strdup(e->name)) != NULL;
                 }
             }
         sh_ms_list_free(&l);
@@ -583,7 +606,8 @@ static int mc_find_build(const char *name, char mod[MODSYNC_MOD_MAX + 1], char *
 static int mc_store_command(idCmdArgs *a, const char *verb)
 {
     mc_job spec;
-    char arg[MAX_PATH * 4];
+    char *arg;
+    int handled = 1;
     memset(&spec, 0, sizeof spec);
     strncpy_s(spec.verb, sizeof spec.verb, verb, _TRUNCATE);
     _strlwr_s(spec.verb, sizeof spec.verb);
@@ -595,26 +619,30 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
     }
     if (!_stricmp(verb, "push")) {
         const char *name = cmd_argv(a, 2);
-        mc_join_args(a, 3, spec.ref, sizeof spec.ref);
-        if (!name || !name[0] || !spec.ref[0]) {
+        spec.ref = mc_join_args(a, 3);
+        if (!name || !name[0] || !spec.ref || !spec.ref[0])
             sh_printf("usage: sh_mods push \"<mod folder>\" \"<ref>\"\n");
-            return 1;
-        }
-        if (!modnet_valid_ref(spec.ref)) { mc_line("MODS: push: the ref must be 1-64 characters of text"); return 1; }
-        if (!mc_find_build(name, spec.mod, spec.label, sizeof spec.label)) {
+        else if (!modnet_valid_ref(spec.ref))
+            mc_line("MODS: push: %s", MODNET_REF_RULE);
+        else if (!mc_find_build(name, spec.mod, &spec.label))
             mc_line("MODS: push %s: no built mod has that name ('sh_mods list' shows them)", name);
-            return 1;
+        else {
+            spec.kind = MC_JOB_PUSH;
+            mc_line("MODS: push mods\\%s under ref '%s'", spec.label, spec.ref);
+            mc_job_launch(&spec);
         }
-        spec.kind = MC_JOB_PUSH;
-        mc_line("MODS: push mods\\%s under ref '%s'", spec.label, spec.ref);
-        mc_job_launch(&spec);
+        free(spec.ref);
+        free(spec.label);
         return 1;
     }
     if (!_stricmp(verb, "release")) {
-        mc_join_args(a, 2, spec.ref, sizeof spec.ref);
-        if (!spec.ref[0]) { sh_printf("usage: sh_mods release \"<ref>\"\n"); return 1; }
-        spec.kind = MC_JOB_RELEASE;
-        mc_job_launch(&spec);
+        spec.ref = mc_join_args(a, 2);
+        if (!spec.ref || !spec.ref[0]) sh_printf("usage: sh_mods release \"<ref>\"\n");
+        else {
+            spec.kind = MC_JOB_RELEASE;
+            mc_job_launch(&spec);
+        }
+        free(spec.ref);
         return 1;
     }
     if (!_stricmp(verb, "retry")) {
@@ -626,8 +654,12 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
         return 1;
     }
     if (!_stricmp(verb, "export") || !_stricmp(verb, "import")) {
-        mc_join_args(a, 2, arg, sizeof arg);
-        if (!arg[0] || !modexport_is_zip_path(arg)) { sh_printf("usage: sh_mods %s \"<path.zip>\"\n", spec.verb); return 1; }
+        arg = mc_join_args(a, 2);
+        if (!arg || !arg[0] || !modexport_is_zip_path(arg)) {
+            sh_printf("usage: sh_mods %s \"<path.zip>\"\n", spec.verb);
+            free(arg);
+            return 1;
+        }
         if (!_stricmp(verb, "export")) {
             char why[192] = "";
             /* The open map through the rawmap writer, which writes a .zip
@@ -636,6 +668,7 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
                 mc_line("MODS: export: writing the open map and its mods to %s; the console says when it is done", arg);
             else
                 mc_line("MODS: export: cannot save: %s", why[0] ? why : "the editor is not ready");
+            free(arg);
             return 1;
         }
         {
@@ -645,9 +678,11 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
             if (sh_rawmap_open_now(arg, why, (int)sizeof why)) mc_line("MODS: import: opening %s", arg);
             else mc_line("MODS: import: %s was not opened: %s", arg, why[0] ? why : "the editor cannot open it now");
         }
+        free(arg);
         return 1;
     }
-    return 0;
+    handled = 0;
+    return handled;
 }
 
 /* sh_modui_doctor's lines: the backend log and the console, as every MODS: line. */
@@ -660,7 +695,7 @@ static void mc_doctor_line(void *context, const char *line)
 void h_sh_mods(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
-    char arg[MAX_PATH * 4], folder[MAX_PATH * 4];
+    char *arg = NULL, *folder = NULL;
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
         sh_printf("%s\n", SH_MODCMD_HELP_TAB);
@@ -697,52 +732,48 @@ void h_sh_mods(idCmdArgs *a)
             mc_line("MODS: doctor: refused (not on the game's main thread, or out of memory)");
         return;
     }
-    mc_join_args(a, 2, arg, sizeof arg);
+    if (!(arg = mc_join_args(a, 2))) { mc_line("MODS: %s: refused: out of memory", verb); return; }
     if (!_stricmp(verb, "new")) {
         /* New mod: a folder with a working example, salted and built at the next rescan. */
-        char key[SH_MB_ID_MAX + 1], cause[SH_MB_CAUSE_MAX];
-        if (!arg[0]) { sh_printf("usage: sh_mods new \"<name>\"\n"); return; }
-        if (!sh_ms_new_mod(arg, key, folder, sizeof folder, cause, sizeof cause)) {
-            mc_line("MODS: new \"%s\": refused: %s", arg, cause);
-            return;
-        }
-        mc_line("MODS: new \"%s\": salt %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
-                "(any other file under its engine path, with mods\\%s\\ in it) and rescan", arg, key, folder, key, key);
-        return;
-    }
-    if (!_stricmp(verb, "verify")) {
-        if (!arg[0]) { sh_printf("usage: sh_mods verify \"<mod folder>\"\n"); return; }
-        mc_verify(arg);
-        return;
-    }
-    if (!_stricmp(verb, "copystock")) {
+        char key[SH_MB_ID_MAX + 1], *cause = NULL;
+        if (!arg[0]) sh_printf("usage: sh_mods new \"<name>\"\n");
+        else if (!sh_ms_new_mod(arg, key, &folder, &cause))
+            mc_line("MODS: new \"%s\": refused: %s", arg, cause ? cause : "out of memory");
+        else
+            mc_line("MODS: new \"%s\": salt %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
+                    "(any other file under its engine path, with mods\\%s\\ in it) and rescan", arg, key, folder, key, key);
+        free(cause);
+    } else if (!_stricmp(verb, "verify")) {
+        if (!arg[0]) sh_printf("usage: sh_mods verify \"<mod folder>\"\n");
+        else mc_verify(arg);
+    } else if (!_stricmp(verb, "copystock")) {
         const char *request = cmd_argv(a, 2);
-        char dest_arg[MAX_PATH * 4];
-        mc_join_args(a, 3, dest_arg, sizeof dest_arg);
-        if (!request || !request[0] || !dest_arg[0]) {
+        char *dest_arg = mc_join_args(a, 3);
+        if (!request || !request[0] || !dest_arg || !dest_arg[0])
             sh_printf("usage: sh_mods copystock \"<engine path>\" \"<file>\"\n");
-            return;
-        }
-        if (!mc_resolve_folder(dest_arg, folder, sizeof folder)) { mc_line("MODS: copystock: the store folder cannot be resolved"); return; }
-        mc_copystock(request, folder);
-        return;
-    }
-    if (_stricmp(verb, "build") && _stricmp(verb, "install") && _stricmp(verb, "rebuild")) {
+        else if (!(folder = mc_resolve_folder(dest_arg))) mc_line("MODS: copystock: the store folder cannot be resolved");
+        else mc_copystock(request, folder);
+        free(dest_arg);
+    } else if (_stricmp(verb, "build") && _stricmp(verb, "install") && _stricmp(verb, "rebuild")) {
         sh_printf("sh_mods: unknown verb '%s'. %s\n", verb, SH_MODCMD_HELP);
-        return;
+    } else if (!arg[0]) {
+        sh_printf("usage: sh_mods %s \"<folder>\"\n", verb);
+    } else if (!(folder = mc_resolve_folder(arg))) {
+        mc_line("MODS: %s: the store folder cannot be resolved", verb);
+    } else {
+        /* Every verb writes the store: it waits for a store write, an import or a
+         * download in progress. */
+        modstore_lock();
+        if (!_stricmp(verb, "build")) mc_build(folder);
+        else if (!_stricmp(verb, "rebuild")) {
+            /* build, then the rescan the tab's Rebuild runs (a folder in the store rescans in mc_build). */
+            mc_build(folder);
+            if (!mc_in_store(folder)) mc_rescan("rebuild");
+        } else mc_install(folder);
+        modstore_unlock();
     }
-    if (!arg[0]) { sh_printf("usage: sh_mods %s \"<folder>\"\n", verb); return; }
-    if (!mc_resolve_folder(arg, folder, sizeof folder)) { mc_line("MODS: %s: the store folder cannot be resolved", verb); return; }
-    /* Every verb writes the store: it waits for a store write, an import or a
-     * download in progress. */
-    modstore_lock();
-    if (!_stricmp(verb, "build")) mc_build(folder);
-    else if (!_stricmp(verb, "rebuild")) {
-        /* build, then the rescan the tab's Rebuild runs (a folder in the store rescans in mc_build). */
-        mc_build(folder);
-        if (!mc_in_store(folder)) mc_rescan("rebuild");
-    } else mc_install(folder);
-    modstore_unlock();
+    free(arg);
+    free(folder);
 }
 
 /* An export's import builds each carried mod on the thread that imports it
@@ -757,10 +788,10 @@ static int mc_import_stock(void *ctx, const char *request)
 
 int sh_modcmd_register(void)
 {
-    char root[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     modexport_set_stock(mc_import_stock, NULL);
     sh_modserve_set_build_cause(sh_ms_build_cause);
-    if (sh_ms_root(root, sizeof root)) mc_line("MODS: sh_mods ready; store %s", root);
+    if (root) mc_line("MODS: sh_mods ready; store %s", root);
     else mc_line("MODS: sh_mods ready; the store folder cannot be resolved");
     return 1;
 }

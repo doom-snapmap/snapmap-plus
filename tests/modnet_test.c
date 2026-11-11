@@ -8,6 +8,7 @@
  * injected 5xx, 429 and 451, a refused connection, cancel, progress, and the
  * job helper's progress, cancel and one-job rule. No real store is contacted.
  */
+#include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
 #include "../src/backend/modsalt.h"
@@ -77,7 +78,7 @@ static void progress(void *ctx, unsigned long long done, unsigned long long tota
  * Returns 1 with the build hash and the archive's size. */
 static int make_build(const char *dir, const char *salt, size_t n, const char *zip, char hash[65], unsigned long long *size)
 {
-    char rel[160], cause[SH_MB_CAUSE_MAX], mj[MAX_PATH * 2];
+    char rel[160], cause[HO_TEXT], mj[MAX_PATH * 2];
     unsigned char *bytes = (unsigned char *)malloc(n + 1), *text;
     size_t i, len = 0;
     sh_mb_bundle b;
@@ -98,8 +99,8 @@ static int make_build(const char *dir, const char *salt, size_t n, const char *z
         fclose(f);
     }
     memset(&b, 0, sizeof b);
-    ok = sh_mb_build(dir, salt, NULL, &b) && sh_mb_write(&b, dir, cause, sizeof cause);
-    if (!ok) { fprintf(stderr, "build %s: %s\n", dir, b.first_cause); sh_mb_free(&b); free(bytes); return 0; }
+    ok = sh_mb_build(dir, salt, NULL, &b) && HO(cause, sh_mb_write(&b, dir, HO_P(0)));
+    if (!ok) { fprintf(stderr, "build %s: %s\n", dir, sh_mb_first_cause(&b)); sh_mb_free(&b); free(bytes); return 0; }
     strcpy_s(hash, 65, b.hash);
     _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\mod.json", dir);
     text = sh_mb_read_file(mj, 1 << 20, &len);
@@ -156,7 +157,12 @@ int main(void)
     CHECK(modnet_valid_ref("export:My Map (2)"));
     CHECK(!modnet_valid_ref(""));
     CHECK(!modnet_valid_ref("tab\tref"));
-    CHECK(!modnet_valid_ref("0123456789012345678901234567890123456789012345678901234567890123x"));   /* 65 */
+    {
+        /* A ref of any length is carried whole; the store refuses what it cannot keep. */
+        static char longref[2001];
+        memset(longref, 'r', 2000);
+        CHECK(modnet_valid_ref(longref));
+    }
     CHECK(modnet_valid_ref("0123456789012345678901234567890123456789012345678901234567890123"));    /* 64 */
     CHECK(!modnet_valid_hash("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"));
     CHECK(modnet_head_build("nothex", NULL, NULL, NULL, &r) == MODNET_E_ARG);

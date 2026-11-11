@@ -30,9 +30,6 @@
 #define SH_MR_BIT_FIRST 19   /* above SPAWN_AI_TYPE_ZOMBIE_UNWILLING, 1 << 18 */
 #define SH_MR_BIT_LAST  29   /* below SPAWN_AI_TYPE_ANY, 1 << 30 */
 
-#define SH_MR_SLOT_MAX    160   /* "<type>/<decl name>/<path>" */
-#define SH_MR_KEY_MAX     65
-#define SH_MR_CHOICES_MAX 64
 #define SH_MR_CLASH_SOURCES 8
 
 /* ------------------------------------------------------------ generation */
@@ -65,15 +62,15 @@ typedef struct sh_mr_choice { const char *slot, *key; } sh_mr_choice;
 typedef struct sh_mr_entry {
     int source;
     unsigned authored, bit;
-    char def[SH_MB_REQUEST_MAX + 1];
-    char encounter[SH_MB_REQUEST_MAX + 1];
+    char *def;                 /* malloc'd */
+    char *encounter;           /* malloc'd, NULL for none */
 } sh_mr_entry;
 
 typedef struct sh_mr_rewrite { int id; char *text; size_t len; } sh_mr_rewrite;
 
 /* A slot two or more sources set to different values. */
 typedef struct sh_mr_clash {
-    char slot[SH_MR_SLOT_MAX];
+    char *slot;                /* malloc'd */
     int target;                /* the sh_mr_target it is in */
     int sources[SH_MR_CLASH_SOURCES];
     int n;
@@ -119,8 +116,7 @@ int  sh_modregistry_stock_bit(unsigned value);
 /* ------------------------------------------------------------ choices --- */
 
 /* 1 when `slot` reads as "<type>/<decl name>/<path>": printable, no blank,
- * quote or backslash, below SH_MR_SLOT_MAX, at least three '/'-separated
- * parts. */
+ * quote or backslash, at least three '/'-separated parts (any length). */
 int  sh_modregistry_slot_valid(const char *slot);
 /* The open map's choice for a slot: key NULL or "" removes it. Recorded in the
  * map's manifest (saved with the map) and given to the serving index, which
@@ -133,7 +129,7 @@ int  sh_modregistry_choices_get(const char *slot, char *key, size_t cap);
 /* The console verb `sh_mods choose "<game file>/<path>" "<mod name>"` (an empty
  * name clears): the mod is one the open map uses, named by its name, its
  * folder or its salt (sh_modserve_listed_mod). One line for the console in
- * `out`, naming the mod by its name. Returns as sh_modregistry_choices_set. */
-int  sh_modregistry_choose_command(const char *slot, const char *mod, char *out, size_t cap);
+ * *out (malloc'd), naming the mod by its name. Returns as sh_modregistry_choices_set. */
+int  sh_modregistry_choose_command(const char *slot, const char *mod, char **out);
 
 #endif /* SNAPMAP_PLUS_MODREGISTRY_H */

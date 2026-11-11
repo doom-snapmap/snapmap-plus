@@ -123,7 +123,7 @@ char *sh_prefab_mods_view_set(const char *view, size_t len, const sh_modmanifest
 int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *name);
 
 /* A row's name, the salt when it has no name (the refusal's label). */
-void  sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap);
+const char *sh_prefab_mods_label(const sh_modmanifest_row *row);
 
 /* {"count":N,"missing":M,"mods":[{"id","salt","build","size",
  * "installed","state","cause"}...]}, "id" the row's name (else its salt),
@@ -202,7 +202,7 @@ int   sh_prefab_mods_meta_write(const char *body, size_t len, const char *path, 
  * SH_PREFAB_MODS_* answer; msg receives what the Prefabs tab shows for
  * NEEDS_MODULE, REFUSED and HELD; *seq the placement to poll when HELD. */
 int   sh_prefab_mods_resolve_main(const char *text, size_t len, const sh_modmanifest_list *rows, const char *name,
-                                  int *seq, char *msg, size_t cap);
+                                  int *seq, char **msg);
 
 /* A held placement: 2 waiting, 1 ready (its mods are installed and in the
  * open map: place it now), 0 refused or dropped. Any thread. */
@@ -218,7 +218,7 @@ int   sh_prefab_mods_poll(int seq);
  * the rows the ZIP carries (the file on disk is not changed). 1 written, -1
  * refused; msg says which and why. */
 int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, const char *name, const char *zip_utf8,
-                            char *msg, size_t cap);
+                            char **msg);
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export
  * folder; UTF-8) into prefabs_dir (UTF-8, with or without a trailing
@@ -228,8 +228,7 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
  * bytes is left alone; one with other bytes gets the next free "<name> (N)".
  * 1 added, 0 already there (nothing written), -1 refused (nothing of the
  * import stays). name_out receives the name it has in the library. */
-int   sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *name_out, size_t name_cap,
-                            char *msg, size_t cap);
+int   sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char **name_out, char **msg);
 
 /* 1 when `name` can be a prefab file name: the one rule the Prefabs tab
  * uses too (prefab_block.h, sh_prefab_block_valid_name). */
@@ -242,9 +241,9 @@ int   sh_prefab_mods_valid_name(const char *name);
 typedef struct sh_prefab_mods_ops {
     /* The asset rule (modserve.h sh_modserve_row_served_for, subject
      * "prefab"): SH_MODPUB_ROW_*, the refusal sentence in `cause`. */
-    int  (*row_state)(const sh_modmanifest_row *row, char *cause, size_t cap);
+    int  (*row_state)(const sh_modmanifest_row *row, char **cause);   /* *cause malloc'd (cause may be NULL) */
     int  (*listed)(const sh_modmanifest_row *row);                 /* 1 the open map lists the build serving it */
-    int  (*attach)(const sh_modmanifest_row *row, char *note, size_t cap);   /* 1 attached, 0 already, -1 failed */
+    int  (*attach)(const sh_modmanifest_row *row, char **note);   /* 1 attached, 0 already, -1 failed (*note malloc'd) */
     int  (*activate)(const sh_modmanifest_list *rows);             /* register the rows' decls for the open map */
     int  (*module_known)(const char *module_name);                 /* the module guard: 1, 0, -1 */
     void (*print)(const char *line);                               /* one console line */

@@ -39,6 +39,15 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     return 0;
 }
 
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
+{
+    if (!ref) return;
+    free(ref->name);
+    free(ref->folder);
+    free(ref->place);
+    ref->name = ref->folder = ref->place = NULL;
+}
+
 
 static int ss_stock(void *context, const char *request)
 {
@@ -46,14 +55,14 @@ static int ss_stock(void *context, const char *request)
     return sh_modstock_exists(request);
 }
 
-int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder, char **first_cause)
 {
     sh_ms_list list;
     sh_mb_resolver r;
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause = NULL;
     int ok = 0;
-    if (first_cause && n) first_cause[0] = 0;
+    if (first_cause) *first_cause = NULL;
     memset(&list, 0, sizeof list);
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     r.installed = sh_ms_request_exists;
@@ -62,10 +71,11 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
     if (!sh_mb_build(folder, NULL, &r, &b)) {
-        if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
-    } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {
-        if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
+        if (first_cause) *first_cause = _strdup(sh_mb_first_cause(&b));
+    } else if (!sh_mb_write(&b, folder, &cause)) {
+        if (first_cause) { *first_cause = cause; cause = NULL; }
     } else ok = 1;
+    free(cause);
     sh_mb_keep_replacements_here(0);
     sh_mb_free(&b);
     sh_ms_list_free(&list);

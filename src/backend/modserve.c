@@ -27,6 +27,7 @@
 #include "decl_tree.h"
 #include "config_json.h"
 #include "backend_log.h"
+#include "text.h"
 #include "script/script_node.h"   /* a scripted mod's Script node row (ms_script_node_row) */
 #include "store_lock.h"
 
@@ -36,9 +37,7 @@
 #define SH_SERVED_MARK_PREFIX L"Local\\snapmap-plus-served-"
 
 #define MS_ANY_SIZE      ((size_t)-1)   /* a read or a string of any size */
-#define MS_NAME_MAX      1024u
 #define MS_JSON_DEPTH    16u
-#define MS_CAUSE_MAX     200
 #define MS_CONFLICT_LOGS 32
 #define MS_CACHE_SLOTS   64
 
@@ -130,9 +129,10 @@ typedef struct ms_bundle {
     const char **req_deact; int req_ndeact;   /* and when they stop */
     const char *req_lost;                 /* a cvar an earlier install asks another value of, or NULL */
     volatile LONG req_live;               /* every cvar requirement read back as asked (read on any thread) */
-    char req_cause[MS_CAUSE_MAX];         /* why they are not live (main thread) */
+    const char *req_cause;                /* why they are not live (main thread; the index's arena: a plan step
+                                             may name it), or NULL */
     double installed_at;
-    char cause[MS_CAUSE_MAX];
+    char *cause;                          /* why it serves nothing (malloc'd), or NULL */
     /* Map scope (modserve.h). */
     const char *scope_editor;             /* the first editor-time shadow (the editor-tweak class: always), or NULL */
     int has_rows, has_shadows;            /* adds Toybox rows; serves shadow files */
@@ -164,7 +164,6 @@ static const char *ms_label(const ms_bundle *b)
 
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
-#define MS_PATH_MAX 1024                  /* a UTF-8 store path (ms_wide) */
 /* A cause naming a damaged builder block: %s is the file, or "its file list". */
 #define MS_DAMAGED "The part of mod.json Snapmap+ writes is damaged (%s). Press Refresh to build the mod again."
 
@@ -179,7 +178,7 @@ typedef struct ms_gone {
 } ms_gone;
 
 typedef struct ms_index {
-    char root[MS_PATH_MAX];
+    char *root;                           /* the mods folder read (malloc'd) */
     ms_chunk *arena;
     ms_bundle *bundles; int nbundles, cbundles;
     ms_file *files; int nfiles, cfiles;
@@ -200,6 +199,7 @@ typedef struct ms_index {
      * game's texts of the fixed registries (read once), and the texts
      * generated per serving set (memo, arena) with the one the listing uses. */
     int reg_bundle, reg_first, reg_count;
+    int reg_made;                         /* the pseudo-bundle exists (its cause is freed with the table) */
     const char **reg_xtext;               /* per registry file: the game's text (read once) */
     size_t *reg_xlen;
     unsigned char *reg_xread;
@@ -221,7 +221,7 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
 static void ms_script_node_row(ms_index *x, ms_bundle *b);
 static void ms_req_index(ms_index *x, const ms_index *old);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
-static char g_last_root[MS_PATH_MAX];
+static char *g_last_root;   /* the mods folder of the last build (malloc'd) */
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
@@ -232,13 +232,27 @@ static SRWLOCK g_index_link_lock = SRWLOCK_INIT;
 
 static void ms_log(const char *fmt, ...)
 {
-    char line[1024];
+    char *text, *line;
     va_list ap;
-    memcpy(line, "MODS: ", 6);
     va_start(ap, fmt);
-    _vsnprintf_s(line + 6, sizeof line - 6, _TRUNCATE, fmt, ap);
+    text = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    line = text ? sh_textf("MODS: %s", text) : NULL;
+    backend_log(line ? line : "MODS: a line could not be written (out of memory)");
+    free(line);
+    free(text);
+}
+
+/* One report line, formatted whole, to `fn`. */
+static void ms_say(sh_modserve_line_fn fn, void *context, const char *fmt, ...)
+{
+    va_list ap;
+    char *line;
+    va_start(ap, fmt);
+    line = sh_vtextf(fmt, ap);
+    va_end(ap);
+    fn(context, line ? line : "(a report line could not be written: out of memory)");
+    free(line);
 }
 
 /* The lines a player should see (sh_modserve_set_console). */
@@ -249,15 +263,18 @@ void sh_modserve_set_build_cause(sh_modserve_build_cause_fn fn) { g_build_cause 
 
 static void ms_console(const char *fmt, ...)
 {
-    char line[600];
+    char *text, *line;
     va_list ap;
     sh_modserve_console_fn fn = g_console;
     if (!fn) return;
-    memcpy(line, "Snapmap+ mods: ", 15);
     va_start(ap, fmt);
-    _vsnprintf_s(line + 15, sizeof line - 15, _TRUNCATE, fmt, ap);
+    text = sh_vtextf(fmt, ap);
     va_end(ap);
+    line = text ? sh_textf("Snapmap+ mods: %s", text) : NULL;
+    free(text);
+    if (!line) return;
     fn(line);
+    free(line);
 }
 
 static double ms_now_ms(void)
@@ -300,7 +317,12 @@ static void ms_index_free(ms_index *x)
 {
     ms_chunk *c, *n;
     if (!x) return;
+    int i;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
+    for (i = 0; x->bundles && i < x->nbundles + (x->reg_made ? 1 : 0); i++) {
+        free(x->bundles[i].cause);
+    }
+    free(x->root);
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
     free(x->gone); free(x->alts); free((void *)x->reg_ids);
     free(x);
@@ -328,11 +350,11 @@ static uint64_t ms_hash_folded(const char *s, size_t *out_len)
 {
     uint64_t h = 1469598103934665603ULL;
     size_t n = 0;
-    for (; s[n] && n < MS_NAME_MAX; ++n) {
+    for (; s[n]; ++n) {
         h ^= (unsigned char)ms_fold(s[n]);
         h *= 1099511628211ULL;
     }
-    if (out_len) *out_len = s[n] ? MS_NAME_MAX : n;
+    if (out_len) *out_len = n;
     return h;
 }
 
@@ -347,11 +369,12 @@ static int ms_folded_eq(const char *key, const char *s)
 
 /* The engine's sanitised resource name: every character outside a-z 0-9 $ . /
  * becomes '_'. Input is already folded. */
-static int ms_sanitize(const char *in, char *out, size_t cap)
+/* `out` holds strlen(in) + 1 bytes. */
+static int ms_sanitize(const char *in, char *out)
 {
     size_t i;
     int changed = 0;
-    for (i = 0; in[i] && i + 1 < cap; ++i) {
+    for (i = 0; in[i]; ++i) {
         char c = in[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '$' || c == '.' || c == '/')) {
             c = '_';
@@ -489,6 +512,28 @@ static int ms_jnum(const char *v, const char *ve, double *out)
     return end == buf + n;
 }
 
+/* "<type>\x01<name>" lower-cased, the provides key, in the arena; NULL when
+ * memory runs out. */
+static char *ms_pkey(ms_index *x, const char *type, const char *name)
+{
+    size_t tl = strlen(type), nl = strlen(name);
+    char *k = (char *)ms_alloc(x, tl + nl + 2);
+    if (!k) return NULL;
+    memcpy(k, type, tl);
+    k[tl] = '\x01';
+    memcpy(k + tl + 1, name, nl + 1);
+    ms_lower(k);
+    return k;
+}
+
+/* The same key on the heap (free), for a lookup. */
+static char *ms_pkey_heap(const char *type, const char *name)
+{
+    char *k = sh_textf("%s\x01%s", type, name);
+    if (k) ms_lower(k);
+    return k;
+}
+
 /* ------------------------------------------------------------------ files */
 
 /* Bundle trees hold engine paths deep enough to pass MAX_PATH below
@@ -497,15 +542,15 @@ static int ms_jnum(const char *v, const char *ve, double *out)
  * writes them. `path` is UTF-8, absolute, with '\' separators: every store
  * path in this file is, from the root sh_ms_root resolves (modstore.c) to
  * the folder names the scan reads, as the store and the record spell them. */
-static int ms_wide(const char *path, wchar_t *out, size_t cap)
+static wchar_t *ms_wide(const char *path)
 {
-    size_t at = 0;
-    if (path[0] && path[1] == ':' && path[2] == '\\') {
-        if (cap < 5) return 0;
-        wcscpy_s(out, cap, L"\\\\?\\");
-        at = 4;
-    }
-    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out + at, (int)(cap - at)) > 0;
+    size_t at = path[0] && path[1] == ':' && path[2] == '\\' ? 4 : 0;
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    wchar_t *out = n > 0 ? (wchar_t *)malloc(sizeof(wchar_t) * (at + (size_t)n)) : NULL;
+    if (!out) return NULL;
+    if (at) memcpy(out, L"\\\\?\\", sizeof(wchar_t) * 4);
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out + at, n) <= 0) { free(out); return NULL; }
+    return out;
 }
 
 /* The whole file, of any size, read in pieces (one ReadFile moves at most
@@ -515,11 +560,12 @@ static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
     HANDLE h;
     LARGE_INTEGER size;
     unsigned char *buf = NULL;
-    wchar_t wide[MS_PATH_MAX + 8];
+    wchar_t *wide = ms_wide(path);
     *len = 0;
-    if (!ms_wide(path, wide, sizeof wide / sizeof wide[0])) return NULL;
+    if (!wide) return NULL;
     h = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     if (GetFileSizeEx(h, &size) && size.QuadPart >= 0 && (uint64_t)size.QuadPart <= max &&
         (uint64_t)size.QuadPart < (uint64_t)SIZE_MAX) {
@@ -544,9 +590,10 @@ static unsigned char *ms_read_whole(const char *path, size_t max, size_t *len)
 static long long ms_file_size(const char *path)
 {
     WIN32_FILE_ATTRIBUTE_DATA a;
-    wchar_t wide[MS_PATH_MAX + 8];
-    if (!ms_wide(path, wide, sizeof wide / sizeof wide[0]) || !GetFileAttributesExW(wide, GetFileExInfoStandard, &a))
-        return -1;
+    wchar_t *wide = ms_wide(path);
+    int got = wide && GetFileAttributesExW(wide, GetFileExInfoStandard, &a);
+    free(wide);
+    if (!got) return -1;
     if (a.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return -1;
     return ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
 }
@@ -567,13 +614,27 @@ static int ms_grow(void **arr, int *cap, int need, size_t elem)
     return 1;
 }
 
+/* *cause (when cause is not NULL) = the formatted sentence (malloc'd), replacing it. */
+static void ms_set_cause(char **cause, const char *fmt, ...)
+{
+    va_list ap;
+    char *text;
+    if (!cause) return;
+    va_start(ap, fmt);
+    text = sh_vtextf(fmt, ap);
+    va_end(ap);
+    free(*cause);
+    *cause = text ? text : _strdup("out of memory");
+}
+
 static void ms_fail(ms_bundle *b, const char *fmt, ...)
 {
     va_list ap;
-    if (b->cause[0]) return;   /* the first cause only */
+    if (b->cause) return;   /* the first cause only */
     va_start(ap, fmt);
-    _vsnprintf_s(b->cause, sizeof b->cause, _TRUNCATE, fmt, ap);
+    b->cause = sh_vtextf(fmt, ap);
     va_end(ap);
+    if (!b->cause) b->cause = _strdup("out of memory");
 }
 
 /* A bundle whose content waits for its requirements: it sets cvars, or an
@@ -737,7 +798,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             /* A bank lives in the one folder Wwise lists, so its namespace is
              * its stem: <salt>_<rest>, as the builder requires
              * (sh_mb_bank_stem). */
-            char stem[96], bid[80];
+            char stem[SH_MB_BANK_STEM_MAX + 1], bid[80];
             size_t k;
             _snprintf_s(bid, sizeof bid, _TRUNCATE, "%s_", b->id);
             k = strlen(bid);
@@ -754,11 +815,10 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
     }
     {
-        char disk[MS_PATH_MAX];
-        char *p;
-        _snprintf_s(disk, sizeof disk, _TRUNCATE, "%s\\%s", b->dir, path);
-        for (p = disk; *p; ++p) if (*p == '/') *p = '\\';
-        f->disk = ms_strdup(x, disk);
+        char *disk = sh_textf("%s\\%s", b->dir, path), *p;
+        for (p = disk; p && *p; ++p) if (*p == '/') *p = '\\';
+        f->disk = disk ? ms_strdup(x, disk) : NULL;
+        free(disk);
         if (!f->disk) { ms_fail(b, "out of memory"); return; }
     }
     x->nfiles++;
@@ -771,12 +831,16 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
  * see the same cvars and lines. No cvar or command is known here by name. */
 static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, const char *ve)
 {
-    char cause[SH_MB_CAUSE_MAX], *key;
+    char *cause = NULL, *key;
     size_t key_cap;
-    char *canon = sh_mb_requirements_canonical(v, (size_t)(ve - v), cause, sizeof cause);
+    char *canon = sh_mb_requirements_canonical(v, (size_t)(ve - v), &cause);
     ms_json o;
     const char *mv, *mve;
-    if (!canon) { ms_fail(b, "%s", cause[0] ? cause : "requirements could not be read (out of memory)"); return; }
+    if (!canon) {
+        ms_fail(b, "%s", cause ? cause : "requirements could not be read (out of memory)");
+        free(cause);
+        return;
+    }
     b->req_text = ms_strdup(x, canon);
     free(canon);
     if (!b->req_text) { ms_fail(b, "out of memory"); return; }
@@ -787,7 +851,7 @@ static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, cons
     o.p = b->req_text;
     o.e = b->req_text + strlen(b->req_text);
     if (!ms_jenter(&o, '{')) { ms_fail(b, "requirements could not be read"); return; }
-    while (!b->cause[0] && ms_jnext(&o, '}')) {
+    while (!b->cause && ms_jnext(&o, '}')) {
         ms_json c;
         if (!ms_jmember(&o, key, key_cap, &mv, &mve)) { ms_fail(b, "requirements could not be read"); return; }
         c.p = mv;
@@ -904,7 +968,7 @@ static const char *const g_ms_retired[] = { "id", "key", "shadows", "stock", "sc
  * verified when it was built. */
 static void ms_parse_bundle(ms_index *x, ms_bundle *b)
 {
-    char path[MS_PATH_MAX], key[64];
+    char *path, key[64];
     unsigned char *text;
     size_t len = 0;
     sh_json_kind kind;
@@ -916,25 +980,27 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     int nshadows = 0, cshadows = 0, i, k, members = 0, block_object = 0, script_node = 0;
     double format = -1, built = 0;
     ms_text extra = { NULL, 0, 0, 0 };
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
+    if (!(path = sh_textf("%s\\mod.json", b->dir))) { ms_fail(b, "out of memory"); return; }
     text = ms_read_whole(path, MS_ANY_SIZE, &len);
     if (!text) {
-        char pkg[MS_PATH_MAX];
-        _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
+        char *pkg = sh_textf("%s\\package.json", b->dir);
         if (ms_file_size(path) >= 0)
             ms_fail(b, "mod.json could not be read (it may be open in another program). Close it and press Refresh.");
-        else if (ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_EARLIER);
+        else if (pkg && ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_EARLIER);
         else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
+        free(pkg);
+        free(path);
         return;
     }
+    free(path);
     if (!sh_json_validate_ex((const char *)text, len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT) {
         /* The store remembers why it refused the folder (sh_ms_build_cause). */
-        char last[SH_MB_CAUSE_MAX] = "";
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
-        if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
-        if (last[0]) ms_fail(b, "not built: %s", last);
+        char *last = cause_fn && b->dir ? cause_fn(b->dir) : NULL;
+        if (last) ms_fail(b, "not built: %s", last);
         else ms_fail(b, "mod.json has a mistake near character %zu (%s). Fix it and press Refresh.", err.offset,
                      err.reason ? err.reason : "it is not an object");
+        free(last);
         HeapFree(GetProcessHeap(), 0, text);
         return;
     }
@@ -979,8 +1045,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
                 else if (!strcmp(key, "shadows")) { shadows_v = v; shadows_e = ve; }
                 else if (!strcmp(key, "cause")) {
-                    /* Any cause stops the build serving, even one too long to show whole. */
-                    state_cause = ms_jstr(x, v, ve, 4 * SH_MB_CAUSE_MAX);
+                    /* Any cause stops the build serving. */
+                    state_cause = ms_jstr(x, v, ve, MS_ANY_SIZE);
                     if (!state_cause)
                         state_cause = (char *)"The part of mod.json Snapmap+ writes is damaged. Press Refresh to build "
                                               "the mod again.";
@@ -1022,20 +1088,20 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     else if (!block_v) {
         /* A fresh folder: the store's scan salts and builds a root folder; a
          * map's place holds only builds the product received. */
-        char last[SH_MB_CAUSE_MAX] = "";
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
         if (b->place) ms_fail(b, SH_MODSERVE_PLACE_FRESH);
         else {
-            if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
-            if (last[0]) ms_fail(b, "not built: %s", last);
+            char *last = cause_fn && b->dir ? cause_fn(b->dir) : NULL;
+            if (last) ms_fail(b, "not built: %s", last);
             else ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
+            free(last);
         }
     }
     else if (state_cause && state_cause[0]) ms_fail(b, "not built: %s", state_cause);
     else if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
     if (!b->id) b->id = "";
-    if (!b->cause[0] && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
-    if (shadows_v && !b->cause[0]) {
+    if (!b->cause && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
+    if (shadows_v && !b->cause) {
         ms_json a = { shadows_v, shadows_e };
         if (ms_jenter(&a, '[')) while (ms_jnext(&a, ']')) {
             const char *sv = a.p, *se = ms_jskip(a.p, a.e);
@@ -1047,17 +1113,17 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             shadows[nshadows++] = s;
         }
     }
-    if (req_v && !b->cause[0]) ms_parse_requirements(x, b, req_v, req_e);
+    if (req_v && !b->cause) ms_parse_requirements(x, b, req_v, req_e);
     if (nshadows > 1) qsort(shadows, (size_t)nshadows, sizeof(char *), ms_str_cmp);
-    if (!b->cause[0]) {
+    if (!b->cause) {
         int pass;
         b->first_file = x->nfiles;
-        for (pass = 0; pass < 2 && !b->cause[0]; ++pass) {
+        for (pass = 0; pass < 2 && !b->cause; ++pass) {
             ms_json a;
             a.p = pass ? stock_v : files_v;
             a.e = pass ? stock_e : files_e;
             if (!a.p) continue;
-            if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
+            if (ms_jenter(&a, '[')) while (!b->cause && ms_jnext(&a, ']')) {
                 ms_json one = { a.p, ms_jskip(a.p, a.e) };
                 a.p = one.e;
                 ms_parse_file(x, b, &one, shadows, nshadows, pass);
@@ -1077,7 +1143,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     free(shadows);
     HeapFree(GetProcessHeap(), 0, text);
     /* Sizes only; hashes were verified at the build and install. */
-    for (i = b->first_file; !b->cause[0] && i < b->first_file + b->file_count; ++i) {
+    for (i = b->first_file; !b->cause && i < b->first_file + b->file_count; ++i) {
         ms_file *f = &x->files[i];
         long long got;
         if (f->stock) continue;   /* resolved against the installed game at install, read when served */
@@ -1089,7 +1155,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
-    if (script_node && !b->cause[0]) ms_script_node_row(x, b);
+    if (script_node && !b->cause) ms_script_node_row(x, b);
 }
 
 /* ------------------------------------------------------------------ the Script node row */
@@ -1215,22 +1281,26 @@ static void ms_extra_add_strings(ms_index *x, ms_bundle *b, const sh_script_node
 static int ms_add_generated(ms_index *x, ms_bundle *b, const char *request, const char *text, const char *need_type,
                             const char *need_name)
 {
-    char path[MS_PATH_MAX], blob[SH_MB_HASH_HEX + 1], *p;
+    char *path, blob[SH_MB_HASH_HEX + 1], *p;
     const char *rest = request + 16, *slash = strchr(rest, '/');
     size_t len = strlen(text), n = strlen(rest);
     const char *type;
     ms_file *f;
     if (strncmp(request, "generated/decls/", 16) || !slash || n < 6) return 0;
     sh_mb_sha256_hex(text, len, blob);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.served\\files\\%.16s.decl", x->root, blob);
+    if (!(path = sh_textf("%s\\.served\\files\\%.16s.decl", x->root, blob))) return 0;
     for (p = path; *p; ++p) if (*p == '/') *p = '\\';
-    if (!ms_write_served(path, (const unsigned char *)text, len)) return 0;
-    if (!ms_grow((void **)&x->files, &x->cfiles, x->nfiles + 1, sizeof(ms_file))) return 0;
+    if (!ms_write_served(path, (const unsigned char *)text, len) ||
+        !ms_grow((void **)&x->files, &x->cfiles, x->nfiles + 1, sizeof(ms_file))) {
+        free(path);
+        return 0;
+    }
     f = &x->files[x->nfiles];
     memset(f, 0, sizeof *f);
     f->bundle = (int)(b - x->bundles);
     f->request = ms_strdup(x, request);
     f->disk = ms_strdup(x, path);
+    free(path);
     f->blob = ms_strdup(x, blob);
     f->size = (uint64_t)len;
     type = sh_mb_decl_type(rest, (size_t)(slash - rest));
@@ -1268,7 +1338,7 @@ static void ms_script_node_row(ms_index *x, ms_bundle *b)
     sh_script_node_row row;
     char category[96], def_name[96];
     int before = x->nfiles, needs_before = x->nneeds;
-    if (!x->root[0] || !b->id || !b->id[0]) return;
+    if (!x->root || !x->root[0] || !b->id || !b->id[0]) return;
     ms_row_category(x, b, category, sizeof category);
     if (!sh_script_node_row_make(b->id, b->name, category, &row)) {
         ms_log("bundle '%s': its Script node could not be made (out of memory)", b->id);
@@ -1305,94 +1375,158 @@ static int ms_work_suffix(const char *name, const char *tag)
 /* A child folder of `dir` the walk looks at, in UTF-8; 0 to skip it (a file,
  * a reparse point, a hidden folder, a name that is not valid Unicode, install
  * staging). */
-static int ms_walk_child(const WIN32_FIND_DATAW *fd, const char *rel, char *name, size_t cap)
+static char *ms_walk_child(const WIN32_FIND_DATAW *fd, const char *rel)
 {
+    char *name;
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-        return 0;
-    if (fd->cFileName[0] == L'.') return 0;
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd->cFileName, -1, name, (int)cap, NULL, NULL)) {
+        return NULL;
+    if (fd->cFileName[0] == L'.') return NULL;
+    if (!(name = sh_mb_utf8(fd->cFileName))) {
         ms_log("a folder in %s skipped: its name is not valid Unicode; rename it", rel && rel[0] ? rel : "the store");
-        return 0;
+        return NULL;
     }
-    return !ms_work_suffix(name, ".staging-") && !ms_work_suffix(name, ".old-");
+    if (ms_work_suffix(name, ".staging-") || ms_work_suffix(name, ".old-")) { free(name); return NULL; }
+    return name;
 }
 
 /* The serving side of the store's walk (ONE-SHAPE rule 4, modstore.c): every
  * folder under the store root that holds mod.json (or a package.json, which
  * is refused), at any depth: a folder without one is an organizing folder and
- * is entered, to eight levels (modstore.h SH_MS_NEST_MAX); a mod folder is not
- * entered. At the top, "maps" is the places area: each folder in it is a
- * map's place, mods\maps\<segment>, whose mods are walked the same way.
- * `rel` is the folder's path below the root, a bundle's name; `place` its
- * area (NULL: the root). This scan only reads: salting and building are the
- * store's (ms_sync). */
-static void ms_scan_folder(ms_index *x, const char *dir, const char *rel, int depth, const char *place)
+ * is entered, as deep as it goes; a mod folder is not entered. At the top,
+ * "maps" is the places area: each folder in it is a map's place,
+ * mods\maps\<segment>, whose mods are walked the same way. `rel` is the
+ * folder's path below the root, a bundle's name; `place` its area (NULL: the
+ * root). The folders still to read wait on the heap, in the order a
+ * depth-first walk reads them. This scan only reads: salting and building are
+ * the store's (ms_sync). */
+typedef struct ms_scan_item {
+    char *dir, *rel;         /* the folder and its path below the root (malloc'd) */
+    const char *place;       /* its area (the index's arena), NULL at the root */
+    int kind;                /* MS_SCAN_FOLDER: list it; MS_SCAN_CHILD: a folder found in a listing */
+    int top;                 /* a child of the store root itself */
+} ms_scan_item;
+#define MS_SCAN_FOLDER 0
+#define MS_SCAN_CHILD  1
+typedef struct ms_scan_list { ms_scan_item *d; size_t n, cap; } ms_scan_list;
+
+static int ms_scan_push(ms_scan_list *l, char *dir, char *rel, const char *place, int kind, int top)
 {
-    char pattern[MS_PATH_MAX];
-    wchar_t wpattern[MS_PATH_MAX + 8];
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 16;
+        ms_scan_item *g = (ms_scan_item *)realloc(l->d, cap * sizeof *g);
+        if (!g) { free(dir); free(rel); return 0; }
+        l->d = g;
+        l->cap = cap;
+    }
+    l->d[l->n].dir = dir;
+    l->d[l->n].rel = rel;
+    l->d[l->n].place = place;
+    l->d[l->n].kind = kind;
+    l->d[l->n].top = top;
+    l->n++;
+    return 1;
+}
+
+/* Push every child folder of `at` as MS_SCAN_CHILD items, last first, so they
+ * come off the stack in the listing's order. */
+static void ms_scan_list_folder(const ms_scan_item *at, ms_scan_list *stack)
+{
+    char *pattern = sh_textf("%s\\*", at->dir);
+    wchar_t *wpattern = pattern ? ms_wide(pattern) : NULL;
     WIN32_FIND_DATAW fd;
-    HANDLE h;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    if (!ms_wide(pattern, wpattern, sizeof wpattern / sizeof wpattern[0])) return;
-    h = FindFirstFileW(wpattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        ms_bundle *b;
-        char name[MS_PATH_MAX], sub[MS_PATH_MAX], probe[MS_PATH_MAX], subrel[MS_PATH_MAX];
-        int mark_files = x->nfiles, mark_needs = x->nneeds;
-        if (!ms_walk_child(&fd, rel, name, sizeof name)) continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, name);
-        if (rel && rel[0]) _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s\\%s", rel, name);
-        else strncpy_s(subrel, sizeof subrel, name, _TRUNCATE);
-        if (!place && depth == 0 && !_stricmp(name, SH_MODSERVE_PLACES)) {
-            /* The places area: each child folder is a map's place. */
-            char inner[MS_PATH_MAX];
-            wchar_t winner[MS_PATH_MAX + 8];
-            WIN32_FIND_DATAW pd;
-            HANDLE ph;
-            _snprintf_s(inner, sizeof inner, _TRUNCATE, "%s\\*", sub);
-            if (!ms_wide(inner, winner, sizeof winner / sizeof winner[0])) continue;
-            ph = FindFirstFileW(winner, &pd);
-            if (ph == INVALID_HANDLE_VALUE) continue;
-            do {
-                char seg[MS_PATH_MAX], prel[MS_PATH_MAX], pdir[MS_PATH_MAX];
-                const char *pl;
-                if (!ms_walk_child(&pd, subrel, seg, sizeof seg)) continue;
-                _snprintf_s(prel, sizeof prel, _TRUNCATE, "%s\\%s", subrel, seg);
-                _snprintf_s(pdir, sizeof pdir, _TRUNCATE, "%s\\%s", sub, seg);
-                pl = ms_strdup(x, prel);
-                if (pl) ms_scan_folder(x, pdir, prel, 1, pl);
-            } while (FindNextFileW(ph, &pd));
-            FindClose(ph);
-            continue;
+    HANDLE h = wpattern ? FindFirstFileW(wpattern, &fd) : INVALID_HANDLE_VALUE;
+    size_t first = stack->n, a, z;
+    free(pattern);
+    free(wpattern);
+    while (h != INVALID_HANDLE_VALUE) {
+        char *name = ms_walk_child(&fd, at->rel);
+        if (name) {
+            char *sub = sh_textf("%s\\%s", at->dir, name);
+            char *subrel = at->rel && at->rel[0] ? sh_textf("%s\\%s", at->rel, name) : _strdup(name);
+            if (sub && subrel) ms_scan_push(stack, sub, subrel, at->place, MS_SCAN_CHILD, at->top);
+            else { free(sub); free(subrel); }
+            free(name);
         }
-        _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\mod.json", sub);
-        if (ms_file_size(probe) < 0) {
-            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\package.json", sub);
-            if (ms_file_size(probe) < 0) {
-                /* Not a mod folder: an organizing folder, looked into. */
-                if (depth + 1 < 8) ms_scan_folder(x, sub, subrel, depth + 1, place);
-                continue;
-            }
+        if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+    }
+    for (a = first, z = stack->n; z > a + 1; a++, z--) {
+        ms_scan_item t = stack->d[a];
+        stack->d[a] = stack->d[z - 1];
+        stack->d[z - 1] = t;
+    }
+}
+
+/* One child folder: the places area, a mod, or an organizing folder. */
+static void ms_scan_child(ms_index *x, ms_scan_item *at, ms_scan_list *stack)
+{
+    const char *leaf = strrchr(at->rel, '\\') ? strrchr(at->rel, '\\') + 1 : at->rel;
+    char *probe;
+    int is_mod, mark_files = x->nfiles, mark_needs = x->nneeds;
+    ms_bundle *b;
+    if (!at->place && at->top && !_stricmp(leaf, SH_MODSERVE_PLACES)) {
+        /* The places area: each child folder is a map's place, walked as its own area. */
+        ms_scan_item places = *at;
+        size_t first = stack->n, i;
+        ms_scan_list_folder(&places, stack);
+        for (i = first; i < stack->n; i++) {
+            stack->d[i].kind = MS_SCAN_FOLDER;
+            stack->d[i].top = 0;
+            stack->d[i].place = ms_strdup(x, stack->d[i].rel);
         }
-        if (!ms_grow((void **)&x->bundles, &x->cbundles, x->nbundles + 1, sizeof(ms_bundle))) break;
-        b = &x->bundles[x->nbundles++];
-        memset(b, 0, sizeof *b);
-        b->dir = ms_strdup(x, sub);
-        b->folder = ms_strdup(x, subrel);
-        b->place = place;
-        b->first_file = x->nfiles;
-        if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
-        else ms_parse_bundle(x, b);
-        if (b->cause[0]) {
-            /* Failure isolation: drop this bundle's rows, keep everything else. */
-            x->nfiles = mark_files;
-            x->nneeds = mark_needs;
-            b->file_count = 0;
-            ms_log("bundle '%s' skipped: %s", subrel, b->cause);
-        } else b->admitted = 1;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        return;
+    }
+    probe = sh_textf("%s\\mod.json", at->dir);
+    is_mod = probe && ms_file_size(probe) >= 0;
+    free(probe);
+    if (!is_mod) {
+        probe = sh_textf("%s\\package.json", at->dir);
+        is_mod = probe && ms_file_size(probe) >= 0;
+        free(probe);
+    }
+    if (!is_mod) {
+        /* Not a mod folder: an organizing folder, looked into now. */
+        if (ms_scan_push(stack, at->dir, at->rel, at->place, MS_SCAN_FOLDER, 0)) at->dir = at->rel = NULL;
+        return;
+    }
+    if (!ms_grow((void **)&x->bundles, &x->cbundles, x->nbundles + 1, sizeof(ms_bundle))) return;
+    b = &x->bundles[x->nbundles++];
+    memset(b, 0, sizeof *b);
+    b->dir = ms_strdup(x, at->dir);
+    b->folder = ms_strdup(x, at->rel);
+    b->place = at->place;
+    b->first_file = x->nfiles;
+    if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
+    else ms_parse_bundle(x, b);
+    if (b->cause) {
+        /* Failure isolation: drop this bundle's rows, keep everything else. */
+        x->nfiles = mark_files;
+        x->nneeds = mark_needs;
+        b->file_count = 0;
+        ms_log("bundle '%s' skipped: %s", at->rel, b->cause);
+    } else b->admitted = 1;
+}
+
+static void ms_scan_folder(ms_index *x, const char *top)
+{
+    ms_scan_list stack = { NULL, 0, 0 };
+    ms_scan_item root;
+    root.dir = _strdup(top);
+    root.rel = _strdup("");
+    root.place = NULL;
+    root.kind = MS_SCAN_FOLDER;
+    root.top = 1;
+    if (!root.dir || !root.rel) { free(root.dir); free(root.rel); return; }
+    ms_scan_list_folder(&root, &stack);
+    free(root.dir);
+    free(root.rel);
+    while (stack.n) {
+        ms_scan_item at = stack.d[--stack.n];
+        if (at.kind == MS_SCAN_FOLDER) ms_scan_list_folder(&at, &stack);
+        else ms_scan_child(x, &at, &stack);
+        free(at.dir);
+        free(at.rel);
+    }
+    free(stack.d);
 }
 
 /* 1 when bundles a and b sit in the same area (both at the root, or both in
@@ -2018,11 +2152,8 @@ static int ms_avail_build(ms_index *x, ms_avail *av)
     if (!av->keys) return 0;
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
-        char buf[MS_NAME_MAX];
         if (!x->bundles[f->bundle].admitted) continue;
-        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", f->ptype, f->pname);
-        ms_lower(buf);
-        av->keys[n] = ms_strdup(x, buf);
+        av->keys[n] = ms_pkey(x, f->ptype, f->pname);
         if (av->keys[n]) n++;
         av->keys[n++] = (char *)f->request;
     }
@@ -2041,13 +2172,13 @@ static int ms_unresolved(const ms_index *x, const ms_avail *av, const ms_file *f
     int k, missing = 0;
     for (k = 0; k < f->need_count; ++k) {
         const ms_need *nd = &x->needs[f->need_first + k];
-        char buf[MS_NAME_MAX], cand[2][SH_MB_REQUEST_MAX + 1];
+        char *buf = ms_pkey_heap(nd->type, nd->name), *cand[2];
         int c, nc, ok;
-        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", nd->type, nd->name);
-        ms_lower(buf);
-        ok = ms_avail_has(av, buf);
+        ok = buf && ms_avail_has(av, buf);
+        free(buf);
         nc = ok ? 0 : sh_mb_need_requests(nd->type, nd->name, cand, 2);
         for (c = 0; c < nc && !ok; ++c) ok = ms_avail_has(av, cand[c]);
+        sh_mb_requests_free(cand, nc);
         if (!ok) missing++;
     }
     return missing;
@@ -2195,8 +2326,8 @@ static int ms_resolve(ms_index *x)
             for (k = i; k < j; ++k)
                 if (keys[k].file != winner) superseded_by[x->files[keys[k].file].bundle] = x->files[winner].bundle;
         } else {
-            char who[1024], how[200];
-            size_t at = 0;
+            ms_text who = { NULL, 0, 0, 0 };
+            char *how;
             const char *reason = NULL;
             int pick, composed = 0, added = 0;
             ms_conflict *c;
@@ -2204,13 +2335,12 @@ static int ms_resolve(ms_index *x)
             if (!avail_built) { if (!ms_avail_build(x, &avail)) { free(keys); free(superseded_by); return 0; } avail_built = 1; }
             pick = ms_pick(x, &avail, keys, i, j, &reason);
             winner = keys[pick].file;
-            who[0] = 0;
-            for (k = i; k < j && at + 2 < sizeof who; ++k) {
-                const ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", k > i ? ", " : "", ms_label(b));
-                if (w < 0) break;
-                at += (size_t)w;
+            for (k = i; k < j; ++k) {
+                const char *one = ms_label(&x->bundles[x->files[keys[k].file].bundle]);
+                if (k > i) ms_text_put(&who, ", ", 2);
+                ms_text_put(&who, one, strlen(one));
             }
+            ms_text_put(&who, "", 1);
             /* Decls whose providers only add list entries are composed. */
             {
                 const unsigned char *texts[64];
@@ -2256,14 +2386,14 @@ static int ms_resolve(ms_index *x)
             if (any_shadow) ms_record_alts(x, &avail, keys, i, j, winner, 1);
             if (composed) {
                 x->composed++;
-                _snprintf_s(how, sizeof how, _TRUNCATE, "composed: %d list entr%s of the other providers added to %s's text",
-                            added, added == 1 ? "y" : "ies", ms_label(&x->bundles[x->files[winner].bundle]));
-            } else _snprintf_s(how, sizeof how, _TRUNCATE, "%s", reason);
+                how = sh_textf("composed: %d list entr%s of the other providers added to %s's text",
+                               added, added == 1 ? "y" : "ies", ms_label(&x->bundles[x->files[winner].bundle]));
+            } else how = sh_text(reason ? reason : "");
             if (ms_grow((void **)&x->conflict_list, &x->cconflict_list, x->nconflict_list + 1, sizeof(ms_conflict))) {
                 c = &x->conflict_list[x->nconflict_list++];
                 c->request = x->files[winner].request;
-                c->providers = ms_strdup(x, who);
-                c->reason = ms_strdup(x, how);
+                c->providers = ms_strdup(x, who.p && !who.oom ? who.p : "");
+                c->reason = ms_strdup(x, how ? how : "");
                 c->winner = winner;
                 c->count = j - i;
                 c->composed = composed;
@@ -2271,12 +2401,15 @@ static int ms_resolve(ms_index *x)
             if (logged++ < MS_CONFLICT_LOGS) {
                 if (composed)
                     ms_log("conflict: %s '%s' is provided by %s; serving %s's text with the others' list entries "
-                           "(%d added)", any_shadow ? "shadow" : "path", keys[i].key, who,
+                           "(%d added)", any_shadow ? "shadow" : "path", keys[i].key, who.p && !who.oom ? who.p : "",
                            ms_label(&x->bundles[x->files[winner].bundle]), added);
                 else
                     ms_log("conflict: %s '%s' is provided by %s; serving %s (%s)", any_shadow ? "shadow" : "path",
-                           keys[i].key, who, ms_label(&x->bundles[x->files[winner].bundle]), reason);
+                           keys[i].key, who.p && !who.oom ? who.p : "", ms_label(&x->bundles[x->files[winner].bundle]),
+                           reason);
             }
+            free(who.p);
+            free(how);
         }
         i = j;
     }
@@ -2317,7 +2450,6 @@ static int ms_find(const ms_slot *slots, uint32_t mask, const char *name)
     uint32_t i;
     if (!slots) return -1;
     h = ms_hash_folded(name, &len);
-    if (len >= MS_NAME_MAX) return -1;
     for (i = (uint32_t)h & mask; slots[i].key; i = (i + 1) & mask)
         if (slots[i].h == h && ms_folded_eq(slots[i].key, name)) return slots[i].file;
     return -1;
@@ -2334,20 +2466,22 @@ static int ms_build_tables(ms_index *x)
     if (!keys) return 0;
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
-        char buf[MS_NAME_MAX];
+        char *alias;
         if (!f->served && !f->registry_keyed) continue;
         if (f->served) x->served_files++;
         if (f->is_shadow && f->served) x->shadows++;
         keys[n].key = f->request; keys[n].file = i; keys[n].alias = 0; n++;
         if (f->is_decl) {
-            char *alias;
-            _snprintf_s(buf, sizeof buf, _TRUNCATE, "decltree/%s", f->reg);
-            alias = ms_strdup(x, buf);
-            if (alias) { keys[n].key = alias; keys[n].file = i; keys[n].alias = 1; n++; }
+            size_t rl = strlen(f->reg);
+            alias = (char *)ms_alloc(x, rl + 10);
+            if (alias) {
+                memcpy(alias, "decltree/", 9);
+                memcpy(alias + 9, f->reg, rl + 1);
+                keys[n].key = alias; keys[n].file = i; keys[n].alias = 1; n++;
+            }
         }
-        if (ms_sanitize(f->request, buf, sizeof buf)) {
-            char *alias = ms_strdup(x, buf);
-            if (alias) { keys[n].key = alias; keys[n].file = i; keys[n].alias = 1; n++; }
+        if ((alias = (char *)ms_alloc(x, strlen(f->request) + 1)) != NULL && ms_sanitize(f->request, alias)) {
+            keys[n].key = alias; keys[n].file = i; keys[n].alias = 1; n++;
         }
     }
     qsort(keys, (size_t)n, sizeof *keys, ms_key_cmp);
@@ -2380,23 +2514,20 @@ static int ms_build_tables(ms_index *x)
     x->pmask = nslots - 1;
     for (i = 0; i < x->nfiles; ++i) {
         ms_file *f = &x->files[i];
-        char buf[MS_NAME_MAX];
         char *key;
         if (!f->served) continue;
-        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", f->ptype, f->pname);
-        ms_lower(buf);
-        if (ms_find(x->pslots, x->pmask, buf) >= 0) continue;
-        key = ms_strdup(x, buf);
-        if (key) ms_insert(x->pslots, x->pmask, key, i);
+        key = ms_pkey(x, f->ptype, f->pname);
+        if (key && ms_find(x->pslots, x->pmask, key) < 0) ms_insert(x->pslots, x->pmask, key, i);
     }
     return 1;
 }
 
 static int ms_provider(const ms_index *x, const char *type, const char *name)
 {
-    char buf[MS_NAME_MAX];
-    _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", type, name);
-    return ms_find(x->pslots, x->pmask, buf);
+    char *buf = sh_textf("%s\x01%s", type, name);
+    int at = buf ? ms_find(x->pslots, x->pmask, buf) : -1;
+    free(buf);
+    return at;
 }
 
 /* A need's served provider: the file whose provides (type, name) match, else
@@ -2406,15 +2537,16 @@ static int ms_provider(const ms_index *x, const char *type, const char *name)
  * source extension). Resolved once per index build. */
 static int ms_need_provider(const ms_index *x, const char *type, const char *name)
 {
-    char cand[2][SH_MB_REQUEST_MAX + 1];
-    int p = ms_provider(x, type, name), n, i;
+    char *cand[2];
+    int p = ms_provider(x, type, name), n, i, hit = -1;
     if (p >= 0) return p;
     n = sh_mb_need_requests(type, name, cand, 2);
-    for (i = 0; i < n; ++i) {
+    for (i = 0; i < n && hit < 0; ++i) {
         p = ms_find(x->slots, x->mask, cand[i]);
-        if (p >= 0 && x->files[p].served) return p;
+        if (p >= 0 && x->files[p].served) hit = p;
     }
-    return -1;
+    sh_mb_requests_free(cand, n);
+    return hit;
 }
 
 static void ms_resolve_needs(ms_index *x)
@@ -2732,15 +2864,18 @@ static sh_modserve_scope_source_fn volatile g_scope_source;
  * happen. Its own lock: ms_bundle_by_hash reads it under the scope lock and
  * without it. */
 static SRWLOCK g_place_lock = SRWLOCK_INIT;
-static char g_place[SH_MODSERVE_PLACE_CAP];
-static char g_place_prev[SH_MODSERVE_PLACE_CAP];
+static char *g_place;        /* malloc'd; NULL for the root */
+static char *g_place_prev;   /* malloc'd; NULL for the root */
 static int g_place_prev_valid;
 
-static void ms_scope_place(char *out, size_t cap)
+/* The loaded map's place (malloc'd: "" for the root), or NULL when memory runs out. */
+static char *ms_scope_place(void)
 {
+    char *out;
     AcquireSRWLockShared(&g_place_lock);
-    strncpy_s(out, cap, g_place, _TRUNCATE);
+    out = _strdup(g_place ? g_place : "");
     ReleaseSRWLockShared(&g_place_lock);
+    return out;
 }
 
 /* Why a path is served as it is (sh_modserve_layer_report). */
@@ -2805,11 +2940,8 @@ static int ms_avail_declared(ms_index *x, ms_avail *av)
     if (!av->keys) return 0;
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
-        char buf[MS_NAME_MAX];
         if (!x->bundles[f->bundle].admitted || InterlockedCompareExchange(&x->bundles[f->bundle].rank, 0, 0) < 0) continue;
-        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", f->ptype, f->pname);
-        ms_lower(buf);
-        av->keys[n] = ms_strdup(x, buf);
+        av->keys[n] = ms_pkey(x, f->ptype, f->pname);
         if (av->keys[n]) n++;
         av->keys[n++] = (char *)f->request;
     }
@@ -2900,8 +3032,19 @@ typedef struct ms_reg_memo {
 } ms_reg_memo;
 
 #define MS_REG_SOURCE_MAX 256
-static struct { char slot[SH_MR_SLOT_MAX]; char key[SH_MR_KEY_MAX]; } g_scope_choice[SH_MR_CHOICES_MAX];
-static int g_scope_nchoice;           /* the open map's choices between mods' edits (g_scope_lock) */
+typedef struct ms_scope_choice { char *slot, *key; } ms_scope_choice;   /* both malloc'd */
+static ms_scope_choice *g_scope_choice;   /* the open map's choices between mods' edits (g_scope_lock) */
+static int g_scope_nchoice;
+
+/* Forget the choices (under g_scope_lock). */
+static void ms_scope_choices_clear(void)
+{
+    int i;
+    for (i = 0; i < g_scope_nchoice; ++i) { free(g_scope_choice[i].slot); free(g_scope_choice[i].key); }
+    free(g_scope_choice);
+    g_scope_choice = NULL;
+    g_scope_nchoice = 0;
+}
 
 /* The bundle whose requirement gates gate what `f` serves: its own, or, for
  * a generated text, the first source with requirements whose edits changed
@@ -2923,23 +3066,32 @@ static int ms_live(const ms_index *x, const ms_file *f)
 
 static int ms_is_type(const char *t, const char *want) { return t && !_stricmp(t, want); }
 
-typedef struct ms_req_list { char (*reqs)[SH_MB_REQUEST_MAX + 1]; int n, cap; int oom; } ms_req_list;
+typedef struct ms_req_list { char **reqs; int n, cap; int oom; } ms_req_list;
 
 static void ms_req_list_add(void *context, const char *file, const sh_dt_counts *counts)
 {
     ms_req_list *l = (ms_req_list *)context;
-    char req[SH_MB_REQUEST_MAX + 1];
+    char *req;
     int k;
     (void)counts;
-    if (!file || strlen(file) >= sizeof req) return;
-    strcpy_s(req, sizeof req, file);
+    if (!file) return;
+    if (!(req = _strdup(file))) { l->oom = 1; return; }
     ms_lower(req);
-    for (k = 0; k < l->n; ++k) if (!strcmp(l->reqs[k], req)) return;
-    if (!ms_grow((void **)&l->reqs, &l->cap, l->n + 1, sizeof *l->reqs)) { l->oom = 1; return; }
-    strcpy_s(l->reqs[l->n++], SH_MB_REQUEST_MAX + 1, req);
+    for (k = 0; k < l->n; ++k) if (!strcmp(l->reqs[k], req)) { free(req); return; }
+    if (!ms_grow((void **)&l->reqs, &l->cap, l->n + 1, sizeof *l->reqs)) { free(req); l->oom = 1; return; }
+    l->reqs[l->n++] = req;
 }
 
-static int ms_req_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+static void ms_req_list_free(ms_req_list *l)
+{
+    int k;
+    for (k = 0; k < l->n; ++k) free(l->reqs[k]);
+    free(l->reqs);
+    l->reqs = NULL;
+    l->n = l->cap = 0;
+}
+
+static int ms_req_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 /* The edited copies of each admitted bundle (ms_file.edit): never served. */
 static void ms_mark_edits(ms_index *x)
@@ -2954,7 +3106,7 @@ static void ms_mark_edits(ms_index *x)
         for (k = b->first_file; k < b->first_file + b->file_count; ++k)
             for (j = 0; j < l.n; ++j)
                 if (!strcmp(x->files[k].request, l.reqs[j])) { x->files[k].edit = 1; break; }
-        free(l.reqs);
+        ms_req_list_free(&l);
     }
 }
 
@@ -2979,7 +3131,8 @@ static int ms_registry_files(ms_index *x)
     pb->hash = "";
     pb->name = "game files generated by the product from the declared mods' edits";
     pb->rank = -1;
-    strcpy_s(pb->cause, sizeof pb->cause, "the product's generated game files, per map");
+    pb->cause = _strdup("the product's generated game files, per map");
+    x->reg_made = 1;
     pb->first_file = x->nfiles;
     x->reg_bundle = x->nbundles;
     x->reg_first = x->nfiles;
@@ -3027,10 +3180,10 @@ static int ms_registry_files(ms_index *x)
     memset((void *)x->reg_xtext, 0, sizeof(char *) * (size_t)(x->reg_count + 1));
     memset(x->reg_xlen, 0, sizeof(size_t) * (size_t)(x->reg_count + 1));
     memset(x->reg_xread, 0, (size_t)(x->reg_count + 1));
-    free(l.reqs);
+    ms_req_list_free(&l);
     return 1;
 oom:
-    free(l.reqs);
+    ms_req_list_free(&l);
     return 0;
 }
 
@@ -3084,14 +3237,14 @@ static char *ms_reg_text(const ms_file *f, size_t *len)
 static void ms_registry_stock(ms_index *x, int k)
 {
     const ms_file *f = &x->files[x->reg_first + k];
-    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    char sha[SH_MB_HASH_HEX + 1];
     unsigned long long size = 0;
     unsigned char *bytes = NULL;
     size_t len = 0;
     if (x->reg_xread[k]) return;
     x->reg_xread[k] = 1;
     if (sh_mb_stock_identify(f->request, sha, &size) == SH_MB_STOCK_OK &&
-        sh_mb_stock_read(f->request, sha, &bytes, &len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) {
+        sh_mb_stock_read(f->request, sha, &bytes, &len, f->request, NULL) == SH_MB_STOCK_OK) {
         char *t = (char *)ms_alloc(x, len + 1);
         if (t) { memcpy(t, bytes, len); t[len] = 0; x->reg_xtext[k] = t; x->reg_xlen[k] = len; }
         HeapFree(GetProcessHeap(), 0, bytes);
@@ -3128,11 +3281,11 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
     sh_mr_target *tg = (sh_mr_target *)calloc((size_t)(x->reg_count + 1), sizeof *tg);
     char **owned = NULL;
     int nowned = 0, cowned = 0, i, k;
-    sh_mr_choice choices[SH_MR_CHOICES_MAX];
+    sh_mr_choice *choices = (sh_mr_choice *)calloc((size_t)(g_scope_nchoice + 1), sizeof *choices);
     sh_mr_result r;
     ms_reg_memo *m = NULL;
     memset(&r, 0, sizeof r);
-    if (!src || !decls || !derived || !tg) goto done;
+    if (!src || !decls || !derived || !tg || !choices) goto done;
     for (k = 0; k < x->reg_count; ++k) {
         ms_registry_stock(x, k);
         tg[k].request = x->files[x->reg_first + k].request;
@@ -3143,11 +3296,9 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
     for (i = 0; i < n; ++i) {
         ms_bundle *b = set[i];
         sh_mr_source *s = &src[i];
-        char who[200];
         int nd = 0, want_decls = b->edits && strstr(b->edits, SH_MB_REGISTRY_CONDUCTOR) != NULL;
-        _snprintf_s(who, sizeof who, _TRUNCATE, "%s", ms_label(b));
         s->key = b->id;
-        s->who = ms_strdup(x, who);
+        s->who = ms_strdup(x, ms_label(b));
         s->edits = b->edits;
         s->edits_len = b->edits_len;
         /* A shadow at a registry's name: its diff against the
@@ -3160,11 +3311,12 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
             if (q < 0 || q >= x->reg_count || !tg[q].text) continue;
             {
                 size_t len = 0;
-                char *t = ms_reg_text(f, &len), cause[300], *one;
+                char *t = ms_reg_text(f, &len), cause[SH_DT_CAUSE_CAP], *one;
                 if (!ms_reg_own(&owned, &nowned, &cowned, t)) continue;
                 one = sh_dt_diff(f->request, tg[q].text, tg[q].len, t, len, NULL, cause, sizeof cause);
                 if (!one) {
-                    ms_log("registry: %s: %s's copy of %s does not parse (%s); it adds nothing", who, b->id, f->request, cause);
+                    ms_log("registry: %s: %s's copy of %s does not parse (%s); it adds nothing", ms_label(b), b->id, f->request,
+                           cause);
                     continue;
                 }
                 {
@@ -3178,7 +3330,8 @@ static ms_reg_memo *ms_registry_generate(ms_index *x, ms_bundle **set, int n, ui
                 }
                 free(one);
                 if (!_stricmp(f->request, SH_MB_REGISTRY_CONDUCTOR)) want_decls = 1;
-                ms_log("registry: %s carries its own %s; its edits against the game's text are applied", who, f->request);
+                ms_log("registry: %s carries its own %s; its edits against the game's text are applied", ms_label(b),
+                       f->request);
             }
         }
         if (derived[i]) { s->edits = derived[i]; s->edits_len = strlen(derived[i]); }
@@ -3613,30 +3766,30 @@ int sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
     for (i = 0; hashes && i < nhashes; ++i) ms_scope_add_hash(hashes[i]);
     InterlockedExchange(&g_scope_open, map_open ? 1 : 0);
     if (!map_open) InterlockedExchange(&g_scope_play, 0);
-    if (!map_open) g_scope_nchoice = 0;   /* registry choices belong to the open map */
+    if (!map_open) ms_scope_choices_clear();   /* registry choices belong to the open map */
     changed = ms_scope_compute(x, 1);
     ReleaseSRWLockExclusive(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
     return changed;
 }
 
-int sh_modserve_place_norm(const char *place, char *out, size_t cap)
+char *sh_modserve_place_norm(const char *place)
 {
-    char seg[SH_MODSERVE_PLACE_CAP], made[SH_MODSERVE_PLACE_CAP];
+    char *seg, *made, *out = NULL;
     const char *s = place;
-    size_t pl = sizeof SH_MODSERVE_PLACES - 1;
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    if (!place || !place[0]) return 1;
+    size_t pl = sizeof SH_MODSERVE_PLACES - 1, n;
+    if (!place || !place[0]) return _strdup("");
     /* "maps\<segment>", either slash, or the segment alone. */
     if (!_strnicmp(s, SH_MODSERVE_PLACES, pl) && (s[pl] == '\\' || s[pl] == '/')) s += pl + 1;
-    if (strlen(s) >= sizeof seg) return 0;
-    strcpy_s(seg, sizeof seg, s);
-    for (size_t n = strlen(seg); n > 0 && (seg[n - 1] == '\\' || seg[n - 1] == '/'); --n) seg[n - 1] = 0;
+    if (!(seg = _strdup(s))) return NULL;
+    for (n = strlen(seg); n > 0 && (seg[n - 1] == '\\' || seg[n - 1] == '/'); --n) seg[n - 1] = 0;
     /* A segment is exactly what the store makes of a title: no separator, no
      * dot step, no character Windows refuses in a name. */
-    if (!seg[0] || !sh_ms_title_segment(seg, made, sizeof made) || strcmp(made, seg)) return 0;
-    return _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", SH_MODSERVE_PLACES, seg) > 0;
+    made = seg[0] ? sh_ms_title_segment(seg) : NULL;
+    if (made && !strcmp(made, seg)) out = sh_textf("%s\\%s", SH_MODSERVE_PLACES, seg);
+    free(made);
+    free(seg);
+    return out;
 }
 
 /* Make `norm` the loaded map's place and recompute the listing (it resolves
@@ -3646,16 +3799,21 @@ static int ms_place_apply(const char *norm, int remember)
 {
     ms_index *x;
     int changed = 0, same;
+    char *copy = _strdup(norm);
+    if (!copy) return 0;
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)g_index;
     AcquireSRWLockExclusive(&g_scope_lock);
     AcquireSRWLockExclusive(&g_place_lock);
+    same = !_stricmp(g_place ? g_place : "", norm);
     if (remember) {
-        strcpy_s(g_place_prev, sizeof g_place_prev, g_place);
+        free(g_place_prev);
+        g_place_prev = g_place;
         g_place_prev_valid = 1;
+    } else {
+        free(g_place);
     }
-    same = !_stricmp(g_place, norm);
-    strcpy_s(g_place, sizeof g_place, norm);
+    g_place = copy;
     ReleaseSRWLockExclusive(&g_place_lock);
     if (!same && x && g_scope_n) changed = ms_scope_compute(x, 1);
     ReleaseSRWLockExclusive(&g_scope_lock);
@@ -3665,35 +3823,40 @@ static int ms_place_apply(const char *norm, int remember)
 
 int sh_modserve_place_set(const char *place)
 {
-    char norm[SH_MODSERVE_PLACE_CAP];
-    if (!sh_modserve_place_norm(place, norm, sizeof norm)) return -1;
-    return ms_place_apply(norm, 0);
+    char *norm = sh_modserve_place_norm(place);
+    int changed;
+    if (!norm) return -1;
+    changed = ms_place_apply(norm, 0);
+    free(norm);
+    return changed;
 }
 
 int sh_modserve_place_load(const char *place)
 {
-    char norm[SH_MODSERVE_PLACE_CAP];
-    if (!sh_modserve_place_norm(place, norm, sizeof norm)) norm[0] = 0;
-    return ms_place_apply(norm, 1);
+    char *norm = sh_modserve_place_norm(place);
+    int changed = ms_place_apply(norm ? norm : "", 1);
+    free(norm);
+    return changed;
 }
 
 int sh_modserve_place_restore(void)
 {
-    char prev[SH_MODSERVE_PLACE_CAP];
+    char *prev;
     int valid;
     AcquireSRWLockExclusive(&g_place_lock);
     valid = g_place_prev_valid;
-    strcpy_s(prev, sizeof prev, g_place_prev);
+    prev = g_place_prev;
+    g_place_prev = NULL;
     g_place_prev_valid = 0;
     ReleaseSRWLockExclusive(&g_place_lock);
-    if (!valid) return 0;
-    (void)ms_place_apply(prev, 0);
-    return 1;
+    if (valid) (void)ms_place_apply(prev ? prev : "", 0);
+    free(prev);
+    return valid;
 }
 
-void sh_modserve_place_get(char *out, size_t cap)
+char *sh_modserve_place_get(void)
 {
-    if (out && cap) ms_scope_place(out, cap);
+    return ms_scope_place();
 }
 
 int sh_modserve_scope_set_choices(const char *const *slots, const char *const *keys, int n, int recompute)
@@ -3703,13 +3866,16 @@ int sh_modserve_scope_set_choices(const char *const *slots, const char *const *k
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)g_index;
     AcquireSRWLockExclusive(&g_scope_lock);
-    g_scope_nchoice = 0;
-    for (i = 0; slots && keys && i < n && g_scope_nchoice < SH_MR_CHOICES_MAX; ++i) {
-        if (!slots[i] || !keys[i] || !slots[i][0] || !keys[i][0]) continue;
-        strncpy_s(g_scope_choice[g_scope_nchoice].slot, sizeof g_scope_choice[0].slot, slots[i], _TRUNCATE);
-        strncpy_s(g_scope_choice[g_scope_nchoice].key, sizeof g_scope_choice[0].key, keys[i], _TRUNCATE);
-        g_scope_nchoice++;
-    }
+    ms_scope_choices_clear();
+    if (n > 0 && (g_scope_choice = (ms_scope_choice *)calloc((size_t)n, sizeof *g_scope_choice)) != NULL)
+        for (i = 0; slots && keys && i < n; ++i) {
+            ms_scope_choice *c = &g_scope_choice[g_scope_nchoice];
+            if (!slots[i] || !keys[i] || !slots[i][0] || !keys[i][0]) continue;
+            c->slot = _strdup(slots[i]);
+            c->key = _strdup(keys[i]);
+            if (!c->slot || !c->key) { free(c->slot); free(c->key); c->slot = c->key = NULL; continue; }
+            g_scope_nchoice++;
+        }
     if (recompute && x) changed = ms_scope_compute(x, 1);
     ReleaseSRWLockExclusive(&g_scope_lock);
     ReleaseSRWLockExclusive(&g_build_lock);
@@ -3720,7 +3886,6 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
 {
     const ms_index *x = g_index;
     const ms_reg_memo *m;
-    char line[800];
     int i, n = 0;
     if (!fn) return 0;
     AcquireSRWLockShared(&g_scope_lock);
@@ -3731,16 +3896,14 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
             const ms_file *f = &x->files[x->reg_first + i];
             const ms_body *b = m ? m->body[i] : NULL;
             if (b)
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry %s: generated, %zu bytes%s", f->request, b->len,
-                            f->registry_keyed ? "" : " (a bundle still carries this file; the generated text serves)");
+                ms_say(fn, context, "registry %s: generated, %zu bytes%s", f->request, b->len,
+                       f->registry_keyed ? "" : " (a bundle still carries this file; the generated text serves)");
             else
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry %s: the game's own file", f->request);
-            fn(context, line);
+                ms_say(fn, context, "registry %s: the game's own file", f->request);
             n++;
         }
         for (i = 0; m && i < m->nlines; ++i) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "registry: %s", m->lines[i]);
-            fn(context, line);
+            ms_say(fn, context, "registry: %s", m->lines[i]);
             n++;
         }
         {
@@ -3750,16 +3913,14 @@ int sh_modserve_registry_report(sh_modserve_line_fn fn, void *context)
                 const ms_bundle *b;
                 if (!f->edit || !x->bundles[f->bundle].admitted) continue;
                 b = &x->bundles[f->bundle];
-                _snprintf_s(line, sizeof line, _TRUNCATE, "registry edits %s: %s edits it; its copy is never "
+                ms_say(fn, context, "registry edits %s: %s edits it; its copy is never "
                             "served, its edits apply in maps that declare it", f->request, ms_label(b));
-                fn(context, line);
                 n++;
             }
         }
         for (i = 0; i < g_scope_nchoice; ++i) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "registry choice: %s -> %s", g_scope_choice[i].slot,
+            ms_say(fn, context, "registry choice: %s -> %s", g_scope_choice[i].slot,
                         g_scope_choice[i].key);
-            fn(context, line);
             n++;
         }
     }
@@ -3838,16 +3999,12 @@ int sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *ou
     out->requirements = b->req_text && (b->req_ncvars || b->req_nact || b->req_ndeact);
     out->requirements_live = out->requirements && !b->req_lost &&
                              !InterlockedCompareExchange((volatile LONG *)&b->req_off, 0, 0);
-    if (b->scope_editor) strncpy_s(out->editor_path, sizeof out->editor_path, b->scope_editor, _TRUNCATE);
+    out->editor_path = b->scope_editor;
     return 1;
 }
 
 /* A mod in a report a player reads (sh_mods map, doctor): its name, never
  * its salt or a hash. */
-static void ms_who(const ms_bundle *b, char *out, size_t cap)
-{
-    _snprintf_s(out, cap, _TRUNCATE, "%s", ms_label(b));
-}
 
 /* 1 when the providers of winner `i`'s path carry more than one set of bytes. */
 static int ms_path_differs(const ms_index *x, int i)
@@ -3866,7 +4023,6 @@ static int ms_path_differs(const ms_index *x, int i)
  * with the same bytes are counted. */
 static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *context)
 {
-    char line[900];
     int i, lines = 0, shown = 0, declared = 0, editor = 0, game = 0, multi = 0, same = 0;
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
@@ -3883,77 +4039,70 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
         why = InterlockedCompareExchange((volatile LONG *)&f->scope_alt, 0, 0) == -1 ? MS_WHY_NONE : f->scope_why;
         if (!sh_modserve_scope_enabled()) why = -1;
         {
-            char who[200], others[400], merged[400], tail[860];
-            size_t at = 0, mt = 0;
+            ms_text others = { NULL, 0, 0, 0 }, merged = { NULL, 0, 0, 0 };
             size_t blen = 0;
             int composed = p >= 0 && ms_body_of(&x->files[p], &blen) != NULL;
-            others[0] = merged[0] = 0;
             for (k = -1; k < f->alt_count; ++k) {
-                int c = k < 0 ? i : x->alts[f->alt_first + k], w;
+                int c = k < 0 ? i : x->alts[f->alt_first + k];
                 const ms_bundle *cb = &x->bundles[x->files[c].bundle];
-                char one[200];
+                const char *one = ms_label(cb);
+                ms_text *into;
                 if (c == p) continue;
-                ms_who(cb, one, sizeof one);
                 /* A composed text carries the entries of the other providers that serve for the listing. */
-                if (composed && (why < 0 || ((cb->sv & ms_sv_class(&x->files[c])) && (cb->rank >= 0 || ms_scope_always(cb))))) {
-                    w = _snprintf_s(merged + mt, sizeof merged - mt, _TRUNCATE, "%s%s", mt ? ", " : "", one);
-                    if (w > 0) mt += (size_t)w;
-                    continue;
-                }
-                w = _snprintf_s(others + at, sizeof others - at, _TRUNCATE, "%s%s", at ? ", " : "", one);
-                if (w < 0) break;
-                at += (size_t)w;
+                into = composed && (why < 0 || ((cb->sv & ms_sv_class(&x->files[c])) && (cb->rank >= 0 || ms_scope_always(cb))))
+                     ? &merged : &others;
+                if (into->n) ms_text_put(into, ", ", 2);
+                ms_text_put(into, one, strlen(one));
             }
-            _snprintf_s(tail, sizeof tail, _TRUNCATE, "%s%s%s%s", mt ? "; with the entries of: " : "", merged,
-                        at ? "; not used: " : "", others);
-            if (p >= 0) {
-                const ms_bundle *b = &x->bundles[x->files[p].bundle];
-                const char *text = why < 0 ? "map scope is off" :
-                                   composed && b->rank < 0 ? "editor-time content, composed with the other editor-time providers" :
-                                   g_why_text[why];
-                ms_who(b, who, sizeof who);
-                if (b->rank >= 0)
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s, declared (row %ld): %s%s",
-                                f->request, who, (long)b->rank + 1, text, tail);
-                else
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s%s", f->request, who, text, tail);
-            } else
-                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not used: %s", f->request,
-                            g_why_text[MS_WHY_NONE], others);
+            ms_text_put(&others, "", 1);
+            ms_text_put(&merged, "", 1);
+            {
+                const char *ot = others.p && !others.oom ? others.p : "", *mt = merged.p && !merged.oom ? merged.p : "";
+                if (p >= 0) {
+                    const ms_bundle *b = &x->bundles[x->files[p].bundle];
+                    const char *text = why < 0 ? "map scope is off" :
+                                       composed && b->rank < 0 ? "editor-time content, composed with the other editor-time providers" :
+                                       g_why_text[why];
+                    if (b->rank >= 0)
+                        ms_say(fn, context, "serving: %s: %s, declared (row %ld): %s%s%s%s%s", f->request, ms_label(b),
+                               (long)b->rank + 1, text, mt[0] ? "; with the entries of: " : "", mt,
+                               ot[0] ? "; not used: " : "", ot);
+                    else
+                        ms_say(fn, context, "serving: %s: %s: %s%s%s%s%s", f->request, ms_label(b), text,
+                               mt[0] ? "; with the entries of: " : "", mt, ot[0] ? "; not used: " : "", ot);
+                } else
+                    ms_say(fn, context, "serving: %s: the game (%s); not used: %s", f->request, g_why_text[MS_WHY_NONE], ot);
+            }
+            free(others.p);
+            free(merged.p);
         }
-        fn(context, line);
         lines++;
         shown++;
     }
     if (multi > shown) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several mods provide with different bytes",
+        ms_say(fn, context, "serving: %d more path(s) several mods provide with different bytes",
                     multi - shown);
-        fn(context, line);
         lines++;
     }
     if (same) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several mods carry with the same bytes; one copy "
+        ms_say(fn, context, "serving: %d path(s) several mods carry with the same bytes; one copy "
                     "is used when any of them may be", same);
-        fn(context, line);
         lines++;
     }
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "serving: %d path(s) from mods the open map uses, %d from mods it does not use (Toybox names, "
+    ms_say(fn, context, "serving: %d path(s) from mods the open map uses, %d from mods it does not use (Toybox names, "
                 "surfaces, editor-time content), %d left to the game", declared, editor, game);
-    fn(context, line);
     return lines + 1;
 }
 
 int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
 {
     const ms_index *x = g_index;
-    char line[900];
     int i, k, lines = 0, on = sh_modserve_scope_enabled();
     if (!fn) return 0;
     for (i = 0; x && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         sh_modserve_scope_info si;
-        char what[160], who[300], state[400];
+        char what[160], *state;
         int builds = 0, first = 1;
         if (!b->admitted || !sh_modserve_bundle_scope(b->hash, &si)) continue;
         /* One row per build of a salt: a header once, before its first build. */
@@ -3963,31 +4112,29 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s is installed %d times: your own copy and the copies downloaded maps "
+            ms_say(fn, context, "scope: %s is installed %d times: your own copy and the copies downloaded maps "
                         "brought. Each map uses its own copy.", ms_label(b), builds);
-            fn(context, line);
             lines++;
         }
-        ms_who(b, who, sizeof who);
         _snprintf_s(what, sizeof what, _TRUNCATE, " (%d name%s, %d shadow%s, %d surface%s%s)", si.names, si.names == 1 ? "" : "s",
                     si.shadows, si.shadows == 1 ? "" : "s", si.surfaces, si.surfaces == 1 ? "" : "s",
                     si.requirements ? ", requirements" : "");
-        if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
-        else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
-        else if (si.inert) strcpy_s(state, sizeof state, "not used here: this map uses its own copy of this mod");
+        if (!on) state = _strdup("map scope is off: serves everything it carries");
+        else if (si.listed) state = sh_textf("declared by the open map (row %d): serves everything it carries", si.rank + 1);
+        else if (si.inert) state = _strdup("not used here: this map uses its own copy of this mod");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
-            _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
-                        "the rest only in maps that declare it", si.editor_path);
-        else if (si.play) strcpy_s(state, sizeof state, "not declared by the map being played: serves nothing");
+            state = sh_textf("editor-time content (%s): its editor tweaks serve in every map; the rest only in maps that "
+                             "declare it", si.editor_path ? si.editor_path : "");
+        else if (si.play) state = _strdup("not declared by the map being played: serves nothing");
         else if (!si.newest)
-            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: a build in %s; it serves only for that map",
-                        si.map_open ? " by the open map" : " (no map is open)", b->place ? b->place : "a map's place");
+            state = sh_textf("not declared%s: a build in %s; it serves only for that map",
+                             si.map_open ? " by the open map" : " (no map is open)", b->place ? b->place : "a map's place");
         else
-            _snprintf_s(state, sizeof state, _TRUNCATE, "not declared%s: its names serve for the Toybox and its surfaces "
-                        "serve; its shadows do not", si.map_open ? " by the open map" : " (no map is open)");
-        _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s%s: %s%s", who, what, state,
+            state = sh_textf("not declared%s: its names serve for the Toybox and its surfaces serve; its shadows do not",
+                             si.map_open ? " by the open map" : " (no map is open)");
+        ms_say(fn, context, "scope: %s%s: %s%s", ms_label(b), what, state ? state : "(out of memory)",
                     si.requirements && !si.listed && si.requirements_live ? "; its requirements stay live because it adds Toybox rows" : "");
-        fn(context, line);
+        free(state);
         lines++;
     }
     if (!on) { fn(context, "scope: map scope is off; every bundle serves in every map"); lines++; }
@@ -4110,20 +4257,22 @@ int sh_modserve_bank_patch_id(unsigned char *bytes, size_t len, const char *stem
 /* Create every directory of `path` (a file path) below the mods root. */
 static int ms_mkdirs_for(const char *path)
 {
-    char dir[MS_PATH_MAX];
-    wchar_t wide[MS_PATH_MAX + 8];
-    char *p;
-    strncpy_s(dir, sizeof dir, path, _TRUNCATE);
-    p = strrchr(dir, '\\');
-    if (!p) return 0;
+    char *dir = _strdup(path), *p;
+    wchar_t *wide;
+    int ok;
+    if (!dir || !(p = strrchr(dir, '\\'))) { free(dir); return 0; }
     *p = 0;
     for (p = dir + 3; *p; ++p) {
         if (*p != '\\') continue;
         *p = 0;
-        if (ms_wide(dir, wide, sizeof wide / sizeof wide[0])) CreateDirectoryW(wide, NULL);
+        if ((wide = ms_wide(dir)) != NULL) { CreateDirectoryW(wide, NULL); free(wide); }
         *p = '\\';
     }
-    return ms_wide(dir, wide, sizeof wide / sizeof wide[0]) && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    wide = ms_wide(dir);
+    ok = wide && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    free(wide);
+    free(dir);
+    return ok;
 }
 
 /* Write `bytes` at `path` unless it already holds exactly them. 1 the file
@@ -4133,23 +4282,26 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
 {
     size_t have_len = 0;
     unsigned char *have = ms_read_whole(path, MS_ANY_SIZE, &have_len);
-    char tmp[MS_PATH_MAX];
-    wchar_t wide[MS_PATH_MAX + 8], wtmp[MS_PATH_MAX + 8];
+    char *tmp;
+    wchar_t *wide = NULL, *wtmp = NULL;
     HANDLE h;
     DWORD put = 0;
-    int same = have && have_len == len && !memcmp(have, bytes, len), ok;
+    int same = have && have_len == len && !memcmp(have, bytes, len), ok = 0;
     if (have) HeapFree(GetProcessHeap(), 0, have);
     if (same) return 1;
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
-    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0]) ||
-        !ms_wide(tmp, wtmp, sizeof wtmp / sizeof wtmp[0]))
-        return 0;
-    h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
-    CloseHandle(h);
-    if (ok) ok = MoveFileExW(wtmp, wide, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-    if (!ok) DeleteFileW(wtmp);
+    tmp = sh_textf("%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
+    if (tmp && ms_mkdirs_for(path) && (wide = ms_wide(path)) != NULL && (wtmp = ms_wide(tmp)) != NULL) {
+        h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
+            CloseHandle(h);
+            if (ok) ok = MoveFileExW(wtmp, wide, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+            if (!ok) DeleteFileW(wtmp);
+        }
+    }
+    free(tmp);
+    free(wide);
+    free(wtmp);
     return ok;
 }
 
@@ -4157,25 +4309,28 @@ static int ms_write_served(const char *path, const unsigned char *bytes, size_t 
  * from. Returns the count. */
 static int ms_prune_served_dir(const ms_index *x, const char *sub)
 {
-    char dir[MS_PATH_MAX], path[MS_PATH_MAX], name[MS_PATH_MAX];
-    wchar_t wide[MS_PATH_MAX + 8];
+    char *dir = sh_textf("%s\\.served\\%s", x->root, sub), *pattern = dir ? sh_textf("%s\\*", dir) : NULL;
+    wchar_t *wide = pattern ? ms_wide(pattern) : NULL;
     WIN32_FIND_DATAW fd;
-    HANDLE h;
+    HANDLE h = wide ? FindFirstFileW(wide, &fd) : INVALID_HANDLE_VALUE;
     int removed = 0, i, used;
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.served\\%s", x->root, sub);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\*", dir);
-    if (!ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
-    h = FindFirstFileW(wide, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd.cFileName, -1, name, (int)sizeof name, NULL, NULL))
-            continue;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
-        for (used = 0, i = 0; i < x->nfiles && !used; ++i) used = x->files[i].disk && !_stricmp(x->files[i].disk, path);
-        if (!used && ms_wide(path, wide, sizeof wide / sizeof wide[0]) && DeleteFileW(wide)) removed++;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+    free(pattern);
+    free(wide);
+    while (h != INVALID_HANDLE_VALUE) {
+        char *name = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? NULL : sh_mb_utf8(fd.cFileName);
+        char *path = name ? sh_textf("%s\\%s", dir, name) : NULL;
+        if (path) {
+            for (used = 0, i = 0; i < x->nfiles && !used; ++i) used = x->files[i].disk && !_stricmp(x->files[i].disk, path);
+            if (!used && (wide = ms_wide(path)) != NULL) {
+                if (DeleteFileW(wide)) removed++;
+                free(wide);
+            }
+        }
+        free(path);
+        free(name);
+        if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+    }
+    free(dir);
     return removed;
 }
 
@@ -4193,7 +4348,7 @@ int sh_modserve_served_prune(void)
      * time): the folder is left whole. The mark is named for the folder, as
      * its store lock is (store_lock.h), so a game using another mods folder,
      * or a test's own folder, is never mistaken for one. */
-    wroot = x && x->root[0] ? sh_mb_wpath(x->root) : NULL;
+    wroot = x && x->root && x->root[0] ? sh_mb_wpath(x->root) : NULL;
     if (wroot && sh_store_lock_name(wroot, name, 64)) {
         wchar_t hex[17];
         wcscpy_s(hex, 17, name + wcslen(name) - 16);
@@ -4220,15 +4375,16 @@ int sh_modserve_served_prune(void)
  * other file as files\<sha16>.<extension>. Size and blob follow. */
 static int ms_serve_rewritten(ms_index *x, ms_file *f, const unsigned char *bytes, size_t len, const char *bank_stem)
 {
-    char path[MS_PATH_MAX], blob[SH_MB_HASH_HEX + 1], *p;
+    char *path, blob[SH_MB_HASH_HEX + 1], *p;
     const char *dot = strrchr(f->request, '.'), *slash = strrchr(f->request, '/');
     sh_mb_sha256_hex(bytes, len, blob);
-    if (bank_stem) _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.served\\banks\\%s.bnk", x->root, bank_stem);
-    else _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.served\\files\\%.16s%s", x->root, blob,
-                     dot && (!slash || dot > slash) ? dot : "");
+    if (bank_stem) path = sh_textf("%s\\.served\\banks\\%s.bnk", x->root, bank_stem);
+    else path = sh_textf("%s\\.served\\files\\%.16s%s", x->root, blob, dot && (!slash || dot > slash) ? dot : "");
+    if (!path) return 0;
     for (p = path; *p; ++p) if (*p == '/') *p = '\\';
-    if (!ms_write_served(path, bytes, len)) return 0;
+    if (!ms_write_served(path, bytes, len)) { free(path); return 0; }
     f->disk = ms_strdup(x, path);
+    free(path);
     f->blob = ms_strdup(x, blob);
     f->size = (uint64_t)len;
     return f->disk && f->blob;
@@ -4253,7 +4409,7 @@ static void ms_bank_stems(ms_index *x)
         }
         for (i = b->first_file; i < b->first_file + b->file_count && i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
-            char stem[SH_MB_BANK_STEM_MAX + 1], req[SH_MB_REQUEST_MAX + 1];
+            char stem[SH_MB_BANK_STEM_MAX + 1], req[SH_MB_BANK_STEM_MAX + 64];
             unsigned char *bytes;
             size_t len = 0;
             if (f->stock || !sh_mb_bank_stem(f->request, stem, sizeof stem)) continue;
@@ -4324,10 +4480,18 @@ int sh_modserve_index_build(const char *mods_root)
     if (!mods_root) return -1;
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)calloc(1, sizeof *x);
-    if (!x) { ReleaseSRWLockExclusive(&g_build_lock); ms_log("index refused: out of memory"); return -1; }
-    strncpy_s(x->root, sizeof x->root, mods_root, _TRUNCATE);
-    strncpy_s(g_last_root, sizeof g_last_root, mods_root, _TRUNCATE);
-    ms_scan_folder(x, mods_root, "", 0, NULL);
+    if (x) x->root = _strdup(mods_root);
+    if (!x || !x->root) {
+        free(x);
+        ReleaseSRWLockExclusive(&g_build_lock);
+        ms_log("index refused: out of memory");
+        return -1;
+    }
+    if (!g_last_root || strcmp(g_last_root, mods_root)) {
+        char *last = _strdup(mods_root);
+        if (last) { free(g_last_root); g_last_root = last; }
+    }
+    ms_scan_folder(x, mods_root);
     ms_one_per_area(x);
     ms_bank_stems(x);
     ms_mark_edits(x);
@@ -4433,10 +4597,10 @@ void sh_modserve_index_link_add(sh_modserve_index_link *link, sh_modserve_index_
 
 int sh_modserve_index_boot(void)
 {
-    char root[MS_PATH_MAX];
     /* The store's own root (modstore.c), in UTF-8 as the store writes it:
      * the ANSI code page cannot spell every profile path. */
-    if (!sh_ms_root(root, sizeof root)) {
+    const char *root = sh_ms_root();
+    if (!root) {
         ms_log("index empty: the user-data folder is unavailable");
         return 0;
     }
@@ -4451,12 +4615,15 @@ int sh_modserve_index_boot(void)
 
 int sh_modserve_index_rescan(void)
 {
-    char root[MS_PATH_MAX];
+    char *root = NULL;
+    int admitted;
     AcquireSRWLockShared(&g_build_lock);
-    strncpy_s(root, sizeof root, g_last_root, _TRUNCATE);
+    if (g_last_root) root = _strdup(g_last_root);
     ReleaseSRWLockShared(&g_build_lock);
-    if (!root[0]) return sh_modserve_index_boot();
-    return sh_modserve_index_build(root);
+    if (!root || !root[0]) { free(root); return sh_modserve_index_boot(); }
+    admitted = sh_modserve_index_build(root);
+    free(root);
+    return admitted;
 }
 
 int sh_modserve_active(void)
@@ -4550,8 +4717,8 @@ static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
     unsigned char *buf = NULL;
     *len = 0;
     if (f->stock) {
-        char cause[SH_MB_CAUSE_MAX], hex[SH_MB_HASH_HEX + 1];
-        if (sh_mb_stock_read(f->stock, f->blob, &buf, len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) return buf;
+        char hex[SH_MB_HASH_HEX + 1];
+        if (sh_mb_stock_read(f->stock, f->blob, &buf, len, f->request, NULL) == SH_MB_STOCK_OK) return buf;
         buf = ms_read_whole(f->disk, MS_ANY_SIZE, len);
         if (buf) {
             sh_mb_sha256_hex(buf, *len, hex);
@@ -4856,10 +5023,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
             int p = nd->file;
             if (p < 0) {
                 if (ms_need_blocks(nd->name) && !cause[at]) {
-                    char buf[MS_CAUSE_MAX];
-                    _snprintf_s(buf, sizeof buf, _TRUNCATE, "needs %s '%s', which no admitted bundle provides",
-                                nd->type, nd->name);
-                    cause[at] = ms_strdup((ms_index *)x, buf);
+                    char *buf = sh_textf("needs %s '%s', which no admitted bundle provides", nd->type, nd->name);
+                    cause[at] = buf ? ms_strdup((ms_index *)x, buf) : NULL;
+                    free(buf);
                     if (!cause[at]) cause[at] = "needs a file no installed mod provides";
                 }
                 continue;
@@ -4877,9 +5043,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
                 const ms_need *nd = &x->needs[f->need_first + k];
                 int p = nd->file;
                 if (p >= 0 && in_plan[p] && cause[p]) {
-                    char buf[MS_CAUSE_MAX];
-                    _snprintf_s(buf, sizeof buf, _TRUNCATE, "needs %s '%s', which is blocked", nd->type, nd->name);
-                    cause[i] = ms_strdup((ms_index *)x, buf);
+                    char *buf = sh_textf("needs %s '%s', which is blocked", nd->type, nd->name);
+                    cause[i] = buf ? ms_strdup((ms_index *)x, buf) : NULL;
+                    free(buf);
                     if (!cause[i]) cause[i] = "needs a blocked decl";
                     changed = 1;
                     break;
@@ -4978,18 +5144,20 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
  * folder of the map's place at that hash; never another map's place. */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only)
 {
-    int i, round;
-    char place[SH_MODSERVE_PLACE_CAP];
+    int i, round, at = -1;
+    const char *place;
     if (!x || !hash) return -1;
-    ms_scope_place(place, sizeof place);
-    for (round = 0; round < (place[0] ? 2 : 1); ++round)
-        for (i = 0; i < x->nbundles; ++i) {
+    AcquireSRWLockShared(&g_place_lock);
+    place = g_place ? g_place : "";
+    for (round = 0; at < 0 && round < (place[0] ? 2 : 1); ++round)
+        for (i = 0; at < 0 && i < x->nbundles; ++i) {
             const ms_bundle *b = &x->bundles[i];
             if (!b->hash || _stricmp(b->hash, hash) || (admitted_only && !b->admitted)) continue;
             if (round == 0 ? b->place != NULL : (!b->place || _stricmp(b->place, place))) continue;
-            return i;
+            at = i;
         }
-    return -1;
+    ReleaseSRWLockShared(&g_place_lock);
+    return at;
 }
 
 /* A build to describe, not to serve (bundle scope and state, the logs that
@@ -5146,14 +5314,14 @@ static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
  * resolved, since the registry does not know a stock decl whose source is not
  * registered yet (the player hands' md6Def at map activation). */
 static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_modserve_engine_ops *ops,
-                                 int strict, char *model, size_t cap)
+                                 int strict, char **model)
 {
     size_t len = 0;
     unsigned char *text = ms_file_bytes(f, &len);
     mc_lex l;
     mc_tok t;
     int found = 0;
-    model[0] = 0;
+    *model = NULL;
     if (!text) return 0;
     l.t = (const char *)text;
     l.len = len;
@@ -5168,8 +5336,8 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
         if (mc_next(&l).kind != MC_LB) continue;
         for (;;) {
             mc_tok m = mc_next(&l), v;
-            char name[MS_NAME_MAX], key[MS_NAME_MAX + 8];
-            int p, engine;
+            char *name, *key;
+            int p, engine, resolved = 0;
             if (m.kind == MC_RB || m.kind == MC_END || m.kind == MC_BAD) break;
             if (m.kind != MC_STR) continue;
             if (pairs) {
@@ -5177,24 +5345,24 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
                 if (v.kind != MC_STR) continue;
                 mc_next(&l);
             }
-            if (m.n < 3 || m.n - 2 >= sizeof name) continue;
-            memcpy(name, m.p + 1, m.n - 2);
-            name[m.n - 2] = 0;
+            if (m.n < 3 || !(name = sh_textn(m.p + 1, m.n - 2))) continue;
             ms_lower(name);
-            _snprintf_s(key, sizeof key, _TRUNCATE, "md6def\x01%s", name);
-            p = ms_find(x->pslots, x->pmask, key);
-            if (p >= 0 && x->files[p].served && !x->files[p].withdrawn) continue;
-            engine = ops->decl_found ? ops->decl_found(ops->context, "md6Def", name) : -1;
-            if (engine == 1) continue;
-            if (engine != 0 || !strict) {
-                if (ops->source_registered(ops->context, "md6Def", name) != 0) continue;
-                if (ops->stock_exists) {
-                    char request[MS_NAME_MAX + 32];
-                    _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/md6def/%s.decl", name);
-                    if (ops->stock_exists(ops->context, request) != 0) continue;
+            key = sh_textf("md6def\x01%s", name);
+            p = key ? ms_find(x->pslots, x->pmask, key) : -1;
+            free(key);
+            if (p >= 0 && x->files[p].served && !x->files[p].withdrawn) resolved = 1;
+            engine = resolved ? 1 : ops->decl_found ? ops->decl_found(ops->context, "md6Def", name) : -1;
+            if (engine == 1) resolved = 1;
+            if (!resolved && (engine != 0 || !strict)) {
+                if (ops->source_registered(ops->context, "md6Def", name) != 0) resolved = 1;
+                else if (ops->stock_exists) {
+                    char *request = sh_textf("generated/decls/md6def/%s.decl", name);
+                    if (request && ops->stock_exists(ops->context, request) != 0) resolved = 1;
+                    free(request);
                 }
             }
-            strncpy_s(model, cap, name, _TRUNCATE);
+            if (resolved) { free(name); continue; }
+            *model = name;
             found = 1;
             break;
         }
@@ -5203,16 +5371,16 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
     return found;
 }
 
-int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char *model, size_t cap)
+int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char **model)
 {
     const ms_index *x = NULL;
     const ms_file *f;
-    if (!model || !cap) return -1;
-    model[0] = 0;
+    if (!model) return -1;
+    *model = NULL;
     if (!ops || !ops->source_registered) return -1;
     f = ms_lookup_file(&x, request);
     if (!f || !f->is_decl || !f->ptype || _stricmp(f->ptype, "animWeb")) return -1;
-    return ms_animweb_unresolved(x, f, ops, 1, model, cap);
+    return ms_animweb_unresolved(x, f, ops, 1, model);
 }
 
 int sh_modserve_withdraw(const char *request, const char *type, const char *name, const char *why)
@@ -5231,14 +5399,19 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
 
 int sh_modserve_error_names_decl(const char *text, const char *type, const char *name)
 {
-    char hay[1024], needle[MS_NAME_MAX + 48];
+    char *hay, *needle;
     size_t i;
+    int named;
     if (!text || !type || !name || !text[0]) return 0;
-    if (_snprintf_s(needle, sizeof needle, _TRUNCATE, "decls/%s/%s.decl", type, name) < 0) return 0;
+    needle = sh_textf("decls/%s/%s.decl", type, name);
+    hay = _strdup(text);
+    if (!needle || !hay) { free(needle); free(hay); return 0; }
     for (i = 0; needle[i]; ++i) needle[i] = needle[i] == '\\' ? '/' : (char)ms_fold(needle[i]);
-    for (i = 0; i + 1 < sizeof hay && text[i]; ++i) hay[i] = text[i] == '\\' ? '/' : (char)ms_fold(text[i]);
-    hay[i] = 0;
-    return strstr(hay, needle) != NULL;
+    for (i = 0; hay[i]; ++i) hay[i] = hay[i] == '\\' ? '/' : (char)ms_fold(hay[i]);
+    named = strstr(hay, needle) != NULL;
+    free(needle);
+    free(hay);
+    return named;
 }
 
 /* ------------------------------------------------------------------ resource watermark */
@@ -6211,7 +6384,8 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
         while ((t = mc_next(&l)).kind != MC_END) {
             const char *type = NULL;
             mc_tok v;
-            char name[MS_NAME_MAX];
+            char *name, *rq;
+            int surface;
             if (t.kind != MC_WORD) continue;
             if (t.n == 11 && !_strnicmp(t.p, "animWebDecl", 11)) type = "animWeb";
             else if (t.n == 15 && !_strnicmp(t.p, "renderModelName", 15)) type = "md6Def";
@@ -6220,20 +6394,21 @@ int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn,
             if (mc_peek(&l).kind != MC_EQ) continue;
             mc_next(&l);
             v = mc_next(&l);
-            if (v.kind != MC_STR || v.n < 3 || v.n - 2 >= sizeof name) continue;
-            memcpy(name, v.p + 1, v.n - 2);
-            name[v.n - 2] = 0;
+            if (v.kind != MC_STR || v.n < 3 || !(name = sh_textn(v.p + 1, v.n - 2))) continue;
             /* A render model that is not an md6 is not a decl. */
-            if (!strcmp(type, "md6Def") && (strlen(name) < 4 || _stricmp(name + strlen(name) - 4, ".md6"))) continue;
-            /* A surface is the game's own decl: the game parses and keeps it. */
-            {
-                char rq[MS_NAME_MAX + 48];
-                if (_snprintf_s(rq, sizeof rq, _TRUNCATE, "generated/decls/%s/%s.decl", type, name) > 0 &&
-                    sh_modserve_is_surface(rq))
-                    continue;
+            if (!strcmp(type, "md6Def") && (strlen(name) < 4 || _stricmp(name + strlen(name) - 4, ".md6"))) {
+                free(name);
+                continue;
             }
-            fn(context, type, name, s->name);
-            calls++;
+            /* A surface is the game's own decl: the game parses and keeps it. */
+            rq = sh_textf("generated/decls/%s/%s.decl", type, name);
+            surface = rq && sh_modserve_is_surface(rq);
+            free(rq);
+            if (!surface) {
+                fn(context, type, name, s->name);
+                calls++;
+            }
+            free(name);
         }
         HeapFree(GetProcessHeap(), 0, text);
     }
@@ -6272,12 +6447,12 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
         }
         {
             int known = ops->source_registered(ops->context, s->type, s->name) == 1;
-            char model[MS_NAME_MAX];
+            char *model = NULL;
             /* An animWeb whose models block names a model nothing provides is
              * refused by the engine's parse (a C++ throw per load). Its file
              * is withdrawn from serving: a stock decl it shadowed serves
              * again, and a new name is never registered. */
-            if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, !known, model, sizeof model)) {
+            if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, !known, &model)) {
                 InterlockedExchange(&f->withdrawn, 1);
                 if (known && s->shadow) {
                     InterlockedExchange(&f->reg_state, 1);
@@ -6297,6 +6472,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                                "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
                                ms_label(&x->bundles[f->bundle]), f->request, model);
                 }
+                free(model);
                 continue;
             }
             if (known) {
@@ -6446,21 +6622,37 @@ int sh_modserve_plan_unvisited(const sh_modserve_plan *plan)
  * displaced; a cvar is restored only when no bundle needs it any more and
  * nobody else changed it since. Written by the pass (main thread) under
  * g_req_lock; the reports and an index build read it shared. */
-#define MS_REQ_ORIGINAL_MAX 512
-#define MS_WHO_MAX          200
 typedef struct ms_held {
     char *name;                           /* malloc'd, any length */
     char *want;                           /* the value the accepted bundles ask (malloc'd) */
-    char original[MS_REQ_ORIGINAL_MAX];   /* what this layer displaced (owned only) */
-    char owner[MS_WHO_MAX];               /* the name of the earliest install asking it */
+    char *original;                       /* what this layer displaced, whole (owned only; malloc'd) */
+    char *owner;                          /* the name of the earliest install asking it (malloc'd) */
     int needed;                           /* an accepted bundle asks it (this pass) */
     int owned;                            /* this layer changed it and restores `original` */
     int state;                            /* 1 live, 0 not applied yet, -1 not live */
-    char why[120];                        /* not live: the cause */
+    char *why;                            /* not live: the cause (malloc'd), or NULL */
 } ms_held;
 
+/* Replace *dst with a copy of `text` (NULL clears it). */
+static void ms_req_set(char **dst, const char *text)
+{
+    char *copy = text ? _strdup(text) : NULL;
+    if (text && !copy) return;
+    free(*dst);
+    *dst = copy;
+}
+
+static void ms_held_free(ms_held *h)
+{
+    free(h->name);
+    free(h->want);
+    free(h->original);
+    free(h->owner);
+    free(h->why);
+}
+
 typedef struct ms_active {
-    char id[100], who[MS_WHO_MAX];
+    char id[100], *who;                   /* who: the mod's name (malloc'd) */
     char **deact;                         /* its deactivate lines, run when it stops (malloc'd) */
     int ndeact, act_ran, act_total;
 } ms_active;
@@ -6533,40 +6725,57 @@ static void ms_active_drop(int i)
     int k;
     for (k = 0; k < g_active[i].ndeact; ++k) free(g_active[i].deact[k]);
     free(g_active[i].deact);
+    free(g_active[i].who);
     memmove(&g_active[i], &g_active[i + 1], sizeof *g_active * (size_t)(g_nactive - i - 1));
     g_nactive--;
 }
 
 /* A bundle's cvars are live when each one's entry is live at its value.
  * Caller holds g_req_lock (shared is enough: it writes only the bundle). */
-static void ms_req_mark_bundle(ms_bundle *b)
+/* Set the bundle's requirements cause to `text` (NULL: none), kept in the
+ * arena; an unchanged text keeps the string it has. */
+static void ms_req_cause_set(ms_index *x, ms_bundle *b, const char *text)
+{
+    if (!text) { b->req_cause = NULL; return; }
+    if (b->req_cause && !strcmp(b->req_cause, text)) return;
+    b->req_cause = ms_strdup(x, text);
+    if (!b->req_cause) b->req_cause = "requirements are not live";
+}
+
+static void ms_req_mark_bundle(ms_index *x, ms_bundle *b)
 {
     int k, unmet = 0;
-    size_t at = 0;
-    char names[MS_CAUSE_MAX];
-    names[0] = 0;
+    ms_text names = { NULL, 0, 0, 0 };
+    char *text;
     if (b->req_lost) {
-        _snprintf_s(b->req_cause, sizeof b->req_cause, _TRUNCATE, "requirement %s", b->req_lost);
+        text = sh_textf("requirement %s", b->req_lost);
+        ms_req_cause_set(x, b, text ? text : "requirements are not live");
+        free(text);
         InterlockedExchange(&b->req_live, 0);
         return;
     }
     if (InterlockedCompareExchange(&b->req_off, 0, 0)) {
-        strcpy_s(b->req_cause, sizeof b->req_cause, "its requirements apply only in maps that use it");
+        ms_req_cause_set(x, b, "its requirements apply only in maps that use it");
         InterlockedExchange(&b->req_live, 0);
         return;
     }
     for (k = 0; k < b->req_ncvars; ++k) {
         const ms_held *h = ms_held_find(b->req_cvars[k].name);
-        int w;
         if (h && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value)) continue;
-        w = _snprintf_s(names + at, sizeof names - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", b->req_cvars[k].name,
-                        b->req_cvars[k].value);
-        if (w > 0) at += (size_t)w;
+        if (names.n) ms_text_put(&names, ", ", 2);
+        ms_text_put(&names, b->req_cvars[k].name, strlen(b->req_cvars[k].name));
+        ms_text_put(&names, "=", 1);
+        ms_text_put(&names, b->req_cvars[k].value, strlen(b->req_cvars[k].value));
         unmet++;
     }
-    if (unmet) _snprintf_s(b->req_cause, sizeof b->req_cause, _TRUNCATE, "requirement%s %s %s not live", unmet > 1 ? "s" : "",
-                           names, unmet > 1 ? "are" : "is");
-    else b->req_cause[0] = 0;
+    ms_text_put(&names, "", 1);
+    if (unmet) {
+        text = sh_textf("requirement%s %s %s not live", unmet > 1 ? "s" : "", names.p && !names.oom ? names.p : "",
+                        unmet > 1 ? "are" : "is");
+        ms_req_cause_set(x, b, text ? text : "requirements are not live");
+        free(text);
+    } else ms_req_cause_set(x, b, NULL);
+    free(names.p);
     InterlockedExchange(&b->req_live, unmet ? 0 : 1);
 }
 
@@ -6590,13 +6799,14 @@ static void ms_req_index(ms_index *x, const ms_index *old)
                 const ms_bundle *e = &x->bundles[order[j]];
                 if (e->req_lost) continue;
                 for (m = 0; m < e->req_ncvars; ++m) {
-                    char text[MS_CAUSE_MAX];
+                    char *text;
                     if (_stricmp(e->req_cvars[m].name, b->req_cvars[k].name) ||
                         ms_req_same(e->req_cvars[m].value, b->req_cvars[k].value))
                         continue;
-                    _snprintf_s(text, sizeof text, _TRUNCATE, "%s=%s lost to %s, installed earlier, which asks \"%s\"",
-                                b->req_cvars[k].name, b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value);
-                    b->req_lost = ms_strdup(x, text);
+                    text = sh_textf("%s=%s lost to %s, installed earlier, which asks \"%s\"",
+                                    b->req_cvars[k].name, b->req_cvars[k].value, ms_label(e), e->req_cvars[m].value);
+                    b->req_lost = text ? ms_strdup(x, text) : NULL;
+                    free(text);
                     if (!b->req_lost) b->req_lost = "a cvar lost to an earlier install";
                     ms_log("requirements: conflict: %s: %s asks \"%s\", %s asks \"%s\"; %s, the later install, loses "
                            "and its requirements are not applied", b->req_cvars[k].name, ms_label(b),
@@ -6622,7 +6832,7 @@ static void ms_req_index(ms_index *x, const ms_index *old)
     free(order);
     AcquireSRWLockShared(&g_req_lock);
     for (i = 0; i < x->nbundles; ++i)
-        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(x, &x->bundles[i]);
     ReleaseSRWLockShared(&g_req_lock);
 }
 
@@ -6661,21 +6871,25 @@ int sh_modserve_requirements_held(void)
 }
 
 /* "a=0, b=1" of the entries selected by `pick` (1 needed, 2 not live, 3 changed and live). */
-static void ms_held_names(int pick, const unsigned char *flag, char *out, size_t cap)
+/* The held cvars `pick` selects as "name=value, ...", whole (malloc'd; "" when none). */
+static char *ms_held_names(int pick, const unsigned char *flag)
 {
     int i;
-    size_t at = 0;
-    out[0] = 0;
+    ms_text out = { NULL, 0, 0, 0 };
     for (i = 0; i < g_nheld; ++i) {
         const ms_held *h = &g_held[i];
-        int w;
         if (!h->needed) continue;
         if (pick == 2 && h->state == 1) continue;
         if (pick == 3 && !(flag && flag[i] && h->state == 1)) continue;
-        w = _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", h->name, h->want);
-        if (w < 0) break;
-        at += (size_t)w;
+        if (pick == 4 && !(flag && flag[i])) continue;
+        if (out.n) ms_text_put(&out, ", ", 2);
+        ms_text_put(&out, h->name, strlen(h->name));
+        ms_text_put(&out, "=", 1);
+        ms_text_put(&out, h->want, strlen(h->want));
     }
+    ms_text_put(&out, "", 1);
+    if (out.oom) { free(out.p); return _strdup("(out of memory)"); }
+    return out.p;
 }
 
 static int ms_req_line(const sh_modserve_gate_ops *ops, const char *phase, const char *id, const char *line)
@@ -6699,8 +6913,8 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     ms_index *x = g_index;
     sh_modserve_gates r;
     unsigned char *changed = NULL, *queued = NULL, *restoring = NULL, *refused = NULL;
-    char (*target)[MS_REQ_ORIGINAL_MAX] = NULL;
-    char names[600];
+    char **target = NULL;
+    char *names = NULL;
     int i, k, result;
     memset(&r, 0, sizeof r);
     if (!phase) phase = "plan";
@@ -6735,7 +6949,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
                         h->want = want;
                         h->state = 0;
                     }
-                    _snprintf_s(h->owner, sizeof h->owner, _TRUNCATE, "%s", ms_label(b));
+                    ms_req_set(&h->owner, ms_label(b));
                     h->needed = 1;
                     r.needed++;
                 }
@@ -6745,7 +6959,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     }
     /* Nothing asked and nothing held: no cvar is read or set, no line runs. */
     if (!r.needed && !g_nheld && !g_nactive) {
-        for (i = 0; x && i < x->nbundles; ++i) if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+        for (i = 0; x && i < x->nbundles; ++i) if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(x, &x->bundles[i]);
         ReleaseSRWLockExclusive(&g_req_lock);
         if (out) *out = r;
         return 0;
@@ -6766,12 +6980,14 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
         ms_active_drop(i);
     }
     if (!ops || !ops->read || !ops->set) {
-        ms_held_names(1, NULL, names, sizeof names);
-        if (r.needed) ms_log("%s: requirements %s NOT applied: the cvar system is unavailable", phase, names);
+        names = ms_held_names(1, NULL);
+        if (r.needed) ms_log("%s: requirements %s NOT applied: the cvar system is unavailable", phase, names ? names : "");
+        free(names);
+        names = NULL;
         for (i = 0; i < g_nheld; ++i)
             if (g_held[i].needed) {
                 g_held[i].state = -1;
-                strcpy_s(g_held[i].why, sizeof g_held[i].why, "the cvar system is unavailable");
+                ms_req_set(&g_held[i].why, "the cvar system is unavailable");
             }
         r.not_live = r.needed;
         goto finish;
@@ -6780,53 +6996,49 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     queued = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
     restoring = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
     refused = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
-    target = (char (*)[MS_REQ_ORIGINAL_MAX])calloc((size_t)g_nheld + 1, MS_REQ_ORIGINAL_MAX);
+    target = (char **)calloc((size_t)g_nheld + 1, sizeof(char *));
     if (!changed || !queued || !restoring || !refused || !target) {
         ms_log("%s: requirements NOT applied: out of memory", phase);
-        for (i = 0; i < g_nheld; ++i) if (g_held[i].needed) { g_held[i].state = -1; strcpy_s(g_held[i].why, sizeof g_held[i].why, "out of memory"); }
+        for (i = 0; i < g_nheld; ++i) if (g_held[i].needed) { g_held[i].state = -1; ms_req_set(&g_held[i].why, "out of memory"); }
         r.not_live = r.needed;
         goto finish;
     }
     /* Phase 1: read every affected cvar, then set what differs. */
     for (i = 0; i < g_nheld; ++i) {
         ms_held *h = &g_held[i];
-        char now[MS_REQ_ORIGINAL_MAX];
+        char *now = NULL;
         int set;
         if (!h->needed && !h->owned) continue;
-        now[0] = 0;
-        if (ops->read(ops->context, h->name, now, sizeof now) != 1) {
+        if (ops->read(ops->context, h->name, &now) != 1) {
             refused[i] = 1;
-            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, "the engine has no such cvar"); }
+            if (h->needed) { h->state = -1; ms_req_set(&h->why, "the engine has no such cvar"); }
             else h->owned = 0;   /* gone: nothing to restore */
+            free(now);
             continue;
         }
         if (h->needed) {
-            strcpy_s(target[i], MS_REQ_ORIGINAL_MAX, h->want);
-            if (ms_req_same(now, h->want)) continue;
-            if (!h->owned && strlen(now) + 1 >= sizeof now) {
-                refused[i] = 1;
-                h->state = -1;
-                strcpy_s(h->why, sizeof h->why, "its current value is too long to restore later");
-                continue;
-            }
+            ms_req_set(&target[i], h->want);
+            if (ms_req_same(now, h->want)) { free(now); continue; }
         } else {
             /* Changed by someone else since: theirs. */
             restoring[i] = 1;
-            strcpy_s(target[i], MS_REQ_ORIGINAL_MAX, ms_req_same(now, h->want) ? h->original : now);
-            if (ms_req_same(now, target[i])) continue;
+            ms_req_set(&target[i], ms_req_same(now, h->want) && h->original ? h->original : now);
+            if (target[i] && ms_req_same(now, target[i])) { free(now); continue; }
         }
-        set = ops->set(ops->context, h->name, target[i]);
+        set = target[i] ? ops->set(ops->context, h->name, target[i]) : 0;
         if (set != SH_MODSERVE_GATE_SET && set != SH_MODSERVE_GATE_QUEUED) {
             refused[i] = 1;
-            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, ms_refusal(set)); }
-            else ms_log("%s: requirement release: %s could not be restored to \"%s\" (%s)", phase, h->name, target[i],
-                        ms_refusal(set));
+            if (h->needed) { h->state = -1; ms_req_set(&h->why, target[i] ? ms_refusal(set) : "out of memory"); }
+            else ms_log("%s: requirement release: %s could not be restored to \"%s\" (%s)", phase, h->name,
+                        target[i] ? target[i] : "", target[i] ? ms_refusal(set) : "out of memory");
+            free(now);
             continue;
         }
         changed[i] = 1;
         r.changed++;
         if (set == SH_MODSERVE_GATE_QUEUED) { queued[i] = 1; r.queued++; }
-        if (h->needed && !h->owned) { strcpy_s(h->original, sizeof h->original, now); h->owned = 1; }
+        if (h->needed && !h->owned) { free(h->original); h->original = now; now = NULL; h->owned = 1; }
+        free(now);
     }
     /* A queued set reaches the cvar only when the command buffer runs: drain
      * it here, between the phases, so the registration that follows is never
@@ -6834,61 +7046,62 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     if (r.queued) {
         if (ops->drain && ops->drain(ops->context) == 1) r.drained = 1;
         else {
-            size_t at = 0;
-            names[0] = 0;
-            for (i = 0; i < g_nheld; ++i)
-                if (queued[i] && g_held[i].needed) {
-                    int w = _snprintf_s(names + at, sizeof names - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", g_held[i].name,
-                                        g_held[i].want);
-                    if (w > 0) at += (size_t)w;
-                }
+            names = ms_held_names(4, queued);
             ms_log("%s: requirement set%s %s queued but the command buffer could not be drained", phase,
-                   r.queued > 1 ? "s" : "", names[0] ? names : "(restore)");
+                   r.queued > 1 ? "s" : "", names && names[0] ? names : "(restore)");
+            free(names);
+            names = NULL;
         }
     }
     /* Phase 2: the registration pass runs only against read-back values. */
     for (i = 0; i < g_nheld; ++i) {
         ms_held *h = &g_held[i];
-        char now[MS_REQ_ORIGINAL_MAX];
+        char *now = NULL;
         if (refused[i] || (!h->needed && !restoring[i])) continue;
-        now[0] = 0;
-        if (ops->read(ops->context, h->name, now, sizeof now) != 1) {
-            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, "the engine has no such cvar"); }
+        if (ops->read(ops->context, h->name, &now) != 1) {
+            if (h->needed) { h->state = -1; ms_req_set(&h->why, "the engine has no such cvar"); }
+            free(now);
             continue;
         }
         if (h->needed) {
-            if (ms_req_same(now, h->want)) { h->state = 1; h->why[0] = 0; }
+            if (ms_req_same(now, h->want)) { h->state = 1; ms_req_set(&h->why, NULL); }
             else {
+                char *why = sh_textf("the engine kept \"%s\"", now);
                 h->state = -1;
-                _snprintf_s(h->why, sizeof h->why, _TRUNCATE, "the engine kept \"%.60s\"", now);
+                ms_req_set(&h->why, why ? why : "the engine kept another value");
+                free(why);
             }
-        } else if (ms_req_same(now, target[i])) {
+        } else if (target[i] && ms_req_same(now, target[i])) {
             if (changed[i]) ms_log("%s: requirement released: %s restored to %s (no active bundle needs it)", phase, h->name,
                                    target[i]);
             r.restored++;
             h->owned = 0;
         }
+        free(now);
     }
     for (i = 0; i < g_nheld; ++i) if (g_held[i].needed && g_held[i].state == 1) r.live++;
     r.not_live = r.needed - r.live;
-    ms_held_names(3, changed, names, sizeof names);
-    if (names[0])
+    names = ms_held_names(3, changed);
+    if (names && names[0])
         ms_log("%s: requirements applied: %s (%s)", phase, names,
                r.drained ? "queued, live after a command-buffer drain" : "set directly, live immediately");
+    free(names);
+    names = NULL;
     if (r.not_live) {
-        ms_held_names(2, NULL, names, sizeof names);
-        ms_log("%s: requirements %s are NOT live; the steps of bundles that need them are blocked", phase, names);
+        names = ms_held_names(2, NULL);
+        ms_log("%s: requirements %s are NOT live; the steps of bundles that need them are blocked", phase, names ? names : "");
+        free(names);
+        names = NULL;
         for (i = 0; i < g_nheld; ++i)
             if (g_held[i].needed && g_held[i].state != 1)
-                ms_log("%s: requirement %s=%s (%s) is not live: %s", phase, g_held[i].name, g_held[i].want, g_held[i].owner,
-                       g_held[i].why[0] ? g_held[i].why : "not read back");
+                ms_log("%s: requirement %s=%s (%s) is not live: %s", phase, g_held[i].name, g_held[i].want,
+                       g_held[i].owner ? g_held[i].owner : "", g_held[i].why && g_held[i].why[0] ? g_held[i].why : "not read back");
     }
 finish:
     /* Entries neither asked nor holding a displaced value are done. */
     for (i = g_nheld - 1; i >= 0; --i)
         if (!g_held[i].needed && !g_held[i].owned) {
-            free(g_held[i].name);
-            free(g_held[i].want);
+            ms_held_free(&g_held[i]);
             memmove(&g_held[i], &g_held[i + 1], sizeof *g_held * (size_t)(g_nheld - i - 1));
             g_nheld--;
         }
@@ -6917,7 +7130,7 @@ finish:
             a->act_total = b->req_nact;
         }
         /* The current build's lines run when it stops. */
-        _snprintf_s(a->who, sizeof a->who, _TRUNCATE, "%s", ms_label(b));
+        ms_req_set(&a->who, ms_label(b));
         for (k = 0; k < a->ndeact; ++k) free(a->deact[k]);
         free(a->deact);
         a->deact = NULL;
@@ -6929,12 +7142,13 @@ finish:
             }
     }
     for (i = 0; x && i < x->nbundles; ++i)
-        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(x, &x->bundles[i]);
     ReleaseSRWLockExclusive(&g_req_lock);
     free(changed);
     free(queued);
     free(restoring);
     free(refused);
+    for (i = 0; target && i < g_nheld + 1; ++i) free(target[i]);
     free(target);
     if (out) *out = r;
     result = !r.needed ? 0 : r.not_live ? -1 : 1;
@@ -6946,11 +7160,12 @@ int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *
     sh_modserve_gates r;
     int result = sh_modserve_requirements_apply(ops, phase, &r);
     if (result == 1 && !r.changed) {
-        char names[600];
+        char *names;
         AcquireSRWLockShared(&g_req_lock);
-        ms_held_names(1, NULL, names, sizeof names);
+        names = ms_held_names(1, NULL);
         ReleaseSRWLockShared(&g_req_lock);
-        ms_log("%s: requirements live: %s (unchanged since the last pass)", phase ? phase : "plan", names);
+        ms_log("%s: requirements live: %s (unchanged since the last pass)", phase ? phase : "plan", names ? names : "");
+        free(names);
     }
     if (out) *out = r;
     return result;
@@ -6973,7 +7188,7 @@ int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates
         /* A step registered while its requirements were live stays ready. */
         if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
             x->files[s->file].reg_state != 1) {
-            s->blocked = b->req_cause[0] ? b->req_cause : "requirements are not live";
+            s->blocked = b->req_cause && b->req_cause[0] ? b->req_cause : "requirements are not live";
             plan->blocked++;
             n++;
         }
@@ -6999,7 +7214,6 @@ int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_
 int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
 {
     const ms_index *x = g_index;
-    char line[900];
     int i, k, lines = 0, any = 0;
     if (!fn) return 0;
     AcquireSRWLockShared(&g_req_lock);
@@ -7019,27 +7233,25 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
         for (k = 0; k < b->req_ncvars; ++k) {
             const ms_held *h = ms_held_find(b->req_cvars[k].name);
             const char *state;
-            char why[300];
-            if (b->req_lost) state = "refused", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", b->req_lost);
+            char *why;
+            if (b->req_lost) state = "refused", why = sh_textf(" (%s)", b->req_lost);
             else if (off) {
                 state = "not active for this map";
                 if (h && h->needed && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value))
-                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; the cvar has this value because %s asks it)", scope_why,
-                                h->owner);
+                    why = sh_textf(" (%s; the cvar has this value because %s asks it)", scope_why, h->owner ? h->owner : "");
                 else if (h && h->owned && !h->needed)
-                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; restored to \"%.120s\" at the next editor pass or map load)",
-                                scope_why, h->original);
+                    why = sh_textf(" (%s; restored to \"%s\" at the next editor pass or map load)", scope_why,
+                                   h->original ? h->original : "");
                 else if (stopped)
-                    _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; restored: the cvar is back at the value it displaced)",
-                                scope_why);
-                else _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", scope_why);
+                    why = sh_textf(" (%s; restored: the cvar is back at the value it displaced)", scope_why);
+                else why = sh_textf(" (%s)", scope_why);
             } else if (!h || !h->needed || !ms_req_same(h->want, b->req_cvars[k].value) || h->state == 0)
-                state = "not applied yet", strcpy_s(why, sizeof why, " (the next editor pass or map load applies it)");
-            else if (h->state == 1) state = "live", why[0] = 0;
-            else state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; its steps are blocked)", h->why);
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: cvar %s=%s: %s%s", ms_label(b),
-                        b->req_cvars[k].name, b->req_cvars[k].value, state, why);
-            fn(context, line);
+                state = "not applied yet", why = _strdup(" (the next editor pass or map load applies it)");
+            else if (h->state == 1) state = "live", why = _strdup("");
+            else state = "NOT live", why = sh_textf(" (%s; its steps are blocked)", h->why ? h->why : "");
+            ms_say(fn, context, "requirements: %s: cvar %s=%s: %s%s", ms_label(b),
+                        b->req_cvars[k].name, b->req_cvars[k].value, state, why ? why : "");
+            free(why);
             lines++;
         }
         for (k = 0; k < b->req_nact; ++k) {
@@ -7047,23 +7259,20 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
                               : a ? (k < a->act_ran ? "ran" : "NOT run")
                               : off ? (stopped ? "ran, then stopped (not active for this map)" : "not run (not active for this map)")
                               : "runs at the next editor pass or map load";
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: activate command \"%s\": %s", ms_label(b),
+            ms_say(fn, context, "requirements: %s: activate command \"%s\": %s", ms_label(b),
                         b->req_act[k], state);
-            fn(context, line);
             lines++;
         }
         for (k = 0; k < b->req_ndeact; ++k) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s: deactivate command \"%s\": %s", ms_label(b),
+            ms_say(fn, context, "requirements: %s: deactivate command \"%s\": %s", ms_label(b),
                         b->req_deact[k], stopped ? "ran when it stopped" : "runs when the mod stops");
-            fn(context, line);
             lines++;
         }
     }
     for (i = 0; i < g_nheld; ++i)
         if (!g_held[i].needed && g_held[i].owned) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s is restored to \"%.200s\" at the next editor pass or "
-                        "map load (no installed mod needs it)", g_held[i].name, g_held[i].original);
-            fn(context, line);
+            ms_say(fn, context, "requirements: %s is restored to \"%s\" at the next editor pass or "
+                        "map load (no installed mod needs it)", g_held[i].name, g_held[i].original ? g_held[i].original : "");
             lines++;
         }
     for (i = 0; i < g_nactive; ++i) {
@@ -7071,9 +7280,8 @@ int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
         for (b = 0; x && b < x->nbundles && !still; ++b)
             still = ms_req_accepted(&x->bundles[b]) && !strcmp(x->bundles[b].id, g_active[i].id);
         if (still) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s stopped; its %d deactivate command(s) run at the next "
+        ms_say(fn, context, "requirements: %s stopped; its %d deactivate command(s) run at the next "
                     "editor pass or map load", g_active[i].who, g_active[i].ndeact);
-        fn(context, line);
         lines++;
     }
     ReleaseSRWLockShared(&g_req_lock);
@@ -7104,17 +7312,16 @@ unsigned sh_modserve_test_gates_owned(void)
 
 /* ------------------------------------------------------------------ queries */
 
-int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap)
+int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 {
     const ms_index *x = g_index;
     int b;
-    if (cause && cause_cap) cause[0] = 0;
     if (!x) return 0;
     b = ms_bundle_describe(x, bundle_hash, 1);
     if (b >= 0) return 1;
     b = ms_bundle_describe(x, bundle_hash, 0);
     if (b < 0) return 0;
-    if (cause && cause_cap) strncpy_s(cause, cause_cap, x->bundles[b].cause, _TRUNCATE);
+    if (cause) { free(*cause); *cause = _strdup(x->bundles[b].cause ? x->bundles[b].cause : ""); }
     return -1;
 }
 
@@ -7125,7 +7332,7 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
 static int ms_name_file(const ms_index *x, const char *lower)
 {
     int f = ms_provider(x, "entitydef", lower), k, m, nm;
-    char keys[2][SH_MB_REQUEST_MAX + 1];
+    char *keys[2];
     for (k = 0; f < 0 && k < x->nfiles; ++k)
         if (x->files[k].served && x->files[k].pname && !strcmp(x->files[k].pname, lower) &&
             (x->files[k].is_decl || (x->files[k].ptype && !strcmp(x->files[k].ptype, "snapModule")))) f = k;
@@ -7140,6 +7347,7 @@ static int ms_name_file(const ms_index *x, const char *lower)
         for (k = 0; f < 0 && k < x->nfiles; ++k)
             if (x->files[k].served && !strcmp(x->files[k].request, keys[m])) f = k;
     }
+    sh_mb_requests_free(keys, nm);
     return f;
 }
 
@@ -7159,17 +7367,18 @@ static int ms_row_name_resolves(const ms_index *x, const char *lower)
 /* 1 when bundle `b` carries `lower` (a placed name or a request path). */
 static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
 {
-    int k, m;
-    char keys[2][SH_MB_REQUEST_MAX + 1];
+    int k, m, hit = 0;
+    char *keys[2];
     const ms_bundle *bd = &x->bundles[b];
     int model = sh_mb_model_keys(lower, keys, 2);
     for (m = 0; m < model; ++m) ms_lower(keys[m]);
-    for (k = bd->first_file; k < bd->first_file + bd->file_count; ++k) {
+    for (k = bd->first_file; !hit && k < bd->first_file + bd->file_count; ++k) {
         const ms_file *f = &x->files[k];
-        if ((f->pname && !strcmp(f->pname, lower)) || !strcmp(f->request, lower)) return 1;
-        for (m = 0; m < model; ++m) if (!strcmp(f->request, keys[m])) return 1;
+        if ((f->pname && !strcmp(f->pname, lower)) || !strcmp(f->request, lower)) hit = 1;
+        for (m = 0; !hit && m < model; ++m) if (!strcmp(f->request, keys[m])) hit = 1;
     }
-    return 0;
+    sh_mb_requests_free(keys, model);
+    return hit;
 }
 
 /* The admitted bundle of `salt` at `hash` (NULL: any hash) in the area
@@ -7210,32 +7419,45 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
 
 static int ms_row_build(const ms_index *x, const sh_modmanifest_row *row)
 {
-    char place[SH_MODSERVE_PLACE_CAP];
-    ms_scope_place(place, sizeof place);
-    return ms_row_build_in(x, row, place);
+    char *place = ms_scope_place();
+    int at = ms_row_build_in(x, row, place ? place : "");
+    free(place);
+    return at;
 }
 
-static void ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
 {
-    if (!out) return;
+    if (!ref) return;
+    free(ref->name);
+    free(ref->folder);
+    free(ref->place);
+    ref->name = ref->folder = ref->place = NULL;
+}
+
+static int ms_ref_fill(const ms_bundle *b, sh_modserve_bundle_ref *out)
+{
+    if (!out) return 1;
     memset(out, 0, sizeof *out);
     strncpy_s(out->id, sizeof out->id, b->id, _TRUNCATE);
     strncpy_s(out->hash, sizeof out->hash, b->hash, _TRUNCATE);
-    strncpy_s(out->name, sizeof out->name, b->name ? b->name : "", _TRUNCATE);
-    strncpy_s(out->folder, sizeof out->folder, b->folder ? b->folder : "", _TRUNCATE);
-    strncpy_s(out->place, sizeof out->place, b->place ? b->place : "", _TRUNCATE);
+    out->name = _strdup(b->name ? b->name : "");
+    out->folder = _strdup(b->folder ? b->folder : "");
+    out->place = _strdup(b->place ? b->place : "");
     out->size = (unsigned long long)b->total;
+    if (out->name && out->folder && out->place) return 1;
+    sh_modserve_bundle_ref_free(out);
+    return 0;
 }
 
 int sh_modserve_row_build_in(const sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out)
 {
     const ms_index *x = g_index;
-    char norm[SH_MODSERVE_PLACE_CAP];
-    int at = sh_modserve_place_norm(place, norm, sizeof norm) ? ms_row_build_in(x, row, norm) : -1;
+    char *norm = sh_modserve_place_norm(place);
+    int at = norm ? ms_row_build_in(x, row, norm) : -1;
+    free(norm);
     if (out) memset(out, 0, sizeof *out);
     if (at < 0) return 0;
-    ms_ref_fill(&x->bundles[at], out);
-    return 1;
+    return ms_ref_fill(&x->bundles[at], out);
 }
 
 int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref *out)
@@ -7244,36 +7466,37 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     int at = ms_row_build(x, row);
     if (out) memset(out, 0, sizeof *out);
     if (at < 0) return 0;
-    ms_ref_fill(&x->bundles[at], out);
-    return 1;
+    return ms_ref_fill(&x->bundles[at], out);
 }
 
 /* The asset rule (modserve.h): a row is served by the build sh_modserve_row_build
  * names when every name it lists resolves, in that build or through the
  * serving index. */
-int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char *cause, size_t cap)
+int sh_modserve_row_served_for(const sh_modmanifest_row *row, const char *subject, char **cause)
 {
-    char place[SH_MODSERVE_PLACE_CAP];
-    ms_scope_place(place, sizeof place);
-    return sh_modserve_row_served_in(row, place, subject, cause, cap);
+    char *place = ms_scope_place();
+    int st = sh_modserve_row_served_in(row, place ? place : "", subject, cause);
+    free(place);
+    return st;
 }
 
-int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                              size_t cap)
+int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
     const ms_index *x = g_index;
-    char salt[SH_MODMANIFEST_SALT_CAP], title[300], missing[600], norm[SH_MODSERVE_PLACE_CAP];
-    const char *what = subject && subject[0] ? subject : "map";
+    char salt[SH_MODMANIFEST_SALT_CAP], *norm;
+    const char *what = subject && subject[0] ? subject : "map", *title;
     int i, declared, skipped = -1, absent = 0;
-    size_t k, w = 0;
-    if (cause && cap) cause[0] = 0;
+    size_t k;
+    ms_text missing = { NULL, 0, 0, 0 };
     if (!row || !sh_salt_valid(row->salt, strlen(row->salt))) {
-        if (cause && cap) _snprintf_s(cause, cap, _TRUNCATE, "This %s names a mod this version does not read.", what);
+        ms_set_cause(cause, "This %s names a mod this version does not read.", what);
         return SH_MODSERVE_ROW_MISSING;
     }
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
-    declared = sh_modserve_place_norm(place, norm, sizeof norm) ? ms_row_build_in(x, row, norm) : -1;
+    norm = sh_modserve_place_norm(place);
+    declared = norm ? ms_row_build_in(x, row, norm) : -1;
+    free(norm);
     /* A folder of the salt that was skipped: the one at the row's hash, else,
      * when no folder of the salt serves at all, any. */
     if (declared < 0 && x) {
@@ -7289,54 +7512,54 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
     }
     {
         const ms_bundle *b = declared >= 0 ? &x->bundles[declared] : skipped >= 0 ? &x->bundles[skipped] : NULL;
-        const char *n;
         for (i = 0; !b && x && i < x->nbundles; ++i)   /* another build of the salt names it */
             if (x->bundles[i].id && !strcmp(x->bundles[i].id, salt) && x->bundles[i].name && x->bundles[i].name[0]) b = &x->bundles[i];
         /* Never the salt: a player who only plays maps never sees one. */
-        n = b && b->name && b->name[0] ? b->name : row->name[0] ? row->name : "";
-        strncpy_s(title, sizeof title, n, _TRUNCATE);
+        title = b && b->name && b->name[0] ? b->name : row->name && row->name[0] ? row->name : "";
     }
     if (declared < 0) {
-        if (cause && cap) {
-            if (skipped >= 0)
-                _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
-                            title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
-            else if (title[0]) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
-            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses a mod that is not installed.", what);
-        }
+        if (skipped >= 0)
+            ms_set_cause(cause, "This %s uses %s, which is installed but cannot be used: %s.", what, title,
+                         x->bundles[skipped].cause ? x->bundles[skipped].cause : "its folder was skipped");
+        else if (title[0]) ms_set_cause(cause, "This %s uses %s, which is not installed.", what, title);
+        else ms_set_cause(cause, "This %s uses a mod that is not installed.", what);
         return SH_MODSERVE_ROW_MISSING;
     }
-    missing[0] = 0;
     for (k = 0; k < row->name_count; ++k) {
-        char lower[MS_NAME_MAX];
-        if (!row->names || !row->names[k] || !row->names[k][0] || strlen(row->names[k]) >= sizeof lower) continue;
-        strcpy_s(lower, sizeof lower, row->names[k]);
+        char *lower;
+        int found;
+        if (!row->names || !row->names[k] || !row->names[k][0]) continue;
+        if (!(lower = _strdup(row->names[k]))) { absent++; continue; }
         ms_lower(lower);
-        if (ms_bundle_carries(x, declared, lower) || ms_row_name_resolves(x, lower)) continue;
+        found = ms_bundle_carries(x, declared, lower) || ms_row_name_resolves(x, lower);
+        free(lower);
+        if (found) continue;
         if (absent < 3) {
             /* Named under the mod, never by its salt: "mods/<salt>/x" reads "x". */
             const char *shown = row->names[k];
             size_t sl = strlen(salt);
             if (!_strnicmp(shown, "mods/", 5) && !_strnicmp(shown + 5, salt, sl) && shown[5 + sl] == '/' && shown[6 + sl])
                 shown += 6 + sl;
-            int n = _snprintf_s(missing + w, sizeof missing - w, _TRUNCATE, "%s%s", absent ? ", " : "", shown);
-            if (n > 0) w += (size_t)n;
+            if (absent) ms_text_put(&missing, ", ", 2);
+            ms_text_put(&missing, shown, strlen(shown));
         }
         absent++;
     }
-    if (!absent) return SH_MODSERVE_ROW_SERVED;
-    if (cause && cap) {
+    if (!absent) { free(missing.p); return SH_MODSERVE_ROW_SERVED; }
+    ms_text_put(&missing, "", 1);
+    {
         char more[48] = "";
         if (absent > 3) _snprintf_s(more, sizeof more, _TRUNCATE, " and %d more", absent - 3);
-        _snprintf_s(cause, cap, _TRUNCATE, "%s is installed but does not provide %s%s, which this %s uses.", title, missing,
-                    more, what);
+        ms_set_cause(cause, "%s is installed but does not provide %s%s, which this %s uses.", title,
+                     missing.p && !missing.oom ? missing.p : "some of its names", more, what);
     }
+    free(missing.p);
     return SH_MODSERVE_ROW_INCOMPLETE;
 }
 
-int sh_modserve_row_served(const sh_modmanifest_row *row, char *cause, size_t cap)
+int sh_modserve_row_served(const sh_modmanifest_row *row, char **cause)
 {
-    return sh_modserve_row_served_for(row, "map", cause, cap);
+    return sh_modserve_row_served_for(row, "map", cause);
 }
 
 /* A served file, as the open map serves its path: the build the map declares
@@ -7361,12 +7584,12 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
     queue = (int *)malloc(sizeof(int) * ((size_t)x->nfiles + 1));
     if (!seen_file || !seen_bundle || !queue) { free(seen_file); free(seen_bundle); free(queue); return -1; }
     for (i = 0; i < n_names; ++i) {
-        char lower[MS_NAME_MAX];
+        char *lower;
         int f;
-        if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
-        strcpy_s(lower, sizeof lower, names[i]);
+        if (!names[i] || !(lower = _strdup(names[i]))) continue;
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
+        free(lower);
         if (f >= 0 && ms_editor_shadow(&x->files[f])) continue;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
@@ -7400,13 +7623,13 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
     if (!seen_file || !seen_bundle || !queue) { free(seen_file); free(seen_bundle); free(queue); return 0; }
     /* The placed names, each reported with the bundle that provides it. */
     for (i = 0; i < count; ++i) {
-        char lower[MS_NAME_MAX];
+        char *lower;
         int f;
         const ms_bundle *b;
-        if (!names[i] || strlen(names[i]) >= sizeof lower) continue;
-        strcpy_s(lower, sizeof lower, names[i]);
+        if (!names[i] || !(lower = _strdup(names[i]))) continue;
         ms_lower(lower);
         f = ms_scoped_or(x, ms_name_file(x, lower));
+        free(lower);
         if (f < 0 || ms_editor_shadow(&x->files[f])) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->hash, (unsigned long long)b->total, names[i]);
@@ -7458,15 +7681,16 @@ void sh_modserve_get_stats(sh_modserve_stats *out)
 int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out)
 {
     const ms_index *x = g_index;
-    char key[MS_NAME_MAX];
-    const char *k = key;
+    char *key;
+    const char *k;
     const ms_conflict *c;
     const ms_file *f;
     if (out) memset(out, 0, sizeof *out);
-    if (!x || !request || !x->nconflict_list || strlen(request) >= sizeof key) return 0;
-    strcpy_s(key, sizeof key, request);
+    if (!x || !request || !x->nconflict_list || !(key = _strdup(request))) return 0;
     ms_lower(key);
+    k = key;
     c = (const ms_conflict *)bsearch(&k, x->conflict_list, (size_t)x->nconflict_list, sizeof *c, ms_conflict_cmp);
+    free(key);
     if (!c) return 0;
     if (out) {
         int p = ms_scoped(x, c->winner);
@@ -7695,7 +7919,8 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
 
 /* The parent a decl's text names at its top level (`inherit = "name"`), else
  * 0. Comments and strings are skipped; only depth 1 of the outer block. */
-static int ms_top_inherit(const unsigned char *t, size_t n, char *out, size_t cap)
+/* The decl's top-level inherit name (malloc'd), or NULL. */
+static char *ms_top_inherit(const unsigned char *t, size_t n)
 {
     size_t i = 0;
     int depth = 0;
@@ -7710,19 +7935,18 @@ static int ms_top_inherit(const unsigned char *t, size_t n, char *out, size_t ca
         }
         if (c == '"') { i++; while (i < n && t[i] != '"') { if (t[i] == '\\') i++; i++; } i++; continue; }
         if (c == '{') { depth++; i++; continue; }
-        if (c == '}') { if (--depth <= 0 && i > 0) return 0; i++; continue; }
+        if (c == '}') { if (--depth <= 0 && i > 0) return NULL; i++; continue; }
         if (depth == 1 && (c == 'i' || c == 'I') && i + 7 <= n && !_strnicmp((const char *)t + i, "inherit", 7) &&
             (i == 0 || !(isalnum(t[i - 1]) || t[i - 1] == '_')) && (i + 7 == n || !(isalnum(t[i + 7]) || t[i + 7] == '_'))) {
-            size_t j = i + 7, k = 0;
+            size_t j = i + 7, k;
             while (j < n && (t[j] == ' ' || t[j] == '\t' || t[j] == '\r' || t[j] == '\n' || t[j] == '=')) j++;
-            if (j >= n || t[j] != '"') return 0;
-            for (++j; j < n && t[j] != '"' && k + 1 < cap; ++j) out[k++] = (char)t[j];
-            out[k] = 0;
-            return k > 0;
+            if (j >= n || t[j] != '"') return NULL;
+            for (k = ++j; j < n && t[j] != '"'; ++j) {}
+            return j > k ? sh_textn((const char *)t + k, j - k) : NULL;
         }
         i++;
     }
-    return 0;
+    return NULL;
 }
 
 /* Mark every served decl that inherits, at any depth, from a decl whose
@@ -7766,14 +7990,15 @@ int sh_modserve_refresh_expand(void)
         ms_file *f = &x->files[i];
         unsigned char *b;
         size_t len = 0;
-        char name[MS_NAME_MAX];
+        char *name;
         int t, ok = 0;
         if (!f->is_decl || !f->served || f->withdrawn || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
         for (t = 0; t < ntypes && !ok; ++t) ok = !_stricmp(types[t], f->ptype);
         if (!ok) continue;
         b = ms_file_bytes(f, &len);
         if (!b) continue;
-        if (ms_top_inherit(b, len, name, sizeof name)) parent[i] = ms_strdup(x, name);
+        if ((name = ms_top_inherit(b, len)) != NULL) parent[i] = ms_strdup(x, name);
+        free(name);
         HeapFree(GetProcessHeap(), 0, b);
     }
     /* Generations: a child of generation N-1 is marked N, up to 8 levels. */
@@ -8073,13 +8298,10 @@ int sh_modserve_is_restore(const char *request)
 int sh_modserve_is_surface(const char *request)
 {
     const ms_index *x = g_index;
-    char lower[MS_NAME_MAX];
-    size_t i;
     int f;
-    if (!x || !x->nkeys || !request || strlen(request) >= sizeof lower) return 0;
-    for (i = 0; request[i]; ++i) lower[i] = ms_fold(request[i]);
-    lower[i] = 0;
-    __try { f = ms_find(x->slots, x->mask, lower); }
+    if (!x || !x->nkeys || !request) return 0;
+    /* ms_find folds the name itself (case and separators). */
+    __try { f = ms_find(x->slots, x->mask, request); }
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
     /* Any build at the path: a surface is the game's file whoever carries it. */
     return f >= 0 && ms_surface(&x->files[f]);
@@ -8094,20 +8316,18 @@ long sh_modserve_open_count(const char *request)
 int sh_modserve_is_mod_sedef(const char *name)
 {
     const ms_index *x = g_index;
-    char lower[MS_NAME_MAX];
-    if (!x || !name || strlen(name) >= sizeof lower) return 0;
-    strcpy_s(lower, sizeof lower, name);
-    ms_lower(lower);
-    return ms_provider(x, "snapeditorentitydef", lower) >= 0;
+    if (!x || !name) return 0;
+    /* ms_provider folds the key itself. */
+    return ms_provider(x, "snapeditorentitydef", name) >= 0;
 }
 
 /* A mod the open map uses, named as a player names it (sh_modserve_listed_mod). */
-int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *label, size_t label_cap)
+int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char **label)
 {
     const ms_index *x = g_index;
     int i, found = -1;
     if (salt && salt_cap) salt[0] = 0;
-    if (label && label_cap) label[0] = 0;
+    if (label) *label = NULL;
     if (!x || !name || !name[0]) return 0;
     for (i = 0; i < x->nbundles && found < 0; ++i) {
         const ms_bundle *b = &x->bundles[i];
@@ -8119,25 +8339,20 @@ int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *
     }
     if (found < 0) return 0;
     if (salt && salt_cap) strncpy_s(salt, salt_cap, x->bundles[found].id, _TRUNCATE);
-    if (label && label_cap) strncpy_s(label, label_cap, ms_label(&x->bundles[found]), _TRUNCATE);
+    if (label) *label = _strdup(ms_label(&x->bundles[found]));
     return 1;
 }
 
 /* A bundle as a status line names it: "<name> (mods\<folder>)". */
-int sh_modserve_bundle_label(const char *bundle_hash, char *out, size_t cap)
+char *sh_modserve_bundle_label(const char *bundle_hash)
 {
     const ms_index *x = g_index;
     int i;
-    if (!out || !cap) return 0;
-    out[0] = 0;
     for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
-        if (b->name && b->name[0] && b->folder && b->folder[0])
-            _snprintf_s(out, cap, _TRUNCATE, "%s (mods\\%s)", b->name, b->folder);
-        else _snprintf_s(out, cap, _TRUNCATE, "mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
-        return 1;
+        if (b->name && b->name[0] && b->folder && b->folder[0]) return sh_textf("%s (mods\\%s)", b->name, b->folder);
+        return sh_textf("mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
     }
-    strncpy_s(out, cap, "a mod", _TRUNCATE);
-    return 0;
+    return sh_text("a mod");
 }

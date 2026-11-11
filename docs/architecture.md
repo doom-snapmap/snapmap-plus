@@ -551,6 +551,18 @@ These backend files share the work:
   files beside `mod.json` and `assets\` are ignored, and campaign content derives its requirements, so
   every own folder is built again once.
 
+  Lengths: the product puts no bound of its own on a name, author,
+  homepage, request path, folder path, nesting depth, cause or script path.
+  Each is a heap string of its own length (`src/common/text.h`). What
+  remains is the platform's or the format's: Windows' long-path form (32,767
+  UTF-16 units, `SH_WPATH_MAX`) and its 255-unit file name per folder, the
+  ZIP format's 65,535-byte entry name, the engine dialog's 255-byte text
+  (a longer notice prints whole to the console and the dialog says so), the
+  vendored Lua's 60-byte chunk name in its own messages (the runtime reads
+  the whole name from the stack instead), and the fixed fields of the store
+  tool's records and the rawmap interface, where a longer sentence is
+  written whole to the log and the field says so. Nothing is cut silently.
+
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
   `strings`, `hud`, `scenes`, `companions`; any other key is kept in the manifest's
@@ -889,7 +901,7 @@ blob store and there are no hard links: a mod's files live in its own
 Identity is the salt (`modsalt.h`), never the folder name: an author may
 rename any folder at any time and the next scan reads the same salt. A folder
 under `mods\` without `mod.json` or `package.json` is an organizing folder and
-is looked into (to eight levels, `SH_MS_NEST_MAX`); one with a descriptor is a
+is looked into at any depth (only the Windows long-path limit bounds a path); one with a descriptor is a
 mod and is not entered, named by its path under `mods\`
 (`demon-mods\cyberdemon`), which the listing, the console, the Mods tab and
 `sh_mods build` use; the console also takes a nested folder by its own name or
@@ -3668,7 +3680,7 @@ A refused import reaches the player whole: the editor reload
 (`sh_rawmap_prepare_reload`) prints and toasts "<file> was not opened:
 <the importer's cause>." (a `.json` that cannot be read gets Windows' reason
 through `plain_reason.h`), and the backend log line carries the same cause
-uncut (`MODEXPORT_CAUSE_MAX`). The map importer tells a map from a prefab by
+uncut (every cause is a heap string of its own length). The map importer tells a map from a prefab by
 the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
 `snapmapPlus` block is a map; a prefab's export is refused with "this is a
 prefab's export, not a map's". `sh_mods import "<path.zip>"` installs the mods

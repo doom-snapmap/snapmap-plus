@@ -142,10 +142,8 @@ void sh_script_node_row_free(sh_script_node_row *row);
 int  sh_script_node_map_load(const char *json, size_t len, char *err, size_t err_cap);
 void sh_script_node_map_clear(void);
 
-/* The display name of the Script node with this uniqueId into out: 1 when
- * the map has such a node (out may be "" for an unnamed one), 0 when not. */
-int  sh_script_node_name_of(int uid, char *out, size_t cap);
-/* The same name whole, malloc'd (the caller frees it); NULL when uid is no Script node. */
+/* The display name of the Script node with this uniqueId, whole, malloc'd
+ * (the caller frees it; "" for an unnamed one); NULL when uid is no Script node. */
 char *sh_script_node_name_dup(int uid);
 
 /* A variable by name (ASCII case-insensitive): 1 with *type and *index,

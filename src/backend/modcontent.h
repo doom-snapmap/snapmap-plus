@@ -15,7 +15,8 @@
 /* `extra` is the build's preserved author keys (sh_mb_bundle.extra, a JSON
  * object), `salt` the mod's. 1 when its "scenes" and "hud" blocks (either may
  * be absent) read as the game reads them; else 0 with one plain sentence in
- * `cause` naming the block in mod.json and what to change. */
-int sh_modcontent_check(const char *salt, const char *extra, size_t len, char *cause, size_t cap);
+ * *cause (malloc'd; the caller frees it) naming the block in mod.json and
+ * what to change. */
+int sh_modcontent_check(const char *salt, const char *extra, size_t len, char **cause);
 
 #endif /* SNAPMAP_PLUS_MODCONTENT_H */

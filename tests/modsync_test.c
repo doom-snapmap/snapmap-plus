@@ -23,6 +23,7 @@
  * The local store and the serving index are stubbed below (the walk, the
  * places, the rescan) so the suite tests this lane's code alone.
  */
+#include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
 #include "../src/backend/modsync.h"
@@ -58,7 +59,7 @@ static char g_note_folder[512], g_note_title[256];
 
 void modstore_lock(void) { EnterCriticalSection(&g_store_cs); }
 void modstore_unlock(void) { LeaveCriticalSection(&g_store_cs); }
-int sh_ms_root(char *out, size_t cap) { strncpy_s(out, cap, g_root, _TRUNCATE); return g_root[0] != 0; }
+const char *sh_ms_root(void) { return g_root[0] ? g_root : NULL; }
 int sh_modserve_index_rescan(void) { g_rescans++; return 0; }
 int sh_ms_entry_usable(const sh_ms_entry *e) { return e && e->loaded && e->bundle.validated; }
 
@@ -80,7 +81,7 @@ static void st_add(sh_ms_list *l, const char *folder, const char *name)
     e = &l->items[l->count++];
     memset(e, 0, sizeof *e);
     e->folder = _strdup(folder);
-    strncpy_s(e->name, sizeof e->name, name, _TRUNCATE);
+    e->name = _strdup(name);
     e->loaded = sh_mb_load_folder(folder, &e->bundle);
 }
 
@@ -131,7 +132,7 @@ int sh_ms_enumerate(sh_ms_list *out)
 }
 
 /* A place: mods\maps\<title>\, its folder of the salt, else <name> free. */
-int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap)
+static int st_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap)
 {
     sh_ms_list l;
     char pre[512];
@@ -162,16 +163,34 @@ int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *s
     return 0;
 }
 
-int sh_ms_title_segment(const char *title, char *out, size_t cap)
+int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char **out)
 {
-    strncpy_s(out, cap, title, _TRUNCATE);
-    return out[0] != 0;
+    char buf[MAX_PATH * 2];
+    int r = st_place_folder(place, name, salt, buf, sizeof buf);
+    *out = r ? _strdup(buf) : NULL;
+    return r;
+}
+
+char *sh_ms_title_segment(const char *title)
+{
+    return title && title[0] ? _strdup(title) : NULL;
 }
 
 /* The store's install at the root, as modstore.c does it: a built folder
  * copied to mods\<its leaf> under its salt; a root folder of the salt is the
  * install at this build and a refusal at another. */
-int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+static int st_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cap);
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char **name_out,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
+{
+    char name[MAX_PATH * 2] = "", why[1024] = "";
+    int ok = st_install_to_root(folder, resolver, name, sizeof name, stats, bundle_out, why, sizeof why);
+    if (name_out) *name_out = ok ? _strdup(name) : NULL;
+    if (cause) *cause = ok ? NULL : _strdup(why);
+    return ok;
+}
+static int st_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                           sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
     sh_mb_bundle b;
@@ -227,11 +246,11 @@ static int rock_same(unsigned long long size, const char *sha)
     sh_mb_sha256_hex(ROCK, strlen(ROCK), h);
     return size == strlen(ROCK) && !strcmp(h, sha);
 }
-static int rock_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+static int rock_match(void *ctx, const char *request, unsigned long long size, const char *sha, char **source)
 {
     (void)ctx; (void)request;
     if (g_game_lacks || !rock_same(size, sha)) return SH_MB_STOCK_ABSENT;
-    strcpy_s(source, cap, ROCK_SOURCE);
+    ho_set(source, ROCK_SOURCE);
     return SH_MB_STOCK_OK;
 }
 static int rock_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
@@ -273,7 +292,7 @@ static int stock_yes(void *context, const char *request) { (void)context; (void)
 static int make_mod(const char *dir, const char *salt, const char *name, const char *const *files,
                     const char *const *bytes, const sh_mb_resolver *resolver, char hash[65])
 {
-    char text[512], cause[SH_MB_CAUSE_MAX];
+    char text[512], cause[HO_TEXT];
     sh_mb_bundle b;
     int i, ok;
     _snprintf_s(text, sizeof text, _TRUNCATE, "{\"name\":\"%s\",\"version\":\"1.0.0\",\"author\":\"tester\"}", name);
@@ -285,8 +304,8 @@ static int make_mod(const char *dir, const char *salt, const char *name, const c
         mt_write(dir, rel, bytes[i]);
     }
     memset(&b, 0, sizeof b);
-    ok = sh_mb_build(dir, salt, resolver, &b) && sh_mb_write(&b, dir, cause, sizeof cause);
-    if (!ok) fprintf(stderr, "build %s: %s %s\n", dir, b.first_cause, cause);
+    ok = sh_mb_build(dir, salt, resolver, &b) && HO(cause, sh_mb_write(&b, dir, HO_P(0)));
+    if (!ok) fprintf(stderr, "build %s: %s %s\n", dir, sh_mb_first_cause(&b), cause);
     if (ok) strcpy_s(hash, 65, b.hash);
     sh_mb_free(&b);
     return ok;
@@ -369,7 +388,7 @@ static int stored_entries(const char *hash, const char *name, int *has)
     o = stub_find(g_stub.builds, g_stub.nbuilds, hash);
     if (o && !fopen_s(&f, path, "wb") && f) { fwrite(o->bytes, 1, o->len, f); fclose(f); } else o = NULL;
     LeaveCriticalSection(&g_stub.cs);
-    if (o && sh_zip_reader_open(&zr, path, cause, sizeof cause)) {
+    if (o && HO(cause, sh_zip_reader_open(&zr, path, HO_P(0)))) {
         n = (int)zr.n;
         *has = sh_zip_reader_find(&zr, name) >= 0;
         sh_zip_reader_close(&zr);
@@ -475,7 +494,7 @@ int main(void)
         list[0] = unknown;
         before = g_stub.requests;
         CHECK(!modsync_upload_builds(list, 1, "item-2", NULL, &st));
-        CHECK(st.code == MODNET_E_ARG && strstr(st.cause, "not on this computer") && !st.queued && g_stub.requests == before);
+        CHECK(st.code == MODNET_E_ARG && strstr(modsync_cause(&st), "not on this computer") && !st.queued && g_stub.requests == before);
     }
     /* Alpha built again: the map's row names the earlier build. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\Alpha Pack", r1);
@@ -483,7 +502,7 @@ int main(void)
     CHECK(strcmp(ha, ha2) != 0);
     list[0] = ma;
     CHECK(!modsync_upload_builds(list, 1, "item-3", NULL, &st));
-    CHECK(strstr(st.cause, "Alpha was built again since the map was saved; save the map again") && !st.queued);
+    CHECK(strstr(modsync_cause(&st), "Alpha was built again since the map was saved; save the map again") && !st.queued);
     /* A file changed since the build. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", r1);
     CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
@@ -492,7 +511,7 @@ int main(void)
     list[0] = mc;
     before = g_stub.build_puts;
     CHECK(!modsync_upload_builds(list, 1, "item-4", NULL, &st));
-    CHECK(strstr(st.cause, "changed since the mod was built; open the Mods tab and Refresh") && g_stub.build_puts == before && !st.queued);
+    CHECK(strstr(modsync_cause(&st), "changed since the mod was built; open the Mods tab and Refresh") && g_stub.build_puts == before && !st.queued);
     CHECK(make_mod(dir, "gamma004", "Gamma", C_FILES, C_BYTES, NULL, hc));
     /* Larger than one request: sent in parts, then claimed like any other. */
     {
@@ -517,9 +536,9 @@ int main(void)
         (void)BIG_TEXT;
         {
             sh_mb_bundle b;
-            char why[SH_MB_CAUSE_MAX];
+            char why[HO_TEXT];
             memset(&b, 0, sizeof b);
-            CHECK(sh_mb_build(dir, "hugee006", NULL, &b) && sh_mb_write(&b, dir, why, sizeof why));
+            CHECK(sh_mb_build(dir, "hugee006", NULL, &b) && HO(why, sh_mb_write(&b, dir, HO_P(0))));
             strcpy_s(hbig, sizeof hbig, b.hash);
             sh_mb_free(&b);
         }
@@ -547,17 +566,17 @@ int main(void)
         }
         {
             sh_mb_bundle b;
-            char why[SH_MB_CAUSE_MAX];
+            char why[HO_TEXT];
             memset(&b, 0, sizeof b);
-            CHECK(sh_mb_build(dir, "manyf007", NULL, &b) && sh_mb_write(&b, dir, why, sizeof why) && b.file_count == 20000);
-            if (b.first_cause[0]) fprintf(stderr, "  many: %s\n", b.first_cause);
+            CHECK(sh_mb_build(dir, "manyf007", NULL, &b) && HO(why, sh_mb_write(&b, dir, HO_P(0))) && b.file_count == 20000);
+            if (sh_mb_first_cause(&b)[0]) fprintf(stderr, "  many: %s\n", sh_mb_first_cause(&b));
             strcpy_s(hmany, sizeof hmany, b.hash);
             sh_mb_free(&b);
         }
         mod_of(mmany, "manyf007", hmany);
         list[0] = mmany;
         CHECK(modsync_upload_builds(list, 1, "item-many", NULL, &st) && stub_has_build(hmany));
-        if (st.cause[0]) fprintf(stderr, "  many: %s\n", st.cause);
+        if (modsync_cause(&st)[0]) fprintf(stderr, "  many: %s\n", modsync_cause(&st));
         CHECK(modsync_release("item-many", NULL, &st) && !stub_has_build(hmany));
         printf("modsync_test: 20,000 files built, archived and uploaded in %lu ms\n", GetTickCount() - t0);
         mt_remove_tree(dir);
@@ -651,7 +670,7 @@ int main(void)
         CHECK(file_has(got, "alpha bytes, republished"));
         CHECK(g_rescans == rescans + 1 && g_notes == notes + 1 && !strcmp(g_note_folder, "maps\\Red Keep\\Alpha") &&
               !strcmp(g_note_title, "Red Keep"));
-        CHECK(modsync_find_installed("alpha001", ha2, &red, NULL, 0) && !modsync_find_installed("alpha001", ha2, &blue, NULL, 0));
+        CHECK(modsync_find_installed("alpha001", ha2, &red, NULL) && !modsync_find_installed("alpha001", ha2, &blue, NULL));
         /* A download the player cancels mid-way installs nothing and leaves no
          * downloaded file behind. */
         {
@@ -691,9 +710,9 @@ int main(void)
             mt_write(got, "assets\\generated\\image\\mods\\alpha001\\a.bimage", "the player's own alpha");
             {
                 sh_mb_bundle b;
-                char why[SH_MB_CAUSE_MAX];
+                char why[HO_TEXT];
                 memset(&b, 0, sizeof b);
-                CHECK(sh_mb_build(got, NULL, NULL, &b) && sh_mb_write(&b, got, why, sizeof why) && strcmp(b.hash, ha2));
+                CHECK(sh_mb_build(got, NULL, NULL, &b) && HO(why, sh_mb_write(&b, got, HO_P(0))) && strcmp(b.hash, ha2));
                 sh_mb_free(&b);
             }
             CHECK(modsync_fetch_build_for(&row, &green, NULL, &st) && !st.already_installed && g_stub.build_gets == gets + 1);
@@ -734,7 +753,7 @@ int main(void)
             free(copy);
             row_of(&row, "rocks003", hx);
             CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
-            CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "damaged on the way"));
+            CHECK(st.code == MODNET_E_HASH && strstr(modsync_cause(&st), "damaged on the way"));
             CHECK(count_dirs(placedir) == 0);
             /* The right build of another salt. */
             row_of(&row, "zzzzzzz9", hr);
@@ -769,7 +788,7 @@ int main(void)
                 free(copy);
                 row_of(&row, "gamma004", hy);
                 CHECK(!modsync_fetch_build_for(&row, &grey, NULL, &st));
-                CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "holds files its mod.json does not list") && count_dirs(placedir) == 0);
+                CHECK(st.code == MODNET_E_HASH && strstr(modsync_cause(&st), "holds files its mod.json does not list") && count_dirs(placedir) == 0);
             }
             /* A borrow this game lacks. */
             g_game_lacks = 1;
@@ -828,7 +847,7 @@ int main(void)
             /* The root holds the salt at another build: the player's own folder stays theirs. */
             row_of(&row, "alpha001", ha2);
             CHECK(!modsync_fetch_build_for(&row, NULL, NULL, &st) && st.code == MODNET_E_REFUSED &&
-                  strstr(st.cause, "your mods already hold"));
+                  strstr(modsync_cause(&st), "your mods already hold"));
         }
 
         /* ---- an editor-tweaks build a map names: installed like any other ---- */

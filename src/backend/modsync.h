@@ -50,7 +50,6 @@
 #define MODSYNC_PENDING_SECTION "pending"
 #define MODSYNC_SALT_HEX    8
 #define MODSYNC_MOD_MAX     (MODSYNC_SALT_HEX + 1 + MODNET_HASH_HEX)   /* "<salt>@<hash>" */
-#define MODSYNC_FOLDER_MAX  1024
 
 struct sh_ms_place;
 struct sh_modmanifest_row;
@@ -68,12 +67,18 @@ typedef struct modsync_stats {
     int reclaimed;                  /* upload: the stored secret replaced the ref's build set */
     int queued;                     /* upload or release: the failure was queued for retry */
     int already_installed;          /* download: nothing was fetched */
-    char folder[MODSYNC_FOLDER_MAX];   /* download: the folder under mods\ that serves the row */
+    char *folder;                   /* download: the folder under mods\ that serves the row, or NULL */
     int code;                       /* MODNET_ code of the failure, MODNET_OK on success */
-    char cause[1024];               /* room for a record path and its next step (sh_mb_record_why) */
+    char *cause;                    /* the failure's sentence, whole, or NULL (modsync_cause) */
     int game_lacks;                 /* download: refused because a borrow names game bytes this machine lacks */
-    char game_source[260];          /* that borrow's installed source path */
+    char *game_source;              /* that borrow's installed source path, or NULL */
 } modsync_stats;
+
+/* The calls below fill a stats block from zero; its strings are malloc'd:
+ * release them with modsync_stats_free before the block is used again.
+ * modsync_cause is the cause, "" when there is none. */
+void modsync_stats_free(modsync_stats *stats);
+const char *modsync_cause(const modsync_stats *stats);
 
 /* Serialise store work across the command and worker threads: the store
  * lock of modstore.h (modstore_lock), under its older names. */
@@ -97,7 +102,7 @@ int  modsync_upload_builds(const char *const *mods, int n, const char *ref, cons
  * bytes, *pointers (optional) the stock pointers left out, *code (optional)
  * MODNET_OK or the failure's code. Returns 1 on success. */
 int  modsync_write_archive(const char *folder, const char *hash, const char *out_path, unsigned long long *size,
-                           unsigned *pointers, int *code, char *cause, size_t cause_cap);
+                           unsigned *pointers, int *code, char **cause);
 
 typedef struct modsync_install_info {
     unsigned files;                 /* carried files placed */
@@ -106,11 +111,13 @@ typedef struct modsync_install_info {
     int already_installed;          /* the root or the place held the build: nothing was placed */
     int replaced;                   /* the place's earlier build of the salt was replaced */
     int mismatch;                   /* refused: the archive is not the build the row names */
-    char rel[MODSYNC_FOLDER_MAX];   /* the folder under mods\ that serves the build */
-    char name[128];                 /* the build's display name */
+    char *rel;                      /* the folder under mods\ that serves the build, or NULL */
+    char *name;                     /* the build's display name, or NULL */
     int game_lacks;                 /* refused: a borrow names game bytes this machine lacks */
-    char game_source[260];          /* that borrow's installed source path */
+    char *game_source;              /* that borrow's installed source path, or NULL */
 } modsync_install_info;
+/* Its strings are malloc'd: release them with modsync_install_info_free. */
+void modsync_install_info_free(modsync_install_info *info);
 
 /* Install the archive file `archive` (UTF-8) as the build `hash` of `salt`
  * into `place` (a map's, or a ZIP's): verified (above), unpacked beside its
@@ -119,7 +126,7 @@ typedef struct modsync_install_info {
  * unpacked outside the store). Does not rescan the serving index. Takes the
  * store lock. Returns 1 on success. */
 int  modsync_install_archive(const char *archive, const char *salt, const char *hash, const struct sh_ms_place *place,
-                             modsync_install_info *info, char *cause, size_t cause_cap);
+                             modsync_install_info *info, char **cause);
 
 /* Fetch the row's build into `place` (NULL: the root) and rescan the serving
  * index. Returns 1 on success, also when the root (at the row's hash) or the
@@ -131,9 +138,8 @@ int  modsync_fetch_build_for(const struct sh_modmanifest_row *row, const struct 
 
 /* The usable folder that serves salt at hash: a root folder, else the
  * place's folder of the salt (place NULL: any place). 1 and its folder
- * (absolute, UTF-8), else 0. */
-int  modsync_find_installed(const char *salt, const char *hash, const struct sh_ms_place *place, char *folder,
-                            size_t cap);
+ * (absolute, UTF-8, malloc'd into *folder when folder is not NULL), else 0. */
+int  modsync_find_installed(const char *salt, const char *hash, const struct sh_ms_place *place, char **folder);
 
 /* Release the claim stored for ref and forget it (also when the store no
  * longer knows the claim). A pending upload for ref is dropped. Returns 1 on
@@ -174,11 +180,13 @@ typedef struct modsync_probe {
     int code;                       /* the MODNET_ code of HEAD /mods/build/<hash> */
     unsigned long long size;        /* found: the archive's bytes */
     unsigned scripts;               /* found: the script files the build carries */
-    char cause[256];
+    char *cause;                    /* the store's sentence when it could not be asked (malloc'd), or NULL */
 } modsync_probe;
 
-/* HEAD the build. Returns out->found. Worker thread; network. */
+/* HEAD the build. Returns out->found. Worker thread; network. Release
+ * out->cause with modsync_probe_free. */
 int  modsync_probe_build(const char *build_hash, const modnet_io *io, modsync_probe *out);
+void modsync_probe_free(modsync_probe *probe);
 
 /* 1 when a claim this machine holds (the "claims" section) names the build:
  * a map of this machine's was published with it and not unpublished. */

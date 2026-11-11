@@ -70,7 +70,7 @@ unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode);
  * serves now is read; others of that salt are not. Returns the rule count,
  * -1 when the builds could not be visited (the table is then empty). */
 typedef int (*sh_modhud_each_fn)(sh_modserve_extra_fn fn, void *context);
-typedef void (*sh_modhud_label_fn)(const char *salt, const char *hash, char *out, size_t cap);
+typedef char *(*sh_modhud_label_fn)(const char *salt, const char *hash);   /* malloc'd, or NULL */
 int sh_modhud_load(sh_modhud_each_fn each, int (*serves_now)(const char *bundle_hash), sh_modhud_label_fn label);
 
 /* The table is read again the next time the HUD asks: after an index change

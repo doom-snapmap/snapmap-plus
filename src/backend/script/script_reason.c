@@ -8,14 +8,33 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
+/* Set when a rule's working text did not fit: the rewording is then not
+ * used and the message is kept as written, whole (sh_script_reason). */
+static __declspec(thread) int g_cut;
+
 static void put(char *out, size_t cap, const char *fmt, ...)
 {
     va_list ap;
-    if (!cap) return;
+    if (!cap) { g_cut = 1; return; }
     va_start(ap, fmt);
-    _vsnprintf_s(out, cap, _TRUNCATE, fmt, ap);
+    if (_vsnprintf_s(out, cap, _TRUNCATE, fmt, ap) < 0) g_cut = 1;
     va_end(ap);
     out[cap - 1] = 0;
+}
+
+static char *heap_text(const char *fmt, ...)
+{
+    va_list ap;
+    char *out;
+    int n;
+    va_start(ap, fmt);
+    n = _vscprintf(fmt, ap);
+    va_end(ap);
+    if (n < 0 || !(out = (char *)malloc((size_t)n + 1))) return NULL;
+    va_start(ap, fmt);
+    vsprintf_s(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
 }
 
 static int starts(const char *s, const char *prefix)
@@ -23,12 +42,12 @@ static int starts(const char *s, const char *prefix)
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-const char *sh_script_split_where(const char *msg, char *file, size_t file_cap, int *line)
+const char *sh_script_split_where(const char *msg, char **file, int *line)
 {
     const char *colon;
     size_t n;
     int v = 0;
-    if (file_cap) file[0] = 0;
+    if (file) *file = NULL;
     *line = 0;
     if (!msg || !starts(msg, "scripts\\")) return msg ? msg : "";
     colon = strstr(msg, ".lua:");
@@ -36,8 +55,7 @@ const char *sh_script_split_where(const char *msg, char *file, size_t file_cap, 
     colon += 4;
     n = (size_t)(colon - msg);
     if (colon[1] == ' ') {                     /* "scripts\x.lua: text": a file, no line */
-        if (n >= file_cap) n = file_cap ? file_cap - 1 : 0;
-        if (file_cap) { memcpy(file, msg, n); file[n] = 0; }
+        if (file) *file = heap_text("%.*s", (int)n, msg);
         return colon + 2;
     }
     {
@@ -47,8 +65,7 @@ const char *sh_script_split_where(const char *msg, char *file, size_t file_cap, 
         if (*d != ':') return msg;
         d++;
         if (*d == ' ') d++;
-        if (n >= file_cap) n = file_cap ? file_cap - 1 : 0;
-        if (file_cap) { memcpy(file, msg, n); file[n] = 0; }
+        if (file) *file = heap_text("%.*s", (int)n, msg);
         *line = v;
         return d;
     }
@@ -92,7 +109,7 @@ static int var_name(const char *text, size_t *body_len, char *name, size_t cap, 
         size_t k = strlen(kinds[i]);
         if ((size_t)(q1 - open - 1) == k + 1 && strncmp(open + 1, kinds[i], k) == 0) {
             size_t n = (size_t)(q2 - q1 - 1);
-            if (n >= cap) n = cap - 1;
+            if (n >= cap) { g_cut = 1; n = cap - 1; }
             memcpy(name, q1 + 1, n);
             name[n] = 0;
             *body_len = (size_t)(open - 1 - text);
@@ -117,6 +134,7 @@ static void requote(const char *s, char *out, size_t cap)
 {
     size_t o = 0;
     for (; *s && o + 1 < cap; s++) out[o++] = (*s == '\'') ? '"' : *s;
+    if (*s) g_cut = 1;
     out[o] = 0;
 }
 
@@ -332,7 +350,7 @@ static int syntax(const char *text, char *what, size_t wcap, char *todo, size_t 
     }
     token(near + 6, tok, sizeof tok);
     hl = (size_t)(near - text);
-    if (hl >= sizeof head) hl = sizeof head - 1;
+    if (hl >= sizeof head) { g_cut = 1; hl = sizeof head - 1; }
     memcpy(head, text, hl);
     head[hl] = 0;
     put(todo, tcap, "Correct it, then press Refresh");
@@ -382,7 +400,7 @@ static int syntax(const char *text, char *what, size_t wcap, char *todo, size_t 
     return 0;
 }
 
-void sh_script_reason(const char *text, char *what, size_t what_cap, char *todo, size_t todo_cap)
+static void reason_into(const char *text, char *what, size_t what_cap, char *todo, size_t todo_cap)
 {
     static const struct { const char *lua, *what, *todo; } exact[] = {
         { "stack overflow", "a function called itself too many times", "Look for a function that never stops calling itself" },
@@ -456,8 +474,39 @@ void sh_script_reason(const char *text, char *what, size_t what_cap, char *todo,
     }
 }
 
-void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_t what_cap,
-                           char *todo, size_t todo_cap)
+void sh_script_reason(const char *text, char **what, char **todo)
+{
+    /* Every rule's sentence is its own words and parts of the message: room
+     * for the message twice over and the longest wording. */
+    size_t cap;
+    char *w, *t;
+    if (!text) text = "";
+    cap = 2 * strlen(text) + 1024;
+    *what = *todo = NULL;
+    w = (char *)malloc(cap);
+    t = (char *)malloc(cap);
+    if (!w || !t) { free(w); free(t); return; }
+    g_cut = 0;
+    reason_into(text, w, cap, t, cap);
+    if (g_cut) {
+        /* A part of the message did not fit a rule's working text: the
+         * message as written, whole. */
+        size_t n;
+        free(w);
+        w = heap_text("%s", text[0] ? text : "the script raised an error without a message");
+        if (w) {
+            for (n = 0; w[n]; n++) if (w[n] == '\'') w[n] = '"';
+            while (n && (w[n - 1] == '.' || w[n - 1] == ' ' || w[n - 1] == '\n')) w[--n] = 0;
+        }
+        t[0] = 0;
+    }
+    *what = w;
+    *todo = t;
+    if (!w) { free(t); *todo = NULL; }
+}
+
+static void reason_stop_into(int stop, unsigned long long limit, char *what, size_t what_cap,
+                             char *todo, size_t todo_cap)
 {
     switch (stop) {
     case SH_SCRIPT_STOP_MEMORY:
@@ -480,13 +529,24 @@ void sh_script_reason_stop(int stop, unsigned long long limit, char *what, size_
     }
 }
 
-void sh_script_stop_text(const char *mod, const char *file, int line, const char *what,
-                         const char *todo, char *out, size_t cap)
+void sh_script_reason_stop(int stop, unsigned long long limit, char **what, char **todo)
 {
-    char where[600];   /* a script's path: a Windows file name is at most 255 characters */
-    if (file && file[0] && line > 0) put(where, sizeof where, ", %s line %d", file, line);
-    else if (file && file[0]) put(where, sizeof where, ", %s", file);
-    else where[0] = 0;
-    if (todo && todo[0]) put(out, cap, "Script stopped: %s%s: %s. %s.", mod, where, what, todo);
-    else put(out, cap, "Script stopped: %s%s: %s.", mod, where, what);
+    /* The runtime's own wording: 512 bytes hold every sentence. */
+    char w[512], t[512];
+    reason_stop_into(stop, limit, w, sizeof w, t, sizeof t);
+    *what = heap_text("%s", w);
+    *todo = heap_text("%s", t);
+}
+
+char *sh_script_stop_text(const char *mod, const char *file, int line, const char *what, const char *todo)
+{
+    char *where, *out;
+    if (file && file[0] && line > 0) where = heap_text(", %s line %d", file, line);
+    else if (file && file[0]) where = heap_text(", %s", file);
+    else where = heap_text("%s", "");
+    if (!where) return NULL;
+    if (todo && todo[0]) out = heap_text("Script stopped: %s%s: %s. %s.", mod, where, what, todo);
+    else out = heap_text("Script stopped: %s%s: %s.", mod, where, what);
+    free(where);
+    return out;
 }

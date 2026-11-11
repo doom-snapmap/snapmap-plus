@@ -19,6 +19,7 @@
  *                            from (default D:\SteamLibrary\steamapps\common\DOOM)
  *   SH_MODSHADOW_ECHO        set to echo every MODS: line */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,14 +117,14 @@ static int game_has(const char *type, const char *name)
  * store tool's conversion builds against the DOOM folder. */
 static int stock_exists(void *ctx, const char *request) { (void)ctx; return sh_modstock_exists(request); }
 
-int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder, char **first_cause)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
+    char cause[HO_TEXT];
     int ok = 0;
-    if (!sh_mb_build(folder, NULL, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
-    else if (!sh_mb_write(&b, folder, cause, sizeof cause)) strncpy_s(first_cause, n, cause, _TRUNCATE);
+    if (!sh_mb_build(folder, NULL, &r, &b)) ho_set(first_cause, sh_mb_first_cause(&b));
+    else if (!HO(cause, sh_mb_write(&b, folder, HO_P(0)))) ho_set(first_cause, cause);
     else ok = 1;
     sh_mb_free(&b);
     return ok;

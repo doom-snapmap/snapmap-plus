@@ -42,6 +42,8 @@
  *     console verbs and the slot's outputs; prefab names.
  * argv[1] is unused; -v echoes the backend log. */
 #define WIN32_LEAN_AND_MEAN
+#include "../src/common/text.h"
+#include "heap_out.h"
 #include "mod_store_stub.h"
 #include <windows.h>
 #include <stdio.h>
@@ -109,15 +111,15 @@ static fake F;
 
 /* The asset rule: the real serving index answers every row but the ghost's,
  * which only a download installs. */
-static int f_row_state(const sh_modmanifest_row *row, char *cause, size_t cap)
+static int f_row_state(const sh_modmanifest_row *row, char **cause)
 {
-    if (cause && cap) cause[0] = 0;
+    if (cause) *cause = NULL;
     if (!strcmp(row->build, GHOST)) {
         if (F.ghost_installed) return SH_MODPUB_ROW_SERVED;
-        if (cause) _snprintf_s(cause, cap, _TRUNCATE, "This prefab uses %s, which is not installed.", row->name);
+        if (cause) ho_setf(cause, "This prefab uses %s, which is not installed.", row->name);
         return SH_MODPUB_ROW_MISSING;
     }
-    return sh_modserve_row_served_for(row, "prefab", cause, cap);
+    return sh_modserve_row_served_for(row, "prefab", cause);
 }
 static int f_listed(const sh_modmanifest_row *row)
 {
@@ -125,10 +127,9 @@ static int f_listed(const sh_modmanifest_row *row)
     for (i = 0; i < F.listed_n; i++) if (!strcmp(F.listed[i], row->build)) return 1;
     return 0;
 }
-static int f_attach(const sh_modmanifest_row *row, char *note, size_t cap)
+static int f_attach(const sh_modmanifest_row *row, char **note)
 {
-    (void)note; (void)cap;
-    if (F.attaches < 4) strcpy_s(F.attached[F.attaches], sizeof F.attached[0], row->build);
+    (void)note; if (F.attaches < 4) strcpy_s(F.attached[F.attaches], sizeof F.attached[0], row->build);
     F.attaches++;
     if (F.listed_n < 4) strcpy_s(F.listed[F.listed_n++], sizeof F.listed[0], row->build);
     return 1;
@@ -156,11 +157,10 @@ static const sh_prefab_mods_ops PM_OPS = {
 
 /* modpublished's doubles: the hold runs as in the game, its jobs inline. */
 static int p_on_main(void *c) { (void)c; return 1; }
-static int p_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                       size_t cap)
+static int p_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
     (void)c; (void)place; (void)subject;
-    return f_row_state(row, cause, cap);
+    return f_row_state(row, cause);
 }
 static int p_rescan(void *c) { (void)c; return 1; }
 static int p_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return (int)rows->count; }
@@ -243,7 +243,7 @@ static const char STOCK_PREFAB[] =
 static int install_mod(const char *src, const char *salt, const char *name, const char *decl_rel, const char *decl,
                        sh_modmanifest_row *row)
 {
-    char json[256], key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char json[256], key[HO_TEXT + 1], cause[HO_TEXT];
     sh_ms_install_stats st;
     sh_mb_bundle b;
     int ok;
@@ -252,12 +252,12 @@ static int install_mod(const char *src, const char *salt, const char *name, cons
     mt_write(src, "mod.json", json);
     mt_write(src, decl_rel, decl);
     memset(&b, 0, sizeof b);
-    ok = sh_ms_install_from_folder(src, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+    ok = HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1)));
     if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
     memset(row, 0, sizeof *row);
     if (ok) {
         strcpy_s(row->salt, sizeof row->salt, b.id);
-        if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
+        if (b.name) sh_modmanifest_row_set_name(row, b.name);
         strcpy_s(row->build, sizeof row->build, b.hash);
         row->size = b.total_size;
     }
@@ -632,7 +632,7 @@ static void status(const sh_modmanifest_row *door)
     memset(&rows, 0, sizeof rows);
     memset(&ghost, 0, sizeof ghost);
     strcpy_s(ghost.salt, sizeof ghost.salt, "ghostmod");
-        strcpy_s(ghost.name, sizeof ghost.name, "ghost.mod");
+        sh_modmanifest_row_set_name(&ghost, "ghost.mod");
     strcpy_s(ghost.build, sizeof ghost.build, GHOST);
     ghost.size = 1048576;
     CHECK(sh_modmanifest_list_add(&rows, door) && sh_modmanifest_list_add(&rows, &ghost));
@@ -660,7 +660,7 @@ static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, i
     if (with_ghost) {
         memset(&ghost, 0, sizeof ghost);
         strcpy_s(ghost.salt, sizeof ghost.salt, "ghostmod");
-        strcpy_s(ghost.name, sizeof ghost.name, "ghost.mod");
+        sh_modmanifest_row_set_name(&ghost, "ghost.mod");
         strcpy_s(ghost.build, sizeof ghost.build, GHOST);
         ghost.size = 1048576;
         sh_modmanifest_row_add_name(&ghost, "maps/modules/mods/ghostmod/room.decl");
@@ -677,15 +677,15 @@ static void resolving(const sh_modmanifest_row *door)
     printf("-- every mod installed: activated, attached to the open map once, then placed\n");
     reset_fakes();
     rows_of(&rows, door, 0);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_PLACE && seq == 0 && F.activations == 1 && F.attaches == 1 && !strcmp(F.attached[0], door->build));
     CHECK(F.prints == 0);   /* the Mods tab shows the new row: no console note */
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 0);   /* the map lists it now */
     sh_modmanifest_list_free(&rows);
     /* No rows: placed as before, nothing asked. */
     memset(&rows, 0, sizeof rows);
-    CHECK(sh_prefab_mods_resolve_main(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, &rows, "Crate", &seq, msg, sizeof msg) ==
+    CHECK(HO(msg, sh_prefab_mods_resolve_main(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, &rows, "Crate", &seq, HO_P(0))) ==
           SH_PREFAB_MODS_PLACE && F.activations == 2);
 
     printf("-- the store has the missing mod: the prefab's question, Yes downloads, then it is ready\n");
@@ -693,7 +693,7 @@ static void resolving(const sh_modmanifest_row *door)
     F.store = 1;
     F.answer = 1;
     rows_of(&rows, door, 1);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_HELD && seq > 0 && sh_prefab_mods_poll(seq) == 2);
     CHECK(!strcmp(msg, "This prefab needs 1 mod you do not have; checking the mod store."));
     CHECK(!strcmp(F.last_print, "Prefab Door needs 1 mod you do not have; checking the mod store."));
@@ -706,7 +706,7 @@ static void resolving(const sh_modmanifest_row *door)
     CHECK(F.attaches == 2 && F.activations == 1 && F.main_calls == 1);   /* both rows reach the open map */
     CHECK(!sh_modpublished_holding());
     /* Placed again: everything is there now. */
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 2);
     sh_modmanifest_list_free(&rows);
 
@@ -714,7 +714,7 @@ static void resolving(const sh_modmanifest_row *door)
     reset_fakes();
     F.store = 0;
     rows_of(&rows, door, 1);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_HELD);
     tick(3);
     CHECK(sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
@@ -728,7 +728,7 @@ static void resolving(const sh_modmanifest_row *door)
     reset_fakes();
     F.store = -1;
     rows_of(&rows, NULL, 1);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     tick(3);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0);
     CHECK(!strcmp(F.last_print, "This prefab needs ghost.mod, which could not be downloaded: the mod store did "
@@ -741,7 +741,7 @@ static void resolving(const sh_modmanifest_row *door)
     F.store = 1;
     F.answer = 2;
     rows_of(&rows, NULL, 1);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     tick(4);
     CHECK(r == SH_PREFAB_MODS_HELD && sh_prefab_mods_poll(seq) == 0 && F.fetches == 0 && F.attaches == 0);
     CHECK(F.asks == 2 && !strcmp(F.last_ask, "This prefab uses ghost.mod, which is not installed. The prefab was not placed."));
@@ -751,7 +751,7 @@ static void resolving(const sh_modmanifest_row *door)
     reset_fakes();
     sh_modpub_test_set_ops(NULL);
     rows_of(&rows, door, 1);
-    r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
+    r = HO(msg, sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, HO_P(0)));
     CHECK(r == SH_PREFAB_MODS_REFUSED && seq == 0 && F.attaches == 0);
     CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod, which you do not have. Ask the "
                                 "prefab's author for its .zip export, which carries the mods."));
@@ -768,7 +768,7 @@ static void resolving(const sh_modmanifest_row *door)
         static const char DLC[] = MODULE_PREFAB("maps/modules/ind_dlc/dlc_room.decl");
         static const char MODDED[] = MODULE_PREFAB("maps/modules/mods/ghostmod/room.decl");
         static const char STOCK[] = MODULE_PREFAB("maps/modules/ind/stock_room.decl");
-        r = sh_prefab_mods_resolve_main(DLC, sizeof DLC - 1, &rows, "Rooms", &seq, msg, sizeof msg);
+        r = HO(msg, sh_prefab_mods_resolve_main(DLC, sizeof DLC - 1, &rows, "Rooms", &seq, HO_P(0)));
         CHECK(r == SH_PREFAB_MODS_NEEDS_MODULE && F.asks == 0 && !sh_modpublished_holding());
         CHECK(!strcmp(msg, "Not placed: this prefab needs module ind_dlc/dlc_room, which is not in your palette "
                            "(DLC or a mod you do not have). Install the DLC or the mod that adds it."));
@@ -779,16 +779,16 @@ static void resolving(const sh_modmanifest_row *door)
             static const char BLK[] = "{\"format\":1,\"summary\":{\"modules\":[{\"name\":\"maps/modules/x.decl\"}]}}";
             size_t bl = 0;
             char *with = sh_prefab_block_put(DLC, sizeof DLC - 1, BLK, sizeof BLK - 1, &bl);
-            CHECK(with && sh_prefab_mods_resolve_main(with, bl, &rows, "Rooms", &seq, msg, sizeof msg) == SH_PREFAB_MODS_NEEDS_MODULE &&
+            CHECK(with && HO(msg, sh_prefab_mods_resolve_main(with, bl, &rows, "Rooms", &seq, HO_P(0))) == SH_PREFAB_MODS_NEEDS_MODULE &&
                   strstr(msg, "ind_dlc/dlc_room") && !strstr(msg, "maps/modules/x"));
             free(with);
         }
-        r = sh_prefab_mods_resolve_main(MODDED, sizeof MODDED - 1, &rows, "Rooms", &seq, msg, sizeof msg);
+        r = HO(msg, sh_prefab_mods_resolve_main(MODDED, sizeof MODDED - 1, &rows, "Rooms", &seq, HO_P(0)));
         CHECK(r == SH_PREFAB_MODS_HELD && sh_modpub_prefab_holding());
         printf("-- a second placement while one waits is refused\n");
         {
             int seq2 = 0;
-            r = sh_prefab_mods_resolve_main(STOCK, sizeof STOCK - 1, &rows, "Other", &seq2, msg, sizeof msg);
+            r = HO(msg, sh_prefab_mods_resolve_main(STOCK, sizeof STOCK - 1, &rows, "Other", &seq2, HO_P(0)));
             CHECK(r == SH_PREFAB_MODS_REFUSED && seq2 == 0 &&
                   !strcmp(msg, "Another prefab is waiting for its mods. Answer that first, then place this one."));
         }
@@ -919,7 +919,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     _snprintf_s(storeB, sizeof storeB, _TRUNCATE, "%s\\storeB", tmp);
     _snprintf_s(prefab, sizeof prefab, _TRUNCATE, "%s\\Door.json", libA);
     _snprintf_s(meta, sizeof meta, _TRUNCATE, "%s\\Door.meta.json", libA);
-    CHECK(sh_prefab_mods_export(prefab, meta, "Door", zipA, msg, sizeof msg) == 1);
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", zipA, HO_P(0))) == 1);
     CHECK(strstr(msg, "Exported prefab Door with 1 mod to ") != NULL);
     z = slurp(zipA, &zl);
     disk = slurp(prefab, &len);
@@ -942,10 +942,10 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     }
     free(z);
     free(disk);
-    CHECK(sh_prefab_mods_export(prefab, meta, "Door", "C:\\x\\Door.json", msg, sizeof msg) == -1 &&
+    CHECK(HO(msg, sh_prefab_mods_export(prefab, meta, "Door", "C:\\x\\Door.json", HO_P(0))) == -1 &&
           strstr(msg, "must end in .zip"));
     /* A map's importer refuses it. */
-    CHECK(modexport_read(zipA, &len, &st, cause, sizeof cause) == NULL && strstr(cause, "prefab's export, not a map's"));
+    CHECK(HOT(char *, cause, modexport_read(zipA, &len, &st, HO_P(0))) == NULL && strstr(cause, "prefab's export, not a map's"));
 
     printf("-- a prefab without mods exports a ZIP too\n");
     {
@@ -954,7 +954,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(z0, sizeof z0, _TRUNCATE, "%s\\Crate.zip", tmp);
         CHECK(put_file(p0, STOCK_PREFAB));
         CHECK(sh_prefab_mods_record(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, p0, NULL) == 0);
-        CHECK(sh_prefab_mods_export(p0, NULL, "Crate", z0, msg, sizeof msg) == 1 && strstr(msg, "it uses no mods"));
+        CHECK(HO(msg, sh_prefab_mods_export(p0, NULL, "Crate", z0, HO_P(0))) == 1 && strstr(msg, "it uses no mods"));
         z = slurp(z0, &zl);
         disk = slurp(p0, &len);
         e = zip_entry(z, zl, "Crate.json", &el);
@@ -967,8 +967,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         static const char MAP[] = "{\"entities\":[],\"name\":\"idSnapMap\"}";
         char zm[MAX_PATH * 2];
         _snprintf_s(zm, sizeof zm, _TRUNCATE, "%s\\map.zip", tmp);
-        CHECK(modexport_write(MAP, sizeof MAP - 1, zm, &st, cause, sizeof cause));
-        CHECK(sh_prefab_mods_import(zm, libB, name, sizeof name, msg, sizeof msg) == -1 &&
+        CHECK(HO(cause, modexport_write(MAP, sizeof MAP - 1, zm, &st, HO_P(0))));
+        CHECK(HO2(name, msg, sh_prefab_mods_import(zm, libB, HO_P(0), HO_P(1))) == -1 &&
               !strcmp(msg, "The prefab was not imported: this is a map's export, not a prefab's."));
     }
 
@@ -981,17 +981,17 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         old_d[1] = "{\"mod\":\"testdoor@}";
         _snprintf_s(zo, sizeof zo, _TRUNCATE, "%s\\old form.zip", tmp);
         CHECK(mt_zip_stored(zo, 2, OLD_N, old_d));
-        CHECK(sh_prefab_mods_import(zo, libB, name, sizeof name, msg, sizeof msg) == -1 &&
+        CHECK(HO2(name, msg, sh_prefab_mods_import(zo, libB, HO_P(0), HO_P(1))) == -1 &&
               !strcmp(msg, "The prefab was not imported. " MODEXPORT_EARLIER));
     }
 
     printf("-- import into an empty store and library: the mod installed, the prefab added, no sidecar\n");
     CHECK(sh_ms_set_root(storeB));
     CHECK(sh_modserve_index_build(storeB) == 0);
-    CHECK(sh_modserve_bundle_state(door->build, NULL, 0) == 0);
-    CHECK(sh_prefab_mods_import(zipA, libB, name, sizeof name, msg, sizeof msg) == 1);
+    CHECK(sh_modserve_bundle_state(door->build, NULL) == 0);
+    CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libB, HO_P(0), HO_P(1))) == 1);
     CHECK(!strcmp(name, "Door") && !strcmp(msg, "Imported prefab Door: 1 mod installed, 0 already installed."));
-    CHECK(sh_modserve_bundle_state(door->build, NULL, 0) == 1 && F.refreshes == 1);
+    CHECK(sh_modserve_bundle_state(door->build, NULL) == 1 && F.refreshes == 1);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libB);
     text = slurp(path, &len);
     disk = slurp(prefab, &el);
@@ -1012,7 +1012,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(mj, sizeof mj, _TRUNCATE, "%s\\door\\mod.json", storeB);
         CHECK(write_time(pj, &before_p) && write_time(mj, &before_m));
         Sleep(30);
-        CHECK(sh_prefab_mods_import(zipA, libB, name, sizeof name, msg, sizeof msg) == 0);
+        CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libB, HO_P(0), HO_P(1))) == 0);
         CHECK(!strcmp(msg, "Prefab Door and its mods are already here; nothing was changed.") && F.refreshes == 1);
         CHECK(write_time(pj, &after_p) && write_time(mj, &after_m));
         CHECK(CompareFileTime(&before_p, &after_p) == 0 && CompareFileTime(&before_m, &after_m) == 0);
@@ -1023,7 +1023,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
     printf("-- a different prefab of that name is kept; the import takes the next name\n");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libB);
     CHECK(put_file(path, STOCK_PREFAB));
-    CHECK(sh_prefab_mods_import(zipA, libB, name, sizeof name, msg, sizeof msg) == 1 && !strcmp(name, "Door (2)"));
+    CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libB, HO_P(0), HO_P(1))) == 1 && !strcmp(name, "Door (2)"));
     text = slurp(path, &len);
     CHECK(text && !strcmp(text, STOCK_PREFAB));
     free(text);
@@ -1038,9 +1038,9 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(pj, sizeof pj, _TRUNCATE, "%s\\Door.json", ex);
         CHECK(sh_ms_set_root(storeC));
         CHECK(sh_modserve_index_build(storeC) == 0);
-        CHECK(sh_prefab_mods_import(pj, libD, name, sizeof name, msg, sizeof msg) == 1);
+        CHECK(HO2(name, msg, sh_prefab_mods_import(pj, libD, HO_P(0), HO_P(1))) == 1);
         CHECK(!strcmp(name, "Door") && !strcmp(msg, "Imported prefab Door: 1 mod installed, 0 already installed."));
-        CHECK(sh_modserve_bundle_state(door->build, NULL, 0) == 1);
+        CHECK(sh_modserve_bundle_state(door->build, NULL) == 1);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libD);
         text = slurp(path, &len);
         disk = slurp(prefab, &el);
@@ -1061,7 +1061,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
             CHECK(with && sh_prefab_mods_write_file(lone, with, wl));
             free(with);
-            CHECK(sh_prefab_mods_import(lone, libD, name, sizeof name, msg, sizeof msg) == 1);
+            CHECK(HO2(name, msg, sh_prefab_mods_import(lone, libD, HO_P(0), HO_P(1))) == 1);
             CHECK(!strcmp(name, "Ghost door") &&
                   !strcmp(msg, "Imported prefab Ghost door: 0 mods installed, 0 already installed. It also needs ghost.mod, "
                                "which the export does not carry."));
@@ -1088,7 +1088,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(sh_modserve_index_build(storeB) >= 0);
         /* The open map: the player's own, no place. Only the downloaded map's place holds the mod. */
         (void)sh_modserve_place_set(NULL);
-        CHECK(sh_modserve_row_served(door, NULL, 0) != SH_MODSERVE_ROW_SERVED);
+        CHECK(sh_modserve_row_served(door, NULL) != SH_MODSERVE_ROW_SERVED);
         memset(&list, 0, sizeof list);
         CHECK(sh_ms_enumerate(&list) && !sh_ms_find_salt(&list, door->salt, NULL, NULL));
         sh_ms_list_free(&list);
@@ -1113,7 +1113,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             sh_prefab_mods_command(2, mods_argv);
             CHECK(strstr(F.prints_all, "  test.door: in a downloaded map's folder; placing it puts it in your mods "
                                        "folder") && !strstr(F.prints_all, "testdoor@"));
-            CHECK(sh_modserve_row_served(door, NULL, 0) != SH_MODSERVE_ROW_SERVED);
+            CHECK(sh_modserve_row_served(door, NULL) != SH_MODSERVE_ROW_SERVED);
             sh_prefab_mods_set_root(NULL);
         }
         memset(&call, 0, sizeof call);
@@ -1131,7 +1131,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(sh_ms_enumerate(&list) && sh_ms_find_salt(&list, door->salt, NULL, NULL) != NULL &&
               !strcmp(sh_ms_find_salt(&list, door->salt, NULL, NULL)->name, "door"));
         sh_ms_list_free(&list);
-        CHECK(sh_modserve_row_served(door, NULL, 0) == SH_MODSERVE_ROW_SERVED);
+        CHECK(sh_modserve_row_served(door, NULL) == SH_MODSERVE_ROW_SERVED);
         /* A second placement installs nothing. */
         F.prints_all[0] = 0;
         CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE && !strstr(F.prints_all, "installed in your mods folder"));
@@ -1147,12 +1147,12 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         CHECK(put_file(storeE, "not a folder"));
         (void)sh_ms_set_root(storeE);
         (void)sh_modserve_index_build(storeE);
-        CHECK(sh_prefab_mods_import(zipA, libE, name, sizeof name, msg, sizeof msg) == -1);
+        CHECK(HO2(name, msg, sh_prefab_mods_import(zipA, libE, HO_P(0), HO_P(1))) == -1);
 
         CHECK(!strncmp(msg, "The prefab was not imported", 27));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libE);
         CHECK(!mt_exists(path));
-        CHECK(sh_modserve_bundle_state(door->build, NULL, 0) == 0);
+        CHECK(sh_modserve_bundle_state(door->build, NULL) == 0);
         CHECK(sh_ms_set_root(storeB));
         CHECK(sh_modserve_index_build(storeB) >= 0);
     }
@@ -1227,7 +1227,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);
-        CHECK(sh_prefab_mods_export(p3, NULL, "Ghost", z3, msg, sizeof msg) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p3, NULL, "Ghost", z3, HO_P(0))) == -1 &&
               strstr(msg, "Prefab Ghost was not exported: this prefab uses ghost.mod, which is not installed") &&
               !strstr(msg, "ghostmod@") &&
               !mt_exists(z3));
@@ -1240,7 +1240,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(m4, sizeof m4, _TRUNCATE, "%s\\Old door.meta.json", libA);
         _snprintf_s(z4, sizeof z4, _TRUNCATE, "%s\\old.zip", tmp);
         CHECK(put_file(p4, OBJECT_PREFAB) && !mt_exists(m4));
-        CHECK(sh_prefab_mods_export(p4, m4, "Old door", z4, msg, sizeof msg) == 1 && strstr(msg, "with 1 mod"));
+        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == 1 && strstr(msg, "with 1 mod"));
         z = slurp(z4, &zl);
         e = zip_entry(z, zl, "Old door.json", &el);
         CHECK(e && strstr(block_of(e, el), door->build) && memmem_find(z, zl, door->build));
@@ -1250,7 +1250,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         free(text);
         /* With an earlier version's sidecar and no block: refused. */
         CHECK(put_file(m4, "{\"desc\":\"From the sidecar\",\"tags\":[\"old\"]}"));
-        CHECK(sh_prefab_mods_export(p4, m4, "Old door", z4, msg, sizeof msg) == -1 &&
+        CHECK(HO(msg, sh_prefab_mods_export(p4, m4, "Old door", z4, HO_P(0))) == -1 &&
               !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier version of Snapmap+. Ask its "
                            "author to export it again."));
 
@@ -1267,11 +1267,10 @@ static char g_e_source[260];
 static int g_e_resumes;
 static int g_e_game_lacks;
 
-static int e_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                       size_t cap)
+static int e_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
     (void)c;
-    return sh_modserve_row_served_in(row, place, subject, cause, cap);
+    return sh_modserve_row_served_in(row, place, subject, cause);
 }
 static int e_rescan(void *c) { (void)c; return sh_modserve_index_rescan() >= 0; }
 /* As eng_fetch_for: the archive where the map finds it (its place, or the root). */
@@ -1287,15 +1286,15 @@ static int e_fetch_for(void *c, const sh_modmanifest_row *row, const char *place
     io.cancel = (volatile long *)cancel;
     F.fetches++;
     g_e_source[0] = 0;
-    if (modexport_fetch_build(row, place, &io, &st, where, sizeof where)) return 0;
+    if (HO(where, modexport_fetch_build(row, place, &io, &st, HO_P(0)))) return 0;
     if (st.game_lacks) strcpy_s(g_e_source, sizeof g_e_source, st.game_source);
     return st.code ? st.code : -1;
 }
-static int e_fetch_detail(void *c, const char *hash, char *out, size_t cap)
+static int e_fetch_detail(void *c, const char *hash, char **out)
 {
     (void)c; (void)hash;
     if (!g_e_source[0]) return 0;
-    strcpy_s(out, cap, g_e_source);
+    ho_set(out, g_e_source);
     return 1;
 }
 static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
@@ -1316,18 +1315,21 @@ static int e_store_probe(void *c, const char *hash, volatile int *cancel, sh_mod
 static int e_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
 static int e_resume(void *c, const sh_modpub_resume *r) { (void)c; (void)r; g_e_resumes++; return 1; }
 /* As eng_item_place and eng_place_set. */
-static int e_item_place(void *c, const char *title, const char *item, char *out, size_t cap)
+static int e_item_place(void *c, const char *title, const char *item, char **out)
 {
     sh_ms_place place;
     (void)c;
-    if (item && item[0] && sh_ms_place_of(item, out, cap, NULL, 0)) return 1;
+    *out = NULL;
+    if (item && item[0] && sh_ms_place_of(item, out, NULL)) return 1;
+    free(*out);
     place.title = title && title[0] ? title : "map";
     place.map_id = item && item[0] ? item : NULL;
-    return sh_ms_place_dir(&place, out, cap) && sh_ms_place_note(&place, out);
+    *out = sh_ms_place_dir(&place);
+    return *out && sh_ms_place_note(&place, *out);
 }
 static void e_place_set(void *c, const char *place) { (void)c; (void)sh_modserve_place_set(place); }
-static int e_place_norm(void *c, const char *place, char *out, size_t cap)
-{ (void)c; return sh_modserve_place_norm(place, out, cap); }
+static int e_place_norm(void *c, const char *place, char **out)
+{ (void)c; *out = sh_modserve_place_norm(place); return *out != NULL; }
 
 static const sh_modpub_ops E_OPS = {
     NULL, p_on_main, e_row_state, e_rescan, p_activate, p_can_ask, p_ask, p_poll, p_release,
@@ -1345,11 +1347,11 @@ static int e_rock_ok(unsigned long long size, const char *sha)
     sh_mb_sha256_hex(ROCK_BYTES, strlen(ROCK_BYTES), h);
     return !g_e_game_lacks && size == strlen(ROCK_BYTES) && !strcmp(h, sha);
 }
-static int e_match(void *ctx, const char *request, unsigned long long size, const char *sha, char *source, size_t cap)
+static int e_match(void *ctx, const char *request, unsigned long long size, const char *sha, char **source)
 {
     (void)ctx; (void)request;
     if (!e_rock_ok(size, sha)) return SH_MB_STOCK_ABSENT;
-    strcpy_s(source, cap, ROCK_SRC);
+    ho_set(source, ROCK_SRC);
     return SH_MB_STOCK_OK;
 }
 static int e_identify(void *ctx, const char *source, char sha[65], unsigned long long *size)
@@ -1385,7 +1387,7 @@ static const sh_mb_stock_ops E_GAME = { NULL, e_match, e_identify, e_verify, e_r
 static int e_install(const char *src, const char *salt, const char *name, const char *bytes, int borrow,
                      sh_modmanifest_row *row, char *folder_out, size_t folder_cap)
 {
-    char json[256], rel[200], key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char json[256], rel[200], key[HO_TEXT + 1], cause[HO_TEXT];
     sh_ms_install_stats st;
     sh_mb_bundle b;
     int ok;
@@ -1399,12 +1401,12 @@ static int e_install(const char *src, const char *salt, const char *name, const 
         mt_write(src, rel, ROCK_BYTES);
     }
     memset(&b, 0, sizeof b);
-    ok = sh_ms_install_from_folder(src, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+    ok = HO2(key, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1)));
     if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
     memset(row, 0, sizeof *row);
     if (ok) {
         strcpy_s(row->salt, sizeof row->salt, b.id);
-        if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
+        if (b.name) sh_modmanifest_row_set_name(row, b.name);
         strcpy_s(row->build, sizeof row->build, b.hash);
         row->size = b.total_size;
         if (folder_out) strcpy_s(folder_out, folder_cap, key);
@@ -1436,7 +1438,7 @@ static void e_upload(const sh_modmanifest_row *row, const char *ref)
     _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s@%s", row->salt, row->build);
     mods[0] = mod;
     CHECK(modsync_upload_builds(mods, 1, ref, NULL, &st));
-    if (st.cause[0] && st.code) fprintf(stderr, "  upload %s: %s\n", ref, st.cause);
+    if (modsync_cause(&st)[0] && st.code) fprintf(stderr, "  upload %s: %s\n", ref, modsync_cause(&st));
 }
 
 /* Hold a rawmap naming `row` and run it to the end: the one-button notice, or
@@ -1457,7 +1459,7 @@ static void e_hold(const sh_modmanifest_row *row, int answer)
 
 static void gate_end_to_end(const char *tmp)
 {
-    char url[64], author[MAX_PATH * 2], player[MAX_PATH * 2], srcd[MAX_PATH * 2], folder[SH_MS_NAME_MAX + 1];
+    char url[64], author[MAX_PATH * 2], player[MAX_PATH * 2], srcd[MAX_PATH * 2], folder[HO_TEXT + 1];
     char path[MAX_PATH * 2];
     sh_modmanifest_row gone, never, borrow, twob;
     printf("-- the denial gate against the loopback store: each cause worded, the download into the place\n");
@@ -1544,13 +1546,276 @@ static void gate_end_to_end(const char *tmp)
     CHECK(!mt_exists(path));   /* the download's own place went with the move */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Two Builds\\mod.json", player);
     CHECK(mt_exists(path));
-    CHECK(sh_modserve_row_served(&twob, NULL, 0) == SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_row_served(&twob, NULL) == SH_MODSERVE_ROW_SERVED);
 
     sh_mb_set_stock_ops(NULL);
     sh_modpub_test_reset();
     sh_modpub_test_set_ops(NULL);
     modnet_shutdown();
     stub_stop();
+}
+
+/* ---------------------------------------------- names and paths of any length */
+
+/* A UTF-8 path in the long-path form Windows opens past MAX_PATH (malloc'd). */
+static wchar_t *lv_wide(const char *path)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    wchar_t *w = (wchar_t *)malloc(sizeof(wchar_t) * ((size_t)n + 4)), *p;
+    if (!w) return NULL;
+    wcscpy_s(w, (size_t)n + 4, L"\\\\?\\");
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w + 4, n);
+    for (p = w + 4; *p; p++) if (*p == L'/') *p = L'\\';
+    return w;
+}
+
+/* Every folder of `path` (a file's folders when `file`), however deep. */
+static int lv_mkdirs(const char *path, int file)
+{
+    wchar_t *w = lv_wide(path), *p;
+    int ok = 1;
+    if (!w) return 0;
+    for (p = w + 7; *p; p++) {   /* past \\?\C:\ */
+        if (*p != L'\\') continue;
+        *p = 0;
+        if (!CreateDirectoryW(w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) ok = 0;
+        *p = L'\\';
+    }
+    if (!file && !CreateDirectoryW(w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) ok = 0;
+    free(w);
+    return ok;
+}
+
+static int lv_write(const char *path, const char *bytes, size_t len)
+{
+    wchar_t *w;
+    HANDLE h;
+    DWORD put = 0;
+    if (!lv_mkdirs(path, 1) || !(w = lv_wide(path))) return 0;
+    h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    WriteFile(h, bytes, (DWORD)len, &put, NULL);
+    CloseHandle(h);
+    return put == (DWORD)len;
+}
+
+static int lv_exists(const char *path)
+{
+    wchar_t *w = lv_wide(path);
+    DWORD a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+    free(w);
+    return a != INVALID_FILE_ATTRIBUTES;
+}
+
+static void lv_rmtree_w(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    size_t n = wcslen(dir) + 4;
+    wchar_t *pat = (wchar_t *)malloc(sizeof(wchar_t) * n);
+    HANDLE h;
+    if (!pat) return;
+    swprintf_s(pat, n, L"%s\\*", dir);
+    h = FindFirstFileW(pat, &fd);
+    free(pat);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            size_t cn;
+            wchar_t *child;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            cn = wcslen(dir) + wcslen(fd.cFileName) + 2;
+            if (!(child = (wchar_t *)malloc(sizeof(wchar_t) * cn))) continue;
+            swprintf_s(child, cn, L"%s\\%s", dir, fd.cFileName);
+            SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                lv_rmtree_w(child);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(child);
+            else DeleteFileW(child);
+            free(child);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* text of n characters: `unit` repeated, cut to n bytes (ASCII units). */
+static char *lv_text(const char *unit, size_t n)
+{
+    char *s = (char *)malloc(n + 1);
+    size_t u = strlen(unit), i;
+    if (!s) return NULL;
+    for (i = 0; i < n; i++) s[i] = unit[i % u];
+    s[n] = 0;
+    return s;
+}
+
+/* A 2,000-character name and author and a 10,000-character homepage, and a
+ * carried file 60 folders deep whose request path is 5,000 bytes, in a
+ * mods folder under a long path: built, archived, published to the store
+ * (the loopback stub, or the Worker's local runtime when SMP_STORE_URL names
+ * it), saved into a map's rows and read back, downloaded into the map's
+ * place and installed, each value whole. */
+static void long_values_end_to_end(const char *tmp)
+{
+    const char *store_url = getenv("SMP_STORE_URL");
+    char url[256], *base, *author, *player, *src, *request, *name, *who, *home, *json, *path, *where = NULL;
+    char *key = NULL, *cause = NULL, err[512];
+    size_t used, i;
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    sh_modmanifest_row row;
+    sh_modmanifest_list rows, back;
+    static const char MAPTEXT[] = "{\"entities\":[],\"instances\":[],\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+    printf("-- names, authors, homepages and paths of any length: build, archive, publish, map rows, download, install\n");
+    if (store_url && store_url[0]) {
+        strcpy_s(url, sizeof url, store_url);
+        printf("    against the store at %s\n", url);
+    } else {
+        CHECK(stub_start() > 0);
+        stub_url(url, sizeof url);
+    }
+    CHECK(modnet_set_base_url(url));
+    /* The mods folders sit under a 600-byte path. */
+    {
+        char *l1 = lv_text("long-folder-", 200), *l2 = lv_text("deeper-folder-", 200), *l3 = lv_text("deepest-", 180);
+        base = sh_textf("%s\\%s\\%s\\%s", tmp, l1, l2, l3);
+        free(l1); free(l2); free(l3);
+    }
+    author = sh_textf("%s\\author\\mods", base);
+    player = sh_textf("%s\\player\\mods", base);
+    src = sh_textf("%s\\src\\Long Values", base);
+    CHECK(base && strlen(base) > 600 && lv_mkdirs(author, 0) && lv_mkdirs(player, 0));
+    /* The request: 60 folders of 80 bytes, then a 110-byte leaf: 5,000 bytes. */
+    {
+        const char *head = "generated/image/mods/testlong/";
+        char *r = (char *)malloc(5001);
+        used = strlen(head);
+        memcpy(r, head, used);
+        for (i = 0; i < 60; i++) {
+            int w = sprintf_s(r + used, 5001 - used, "f%02u_", (unsigned)i);
+            memset(r + used + w, 'x', 80 - (size_t)w);
+            used += 80;
+            r[used++] = '/';
+        }
+        memcpy(r + used, "deep", 4);
+        memset(r + used + 4, 'z', 5000 - 7 - 4 - used);
+        memcpy(r + 5000 - 7, ".bimage", 8);
+        request = r;
+    }
+    CHECK(strlen(request) == 5000);
+    {
+        size_t slashes = 0;
+        for (i = 0; request[i]; i++) slashes += request[i] == '/';
+        CHECK(slashes == 4 + 60);   /* generated/image/mods/testlong/ then 60 folders */
+    }
+    name = lv_text("Long Name ", 2000);
+    who = lv_text("Author ", 2000);
+    name[1999] = '!';   /* a display name is trimmed: end on a character */
+    who[1999] = '!';
+    home = sh_textf("https://example.test/%s", "");
+    {
+        char *tail = lv_text("h", 10000 - strlen(home));
+        free(home);
+        home = sh_textf("https://example.test/%s", tail);
+        free(tail);
+    }
+    CHECK(strlen(home) == 10000);
+    json = sh_textf("{\"name\":\"%s\",\"author\":\"%s\",\"homepage\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"testlong\"}}",
+                    name, who, home);
+    path = sh_textf("%s\\mod.json", src);
+    CHECK(lv_write(path, json, strlen(json)));
+    free(path);
+    path = sh_textf("%s\\assets\\%s", src, request);
+    CHECK(strlen(path) > 5600 && lv_write(path, "deep bytes", 10));
+    free(path);
+
+    /* Build into the author's long mods folder. */
+    CHECK(sh_ms_set_root(author));
+    memset(&b, 0, sizeof b);
+    CHECK(sh_ms_install_from_folder(src, NULL, &key, &st, &b, &cause));
+    if (cause) fprintf(stderr, "  long install: %s\n", cause);
+    CHECK(b.name && !strcmp(b.name, name));
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, b.id);
+    strcpy_s(row.build, sizeof row.build, b.hash);
+    row.size = b.total_size;
+    CHECK(sh_modmanifest_row_set_name(&row, b.name ? b.name : ""));
+    sh_mb_free(&b);
+    {
+        char *built = sh_textf("%s\\%s\\assets\\%s", author, key ? key : "", request);
+        CHECK(built && lv_exists(built));
+        free(built);
+    }
+    free(cause); cause = NULL;
+
+    /* Publish: the archive carries the deep file and mod.json whole. */
+    e_upload(&row, "map-long-values");
+
+    /* Save the map with its row, and load it back: the name whole. */
+    memset(&rows, 0, sizeof rows);
+    memset(&back, 0, sizeof back);
+    CHECK(sh_modmanifest_list_add(&rows, &row));
+    {
+        size_t len = 0;
+        unsigned rejected = 0;
+        char *saved = sh_modmanifest_write(MAPTEXT, sizeof MAPTEXT - 1, &rows, &len, err, sizeof err);
+        CHECK(saved != NULL);
+        if (!saved) fprintf(stderr, "  long map write: %s\n", err);
+        if (saved) {
+            size_t got = sh_modmanifest_read(saved, len, &back, &rejected);
+            if (got != 1 || rejected) fprintf(stderr, "  long map read: %u rows, %u rejected\n", (unsigned)got, rejected);
+            CHECK(got == 1 && !rejected);
+            CHECK(back.count == 1 && !strcmp(sh_modmanifest_row_name(&back.rows[0]), name) &&
+                  !strcmp(back.rows[0].build, row.build));
+            HeapFree(GetProcessHeap(), 0, saved);
+        }
+    }
+
+    /* The player's machine: download into the map's place, installed whole. */
+    CHECK(sh_ms_set_root(player));
+    {
+        modnet_io io;
+        modsync_stats ms;
+        memset(&io, 0, sizeof io);
+        memset(&ms, 0, sizeof ms);
+        CHECK(modexport_fetch_build(&back.rows[0], "maps\\Long Values Map", &io, &ms, &where));
+        if (modsync_cause(&ms)[0]) fprintf(stderr, "  long download: %s\n", modsync_cause(&ms));
+        modsync_stats_free(&ms);
+    }
+    if (where) {
+        char *deep = sh_textf("%s\\%s\\assets\\%s", player, where, request);
+        char *mj = sh_textf("%s\\%s\\mod.json", player, where);
+        sh_mb_bundle got;
+        CHECK(deep && lv_exists(deep));
+        memset(&got, 0, sizeof got);
+        CHECK(mj && sh_mb_load(mj, &got) && got.name && !strcmp(got.name, name));
+        CHECK(got.author && !strcmp(got.author, who) && got.homepage && !strcmp(got.homepage, home));
+        sh_mb_free(&got);
+        free(deep);
+        free(mj);
+    }
+    printf("    a %u-byte request %u folders deep under a %u-byte mods folder, a %u-character name: carried whole\n",
+           (unsigned)strlen(request), 60u, (unsigned)strlen(player), (unsigned)strlen(name));
+
+    sh_modmanifest_list_free(&rows);
+    sh_modmanifest_list_free(&back);
+    sh_modmanifest_row_free(&row);
+    sh_ms_set_root(NULL);
+    {
+        char *top = sh_textf("%s\\%s", tmp, "x");
+        wchar_t *w;
+        free(top);
+        w = lv_wide(base);
+        if (w) {
+            /* the first long folder under tmp */
+            wchar_t *cut = wcsstr(w + 4, L"\\long-folder-");
+            if (cut) { cut = wcschr(cut + 1, L'\\'); if (cut) *cut = 0; }
+            lv_rmtree_w(w);
+            free(w);
+        }
+    }
+    free(where); free(key); free(base); free(author); free(player); free(src); free(request);
+    free(name); free(who); free(home); free(json);
 }
 
 int main(int argc, char **argv)
@@ -1561,6 +1826,12 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash keeps what was said */
 
     CHECK(mt_temp_dir("prefabmods", tmp, sizeof tmp));
+    if (getenv("SMP_LONG_ONLY")) {
+        long_values_end_to_end(tmp);
+        mt_remove_tree(tmp);
+        printf("prefab_mods_test: %d checks, %d failed\n", g_checks, g_failed);
+        return g_failed ? 1 : 0;
+    }
     _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\src\\door", tmp);
     _snprintf_s(storeA, sizeof storeA, _TRUNCATE, "%s\\storeA", tmp);
     _snprintf_s(libA, sizeof libA, _TRUNCATE, "%s\\libA", tmp);
@@ -1568,7 +1839,7 @@ int main(int argc, char **argv)
     CHECK(sh_ms_set_root(storeA));
     CHECK(install_mod(src, "testdoor", "test.door", "assets\\generated\\decls\\entitydef\\mods\\testdoor\\door.decl", DOOR_DECL, &door));
     CHECK(sh_modserve_index_build(storeA) >= 1);
-    CHECK(sh_modserve_bundle_state(door.build, NULL, 0) == 1);
+    CHECK(sh_modserve_bundle_state(door.build, NULL) == 1);
     reset_fakes();
 
     names();
@@ -1580,6 +1851,7 @@ int main(int argc, char **argv)
     resolve_through_slot(libA, &door);
     zip(tmp, libA, storeA, &door);
     gate_end_to_end(tmp);
+    long_values_end_to_end(tmp);
 
     sh_modpub_test_reset();
     sh_ms_set_root(NULL);

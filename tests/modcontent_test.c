@@ -1,6 +1,7 @@
 /* modcontent_test.c -- the build-time check of a mod's "scenes" and "hud"
  * blocks (modcontent.c): what the game's readers accept passes, and each
  * refusal is one sentence naming the block in mod.json. */
+#include "heap_out.h"
 #include <stdio.h>
 #include <string.h>
 #include "modcontent.h"
@@ -10,7 +11,7 @@ static int g_fail;
 
 static int check(const char *extra, char *cause, size_t cap)
 {
-    return sh_modcontent_check("alexrimp", extra, strlen(extra), cause, cap);
+    return HOC(cause, cap, sh_modcontent_check("alexrimp", extra, strlen(extra), HO_P(0)));
 }
 
 int main(void)

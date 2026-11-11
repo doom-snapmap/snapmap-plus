@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "modbundle.h"
+#include "store_text.h"
 #include "mp_json.h"
 
 int sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1])
@@ -36,14 +37,14 @@ int sh_mb_id_normalize(const char *in, size_t len, char out[SH_MB_ID_MAX + 1])
     return 1;
 }
 
-int sh_mb_state_parse(const char *text, size_t len, int *validated, long long *installed_at, char *cause, size_t cap)
+int sh_mb_state_parse(const char *text, size_t len, int *validated, long long *installed_at, char **cause)
 {
     mpj *root = text ? mpj_parse(text, len) : NULL;
     const mpj *v, *at, *fc;
     int ok = 0;
     if (validated) *validated = 0;
     if (installed_at) *installed_at = 0;
-    if (cause && cap) cause[0] = 0;
+    if (cause) *cause = NULL;
     if (!root || root->type != MPJ_OBJ) goto done;
     v = mpj_get(root, "validated");
     at = mpj_get(root, "installedAt");
@@ -51,7 +52,7 @@ int sh_mb_state_parse(const char *text, size_t len, int *validated, long long *i
     if (!v || v->type != MPJ_BOOL) goto done;
     if (validated) *validated = v->b;
     if (at && at->type == MPJ_NUM && at->text && installed_at) *installed_at = _strtoi64(at->text, NULL, 10);
-    if (fc && fc->type == MPJ_STR && fc->text && cause && cap) strncpy_s(cause, cap, fc->text, _TRUNCATE);
+    if (fc && fc->type == MPJ_STR && fc->text && cause) *cause = _strdup(fc->text);
     ok = 1;
 done:
     mpj_free(root);
@@ -101,7 +102,7 @@ void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
         if (f->stock) sk_puts(&o, f->stock_source ? f->stock_source : "");
         sk_puts(&o, "\t");
         sk_puts(&o, f->blob);
-        _snprintf_s(size, sizeof size, _TRUNCATE, "\t%llu\n", f->stock ? 0ull : f->size);
+        st_fmt(size, sizeof size, "\t%llu\n", f->stock ? 0ull : f->size);
         sk_puts(&o, size);
     }
     if (!o.oom && o.p) sh_mb_sha256_hex(o.p, o.n, out);

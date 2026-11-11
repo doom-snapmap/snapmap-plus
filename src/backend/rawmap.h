@@ -112,12 +112,14 @@ typedef struct sh_rawmap_save_report {
     char zip[SH_RAWMAP_REPORT_PATH];      /* the export, or "" for a map without mods */
     unsigned long long json_bytes, zip_bytes;   /* zip_bytes 0 with zip set: it was refused */
     unsigned mods;                        /* rows in the saved map */
-    char zip_error[192];                  /* why the export was not written */
+    char *zip_error;                      /* why the export was not written (malloc'd, whole), or NULL */
     unsigned long sequence;               /* increments on every reported write */
 } sh_rawmap_save_report;
 
 /* What the last rawmap write produced. Any thread. */
 void sh_rawmap_last_save(sh_rawmap_save_report *out);
+/* Free a report sh_rawmap_last_save filled (its zip_error). */
+void sh_rawmap_save_report_free(sh_rawmap_save_report *r);
 
 /* The export path for a JSON path: a trailing ".json" (any case) becomes
  * ".zip", anything else gets ".zip" appended. 0 for a .zip path, an empty
@@ -163,17 +165,17 @@ int sh_rawmap_transport_busy(void);
 /* The editor reload's own check, on its frame and before LoadMap (MAIN
  * THREAD): read the load path once (a .zip imports its mods here), count
  * the mods it names that are not installed and, when there are any, hand them
- * to the rawmap hold (modpublished.h) and refuse with the reason in `why`.
+ * to the rawmap hold (modpublished.h) and refuse with the reason in *why (malloc'd).
  * On 1 the text is kept for the parse; call sh_rawmap_reload_done with
  * LoadMap's result after it returns, on every path (`faulted` when it
  * faulted); a failure is told to the player there. */
-int  sh_rawmap_prepare_reload(char *why, int cap);
+int  sh_rawmap_prepare_reload(char **why);
 void sh_rawmap_reload_done(int rc, int faulted);
 
 /* The rawmap hold's resume: the mods are installed, so open the rawmap again
- * now when the editor can take it. `note` receives a sentence for the player
+ * now when the editor can take it. *note (malloc'd) receives a sentence for the player
  * when it could not. Returns 1. */
-int sh_rawmap_reopen_after_mods(char *note, size_t cap);
+int sh_rawmap_reopen_after_mods(char **note);
 
 /* Bytes in the most recent successful rawmap save, or 0 before any write. */
 unsigned long long sh_rawmap_save_last_bytes(void);

@@ -40,8 +40,7 @@ void sh_modstock_set_install(const char *doom_root);
 void sh_modstock_register(void);
 
 /* The operations themselves (modbundle.h sh_mb_stock_ops semantics). */
-int sh_modstock_match(const char *request, unsigned long long size, const char *sha256,
-                      char *source, size_t source_cap);
+int sh_modstock_match(const char *request, unsigned long long size, const char *sha256, char **source);
 int sh_modstock_identify(const char *source, char sha256[SH_MB_HASH_HEX + 1], unsigned long long *size);
 int sh_modstock_verify(const char *source, const char *sha256, unsigned long long *size);
 int sh_modstock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len);
@@ -68,9 +67,10 @@ typedef struct sh_modstock_stats {
     unsigned slices_hashed;         /* distinct archive slices hashed */
     unsigned long long bytes_hashed;/* decoded bytes hashed (slices and loose files) */
     unsigned reads;                 /* successful reads */
-    char cause[160];                /* why the table is unavailable */
+    char *cause;                    /* why the table is unavailable (malloc'd, "" when it is) */
 } sh_modstock_stats;
 void sh_modstock_get_stats(sh_modstock_stats *out);
+void sh_modstock_stats_free(sh_modstock_stats *s);
 
 /* Forget the table and the counters (tests). */
 void sh_modstock_reset(void);

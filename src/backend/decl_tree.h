@@ -101,7 +101,10 @@ int sh_dt_counts_total(const sh_dt_counts *c);
 
 /* The edits element of one edited copy against the game's text: a JSON
  * object (malloc'd) as above, its counts in *counts. NULL with a cause when
- * either text does not parse ("the game's text: ..." or "line N: ..."). */
+ * either text does not parse ("the game's text: ..." or "line N: ..."). A
+ * cause quotes at most 60 characters of the decl text around the line it
+ * names, so SH_DT_CAUSE_CAP bytes always hold it whole. */
+#define SH_DT_CAUSE_CAP 512
 char *sh_dt_diff(const char *request, const char *stock, size_t stock_len, const char *copy, size_t copy_len,
                  sh_dt_counts *counts, char *cause, size_t cap);
 
@@ -143,7 +146,8 @@ int sh_dt_edits_files(const char *edits, size_t len,
  * unkey), with a digest of the value it sets: fn(slot, digest). */
 int sh_dt_edits_slots(const char *request, const char *edits, size_t len,
                       void (*fn)(void *context, const char *slot, unsigned long long digest), void *context);
-/* "<type>/<decl name>" of a generated/decls/<type>/<name>.decl request. */
-int sh_dt_game_name(const char *request, char *out, size_t cap);
+/* "<type>/<decl name>" of a generated/decls/<type>/<name>.decl request, else
+ * the request itself (malloc'd), or NULL. */
+char *sh_dt_game_name(const char *request);
 
 #endif /* BACKEND_DECL_TREE_H */

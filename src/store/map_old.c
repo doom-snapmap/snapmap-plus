@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "text.h"
+#include "store_text.h"
 #include "map_old.h"
 #include "map_shards.h"
 #include "map_carrier.h"
@@ -313,7 +315,7 @@ static size_t shard_write_var(char *out, const char *header, const char *chunk, 
 static void shard_err(char *err, size_t cap, const char *msg)
 {
     if (!err || cap == 0) return;
-    strncpy_s(err, cap, msg, _TRUNCATE);
+    st_put(err, cap, msg);
 }
 
 char *sh_shard_insert(const char *json, size_t len,
@@ -573,7 +575,7 @@ static int mo_member_uint(const sh_json_object *object, const char *key, unsigne
 static int mo_slot_ok(const char *slot)
 {
     size_t i, n = slot ? strlen(slot) : 0;
-    if (!n || n >= SH_MODMANIFEST_SLOT_MAX) return 0;
+    if (!n) return 0;
     for (i = 0; i < n; i++)
         if ((unsigned char)slot[i] <= 0x20 || slot[i] == '"' || slot[i] == '\\' || (unsigned char)slot[i] >= 0x7f) return 0;
     return 1;
@@ -602,12 +604,14 @@ static int mo_choice_find(const char *lines, const char *slot, char *key, size_t
 }
 
 /* Append "slot\tkey\n" unless the slot is there. 0 when it does not fit. */
-static int mo_choice_add(char *lines, size_t cap, const char *slot, const char *key)
+static int mo_choice_add(char **lines, const char *slot, const char *key)
 {
-    size_t at = strlen(lines), need = strlen(slot) + strlen(key) + 2;
-    if (mo_choice_find(lines, slot, NULL, 0)) return 1;
-    if (at + need + 1 > cap) return 0;
-    _snprintf_s(lines + at, cap - at, _TRUNCATE, "%s\t%s\n", slot, key);
+    size_t at = *lines ? strlen(*lines) : 0, need = strlen(slot) + strlen(key) + 2;
+    char *grown;
+    if (*lines && mo_choice_find(*lines, slot, NULL, 0)) return 1;
+    if (!(grown = (char *)realloc(*lines, at + need + 1))) return 0;
+    *lines = grown;
+    st_fmt(grown + at, need + 1, "%s\t%s\n", slot, key);
     return 1;
 }
 
@@ -971,6 +975,8 @@ static void mo_row_free(sh_map_old_row *row)
     free(row->names);
     row->names = NULL;
     row->name_count = 0;
+    free(row->choices);
+    row->choices = NULL;
 }
 
 static int mo_row_add_name(sh_map_old_row *row, const char *name)
@@ -1031,16 +1037,17 @@ static int mo_parse_row(const char *json, size_t length, sh_map_old_row *out)
         sh_json_object co = {0};
         size_t c;
         if (choices && *choices == '{' && sh_native_json_parse_object(choices, strlen(choices), 2, &co)) {
-            for (c = 0; c < co.count && c < SH_MODMANIFEST_CHOICES_MAX; c++) {
+            for (c = 0; c < co.count; c++) {
                 char *key = mo_decode(co.members[c].value_json, strlen(co.members[c].value_json));
-                char slot[SH_MODMANIFEST_SLOT_MAX];
-                if (key && co.members[c].key_length < sizeof slot) {
-                    memcpy(slot, co.members[c].key, co.members[c].key_length);
-                    slot[co.members[c].key_length] = 0;
-                    if (mo_slot_ok(slot) && mo_valid_key(key))
-                        (void)mo_choice_add(out->choices, sizeof out->choices, slot, key);
+                char *slot = sh_textn(co.members[c].key, co.members[c].key_length);
+                if (key && slot && mo_slot_ok(slot) && mo_valid_key(key) && !mo_choice_add(&out->choices, slot, key)) {
+                    free(key);
+                    free(slot);
+                    sh_json_object_free(&co);
+                    goto done;
                 }
                 free(key);
+                free(slot);
             }
             sh_json_object_free(&co);
         }
@@ -1054,7 +1061,7 @@ static int mo_parse_row(const char *json, size_t length, sh_map_old_row *out)
             char *name;
             if (*elem != '"') continue;
             name = mo_decode(elem, elem_len);
-            if (name && strlen(name) <= SH_MODMANIFEST_NAME_MAX && !mo_row_add_name(out, name)) r = -1;
+            if (name && !mo_row_add_name(out, name)) r = -1;
             free(name);
             if (r < 0) break;
         }
@@ -1419,7 +1426,7 @@ done:
 /* the API                                                               */
 /* ==================================================================== */
 
-#define MO_ERR(...) do { if (err && err_cap) _snprintf_s(err, err_cap, _TRUNCATE, __VA_ARGS__); } while (0)
+#define MO_ERR(...) do { if (err && err_cap) st_putf(err, err_cap, __VA_ARGS__); } while (0)
 
 static int mo_package_header(const char *h, size_t n) { return sh_map_legacy_payload_header(h, n); }
 static int mo_unreleased_header(const char *h, size_t n) { return sh_map_legacy_unreleased_header(h, n); }
@@ -1586,21 +1593,34 @@ char *sh_map_old_write(const char *json, size_t len, const sh_map_old *old,
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, m->salt);
         strcpy_s(row.build, sizeof row.build, m->build);
-        strncpy_s(row.name, sizeof row.name, m->name[0] ? m->name : o->key, _TRUNCATE);
         row.size = m->size ? m->size : o->size;
         row.attached = o->attached;
-        for (p = o->choices; *p;) {
+        if (!sh_modmanifest_row_set_name(&row, m->name && m->name[0] ? m->name : o->key)) {
+            MO_ERR("out of memory");
+            goto fail;
+        }
+        for (p = o->choices; p && *p;) {
             const char *tab = strchr(p, '\t'), *nl = strchr(p, '\n');
-            char slot[SH_MODMANIFEST_SLOT_MAX], key[SH_MAP_OLD_KEY_CAP];
+            char *slot, key[SH_MAP_OLD_KEY_CAP];
             const sh_map_old_salt *cm;
-            if (!tab || !nl || tab > nl || (size_t)(tab - p) >= sizeof slot || (size_t)(nl - tab - 1) >= sizeof key) break;
-            memcpy(slot, p, (size_t)(tab - p)); slot[tab - p] = 0;
+            if (!tab || !nl || tab > nl || (size_t)(nl - tab - 1) >= sizeof key) break;
             memcpy(key, tab + 1, (size_t)(nl - tab - 1)); key[nl - tab - 1] = 0;
             cm = mo_salt_of(map, map_count, key);
-            if (cm) (void)mo_choice_add(row.choices, sizeof row.choices, slot, cm->salt);
+            slot = sh_textn(p, (size_t)(tab - p));
+            if (cm && (!slot || !mo_choice_add(&row.choices, slot, cm->salt))) {
+                free(slot);
+                sh_modmanifest_row_free(&row);
+                MO_ERR("out of memory");
+                goto fail;
+            }
+            free(slot);
             p = nl + 1;
         }
-        if (!sh_modmanifest_list_add(&rows, &row)) { MO_ERR("out of memory"); goto fail; }
+        {
+            int added = sh_modmanifest_list_add(&rows, &row);
+            sh_modmanifest_row_free(&row);
+            if (!added) { MO_ERR("out of memory"); goto fail; }
+        }
         for (k = 0; k < o->name_count; k++) {
             char *name = mo_rekey_name(o->names[k], m);
             int added = name && sh_modmanifest_row_add_name(&rows.rows[rows.count - 1], name);

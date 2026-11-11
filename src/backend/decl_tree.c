@@ -1,4 +1,5 @@
 /* decl_tree.c -- see decl_tree.h. Pure C; no engine or filesystem dependency. */
+#include "../common/text.h"
 #include "decl_tree.h"
 
 #include <stdarg.h>
@@ -911,15 +912,16 @@ static void dt_op_remove(dt_diff *d, const sh_dt_node *n)
 
 static void dt_op_keyed(dt_diff *d, const char *op, const sh_dt_node *n, const char *name, size_t name_n)
 {
-    char word[256], nm[512];
+    char *word = sh_textn(n->key, n->key_n), *nm = sh_textn(name, name_n);
     char *t = op[0] == 'k' ? dt_stmt_text(n, 0, "\n") : NULL;
-    _snprintf_s(word, sizeof word, _TRUNCATE, "%.*s", (int)n->key_n, n->key);
-    _snprintf_s(nm, sizeof nm, _TRUNCATE, "%.*s", (int)name_n, name);
+    if (!word || !nm || (op[0] == 'k' && !t)) { free(word); free(nm); free(t); d->failed = 1; return; }
     dt_op_begin(d, op, NULL);
     dt_op_member(d, "word", word);
     dt_op_member(d, "name", nm);
     if (op[0] == 'k') dt_op_member(d, "entry", t);
     dt_op_end(d);
+    free(word);
+    free(nm);
     free(t);
     if (op[0] == 'k') d->counts.keyed++; else d->counts.drop++;
 }
@@ -1201,16 +1203,15 @@ static int dt_find_seg(const sh_dt_node *n, const char *seg)
 
 sh_dt_node *sh_dt_at(sh_dt_node *n, const char *path)
 {
-    char seg[512];
     const char *p = path;
     while (n && p && *p) {
         const char *e = strchr(p, '/');
         size_t sl = e ? (size_t)(e - p) : strlen(p);
+        char *seg = sh_textn(p, sl);
         int k;
-        if (sl >= sizeof seg) return NULL;
-        memcpy(seg, p, sl);
-        seg[sl] = 0;
+        if (!seg) return NULL;
         k = dt_find_seg(n, seg);
+        free(seg);
         n = k >= 0 && n->kids[k]->block ? n->kids[k] : NULL;
         p = e ? e + 1 : NULL;
     }
@@ -1237,13 +1238,24 @@ typedef struct dt_op {
     const char *path[DT_PATH];         /* into the parsed JSON */
     int npath;
     const char *word, *name, *entry;
-    char slot[512];
+    char *slot;                        /* malloc'd (dt_src_ops_free) */
     unsigned long long digest;
     int skip;                          /* lost a clash */
     int lost_to, lost_by_choice;       /* with skip: the source that serves the slot, and whether the map chose it */
 } dt_op;
 
 typedef struct dt_src_ops { dj *json; dt_op *ops; int n; } dt_src_ops;
+
+static void dt_src_ops_free(dt_src_ops *so)
+{
+    int k;
+    for (k = 0; so->ops && k < so->n; ++k) free(so->ops[k].slot);
+    free(so->ops);
+    dj_free(so->json);
+    so->ops = NULL;
+    so->json = NULL;
+    so->n = 0;
+}
 
 static int dt_op_kind(const char *s)
 {
@@ -1253,17 +1265,14 @@ static int dt_op_kind(const char *s)
     return OP_BAD;
 }
 
-int sh_dt_game_name(const char *request, char *out, size_t cap)
+char *sh_dt_game_name(const char *request)
 {
     size_t n;
-    if (!request || !out || !cap) return 0;
+    if (!request) return NULL;
     n = strlen(request);
-    if (n > 21 && !_strnicmp(request, "generated/decls/", 16) && !_stricmp(request + n - 5, ".decl")) {
-        _snprintf_s(out, cap, _TRUNCATE, "%.*s", (int)(n - 21), request + 16);
-        return 1;
-    }
-    _snprintf_s(out, cap, _TRUNCATE, "%s", request);
-    return 0;
+    if (n > 21 && !_strnicmp(request, "generated/decls/", 16) && !_stricmp(request + n - 5, ".decl"))
+        return sh_textn(request + 16, n - 21);
+    return sh_text(request);
 }
 
 /* One slot segment: the key, or `word:name` for a named block. */
@@ -1287,8 +1296,8 @@ static void dt_op_slot(dt_op *op, const char *game)
     for (i = 0; i < op->npath; ++i) { dt_put(&b, "/", 1); dt_slot_seg(&b, op->path[i]); }
     if (op->kind == OP_KEYED || op->kind == OP_UNKEY) { dt_put(&b, "/", 1); dt_puts(&b, op->name ? op->name : ""); }
     s = dt_done(&b, NULL);
-    _snprintf_s(op->slot, sizeof op->slot, _TRUNCATE, "%s", s ? s : "");
-    free(s);
+    free(op->slot);
+    op->slot = s ? s : sh_text("");
 }
 
 /* The digest of what an op sets its slot to (removal is its own value). */
@@ -1361,13 +1370,14 @@ static int dt_src_load(const sh_dt_source *s, const char *request, const char *g
 
 static void dt_line(sh_dt_report *r, const char *fmt, ...)
 {
-    char buf[900];
+    char *buf;
     va_list ap;
     if (!r || !r->line) return;
     va_start(ap, fmt);
-    _vsnprintf_s(buf, sizeof buf, _TRUNCATE, fmt, ap);
+    buf = sh_vtextf(fmt, ap);
     va_end(ap);
-    r->line(r->context, buf);
+    if (buf) r->line(r->context, buf);
+    free(buf);
 }
 
 /* Parse an op's statement into the tree: the one member of `{ <entry> }`. */
@@ -1459,17 +1469,14 @@ static sh_dt_node *dt_nav(sh_dt_node *n, const char *const *path, int npath, con
     return n;
 }
 
-static void dt_path_text(const dt_op *op, int npath, char *out, size_t cap)
+/* The op's path, "/"-joined (malloc'd), or NULL. */
+static char *dt_path_text(const dt_op *op, int npath)
 {
-    size_t at = 0;
+    dt_buf b = { NULL, 0, 0, 0 };
     int i;
-    out[0] = 0;
-    for (i = 0; i < npath && at + 2 < cap; ++i) {
-        int w = _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s", i ? "/" : "", op->path[i]);
-        if (w < 0) break;
-        at += (size_t)w;
-    }
-    if (!npath) _snprintf_s(out, cap, _TRUNCATE, "(the decl)");
+    if (!npath) return sh_text("(the decl)");
+    for (i = 0; i < npath; ++i) { if (i) dt_put(&b, "/", 1); dt_puts(&b, op->path[i]); }
+    return dt_done(&b, NULL);
 }
 
 /* Apply one op of source `s`. 1 changed, 0 merged (nothing to do), -1 skipped (*why). */
@@ -1598,17 +1605,16 @@ static const sh_dt_choice *dt_choice(const sh_dt_choice *ch, int n, const char *
 sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, const sh_dt_source *src, int n,
                    const sh_dt_choice *choices, int nchoices, sh_dt_report *report)
 {
-    char game[400], why[300];
+    char *game, why[SH_DT_CAUSE_CAP];
     dt_src_ops *so;
     sh_dt *t = NULL;
     int s, k, any = 0;
     sh_dt_report none;
     if (!report) { memset(&none, 0, sizeof none); report = &none; }
     report->applied = report->merged = report->skipped = report->clashes = report->sources = 0;
-    if (!request || !stock) return NULL;
-    (void)sh_dt_game_name(request, game, sizeof game);
+    if (!request || !stock || !(game = sh_dt_game_name(request))) return NULL;
     so = (dt_src_ops *)calloc((size_t)(n > 0 ? n : 1), sizeof *so);
-    if (!so) return NULL;
+    if (!so) { free(game); return NULL; }
     for (s = 0; s < n; ++s) {
         if (!dt_src_load(&src[s], request, game, &so[s]))
             dt_line(report, "%s: %s's edits do not read; nothing taken from them", game, src[s].who ? src[s].who : "?");
@@ -1630,8 +1636,8 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             int who[64], nwho = 0, differ = 0, serving, by_choice = 0, s2, k2, w;
             unsigned long long first_digest = op->digest;
             const sh_dt_choice *ch;
-            char list[600];
-            size_t at = 0;
+            dt_buf list = { NULL, 0, 0, 0 };
+            const char *names;
             if (op->skip || !(op->kind == OP_SET || op->kind == OP_REMOVE || op->kind == OP_KEYED || op->kind == OP_UNKEY)) continue;
             /* The first claim of this slot (earlier claims were handled with their slot). */
             {
@@ -1672,25 +1678,25 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
                         }
                     }
             }
-            for (w = 0; w < nwho && at + 2 < sizeof list; ++w) {
-                int q = _snprintf_s(list + at, sizeof list - at, _TRUNCATE, "%s%s", w ? ", " : "",
-                                    src[who[w]].who ? src[who[w]].who : "?");
-                if (q < 0) break;
-                at += (size_t)q;
+            for (w = 0; w < nwho; ++w) {
+                if (w) dt_puts(&list, ", ");
+                dt_puts(&list, src[who[w]].who ? src[who[w]].who : "?");
             }
+            names = list.p && !list.oom ? list.p : "";
             report->clashes++;
-            if (by_choice) dt_line(report, "%s: set by %s; serving %s (the map's choice)", op->slot, list, src[serving].who);
+            if (by_choice) dt_line(report, "%s: set by %s; serving %s (the map's choice)", op->slot, names, src[serving].who);
             else if (ch)
                 dt_line(report, "%s: set by %s; the map chose %s, which does not set it; serving %s (row order)", op->slot,
-                        list, ch->key, src[serving].who);
+                        names, ch->key, src[serving].who);
             else
                 dt_line(report, "%s: set by %s; serving %s (row order; choose with sh_mods choose \"%s\" \"<mod name>\")", op->slot,
-                        list, src[serving].who, op->slot);
+                        names, src[serving].who, op->slot);
+            free(list.p);
             if (report->clash) report->clash(report->context, op->slot, who, nwho, serving, by_choice);
         }
     for (s = 0; s < n; ++s) {
         int changed = 0, merged = 0, skipped = 0, rows = 0, lost = 0, lost_to = -1, lost_choice = 0, lost_mixed = 0;
-        char superseded[300] = "";
+        char *superseded = NULL;
         for (k = 0; k < so[s].n; ++k) {
             const dt_op *op = &so[s].ops[k];
             const char *w = NULL;
@@ -1708,26 +1714,28 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
             else if (r == 2) { changed++; rows++; }
             else if (r == 0) merged++;
             else {
-                char path[400];
                 static const char *const kinds[] = { "set", "remove", "list", "unlist", "keyed", "unkey", "bag", "unbag" };
-                dt_path_text(op, op->npath, path, sizeof path);
                 skipped++;
-                if (skipped <= 4)
+                if (skipped <= 4) {
+                    char *path = dt_path_text(op, op->npath);
                     dt_line(report, "%s: %s: %s %s%s%s: %s; skipped", game, src[s].who, op->kind < OP_BAD ? kinds[op->kind] : "?",
-                            path, op->name ? " " : "", op->name ? op->name : "", w ? w : "out of memory");
+                            path ? path : "", op->name ? " " : "", op->name ? op->name : "", w ? w : "out of memory");
+                    free(path);
+                }
             }
         }
         if (skipped > 4) dt_line(report, "%s: %s: %d more operation(s) skipped", game, src[s].who, skipped - 4);
         if (lost) {
             const char *by = lost_to >= 0 && lost_to < n ? (src[lost_to].key ? src[lost_to].key : src[lost_to].who) : NULL;
-            if (lost_mixed || !by) _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by other mods' values", lost);
-            else if (lost_choice) _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by %s's choice", lost, by);
-            else _snprintf_s(superseded, sizeof superseded, _TRUNCATE, ", %d superseded by %s (row order)", lost, by);
+            if (lost_mixed || !by) superseded = sh_textf(", %d superseded by other mods' values", lost);
+            else if (lost_choice) superseded = sh_textf(", %d superseded by %s's choice", lost, by);
+            else superseded = sh_textf(", %d superseded by %s (row order)", lost, by);
         }
         if (so[s].n)
             dt_line(report, "%s: %d edit(s) from %s: %d applied%s%s, %d already held%s%s", game, so[s].n, src[s].who, changed,
-                    rows ? ", " : "", rows ? "some merged into an entry another mod adds" : "", merged, superseded,
-                    skipped ? ", some skipped" : "");
+                    rows ? ", " : "", rows ? "some merged into an entry another mod adds" : "", merged,
+                    superseded ? superseded : "", skipped ? ", some skipped" : "");
+        free(superseded);
         if (changed && report->used) report->used[s] = 1;
         report->applied += changed;
         report->merged += merged;
@@ -1735,8 +1743,9 @@ sh_dt *sh_dt_apply(const char *request, const char *stock, size_t stock_len, con
     }
     if (t->failed) { sh_dt_free(t); t = NULL; }
 done:
-    for (s = 0; s < n; ++s) { dj_free(so[s].json); free(so[s].ops); }
+    for (s = 0; s < n; ++s) dt_src_ops_free(&so[s]);
     free(so);
+    free(game);
     return t;
 }
 
@@ -1788,20 +1797,21 @@ int sh_dt_edits_slots(const char *request, const char *edits, size_t len,
 {
     sh_dt_source s;
     dt_src_ops so;
-    char game[400];
+    char *game;
     int k, n = 0;
     memset(&s, 0, sizeof s);
+    memset(&so, 0, sizeof so);
     s.edits = edits;
     s.edits_len = len;
-    (void)sh_dt_game_name(request, game, sizeof game);
-    if (!dt_src_load(&s, request, game, &so)) { dj_free(so.json); free(so.ops); return -1; }
+    if (!(game = sh_dt_game_name(request))) return -1;
+    if (!dt_src_load(&s, request, game, &so)) { dt_src_ops_free(&so); free(game); return -1; }
     for (k = 0; k < so.n; ++k) {
         dt_op *op = &so.ops[k];
         if (!(op->kind == OP_SET || op->kind == OP_REMOVE || op->kind == OP_KEYED || op->kind == OP_UNKEY)) continue;
         if (fn) fn(context, op->slot, dt_op_digest(op));
         n++;
     }
-    dj_free(so.json);
-    free(so.ops);
+    dt_src_ops_free(&so);
+    free(game);
     return n;
 }

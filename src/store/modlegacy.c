@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "modlegacy.h"
+#include "store_text.h"
 #include "modmanifest.h"
 #include "modbundle.h"
 #include "map_legacy_payload.h"
@@ -20,7 +21,7 @@
 #include "backend_log.h"
 #include "plain_reason.h"
 
-#define LG_ERR(buf, cap, ...) do { if ((buf) && (cap)) _snprintf_s((buf), (cap), _TRUNCATE, __VA_ARGS__); } while (0)
+#define LG_ERR(buf, cap, ...) do { if ((buf) && (cap)) st_putf((buf), (cap), __VA_ARGS__); } while (0)
 
 /* ==================================================================== */
 /* text helpers                                                          */
@@ -543,7 +544,7 @@ static char g_root_override[LG_PATH];
 void sh_modlegacy_set_data_root(const char *root)
 {
     AcquireSRWLockExclusive(&g_lg_lock);
-    if (root) strncpy_s(g_root_override, sizeof g_root_override, root, _TRUNCATE);
+    if (root) st_put(g_root_override, sizeof g_root_override, root);
     else g_root_override[0] = 0;
     ReleaseSRWLockExclusive(&g_lg_lock);
 }
@@ -551,10 +552,10 @@ void sh_modlegacy_set_data_root(const char *root)
 static int lg_data_root(char *out, size_t cap)
 {
     AcquireSRWLockShared(&g_lg_lock);
-    strncpy_s(out, cap, g_root_override, _TRUNCATE);
+    st_cpy(out, cap, g_root_override);
     ReleaseSRWLockShared(&g_lg_lock);
     if (out[0]) return 1;
-    return sh_mb_user_root(out, cap);
+    return st_path(out, cap, sh_mb_user_root());
 }
 
 /* A UTF-8 path (every path in this file is, as the store spells them) to a
@@ -626,7 +627,7 @@ static int lg_ensure_dir(const char *dir)
 {
     char path[LG_PATH];
     size_t i, n;
-    strncpy_s(path, sizeof path, dir, _TRUNCATE);
+    st_cpy(path, sizeof path, dir);
     n = strlen(path);
     for (i = 3; i <= n; i++) {
         if (path[i] == '\\' || path[i] == 0) {
@@ -1096,7 +1097,7 @@ static void lg_policy_manifest(lg_plan *p, const char *component, const char *bo
                 if (sh_modlegacy_safe_path(provider)) {
                     char full[LG_PATH_MAX + 64];
                     char **grown;
-                    _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s", component, provider);
+                    st_fmt(full, sizeof full, "%s%s", component, provider);
                     grown = (char **)realloc(p->providers, (p->nproviders + 1) * sizeof *grown);
                     if (grown) {
                         p->providers = grown;
@@ -1254,18 +1255,16 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
              * empty file, a path the request rules refuse) is left out and
              * counted, so the rest of the package still converts. */
             {
-                char request[LG_PATH_MAX + 32], why[SH_MB_CAUSE_MAX] = "";
+                char request[LG_PATH_MAX + 32], *why = NULL;
                 lg_request(target, request, sizeof request);
-                if (!sh_mb_extension_allowed(request)) _snprintf_s(why, sizeof why, _TRUNCATE, "type not carried by bundles");
-                else if (!e->size) _snprintf_s(why, sizeof why, _TRUNCATE, "empty file");
-                else if (!sh_mb_check_request(request, why, sizeof why) && !why[0])
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "unusable request path");
-                if (why[0]) {
+                if (!sh_mb_extension_allowed(request)) why = _strdup("type not carried by bundles");
+                else if (!e->size) why = _strdup("empty file");
+                else if (!sh_mb_check_request(request, &why) && !why) why = _strdup("unusable request path");
+                if (why) {
                     size_t rn = strlen(request);
                     if (rn > 5 && !_stricmp(request + rn - 5, ".bswf")) p->movies++;
-                    if (!p->unsupported++)
-                        _snprintf_s(p->first_unsupported, sizeof p->first_unsupported, _TRUNCATE, "%s (%s)",
-                                    e->name, why);
+                    if (!p->unsupported++) st_putf(p->first_unsupported, sizeof p->first_unsupported, "%s (%s)", e->name, why);
+                    free(why);
                     continue;
                 }
             }
@@ -1306,7 +1305,7 @@ static int lg_plan_build(lg_plan *p, const sh_modlegacy_zip *zip, char *err, siz
 static void lg_request(const char *target, char *out, size_t cap)
 {
     size_t i;
-    strncpy_s(out, cap, target + 7, _TRUNCATE);
+    st_cpy(out, cap, target + 7);
     for (i = 0; out[i]; i++) if (out[i] >= 'A' && out[i] <= 'Z') out[i] = (char)(out[i] - 'A' + 'a');
 }
 
@@ -1326,21 +1325,8 @@ static int lg_set_object(sh_json_object *o, const char *key, const sh_json_objec
     return ok;
 }
 
-/* At most `max` code points of UTF-8 `s`, in place. */
-static void lg_clip_codepoints(char *s, size_t max)
-{
-    size_t i = 0, cp = 0;
-    while (s[i]) {
-        if (((unsigned char)s[i] & 0xc0) != 0x80) {
-            if (cp == max) { s[i] = 0; return; }
-            cp++;
-        }
-        i++;
-    }
-}
-
-/* A display string the builder accepts: trimmed, clipped to `max` code points. */
-static int lg_set_display(sh_json_object *o, const char *key, const char *text, size_t max)
+/* A display string the builder accepts: trimmed, whole. */
+static int lg_set_display(sh_json_object *o, const char *key, const char *text)
 {
     char *copy;
     size_t n;
@@ -1349,7 +1335,6 @@ static int lg_set_display(sh_json_object *o, const char *key, const char *text, 
     while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') text++;
     copy = _strdup(text);
     if (!copy) return 0;
-    lg_clip_codepoints(copy, max);
     n = strlen(copy);
     while (n && (copy[n - 1] == ' ' || copy[n - 1] == '\t' || copy[n - 1] == '\r' || copy[n - 1] == '\n')) copy[--n] = 0;
     ok = !n || lg_set_text(o, key, copy);
@@ -1363,7 +1348,7 @@ typedef struct lg_origin {
     const char *source;      /* the migration source: an authored or a delivered package */
     const char *folder;      /* overrides-relative folder, '/'-separated */
     const char *tree;        /* the beta.16-19 tree fingerprint (64 hex), or NULL */
-    int (*build)(const char *folder_utf8, char *first_cause, size_t n);   /* NULL: modbundle_build_folder */
+    int (*build)(const char *folder_utf8, char **first_cause);   /* NULL: modbundle_build_folder */
 } lg_origin;
 
 /* Descriptor keys the converter writes itself; any other key of an
@@ -1395,23 +1380,22 @@ static char *lg_descriptor(lg_plan *p, const char *id, const sh_legacy_header *h
     *shadows = 0;
     /* A mod has no version (the package's own is dropped). */
     (void)origin;
-    _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", id);
-    if (name) lg_clip_codepoints(name, SH_MB_NAME_MAX);
+    st_fmt(ns, sizeof ns, "mods/%s/", id);
     {
         char *trimmed = name;
         while (trimmed && (*trimmed == ' ' || *trimmed == '\t')) trimmed++;
-        if (!lg_set_display(&d, "name", (trimmed && *trimmed) ? trimmed : id, SH_MB_NAME_MAX)) goto done;
+        if (!lg_set_display(&d, "name", (trimmed && *trimmed) ? trimmed : id)) goto done;
     }
     raw = sh_json_object_get(&p->root, "description");
     if (raw && raw[0] == '"') sh_json_object_set(&d, "description", raw, 2);
     text = lg_text_of(sh_json_object_get(&p->root, "author"));
-    if (!lg_set_display(&d, "author", text, SH_MB_AUTHOR_MAX)) { free(text); goto done; }
+    if (!lg_set_display(&d, "author", text)) { free(text); goto done; }
     free(text);
     /* The builder refuses anything but an http(s) address; a first-generation
      * descriptor never had to meet that, so another value is not carried. */
     text = lg_text_of(sh_json_object_get(&p->root, "homepage"));
     if (text && (!_strnicmp(text, "https://", 8) || !_strnicmp(text, "http://", 7)) &&
-        !strpbrk(text, " \t\r\n\"<>") && strlen(text) <= SH_MB_HOMEPAGE_MAX)
+        !strpbrk(text, " \t\r\n\"<>"))
         lg_set_text(&d, "homepage", text);
     free(text);
     if (p->cvars.count) {
@@ -1490,7 +1474,7 @@ static int lg_take_bundle(const char *folder, sh_modlegacy_verdict *v, sh_modman
     strcpy_s(v->salt, sizeof v->salt, info->salt);
     strcpy_s(v->build, sizeof v->build, info->build);
     v->size = info->size;
-    strncpy_s(v->folder, sizeof v->folder, folder, _TRUNCATE);
+    st_cpy(v->folder, sizeof v->folder, folder);
     return 1;
 }
 
@@ -1566,10 +1550,10 @@ static int lg_installed_copy(const char *mods, const char *built, char *out, siz
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !lg_find_name(&fd, name, sizeof name) || name[0] == '.' ||
                 !_stricmp(name, "maps"))
                 continue;
-            _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\%s", mods, name);
+            st_fmt(other, sizeof other, "%s\\%s", mods, name);
             if (!_stricmp(other, built)) continue;
             if (sh_mb_load_folder(other, &o) && o.validated && (!strcmp(o.hash, b.hash) || lg_same_files(&o, &b))) {
-                strncpy_s(out, cap, other, _TRUNCATE);
+                st_cpy(out, cap, other);
                 hit = 1;
             }
             sh_mb_free(&o);
@@ -1586,8 +1570,8 @@ static int lg_pick_folder(const char *mods, const char *id, char *out, size_t ca
 {
     int round;
     for (round = 1; round <= 9; round++) {
-        if (round == 1) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", mods, id);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s\\%s (%d)", mods, id, round);
+        if (round == 1) st_fmt(out, cap, "%s\\%s", mods, id);
+        else st_fmt(out, cap, "%s\\%s (%d)", mods, id, round);
         if (lg_attr(out) == INVALID_FILE_ATTRIBUTES) return 1;
     }
     return 0;
@@ -1670,7 +1654,7 @@ static char lg_layout(const lg_plan *plan, const sh_modlegacy_zip *zip)
 static void lg_log_unpacked(const lg_plan *plan, const char *folder, ULONGLONG started)
 {
     char line[MAX_PATH + 1200];
-    _snprintf_s(line, sizeof line, _TRUNCATE,
+    st_putf(line, sizeof line,
         "LEGACY: unpacked %zu file(s) into %s in %llu ms (%u not an input and not kept, %u imported by a "
         "resources manifest, %u policy file(s) folded into mod.json, %u nested component(s), %u file(s) under "
         "assets/ a bundle cannot carry (%u of them .bswf movies)%s%s%s)",
@@ -1690,7 +1674,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
 {
     lg_plan plan;
     char root[LG_PATH], mods[LG_PATH], folder[LG_PATH], tmp[LG_PATH], kept[LG_PATH];
-    char err[200] = "", cause[SH_MB_CAUSE_MAX] = "", id[SH_MODLEGACY_ID_CAP], salt[SH_MODMANIFEST_SALT_CAP] = "";
+    char err[200] = "", *cause = NULL, id[SH_MODLEGACY_ID_CAP], salt[SH_MODMANIFEST_SALT_CAP] = "";
     char *descriptor = NULL;
     size_t descriptor_len = 0;
     unsigned shadows = 0;
@@ -1699,7 +1683,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
 
     memset(&plan, 0, sizeof plan);
     if (!lg_data_root(root, sizeof root)) { LG_ERR(v->reason, sizeof v->reason, "no data folder"); return 0; }
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    st_fmt(mods, sizeof mods, "%s\\mods", root);
     if (!lg_plan_build(&plan, zip, err, sizeof err)) {
         LG_ERR(v->reason, sizeof v->reason, "%s", err);
         goto done;
@@ -1710,7 +1694,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     if (!lg_pick_folder(mods, id, folder, sizeof folder)) {
         LG_ERR(v->reason, sizeof v->reason, "no free folder for %s under %s", id, mods); goto done;
     }
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s\\.tmp-%s-%lu-%llu", mods, h->digest,
+    st_fmt(tmp, sizeof tmp, "%s\\.tmp-%s-%lu-%llu", mods, h->digest,
                 GetCurrentProcessId(), (unsigned long long)GetTickCount64());
     if (strlen(folder) + 32 >= LG_PATH || strlen(tmp) + 32 >= LG_PATH) {
         LG_ERR(v->reason, sizeof v->reason, "the data folder path is too long"); goto done;
@@ -1723,21 +1707,23 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     if (!lg_unpack(zip, &plan, descriptor, descriptor_len, tmp, folder, v)) goto done;
     unpacked = 1;
 
-    if (!g_lg_salter || g_lg_salter(folder, id, salt, cause, sizeof cause) < 0) {
-        LG_ERR(v->reason, sizeof v->reason, "%s could not take a salt: %s", folder,
-               g_lg_salter ? (cause[0] ? cause : "no cause given") : "no salting is set");
+    if (!g_lg_salter || g_lg_salter(folder, id, salt, &cause) < 0) {
+        st_putf(v->reason, sizeof v->reason, "%s could not take a salt: %s", folder,
+                g_lg_salter ? (cause && cause[0] ? cause : "no cause given") : "no salting is set");
         lg_rmtree(folder);
         goto done;
     }
-    if (!((origin && origin->build) ? origin->build : modbundle_build_folder)(folder, cause, sizeof cause)) {
-        LG_ERR(v->reason, sizeof v->reason, "the bundle builder refused it under the current rules: %s",
-               cause[0] ? cause : "no cause given");
+    free(cause);
+    cause = NULL;
+    if (!((origin && origin->build) ? origin->build : modbundle_build_folder)(folder, &cause)) {
+        st_putf(v->reason, sizeof v->reason, "the bundle builder refused it under the current rules: %s",
+                cause && cause[0] ? cause : "no cause given");
         lg_rmtree(folder);
         goto done;
     }
     if (lg_installed_copy(mods, folder, kept, sizeof kept)) {
         char line[2 * LG_PATH + 160];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "LEGACY: the installed %s serves this package; the converted copy is not kept", kept);
+        st_putf(line, sizeof line, "LEGACY: the installed %s serves this package; the converted copy is not kept", kept);
         backend_log(line);
         lg_rmtree(folder);
         strcpy_s(folder, sizeof folder, kept);
@@ -1750,10 +1736,11 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
         v->shadows = shadows;
         v->skipped = plan.unsupported;
         v->movies = plan.movies;
-        strncpy_s(v->first_skipped, sizeof v->first_skipped, plan.first_unsupported, _TRUNCATE);
+        st_cpy(v->first_skipped, sizeof v->first_skipped, plan.first_unsupported);
         if (unpacked) lg_log_unpacked(&plan, folder, started);
     }
 done:
+    free(cause);
     free(descriptor);
     lg_plan_free(&plan);
     return ok;
@@ -1768,12 +1755,12 @@ static int lg_find_migrated(const char *root, const char *tree, char *folder, si
     char *text = NULL, *relative = NULL;
     sh_json_object record = {0}, trees = {0};
     int hit = 0;
-    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    st_fmt(mods, sizeof mods, "%s\\mods", root);
     if (sh_mb_record_get(mods, "migration", &text) != 1 || !text) { free(text); return 0; }
     if (sh_json_parse_object(text, strlen(text), 24, &record) && lg_section(&record, "trees", &trees) &&
         (relative = lg_text_of(sh_json_object_get(&trees, tree))) != NULL && sh_modlegacy_safe_path(relative)) {
         size_t i;
-        _snprintf_s(folder, cap, _TRUNCATE, "%s\\%s", mods, relative);
+        st_fmt(folder, cap, "%s\\%s", mods, relative);
         for (i = strlen(mods); folder[i]; i++) if (folder[i] == '/') folder[i] = '\\';
         hit = lg_file_exists(folder, "mod.json");
     }
@@ -1829,7 +1816,7 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
     v->verdict = SH_MODLEGACY_CLEAN;
     if (!zip || !tree_hex || !lg_is_hex64(tree_hex)) { LG_ERR(v->reason, sizeof v->reason, "no tree fingerprint"); return 0; }
     memset(&h, 0, sizeof h);
-    _snprintf_s(h.key, sizeof h.key, _TRUNCATE, "delivery.%s", tree_hex);
+    st_fmt(h.key, sizeof h.key, "delivery.%s", tree_hex);
     memcpy(h.digest, tree_hex, 16);
     h.digest[16] = 0;
     h.key_form = SH_LEGACY_KEY_DELIVERY;
@@ -1877,7 +1864,7 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     memset(&h, 0, sizeof h);
     memset(&plan, 0, sizeof plan);
     lg_origin_of(origin, &o);
-    _snprintf_s(h.key, sizeof h.key, _TRUNCATE, "overrides/%s", (origin && origin->folder) ? origin->folder : "");
+    st_fmt(h.key, sizeof h.key, "overrides/%s", (origin && origin->folder) ? origin->folder : "");
     if (o.tree && lg_is_hex64(o.tree)) { memcpy(h.digest, o.tree, 16); h.digest[16] = 0; }
     h.key_form = SH_LEGACY_KEY_OVERRIDES;
     strcpy_s(v->key, sizeof v->key, h.key);
@@ -1888,15 +1875,15 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     lg_pick_id(&plan, &h, origin ? origin->fallback_id : NULL, id, sizeof id);
     descriptor = lg_descriptor(&plan, id, &h, &o, &shadows, &descriptor_len);
     if (!descriptor) { LG_ERR(v->reason, sizeof v->reason, "the descriptor could not be converted"); goto done; }
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.tmp-%lu", dest, GetCurrentProcessId());
+    st_fmt(tmp, sizeof tmp, "%s.tmp-%lu", dest, GetCurrentProcessId());
     if (!lg_unpack(zip, &plan, descriptor, descriptor_len, tmp, dest, v)) goto done;
     strcpy_s(v->id, sizeof v->id, id);
-    strncpy_s(v->folder, sizeof v->folder, dest, _TRUNCATE);
+    st_cpy(v->folder, sizeof v->folder, dest);
     v->files = (unsigned)plan.count;
     v->shadows = shadows;
     v->skipped = plan.unsupported;
     v->movies = plan.movies;
-    strncpy_s(v->first_skipped, sizeof v->first_skipped, plan.first_unsupported, _TRUNCATE);
+    st_cpy(v->first_skipped, sizeof v->first_skipped, plan.first_unsupported);
     lg_log_unpacked(&plan, dest, started);
     ok = 1;
 done:
@@ -1976,11 +1963,23 @@ static lg_memo *lg_memo_find(const sh_modlegacy_carrier *c)
     return NULL;
 }
 
+/* A row's own copy of `from`: its names, name and choices duplicated. */
+static void lg_row_copy(sh_modmanifest_row *to, const sh_modmanifest_row *from)
+{
+    size_t i;
+    *to = *from;
+    to->names = NULL;
+    to->name_count = 0;
+    to->name = NULL;
+    to->choices = from->choices ? _strdup(from->choices) : NULL;
+    if (from->name) (void)sh_modmanifest_row_set_name(to, from->name);
+    for (i = 0; i < from->name_count; i++) sh_modmanifest_row_add_name(to, from->names[i]);
+}
+
 static void lg_memo_store(const sh_modlegacy_carrier *c, const sh_modlegacy_verdict *v,
                           const sh_modmanifest_row *info)
 {
     lg_memo *m;
-    size_t i;
     if (g_memo_count == LG_MEMO_MAX) {
         sh_modmanifest_row_free(&g_memo[0].info);
         memmove(g_memo, g_memo + 1, (LG_MEMO_MAX - 1) * sizeof *g_memo);
@@ -1994,10 +1993,7 @@ static void lg_memo_store(const sh_modlegacy_carrier *c, const sh_modlegacy_verd
     m->chars = lg_chars(c);
     m->verdict = *v;
     if (info) {
-        m->info = *info;
-        m->info.names = NULL;
-        m->info.name_count = 0;
-        for (i = 0; i < info->name_count; i++) sh_modmanifest_row_add_name(&m->info, info->names[i]);
+        lg_row_copy(&m->info, info);
     }
 }
 
@@ -2010,14 +2006,14 @@ static void lg_log_verdict(const sh_modlegacy_verdict *v, int memo)
 {
     char line[1024];
     if (v->verdict == SH_MODLEGACY_CONVERT)
-        _snprintf_s(line, sizeof line, _TRUNCATE,
+        st_putf(line, sizeof line,
             "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CONVERT -> %s, package %s, salt %s, "
             "build %.16s, layout era %c, %u file(s), %u name(s) outside mods/<salt>/%s",
             v->key, v->digest, v->present, v->total, sh_map_legacy_key_form_name(v->key_form),
             v->folder, v->id, v->salt, v->build, v->layout ? v->layout : '?', v->files, v->shadows,
             memo ? " [converted earlier this session]" : "");
     else
-        _snprintf_s(line, sizeof line, _TRUNCATE,
+        st_putf(line, sizeof line,
             "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CLEAN -- %s; its rows are removed from the map",
             v->key, v->digest, v->present, v->total, sh_map_legacy_key_form_name(v->key_form),
             v->reason[0] ? v->reason : "unknown");
@@ -2056,11 +2052,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
         if (memo) {
             *v = memo->verdict;
             if (v->verdict == SH_MODLEGACY_CONVERT) {
-                size_t k;
-                info = memo->info;
-                info.names = NULL;
-                info.name_count = 0;
-                for (k = 0; k < memo->info.name_count; k++) sh_modmanifest_row_add_name(&info, memo->info.names[k]);
+                lg_row_copy(&info, &memo->info);
             }
         } else {
             size_t zip_len = 0;
@@ -2092,7 +2084,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
             memset(&row, 0, sizeof row);
             strcpy_s(row.salt, sizeof row.salt, v->salt);
             strcpy_s(row.build, sizeof row.build, v->build);
-            strncpy_s(row.name, sizeof row.name, info.name[0] ? info.name : v->id, _TRUNCATE);
+            (void)sh_modmanifest_row_set_name(&row, sh_modmanifest_row_name(&info)[0] ? sh_modmanifest_row_name(&info) : v->id);
             row.size = v->size;
             for (k = 0; k < info.name_count && nplaced; k++) {
                 const char *key = info.names[k];
@@ -2137,7 +2129,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
         sh_modmanifest_list_free(&merged);
         if (final) HeapFree(GetProcessHeap(), 0, stripped);
         else {
-            _snprintf_s(line, sizeof line, _TRUNCATE,
+            st_putf(line, sizeof line,
                 "LEGACY: the rows of the converted mods could not be written into the map (%s); the mods are in the "
                 "mods folder", err[0] ? err : "unknown");
             backend_log(line);
@@ -2146,7 +2138,7 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
         }
     }
     if (ncarriers) {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
+        st_putf(line, sizeof line,
             "LEGACY: %zu carrier(s): %u converted, %u cleaned; %u package row(s)%s removed, %zu -> %zu bytes",
             ncarriers, converted, cleaned, package_rows, unreleased ? " and unreleased v2 rows" : "",
             length, final_len);

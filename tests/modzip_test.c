@@ -13,6 +13,7 @@
  * crash or hang; every refusal is one sentence, and a refusal of the
  * archive's structure names the next step. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +74,7 @@ static int exercise(char *cause, size_t cap)
     size_t i;
     int opened;
     cause[0] = 0;
-    opened = sh_zip_reader_open(&r, g_path, cause, cap);
+    opened = HOC(cause, cap, sh_zip_reader_open(&r, g_path, HO_P(0)));
     if (!opened) {
         CHECK(cause[0] && strlen(cause) < cap - 1 && !strchr(cause, '\n'));
         return 0;
@@ -81,7 +82,7 @@ static int exercise(char *cause, size_t cap)
     for (i = 0; i < r.n; i++) {
         size_t len = 0;
         char why[512];
-        unsigned char *b = sh_zip_reader_read(&r, (long)i, 1u << 20, &len, why, sizeof why);
+        unsigned char *b = HOT(unsigned char *, why, sh_zip_reader_read(&r, (long)i, 1u << 20, &len, HO_P(0)));
         if (b) free(b);
         else CHECK(why[0]);
         CHECK(sh_zip_reader_find(&r, r.e[i].name) == (long)i);
@@ -297,12 +298,12 @@ static void zip64_reads(void)
     printf("-- a ZIP64 archive another tool wrote reads back; its damage is refused like any other\n");
     build_zip64();
     CHECK(spit(g_z64, g_z64_len));
-    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == 2);
+    CHECK(HO(cause, sh_zip_reader_open(&r, g_path, HO_P(0))) && r.n == 2);
     if (r.n == 2) {
-        b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "a.txt"), 16, &n, cause, sizeof cause);
+        b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, sh_zip_reader_find(&r, "a.txt"), 16, &n, HO_P(0)));
         CHECK(b && n == 5 && !memcmp(b, "hello", 5));
         free(b);
-        b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "dir/b.txt"), 16, &n, cause, sizeof cause);
+        b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, sh_zip_reader_find(&r, "dir/b.txt"), 16, &n, HO_P(0)));
         CHECK(b && n == 3 && !memcmp(b, "abc", 3));
         free(b);
     }
@@ -379,8 +380,8 @@ static void zip64_many(void)
         CHECK(z[len - 42] == 0x50 && z[len - 41] == 0x4b && z[len - 40] == 6 && z[len - 39] == 7);   /* the locator */
         free(z);
     }
-    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == 70000);
-    b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "f/69999.txt"), 64, &n, cause, sizeof cause);
+    CHECK(HO(cause, sh_zip_reader_open(&r, g_path, HO_P(0))) && r.n == 70000);
+    b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, sh_zip_reader_find(&r, "f/69999.txt"), 64, &n, HO_P(0)));
     CHECK(b && n == 11 && !memcmp(b, "f/69999.txt", 11));
     free(b);
     sh_zip_reader_close(&r);
@@ -419,8 +420,8 @@ static void zip64_large(void)
     }
     CHECK(i == count && sh_zip_writer_finish(&w) && w.off > (4ull << 30));
     sh_zip_writer_free(&w);
-    CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == count);
-    b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "big/65.bin"), size, &n, cause, sizeof cause);
+    CHECK(HO(cause, sh_zip_reader_open(&r, g_path, HO_P(0))) && r.n == count);
+    b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, sh_zip_reader_find(&r, "big/65.bin"), size, &n, HO_P(0)));
     block[0] = 65;
     CHECK(b && n == size && !memcmp(b, block, size) && r.e[sh_zip_reader_find(&r, "big/65.bin")].lho > (4ull << 30));
     free(b);
@@ -440,8 +441,8 @@ int main(void)
         sh_zip_reader r;
         size_t n = 0;
         unsigned char *b;
-        CHECK(sh_zip_reader_open(&r, g_path, cause, sizeof cause) && r.n == 2);
-        b = sh_zip_reader_read(&r, sh_zip_reader_find(&r, "dir/b.txt"), 16, &n, cause, sizeof cause);
+        CHECK(HO(cause, sh_zip_reader_open(&r, g_path, HO_P(0))) && r.n == 2);
+        b = HOT(unsigned char *, cause, sh_zip_reader_read(&r, sh_zip_reader_find(&r, "dir/b.txt"), 16, &n, HO_P(0)));
         CHECK(b && n == 3 && !memcmp(b, "abc", 3));
         free(b);
         CHECK(sh_zip_reader_find(&r, "DIR/B.TXT") < 0);   /* the exact name */

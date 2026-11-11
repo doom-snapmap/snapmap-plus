@@ -17,6 +17,7 @@
 #include "mp_json.h"
 #include "backend_log.h"
 #include "plain_reason.h"
+#include "text.h"
 
 #include "modstore_internal.h"
 /* ------------------------------------------------------------ lock ----- */
@@ -35,15 +36,15 @@ static __declspec(thread) LONG   t_ms_depth;  /* this thread's nested holds */
 
 void modstore_lock(void)
 {
-    char root[MAX_PATH * 4];
+    const char *root;
     HANDLE h;
     if (t_ms_depth > 0) {
         t_ms_depth++;
         InterlockedIncrement(&g_ms_lock_depth);
         return;
     }
-    if (!sh_ms_root(root, sizeof root)) root[0] = 0;
-    h = sh_mb_store_mutex(root);
+    root = sh_ms_root();
+    h = sh_mb_store_mutex(root ? root : "");
     if (h) sh_mb_store_wait(h);
     else backend_log("MODS: store: the mods folder's lock could not be opened; the store operation goes ahead unguarded");
     t_ms_held = h;
@@ -92,17 +93,21 @@ static int ms_lock_yield(void)
     return 1;
 }
 
-static char g_ms_root[MAX_PATH * 4];
-static int  g_ms_root_set;
+/* The root a test or the store tool set (sh_ms_set_root), or NULL for the
+ * default. A replaced root is kept, never freed: a reader on another thread
+ * may still hold it. */
+static const char *volatile g_ms_root;
 
-int ms_cause(char *cause, size_t cap, const char *fmt, ...)
+int ms_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
-    if (cause && cap) {
-        va_start(ap, fmt);
-        _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
-        va_end(ap);
-    }
+    char *text;
+    if (!cause) return 0;
+    va_start(ap, fmt);
+    text = sh_vtextf(fmt, ap);
+    va_end(ap);
+    free(*cause);
+    *cause = text ? text : _strdup("out of memory");
     return 0;
 }
 
@@ -113,48 +118,47 @@ int ms_cause(char *cause, size_t cap, const char *fmt, ...)
  * in a per-thread buffer: one call per message. */
 const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes)
 {
-    char root[MAX_PATH * 4], path[MAX_PATH * 4 + 300];
-    int have_root = sh_ms_root(root, sizeof root);
-    if (!name || !name[0]) strcpy_s(path, sizeof path, have_root ? root : "the mods folder");
-    else if (in_store && have_root) _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, name);
-    else if ((err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) && have_root && name[1] != ':')
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, name);
-    else strcpy_s(path, sizeof path, name);
-    return sh_reason_win32(err, path, bytes);
+    const char *root = sh_ms_root(), *why;
+    char *path;
+    if (!name || !name[0]) path = sh_text(root ? root : "the mods folder");
+    else if (in_store && root) path = sh_textf("%s\\%s", root, name);
+    else if ((err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) && root && name[1] != ':')
+        path = sh_textf("%s\\%s", root, name);
+    else path = sh_text(name);
+    why = sh_reason_win32(err, path ? path : name, bytes);
+    free(path);
+    return why;
 }
 
 void ms_log(const char *fmt, ...)
 {
-    char line[2048];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    backend_log(line ? line : "MODS: store: a line could not be written (out of memory)");
+    free(line);
 }
 
 int sh_ms_set_root(const char *root)
 {
-    if (!root || !root[0]) { g_ms_root_set = 0; g_ms_root[0] = 0; return 1; }
-    if (strlen(root) >= sizeof g_ms_root) return 0;
-    strcpy_s(g_ms_root, sizeof g_ms_root, root);
-    g_ms_root_set = 1;
+    char *copy = NULL;
+    if (root && root[0] && !(copy = sh_text(root))) return 0;
+    g_ms_root = copy;
     return 1;
 }
 
-int sh_ms_root(char *out, size_t cap)
+const char *sh_ms_root(void)
 {
-    char base[MAX_PATH * 4];
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    if (g_ms_root_set) {
-        if (strlen(g_ms_root) >= cap) return 0;
-        strcpy_s(out, cap, g_ms_root);
-        return 1;
-    }
-    if (!sh_mb_user_root(base, sizeof base)) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\mods", base);
-    return out[0] != 0;
+    static char *volatile fallback;
+    const char *set = g_ms_root, *base;
+    char *made;
+    if (set) return set;
+    if (fallback) return fallback;
+    if (!(base = sh_mb_user_root()) || !(made = sh_textf("%s\\mods", base))) return NULL;
+    if (InterlockedCompareExchangePointer((void *volatile *)&fallback, made, NULL) != NULL) free(made);
+    return fallback;
 }
 
 /* ------------------------------------------------------------ paths ---- */
@@ -187,9 +191,8 @@ wchar_t *ms_wjoin_utf8(const wchar_t *dir, const char *rel)
 
 wchar_t *ms_wroot(void)
 {
-    char root[MAX_PATH * 4];
-    if (!sh_ms_root(root, sizeof root)) return NULL;
-    return sh_mb_wpath(root);
+    const char *root = sh_ms_root();
+    return root ? sh_mb_wpath(root) : NULL;
 }
 
 /* Create every missing folder of a \\?\ path. */
@@ -253,10 +256,10 @@ static const char *ms_leaf(const char *folder)
  * its leaf. Points into `folder`. */
 static const char *ms_rel(const char *folder)
 {
-    char root[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     size_t n;
     if (!folder) return "";
-    if (!sh_ms_root(root, sizeof root)) return ms_leaf(folder);
+    if (!root) return ms_leaf(folder);
     n = strlen(root);
     if (_strnicmp(folder, root, n) == 0 && (folder[n] == '\\' || folder[n] == '/') && folder[n + 1]) return folder + n + 1;
     return ms_leaf(folder);
@@ -392,7 +395,7 @@ void sh_ms_recycle_refuse_for_test(int refuse) { InterlockedExchange(&g_ms_recyc
  * fixed drive's folder is offered: on a network or removable drive the shell
  * would delete it outright without saying so. 1 when the folder went to the
  * bin; else 0 with why the bin could not take it in `why`. */
-static int ms_recycle(const wchar_t *path, char *why, size_t cap)
+static int ms_recycle(const wchar_t *path, char **why)
 {
     const wchar_t *plain = path;
     wchar_t drive[4], *from;
@@ -400,18 +403,18 @@ static int ms_recycle(const wchar_t *path, char *why, size_t cap)
     size_t n;
     int rc;
 #if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
-    if (g_ms_recycle_refused) { ms_cause(why, cap, "the shell refused it (test)"); return 0; }
+    if (g_ms_recycle_refused) { ms_cause(why, "the shell refused it (test)"); return 0; }
 #endif
-    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) { ms_cause(why, cap, "a network folder has no Recycle Bin"); return 0; }
+    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) { ms_cause(why, "a network folder has no Recycle Bin"); return 0; }
     if (!wcsncmp(path, L"\\\\?\\", 4)) plain = path + 4;
     n = wcslen(plain);
     /* The shell takes plain drive paths shorter than MAX_PATH only. */
-    if (n < 3 || plain[1] != L':' || plain[2] != L'\\') { ms_cause(why, cap, "the Recycle Bin cannot take this path"); return 0; }
-    if (n >= MAX_PATH) { ms_cause(why, cap, "its path is too long for the Recycle Bin"); return 0; }
+    if (n < 3 || plain[1] != L':' || plain[2] != L'\\') { ms_cause(why, "the Recycle Bin cannot take this path"); return 0; }
+    if (n >= MAX_PATH) { ms_cause(why, "its path is too long for the Recycle Bin"); return 0; }
     drive[0] = plain[0]; drive[1] = L':'; drive[2] = L'\\'; drive[3] = 0;
-    if (GetDriveTypeW(drive) != DRIVE_FIXED) { ms_cause(why, cap, "drive %lc: has no Recycle Bin", plain[0]); return 0; }
+    if (GetDriveTypeW(drive) != DRIVE_FIXED) { ms_cause(why, "drive %lc: has no Recycle Bin", plain[0]); return 0; }
     from = (wchar_t *)calloc(n + 2, sizeof(wchar_t));   /* double-NUL terminated */
-    if (!from) { ms_cause(why, cap, "out of memory"); return 0; }
+    if (!from) { ms_cause(why, "out of memory"); return 0; }
     memcpy(from, plain, n * sizeof(wchar_t));
     memset(&op, 0, sizeof op);
     op.wFunc = FO_DELETE;
@@ -419,21 +422,20 @@ static int ms_recycle(const wchar_t *path, char *why, size_t cap)
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NORECURSEREPARSE;
     rc = SHFileOperationW(&op);
     free(from);
-    if (rc) { ms_cause(why, cap, "the shell refused it (error 0x%x)", (unsigned)rc); return 0; }
-    if (op.fAnyOperationsAborted) { ms_cause(why, cap, "the shell stopped before it finished"); return 0; }
-    if (ms_exists(path)) { ms_cause(why, cap, "the shell left part of it in place"); return 0; }
+    if (rc) { ms_cause(why, "the shell refused it (error 0x%x)", (unsigned)rc); return 0; }
+    if (op.fAnyOperationsAborted) { ms_cause(why, "the shell stopped before it finished"); return 0; }
+    if (ms_exists(path)) { ms_cause(why, "the shell left part of it in place"); return 0; }
     return 1;
 }
 
 /* Remove a tree under the store root: the Recycle Bin first, the outright
  * delete (ms_rmtree: links removed, never followed) when the bin cannot take
  * it. SH_MS_RECYCLED, SH_MS_DELETED, or 0 when it could not be removed. */
-static int ms_retire(const wchar_t *path, const wchar_t *root, char *why, size_t cap)
+static int ms_retire(const wchar_t *path, const wchar_t *root, char **why)
 {
-    if (why && cap) why[0] = 0;
     if (!ms_inside(path, root)) return 0;
     if (!ms_exists(path)) return SH_MS_DELETED;   /* nothing there: nothing to say */
-    if (ms_recycle(path, why, cap)) return SH_MS_RECYCLED;
+    if (ms_recycle(path, why)) return SH_MS_RECYCLED;
     return ms_rmtree(path, root) ? SH_MS_DELETED : 0;
 }
 
@@ -460,40 +462,41 @@ static void ms_log_discard(const char *folder, int r, const char *why)
 int sh_ms_remove_folder(const char *folder)
 {
     wchar_t *root, *w;
-    char why[200] = "";
+    char *why = NULL;
     int r = 0;
     modstore_lock();
     root = ms_wroot();
     w = folder ? sh_mb_wpath(folder) : NULL;
-    if (root && w) r = ms_retire(w, root, why, sizeof why);
+    if (root && w) r = ms_retire(w, root, &why);
     ms_log_discard(folder, r, why);
     if (r) ms_after_removal(folder, w, root);
     free(root);
     free(w);
+    free(why);
     modstore_unlock();
     return r;
 }
 
-int sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap)
+int sh_ms_delete_mod_folder(const char *folder, char **cause)
 {
     wchar_t *root, *w;
-    char why[200] = "";
+    char *why = NULL;
     int r = 0;
-    if (cause && cap) cause[0] = 0;
-    if (!folder || !folder[0]) { ms_cause(cause, cap, "no folder named"); return 0; }
+    if (!folder || !folder[0]) { ms_cause(cause, "no folder named"); return 0; }
     modstore_lock();
     root = ms_wroot();
     w = sh_mb_wpath(folder);
-    if (!root || !w) ms_cause(cause, cap, "the store folder cannot be resolved");
-    else if (!ms_is_dir(w)) ms_cause(cause, cap, "%s is no longer in the store", ms_rel(folder));
-    else if (!ms_store_mod_folder(w, root)) ms_cause(cause, cap, "%s is not a mod folder of the store", ms_rel(folder));
-    else if ((r = ms_retire(w, root, why, sizeof why)) == 0)
-        ms_cause(cause, cap, "%s could not be deleted completely: %s", ms_rel(folder), ms_why(GetLastError(), ms_rel(folder), 1, 0));
-    else if (r == SH_MS_DELETED) ms_cause(cause, cap, "%s", why);
+    if (!root || !w) ms_cause(cause, "the store folder cannot be resolved");
+    else if (!ms_is_dir(w)) ms_cause(cause, "%s is no longer in the store", ms_rel(folder));
+    else if (!ms_store_mod_folder(w, root)) ms_cause(cause, "%s is not a mod folder of the store", ms_rel(folder));
+    else if ((r = ms_retire(w, root, &why)) == 0)
+        ms_cause(cause, "%s could not be deleted completely: %s", ms_rel(folder), ms_why(GetLastError(), ms_rel(folder), 1, 0));
+    else if (r == SH_MS_DELETED) ms_cause(cause, "%s", why ? why : "");
     ms_log_discard(folder, r, why);
     if (r) ms_after_removal(folder, w, root);
     free(root);
     free(w);
+    free(why);
     modstore_unlock();
     return r;
 }
@@ -593,7 +596,7 @@ static int ms_write_text(const wchar_t *path, const char *text, size_t len)
 /* ------------------------------------------------------ build causes ---- */
 
 /* The cause of the last refused build per folder, for this process. */
-typedef struct ms_bcause { char *folder; char cause[SH_MB_CAUSE_MAX]; } ms_bcause;
+typedef struct ms_bcause { char *folder; char *cause; } ms_bcause;
 static ms_bcause *g_bcause;
 static size_t g_bcause_count, g_bcause_cap;
 
@@ -611,9 +614,13 @@ static void ms_note_cause(const char *folder, const char *cause)
     modstore_lock();
     for (i = 0; i < g_bcause_count; i++)
         if (!_stricmp(g_bcause[i].folder, folder)) {
-            if (cause && cause[0]) strncpy_s(g_bcause[i].cause, sizeof g_bcause[i].cause, cause, _TRUNCATE);
-            else {
+            char *copy = cause && cause[0] ? _strdup(cause) : NULL;
+            if (copy) {
+                free(g_bcause[i].cause);
+                g_bcause[i].cause = copy;
+            } else if (!cause || !cause[0]) {
                 free(g_bcause[i].folder);
+                free(g_bcause[i].cause);
                 g_bcause[i] = g_bcause[--g_bcause_count];
             }
             modstore_unlock();
@@ -628,9 +635,11 @@ static void ms_note_cause(const char *folder, const char *cause)
             g_bcause_cap = cap;
         }
         g_bcause[g_bcause_count].folder = _strdup(folder);
-        if (g_bcause[g_bcause_count].folder) {
-            strncpy_s(g_bcause[g_bcause_count].cause, sizeof g_bcause[g_bcause_count].cause, cause, _TRUNCATE);
-            g_bcause_count++;
+        g_bcause[g_bcause_count].cause = _strdup(cause);
+        if (g_bcause[g_bcause_count].folder && g_bcause[g_bcause_count].cause) g_bcause_count++;
+        else {
+            free(g_bcause[g_bcause_count].folder);
+            free(g_bcause[g_bcause_count].cause);
         }
     }
     modstore_unlock();
@@ -641,37 +650,36 @@ void sh_ms_note_build_failure(const char *folder, const char *cause)
     if (folder && cause && cause[0]) ms_note_cause(folder, cause);
 }
 
-void sh_ms_build_cause(const char *folder, char *out, size_t cap)
+char *sh_ms_build_cause(const char *folder)
 {
     size_t i;
-    if (!out || !cap) return;
-    out[0] = 0;
-    if (!folder) return;
+    char *out = NULL;
+    if (!folder) return NULL;
     folder = ms_plain(folder);
     modstore_lock();
     for (i = 0; i < g_bcause_count; i++)
-        if (!_stricmp(g_bcause[i].folder, folder)) { strncpy_s(out, cap, g_bcause[i].cause, _TRUNCATE); break; }
+        if (!_stricmp(g_bcause[i].folder, folder)) { out = _strdup(g_bcause[i].cause); break; }
     modstore_unlock();
+    return out;
 }
 
-int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap)
+int sh_ms_descriptor_unparsable(const char *folder, char **out)
 {
-    char path[MAX_PATH * 4];
+    char *path;
     unsigned char *text;
     size_t len = 0;
     sh_json_kind kind;
     sh_json_error err = { 0, NULL };
     int bad;
-    if (out && cap) out[0] = 0;
-    if (!folder) return 0;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
-    text = sh_mb_read_file(path, 16u << 20, &len);
+    if (!folder || !(path = sh_textf("%s\\mod.json", folder))) return 0;
+    text = sh_mb_read_file(path, (size_t)-1, &len);
+    free(path);
     if (!text) return 0;   /* missing, or unreadable: the build says which */
     bad = !sh_json_validate_ex((const char *)text, len, 16u, &kind, &err) || kind != SH_JSON_OBJECT;
     free(text);
-    if (bad && out && cap)
-        _snprintf_s(out, cap, _TRUNCATE, "mod.json is not a valid JSON object (%s at byte %zu); fix the file and it "
-                    "builds again", err.reason ? err.reason : "not an object", err.offset);
+    if (bad)
+        ms_cause(out, "mod.json is not a valid JSON object (%s at byte %zu); fix the file and it builds again",
+                 err.reason ? err.reason : "not an object", err.offset);
     return bad;
 }
 
@@ -687,26 +695,25 @@ int ms_has_descriptor(const wchar_t *folder)
 }
 
 /* The place of a folder from its name under mods\ ("maps\<segment>\..."):
- * "maps\<segment>" in `out` (1), or "" at the root (0). */
-static int ms_place_of_name(const char *name, char *out, size_t cap)
+ * "maps\<segment>" (malloc'd), or "" (malloc'd) at the root; NULL when
+ * memory runs out. */
+static char *ms_place_of_name(const char *name)
 {
     size_t pl = sizeof SH_MS_PLACES - 1;
     const char *seg, *end;
-    if (out && cap) out[0] = 0;
-    if (!name || _strnicmp(name, SH_MS_PLACES, pl) || (name[pl] != '\\' && name[pl] != '/')) return 0;
+    if (!name || _strnicmp(name, SH_MS_PLACES, pl) || (name[pl] != '\\' && name[pl] != '/')) return _strdup("");
     seg = name + pl + 1;
     end = strpbrk(seg, "\\/");
-    if (!end || end == seg || !end[1]) return 0;   /* the place folder itself is not a mod's */
-    if (out && cap) _snprintf_s(out, cap, _TRUNCATE, SH_MS_PLACES "\\%.*s", (int)(end - seg), seg);
-    return 1;
+    if (!end || end == seg || !end[1]) return _strdup("");   /* the place folder itself is not a mod's */
+    return sh_textf(SH_MS_PLACES "\\%.*s", (int)(end - seg), seg);
 }
 
 /* The mod folders under a directory, at any depth: a candidate folder with
  * mod.json or package.json is a mod and is not entered; one without is an
- * organizing folder and is entered, down to SH_MS_NEST_MAX levels below the
- * root. At the store root the top folder "maps" is the places: each of its
- * children is a place, walked the same way. `rel` is each folder's path below
- * the root. */
+ * organizing folder and is entered, as deep as it goes (the pending folders
+ * are kept on the heap, so depth costs no stack). At the store root the top
+ * folder "maps" is the places: each of its children is a place, walked the
+ * same way. `rel` is each folder's path below the root. */
 typedef struct ms_found { wchar_t *folder, *rel; } ms_found;
 typedef struct ms_found_list { ms_found *items; size_t count, cap; } ms_found_list;
 
@@ -718,66 +725,90 @@ static void ms_found_free(ms_found_list *l)
     memset(l, 0, sizeof *l);
 }
 
-static void ms_find_mods(ms_found_list *l, const wchar_t *dir, const wchar_t *rel, int depth, int at_root)
+/* The walk's order: a folder's contents in name order, a folder before the
+ * folders inside it (a separator sorts before every name character). */
+static int ms_found_cmp(const void *a, const void *b)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern = ms_wjoin(dir, L"*");
-    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        wchar_t *child, *crel;
-        if (!ms_candidate(&fd)) continue;
-        child = ms_wjoin(dir, fd.cFileName);
-        crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
-        if (!child || !crel) { free(child); free(crel); break; }
-        if (at_root && depth == 0 && !_wcsicmp(fd.cFileName, L"" SH_MS_PLACES)) {
-            /* The places: mods\maps\<place>\..., each walked as its own area. */
-            WIN32_FIND_DATAW pd;
-            wchar_t *pp = ms_wjoin(child, L"*");
-            HANDLE ph = pp ? FindFirstFileExW(pp, FindExInfoBasic, &pd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-            free(pp);
-            if (ph != INVALID_HANDLE_VALUE) {
-                do {
-                    wchar_t *place, *prel;
-                    if (!ms_candidate(&pd)) continue;
-                    place = ms_wjoin(child, pd.cFileName);
-                    prel = ms_wjoin(crel, pd.cFileName);
-                    if (place && prel) ms_find_mods(l, place, prel, 1, 0);
-                    free(place);
-                    free(prel);
-                } while (FindNextFileW(ph, &pd));
-                FindClose(ph);
+    const wchar_t *x = ((const ms_found *)a)->rel, *y = ((const ms_found *)b)->rel;
+    for (;; x++, y++) {
+        wchar_t cx = *x == L'\\' ? 1 : towlower(*x), cy = *y == L'\\' ? 1 : towlower(*y);
+        if (cx != cy || !cx) return cx < cy ? -1 : cx > cy;
+    }
+}
+
+static int ms_found_push(ms_found_list *l, wchar_t *folder, wchar_t *rel)
+{
+    if (l->count == l->cap) {
+        size_t ncap = l->cap ? l->cap * 2 : 16;
+        ms_found *n = (ms_found *)realloc(l->items, ncap * sizeof *n);
+        if (!n) return 0;
+        l->items = n;
+        l->cap = ncap;
+    }
+    l->items[l->count].folder = folder;
+    l->items[l->count].rel = rel;
+    l->count++;
+    return 1;
+}
+
+static void ms_find_mods(ms_found_list *l, const wchar_t *top, const wchar_t *top_rel, int at_root)
+{
+    ms_found_list pending = { NULL, 0, 0 };   /* organizing folders still to enter */
+    wchar_t *dir = _wcsdup(top), *rel = _wcsdup(top_rel ? top_rel : L"");
+    int root_level = at_root;
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern = dir && rel ? ms_wjoin(dir, L"*") : NULL;
+        HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)
+                           : INVALID_HANDLE_VALUE;
+        free(pattern);
+        while (h != INVALID_HANDLE_VALUE) {
+            if (ms_candidate(&fd)) {
+                wchar_t *child = ms_wjoin(dir, fd.cFileName);
+                wchar_t *crel = rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
+                if (!child || !crel) { free(child); free(crel); }
+                else if (root_level && !_wcsicmp(fd.cFileName, L"" SH_MS_PLACES)) {
+                    /* The places: mods\maps\<place>\..., each walked as its own area. */
+                    WIN32_FIND_DATAW pd;
+                    wchar_t *pp = ms_wjoin(child, L"*");
+                    HANDLE ph = pp ? FindFirstFileExW(pp, FindExInfoBasic, &pd, FindExSearchNameMatch, NULL, 0)
+                                   : INVALID_HANDLE_VALUE;
+                    free(pp);
+                    while (ph != INVALID_HANDLE_VALUE) {
+                        if (ms_candidate(&pd)) {
+                            wchar_t *place = ms_wjoin(child, pd.cFileName), *prel = ms_wjoin(crel, pd.cFileName);
+                            if (!place || !prel || !ms_found_push(&pending, place, prel)) { free(place); free(prel); }
+                        }
+                        if (!FindNextFileW(ph, &pd)) { FindClose(ph); ph = INVALID_HANDLE_VALUE; }
+                    }
+                    free(child);
+                    free(crel);
+                } else if (ms_has_descriptor(child)) {
+                    if (!ms_found_push(l, child, crel)) { free(child); free(crel); }
+                } else if (!ms_found_push(&pending, child, crel)) {
+                    free(child);
+                    free(crel);
+                }
             }
-            free(child);
-            free(crel);
-            continue;
+            if (!FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
         }
-        if (ms_has_descriptor(child)) {
-            if (l->count == l->cap) {
-                size_t ncap = l->cap ? l->cap * 2 : 16;
-                ms_found *n = (ms_found *)realloc(l->items, ncap * sizeof *n);
-                if (!n) { free(child); free(crel); break; }
-                l->items = n;
-                l->cap = ncap;
-            }
-            l->items[l->count].folder = child;
-            l->items[l->count].rel = crel;
-            l->count++;
-        } else {
-            if (depth + 1 < SH_MS_NEST_MAX) ms_find_mods(l, child, crel, depth + 1, 0);
-            free(child);
-            free(crel);
-        }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        free(dir);
+        free(rel);
+        root_level = 0;
+        if (!pending.count) break;
+        pending.count--;
+        dir = pending.items[pending.count].folder;
+        rel = pending.items[pending.count].rel;
+    }
+    free(pending.items);
+    qsort(l->items, l->count, sizeof *l->items, ms_found_cmp);
 }
 
 /* Every mod folder of the store (root and places). */
 static void ms_find_store(ms_found_list *l, const wchar_t *root)
 {
     memset(l, 0, sizeof *l);
-    ms_find_mods(l, root, L"", 0, 1);
+    ms_find_mods(l, root, L"", 1);
 }
 
 /* Whether `path` lies in the places area, mods\maps\<segment>\... */
@@ -823,13 +854,14 @@ int sh_ms_entry_usable(const sh_ms_entry *e)
 int sh_ms_entry_matches(const sh_ms_entry *e, const char *spec)
 {
     size_t n;
-    char norm[SH_MS_NAME_MAX + 1];
-    if (!e || !spec || !spec[0]) return 0;
-    strncpy_s(norm, sizeof norm, spec, _TRUNCATE);
+    char *norm;
+    int hit;
+    if (!e || !spec || !spec[0] || !e->name || !(norm = _strdup(spec))) return 0;
     for (n = 0; norm[n]; n++) if (norm[n] == '/') norm[n] = '\\';
-    if (!_stricmp(e->name, norm)) return 1;
-    if (strchr(e->name, '\\') && !strchr(norm, '\\') && !_stricmp(ms_leaf(e->name), norm)) return 1;   /* a nested folder by its own name */
-    return e->salt[0] && !_stricmp(e->salt, spec);
+    hit = !_stricmp(e->name, norm) ||
+          (strchr(e->name, '\\') && !strchr(norm, '\\') && !_stricmp(ms_leaf(e->name), norm));   /* a nested folder by its own name */
+    free(norm);
+    return hit || (e->salt[0] && !_stricmp(e->salt, spec));
 }
 
 static sh_ms_entry *ms_add_entry(sh_ms_list *l)
@@ -852,70 +884,87 @@ void sh_ms_list_free(sh_ms_list *l)
     for (i = 0; i < l->count; i++) {
         sh_mb_free(&l->items[i].bundle);
         free(l->items[i].folder);
+        free(l->items[i].name);
+        free(l->items[i].key);
+        free(l->items[i].place);
+        free(l->items[i].cause);
     }
     free(l->items);
     memset(l, 0, sizeof *l);
 }
 
+/* Replace the entry's cause with a copy of `text`. */
+static void ms_entry_cause(sh_ms_entry *e, const char *text)
+{
+    char *copy = _strdup(text ? text : "");
+    if (!copy) return;
+    free(e->cause);
+    e->cause = copy;
+}
+
 static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *rel)
 {
     sh_ms_entry *e;
-    char *u, why[SH_MB_CAUSE_MAX], recorded[SH_MB_CAUSE_MAX];
+    char *why = NULL, *recorded = NULL, *unparsable = NULL;
     size_t i;
     if (!ms_has_descriptor(folder)) return;
     e = ms_add_entry(l);
     if (!e) return;
     e->folder = sh_mb_utf8(folder);
-    u = sh_mb_utf8(rel);
-    if (u) {
-        strncpy_s(e->name, sizeof e->name, u, _TRUNCATE);
-        strncpy_s(e->key, sizeof e->key, u, _TRUNCATE);
-        free(u);
+    e->name = sh_mb_utf8(rel);
+    e->key = e->name ? _strdup(e->name) : NULL;
+    e->place = ms_place_of_name(e->name);
+    e->cause = _strdup("");
+    if (!e->folder || !e->name || !e->key || !e->place || !e->cause) {
+        /* Out of memory: the entry is dropped, never listed half-made. */
+        free(e->folder); free(e->name); free(e->key); free(e->place); free(e->cause);
+        l->count--;
+        return;
     }
-    ms_place_of_name(e->name, e->place, sizeof e->place);
-    why[0] = recorded[0] = 0;
-    e->state = e->folder ? sh_mb_descriptor_state_why(e->folder, why, sizeof why) : SH_MB_DESC_UNREADABLE;
-    if (e->folder) sh_ms_build_cause(e->folder, recorded, sizeof recorded);
+    e->state = sh_mb_descriptor_state_why(e->folder, &why);
+    recorded = sh_ms_build_cause(e->folder);
     switch (e->state) {
     case SH_MB_DESC_FRESH:
         if (e->place[0]) {
             /* A place holds the builds a map brought; nothing is made there. */
             e->refused = 1;
-            strcpy_s(e->cause, sizeof e->cause, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
-        } else if (recorded[0]) {
-            strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
+            ms_entry_cause(e, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
+        } else if (recorded) {
+            ms_entry_cause(e, recorded);
         } else {
-            strcpy_s(e->cause, sizeof e->cause, "a new mod, not built yet (Refresh in the Mods tab builds it)");
+            ms_entry_cause(e, "a new mod, not built yet (Refresh in the Mods tab builds it)");
         }
-        return;
+        goto done;
     case SH_MB_DESC_BUILT:
         break;
     default:
         e->refused = 1;
-        if (e->state == SH_MB_DESC_UNREADABLE && e->folder && sh_ms_descriptor_unparsable(e->folder, recorded, sizeof recorded))
-            strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
-        else strncpy_s(e->cause, sizeof e->cause, why[0] ? why : "This mod folder's mod.json cannot be read; close any program holding it and press Refresh", _TRUNCATE);
-        return;
+        if (e->state == SH_MB_DESC_UNREADABLE && sh_ms_descriptor_unparsable(e->folder, &unparsable))
+            ms_entry_cause(e, unparsable);
+        else ms_entry_cause(e, why && why[0] ? why : "This mod folder's mod.json cannot be read; close any program holding it and press Refresh");
+        goto done;
     }
     e->loaded = sh_mb_load_folder(e->folder, &e->bundle);
     /* The salt is read with the block even when the build is not there. */
     if (sh_salt_valid(e->bundle.id, strlen(e->bundle.id))) {
+        char *key = _strdup(e->bundle.id);
         strcpy_s(e->salt, sizeof e->salt, e->bundle.id);
-        strcpy_s(e->key, sizeof e->key, e->salt);
+        if (key) { free(e->key); e->key = key; }
     }
     e->installed_at = e->bundle.built;
     if (!e->loaded) {
-        if (recorded[0]) strncpy_s(e->cause, sizeof e->cause, recorded, _TRUNCATE);
-        else if (!strcmp(e->bundle.first_cause, "not built yet"))
-            strcpy_s(e->cause, sizeof e->cause, "not built yet (Refresh in the Mods tab builds it)");
-        else strncpy_s(e->cause, sizeof e->cause, e->bundle.first_cause[0] ? e->bundle.first_cause : "mod.json unreadable",
-                       _TRUNCATE);
-        return;
+        if (recorded) ms_entry_cause(e, recorded);
+        else if (!strcmp(sh_mb_first_cause(&e->bundle), "not built yet"))
+            ms_entry_cause(e, "not built yet (Refresh in the Mods tab builds it)");
+        else ms_entry_cause(e, sh_mb_first_cause(&e->bundle)[0] ? sh_mb_first_cause(&e->bundle) : "mod.json unreadable");
+        goto done;
     }
-    if (!sh_mb_salt_paths_check(&e->bundle, why, sizeof why)) {
+    free(why);
+    why = NULL;
+    if (!sh_mb_salt_paths_check(&e->bundle, &why)) {
         e->refused = 1;
-        strncpy_s(e->cause, sizeof e->cause, why, _TRUNCATE);
-        return;
+        ms_entry_cause(e, why);
+        goto done;
     }
     e->validated = e->bundle.validated;
     e->sizes_ok = 1;
@@ -928,15 +977,19 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *r
         present = p && ms_file_size(p, &size);
         free(p);
         if (!present || size != e->bundle.files[i].size) {
+            char *text = sh_textf("%s is %s", e->bundle.files[i].path,
+                                  present ? "not the size mod.json records" : "missing");
             e->sizes_ok = 0;
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "%s is %s", e->bundle.files[i].path,
-                        present ? "not the size mod.json records" : "missing");
+            if (text) { free(e->cause); e->cause = text; }
             break;
         }
     }
     if (!e->validated && e->sizes_ok)
-        strncpy_s(e->cause, sizeof e->cause, e->bundle.state_cause[0] ? e->bundle.state_cause : "failed verification",
-                  _TRUNCATE);
+        ms_entry_cause(e, sh_mb_state_cause(&e->bundle)[0] ? sh_mb_state_cause(&e->bundle) : "failed verification");
+done:
+    free(why);
+    free(recorded);
+    free(unparsable);
 }
 
 static mpj *ms_salts_record(void);
@@ -974,19 +1027,18 @@ static void ms_mark_duplicates(sh_ms_list *l)
         if (keeper[i] == (size_t)-1) continue;
         e->refused = 1;
         if (e->place[0]) {
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "Another folder of this map's mods, mods\\%s, holds the same "
-                        "mod; remove one of them", l->items[keeper[i]].name);
+            char *text = sh_textf("Another folder of this map's mods, mods\\%s, holds the same mod; remove one of them",
+                                  l->items[keeper[i]].name);
+            if (text) { free(e->cause); e->cause = text; }
         } else {
             /* A copy the scan could not give a new salt (its binaries name
              * the salt, as an outside converter's do) says why, plainly;
              * any other waits for the scan's new salt. */
-            char why[SH_MB_CAUSE_MAX];
-            sh_ms_build_cause(e->folder, why, sizeof why);
-            if (why[0])
-                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "%s", why);
-            else
-                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "mods\\%s is a copy of mods\\%s; Refresh in the Mods tab "
-                            "makes it a new mod", e->name, l->items[keeper[i]].name);
+            char *why = sh_ms_build_cause(e->folder);
+            if (!why)
+                why = sh_textf("mods\\%s is a copy of mods\\%s; Refresh in the Mods tab makes it a new mod", e->name,
+                               l->items[keeper[i]].name);
+            if (why) { free(e->cause); e->cause = why; }
         }
     }
     free(keeper);
@@ -1020,7 +1072,7 @@ int sh_ms_find_mods(const char *dir, char ***out, size_t *count)
     if (!w || !ms_is_dir(w)) { free(w); return 0; }
     root = ms_wroot();
     memset(&found, 0, sizeof found);
-    ms_find_mods(&found, w, L"", 0, root && !_wcsicmp(root, w));
+    ms_find_mods(&found, w, L"", root && !_wcsicmp(root, w));
     free(root);
     free(w);
     if (found.count) {
@@ -1052,14 +1104,12 @@ int sh_ms_walk(sh_ms_walk_fn fn, void *ctx)
     ms_find_store(&found, root);
     for (i = 0; i < found.count; i++) {
         char *folder = sh_mb_utf8(found.items[i].folder), *name = sh_mb_utf8(found.items[i].rel);
-        char place[SH_MS_NAME_MAX + 1];
+        char *place = name ? ms_place_of_name(name) : NULL;
         int stop = 0;
-        if (folder && name) {
-            ms_place_of_name(name, place, sizeof place);
-            stop = fn(ctx, folder, name, place);
-        }
+        if (folder && name && place) stop = fn(ctx, folder, name, place);
         free(folder);
         free(name);
+        free(place);
         if (stop) break;
     }
     ms_found_free(&found);
@@ -1234,7 +1284,7 @@ typedef struct ms_rk {
     int keep;                    /* a folder that has its salt: binaries naming mods/<from>/ are left alone */
     unsigned refs, rewritten, moved, srefs, banks;
     int failed;
-    char cause[SH_MB_CAUSE_MAX];
+    char *cause;                 /* the first failure (ms_rk_fail) */
 } ms_rk;
 
 static void ms_rk_free(ms_rk *r)
@@ -1242,7 +1292,9 @@ static void ms_rk_free(ms_rk *r)
     size_t i;
     for (i = 0; i < r->n; i++) { free(r->f[i].rel); free(r->f[i].new_rel); free(r->f[i].text); }
     free(r->f);
+    free(r->cause);
     r->f = NULL;
+    r->cause = NULL;
     r->n = r->cap = 0;
 }
 
@@ -1252,7 +1304,7 @@ static void ms_rk_fail(ms_rk *r, const char *fmt, ...)
     if (r->failed) return;
     r->failed = 1;
     va_start(ap, fmt);
-    _vsnprintf_s(r->cause, sizeof r->cause, _TRUNCATE, fmt, ap);
+    r->cause = sh_vtextf(fmt, ap);
     va_end(ap);
 }
 
@@ -1343,11 +1395,10 @@ static void ms_rk_bank(ms_rk *r, ms_rk_file *f, const wchar_t *path, const char 
     if (id == want && !strcmp(to, stem)) { free(bytes); return; }
     memcpy(bytes + 12, &want, 4);
     if (strcmp(to, stem)) {
-        char moved[SH_MB_REQUEST_MAX + 128];
         size_t dl = strlen(child) - strlen(stem) - 4;   /* "assets/sound/soundbanks/pc/" as written */
-        _snprintf_s(moved, sizeof moved, _TRUNCATE, "%.*s%s%s", (int)dl, child, to, child + dl + strlen(stem));
         free(f->new_rel);
-        if (!(f->new_rel = _strdup(moved))) { free(bytes); ms_rk_fail(r, "out of memory"); return; }
+        f->new_rel = sh_textf("%.*s%s%s", (int)dl, child, to, child + dl + strlen(stem));
+        if (!f->new_rel) { free(bytes); ms_rk_fail(r, "out of memory"); return; }
         r->moved++;
     }
     f->text = (char *)bytes;
@@ -1454,104 +1505,151 @@ static void ms_rk_rebank(ms_rk *r, const wchar_t *src, char **modjson, size_t *m
 
 /* Read the tree below `dir` (rel "" at the folder itself) into the plan. */
 
-static void ms_rk_walk(ms_rk *r, const wchar_t *dir, const char *rel, int depth)
+/* One entry `fd` of the folder `dir` (`rel` below the mod folder, "" at the
+ * folder itself) into the plan; a folder joins `pending`. */
+typedef struct ms_rk_dir { wchar_t *dir; char *rel; } ms_rk_dir;
+typedef struct ms_rk_dirs { ms_rk_dir *d; size_t n, cap; } ms_rk_dirs;
+
+static void ms_rk_entry(ms_rk *r, const wchar_t *dir, const char *rel, const WIN32_FIND_DATAW *fd, ms_rk_dirs *pending)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern = ms_wjoin(dir, L"*");
-    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND)
-            ms_rk_fail(r, "cannot list %s: %s", rel[0] ? rel : "the folder", ms_why(GetLastError(), rel[0] ? rel : "the folder", 0, 0));
+    char *name, *child, *moved = NULL;
+    wchar_t *path;
+    ms_rk_file *f;
+    int changed = 0, in_assets;
+    if (!wcscmp(fd->cFileName, L".") || !wcscmp(fd->cFileName, L"..")) return;
+    name = sh_mb_utf8(fd->cFileName);
+    if (!name) { ms_rk_fail(r, "a file name under %s is not valid Unicode", rel[0] ? rel : "the folder"); return; }
+    child = sh_textf("%s%s%s", rel, rel[0] ? "/" : "", name);
+    free(name);
+    if (!child) { ms_rk_fail(r, "out of memory"); return; }
+    if (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        ms_rk_fail(r, "symbolic link or junction not allowed: %s", child);
+        free(child);
         return;
     }
-    if (depth > 48) { FindClose(h); ms_rk_fail(r, "folder nesting deeper than 48: %s", rel); return; }
-    do {
-        char *name, child[SH_MB_REQUEST_MAX + 64], moved[SH_MB_REQUEST_MAX + 128];
-        wchar_t *path;
-        ms_rk_file *f;
-        int changed = 0, in_assets;
-        if (r->failed) break;
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        name = sh_mb_utf8(fd.cFileName);
-        if (!name) { ms_rk_fail(r, "a file name under %s is not valid Unicode", rel[0] ? rel : "the folder"); break; }
-        _snprintf_s(child, sizeof child, _TRUNCATE, "%s%s%s", rel, rel[0] ? "/" : "", name);
-        free(name);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ms_rk_fail(r, "symbolic link or junction not allowed: %s", child); break; }
-        /* The descriptor is rewritten on its own (sh_mb_salt_modjson). */
-        if (!rel[0] && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-            (!_stricmp(child, "mod.json") || !_stricmp(child, "package.json")))
-            continue;
-        strcpy_s(moved, sizeof moved, child);
-        in_assets = !_strnicmp(child, "assets/", 7);
-        if (in_assets && r->leaf) {
-            /* "assets/x/mods/<from>/y" -> "assets/x/mods/<salt>/y"; a
-             * directory is probed with a trailing '/' so its own last
-             * segment counts as a folder segment. */
-            char probe[SH_MB_REQUEST_MAX + 130], tail[SH_MB_REQUEST_MAX + 130];
-            int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, c;
-            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s%s", child + 7, dir ? "/" : "");
-            c = sh_mb_rekey_path(probe, r->leaf, r->key, tail, sizeof tail);
-            if (c < 0) { ms_rk_fail(r, "%s: the path is too long once moved under the salt; shorten it", child); break; }
-            if (dir) { size_t tl = strlen(tail); if (tl && tail[tl - 1] == '/') tail[tl - 1] = 0; }
-            if (c > 0) { _snprintf_s(moved, sizeof moved, _TRUNCATE, "assets/%s", tail); changed = 1; }
+    /* The descriptor is rewritten on its own (sh_mb_salt_modjson). */
+    if (!rel[0] && !(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        (!_stricmp(child, "mod.json") || !_stricmp(child, "package.json"))) {
+        free(child);
+        return;
+    }
+    in_assets = !_strnicmp(child, "assets/", 7);
+    if (in_assets && r->leaf) {
+        /* "assets/x/mods/<from>/y" -> "assets/x/mods/<salt>/y"; a
+         * directory is probed with a trailing '/' so its own last
+         * segment counts as a folder segment. */
+        int is_dir = (fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, c = -1;
+        char *probe = sh_textf("%s%s", child + 7, is_dir ? "/" : ""), *tail = NULL;
+        if (probe) c = sh_mb_rekey_path(probe, r->leaf, r->key, &tail);
+        free(probe);
+        if (c < 0) { ms_rk_fail(r, "out of memory"); free(child); return; }
+        if (c > 0) {
+            size_t tl = strlen(tail);
+            if (is_dir && tl && tail[tl - 1] == '/') tail[tl - 1] = 0;
+            moved = sh_textf("assets/%s", tail);
+            changed = 1;
         }
-        path = ms_wjoin(dir, fd.cFileName);
-        f = path ? ms_rk_add(r) : NULL;
-        if (!f || !(f->rel = _strdup(child)) || !(f->new_rel = _strdup(moved))) {
-            free(path);
-            ms_rk_fail(r, "out of memory");
-            break;
-        }
-        if (changed && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) r->moved++;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            f->dir = 1;
-            ms_rk_walk(r, path, child, depth + 1);
-        } else if (!in_assets) {
-            /* Outside mod.json and assets\ (a README, desktop.ini): the
-             * build ignores it, and so does the move. */
-        } else if (sh_mb_bank_stem(child + 7, NULL, 0)) {
-            ms_rk_bank(r, f, path, child);
-        } else {
-            size_t len = 0;
-            int is_text = ms_rk_is_text(path);
-            char *t = is_text == 1 ? ms_read_text(path, (size_t)-1, &len) : NULL;
-            if (is_text < 0 || (is_text == 1 && !t)) {
-                ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
-            } else if (t) {
-                /* A text: decl text, scripts and anything else without a NUL
-                 * byte. mods/<from>/ first, then the #str_ references of the
-                 * renamed strings keys. */
-                char *out = NULL, *out2 = NULL;
-                size_t out_len = 0, out2_len = 0, s = 0;
-                size_t c = r->leaf ? sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len) : 0;
-                if (c != (size_t)-1 && r->nskeys)
-                    s = sh_mb_restr_text(c ? out : t, c ? out_len : len, r->skeys, r->nskeys, &out2, &out2_len);
-                if (c == (size_t)-1 || s == (size_t)-1) { free(out); ms_rk_fail(r, "out of memory"); }
-                else {
-                    if (s) { free(out); out = out2; out_len = out2_len; r->srefs += (unsigned)s; }
-                    if (c || s) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
-                }
-            } else if (!r->keep) {
-                /* A new mod's binary that spells its folder's name or one of
-                 * its strings cannot be renamed with it. A mod that has its
-                 * salt keeps its binaries as they are: the build decides. */
-                int hit = r->leaf || r->nskeys ? ms_rk_binary_names(path, r) : 0;
-                if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
-                else if (hit == 1)
-                    ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
-                               "New mod in the Mods tab first, then export the file under the new mod's folder", child,
-                               r->leaf);
-                else if (hit == 2)
-                    ms_rk_fail(r, "%s names one of this mod's strings (#str_) inside a binary file, which Snapmap+ cannot "
-                               "rename; make the mod with New mod in the Mods tab first, then export the file with the "
-                               "string names that mod's mod.json shows", child);
-            }
-            free(t);
-        }
+        free(tail);
+        if (c > 0 && !moved) { ms_rk_fail(r, "out of memory"); free(child); return; }
+    }
+    path = ms_wjoin(dir, fd->cFileName);
+    f = path ? ms_rk_add(r) : NULL;
+    if (!f || !(f->rel = _strdup(child)) || !(f->new_rel = moved ? moved : _strdup(child))) {
+        if (!f || !f->new_rel) free(moved);
         free(path);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        free(child);
+        ms_rk_fail(r, "out of memory");
+        return;
+    }
+    if (changed && !(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) r->moved++;
+    if (fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        f->dir = 1;
+        if (pending->n == pending->cap) {
+            size_t cap = pending->cap ? pending->cap * 2 : 16;
+            ms_rk_dir *g = (ms_rk_dir *)realloc(pending->d, cap * sizeof *g);
+            if (!g) { free(path); free(child); ms_rk_fail(r, "out of memory"); return; }
+            pending->d = g;
+            pending->cap = cap;
+        }
+        pending->d[pending->n].dir = path;
+        pending->d[pending->n].rel = child;
+        pending->n++;
+        return;
+    } else if (!in_assets) {
+        /* Outside mod.json and assets\ (a README, desktop.ini): the
+         * build ignores it, and so does the move. */
+    } else if (sh_mb_bank_stem(child + 7, NULL, 0)) {
+        ms_rk_bank(r, f, path, child);
+    } else {
+        size_t len = 0;
+        int is_text = ms_rk_is_text(path);
+        char *t = is_text == 1 ? ms_read_text(path, (size_t)-1, &len) : NULL;
+        if (is_text < 0 || (is_text == 1 && !t)) {
+            ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
+        } else if (t) {
+            /* A text: decl text, scripts and anything else without a NUL
+             * byte. mods/<from>/ first, then the #str_ references of the
+             * renamed strings keys. */
+            char *out = NULL, *out2 = NULL;
+            size_t out_len = 0, out2_len = 0, s = 0;
+            size_t c = r->leaf ? sh_mb_rekey_text(t, len, r->leaf, r->key, &out, &out_len) : 0;
+            if (c != (size_t)-1 && r->nskeys)
+                s = sh_mb_restr_text(c ? out : t, c ? out_len : len, r->skeys, r->nskeys, &out2, &out2_len);
+            if (c == (size_t)-1 || s == (size_t)-1) { free(out); ms_rk_fail(r, "out of memory"); }
+            else {
+                if (s) { free(out); out = out2; out_len = out2_len; r->srefs += (unsigned)s; }
+                if (c || s) { f->text = out; f->text_len = out_len; r->refs += (unsigned)c; r->rewritten++; }
+            }
+        } else if (!r->keep) {
+            /* A new mod's binary that spells its folder's name or one of
+             * its strings cannot be renamed with it. A mod that has its
+             * salt keeps its binaries as they are: the build decides. */
+            int hit = r->leaf || r->nskeys ? ms_rk_binary_names(path, r) : 0;
+            if (hit < 0) ms_rk_fail(r, "%s could not be read (%s); the folder is unchanged", child, ms_why(GetLastError(), child, 0, 0));
+            else if (hit == 1)
+                ms_rk_fail(r, "%s names mods/%s/ inside a binary file, which Snapmap+ cannot rename; make the mod with "
+                           "New mod in the Mods tab first, then export the file under the new mod's folder", child,
+                           r->leaf);
+            else if (hit == 2)
+                ms_rk_fail(r, "%s names one of this mod's strings (#str_) inside a binary file, which Snapmap+ cannot "
+                           "rename; make the mod with New mod in the Mods tab first, then export the file with the "
+                           "string names that mod's mod.json shows", child);
+        }
+        free(t);
+    }
+    free(path);
+    free(child);
+}
+
+/* Read the tree below `top` into the plan, as deep as it goes (the folders
+ * still to read wait on the heap; the plan is sorted afterwards). */
+static void ms_rk_walk(ms_rk *r, const wchar_t *top)
+{
+    ms_rk_dirs pending = { NULL, 0, 0 };
+    wchar_t *dir = _wcsdup(top);
+    char *rel = _strdup("");
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern = dir && rel ? ms_wjoin(dir, L"*") : NULL;
+        HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)
+                           : INVALID_HANDLE_VALUE;
+        if (!dir || !rel) ms_rk_fail(r, "out of memory");
+        else if (h == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_NOT_FOUND)
+            ms_rk_fail(r, "cannot list %s: %s", rel[0] ? rel : "the folder", ms_why(GetLastError(), rel[0] ? rel : "the folder", 0, 0));
+        free(pattern);
+        while (h != INVALID_HANDLE_VALUE) {
+            if (!r->failed) ms_rk_entry(r, dir, rel, &fd, &pending);
+            if (r->failed || !FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+        }
+        free(dir);
+        free(rel);
+        if (!pending.n || r->failed) break;
+        pending.n--;
+        dir = pending.d[pending.n].dir;
+        rel = pending.d[pending.n].rel;
+    }
+    while (pending.n) { pending.n--; free(pending.d[pending.n].dir); free(pending.d[pending.n].rel); }
+    free(pending.d);
 }
 
 static int ms_rk_rel_cmp(const void *a, const void *b)
@@ -1632,7 +1730,7 @@ static void ms_bank_prefix(const char *name, char *out, size_t cap)
  * `folder` is left as it is. Returns 1 with the salt, -1 with the cause (the
  * folder untouched). The caller holds the store lock. */
 static int ms_assign_to(const char *folder, const char *given, size_t given_len, const char *from, int from_name,
-                        const char *keep, const char *dest, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+                        const char *keep, const char *dest, char salt_out[SH_SALT_LEN + 1], char **cause)
 {
     ms_rk r;
     char salt[SH_SALT_LEN + 1];
@@ -1646,12 +1744,12 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
 
     if (salt_out) salt_out[0] = 0;
     src = sh_mb_wpath(folder);
-    if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, ccap, "out of memory"); goto done; }
+    if (!src || !(slash = wcsrchr(src, L'\\')) || !(parent = _wcsdup(src))) { ms_cause(cause, "out of memory"); goto done; }
     parent[slash - src] = 0;
     if (keep) strcpy_s(salt, sizeof salt, keep);
     else if (g_ms_fixed_salt[0]) strcpy_s(salt, sizeof salt, g_ms_fixed_salt);
     else if (!ms_new_salt(salt, from)) {
-        ms_cause(cause, ccap, "Windows could not supply the random numbers that name a new mod; restart the game and press "
+        ms_cause(cause, "Windows could not supply the random numbers that name a new mod; restart the game and press "
                  "Refresh");
         goto done;
     }
@@ -1667,46 +1765,46 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     if (given) {
         author = (char *)malloc(given_len + 1);
         if (author) { memcpy(author, given, given_len); author[given_len] = 0; alen = given_len; }
-        else { ms_cause(cause, ccap, "out of memory"); goto done; }
+        else { ms_cause(cause, "out of memory"); goto done; }
     } else {
         mj = ms_wjoin(src, L"mod.json");
         author = ms_read_text(mj, (size_t)-1, &alen);
         free(mj);
     }
-    if (!author) { ms_cause(cause, ccap, "mod.json could not be read (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
+    if (!author) { ms_cause(cause, "mod.json could not be read (%s); the folder is unchanged", ms_why(GetLastError(), "mod.json", 0, 0)); goto done; }
     if (from) drefs = sh_mb_rekey_text(author, alen, from, salt, NULL, NULL);
-    if (drefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
+    if (drefs == (size_t)-1) { ms_cause(cause, "out of memory"); goto done; }
     if (keep) {
         /* The builder block stays; the next build rewrites it. */
         if (drefs) {
             size_t c = sh_mb_rekey_text(author, alen, from, salt, &modjson, &mlen);
-            if (c == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
+            if (c == (size_t)-1) { ms_cause(cause, "out of memory"); goto done; }
         } else if ((modjson = (char *)malloc(alen + 1)) != NULL) {
             memcpy(modjson, author, alen + 1);
             mlen = alen;
         }
-        if (!modjson) { ms_cause(cause, ccap, "out of memory"); goto done; }
+        if (!modjson) { ms_cause(cause, "out of memory"); goto done; }
     } else {
         modjson = sh_mb_salt_modjson(author, alen, from, salt, &mlen);
-        if (!modjson) { ms_cause(cause, ccap, "mod.json is not one JSON object { ... }; correct it and press Refresh"); goto done; }
+        if (!modjson) { ms_cause(cause, "mod.json is not one JSON object { ... }; correct it and press Refresh"); goto done; }
     }
     /* Its strings keys gain the salt's prefix, and every #str_ reference
      * to them in its own text files (mod.json among them) follows. */
     keyed = sh_mb_salt_strings(modjson, mlen, from_name ? NULL : from, salt, &skeys, &nskeys, &i);
-    if (!keyed) { ms_cause(cause, ccap, "mod.json is not valid JSON; correct it and press Refresh"); goto done; }
+    if (!keyed) { ms_cause(cause, "mod.json is not valid JSON; correct it and press Refresh"); goto done; }
     free(modjson);
     modjson = keyed;
     mlen = i;
     keyed = NULL;
     if (nskeys) {
         srefs = sh_mb_restr_text(modjson, mlen, skeys, nskeys, &keyed, &i);
-        if (srefs == (size_t)-1) { ms_cause(cause, ccap, "out of memory"); goto done; }
+        if (srefs == (size_t)-1) { ms_cause(cause, "out of memory"); goto done; }
         if (srefs) { free(modjson); modjson = keyed; mlen = i; keyed = NULL; }
     }
     r.skeys = skeys;
     r.nskeys = nskeys;
     r.refs = (unsigned)drefs;
-    ms_rk_walk(&r, src, "", 0);
+    ms_rk_walk(&r, src);
     if (!r.failed && r.n > 1) {
         qsort(r.f, r.n, sizeof *r.f, ms_rk_rel_cmp);
         for (i = 1; i < r.n && !r.failed; i++)
@@ -1723,8 +1821,8 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         /* Files under another mod's mods/<x>/ (x neither `from` nor the new
          * salt) would be refused by the build: refuse before anything moves. */
         unsigned files = 0, foreign = 0;
-        const char *first = NULL;
-        char other[SH_MB_ID_MAX + 1] = "";
+        const char *first = NULL, *other = "";
+        int other_n = 0;
         for (i = 0; i < r.n; i++) {
             const char *p, *e;
             if (r.f[i].dir) continue;
@@ -1734,23 +1832,24 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             if (!e || ((size_t)(e - (p + 6)) == SH_SALT_LEN && !_strnicmp(p + 6, salt, SH_SALT_LEN))) continue;
             if (!foreign++) {
                 first = r.f[i].rel;
-                _snprintf_s(other, sizeof other, _TRUNCATE, "%.*s", (int)(e - (p + 6)), p + 6);
+                other = p + 6;
+                other_n = (int)(e - (p + 6));
             }
         }
-        if (foreign && named_salt && !_stricmp(other, named_salt))
+        if (foreign && named_salt && (size_t)other_n == strlen(named_salt) && !_strnicmp(other, named_salt, other_n))
             ms_rk_fail(&r, "this folder's name, %s, is another mod's salt, so its files under mods/%s/ belong to that mod; "
                        "rename this folder and press Refresh", named_salt, named_salt);
         else if (foreign)
-            ms_rk_fail(&r, "%u of this folder's %u file(s) are under mods/%s/ (the first: %s), which is not this folder's "
+            ms_rk_fail(&r, "%u of this folder's %u file(s) are under mods/%.*s/ (the first: %s), which is not this folder's "
                        "name; move them under a mods folder named like this folder and press Refresh", foreign, files,
-                       other, first);
+                       other_n, other, first);
     }
-    if (r.failed) { ms_cause(cause, ccap, "%s", r.cause); goto done; }
+    if (r.failed) { ms_cause(cause, "%s", r.cause ? r.cause : "out of memory"); goto done; }
     if (dest) {
         /* Written to `dest`; the folder itself is not touched. */
         wchar_t *to = sh_mb_wpath(dest);
         if (!to || ms_exists(to)) {
-            ms_cause(cause, ccap, to ? "the work folder %s already exists" : "out of memory", dest);
+            ms_cause(cause, to ? "the work folder %s already exists" : "out of memory", dest);
             free(to);
             goto done;
         }
@@ -1759,7 +1858,7 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             if (ts) { *ts = 0; ms_rmtree(to, tp); }
             free(tp);
             free(to);
-            ms_cause(cause, ccap, "%s", r.cause);
+            ms_cause(cause, "%s", r.cause ? r.cause : "out of memory");
             goto done;
         }
         free(to);
@@ -1771,7 +1870,7 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
         size_t n = wcslen(src) + 32;
         staging = (wchar_t *)malloc(sizeof(wchar_t) * n);
         old = (wchar_t *)malloc(sizeof(wchar_t) * n);
-        if (!staging || !old) { ms_cause(cause, ccap, "out of memory"); goto done; }
+        if (!staging || !old) { ms_cause(cause, "out of memory"); goto done; }
         _snwprintf_s(staging, n, _TRUNCATE, L"%s.staging-%lu", src, GetCurrentProcessId());
         _snwprintf_s(old, n, _TRUNCATE, L"%s.old-%lu", src, GetCurrentProcessId());
     }
@@ -1779,14 +1878,14 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
     if (ms_exists(staging)) ms_rmtree(staging, parent);
     if (!ms_rk_stage(&r, src, staging, 1, modjson, mlen)) {
         ms_rmtree(staging, parent);
-        ms_cause(cause, ccap, "%s", r.cause);
+        ms_cause(cause, "%s", r.cause ? r.cause : "out of memory");
         goto done;
     }
     if (ms_exists(old)) ms_rmtree(old, parent);
     if (!ms_move_folder(src, old)) {
         DWORD err = GetLastError();
         ms_rmtree(staging, parent);
-        ms_cause(cause, ccap, "Snapmap+ could not prepare this mod folder (%s); close any program using it and press "
+        ms_cause(cause, "Snapmap+ could not prepare this mod folder (%s); close any program using it and press "
                  "Refresh (the folder is unchanged)", ms_why(err, ms_rel(folder), 0, 0));
         goto done;
     }
@@ -1796,17 +1895,18 @@ static int ms_assign_to(const char *folder, const char *given, size_t given_len,
             ms_log("MODS: store: %s: the folder could not be put back from %ls (%s)", ms_rel(folder), old,
                    ms_why(GetLastError(), ms_rel(folder), 0, 0));
         ms_rmtree(staging, parent);
-        ms_cause(cause, ccap, "Snapmap+ could not finish preparing this mod folder (%s); close any program using it and "
+        ms_cause(cause, "Snapmap+ could not finish preparing this mod folder (%s); close any program using it and "
                  "press Refresh (the folder is unchanged)", ms_why(err, ms_rel(folder), 0, 0));
         goto done;
     }
     {
         /* The folder as it was goes to the Recycle Bin (its files are the
          * new folder's too, hard-linked); outright when the bin cannot take it. */
-        char why[200];
-        if (!ms_recycle(old, why, sizeof why) && !ms_rmtree(old, parent))
+        char *why = NULL;
+        if (!ms_recycle(old, &why) && !ms_rmtree(old, parent))
             ms_log("MODS: store: %s: the folder as it was before its salt, %ls, could not be removed completely; it is not "
                    "a mod (its name ends in .old-)", ms_rel(folder), old);
+        free(why);
     }
     ms_log("MODS: store: mods\\%s %s: salt %s; %u reference(s) to mods/%s/ rewritten in %u file(s)%s, %u file(s) "
            "moved under mods/%s/ (%u sound bank(s) named or corrected); %zu strings key(s) named %s_<key>, %u #str_ "
@@ -1831,41 +1931,43 @@ done:
 
 /* A new salt for `folder`: from its name (from_name 1) or from the salt a
  * copy carried. */
-static int ms_assign(const char *folder, const char *from, int from_name, char salt_out[SH_SALT_LEN + 1], char *cause,
-                     size_t ccap)
+static int ms_assign(const char *folder, const char *from, int from_name, char salt_out[SH_SALT_LEN + 1], char **cause)
 {
-    return ms_assign_to(folder, NULL, 0, from, from_name, NULL, NULL, salt_out, cause, ccap);
+    return ms_assign_to(folder, NULL, 0, from, from_name, NULL, NULL, salt_out, cause);
 }
 
 /* A salted root folder's new content under its name moved under its salt
  * (DECISIONS 20): 1 moved, 0 nothing to move, -1 with the cause. */
-static int ms_rehome(const char *folder, const char *name, const char *salt, char *cause, size_t ccap)
+static int ms_rehome(const char *folder, const char *name, const char *salt, char **cause)
 {
     char got[SH_SALT_LEN + 1];
-    return ms_assign_to(folder, NULL, 0, name, 1, salt, NULL, got, cause, ccap);
+    return ms_assign_to(folder, NULL, 0, name, 1, salt, NULL, got, cause);
 }
 
 /* Whether `folder` lies in a place of the store (mods\maps\<segment>\...). */
 static int ms_in_place(const char *folder)
 {
-    char root[MAX_PATH * 4], place[SH_MS_NAME_MAX + 1];
-    const char *p = ms_plain(folder);
+    const char *root = sh_ms_root(), *p = ms_plain(folder);
+    char *place;
     size_t n;
-    if (!p || !sh_ms_root(root, sizeof root)) return 0;
+    int in;
+    if (!p || !root) return 0;
     n = strlen(root);
     if (_strnicmp(p, root, n) || (p[n] != '\\' && p[n] != '/')) return 0;
-    return ms_place_of_name(p + n + 1, place, sizeof place);
+    place = ms_place_of_name(p + n + 1);
+    in = place && place[0];
+    free(place);
+    return in;
 }
 
-int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char **cause)
 {
-    char why[SH_MB_CAUSE_MAX];
+    char *why = NULL;
     int state, r;
     if (salt_out) salt_out[0] = 0;
-    if (cause && ccap) cause[0] = 0;
-    if (!folder || !folder[0] || !from || !from[0]) return ms_cause(cause, ccap, "no folder named") - 1;
+    if (!folder || !folder[0] || !from || !from[0]) return ms_cause(cause, "no folder named") - 1;
     modstore_lock();
-    state = sh_mb_descriptor_state_why(folder, why, sizeof why);
+    state = sh_mb_descriptor_state_why(folder, &why);
     if (state == SH_MB_DESC_BUILT) {
         if (salt_out) {
             wchar_t *w = sh_mb_wpath(folder);
@@ -1874,59 +1976,61 @@ int sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SAL
         }
         r = 0;
     } else if (state != SH_MB_DESC_FRESH) {
-        ms_cause(cause, ccap, "%s", why);
+        ms_cause(cause, "%s", why ? why : "");
         r = -1;
     } else if (ms_in_place(folder)) {
-        ms_cause(cause, ccap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
+        ms_cause(cause, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh");
         r = -1;
     } else {
-        r = ms_assign_to(folder, NULL, 0, from, 1, NULL, NULL, salt_out, cause, ccap);
+        r = ms_assign_to(folder, NULL, 0, from, 1, NULL, NULL, salt_out, cause);
     }
-    if (r < 0) ms_note_cause(folder, cause);
+    if (r < 0) ms_note_cause(folder, cause && *cause ? *cause : "the folder could not be given its salt");
     else if (r > 0) ms_note_cause(folder, NULL);
     modstore_unlock();
+    free(why);
     return r;
 }
 
-int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char *cause, size_t ccap)
+int sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char **cause)
 {
     char got[SH_SALT_LEN + 1];
     int r;
-    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, ccap, "no salt given") - 1;
+    if (!salt || !sh_salt_valid(salt, strlen(salt))) return ms_cause(cause, "no salt given") - 1;
     modstore_lock();
     strcpy_s(g_ms_fixed_salt, sizeof g_ms_fixed_salt, salt);
-    r = sh_ms_assign_salt(folder, from, got, cause, ccap);
+    r = sh_ms_assign_salt(folder, from, got, cause);
     g_ms_fixed_salt[0] = 0;
     modstore_unlock();
     return r;
 }
 
 int sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
-                    char salt_out[SH_SALT_LEN + 1], char *cause, size_t ccap)
+                    char salt_out[SH_SALT_LEN + 1], char **cause)
 {
     int r;
     if (salt_out) salt_out[0] = 0;
-    if (cause && ccap) cause[0] = 0;
     if (!folder || !folder[0] || !from || !from[0] || !dest || !dest[0] || !modjson)
-        return ms_cause(cause, ccap, "no folder named") - 1;
+        return ms_cause(cause, "no folder named") - 1;
     modstore_lock();
-    r = ms_assign_to(folder, modjson, modjson_len, from, 1, NULL, dest, salt_out, cause, ccap);
+    r = ms_assign_to(folder, modjson, modjson_len, from, 1, NULL, dest, salt_out, cause);
     modstore_unlock();
     return r;
 }
 
 /* ------------------------------------------------- the store's names ---- */
 
-int sh_ms_title_segment(const char *title, char *out, size_t cap)
+char *sh_ms_title_segment(const char *title)
 {
-    char seg[64 + 8];
-    size_t w = 0, i, n, stem;
+    char *seg;
+    size_t w = 0, i, n, stem, chars = 0;
     int space = 0, device = 0;
-    if (out && cap) out[0] = 0;
-    if (!title || !out || cap < 2) return 0;
-    for (i = 0; title[i] && w < 60; i++) {
+    if (!title || !(seg = (char *)malloc(strlen(title) + 2))) return NULL;
+    /* Windows holds a folder name of at most 255 characters (UTF-16 units):
+     * the title is kept whole up to SH_MS_SEGMENT_CHARS of them, which leaves
+     * room for a " (n)" suffix. */
+    for (i = 0; title[i]; i++) {
         unsigned char c = (unsigned char)title[i];
-        size_t len = 1;
+        size_t len = 1, units = 1;
         if (c < 0x20 || c == 0x7F || c == ' ' || strchr("<>:\"/\\|?*", c)) { space = w > 0; continue; }
         if (c >= 0x80) {
             /* One whole UTF-8 sequence, or nothing of it. */
@@ -1934,11 +2038,13 @@ int sh_ms_title_segment(const char *title, char *out, size_t cap)
             if (!len) continue;
             for (n = 1; n < len; n++) if (((unsigned char)title[i + n] & 0xC0) != 0x80) break;
             if (n < len) continue;
+            units = len == 4 ? 2 : 1;
         }
-        if (w + (space ? 1 : 0) + len > 60) break;
-        if (space) { seg[w++] = ' '; space = 0; }
+        if (chars + (space ? 1 : 0) + units > SH_MS_SEGMENT_CHARS) break;
+        if (space) { seg[w++] = ' '; chars++; space = 0; }
         memcpy(seg + w, title + i, len);
         w += len;
+        chars += units;
         i += len - 1;
     }
     seg[w] = 0;
@@ -1946,7 +2052,7 @@ int sh_ms_title_segment(const char *title, char *out, size_t cap)
     for (i = 0; seg[i] == '.' || seg[i] == ' '; i++) {}
     if (i) { memmove(seg, seg + i, w - i + 1); w -= i; }
     while (w && (seg[w - 1] == '.' || seg[w - 1] == ' ')) seg[--w] = 0;
-    if (!w) return 0;
+    if (!w) { free(seg); return NULL; }
     {
         /* The listing skips work folders by these suffixes. */
         char *p;
@@ -1959,12 +2065,12 @@ int sh_ms_title_segment(const char *title, char *out, size_t cap)
     if (stem == 4 && (!_strnicmp(seg, "com", 3) || !_strnicmp(seg, "lpt", 3)) && seg[3] >= '1' && seg[3] <= '9')
         device = 1;
     if (device) {
+        /* seg holds strlen(title) + 2 bytes and the segment is shorter than the title */
         memmove(seg + stem + 1, seg + stem, w - stem + 1);
         seg[stem] = '_';
         w++;
     }
-    strncpy_s(out, cap, seg, _TRUNCATE);
-    return 1;
+    return seg;
 }
 
 /* ------------------------------------------------------------ places ---- */
@@ -2014,144 +2120,171 @@ static char *ms_pl_escape(const char *s)
     return o;
 }
 
-/* An escaped string body decoded into `out`. */
-static int ms_pl_decode(const char *body, char *out, size_t cap)
+/* An escaped string body decoded (malloc'd), or NULL. A decoded body is
+ * never longer than its escaped form. */
+static char *ms_pl_decode(const char *body)
 {
-    char quoted[SH_MS_NAME_MAX * 2 + 8];
-    size_t got = 0;
-    if (!body || !out || !cap) return 0;
-    _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", body);
-    return sh_json_decode_string(quoted, strlen(quoted), out, cap, &got) != 0;
+    char *quoted, *out;
+    size_t got = 0, n;
+    if (!body) return NULL;
+    n = strlen(body);
+    quoted = sh_textf("\"%s\"", body);
+    out = (char *)malloc(n + 1);
+    if (!quoted || !out || !sh_json_decode_string(quoted, n + 2, out, n + 1, &got)) { free(quoted); free(out); return NULL; }
+    free(quoted);
+    return out;
 }
 
-/* The section's key for a place: its key, else "title:<segment>". */
-static int ms_pl_key(const sh_ms_place *place, char *out, size_t cap)
+/* The section's key for a place: its key, else "title:<segment>" (malloc'd). */
+static char *ms_pl_key(const sh_ms_place *place)
 {
-    char seg[72];
-    if (!place) return 0;
-    if (place->map_id && place->map_id[0]) { strncpy_s(out, cap, place->map_id, _TRUNCATE); return 1; }
-    if (place->title && sh_ms_title_segment(place->title, seg, sizeof seg)) {
-        _snprintf_s(out, cap, _TRUNCATE, "title:%s", seg);
-        return 1;
-    }
-    return 0;
+    char *seg, *key;
+    if (!place) return NULL;
+    if (place->map_id && place->map_id[0]) return _strdup(place->map_id);
+    if (!place->title || !(seg = sh_ms_title_segment(place->title))) return NULL;
+    key = sh_textf("title:%s", seg);
+    free(seg);
+    return key;
 }
 
-/* The folder (decoded) the entry at index i of the section names, or 0. */
-static int ms_pl_folder(const mpj *doc, int i, char *out, size_t cap)
+/* The folder (decoded, malloc'd) the entry at index i of the section names, or NULL. */
+static char *ms_pl_folder(const mpj *doc, int i)
 {
     const mpj *f = mpj_get(doc->items[i], "folder");
-    return f && f->type == MPJ_STR && f->text && ms_pl_decode(f->text, out, cap);
+    return f && f->type == MPJ_STR && f->text ? ms_pl_decode(f->text) : NULL;
 }
 
 /* 1 when an entry of the section other than `self` names `dir`. */
 static int ms_pl_taken(const mpj *doc, const char *self_body, const char *dir)
 {
-    int i;
-    for (i = 0; doc && i < doc->n; i++) {
-        char f[SH_MS_NAME_MAX + 1];
+    int i, taken = 0;
+    for (i = 0; doc && i < doc->n && !taken; i++) {
+        char *f;
         if (self_body && !strcmp(doc->keys[i], self_body)) continue;
-        if (ms_pl_folder(doc, i, f, sizeof f) && !_stricmp(f, dir)) return 1;
+        f = ms_pl_folder(doc, i);
+        taken = f && !_stricmp(f, dir);
+        free(f);
     }
-    return 0;
+    return taken;
 }
 
-int sh_ms_place_dir(const sh_ms_place *place, char *out, size_t cap)
+/* `name` with every '/' made '\' (malloc'd). */
+static char *ms_backslashed(const char *name)
 {
-    char rootu[MAX_PATH * 4], key[SH_MS_NAME_MAX + 1], seg[72], dir[SH_MS_NAME_MAX + 1], *ek;
+    char *out = _strdup(name ? name : ""), *c;
+    for (c = out; c && *c; c++) if (*c == '/') *c = '\\';
+    return out;
+}
+
+char *sh_ms_place_dir(const sh_ms_place *place)
+{
+    const char *rootu = sh_ms_root();
+    char *key, *seg, *ek, *out = NULL;
     mpj *doc;
     const mpj *entry;
-    int ok = 0, round;
-    if (out && cap) out[0] = 0;
-    if (!place || !out || !cap || !sh_ms_root(rootu, sizeof rootu) || !ms_pl_key(place, key, sizeof key)) return 0;
-    if (!place->title || !sh_ms_title_segment(place->title, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "map");
-    if (!(ek = ms_pl_escape(key))) return 0;
+    int round;
+    if (!place || !rootu || !(key = ms_pl_key(place))) return NULL;
+    seg = place->title ? sh_ms_title_segment(place->title) : NULL;
+    if (!seg) seg = _strdup("map");
+    ek = ms_pl_escape(key);
+    if (!seg || !ek) { free(seg); free(ek); free(key); return NULL; }
     sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     entry = doc ? mpj_get(doc, ek) : NULL;
     if (entry && entry->type == MPJ_OBJ) {
         int i;
-        for (i = 0; i < doc->n; i++)
-            if (doc->items[i] == entry && ms_pl_folder(doc, i, dir, sizeof dir)) { strncpy_s(out, cap, dir, _TRUNCATE); ok = 1; }
+        for (i = 0; i < doc->n && !out; i++)
+            if (doc->items[i] == entry) out = ms_pl_folder(doc, i);
     }
-    for (round = 0; !ok && doc && round < 12; round++) {
-        char kseg[72];
-        if (round == 0) _snprintf_s(dir, sizeof dir, _TRUNCATE, SH_MS_PLACES "\\%s", seg);
+    /* A free place: the title's, else with this map's key, else numbered,
+     * as many numbers as it takes. */
+    for (round = 0; !out && doc; round++) {
+        char *dir = NULL;
+        if (round == 0) dir = sh_textf(SH_MS_PLACES "\\%s", seg);
         else if (round == 1) {
             /* Another map has the title: this map's place carries its key. */
             const char *k = place->map_id && place->map_id[0] ? place->map_id : NULL;
-            if (!k || !sh_ms_title_segment(!strncmp(k, "zip:", 4) ? k + 4 : k, kseg, 41)) continue;
-            _snprintf_s(dir, sizeof dir, _TRUNCATE, SH_MS_PLACES "\\%s (%s)", seg, kseg);
-        } else _snprintf_s(dir, sizeof dir, _TRUNCATE, SH_MS_PLACES "\\%s (%d)", seg, round);
-        if (!ms_pl_taken(doc, ek, dir)) { strncpy_s(out, cap, dir, _TRUNCATE); ok = 1; }
+            char *kseg = k ? sh_ms_title_segment(!strncmp(k, "zip:", 4) ? k + 4 : k) : NULL;
+            if (!kseg) continue;
+            dir = sh_textf(SH_MS_PLACES "\\%s (%s)", seg, kseg);
+            free(kseg);
+        } else dir = sh_textf(SH_MS_PLACES "\\%s (%d)", seg, round);
+        if (!dir) break;
+        if (!ms_pl_taken(doc, ek, dir)) out = dir;
+        else free(dir);
     }
     mpj_free(doc);
     sh_mb_record_unlock();
     free(ek);
-    return ok;
+    free(seg);
+    free(key);
+    return out;
 }
 
-int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap)
+int sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char **out)
 {
-    char rootu[MAX_PATH * 4], dir[SH_MS_NAME_MAX + 1], seg[72], path[MAX_PATH * 4];
+    const char *rootu = sh_ms_root();
+    char *dir, *seg, *path;
     wchar_t *w;
     int round;
-    if (out && cap) out[0] = 0;
-    if (!out || !cap || !sh_ms_root(rootu, sizeof rootu) || !sh_ms_place_dir(place, dir, sizeof dir)) return 0;
+    if (!out) return 0;
+    *out = NULL;
+    if (!rootu || !(dir = sh_ms_place_dir(place))) return 0;
     if (salt && salt[0]) {
         /* One build per salt per place: the place's folder of it is the target. */
         ms_found_list found;
         size_t i;
-        int hit = 0;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", rootu, dir);
-        w = sh_mb_wpath(path);
+        path = sh_textf("%s\\%s", rootu, dir);
+        w = path ? sh_mb_wpath(path) : NULL;
+        free(path);
         memset(&found, 0, sizeof found);
-        if (w && ms_is_dir(w)) ms_find_mods(&found, w, L"", 1, 0);
-        for (i = 0; i < found.count && !hit; i++) {
+        if (w && ms_is_dir(w)) ms_find_mods(&found, w, L"", 0);
+        for (i = 0; i < found.count && !*out; i++) {
             char s[SH_SALT_LEN + 1], *rel;
             ms_block_salt(found.items[i].folder, s);
             if (!s[0] || _stricmp(s, salt) || !(rel = sh_mb_utf8(found.items[i].rel))) continue;
-            _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, rel);
+            *out = sh_textf("%s\\%s", dir, rel);
             free(rel);
-            hit = 1;
         }
         ms_found_free(&found);
         free(w);
-        if (hit) return 2;
+        if (*out) { free(dir); return 2; }
     }
-    if (!name || !sh_ms_title_segment(name, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "mod");
-    for (round = 1; round < 64; round++) {
-        char leaf[96];
-        if (round == 1) strcpy_s(leaf, sizeof leaf, seg);
-        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s (%d)", seg, round);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\%s", rootu, dir, leaf);
-        w = sh_mb_wpath(path);
-        if (w && !ms_exists(w)) {
-            free(w);
-            _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, leaf);
-            return 1;
-        }
+    seg = name ? sh_ms_title_segment(name) : NULL;
+    if (!seg) seg = _strdup("mod");
+    /* A free name: the mod's, else numbered, as many numbers as it takes. */
+    for (round = 1; seg; round++) {
+        char *leaf = round == 1 ? _strdup(seg) : sh_textf("%s (%d)", seg, round);
+        int free_name;
+        path = leaf ? sh_textf("%s\\%s\\%s", rootu, dir, leaf) : NULL;
+        w = path ? sh_mb_wpath(path) : NULL;
+        free_name = w && !ms_exists(w);
         free(w);
+        free(path);
+        if (!leaf || !w) { free(leaf); break; }
+        if (free_name) *out = sh_textf("%s\\%s", dir, leaf);
+        free(leaf);
+        if (free_name) break;
     }
-    return 0;
+    free(seg);
+    free(dir);
+    return *out ? 1 : 0;
 }
 
 int sh_ms_place_note(const sh_ms_place *place, const char *dir_in)
 {
-    char rootu[MAX_PATH * 4], key[SH_MS_NAME_MAX + 1], dir[SH_MS_NAME_MAX + 1], *ek = NULL, *et = NULL, *ef = NULL;
+    const char *rootu = sh_ms_root();
+    char *key, *dir = NULL, *ek = NULL, *et = NULL, *ef = NULL;
     mpj *doc, *entry;
     int ok = 0;
-    if (!place || !sh_ms_root(rootu, sizeof rootu) || !ms_pl_key(place, key, sizeof key)) return 0;
+    if (!place || !rootu || !(key = ms_pl_key(place))) return 0;
     if (dir_in && dir_in[0]) {
-        char *c;
-        strncpy_s(dir, sizeof dir, dir_in, _TRUNCATE);
-        for (c = dir; *c; c++) if (*c == '/') *c = '\\';
-        {
-            /* A mod's folder in the place names the place it lies in. */
-            char up[SH_MS_NAME_MAX + 1];
-            if (ms_place_of_name(dir, up, sizeof up)) strcpy_s(dir, sizeof dir, up);
-        }
-    } else if (!sh_ms_place_dir(place, dir, sizeof dir)) return 0;
+        /* A mod's folder in the place names the place it lies in. */
+        char *named = ms_backslashed(dir_in), *up = named ? ms_place_of_name(named) : NULL;
+        if (up && up[0]) { dir = up; free(named); }
+        else { dir = named; free(up); }
+    } else dir = sh_ms_place_dir(place);
+    if (!dir) goto out;
     ek = ms_pl_escape(key);
     et = ms_pl_escape(place->title ? place->title : "");
     ef = ms_pl_escape(dir);
@@ -2168,20 +2301,23 @@ int sh_ms_place_note(const sh_ms_place *place, const char *dir_in)
     mpj_free(doc);
     sh_mb_record_unlock();
 out:
+    free(key);
+    free(dir);
     free(ek);
     free(et);
     free(ef);
     return ok;
 }
 
-int sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size_t title_cap)
+int sh_ms_place_of(const char *key, char **dir, char **title)
 {
-    char rootu[MAX_PATH * 4], *ek;
+    const char *rootu = sh_ms_root();
+    char *ek;
     mpj *doc;
     int i, found = 0;
-    if (dir && dir_cap) dir[0] = 0;
-    if (title && title_cap) title[0] = 0;
-    if (!key || !key[0] || !sh_ms_root(rootu, sizeof rootu) || !(ek = ms_pl_escape(key))) return 0;
+    if (dir) *dir = NULL;
+    if (title) *title = NULL;
+    if (!key || !key[0] || !rootu || !(ek = ms_pl_escape(key))) return 0;
     sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
@@ -2189,44 +2325,51 @@ int sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size
         const mpj *t;
         if (strcmp(doc->keys[i], ek)) continue;
         found = 1;
-        if (dir && dir_cap) found = ms_pl_folder(doc, i, dir, dir_cap);
+        if (dir) found = (*dir = ms_pl_folder(doc, i)) != NULL;
         t = mpj_get(doc->items[i], "title");
-        if (found && title && title_cap && t && t->type == MPJ_STR && t->text) ms_pl_decode(t->text, title, title_cap);
+        if (found && title && t && t->type == MPJ_STR && t->text) *title = ms_pl_decode(t->text);
     }
     mpj_free(doc);
     free(ek);
     return found;
 }
 
-int sh_ms_place_title(const char *folder, char *title, size_t cap)
+char *sh_ms_place_title(const char *folder)
 {
-    char rootu[MAX_PATH * 4], place[SH_MS_NAME_MAX + 1], name[SH_MS_NAME_MAX + 1], *c;
+    const char *rootu = sh_ms_root();
+    char *place, *name, *title = NULL;
     mpj *doc;
-    int i, found = 0;
-    if (title && cap) title[0] = 0;
-    if (!folder || !sh_ms_root(rootu, sizeof rootu)) return 0;
+    int i;
+    if (!folder || !rootu) return NULL;
     /* An absolute folder is named by its path under mods\; a name is taken as it is. */
-    strncpy_s(name, sizeof name, folder[0] && (folder[1] == ':' || folder[0] == '\\') ? ms_rel(ms_plain(folder)) : folder,
-              _TRUNCATE);
-    for (c = name; *c; c++) if (*c == '/') *c = '\\';
-    if (!ms_place_of_name(name, place, sizeof place)) {
+    name = ms_backslashed(folder[0] && (folder[1] == ':' || folder[0] == '\\') ? ms_rel(ms_plain(folder)) : folder);
+    if (!name) return NULL;
+    place = ms_place_of_name(name);
+    if (place && !place[0]) {
         /* The place folder itself. */
         size_t pl = sizeof SH_MS_PLACES - 1;
-        if (_strnicmp(name, SH_MS_PLACES "\\", pl + 1) || !name[pl + 1] || strchr(name + pl + 1, '\\')) return 0;
-        strcpy_s(place, sizeof place, name);
+        free(place);
+        place = NULL;
+        if (!_strnicmp(name, SH_MS_PLACES "\\", pl + 1) && name[pl + 1] && !strchr(name + pl + 1, '\\'))
+            place = _strdup(name);
     }
+    free(name);
+    if (!place) return NULL;
     sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     sh_mb_record_unlock();
-    for (i = 0; doc && i < doc->n && !found; i++) {
-        char f[SH_MS_NAME_MAX + 1];
+    for (i = 0; doc && i < doc->n && !title; i++) {
+        char *f = ms_pl_folder(doc, i);
         const mpj *t;
-        if (!ms_pl_folder(doc, i, f, sizeof f) || _stricmp(f, place)) continue;
+        int same = f && !_stricmp(f, place);
+        free(f);
+        if (!same) continue;
         t = mpj_get(doc->items[i], "title");
-        if (t && t->type == MPJ_STR && t->text && t->text[0]) found = ms_pl_decode(t->text, title, cap);
+        if (t && t->type == MPJ_STR && t->text && t->text[0]) title = ms_pl_decode(t->text);
     }
     mpj_free(doc);
-    return found;
+    free(place);
+    return title;
 }
 
 /* After a folder in a place left: the place folder goes once nothing is left
@@ -2236,7 +2379,7 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
 {
     size_t rl = wcslen(root), pl = sizeof SH_MS_PLACES - 1;
     wchar_t *copy, *slash;
-    char rootu[MAX_PATH * 4];
+    const char *rootu;
     mpj *doc;
     int i, changed = 0;
     if (!ms_inside(path, root) || _wcsnicmp(path + rl + 1, L"" SH_MS_PLACES, pl) || path[rl + 1 + pl] != L'\\') return;
@@ -2246,18 +2389,16 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
         if (!RemoveDirectoryW(copy)) break;
     }
     free(copy);
-    if (!sh_ms_root(rootu, sizeof rootu)) return;
+    if (!(rootu = sh_ms_root())) return;
     sh_mb_record_lock(rootu);
     doc = ms_pl_load(rootu);
     for (i = 0; doc && i < doc->n; i++) {
-        char f[SH_MS_NAME_MAX + 1], full[MAX_PATH * 4];
-        wchar_t *w;
-        int gone;
-        if (!ms_pl_folder(doc, i, f, sizeof f)) continue;
-        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", rootu, f);
-        w = sh_mb_wpath(full);
-        gone = w && !ms_exists(w);
+        char *f = ms_pl_folder(doc, i), *full = f ? sh_textf("%s\\%s", rootu, f) : NULL;
+        wchar_t *w = full ? sh_mb_wpath(full) : NULL;
+        int gone = w && !ms_exists(w);
         free(w);
+        free(full);
+        free(f);
         if (!gone) continue;
         mpj_free(doc->items[i]);
         free(doc->keys[i]);
@@ -2284,9 +2425,10 @@ static void ms_place_prune(const wchar_t *path, const wchar_t *root)
 
 static mpj *ms_salts_record(void)
 {
-    char rootu[MAX_PATH * 4], *text = NULL;
+    const char *rootu = sh_ms_root();
+    char *text = NULL;
     mpj *doc = NULL;
-    if (!sh_ms_root(rootu, sizeof rootu)) return NULL;
+    if (!rootu) return NULL;
     if (sh_mb_record_get(rootu, MS_SALTS_SECTION, &text) == 1 && text) doc = mpj_parse(text, strlen(text));
     free(text);
     if (doc && doc->type != MPJ_OBJ) { mpj_free(doc); doc = NULL; }
@@ -2296,8 +2438,10 @@ static mpj *ms_salts_record(void)
 static int ms_salt_recorded_at(const mpj *rec, const char *salt, const char *name)
 {
     const mpj *v = rec && salt && salt[0] ? mpj_get(rec, salt) : NULL;
-    char held[SH_MS_NAME_MAX + 1];
-    return v && v->type == MPJ_STR && v->text && ms_pl_decode(v->text, held, sizeof held) && !_stricmp(held, name);
+    char *held = v && v->type == MPJ_STR && v->text ? ms_pl_decode(v->text) : NULL;
+    int at = held && !_stricmp(held, name);
+    free(held);
+    return at;
 }
 
 static unsigned long long ms_created(const char *folder)
@@ -2327,11 +2471,11 @@ static int ms_keeps_salt(const mpj *rec, const char *salt, const char *a_name, c
  * by `names[i]`. Written only when it changed. */
 static void ms_salts_note(const char *const *salts, const char *const *names, size_t n)
 {
-    char rootu[MAX_PATH * 4];
+    const char *rootu = sh_ms_root();
     mpj *doc = mpj_new(MPJ_OBJ), *was;
     char *a = NULL, *b = NULL;
     size_t i, al = 0, bl = 0;
-    if (!doc || !sh_ms_root(rootu, sizeof rootu)) { mpj_free(doc); return; }
+    if (!doc || !rootu) { mpj_free(doc); return; }
     for (i = 0; i < n; i++) {
         char *e = ms_pl_escape(names[i]);
         if (!e || !mpj_set(doc, salts[i], mpj_new_str(e))) { free(e); mpj_free(doc); return; }
@@ -2431,96 +2575,111 @@ static const char MS_EXAMPLE_ROW[] =
     "\t}\r\n"
     "}\r\n";
 
-static int ms_write_example(const wchar_t *dir, const char *salt, char *rel_out, size_t rel_cap)
+static int ms_write_example(const wchar_t *dir, const char *salt, char **rel_out)
 {
-    char rel[MAX_PATH], text[sizeof MS_EXAMPLE_ROW + 4 * SH_MB_ID_MAX];
+    char *rel, *text;
     wchar_t *path;
     int ok;
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, MS_EXAMPLE_DEF_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt);
+    if (!(rel = sh_textf(MS_EXAMPLE_DEF_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt))) return 0;
     path = ms_wjoin_utf8(dir, rel);
+    free(rel);
     ok = path && ms_mkdirs_parent(path) && ms_write_text(path, MS_EXAMPLE_DEF, sizeof MS_EXAMPLE_DEF - 1);
     free(path);
     if (!ok) return 0;
-    _snprintf_s(text, sizeof text, _TRUNCATE, MS_EXAMPLE_ROW, salt, salt, salt, salt);
-    _snprintf_s(rel, sizeof rel, _TRUNCATE, MS_EXAMPLE_ROW_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt);
-    path = ms_wjoin_utf8(dir, rel);
-    ok = path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
+    text = sh_textf(MS_EXAMPLE_ROW, salt, salt, salt, salt);
+    rel = sh_textf(MS_EXAMPLE_ROW_DIR "%s\\" MS_EXAMPLE_DECL ".decl", salt);
+    path = rel ? ms_wjoin_utf8(dir, rel) : NULL;
+    ok = text && path && ms_mkdirs_parent(path) && ms_write_text(path, text, strlen(text));
     free(path);
-    if (ok && rel_out && rel_cap) {
+    free(text);
+    if (ok && rel_out) {
         char *c;
-        strncpy_s(rel_out, rel_cap, rel, _TRUNCATE);
-        for (c = rel_out; *c; c++) if (*c == '\\') *c = '/';
+        for (c = rel; *c; c++) if (*c == '\\') *c = '/';
+        *rel_out = rel;
+        rel = NULL;
     }
+    free(rel);
     return ok;
 }
 
-static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                      char *example_out, size_t example_cap, char *cause, size_t cap)
+/* `s` as a JSON string body (no quotes), malloc'd. */
+static char *ms_json_body(const char *s)
 {
-    char salt[SH_SALT_LEN + 1], esc[SH_MB_NAME_MAX * 6 + 1], seg[72], leaf[96], *u;
-    char text[SH_MB_NAME_MAX * 12 + 4 * SH_MB_ID_MAX + 1024], strings[SH_MB_NAME_MAX * 6 + 4 * SH_MB_ID_MAX + 512];
+    size_t n = strlen(s), w = 0, i;
+    char *o = (char *)malloc(n * 6 + 1);
+    if (!o) return NULL;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { o[w++] = '\\'; o[w++] = (char)c; }
+        else if (c < 0x20) w += (size_t)_snprintf_s(o + w, 7, _TRUNCATE, "\\u%04x", c);
+        else o[w++] = (char)c;
+    }
+    o[w] = 0;
+    return o;
+}
+
+static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX + 1], char **folder_out,
+                      char **example_out, char **cause)
+{
+    char salt[SH_SALT_LEN + 1], *esc = NULL, *seg = NULL, *leaf = NULL, *u, *text = NULL, *strings = NULL;
     wchar_t *root = NULL, *dir = NULL, *assets = NULL, *desc = NULL;
-    size_t i, n = 0, points = 0;
+    size_t n;
     int round, ok = 0;
     if (salt_out) salt_out[0] = 0;
-    if (folder_out && folder_cap) folder_out[0] = 0;
-    if (example_out && example_cap) example_out[0] = 0;
+    if (folder_out) *folder_out = NULL;
+    if (example_out) *example_out = NULL;
     while (name && (*name == ' ' || *name == '\t')) name++;
-    if (!name || !name[0]) return ms_cause(cause, cap, "a new mod needs a name");
-    for (i = 0; name[i]; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if ((c & 0xC0) != 0x80) points++;
-        if (n + 7 >= sizeof esc) break;
-        if (c == '"' || c == '\\') { esc[n++] = '\\'; esc[n++] = (char)c; }
-        else if (c < 0x20) n += (size_t)_snprintf_s(esc + n, sizeof esc - n, _TRUNCATE, "\\u%04x", c);
-        else esc[n++] = (char)c;
-    }
-    esc[n] = 0;
+    if (!name || !name[0]) return ms_cause(cause, "a new mod needs a name");
+    /* The name as the author typed it, any length (DECISIONS 26). */
+    if (!(esc = ms_json_body(name))) return ms_cause(cause, "out of memory");
+    n = strlen(esc);
     while (n && esc[n - 1] == ' ') esc[--n] = 0;
-    if (points > SH_MB_NAME_MAX) return ms_cause(cause, cap, "a mod name is at most %u characters", SH_MB_NAME_MAX);
     root = ms_wroot();
-    if (!root) return ms_cause(cause, cap, "the store folder cannot be resolved");
-    if (!sh_ms_title_segment(name, seg, sizeof seg)) strcpy_s(seg, sizeof seg, "mod");
+    if (!root) { free(esc); return ms_cause(cause, "the store folder cannot be resolved"); }
+    seg = sh_ms_title_segment(name);
+    if (!seg) seg = _strdup("mod");
     /* "maps" at the top of mods\ is the places' folder, never a mod's. */
-    if (!_stricmp(seg, SH_MS_PLACES)) strcat_s(seg, sizeof seg, " mod");
+    if (seg && !_stricmp(seg, SH_MS_PLACES)) { free(seg); seg = _strdup(SH_MS_PLACES " mod"); }
+    if (!seg) { free(esc); free(root); return ms_cause(cause, "out of memory"); }
     modstore_lock();
-    for (round = 1; round < 64 && !dir; round++) {
-        if (round == 1) strcpy_s(leaf, sizeof leaf, seg);
-        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s (%d)", seg, round);
-        dir = ms_wjoin_utf8(root, leaf);
-        if (dir && ms_exists(dir)) { free(dir); dir = NULL; }
+    /* A free folder name: the mod's, else numbered, as many numbers as it takes. */
+    for (round = 1; !dir; round++) {
+        free(leaf);
+        leaf = round == 1 ? _strdup(seg) : sh_textf("%s (%d)", seg, round);
+        dir = leaf ? ms_wjoin_utf8(root, leaf) : NULL;
+        if (!dir) break;
+        if (ms_exists(dir)) { free(dir); dir = NULL; }
     }
-    if (!dir) { ms_cause(cause, cap, "no free folder name under mods\\ for \"%s\"", name); goto done; }
-    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, cap, "Windows could not supply the random numbers that name a new mod; restart the game and "
+    if (!dir) { ms_cause(cause, "out of memory"); goto done; }
+    if (!ms_new_salt(salt, NULL)) { ms_cause(cause, "Windows could not supply the random numbers that name a new mod; restart the game and "
                                                      "try again"); goto done; }
     assets = ms_wjoin(dir, L"assets");
     desc = ms_wjoin(dir, L"mod.json");
     if (!assets || !desc || !ms_mkdirs(assets)) {
-        ms_cause(cause, cap, "cannot create the folder mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
+        ms_cause(cause, "cannot create the folder mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
     /* The author's part holds what the files cannot say; the block the salt,
      * which never changes afterwards. The example's Toybox text is author
      * text: its strings, keyed <salt>_<name> (no '/' in a string key). */
-    strings[0] = 0;
     if (example)
-        _snprintf_s(strings, sizeof strings, _TRUNCATE,
-                    "  \"strings\": {\r\n    \"en\": {\r\n"
-                    "      \"%s_category\": \"%s\",\r\n"
-                    "      \"%s_" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
-                    "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
-                    "    }\r\n  },\r\n", salt, esc, salt, salt);
-    _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
-                "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
-                esc, strings, SH_MB_FORMAT, salt);
-    if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", leaf); goto done; }
-    if (example && !ms_write_example(dir, salt, example_out, example_cap)) {
-        ms_cause(cause, cap, "cannot write the example files of mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
+        strings = sh_textf("  \"strings\": {\r\n    \"en\": {\r\n"
+                           "      \"%s_category\": \"%s\",\r\n"
+                           "      \"%s_" MS_EXAMPLE_DECL "_name\": \"Example crate\",\r\n"
+                           "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
+                           "    }\r\n  },\r\n", salt, esc, salt, salt);
+    else strings = _strdup("");
+    text = strings ? sh_textf("{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
+                              "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
+                              esc, strings, SH_MB_FORMAT, salt) : NULL;
+    if (!text) { ms_cause(cause, "out of memory"); goto done; }
+    if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, "cannot write mods\\%s\\mod.json", leaf); goto done; }
+    if (example && !ms_write_example(dir, salt, example_out)) {
+        ms_cause(cause, "cannot write the example files of mods\\%s: %s", leaf, ms_why(GetLastError(), leaf, 1, 0));
         goto done;
     }
     u = sh_mb_utf8(dir);
-    if (folder_out && folder_cap && u) strncpy_s(folder_out, folder_cap, ms_plain(u), _TRUNCATE);   /* without the long-path prefix */
+    if (folder_out && u) *folder_out = _strdup(ms_plain(u));   /* without the long-path prefix */
     free(u);
     if (salt_out) strcpy_s(salt_out, SH_MB_ID_MAX + 1, salt);
     ms_log("MODS: store: new mod \"%s\" created as mods\\%s, salt %s", name, leaf, salt);
@@ -2531,25 +2690,28 @@ done:
     free(dir);
     free(assets);
     free(desc);
+    free(esc);
+    free(seg);
+    free(leaf);
+    free(text);
+    free(strings);
     return ok;
 }
 
-int sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                  char *cause, size_t cap)
+int sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char **folder_out, char **cause)
 {
-    return ms_new_mod(name, 0, salt_out, folder_out, folder_cap, NULL, 0, cause, cap);
+    return ms_new_mod(name, 0, salt_out, folder_out, NULL, cause);
 }
 
-int sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                          char *example_out, size_t example_cap, char *cause, size_t cap)
+int sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char **folder_out, char **example_out,
+                          char **cause)
 {
-    return ms_new_mod(name, 1, salt_out, folder_out, folder_cap, example_out, example_cap, cause, cap);
+    return ms_new_mod(name, 1, salt_out, folder_out, example_out, cause);
 }
 
 /* ---------------------------------------------------------- resolve ---- */
 
-static int ms_file_matches(const sh_mb_file *f, const char *type, const char *name,
-                           char cand[][SH_MB_REQUEST_MAX + 1], int ncand)
+static int ms_file_matches(const sh_mb_file *f, const char *type, const char *name, char *const cand[], int ncand)
 {
     int i;
     if (f->ptype && f->pname && _stricmp(f->ptype, type) == 0 && _stricmp(f->pname, name) == 0) return 1;
@@ -2559,7 +2721,7 @@ static int ms_file_matches(const sh_mb_file *f, const char *type, const char *na
 
 int sh_ms_resolve_need(const sh_ms_list *l, const char *type, const char *name, sh_ms_hit *hit)
 {
-    char cand[2][SH_MB_REQUEST_MAX + 1];
+    char *cand[2] = { NULL, NULL };
     int ncand;
     size_t i, k;
     const sh_mb_file *first = NULL;
@@ -2590,6 +2752,7 @@ int sh_ms_resolve_need(const sh_ms_list *l, const char *type, const char *name, 
             break;   /* one provider per bundle */
         }
     }
+    sh_mb_requests_free(cand, ncand);
     if (!first) h.status = SH_MS_MISS;
     else if (h.providers == 1) h.status = SH_MS_HIT;
     else h.status = (decl || differ) ? SH_MS_CONFLICT : SH_MS_DEDUPE;
@@ -2615,13 +2778,12 @@ int sh_ms_request_exists(void *ctx, const char *request)
 
 /* Rehash every carried file of one folder; resolve every pointer. */
 static int ms_verify_folder(const wchar_t *folder, const sh_mb_bundle *b, sh_ms_verify_stats *st,
-                            char *cause, size_t cap)
+                            char **cause)
 {
-    char first[SH_MB_CAUSE_MAX];
+    char *first = NULL;
     int ok = 1;
     unsigned long long bytes = 0;
     size_t i;
-    first[0] = 0;
     for (i = 0; i < b->file_count && ok; i++) {
         const sh_mb_file *f = &b->files[i];
         wchar_t *p;
@@ -2630,67 +2792,70 @@ static int ms_verify_folder(const wchar_t *folder, const sh_mb_bundle *b, sh_ms_
         if (f->stock) {
             /* A stock pointer resolves against this player's installed game:
              * a different revision lacks the entry or holds other bytes. */
-            if (sh_mb_stock_verify(f->stock_source, f->blob, &size, f->path, first, sizeof first) != SH_MB_STOCK_OK) ok = 0;
+            if (sh_mb_stock_verify(f->stock_source, f->blob, &size, f->path, &first) != SH_MB_STOCK_OK) ok = 0;
             else if (st) { st->files++; st->pointers++; }
             continue;
         }
         p = ms_wjoin_utf8(folder, f->path);
-        if (!p) { ok = 0; strcpy_s(first, sizeof first, "out of memory"); }
+        if (!p) { ok = 0; ms_cause(&first, "out of memory"); }
         else if (!ms_hash_wfile(p, &size, hex)) {
             ok = 0;
-            _snprintf_s(first, sizeof first, _TRUNCATE, "%s is missing or unreadable", f->path);
+            ms_cause(&first, "%s is missing or unreadable", f->path);
         } else if (size != f->size || strcmp(hex, f->blob) != 0) {
             ok = 0;
-            _snprintf_s(first, sizeof first, _TRUNCATE, "%s does not match mod.json (damaged or edited)", f->path);
+            ms_cause(&first, "%s does not match mod.json (damaged or edited)", f->path);
         }
         if (ok) { bytes += f->size; if (st) st->files++; }
         free(p);
     }
     if (st) st->bytes_mb += (unsigned)(bytes >> 20);
-    if (!ok) return ms_cause(cause, cap, "%s", first);
-    return 1;
+    if (!ok) ms_cause(cause, "%s", first ? first : "out of memory");
+    free(first);
+    return ok;
 }
 
-int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char *cause, size_t cap)
+int sh_ms_verify(const char *spec, sh_ms_verify_stats *st, char **cause)
 {
     sh_ms_list l;
     size_t i, matched = 0;
     int ok = 1;
-    char first[SH_MB_CAUSE_MAX];
-    first[0] = 0;
+    char *first = NULL;
     if (st) memset(st, 0, sizeof *st);
-    if (!spec || !spec[0]) return ms_cause(cause, cap, "Name the mod: its folder name under mods, or its salt");
+    if (!spec || !spec[0]) return ms_cause(cause, "Name the mod: its folder name under mods, or its salt");
     modstore_lock();
-    if (!sh_ms_enumerate(&l)) { modstore_unlock(); return ms_cause(cause, cap, "the store cannot be listed"); }
+    if (!sh_ms_enumerate(&l)) { modstore_unlock(); return ms_cause(cause, "the store cannot be listed"); }
     for (i = 0; i < l.count; i++) {
         sh_ms_entry *e = &l.items[i];
         wchar_t *folder;
-        char one[SH_MB_CAUSE_MAX], why[SH_MB_CAUSE_MAX];
+        char *one = NULL, *why = NULL;
         int passed;
         if (!sh_ms_entry_matches(e, spec)) continue;
         matched++;
         if (st) st->entries++;
         if (!e->loaded) {
-            if (ok) strncpy_s(first, sizeof first, e->cause, _TRUNCATE);
+            if (ok) ms_cause(&first, "%s", e->cause);
             ok = 0;
             continue;
         }
         folder = sh_mb_wpath(e->folder);
-        passed = folder && ms_verify_folder(folder, &e->bundle, st, one, sizeof one);
-        if (!folder) strcpy_s(one, sizeof one, "out of memory");
+        passed = folder && ms_verify_folder(folder, &e->bundle, st, &one);
+        if (!folder) ms_cause(&one, "out of memory");
         if (!passed) {
-            if (ok) strncpy_s(first, sizeof first, one, _TRUNCATE);
+            if (ok) ms_cause(&first, "%s", one ? one : "out of memory");
             ok = 0;
         }
-        if (!sh_mb_set_state(e->folder, passed, passed ? "" : one, why, sizeof why))
-            ms_log("MODS: verify %s: the result could not be recorded in mod.json: %s", e->name, why);
+        if (!sh_mb_set_state(e->folder, passed, passed ? "" : (one ? one : ""), &why))
+            ms_log("MODS: verify %s: the result could not be recorded in mod.json: %s", e->name, why ? why : "");
         free(folder);
+        free(one);
+        free(why);
     }
     sh_ms_list_free(&l);
     modstore_unlock();
-    if (!matched) return ms_cause(cause, cap, "no installed mod is named %s", spec);
-    if (!ok) return ms_cause(cause, cap, "%s", first);
-    return 1;
+    if (!matched) ok = ms_cause(cause, "no installed mod is named %s", spec);
+    else if (!ok) ms_cause(cause, "%s", first ? first : "out of memory");
+    free(first);
+    return ok;
 }
 
 /* ---------------------------------------------------------- install ---- */
@@ -2724,32 +2889,29 @@ static void ms_chain_init(sh_mb_resolver *out, ms_chain *chain, const sh_mb_reso
  * cause): the folder serves nothing until fixed (rule 2). A place folder is a
  * received build and is never built here (R3). */
 static int ms_build_in_place(const char *folder, const char *from, const sh_mb_resolver *resolver, sh_mb_bundle *b,
-                             char *cause, size_t cap)
+                             char **cause)
 {
     sh_ms_list list;
     sh_mb_resolver chain_resolver;
     ms_chain chain;
-    char one[SH_MB_CAUSE_MAX], why[SH_MB_CAUSE_MAX], salt[SH_SALT_LEN + 1];
-    int state;
+    char *one = NULL, *why = NULL, salt[SH_SALT_LEN + 1];
+    int state, ok = 0;
     memset(b, 0, sizeof *b);
     if (ms_in_place(folder)) {
-        ms_cause(cause, cap, "mods\\%s came with a downloaded map and is kept exactly as the map uses it; to change "
-                 "it, copy it to the top of the mods folder",
-                 ms_rel(folder));
-        strncpy_s(b->first_cause, sizeof b->first_cause, cause ? cause : "", _TRUNCATE);
-        return 0;
+        ms_cause(&one, "mods\\%s came with a downloaded map and is kept exactly as the map uses it; to change "
+                 "it, copy it to the top of the mods folder", ms_rel(folder));
+        goto refused;
     }
-    state = sh_mb_descriptor_state_why(folder, why, sizeof why);
+    state = sh_mb_descriptor_state_why(folder, &why);
     if (state == SH_MB_DESC_FRESH) {
-        if (ms_assign(folder, from && from[0] ? from : ms_leaf(folder), 1, salt, one, sizeof one) < 0) {
+        if (ms_assign(folder, from && from[0] ? from : ms_leaf(folder), 1, salt, &one) < 0) {
             ms_note_cause(folder, one);
-            strncpy_s(b->first_cause, sizeof b->first_cause, one, _TRUNCATE);
-            return ms_cause(cause, cap, "%s", one);
+            goto refused;
         }
     } else if (state != SH_MB_DESC_BUILT) {
-        ms_note_cause(folder, why);
-        strncpy_s(b->first_cause, sizeof b->first_cause, why, _TRUNCATE);
-        return ms_cause(cause, cap, "%s", why);
+        ms_cause(&one, "%s", why ? why : "");
+        ms_note_cause(folder, one);
+        goto refused;
     } else {
         /* What the author added under the folder's name since moves under
          * the salt before every build (DECISIONS 20). */
@@ -2757,10 +2919,9 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
         salt[0] = 0;
         if (w) ms_block_salt(w, salt);
         free(w);
-        if (salt[0] && ms_rehome(folder, from && from[0] ? from : ms_leaf(folder), salt, one, sizeof one) < 0) {
+        if (salt[0] && ms_rehome(folder, from && from[0] ? from : ms_leaf(folder), salt, &one) < 0) {
             ms_note_cause(folder, one);
-            strncpy_s(b->first_cause, sizeof b->first_cause, one, _TRUNCATE);
-            return ms_cause(cause, cap, "%s", one);
+            goto refused;
         }
     }
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
@@ -2769,76 +2930,123 @@ static int ms_build_in_place(const char *folder, const char *from, const sh_mb_r
         sh_ms_list_free(&list);
         /* The cause goes into the block: the Mods tab shows it, and the folder
          * serves nothing until it builds again. */
-        if (sh_salt_valid(b->id, strlen(b->id)) && !sh_mb_write_failed(b, folder, one, sizeof one))
-            ms_log("MODS: store: %s: the failed build could not be recorded in mod.json: %s", ms_rel(folder), one);
-        ms_note_cause(folder, b->first_cause);
-        return ms_cause(cause, cap, "%s", b->first_cause);
+        if (sh_salt_valid(b->id, strlen(b->id)) && !sh_mb_write_failed(b, folder, &one))
+            ms_log("MODS: store: %s: the failed build could not be recorded in mod.json: %s", ms_rel(folder), one ? one : "");
+        ms_note_cause(folder, sh_mb_first_cause(b));
+        ms_cause(cause, "%s", sh_mb_first_cause(b));
+        goto out;
     }
     sh_ms_list_free(&list);
-    if (!sh_mb_write(b, folder, one, sizeof one)) {
-        ms_note_cause(folder, one);
-        return ms_cause(cause, cap, "%s", one);
+    if (!sh_mb_write(b, folder, &one)) {
+        ms_note_cause(folder, one ? one : "mod.json could not be written");
+        ms_cause(cause, "%s", one ? one : "mod.json could not be written");
+        goto out;
     }
     sh_ms_note_build(folder, b);
-    return 1;
+    ok = 1;
+    goto out;
+refused:
+    if (!one) ms_cause(&one, "out of memory");
+    sh_mb_set_first_cause(b, one);
+    ms_cause(cause, "%s", one);
+out:
+    free(one);
+    free(why);
+    return ok;
 }
 
 /* Copy every file and folder below `src` into `dst` (created), real copies,
  * no link followed; everything below assets\ is named in lower case, the game
  * names the builder records (DECISIONS 13). 1 when all of it was copied. */
-static int ms_copy_tree(const wchar_t *src, const wchar_t *dst, int depth, int lower, char *cause, size_t cap)
+typedef struct ms_copy_dir { wchar_t *src, *dst; int lower; } ms_copy_dir;
+
+static int ms_copy_tree(const wchar_t *src_top, const wchar_t *dst_top, char **cause)
 {
-    WIN32_FIND_DATAW fd;
-    wchar_t *pattern;
-    HANDLE h;
-    int ok = 1;
-    if (depth > 48) return ms_cause(cause, cap, "folder nesting deeper than 48");
-    if (!ms_mkdirs(dst)) return ms_cause(cause, cap, "cannot create a folder in the store: %s", ms_why(GetLastError(), NULL, 0, 0));
-    pattern = ms_wjoin(src, L"*");
-    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-    free(pattern);
-    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND ? 1 : ms_cause(cause, cap, "cannot list the folder");
-    do {
-        wchar_t *from, *to;
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ok = ms_cause(cause, cap, "a symbolic link or junction is not allowed in a mod folder"); break; }
-        {
-            int sub = lower || (depth == 0 && !_wcsicmp(fd.cFileName, L"assets"));
-            wchar_t name[MAX_PATH];
-            size_t k;
-            wcsncpy_s(name, MAX_PATH, fd.cFileName, _TRUNCATE);
-            for (k = 0; sub && name[k]; k++) if (name[k] >= L'A' && name[k] <= L'Z') name[k] = (wchar_t)(name[k] - L'A' + L'a');
-            from = ms_wjoin(src, fd.cFileName);
-            to = ms_wjoin(dst, name);
-            if (!from || !to) ok = ms_cause(cause, cap, "out of memory");
-            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = ms_copy_tree(from, to, depth + 1, sub, cause, cap);
-            else if (!sh_ms_copy_file(from, to)) {
-                char *u = sh_mb_utf8(fd.cFileName);
-                ok = ms_cause(cause, cap, "cannot copy %s into the store: %s", u ? u : "a file", ms_why(GetLastError(), u ? u : "", 0, 0));
-                free(u);
-            }
+    ms_copy_dir *pending = NULL, cur;
+    size_t n = 0, cap = 0;
+    int ok = 1, top = 1;
+    cur.src = _wcsdup(src_top);
+    cur.dst = _wcsdup(dst_top);
+    cur.lower = 0;
+    if (!cur.src || !cur.dst) { free(cur.src); free(cur.dst); return ms_cause(cause, "out of memory"); }
+    /* As deep as the folder goes: the folders still to copy wait on the heap. */
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        wchar_t *pattern;
+        HANDLE h = INVALID_HANDLE_VALUE;
+        if (!ms_mkdirs(cur.dst)) ok = ms_cause(cause, "cannot create a folder in the store: %s", ms_why(GetLastError(), NULL, 0, 0));
+        else {
+            pattern = ms_wjoin(cur.src, L"*");
+            h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+            free(pattern);
+            if (h == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_NOT_FOUND) ok = ms_cause(cause, "cannot list the folder");
         }
-        free(from);
-        free(to);
-    } while (ok && FindNextFileW(h, &fd));
-    FindClose(h);
+        while (ok && h != INVALID_HANDLE_VALUE) {
+            if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                    ok = ms_cause(cause, "a symbolic link or junction is not allowed in a mod folder");
+                } else {
+                    int sub = cur.lower || (top && !_wcsicmp(fd.cFileName, L"assets"));
+                    wchar_t *name = _wcsdup(fd.cFileName), *from, *to;
+                    size_t k;
+                    for (k = 0; sub && name && name[k]; k++)
+                        if (name[k] >= L'A' && name[k] <= L'Z') name[k] = (wchar_t)(name[k] - L'A' + L'a');
+                    from = ms_wjoin(cur.src, fd.cFileName);
+                    to = name ? ms_wjoin(cur.dst, name) : NULL;
+                    free(name);
+                    if (!from || !to) ok = ms_cause(cause, "out of memory");
+                    else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        if (n == cap) {
+                            size_t grow = cap ? cap * 2 : 16;
+                            ms_copy_dir *g = (ms_copy_dir *)realloc(pending, grow * sizeof *g);
+                            if (g) { pending = g; cap = grow; }
+                        }
+                        if (n == cap) ok = ms_cause(cause, "out of memory");
+                        else {
+                            pending[n].src = from;
+                            pending[n].dst = to;
+                            pending[n].lower = sub;
+                            n++;
+                            from = to = NULL;
+                        }
+                    } else if (!sh_ms_copy_file(from, to)) {
+                        char *u = sh_mb_utf8(fd.cFileName);
+                        ok = ms_cause(cause, "cannot copy %s into the store: %s", u ? u : "a file", ms_why(GetLastError(), u ? u : "", 0, 0));
+                        free(u);
+                    }
+                    free(from);
+                    free(to);
+                }
+            }
+            if (!ok || !FindNextFileW(h, &fd)) { FindClose(h); h = INVALID_HANDLE_VALUE; }
+        }
+        free(cur.src);
+        free(cur.dst);
+        top = 0;
+        if (!ok || !n) break;
+        cur = pending[--n];
+    }
+    while (n) { n--; free(pending[n].src); free(pending[n].dst); }
+    free(pending);
     return ok;
 }
 
-/* A free folder name at the root for `leaf`: the leaf, else "<leaf> (2)" ... */
-static int ms_free_root_name(const wchar_t *root, const char *leaf, char *out, size_t cap)
+/* A free folder name at the root for `leaf`: the leaf, else "<leaf> (2)" ...,
+ * as many numbers as it takes (malloc'd), or NULL when memory runs out. */
+static char *ms_free_root_name(const wchar_t *root, const char *leaf)
 {
     int round;
-    for (round = 1; round < 64; round++) {
+    for (round = 1;; round++) {
         wchar_t *p;
-        if (round == 1) strncpy_s(out, cap, leaf, _TRUNCATE);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s (%d)", leaf, round);
-        if (!_stricmp(out, SH_MS_PLACES)) continue;
+        char *out = round == 1 ? _strdup(leaf) : sh_textf("%s (%d)", leaf, round);
+        if (!out) return NULL;
+        if (!_stricmp(out, SH_MS_PLACES)) { free(out); continue; }
         p = ms_wjoin_utf8(root, out);
-        if (p && !ms_exists(p)) { free(p); return 1; }
+        if (!p) { free(out); return NULL; }
+        if (!ms_exists(p)) { free(p); return out; }
         free(p);
+        free(out);
     }
-    return 0;
 }
 
 /* The work folders of an install into `final`: staging and the replaced copy. */
@@ -2857,7 +3065,7 @@ static int ms_work_names(const wchar_t *final, wchar_t **staging, wchar_t **old)
  * and retired after. 1 on success; on failure the staging is removed and the
  * folder there put back. */
 static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_t *old, const wchar_t *root, const char *name,
-                      int *replaced, char *cause, size_t cap)
+                      int *replaced, char **cause)
 {
     *replaced = 0;
     if (ms_exists(final)) {
@@ -2865,7 +3073,7 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
         if (!ms_move_folder(final, old)) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            return ms_cause(cause, cap, "cannot replace mods\\%s: %s", name, ms_why(err, name, 1, 0));
+            return ms_cause(cause, "cannot replace mods\\%s: %s", name, ms_why(err, name, 1, 0));
         }
         *replaced = 1;
     }
@@ -2873,13 +3081,14 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
         DWORD err = GetLastError();
         if (*replaced) ms_move_folder(old, final);
         ms_rmtree(staging, root);
-        return ms_cause(cause, cap, "cannot place mods\\%s: %s", name, ms_why(err, name, 1, 0));
+        return ms_cause(cause, "cannot place mods\\%s: %s", name, ms_why(err, name, 1, 0));
     }
     if (*replaced) {
-        char why[200];
-        if (ms_retire(old, root, why, sizeof why) == 0)
+        char *why = NULL;
+        if (ms_retire(old, root, &why) == 0)
             ms_log("MODS: store: the replaced copy of mods\\%s could not be removed completely; it is not a mod (its name "
                    "ends in .old-)", name);
+        free(why);
     }
     return 1;
 }
@@ -2889,78 +3098,80 @@ static int ms_swap_in(const wchar_t *staging, const wchar_t *final, const wchar_
  * at the root, and a root folder of that salt is the install only when it
  * holds this very build. */
 static int ms_install_locked(const char *folder, const char *as_name, const sh_ms_place *place, int to_root,
-                             const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
-                             sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char *cause, size_t cap)
+                             const sh_mb_resolver *resolver, char **name_out,
+                             sh_ms_install_stats *st, sh_mb_bundle *bundle_out, char **cause)
 {
     sh_mb_bundle b;
     sh_mb_resolver chain_resolver;
     ms_chain chain;
     sh_ms_list list;
     wchar_t *root = NULL, *src = NULL, *final = NULL, *staging = NULL, *old = NULL;
-    char rootu[MAX_PATH * 4], name[SH_MS_NAME_MAX + 1], one[SH_MB_CAUSE_MAX], why[SH_MB_CAUSE_MAX], leaf[MAX_PATH * 4];
-    char *author = NULL, *text = NULL, dir[SH_MS_NAME_MAX + 1] = "";
+    const char *rootu;
+    char *name = NULL, *one = NULL, *why = NULL, *leaf = NULL;
+    char *author = NULL, *text = NULL, *dir = NULL;
     size_t i, author_len = 0, text_len = 0;
     int ok = 0, state, copy_of_root = 0, replaced = 0;
 
     memset(st, 0, sizeof *st);
     memset(&b, 0, sizeof b);
     memset(&list, 0, sizeof list);
-    if (name_out && name_cap) name_out[0] = 0;
+    if (name_out) *name_out = NULL;
     if (bundle_out) memset(bundle_out, 0, sizeof *bundle_out);
-    name[0] = 0;
     root = ms_wroot();
     src = folder ? sh_mb_wpath(folder) : NULL;
-    if (!root || !src || !sh_ms_root(rootu, sizeof rootu)) {
-        ms_cause(cause, cap, root ? "no mod folder given" : "the store folder cannot be resolved");
+    if (!root || !src || !(rootu = sh_ms_root())) {
+        ms_cause(cause, root ? "no mod folder given" : "the store folder cannot be resolved");
         goto done;
     }
-    if (_wcsicmp(src, root) == 0) { ms_cause(cause, cap, "that folder is the store itself, not a mod"); goto done; }
-    if (!ms_mkdirs(root)) { ms_cause(cause, cap, "cannot create the store folder: %s", ms_why(GetLastError(), NULL, 0, 0)); goto done; }
+    if (_wcsicmp(src, root) == 0) { ms_cause(cause, "that folder is the store itself, not a mod"); goto done; }
+    if (!ms_mkdirs(root)) { ms_cause(cause, "cannot create the store folder: %s", ms_why(GetLastError(), NULL, 0, 0)); goto done; }
 
     if (to_root && ms_inside(src, root) && !ms_in_place_area(src, root)) {
-        ms_cause(cause, cap, "mods\\%s is already one of your mods", ms_rel(folder));
+        ms_cause(cause, "mods\\%s is already one of your mods", ms_rel(folder));
         goto done;
     }
     if (!to_root && ms_store_mod_folder(src, root)) {
         /* A folder of the store, at any depth: built in place. */
-        if (place) { ms_cause(cause, cap, "mods\\%s is already in the store", ms_rel(folder)); goto done; }
+        if (place) { ms_cause(cause, "mods\\%s is already in the store", ms_rel(folder)); goto done; }
         st->in_place = 1;
-        if (!ms_build_in_place(folder, NULL, resolver, &b, cause, cap)) goto done;
+        if (!ms_build_in_place(folder, NULL, resolver, &b, cause)) goto done;
         for (i = 0; i < b.file_count; i++)
             if (b.files[i].stock) { st->stock_files++; st->stock_bytes += b.files[i].size; }
-        strncpy_s(name, sizeof name, ms_rel(folder), _TRUNCATE);
+        if (!(name = _strdup(ms_rel(folder)))) { ms_cause(cause, "out of memory"); goto done; }
         ok = 1;
         goto done;
     }
     if (!to_root && ms_inside(src, root)) {
-        ms_cause(cause, cap, ms_has_descriptor(src) ? "that folder is inside a mod of the store, not a mod itself"
+        ms_cause(cause, ms_has_descriptor(src) ? "that folder is inside a mod of the store, not a mod itself"
                                                     : "that folder of the store has no mod.json");
         goto done;
     }
     {
         const wchar_t *s = wcsrchr(src, L'\\');
-        char *u = sh_mb_utf8(s ? s + 1 : src);
-        strncpy_s(leaf, sizeof leaf, u ? u : "mod", _TRUNCATE);
-        free(u);
+        leaf = sh_mb_utf8(s ? s + 1 : src);
+        if (!leaf) { ms_cause(cause, "out of memory"); goto done; }
     }
-    state = sh_mb_descriptor_state_why(folder, why, sizeof why);
-    if (to_root && state != SH_MB_DESC_BUILT) { ms_cause(cause, cap, "%s", state == SH_MB_DESC_FRESH ? "it was never built" : why); goto done; }
+    state = sh_mb_descriptor_state_why(folder, &why);
+    if (to_root && state != SH_MB_DESC_BUILT) {
+        ms_cause(cause, "%s", state == SH_MB_DESC_FRESH ? "it was never built" : why ? why : "");
+        goto done;
+    }
     if (state == SH_MB_DESC_FRESH) {
         /* A new mod from elsewhere: copied in whole under its own name, salted
          * with its references rewritten (the source is only read), built; a
          * refused build leaves nothing installed. */
         char *fu;
-        if (place) { ms_cause(cause, cap, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh"); goto done; }
-        if (as_name && as_name[0]) strncpy_s(name, sizeof name, as_name, _TRUNCATE);
-        else if (!ms_free_root_name(root, leaf, name, sizeof name)) { ms_cause(cause, cap, "no free folder name under mods\\ for %s", leaf); goto done; }
+        if (place) { ms_cause(cause, "This folder is inside a downloaded map's mods (mods\\maps\\...), where Snapmap+ builds nothing; move it to the top of the mods folder and press Refresh"); goto done; }
+        name = as_name && as_name[0] ? _strdup(as_name) : ms_free_root_name(root, leaf);
+        if (!name) { ms_cause(cause, "out of memory"); goto done; }
         final = ms_wjoin_utf8(root, name);
-        if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, cap, "out of memory"); goto done; }
+        if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, "out of memory"); goto done; }
         if (ms_exists(staging)) ms_rmtree(staging, root);
-        if (!ms_copy_tree(src, staging, 0, 0, cause, cap)) { ms_rmtree(staging, root); goto done; }
-        if (!ms_swap_in(staging, final, old, root, name, &replaced, cause, cap)) goto done;
+        if (!ms_copy_tree(src, staging, cause)) { ms_rmtree(staging, root); goto done; }
+        if (!ms_swap_in(staging, final, old, root, name, &replaced, cause)) goto done;
         st->replaced = replaced;
         fu = sh_mb_utf8(final);
-        if (!fu || !ms_build_in_place(ms_plain(fu), leaf, resolver, &b, cause, cap)) {
+        if (!fu || !ms_build_in_place(ms_plain(fu), leaf, resolver, &b, cause)) {
             ms_rmtree(final, root);
             if (fu) ms_note_cause(ms_plain(fu), NULL);
             free(fu);
@@ -2974,17 +3185,17 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         ok = 1;
         goto done;
     }
-    if (state != SH_MB_DESC_BUILT) { ms_cause(cause, cap, "%s", why); goto done; }
+    if (state != SH_MB_DESC_BUILT) { ms_cause(cause, "%s", why ? why : ""); goto done; }
 
     /* A built mod from elsewhere: built in memory, the source is not written. */
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     ms_chain_init(&chain_resolver, &chain, resolver, &list);
-    if (!sh_mb_build(folder, NULL, &chain_resolver, &b)) { ms_cause(cause, cap, "%s", b.first_cause); goto done; }
+    if (!sh_mb_build(folder, NULL, &chain_resolver, &b)) { ms_cause(cause, "%s", sh_mb_first_cause(&b)); goto done; }
     if (place) {
         const sh_ms_entry *have;
-        int r = sh_ms_place_folder(place, b.name, b.id, name, sizeof name);
-        if (!r) { ms_cause(cause, cap, "no free folder for %s in its map's place under mods\\" SH_MS_PLACES, b.name ? b.name : b.id); goto done; }
-        if (!ms_place_of_name(name, dir, sizeof dir)) dir[0] = 0;
+        int r = sh_ms_place_folder(place, b.name, b.id, &name);
+        if (!r) { ms_cause(cause, "no folder for %s could be made in its map's place under mods\\" SH_MS_PLACES, b.name ? b.name : b.id); goto done; }
+        if (!(dir = ms_place_of_name(name))) { ms_cause(cause, "out of memory"); goto done; }
         have = r == 2 ? sh_ms_find_salt(&list, b.id, dir, b.hash) : NULL;
         if (have && sh_ms_entry_usable(have) && !_stricmp(have->name, name)) {
             st->present = 1;
@@ -2993,20 +3204,20 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         }
     } else {
         const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL, NULL);
-        if (as_name && as_name[0]) strncpy_s(name, sizeof name, as_name, _TRUNCATE);
+        if (as_name && as_name[0]) name = _strdup(as_name);
         else if (to_root && here && !(here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here))) {
             /* One build per salt at the root: the player's own folder of this mod stays theirs. */
-            ms_cause(cause, cap, "your mods already hold %s in mods\\%s", b.name && b.name[0] ? b.name : b.id, here->name);
+            ms_cause(cause, "your mods already hold %s in mods\\%s", b.name && b.name[0] ? b.name : b.id, here->name);
             goto done;
         } else if (here && here->loaded && !_stricmp(here->bundle.hash, b.hash) && sh_ms_entry_usable(here)) {
-            strncpy_s(name, sizeof name, here->name, _TRUNCATE);
+            name = _strdup(here->name);
             st->present = 1;
             ms_log("MODS: store: %s (salt %s, build %.16s) is already installed as mods\\%s; nothing was copied",
-                   b.name ? b.name : b.id, b.id, b.hash, name);
-        } else if (!ms_free_root_name(root, leaf, name, sizeof name)) {
-            ms_cause(cause, cap, "no free folder name under mods\\ for %s", leaf);
-            goto done;
+                   b.name ? b.name : b.id, b.id, b.hash, here->name);
+        } else {
+            name = ms_free_root_name(root, leaf);
         }
+        if (!name) { ms_cause(cause, "out of memory"); goto done; }
         /* The arriving folder of a salt the root holds is the newer copy (R9). */
         if (!st->present && here && _stricmp(here->name, name)) copy_of_root = 1;
     }
@@ -3025,9 +3236,9 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         st->stock_bytes += b.files[i].size;
     }
     final = ms_wjoin_utf8(root, name);
-    if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, cap, "out of memory"); goto done; }
+    if (!final || !ms_work_names(final, &staging, &old)) { ms_cause(cause, "out of memory"); goto done; }
     if (ms_exists(staging)) ms_rmtree(staging, root);
-    if (!ms_mkdirs(staging)) { ms_cause(cause, cap, "cannot create mods\\%s: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
+    if (!ms_mkdirs(staging)) { ms_cause(cause, "cannot create mods\\%s: %s", name, ms_why(GetLastError(), name, 1, 0)); goto done; }
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
@@ -3040,7 +3251,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         if (!copied) {
             DWORD err = GetLastError();
             ms_rmtree(staging, root);
-            ms_cause(cause, cap, "cannot copy %s into the store: %s", b.files[i].path, ms_why(err, name, 1, b.files[i].size));
+            ms_cause(cause, "cannot copy %s into the store: %s", b.files[i].path, ms_why(err, name, 1, b.files[i].size));
             goto done;
         }
         st->copied++;
@@ -3055,15 +3266,15 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         wchar_t *mj = ms_wjoin(staging, L"mod.json");
         int wrote = mj && text && ms_write_text(mj, text, text_len);
         free(mj);
-        if (!wrote) { ms_rmtree(staging, root); ms_cause(cause, cap, "cannot write mod.json for mods\\%s", name); goto done; }
+        if (!wrote) { ms_rmtree(staging, root); ms_cause(cause, "cannot write mod.json for mods\\%s", name); goto done; }
     }
     /* The copy is what serves: hash it (the source may have changed since the build). */
-    if (!ms_verify_folder(staging, &b, NULL, one, sizeof one)) {
+    if (!ms_verify_folder(staging, &b, NULL, &one)) {
         ms_rmtree(staging, root);
-        ms_cause(cause, cap, "the copy did not verify: %s; install it again", one);
+        ms_cause(cause, "the copy did not verify: %s; install it again", one ? one : "out of memory");
         goto done;
     }
-    if (!ms_swap_in(staging, final, old, root, name, &replaced, cause, cap)) goto done;
+    if (!ms_swap_in(staging, final, old, root, name, &replaced, cause)) goto done;
     st->replaced = replaced;
     if (replaced) ms_log("MODS: store: replaced mods\\%s with %s (salt %s, build %.16s)", name, b.name ? b.name : b.id, b.id, b.hash);
     {
@@ -3074,7 +3285,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
             char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1];
             const sh_ms_entry *here = sh_ms_find_salt(&list, b.id, NULL, NULL);
             strcpy_s(was, sizeof was, b.id);
-            if (ms_assign(ms_plain(fu), was, 0, salt, cause, cap) < 0) {
+            if (ms_assign(ms_plain(fu), was, 0, salt, cause) < 0) {
                 ms_rmtree(final, root);
                 free(fu);
                 goto done;
@@ -3082,7 +3293,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
             ms_log("MODS: store: mods\\%s is a copy of mods\\%s; it is a new mod now", name, here ? here->name : "?");
             st->resalted = 1;
             sh_mb_free(&b);
-            if (!ms_build_in_place(ms_plain(fu), NULL, resolver, &b, cause, cap)) {
+            if (!ms_build_in_place(ms_plain(fu), NULL, resolver, &b, cause)) {
                 ms_rmtree(final, root);
                 free(fu);
                 goto done;
@@ -3090,60 +3301,57 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         }
         free(fu);
     }
-    if (place) sh_ms_place_note(place, dir[0] ? dir : NULL);
+    if (place) sh_ms_place_note(place, dir && dir[0] ? dir : NULL);
     ok = 1;
 done:
-    if (ok && name_out) strncpy_s(name_out, name_cap, name, _TRUNCATE);
-    if (ok && place && st->present) sh_ms_place_note(place, dir[0] ? dir : NULL);
+    if (ok && name_out) { *name_out = name; name = NULL; }
+    if (ok && place && st->present) sh_ms_place_note(place, dir && dir[0] ? dir : NULL);
     if (bundle_out) { *bundle_out = b; memset(&b, 0, sizeof b); }
     sh_mb_free(&b);
     sh_ms_list_free(&list);
     free(author);
     free(text);
+    free(name); free(one); free(why); free(leaf); free(dir);
     free(root); free(src); free(final); free(staging); free(old);
     return ok;
 }
 
-int sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
-                              char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                              sh_mb_bundle *bundle_out, char *cause, size_t cap)
+int sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver, char **name_out,
+                              sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
 {
-    return sh_ms_install_as(folder, NULL, resolver, name_out, name_cap, stats, bundle_out, cause, cap);
+    return sh_ms_install_as(folder, NULL, resolver, name_out, stats, bundle_out, cause);
 }
 
-int sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
-                     char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                     sh_mb_bundle *bundle_out, char *cause, size_t cap)
+int sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver, char **name_out,
+                     sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
 {
     sh_ms_install_stats local;
     int ok;
     modstore_lock();
-    ok = ms_install_locked(folder, as_name, NULL, 0, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, as_name, NULL, 0, resolver, name_out, stats ? stats : &local, bundle_out, cause);
     modstore_unlock();
     return ok;
 }
 
-int sh_ms_install_placed(const char *folder, const sh_ms_place *place,
-                         const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                         sh_mb_bundle *bundle_out, char *cause, size_t cap)
+int sh_ms_install_placed(const char *folder, const sh_ms_place *place, const sh_mb_resolver *resolver, char **name_out,
+                         sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
 {
     sh_ms_install_stats local;
     int ok;
-    if (!place) return ms_cause(cause, cap, "no map named for the place");
+    if (!place) return ms_cause(cause, "no map named for the place");
     modstore_lock();
-    ok = ms_install_locked(folder, NULL, place, 0, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, NULL, place, 0, resolver, name_out, stats ? stats : &local, bundle_out, cause);
     modstore_unlock();
     return ok;
 }
 
-int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
-                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cap)
+int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char **name_out,
+                          sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause)
 {
     sh_ms_install_stats local;
     int ok;
-    if (cause && cap) cause[0] = 0;
     modstore_lock();
-    ok = ms_install_locked(folder, NULL, NULL, 1, resolver, name_out, name_cap, stats ? stats : &local, bundle_out, cause, cap);
+    ok = ms_install_locked(folder, NULL, NULL, 1, resolver, name_out, stats ? stats : &local, bundle_out, cause);
     modstore_unlock();
     return ok;
 }
@@ -3157,7 +3365,7 @@ void (*sh_ms_test_between_folders)(unsigned built);
 /* One root folder as the scan sees it. */
 typedef struct ms_sf {
     char *folder;               /* absolute UTF-8, plain */
-    char name[SH_MS_NAME_MAX + 1];
+    char *name;
     char salt[SH_SALT_LEN + 1];
     int  state;
     long long built;            /* the block's "built", 0 when none */
@@ -3175,14 +3383,15 @@ static size_t ms_sync_scan(const wchar_t *root, ms_sf **out)
     v = found.count ? (ms_sf *)calloc(found.count, sizeof *v) : NULL;
     for (i = 0; v && i < found.count; i++) {
         ms_sf *f = &v[n];
-        char *rel = sh_mb_utf8(found.items[i].rel), *u = sh_mb_utf8(found.items[i].folder), place[8];
+        char *rel = sh_mb_utf8(found.items[i].rel), *u = sh_mb_utf8(found.items[i].folder);
+        char *place = rel ? ms_place_of_name(rel) : NULL;
         sh_mb_bundle b;
-        if (!rel || !u || ms_place_of_name(rel, place, sizeof place)) { free(rel); free(u); continue; }   /* places are never built */
+        if (!rel || !u || !place || place[0]) { free(rel); free(u); free(place); continue; }   /* places are never built */
+        free(place);
         f->folder = _strdup(ms_plain(u));
-        strncpy_s(f->name, sizeof f->name, rel, _TRUNCATE);
-        free(rel);
+        f->name = rel;
         free(u);
-        if (!f->folder) continue;
+        if (!f->folder) { free(f->name); f->name = NULL; continue; }
         f->state = sh_mb_descriptor_state(f->folder);
         if (f->state == SH_MB_DESC_BUILT) {
             char tree[SH_MB_HASH_HEX + 1];
@@ -3202,7 +3411,7 @@ static size_t ms_sync_scan(const wchar_t *root, ms_sf **out)
 static void ms_sf_free(ms_sf *v, size_t n)
 {
     size_t i;
-    for (i = 0; v && i < n; i++) free(v[i].folder);
+    for (i = 0; v && i < n; i++) { free(v[i].folder); free(v[i].name); }
     free(v);
 }
 
@@ -3241,12 +3450,13 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
     st->folders = (unsigned)n;
     /* 1. A new mod gets its salt; its folder keeps its name. */
     for (i = 0; i < n; i++) {
-        char salt[SH_SALT_LEN + 1], cause[SH_MB_CAUSE_MAX];
+        char salt[SH_SALT_LEN + 1], *cause = NULL;
         if (v[i].state != SH_MB_DESC_FRESH) continue;
-        if (ms_assign(v[i].folder, ms_leaf(v[i].folder), 1, salt, cause, sizeof cause) < 0) {
+        if (ms_assign(v[i].folder, ms_leaf(v[i].folder), 1, salt, &cause) < 0) {
             st->failed++;
-            ms_note_cause(v[i].folder, cause);
-            ms_log("MODS: store: %s refused: %s", v[i].name, cause);
+            ms_note_cause(v[i].folder, cause ? cause : "out of memory");
+            ms_log("MODS: store: %s refused: %s", v[i].name, cause ? cause : "out of memory");
+            free(cause);
             continue;
         }
         ms_note_cause(v[i].folder, NULL);
@@ -3265,13 +3475,15 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         for (i = 0; keep && i < n; i++) keep[i] = v[i].state == SH_MB_DESC_BUILT ? ms_sf_keeper(rec, v, n, i) : (size_t)-1;
         mpj_free(rec);
         for (i = 0; keep && i < n; i++) {
-            char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1], cause[SH_MB_CAUSE_MAX];
+            char salt[SH_SALT_LEN + 1], was[SH_SALT_LEN + 1], *cause = NULL;
             if (keep[i] == (size_t)-1) continue;
             strcpy_s(was, sizeof was, v[i].salt);
-            if (ms_assign(v[i].folder, was, 0, salt, cause, sizeof cause) < 0) {
+            if (ms_assign(v[i].folder, was, 0, salt, &cause) < 0) {
                 st->failed++;
-                ms_note_cause(v[i].folder, cause);
-                ms_log("MODS: store: %s is a copy of %s and could not become a new mod: %s", v[i].name, v[keep[i]].name, cause);
+                ms_note_cause(v[i].folder, cause ? cause : "out of memory");
+                ms_log("MODS: store: %s is a copy of %s and could not become a new mod: %s", v[i].name, v[keep[i]].name,
+                       cause ? cause : "out of memory");
+                free(cause);
                 v[i].state = 0;   /* not built: it serves nothing while it carries another folder's salt */
                 continue;
             }
@@ -3296,16 +3508,18 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
     /* 3. The rebuild rule: a root folder not built from its current tree under
      * these rules is built again; one whose last build failed too. */
     for (i = 0; i < n; i++) {
-        char cause[SH_MB_CAUSE_MAX], classes[160], why[SH_MB_CAUSE_MAX];
+        char *cause = NULL, classes[160], *why = NULL;
         sh_mb_bundle b;
         ULONGLONG b0;
         if (v[i].state != SH_MB_DESC_BUILT) {
             if (v[i].state && v[i].state != SH_MB_DESC_FRESH) {
                 /* An earlier shape: listed with its reason, nothing written. */
-                sh_mb_descriptor_state_why(v[i].folder, why, sizeof why);
-                if (sh_ms_descriptor_unparsable(v[i].folder, cause, sizeof cause)) strcpy_s(why, sizeof why, cause);
+                sh_mb_descriptor_state_why(v[i].folder, &why);
+                sh_ms_descriptor_unparsable(v[i].folder, &cause);
                 st->failed++;
-                ms_log("MODS: store: %s refused: %s", v[i].name, why);
+                ms_log("MODS: store: %s refused: %s", v[i].name, cause ? cause : why ? why : "");
+                free(cause);
+                free(why);
             }
             continue;
         }
@@ -3315,7 +3529,7 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
 #endif
         if (yield && st->rebuilt + st->failed) ms_lock_yield();
         b0 = GetTickCount64();
-        if (ms_build_in_place(v[i].folder, NULL, resolver, &b, cause, sizeof cause)) {
+        if (ms_build_in_place(v[i].folder, NULL, resolver, &b, &cause)) {
             st->rebuilt++;
             sh_mb_classes_text(&b.classes, classes, sizeof classes);
             ms_log("MODS: store: %s built: %s (salt %s), build %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s; %s",
@@ -3325,8 +3539,9 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
                    classes);
         } else {
             st->failed++;
-            ms_log("MODS: store: %s refused: %s", v[i].name, cause);
+            ms_log("MODS: store: %s refused: %s", v[i].name, cause ? cause : "out of memory");
         }
+        free(cause);
         sh_mb_free(&b);
     }
     ms_sf_free(v, n);
@@ -3481,7 +3696,7 @@ static int ms_pid_alive(DWORD pid)
     return alive;
 }
 
-static void ms_recover_dir(const wchar_t *dir, const wchar_t *rel, const wchar_t *root, int depth, int enter, int *put_back)
+static void ms_recover_dir(const wchar_t *dir, const wchar_t *rel, const wchar_t *root, ms_found_list *pending, int *put_back)
 {
     WIN32_FIND_DATAW fd;
     wchar_t *pattern = ms_wjoin(dir, L"*");
@@ -3498,10 +3713,10 @@ static void ms_recover_dir(const wchar_t *dir, const wchar_t *rel, const wchar_t
         at = old_at ? old_at : ms_work_at(fd.cFileName, L".staging-");
         if (!at) {
             /* An organizing folder is looked into, as the listing does; a mod is not. */
-            if (!enter || !ms_candidate(&fd) || depth + 1 >= SH_MS_NEST_MAX) continue;
+            if (!ms_candidate(&fd)) continue;
             child = ms_wjoin(dir, fd.cFileName);
             crel = rel && rel[0] ? ms_wjoin(rel, fd.cFileName) : _wcsdup(fd.cFileName);
-            if (child && crel && !ms_has_descriptor(child)) ms_recover_dir(child, crel, root, depth + 1, 1, put_back);
+            if (child && crel && !ms_has_descriptor(child) && ms_found_push(pending, child, crel)) continue;
             free(child);
             free(crel);
             continue;
@@ -3554,7 +3769,18 @@ int sh_ms_recover_work(void)
     if (!root) return -1;
     if (!ms_exists(root)) { free(root); return 0; }
     modstore_lock();
-    ms_recover_dir(root, L"", root, 0, 1, &put_back);
+    {
+        /* Organizing folders at any depth: the ones still to look into wait on the heap. */
+        ms_found_list pending = { NULL, 0, 0 };
+        ms_recover_dir(root, L"", root, &pending, &put_back);
+        while (pending.count) {
+            ms_found next = pending.items[--pending.count];
+            ms_recover_dir(next.folder, next.rel, root, &pending, &put_back);
+            free(next.folder);
+            free(next.rel);
+        }
+        free(pending.items);
+    }
     modstore_unlock();
     free(root);
     return put_back;

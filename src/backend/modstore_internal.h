@@ -28,7 +28,7 @@
 #define ms_read_text        sh_msi_read_text
 #define ms_is_hash          sh_msi_is_hash
 
-int         ms_cause(char *cause, size_t cap, const char *fmt, ...);
+int         ms_cause(char **cause, const char *fmt, ...);
 const char *ms_why(DWORD err, const char *name, int in_store, unsigned long long bytes);
 void        ms_log(const char *fmt, ...);
 wchar_t    *ms_wjoin(const wchar_t *dir, const wchar_t *name);

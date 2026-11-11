@@ -36,10 +36,10 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
     return 0;
 }
 
-int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap)
+int sh_modserve_bundle_state(const char *bundle_hash, char **cause)
 {
     (void)bundle_hash;
-    if (cause && cause_cap) cause[0] = 0;
+    if (cause) *cause = NULL;
     return 0;
 }
 
@@ -53,21 +53,33 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
     return 0;
 }
 
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref)
+{
+    if (!ref) return;
+    free(ref->name);
+    free(ref->folder);
+    free(ref->place);
+    ref->name = ref->folder = ref->place = NULL;
+}
+
 /* The loaded map's place (sh_modserve_place_*): a parse sets it, a failed
  * one puts it back. */
-static char g_stub_place[SH_MODSERVE_PLACE_CAP], g_stub_place_prev[SH_MODSERVE_PLACE_CAP];
+static char *g_stub_place, *g_stub_place_prev;
 int sh_modserve_place_load(const char *place)
 {
-    strcpy_s(g_stub_place_prev, sizeof g_stub_place_prev, g_stub_place);
-    strncpy_s(g_stub_place, sizeof g_stub_place, place ? place : "", _TRUNCATE);
+    free(g_stub_place_prev);
+    g_stub_place_prev = g_stub_place;
+    g_stub_place = _strdup(place ? place : "");
     return 0;
 }
 int sh_modserve_place_restore(void)
 {
-    strcpy_s(g_stub_place, sizeof g_stub_place, g_stub_place_prev);
+    free(g_stub_place);
+    g_stub_place = g_stub_place_prev;
+    g_stub_place_prev = NULL;
     return 1;
 }
-void sh_modserve_place_get(char *out, size_t cap) { strncpy_s(out, cap, g_stub_place, _TRUNCATE); }
+char *sh_modserve_place_get(void) { return _strdup(g_stub_place ? g_stub_place : ""); }
 
 int sh_modserve_index_rescan(void)
 {
@@ -107,36 +119,36 @@ int g_mod_stub_export_calls;
 char g_mod_stub_export_path[520];
 
 unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
-                                               unsigned *bundles, char *cause, size_t cause_cap)
+                                               unsigned *bundles, char **cause)
 {
     (void)data; (void)len;
     g_mod_stub_export_calls++;
     strncpy_s(g_mod_stub_export_path, sizeof g_mod_stub_export_path, path ? path : "", _TRUNCATE);
     if (bundles) *bundles = 0;
     if (!stub_utf8_exists(path, 1)) {
-        if (cause && cause_cap) strncpy_s(cause, cause_cap, "the path did not arrive in UTF-8", _TRUNCATE);
+        if (cause) *cause = _strdup("the path did not arrive in UTF-8");
         return 0;
     }
     if (g_mod_stub_export_result) return g_mod_stub_export_result;
-    if (cause && cause_cap) strncpy_s(cause, cause_cap, "the rawmap export is not linked into this test", _TRUNCATE);
+    if (cause) *cause = _strdup("the rawmap export is not linked into this test");
     return 0;
 }
 
 /* The importer's refusal: g_mod_stub_import_cause is what it says (the
  * export is not linked, so every import is refused). */
-char g_mod_stub_import_cause[MODEXPORT_CAUSE_MAX] = "the rawmap export is not linked into this test";
+char g_mod_stub_import_cause[1024] = "the rawmap export is not linked into this test";
 
 /* g_mod_stub_import_text, when set, is the map every import returns; the
  * imports are counted either way. */
 const char *g_mod_stub_import_text;
 int g_mod_stub_import_calls;
 
-char *modexport_read_text_report(const char *path, size_t *out_len, char *cause, size_t cause_cap)
+char *modexport_read_text_report(const char *path, size_t *out_len, char **cause)
 {
     g_mod_stub_import_calls++;
     if (out_len) *out_len = 0;
     if (g_mod_stub_import_text && !stub_utf8_exists(path, 0)) {
-        if (cause && cause_cap) strncpy_s(cause, cause_cap, "the path did not arrive in UTF-8", _TRUNCATE);
+        if (cause) *cause = _strdup("the path did not arrive in UTF-8");
         return NULL;
     }
     if (g_mod_stub_import_text) {
@@ -145,22 +157,22 @@ char *modexport_read_text_report(const char *path, size_t *out_len, char *cause,
         if (heap) { memcpy(heap, g_mod_stub_import_text, n + 1); if (out_len) *out_len = n; }
         return heap;
     }
-    if (cause && cause_cap) strncpy_s(cause, cause_cap, g_mod_stub_import_cause, _TRUNCATE);
+    if (cause) *cause = _strdup(g_mod_stub_import_cause);
     return NULL;
 }
 
-int modexport_validate_source(const char *path, char *out_msg, int msg_capacity)
+int modexport_validate_source(const char *path, char **out_msg)
 {
     (void)path;
-    if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, "the rawmap export is not linked into this test", _TRUNCATE);
+    if (out_msg) *out_msg = _strdup("the rawmap export is not linked into this test");
     return 0;
 }
 
 #ifndef SH_MOD_STUB_NO_BUILDER
-int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
+int modbundle_build_folder(const char *folder, char **first_cause)
 {
     (void)folder;
-    if (first_cause && n) strncpy_s(first_cause, n, "the bundle builder is not linked into this test", _TRUNCATE);
+    if (first_cause) *first_cause = _strdup("the bundle builder is not linked into this test");
     return 0;
 }
 #endif

@@ -20,26 +20,31 @@
 #include "map_carrier.h"
 #include "modsync.h"
 #include "modui.h"
+#include "../common/text.h"
 
-static int me_cause(char *cause, size_t cap, const char *fmt, ...)
+/* Set *cause (malloc'd, the old one freed) to the sentence; returns 0. */
+static int me_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
-    if (cause && cap) {
+    char *text;
+    if (cause) {
         va_start(ap, fmt);
-        _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
+        text = sh_vtextf(fmt, ap);
         va_end(ap);
+        if (text) { free(*cause); *cause = text; }
     }
     return 0;
 }
 
 static void me_log(const char *fmt, ...)
 {
-    char line[MODEXPORT_CAUSE_MAX + MAX_PATH * 4];
     va_list ap;
+    char *line;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    backend_log(line ? line : "MODS: export: (out of memory)");
+    free(line);
 }
 
 static double me_now_ms(void)
@@ -60,26 +65,29 @@ int modexport_is_zip_path(const char *path)
 /* ------------------------------------------------------------ helpers --- */
 
 
-static void me_join_native(char *out, size_t cap, const char *dir, const char *rel)
+/* dir\rel with rel's slashes made backslashes (malloc'd), or NULL. */
+static char *me_join_native(const char *dir, const char *rel)
 {
-    size_t i, n;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", dir, rel);
-    n = strlen(out);
-    for (i = strlen(dir); i < n; i++) if (out[i] == '/') out[i] = '\\';
+    char *out = sh_textf("%s\\%s", dir, rel);
+    size_t i;
+    if (out) for (i = strlen(dir); out[i]; i++) if (out[i] == '/') out[i] = '\\';
+    return out;
 }
 
 /* The entry a map's export names its map: the ZIP's own base name with .json
- * ("my map.zip" carries "my map.json"). */
-static void me_map_entry(const char *zip_path, char *out, size_t cap)
+ * ("my map.zip" carries "my map.json"), malloc'd, or NULL. */
+static char *me_map_entry(const char *zip_path)
 {
     const char *base = zip_path, *p;
     size_t n;
+    char *out;
     for (p = zip_path; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
     n = strlen(base);
     if (n > 4 && !_stricmp(base + n - 4, ".zip")) n -= 4;
-    if (!n || n > 200) { strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK); return; }
-    _snprintf_s(out, cap, _TRUNCATE, "%.*s.json", (int)n, base);
-    if (!sh_zip_name_ok(out, strlen(out))) strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK);
+    if (!n) return sh_text(MODEXPORT_MAP_FALLBACK);
+    out = sh_textf("%.*s.json", (int)n, base);
+    if (out && !sh_zip_name_ok(out, strlen(out))) { free(out); out = sh_text(MODEXPORT_MAP_FALLBACK); }
+    return out;
 }
 
 /* ------------------------------------------------------------ write ----- */
@@ -106,50 +114,59 @@ typedef struct me_payload {
     void *ctx;
 } me_payload;
 
-static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char *cause, size_t cap);
+static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char **cause);
 
 int modexport_write(const char *map_json, size_t len, const char *zip_path, modexport_stats *stp,
-                    char *cause, size_t cap)
+                    char **cause)
 {
     me_payload pl;
-    char entry[SH_ZIP_NAME_MAX];
-    char segment[SH_CARRIER_PLACE_CAP], place[SH_MODSERVE_PLACE_CAP] = "";
+    char *entry, *segment = NULL, *place = NULL;
+    int ok;
     memset(&pl, 0, sizeof pl);
-    me_map_entry(zip_path ? zip_path : "", entry, sizeof entry);
+    entry = me_map_entry(zip_path ? zip_path : "");
+    if (!entry) return me_cause(cause, "out of memory");
     pl.entry = entry;
     pl.text = map_json;
     pl.len = len;
     /* The map's rows resolve in the place it records (none: the root). */
-    if (map_json && sh_carrier_place(map_json, len, segment, sizeof segment) == 1 &&
-        !sh_modserve_place_norm(segment, place, sizeof place))
-        place[0] = 0;
-    pl.place = place;
-    return me_write(&pl, zip_path, stp, cause, cap);
+    if (map_json && sh_carrier_place(map_json, len, &segment) == 1) place = sh_modserve_place_norm(segment);
+    pl.place = place ? place : "";
+    ok = me_write(&pl, zip_path, stp, cause);
+    free(segment);
+    free(place);
+    free(entry);
+    return ok;
 }
 
 int modexport_write_prefab(const char *name, const char *prefab, size_t len, const sh_modmanifest_list *rows,
                            modexport_prefab_fn text_for, void *ctx, const char *zip_path, modexport_stats *stp,
-                           char *cause, size_t cap)
+                           char **cause)
 {
     me_payload pl;
     sh_modmanifest_list none;
-    char entry[SH_ZIP_NAME_MAX];
+    char *entry;
     size_t n;
+    int ok;
     memset(&pl, 0, sizeof pl);
     memset(&none, 0, sizeof none);
     if (stp) memset(stp, 0, sizeof *stp);
-    if (!name || !name[0]) return me_cause(cause, cap, "the prefab has no name");
+    if (!name || !name[0]) return me_cause(cause, "the prefab has no name");
     n = strlen(name);
-    if (n + sizeof ".json" > SH_ZIP_NAME_MAX || strchr(name, '/') || strchr(name, '\\') || !sh_zip_name_ok(name, n))
-        return me_cause(cause, cap, "the prefab's name cannot name a file in the ZIP");
-    _snprintf_s(entry, sizeof entry, _TRUNCATE, "%s.json", name);
+    if (n + sizeof ".json" - 1 > SH_ZIP_NAME_MAX)
+        return me_cause(cause, "the prefab's name is %zu bytes, and a ZIP entry's name holds at most 65,535 bytes "
+                        "(the ZIP format's limit); give it a shorter name", n + sizeof ".json" - 1);
+    if (strchr(name, '/') || strchr(name, '\\') || !sh_zip_name_ok(name, n))
+        return me_cause(cause, "the prefab's name cannot name a file in the ZIP");
+    if (!(entry = sh_textf("%s.json", name))) return me_cause(cause, "out of memory");
     pl.entry = entry;
     pl.text = prefab;
     pl.len = len;
     pl.rows = rows ? rows : &none;
     pl.text_for = text_for;
     pl.ctx = ctx;
-    return me_write(&pl, zip_path, stp, cause, cap);
+    ok = me_write(&pl, zip_path, stp, cause);
+    free(entry);
+    return ok;
 }
 
 /* One build as the folder it is installed as: mods/<folder>/mod.json as it is
@@ -158,50 +175,55 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
  * name the ZIP carries it under (the store folder's own name, its last
  * segment). A stock pointer is an entry of mod.json and has no file here:
  * installed game content never leaves the machine. */
-static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry *e, modexport_stats *st, char *cause,
-                        size_t cap)
+static int me_add_build(sh_zip_writer *w, const char *folder, const sh_ms_entry *e, modexport_stats *st, char **cause)
 {
     const sh_mb_bundle *b = &e->bundle;
     const char *label = b->name && b->name[0] ? b->name : e->name;
-    char name[SH_ZIP_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
+    char *name, *path, actual[SH_MB_HASH_HEX + 1];
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
     int same;
     /* Read without the store lock: every file is checked against the build
      * the listing named, so a folder changed meanwhile refuses the export. */
-    me_join_native(path, sizeof path, e->folder, "mod.json");
-    bytes = sh_mb_read_file(path, (size_t)-1, &blen);
-    if (!bytes) return me_cause(cause, cap, "%s's mod.json cannot be read. Press Refresh in the Mods tab to see why", label);
+    path = me_join_native(e->folder, "mod.json");
+    bytes = path ? sh_mb_read_file(path, (size_t)-1, &blen) : NULL;
+    free(path);
+    if (!bytes) return me_cause(cause, "%s's mod.json cannot be read. Press Refresh in the Mods tab to see why", label);
     memset(&check, 0, sizeof check);
     same = sh_mb_load_text((const char *)bytes, blen, &check) && !strcmp(check.hash, b->hash);
     sh_mb_free(&check);
     if (!same) {
         free(bytes);
-        return me_cause(cause, cap, "%s changed since Snapmap+ last read it. Press Refresh in the Mods tab, then save again",
+        return me_cause(cause, "%s changed since Snapmap+ last read it. Press Refresh in the Mods tab, then save again",
                         label);
     }
-    _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", folder);
+    name = sh_textf("mods/%s/mod.json", folder);
+    if (!name) { free(bytes); return me_cause(cause, "out of memory"); }
     sh_zip_writer_add(w, name, bytes, blen);
+    free(name);
     free(bytes);
     for (k = 0; k < b->file_count && !w->failed; k++) {
         const sh_mb_file *f = &b->files[k];
         if (f->stock) continue;
-        me_join_native(path, sizeof path, e->folder, f->path);
-        bytes = sh_mb_read_file(path, (size_t)-1, &blen);
+        path = me_join_native(e->folder, f->path);
+        bytes = path ? sh_mb_read_file(path, (size_t)-1, &blen) : NULL;
+        free(path);
         if (bytes) {
             sh_mb_sha256_hex(bytes, blen, actual);
             if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
         }
         if (!bytes)
-            return me_cause(cause, cap, "%s's file %s is missing or changed. Press Refresh in the Mods tab, then save again",
+            return me_cause(cause, "%s's file %s is missing or changed. Press Refresh in the Mods tab, then save again",
                             label, f->path);
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", folder, f->path);
+        name = sh_textf("mods/%s/%s", folder, f->path);
+        if (!name) { free(bytes); return me_cause(cause, "out of memory"); }
         sh_zip_writer_add(w, name, bytes, blen);
+        free(name);
         free(bytes);
         st->files++;
     }
-    if (w->failed) return me_cause(cause, cap, "%s", w->cause);
+    if (w->failed) return me_cause(cause, "%s", w->cause);
     return 1;
 }
 
@@ -231,22 +253,24 @@ static int me_pick_row(const sh_ms_list *l, const sh_modmanifest_row *row, const
  * below mods\ (a mod in an organizing folder, or in a map's place, is
  * carried as mods/<its own folder name>/), " (2)", " (3)" ... when another
  * carried mod has the name. */
-static void me_carry_name(const sh_ms_entry *e, char (*taken)[SH_MS_NAME_MAX + 1], size_t ntaken, char *out, size_t cap)
+static char *me_carry_name(const sh_ms_entry *e, char **taken, size_t ntaken)
 {
     const char *leaf = e->name, *c;
     size_t i;
     int n;
     for (c = e->name; *c; c++) if (*c == '\\' || *c == '/') leaf = c + 1;
-    for (n = 1; n < 1000; n++) {
+    /* At most ntaken names clash, so one of the first ntaken + 1 is free. */
+    for (n = 1;; n++) {
         int clash = 0;
-        if (n == 1) _snprintf_s(out, cap, _TRUNCATE, "%s", leaf);
-        else _snprintf_s(out, cap, _TRUNCATE, "%s (%d)", leaf, n);
+        char *out = n == 1 ? sh_text(leaf) : sh_textf("%s (%d)", leaf, n);
+        if (!out) return NULL;
         for (i = 0; i < ntaken && !clash; i++) clash = !_stricmp(taken[i], out);
-        if (!clash) return;
+        if (!clash) return out;
+        free(out);
     }
 }
 
-static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char *cause, size_t cap)
+static int me_write(const me_payload *pl, const char *zip_path, modexport_stats *stp, char **cause)
 {
     const char *map_json = pl->text;
     size_t len = pl->len;
@@ -258,11 +282,11 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     sh_modmanifest_list rows;
     sh_ms_list l;
     const sh_ms_entry **picked = NULL;
-    char (*names)[SH_MS_NAME_MAX + 1] = NULL;
+    char **names = NULL;
     size_t nnames = 0;
     sh_zip_writer w;
     wchar_t *wfinal = NULL, *wtmp = NULL;
-    char tmp[MAX_PATH * 4];
+    char *tmp = NULL;
     unsigned rejected = 0;
     size_t i, k;
     double t0 = me_now_ms();
@@ -273,14 +297,13 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     memset(&rows, 0, sizeof rows);
     memset(&w, 0, sizeof w);
     w.h = INVALID_HANDLE_VALUE;
-    if (cause && cap) cause[0] = 0;
     if (!map_json || !len || !zip_path || !zip_path[0])
-        return me_cause(cause, cap, prefab ? "no prefab text or no destination" : "no map text or no destination");
+        return me_cause(cause, prefab ? "no prefab text or no destination" : "no map text or no destination");
     if (prefab) {
         for (i = 0; i < pl->rows->count; i++)
             if (!mm_list_has(&rows, &pl->rows->rows[i]) && !sh_modmanifest_list_add(&rows, &pl->rows->rows[i])) {
                 sh_modmanifest_list_free(&rows);
-                return me_cause(cause, cap, "out of memory");
+                return me_cause(cause, "out of memory");
             }
     } else sh_modmanifest_read(map_json, len, &rows, &rejected);
     st->map_bytes = len;
@@ -288,16 +311,16 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     modstore_lock();
     locked = 1;
     listed = sh_ms_enumerate(&l);
-    if (!listed) { me_cause(cause, cap, "the mods folder cannot be read. Check that it exists, then press Refresh in the Mods tab"); goto done; }
+    if (!listed) { me_cause(cause, "the mods folder cannot be read. Check that it exists, then press Refresh in the Mods tab"); goto done; }
     picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
-    if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
+    if (!picked) { me_cause(cause, "out of memory"); goto done; }
     /* Each row at its build, else the root folder of its salt. */
     for (i = 0; i < rows.count; i++) {
         int how = me_pick_row(&l, &rows.rows[i], pl->place, &picked[i]);
         if (!how) {
-            me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the Mods "
+            me_cause(cause, "this %s uses %s, which is not installed or does not build. Press Refresh in the Mods "
                      "tab, or remove it from the %s", prefab ? "prefab" : "map",
-                     rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
+                     sh_modmanifest_row_name(&rows.rows[i])[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
             goto done;
         }
         if (how == 2) moved++;
@@ -316,17 +339,21 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             if (r) {
                 for (k = 0; k < rows.rows[i].name_count; k++)
                     if (!sh_modmanifest_row_add_name(r, rows.rows[i].names[k])) { r = NULL; break; }
-                if (!r) { sh_modmanifest_list_free(&fixed); me_cause(cause, cap, "out of memory"); goto done; }
+                if (!r) { sh_modmanifest_list_free(&fixed); me_cause(cause, "out of memory"); goto done; }
                 continue;
             }
             if (!sh_modmanifest_list_add(&fixed, &rows.rows[i])) {
                 sh_modmanifest_list_free(&fixed);
-                me_cause(cause, cap, "out of memory");
+                me_cause(cause, "out of memory");
                 goto done;
             }
             r = &fixed.rows[fixed.count - 1];
             strcpy_s(r->build, sizeof r->build, b->hash);
-            if (b->name) strncpy_s(r->name, sizeof r->name, b->name, _TRUNCATE);
+            if (b->name && !sh_modmanifest_row_set_name(r, b->name)) {
+                sh_modmanifest_list_free(&fixed);
+                me_cause(cause, "out of memory");
+                goto done;
+            }
             r->size = b->total_size;
         }
         me_log("MODS: export: %zu row(s) named another build; the export carries and names the root folder's build",
@@ -335,7 +362,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             moved_map = sh_modmanifest_write(map_json, len, &fixed, &map_len, err, sizeof err);
             if (!moved_map) {
                 sh_modmanifest_list_free(&fixed);
-                me_cause(cause, cap, "the map's list of mods could not be updated (%s). Save the map again", err[0] ? err : "out of memory");
+                me_cause(cause, "the map's list of mods could not be updated (%s). Save the map again", err[0] ? err : "out of memory");
                 goto done;
             }
             map_json = moved_map;
@@ -346,12 +373,12 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
         rows = fixed;
         free((void *)picked);
         picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
-        if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
+        if (!picked) { me_cause(cause, "out of memory"); goto done; }
         for (i = 0; i < rows.count; i++)
             if (!me_pick_row(&l, &rows.rows[i], pl->place, &picked[i])) {
-                me_cause(cause, cap, "this %s uses %s, which is not installed or does not build. Press Refresh in the "
+                me_cause(cause, "this %s uses %s, which is not installed or does not build. Press Refresh in the "
                          "Mods tab, or remove it from the %s", prefab ? "prefab" : "map",
-                         rows.rows[i].name[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
+                         sh_modmanifest_row_name(&rows.rows[i])[0] ? rows.rows[i].name : "a mod", prefab ? "prefab" : "map");
                 goto done;
             }
     }
@@ -361,34 +388,34 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     locked = 0;
     if (prefab && pl->text_for) {
         prefab_text = pl->text_for(pl->ctx, &rows, moved > 0, &len);
-        if (!prefab_text || !len) { me_cause(cause, cap, "the prefab's export could not be written. Export it again"); goto done; }
+        if (!prefab_text || !len) { me_cause(cause, "the prefab's export could not be written. Export it again"); goto done; }
         map_json = prefab_text;
         st->map_bytes = len;
     }
 
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.smp-%lu.tmp", zip_path, GetCurrentProcessId());
+    tmp = sh_textf("%s.smp-%lu.tmp", zip_path, GetCurrentProcessId());
     wfinal = sh_mb_wpath(zip_path);
-    wtmp = sh_mb_wpath(tmp);
-    names = calloc(rows.count ? rows.count : 1, sizeof *names);
-    if (!wfinal || !wtmp || !names) { me_cause(cause, cap, "the destination path is not usable"); goto done; }
-    if (!sh_zip_writer_open(&w, wtmp)) { me_cause(cause, cap, "cannot create %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
+    wtmp = tmp ? sh_mb_wpath(tmp) : NULL;
+    names = (char **)calloc(rows.count ? rows.count : 1, sizeof *names);
+    if (!wfinal || !wtmp || !names) { me_cause(cause, "the destination path is not usable"); goto done; }
+    if (!sh_zip_writer_open(&w, wtmp)) { me_cause(cause, "cannot create %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
 
     sh_zip_writer_add(&w, pl->entry, map_json, len);
     for (i = 0; i < rows.count && !w.failed; i++) {
         int dup = 0;
         for (k = 0; k < i && !dup; k++) dup = picked[k] == picked[i];
         if (dup) continue;
-        me_carry_name(picked[i], names, nnames, names[nnames], sizeof names[nnames]);
-        if (!me_add_build(&w, names[nnames], picked[i], st, cause, cap)) goto done;
+        if (!(names[nnames] = me_carry_name(picked[i], names, nnames))) { me_cause(cause, "out of memory"); goto done; }
         nnames++;
+        if (!me_add_build(&w, names[nnames - 1], picked[i], st, cause)) goto done;
     }
     sh_zip_writer_finish(&w);
-    if (w.failed) { me_cause(cause, cap, "%s", w.cause); goto done; }
-    if (!FlushFileBuffers(w.h)) { me_cause(cause, cap, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
+    if (w.failed) { me_cause(cause, "%s", w.cause); goto done; }
+    if (!FlushFileBuffers(w.h)) { me_cause(cause, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
     CloseHandle(w.h);
     w.h = INVALID_HANDLE_VALUE;
     if (!MoveFileExW(wtmp, wfinal, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        me_cause(cause, cap, "cannot replace %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0));
+        me_cause(cause, "cannot replace %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0));
         goto done;
     }
     st->entries = (unsigned)w.n;
@@ -398,7 +425,9 @@ done:
     sh_zip_writer_free(&w);
     if (!ok && wtmp) DeleteFileW(wtmp);
     free((void *)picked);
+    for (i = 0; i < nnames; i++) free(names[i]);
     free(names);
+    free(tmp);
     free(moved_map);
     free(prefab_text);
     free(wfinal);
@@ -425,13 +454,13 @@ void modexport_set_stock(sh_mb_exists_fn stock, void *ctx)
 
 /* One mod folder an export carries that a row names. */
 typedef struct me_carry {
-    char name[SH_MS_NAME_MAX + 1];      /* the folder's name under mods/ */
+    char *name;                         /* the folder's name under mods/ (malloc'd) */
     sh_mb_bundle b;                     /* its mod.json, loaded: the salt (b.id) and build hash it records */
     int present;                        /* something already serves its row: not installed */
     int installed;                      /* this import installed it, as `stored` */
-    char stored[SH_MS_NAME_MAX + 1];    /* where: its folder below mods\ */
-    char stage[MAX_PATH * 4];           /* its copy outside the store, which the install reads */
-    char why[SH_MB_CAUSE_MAX];          /* the last install refusal */
+    char *stored;                       /* where: its folder below mods\ (malloc'd), or NULL */
+    char *stage;                        /* its copy outside the store, which the install reads (malloc'd), or NULL */
+    char *why;                          /* the last install refusal (malloc'd), or NULL */
 } me_carry;
 
 typedef struct me_import {
@@ -443,15 +472,23 @@ typedef struct me_import {
      * and keyed "zip:<the ZIP's path>", so two ZIPs with one name get two
      * places. A prefab has none: its mods install at the root (DECISIONS
      * 12). */
-    char place_title[MAX_PATH];
-    char place_key[MAX_PATH * 4 + 48];
+    char *place_title;                  /* malloc'd, or NULL */
+    char *place_key;                    /* malloc'd, or NULL */
 } me_import;
 
 static void me_import_free(me_import *im)
 {
     size_t i;
-    for (i = 0; i < im->nc; i++) sh_mb_free(&im->c[i].b);
+    for (i = 0; i < im->nc; i++) {
+        sh_mb_free(&im->c[i].b);
+        free(im->c[i].name);
+        free(im->c[i].stored);
+        free(im->c[i].stage);
+        free(im->c[i].why);
+    }
     free(im->c);
+    free(im->place_title);
+    free(im->place_key);
     sh_zip_reader_close(&im->zr);
     memset(im, 0, sizeof *im);
 }
@@ -463,40 +500,66 @@ static int me_top_json(const char *name)
     return n > 5 && !strchr(name, '/') && !_stricmp(name + n - 5, ".json");
 }
 
-static int me_w_to_utf8(const wchar_t *w, char *out, size_t cap)
-{
-    return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) > 0;
-}
+/* A folder still to walk: its absolute wide path and its entry name. */
+typedef struct me_walk_dir { wchar_t *abs; char *rel; } me_walk_dir;
 
-/* Add every file under abs (the folder rel names) as an entry. Links and
- * junctions are not followed. */
-static int me_walk(sh_zip_reader *r, const wchar_t *abs, const char *rel, int depth, char *cause, size_t cap)
+/* Add every file under abs (the folder rel names) as an entry, at any depth
+ * (a heap stack of folders, no recursion). Links and junctions are not
+ * followed; a name no ZIP entry can hold is left out, as a ZIP's would be. */
+static int me_walk(sh_zip_reader *r, const wchar_t *abs, const char *rel, char **cause)
 {
-    wchar_t pattern[MAX_PATH * 2];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    if (depth > 32) return me_cause(cause, cap, "%s is nested too deeply", rel);
-    _snwprintf_s(pattern, MAX_PATH * 2, _TRUNCATE, L"%s\\*", abs);
-    h = FindFirstFileW(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 1;
-    do {
-        wchar_t child[MAX_PATH * 2];
-        char leaf[MAX_PATH * 3], name[SH_ZIP_NAME_MAX + 1];
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
-        if (!me_w_to_utf8(fd.cFileName, leaf, sizeof leaf)) continue;
-        _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", rel, leaf);
-        if (!sh_zip_name_ok(name, strlen(name))) continue;
-        _snwprintf_s(child, MAX_PATH * 2, _TRUNCATE, L"%s\\%s", abs, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!me_walk(r, child, name, depth + 1, cause, cap)) { FindClose(h); return 0; }
-        } else if (!sh_zip_reader_add(r, name, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow)) {
+    me_walk_dir *stack = NULL;
+    size_t n = 0, cap = 0;
+    int ok = 1;
+    me_walk_dir top;
+    top.abs = sh_wtextf(L"%s", abs);
+    top.rel = sh_text(rel);
+    if (!top.abs || !top.rel) { free(top.abs); free(top.rel); return me_cause(cause, "out of memory"); }
+    stack = (me_walk_dir *)malloc(sizeof *stack);
+    if (!stack) { free(top.abs); free(top.rel); return me_cause(cause, "out of memory"); }
+    stack[n++] = top;
+    cap = 1;
+    while (ok && n) {
+        me_walk_dir d = stack[--n];
+        wchar_t *pattern = sh_wtextf(L"%s\\*", d.abs);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = pattern ? FindFirstFileW(pattern, &fd) : INVALID_HANDLE_VALUE;
+        free(pattern);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                char *leaf, *name;
+                if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                if (!(leaf = sh_mb_utf8(fd.cFileName))) continue;
+                name = sh_textf("%s/%s", d.rel, leaf);
+                free(leaf);
+                if (!name) { ok = me_cause(cause, "out of memory"); break; }
+                if (!sh_zip_name_ok(name, strlen(name))) { free(name); continue; }
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    me_walk_dir child;
+                    child.abs = sh_wtextf(L"%s\\%s", d.abs, fd.cFileName);
+                    child.rel = name;
+                    if (n == cap) {
+                        size_t next = cap * 2;
+                        me_walk_dir *grown = (me_walk_dir *)realloc(stack, next * sizeof *grown);
+                        if (grown) { stack = grown; cap = next; }
+                    }
+                    if (!child.abs || n == cap) { free(child.abs); free(name); ok = me_cause(cause, "out of memory"); break; }
+                    stack[n++] = child;
+                } else {
+                    int added = sh_zip_reader_add(r, name, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+                    free(name);
+                    if (!added) { ok = me_cause(cause, "out of memory while listing the export folder"); break; }
+                }
+            } while (FindNextFileW(h, &fd));
             FindClose(h);
-            return me_cause(cause, cap, "the export folder holds too many files");
         }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return 1;
+        free(d.abs);
+        free(d.rel);
+    }
+    while (n) { --n; free(stack[n].abs); free(stack[n].rel); }
+    free(stack);
+    return ok;
 }
 
 /* The bundle form of earlier releases: a bundle.canonical.json anywhere, or
@@ -515,10 +578,11 @@ static int me_retired(const sh_zip_reader *r)
     }
     idx = sh_zip_reader_find(r, MODEXPORT_INDEX);
     if (idx >= 0) {
-        char ignored[64], type[64];
+        char *ignored = NULL, type[64];
         size_t len = 0;
-        unsigned char *text = sh_zip_reader_read(r, idx, (size_t)-1, &len, ignored, sizeof ignored);
+        unsigned char *text = sh_zip_reader_read(r, idx, (size_t)-1, &len, &ignored);
         int t = text ? sh_prefab_block_top_type((const char *)text, len, type, sizeof type) : -1;
+        free(ignored);
         free(text);
         if (t != 1) return 1;
     }
@@ -553,7 +617,7 @@ static void me_open_fail(me_import *im, char **text)
  * the ZIP's would be. *text (malloc'd) and *idx are the carried .json. The
  * .json is read and checked before anything is installed: a damaged or
  * mistaken export installs nothing. */
-static int me_open(me_import *im, const char *path, int want, char **text, size_t *len, long *idx, char *cause, size_t cap)
+static int me_open(me_import *im, const char *path, int want, char **text, size_t *len, long *idx, char **cause)
 {
     size_t n = path ? strlen(path) : 0, i;
     int kind, dir = 0;
@@ -569,84 +633,88 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         ln = strlen(leaf);
         if (ln > 4 && !_stricmp(leaf + ln - 4, ".zip")) ln -= 4;
         if (ln > 5 && !_stricmp(leaf + ln - 5, ".json")) ln -= 5;
-        if (ln >= sizeof im->place_title) ln = sizeof im->place_title - 1;
-        memcpy(im->place_title, leaf, ln);
-        im->place_title[ln] = 0;
-        _snprintf_s(im->place_key, sizeof im->place_key, _TRUNCATE, "zip:%s", path);
+        im->place_title = sh_textn(leaf, ln);
+        im->place_key = sh_textf("zip:%s", path);
+        if (!im->place_title || !im->place_key) { me_import_free(im); return me_cause(cause, "out of memory"); }
     }
     if (want == ME_KIND_PREFAB && n > 5 && !_stricmp(path + n - 5, ".json")) {
         wchar_t *w = sh_mb_wpath(path), *slash;
         WIN32_FILE_ATTRIBUTE_DATA fa;
-        char leaf[MAX_PATH * 3];
+        char *leaf = NULL;
+        int added;
         if (!w || !GetFileAttributesExW(w, GetFileExInfoStandard, &fa) || (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
             free(w);
-            return me_cause(cause, cap, "cannot open the prefab file");
+            return me_cause(cause, "cannot open the prefab file");
         }
         slash = wcsrchr(w, L'\\');
         if (!slash) slash = wcsrchr(w, L'/');
-        if (!slash || !me_w_to_utf8(slash + 1, leaf, sizeof leaf) || !sh_zip_name_ok(leaf, strlen(leaf))) {
+        if (!slash || !(leaf = sh_mb_utf8(slash + 1)) || !sh_zip_name_ok(leaf, strlen(leaf))) {
+            free(leaf);
             free(w);
-            return me_cause(cause, cap, "the prefab file's path is not usable");
+            return me_cause(cause, "the prefab file's path is not usable");
         }
         *slash = 0;
         im->zr.dir = w;
         im->zr.h = NULL;
-        if (!sh_zip_reader_add(&im->zr, leaf, ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow)) {
+        added = sh_zip_reader_add(&im->zr, leaf, ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow);
+        free(leaf);
+        if (!added) {
             me_import_free(im);
-            return me_cause(cause, cap, "out of memory");
+            return me_cause(cause, "out of memory");
         }
         *idx = 0;
         dir = 1;
     } else {
-        if (!sh_zip_reader_open(&im->zr, path, cause, cap)) return 0;
+        if (!sh_zip_reader_open(&im->zr, path, cause)) { me_import_free(im); return 0; }
         if (me_retired(&im->zr)) {
             me_import_free(im);
-            return me_cause(cause, cap, "%s", MODEXPORT_EARLIER);
+            return me_cause(cause, "%s", MODEXPORT_EARLIER);
         }
         for (i = 0; i < im->zr.n; i++) {
             if (!me_top_json(im->zr.e[i].name)) continue;
             if (*idx >= 0) {
                 me_import_free(im);
-                return me_cause(cause, cap, "the export holds more than one %s", me_kind_word(want));
+                return me_cause(cause, "the export holds more than one %s", me_kind_word(want));
             }
             *idx = (long)i;
         }
-        if (*idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export holds no %s", me_kind_word(want)); }
+        if (*idx < 0) { me_import_free(im); return me_cause(cause, "the export holds no %s", me_kind_word(want)); }
     }
-    *text = (char *)sh_zip_reader_read(&im->zr, *idx, (size_t)-1, len, cause, cap);
+    *text = (char *)sh_zip_reader_read(&im->zr, *idx, (size_t)-1, len, cause);
     if (!*text) { me_import_free(im); return 0; }
     kind = me_classify(*text, *len);
     if (kind != want) {
         const char *file = im->zr.e[*idx].name;
         if (kind == 0)
-            me_cause(cause, cap, want == ME_KIND_PREFAB ? "the export's prefab is not prefab JSON" : "the export's map is not rawmap JSON");
+            me_cause(cause, want == ME_KIND_PREFAB ? "the export's prefab is not prefab JSON" : "the export's map is not rawmap JSON");
         else if (want == ME_KIND_MAP)
-            me_cause(cause, cap, kind == ME_KIND_PREFAB ? "this is a prefab's export, not a map's" : "the export's map is not rawmap JSON");
-        else if (kind < 0) me_cause(cause, cap, "%s is not a prefab", file);
-        else if (dir) me_cause(cause, cap, "%s is a map, not a prefab", file);
-        else me_cause(cause, cap, "this is a map's export, not a prefab's");
+            me_cause(cause, kind == ME_KIND_PREFAB ? "this is a prefab's export, not a map's" : "the export's map is not rawmap JSON");
+        else if (kind < 0) me_cause(cause, "%s is not a prefab", file);
+        else if (dir) me_cause(cause, "%s is a map, not a prefab", file);
+        else me_cause(cause, "this is a map's export, not a prefab's");
         me_open_fail(im, text);
         return 0;
     }
     /* A map in an earlier shape (its variables or rows): nothing is read. */
     if (want == ME_KIND_MAP && sh_map_old_shape(*text, *len) != SH_MAP_OLD_NONE) {
         me_open_fail(im, text);
-        return me_cause(cause, cap, "%s", MODEXPORT_EARLIER);
+        return me_cause(cause, "%s", MODEXPORT_EARLIER);
     }
     im->kind = want;
     if (dir) {
         /* The extracted export's mods/ folder. Sorting moves the entries, so
          * the picked .json (the only top-level one) is found again. */
-        wchar_t mods[MAX_PATH * 2];
-        _snwprintf_s(mods, MAX_PATH * 2, _TRUNCATE, L"%s\\mods", im->zr.dir);
-        if (!me_walk(&im->zr, mods, "mods", 0, cause, cap) || !sh_zip_reader_sort(&im->zr, cause, cap)) {
+        wchar_t *mods = sh_wtextf(L"%s\\mods", im->zr.dir);
+        int walked = mods ? me_walk(&im->zr, mods, "mods", cause) : me_cause(cause, "out of memory");
+        free(mods);
+        if (!walked || !sh_zip_reader_sort(&im->zr, cause)) {
             me_open_fail(im, text);
             return 0;
         }
         for (i = 0; i < im->zr.n; i++) if (me_top_json(im->zr.e[i].name)) { *idx = (long)i; break; }
         if (me_retired(&im->zr)) {
             me_open_fail(im, text);
-            return me_cause(cause, cap, "%s", MODEXPORT_EARLIER);
+            return me_cause(cause, "%s", MODEXPORT_EARLIER);
         }
     }
     return 1;
@@ -668,17 +736,19 @@ static int me_carried(const me_import *im, const char *salt, const char *hash)
 }
 
 /* Whether a folder's path below mods/ lies inside another folder the export
- * carries (an ancestor with its own mod.json), or deeper than the store
- * enters organizing folders. */
+ * carries (an ancestor with its own mod.json). Organizing folders nest to
+ * any depth. */
 static int me_inside_carried(const sh_zip_reader *r, const char *seg, size_t sl)
 {
-    char probe[SH_ZIP_NAME_MAX + 1];
-    size_t i, depth = 0;
+    size_t i;
     for (i = 0; i < sl; i++) {
+        char *probe;
+        long at;
         if (seg[i] != '/') continue;
-        if (++depth >= SH_MS_NEST_MAX) return 1;
-        _snprintf_s(probe, sizeof probe, _TRUNCATE, "mods/%.*s/mod.json", (int)i, seg);
-        if (sh_zip_reader_find(r, probe) >= 0) return 1;
+        if (!(probe = sh_textf("mods/%.*s/mod.json", (int)i, seg))) return 1;
+        at = sh_zip_reader_find(r, probe);
+        free(probe);
+        if (at >= 0) return 1;
     }
     return 0;
 }
@@ -687,7 +757,7 @@ static int me_inside_carried(const sh_zip_reader *r, const char *seg, size_t sl)
  * (every one when `all`). A folder no row names is left out. A carried
  * mod.json in an earlier shape refuses the whole export (MODEXPORT_EARLIER):
  * nothing of it is read. */
-static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, char *cause, size_t cap)
+static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, char **cause)
 {
     size_t i;
     for (i = 0; i < im->zr.n; i++) {
@@ -704,18 +774,18 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         slash = strrchr(seg, '/');
         if (!slash || strcmp(slash, "/mod.json")) continue;
         sl = (size_t)(slash - seg);
-        if (!sl || sl > SH_MS_NAME_MAX || me_inside_carried(&im->zr, seg, sl)) continue;
-        text = (char *)sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause, cap);
+        if (!sl || me_inside_carried(&im->zr, seg, sl)) continue;
+        text = (char *)sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause);
         if (!text) return 0;
         memset(&b, 0, sizeof b);
         if (!sh_mb_load_text(text, len, &b)) {
             free(text);
-            if (!strncmp(b.first_cause, SH_MB_SHAPE, sizeof SH_MB_SHAPE - 1)) {
-                me_log("MODS: import: %s: %s", name, b.first_cause);
+            if (!strncmp(sh_mb_first_cause(&b), SH_MB_SHAPE, sizeof SH_MB_SHAPE - 1)) {
+                me_log("MODS: import: %s: %s", name, sh_mb_first_cause(&b));
                 sh_mb_free(&b);
-                return me_cause(cause, cap, "%s", MODEXPORT_EARLIER);
+                return me_cause(cause, "%s", MODEXPORT_EARLIER);
             }
-            me_log("MODS: import: %s is not a built mod (%s); left out", name, b.first_cause);
+            me_log("MODS: import: %s is not a built mod (%s); left out", name, sh_mb_first_cause(&b));
             sh_mb_free(&b);
             continue;
         }
@@ -729,14 +799,14 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         if (im->nc == im->cap) {
             size_t c2 = im->cap ? im->cap * 2 : 8;
             me_carry *g = (me_carry *)realloc(im->c, sizeof *g * c2);
-            if (!g) { sh_mb_free(&b); return me_cause(cause, cap, "out of memory"); }
+            if (!g) { sh_mb_free(&b); return me_cause(cause, "out of memory"); }
             im->c = g;
             im->cap = c2;
         }
-        c = &im->c[im->nc++];
+        c = &im->c[im->nc];
         memset(c, 0, sizeof *c);
-        memcpy(c->name, seg, sl);
-        c->name[sl] = 0;
+        if (!(c->name = sh_textn(seg, sl))) { sh_mb_free(&b); return me_cause(cause, "out of memory"); }
+        im->nc++;
         c->b = b;
 
     }
@@ -747,9 +817,10 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
 
 static wchar_t *me_wjoin(const char *dir, const char *rel)
 {
-    char path[MAX_PATH * 4];
-    me_join_native(path, sizeof path, dir, rel);
-    return sh_mb_wpath(path);
+    char *path = me_join_native(dir, rel);
+    wchar_t *w = path ? sh_mb_wpath(path) : NULL;
+    free(path);
+    return w;
 }
 
 static void me_wmkdirs_for(wchar_t *file)
@@ -815,41 +886,44 @@ static void me_rmtree(const wchar_t *dir)
     RemoveDirectoryW(dir);
 }
 
-/* A fresh folder under the temporary directory for this import's copies. */
-static int me_stage_root(char *out, size_t cap)
+/* A fresh folder under the temporary directory for this import's copies:
+ * its path (malloc'd), or NULL. */
+static char *me_stage_root(void)
 {
     static volatile LONG seq;
-    wchar_t tmp[MAX_PATH + 1];
-    char base[MAX_PATH * 4];
-    DWORD n = GetTempPathW(MAX_PATH + 1, tmp);
-    wchar_t *w;
-    int made;
+    DWORD need = GetTempPathW(0, NULL), n;
+    wchar_t *tmp, *w;
+    char *base, *out = NULL;
     size_t bl;
-    if (!n || n > MAX_PATH || !me_w_to_utf8(tmp, base, sizeof base)) return 0;
+    if (!need || !(tmp = (wchar_t *)malloc(((size_t)need + 1) * sizeof *tmp))) return NULL;
+    n = GetTempPathW(need + 1, tmp);
+    base = n && n <= need ? sh_mb_utf8(tmp) : NULL;
+    free(tmp);
+    if (!base) return NULL;
     bl = strlen(base);
     if (bl && (base[bl - 1] == '\\' || base[bl - 1] == '/')) base[bl - 1] = 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus-import-%lu-%ld", base, GetCurrentProcessId(),
-                InterlockedIncrement(&seq));
-    w = sh_mb_wpath(out);
-    if (!w) return 0;
+    out = sh_textf("%s\\snapmap-plus-import-%lu-%ld", base, GetCurrentProcessId(), InterlockedIncrement(&seq));
+    free(base);
+    if (!out || !(w = sh_mb_wpath(out))) { free(out); return NULL; }
     me_rmtree(w);
-    made = CreateDirectoryW(w, NULL) != 0;
+    if (!CreateDirectoryW(w, NULL)) { free(out); out = NULL; }
     free(w);
-    return made;
+    return out;
 }
 
 /* Copy one carried folder out of the export (mod.json and assets/), then
  * put back, from this player's game, the bytes of each stock pointer whose
  * file the folder held (the export never carries game content), so the
  * install builds the same pointers. */
-static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index, modexport_stats *st, char *cause,
-                    size_t cap)
+static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index, modexport_stats *st, char **cause)
 {
-    char prefix[SH_MS_NAME_MAX + 8];
+    char *prefix;
     size_t pl, i;
     /* Named as the export carries it: a root install takes the folder's name. */
-    _snprintf_s(c->stage, sizeof c->stage, _TRUNCATE, "%s\\%zu\\%s", stage, index, c->name);
-    _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "mods/%s/", c->name);
+    free(c->stage);
+    c->stage = sh_textf("%s\\%zu\\%s", stage, index, c->name);
+    prefix = sh_textf("mods/%s/", c->name);
+    if (!c->stage || !prefix) { free(prefix); return me_cause(cause, "out of memory"); }
     pl = strlen(prefix);
     for (i = 0; i < im->zr.n; i++) {
         const char *name = im->zr.e[i].name, *rel;
@@ -862,13 +936,17 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
             me_log("MODS: import: %s is not part of a mod folder; left out", name);
             continue;
         }
-        bytes = sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause, cap);
-        if (!bytes) return 0;
+        bytes = sh_zip_reader_read(&im->zr, (long)i, (size_t)-1, &len, cause);
+        if (!bytes) { free(prefix); return 0; }
         put = me_put_file(c->stage, rel, bytes, len);
         free(bytes);
-        if (!put) return me_cause(cause, cap, "cannot copy %s out of the export: %s", name, sh_reason_win32(GetLastError(), name, len));
+        if (!put) {
+            free(prefix);
+            return me_cause(cause, "cannot copy %s out of the export: %s", name, sh_reason_win32(GetLastError(), name, len));
+        }
         st->files++;
     }
+    free(prefix);
     for (i = 0; i < c->b.file_count; i++) {
         const sh_mb_file *f = &c->b.files[i];
         unsigned char *bytes = NULL;
@@ -880,14 +958,14 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
         have = w && GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
         free(w);
         if (have) continue;
-        if (cause && cap) cause[0] = 0;
-        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, &len, f->path, cause, cap) != SH_MB_STOCK_OK) {
-            if (!cause || !cap || !cause[0]) me_cause(cause, cap, "%s names game content this game does not have", f->path);
+            if (cause) { free(*cause); *cause = NULL; }
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, &len, f->path, cause) != SH_MB_STOCK_OK) {
+            if (!cause || !*cause) me_cause(cause, "%s names game content this game does not have", f->path);
             return 0;
         }
         put = me_put_file(c->stage, f->path, bytes, len);
         HeapFree(GetProcessHeap(), 0, bytes);
-        if (!put) return me_cause(cause, cap, "cannot copy %s out of the game: %s", f->path, sh_reason_win32(GetLastError(), f->path, len));
+        if (!put) return me_cause(cause, "cannot copy %s out of the game: %s", f->path, sh_reason_win32(GetLastError(), f->path, len));
     }
     return 1;
 }
@@ -897,11 +975,12 @@ static void me_rollback(me_import *im, const char *root)
 {
     size_t i;
     for (i = 0; i < im->nc; i++) {
-        char path[MAX_PATH * 4];
+        char *path;
         if (!im->c[i].installed) continue;
-        me_join_native(path, sizeof path, root, im->c[i].stored);
-        if (sh_ms_remove_folder(path)) me_log("MODS: import: mods\\%s removed again", im->c[i].stored);
+        path = me_join_native(root, im->c[i].stored);
+        if (path && sh_ms_remove_folder(path)) me_log("MODS: import: mods\\%s removed again", im->c[i].stored);
         else me_log("MODS: import: mods\\%s could not be removed again; remove it by hand", im->c[i].stored);
+        free(path);
         im->c[i].installed = 0;
     }
 }
@@ -912,7 +991,8 @@ static int me_rows_name_one(const sh_modmanifest_row *row, const me_carry *c)
 }
 
 /* A carried folder's row: its salt and build, with every name the rows that
- * name that build list (`names` receives the borrowed array; free it). */
+ * name that build list (`names` receives the borrowed array; free it). The
+ * row's name is borrowed from the bundle: the row is never freed. */
 static void me_carry_row(const me_carry *c, const sh_modmanifest_list *rows, sh_modmanifest_row *row, char ***names)
 {
     size_t i, k, n = 0, total = 0;
@@ -920,7 +1000,7 @@ static void me_carry_row(const me_carry *c, const sh_modmanifest_list *rows, sh_
     *names = NULL;
     strncpy_s(row->salt, sizeof row->salt, c->b.id, _TRUNCATE);
     strcpy_s(row->build, sizeof row->build, c->b.hash);
-    if (c->b.name) strncpy_s(row->name, sizeof row->name, c->b.name, _TRUNCATE);
+    row->name = c->b.name;
     for (i = 0; rows && i < rows->count; i++)
         if (me_rows_name_one(&rows->rows[i], c)) total += rows->rows[i].name_count;
     if (total && (*names = (char **)calloc(total, sizeof **names)) != NULL)
@@ -942,7 +1022,7 @@ static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows, c
     char **names;
     int st;
     me_carry_row(c, rows, &row, &names);
-    st = sh_modserve_row_served_in(&row, place, NULL, NULL, 0);
+    st = sh_modserve_row_served_in(&row, place, NULL, NULL);
     free(names);
     return st == SH_MODSERVE_ROW_SERVED;
 }
@@ -955,11 +1035,12 @@ static int me_carry_served(const me_carry *c, const sh_modmanifest_list *rows, c
  * mod.json records. A refusal removes what the import installed; nothing that
  * was installed before is written. */
 static int me_install(me_import *im, const sh_modmanifest_list *rows, const char *dir, modexport_stats *st,
-                      char *cause, size_t cap)
+                      char **cause)
 {
     sh_mb_resolver r;
     sh_ms_place place;
-    char root[MAX_PATH * 4], stage[MAX_PATH * 4] = "";
+    const char *root;
+    char *stage = NULL;
     size_t i, left = 0;
     int ok = 0, progress, staged = 0, locked = 0;
     const char *what = me_kind_word(im->kind);
@@ -968,7 +1049,7 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
     st->entries = (unsigned)im->zr.n;
     st->zip_bytes = im->zr.size;
     if (!im->nc) return 1;
-    if (!sh_ms_root(root, sizeof root)) return me_cause(cause, cap, "the mods folder cannot be resolved");
+    if (!(root = sh_ms_root())) return me_cause(cause, "the mods folder cannot be resolved");
     for (i = 0; i < im->nc; i++) {
         me_carry *c = &im->c[i];
         if (me_carry_served(c, rows, dir)) {
@@ -989,21 +1070,21 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
             if (c->present || !c->b.script_files) continue;
             me_log("MODS: import: mods/%s carries %u script file(s) and the player turned scripts off", c->name,
                    c->b.script_files);
-            me_cause(cause, cap, "%s", SH_MODUI_SCRIPTS_OFF);
+            me_cause(cause, "%s", SH_MODUI_SCRIPTS_OFF);
             goto done;
         }
     }
 
     /* The files are copied out of the export without the store lock: a large
      * import never holds up a save, a download or a build. */
-    if (!me_stage_root(stage, sizeof stage)) { me_cause(cause, cap, "no temporary folder could be made for the export's mods"); goto done; }
+    if (!(stage = me_stage_root())) { me_cause(cause, "no temporary folder could be made for the export's mods"); goto done; }
     staged = 1;
     for (i = 0; i < im->nc; i++)
-        if (!im->c[i].present && !me_stage(im, &im->c[i], stage, i, st, cause, cap)) goto done;
+        if (!im->c[i].present && !me_stage(im, &im->c[i], stage, i, st, cause)) goto done;
     modstore_lock();
     locked = 1;
 
-    place.title = im->place_title;
+    place.title = im->place_title ? im->place_title : "map";
     place.map_id = im->place_key;
     /* A mod that needs another carried one builds once that one is installed. */
     r.installed = NULL;
@@ -1022,10 +1103,8 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
             /* An exported folder is its author's build as it was: its
              * replacements are kept, never refused (a received build). */
             sh_mb_keep_replacements_here(1);
-            if (!(dir[0] ? sh_ms_install_placed(c->stage, &place, &r, c->stored, sizeof c->stored, &is, &built, c->why,
-                                                sizeof c->why)
-                         : sh_ms_install_from_folder(c->stage, &r, c->stored, sizeof c->stored, &is, &built, c->why,
-                                                     sizeof c->why))) {
+            if (!(dir[0] ? sh_ms_install_placed(c->stage, &place, &r, &c->stored, &is, &built, &c->why)
+                         : sh_ms_install_from_folder(c->stage, &r, &c->stored, &is, &built, &c->why))) {
                 sh_mb_keep_replacements_here(0);
                 sh_mb_free(&built);
                 continue;
@@ -1036,7 +1115,7 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
             if (strcmp(built.hash, c->b.hash) != 0 || !built.validated) {
                 me_log("MODS: import: mods/%s built to %.16s, not %.16s as its mod.json records", c->name, built.hash,
                        c->b.hash);
-                me_cause(cause, cap, "%s in the export does not build to the build the %s names",
+                me_cause(cause, "%s in the export does not build to the build the %s names",
                          c->b.name && c->b.name[0] ? c->b.name : c->b.id, what);
                 if (!is.present) c->installed = 1;
                 sh_mb_free(&built);
@@ -1058,8 +1137,8 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
         for (i = 0; i < im->nc; i++) {
             const me_carry *c = &im->c[i];
             if (c->present || c->installed) continue;
-            me_cause(cause, cap, "%s, a mod this %s carries, does not install on this computer (%s); nothing was "
-                     "installed", c->b.name && c->b.name[0] ? c->b.name : c->b.id, what, c->why);
+            me_cause(cause, "%s, a mod this %s carries, does not install on this computer (%s); nothing was "
+                     "installed", c->b.name && c->b.name[0] ? c->b.name : c->b.id, what, c->why ? c->why : "it does not build");
             break;
         }
         goto rollback;
@@ -1077,6 +1156,7 @@ done:
         wchar_t *w = sh_mb_wpath(stage);
         if (w) { me_rmtree(w); free(w); }
     }
+    free(stage);
     return ok;
 }
 
@@ -1088,10 +1168,10 @@ static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows
     for (i = 0; i < rows->count; i++) {
         const sh_modmanifest_row *row = &rows->rows[i];
         if (me_carried(im, row->salt, row->build)) continue;
-        if (sh_modserve_row_served_in(row, place, NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED) continue;
+        if (sh_modserve_row_served_in(row, place, NULL, NULL) == SH_MODSERVE_ROW_SERVED) continue;
         st->bundles_absent++;
         me_log("MODS: import: the %s names %s, which the export does not carry", me_kind_word(im->kind),
-               row->name[0] ? row->name : row->salt);
+               sh_modmanifest_row_name(row)[0] ? row->name : row->salt);
     }
 }
 
@@ -1100,38 +1180,43 @@ static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows
  * replace the place's folder of its salt (an earlier import of that ZIP, at
  * another build) never does: the import takes a fresh place beside it, so a
  * map saved from the earlier import keeps its mods, and a failed import
- * leaves every installed folder as it was. 1 with `out`, else 0. */
-static int me_place_dir(me_import *im, const sh_modmanifest_list *rows, char *out, size_t cap)
+ * leaves every installed folder as it was. The place (malloc'd), else NULL. */
+static char *me_place_dir(me_import *im, const sh_modmanifest_list *rows)
 {
     sh_ms_place place;
     size_t i;
-    char folder[SH_MS_NAME_MAX + 1];
-    out[0] = 0;
-    place.title = im->place_title[0] ? im->place_title : "map";
+    char *out, *folder = NULL;
+    place.title = im->place_title && im->place_title[0] ? im->place_title : "map";
     place.map_id = im->place_key;
-    if (!sh_ms_place_dir(&place, out, cap)) return 0;
+    if (!(out = sh_ms_place_dir(&place))) return NULL;
     for (i = 0; i < im->nc; i++) {
         const me_carry *c = &im->c[i];
-        if (me_carry_served(c, rows, out) ||
-            sh_ms_place_folder(&place, c->b.name, c->b.id, folder, sizeof folder) != 2)
-            continue;
-        _snprintf_s(im->place_key + strlen(im->place_key), sizeof im->place_key - strlen(im->place_key), _TRUNCATE,
-                    "#%llu", (unsigned long long)GetTickCount64());
+        int at;
+        if (me_carry_served(c, rows, out)) continue;
+        at = sh_ms_place_folder(&place, c->b.name, c->b.id, &folder);
+        free(folder);
+        folder = NULL;
+        if (at != 2) continue;
+        if (!sh_text_set(&im->place_key, "%s#%llu", im->place_key ? im->place_key : "", (unsigned long long)GetTickCount64())) {
+            free(out);
+            return NULL;
+        }
         me_log("MODS: import: mods\\%s holds another build of %s; this import gets a place of its own", out,
                c->b.name && c->b.name[0] ? c->b.name : c->b.id);
-        return sh_ms_place_dir(&place, out, cap);
+        free(out);
+        place.map_id = im->place_key;
+        return sh_ms_place_dir(&place);
     }
-    return 1;
+    return out;
 }
 
-int modexport_probe(const char *zip_path, char *cause, size_t cap)
+int modexport_probe(const char *zip_path, char **cause)
 {
     me_import im;
     char *text = NULL;
     size_t len = 0;
     long idx;
-    if (cause && cap) cause[0] = 0;
-    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) return 0;
+    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause)) return 0;
     free(text);
     me_import_free(&im);
     return 1;
@@ -1142,20 +1227,22 @@ int modexport_probe(const char *zip_path, char *cause, size_t cap)
  * root, as the player's own maps do. malloc'd; NULL when it cannot be
  * written. */
 static char *me_stamp_place(const char *text, size_t len, const sh_modmanifest_list *rows, const char *place,
-                            size_t *out_len, char *cause, size_t cap)
+                            size_t *out_len, char **cause)
 {
     size_t i, n = 0;
     int used = 0;
     char err[96] = "", *heap, *out;
     for (i = 0; i < rows->count && !used; i++) {
         sh_modserve_bundle_ref ref;
-        used = sh_modserve_row_build_in(&rows->rows[i], place, &ref) && ref.place[0];
+        memset(&ref, 0, sizeof ref);
+        used = sh_modserve_row_build_in(&rows->rows[i], place, &ref) && ref.place && ref.place[0];
+        sh_modserve_bundle_ref_free(&ref);
     }
     heap = sh_carrier_put_place(text, len, used ? place + sizeof SH_MODSERVE_PLACES : NULL, &n, err, sizeof err);
-    if (!heap && err[0]) { me_cause(cause, cap, "the map could not record where its mods are: %s", err); return NULL; }
+    if (!heap && err[0]) { me_cause(cause, "the map could not record where its mods are: %s", err); return NULL; }
     if (!heap) n = len;
     out = (char *)malloc(n + 1);
-    if (!out) { if (heap) HeapFree(GetProcessHeap(), 0, heap); me_cause(cause, cap, "out of memory"); return NULL; }
+    if (!out) { if (heap) HeapFree(GetProcessHeap(), 0, heap); me_cause(cause, "out of memory"); return NULL; }
     memcpy(out, heap ? heap : text, n);
     out[n] = 0;
     if (heap) HeapFree(GetProcessHeap(), 0, heap);
@@ -1163,13 +1250,13 @@ static char *me_stamp_place(const char *text, size_t len, const sh_modmanifest_l
     return out;
 }
 
-char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char *cause, size_t cap)
+char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp, char **cause)
 {
     modexport_stats local;
     modexport_stats *st = stp ? stp : &local;
     me_import im;
     sh_modmanifest_list rows;
-    char *text = NULL, *stamped = NULL, dir[SH_MODSERVE_PLACE_CAP];
+    char *text = NULL, *stamped = NULL, *dir = NULL;
     size_t len = 0;
     unsigned rejected = 0;
     long idx;
@@ -1177,22 +1264,22 @@ char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *stp
     if (out_len) *out_len = 0;
     memset(st, 0, sizeof *st);
     memset(&rows, 0, sizeof rows);
-    if (cause && cap) cause[0] = 0;
-    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return NULL; }
+    if (!me_open(&im, zip_path, ME_KIND_MAP, &text, &len, &idx, cause)) { st->ms = me_now_ms() - t0; return NULL; }
     sh_modmanifest_read(text, len, &rows, &rejected);
     /* The map this ZIP carries arrives with its mods: its place is the
      * ZIP's, and a carried folder installs only when nothing serves its row
      * there (the root at the row's build first). Nothing here changes what
      * the loaded map serves: the place is recorded in the text, and the
      * load of that text sets it. */
-    if (!me_collect(&im, &rows, 0, cause, cap)) goto done;
-    if (!me_place_dir(&im, &rows, dir, sizeof dir)) { me_cause(cause, cap, "no folder could be named for the map's mods"); goto done; }
-    if (!me_install(&im, &rows, dir, st, cause, cap)) goto done;
+    if (!me_collect(&im, &rows, 0, cause)) goto done;
+    if (!(dir = me_place_dir(&im, &rows))) { me_cause(cause, "no folder could be named for the map's mods"); goto done; }
+    if (!me_install(&im, &rows, dir, st, cause)) goto done;
     me_count_absent(&im, &rows, dir, st);
-    stamped = me_stamp_place(text, len, &rows, dir, &len, cause, cap);
+    stamped = me_stamp_place(text, len, &rows, dir, &len, cause);
     if (stamped) st->map_bytes = len;
 done:
     free(text);
+    free(dir);
     if (!stamped) len = 0;
     sh_modmanifest_list_free(&rows);
     me_import_free(&im);
@@ -1202,7 +1289,7 @@ done:
 }
 
 int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
-                          char *name, size_t name_cap, modexport_stats *stp, char *cause, size_t cap)
+                          char **name, modexport_stats *stp, char **cause)
 {
     modexport_stats local;
     modexport_stats *st = stp ? stp : &local;
@@ -1216,25 +1303,22 @@ int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx
     memset(&rows, 0, sizeof rows);
     if (prefab) *prefab = NULL;
     if (prefab_len) *prefab_len = 0;
-    if (name && name_cap) name[0] = 0;
+    if (name) *name = NULL;
     memset(st, 0, sizeof *st);
-    if (cause && cap) cause[0] = 0;
-    if (!prefab || !path || !path[0]) return me_cause(cause, cap, "nothing to read");
-    if (!me_open(&im, path, ME_KIND_PREFAB, &text, &len, &idx, cause, cap)) { st->ms = me_now_ms() - t0; return 0; }
-    if (name && name_cap) {
-        size_t nl = strlen(im.zr.e[idx].name) - 5;
-        if (nl >= name_cap) nl = name_cap - 1;
-        memcpy(name, im.zr.e[idx].name, nl);
-        name[nl] = 0;
+    if (!prefab || !path || !path[0]) return me_cause(cause, "nothing to read");
+    if (!me_open(&im, path, ME_KIND_PREFAB, &text, &len, &idx, cause)) { st->ms = me_now_ms() - t0; return 0; }
+    if (name && !(*name = sh_textn(im.zr.e[idx].name, strlen(im.zr.e[idx].name) - 5))) {
+        me_cause(cause, "out of memory");
+        goto done;
     }
     if (rows_of) {
         int n = rows_of(ctx, text, len, &rows);
-        if (n == -2) { me_cause(cause, cap, "%s", MODEXPORT_EARLIER); goto done; }
-        if (n < 0) { me_cause(cause, cap, "the prefab's mods cannot be read"); goto done; }
+        if (n == -2) { me_cause(cause, "%s", MODEXPORT_EARLIER); goto done; }
+        if (n < 0) { me_cause(cause, "the prefab's mods cannot be read"); goto done; }
     }
     /* A placed prefab's mods are the player's own: a carried folder installs
      * at the root when no root folder holds its salt (DECISIONS 12). */
-    if (!me_collect(&im, &rows, rows_of == NULL, cause, cap) || !me_install(&im, &rows, "", st, cause, cap)) goto done;
+    if (!me_collect(&im, &rows, rows_of == NULL, cause) || !me_install(&im, &rows, "", st, cause)) goto done;
     me_count_absent(&im, &rows, "", st);
     st->map_bytes = len;
     ok = 1;
@@ -1246,7 +1330,7 @@ done:
         if (prefab_len) *prefab_len = len;
     } else {
         free(text);
-        if (name && name_cap) name[0] = 0;
+        if (name) { free(*name); *name = NULL; }
     }
     st->ms = me_now_ms() - t0;
     return ok;
@@ -1256,43 +1340,44 @@ done:
 
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path)
 {
-    char cause[MODEXPORT_CAUSE_MAX];
-    return modexport_write_text_report(data, len, path, NULL, cause, sizeof cause);
+    return modexport_write_text_report(data, len, path, NULL, NULL);
 }
 
 unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
-                                               unsigned *bundles, char *cause_out, size_t cause_cap)
+                                               unsigned *bundles, char **cause_out)
 {
     modexport_stats st;
-    char cause[MODEXPORT_CAUSE_MAX];
+    char *cause = NULL;
     if (bundles) *bundles = 0;
-    if (cause_out && cause_cap) cause_out[0] = 0;
-    if (!modexport_write(data, len, path, &st, cause, sizeof cause)) {
-        me_log("MODS: export %s: refused: %s", path, cause);
+    if (!modexport_write(data, len, path, &st, &cause)) {
+        me_log("MODS: export %s: refused: %s", path, cause ? cause : "out of memory");
         if (bundles) *bundles = st.bundles;
-        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, cause, _TRUNCATE);
+        if (cause_out) { free(*cause_out); *cause_out = cause; }
+        else free(cause);
         return 0;
     }
+    free(cause);
     if (bundles) *bundles = st.bundles;
     me_log("MODS: export %s: map %llu byte(s), %u mod folder(s), %u file(s) carried, %u entr%s, %llu byte(s) in %.0f ms",
            path, st.map_bytes, st.bundles, st.files, st.entries, st.entries == 1 ? "y" : "ies", st.zip_bytes, st.ms);
     return st.zip_bytes;
 }
 
-char *modexport_read_text_report(const char *path, size_t *out_len, char *cause_out, size_t cause_cap)
+char *modexport_read_text_report(const char *path, size_t *out_len, char **cause_out)
 {
     modexport_stats st;
-    char cause[MODEXPORT_CAUSE_MAX];
+    char *cause = NULL;
     char *text, *heap;
     size_t len = 0;
     if (out_len) *out_len = 0;
-    if (cause_out && cause_cap) cause_out[0] = 0;
-    text = modexport_read(path, &len, &st, cause, sizeof cause);
+    text = modexport_read(path, &len, &st, &cause);
     if (!text) {
-        me_log("MODS: import %s: refused: %s", path, cause);
-        if (cause_out && cause_cap) strncpy_s(cause_out, cause_cap, cause, _TRUNCATE);
+        me_log("MODS: import %s: refused: %s", path, cause ? cause : "out of memory");
+        if (cause_out) { free(*cause_out); *cause_out = cause; }
+        else free(cause);
         return NULL;
     }
+    free(cause);
     me_log("MODS: import %s: %u mod folder(s) (%u installed, %u already installed), %u file(s) copied out, map %llu byte(s), "
            "%llu byte(s) read in %.0f ms%s", path, st.bundles, st.bundles_installed, st.bundles_present, st.files,
            st.map_bytes, st.zip_bytes, st.ms,
@@ -1304,35 +1389,39 @@ char *modexport_read_text_report(const char *path, size_t *out_len, char *cause_
     return heap;
 }
 
-int modexport_validate_source(const char *path, char *out_msg, int msg_capacity)
+int modexport_validate_source(const char *path, char **out_msg)
 {
-    char cause[MODEXPORT_CAUSE_MAX];
-    int ok;
-    if (out_msg && msg_capacity > 0) out_msg[0] = 0;
-    ok = modexport_probe(path, cause, sizeof cause);
-    if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : cause, _TRUNCATE);
+    char *cause = NULL;
+    int ok = modexport_probe(path, &cause);
+    if (out_msg) {
+        free(*out_msg);
+        *out_msg = ok ? sh_text("ok") : cause ? cause : sh_text("the export cannot be read");
+        if (ok || !cause) free(cause);
+    } else free(cause);
     return ok;
 }
 
 /* ------------------------------------------------------------ received builds */
 
 int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const modnet_io *io, modsync_stats *st,
-                          char *where, size_t where_cap)
+                          char **where)
 {
     sh_ms_place at;
-    char key[SH_MODSERVE_PLACE_CAP + 16], title[SH_MODSERVE_PLACE_CAP];
+    char *key = NULL;
     const char *segment = place && place[0] ? strchr(place, '\\') : NULL;
-    if (where && where_cap) where[0] = 0;
+    int ok;
+    if (where) *where = NULL;
     if (segment) {
         /* The map's place, under a record key that names exactly that folder. */
-        strncpy_s(title, sizeof title, segment + 1, _TRUNCATE);
-        _snprintf_s(key, sizeof key, _TRUNCATE, "place:%s", title);
-        at.title = title;
+        if (!(key = sh_textf("place:%s", segment + 1))) return 0;
+        at.title = segment + 1;
         at.map_id = key;
         (void)sh_ms_place_note(&at, place);
     }
     /* Without a place the build installs at the root, as the player's own mod. */
-    if (!modsync_fetch_build_for(row, segment ? &at : NULL, io, st)) return 0;
-    if (where && where_cap) strncpy_s(where, where_cap, st->folder, _TRUNCATE);
+    ok = modsync_fetch_build_for(row, segment ? &at : NULL, io, st);
+    free(key);
+    if (!ok) return 0;
+    if (where) *where = sh_text(st->folder ? st->folder : "");
     return 1;
 }

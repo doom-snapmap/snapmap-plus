@@ -55,6 +55,7 @@
 #include "map_carrier.h"
 #include "config.h"
 #include "plain_reason.h"
+#include "../common/text.h"
 
 #define MP_GDM_ID          0x29u   /* GDM_CONFIRM_VIDEO_CHANGES: the Yes/No shape modpublished.c uses */
 #define MP_BUTTONS_YES_NO  6u
@@ -63,10 +64,11 @@
 #define MP_WORKER_TICKS    1200    /* about twenty seconds */
 #define MP_SAVE_FRESH_MS   5000ull /* the Save state saves and calls back in one frame */
 #define MP_CONTEXT_MS      (15ull * 60ull * 1000ull)
-#define MP_TEXT_CAP        256     /* the native dialog body */
-#define MP_REF_CAP         (4 * MODNET_REF_MAX + 1)
+#define MP_TEXT_CAP        256     /* the game's dialog body (engine_dialog.c: 255 bytes of text) */
 #define MP_SETTING         "mods.upload_confirmed"
-#define MP_ID_CAP          160     /* a saved-map or item id in the links file */
+/* A saved-map or item id the links file keeps: the engine's own ids, which
+ * are short plain tokens; anything longer is not one (mp_link_id). */
+#define MP_ID_CAP          160
 
 static void mp_link_record(const char *item, const char *cloud, const char *local);
 static void mp_link_forget(const char *item);
@@ -89,13 +91,17 @@ static void mp_log(const char *line)
 
 static void mp_logf(const char *fmt, ...)
 {
-    char line[600];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    mp_log(line);
+    mp_log(line ? line : "MODS: publish: (out of memory)");
+    free(line);
 }
+
+/* The modsync cause, or "" for none. */
+static const char *mp_cause(const modsync_stats *st) { return st->cause ? st->cause : ""; }
 
 static int mp_on_main(void)
 {
@@ -137,7 +143,7 @@ typedef struct mp_save {
     unsigned long long bytes;                  /* their sizes, summed */
     int carrier;                               /* the text carries the snapmap-plus member */
     int unreadable;                            /* rows the reader refused, or the read failed: never published */
-    char unreadable_name[96];                  /* the first refused row's mod name, "" when it has none */
+    char *unreadable_name;                     /* the first refused row's mod name (malloc'd), NULL when it has none */
 } mp_save;
 
 static mp_save g_save;
@@ -146,19 +152,19 @@ static volatile LONG g_save_sequence;
 static void mp_save_clear(mp_save *s)
 {
     free(s->hashes);
+    free(s->unreadable_name);
     memset(s, 0, sizeof(*s));
 }
 
 /* The name a refused row gives its mod, read from the member itself: each
  * row of the "mods" part is read alone, and the first the manifest reader
- * refuses names it ("" when it has no name either). */
-static void mp_refused_name(const char *text, size_t length, char *out, size_t cap)
+ * refuses names it, whole (malloc'd; NULL when it has no name either). */
+static char *mp_refused_name(const char *text, size_t length)
 {
     size_t from = 0, to = 0;
     const char *cursor, *elem;
     size_t elem_len;
-    out[0] = 0;
-    if (sh_carrier_part(text, length, "mods", &from, &to) != 1) return;
+    if (sh_carrier_part(text, length, "mods", &from, &to) != 1) return NULL;
     cursor = text + from;
     while (sh_carrier_array_next(&cursor, text + to, &elem, &elem_len) == 1) {
         static const char head[] = "{\"" SH_CARRIER_KEY "\":{\"format\":1,\"mods\":[";
@@ -167,7 +173,7 @@ static void mp_refused_name(const char *text, size_t length, char *out, size_t c
         char *alone = (char *)malloc(sizeof head + elem_len + 4);
         const char *name = NULL;
         size_t name_len = 0;
-        if (!alone) return;
+        if (!alone) return NULL;
         memcpy(alone, head, sizeof head - 1);
         memcpy(alone + sizeof head - 1, elem, elem_len);
         memcpy(alone + sizeof head - 1 + elem_len, "]}}", 4);
@@ -176,13 +182,12 @@ static void mp_refused_name(const char *text, size_t length, char *out, size_t c
         sh_modmanifest_list_free(&one);
         free(alone);
         if (!refused) continue;
-        if (sh_carrier_object_string(elem, elem + elem_len, "name", &name, &name_len) == 1 && name_len < cap &&
-            !memchr(name, '\\', name_len)) {
-            memcpy(out, name, name_len);
-            out[name_len] = 0;
-        }
-        return;
+        if (sh_carrier_object_string(elem, elem + elem_len, "name", &name, &name_len) == 1 && name_len &&
+            !memchr(name, '\\', name_len))
+            return sh_textn(name, name_len);
+        return NULL;
     }
+    return NULL;
 }
 
 void sh_modpublish_save_seen(const char *text, size_t length)
@@ -235,9 +240,9 @@ void sh_modpublish_save_seen(const char *text, size_t length)
          * publishing would leave players without it, so the map is not
          * published until it is fixed. */
         g_save.unreadable = 1;
-        mp_refused_name(text, length, g_save.unreadable_name, sizeof g_save.unreadable_name);
+        g_save.unreadable_name = mp_refused_name(text, length);
         mp_logf("MODS: publish: %u row(s) of the saved map's mod list did not read (first: %s); it will not be published",
-                rejected, g_save.unreadable_name[0] ? g_save.unreadable_name : "a mod with no name");
+                rejected, g_save.unreadable_name ? g_save.unreadable_name : "a mod with no name");
     }
     sh_modmanifest_list_free(&rows);
 }
@@ -305,8 +310,8 @@ int sh_modpublish_save_tag(const char *local_id, void *model)
 typedef struct mp_job {
     struct mp_job *next;
     int kind;
-    char ref[MP_REF_CAP];                      /* upload/claim: the claim ref; release: the ref */
-    char provisional[MP_REF_CAP];              /* claim: released after the claim succeeds */
+    char *ref;                                 /* upload/claim: the claim ref; release: the ref (malloc'd, "" for none) */
+    char *provisional;                         /* claim: released after the claim succeeds (malloc'd), or NULL */
     char (*hashes)[MP_MOD_CAP];
     int count;
     volatile LONG done;
@@ -325,6 +330,10 @@ static void mp_job_free(mp_job *job)
 {
     if (!job) return;
     free(job->hashes);
+    free(job->ref);
+    free(job->provisional);
+    modsync_stats_free(&job->st);
+    modsync_stats_free(&job->st2);
     SecureZeroMemory(job, sizeof(*job));
     free(job);
 }
@@ -334,10 +343,10 @@ static mp_job *mp_job_new(int kind, const char *ref, const char (*hashes)[MP_MOD
     mp_job *job = calloc(1, sizeof(*job));
     if (!job) return NULL;
     job->kind = kind;
-    if (ref) strcpy_s(job->ref, sizeof job->ref, ref);
+    if (!(job->ref = sh_text(ref ? ref : ""))) { free(job); return NULL; }
     if (count > 0) {
         job->hashes = calloc((size_t)count, sizeof(*job->hashes));
-        if (!job->hashes) { free(job); return NULL; }
+        if (!job->hashes) { free(job->ref); free(job); return NULL; }
         memcpy(job->hashes, hashes, (size_t)count * sizeof(*job->hashes));
         job->count = count;
     }
@@ -346,16 +355,17 @@ static mp_job *mp_job_new(int kind, const char *ref, const char (*hashes)[MP_MOD
 
 /* Refs of provisional claims this installation still holds: claims and queued
  * uploads named with the provisional prefix (read-only: modsync owns both
- * sections of mods\snapmap-plus.json). Returns a malloc'd array of `*n` refs. */
-static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
+ * sections of mods\snapmap-plus.json). Returns a malloc'd array of `*n`
+ * malloc'd refs (mp_refs_free). */
+static char **mp_provisional_refs(int *n)
 {
     static const char *const sections[2] = { MODSYNC_CLAIMS_SECTION, MODSYNC_PENDING_SECTION };
-    char root[MAX_PATH * 4];
-    char (*out)[MP_REF_CAP] = NULL;
+    const char *root = sh_ms_root();
+    char **out = NULL;
     int count = 0, cap = 0;
     size_t prefix = strlen(SH_MODPUBLISH_PENDING_PREFIX);
     *n = 0;
-    if (!sh_ms_root(root, sizeof root)) return NULL;
+    if (!root) return NULL;
     for (int f = 0; f < 2; f++) {
         char *text = NULL;
         size_t size;
@@ -372,8 +382,7 @@ static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
             for (int i = 0; i < member->n; i++) {
                 const char *key = member->keys[i];
                 int seen = 0;
-                if (!key || strncmp(key, SH_MODPUBLISH_PENDING_PREFIX, prefix) || strlen(key) >= MP_REF_CAP ||
-                    strchr(key, '\\')) continue;
+                if (!key || strncmp(key, SH_MODPUBLISH_PENDING_PREFIX, prefix) || strchr(key, '\\')) continue;
                 for (int k = 0; k < count && !seen; k++) seen = !strcmp(out[k], key);
                 if (seen) continue;
                 if (count == cap) {
@@ -383,7 +392,8 @@ static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
                     out = bigger;
                     cap = grown;
                 }
-                strcpy_s(out[count++], MP_REF_CAP, key);
+                if (!(out[count] = sh_text(key))) break;
+                count++;
             }
         }
         if (doc) {
@@ -400,6 +410,12 @@ static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
     return out;
 }
 
+static void mp_refs_free(char **refs, int n)
+{
+    for (int i = 0; refs && i < n; i++) free(refs[i]);
+    free(refs);
+}
+
 /* Upload the builds the store lacks and claim them all (modsync.h). A claim
  * that races the release of one of its builds is refused (409, the archive
  * went with its last claim): the builds are uploaded again, once. */
@@ -408,6 +424,7 @@ static int mp_upload(const char *const *mods, int n, const char *ref, const modn
     if (modsync_upload_builds(mods, n, ref, io, st)) return 1;
     if (st->code != MODNET_E_CONFLICT || (io && io->cancel && *io->cancel)) return 0;
     mp_logf("MODS: publish: a build of '%s' was released while it was claimed; uploading again", ref);
+    modsync_stats_free(st);
     memset(st, 0, sizeof *st);
     return modsync_upload_builds(mods, n, ref, io, st);
 }
@@ -426,9 +443,9 @@ static int mp_job_run(void *context, const modnet_io *io)
         break;
     case JOB_CLAIM:
         job->ok = mp_upload(list, n, job->ref, io, &job->st);
-        if (job->ok && job->provisional[0] && strcmp(job->provisional, job->ref))
+        if (job->ok && job->provisional && job->provisional[0] && strcmp(job->provisional, job->ref))
             job->ok2 = modsync_release(job->provisional, io, &job->st2);
-        else if (!job->ok && job->st.queued && job->provisional[0])
+        else if (!job->ok && job->st.queued && job->provisional && job->provisional[0])
             (void)modsync_pending_link(job->ref, job->provisional);   /* released only after this claim */
         break;
     case JOB_RELEASE: {
@@ -439,7 +456,7 @@ static int mp_job_run(void *context, const modnet_io *io)
     }
     case JOB_LAUNCH: {
         int count = 0;
-        char (*refs)[MP_REF_CAP] = mp_provisional_refs(&count);
+        char **refs = mp_provisional_refs(&count);
         /* A provisional ref's own queued upload or release belongs to a
          * publish that never completed: forgotten here, settled below. */
         for (int i = 0; i < count; i++) modsync_pending_drop(refs[i]);
@@ -452,10 +469,12 @@ static int mp_job_run(void *context, const modnet_io *io)
             if (io && io->cancel && *io->cancel) break;
             if (modsync_pending_waits_on(refs[i])) { job->kept++; continue; }
             /* A claim is released (queued again when the store is busy). */
+            memset(&st, 0, sizeof st);
             (void)modsync_release(refs[i], io, &st);
+            modsync_stats_free(&st);
             job->released++;
         }
-        free(refs);
+        mp_refs_free(refs, count);
         job->left = modsync_pending_count();
         job->ok = 1;
         break;
@@ -525,7 +544,7 @@ static int mp_queue_release(const char *ref, const char *why)
 /* The finished background job: its result lines. */
 static void mp_job_report(mp_job *job)
 {
-    const char *cause = job->st.cause[0] ? job->st.cause : modnet_code_text(job->st.code);
+    const char *cause = mp_cause(&job->st)[0] ? job->st.cause : modnet_code_text(job->st.code);
     switch (job->kind) {
     case JOB_CLAIM:
         if (job->ok)
@@ -536,16 +555,16 @@ static void mp_job_report(mp_job *job)
             mp_logf("MODS: publish: the claim under item '%s' failed: %s%s; the map is published, but other "
                     "players cannot download its mods until it succeeds", job->ref, cause,
                     job->st.queued ? " (queued; retried at the next launch)" : "");
-        if (job->ok && job->provisional[0] && strcmp(job->provisional, job->ref))
+        if (job->ok && job->provisional && job->provisional[0] && strcmp(job->provisional, job->ref))
             mp_logf("MODS: publish: provisional claim '%s' %s", job->provisional,
                     job->ok2 ? "released" : "could not be released; it is retried at the next launch");
-        else if (!job->ok && job->provisional[0])
+        else if (!job->ok && job->provisional && job->provisional[0])
             mp_logf("MODS: publish: provisional claim '%s' kept while the item claim is pending", job->provisional);
         break;
     case JOB_RELEASE:
         if (!job->had_claim) mp_logf("MODS: publish: '%s' had no stored claim; nothing to release", job->ref);
         else if (job->ok) mp_logf("MODS: publish: released the claim for '%s'%s%s", job->ref,
-                                  job->st.cause[0] ? ": " : "", job->st.cause);
+                                  mp_cause(&job->st)[0] ? ": " : "", mp_cause(&job->st));
         else mp_logf("MODS: publish: the release of '%s' failed: %s%s", job->ref, cause,
                      job->st.queued ? " (queued; retried at the next launch)" : "");
         if (job->ok || !job->had_claim) mp_link_forget(job->ref);
@@ -574,7 +593,7 @@ typedef struct mp_hold {
     int ticket;
     int waited;
     mp_job *job;
-    char ref[MP_REF_CAP];
+    char *ref;                                 /* the provisional ref (malloc'd), or NULL */
 } mp_hold;
 
 typedef struct mp_context {
@@ -583,7 +602,7 @@ typedef struct mp_context {
     unsigned long long token;
     int count;
     char (*hashes)[MP_MOD_CAP];
-    char provisional[MP_REF_CAP];
+    char *provisional;                         /* malloc'd, or NULL */
     ULONGLONG at;
 } mp_context;
 
@@ -608,8 +627,9 @@ static void mp_editor_notice(void *editor, const char *text)
 
 static void mp_ctx_clear(int release_provisional, const char *why)
 {
-    if (release_provisional && g_ctx.provisional[0]) (void)mp_queue_release(g_ctx.provisional, why);
+    if (release_provisional && g_ctx.provisional && g_ctx.provisional[0]) (void)mp_queue_release(g_ctx.provisional, why);
     free(g_ctx.hashes);
+    free(g_ctx.provisional);
     memset(&g_ctx, 0, sizeof g_ctx);
 }
 
@@ -619,7 +639,7 @@ static void mp_hold_free(void)
     if (h->ticket && g_ops.release) g_ops.release(g_ops.context, h->ticket);
     /* An upload that ran (or still runs) may have claimed the provisional ref:
      * release it after the job, in order on the worker. */
-    if (h->job && h->ref[0] && (!InterlockedCompareExchange(&h->job->done, 0, 0) || h->job->ok))
+    if (h->job && h->ref && h->ref[0] && (!InterlockedCompareExchange(&h->job->done, 0, 0) || h->job->ok))
         (void)mp_queue_release(h->ref, "the held publish ended before the engine resumed");
     if (h->job) {
         if (InterlockedCompareExchange(&h->job->done, 0, 0)) mp_job_free(h->job);
@@ -630,6 +650,7 @@ static void mp_hold_free(void)
         }
     }
     free(h->hashes);
+    free(h->ref);
     memset(h, 0, sizeof(*h));
 }
 
@@ -657,14 +678,15 @@ int sh_modpublish_holding(void)
     return g_hold.state != HOLD_IDLE;
 }
 
-static void mp_provisional_name(char *out, size_t cap)
+/* A fresh provisional ref (malloc'd), or NULL. */
+static char *mp_provisional_name(void)
 {
     unsigned int a = 0, b = 0;
     if (rand_s(&a) || rand_s(&b)) {
         a = (unsigned)GetTickCount64() ^ GetCurrentProcessId();
         b = (unsigned)(uintptr_t)&a ^ (unsigned)time(NULL);
     }
-    _snprintf_s(out, cap, _TRUNCATE, "%s%08x%08x", SH_MODPUBLISH_PENDING_PREFIX, a, b);
+    return sh_textf("%s%08x%08x", SH_MODPUBLISH_PENDING_PREFIX, a, b);
 }
 
 static unsigned long long mp_token(void *editor)
@@ -711,16 +733,16 @@ int sh_modpublish_after_save(void *editor)
         return 0;
     }
     if (g_save.unreadable) {
-        if (g_save.unreadable_name[0])
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "The map was not published: Snapmap+ cannot read the mod %s in its list. Remove that mod in "
-                        "the Mods tab, save, and publish again.", g_save.unreadable_name);
-        else
-            strcpy_s(line, sizeof line, "The map was not published: its list of mods cannot be read. Save the map "
-                                        "again, then publish it.");
-        mp_logf("MODS: publish refused: %s", line);
+        char *said = g_save.unreadable_name
+            ? sh_textf("The map was not published: Snapmap+ cannot read the mod %s in its list. Remove that mod in "
+                       "the Mods tab, save, and publish again.", g_save.unreadable_name)
+            : NULL;
+        const char *text = said ? said : "The map was not published: its list of mods cannot be read. Save the map "
+                                         "again, then publish it.";
+        mp_logf("MODS: publish refused: %s", text);
         if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
-        mp_editor_notice(editor, line);
+        mp_editor_notice(editor, text);
+        free(said);
         memset(&g_ctx, 0, sizeof g_ctx);
         return 0;
     }
@@ -745,7 +767,15 @@ int sh_modpublish_after_save(void *editor)
     h->editor = editor;
     h->token = token;
     h->save_sequence = g_save.sequence;
-    mp_provisional_name(h->ref, sizeof h->ref);
+    if (!(h->ref = mp_provisional_name())) {
+        free(h->hashes);
+        memset(h, 0, sizeof(*h));
+        mp_log("MODS: publish refused: no memory to name the provisional claim");
+        if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
+        mp_editor_notice(editor, "The map was not published: Snapmap+ ran out of memory preparing its mods. Restart "
+                                 "DOOM and publish again.");
+        return 0;
+    }
     (void)sh_config_get_bool(MP_SETTING, &confirmed, NULL);
     h->state = confirmed ? HOLD_WORKER : HOLD_RAISE;
     mp_logf("MODS: publish held: the map uses %d mod(s), %llu bytes%s", h->count, h->bytes,
@@ -779,7 +809,7 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
             mp_ctx_clear(0, NULL);
             return;
         }
-        strcpy_s(job->provisional, sizeof job->provisional, g_ctx.provisional);
+        job->provisional = g_ctx.provisional ? sh_text(g_ctx.provisional) : NULL;
         mp_queue_push(job);
         mp_logf("MODS: publish: item '%s' revision '%s' published with %d mod(s); claim queued", item_id,
                 revision ? revision : "", g_ctx.count);
@@ -840,9 +870,10 @@ static int mp_link_id(const char *s)
 /* The links document, or a fresh empty one; NULL only without memory. */
 static mpj *mp_links_load(void)
 {
-    char root[MAX_PATH * 4], *text = NULL;
+    const char *root = sh_ms_root();
+    char *text = NULL;
     mpj *doc, *links = NULL;
-    if (sh_ms_root(root, sizeof root) && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1 && text)
+    if (root && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1 && text)
         links = mpj_parse(text, strlen(text));
     free(text);
     if (links && links->type != MPJ_OBJ) { mpj_free(links); links = NULL; }
@@ -856,11 +887,11 @@ static mpj *mp_links_load(void)
 
 static int mp_links_save(const mpj *doc)
 {
-    char root[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     const mpj *links = doc ? mpj_get(doc, "links") : NULL;
     size_t len = 0;
     char *text = links ? mpj_dump(links, &len) : NULL;
-    int ok = text && sh_ms_root(root, sizeof root) && sh_mb_record_put(root, SH_MODPUBLISH_LINKS_SECTION, text);
+    int ok = text && root && sh_mb_record_put(root, SH_MODPUBLISH_LINKS_SECTION, text);
     free(text);
     return ok;
 }
@@ -957,8 +988,10 @@ void sh_modpublish_published_result(unsigned ticket, int ok, const char *const *
         if (count > MP_ANSWER_ITEMS) count = MP_ANSWER_ITEMS;
         a->items = calloc((size_t)count, sizeof(*a->items));
         if (!a->items) { free(a); return; }
+        /* An answer id that is not a plain id of the links' form names no
+         * linked item: it is left out, never cut. */
         for (int i = 0; i < count; i++)
-            if (item_ids[i]) strncpy_s(a->items[a->count++], MP_ID_CAP, item_ids[i], _TRUNCATE);
+            if (item_ids[i] && mp_link_id(item_ids[i])) strcpy_s(a->items[a->count++], MP_ID_CAP, item_ids[i]);
     }
     AcquireSRWLockExclusive(&g_answer_lock);
     a->next = g_answers;
@@ -980,8 +1013,9 @@ void sh_modpublish_deleted(const char *local_id, const char *cloud_id)
     if (!mp_link_id(cloud_id) && !mp_link_id(local_id)) return;
     {
         /* Nothing published from this installation: no links, nothing to do. */
-        char root[MAX_PATH * 4], *text = NULL;
-        int has = sh_ms_root(root, sizeof root) && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1;
+        const char *root = sh_ms_root();
+        char *text = NULL;
+        int has = root && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1;
         free(text);
         if (!has) return;
     }
@@ -1094,21 +1128,21 @@ static void mp_poll_checks(void)
 
 /* ------------------------------------------------------------ copy gate */
 
-static char g_cache_root[MAX_PATH * 4];
+static char *g_cache_root;   /* tests: the cache folder (malloc'd), or NULL for the game's */
 
-static int mp_cache_root(char *out, size_t cap)
+/* The game's published-map cache folder (malloc'd), or NULL. */
+static char *mp_cache_root(void)
 {
     PWSTR known = NULL;
-    char local[MAX_PATH * 4];
-    if (g_cache_root[0]) { strcpy_s(out, cap, g_cache_root); return 1; }
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return 0;
-    if (!WideCharToMultiByte(CP_UTF8, 0, known, -1, local, (int)sizeof local, NULL, NULL)) {
-        CoTaskMemFree(known);
-        return 0;
-    }
+    char *local, *out;
+    if (g_cache_root) return sh_text(g_cache_root);
+    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) || !known) return NULL;
+    local = sh_mb_utf8(known);
     CoTaskMemFree(known);
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\id Software\\DOOM\\base\\doomsnapmaps\\published-maps", local);
-    return 1;
+    if (!local) return NULL;
+    out = sh_textf("%s\\id Software\\DOOM\\base\\doomsnapmaps\\published-maps", local);
+    free(local);
+    return out;
 }
 
 static int mp_plain_id(const char *s)
@@ -1120,30 +1154,33 @@ static int mp_plain_id(const char *s)
     return 1;
 }
 
-int sh_modpublish_cache_path(const char *item_id, const char *revision, char *out, size_t cap)
+char *sh_modpublish_cache_path(const char *item_id, const char *revision)
 {
-    char root[MAX_PATH * 4];
-    if (!out || !cap) return 0;
-    out[0] = 0;
-    if (!mp_plain_id(item_id) || !mp_plain_id(revision) || !mp_cache_root(root, sizeof root)) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\%s_%s_map.decl", root, item_id, revision);
-    return 1;
+    char *root, *out;
+    if (!mp_plain_id(item_id) || !mp_plain_id(revision) || !(root = mp_cache_root())) return NULL;
+    out = sh_textf("%s\\%s_%s_map.decl", root, item_id, revision);
+    free(root);
+    return out;
 }
 
 int sh_modpublish_copy_allowed(const char *item_id, const char *revision)
 {
-    char path[MAX_PATH * 4], size[32], over[32], line[MP_TEXT_CAP];
-    wchar_t wide[MAX_PATH * 4];
+    char *path, size[32], over[32], line[MP_TEXT_CAP];
+    wchar_t *wide;
     WIN32_FILE_ATTRIBUTE_DATA data;
     unsigned long long bytes;
+    int cached;
     if (!g_ops_set || !mp_on_main()) return 1;
-    if (!sh_modpublish_cache_path(item_id, revision, path, sizeof path)) {
+    if (!(path = sh_modpublish_cache_path(item_id, revision))) {
         mp_logf("MODS: copy: map '%s' revision '%s' has no cache path; copied natively", item_id ? item_id : "",
                 revision ? revision : "");
         return 1;
     }
-    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0])) ||
-        !GetFileAttributesExW(wide, GetFileExInfoStandard, &data)) {
+    wide = sh_mb_wpath(path);
+    cached = wide && GetFileAttributesExW(wide, GetFileExInfoStandard, &data);
+    free(wide);
+    free(path);
+    if (!cached) {
         mp_logf("MODS: copy: the published text of '%s' is not cached; copied natively", item_id);
         return 1;
     }
@@ -1166,8 +1203,8 @@ void sh_modpublish_launch(void)
 {
     mp_job *job = mp_job_new(JOB_LAUNCH, NULL, NULL, 0);
     int provisional = 0, pending = modsync_pending_count();
-    char (*refs)[MP_REF_CAP] = mp_provisional_refs(&provisional);
-    free(refs);
+    char **refs = mp_provisional_refs(&provisional);
+    mp_refs_free(refs, provisional);
     if (pending <= 0 && !provisional) { mp_job_free(job); return; }
     if (!job) { mp_log("MODS: launch: no memory to queue the retry"); return; }
     mp_logf("MODS: launch: %d queued upload(s) and %d provisional claim(s) to settle", pending < 0 ? 0 : pending,
@@ -1193,20 +1230,22 @@ static void mp_upload_finished(void)
 {
     mp_hold *h = &g_hold;
     mp_job *job = h->job;
-    char line[MP_TEXT_CAP];
+    char *line;
     void *editor = h->editor;
     if (!job->ok) {
-        const char *cause = job->st.cause[0] ? job->st.cause : modnet_code_text(job->st.code);
-        char reason[200];
-        if (job->st.code == MODNET_E_REFUSED && job->st.cause[0])
+        const char *cause = mp_cause(&job->st)[0] ? job->st.cause : modnet_code_text(job->st.code);
+        if (job->st.code == MODNET_E_REFUSED && mp_cause(&job->st)[0])
             /* The mod store's own sentence, shown alone. */
-            _snprintf_s(line, sizeof line, _TRUNCATE, "The map was not published. %s", job->st.cause);
-        else
-            _snprintf_s(line, sizeof line, _TRUNCATE, "The map was not published: %s.",
-                        sh_reason(SH_REASON_STORE, job->st.code, NULL, 0, reason, sizeof reason));
+            line = sh_textf("The map was not published. %s", job->st.cause);
+        else {
+            char *reason = sh_reason(SH_REASON_STORE, job->st.code, NULL, 0);
+            line = sh_textf("The map was not published: %s.", reason ? reason : "the mod store refused the upload");
+            free(reason);
+        }
         mp_logf("MODS: publish: the upload of %d bundle(s) failed after %u request(s): %s%s", h->count,
                 job->st.requests, cause, job->st.queued ? " (left in the retry queue)" : "");
-        mp_cancel(line, "the upload failed");
+        mp_cancel(line ? line : "The map was not published.", "the upload failed");
+        free(line);
         return;
     }
     mp_logf("MODS: publish: uploaded %d build(s): %u archive(s) sent, %u already stored, %llu bytes, %u request(s), "
@@ -1219,7 +1258,8 @@ static void mp_upload_finished(void)
     g_ctx.count = h->count;
     g_ctx.hashes = h->hashes;
     h->hashes = NULL;
-    strcpy_s(g_ctx.provisional, sizeof g_ctx.provisional, h->ref);
+    g_ctx.provisional = h->ref;
+    h->ref = NULL;
     g_ctx.at = GetTickCount64();
     mp_job_free(h->job);
     h->job = NULL;
@@ -1390,13 +1430,14 @@ void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
 const char *sh_modpublish_test_provisional(void)
 {
-    return g_hold.state != HOLD_IDLE ? g_hold.ref : g_ctx.provisional;
+    const char *p = g_hold.state != HOLD_IDLE ? g_hold.ref : g_ctx.provisional;
+    return p ? p : "";
 }
 int sh_modpublish_test_background_busy(void) { return g_queue != NULL || g_running != NULL; }
 void sh_modpublish_test_set_cache_root(const char *root)
 {
-    if (root) strcpy_s(g_cache_root, sizeof g_cache_root, root);
-    else g_cache_root[0] = 0;
+    free(g_cache_root);
+    g_cache_root = root ? sh_text(root) : NULL;
 }
 #endif
 
@@ -1515,6 +1556,21 @@ static int eng_string(const void *s, char *out, size_t cap)
         out[length] = 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
+}
+
+/* A native idStr's text, whole (malloc'd), or NULL when it does not read. */
+static char *eng_string_dup(const void *s)
+{
+    char *out = NULL;
+    if (!s) return NULL;
+    __try {
+        int length = *(const int *)((const uint8_t *)s + 8);
+        const char *data = *(const char *const *)((const uint8_t *)s + 0x10);
+        if (length < 0 || (length && !data) || !(out = (char *)malloc((size_t)length + 1))) return NULL;
+        if (length) memcpy(out, data, (size_t)length);
+        out[length] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(out); out = NULL; }
+    return out;
 }
 
 /* ------------------------------------------------------------ ops */
@@ -1790,13 +1846,14 @@ static void eng_after_save_detour(void *editor)
 
 static void eng_feed_post_detour(void *edit, const void *model)
 {
-    char id[MP_REF_CAP], revision[MP_REF_CAP];
     if (eng_live()) {
+        char *id = eng_string_dup(model), *revision = eng_string_dup((const uint8_t *)model + 0x30);
         __try {
-            if (eng_string(model, id, sizeof id) && eng_string((const uint8_t *)model + 0x30, revision, sizeof revision))
-                sh_modpublish_feed_post(edit, id, revision);
+            if (id && revision) sh_modpublish_feed_post(edit, id, revision);
             else backend_log("MODS: publish: the published model's id did not read; no claim change");
         } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the feed-post claim faulted"); }
+        free(id);
+        free(revision);
     }
     ((eng_feed_fn)g_eng.original[ENG_FEED_POST])(edit, model);
 }
@@ -1804,12 +1861,13 @@ static void eng_feed_post_detour(void *edit, const void *model)
 /* The MapInfo screen's unpublish success: (screen, context, const idStr &id). */
 static void eng_unpublished_detour(void *screen, void *context, const void *id_string)
 {
-    char id[MP_REF_CAP];
     if (eng_live()) {
+        char *id = eng_string_dup(id_string);
         __try {
-            if (eng_string(id_string, id, sizeof id)) sh_modpublish_unpublished(id);
+            if (id) sh_modpublish_unpublished(id);
             else backend_log("MODS: unpublish: the item id did not read; no release");
         } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: unpublish: the release step faulted"); }
+        free(id);
     }
     ((eng_unpub_fn)g_eng.original[ENG_UNPUBLISHED])(screen, context, id_string);
 }
@@ -1884,16 +1942,20 @@ static const void *eng_browser_model(void *browser)
 
 static int eng_copy_decide(const void *model)
 {
-    char id[MP_REF_CAP], revision[MP_REF_CAP];
+    char *id, *revision;
+    int allowed = 1;
     if (!eng_live() || !model) return 1;
+    id = eng_string_dup(model);
+    revision = eng_string_dup((const uint8_t *)model + 0x30);
     __try {
-        if (!eng_string(model, id, sizeof id) || !eng_string((const uint8_t *)model + 0x30, revision, sizeof revision))
-            return 1;
-        return sh_modpublish_copy_allowed(id, revision);
+        if (id && revision) allowed = sh_modpublish_copy_allowed(id, revision);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: copy: the size gate faulted; the copy continues natively");
-        return 1;
+        allowed = 1;
     }
+    free(id);
+    free(revision);
+    return allowed;
 }
 
 static void eng_mapinfo_copy_detour(void *screen)

@@ -274,8 +274,8 @@ void sh_modserve_set_console(sh_modserve_console_fn fn);
 
 /* The store's memory of the last refused build of a folder (absolute path),
  * so a folder without a product block reports why its build was refused
- * rather than "not built yet". NULL turns it off. */
-typedef void (*sh_modserve_build_cause_fn)(const char *folder, char *out, size_t cap);
+ * rather than "not built yet": the cause, malloc'd, or NULL. NULL turns it off. */
+typedef char *(*sh_modserve_build_cause_fn)(const char *folder);
 void sh_modserve_set_build_cause(sh_modserve_build_cause_fn fn);
 
 /* The model check for the served animWeb at `request`, as a load now would
@@ -283,7 +283,7 @@ void sh_modserve_set_build_cause(sh_modserve_build_cause_fn fn);
  * no bundle serves and the engine cannot find (written to `model`), 0 when
  * every model resolves or the check cannot tell, -1 when `request` is not a
  * served animWeb. */
-int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char *model, size_t cap);
+int sh_modserve_animweb_check(const char *request, const sh_modserve_engine_ops *ops, char **model);
 
 /* Withdraw the file serving `request` (lookups and the probe miss it, a
  * rescan keeps it withdrawn while its bytes are unchanged), logging `why` and
@@ -593,7 +593,7 @@ int sh_modserve_requirements_held(void);
 #define SH_MODSERVE_GATE_INIT_ONLY  (-2)   /* the cvar is settable only on the command line */
 typedef struct sh_modserve_gate_ops {
     void *context;
-    int (*read)(void *context, const char *cvar, char *value, size_t cap);
+    int (*read)(void *context, const char *cvar, char **value);   /* *value: malloc'd, the whole value */
     int (*set)(void *context, const char *cvar, const char *value);
     int (*drain)(void *context);
     int (*command)(void *context, const char *line);
@@ -749,9 +749,9 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  * place; the _in forms take a place and change nothing (a gate counting a
  * map's rows before that map loads).
  *
- * sh_modserve_place_norm: 1 with `out` the place as stored ("" or
- *   "maps\<segment>"; "maps/<segment>" and a bare segment are accepted), 0
- *   when `place` is not one: the segment must be exactly what
+ * sh_modserve_place_norm: the place as stored, malloc'd ("" or
+ *   "maps\<segment>"; "maps/<segment>" and a bare segment are accepted),
+ *   NULL when `place` is not one: the segment must be exactly what
  *   sh_ms_title_segment makes of it (no separator, no dot step, no
  *   character Windows refuses), so a hostile map cannot point outside
  *   mods\maps\.
@@ -762,7 +762,8 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
  *   remembering the place it replaces; sh_modserve_place_restore puts that
  *   back (a parse that failed, a launch that was refused) and returns 1, or
  *   0 when nothing is remembered.
- * sh_modserve_place_get: the loaded map's place.
+ * sh_modserve_place_get: the loaded map's place (malloc'd; NULL when memory
+ *   runs out).
  * Any thread. */
 #define SH_MODSERVE_PLACES    "maps"   /* the places area under the store root */
 /* The cause of a folder in a map's place that the product did not receive:
@@ -771,12 +772,11 @@ int  sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
     "This folder sits among a downloaded map's mods but did not come with the map. Move it out of the maps folder " \
     "into your own mods and press Refresh."
 
-#define SH_MODSERVE_PLACE_CAP 300
-int  sh_modserve_place_norm(const char *place, char *out, size_t cap);
+char *sh_modserve_place_norm(const char *place);
 int  sh_modserve_place_set(const char *place);
 int  sh_modserve_place_load(const char *place);
 int  sh_modserve_place_restore(void);
-void sh_modserve_place_get(char *out, size_t cap);
+char *sh_modserve_place_get(void);
 
 /* Set the mode (SH_MODSERVE_MODE_*): the Play entry sets PLAY
  * (sh_modserve_scope_source with SH_MODSERVE_AT_PLAY), a map load sets PLAY
@@ -809,7 +809,7 @@ typedef struct sh_modserve_scope_info {
     int names_live, shadows_live, surfaces_live;   /* 1 each class is served now */
     int requirements;        /* 1 it has requirements */
     int requirements_live;   /* 1 its requirements are accepted now (whether each cvar is live is the report's) */
-    char editor_path[160];   /* the first editor-time shadow, when automatic */
+    const char *editor_path; /* the first editor-time shadow, when automatic (the index's; NULL when none) */
 } sh_modserve_scope_info;
 
 /* The scope of the admitted bundle `bundle_hash` (in the open map's context). 1 filled, 0 not admitted. */
@@ -817,9 +817,9 @@ int  sh_modserve_bundle_scope(const char *bundle_hash, sh_modserve_scope_info *o
 
 /* A mod the open map uses, named as a player names it: its name (mod.json
  * "name"), its folder, the folder's last part, or its salt, ASCII
- * case-insensitive. 1 with its salt and the name lines use (`label`: its
- * name, else its folder), 0 when the open map uses no such mod. */
-int  sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *label, size_t label_cap);
+ * case-insensitive. 1 with its salt and the name lines use (*label,
+ * malloc'd: its name, else its folder), 0 when the open map uses no such mod. */
+int  sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char **label);
 
 /* 1 when the admitted bundle `bundle_hash`'s edits of game content apply now:
  * map scope is off, the open map declares it, or it is the editor-tweak class
@@ -870,8 +870,8 @@ int  sh_modserve_scope_source(int when);
 /* ------------------------------------------------------------------ queries */
 
 /* 1 installed and admitted, 0 not installed, -1 installed but skipped (the
- * first cause is copied to `cause` when non-NULL). */
-int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_cap);
+ * first cause, malloc'd, in *cause when cause is not NULL). */
+int sh_modserve_bundle_state(const char *bundle_hash, char **cause);
 
 /* The asset rule. A map, rawmap or prefab needs the builds its manifest rows
  * name. A row is SERVED when the build sh_modserve_row_build names for it is
@@ -879,7 +879,7 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
  * the serving index; MISSING when it names none (a stranger's map whose
  * place and root do not hold the row's build: the hold fetches it into the
  * map's place); INCOMPLETE when the build is admitted but a listed name does
- * not resolve. `cause` (when non-NULL) gets the sentence a refusal shows,
+ * not resolve. *cause (when cause is not NULL; malloc'd) gets the sentence a refusal shows,
  * for a MISSING row "This map uses Hell Guards, which is not installed." or
  * "... which is installed but cannot be used: <cause>." (a folder of that
  * salt was skipped), and for an INCOMPLETE one "Hell Guards is installed but
@@ -891,11 +891,11 @@ int sh_modserve_bundle_state(const char *bundle_hash, char *cause, size_t cause_
 #define SH_MODSERVE_ROW_SERVED     1
 #define SH_MODSERVE_ROW_INCOMPLETE 2
 struct sh_modmanifest_row;
-int sh_modserve_row_served(const struct sh_modmanifest_row *row, char *cause, size_t cap);
+int sh_modserve_row_served(const struct sh_modmanifest_row *row, char **cause);
 
-int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char *cause, size_t cap);
+int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char *subject, char **cause);
 int sh_modserve_row_served_in(const struct sh_modmanifest_row *row, const char *place, const char *subject,
-                              char *cause, size_t cap);
+                              char **cause);
 
 /* The build that serves a row now: the one place resolver above, for the
  * loaded map's place, or (sh_modserve_row_build_in) for `place`. 1 with *out
@@ -903,13 +903,15 @@ int sh_modserve_row_served_in(const struct sh_modmanifest_row *row, const char *
  * salt. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], hash[SH_MODSERVE_HASH_HEX + 1];
-    char name[400];                    /* the author's name, "" when none */
-    char folder[260];                  /* its folder below the store root */
-    char place[SH_MODSERVE_PLACE_CAP]; /* "maps\<segment>" for a place's folder, "" at the root */
+    char *name;                        /* the author's name, "" when none (malloc'd) */
+    char *folder;                      /* its folder below the store root (malloc'd) */
+    char *place;                       /* "maps\<segment>" for a place's folder, "" at the root (malloc'd) */
     unsigned long long size;           /* carried bytes, as a manifest row's size */
 } sh_modserve_bundle_ref;
+/* Filled refs hold malloc'd text: release each with sh_modserve_bundle_ref_free. */
 int sh_modserve_row_build(const struct sh_modmanifest_row *row, sh_modserve_bundle_ref *out);
 int sh_modserve_row_build_in(const struct sh_modmanifest_row *row, const char *place, sh_modserve_bundle_ref *out);
+void sh_modserve_bundle_ref_free(sh_modserve_bundle_ref *ref);
 
 /* Map placed logical names (entityDef inherit names, or any decl name a
  * bundle provides) to the installed bundles that provide them, including the
@@ -974,9 +976,10 @@ typedef void (*sh_modserve_bundle_fn)(void *context, const char *id,
                                       const char *hash, int admitted, const char *cause,
                                       int files, int place);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
-/* The bundle at `bundle_hash` as a status line names it: its name and folder
- * ("<name> (mods\<folder>)"), else its folder. 1 found, 0 ("a mod") not. */
-int sh_modserve_bundle_label(const char *bundle_hash, char *out, size_t cap);
+/* The bundle at `bundle_hash` as a status line names it (malloc'd): its name
+ * and folder ("<name> (mods\<folder>)"), else its folder; "a mod" when no
+ * bundle has that hash. */
+char *sh_modserve_bundle_label(const char *bundle_hash);
 
 /* Visit every admitted bundle whose mod.json author block carries keys the
  * product does not read itself (the manifest's "extra", such as "strings" and

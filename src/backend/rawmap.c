@@ -34,6 +34,25 @@
 #include "nav_bake.h"
 #include "nav_regions.h"
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
+#include "../common/text.h"
+
+/* A reason given to a caller's fixed message buffer (the page's slots, the
+ * console commands): whole when it fits, else this sentence, with the whole
+ * reason in the backend log. */
+#define RAWMAP_MSG_OVER "the reason is longer than this message holds; it is in the backend log"
+static void rawmap_msg_put(char *out, int cap, const char *text)
+{
+    if (!out || cap <= 0) return;
+    if (!text) text = "";
+    if (strlen(text) < (size_t)cap) { strcpy_s(out, (size_t)cap, text); return; }
+    {
+        char *line = sh_textf("RAWMAP: %s", text);
+        backend_log(line ? line : "RAWMAP: (a reason too long for its message, and out of memory)");
+        free(line);
+    }
+    if (strlen(RAWMAP_MSG_OVER) < (size_t)cap) strcpy_s(out, (size_t)cap, RAWMAP_MSG_OVER);
+    else out[0] = '\0';
+}
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -164,18 +183,26 @@ static char *held_take(const char *path, size_t *out_len)
 
 static int transport_start_import(const char *path, char *why, size_t why_cap);
 
+/* The text, or "" for none. */
+static const char *rawmap_s(const char *text) { return text ? text : ""; }
+
+/* Set *why (malloc'd, the old one freed) when why is not NULL. */
+static void rawmap_why(char **why, const char *text)
+{
+    if (why) { free(*why); *why = sh_text(text); }
+}
+
 /* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
- * failure, with the reason and next step in `why` when one is given. A .zip
- * not imported yet starts its import off the game's thread (*importing set,
- * NULL returned); the load opens again when it is done.
+ * failure, with the reason and next step in *why (malloc'd) when why is
+ * given. A .zip not imported yet starts its import off the game's thread
+ * (*importing set, NULL returned); the load opens again when it is done.
  */
-static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap, int *importing)
+static char *read_source_file_why(size_t *out_len, char **why, int *importing)
 {
     char buf_path[SH_RAWMAP_PATH_MAX];
     char *held;
     resolve_source_path(buf_path, sizeof buf_path);
     const char *path = buf_path;
-    if (why && why_cap) why[0] = '\0';
     held = held_take(path, out_len);
     if (held) {
         char line[SH_RAWMAP_PATH_MAX + 96];
@@ -184,29 +211,29 @@ static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap, in
         return held;
     }
     if (modexport_is_zip_path(path)) {
-        *importing = transport_start_import(path, why, why_cap);
+        char busy[200] = "";
+        *importing = transport_start_import(path, busy, sizeof busy);
+        if (!*importing) rawmap_why(why, busy);
         return NULL;
     }
 
     HANDLE h = path_open_read(path);
     if (h == INVALID_HANDLE_VALUE) {
-        if (why && why_cap) strncpy_s(why, why_cap, sh_reason_win32(GetLastError(), path, 0), _TRUNCATE);
+        rawmap_why(why, sh_reason_win32(GetLastError(), path, 0));
         return NULL;
     }
 
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (LONGLONG)INT_MAX) {
         CloseHandle(h);
-        if (why && why_cap)
-            strncpy_s(why, why_cap, "the file is empty or larger than 2 GB, so it is not a saved map; save the map again",
-                      _TRUNCATE);
+        rawmap_why(why, "the file is empty or larger than 2 GB, so it is not a saved map; save the map again");
         return NULL;
     }
     size_t n = (size_t)sz.QuadPart;
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);   /* Reserve the trailing NUL. */
     if (!buf) {
         CloseHandle(h);
-        if (why && why_cap) strncpy_s(why, why_cap, "the game ran out of memory reading it; restart the game and try again", _TRUNCATE);
+        rawmap_why(why, "the game ran out of memory reading it; restart the game and try again");
         return NULL;
     }
 
@@ -220,7 +247,7 @@ static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap, in
     CloseHandle(h);
     if (got != n) {
         HeapFree(GetProcessHeap(), 0, buf);
-        if (why && why_cap) strncpy_s(why, why_cap, "the file could not be read to its end; try again", _TRUNCATE);
+        rawmap_why(why, "the file could not be read to its end; try again");
         return NULL;
     }
     buf[n] = '\0';
@@ -278,14 +305,15 @@ static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted
  * the player's own and finds its mods at the root. */
 static void place_prepare_guarded(const char *json, size_t len)
 {
+    char *place = NULL;
     __try {
-        char place[SH_CARRIER_PLACE_CAP];
-        if (sh_carrier_place(json, len, place, sizeof place) != 1) place[0] = 0;
-        (void)sh_modserve_place_load(place);
+        if (sh_carrier_place(json, len, &place) != 1) { free(place); place = NULL; }
+        (void)sh_modserve_place_load(place ? place : "");
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: reading the map's place FAULTED; the map finds its mods at the root");
         (void)sh_modserve_place_load(NULL);
     }
+    free(place);
 }
 
 /* Read the map's settings rows into the settings of the map being parsed and
@@ -618,12 +646,11 @@ static void rawmap_base_name(const char *path, char *out, size_t cap)
 /* The rows the rawmap names that nothing serves, or (size_t)-1 when the
  * check faulted: the map is then refused, never handed to the engine. */
 #define RAWMAP_MISSING_FAULTED ((size_t)-1)
-static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows, char *place,
-                                     size_t place_cap)
+static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows, char **place)
 {
     memset(rows, 0, sizeof *rows);
     __try {
-        return sh_modpub_rawmap_missing(text, len, rows, place, place_cap);
+        return sh_modpub_rawmap_missing(text, len, rows, place);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap's mod check FAULTED; the map is refused");
         memset(rows, 0, sizeof *rows);   /* leaked on purpose: its state is unknown */
@@ -659,82 +686,87 @@ static void prepared_drop(void)
     g_prepared_path[0] = '\0';
 }
 
-int sh_rawmap_prepare_reload(char *why, int cap)
+/* Say `sentence` (malloc'd, taken) to the player, note it, and hand it to
+ * *why; returns 0 (the reload does not start). */
+static int rawmap_reload_refused(char *sentence, const char *state, const char *path, size_t len, int mods, char **why)
 {
-    char path[SH_RAWMAP_PATH_MAX], name[SH_RAWMAP_PATH_MAX], cause[MODEXPORT_CAUSE_MAX], sentence[MODEXPORT_CAUSE_MAX + MAX_PATH];
-    char place[SH_MODPUB_PLACE_CAP];
+    const char *said = sentence ? sentence : "The rawmap was not opened.";
+    rawmap_tell(said);
+    RAWMAP_DIAG(0, state, path, 0, said, len, mods);
+    (void)state; (void)len; (void)mods;
+    if (why) { free(*why); *why = sentence; }
+    else free(sentence);
+    return 0;
+}
+
+int sh_rawmap_prepare_reload(char **why)
+{
+    char path[SH_RAWMAP_PATH_MAX], name[SH_RAWMAP_PATH_MAX];
+    char *place = NULL, *cause = NULL, *line;
     sh_modmanifest_list rows;
     size_t len = 0, missing;
     char *text;
     int held, importing = 0;
 
-    if (why && cap > 0) why[0] = '\0';
+    if (why) *why = NULL;
     prepared_drop();
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
     /* A .zip is imported off the game's thread first: its mods install before
      * the rows are counted, and the load opens again when the import is done. */
-    text = read_source_file_why(&len, cause, sizeof cause, &importing);
-    if (text == NULL && importing) {
-        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "Importing %s and its mods; it opens when that is done.", name);
-        rawmap_tell(sentence);
-        RAWMAP_DIAG(0, "importing", path, 0, sentence, 0, 0);
-        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
-        return 0;
-    }
+    text = read_source_file_why(&len, &cause, &importing);
+    if (text == NULL && importing)
+        return rawmap_reload_refused(sh_textf("Importing %s and its mods; it opens when that is done.", name),
+                                     "importing", path, 0, 0, why);
     if (text == NULL) {
-        char line[SH_RAWMAP_PATH_MAX + MODEXPORT_CAUSE_MAX + 96];
-        if (!cause[0]) strcpy_s(cause, sizeof cause, "the file could not be read; try again");
-        _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: open refused -- %s was not opened: %s", path, cause);
-        backend_log(line);
+        if (!cause || !cause[0]) rawmap_why(&cause, "the file could not be read; try again");
+        line = sh_textf("RAWMAP: open refused -- %s was not opened: %s", path, rawmap_s(cause));
+        backend_log(line ? line : "RAWMAP: open refused");
+        free(line);
         /* The importer's or Windows' own reason and next step reach the player
          * (console and toast): the page's Load Rawmap toast was shown before
          * this frame ran. */
-        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s.", name, cause);
-        rawmap_tell(sentence);
-        RAWMAP_DIAG(0, "refused", path, 0, sentence, 0, 0);
-        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
-        return 0;
+        line = sh_textf("%s was not opened: %s.", name, rawmap_s(cause));
+        free(cause);
+        return rawmap_reload_refused(line, "refused", path, 0, 0, why);
     }
-    missing = rawmap_missing_guarded(text, len, &rows, place, sizeof place);
+    free(cause);
+    missing = rawmap_missing_guarded(text, len, &rows, &place);
     if (missing == RAWMAP_MISSING_FAULTED) {
         HeapFree(GetProcessHeap(), 0, text);
-        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s", name, RAWMAP_CHECK_FAULTED);
-        rawmap_tell(sentence);
-        RAWMAP_DIAG(0, "refused", path, 0, sentence, len, 0);
-        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
-        return 0;
+        return rawmap_reload_refused(sh_textf("%s was not opened: %s", name, RAWMAP_CHECK_FAULTED), "refused", path, len,
+                                     0, why);
     }
     /* A rawmap that came with its mods follows "Play maps whose mods include
      * scripts" at every open, however its mods got here. */
-    if ((held = rawmap_scripts_off_guarded(&rows, place)) != 0) {
+    if ((held = rawmap_scripts_off_guarded(&rows, rawmap_s(place))) != 0) {
         sh_modmanifest_list_free(&rows);
         HeapFree(GetProcessHeap(), 0, text);
-        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, held < 0 ? "%s was not opened: %s" : "%s was not opened. %s",
-                    name, held < 0 ? RAWMAP_CHECK_FAULTED : SH_MODUI_SCRIPTS_OFF);
-        rawmap_tell(sentence);
-        RAWMAP_DIAG(0, "refused", path, 0, sentence, len, 0);
-        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
-        return 0;
+        free(place);
+        return rawmap_reload_refused(sh_textf(held < 0 ? "%s was not opened: %s" : "%s was not opened. %s", name,
+                                              held < 0 ? RAWMAP_CHECK_FAULTED : SH_MODUI_SCRIPTS_OFF),
+                                     "refused", path, len, 0, why);
     }
     if (missing) {
-        char line[SH_RAWMAP_PATH_MAX + 128];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "RAWMAP: open held -- %s names %u mod(s) that are not installed; the engine never sees it",
-                    path, (unsigned)missing);
-        backend_log(line);
-        held = rawmap_hold_guarded(&rows, name, place);
+        char *sentence;
+        line = sh_textf("RAWMAP: open held -- %s names %u mod(s) that are not installed; the engine never sees it",
+                        path, (unsigned)missing);
+        backend_log(line ? line : "RAWMAP: open held -- the map names mods that are not installed");
+        free(line);
+        held = rawmap_hold_guarded(&rows, name, rawmap_s(place));
         sh_modmanifest_list_free(&rows);
+        free(place);
         /* Its resume parses these bytes (a ZIP is not imported again). */
         if (held > 0) held_keep(text, len, path);
         else HeapFree(GetProcessHeap(), 0, text);
-        if (why && cap > 0)
-            _snprintf_s(why, (size_t)cap, _TRUNCATE, held > 0
-                        ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
-                        : "%s needs %u mod(s) you do not have, so it was not opened", name, (unsigned)missing);
-        RAWMAP_DIAG(0, "refused", path, 0, why && cap > 0 ? why : "", len, (int)missing);
+        sentence = sh_textf(held > 0 ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
+                                     : "%s needs %u mod(s) you do not have, so it was not opened", name, (unsigned)missing);
+        RAWMAP_DIAG(0, "refused", path, 0, rawmap_s(sentence), len, (int)missing);
+        if (why) *why = sentence;
+        else free(sentence);
         return 0;
     }
+    free(place);
     RAWMAP_DIAG(0, "opening", path, 0, "", len, (int)rows.count);
     sh_modmanifest_list_free(&rows);
     g_prepared_len = len;
@@ -763,10 +795,10 @@ void sh_rawmap_reload_done(int rc, int faulted)
     prepared_drop();
 }
 
-int sh_rawmap_reopen_after_mods(char *note, size_t cap)
+int sh_rawmap_reopen_after_mods(char **note)
 {
     char path[SH_RAWMAP_PATH_MAX], name[SH_RAWMAP_PATH_MAX], msg[192] = "", line[SH_RAWMAP_PATH_MAX + 256];
-    if (note && cap) note[0] = '\0';
+    if (note) *note = NULL;
     resolve_source_path(path, sizeof path);
     rawmap_base_name(path, name, sizeof name);
     held_mark_ready(path);   /* the reload below parses the bytes the hold checked */
@@ -778,10 +810,9 @@ int sh_rawmap_reopen_after_mods(char *note, size_t cap)
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "RAWMAP: %s not reopened after its mods were installed: %s", path, msg);
     backend_log(line);
-    if (note && cap)
-        _snprintf_s(note, cap, _TRUNCATE,
-                    "The mods are installed. Open a map in the editor, then load %s again from File > Load Rawmap.",
-                    name);
+    if (note)
+        *note = sh_textf("The mods are installed. Open a map in the editor, then load %s again from File > Load Rawmap.",
+                         name);
     return 1;
 }
 
@@ -1027,22 +1058,32 @@ void sh_rawmap_set_notify(void (*toast)(const char *title, const char *text), vo
  * reported from inside the engine's serializer, which is no place to raise a
  * toast. One slot; a newer save's sentence replaces an unshown one. */
 static SRWLOCK g_tell_lock = SRWLOCK_INIT;
-static char g_tell[MODEXPORT_CAUSE_MAX + MAX_PATH];
+static char *g_tell;                        /* the sentence, whole (malloc'd), or NULL */
 static volatile LONG g_tell_pending;
 static volatile LONG g_tell_console_only;   /* the page shows its own toast for this one */
 static const char *volatile g_tell_title = "Rawmap";
 
-static void tell_titled(const char *title, const char *text)
+/* Hold `text` (malloc'd, taken) as the sentence the main tick says. */
+static void tell_hold(const char *title, char *text, int console_only)
 {
-    char line[sizeof g_tell + 32];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", title, text);
-    backend_log(line);
+    char *old;
+    if (!text) return;
     AcquireSRWLockExclusive(&g_tell_lock);
-    strncpy_s(g_tell, sizeof g_tell, text, _TRUNCATE);
+    old = g_tell;
+    g_tell = text;
     g_tell_title = title;
     ReleaseSRWLockExclusive(&g_tell_lock);
-    InterlockedExchange(&g_tell_console_only, 0);
+    free(old);
+    InterlockedExchange(&g_tell_console_only, console_only);
     InterlockedExchange(&g_tell_pending, 1);
+}
+
+static void tell_titled(const char *title, const char *text)
+{
+    char *line = sh_textf("%s: %s", title, text);
+    backend_log(line ? line : title);
+    free(line);
+    tell_hold(title, sh_text(text), 0);
 }
 
 static void rawmap_tell(const char *text) { tell_titled("Rawmap", text); }
@@ -1057,33 +1098,31 @@ void sh_rawmap_tell(const char *text)
  * Import's "The prefab was not imported: ..." line. */
 static void rawmap_tell_load_refused(const char *path, const char *reason)
 {
-    char line[900];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: load of %s refused: %s", path ? path : "", reason ? reason : "");
-    backend_log(line);
-    AcquireSRWLockExclusive(&g_tell_lock);
-    _snprintf_s(g_tell, sizeof g_tell, _TRUNCATE, "The rawmap was not loaded: %s.", reason && reason[0] ? reason : "it cannot be read");
-    g_tell_title = "Rawmap";
-    ReleaseSRWLockExclusive(&g_tell_lock);
-    InterlockedExchange(&g_tell_console_only, 1);
-    InterlockedExchange(&g_tell_pending, 1);
+    char *line = sh_textf("RAWMAP: load of %s refused: %s", path ? path : "", reason ? reason : "");
+    backend_log(line ? line : "RAWMAP: a load was refused");
+    free(line);
+    tell_hold("Rawmap", sh_textf("The rawmap was not loaded: %s.", reason && reason[0] ? reason : "it cannot be read"), 1);
 }
 
 static void transport_poll(void);
 
 void sh_rawmap_poll_main(void)
 {
-    char text[sizeof g_tell];
+    char *text;
     const char *title;
     void (*toast)(const char *, const char *) = g_notify_toast;
     void (*print)(const char *) = g_notify_print;
     transport_poll();
     if (!InterlockedExchange(&g_tell_pending, 0)) return;
-    AcquireSRWLockShared(&g_tell_lock);
-    strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
+    AcquireSRWLockExclusive(&g_tell_lock);
+    text = g_tell;
+    g_tell = NULL;
     title = g_tell_title;
-    ReleaseSRWLockShared(&g_tell_lock);
+    ReleaseSRWLockExclusive(&g_tell_lock);
+    if (!text) return;
     if (print) print(text);
     if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast(title, text);
+    free(text);
 }
 
 void sh_rawmap_last_save(sh_rawmap_save_report *out)
@@ -1091,7 +1130,15 @@ void sh_rawmap_last_save(sh_rawmap_save_report *out)
     if (!out) return;
     AcquireSRWLockShared(&g_report_lock);
     *out = g_report;
+    out->zip_error = g_report.zip_error ? sh_text(g_report.zip_error) : NULL;
     ReleaseSRWLockShared(&g_report_lock);
+}
+
+void sh_rawmap_save_report_free(sh_rawmap_save_report *r)
+{
+    if (!r) return;
+    free(r->zip_error);
+    r->zip_error = NULL;
 }
 
 int sh_rawmap_open_map_mods(void)
@@ -1139,16 +1186,16 @@ static struct {
     unsigned mods;
     unsigned long long json_bytes, bytes;
     char json[SH_RAWMAP_PATH_MAX];    /* a companion export's .json */
-    char cause[MODEXPORT_CAUSE_MAX];
+    char *cause;                      /* the importer's or exporter's refusal (malloc'd), or NULL */
 } g_rt;
 
 static DWORD WINAPI transport_main(void *unused)
 {
     (void)unused;
     if (g_rt.kind == RT_IMPORT) {
-        g_rt.data = modexport_read_text_report(g_rt.path, &g_rt.len, g_rt.cause, sizeof g_rt.cause);
+        g_rt.data = modexport_read_text_report(g_rt.path, &g_rt.len, &g_rt.cause);
     } else {
-        g_rt.bytes = modexport_write_text_report(g_rt.data, g_rt.len, g_rt.path, NULL, g_rt.cause, sizeof g_rt.cause);
+        g_rt.bytes = modexport_write_text_report(g_rt.data, g_rt.len, g_rt.path, NULL, &g_rt.cause);
     }
     MemoryBarrier();
     InterlockedExchange(&g_rt.state, RT_DONE);
@@ -1178,7 +1225,8 @@ static int transport_start(int kind, const char *path, char *data, size_t len, c
     g_rt.data = data;
     g_rt.len = len;
     g_rt.bytes = 0;
-    g_rt.cause[0] = 0;
+    free(g_rt.cause);
+    g_rt.cause = NULL;
     t = CreateThread(NULL, 0, transport_main, NULL, 0, NULL);
     if (!t) {
         if (data) HeapFree(GetProcessHeap(), 0, data);
@@ -1204,37 +1252,45 @@ static char *transport_copy(const char *data, size_t len)
     return copy;
 }
 
+/* Record the report (its zip_error, malloc'd, is taken). */
 static void report_set(sh_rawmap_save_report *r)
 {
+    char *old;
     AcquireSRWLockExclusive(&g_report_lock);
     r->sequence = g_report.sequence + 1;
+    old = g_report.zip_error;
     g_report = *r;
     ReleaseSRWLockExclusive(&g_report_lock);
+    free(old);
+    r->zip_error = NULL;
+}
+
+/* Say `text` (malloc'd) and free it. */
+static void rawmap_tell_free(char *text)
+{
+    if (text) rawmap_tell(text);
+    free(text);
 }
 
 /* The main tick's part: a finished job's result. */
 static void transport_poll(void)
 {
-    char name[SH_RAWMAP_PATH_MAX], text[MODEXPORT_CAUSE_MAX + SH_RAWMAP_PATH_MAX + 160], msg[192] = "";
+    char name[SH_RAWMAP_PATH_MAX], msg[192] = "", *text = NULL;
     if (InterlockedCompareExchange(&g_rt.state, 0, 0) != RT_DONE) return;
     MemoryBarrier();
     rawmap_base_name(g_rt.path, name, sizeof name);
     if (g_rt.kind == RT_IMPORT) {
         if (!g_rt.data) {
-            if (!g_rt.cause[0]) strcpy_s(g_rt.cause, sizeof g_rt.cause, "the file could not be read; try again");
-            _snprintf_s(text, sizeof text, _TRUNCATE, "%s was not opened: %s.", name, g_rt.cause);
-            rawmap_tell(text);
+            rawmap_tell_free(sh_textf("%s was not opened: %s.", name,
+                                      g_rt.cause && g_rt.cause[0] ? g_rt.cause : "the file could not be read; try again"));
         } else {
             /* The load opens again and parses exactly what was imported. */
             held_keep(g_rt.data, g_rt.len, g_rt.path);
             held_mark_ready(g_rt.path);
             g_rt.data = NULL;
-            if (!sh_editor_frame_request_reload(msg, (int)sizeof msg)) {
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "%s and its mods are imported, but it could not be opened now (%s). Load it again from "
-                            "File > Load Rawmap.", name, msg[0] ? msg : "the editor is busy");
-                rawmap_tell(text);
-            }
+            if (!sh_editor_frame_request_reload(msg, (int)sizeof msg))
+                rawmap_tell_free(sh_textf("%s and its mods are imported, but it could not be opened now (%s). Load it "
+                                          "again from File > Load Rawmap.", name, msg[0] ? msg : "the editor is busy"));
         }
     } else {
         sh_rawmap_save_report r;
@@ -1247,25 +1303,22 @@ static void transport_poll(void)
             r.json_bytes = g_rt.json_bytes;
         }
         if (!g_rt.bytes) {
-            strncpy_s(r.zip_error, sizeof r.zip_error, g_rt.cause[0] ? g_rt.cause : "the export could not be written",
-                      _TRUNCATE);
+            r.zip_error = sh_text(g_rt.cause && g_rt.cause[0] ? g_rt.cause : "the export could not be written");
             if (g_rt.kind == RT_EXPORT_BESIDE)
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "This map uses %u mod%s, but %s could not be written (%s). The .json alone will not load "
-                            "for others.", r.mods, r.mods == 1 ? "" : "s", name, r.zip_error);
+                text = sh_textf("This map uses %u mod%s, but %s could not be written (%s). The .json alone will not load "
+                                "for others.", r.mods, r.mods == 1 ? "" : "s", name, r.zip_error ? r.zip_error : "");
             else
-                _snprintf_s(text, sizeof text, _TRUNCATE, "%s could not be written: %s.", name, r.zip_error);
+                text = sh_textf("%s could not be written: %s.", name, r.zip_error ? r.zip_error : "");
         } else if (g_rt.kind == RT_EXPORT_BESIDE)
-            _snprintf_s(text, sizeof text, _TRUNCATE,
-                        "This map uses %u mod%s; share %s, the .json alone will not load for others.", r.mods,
-                        r.mods == 1 ? "" : "s", name);
+            text = sh_textf("This map uses %u mod%s; share %s, the .json alone will not load for others.", r.mods,
+                            r.mods == 1 ? "" : "s", name);
         else if (r.mods)
-            _snprintf_s(text, sizeof text, _TRUNCATE, "This map uses %u mod%s; %s carries %s, so share that one file.",
-                        r.mods, r.mods == 1 ? "" : "s", name, r.mods == 1 ? "it" : "them");
+            text = sh_textf("This map uses %u mod%s; %s carries %s, so share that one file.",
+                            r.mods, r.mods == 1 ? "" : "s", name, r.mods == 1 ? "it" : "them");
         else
-            _snprintf_s(text, sizeof text, _TRUNCATE, "Saved the open map to %s.", name);
+            text = sh_textf("Saved the open map to %s.", name);
         report_set(&r);
-        rawmap_tell(text);
+        rawmap_tell_free(text);
         if (g_rt.data) HeapFree(GetProcessHeap(), 0, g_rt.data);
         g_rt.data = NULL;
     }
@@ -1319,7 +1372,7 @@ static void rawmap_after_write(const char *data, size_t len, const char *path, u
         }
         if (!copy) strcpy_s(why, sizeof why, "the game ran out of memory");
         rawmap_base_name(r.zip, name, sizeof name);
-        strncpy_s(r.zip_error, sizeof r.zip_error, why, _TRUNCATE);
+        r.zip_error = sh_text(why);
         _snprintf_s(text, sizeof text, _TRUNCATE,
                     "This map uses %u mod%s, but %s was not written (%s). The .json alone will not load for others.",
                     r.mods, r.mods == 1 ? "" : "s", name, why);
@@ -2044,13 +2097,16 @@ static void place_on_save(void *out_idstr)
 {
     const char *data = NULL;
     int len = 0;
-    char *body = NULL, place[SH_MODSERVE_PLACE_CAP], err[96] = "";
+    char *body = NULL, *place, err[96] = "";
     const char *segment;
     size_t body_len = 0;
 
     if (!g_idstr_assign || out_idstr == NULL) return;
     if (!read_out_idstr(out_idstr, &data, &len)) return;
-    sh_modserve_place_get(place, sizeof place);
+    if (!(place = sh_modserve_place_get())) {
+        backend_log("MODS: the map's place was not saved (out of memory); it reopens finding its mods at the root");
+        return;
+    }
     segment = place[0] ? place + sizeof SH_MODSERVE_PLACES : NULL;
     __try {
         body = sh_carrier_put_place(data, (size_t)len, segment, &body_len, err, sizeof err);
@@ -2058,6 +2114,7 @@ static void place_on_save(void *out_idstr)
         body = NULL;
         strcpy_s(err, sizeof err, "it faulted");
     }
+    free(place);
     if (body == NULL) {
         if (err[0]) {
             char line[200];
@@ -2288,6 +2345,20 @@ int sh_rawmap_looks_like_rawmap(const char *path)
     return found;
 }
 
+/* sh_rawmap_validate_source with the reason whole in *why (malloc'd). */
+static int validate_source_why(const char *path, char **why)
+{
+    int ok;
+    if (why) *why = NULL;
+    if (path && path[0] && modexport_is_zip_path(path)) return modexport_validate_source(path, why);
+    {
+        char msg[SH_RAWMAP_PATH_MAX + 256];
+        ok = sh_rawmap_validate_source(path, msg, (int)sizeof msg);
+        if (why) *why = sh_text(ok ? "ok" : msg);
+    }
+    return ok;
+}
+
 int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
 {
     HANDLE h;
@@ -2301,7 +2372,13 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "no path given", _TRUNCATE);
         return 0;
     }
-    if (modexport_is_zip_path(path)) return modexport_validate_source(path, out_msg, msg_capacity);
+    if (modexport_is_zip_path(path)) {
+        char *why = NULL;
+        int ok = modexport_validate_source(path, &why);
+        rawmap_msg_put(out_msg, msg_capacity, why);
+        free(why);
+        return ok;
+    }
 
     h = path_open_read(path);
     if (h == INVALID_HANDLE_VALUE) {
@@ -2379,7 +2456,7 @@ int sh_rawmap_source_ok(char *out_msg, int msg_capacity)
 
 int sh_rawmap_open_now(const char *path, char *out_msg, int msg_capacity)
 {
-    char reason[MODEXPORT_CAUSE_MAX];
+    char *reason = NULL;
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
     if (!sh_rawmap_load_is_safe()) {
         if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, RAWMAP_OPEN_UNSAFE, _TRUNCATE);
@@ -2388,12 +2465,14 @@ int sh_rawmap_open_now(const char *path, char *out_msg, int msg_capacity)
     if (path && path[0]) {
         /* Nothing is remembered for later: a file that cannot open now is refused now. */
         if (!sh_editor_frame_can_reload(out_msg, msg_capacity)) return 0;
-        if (!sh_rawmap_validate_source(path, reason, (int)sizeof reason)) {
-            if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
+        if (!validate_source_why(path, &reason)) {
+            rawmap_msg_put(out_msg, msg_capacity, reason);
             rawmap_tell_load_refused(path, reason);
-            RAWMAP_DIAG(1, "refused", path, 0, reason, 0, 0);
+            RAWMAP_DIAG(1, "refused", path, 0, reason ? reason : "", 0, 0);
+            free(reason);
             return 0;
         }
+        free(reason);
         if (!sh_rawmap_swap_set_source(path)) {
             if (out_msg && msg_capacity > 0)
                 strncpy_s(out_msg, (size_t)msg_capacity, "that path is too long to use", _TRUNCATE);
@@ -2418,7 +2497,8 @@ static struct {
     unsigned long opens, seq;
     int faulted, rc, mods;
     size_t bytes;
-    char state[16], path[SH_RAWMAP_PATH_MAX], reason[MODEXPORT_CAUSE_MAX + MAX_PATH];
+    char state[16], path[SH_RAWMAP_PATH_MAX];
+    char *reason;   /* whole (malloc'd), or NULL */
 } g_diag;
 
 /* new_seq starts a request (sh_rawmap_open_now); later notes update it. mods < 0 keeps the count. */
@@ -2428,12 +2508,13 @@ static void rawmap_diag_note(int new_seq, const char *state, const char *path, i
     AcquireSRWLockExclusive(&g_diag_lock);
     if (new_seq || !g_diag.seq) {
         g_diag.seq++;
-        g_diag.bytes = 0; g_diag.mods = 0; g_diag.rc = 0; g_diag.reason[0] = '\0';
+        g_diag.bytes = 0; g_diag.mods = 0; g_diag.rc = 0;
     }
     strncpy_s(g_diag.state, sizeof g_diag.state, state, _TRUNCATE);
     if (path && path[0]) strncpy_s(g_diag.path, sizeof g_diag.path, path, _TRUNCATE);
     g_diag.rc = rc;
-    strncpy_s(g_diag.reason, sizeof g_diag.reason, reason ? reason : "", _TRUNCATE);
+    free(g_diag.reason);
+    g_diag.reason = sh_text(reason ? reason : "");
     if (bytes) g_diag.bytes = bytes;
     if (mods >= 0) g_diag.mods = mods;
     if (!strcmp(state, "opened")) g_diag.opens++;
@@ -2443,19 +2524,24 @@ static void rawmap_diag_note(int new_seq, const char *state, const char *path, i
 
 int sh_rawmap_diag_status(char *out, size_t cap)
 {
-    char path[SH_RAWMAP_PATH_MAX * 2], reason[sizeof g_diag.reason * 2];
+    char path[SH_RAWMAP_PATH_MAX * 2], *reason;
+    size_t rcap;
     int n, pending;
     if (!out || !cap) return -1;
     AcquireSRWLockShared(&g_diag_lock);
     if (!json_escape_into(path, sizeof path, g_diag.path)) path[0] = '\0';
-    if (!json_escape_into(reason, sizeof reason, g_diag.reason)) reason[0] = '\0';
+    /* Every byte escapes to at most six. */
+    rcap = (g_diag.reason ? strlen(g_diag.reason) : 0) * 6 + 1;
+    if ((reason = (char *)malloc(rcap)) != NULL && !json_escape_into(reason, rcap, g_diag.reason ? g_diag.reason : ""))
+        reason[0] = '\0';
     pending = !strcmp(g_diag.state, "queued") || !strcmp(g_diag.state, "opening");
     n = _snprintf_s(out, cap, _TRUNCATE,
         "{\"opens\":%lu,\"generation\":%lu,\"pending\":%d,\"faulted\":%d,\"last\":{\"seq\":%lu,"
         "\"path\":\"%s\",\"state\":\"%s\",\"rc\":%d,\"reason\":\"%s\",\"bytes\":%llu,\"mods\":%d}}",
         g_diag.opens, sh_rawmap_load_generation(), pending, g_diag.faulted, g_diag.seq, path,
-        g_diag.seq ? g_diag.state : "", g_diag.rc, reason, (unsigned long long)g_diag.bytes, g_diag.mods);
+        g_diag.seq ? g_diag.state : "", g_diag.rc, reason ? reason : "", (unsigned long long)g_diag.bytes, g_diag.mods);
     ReleaseSRWLockShared(&g_diag_lock);
+    free(reason);
     return n;
 }
 #endif
@@ -2464,7 +2550,8 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
     char load_path[SH_RAWMAP_PATH_MAX], save_path[SH_RAWMAP_PATH_MAX];
     char load_esc[SH_RAWMAP_PATH_MAX * 2], save_esc[SH_RAWMAP_PATH_MAX * 2], target_esc[SH_RAWMAP_PATH_MAX * 2];
-    char json_esc[SH_RAWMAP_PATH_MAX * 2], zip_esc[SH_RAWMAP_PATH_MAX * 2], err_esc[512];
+    char json_esc[SH_RAWMAP_PATH_MAX * 2], zip_esc[SH_RAWMAP_PATH_MAX * 2], *err_esc;
+    size_t err_cap;
     char target[SH_RAWMAP_PATH_MAX] = "";
     sh_rawmap_save_report last;
     int written, tail;
@@ -2482,7 +2569,12 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     sh_rawmap_last_save(&last);
     if (!json_escape_into(json_esc, sizeof json_esc, last.json)) json_esc[0] = '\0';
     if (!json_escape_into(zip_esc, sizeof zip_esc, last.zip)) zip_esc[0] = '\0';
-    if (!json_escape_into(err_esc, sizeof err_esc, last.zip_error)) err_esc[0] = '\0';
+    /* Every byte escapes to at most six. */
+    err_cap = (last.zip_error ? strlen(last.zip_error) : 0) * 6 + 1;
+    if ((err_esc = (char *)malloc(err_cap)) != NULL &&
+        !json_escape_into(err_esc, err_cap, last.zip_error ? last.zip_error : ""))
+        err_esc[0] = '\0';
+    sh_rawmap_save_report_free(&last);
 
     /* Paths are UTF-8 (the page reads the status as UTF-8). `saveTarget` is the
      * file Save writes to, or "" for the default; it rides the status because
@@ -2499,7 +2591,8 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     tail = _snprintf_s(out_json + written - 1, (size_t)(out_capacity - written + 1), _TRUNCATE,
         ",\"lastJson\":\"%s\",\"lastJsonBytes\":%llu,\"lastZip\":\"%s\",\"lastZipBytes\":%llu,"
         "\"lastMods\":%u,\"lastZipError\":\"%s\",\"mapMods\":%d}",
-        json_esc, last.json_bytes, zip_esc, last.zip_bytes, last.mods, err_esc, sh_rawmap_open_map_mods());
+        json_esc, last.json_bytes, zip_esc, last.zip_bytes, last.mods, err_esc ? err_esc : "", sh_rawmap_open_map_mods());
+    free(err_esc);
     if (tail > 0) written += tail - 1;
     else { out_json[written - 1] = '}'; out_json[written] = '\0'; }
 
@@ -2514,7 +2607,7 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 static int slot_rawmap_configure(sh_iface *self, const char *load_path, const char *save_path,
                                  int arm, char *out_msg, int msg_capacity)
 {
-    char reason[MODEXPORT_CAUSE_MAX];
+    char *reason = NULL;
     int ok = 1;
 
     (void)self;
@@ -2533,11 +2626,14 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
                 return 0;
             }
             if (arm == 2 && !sh_editor_frame_can_reload(out_msg, msg_capacity)) return 0;
-            if (!sh_rawmap_validate_source(load_path, reason, (int)sizeof reason)) {
-                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
+            if (!validate_source_why(load_path, &reason)) {
+                rawmap_msg_put(out_msg, msg_capacity, reason);
                 rawmap_tell_load_refused(load_path, reason);
+                free(reason);
                 return 0;
             }
+            free(reason);
+            reason = NULL;
             if (!sh_rawmap_swap_set_source(load_path)) {
                 if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "that path is too long to use", _TRUNCATE);
                 return 0;

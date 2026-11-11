@@ -50,6 +50,7 @@
 #include "plain_reason.h"
 #include "modmanifest.h"
 #include "map_carrier.h"
+#include "../common/text.h"
 
 /* The fetch and the worker come from modsync.c and modnet.c: the fetch
  * downloads the build's archive, verifies it against the row and unpacks it
@@ -67,10 +68,13 @@
 #define PUB_RAISE_TICKS     600     /* about ten seconds at 60 Hz */
 #define PUB_PROGRESS_MS     2000ull
 #define PUB_SEEN_MAX        16
-#define PUB_ID_CAP          96
-#define PUB_TITLE_CAP       160     /* a map's title, as its place is named after it */
-#define PUB_TEXT_CAP        256     /* the native dialog body */
-#define PUB_CAUSE_CAP       400     /* the asset rule's sentence for one row */
+/* The engine's dialog: its descriptor carries 255 bytes of text
+ * (engine_dialog.c). Every other text here is a heap string of its own
+ * length; a notice longer than the dialog holds is said whole on the console
+ * and the dialog says where it is (pub_poll_notice). */
+#define PUB_TEXT_CAP        256
+#define PUB_DIALOG_OVER     "This message is longer than the 255 bytes the game's dialog holds (the game's limit); " \
+                            "it is on the console."
 
 enum { PUB_DIALOG_PENDING = 0, PUB_DIALOG_ACCEPTED = 1 };
 enum { HOLD_IDLE = 0, HOLD_RAISE, HOLD_ASKING, HOLD_FETCHING, HOLD_PROBING };
@@ -87,13 +91,17 @@ static void pub_log(const char *line)
 
 static void pub_logf(const char *fmt, ...)
 {
-    char line[512];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    pub_log(line);
+    pub_log(line ? line : "MODS: (out of memory)");
+    free(line);
 }
+
+/* The text, or "" for none. */
+static const char *pub_s(const char *text) { return text ? text : ""; }
 
 static void pub_print(const char *line);
 static void pub_deny(const int *verdicts, const sh_modpub_probe *probes, const char *detail, const char *why);
@@ -129,7 +137,7 @@ typedef struct pub_record {
     unsigned long sequence;
     unsigned long frame;      /* g_frame when it was made: a gate uses only a record of its own frame */
     int repeat;               /* the held map parsed again: this launch is held with the running hold */
-    char place[SH_MODPUB_PLACE_CAP];   /* the place the text records ("" for none) */
+    char *place;              /* the place the text records (malloc'd; NULL or "" for none) */
 } pub_record;
 
 static pub_record g_record;
@@ -155,16 +163,16 @@ static volatile LONG g_resuming;       /* our own parse and original call are ru
  * when the build the one place resolver names for it in `place` provides
  * every name it lists. `subject` is the word the cause uses ("map",
  * "prefab"). */
-static int pub_row_state(const sh_modmanifest_row *row, const char *place, const char *subject, char *cause, size_t cap)
+static int pub_row_state(const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
 {
-    if (cause && cap) cause[0] = 0;
-    return g_ops.row_state ? g_ops.row_state(g_ops.context, row, place ? place : "", subject, cause, cap)
+    if (cause) *cause = NULL;
+    return g_ops.row_state ? g_ops.row_state(g_ops.context, row, place ? place : "", subject, cause)
                            : SH_MODPUB_ROW_MISSING;
 }
 
 static int pub_row_served(const sh_modmanifest_row *row, const char *place)
 {
-    return pub_row_state(row, place, NULL, NULL, 0) == SH_MODPUB_ROW_SERVED;
+    return pub_row_state(row, place, NULL, NULL) == SH_MODPUB_ROW_SERVED;
 }
 
 static size_t pub_count_missing(const sh_modmanifest_list *rows, const char *place)
@@ -176,31 +184,37 @@ static size_t pub_count_missing(const sh_modmanifest_list *rows, const char *pla
 }
 
 /* The place `text` records (map_carrier.h), as a place ("maps\<segment>"),
- * or "" when it records none or one that is not a place. */
-static void pub_text_place(const char *text, size_t length, char *out, size_t cap)
+ * malloc'd: "" when it records none or one that is not a place; NULL only
+ * when memory runs out. */
+static char *pub_text_place(const char *text, size_t length)
 {
-    char segment[SH_CARRIER_PLACE_CAP];
-    out[0] = 0;
-    if (!text || !length || sh_carrier_place(text, length, segment, sizeof segment) != 1) return;
-    if (!g_ops.place_norm || !g_ops.place_norm(g_ops.context, segment, out, cap)) out[0] = 0;
+    char *segment = NULL, *out = NULL;
+    if (text && length && sh_carrier_place(text, length, &segment) == 1 && g_ops.place_norm &&
+        !g_ops.place_norm(g_ops.context, segment, &out)) {
+        free(out);
+        out = NULL;
+    }
+    free(segment);
+    return out ? out : sh_text("");
 }
 
 /* The place the next launch serves from (sh_modpub_launch_place), set by the
  * gate or hold that let its map through, and made the loaded map's now. */
-static char g_launch_place[SH_MODPUB_PLACE_CAP];
+static char *g_launch_place;
 static int g_launch_set;
 
 static void pub_place_decided(const char *place)
 {
-    strcpy_s(g_launch_place, sizeof g_launch_place, place ? place : "");
+    free(g_launch_place);
+    g_launch_place = sh_text(pub_s(place));
     g_launch_set = 1;
-    if (g_ops.place_set) g_ops.place_set(g_ops.context, g_launch_place);
+    if (g_ops.place_set) g_ops.place_set(g_ops.context, pub_s(g_launch_place));
 }
 
-int sh_modpub_launch_place(char *out, size_t cap)
+int sh_modpub_launch_place(char **out)
 {
     int set = g_launch_set;
-    if (out && cap) strncpy_s(out, cap, set ? g_launch_place : "", _TRUNCATE);
+    if (out) *out = sh_text(set ? pub_s(g_launch_place) : "");
     g_launch_set = 0;
     return set;
 }
@@ -209,6 +223,7 @@ static void pub_record_clear(pub_record *r)
 {
     sh_modmanifest_list_free(&r->rows);
     free(r->text);
+    free(r->place);
     memset(r, 0, sizeof(*r));
 }
 
@@ -218,11 +233,20 @@ static void pub_record_clear(pub_record *r)
  * revision last reached a gated completion. */
 
 typedef struct pub_seen {
-    char id[PUB_ID_CAP], revision[PUB_ID_CAP];
-    char place[SH_MODPUB_PLACE_CAP];     /* the place its gate decided */
+    char *id, *revision;                 /* malloc'd */
+    char *place;                         /* the place its gate decided (malloc'd) */
     sh_modmanifest_list rows;
     unsigned long stamp;
 } pub_seen;
+
+static void pub_seen_clear(pub_seen *slot)
+{
+    sh_modmanifest_list_free(&slot->rows);
+    free(slot->id);
+    free(slot->revision);
+    free(slot->place);
+    memset(slot, 0, sizeof(*slot));
+}
 
 static pub_seen g_seen[PUB_SEEN_MAX];
 static unsigned long g_seen_stamp;
@@ -256,12 +280,14 @@ static void pub_seen_note(const char *id, const char *revision, const char *plac
             if (g_seen[i].stamp < slot->stamp) slot = &g_seen[i];
         }
     }
-    sh_modmanifest_list_free(&slot->rows);
-    memset(slot, 0, sizeof(*slot));
-    strcpy_s(slot->id, sizeof slot->id, id);
-    strcpy_s(slot->revision, sizeof slot->revision, revision);
-    if (place) strncpy_s(slot->place, sizeof slot->place, place, _TRUNCATE);
-    if (rows && !pub_list_copy(&slot->rows, rows)) { memset(slot, 0, sizeof(*slot)); return; }
+    pub_seen_clear(slot);
+    slot->id = sh_text(id);
+    slot->revision = sh_text(revision);
+    slot->place = sh_text(pub_s(place));
+    if (!slot->id || !slot->revision || !slot->place || (rows && !pub_list_copy(&slot->rows, rows))) {
+        pub_seen_clear(slot);
+        return;
+    }
     slot->stamp = ++g_seen_stamp;
 }
 
@@ -270,10 +296,10 @@ static void pub_seen_note(const char *id, const char *revision, const char *plac
 typedef struct pub_job {
     struct pub_job *next;
     size_t count;
-    char place[SH_MODPUB_PLACE_CAP];   /* where the fetch installs: the map's place, "" the root */
+    char *place;                       /* where the fetch installs: the map's place, "" the root (malloc'd) */
     char (*hashes)[SH_MODMANIFEST_HASH_CAP];
     char (*salts)[SH_MODMANIFEST_SALT_CAP];
-    char (*names)[SH_MODMANIFEST_DISPLAY_CAP];      /* the row's name, else its salt */
+    char **names;                        /* the row's name, else its salt (malloc'd, count of them) */
     volatile int cancel;
     volatile LONG done;
     volatile LONG current;               /* index being fetched */
@@ -292,8 +318,10 @@ static void pub_job_free(pub_job *job)
     if (!job) return;
     free(job->hashes);
     free(job->salts);
+    if (job->names) for (size_t i = 0; i < job->count; i++) free(job->names[i]);
     free(job->names);
     free(job->probes);
+    free(job->place);
     free(job);
 }
 
@@ -337,7 +365,7 @@ static void pub_job_main(void *context)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, job->salts[i]);
         strcpy_s(row.build, sizeof row.build, job->hashes[i]);
-        strcpy_s(row.name, sizeof row.name, job->names[i]);
+        row.name = job->names[i];   /* borrowed: the row is not freed */
         rc = g_ops.fetch_for ? g_ops.fetch_for(g_ops.context, &row, job->place, pub_progress, &job->cancel) : -1;
         if (rc != 0) { job->failed_index = (int)i; job->failed_code = rc; break; }
     }
@@ -365,8 +393,8 @@ typedef struct pub_hold {
     void *owner, *extra;
     unsigned long long token;
     void *metadata;                      /* owned copy, completions only */
-    char id[PUB_ID_CAP], revision[PUB_ID_CAP];
-    char place[SH_MODPUB_PLACE_CAP];     /* the map's place ("" the root): rows resolve and fetch there */
+    char *id, *revision;                 /* malloc'd ("" for none) while a hold runs */
+    char *place;                         /* the map's place ("" the root): rows resolve and fetch there (malloc'd) */
     char *text;                          /* owned, completions and local play */
     size_t length;
     sh_modmanifest_list rows;
@@ -401,17 +429,26 @@ static void pub_launch_refused(int hook)
     if (!pub_is_local(hook) && g_ops.launch_refused) g_ops.launch_refused(g_ops.context, hook);
 }
 
-/* One pending notice, raised with a single Accept button when the surface is
- * idle and no question is up. A later notice replaces an unraised one. */
-static char g_notice[PUB_TEXT_CAP];
+/* One pending notice (malloc'd, whole), raised with a single Accept button
+ * when the surface is idle and no question is up. A later notice replaces an
+ * unraised one. */
+static char *g_notice;
 static int g_notice_ticket, g_notice_waited;
 
 static void pub_notice(const char *text)
 {
-    if (!text || !text[0]) return;
-    strncpy_s(g_notice, sizeof g_notice, text, _TRUNCATE);
+    char *copy;
+    if (!text || !text[0] || !(copy = sh_text(text))) return;
+    free(g_notice);
+    g_notice = copy;
     g_notice_waited = 0;
     pub_logf("MODS: notice: %s", text);
+}
+
+static void pub_notice_clear(void)
+{
+    free(g_notice);
+    g_notice = NULL;
 }
 
 void sh_modpublished_notice(const char *text)
@@ -516,58 +553,49 @@ int sh_modpub_gate_decide(const sh_modpub_gate_facts *f)
     return SH_MODPUB_GATE_UNREACHABLE;
 }
 
-void sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
-                            int store_code, char *out, size_t cap)
+char *sh_modpub_gate_wording(int verdict, const char *subject, const char *title, const char *source,
+                             int store_code)
 {
-    char reason[200];
+    char *reason, *out;
     const int prefab = subject && !strcmp(subject, "prefab");
     const char *what = subject && subject[0] ? subject : "map";
     const char *t = title && title[0] ? title : "a mod";
-    if (!out || !cap) return;
-    switch (verdict) {
-    case SH_MODPUB_GATE_GONE:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which is no longer available: its author "
-                    "unpublished it, or it was removed. This is permanent on this machine.", what, t);
-        break;
-    case SH_MODPUB_GATE_UNREACHABLE:
-        (void)sh_reason(SH_REASON_STORE, store_code, NULL, 0, reason, sizeof reason);
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which could not be downloaded: %s.", what, t,
-                    reason);
-        break;
-    case SH_MODPUB_GATE_NEVER_PUBLISHED:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which is not installed and was never "
-                    "published. Restore its folder from the Recycle Bin or load the %s.", what, t,
-                    prefab ? "prefab's ZIP export" : "map's rawmap ZIP");
-        break;
-    case SH_MODPUB_GATE_GAME_REVISION:
-        _snprintf_s(out, cap, _TRUNCATE, "This %s needs %s, which needs a file this game does not hold "
-                    "(%s): a different game revision. This is permanent on this machine.", what, t,
-                    source && source[0] ? source : "a game file");
-        break;
-    default:
-        out[0] = 0;
-        return;
-    }
     /* A prefab's denial ends as every other prefab refusal does, saying the
      * placement did not happen (architecture.md "Prefabs that name mods"). */
-    if (prefab && strlen(out) + 28 < cap) strcat_s(out, cap, " The prefab was not placed.");
+    const char *end = prefab ? " The prefab was not placed." : "";
+    switch (verdict) {
+    case SH_MODPUB_GATE_GONE:
+        return sh_textf("This %s needs %s, which is no longer available: its author unpublished it, or it was removed. "
+                        "This is permanent on this machine.%s", what, t, end);
+    case SH_MODPUB_GATE_UNREACHABLE:
+        reason = sh_reason(SH_REASON_STORE, store_code, NULL, 0);
+        out = sh_textf("This %s needs %s, which could not be downloaded: %s.%s", what, t, pub_s(reason), end);
+        free(reason);
+        return out;
+    case SH_MODPUB_GATE_NEVER_PUBLISHED:
+        return sh_textf("This %s needs %s, which is not installed and was never published. Restore its folder from the "
+                        "Recycle Bin or load the %s.%s", what, t, prefab ? "prefab's ZIP export" : "map's rawmap ZIP", end);
+    case SH_MODPUB_GATE_GAME_REVISION:
+        return sh_textf("This %s needs %s, which needs a file this game does not hold (%s): a different game revision. "
+                        "This is permanent on this machine.%s", what, t, source && source[0] ? source : "a game file", end);
+    default:
+        return NULL;
+    }
 }
 
-static void pub_title(char *out, size_t cap, const sh_modmanifest_row *row);
+static const char *pub_title(const sh_modmanifest_row *row);
 
 int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, size_t hash_cap, int placed,
-                                char *why, size_t why_cap)
+                                char **why)
 {
-    char title[SH_MODMANIFEST_DISPLAY_CAP];
     if (hash_out && hash_cap) hash_out[0] = 0;
-    if (why && why_cap) why[0] = 0;
+    if (why) *why = NULL;
     if (!row || !g_ops_set) return 0;
     /* The editor opens the author's own map: its rows follow the root
      * folders (sh_modserve_row_build), so a row nothing serves names a salt
      * no root folder holds. Nothing substitutes for it. */
-    if (why && why_cap) {
-        const char *key = row->salt;
-        pub_title(title, sizeof title, row);
+    if (why) {
+        const char *key = row->salt, *title = pub_title(row);
         /* The store was not asked, so the note says only what this computer
          * knows; the gate's words ("no longer available", "never published")
          * are said where the store is asked, at Play. A map whose placed
@@ -578,23 +606,25 @@ int sh_modpub_editor_substitute(const sh_modmanifest_row *row, char *hash_out, s
         if (placed) {
             int k;
             for (k = 0; k < 2; k++) {
-                _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
-                            "the editor cannot open the map. Restore the mod's folder from the Recycle Bin, or play "
-                            "the map from My Maps to get it from the mod store.", k ? key : title);
-                if (strlen(why) < PUB_TEXT_CAP) break;
+                free(*why);
+                *why = sh_textf("This map needs %s, which is not installed on this computer, so the editor cannot open "
+                                "the map. Restore the mod's folder from the Recycle Bin, or play the map from My Maps "
+                                "to get it from the mod store.", k ? key : title);
+                if (!*why || strlen(*why) < PUB_TEXT_CAP) break;
             }
         } else
-            _snprintf_s(why, why_cap, _TRUNCATE, "This map needs %s, which is not installed on this computer, so "
-                        "the editor opens the map without it. Playing the map asks the mod store for it.", title);
+            *why = sh_textf("This map needs %s, which is not installed on this computer, so the editor opens the map "
+                            "without it. Playing the map asks the mod store for it.", title);
     }
     return 0;
 }
 
 /* The mod as the player knows it: the row's name (the author's, as the map
- * recorded it), else its salt. */
-static void pub_title(char *out, size_t cap, const sh_modmanifest_row *row)
+ * recorded it), else its salt. Borrowed from the row. */
+static const char *pub_title(const sh_modmanifest_row *row)
 {
-    _snprintf_s(out, cap, _TRUNCATE, "%s", row->name[0] ? row->name : row->salt[0] ? row->salt : "a mod");
+    const char *name = sh_modmanifest_row_name(row);
+    return name[0] ? name : row->salt[0] ? row->salt : "a mod";
 }
 
 /* Was the map (or this build) published? Every map-service hook is; a My
@@ -632,7 +662,7 @@ static const char **pub_missing_names(const pub_hold *h)
     if (!names) return NULL;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        names[i] = row->name[0] ? row->name : row->salt;
+        names[i] = sh_modmanifest_row_name(row)[0] ? row->name : row->salt;
     }
     return names;
 }
@@ -664,6 +694,9 @@ static void pub_hold_free(void)
     free(h->text);
     free(h->missing);
     free(h->probes);
+    free(h->id);
+    free(h->revision);
+    free(h->place);
     sh_modmanifest_list_free(&h->rows);
     memset(h, 0, sizeof(*h));
 }
@@ -682,7 +715,7 @@ static void pub_abandon(const char *why)
 {
     if (g_hold.state == HOLD_IDLE) return;
     pub_logf("MODS: the held %s of '%s' was abandoned: %s", pub_hook_name(g_hold.hook),
-             g_hold.id[0] ? g_hold.id : "local map", why);
+             g_hold.id && g_hold.id[0] ? g_hold.id : "local map", why);
     pub_hold_free();
 }
 
@@ -692,7 +725,7 @@ static void pub_drop(const char *notice, const char *why)
     int hook;
     if (g_hold.state == HOLD_IDLE) return;
     pub_logf("MODS: the held %s of '%s' was dropped: %s", pub_hook_name(g_hold.hook),
-             g_hold.id[0] ? g_hold.id : "local map", why);
+             g_hold.id && g_hold.id[0] ? g_hold.id : "local map", why);
     pub_progress_hide(&g_hold);
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, g_hold.hook, g_hold.owner);
     hook = g_hold.hook;
@@ -729,7 +762,7 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
         g_record.frame = g_frame;
         g_record.valid = 1;
         pub_logf("MODS: '%s' was launched again while its mods %s; that launch is held with the first",
-                 g_hold.id[0] ? g_hold.id : "the held map", g_hold.state == HOLD_FETCHING ? "download" : "are offered");
+                 g_hold.id && g_hold.id[0] ? g_hold.id : "the held map", g_hold.state == HOLD_FETCHING ? "download" : "are offered");
         return;
     }
     if (g_hold.state != HOLD_IDLE) pub_abandon("another map load started");
@@ -742,8 +775,8 @@ void sh_modpublished_parse_seen(int kind, const char *text, void *out_map, int p
     g_record.valid = 1;
     if (!parsed || !sh_modmanifest_current(&rows)) { sh_modmanifest_list_free(&rows); return; }
     g_record.rows = rows;
-    if (text) pub_text_place(text, strlen(text), g_record.place, sizeof g_record.place);
-    g_record.missing = pub_count_missing(&g_record.rows, g_record.place);
+    g_record.place = text ? pub_text_place(text, strlen(text)) : NULL;
+    g_record.missing = pub_count_missing(&g_record.rows, pub_s(g_record.place));
     /* The text is kept for every map with rows: the gate that takes the
      * parse decides the map's place, in which a row the parse found served
      * may be missing. */
@@ -796,7 +829,7 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     if (!pub_list_copy(&h->rows, rows)) goto nomem;
     h->missing = calloc(rows->count ? rows->count : 1, sizeof(*h->missing));
     if (!h->missing) goto nomem;
-    if (place) strncpy_s(h->place, sizeof h->place, place, _TRUNCATE);
+    if (!(h->place = sh_text(pub_s(place)))) goto nomem;
     for (size_t i = 0; i < h->rows.count; i++) {
         if (pub_row_served(&h->rows.rows[i], h->place)) continue;
         h->missing[h->missing_count++] = i;
@@ -804,8 +837,7 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     }
     if (!h->missing_count) { pub_hold_free(); return 0; }
     h->hook = hook; h->owner = owner; h->extra = extra;
-    if (id) strcpy_s(h->id, sizeof h->id, id);
-    if (revision) strcpy_s(h->revision, sizeof h->revision, revision);
+    if (!(h->id = sh_text(pub_s(id))) || !(h->revision = sh_text(pub_s(revision)))) goto nomem;
     h->token = g_ops.hold_token ? g_ops.hold_token(g_ops.context, hook, owner, extra) : 0;
     if (record) {
         if (!record->text) goto nomem;
@@ -824,9 +856,10 @@ static int pub_hold_begin(int hook, void *owner, const void *metadata, void *ext
     h->state = HOLD_PROBING;
     /* Each row the hold asks for, as the asset rule names it. */
     for (size_t i = 0; i < h->missing_count; i++) {
-        char cause[PUB_CAUSE_CAP];
-        (void)pub_row_state(&h->rows.rows[h->missing[i]], h->place, pub_thing(hook), cause, sizeof cause);
-        if (cause[0]) { pub_print(cause); pub_logf("MODS: %s", cause); }
+        char *cause = NULL;
+        (void)pub_row_state(&h->rows.rows[h->missing[i]], h->place, pub_thing(hook), &cause);
+        if (cause && cause[0]) { pub_print(cause); pub_logf("MODS: %s", cause); }
+        free(cause);
     }
     return 1;
 nomem:
@@ -861,9 +894,9 @@ static int pub_refuse_scripts(int hook, void *owner, const char *place, const sh
 int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, void *extra,
                      const char *id, const char *revision)
 {
-    char item[PUB_ID_CAP] = "", rev[PUB_ID_CAP] = "", title[PUB_TITLE_CAP] = "", place[SH_MODPUB_PLACE_CAP] = "";
+    char *item = NULL, *rev = NULL, *title = NULL, *place = NULL;
     pub_record *record = &g_record;
-    int begun;
+    int begun, passed;
     if (!g_ops_set || hook < 0 || hook >= SH_MODPUB_HOOKS || pub_is_local(hook) || pub_is_launch(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
@@ -920,40 +953,50 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         pub_record_clear(record);
         return held ? 0 : 1;
     }
-    if (pub_is_completion(hook) && g_ops.metadata_ids)
-        (void)g_ops.metadata_ids(g_ops.context, metadata, item, sizeof item, rev, sizeof rev);
+    if (pub_is_completion(hook) && g_ops.metadata_ids &&
+        !g_ops.metadata_ids(g_ops.context, metadata, &item, &rev)) {
+        free(item); free(rev);
+        item = rev = NULL;
+    }
     if (pub_is_completion(hook) && g_ops.metadata_title &&
-        !g_ops.metadata_title(g_ops.context, metadata, title, sizeof title))
-        title[0] = 0;
+        !g_ops.metadata_title(g_ops.context, metadata, &title)) {
+        free(title);
+        title = NULL;
+    }
     /* The map's place before anything counts what is missing (DECISIONS
      * 11): a stranger's published map is served from its item's place; a
      * map this machine published finds its mods at the root, as the
      * player's own maps do; a My Maps play uses the place the map records. */
     if (pub_is_completion(hook)) {
-        int own = item[0] && g_ops.own_item && g_ops.own_item(g_ops.context, item);
+        int own = item && item[0] && g_ops.own_item && g_ops.own_item(g_ops.context, item);
         if (record->rows.count && !own &&
-            (!g_ops.item_place || !g_ops.item_place(g_ops.context, title, item, place, sizeof place)))
-            place[0] = 0;
+            (!g_ops.item_place || !g_ops.item_place(g_ops.context, pub_s(title), pub_s(item), &place))) {
+            free(place);
+            place = NULL;
+        }
     } else {
-        strcpy_s(place, sizeof place, record->place);
+        place = sh_text(pub_s(record->place));
     }
-    record->missing = pub_count_missing(&record->rows, place);
-    if (pub_is_completion(hook)) pub_seen_note(item, rev, place, &record->rows);
-    if (pub_refuse_scripts(hook, owner, place, &record->rows)) { pub_record_clear(record); return 0; }
+    record->missing = pub_count_missing(&record->rows, pub_s(place));
+    if (pub_is_completion(hook)) pub_seen_note(pub_s(item), pub_s(rev), pub_s(place), &record->rows);
+    passed = -1;
+    if (pub_refuse_scripts(hook, owner, pub_s(place), &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
     if (!record->rows.count || !record->missing) {
         pub_record_clear(record);   /* consumed */
-        pub_place_decided(place);
-        return 1;
+        pub_place_decided(pub_s(place));
+        passed = 1;
+        goto out;
     }
     /* A joiner's read of a map the lobby no longer hosts: CacheReady itself
      * ignores it (it sets nothing unless the host's item matches), so there is
      * nothing to ask about. */
     if (hook == SH_MODPUB_CACHE_READY &&
-        (!g_ops.host_matches || !g_ops.host_matches(g_ops.context, item, rev))) {
+        (!g_ops.host_matches || !g_ops.host_matches(g_ops.context, pub_s(item), pub_s(rev)))) {
         pub_record_clear(record);
-        return 1;
+        passed = 1;
+        goto out;
     }
-    begun = pub_hold_begin(hook, owner, metadata, extra, item, rev, place, &record->rows, record);
+    begun = pub_hold_begin(hook, owner, metadata, extra, pub_s(item), pub_s(rev), pub_s(place), &record->rows, record);
     pub_record_clear(record);
     if (begun < 0) {
         /* Never hand the engine a map whose mods are absent: it ends in the
@@ -962,22 +1005,30 @@ int sh_modpub_decide(int hook, void *owner, const void *metadata, void *map, voi
         if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, owner);
         pub_launch_refused(hook);
         pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
-        return 0;
+        passed = 0;
+        goto out;
     }
-    if (!begun) { pub_place_decided(place); return 1; }
+    if (!begun) { pub_place_decided(pub_s(place)); passed = 1; goto out; }
     pub_logf("MODS: %s of '%s' needs %u missing mod(s) (%llu bytes); held for the player's answer",
-             pub_hook_name(hook), item[0] ? item : "local map", (unsigned)g_hold.missing_count,
+             pub_hook_name(hook), item && item[0] ? item : "local map", (unsigned)g_hold.missing_count,
              g_hold.missing_bytes);
     if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, owner);
-    return 0;
+    passed = 0;
+out:
+    free(item);
+    free(rev);
+    free(title);
+    free(place);
+    return passed;
 }
 
 int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
 {
     pub_record *record = &g_record;
-    char place[SH_MODPUB_PLACE_CAP];
+    const char *place;
+    char *owned;
     size_t missing;
-    int begun = -1;
+    int begun = -1, passed;
     if (!g_ops_set || !pub_is_launch(hook)) return 1;
     if (InterlockedCompareExchange(&g_resuming, 0, 0)) return 1;
     if (!pub_on_main()) return 1;
@@ -987,11 +1038,14 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
     if (!record->valid || record->repeat || record->frame != g_frame || !record->rows.count) return 1;
     if (map && record->map != map) return 1;
     pub_notes_gated();
-    /* The parse no gate saw is decided in the place its map records. */
-    strcpy_s(place, sizeof place, record->place);
-    if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); return 0; }
+    /* The parse no gate saw is decided in the place its map records (taken
+     * from the record, which is cleared below). */
+    owned = record->place;
+    record->place = NULL;
+    place = pub_s(owned);
+    if (pub_refuse_scripts(hook, NULL, place, &record->rows)) { pub_record_clear(record); passed = 0; goto out; }
     missing = pub_count_missing(&record->rows, place);
-    if (!missing) { pub_record_clear(record); pub_place_decided(place); return 1; }
+    if (!missing) { pub_record_clear(record); pub_place_decided(place); passed = 1; goto out; }
     pub_logf("MODS: %s of a map no gate saw (parse %lu, map %p) names %u missing mod(s)", pub_hook_name(hook),
              record->sequence, record->map, (unsigned)missing);
     if (hook == SH_MODPUB_LOBBY_LAUNCH)
@@ -1001,16 +1055,20 @@ int sh_modpub_launch_gate(int hook, void *manager, void *map, void *extra)
         pub_logf("MODS: %s needs %u missing mod(s) (%llu bytes); held for the player's answer", pub_hook_name(hook),
                  (unsigned)g_hold.missing_count, g_hold.missing_bytes);
         if (g_ops.hold_ui) g_ops.hold_ui(g_ops.context, hook, manager);
-        return 0;
+        passed = 0;
+        goto out;
     }
-    if (begun == 0) { pub_place_decided(place); return 1; }
+    if (begun == 0) { pub_place_decided(place); passed = 1; goto out; }
     /* Never hand the engine a published map whose mods are absent. An offline
      * launch has no map object left to resume with, so it is refused. */
     pub_logf("MODS: the %s was refused: its mods are not installed and it cannot be held", pub_hook_name(hook));
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, hook, manager);
     pub_launch_refused(hook);
     pub_notice("This map was not loaded: Snapmap+ ran out of memory preparing its mods. Restart DOOM and open it again.");
-    return 0;
+    passed = 0;
+out:
+    free(owned);
+    return passed;
 }
 
 /* ------------------------------------------------------------ the tick */
@@ -1025,17 +1083,21 @@ static void pub_poll_notice(void)
         g_notice_ticket = 0;
         return;
     }
-    if (!g_notice[0] || g_hold.state == HOLD_RAISE || g_hold.state == HOLD_ASKING) return;
+    if (!g_notice || g_hold.state == HOLD_RAISE || g_hold.state == HOLD_ASKING) return;
     if (!g_ops.can_ask || !g_ops.can_ask(g_ops.context)) {
         if (++g_notice_waited > PUB_RAISE_TICKS) {
             pub_log("MODS: the notice could not be shown; the dialog surface stayed busy");
-            g_notice[0] = 0;
+            pub_notice_clear();
         }
         return;
     }
-    g_notice_ticket = g_ops.ask ? g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_ACCEPT, g_notice) : 0;
+    /* The game's dialog holds 255 bytes: a longer notice is said whole on the
+     * console, and the dialog says so. */
+    if (strlen(g_notice) >= PUB_TEXT_CAP) pub_print(g_notice);
+    g_notice_ticket = g_ops.ask ? g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_ACCEPT,
+                                            strlen(g_notice) < PUB_TEXT_CAP ? g_notice : PUB_DIALOG_OVER) : 0;
     if (!g_notice_ticket) pub_log("MODS: the notice dialog would not raise");
-    g_notice[0] = 0;
+    pub_notice_clear();
 }
 
 /* The job's per-build arrays from the hold's missing rows. 1, or 0 out of
@@ -1051,22 +1113,19 @@ static int pub_job_rows(pub_job *job, const pub_hold *h)
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
         strcpy_s(job->hashes[i], sizeof job->hashes[i], row->build);
         strcpy_s(job->salts[i], sizeof job->salts[i], row->salt);
-        strcpy_s(job->names[i], sizeof job->names[i], row->name[0] ? row->name : row->salt);
+        if (!(job->names[i] = sh_text(sh_modmanifest_row_name(row)[0] ? row->name : row->salt))) return 0;
     }
     return 1;
 }
 
 /* The download's progress, as the player sees it, in words: "Downloading
  * <mod> (i of n): x of y MB, p%." */
-static void pub_progress_text(char *out, size_t cap, const char *name, long current, size_t count, long long done,
-                              long long total)
+static char *pub_progress_text(const char *name, long current, size_t count, long long done, long long total)
 {
     if (total > 0)
-        _snprintf_s(out, cap, _TRUNCATE, "Downloading %s (%ld of %u): %.1f of %.1f MB, %d%%.", name, current + 1,
-                    (unsigned)count, done / 1048576.0, total / 1048576.0, (int)(done * 100 / total));
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "Downloading %s (%ld of %u): %.1f MB.", name, current + 1, (unsigned)count,
-                    done / 1048576.0);
+        return sh_textf("Downloading %s (%ld of %u): %.1f of %.1f MB, %d%%.", name, current + 1, (unsigned)count,
+                        done / 1048576.0, total / 1048576.0, (int)(done * 100 / total));
+    return sh_textf("Downloading %s (%ld of %u): %.1f MB.", name, current + 1, (unsigned)count, done / 1048576.0);
 }
 
 /* While a download runs the player sees where it is in the game's own
@@ -1078,7 +1137,7 @@ static void pub_progress_text(char *out, size_t cap, const char *name, long curr
  * downloading and is not asked again, No cancels. */
 static void pub_progress_step(pub_hold *h, pub_job *job)
 {
-    char text[PUB_TEXT_CAP];
+    char text[PUB_TEXT_CAP], *line;
     ULONGLONG now = GetTickCount64();
     if (h->ticket) {
         int answer = g_ops.poll ? g_ops.poll(g_ops.context, h->ticket) : PUB_DIALOG_PENDING;
@@ -1101,10 +1160,13 @@ static void pub_progress_step(pub_hold *h, pub_job *job)
         long long done = InterlockedCompareExchange64(&job->progress_done, 0, 0);
         long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
         h->progress_at = now;
-        pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
-        if (h->progress_shown) pub_print(text);   /* the first line says only "0.0 MB" */
-        if (g_ops.progress) g_ops.progress(g_ops.context, h->hook, h->owner, text);
-        h->progress_shown = 1;
+        line = pub_progress_text(job->names[current], current, job->count, done, total);
+        if (line) {
+            if (h->progress_shown) pub_print(line);   /* the first line says only "0.0 MB" */
+            if (g_ops.progress) g_ops.progress(g_ops.context, h->hook, h->owner, line);
+            h->progress_shown = 1;
+        }
+        free(line);
     }
     if (!h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask && g_ops.can_ask(g_ops.context) &&
         g_ops.ask) {
@@ -1119,7 +1181,7 @@ static void pub_start_fetch(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = calloc(1, sizeof(*job));
-    if (!job || !pub_job_rows(job, h)) {
+    if (!job || !pub_job_rows(job, h) || !(job->place = sh_text(pub_s(h->place)))) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "This %s's mods could not be downloaded: Snapmap+ ran out of memory. %s Restart DOOM and try again.",
                     pub_thing(h->hook), pub_not_done(h->hook));
@@ -1127,7 +1189,6 @@ static void pub_start_fetch(void)
         pub_drop(line, "no memory for the fetch job");
         return;
     }
-    strcpy_s(job->place, sizeof job->place, h->place);
     h->job = job;
     h->state = HOLD_FETCHING;
     h->fetch_at = GetTickCount64();
@@ -1141,7 +1202,7 @@ static void pub_start_fetch(void)
         pub_drop(line, "the worker refused the job");
         return;
     }
-    pub_logf("MODS: downloading %u mod(s) for '%s'", (unsigned)job->count, h->id[0] ? h->id : "local map");
+    pub_logf("MODS: downloading %u mod(s) for '%s'", (unsigned)job->count, h->id && h->id[0] ? h->id : "local map");
 }
 
 
@@ -1151,7 +1212,7 @@ static void pub_finish(void)
 {
     pub_hold *h = &g_hold;
     pub_job *job = h->job;
-    char line[PUB_TEXT_CAP], cause[PUB_CAUSE_CAP];
+    char *line, *cause = NULL;
 
     if (job->failed_index >= 0) {
         /* The gate decides a failed fetch too: the bundle left the store, the
@@ -1160,46 +1221,58 @@ static void pub_finish(void)
          * download's own failure. */
         size_t at = (size_t)job->failed_index;
         const sh_modmanifest_row *row = at < h->missing_count ? &h->rows.rows[h->missing[at]] : NULL;
-        _snprintf_s(cause, sizeof cause, _TRUNCATE, "the fetch of %s returned %d", job->hashes[job->failed_index],
+        char why[96];
+        _snprintf_s(why, sizeof why, _TRUNCATE, "the fetch of %s returned %d", job->hashes[job->failed_index],
                     job->failed_code);
         if (row && job->failed_code != PUB_NET_CANCELLED && job->failed_code != -2) {
             sh_modpub_gate_facts facts;
             int *verdicts = calloc(h->missing_count, sizeof(*verdicts));
-            char detail[260] = "";
+            char *detail = NULL;
             memset(&facts, 0, sizeof facts);
             facts.store = pub_fetch_answer(job->failed_code);
             facts.game_lacks = job->failed_code == PUB_NET_GAME;
             facts.published = pub_published(h->hook, row);
             if (facts.game_lacks && g_ops.fetch_detail &&
-                !g_ops.fetch_detail(g_ops.context, job->hashes[job->failed_index], detail, sizeof detail))
-                detail[0] = 0;
+                !g_ops.fetch_detail(g_ops.context, job->hashes[job->failed_index], &detail)) {
+                free(detail);
+                detail = NULL;
+            }
             if (verdicts) verdicts[at] = sh_modpub_gate_decide(&facts);
             if (verdicts && verdicts[at] != SH_MODPUB_GATE_OBTAIN) {
                 if (h->probes) h->probes[at].code = job->failed_code;
-                pub_deny(verdicts, h->probes, detail, cause);
+                pub_deny(verdicts, h->probes, detail, why);
                 free(verdicts);
+                free(detail);
                 return;
             }
             free(verdicts);
+            free(detail);
         }
         {
-            char reason[200];
-            (void)sh_reason(SH_REASON_STORE, job->failed_code, NULL, 0, reason, sizeof reason);
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s could not be downloaded: %s. %s",
-                        job->names[job->failed_index], reason[0] ? reason : "try again", pub_not_done(h->hook));
+            char *reason = sh_reason(SH_REASON_STORE, job->failed_code, NULL, 0);
+            line = sh_textf("%s could not be downloaded: %s. %s", job->names[job->failed_index],
+                            reason && reason[0] ? reason : "try again", pub_not_done(h->hook));
+            free(reason);
         }
-        pub_drop(line, cause);
+        pub_drop(line ? line : "A mod could not be downloaded.", why);
+        free(line);
         return;
     }
     if (g_ops.rescan) (void)g_ops.rescan(g_ops.context);
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        if (pub_row_state(row, h->place, pub_thing(h->hook), cause, sizeof cause) == SH_MODPUB_ROW_SERVED) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "%s was downloaded but cannot be used.%s%s %s",
-                    row->name[0] ? row->name : "The mod", cause[0] ? " " : "", cause, pub_not_done(h->hook));
-        pub_drop(line, "a fetched row is not served");
+        free(cause);
+        cause = NULL;
+        if (pub_row_state(row, h->place, pub_thing(h->hook), &cause) == SH_MODPUB_ROW_SERVED) continue;
+        line = sh_textf("%s was downloaded but cannot be used.%s%s %s",
+                        sh_modmanifest_row_name(row)[0] ? row->name : "The mod", cause && cause[0] ? " " : "",
+                        pub_s(cause), pub_not_done(h->hook));
+        pub_drop(line ? line : "A mod was downloaded but cannot be used.", "a fetched row is not served");
+        free(line);
+        free(cause);
         return;
     }
+    free(cause);
     pub_resume(h->missing_count);
 }
 
@@ -1259,7 +1332,7 @@ static void pub_resume(size_t installed)
         return;
     }
     pub_logf("MODS: the held %s of '%s' resumed with %u mod(s) installed", pub_hook_name(h->hook),
-             h->id[0] ? h->id : "local map", (unsigned)installed);
+             h->id && h->id[0] ? h->id : "local map", (unsigned)installed);
     pub_hold_free();
 }
 
@@ -1271,10 +1344,10 @@ static void pub_print(const char *line)
 }
 
 /* A row's name, the way the refusal names a mod (the salt when the row has
- * no name). */
-static void pub_row_label(char *out, size_t cap, const sh_modmanifest_row *row)
+ * no name). Borrowed from the row. */
+static const char *pub_row_label(const sh_modmanifest_row *row)
 {
-    _snprintf_s(out, cap, _TRUNCATE, "%s", row->name[0] ? row->name : row->salt);
+    return sh_modmanifest_row_name(row)[0] ? row->name : row->salt;
 }
 
 /* mode 0: the store lacks them; 1: the store could not be reached; 2 (a
@@ -1310,41 +1383,52 @@ void sh_modpublished_compose_prefab_refusal(char *out, size_t cap, const char *c
     pub_compose_refusal(out, cap, mods, count, mode < 0 || mode > 2 ? 0 : mode, 1);
 }
 
-void sh_modpublished_prefab_refusal_line(char *out, size_t cap, const char *name, const char *const *mods, size_t count,
-                                         int mode)
+/* "<head><mods joined by ", "><tail>", every name whole (malloc'd). */
+static char *pub_join(const char *head, const char *const *mods, size_t count, const char *tail)
 {
-    size_t i;
-    if (!out || !cap) return;
-    _snprintf_s(out, cap, _TRUNCATE, "Prefab %s was not placed: it needs ", name && name[0] ? name : "prefab");
+    size_t i, n = strlen(head) + strlen(tail) + 1;
+    char *out;
+    for (i = 0; i < count; i++) n += strlen(mods[i]) + 2;
+    if (!(out = (char *)malloc(n))) return NULL;
+    strcpy_s(out, n, head);
     for (i = 0; i < count; i++) {
-        if (i) strncat_s(out, cap, ", ", _TRUNCATE);
-        strncat_s(out, cap, mods[i], _TRUNCATE);
+        if (i) strcat_s(out, n, ", ");
+        strcat_s(out, n, mods[i]);
     }
-    strncat_s(out, cap, mode == 1
+    strcat_s(out, n, tail);
+    return out;
+}
+
+char *sh_modpublished_prefab_refusal_line(const char *name, const char *const *mods, size_t count, int mode)
+{
+    char *head = sh_textf("Prefab %s was not placed: it needs ", name && name[0] ? name : "prefab"), *out;
+    if (!head) return NULL;
+    out = pub_join(head, mods, count, mode == 1
         ? ", which you do not have, and the mod store could not be reached. Try again, or ask the prefab's author "
           "for its .zip export, which carries the mods."
         : mode == 2 ? ", which you do not have. Ask the prefab's author for its .zip export, which carries the mods."
         : ", which you do not have and the mod store does not hold. Ask the prefab's author for its .zip export, "
-          "which carries the mods.", _TRUNCATE);
+          "which carries the mods.");
+    free(head);
+    return out;
 }
 
-size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char *place,
-                                size_t place_cap)
+size_t sh_modpub_rawmap_missing(const char *text, size_t length, sh_modmanifest_list *rows, char **place)
 {
     unsigned rejected = 0;
     size_t missing;
-    char at[SH_MODPUB_PLACE_CAP];
-    if (place && place_cap) place[0] = 0;
+    char *at;
+    if (place) *place = NULL;
     if (!rows) return 0;
     memset(rows, 0, sizeof(*rows));
     if (!g_ops_set || !text || !length) return 0;
-    pub_text_place(text, length, at, sizeof at);
-    if (place && place_cap) strncpy_s(place, place_cap, at, _TRUNCATE);
+    at = pub_text_place(text, length);
     sh_modmanifest_read(text, length, rows, &rejected);
-    if (!rows->count) return 0;
     missing = 0;
     for (size_t i = 0; i < rows->count; i++)
-        if (!pub_row_served(&rows->rows[i], at)) missing++;
+        if (!pub_row_served(&rows->rows[i], pub_s(at))) missing++;
+    if (place) *place = at;
+    else free(at);
     return missing;
 }
 
@@ -1355,88 +1439,76 @@ int sh_modpub_rawmap_scripts_off(const sh_modmanifest_list *rows, const char *pl
     return 1;
 }
 
-#define PUB_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + 16)
-
 /* One row's refusal notice: the asset rule's sentence, what did not happen,
- * and where the mod can come from. Kept only when it fits the dialog body. */
+ * and where the mod can come from. It replaces the composed notice only when
+ * it fits the game's dialog (the composed one always does). */
 static void pub_single_notice(char *notice, size_t cap, const char *cause, int hook, int unreachable)
 {
-    char text[PUB_TEXT_CAP * 2];
-    _snprintf_s(text, sizeof text, _TRUNCATE, "%s %s %s", cause, pub_not_done(hook),
-                unreachable ? "The mod store could not be reached; try again, or ask its author for the .zip export."
-                            : "Ask its author for the .zip export.");
-    if (strlen(text) < cap && strlen(text) < PUB_TEXT_CAP) strcpy_s(notice, cap, text);
+    char *text = sh_textf("%s %s %s", cause, pub_not_done(hook),
+                          unreachable ? "The mod store could not be reached; try again, or ask its author for the .zip export."
+                                      : "Ask its author for the .zip export.");
+    if (text && strlen(text) < cap && strlen(text) < PUB_TEXT_CAP) strcpy_s(notice, cap, text);
+    free(text);
 }
 
 /* The refusal: the notice, and one console line naming every mod. */
 static void pub_rawmap_refuse(int hook, const char *source, const char *place, const sh_modmanifest_row *const *rows,
                               size_t count, int unreachable, const char *why)
 {
-    char notice[PUB_TEXT_CAP], line[1024], piece[PUB_LABEL_CAP + 4];
+    char notice[PUB_TEXT_CAP], *line, *head;
     const char **labels = calloc(count ? count : 1, sizeof(*labels));
-    char (*storage)[PUB_LABEL_CAP] = calloc(count ? count : 1, sizeof(*storage));
     const char *bare = pub_is_prefab(hook)
         ? "This prefab was not placed: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and place it again."
         : "This map was not loaded: it needs mods you do not have, and Snapmap+ ran out of memory naming them. Restart DOOM and open it again.";
-    char single[PUB_CAUSE_CAP] = "";
+    char *single = NULL;
     /* The asset rule's sentence for each row first; one row's sentence is
      * also the notice. */
     for (size_t i = 0; i < count; i++) {
-        char cause[PUB_CAUSE_CAP];
-        (void)pub_row_state(rows[i], g_hold.state != HOLD_IDLE ? g_hold.place : place, pub_thing(hook), cause,
-                            sizeof cause);
-        if (!cause[0]) continue;
-        pub_print(cause);
-        if (count == 1) strcpy_s(single, sizeof single, cause);
+        char *cause = NULL;
+        (void)pub_row_state(rows[i], g_hold.state != HOLD_IDLE ? g_hold.place : place, pub_thing(hook), &cause);
+        if (cause && cause[0]) {
+            pub_print(cause);
+            if (count == 1 && !single) { single = cause; cause = NULL; }
+        }
+        free(cause);
     }
-    if (!labels || !storage) {
-        free((void *)labels); free(storage);
+    if (!labels) {
+        free(single);
         if (g_hold.state != HOLD_IDLE) pub_drop(bare, why);
         else pub_notice(bare);
         return;
     }
+    for (size_t i = 0; i < count; i++) labels[i] = pub_row_label(rows[i]);
     if (pub_is_prefab(hook)) {
-        for (size_t i = 0; i < count; i++) {
-            pub_row_label(storage[i], sizeof storage[i], rows[i]);
-            labels[i] = storage[i];
-        }
-        sh_modpublished_prefab_refusal_line(line, sizeof line, source, labels, count, unreachable ? 1 : 0);
+        line = sh_modpublished_prefab_refusal_line(source, labels, count, unreachable ? 1 : 0);
         sh_modpublished_compose_prefab_refusal(notice, sizeof notice, labels, count, unreachable ? 1 : 0);
-        if (single[0]) pub_single_notice(notice, sizeof notice, single, hook, unreachable);
-        free((void *)labels); free(storage);
+    } else {
+        head = sh_textf("Rawmap %s was not loaded: it needs ", source && source[0] ? source : "map");
+        line = head ? pub_join(head, labels, count, unreachable
+            ? ", which you do not have, and the mod store could not be reached. Try again, or ask the map's author "
+              "for its .zip export, which carries the mods."
+            : ", which you do not have and the mod store does not hold. Ask the map's author for its .zip export, "
+              "which carries the mods.") : NULL;
+        free(head);
+        sh_modpublished_compose_refusal(notice, sizeof notice, labels, count, unreachable);
+    }
+    if (single) pub_single_notice(notice, sizeof notice, single, hook, unreachable);
+    free((void *)labels);
+    free(single);
+    if (line) {
         pub_print(line);
         pub_logf("MODS: %s", line);
-        if (g_hold.state != HOLD_IDLE) pub_drop(notice, why);
-        else pub_notice(notice);
-        return;
+        free(line);
     }
-    _snprintf_s(line, sizeof line, _TRUNCATE, "Rawmap %s was not loaded: it needs ", source && source[0] ? source : "map");
-    for (size_t i = 0; i < count; i++) {
-        pub_row_label(storage[i], sizeof storage[i], rows[i]);
-        labels[i] = storage[i];
-        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s", i ? ", " : "", storage[i]);
-        strncat_s(line, sizeof line, piece, _TRUNCATE);
-    }
-    strncat_s(line, sizeof line, unreachable
-        ? ", which you do not have, and the mod store could not be reached. Try again, or ask the map's author "
-          "for its .zip export, which carries the mods."
-        : ", which you do not have and the mod store does not hold. Ask the map's author for its .zip export, "
-          "which carries the mods.", _TRUNCATE);
-    sh_modpublished_compose_refusal(notice, sizeof notice, labels, count, unreachable);
-    if (single[0]) pub_single_notice(notice, sizeof notice, single, hook, unreachable);
-    free((void *)labels); free(storage);
-    pub_print(line);
-    pub_logf("MODS: %s", line);
     if (g_hold.state != HOLD_IDLE) pub_drop(notice, why);
     else pub_notice(notice);
 }
 
 int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, const char *place)
 {
-    char name[PUB_ID_CAP] = "";
+    const char *name = pub_s(source);
     int begun;
     if (!rows || !rows->count) return 0;
-    if (source) strncpy_s(name, sizeof name, source, _TRUNCATE);
     if (!g_ops_set || !pub_on_main()) {
         const sh_modmanifest_row **missing = calloc(rows->count, sizeof(*missing));
         size_t n = 0;
@@ -1460,10 +1532,10 @@ int sh_modpub_rawmap_hold(const sh_modmanifest_list *rows, const char *source, c
     pub_logf("MODS: rawmap '%s' needs %u missing mod(s) (%llu bytes); asking the mod store for them", name,
              (unsigned)g_hold.missing_count, g_hold.missing_bytes);
     {
-        char line[PUB_TEXT_CAP + PUB_ID_CAP];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "Rawmap %s needs %u mod%s you do not have; checking the mod store.",
-                    name[0] ? name : "map", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
-        pub_print(line);
+        char *line = sh_textf("Rawmap %s needs %u mod%s you do not have; checking the mod store.",
+                              name[0] ? name : "map", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
+        if (line) pub_print(line);
+        free(line);
     }
     return 1;
 }
@@ -1479,12 +1551,12 @@ int sh_modpub_prefab_holding(void)
 
 int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
 {
-    char nm[PUB_ID_CAP] = "", line[PUB_TEXT_CAP + PUB_ID_CAP];
+    const char *nm = pub_s(name);
+    char *line;
     int begun;
     if (!rows || !rows->count) return 0;
     if (!g_ops_set) return -2;
     if (!pub_on_main()) return -1;
-    if (name) strncpy_s(nm, sizeof nm, name, _TRUNCATE);
     /* A prefab's mods are the player's own once placed: they install at the
      * root (DECISIONS 12). */
     begun = pub_hold_begin(SH_MODPUB_PREFAB_PLACE, NULL, NULL, NULL, nm, "", "", rows, NULL);
@@ -1492,9 +1564,10 @@ int sh_modpub_prefab_hold(const sh_modmanifest_list *rows, const char *name)
     g_hold.state = HOLD_PROBING;
     pub_logf("MODS: prefab '%s' needs %u missing mod(s) (%llu bytes); asking the mod store for them", nm,
              (unsigned)g_hold.missing_count, g_hold.missing_bytes);
-    _snprintf_s(line, sizeof line, _TRUNCATE, "Prefab %s needs %u mod%s you do not have; checking the mod store.",
-                nm[0] ? nm : "prefab", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
-    pub_print(line);
+    line = sh_textf("Prefab %s needs %u mod%s you do not have; checking the mod store.",
+                    nm[0] ? nm : "prefab", (unsigned)g_hold.missing_count, g_hold.missing_count == 1 ? "" : "s");
+    if (line) pub_print(line);
+    free(line);
     return 1;
 }
 
@@ -1537,26 +1610,24 @@ static void pub_start_probe(void)
 static void pub_deny(const int *verdicts, const sh_modpub_probe *probes, const char *detail, const char *why)
 {
     pub_hold *h = &g_hold;
-    char notice[PUB_TEXT_CAP] = "", line[1024];
+    char *notice = NULL;
     size_t denied = 0;
     for (size_t i = 0; i < h->missing_count; i++) {
         const sh_modmanifest_row *row = &h->rows.rows[h->missing[i]];
-        char title[SH_MODMANIFEST_DISPLAY_CAP];
+        char *line;
         if (verdicts[i] == SH_MODPUB_GATE_OBTAIN) continue;
-        pub_title(title, sizeof title, row);
-        sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), title, detail, probes ? probes[i].code : 0, line,
-                               sizeof line);
+        line = sh_modpub_gate_wording(verdicts[i], pub_thing(h->hook), pub_title(row), detail, probes ? probes[i].code : 0);
+        if (!line) continue;
         pub_print(line);
         pub_logf("MODS: denied (cause %d, %s@%.16s): %s", verdicts[i], row->salt, row->build, line);
-        if (!denied++) strncpy_s(notice, sizeof notice, line, _TRUNCATE);
+        if (!denied++) notice = line;
+        else free(line);
     }
-    if (denied > 1) {
-        char more[96];
-        _snprintf_s(more, sizeof more, _TRUNCATE, " %u more mod%s cannot be obtained; see the console.",
-                    (unsigned)(denied - 1), denied == 2 ? "" : "s");
-        if (strlen(notice) + strlen(more) < sizeof notice) strcat_s(notice, sizeof notice, more);
-    }
+    if (denied > 1 && notice)
+        (void)sh_text_set(&notice, "%s %u more mod%s cannot be obtained; see the console.", notice,
+                          (unsigned)(denied - 1), denied == 2 ? "" : "s");
     pub_drop(notice, why);
+    free(notice);
 }
 
 static void pub_probe_finish(void)
@@ -1608,7 +1679,7 @@ static void pub_probe_finish(void)
             return;
         }
         pub_logf("MODS: the mod store holds all %u missing mod(s) of the %s of '%s'", (unsigned)h->missing_count,
-                 pub_hook_name(h->hook), h->id[0] ? h->id : "local map");
+                 pub_hook_name(h->hook), h->id && h->id[0] ? h->id : "local map");
         pub_job_free(job);
         h->job = NULL;
         h->waited = 0;
@@ -1625,14 +1696,15 @@ void sh_modpublished_poll(void)
     /* A parse no gate took in its frame was the editor's: its held cause
      * sentences are said now, once. */
     if (g_notes_held && g_notes_frame != g_frame && pub_on_main()) {
-        char refusal[700];
-        int refused = sh_modmanifest_load_refusal(refusal, sizeof refusal);
+        char *refusal = NULL;
+        int refused = sh_modmanifest_load_refusal(&refusal);
         g_notes_held = 0;
         (void)sh_modmanifest_load_notes_flush(1);
         /* The editor cannot open the map: the player is told why, in words. */
-        if (refused && strlen(refusal) < PUB_TEXT_CAP) pub_notice(refusal);
+        if (refused && refusal) pub_notice(refusal);
+        free(refusal);
     }
-    if (h->state == HOLD_IDLE && !g_notice[0] && !g_notice_ticket && !g_orphans) return;
+    if (h->state == HOLD_IDLE && !g_notice && !g_notice_ticket && !g_orphans) return;
     if (!pub_on_main()) return;
     pub_orphans_retire();
 
@@ -1673,10 +1745,13 @@ void sh_modpublished_poll(void)
         _snprintf_s(line, sizeof line, _TRUNCATE, pub_is_prefab(h->hook) ? "The prefab was not placed: it needs %s."
                                                                         : "The map was not loaded: it needs %s.", list);
         if (h->missing_count == 1) {
-            char cause[PUB_CAUSE_CAP], text[PUB_TEXT_CAP * 2];
-            (void)pub_row_state(&h->rows.rows[h->missing[0]], h->place, pub_thing(h->hook), cause, sizeof cause);
-            _snprintf_s(text, sizeof text, _TRUNCATE, "%s %s", cause, pub_not_done(h->hook));
-            if (cause[0] && strlen(text) < sizeof line) strcpy_s(line, sizeof line, text);
+            /* The one row's sentence, when the dialog holds it whole. */
+            char *cause = NULL, *text;
+            (void)pub_row_state(&h->rows.rows[h->missing[0]], h->place, pub_thing(h->hook), &cause);
+            text = cause && cause[0] ? sh_textf("%s %s", cause, pub_not_done(h->hook)) : NULL;
+            if (text && strlen(text) < sizeof line) strcpy_s(line, sizeof line, text);
+            free(text);
+            free(cause);
         }
         pub_drop(line, "the player declined");
         break;
@@ -1731,14 +1806,13 @@ void sh_modpub_test_reset(void)
     }
     pub_record_clear(&g_record);
     g_prefab_ready = NULL;
-    for (size_t i = 0; i < PUB_SEEN_MAX; i++) sh_modmanifest_list_free(&g_seen[i].rows);
-    memset(g_seen, 0, sizeof g_seen);
-    g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
-    g_launch_place[0] = 0; g_launch_set = 0;
+    for (size_t i = 0; i < PUB_SEEN_MAX; i++) pub_seen_clear(&g_seen[i]);
+    pub_notice_clear(); g_notice_ticket = 0; g_notice_waited = 0;
+    free(g_launch_place); g_launch_place = NULL; g_launch_set = 0;
     InterlockedExchange(&g_resuming, 0);
 }
 int sh_modpub_test_state(void) { return g_hold.state; }
-const char *sh_modpub_test_notice(void) { return g_notice; }
+const char *sh_modpub_test_notice(void) { return g_notice ? g_notice : ""; }
 #endif
 
 /* ================================================================== engine
@@ -1872,19 +1946,21 @@ static void *eng_vslot(void *object, size_t offset)
     return (*(void ***)object)[offset / sizeof(void *)];
 }
 
-/* A native idStr's text: length at +8, data at +0x10. */
-static int eng_string(const void *s, char *out, size_t cap)
+/* A native idStr's text, whole (malloc'd): length at +8, data at +0x10.
+ * NULL when it does not read. */
+static char *eng_string(const void *s)
 {
-    if (out && cap) out[0] = 0;
-    if (!s || !out || !cap) return 0;
+    char *out = NULL;
+    if (!s) return NULL;
     __try {
         int length = *(const int *)((const uint8_t *)s + 8);
         const char *data = *(const char *const *)((const uint8_t *)s + 0x10);
-        if (length < 0 || (size_t)length >= cap || (length && !data)) return 0;
+        if (length < 0 || (length && !data)) return NULL;
+        if ((out = (char *)malloc((size_t)length + 1)) == NULL) return NULL;
         if (length) memcpy(out, data, (size_t)length);
         out[length] = 0;
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
+        return out;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(out); return NULL; }
 }
 
 /* The shell's menu manager, the one every published-map screen belongs to. */
@@ -1927,9 +2003,8 @@ static int eng_on_main(void *c)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char *cause,
-                         size_t cap)
-{ (void)c; return sh_modserve_row_served_in(row, place, subject, cause, cap); }
+static int eng_row_state(void *c, const sh_modmanifest_row *row, const char *place, const char *subject, char **cause)
+{ (void)c; return sh_modserve_row_served_in(row, place, subject, cause); }
 static int eng_rescan(void *c) { (void)c; return sh_modserve_index_rescan(); }
 static int eng_activate(void *c, const sh_modmanifest_list *rows) { (void)c; return sh_modmanifest_activate(rows); }
 static int eng_can_ask(void *c) { (void)c; return sh_engine_dialog_can_ask(); }
@@ -1955,7 +2030,7 @@ static int eng_worker_run(void *c, void (*job)(void *), void *ctx)
 /* The source of the borrow that refused the last fetch (MODNET_E_GAME), for
  * the gate's cause 4. Written on the worker, read on the main tick after the
  * job is done (the job's completion is the barrier). */
-static char g_eng_fetch_hash[SH_MODMANIFEST_HASH_CAP], g_eng_fetch_source[260];
+static char g_eng_fetch_hash[SH_MODMANIFEST_HASH_CAP], *g_eng_fetch_source;   /* the source: malloc'd, or NULL */
 
 C_ASSERT(PUB_NET_CONFIG == MODNET_E_CONFIG && PUB_NET_NET == MODNET_E_NET && PUB_NET_TIMEOUT == MODNET_E_TIMEOUT);
 C_ASSERT(PUB_NET_CANCELLED == MODNET_E_CANCELLED && PUB_NET_HTTP == MODNET_E_HTTP && PUB_NET_PROTOCOL == MODNET_E_PROTOCOL);
@@ -1969,36 +2044,42 @@ static int eng_fetch_for(void *c, const sh_modmanifest_row *row, const char *pla
 {
     modnet_io io;
     modsync_stats st;
-    char where[MAX_PATH];
+    char *where = NULL;
+    int code;
     (void)c;
     memset(&io, 0, sizeof io);
     memset(&st, 0, sizeof st);
     io.cancel = (volatile long *)cancel;
     io.progress = (modnet_progress_fn)progress;
     g_eng_fetch_hash[0] = 0;
-    g_eng_fetch_source[0] = 0;
-    if (modexport_fetch_build(row, place, &io, &st, where, sizeof where)) {
-        if (where[0])
-            pub_logf("MODS: %s is served by mods\\%s%s", row->name[0] ? row->name : row->salt, where,
+    free(g_eng_fetch_source);
+    g_eng_fetch_source = NULL;
+    if (modexport_fetch_build(row, place, &io, &st, &where)) {
+        if (where && where[0])
+            pub_logf("MODS: %s is served by mods\\%s%s", pub_title(row), where,
                      st.already_installed ? " (already there)" : "");
+        free(where);
+        modsync_stats_free(&st);
         return 0;
     }
-    pub_logf("MODS: the download of %s failed: %s", row->name[0] ? row->name : row->salt,
-             st.cause[0] ? st.cause : modnet_code_text(st.code));
+    pub_logf("MODS: the download of %s failed: %s", pub_title(row), st.cause && st.cause[0] ? st.cause : modnet_code_text(st.code));
     if (st.game_lacks) {
-        strncpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, row->build, _TRUNCATE);
-        strncpy_s(g_eng_fetch_source, sizeof g_eng_fetch_source, st.game_source, _TRUNCATE);
+        strcpy_s(g_eng_fetch_hash, sizeof g_eng_fetch_hash, row->build);
+        g_eng_fetch_source = st.game_source ? sh_text(st.game_source) : NULL;
     }
-    return st.code ? st.code : -1;
+    code = st.code ? st.code : -1;
+    modsync_stats_free(&st);
+    return code;
 }
 
 /* The published metadata's title (an idStr at +0x398; the item id is at +0
  * and the revision at +0x30, as eng_metadata_ids reads them). */
 #define ENG_METADATA_TITLE 0x398
-static int eng_metadata_title(void *c, const void *metadata, char *out, size_t cap)
+static int eng_metadata_title(void *c, const void *metadata, char **out)
 {
     (void)c;
-    return metadata && eng_string((const uint8_t *)metadata + ENG_METADATA_TITLE, out, cap) && out[0];
+    *out = metadata ? eng_string((const uint8_t *)metadata + ENG_METADATA_TITLE) : NULL;
+    return *out && (*out)[0];
 }
 
 static int eng_own_item(void *c, const char *item)
@@ -2008,32 +2089,32 @@ static int eng_own_item(void *c, const char *item)
 }
 
 /* The published item's place: the record's, else a free one its title names. */
-static int eng_item_place(void *c, const char *title, const char *item, char *out, size_t cap)
+static int eng_item_place(void *c, const char *title, const char *item, char **out)
 {
     sh_ms_place place;
     (void)c;
-    out[0] = 0;
-    if (item && item[0] && sh_ms_place_of(item, out, cap, NULL, 0)) return 1;
+    *out = NULL;
+    if (item && item[0] && sh_ms_place_of(item, out, NULL)) return 1;
     place.title = title && title[0] ? title : "map";
     place.map_id = item && item[0] ? item : NULL;
     /* Noted now, so the item keeps this place whatever else takes the title. */
-    return sh_ms_place_dir(&place, out, cap) && sh_ms_place_note(&place, out);
+    return (*out = sh_ms_place_dir(&place)) != NULL && sh_ms_place_note(&place, *out);
 }
 
 static void eng_place_set(void *c, const char *place) { (void)c; (void)sh_modserve_place_set(place); }
 
-static int eng_place_norm(void *c, const char *place, char *out, size_t cap)
+static int eng_place_norm(void *c, const char *place, char **out)
 {
     (void)c;
-    return sh_modserve_place_norm(place, out, cap);
+    return (*out = sh_modserve_place_norm(place)) != NULL;
 }
 
-static int eng_fetch_detail(void *c, const char *hash, char *out, size_t cap)
+static int eng_fetch_detail(void *c, const char *hash, char **out)
 {
     (void)c;
-    if (!hash || _stricmp(hash, g_eng_fetch_hash) || !g_eng_fetch_source[0]) return 0;
-    strncpy_s(out, cap, g_eng_fetch_source, _TRUNCATE);
-    return 1;
+    *out = NULL;
+    if (!hash || _stricmp(hash, g_eng_fetch_hash) || !g_eng_fetch_source || !g_eng_fetch_source[0]) return 0;
+    return (*out = sh_text(g_eng_fetch_source)) != NULL;
 }
 
 /* A deep copy through the copy constructor the selection record uses, inside
@@ -2073,11 +2154,12 @@ static void eng_metadata_free(void *c, void *copy)
     (void)sh_process_heap_leave(&scope);
 }
 
-static int eng_metadata_ids(void *c, const void *metadata, char *id, size_t id_cap, char *rev, size_t rev_cap)
+static int eng_metadata_ids(void *c, const void *metadata, char **id, char **rev)
 {
     (void)c;
-    return metadata && eng_string(metadata, id, id_cap) &&
-           eng_string((const uint8_t *)metadata + 0x30, rev, rev_cap);
+    *id = metadata ? eng_string(metadata) : NULL;
+    *rev = metadata ? eng_string((const uint8_t *)metadata + 0x30) : NULL;
+    return *id && *rev;
 }
 
 static unsigned long long eng_hold_token(void *c, int hook, void *owner, const void *extra)
@@ -2111,20 +2193,25 @@ static int eng_owner_current(void *c, int hook, void *owner, const void *extra, 
  * them: session -> lobby (+0x348) -> parameters (+0x2B8). */
 static int eng_host_matches(void *c, const char *id, const char *revision)
 {
-    char item[PUB_ID_CAP], rev[PUB_ID_CAP];
+    const uint8_t *parameters = NULL;
+    char *item, *rev;
+    int same;
     (void)c;
     if (!id || !id[0] || !revision) return 0;
     __try {
         void *session = g_eng.session_slot ? *g_eng.session_slot : NULL, *lobby;
-        const uint8_t *parameters;
         if (!session) return 0;
         lobby = ((void *(*)(void *))(*(void ***)session)[g_eng.slot_lobby])(session);
         if (!lobby) return 0;
         parameters = ((const uint8_t *(*)(void *))(*(void ***)lobby)[g_eng.slot_parameters])(lobby);
-        if (!parameters || !eng_string(parameters + ENG_LOBBY_ITEM, item, sizeof item) ||
-            !eng_string(parameters + ENG_LOBBY_REVISION, rev, sizeof rev)) return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-    return !strcmp(item, id) && !strcmp(rev, revision);
+    if (!parameters) return 0;
+    item = eng_string(parameters + ENG_LOBBY_ITEM);
+    rev = eng_string(parameters + ENG_LOBBY_REVISION);
+    same = item && rev && !strcmp(item, id) && !strcmp(rev, revision);
+    free(item);
+    free(rev);
+    return same;
 }
 
 /* OnSnapPlay's own first steps: clear the read's wait dialog (GDM 0x63)
@@ -2245,8 +2332,9 @@ static void eng_scope_play(const char *why)
         /* The launched map's place, as its gate or hold decided it, before
          * its serving is computed; a launch no gate decided keeps the place
          * its parse set. */
-        char place[SH_MODSERVE_PLACE_CAP];
-        if (sh_modpub_launch_place(place, sizeof place)) (void)sh_modserve_place_set(place);
+        char *place = NULL;
+        if (sh_modpub_launch_place(&place) && place) (void)sh_modserve_place_set(place);
+        free(place);
         (void)sh_modui_scope_launch(why);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the launch's serving mode change faulted; the launch continues");
@@ -2262,9 +2350,10 @@ static int eng_resume(void *c, const sh_modpub_resume *r)
     if (r && r->hook == SH_MODPUB_RAWMAP_LOAD) {
         /* Nothing was launched, so there is nothing to call: the rawmap opens
          * again, now or at the next map open. */
-        char note[PUB_TEXT_CAP] = "";
-        ran = sh_rawmap_reopen_after_mods(note, sizeof note);
-        if (note[0]) pub_notice(note);
+        char *note = NULL;
+        ran = sh_rawmap_reopen_after_mods(&note);
+        if (note && note[0]) pub_notice(note);
+        free(note);
         return ran;
     }
     if (r && r->hook == SH_MODPUB_LOBBY_LAUNCH && r->text) {
@@ -2352,18 +2441,25 @@ static int eng_scripted_maps_allowed(void *c) { (void)c; return sh_modui_scripte
  * serving folder's mod.json. Asked only while scripts are turned off. */
 static unsigned eng_served_scripts(void *c, const sh_modmanifest_list *rows, const char *place)
 {
-    char root[MAX_PATH * 4], folder[MAX_PATH * 4];
+    const char *root = sh_ms_root();
     unsigned n = 0;
     (void)c;
-    if (!sh_ms_root(root, sizeof root)) return 0;
+    if (!root) return 0;
     for (size_t i = 0; i < rows->count; i++) {
         sh_modserve_bundle_ref ref;
         sh_mb_bundle b;
-        if (!sh_modserve_row_build_in(&rows->rows[i], place, &ref) || !ref.folder[0]) continue;
-        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", root, ref.folder);
+        char *folder;
+        memset(&ref, 0, sizeof ref);
+        if (!sh_modserve_row_build_in(&rows->rows[i], place, &ref) || !ref.folder || !ref.folder[0] ||
+            !(folder = sh_textf("%s\\%s", root, ref.folder))) {
+            sh_modserve_bundle_ref_free(&ref);
+            continue;
+        }
+        sh_modserve_bundle_ref_free(&ref);
         memset(&b, 0, sizeof b);
         if (sh_mb_load_folder(folder, &b)) n += b.script_files;
         sh_mb_free(&b);
+        free(folder);
     }
     return n;
 }
@@ -2443,14 +2539,18 @@ static int eng_cache_warm(const void *id, const void *revision)
 
 static unsigned char eng_lobby_detour(void *manager, const void *id, const void *revision)
 {
-    char item[PUB_ID_CAP], rev[PUB_ID_CAP];
+    char *item = NULL, *rev = NULL;
+    int pass;
     eng_cache_lobby_fn original = (eng_cache_lobby_fn)g_eng.original[ENG_LOBBY];
     if (!InterlockedCompareExchange(&g_eng.ready, 0, 0) || InterlockedCompareExchange(&g_resuming, 0, 0) ||
-        eng_cache_warm(id, revision) != 1 ||
-        !eng_string(id, item, sizeof item) || !eng_string(revision, rev, sizeof rev))
+        eng_cache_warm(id, revision) != 1 || !(item = eng_string(id)) || !(rev = eng_string(revision))) {
+        free(item);
         return original(manager, id, revision);
-    if (eng_decide(SH_MODPUB_CACHE_LOBBY, manager, NULL, NULL, NULL, item, rev))
-        return original(manager, id, revision);
+    }
+    pass = eng_decide(SH_MODPUB_CACHE_LOBBY, manager, NULL, NULL, NULL, item, rev);
+    free(item);
+    free(rev);
+    if (pass) return original(manager, id, revision);
     return 0;
 }
 

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../common/text.h"
 #include "script_api_combat.h"
 #include "script_api_common.h"
 #include "script_hooks.h"
@@ -880,18 +881,21 @@ static find_decl_fn  g_decl_find;
 static uintptr_t     g_vt_ai;
 static const uint8_t *g_fx_table;
 static int           g_fx_count;
-static char          g_log_last[512];   /* the line written last */
+static char *g_log_last;   /* the last line logged, malloc'd */
 
 static void combat_log(const char *fmt, ...)
 {
-    char line[400];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    if (!strcmp(line, g_log_last)) return;   /* the same line again says nothing new */
-    strcpy_s(g_log_last, sizeof g_log_last, line);
+    if (!line) return;
+    /* the same line again says nothing new */
+    if (g_log_last && !strcmp(line, g_log_last)) { free(line); return; }
     backend_log(line);
+    free(g_log_last);
+    g_log_last = line;
 }
 
 static int av_only(DWORD code)

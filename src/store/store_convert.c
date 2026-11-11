@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "store_convert.h"
+#include "store_text.h"
 #include "store_deflate.h"
 #include "store_saves.h"
 #include "modstore.h"
@@ -19,7 +20,8 @@
 #include "mp_json.h"
 
 #define CV_PATH      (MAX_PATH * 4)
-#define CV_NEST_MAX  8
+#define CV_NEST_MAX  8              /* how deep an earlier store looked for a mod folder (its SH_MS_NEST_MAX) */
+#define CV_CAUSE_CAP 2048           /* a cause field of the record; a longer sentence is in the log (store_text.h) */
 #define CV_ANY_SIZE  ((size_t)-1)   /* a map, a descriptor or a bank of any size */
 
 /* ------------------------------------------------------------ output ---- */
@@ -40,7 +42,7 @@ static char *cv_join(const char *a, const char *b)
 {
     size_t n = strlen(a) + strlen(b) + 2;
     char *p = (char *)malloc(n);
-    if (p) _snprintf_s(p, n, _TRUNCATE, "%s\\%s", a, b);
+    if (p) st_fmt(p, n, "%s\\%s", a, b);
     return p;
 }
 
@@ -122,7 +124,7 @@ static int cv_write_tmp(const char *path, const void *data, size_t n)
     DWORD done = 0;
     int ok = 0;
     if (!tmp) return 0;
-    _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+    st_fmt(tmp, strlen(path) + 32, "%s" CV_TMP, path);
     wt = sh_mb_wpath(tmp);
     if (wt) {
         h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -144,7 +146,7 @@ static int cv_put_tmp(const char *path)
     wchar_t *wt = NULL, *wp = sh_mb_wpath(path);
     int ok = 0;
     if (tmp) {
-        _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        st_fmt(tmp, strlen(path) + 32, "%s" CV_TMP, path);
         wt = sh_mb_wpath(tmp);
     }
     if (wt && wp) ok = MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
@@ -159,7 +161,7 @@ static void cv_drop_tmp(const char *path)
     char *tmp = (char *)malloc(strlen(path) + 32);
     wchar_t *wt = NULL;
     if (tmp) {
-        _snprintf_s(tmp, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        st_fmt(tmp, strlen(path) + 32, "%s" CV_TMP, path);
         wt = sh_mb_wpath(tmp);
     }
     if (wt) DeleteFileW(wt);
@@ -183,7 +185,7 @@ static int cv_backup(const char *path)
     wchar_t *wb, *wp;
     int ok = 0;
     if (!bak) return 0;
-    _snprintf_s(bak, strlen(path) + sizeof SH_CONV_BACKUP_SUFFIX, _TRUNCATE, "%s%s", path, SH_CONV_BACKUP_SUFFIX);
+    st_fmt(bak, strlen(path) + sizeof SH_CONV_BACKUP_SUFFIX, "%s%s", path, SH_CONV_BACKUP_SUFFIX);
     wb = sh_mb_wpath(bak);
     wp = sh_mb_wpath(path);
     if (wb && wp) ok = CopyFileW(wp, wb, TRUE) || GetLastError() == ERROR_FILE_EXISTS;
@@ -292,7 +294,7 @@ static int cv_rec_get(cv_rec *r, const char *name, const char *key, char *out, s
     int ok = 0;
     if (out && cap) out[0] = 0;
     if (obj && obj->type == MPJ_OBJ && k && (v = mpj_get(obj, k)) != NULL && v->type == MPJ_STR) {
-        strncpy_s(out, cap, v->text, _TRUNCATE);
+        st_cpy(out, cap, v->text);
         ok = 1;
     }
     free(k);
@@ -308,7 +310,7 @@ static int cv_rec_get_key(cv_rec *r, const char *key, char *out, size_t cap)
     if (!obj || obj->type != MPJ_OBJ) return 0;
     for (i = 0; i < obj->n; i++)
         if (!_stricmp(obj->keys[i], key) && obj->items[i]->type == MPJ_STR) {
-            strncpy_s(out, cap, obj->items[i]->text, _TRUNCATE);
+            st_cpy(out, cap, obj->items[i]->text);
             return 1;
         }
     return 0;
@@ -571,7 +573,7 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
         name = sh_mb_utf8(fd.cFileName);
         if (!name) continue;
         if (depth == 0 && !_stricmp(name, "maps")) { free(name); continue; }
-        _snprintf_s(crel, sizeof crel, _TRUNCATE, "%s%s%s", rel, rel[0] ? "\\" : "", name);
+        st_fmt(crel, sizeof crel, "%s%s%s", rel, rel[0] ? "\\" : "", name);
         path = cv_join(dir, name);
         free(name);
         if (!path) continue;
@@ -593,13 +595,13 @@ static void cv_walk(cv_list *l, const char *mods, const char *dir, const char *r
                 if (!f->rel) { free(path); continue; }
                 f->leaf = strrchr(f->rel, '\\') ? strrchr(f->rel, '\\') + 1 : f->rel;
                 sh_mb_old_load(path, &old);
-                strncpy_s(f->key, sizeof f->key, old.key[0] ? old.key : f->leaf, _TRUNCATE);
+                st_cpy(f->key, sizeof f->key, old.key[0] ? old.key : f->leaf);
                 if (!old.key[0]) {
                     size_t i;
                     for (i = 0; f->key[i]; i++) if (f->key[i] >= 'A' && f->key[i] <= 'Z') f->key[i] = (char)(f->key[i] + 32);
                 }
-                strncpy_s(f->bundle, sizeof f->bundle, old.bundle, _TRUNCATE);
-                strncpy_s(f->descriptor, sizeof f->descriptor, old.descriptor[0] ? old.descriptor : "mod.json", _TRUNCATE);
+                st_cpy(f->bundle, sizeof f->bundle, old.bundle);
+                st_cpy(f->descriptor, sizeof f->descriptor, old.descriptor[0] ? old.descriptor : "mod.json");
                 f->product = cv_product_made(f->rel, f->leaf, old.origin);
                 sh_mb_old_free(&old);
                 if (!sh_mb_tree_hash(path, f->tree)) f->tree[0] = 0;
@@ -813,12 +815,12 @@ static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int
         char *v = (char *)malloc(strlen(path) + 40);
         int half = 0;
         if (v) {
-            _snprintf_s(v, strlen(path) + 40, _TRUNCATE, "%s.verify" CV_TMP, path);
+            st_fmt(v, strlen(path) + 40, "%s.verify" CV_TMP, path);
             half = cv_attr(v, NULL);
         }
         free(v);
         if (half) {
-            if (!x->c->maps) strncpy_s(x->c->first_map, sizeof x->c->first_map, path, _TRUNCATE);
+            if (!x->c->maps) st_cpy(x->c->first_map, sizeof x->c->first_map, path);
             x->c->maps++;
             return;
         }
@@ -836,7 +838,7 @@ static void cv_scan_map(const sh_conv_opts *o, void *vctx, const char *path, int
             x->c->maps_left++;
             if (x->list) cv_say(o, 0, "  %s: left as it is (see the earlier run's line for why)", path);
         } else {
-            if (!x->c->maps) strncpy_s(x->c->first_map, sizeof x->c->first_map, path, _TRUNCATE);
+            if (!x->c->maps) st_cpy(x->c->first_map, sizeof x->c->first_map, path);
             x->c->maps++;
         }
     }
@@ -881,7 +883,7 @@ int sh_conv_scan(const sh_conv_opts *o, sh_conv_check *out, int list)
         char *t = NULL;
         if (sh_mb_record_get(o->mods, CV_SECTIONS[i], &t) == 1) {
             size_t w = strlen(out->section_names);
-            _snprintf_s(out->section_names + w, sizeof out->section_names - w, _TRUNCATE, "%s%s", w ? ", " : "", CV_SECTIONS[i]);
+            st_fmt(out->section_names + w, sizeof out->section_names - w, "%s%s", w ? ", " : "", CV_SECTIONS[i]);
             out->sections++;
         }
         free(t);
@@ -908,6 +910,17 @@ static int cv_stock(void *context, const char *request)
     return sh_modstock_exists(request);
 }
 
+/* The failed build's record written into dest: 1 with the build's first cause
+ * in cause[cap], or 0 with why it could not be written there. */
+static int cv_write_failed(const sh_mb_bundle *b, const char *dest, char *cause, size_t cap)
+{
+    char *why = NULL;
+    int ok = sh_mb_write_failed(b, dest, &why);
+    st_put(cause, cap, ok ? sh_mb_first_cause(b) : why ? why : "its build record could not be written");
+    free(why);
+    return ok;
+}
+
 /* Build `dest` with the real builder and write its mod.json. 1 built; 0 with
  * the builder's own first cause in b->first_cause (the folder is not written). */
 static int cv_build(const char *dest, sh_mb_bundle *b, char *cause, size_t cap)
@@ -922,9 +935,13 @@ static int cv_build(const char *dest, sh_mb_bundle *b, char *cause, size_t cap)
     r.stock = cv_stock;
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
-    if (!sh_mb_build(dest, NULL, &r, b)) strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
-    else if (!sh_mb_write(b, dest, cause, cap)) {}
-    else ok = 1;
+    if (!sh_mb_build(dest, NULL, &r, b)) st_put(cause, cap, sh_mb_first_cause(b));
+    else {
+        char *why = NULL;
+        if (!sh_mb_write(b, dest, &why)) st_put(cause, cap, why ? why : "its build could not be written");
+        else ok = 1;
+        free(why);
+    }
     sh_mb_keep_replacements_here(0);
     sh_ms_list_free(&list);
     return ok;
@@ -1078,7 +1095,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
     prefix[i] = '_';
     prefix[i + 1] = 0;
     pn = i + 1;
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\assets\\sound\\soundbanks\\pc", dest);
+    st_fmt(dir, sizeof dir, "%s\\assets\\sound\\soundbanks\\pc", dest);
     pat = cv_join(dir, "*.bnk");
     w = pat ? sh_mb_wpath(pat) : NULL;
     h = w ? FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
@@ -1096,7 +1113,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
         stem[sn] = 0;
         if (_strnicmp(stem, salt, SH_SALT_LEN) || stem[SH_SALT_LEN] != '_') {
             const char *rest = !_strnicmp(stem, prefix, pn) && stem[pn] ? stem + pn : stem;
-            _snprintf_s(fresh, sizeof fresh, _TRUNCATE, "%s_%s.bnk", salt, rest);
+            st_fmt(fresh, sizeof fresh, "%s_%s.bnk", salt, rest);
             /* A name past the stem limit stays as it is: the build names the length rule. */
             if (strlen(fresh) - 4 <= SH_MB_BANK_STEM_MAX) {
                 from = cv_join(dir, leaf);
@@ -1125,7 +1142,7 @@ static void cv_name_banks(const char *dest, const char *key, const char *salt)
                     }
                     if (renamed < names_cap) {
                         strcpy_s(names[renamed].from, sizeof names[renamed].from, stem);
-                        _snprintf_s(names[renamed].to, sizeof names[renamed].to, _TRUNCATE, "%.*s", (int)(strlen(fresh) - 4),
+                        st_fmt(names[renamed].to, sizeof names[renamed].to, "%.*s", (int)(strlen(fresh) - 4),
                                     fresh);
                         renamed++;
                     }
@@ -1178,24 +1195,31 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
     cause[0] = 0;
     text = dpath ? cv_read(dpath, CV_ANY_SIZE, &n) : NULL;
     free(dpath);
-    if (!text) { _snprintf_s(cause, cap, _TRUNCATE, "its %s cannot be read", f->descriptor); return CV_LEFT; }
+    if (!text) { st_putf(cause, cap, "its %s cannot be read", f->descriptor); return CV_LEFT; }
     fresh = cv_fresh((const char *)text, n, f->key, &fl, &retired);
     free(text);
-    if (!fresh) { _snprintf_s(cause, cap, _TRUNCATE, "its %s is not a JSON object; fix it", f->descriptor); return CV_LEFT; }
+    if (!fresh) { st_putf(cause, cap, "its %s is not a JSON object; fix it", f->descriptor); return CV_LEFT; }
     /* The salting reads a view of the mod's own part only: files beside it are never read or rewritten (DECISIONS 16). */
-    _snprintf_s(view, sizeof view, _TRUNCATE, "%s.view-%lu", f->path, GetCurrentProcessId());
+    st_fmt(view, sizeof view, "%s.view-%lu", f->path, GetCurrentProcessId());
     if (cv_is_dir(view)) cv_rmtree(view);
     if (!cv_link_top(f->path, view, 1)) {
-        _snprintf_s(cause, cap, _TRUNCATE, "its files could not be read (error %lu)", GetLastError());
+        st_putf(cause, cap, "its files could not be read (error %lu)", GetLastError());
         cv_rmtree(view);
         free(fresh);
         return CV_LEFT;
     }
-    r = sh_ms_salt_copy(view, fresh, fl, f->key, dest, f->salt, cause, cap);
-    if (r < 0 && strstr(cause, " file(s) are under mods/") && _stricmp(f->leaf, f->key)) {
-        /* Its files are under its folder's name rather than its key. */
-        if (cv_is_dir(dest)) cv_rmtree(dest);
-        r = sh_ms_salt_copy(view, fresh, fl, f->leaf, dest, f->salt, cause, cap);
+    {
+        char *why = NULL;
+        r = sh_ms_salt_copy(view, fresh, fl, f->key, dest, f->salt, &why);
+        if (r < 0 && why && strstr(why, " file(s) are under mods/") && _stricmp(f->leaf, f->key)) {
+            /* Its files are under its folder's name rather than its key. */
+            if (cv_is_dir(dest)) cv_rmtree(dest);
+            free(why);
+            why = NULL;
+            r = sh_ms_salt_copy(view, fresh, fl, f->leaf, dest, f->salt, &why);
+        }
+        if (r < 0) st_put(cause, cap, why ? why : "it could not be salted");
+        free(why);
     }
     cv_rmtree(view);
     if (r < 0) {
@@ -1207,7 +1231,7 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
         if (!sh_salt_generate(f->salt) || !cv_link_top(f->path, dest, 1) || !mj) {
             free(mj);
             free(fresh);
-            _snprintf_s(cause, cap, _TRUNCATE, "its files could not be copied (error %lu)", GetLastError());
+            st_putf(cause, cap, "its files could not be copied (error %lu)", GetLastError());
             return CV_LEFT;
         }
         {
@@ -1222,7 +1246,7 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
         if (!cv_write(mj, fresh, fl)) {
             free(mj);
             free(fresh);
-            _snprintf_s(cause, cap, _TRUNCATE, "its new mod.json could not be written (error %lu)", GetLastError());
+            st_putf(cause, cap, "its new mod.json could not be written (error %lu)", GetLastError());
             return CV_LEFT;
         }
         free(mj);
@@ -1230,11 +1254,9 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
         memset(b, 0, sizeof *b);
         strcpy_s(b->id, sizeof b->id, f->salt);
         if (!sh_mb_tree_hash(dest, b->tree)) b->tree[0] = 0;
-        strncpy_s(b->first_cause, sizeof b->first_cause, cause, _TRUNCATE);
-        if (!sh_mb_write_failed(b, dest, cause, cap)) return CV_LEFT;
-        strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
+        if (!sh_mb_set_first_cause(b, cause) || !cv_write_failed(b, dest, cause, cap)) return CV_LEFT;
         if (!cv_link_top(f->path, dest, 0)) {
-            _snprintf_s(cause, cap, _TRUNCATE, "the files beside its mod could not be copied (error %lu)", GetLastError());
+            st_putf(cause, cap, "the files beside its mod could not be copied (error %lu)", GetLastError());
             return CV_LEFT;
         }
         return CV_FAILED;
@@ -1245,13 +1267,12 @@ static int cv_stage(const sh_conv_opts *o, cv_folder *f, int last, const char *d
     else if (!last && strstr(cause, "resolves to nothing")) return CV_LATER;
     else {
         if (!sh_salt_valid(b->id, strlen(b->id))) strcpy_s(b->id, sizeof b->id, f->salt);
-        if (!b->first_cause[0]) strncpy_s(b->first_cause, sizeof b->first_cause, cause, _TRUNCATE);
-        if (!sh_mb_write_failed(b, dest, cause, cap)) return CV_LEFT;
-        strncpy_s(cause, cap, b->first_cause, _TRUNCATE);
+        if (!sh_mb_first_cause(b)[0] && !sh_mb_set_first_cause(b, cause)) return CV_LEFT;
+        if (!cv_write_failed(b, dest, cause, cap)) return CV_LEFT;
         result = CV_FAILED;
     }
     if (!cv_link_top(f->path, dest, 0)) {
-        _snprintf_s(cause, cap, _TRUNCATE, "the files beside its mod could not be copied (error %lu)", GetLastError());
+        st_putf(cause, cap, "the files beside its mod could not be copied (error %lu)", GetLastError());
         return CV_LEFT;
     }
     return result;
@@ -1263,20 +1284,20 @@ static int cv_swap(const sh_conv_opts *o, const char *path, const char *dest, ch
     char old[CV_PATH];
     wchar_t *wp, *wd, *wo;
     int ok = 0;
-    _snprintf_s(old, sizeof old, _TRUNCATE, "%s.old-%lu", path, GetCurrentProcessId());
+    st_fmt(old, sizeof old, "%s.old-%lu", path, GetCurrentProcessId());
     wp = sh_mb_wpath(path);
     wd = sh_mb_wpath(dest);
     wo = sh_mb_wpath(old);
-    if (!wp || !wd || !wo) _snprintf_s(cause, cap, _TRUNCATE, "out of memory");
+    if (!wp || !wd || !wo) st_putf(cause, cap, "out of memory");
     else {
         if (GetFileAttributesW(wo) != INVALID_FILE_ATTRIBUTES) cv_rmtree_w(wo);
         if (!cv_move(wp, wo))
-            _snprintf_s(cause, cap, _TRUNCATE, "the folder could not be set aside (error %lu); close the program that "
+            st_putf(cause, cap, "the folder could not be set aside (error %lu); close the program that "
                         "holds a file in it and run the Snapmap+ installer again", GetLastError());
         else if (!cv_move(wd, wp)) {
             DWORD e = GetLastError();
             cv_move(wo, wp);
-            _snprintf_s(cause, cap, _TRUNCATE, "the converted folder could not be put in its place (error %lu); run this "
+            st_putf(cause, cap, "the converted folder could not be put in its place (error %lu); run this "
                         "again", e);
         } else {
             ok = 1;
@@ -1386,7 +1407,7 @@ static unsigned cv_leftovers(const sh_conv_opts *o, const char *dir, int depth, 
             found++;
             if (act) {
                 char target[CV_PATH];
-                _snprintf_s(target, sizeof target, _TRUNCATE, "%s\\%.*s", dir, (int)base, name);
+                st_fmt(target, sizeof target, "%s\\%.*s", dir, (int)base, name);
                 if (made) cv_rmtree(path);
                 else if (!cv_is_dir(target)) {
                     wchar_t *wf = sh_mb_wpath(path), *wt = sh_mb_wpath(target);
@@ -1505,12 +1526,12 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
         for (order = 0; order < 2 * l.n; order++) {
             cv_folder *f = &l.f[order % l.n];
             sh_mb_bundle b;
-            char cause[SH_MB_CAUSE_MAX + 128], dest[CV_PATH], row[160];
+            char cause[CV_CAUSE_CAP], dest[CV_PATH], row[160];
             int r;
             if ((order < l.n) == (f->product != 0)) continue;   /* the player's own folders first */
             if (!f->keep || f->left || f->done) continue;
             memset(&b, 0, sizeof b);
-            _snprintf_s(dest, sizeof dest, _TRUNCATE, "%s.staging-%lu", f->path, GetCurrentProcessId());
+            st_fmt(dest, sizeof dest, "%s.staging-%lu", f->path, GetCurrentProcessId());
             if (cv_is_dir(dest)) cv_rmtree(dest);
             r = cv_stage(o, f, pass == 3, dest, &b, cause, sizeof cause);
             if (r == CV_LATER) {
@@ -1521,7 +1542,7 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
                 continue;
             }
             if (r != CV_LEFT) {
-                _snprintf_s(row, sizeof row, _TRUNCATE, "%s %s %s", f->salt, f->key, f->bundle[0] ? f->bundle : "-");
+                st_fmt(row, sizeof row, "%s %s %s", f->salt, f->key, f->bundle[0] ? f->bundle : "-");
                 cv_rec_set(&rec, "pending", f->rel, row);
                 cv_save(o, &rec);
                 if (cv_swap(o, f->path, dest, cause, sizeof cause)) {
@@ -1559,7 +1580,7 @@ int sh_conv_folders(const sh_conv_opts *o, sh_conv_stats *st)
         char have[16], row[160];
         cv_folder *f = &l.f[i];
         if (!f->done || cv_rec_get_key(&rec, f->key, have, sizeof have)) continue;
-        _snprintf_s(row, sizeof row, _TRUNCATE, "%s %s -", f->salt, f->key);
+        st_fmt(row, sizeof row, "%s %s -", f->salt, f->key);
         cv_commit(&rec, f->rel, row, 1);
     }
     /* Second builds the product made: gone once the kept folder is converted. */
@@ -1659,27 +1680,31 @@ static int cv_resolve(cv_ids *ids, const char *key, const char *bundle, sh_map_o
     char salt[16] = "";
     const sh_ms_entry *e;
     memset(out, 0, sizeof *out);
-    strncpy_s(out->key, sizeof out->key, key, _TRUNCATE);
+    if (!st_path(out->key, sizeof out->key, key)) {
+        st_putf(cause, cap, "it uses %s, a key longer than the %u characters earlier builds wrote", key,
+                (unsigned)(sizeof out->key - 1));
+        return 0;
+    }
     if (!cv_rec_get_key(&ids->rec, key, salt, sizeof salt) && !(bundle && bundle[0] &&
                                                                  cv_rec_get(&ids->rec, "builds", bundle, salt, sizeof salt))) {
         size_t i;
         for (i = 0; i < ids->old.n; i++)
             if (!_stricmp(ids->old.f[i].key, key)) {
-                _snprintf_s(cause, cap, _TRUNCATE, "it uses %s, whose folder mods\\%s could not be converted", key,
+                st_putf(cause, cap, "it uses %s, whose folder mods\\%s could not be converted", key,
                             ids->old.f[i].rel);
                 return 0;
             }
-        _snprintf_s(cause, cap, _TRUNCATE, "it uses %s, which no installed mod folder provides", key);
+        st_putf(cause, cap, "it uses %s, which no installed mod folder provides", key);
         return 0;
     }
     e = cv_root_salt(&ids->list, salt);
     if (!e) {
-        _snprintf_s(cause, cap, _TRUNCATE, "it uses %s (now salt %s), whose folder is not installed or does not build", key, salt);
+        st_putf(cause, cap, "it uses %s (now salt %s), whose folder is not installed or does not build", key, salt);
         return 0;
     }
-    strncpy_s(out->salt, sizeof out->salt, salt, _TRUNCATE);
-    strncpy_s(out->build, sizeof out->build, e->bundle.hash, _TRUNCATE);
-    if (e->bundle.name) strncpy_s(out->name, sizeof out->name, e->bundle.name, _TRUNCATE);
+    st_cpy(out->salt, sizeof out->salt, salt);
+    st_cpy(out->build, sizeof out->build, e->bundle.hash);
+    out->name = e->bundle.name;   /* the installed list outlives the conversion */
     out->size = e->bundle.total_size;
     return 1;
 }
@@ -1731,7 +1756,7 @@ static int cv_map_text_ids(const sh_conv_opts *o, cv_ids *ids, const char *text,
         if (!sh_ms_enumerate(&ids->list)) memset(&ids->list, 0, sizeof ids->list);
     }
     if (!sh_map_old_read(t, tn, &old, err, sizeof err)) {
-        _snprintf_s(cause, cap, _TRUNCATE, "it does not read as a map: %s", err);
+        st_putf(cause, cap, "it does not read as a map: %s", err);
         goto done;
     }
     if (!old.families) {
@@ -1743,23 +1768,22 @@ static int cv_map_text_ids(const sh_conv_opts *o, cv_ids *ids, const char *text,
         goto done;
     }
     if (old.families & SH_MAP_OLD_F_PACKAGE) {
-        _snprintf_s(cause, cap, _TRUNCATE, "it carries packages of beta.6 to beta.19 that could not be converted");
+        st_putf(cause, cap, "it carries packages of beta.6 to beta.19 that could not be converted");
         sh_map_old_free(&old);
         goto done;
     }
     map = (sh_map_old_salt *)calloc(old.row_count + 1, sizeof *map);
-    if (!map) { _snprintf_s(cause, cap, _TRUNCATE, "out of memory"); sh_map_old_free(&old); goto done; }
+    if (!map) { st_putf(cause, cap, "out of memory"); sh_map_old_free(&old); goto done; }
     for (i = 0; i < old.row_count; i++) {
         for (k = 0; k < nmap && _stricmp(map[k].key, old.rows[i].key); k++) {}
         if (k < nmap) continue;
         if (!cv_resolve(ids, old.rows[i].key, old.rows[i].bundle, &map[nmap], cause, cap)) { sh_map_old_free(&old); goto done; }
-        if (!map[nmap].name[0]) strncpy_s(map[nmap].name, sizeof map[nmap].name, old.rows[i].key, _TRUNCATE);
         nmap++;
     }
     {
         size_t wl = 0;
         char *w = sh_map_old_write(t, tn, &old, map, nmap, &wl, err, sizeof err);
-        if (!w) _snprintf_s(cause, cap, _TRUNCATE, "it could not be written in this version's shape: %s", err);
+        if (!w) st_putf(cause, cap, "it could not be written in this version's shape: %s", err);
         else {
             *out = (char *)malloc(wl + 1);
             if (*out) { memcpy(*out, w, wl); (*out)[wl] = 0; if (out_len) *out_len = wl; r = 1; }
@@ -1795,12 +1819,12 @@ static int cv_prefab_text(cv_ids *ids, const char *text, size_t n, char **out, s
     *out = NULL;
     if (!cv_prefab_old(text, n)) return 0;
     t = (char *)malloc(n + 1);
-    if (!t) { _snprintf_s(cause, cap, _TRUNCATE, "out of memory"); return -1; }
+    if (!t) { st_putf(cause, cap, "out of memory"); return -1; }
     memcpy(t, text, n);
     t[n] = 0;
     if (sh_prefab_block_find(t, tn, &sp) != 1 || !(block = mpj_parse(t + sp.value_at, sp.value_len)) ||
         block->type != MPJ_OBJ) {
-        _snprintf_s(cause, cap, _TRUNCATE, "its block does not read");
+        st_putf(cause, cap, "its block does not read");
         goto done;
     }
     mods = mpj_get(block, "mods");
@@ -1820,7 +1844,10 @@ static int cv_prefab_text(cv_ids *ids, const char *text, size_t n, char **out, s
             memset(&mr, 0, sizeof mr);
             strcpy_s(mr.salt, sizeof mr.salt, s.salt);
             strcpy_s(mr.build, sizeof mr.build, s.build);
-            strcpy_s(mr.name, sizeof mr.name, s.name[0] ? s.name : id->text);
+            if (!sh_modmanifest_row_set_name(&mr, s.name && s.name[0] ? s.name : id->text)) {
+                st_put(cause, cap, "out of memory");
+                goto done;
+            }
             mr.size = s.size;
             v = mpj_get(row, "attached");
             mr.attached = v && v->type == MPJ_BOOL && v->b;
@@ -1828,22 +1855,20 @@ static int cv_prefab_text(cv_ids *ids, const char *text, size_t n, char **out, s
             if (nm && nm->type == MPJ_ARR) {
                 int q;
                 for (q = 0; q < nm->n; q++) {
-                    char nb[512], *mv = NULL;
+                    char *mv = NULL;
                     size_t mvl = 0;
                     if (nm->items[q]->type != MPJ_STR) continue;
-                    if (sh_mb_rekey_text(nm->items[q]->text, strlen(nm->items[q]->text), id->text, s.salt, &mv, &mvl) &&
-                        mv) {
-                        strncpy_s(nb, sizeof nb, mv, _TRUNCATE);
-                        free(mv);
-                    } else strncpy_s(nb, sizeof nb, nm->items[q]->text, _TRUNCATE);
-                    sh_modmanifest_row_add_name(&mr, nb);
+                    if (!sh_mb_rekey_text(nm->items[q]->text, strlen(nm->items[q]->text), id->text, s.salt, &mv, &mvl))
+                        { free(mv); mv = NULL; }
+                    sh_modmanifest_row_add_name(&mr, mv ? mv : nm->items[q]->text);
+                    free(mv);
                 }
             }
             rowtext = sh_modmanifest_format_value(&mr, &rl);
             sh_modmanifest_row_free(&mr);
             fresh = rowtext ? mpj_parse(rowtext, rl) : NULL;
             free(rowtext);
-            if (!fresh) { _snprintf_s(cause, cap, _TRUNCATE, "a row could not be written"); goto done; }
+            if (!fresh) { st_putf(cause, cap, "a row could not be written"); goto done; }
             mpj_free(mods->items[i]);
             mods->items[i] = fresh;
             changed = 1;
@@ -1852,7 +1877,7 @@ static int cv_prefab_text(cv_ids *ids, const char *text, size_t n, char **out, s
     if (!changed) { r = 0; goto done; }
     bt = mpj_dump(block, &pl);
     put = bt ? sh_prefab_block_put(t, tn, bt, pl, out_len) : NULL;
-    if (!put) { _snprintf_s(cause, cap, _TRUNCATE, "the block could not be written"); goto done; }
+    if (!put) { st_putf(cause, cap, "the block could not be written"); goto done; }
     *out = put;
     r = 1;
 done:
@@ -1904,9 +1929,9 @@ static void cv_saved_repair(const sh_conv_opts *o, cv_map_ctx *x, const char *pa
     char *vpath = (char *)malloc(strlen(path) + 8), *vt = (char *)malloc(strlen(path) + 40);
     char *mt = (char *)malloc(strlen(path) + 32), user[32];
     if (vpath && vt && mt) {
-        _snprintf_s(vpath, strlen(path) + 8, _TRUNCATE, "%s.verify", path);
-        _snprintf_s(vt, strlen(path) + 40, _TRUNCATE, "%s" CV_TMP, vpath);
-        _snprintf_s(mt, strlen(path) + 32, _TRUNCATE, "%s" CV_TMP, path);
+        st_fmt(vpath, strlen(path) + 8, "%s.verify", path);
+        st_fmt(vt, strlen(path) + 40, "%s" CV_TMP, vpath);
+        st_fmt(mt, strlen(path) + 32, "%s" CV_TMP, path);
         if (cv_attr(mt, NULL)) {
             cv_drop_tmp(path);
             cv_drop_tmp(vpath);
@@ -1963,7 +1988,7 @@ static void cv_do_map(const sh_conv_opts *o, void *vctx, const char *path, int k
         char *vpath = (char *)malloc(strlen(path) + 8), user[32];
         unsigned char *side = NULL, nside[SH_STORE_SIDECAR_LEN], *z = NULL, *nraw = NULL;
         size_t sn = 0, zn = 0;
-        if (vpath) _snprintf_s(vpath, strlen(path) + 8, _TRUNCATE, "%s.verify", path);
+        if (vpath) st_fmt(vpath, strlen(path) + 8, "%s.verify", path);
         side = vpath ? cv_read(vpath, 64, &sn) : NULL;
         if (!side || sn != SH_STORE_SIDECAR_LEN) cv_map_left(o, x, path, raw, n, "its map.decl.verify is missing or not 40 bytes");
         else if (!sh_store_sidecar_user(account, raw, n, side, "map.decl", user, sizeof user))

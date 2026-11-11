@@ -14,7 +14,7 @@
  * earlier shape and is refused with its reason).
  *
  * Areas (rule 4). The root is everything under mods\ except mods\maps\:
- * the player's own mods, with organizing folders to SH_MS_NEST_MAX levels.
+ * the player's own mods, with organizing folders to any depth.
  * One salt has one folder at the root. A place, mods\maps\<segment>\, holds
  * the builds one map pins, one folder per salt, named after its mod; a place
  * folder is a received build and is never built again here. "maps" is a
@@ -76,26 +76,26 @@ unsigned modstore_lock_waits(void);
  * released so far, so a change tells that a hold ended since the last look. */
 int      modstore_lock_busy(unsigned *generation);
 
-/* A label buffer of an entry (sh_ms_entry.key). */
-#define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 128 + 1 + 20)
-/* A folder name under mods\. */
-#define SH_MS_NAME_MAX 1023   /* a nested folder's path under mods\ */
-#define SH_MS_NEST_MAX 8      /* organizing folders are entered this many levels below mods\ */
+/* Paths under mods\ have no length or depth of the product's: a nested
+ * folder's name, a place and a file inside a mod are heap strings, and the
+ * folders hold as many levels as Windows' long-path form (32,767
+ * characters, wide_path.h) leaves room for. */
 /* The top folder of the places: mods\maps\<segment>\<mod>. */
 #define SH_MS_PLACES "maps"
 
 /* The store root. NULL or "" restores the default (%LOCALAPPDATA%\snapmap-plus\mods).
- * Tests point it at a temporary folder. Returns 1 when the root is set. */
+ * Tests and the store tool point it elsewhere. Returns 1 when the root is set. */
 int  sh_ms_set_root(const char *root_utf8);
-/* The current root as UTF-8, or 0 when %LOCALAPPDATA% cannot be resolved. */
-int  sh_ms_root(char *out, size_t cap);
+/* The current root as UTF-8 (stable for the process), or NULL when
+ * %LOCALAPPDATA% cannot be resolved. */
+const char *sh_ms_root(void);
 
 typedef struct sh_ms_entry {
     char *folder;               /* absolute UTF-8 folder of the mod */
-    char  name[SH_MS_NAME_MAX + 1];   /* the folder's path under mods\ ("x", "group\x", "maps\<map>\x") */
-    char  key[SH_MS_KEY_MAX + 1];     /* a label: the salt, or the folder name while it has none */
+    char *name;                 /* the folder's path under mods\ ("x", "group\x", "maps\<map>\x") */
+    char *key;                  /* a label: the salt, or the folder name while it has none */
     char  salt[SH_SALT_LEN + 1];      /* the block's salt; "" when it has none */
-    char  place[SH_MS_NAME_MAX + 1];  /* "" at the root; "maps\<segment>" for a folder in a map's place */
+    char *place;                /* "" at the root; "maps\<segment>" for a folder in a map's place */
     int   state;                /* sh_mb_descriptor_state: SH_MB_DESC_* */
     int   refused;              /* listed with its cause and serves nothing: an earlier shape, files under
                                    another salt, a copy waiting for its new salt, a second folder of one
@@ -104,7 +104,7 @@ typedef struct sh_ms_entry {
     int   sizes_ok;             /* every carried file present with its recorded size */
     int   validated;            /* the block records no "cause" */
     long long installed_at;     /* the block's "built" */
-    char  cause[SH_MB_CAUSE_MAX];   /* why the entry is unusable, or the block's cause */
+    char *cause;                /* why the entry is unusable, or the block's cause; never NULL in a list */
     sh_mb_bundle bundle;
 } sh_ms_entry;
 
@@ -131,7 +131,7 @@ void sh_ms_list_free(sh_ms_list *list);
 /* The walk every reader of the store shares (enumeration, the scan, the
  * serving index), so they agree on what is a mod: below the root, a folder
  * holding mod.json or package.json is a mod and is not entered; one without is
- * an organizing folder and is entered to SH_MS_NEST_MAX levels; dot folders,
+ * an organizing folder and is entered, at any depth; dot folders,
  * reparse points and "<name>.staging-<pid>" / "<name>.old-<pid>" work folders
  * are skipped; mods\maps\ is entered as the places. `fn` receives the absolute
  * folder (UTF-8, long-path form), its name under mods\ and its place ("" at
@@ -184,15 +184,16 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * builds only). Takes the store lock.
  *
  * Returns 1 with the new salt in salt_out; 0 when the folder already has its
- * salt (salt_out receives it); -1 with the plain reason in `cause`, the
- * folder untouched (also an earlier shape, or a mod.json that is not a JSON
- * object). A refusal of a store folder is also recorded as its build cause. */
-int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
+ * salt (salt_out receives it); -1 with the plain reason in *cause (malloc'd;
+ * the caller frees it, as every cause of this header), the folder untouched
+ * (also an earlier shape, or a mod.json that is not a JSON object). A refusal
+ * of a store folder is also recorded as its build cause. */
+int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char **cause);
 
 /* sh_ms_assign_salt with `salt` instead of a new one: the store tool's
  * overrides migration, moving a package again into the folder an earlier
  * pass made of it, keeps that folder's identity. */
-int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char *cause, size_t cause_cap);
+int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt, char **cause);
 
 /* The same salting written to a new folder `dest` (it must not exist; files
  * the salting does not rewrite are hard-linked), with `modjson` (a fresh
@@ -201,7 +202,7 @@ int  sh_ms_assign_salt_as(const char *folder, const char *from, const char *salt
  * of an earlier shape through it: salted and built in `dest`, swapped in
  * only when the build succeeds. Returns 1 with the salt, -1 with the cause. */
 int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
-                     char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
+                     char salt_out[SH_SALT_LEN + 1], char **cause);
 
 /* A renamed sound bank's stem, old and new. */
 typedef struct sh_ms_bank_rename { char from[SH_MB_BANK_STEM_MAX + 1], to[SH_MB_BANK_STEM_MAX + 1]; } sh_ms_bank_rename;
@@ -238,15 +239,15 @@ typedef struct sh_ms_install_stats {
  * `as_name` (sh_ms_install_as: the store tool's target) names the folder under
  * mods\ instead; a folder of that name is replaced. `resolver` may be NULL;
  * the store's installed bundles are consulted in addition to it. On success
- * name_out holds the folder name under mods\. bundle_out (optional) receives
- * the bundle as installed; release it with sh_mb_free. Returns 1, else 0 with
- * the first cause. */
+ * *name_out (optional; malloc'd) holds the folder name under mods\.
+ * bundle_out (optional) receives the bundle as installed; release it with
+ * sh_mb_free. Returns 1, else 0 with the first cause. */
 int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
-                               char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                               sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+                               char **name_out, sh_ms_install_stats *stats,
+                               sh_mb_bundle *bundle_out, char **cause);
 int  sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
-                      char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                      sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+                      char **name_out, sh_ms_install_stats *stats,
+                      sh_mb_bundle *bundle_out, char **cause);
 
 /* ------------------------------------------------------------ places ---- */
 /* A place is mods\maps\<segment>\: the segment sh_ms_title_segment of the
@@ -264,20 +265,26 @@ typedef struct sh_ms_place {
  * name and control characters dropped, runs of spaces folded, leading dots
  * and spaces and trailing dots and spaces cut, a work-folder suffix
  * (".staging-", ".old-") spelled with "_", a device name (con, prn, aux, nul,
- * com1 to com9, lpt1 to lpt9) given a trailing "_", at most 60 bytes cut at a
- * character boundary. 1 with the segment, 0 when nothing is left. */
-int  sh_ms_title_segment(const char *title, char *out, size_t cap);
+ * com1 to com9, lpt1 to lpt9) given a trailing "_". The whole title is kept
+ * up to what Windows holds in one folder name, 255 characters, less room for
+ * the " (2)" a taken name gets; only a longer title is cut there, at a
+ * character boundary (the record keeps the whole title). The segment
+ * (malloc'd), or NULL when nothing is left. */
+#define SH_MS_SEGMENT_CHARS 240
+char *sh_ms_title_segment(const char *title);
 
 /* The place of `place` under mods\ ("maps\<segment>"): the record's when the
- * map is noted, else a free one. 1 with it, 0 when none can be made. */
-int  sh_ms_place_dir(const sh_ms_place *place, char *out, size_t cap);
+ * map is noted, else a free one. The place (malloc'd), NULL when none can be
+ * made. */
+char *sh_ms_place_dir(const sh_ms_place *place);
 
 /* The folder under mods\ for the build of `salt` (mod display name `name`) in
  * `place`: 2 with the place's folder that already holds the salt (one build
  * per salt per place: it is replaced), 1 with a free name
  * "maps\<segment>\<sh_ms_title_segment(name), else mod>" (" (2)", " (3)" ...
- * when another mod of the place has the name), 0 when none is free. */
-int  sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char *out, size_t cap);
+ * when another mod of the place has the name), 0 when none is free. The
+ * folder in *out (malloc'd). */
+int  sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *salt, char **out);
 
 /* Record that `place`'s map is served from `folder` (under mods\: the place
  * "maps\<segment>" or a mod's folder in it, either slash; NULL: its
@@ -285,14 +292,14 @@ int  sh_ms_place_folder(const sh_ms_place *place, const char *name, const char *
 int  sh_ms_place_note(const sh_ms_place *place, const char *folder);
 
 /* The place the record gives the map `key` (an item id, "zip:<name>" or
- * "title:<segment>"): 1 with "maps\<segment>" in `dir` and its title (either
- * may be NULL), 0 when none. */
-int  sh_ms_place_of(const char *key, char *dir, size_t dir_cap, char *title, size_t title_cap);
+ * "title:<segment>"): 1 with "maps\<segment>" in *dir and its title in
+ * *title (either may be NULL; malloc'd), 0 when none. */
+int  sh_ms_place_of(const char *key, char **dir, char **title);
 
 /* The title of the map whose place holds `folder` (its name under mods\,
- * either slash, or absolute): 1 with it, else 0 (a root folder, or a place no
- * map of the record names). */
-int  sh_ms_place_title(const char *folder, char *title, size_t cap);
+ * either slash, or absolute): the title (malloc'd), else NULL (a root
+ * folder, or a place no map of the record names). */
+char *sh_ms_place_title(const char *folder);
 
 /* sh_ms_install_from_folder into `place`: the source must be built (a
  * received build); the place's folder of its salt is replaced (the old one to
@@ -300,8 +307,8 @@ int  sh_ms_place_title(const char *folder, char *title, size_t cap);
  * map is noted (sh_ms_place_note). A place folder is never built again by the
  * scan. */
 int  sh_ms_install_placed(const char *folder, const sh_ms_place *place,
-                          const sh_mb_resolver *resolver, char *name_out, size_t name_cap, sh_ms_install_stats *stats,
-                          sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+                          const sh_mb_resolver *resolver, char **name_out, sh_ms_install_stats *stats,
+                          sh_mb_bundle *bundle_out, char **cause);
 
 /* Install a built folder at the root of mods\ as one of the player's own
  * mods, keeping its salt: a folder of a map's place (Add to my mods, a
@@ -313,8 +320,8 @@ int  sh_ms_install_placed(const char *folder, const sh_ms_place *place,
  * the player's own folder of a mod stays theirs. Returns 1 with the folder
  * name under mods\, else 0 with the plain cause. Any thread; takes the store
  * lock. */
-int  sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
-                           sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+int  sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char **name_out,
+                           sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char **cause);
 
 typedef struct sh_ms_verify_stats {
     unsigned files, bytes_mb, entries;
@@ -324,7 +331,7 @@ typedef struct sh_ms_verify_stats {
 /* Rehash every file of the entries `spec` names (sh_ms_entry_matches)
  * against their builder blocks and record the result there ("cause").
  * Returns 1 when every matching entry passes. */
-int  sh_ms_verify(const char *spec, sh_ms_verify_stats *stats, char *cause, size_t cause_cap);
+int  sh_ms_verify(const char *spec, sh_ms_verify_stats *stats, char **cause);
 
 typedef struct sh_ms_sync_stats {
     unsigned folders;           /* folders looked at */
@@ -376,13 +383,14 @@ extern void (*sh_ms_test_between_folders)(unsigned built);   /* the boot build, 
 #endif
 
 /* The first cause of the last refused build or salting of `folder` in this
- * process, or "" (sh_ms_sync and installs record it; enumeration reports it). */
-void sh_ms_build_cause(const char *folder, char *out, size_t cap);
+ * process (malloc'd), or NULL (sh_ms_sync and installs record it;
+ * enumeration reports it). */
+char *sh_ms_build_cause(const char *folder);
 
 /* 1 when `folder` (absolute UTF-8) has a mod.json that is not a JSON object,
- * with the parse error and the next step in `out`; 0 otherwise (no mod.json,
- * or one that parses). */
-int sh_ms_descriptor_unparsable(const char *folder, char *out, size_t cap);
+ * with the parse error and the next step in *out (malloc'd); 0 otherwise (no
+ * mod.json, or one that parses). */
+int sh_ms_descriptor_unparsable(const char *folder, char **out);
 
 /* Record a refused build of `folder` (absolute) that a caller ran itself
  * (`sh_mods build`): the same per-folder state sh_ms_sync records. A later
@@ -393,18 +401,17 @@ void sh_ms_note_build_failure(const char *folder, const char *cause);
  * when taken) holding a mod.json of name, empty description
  * and author, and the block {"format": 2, "salt": <a new salt>}, and an
  * empty assets\. The caller's scan builds it. Returns 1 with the salt and the
- * absolute folder; 0 with the cause. */
-int  sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                   char *cause, size_t cause_cap);
+ * absolute folder (malloc'd into *folder_out); 0 with the cause. */
+int  sh_ms_new_mod(const char *name, char salt_out[SH_MB_ID_MAX + 1], char **folder_out, char **cause);
 /* New mod from the Mods tab: as sh_ms_new_mod, plus an example that places
  * and plays untouched: an entityDef at mods/<salt>/example_crate (the game's
  * SnapMap crate01 model), its Toybox row (snapEditorEntityDef) and the row's
  * strings in mod.json's author part (<salt>_category named after the mod,
  * <salt>_example_crate_name and _desc). Nothing binary.
 
- * `example_out` receives the row's path below the folder, with '/'. */
-int  sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char *folder_out, size_t folder_cap,
-                           char *example_out, size_t example_cap, char *cause, size_t cause_cap);
+ * *example_out (malloc'd) receives the row's path below the folder, with '/'. */
+int  sh_ms_new_mod_example(const char *name, char salt_out[SH_MB_ID_MAX + 1], char **folder_out, char **example_out,
+                           char **cause);
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };
 
@@ -448,7 +455,7 @@ int  sh_ms_remove_folder(const char *folder);
  * that exists; it goes as sh_ms_remove_folder's does. SH_MS_RECYCLED;
  * SH_MS_DELETED with why the bin could not take it in `cause`; else 0 with
  * the first cause. */
-int  sh_ms_delete_mod_folder(const char *folder, char *cause, size_t cap);
+int  sh_ms_delete_mod_folder(const char *folder, char **cause);
 
 #if defined(SH_MODSTORE_TESTING) || defined(SH_MODUI_TESTING)
 /* Test seam: nonzero makes every removal take the outright-delete fallback,

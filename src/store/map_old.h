@@ -115,7 +115,7 @@ typedef struct sh_map_old_row {
     char **names;                               /* malloc'd; owned */
     size_t name_count;
     int attached;
-    char choices[SH_MODMANIFEST_CHOICES_CAP];   /* "slot\told key\n" lines */
+    char *choices;                              /* "slot\told key\n" lines, malloc'd; NULL for none */
 } sh_map_old_row;
 
 typedef struct sh_map_old {
@@ -147,7 +147,7 @@ typedef struct sh_map_old_salt {
     char key[SH_MAP_OLD_KEY_CAP];
     char salt[SH_MODMANIFEST_SALT_CAP];
     char build[SH_MODMANIFEST_HASH_CAP];
-    char name[SH_MODMANIFEST_DISPLAY_CAP];
+    const char *name;                  /* borrowed from the caller; NULL or "": the key */
     unsigned long long size;
 } sh_map_old_salt;
 

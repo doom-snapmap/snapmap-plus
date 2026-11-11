@@ -108,10 +108,10 @@ char *sh_carrier_strip(const char *json, size_t len, size_t *out_len);
 char *sh_carrier_put(const char *json, size_t len, const char *part, const char *value, size_t value_len,
                      size_t *out_len, char *err, size_t err_cap);
 
-/* The member's place (above): 1 with it in `out`, 0 when the map has none, -1
- * when the member is malformed or the place is not a plain string that fits. */
-#define SH_CARRIER_PLACE_CAP 300
-int sh_carrier_place(const char *json, size_t len, char *out, size_t cap);
+/* The member's place (above): 1 with it in *out (malloc'd, any length), 0
+ * when the map has none, -1 when the member is malformed or the place is not
+ * a plain string. */
+int sh_carrier_place(const char *json, size_t len, char **out);
 
 /* sh_carrier_put of the place: `place` NULL or "" removes it; one holding a
  * quote or a backslash is refused (err). */

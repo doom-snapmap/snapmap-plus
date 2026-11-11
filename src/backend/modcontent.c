@@ -1,32 +1,37 @@
 /* modcontent.c -- see modcontent.h. */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "modcontent.h"
 #include "modscene_decl.h"
 #include "modhud.h"
 #include "config_json.h"
+#include "../common/text.h"
 
-static int mc_cause(char *cause, size_t cap, const char *fmt, ...)
+static int mc_cause(char **cause, const char *fmt, ...)
 {
     va_list ap;
-    if (cause && cap) {
+    if (cause) {
+        char *text;
         va_start(ap, fmt);
-        _vsnprintf_s(cause, cap, _TRUNCATE, fmt, ap);
+        text = sh_vtextf(fmt, ap);
         va_end(ap);
+        free(*cause);
+        *cause = text ? text : _strdup("out of memory");
     }
     return 0;
 }
 
-/* The scene reader's first refusal, without its log prefix. */
-typedef struct mc_scene { char why[400]; } mc_scene;
+/* The scene reader's first refusal, without its log prefix (malloc'd). */
+typedef struct mc_scene { char *why; } mc_scene;
 
 static void mc_scene_line(void *context, const char *line)
 {
     mc_scene *s = (mc_scene *)context;
     /* The reader's first refusal is the cause; its lines name the entry. */
-    if (!s->why[0]) strncpy_s(s->why, sizeof s->why, line, _TRUNCATE);
+    if (!s->why && line) s->why = _strdup(line);
 }
 
 /* The HUD rule's weapon name, as modhud.c reads it. */
@@ -50,18 +55,18 @@ static int mc_hud_name(const char *s)
 
 /* modhud.c sh_modhud_parse's grammar, without its rule table:
  * {"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}. */
-static int mc_hud(const char *json, size_t len, char *cause, size_t cap)
+static int mc_hud(const char *json, size_t len, char **cause)
 {
     sh_json_object root = {0}, weapons = {0};
     const char *raw;
     size_t i;
     int ok = 0;
     if (!sh_json_parse_object(json, len, 5, &root))
-        return mc_cause(cause, cap, "mod.json \"hud\" must be an object like {\"weapons\": {...}}; correct it and press Refresh");
+        return mc_cause(cause, "mod.json \"hud\" must be an object like {\"weapons\": {...}}; correct it and press Refresh");
     if (!root.count) { sh_json_object_free(&root); return 1; }
     raw = sh_json_object_get(&root, "weapons");
     if (root.count != 1 || !raw || !sh_json_parse_object(raw, strlen(raw), 3, &weapons)) {
-        mc_cause(cause, cap, "mod.json \"hud\" may hold only \"weapons\", an object of weapon names; correct it and press "
+        mc_cause(cause, "mod.json \"hud\" may hold only \"weapons\", an object of weapon names; correct it and press "
                  "Refresh");
         goto done;
     }
@@ -73,7 +78,7 @@ static int mc_hud(const char *json, size_t len, char *cause, size_t cap)
         const char *v;
         int valid;
         if (strlen(m->key) != m->key_length || !mc_hud_name(m->key)) {
-            mc_cause(cause, cap, "mod.json \"hud\" names the weapon \"%s\", which is not a weapon decl name (lower-case "
+            mc_cause(cause, "mod.json \"hud\" names the weapon \"%s\", which is not a weapon decl name (lower-case "
                      "letters, digits, _, - and . in /-separated parts); correct it and press Refresh", m->key);
             goto done;
         }
@@ -83,7 +88,7 @@ static int mc_hud(const char *json, size_t len, char *cause, size_t cap)
                 (!strcmp(mode, "weapon") || !strcmp(mode, "engine"));
         sh_json_object_free(&settings);
         if (!valid) {
-            mc_cause(cause, cap, "mod.json \"hud\" gives the weapon %s something other than {\"ammo_display\": \"weapon\"} or "
+            mc_cause(cause, "mod.json \"hud\" gives the weapon %s something other than {\"ammo_display\": \"weapon\"} or "
                      "{\"ammo_display\": \"engine\"}; correct it and press Refresh", m->key);
             goto done;
         }
@@ -95,27 +100,28 @@ done:
     return ok;
 }
 
-int sh_modcontent_check(const char *salt, const char *extra, size_t len, char *cause, size_t cap)
+int sh_modcontent_check(const char *salt, const char *extra, size_t len, char **cause)
 {
     sh_json_object root = {0};
     const char *hud;
     int ok = 1;
-    if (cause && cap) cause[0] = 0;
+    if (cause) *cause = NULL;
     if (!extra || !len || !salt) return 1;
     {
         sh_scene_table t;
         mc_scene s;
         memset(&t, 0, sizeof t);
-        s.why[0] = 0;
+        s.why = NULL;
         if (sh_scene_add_bundle(&t, salt, extra, len, mc_scene_line, &s) < 0)
-            ok = mc_cause(cause, cap, "mod.json \"scenes\" is refused: %s; correct it and press Refresh",
-                          s.why[0] ? s.why : "it does not read");
+            ok = mc_cause(cause, "mod.json \"scenes\" is refused: %s; correct it and press Refresh",
+                          s.why ? s.why : "it does not read");
+        free(s.why);
         sh_scene_table_free(&t);
         if (!ok) return 0;
     }
     if (!sh_json_parse_object(extra, len, 24, &root)) return 1;   /* the builder read it; nothing more to check */
     hud = sh_json_object_get(&root, "hud");
-    if (hud) ok = mc_hud(hud, strlen(hud), cause, cap);
+    if (hud) ok = mc_hud(hud, strlen(hud), cause);
     sh_json_object_free(&root);
     return ok;
 }

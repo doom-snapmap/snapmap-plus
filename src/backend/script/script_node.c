@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <limits.h>
+#include "../../common/text.h"
 #include "script_node.h"
 #include "script_runtime.h"
 #include "script_hooks.h"
@@ -163,21 +164,6 @@ char *sh_script_node_name_dup(int uid)
     return out;
 }
 
-int sh_script_node_name_of(int uid, char *out, size_t cap)
-{
-    int i, found = 0;
-    if (out && cap) out[0] = 0;
-    AcquireSRWLockShared(&g_map_lock);
-    for (i = 0; i < g_nnodes; i++) {
-        if (g_nodes[i].uid != uid) continue;
-        if (out) copyz(out, cap, g_nodes[i].name);
-        found = 1;
-        break;
-    }
-    ReleaseSRWLockShared(&g_map_lock);
-    return found;
-}
-
 int sh_script_node_var_find(const char *name, int *type, int *index, int *other)
 {
     int i, found = 0;
@@ -254,7 +240,7 @@ static const char *var_type_name(int type)
  * `reg` (a warning naming the calling script line). */
 static void warn_once(lua_State *L, const char *reg, const char *key, const char *text)
 {
-    char file[512];
+    char *file = NULL;
     int ln = 0;
     if (lua_getfield(L, LUA_REGISTRYINDEX, reg) != LUA_TTABLE) {
         lua_pop(L, 1);
@@ -267,12 +253,10 @@ static void warn_once(lua_State *L, const char *reg, const char *key, const char
     lua_pushboolean(L, 1);
     lua_setfield(L, -2, key);
     lua_pop(L, 1);
-    file[0] = 0;
-    luaL_where(L, 1);
-    sh_script_split_where(lua_tostring(L, -1), file, sizeof file, &ln);
-    lua_pop(L, 1);
-    if (file[0] && ln) lua_pushfstring(L, "%s line %d: %s", file, ln, text);
+    sh_script_where_line(L, 1, &file, &ln);
+    if (file && ln) lua_pushfstring(L, "%s line %d: %s", file, ln, text);
     else lua_pushstring(L, text);
+    free(file);
     lua_warning(L, lua_tostring(L, -1), 0);
     lua_pop(L, 1);
 }
@@ -589,12 +573,13 @@ static volatile LONG   g_fault_logged;
 
 static void node_log(const char *fmt, ...)
 {
-    char line[512];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    if (line) backend_log(line);
+    free(line);
 }
 
 /* Only access violations are contained; an engine idException must reach

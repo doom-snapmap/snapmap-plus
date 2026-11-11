@@ -12,6 +12,30 @@
 #include "config_json.h"
 #include "mp_json.h"
 #include "backend_log.h"
+#include "store_text.h"
+
+/* This tool's cause fields are fixed records: a sentence goes in whole or
+ * is said in the log (store_text.h). */
+#undef ms_cause
+static int ms_cause(char *out, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    char *text;
+    va_start(ap, fmt);
+    text = sh_vtextf(fmt, ap);
+    va_end(ap);
+    st_put(out, cap, text ? text : "out of memory");
+    free(text);
+    return 0;
+}
+
+/* An earlier store's folder path under mods\ and its label: the store this
+ * tool upgrades admitted at most 1,023 bytes and SH_MB_ID_MAX + 150 (its
+ * MSU_NAME_MAX and MSU_KEY_MAX). A cause field holds a sentence whole or
+ * says it is in the log (store_text.h). */
+#define MSU_NAME_MAX  1023
+#define MSU_KEY_MAX   (SH_MB_ID_MAX + 1 + 128 + 1 + 20)
+#define MSU_CAUSE_CAP 1024
 
 /* ---------------------------------------------------- the retired bin --- */
 
@@ -86,7 +110,7 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
         (h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0)) != INVALID_HANDLE_VALUE) {
         do {
             wchar_t *child;
-            char leaf[SH_MS_NAME_MAX * 4 + 1];
+            char leaf[MSU_NAME_MAX * 4 + 1];
             int ok;
             if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
             child = ms_wjoin(bin, fd.cFileName);
@@ -97,10 +121,10 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
             free(child);
             if (ok) {
                 deleted++;
-                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s %s", leaf, g_ms_discard_verb);
+                st_putf(text, sizeof text, "MODS: removed-mods: %s %s", leaf, g_ms_discard_verb);
             } else {
                 failed++;
-                _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %s could not be removed (%s); it stays "
+                st_putf(text, sizeof text, "MODS: removed-mods: %s could not be removed (%s); it stays "
                             "for the next run", leaf, ms_why(GetLastError(), leaf, 0, 0));
             }
             backend_log(text);
@@ -111,16 +135,16 @@ int sh_ms_bin_sweep(sh_ms_sweep_line_fn line, void *context)
     free(pattern);
     if (bin && ms_is_dir(bin) && !failed) (void)RemoveDirectoryW(bin);
     /* The record's "removed" section goes with the bin. */
-    if (sh_ms_root(root8, sizeof root8) && sh_mb_record_get(root8, "removed", &record) == 1 && record) {
+    if (st_path(root8, sizeof root8, sh_ms_root()) && sh_mb_record_get(root8, "removed", &record) == 1 && record) {
         had_record = 1;
         (void)sh_mb_record_put(root8, "removed", NULL);
     }
     free(record);
     if (deleted || failed || had_record) {
         if (failed)
-            _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) %s, %d could not be removed; "
+            st_putf(text, sizeof text, "MODS: removed-mods: %d folder(s) %s, %d could not be removed; "
                         "the bin is retired", deleted, g_ms_discard_verb, failed);
-        else _snprintf_s(text, sizeof text, _TRUNCATE, "MODS: removed-mods: %d folder(s) %s; the bin is retired", deleted,
+        else st_putf(text, sizeof text, "MODS: removed-mods: %d folder(s) %s; the bin is retired", deleted,
                          g_ms_discard_verb);
         backend_log(text);
         if (line) line(context, text);
@@ -151,8 +175,8 @@ static DWORD ms_link_count(const wchar_t *path)
 
 typedef struct ms_up_item {
     wchar_t *dir;               /* where it is now */
-    char from[SH_MS_NAME_MAX + 16];   /* its name before the upgrade ("legacy\..." for a delivered one) */
-    char name[SH_MS_NAME_MAX + 1];    /* its name after */
+    char from[MSU_NAME_MAX + 16];   /* its name before the upgrade ("legacy\..." for a delivered one) */
+    char name[MSU_NAME_MAX + 1];    /* its name after */
     int legacy;                 /* under legacy\ */
     int product;                /* named <id>@<version>+<build> by the product: renamed */
     int dropped;                /* a delivered copy an installed mod already serves */
@@ -352,7 +376,7 @@ static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *ve
         goto out;
     }
     v = mpj_get(j, "version");
-    strncpy_s(version, vcap, v && v->type == MPJ_STR ? v->text : "0.0.0", _TRUNCATE);
+    st_cpy(version, vcap, v && v->type == MPJ_STR ? v->text : "0.0.0");
     b->name = ms_up_strdup_body(mpj_get(j, "name"));
     v = mpj_get(j, "bundle");
     if (v && v->type == MPJ_STR && ms_is_hash(v->text)) strcpy_s(b->hash, sizeof b->hash, v->text);
@@ -376,10 +400,10 @@ static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *ve
             if (st && st->type == MPJ_OBJ) {
                 const mpj *sh = mpj_get(st, "sha256");
                 o->stock = 1;
-                if (sh && sh->type == MPJ_STR) strncpy_s(o->blob, sizeof o->blob, sh->text, _TRUNCATE);
+                if (sh && sh->type == MPJ_STR) st_cpy(o->blob, sizeof o->blob, sh->text);
             } else {
                 v = mpj_get(f, "size");
-                if (bl && bl->type == MPJ_STR) strncpy_s(o->blob, sizeof o->blob, bl->text, _TRUNCATE);
+                if (bl && bl->type == MPJ_STR) st_cpy(o->blob, sizeof o->blob, bl->text);
                 o->size = v && mpj_is_num(v) ? (unsigned long long)mpj_int(v) : 0;
                 b->total_size += o->size;
             }
@@ -421,16 +445,20 @@ static char *ms_up_c2_modjson(const char *text, size_t len, const sh_mb_bundle *
         if (val) val->b = b->validated;
         mpj_set(blk, "validated", val);
     }
-    if (!b->validated && b->state_cause[0]) {
-        char esc[SH_MB_CAUSE_MAX * 2];
-        size_t w = 0, k;
-        for (k = 0; b->state_cause[k] && w + 3 < sizeof esc; k++) {
-            char c = b->state_cause[k];
+    if (!b->validated && sh_mb_state_cause(b)[0]) {
+        const char *sc = sh_mb_state_cause(b);
+        size_t w = 0, k, ecap = strlen(sc) * 2 + 1;
+        char *esc = (char *)malloc(ecap);
+        for (k = 0; esc && sc[k] && w + 3 < ecap; k++) {
+            char c = sc[k];
             if (c == '"' || c == '\\') esc[w++] = '\\';
             esc[w++] = (unsigned char)c < 0x20 ? ' ' : c;
         }
-        esc[w] = 0;
-        mpj_set(blk, "cause", mpj_new_str(esc));
+        if (esc) {
+            esc[w] = 0;
+            mpj_set(blk, "cause", mpj_new_str(esc));
+            free(esc);
+        }
     }
     mpj_set(o, SH_MB_BLOCK_KEY, blk);
     blk = NULL;
@@ -456,7 +484,7 @@ static int ms_up_read_old(const char *dir, sh_mb_bundle *b, char *version, size_
         /* the caller wants the files only */
     } else if (old.version && old.version[0] == '"') {
         size_t n = strlen(old.version);
-        _snprintf_s(version, vcap, _TRUNCATE, "%.*s", (int)(n > 2 ? n - 2 : 0), old.version + 1);
+        st_fmt(version, vcap, "%.*s", (int)(n > 2 ? n - 2 : 0), old.version + 1);
     } else strcpy_s(version, vcap, "0.0.0");
     strcpy_s(b->hash, sizeof b->hash, old.bundle);
     b->files = old.file_count ? (sh_mb_file *)calloc(old.file_count, sizeof *b->files) : NULL;
@@ -483,7 +511,7 @@ static int ms_up_read_old(const char *dir, sh_mb_bundle *b, char *version, size_
 static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
 {
     wchar_t *bj = ms_wjoin(it->dir, L"bundle.json"), *mj = ms_wjoin(it->dir, L"mod.json");
-    char *dir = sh_mb_utf8(it->dir), *text = NULL, *modjson = NULL, cause[SH_MB_CAUSE_MAX];
+    char *dir = sh_mb_utf8(it->dir), *text = NULL, *modjson = NULL, cause[MSU_CAUSE_CAP];
     size_t len = 0, mlen = 0;
     unsigned unlinked = 0, restored = 0;
     int r = -1;
@@ -514,9 +542,9 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         mpj_free(j);
     }
     if (!text || !ms_up_read_c2(text, len, &it->b, it->version, sizeof it->version, cause, sizeof cause)) {
-        char why[SH_MB_CAUSE_MAX];
+        char why[MSU_CAUSE_CAP];
         strcpy_s(why, sizeof why, cause[0] ? cause : "it cannot be read");
-        _snprintf_s(cause, sizeof cause, _TRUNCATE, "bundle.json does not read: %s", why);
+        st_putf(cause, sizeof cause, "bundle.json does not read: %s", why);
         goto out;
     }
     it->b.validated = 1;
@@ -524,14 +552,15 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         /* .state.json carries the verification result and the install time. */
         wchar_t *sp = ms_wjoin(it->dir, L".state.json");
         size_t sl = 0;
-        char *s = ms_read_text(sp, 65536, &sl), sc[SH_MB_CAUSE_MAX] = "";
+        char *s = ms_read_text(sp, 65536, &sl), *sc = NULL;
         int validated = 1;
         long long at = 0;
-        if (s && sh_mb_state_parse(s, sl, &validated, &at, sc, sizeof sc)) {
+        if (s && sh_mb_state_parse(s, sl, &validated, &at, &sc)) {
             it->b.validated = validated;
             it->b.built = at;
-            if (!validated) strncpy_s(it->b.state_cause, sizeof it->b.state_cause, sc, _TRUNCATE);
+            if (!validated) (void)sh_mb_set_state_cause(&it->b, sc ? sc : "");
         }
+        free(sc);
         free(s);
         free(sp);
     }
@@ -542,7 +571,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         goto out;
     }
     if (!ms_up_read_old(dir, &chk, NULL, 0) || strcmp(chk.hash, it->b.hash) != 0) {
-        _snprintf_s(cause, sizeof cause, _TRUNCATE, "the written mod.json does not read back as bundle %.16s", it->b.hash);
+        st_putf(cause, sizeof cause, "the written mod.json does not read back as bundle %.16s", it->b.hash);
         goto out;
     }
     {
@@ -559,7 +588,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
     {
         char extra[160] = "";
         if (unlinked || restored)
-            _snprintf_s(extra, sizeof extra, _TRUNCATE, "; %u hard link(s) replaced by copies, %u file(s) restored from blobs\\",
+            st_fmt(extra, sizeof extra, "; %u hard link(s) replaced by copies, %u file(s) restored from blobs\\",
                         unlinked, restored);
         ms_log("MODS: store: %s: mod.json written for %s@%s+%llu (bundle %.16s, %zu file(s)); bundle.json, "
                "bundle.canonical.json and .state.json removed%s",
@@ -611,8 +640,8 @@ static void ms_up_scan(ms_up_ctx *c, const wchar_t *dir, int legacy)
         it->legacy = legacy;
         leaf = sh_mb_utf8(fd.cFileName);
         if (leaf) {
-            _snprintf_s(it->from, sizeof it->from, _TRUNCATE, "%s%s", legacy ? "legacy\\" : "", leaf);
-            strncpy_s(it->name, sizeof it->name, leaf, _TRUNCATE);
+            st_fmt(it->from, sizeof it->from, "%s%s", legacy ? "legacy\\" : "", leaf);
+            st_cpy(it->name, sizeof it->name, leaf);
             free(leaf);
         }
         r = it->dir ? ms_up_convert(c, it) : -1;
@@ -624,8 +653,8 @@ static void ms_up_scan(ms_up_ctx *c, const wchar_t *dir, int legacy)
             continue;
         }
         {
-            char key[SH_MS_KEY_MAX + 1];
-            _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", it->b.id, it->version, it->build);
+            char key[MSU_KEY_MAX + 1];
+            st_fmt(key, sizeof key, "%s@%s+%llu", it->b.id, it->version, it->build);
             it->product = legacy || !_stricmp(key, it->name);
         }
         sh_mb_content_key(&it->b, it->content);
@@ -644,30 +673,30 @@ static void ms_up_pick(ms_up_ctx *c, size_t k)
     int round;
     for (i = 0; i < c->count; i++) if (!c->items[i].dropped && !strcmp(c->items[i].b.id, it->b.id)) same_id++;
     for (round = same_id > 1 ? 1 : 0; round < 5; round++) {
-        char leaf[SH_MS_NAME_MAX + 1];
+        char leaf[MSU_NAME_MAX + 1];
         wchar_t *p;
         int taken = 0;
-        if (round == 0) strncpy_s(leaf, sizeof leaf, it->b.id, _TRUNCATE);
-        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", it->b.id, it->version);
-        else if (round == 2) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+%llu", it->b.id, it->version, it->build);
-        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", it->b.id, it->version, round == 3 ? 8 : 16, it->b.hash);
+        if (round == 0) st_cpy(leaf, sizeof leaf, it->b.id);
+        else if (round == 1) st_fmt(leaf, sizeof leaf, "%s@%s", it->b.id, it->version);
+        else if (round == 2) st_fmt(leaf, sizeof leaf, "%s@%s+%llu", it->b.id, it->version, it->build);
+        else st_fmt(leaf, sizeof leaf, "%s@%s-%.*s", it->b.id, it->version, round == 3 ? 8 : 16, it->b.hash);
         if (!it->legacy && !_stricmp(leaf, it->name)) return;   /* already there */
         /* Folders are renamed one at a time, so the disk says what is taken. */
         p = ms_wjoin_utf8(c->root, leaf);
         taken = !p || ms_exists(p);
         free(p);
-        if (!taken) { strncpy_s(it->name, sizeof it->name, leaf, _TRUNCATE); return; }
+        if (!taken) { st_cpy(it->name, sizeof it->name, leaf); return; }
     }
 }
 
 /* Replace every quoted occurrence of `from` with `to` (record folder names). */
 static char *ms_up_rename_text(char *text, const char *from, const char *to)
 {
-    char qf[SH_MS_NAME_MAX + 24], qt[SH_MS_NAME_MAX + 24];
+    char qf[MSU_NAME_MAX + 24], qt[MSU_NAME_MAX + 24];
     size_t lf, lt;
     char *hit;
-    _snprintf_s(qf, sizeof qf, _TRUNCATE, "\"%s\"", from);
-    _snprintf_s(qt, sizeof qt, _TRUNCATE, "\"%s\"", to);
+    st_fmt(qf, sizeof qf, "\"%s\"", from);
+    st_fmt(qt, sizeof qt, "\"%s\"", to);
     lf = strlen(qf);
     lt = strlen(qt);
     while (text && (hit = strstr(text, qf)) != NULL) {
@@ -700,7 +729,7 @@ static int ms_up_fold(ms_up_ctx *c, const wchar_t *leaf, const char *member, con
     }
     if (value && renames) {
         for (i = 0; i < c->count; i++) {
-            char from[SH_MS_NAME_MAX + 24];
+            char from[MSU_NAME_MAX + 24];
             const ms_up_item *it = &c->items[i];
             const char *to = it->name;
             size_t k;
@@ -746,7 +775,7 @@ static unsigned long long ms_tree_bytes(const wchar_t *dir)
 
 typedef struct ms_old_entry {
     char *folder;               /* absolute UTF-8 */
-    char  name[SH_MS_NAME_MAX + 1];   /* under mods\ */
+    char  name[MSU_NAME_MAX + 1];   /* under mods\ */
     sh_mb_old o;
     int   loaded;               /* its descriptor read */
     int   delivered;            /* a package a map delivered: origin "delivery", or a "legacy" record */
@@ -769,7 +798,7 @@ static int ms_old_walk(void *ctx, const char *folder, const char *name, const ch
     e = &l->v[l->n++];
     memset(e, 0, sizeof *e);
     e->folder = _strdup(folder);
-    strncpy_s(e->name, sizeof e->name, name, _TRUNCATE);
+    st_cpy(e->name, sizeof e->name, name);
     e->loaded = e->folder && sh_mb_old_load(e->folder, &e->o) && e->o.key[0];
     e->delivered = e->loaded && (!strcmp(e->o.origin, "delivery") || e->o.block_legacy != NULL);
     return 0;
@@ -841,8 +870,8 @@ static const ms_old_entry *ms_old_counterpart(const ms_old_list *l, const ms_old
 
 /* A folder name the second step changed: `from` now answers as `to`. */
 typedef struct ms_pair {
-    char from[SH_MS_NAME_MAX + 1];
-    char to[SH_MS_NAME_MAX + 1];
+    char from[MSU_NAME_MAX + 1];
+    char to[MSU_NAME_MAX + 1];
 } ms_pair;
 
 /* The 64-hex tree a delivered package's legacy record keys it by
@@ -939,7 +968,7 @@ static int ms_tidy_move(const char *folder, const char *rootu, const char *to)
     char path[MAX_PATH * 4];
     wchar_t *from = sh_mb_wpath(folder), *dst;
     int ok;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", rootu, to);
+    st_fmt(path, sizeof path, "%s\\%s", rootu, to);
     dst = sh_mb_wpath(path);
     ok = from && dst && !ms_exists(dst) && MoveFileExW(from, dst, 0);
     free(from);
@@ -1007,21 +1036,21 @@ static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
      * version never names a folder. */
     for (i = 0; i < l.n; i++) {
         const ms_old_entry *e = &l.v[i];
-        char to[SH_MS_NAME_MAX + 1], prefix[80];
+        char to[MSU_NAME_MAX + 1], prefix[80];
         size_t k, same = 0, pl;
         int generated;
         if (!e->loaded || !e->o.origin[0] || !_stricmp(e->name, e->o.key)) continue;
         if (strchr(e->name, '\\')) continue;   /* a folder the player nested stays where it is */
         for (k = 0; k < l.n; k++) if (l.v[k].loaded && !strcmp(l.v[k].o.key, e->o.key)) same++;
-        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->o.key);
+        st_fmt(prefix, sizeof prefix, "%s@", e->o.key);
         pl = strlen(prefix);
         generated = strstr(e->name, "@legacy-") != NULL;
         if (same == 1 && !_strnicmp(e->name, prefix, pl) && ms_tidy_move(e->folder, rootu, e->o.key))
             strcpy_s(to, sizeof to, e->o.key);
         else if (generated) {
-            _snprintf_s(to, sizeof to, _TRUNCATE, "%s-%.8s", e->o.key, e->o.bundle);
+            st_fmt(to, sizeof to, "%s-%.8s", e->o.key, e->o.bundle);
             if (!ms_tidy_move(e->folder, rootu, to)) {
-                _snprintf_s(to, sizeof to, _TRUNCATE, "%s-%.16s", e->o.key, e->o.bundle);
+                st_fmt(to, sizeof to, "%s-%.16s", e->o.key, e->o.bundle);
                 if (!ms_tidy_move(e->folder, rootu, to)) {
                     st->tidy_failed++;
                     ms_log("MODS: store: %s could not be renamed (%s); it keeps its name", e->name, ms_why(GetLastError(), e->name, 1, 0));
@@ -1065,7 +1094,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
     memset(&c, 0, sizeof c);
     c.st = stats;
     c.root = ms_wroot();
-    if (!c.root || !sh_ms_root(c.rootu, sizeof c.rootu)) { free(c.root); return -1; }
+    if (!c.root || !st_path(c.rootu, sizeof c.rootu, sh_ms_root())) { free(c.root); return -1; }
     if (!ms_exists(c.root)) { free(c.root); return 0; }
     if (!ms_up_needed(c.root)) {
         int tidied = ms_tidy(stats, c.rootu);
@@ -1110,7 +1139,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
     for (i = 0; i < c.count; i++) {
         ms_up_item *it = &c.items[i];
         wchar_t *to;
-        char before[SH_MS_NAME_MAX + 16];
+        char before[MSU_NAME_MAX + 16];
         if (it->dropped || !it->product) continue;
         strcpy_s(before, sizeof before, it->name);
         ms_up_pick(&c, i);
@@ -1212,7 +1241,7 @@ static void ms_check_tidy(const char *rootu, sh_ms_upgrade_check *out)
         size_t same = 0;
         if (dropped[i] || !e->loaded || !e->o.origin[0] || !_stricmp(e->name, e->o.key)) continue;
         for (k = 0; k < l.n; k++) if (!dropped[k] && l.v[k].loaded && !strcmp(l.v[k].o.key, e->o.key)) same++;
-        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->o.key);
+        st_fmt(prefix, sizeof prefix, "%s@", e->o.key);
         if (strchr(e->name, '\\')) continue;
         if ((same == 1 && !_strnicmp(e->name, prefix, strlen(prefix))) || strstr(e->name, "@legacy-")) out->tidy_renames++;
     }
@@ -1249,7 +1278,7 @@ int sh_ms_upgrade_scan(sh_ms_upgrade_check *out)
     if (!out) return -1;
     memset(out, 0, sizeof *out);
     root = ms_wroot();
-    if (!root || !sh_ms_root(rootu, sizeof rootu)) { free(root); return -1; }
+    if (!root || !st_path(rootu, sizeof rootu, sh_ms_root())) { free(root); return -1; }
     /* removed-mods\ is the store root's sibling. */
     slash = wcsrchr(root, L'\\');
     if (slash && slash > root) {

@@ -13,6 +13,7 @@
  * entityDef that names it through customMaterial, the sedef last). The folder
  * holds stock game bytes, so it is not part of the repository. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,7 +73,7 @@ static int stock_exists(void *ctx, const char *request) { (void)ctx; return strs
 
 static void fixture(const char *src)
 {
-    char root[MAX_PATH], mods[MAX_PATH], folder[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    char root[MAX_PATH], mods[MAX_PATH], folder[MAX_PATH], cause[HO_TEXT];
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
     sh_modserve_hit hit;
@@ -88,7 +89,7 @@ static void fixture(const char *src)
     CHECK(mt_copy_tree(src, folder));
     CHECK(sh_mb_build(folder, NULL, &r, &b) == 1);   /* the folder must carry its salt (format 2) */
     printf("    build: %u error(s) %s; %u warning(s) %s; %zu files, %llu bytes; needs %u (bundle %u, game %u, unresolved %u)\n",
-           b.errors, b.errors ? b.first_cause : "", b.warnings, b.warnings ? b.first_warning : "", b.file_count,
+           b.errors, b.errors ? sh_mb_first_cause(&b) : "", b.warnings, b.warnings ? b.first_warning : "", b.file_count,
            b.total_size, b.needs.total, b.needs.local, b.needs.stock, b.needs.unresolved);
     CHECK(!strcmp(b.id, "rctestvt") && b.file_count == 4);
     for (k = 0; k < b.file_count; ++k) {
@@ -105,11 +106,11 @@ static void fixture(const char *src)
         }
     }
     CHECK(mega);
-    CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
+    CHECK(HO(cause, sh_mb_write(&b, folder, HO_P(0))) == 1);
     printf("    bundle %s\n", b.hash);
 
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(sh_modserve_bundle_state(b.hash, NULL, 0) == 1);
+    CHECK(sh_modserve_bundle_state(b.hash, NULL) == 1);
     CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq1.mega2", &hit) == 1 && hit.size > 0x170);
     CHECK(sh_modserve_lookup("VirtualTextures\\Mods\\RCTestVT\\fam_sq1.mega2", &hit) == 1);
     CHECK(sh_modserve_lookup("virtualtextures/mods/rctestvt/fam_sq2.mega2", &hit) == 0);

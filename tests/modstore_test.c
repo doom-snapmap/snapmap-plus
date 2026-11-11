@@ -12,6 +12,7 @@
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
+#include "heap_out.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <stdio.h>
@@ -179,7 +180,7 @@ static void dir_names(const char *parent, char *out, size_t cap)
 
 static void test_install(const char *fixture, const char *tmp)
 {
-    char root[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], name[SH_MS_NAME_MAX + 1], cause[600] = "";
+    char root[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], name[HO_TEXT + 1], cause[600] = "";
     char h1[65], salt[SH_SALT_LEN + 1];
     sh_ms_install_stats st;
     sh_ms_verify_stats vs;
@@ -200,7 +201,7 @@ static void test_install(const char *fixture, const char *tmp)
     sh_ms_list_free(&list);
     before = slurp(src, "mod.json", NULL);
 
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, name, sizeof name, &st, &b, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
     CHECK(!strcmp(name, "alex.r2-imp") && !strcmp(b.id, "alexrimp"));
     CHECK(st.copied == 13 && !st.in_place && !st.replaced && !st.present && !st.resalted);
@@ -226,12 +227,12 @@ static void test_install(const char *fixture, const char *tmp)
     CHECK(sh_ms_request_exists(&list, "generated/decls/entitydef/mods/alexrimp/none.decl") == 0);
     sh_ms_list_free(&list);
 
-    CHECK(sh_ms_verify("alexrimp", &vs, cause, sizeof cause) && vs.entries == 1 && vs.files == 13);
-    CHECK(!sh_ms_verify("nobody", &vs, cause, sizeof cause) && strstr(cause, "no installed mod"));
+    CHECK(HO(cause, sh_ms_verify("alexrimp", &vs, HO_P(0))) && vs.entries == 1 && vs.files == 13);
+    CHECK(!HO(cause, sh_ms_verify("nobody", &vs, HO_P(0))) && strstr(cause, "no installed mod"));
 
     /* The same build again: present, nothing copied. */
     g_logged = 0;
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     CHECK(!strcmp(name, "alex.r2-imp") && st.present && st.copied == 0);
     CHECK(log_has("is already installed as mods\\alex.r2-imp; nothing was copied"));
 
@@ -240,7 +241,7 @@ static void test_install(const char *fixture, const char *tmp)
     mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// edited\r\n");
     g_logged = 0;
     cause[0] = 0;
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, name, sizeof name, &st, &b, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  copy install: %s\n", cause);
     CHECK(!strcmp(name, "alex.r2-imp (2)") && st.resalted && strcmp(b.id, "alexrimp") && sh_salt_valid(b.id, strlen(b.id)));
     CHECK(log_has("mods\\alex.r2-imp (2) is a copy of mods\\alex.r2-imp; it is a new mod now"));
@@ -260,7 +261,7 @@ static void test_install(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE,
                 "%s\\alex.r2-imp\\assets\\generated\\basemodel\\md6\\mods\\alexrimp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model", root);
     { FILE *f = NULL; if (fopen_s(&f, path, "r+b") == 0 && f) { fputc('X', f); fclose(f); } }
-    CHECK(!sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause) && strstr(cause, "imp_copy.bmd6model does not match mod.json"));
+    CHECK(!HO(cause, sh_ms_verify("alex.r2-imp", &vs, HO_P(0))) && strstr(cause, "imp_copy.bmd6model does not match mod.json"));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "alex.r2-imp");
     CHECK(e && e->loaded && e->sizes_ok && !e->validated && !sh_ms_entry_usable(e) && strstr(e->cause, "does not match"));
@@ -480,8 +481,8 @@ static void test_fresh_folder_refusals(const char *tmp)
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
     /* Called directly: refused with the cause; an already salted folder answers 0. */
-    CHECK(sh_ms_assign_salt(bin, "binprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "binary file"));
-    CHECK(sh_ms_assign_salt(good, "goodprobe", salt, cause, sizeof cause) == 0 && sh_salt_valid(salt, strlen(salt)));
+    CHECK(HO(cause, sh_ms_assign_salt(bin, "binprobe", salt, HO_P(0))) == -1 && strstr(cause, "binary file"));
+    CHECK(HO(cause, sh_ms_assign_salt(good, "goodprobe", salt, HO_P(0))) == 0 && sh_salt_valid(salt, strlen(salt)));
     /* A swap the system refuses: a file held open without delete sharing
      * makes the rename of the folder fail; nothing changes. */
     {
@@ -493,7 +494,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         h = CreateFileA(rel, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
         dir_names(path, before, sizeof before);
-        CHECK(sh_ms_assign_salt(path, "heldprobe", salt, cause, sizeof cause) == -1);
+        CHECK(HO(cause, sh_ms_assign_salt(path, "heldprobe", salt, HO_P(0))) == -1);
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         dir_names(path, after, sizeof after);
         t = slurp(path, "mod.json", NULL);
@@ -512,7 +513,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\lockedprobe\\probe.decl", path);
         h = CreateFileA(rel, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
-        CHECK(sh_ms_assign_salt(path, "lockedprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "could not be read"));
+        CHECK(HO(cause, sh_ms_assign_salt(path, "lockedprobe", salt, HO_P(0))) == -1 && strstr(cause, "could not be read"));
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         t = slurp(path, "mod.json", NULL);
         CHECK(t && !strstr(t, "salt"));
@@ -697,7 +698,7 @@ static void test_earlier_shapes(const char *tmp)
 
 static void test_place_folders(const char *fixture, const char *tmp)
 {
-    char root[MAX_PATH], src[MAX_PATH], src2[MAX_PATH], name[SH_MS_NAME_MAX + 1], cause[600] = "", dir[SH_MS_NAME_MAX + 1];
+    char root[MAX_PATH], src[MAX_PATH], src2[MAX_PATH], name[HO_TEXT + 1], cause[600] = "", dir[HO_TEXT + 1];
     char title[200], path[MAX_PATH * 2], *t;
     sh_ms_install_stats st;
     sh_ms_sync_stats ss;
@@ -712,29 +713,29 @@ static void test_place_folders(const char *fixture, const char *tmp)
     mt_mkdirs_for(src);
     CHECK(mt_copy_tree(fixture, src));
     CHECK(sh_ms_set_root(root));
-    CHECK(sh_ms_place_dir(&arena, dir, sizeof dir) && !strcmp(dir, "maps\\Hell Arena Part 1"));
-    CHECK(sh_ms_install_placed(src, &arena, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HOS(dir, sh_ms_place_dir(&arena)) && !strcmp(dir, "maps\\Hell Arena Part 1"));
+    CHECK(HO2(name, cause, sh_ms_install_placed(src, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  placed: %s\n", cause);
     CHECK(!strcmp(name, "maps\\Hell Arena Part 1\\R2 Imp copy") && st.copied == 13 && !st.replaced);
-    CHECK(sh_ms_place_of("1234567", dir, sizeof dir, title, sizeof title) && !strcmp(dir, "maps\\Hell Arena Part 1") &&
+    CHECK(HO2(dir, title, sh_ms_place_of("1234567", HO_P(0), HO_P(1))) && !strcmp(dir, "maps\\Hell Arena Part 1") &&
           !strcmp(title, "Hell Arena: Part 1?"));
-    CHECK(sh_ms_place_title("maps\\Hell Arena Part 1\\R2 Imp copy", title, sizeof title) && !strcmp(title, "Hell Arena: Part 1?"));
-    CHECK(sh_ms_place_title("maps/Hell Arena Part 1", title, sizeof title));
-    CHECK(!sh_ms_place_title("alex.r2-imp", title, sizeof title));
+    CHECK(HOS(title, sh_ms_place_title("maps\\Hell Arena Part 1\\R2 Imp copy")) && !strcmp(title, "Hell Arena: Part 1?"));
+    CHECK(HOS(title, sh_ms_place_title("maps/Hell Arena Part 1")));
+    CHECK(!HOS(title, sh_ms_place_title("alex.r2-imp")));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "maps\\Hell Arena Part 1\\R2 Imp copy");
     CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->place, "maps\\Hell Arena Part 1") && !strcmp(e->salt, "alexrimp"));
     CHECK(sh_ms_find_salt(&list, "alexrimp", "maps\\Hell Arena Part 1", NULL) == e && sh_ms_find_salt(&list, "alexrimp", "*", NULL) == e);
     CHECK(!sh_ms_find_salt(&list, "alexrimp", NULL, NULL));   /* not a root build */
     sh_ms_list_free(&list);
-    CHECK(sh_ms_place_folder(&arena, "R2 Imp copy", "alexrimp", dir, sizeof dir) == 2 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy"));
-    CHECK(sh_ms_place_folder(&arena, "R2 Imp copy", "otherimp", dir, sizeof dir) == 1 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy (2)"));
+    CHECK(HO(dir, sh_ms_place_folder(&arena, "R2 Imp copy", "alexrimp", HO_P(0))) == 2 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy"));
+    CHECK(HO(dir, sh_ms_place_folder(&arena, "R2 Imp copy", "otherimp", HO_P(0))) == 1 && !strcmp(dir, "maps\\Hell Arena Part 1\\R2 Imp copy (2)"));
     /* F's note: a mod's folder names its place. */
-    CHECK(sh_ms_place_note(&arena, "maps/Hell Arena Part 1/R2 Imp copy") && sh_ms_place_of("1234567", dir, sizeof dir, NULL, 0) &&
+    CHECK(sh_ms_place_note(&arena, "maps/Hell Arena Part 1/R2 Imp copy") && HO(dir, sh_ms_place_of("1234567", HO_P(0), NULL)) &&
           !strcmp(dir, "maps\\Hell Arena Part 1"));
     /* Another build of the same salt for the same map replaces the place's folder. */
     mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alexrimp\\imp_copy.decl", "\r\n// republished\r\n");
-    CHECK(sh_ms_install_placed(src, &arena, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_placed(src, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     CHECK(!strcmp(name, "maps\\Hell Arena Part 1\\R2 Imp copy") && st.replaced);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1", root);
     {
@@ -751,13 +752,13 @@ static void test_place_folders(const char *fixture, const char *tmp)
         if (t) mt_write(src2, "mod.json", t);
     }
     free(t);
-    CHECK(!sh_ms_install_placed(src2, &arena, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+    CHECK(!HO2(name, cause, sh_ms_install_placed(src2, &arena, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "is under mods/alexrimp/, which is neither this mod folder"));
     /* The same title for another map: a place of its own. */
-    CHECK(sh_ms_place_dir(&other, dir, sizeof dir) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
-    CHECK(sh_ms_install_placed(src, &other, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HOS(dir, sh_ms_place_dir(&other)) && !strcmp(dir, "maps\\Hell Arena Part 1 (7654321)"));
+    CHECK(HO2(name, cause, sh_ms_install_placed(src, &other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     CHECK(!strcmp(name, "maps\\Hell Arena Part 1 (7654321)\\R2 Imp copy"));
-    CHECK(sh_ms_install_placed(src, &zip, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_placed(src, &zip, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     CHECK(!strcmp(name, "maps\\pack.rawmap.zip\\R2 Imp copy"));
     /* A new folder dropped into a place is refused; place folders are never built. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
@@ -771,11 +772,11 @@ static void test_place_folders(const char *fixture, const char *tmp)
     CHECK(e && e->refused && strstr(e->cause, "where Snapmap+ builds nothing"));
     sh_ms_list_free(&list);
     {
-        char built[SH_MS_NAME_MAX + 1], c2[600], dropped[MAX_PATH * 2];
+        char built[HO_TEXT + 1], c2[600], dropped[MAX_PATH * 2];
         sh_ms_install_stats s2;
         _snprintf_s(dropped, sizeof dropped, _TRUNCATE, "%s\\maps\\Hell Arena Part 1\\dropped", root);
-        CHECK(sh_ms_assign_salt(dropped, "dropped", NULL, c2, sizeof c2) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
-        CHECK(!sh_ms_install_from_folder(path, &RESOLVER, built, sizeof built, &s2, NULL, c2, sizeof c2) &&
+        CHECK(HO(c2, sh_ms_assign_salt(dropped, "dropped", NULL, HO_P(0))) == -1 && strstr(c2, "where Snapmap+ builds nothing"));
+        CHECK(!HO2(built, c2, sh_ms_install_from_folder(path, &RESOLVER, HO_P(0), &s2, NULL, HO_P(1))) &&
               strstr(c2, "came with a downloaded map"));
     }
     /* A hand copy inside one place: the newer one is refused. */
@@ -793,10 +794,10 @@ static void test_place_folders(const char *fixture, const char *tmp)
     }
     /* Removal: an emptied place goes with its record entry. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1 (7654321)\\R2 Imp copy", root);
-    CHECK(sh_ms_delete_mod_folder(path, cause, sizeof cause));
+    CHECK(HO(cause, sh_ms_delete_mod_folder(path, HO_P(0))));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Hell Arena Part 1 (7654321)", root);
-    CHECK(!mt_exists(path) && !sh_ms_place_of("7654321", dir, sizeof dir, NULL, 0));
-    CHECK(sh_ms_place_of("1234567", dir, sizeof dir, NULL, 0));
+    CHECK(!mt_exists(path) && !HO(dir, sh_ms_place_of("7654321", HO_P(0), NULL)));
+    CHECK(HO(dir, sh_ms_place_of("1234567", HO_P(0), NULL)));
 }
 
 /* ------------------------------------------------------------- new mod */
@@ -811,7 +812,7 @@ static void test_new_mod(const char *tmp)
     printf("-- new mod: a folder named after it, its salt in the block, an example under mods/<salt>/\n");
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\newmod\\mods", tmp);
     CHECK(sh_ms_set_root(root));
-    CHECK(sh_ms_new_mod_example("Hell Guards", salt, folder, sizeof folder, example, sizeof example, cause, sizeof cause));
+    CHECK(HO3(folder, example, cause, sh_ms_new_mod_example("Hell Guards", salt, HO_P(0), HO_P(1), HO_P(2))));
     if (cause[0]) fprintf(stderr, "  new mod: %s\n", cause);
     fl = strlen(folder);
     CHECK(sh_salt_valid(salt, strlen(salt)) && fl > 11 && !strcmp(folder + fl - 12, "\\Hell Guards"));
@@ -826,9 +827,9 @@ static void test_new_mod(const char *tmp)
     CHECK(t && strstr(t, want));
     free(t);
     CHECK(sh_mb_descriptor_state(folder) == SH_MB_DESC_BUILT);
-    CHECK(sh_ms_new_mod("Hell Guards", s2, folder, sizeof folder, cause, sizeof cause) && strstr(folder, "Hell Guards (2)") && strcmp(s2, salt));
-    CHECK(sh_ms_new_mod("maps", s2, folder, sizeof folder, cause, sizeof cause) && strstr(folder, "\\maps mod"));
-    CHECK(!sh_ms_new_mod("   ", s2, folder, sizeof folder, cause, sizeof cause) && strstr(cause, "needs a name"));
+    CHECK(HO2(folder, cause, sh_ms_new_mod("Hell Guards", s2, HO_P(0), HO_P(1))) && strstr(folder, "Hell Guards (2)") && strcmp(s2, salt));
+    CHECK(HO2(folder, cause, sh_ms_new_mod("maps", s2, HO_P(0), HO_P(1))) && strstr(folder, "\\maps mod"));
+    CHECK(!HO2(folder, cause, sh_ms_new_mod("   ", s2, HO_P(0), HO_P(1))) && strstr(cause, "needs a name"));
     g_logged = 0;
     /* The example names the game's crate model and prop rows: a resolver
      * that has the whole game. */
@@ -850,8 +851,8 @@ static DWORD WINAPI install_thread(void *p)
 {
     lock_job *j = (lock_job *)p;
     sh_ms_install_stats st;
-    char name[SH_MS_NAME_MAX + 1];
-    j->ok = sh_ms_install_from_folder(j->folder, &RESOLVER, name, sizeof name, &st, NULL, j->cause, sizeof j->cause);
+    char name[HO_TEXT + 1];
+    j->ok = HO2(name, j->cause, sh_ms_install_from_folder(j->folder, &RESOLVER, HO_P(0), &st, NULL, HO_P(1)));
     j->done_at = GetTickCount64();
     return 0;
 }
@@ -986,17 +987,17 @@ static void test_lock(const char *tmp)
     if (!a.ok || !c.ok) fprintf(stderr, "  parallel installs: %s / %s\n", a.cause, c.cause);
     if (ti[0]) CloseHandle(ti[0]);
     if (ti[1]) CloseHandle(ti[1]);
-    CHECK(sh_ms_verify("lockone", &vs, cause, sizeof cause) && sh_ms_verify("locktwo", &vs, cause, sizeof cause));
+    CHECK(HO(cause, sh_ms_verify("lockone", &vs, HO_P(0))) && HO(cause, sh_ms_verify("locktwo", &vs, HO_P(0))));
     modstore_lock();
-    CHECK(sh_ms_verify("lockthree", &vs, cause, sizeof cause));
+    CHECK(HO(cause, sh_ms_verify("lockthree", &vs, HO_P(0))));
     modstore_unlock();
     /* The store itself is not a mod, nor a folder inside a mod. */
     {
-        char name[SH_MS_NAME_MAX + 1], path[MAX_PATH * 2];
+        char name[HO_TEXT + 1], path[MAX_PATH * 2];
         sh_ms_install_stats st;
-        CHECK(!sh_ms_install_from_folder(root, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+        CHECK(!HO2(name, cause, sh_ms_install_from_folder(root, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\lockone\\assets", root);
-        CHECK(!sh_ms_install_from_folder(path, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+        CHECK(!HO2(name, cause, sh_ms_install_from_folder(path, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     }
 }
 
@@ -1145,7 +1146,7 @@ static void test_recycle(const char *tmp)
     (void)system(cmd);
     before = bin_items(dir);
     g_logged = 0;
-    r = sh_ms_delete_mod_folder(dir, cause, sizeof cause);
+    r = HO(cause, sh_ms_delete_mod_folder(dir, HO_P(0)));
     after = bin_items(dir);
     if (r != SH_MS_RECYCLED) fprintf(stderr, "  recycle: %d (%s)\n", r, cause);
     CHECK(ci ? r != 0 : r == SH_MS_RECYCLED);
@@ -1154,7 +1155,7 @@ static void test_recycle(const char *tmp)
         CHECK(log_has("MODS: store: moved mods\\binned to the Recycle Bin"));
         CHECK(before < 0 || after > before);
     }
-    CHECK(!sh_ms_delete_mod_folder(outside, cause, sizeof cause) && strstr(cause, "is not a mod folder of the store"));
+    CHECK(!HO(cause, sh_ms_delete_mod_folder(outside, HO_P(0))) && strstr(cause, "is not a mod folder of the store"));
     CHECK(!sh_ms_remove_folder(outside) && mt_exists(precious));
     CHECK(!sh_ms_remove_folder(root) && mt_exists(root));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\refused", root);
@@ -1163,11 +1164,11 @@ static void test_recycle(const char *tmp)
     (void)system(cmd);
     sh_ms_recycle_refuse_for_test(1);
     g_logged = 0;
-    CHECK(sh_ms_delete_mod_folder(dir, cause, sizeof cause) == SH_MS_DELETED && strstr(cause, "the shell refused it (test)"));
+    CHECK(HO(cause, sh_ms_delete_mod_folder(dir, HO_P(0))) == SH_MS_DELETED && strstr(cause, "the shell refused it (test)"));
     CHECK(!mt_exists(dir) && mt_exists(precious));
     CHECK(log_has("MODS: store: deleted mods\\refused outright; the Recycle Bin could not take it (the shell refused it (test))"));
     sh_ms_recycle_refuse_for_test(0);
-    CHECK(!sh_ms_delete_mod_folder(dir, cause, sizeof cause) && strstr(cause, "is no longer in the store"));
+    CHECK(!HO(cause, sh_ms_delete_mod_folder(dir, HO_P(0))) && strstr(cause, "is no longer in the store"));
 }
 
 static void test_work_folder_names(const char *tmp)
@@ -1238,11 +1239,10 @@ static void test_crash_leftovers(const char *tmp)
 }
 
 /* The scripts' compile check, standing in for script_compile.c. */
-static int script_ok(const char *file, int entry, const char *text, size_t len, int *line, char *what, size_t what_cap,
-                     char *todo, size_t todo_cap)
+static int script_ok(const char *file, int entry, const char *text, size_t len, int *line, char **what,
+                     char **todo)
 {
-    (void)file; (void)entry; (void)text; (void)len; (void)what; (void)what_cap; (void)todo; (void)todo_cap;
-    if (line) *line = 0;
+    (void)file; (void)entry; (void)text; (void)len; (void)what; (void)todo; if (line) *line = 0;
     return 1;
 }
 
@@ -1394,7 +1394,7 @@ static void test_ordinary_names(const char *tmp)
 static void test_install_to_root(const char *tmp)
 {
     char root[MAX_PATH], dir[MAX_PATH * 2], place[MAX_PATH * 2], salt[SH_SALT_LEN + 1], hash[65], s2[SH_SALT_LEN + 1],
-        h2[65], name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+        h2[65], name[HO_TEXT + 1], cause[HO_TEXT];
     sh_ms_sync_stats ss;
     sh_ms_install_stats st;
     int usable;
@@ -1406,7 +1406,7 @@ static void test_install_to_root(const char *tmp)
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     CHECK(entry_of("crate", salt, hash, &usable) && usable);
     /* The root's own folder is not a source. */
-    CHECK(!sh_ms_install_to_root(dir, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+    CHECK(!HO2(name, cause, sh_ms_install_to_root(dir, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "already one of your mods"));
     /* Moved into a map's place, it installs at the root from there. */
     _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep", root);
@@ -1414,24 +1414,24 @@ static void test_install_to_root(const char *tmp)
     CreateDirectoryA(place, NULL);
     _snprintf_s(place, sizeof place, _TRUNCATE, "%s\\maps\\Keep\\crate", root);
     CHECK(MoveFileA(dir, place));
-    CHECK(sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) && !st.present);
+    CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && !st.present);
     if (cause[0]) printf("   %s\n", cause);
     CHECK(!strcmp(name, "crate") && mt_has(place, "mod.json"));
     CHECK(entry_of("crate", s2, h2, &usable) && usable && !strcmp(s2, salt) && !strcmp(h2, hash));
     /* Again: the root folder at this build is the install. */
-    CHECK(sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) && st.present &&
+    CHECK(HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) && st.present &&
           !strcmp(name, "crate"));
     /* The player's own folder changed: it stays theirs. */
     mt_write(dir, "assets\\generated\\image\\mods\\crate\\b.bimage", "the player's own second image");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
-    CHECK(!sh_ms_install_to_root(place, NULL, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+    CHECK(!HO2(name, cause, sh_ms_install_to_root(place, NULL, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "your mods already hold") && strstr(cause, "mods\\crate"));
     printf("   %s\n", cause);
 }
 
 static void test_nested(const char *tmp)
 {
-    char root[MAX_PATH], dir[MAX_PATH], cause[300], name[SH_MS_NAME_MAX + 1];
+    char root[MAX_PATH], dir[MAX_PATH], cause[300], name[HO_TEXT + 1];
     sh_ms_list list;
     sh_ms_install_stats st;
     sh_ms_verify_stats vs;
@@ -1475,21 +1475,21 @@ static void test_nested(const char *tmp)
     sh_ms_list_free(&list);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\cyber", root);
     cause[0] = 0;
-    CHECK(sh_ms_install_from_folder(dir, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  nested build: %s\n", cause);
     CHECK(st.in_place && !strcmp(name, "demon-mods\\cyber"));
-    CHECK(sh_ms_verify("cyber", &vs, cause, sizeof cause) && vs.entries == 1);
+    CHECK(HO(cause, sh_ms_verify("cyber", &vs, HO_P(0))) && vs.entries == 1);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "demon-mods\\cyber");
     CHECK(e && e->loaded && sh_salt_valid(e->salt, strlen(e->salt)) && sh_ms_entry_matches(e, e->salt));
     sh_ms_list_free(&list);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods", root);
-    CHECK(!sh_ms_install_from_folder(dir, &RESOLVER, name, sizeof name, &st, NULL, cause, sizeof cause) &&
+    CHECK(!HO2(name, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))) &&
           strstr(cause, "has no mod.json"));
-    CHECK(!sh_ms_delete_mod_folder(dir, cause, sizeof cause) && strstr(cause, "is not a mod folder of the store") && mt_exists(dir));
+    CHECK(!HO(cause, sh_ms_delete_mod_folder(dir, HO_P(0))) && strstr(cause, "is not a mod folder of the store") && mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\bosses\\spider", root);
     g_logged = 0;
-    r = sh_ms_delete_mod_folder(dir, cause, sizeof cause);
+    r = HO(cause, sh_ms_delete_mod_folder(dir, HO_P(0)));
     CHECK(ci ? r != 0 : r == SH_MS_RECYCLED);
     CHECK(!mt_exists(dir));
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\demon-mods\\bosses", root);
@@ -1502,7 +1502,7 @@ int main(int argc, char **argv)
     char tmp[MAX_PATH], fixture[MAX_PATH], got[MAX_PATH];
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
-    CHECK(sh_ms_set_root(NULL) && sh_ms_root(got, sizeof got) && strstr(got, "\\snapmap-plus\\mods"));
+    CHECK(sh_ms_set_root(NULL) && sh_ms_root() && strcpy_s(got, sizeof got, sh_ms_root()) == 0 && strstr(got, "\\snapmap-plus\\mods"));
     test_install(fixture, tmp);
     test_fresh_folder_salted(tmp);
     test_fresh_folder_strings(tmp);

@@ -15,6 +15,7 @@
  *
  *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload_v4.json>
  */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,14 +345,13 @@ static int fake_preload(const char *why)
 /* Mod scripts: the builder's compile check (script_compile.c in the product)
  * fails a text holding BROKEN at line 4 as Lua would say it; the runtime's
  * state, log and the sound banks a restart brings in are the test's. */
-static int fake_script_check(const char *file, int entry, const char *text, size_t len, int *line, char *what,
-                             size_t what_cap, char *todo, size_t todo_cap)
+static int fake_script_check(const char *file, int entry, const char *text, size_t len, int *line, char **what, char **todo)
 {
     (void)file; (void)entry; (void)len;
     if (!strstr(text, "BROKEN")) return 1;
     *line = 4;
-    strncpy_s(what, what_cap, "\"end\" expected to close \"function\" on line 2", _TRUNCATE);
-    strncpy_s(todo, todo_cap, "correct it, then press Refresh", _TRUNCATE);
+    ho_set(what, "\"end\" expected to close \"function\" on line 2");
+    ho_set(todo, "correct it, then press Refresh");
     return 0;
 }
 static int g_script_on;                 /* the runtime knows g_script_salt */
@@ -432,7 +432,7 @@ static int load_rows(const char *const *salts, const char *const *builds, const 
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, salts[i]);
         strcpy_s(row.build, sizeof row.build, builds[i]);
-        strcpy_s(row.name, sizeof row.name, names[i]);
+        sh_modmanifest_row_set_name(&row, names[i]);
         row.size = 10;
         row.attached = 1;
         if (!sh_modmanifest_list_add(&rows, &row)) return 0;
@@ -704,7 +704,7 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, salt);
     strcpy_s(row.build, sizeof row.build, build);
-    strcpy_s(row.name, sizeof row.name, name);
+    sh_modmanifest_row_set_name(&row, name);
     row.size = 1234;
     CHECK(sh_modmanifest_row_add_name(&row, placed ? placed : "mods/alexrimp/imp_copy"));
     CHECK(sh_modmanifest_list_add(&rows, &row));
@@ -905,7 +905,7 @@ static void age_dir(const char *dir, unsigned days)
 
 static void test_places_stay(const char *tmp)
 {
-    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], *doc;
+    char root[MAX_PATH * 2], src[MAX_PATH * 2], dir[MAX_PATH * 2], saves[MAX_PATH * 2], cause[HO_TEXT], *doc;
     static const char *const keeps[] = { "Old Keep", "Other Keep" };
     sh_mb_bundle b;
     size_t i;
@@ -916,7 +916,7 @@ static void test_places_stay(const char *tmp)
     mt_write(src, "mod.json", "{\"name\":\"Crate\"}");
     mt_write(src, "assets\\generated\\image\\mods\\cratebox\\a.bimage", "crate bytes");
     memset(&b, 0, sizeof b);
-    CHECK(sh_mb_build(src, "cratebox", NULL, &b) && sh_mb_write(&b, src, cause, sizeof cause));
+    CHECK(sh_mb_build(src, "cratebox", NULL, &b) && HO(cause, sh_mb_write(&b, src, HO_P(0))));
     sh_mb_free(&b);
     for (i = 0; i < 2; i++) {
         sh_ms_place pl;
@@ -1258,7 +1258,7 @@ int main(int argc, char **argv)
 
     printf("-- a downloaded map's place: its own group, kept as the map needs it\n");
     {
-        char built[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "";
+        char built[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "";
         sh_ms_install_stats st;
         sh_ms_place place;
         sh_mb_bundle bd;
@@ -1274,7 +1274,7 @@ int main(int argc, char **argv)
             sh_mb_resolver r;
             memset(&r, 0, sizeof r);
             r.stock = stock_cb;
-            CHECK(sh_ms_install_placed(built, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+            CHECK(HO2(name, cause, sh_ms_install_placed(built, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
         }
         if (cause[0]) printf("    placed: %s\n", cause);
         sh_mb_free(&bd);
@@ -1325,7 +1325,7 @@ int main(int argc, char **argv)
 
     printf("-- Add to my mods: a downloaded map's mod copied to the root, off the game's thread\n");
     {
-        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[SH_MB_CAUSE_MAX] = "", key[600], esc[800];
+        char solo[MAX_PATH * 2], recv[MAX_PATH * 2], name[400] = "", cause[HO_TEXT] = "", key[600], esc[800];
         sh_ms_install_stats st;
         sh_ms_place place;
         sh_mb_bundle bd;
@@ -1343,9 +1343,9 @@ int main(int argc, char **argv)
         r.stock = stock_cb;
         place.title = "Solo Arena";
         place.map_id = "6ae40b378bf5037d3d63bd77";
-        CHECK(sh_ms_install_placed(recv, &place, &r, name, sizeof name, &st, &bd, cause, sizeof cause));
+        CHECK(HO2(name, cause, sh_ms_install_placed(recv, &place, &r, HO_P(0), &st, &bd, HO_P(1))));
         sh_mb_free(&bd);
-        CHECK(sh_ms_delete_mod_folder(solo, cause, sizeof cause) != 0);
+        CHECK(HO(cause, sh_ms_delete_mod_folder(solo, HO_P(0))) != 0);
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
         esc[w] = 0;
@@ -1438,7 +1438,7 @@ int main(int argc, char **argv)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "alexrimp");
         strcpy_s(row.build, sizeof row.build, hash1);
-        strcpy_s(row.name, sizeof row.name, "R2 Imp copy");
+        sh_modmanifest_row_set_name(&row, "R2 Imp copy");
         CHECK(sh_modmanifest_list_add(&rows, &row));
         text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
         CHECK(text != NULL);

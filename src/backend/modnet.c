@@ -9,6 +9,7 @@
 #include "modnet.h"
 #include "modbundle.h"
 #include "mp_json.h"
+#include "text.h"
 #include "config.h"
 
 #pragma comment(lib, "winhttp.lib")
@@ -54,6 +55,18 @@ static double mn_now_ms(void)
     return (double)t.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
 
+/* The message of the last call on this thread: the whole sentence, kept
+ * until the thread's next call replaces it. */
+static __declspec(thread) char *t_mn_message;
+
+static void mn_message(modnet_result *r, char *text)
+{
+    if (!text) { r->message = modnet_code_text(r->code); return; }
+    free(t_mn_message);
+    t_mn_message = text;
+    r->message = t_mn_message;
+}
+
 static int mn_fail(modnet_result *r, int code, const char *fmt, ...)
 {
     if (r) {
@@ -61,10 +74,10 @@ static int mn_fail(modnet_result *r, int code, const char *fmt, ...)
         if (fmt) {
             va_list ap;
             va_start(ap, fmt);
-            _vsnprintf_s(r->message, sizeof r->message, _TRUNCATE, fmt, ap);
+            mn_message(r, sh_vtextf(fmt, ap));
             va_end(ap);
         } else {
-            strncpy_s(r->message, sizeof r->message, modnet_code_text(code), _TRUNCATE);
+            r->message = modnet_code_text(code);
         }
     }
     return code;
@@ -139,19 +152,19 @@ static int mn_valid_hex(const char *s, size_t n)
 
 int modnet_valid_ref(const char *ref)
 {
-    int units, wn;
+    int units, ok = 1;
     const unsigned char *p;
-    wchar_t w[MODNET_REF_MAX + 2];
-    if (!ref || !ref[0] || strlen(ref) > 4 * MODNET_REF_MAX) return 0;
+    wchar_t *w;
+    if (!ref || !ref[0]) return 0;
     for (p = (const unsigned char *)ref; *p; p++)
         if (*p < 0x20 || *p == 0x7f) return 0;
     units = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ref, -1, NULL, 0);
-    if (units <= 1 || units - 1 > MODNET_REF_MAX) return 0;
-    wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ref, -1, w, MODNET_REF_MAX + 2);
-    if (wn <= 0) return 0;
-    for (units = 0; w[units]; units++)
-        if (w[units] >= 0x80 && w[units] <= 0x9f) return 0;   /* C1 controls, as the store refuses */
-    return 1;
+    if (units <= 1 || !(w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)units))) return 0;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ref, -1, w, units) <= 0) ok = 0;
+    for (units = 0; ok && w[units]; units++)
+        if (w[units] >= 0x80 && w[units] <= 0x9f) ok = 0;   /* C1 controls, as the store refuses */
+    free(w);
+    return ok;
 }
 
 static int mn_is_loopback(const wchar_t *host)
@@ -471,8 +484,9 @@ static int mn_exchange(const mn_req *q, unsigned char **resp, size_t *resp_len, 
         buf = NULL;
         goto done;
     }
-    /* Refusals carry a short JSON error; nothing more is read from them. */
-    cap_bytes = status >= 300 ? MN_ERROR_BODY : q->max_response;
+    /* A refusal's JSON error is read whole: its sentence may name a path of
+     * any length. */
+    cap_bytes = status >= 300 ? (unsigned long long)-1 : q->max_response;
     if (status < 300 && have_declared && declared > cap_bytes) {
         code = mn_fail(r, MODNET_E_TOO_LARGE, "the response is larger than %llu bytes", cap_bytes);
         goto done;
@@ -547,34 +561,37 @@ done:
     return code;
 }
 
-/* The store's {"error": "..."} text, printable ASCII only. */
-static void mn_error_text(const unsigned char *body, size_t len, char *out, size_t cap)
+/* The store's {"error": "..."} text, whole, printable ASCII only (malloc'd),
+ * or NULL. */
+static char *mn_error_text(const unsigned char *body, size_t len)
 {
     mpj *root;
     const mpj *e;
     size_t i, w = 0;
-    out[0] = 0;
-    if (!body || !len || len > MN_ERROR_BODY) return;
+    char *out = NULL;
+    if (!body || !len) return NULL;
     root = mpj_parse((const char *)body, len);
-    if (!root) return;
+    if (!root) return NULL;
     e = root->type == MPJ_OBJ ? mpj_get(root, "error") : NULL;
-    if (e && e->type == MPJ_STR && e->text) {
-        for (i = 0; e->text[i] && w + 1 < cap && w < 160; i++) {
+    if (e && e->type == MPJ_STR && e->text && (out = (char *)malloc(strlen(e->text) + 1)) != NULL) {
+        for (i = 0; e->text[i]; i++) {
             unsigned char c = (unsigned char)e->text[i];
             if (c >= 0x20 && c < 0x7f) out[w++] = (char)c;
         }
         out[w] = 0;
+        if (!w) { free(out); out = NULL; }
     }
     mpj_free(root);
+    return out;
 }
 
 /* Map a refusal status onto a code with the store's cause. */
 static int mn_status_fail(modnet_result *r, const unsigned char *body, size_t len, const char *what)
 {
-    char cause[176];
+    char *cause;
     int code;
     int s = r->status;
-    mn_error_text(body, len, cause, sizeof cause);
+    cause = mn_error_text(body, len);
     if (s == 400 || s == 411 || s == 415 || s == 422) code = MODNET_E_REFUSED;
     else if (s == 403) code = MODNET_E_FORBIDDEN;
     else if (s == 404) code = MODNET_E_NOT_FOUND;
@@ -587,8 +604,10 @@ static int mn_status_fail(modnet_result *r, const unsigned char *body, size_t le
     /* The store's own sentence is the message, alone; the status stays in
      * r->status for the caller's log. */
     (void)what;
-    if (cause[0]) return mn_fail(r, code, "%s", cause);
-    return mn_fail(r, code, "%s", modnet_code_text(code));
+    r->code = code;
+    if (cause) mn_message(r, cause);
+    else r->message = modnet_code_text(code);
+    return code;
 }
 
 static void mn_begin(modnet_result *r, double *t0)
@@ -601,8 +620,8 @@ static int mn_end(modnet_result *r, double t0, int code)
 {
     r->ms = mn_now_ms() - t0;
     r->code = code;
-    if (code == MODNET_OK) r->message[0] = 0;
-    else if (!r->message[0]) strncpy_s(r->message, sizeof r->message, modnet_code_text(code), _TRUNCATE);
+    if (code == MODNET_OK) r->message = "";
+    else if (!r->message || !r->message[0]) r->message = modnet_code_text(code);
     return code;
 }
 

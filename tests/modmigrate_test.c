@@ -17,6 +17,7 @@
  * the product's builder entry are the seam stub (mod_seam_stub.c), whose
  * builder refuses, so any conversion a memo should have answered fails. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <stdio.h>
@@ -397,7 +398,7 @@ static void full_pass(const char *root)
     char *record;
     sh_ms_list list;
     size_t i, n = 0;
-    char dupe_b_key[SH_MS_KEY_MAX + 1] = "dupe-b";
+    char dupe_b_key[HO_TEXT + 1] = "dupe-b";
     char *hash_c = NULL;
 
     printf("-- the synthetic overrides tree migrates into the store\n");

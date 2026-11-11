@@ -5,14 +5,30 @@
 #include <string.h>
 
 #include "script_source.h"
+#include "../../common/text.h"
 #ifndef SH_SCRIPT_PURE
 #include "../modserve.h"
 #include "../modmanifest.h"
 #include "../modbundle.h"
 #endif
 
-#define SRC_PATH_MAX 1024   /* the tests' stand-in reads a folder: Windows paths */
-#define SRC_REL_MAX  300
+/* A UTF-8 path as the wide long-path form Windows opens (\\?\ for a
+ * drive path), malloc'd. */
+static wchar_t *src_wide(const char *path)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    wchar_t *w, *out;
+    if (n <= 0 || !(w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)n))) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w, n);
+    if (w[0] && w[1] == L':') {
+        size_t i;
+        for (i = 0; w[i]; i++) if (w[i] == L'/') w[i] = L'\\';
+        out = sh_wtextf(L"\\\\?\\%ls", w);
+        free(w);
+        return out;
+    }
+    return w;
+}
 
 typedef struct src_file {
     char *rel;                   /* "x.lua" or "lib/x.lua", malloc'd */
@@ -22,7 +38,7 @@ typedef struct src_file {
 
 typedef struct src_mod {
     char salt[SH_SCRIPT_SALT_CAP];
-    char name[SH_SCRIPT_MODNAME_CAP];
+    char *name;                  /* malloc'd, any length */
     src_file *f;
     int n, cap;
 } src_mod;
@@ -43,6 +59,7 @@ static void mod_free(src_mod *m)
     int i;
     for (i = 0; i < m->n; i++) { free(m->f[i].text); free(m->f[i].rel); }
     free(m->f);
+    free(m->name);
     memset(m, 0, sizeof *m);
 }
 
@@ -68,7 +85,7 @@ static src_mod *mod_add(const char *salt, const char *name)
     memset(m, 0, sizeof *m);
     strncpy_s(m->salt, sizeof m->salt, salt, _TRUNCATE);
     _strlwr_s(m->salt, sizeof m->salt);
-    strncpy_s(m->name, sizeof m->name, name && name[0] ? name : salt, _TRUNCATE);
+    if (!(m->name = _strdup(name && name[0] ? name : salt))) { g_nsrc--; return NULL; }
     return m;
 }
 
@@ -161,13 +178,14 @@ static int fill(sh_script_mod_desc *out, int cap)
 
 static int read_whole(const char *path, char **text, size_t *len)
 {
-    wchar_t w[SRC_PATH_MAX];
+    wchar_t *w = src_wide(path);
     HANDLE h;
     LARGE_INTEGER size;
     DWORD got = 0;
     char *buf;
-    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, SRC_PATH_MAX)) return 0;
+    if (!w) return 0;
     h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(w);
     if (h == INVALID_HANDLE_VALUE) return 0;
     if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart >= 0xFFFFFFFFll) {   /* one ReadFile */
         CloseHandle(h);
@@ -188,24 +206,29 @@ static int read_whole(const char *path, char **text, size_t *len)
 
 static void read_dir(src_mod *m, const char *dir, const char *prefix)
 {
-    char pattern[SRC_PATH_MAX];
-    wchar_t w[SRC_PATH_MAX];
+    char *pattern = sh_textf("%s\\*.lua", dir);
+    wchar_t *w = pattern ? src_wide(pattern) : NULL;
     WIN32_FIND_DATAW fd;
     HANDLE h;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.lua", dir);
-    if (!MultiByteToWideChar(CP_UTF8, 0, pattern, -1, w, SRC_PATH_MAX)) return;
+    free(pattern);
+    if (!w) return;
     h = FindFirstFileW(w, &fd);
+    free(w);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
-        char name[260], rel[SRC_REL_MAX], path[SRC_PATH_MAX], *text = NULL;
+        char name[1024], *rel, *path, *text = NULL;   /* a file name: 255 UTF-16 units, at most 3 bytes each */
         size_t len = 0;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof name, NULL, NULL)) continue;
         _strlwr_s(name, sizeof name);
-        _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s%s", prefix, name);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
-        if (!read_whole(path, &text, &len)) text = NULL;
-        file_add(m, rel, text, len);
+        rel = sh_textf("%s%s", prefix, name);
+        path = sh_textf("%s\\%s", dir, name);
+        if (rel && path) {
+            if (!read_whole(path, &text, &len)) text = NULL;
+            file_add(m, rel, text, len);
+        }
+        free(rel);
+        free(path);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -218,15 +241,15 @@ static int rel_cmp(const void *a, const void *b)
 int sh_script_source_set_folder(const char *salt, const char *name, const char *scripts_dir)
 {
     src_mod *m;
-    char lib[SRC_PATH_MAX];
+    char *lib;
     int i;
     if (!scripts_dir) return 0;
     for (i = 0; i < g_nsrc; i++)
         if (!_stricmp(g_src[i].salt, salt)) { mod_free(&g_src[i]); g_src[i] = g_src[--g_nsrc]; break; }
     if (!(m = mod_add(salt, name))) return 0;
     read_dir(m, scripts_dir, "");
-    _snprintf_s(lib, sizeof lib, _TRUNCATE, "%s\\lib", scripts_dir);
-    read_dir(m, lib, "lib/");
+    if ((lib = sh_textf("%s\\lib", scripts_dir)) != NULL) read_dir(m, lib, "lib/");
+    free(lib);
     qsort(m->f, (size_t)m->n, sizeof *m->f, rel_cmp);
     return 1;
 }
@@ -304,8 +327,10 @@ static int collect(uint64_t *seed)
         strncpy_s(row.build, sizeof row.build, hashes[i], _TRUNCATE);
         memset(&ref, 0, sizeof ref);
         (void)sh_modserve_row_build(&row, &ref);
-        seg = ref.folder[0] ? strrchr(ref.folder, '\\') : NULL;
-        m = mod_add(hs.salt, ref.name[0] ? ref.name : seg ? seg + 1 : ref.folder[0] ? ref.folder : "a mod");
+        seg = ref.folder && ref.folder[0] ? strrchr(ref.folder, '\\') : NULL;
+        m = mod_add(hs.salt, ref.name && ref.name[0] ? ref.name : seg ? seg + 1 : ref.folder && ref.folder[0] ? ref.folder
+                                                                                                        : "a mod");
+        sh_modserve_bundle_ref_free(&ref);
         if (!m) continue;
         sh_modserve_script_files(m->salt, keep_script, m);
     }

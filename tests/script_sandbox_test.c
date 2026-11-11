@@ -20,6 +20,7 @@
  * timers and coroutines; deterministic random; teardown with nothing left;
  * and the loader fed malformed text. The wall-clock stop is set to 300 ms for
  * the test (the product's is 5 s). */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -175,7 +176,7 @@ static const char *log_of(const char *salt)
 static char g_stop[4096];
 static const char *stop_of(const char *salt)
 {
-    sh_script_stop_line(salt, g_stop, sizeof g_stop);
+    HOS(g_stop, sh_script_stop_line_dup(salt));
     return g_stop;
 }
 
@@ -1044,24 +1045,36 @@ static void test_reason_table(void)
 {
     char what[300], todo[200], file[64];
     int line;
-    const char *rest = sh_script_split_where("scripts\\lib\\fsm.lua:42: boom", file, sizeof file, &line);
+    const char *rest = HOT(const char *, file, sh_script_split_where("scripts\\lib\\fsm.lua:42: boom", HO_P(0), &line));
     CHECK(!strcmp(file, "scripts\\lib\\fsm.lua") && line == 42 && !strcmp(rest, "boom"));
-    rest = sh_script_split_where("the door: open", file, sizeof file, &line);
+    rest = HOT(const char *, file, sh_script_split_where("the door: open", HO_P(0), &line));
     CHECK(!file[0] && line == 0 && !strcmp(rest, "the door: open"));
-    sh_script_reason("attempt to call a nil value (method 'move_to')", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("attempt to call a nil value (method 'move_to')", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"move_to\" is not something this value can do") && !strcmp(todo, "Check the name of the call"));
-    sh_script_reason("bad argument #1 to 'move_to' (number expected, got nil)", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("bad argument #1 to 'move_to' (number expected, got nil)", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"move_to\" needs a number as its first value, got nil"));
-    sh_script_reason("bad argument #2 to 'insert' (position out of bounds)", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("bad argument #2 to 'insert' (position out of bounds)", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"insert\" cannot use its second value (position out of bounds)"));
-    sh_script_reason("calling 'pos' on bad self (entity expected, got table)", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("calling 'pos' on bad self (entity expected, got table)", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"pos\" needs an entity as the value before the colon, got a table"));
-    sh_script_reason("attempt to load a binary chunk (mode is 't')", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("attempt to load a binary chunk (mode is 't')", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "the file is compiled Lua, not script text, so it did not run"));
-    sh_script_reason("'=' expected near 'x'", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("'=' expected near 'x'", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "\"=\" expected near \"x\""));
-    sh_script_reason("monster near the door", what, sizeof what, todo, sizeof todo);
+    HOV2(what, todo, sh_script_reason("monster near the door", HO_P(0), HO_P(1)));
     CHECK(!strcmp(what, "monster near the door") && !todo[0]);
+    {
+        /* A 2,000-character name: the sentence carries it whole. */
+        static char msg[2100], name[2001];
+        char *w = NULL, *t = NULL;
+        memset(name, 'm', 2000);
+        name[2000] = 0;
+        sprintf_s(msg, sizeof msg, "attempt to call a nil value (method '%s')", name);
+        sh_script_reason(msg, &w, &t);
+        CHECK(w && strstr(w, name) != NULL);
+        free(w);
+        free(t);
+    }
 }
 
 int main(void)

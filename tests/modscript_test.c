@@ -21,6 +21,7 @@
  * (tests\fixtures\scripts) build without errors or warnings.
  *
  *   modscript_test.exe <tests\fixtures\scripts> */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,9 +126,9 @@ static void refused(const char *dir, const char *want)
 {
     sh_mb_bundle b;
     int ok = build(dir, &b);
-    printf("  refused: %s\n", b.first_cause);
-    CHECK(!ok && strstr(b.first_cause, want) != NULL);
-    if (ok || !strstr(b.first_cause, want)) fprintf(stderr, "    wanted \"%s\"\n", want);
+    printf("  refused: %s\n", sh_mb_first_cause(&b));
+    CHECK(!ok && strstr(sh_mb_first_cause(&b), want) != NULL);
+    if (ok || !strstr(sh_mb_first_cause(&b), want)) fprintf(stderr, "    wanted \"%s\"\n", want);
     sh_mb_free(&b);
 }
 
@@ -196,7 +197,7 @@ static void test_requests(void)
     CHECK(sh_mb_script_request("mods/" SALT "/scripts/a b.lua", NULL, NULL) == SH_MB_SCRIPT_MISPLACED);
     CHECK(sh_mb_script_request("mods/" SALT "/scripts/door.txt", NULL, NULL) == 0);
     CHECK(sh_mb_extension_allowed("mods/" SALT "/scripts/door.lua") && !sh_mb_extension_allowed("mods/" SALT "/door.lua"));
-    sh_mb_script_file_name("mods/" SALT "/scripts/lib/fsm.lua", file, sizeof file);
+    HOS(file, sh_mb_script_file_name("mods/" SALT "/scripts/lib/fsm.lua"));
     CHECK(!strcmp(file, "scripts\\lib\\fsm.lua"));
 }
 
@@ -212,7 +213,7 @@ static void test_builds(void)
     printf("-- a scripted mod builds; the block records what it binds\n");
     good_mod(dir, sizeof dir);
     CHECK(build(dir, &b));
-    if (b.errors) fprintf(stderr, "  %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  %s\n", sh_mb_first_cause(&b));
     CHECK(b.script_files == 2 && b.warnings == 0);
     CHECK(b.scripts && !strcmp(b.scripts, "{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],\"name\":\"ai/door\"}],"
                                          "\"files\":2,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
@@ -220,9 +221,9 @@ static void test_builds(void)
     f = find_file(&b, "mods/" SALT "/scripts/door.lua");
     CHECK(f && f->ptype && !strcmp(f->ptype, "script") && f->cls == SH_MB_CLASS_ADD && !f->stock);
     CHECK(!sh_mb_sliceable(&b));
-    CHECK(sh_mb_write(&b, dir, rel, sizeof rel));
+    CHECK(HO(rel, sh_mb_write(&b, dir, HO_P(0))));
     memset(&back, 0, sizeof back);
-    if (!sh_mb_load_folder(dir, &back)) fprintf(stderr, "  load: %s\n", back.first_cause);
+    if (!sh_mb_load_folder(dir, &back)) fprintf(stderr, "  load: %s\n", sh_mb_first_cause(&back));
     CHECK(back.errors == 0 && back.script_files == 2 && back.scripts && b.scripts &&
           !strcmp(back.scripts, b.scripts) && !strcmp(back.hash, b.hash));
     sh_mb_free(&back);
@@ -277,7 +278,7 @@ static void test_builds(void)
         sh_mb_bundle big;
         int ok = build(dir, &big);
         CHECK(ok && big.script_files == 154);
-        if (!ok) fprintf(stderr, "    refused: %s\n", big.first_cause);
+        if (!ok) fprintf(stderr, "    refused: %s\n", sh_mb_first_cause(&big));
         sh_mb_free(&big);
     }
 
@@ -288,12 +289,12 @@ static void test_builds(void)
         sh_mb_bundle b;
         char want[256];
         const char *folder = strrchr(dir, '\\') + 1;
-        CHECK(!build(dir, &b) && !strstr(b.first_cause, SALT));
+        CHECK(!build(dir, &b) && !strstr(sh_mb_first_cause(&b), SALT));
         _snprintf_s(want, sizeof want, _TRUNCATE, "assets\\mods\\%s\\door.lua: a script goes in this mod's own "
                     "scripts folder, assets\\mods\\%s\\scripts\\ for the files that run or assets\\mods\\%s\\scripts\\lib\\ "
                     "for the files loaded with require; move it there", folder, folder, folder);
-        CHECK(!strcmp(b.first_cause, want));
-        if (strcmp(b.first_cause, want)) fprintf(stderr, "    got: %s%c", b.first_cause, 10);
+        CHECK(!strcmp(sh_mb_first_cause(&b), want));
+        if (strcmp(sh_mb_first_cause(&b), want)) fprintf(stderr, "    got: %s%c", sh_mb_first_cause(&b), 10);
         sh_mb_free(&b);
     }
 
@@ -336,7 +337,7 @@ static void zip_names(const char *zip, char *out, size_t cap)
     char cause[256];
     size_t i;
     out[0] = 0;
-    if (!sh_zip_reader_open(&r, zip, cause, sizeof cause)) return;
+    if (!HO(cause, sh_zip_reader_open(&r, zip, HO_P(0)))) return;
     for (i = 0; i < r.n; i++) {
         strncat_s(out, cap, r.e[i].name, _TRUNCATE);
         strncat_s(out, cap, "\n", _TRUNCATE);
@@ -394,8 +395,8 @@ static char *map_with(const sh_modmanifest_row *row)
 
 static void test_store(void)
 {
-    char src[MAX_PATH], a[MAX_PATH], c[MAX_PATH], d[MAX_PATH], name[SH_MS_NAME_MAX + 1], path[MAX_PATH * 2];
-    char names[8192], want[512], salt[16] = "", cause[MODEXPORT_CAUSE_MAX] = "", zip[MAX_PATH], *map, *back;
+    char src[MAX_PATH], a[MAX_PATH], c[MAX_PATH], d[MAX_PATH], name[HO_TEXT + 1], path[MAX_PATH * 2];
+    char names[8192], want[512], salt[16] = "", cause[HO_TEXT] = "", zip[MAX_PATH], *map, *back;
     sh_ms_install_stats st;
     sh_mb_bundle b;
     sh_modmanifest_row row;
@@ -418,7 +419,7 @@ static void test_store(void)
     CreateDirectoryA(a, NULL);
     CHECK(sh_ms_set_root(a));
     memset(&b, 0, sizeof b);
-    CHECK(sh_ms_install_from_folder(src, NULL, name, sizeof name, &st, &b, cause, sizeof cause));
+    CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
     if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
     strncpy_s(salt, sizeof salt, b.id, _TRUNCATE);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts\\door.lua", a, name, salt);
@@ -446,7 +447,7 @@ static void test_store(void)
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, b.id);
     strcpy_s(row.build, sizeof row.build, b.hash);
-    strcpy_s(row.name, sizeof row.name, "Door Logic");
+    sh_modmanifest_row_set_name(&row, "Door Logic");
     row.size = b.total_size;
 
     printf("-- the serving index lists the scripts and serves their built bytes\n");
@@ -460,7 +461,7 @@ static void test_store(void)
     printf("-- the publish archive carries them under their game names\n");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", a, name);
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\publish.zip", g_tmp);
-    CHECK(modsync_write_archive(path, b.hash, zip, &size, &pointers, &code, cause, sizeof cause));
+    CHECK(HO(cause, modsync_write_archive(path, b.hash, zip, &size, &pointers, &code, HO_P(0))));
     zip_names(zip, names, sizeof names);
     _snprintf_s(want, sizeof want, _TRUNCATE, "assets/mods/%s/scripts/door.lua\n", salt);
     CHECK(strstr(names, want) != NULL);
@@ -470,7 +471,7 @@ static void test_store(void)
     printf("-- a rawmap export carries them; its import installs and serves them\n");
     map = map_with(&row);
     _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\Door Map.zip", g_tmp);
-    CHECK(map && modexport_write(map, strlen(map), zip, &es, cause, sizeof cause));
+    CHECK(map && HO(cause, modexport_write(map, strlen(map), zip, &es, HO_P(0))));
     zip_names(zip, names, sizeof names);
     _snprintf_s(want, sizeof want, _TRUNCATE, "mods/%s/assets/mods/%s/scripts/lib/fsm.lua\n", name, salt);
     CHECK(strstr(names, want) != NULL);
@@ -481,13 +482,13 @@ static void test_store(void)
     (void)sh_modserve_place_set(NULL);
     printf("-- with scripts turned off, the import installs nothing and says what to turn on\n");
     g_scripts_on = 0;
-    back = modexport_read(zip, &len, &es, cause, sizeof cause);
+    back = HOT(char *, cause, modexport_read(zip, &len, &es, HO_P(0)));
     CHECK(!back && !strcmp(cause, SH_MODUI_SCRIPTS_OFF) && es.bundles_installed == 0);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps", c);
     CHECK(!mt_exists(path));
     free(back);
     g_scripts_on = 1;
-    back = modexport_read(zip, &len, &es, cause, sizeof cause);
+    back = HOT(char *, cause, modexport_read(zip, &len, &es, HO_P(0)));
     if (!back) fprintf(stderr, "  import: %s\n", cause);
     CHECK(back && es.bundles_installed == 1);
     free(back);
@@ -511,7 +512,7 @@ static void test_store(void)
         CHECK(sh_ms_set_root(d));
         sh_mb_free(&b);
         memset(&b, 0, sizeof b);
-        CHECK(sh_ms_install_from_folder(copy, NULL, name, sizeof name, &st, &b, cause, sizeof cause));
+        CHECK(HO2(name, cause, sh_ms_install_from_folder(copy, NULL, HO_P(0), &st, &b, HO_P(1))));
         if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
         CHECK(!strcmp(b.hash, row.build));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\mods\\%s\\scripts\\door.lua", d, name, salt);
@@ -539,7 +540,7 @@ static void extra_cb(void *context, const char *id, const char *hash, int place,
 static void test_fixtures(void)
 {
     static const char *const mods[] = { "door-logic", "spin-heal", "brute", "script-probe", "script-runaway", NULL };
-    char src[MAX_PATH * 2], e[MAX_PATH], name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX] = "";
+    char src[MAX_PATH * 2], e[MAX_PATH], name[HO_TEXT + 1], cause[HO_TEXT] = "";
     char hashes[4][SH_MODSERVE_HASH_HEX + 1];
     const char *names[1];
     sh_ms_install_stats st;
@@ -554,7 +555,7 @@ static void test_fixtures(void)
     for (i = 0; mods[i]; i++) {
         _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\%s", g_fixtures, mods[i]);
         CHECK(build(src, &b) && b.errors == 0 && b.warnings == 0 && b.script_files == 1);
-        if (b.errors || b.warnings) fprintf(stderr, "  %s: %s%s\n", mods[i], b.first_cause, b.first_warning);
+        if (b.errors || b.warnings) fprintf(stderr, "  %s: %s%s\n", mods[i], sh_mb_first_cause(&b), b.first_warning);
         CHECK(!strcmp(mods[i], "door-logic") == (b.scripts && strstr(b.scripts, "\"node\":true") != NULL));
         sh_mb_free(&b);
     }
@@ -566,7 +567,7 @@ static void test_fixtures(void)
     for (i = 0; i < 2; i++) {
         _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\%s", g_fixtures, i ? "script-probe" : "door-logic");
         memset(&b, 0, sizeof b);
-        CHECK(sh_ms_install_from_folder(src, NULL, name, sizeof name, &st, &b, cause, sizeof cause));
+        CHECK(HO2(name, cause, sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1))));
         if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
         if (!i) strcpy_s(hashes[3], sizeof hashes[3], b.hash);
         sh_mb_free(&b);

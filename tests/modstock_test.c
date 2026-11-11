@@ -36,6 +36,7 @@
  * doors pack, files total, files that become pointers and bytes not stored,
  * and the cost (index load, bytes hashed, time).
  */
+#include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
 #include "../src/backend/modsync.h"
@@ -56,9 +57,9 @@ static int g_failed, g_checks;
 } while (0)
 #define CHECK_CAUSE(b, needle) do {                                                    \
     g_checks++;                                                                        \
-    if (!strstr((b).first_cause, (needle))) {                                          \
+    if (!strstr(sh_mb_first_cause(&(b)), (needle))) {                                          \
         fprintf(stderr, "%s:%d: first cause '%s' lacks '%s'\n", __FILE__, __LINE__,    \
-                (b).first_cause, (needle));                                            \
+                sh_mb_first_cause(&(b)), (needle));                                            \
         g_failed++;                                                                    \
     }                                                                                  \
 } while (0)
@@ -122,7 +123,7 @@ static void make_installs(const char *d1, const char *d2)
 
 static void test_bridge(const char *d1)
 {
-    char src[SH_MB_REQUEST_MAX + 1], h[65], got[65];
+    char src[HO_TEXT + 1], h[65], got[65];
     unsigned long long size = 0;
     unsigned char *bytes = NULL;
     size_t len = 0;
@@ -130,28 +131,28 @@ static void test_bridge(const char *d1)
 
     sh_modstock_set_install(d1);
     hex_of(IMG_B, sizeof IMG_B, h);
-    CHECK(sh_modstock_match(P_IMAGE, sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_OK && !strcmp(src, P_IMAGE));
+    CHECK(HO(src, sh_modstock_match(P_IMAGE, sizeof IMG_B, h, HO_P(0))) == SH_MB_STOCK_OK && !strcmp(src, P_IMAGE));
     /* A renamed copy: same size and extension elsewhere. */
-    CHECK(sh_modstock_match("generated/image/mods/tstock00/b_copy.bimage", sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tstock00/b_copy.bimage", sizeof IMG_B, h, HO_P(0))) == SH_MB_STOCK_OK &&
           !strcmp(src, P_IMAGE));
     /* The other container's bytes at the same path. */
     hex_of(IMG_B2, sizeof IMG_B2, h);
-    CHECK(sh_modstock_match(P_IMAGE, sizeof IMG_B2, h, src, sizeof src) == SH_MB_STOCK_OK && !strcmp(src, P_IMAGE));
+    CHECK(HO(src, sh_modstock_match(P_IMAGE, sizeof IMG_B2, h, HO_P(0))) == SH_MB_STOCK_OK && !strcmp(src, P_IMAGE));
     /* The .patch store, inflated. */
     hex_of(ANIM_C, sizeof ANIM_C, h);
-    CHECK(sh_modstock_match(P_ANIM, sizeof ANIM_C, h, src, sizeof src) == SH_MB_STOCK_OK);
+    CHECK(HO(src, sh_modstock_match(P_ANIM, sizeof ANIM_C, h, HO_P(0))) == SH_MB_STOCK_OK);
     CHECK(sh_modstock_read(P_ANIM, h, &bytes, &len) == SH_MB_STOCK_OK && len == sizeof ANIM_C && !memcmp(bytes, ANIM_C, len));
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     /* Loose files under base\ and the install root. */
     hex_of(LOOSE_L, sizeof LOOSE_L, h);
-    CHECK(sh_modstock_match(P_LOOSE, sizeof LOOSE_L, h, src, sizeof src) == SH_MB_STOCK_OK && !strcmp(src, P_LOOSE));
+    CHECK(HO(src, sh_modstock_match(P_LOOSE, sizeof LOOSE_L, h, HO_P(0))) == SH_MB_STOCK_OK && !strcmp(src, P_LOOSE));
     hex_of(PAGES_P, sizeof PAGES_P, h);
     CHECK(sh_modstock_verify(P_PAGES, h, &size) == SH_MB_STOCK_OK && size == sizeof PAGES_P);
     CHECK(sh_modstock_read(P_PAGES, h, &bytes, &len) == SH_MB_STOCK_OK && len == sizeof PAGES_P);
     if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     /* Content no entry holds. */
     hex_of(OWN, sizeof OWN, h);
-    CHECK(sh_modstock_match("generated/image/mods/tstock00/own.bimage", sizeof OWN, h, src, sizeof src) == SH_MB_STOCK_ABSENT);
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tstock00/own.bimage", sizeof OWN, h, HO_P(0))) == SH_MB_STOCK_ABSENT);
     /* identify takes SnapMap's own container first. */
     CHECK(sh_modstock_identify(P_IMAGE, got, &size) == SH_MB_STOCK_OK && size == sizeof IMG_B2);
     hex_of(IMG_B2, sizeof IMG_B2, h);
@@ -185,7 +186,7 @@ static void test_bridge(const char *d1)
         char empty[MAX_PATH * 2];
         _snprintf_s(empty, sizeof empty, _TRUNCATE, "%s\\..\\nothing-here", d1);
         sh_modstock_set_install(empty);
-        CHECK(sh_modstock_match(P_IMAGE, sizeof IMG_B, h, src, sizeof src) == SH_MB_STOCK_UNAVAILABLE);
+        CHECK(HO(src, sh_modstock_match(P_IMAGE, sizeof IMG_B, h, HO_P(0))) == SH_MB_STOCK_UNAVAILABLE);
         CHECK(sh_modstock_exists(P_IMAGE) == -1);
         sh_modstock_get_stats(&ss);
         CHECK(ss.loaded == -1 && ss.cause[0]);
@@ -225,14 +226,14 @@ static void make_mod(const char *dir, const char *extra_json)
 
 static void test_builder(const char *tmp)
 {
-    char dir[MAX_PATH * 2], h[65], json[512], cause[SH_MB_CAUSE_MAX];
+    char dir[MAX_PATH * 2], h[65], json[512], cause[HO_TEXT];
     sh_mb_bundle b, back;
     const sh_mb_file *f;
 
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod1", tmp);
     make_mod(dir, NULL);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b));
-    if (b.errors) fprintf(stderr, "  build refused: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  build refused: %s\n", sh_mb_first_cause(&b));
     CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof OWN);
     CHECK(b.stock_bytes == sizeof IMG_B * 2 + sizeof TOME_T);
     f = find(&b, REQ_COPY);
@@ -253,7 +254,7 @@ static void test_builder(const char *tmp)
     CHECK(b.canonical && strstr(b.canonical, json));
     CHECK(strstr(b.canonical, "{\"needs\":[],\"path\":\"assets/" REQ_COPY "\"") != NULL);
     CHECK(strstr(b.canonical, "\"stock\":{\"sha256\"") && !strstr(b.canonical, "\"descriptor\""));
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     {
         char path[MAX_PATH * 2];
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
@@ -345,43 +346,43 @@ static void l1c_mod(const char *dir, const char *rel, const char *text)
 
 static void test_renamed_names_dead(const char *tmp)
 {
-    char d3[MAX_PATH * 2], dir[MAX_PATH * 2], src[SH_MB_REQUEST_MAX + 1], h[65], cut[SH_MB_REQUEST_MAX + 1];
+    char d3[MAX_PATH * 2], dir[MAX_PATH * 2], src[HO_TEXT + 1], h[65], cut[HO_TEXT + 1];
     unsigned long long size = 0;
     sh_mb_bundle b;
     const sh_mb_file *f;
 
     /* The key cut, both spellings, wherever a path segment starts. */
-    CHECK(sh_mb_strip_key("generated/image/mods/olivia_pierce_complete/models/a.bimage", cut, sizeof cut) &&
+    CHECK(HOS(cut, sh_mb_strip_key("generated/image/mods/olivia_pierce_complete/models/a.bimage")) &&
           !strcmp(cut, "generated/image/models/a.bimage"));
-    CHECK(sh_mb_strip_key("generated/decls/md6def/mods/olivia-pierce-complete/zion/x.md6.decl", cut, sizeof cut) &&
+    CHECK(HOS(cut, sh_mb_strip_key("generated/decls/md6def/mods/olivia-pierce-complete/zion/x.md6.decl")) &&
           !strcmp(cut, "generated/decls/md6def/zion/x.md6.decl"));
-    CHECK(sh_mb_strip_key("md6/mods/local.hell_guard/characters/A.lwo", cut, sizeof cut) && !strcmp(cut, "md6/characters/a.lwo"));
-    CHECK(sh_mb_strip_key("mods/k/x.decl", cut, sizeof cut) && !strcmp(cut, "x.decl"));
-    CHECK(!sh_mb_strip_key("generated/image/godmods/k/x.bimage", cut, sizeof cut));
-    CHECK(!sh_mb_strip_key("generated/image/mods/x.bimage", cut, sizeof cut));
-    CHECK(!sh_mb_strip_key("generated/image/stock/b.bimage", cut, sizeof cut));
+    CHECK(HOS(cut, sh_mb_strip_key("md6/mods/local.hell_guard/characters/A.lwo")) && !strcmp(cut, "md6/characters/a.lwo"));
+    CHECK(HOS(cut, sh_mb_strip_key("mods/k/x.decl")) && !strcmp(cut, "x.decl"));
+    CHECK(!HOS(cut, sh_mb_strip_key("generated/image/godmods/k/x.bimage")));
+    CHECK(!HOS(cut, sh_mb_strip_key("generated/image/mods/x.bimage")));
+    CHECK(!HOS(cut, sh_mb_strip_key("generated/image/stock/b.bimage")));
 
     _snprintf_s(d3, sizeof d3, _TRUNCATE, "%s\\d3", tmp);
     make_install3(d3);
     sh_modstock_set_install(d3);
     /* A renamed copy past 64 same-size candidates is found (budget only). */
     hex_of(LATE_B, sizeof LATE_B, h);
-    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/q/elsewhere.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tl1c0000/q/elsewhere.bimage", 300, h, HO_P(0))) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_LATE));
     /* The de-namespaced path is tried first, under either key spelling. */
-    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/z/late.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tl1c0000/z/late.bimage", 300, h, HO_P(0))) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_LATE));
     /* A name both archives hold with other bytes: the variant whose bytes the
      * copy has is the one named, whichever archive holds it. */
     hex_of(TWO_CAMP, sizeof TWO_CAMP, h);
-    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, HO_P(0))) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_TWO) && sh_modstock_verify(src, h, &size) == SH_MB_STOCK_OK && size == 300);
     hex_of(TWO_SNAP, sizeof TWO_SNAP, h);
-    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_OK &&
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tl1c0000/two/v.bimage", 300, h, HO_P(0))) == SH_MB_STOCK_OK &&
           !strcmp(src, D3_TWO));
     /* Bytes no row holds stay absent, and the source is left empty. */
     hex_of(D3_IMG[0], 299, h);
-    CHECK(sh_modstock_match("generated/image/mods/tl1c0000/a/000.bimage", 300, h, src, sizeof src) == SH_MB_STOCK_ABSENT && !src[0]);
+    CHECK(HO(src, sh_modstock_match("generated/image/mods/tl1c0000/a/000.bimage", 300, h, HO_P(0))) == SH_MB_STOCK_ABSENT && !src[0]);
 
     /* An md6 collision model name resolves to generated/model/, as the game ships it. */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\l1c1", tmp);
@@ -389,7 +390,7 @@ static void test_renamed_names_dead(const char *tmp)
             "{\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"md6/m/collision/c.lwo\";\r\n\t\t}\r\n\t}\r\n}\r\n");
     /* Only the campaign archive holds it here, so it is brought along. */
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.needs.local == 1 && b.needs.unresolved == 0);
-    if (b.errors) fprintf(stderr, "  collision model: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  collision model: %s\n", sh_mb_first_cause(&b));
     f = find(&b, D3_COLLISION);
     CHECK(f && f->stock && f->closure && b.stock_count == 1);
     sh_mb_free(&b);
@@ -480,7 +481,7 @@ static int has_note(const sh_mb_bundle *b, const char *needle)
 
 static void test_campaign_closure(const char *tmp)
 {
-    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], hash[65];
+    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], cause[HO_TEXT], hash[65];
     sh_mb_bundle b;
     const sh_mb_file *f;
     const char *chain[] = { K_MD6, K_MESH, K_SKL };
@@ -497,7 +498,7 @@ static void test_campaign_closure(const char *tmp)
     mt_write(dir, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tclose00\"},\"name\":\"Closure test\"}");
     mt_write(dir, K_WEB, K_WEB_TEXT);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
-    if (b.errors) fprintf(stderr, "  closure: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  closure: %s\n", sh_mb_first_cause(&b));
     CHECK(b.file_count == 4 && b.stock_count == 3 && b.total_size == sizeof K_WEB_TEXT - 1);
     CHECK(b.stock_bytes == sizeof K_MD6_TEXT - 1 + sizeof K_MESH_B + sizeof K_SKL_B);
     for (i = 0; i < 3; i++) {
@@ -513,7 +514,7 @@ static void test_campaign_closure(const char *tmp)
      * writes (DECISIONS 17), and a load of the written block agrees. */
     CHECK(b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
     CHECK(has_note(&b, "derived: the mod brings campaign content"));
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
     CHECK(sh_mb_load_folder(dir, &b) && !strcmp(b.hash, hash) && b.requirements && strstr(b.requirements, "g_useImageBlackList"));
@@ -576,7 +577,7 @@ static void test_campaign_closure(const char *tmp)
         }
         mt_write(dir, K_WEB, K_WEB_TEXT);
         CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.file_count > 4096);
-        if (b.first_cause[0]) fprintf(stderr, "  closure past 4096 files: %s\n", b.first_cause);
+        if (sh_mb_first_cause(&b)[0]) fprintf(stderr, "  closure past 4096 files: %s\n", sh_mb_first_cause(&b));
         sh_mb_free(&b);
     }
 }
@@ -585,7 +586,7 @@ static void test_campaign_closure(const char *tmp)
  * is gone after the decl that needed it is removed, and the hash changes. */
 static void test_closure_recomputed(const char *tmp)
 {
-    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[SH_MB_CAUSE_MAX], hash[65];
+    char d4[MAX_PATH * 2], dir[MAX_PATH * 2], path[MAX_PATH * 2], cause[HO_TEXT], hash[65];
     sh_mb_bundle b;
     size_t len = 0;
     unsigned char *text;
@@ -598,7 +599,7 @@ static void test_closure_recomputed(const char *tmp)
     mt_write(dir, K_WEB, K_WEB_TEXT);
     mt_write(dir, "assets\\generated\\decls\\material\\mods\\tclose00\\m.decl", "{\r\n\tdiffusemap = \"k/snap\";\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3);
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     memcpy(hash, b.hash, sizeof hash);
     sh_mb_free(&b);
     /* The product block marks the derived pointers. */
@@ -608,14 +609,14 @@ static void test_closure_recomputed(const char *tmp)
     /* An unchanged rebuild derives the same set: same hash. */
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 3 && !strcmp(b.hash, hash));
     CHECK(has_note(&b, "3 game files borrowed for completeness"));
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     sh_mb_free(&b);
     /* The animWeb is removed: nothing needs the chain, so it is gone. */
     mt_delete(dir, K_WEB);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
           strcmp(b.hash, hash) != 0);
     CHECK(!find(&b, K_MD6) && !find(&b, K_MESH) && !find(&b, K_SKL) && !has_note(&b, "borrowed for completeness"));
-    CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+    CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     sh_mb_free(&b);
     text = sh_mb_read_file(path, 1 << 20, &len);
     CHECK(text && !strstr((const char *)text, K_MD6) && !strstr((const char *)text, "\"closure\""));
@@ -708,7 +709,7 @@ static void test_closure_effects(const char *tmp)
              "\t\t\titem[2] = {\r\n\t\t\t\ttype = \"FX_PARTICLE\";\r\n\t\t\t\tdeclPrt = \"k/snapsparks\";\r\n\t\t\t}\r\n"
              "\t\t}\r\n\t}\r\n}\r\n");
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0);
-    if (b.errors) fprintf(stderr, "  effects: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  effects: %s\n", sh_mb_first_cause(&b));
     CHECK(b.stock_count == 5 && b.file_count == 6);
     for (i = 0; i < 5; i++) {
         f = find(&b, fx_added[i]);
@@ -847,7 +848,7 @@ static void test_whole_models(const char *tmp)
              "{\r\n\tinit {\r\n\t\tmesh \"md6/mods/tmodel00/none.md6mesh\"\r\n\t}\r\n}\r\n");
     put_rel(dir, "assets\\generated\\basemodel\\md6\\mods\\tmodel00\\none.bmd6model", NONE6_MESH_B, sizeof NONE6_MESH_B);
     CHECK(sh_mb_build(dir, NULL, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
-    if (b.errors) fprintf(stderr, "  models: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  models: %s\n", sh_mb_first_cause(&b));
     CHECK(b.stock_count == 0 && b.file_count == 5);
     f = find(&b, "generated/decls/md6def/mods/tmodel00/card.md6.decl");
     CHECK(f && f->need_count == 3 && has_need(f, "baseModel", "s6/card.md6mesh") &&
@@ -883,8 +884,8 @@ static void test_whole_models(const char *tmp)
  * and an unchanged rebuild, with its own earlier build installed, keeps them. */
 static void test_closure_store_path(const char *tmp)
 {
-    char d6[MAX_PATH * 2], store[MAX_PATH * 2], other[MAX_PATH * 2], surf[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1];
-    char cause[SH_MB_CAUSE_MAX], hash[65];
+    char d6[MAX_PATH * 2], store[MAX_PATH * 2], other[MAX_PATH * 2], surf[MAX_PATH * 2], key[HO_TEXT + 1];
+    char cause[HO_TEXT], hash[65];
     const char *chain[] = { M6_MD6, M6_MESH, M6_SKL, M6_DEF };
     sh_ms_install_stats st;
     sh_ms_sync_stats ss;
@@ -907,7 +908,7 @@ static void test_closure_store_path(const char *tmp)
     put_rel(other, "assets\\" M6_SKL, M6_SKL_B, sizeof M6_SKL_B);
     put_rel(other, "assets\\" M6_DEF, M6_DEF_B, sizeof M6_DEF_B);
     put_rel(other, "assets/generated/image/mods/tother06/own.bimage", S6_SKL_B, 8);
-    CHECK(sh_ms_install_from_folder(other, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    CHECK(HO2(key, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
     if (!key[0]) fprintf(stderr, "  other refused: %s\n", cause);
     /* The hand-made folder: the game's animWeb, byte for byte. */
     mt_write(surf, "mod.json", "{\"snapmap-plus\":{\"format\":2,\"salt\":\"tsurf006\"},\"name\":\"Surface\"}");
@@ -925,7 +926,7 @@ static void test_closure_store_path(const char *tmp)
     /* A second rescan finds it current; a forced rebuild in place, with its
      * own earlier build installed, derives the same set and hash. */
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
-    CHECK(sh_ms_install_from_folder(surf, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(HO2(key, cause, sh_ms_install_from_folder(surf, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     CHECK(b.stock_count == 5 && !strcmp(b.hash, hash) && find(&b, M6_SKL) && find(&b, M6_SKL)->closure);
     sh_mb_free(&b);
     sh_ms_set_root(NULL);
@@ -957,7 +958,7 @@ static int count_files(const char *dir)
 static void test_store(const char *tmp, const char *d1, const char *d2)
 {
     char dir[MAX_PATH * 2], store[MAX_PATH * 2], store2[MAX_PATH * 2], store3[MAX_PATH * 2], path[MAX_PATH * 2];
-    char key[SH_MS_KEY_MAX + 1], key2[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], url[64], hash[65];
+    char key[HO_TEXT + 1], key2[HO_TEXT + 1], cause[HO_TEXT], url[64], hash[65];
     sh_ms_install_stats st;
     sh_ms_verify_stats vs;
     sh_mb_bundle b;
@@ -974,7 +975,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src1", tmp);
     make_mod(dir, NULL);
     CHECK(sh_ms_set_root(store));
-    CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(HO2(key, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
     CHECK(st.stock_files == 3 && st.copied == 4);
     strcpy_s(hash, sizeof hash, b.hash);
@@ -993,7 +994,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\" REQ_COPY, store, key);
     { char *q; for (q = path; *q; q++) if (*q == '/') *q = '\\'; }
     CHECK(mt_exists(path));
-    CHECK(sh_ms_verify(key, &vs, cause, sizeof cause) && vs.files == 4 && vs.pointers == 3);
+    CHECK(HO(cause, sh_ms_verify(key, &vs, HO_P(0))) && vs.files == 4 && vs.pointers == 3);
 
     /* Serving: the pointer is answered with the installed bytes. */
     CHECK(sh_modserve_index_build(store) == 1);
@@ -1013,7 +1014,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         put_rel(other, "assets\\" P_IMAGE, IMG_B, sizeof IMG_B);
         sh_mb_set_stock_ops(NULL);
         sh_mb_keep_replacements_here(1);   /* carried at a game name: a replacement */
-        CHECK(sh_ms_install_from_folder(other, &RESOLVER, key2, sizeof key2, &st, NULL, cause, sizeof cause));
+        CHECK(HO2(key2, cause, sh_ms_install_from_folder(other, &RESOLVER, HO_P(0), &st, NULL, HO_P(1))));
         sh_mb_keep_replacements_here(0);
         sh_modstock_register();
         CHECK(st.stock_files == 0 && st.copied == 1);
@@ -1026,11 +1027,11 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     /* Another revision: verification fails with the first cause, and the
      * pointer it cannot answer falls through to the engine. */
     sh_modstock_set_install(d2);
-    CHECK(!sh_ms_verify(key, &vs, cause, sizeof cause));
+    CHECK(!HO(cause, sh_ms_verify(key, &vs, HO_P(0))));
     CHECK(strstr(cause, " uses the game's file ") != NULL);
     CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in mod.json */
     sh_modstock_set_install(d1);
-    CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));
+    CHECK(HO(cause, sh_ms_verify(key, &vs, HO_P(0))));
     CHECK(sh_modserve_index_build(store) == 2);
     /* Another revision without those bytes: the copy the folder keeps answers. */
     sh_modstock_set_install(d2);
@@ -1061,7 +1062,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, salt);
     strcpy_s(row.build, sizeof row.build, hash);
-    strcpy_s(row.name, sizeof row.name, "Stock test");
+    row.name = (char *)"Stock test";   /* borrowed: this test never frees the row */
     place.title = "Stock map";
     place.map_id = NULL;
     /* Download into an empty store: the one carried file, the pointers resolved. */
@@ -1071,7 +1072,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     memset(&ss, 0, sizeof ss);
     CHECK(modsync_fetch_build_for(&row, &place, NULL, &ss));
     if (ss.code != MODNET_OK) fprintf(stderr, "  fetch: %s\n", ss.cause);
-    CHECK(sh_modserve_bundle_state(hash, NULL, 0) == 1);
+    CHECK(sh_modserve_bundle_state(hash, NULL) == 1);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store2, ss.folder);
     CHECK(count_files(path) == 1);
     /* A player on another revision: the archive is refused before anything is placed. */
@@ -1091,13 +1092,13 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         CHECK(sh_ms_set_root(store));
         _snprintf_s(archive, sizeof archive, _TRUNCATE, "%s\\stock.zip", tmp);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, key);
-        CHECK(modsync_write_archive(path, hash, archive, &asize, &pointers, &code, cause, sizeof cause) && pointers == 3);
+        CHECK(HO(cause, modsync_write_archive(path, hash, archive, &asize, &pointers, &code, HO_P(0))) && pointers == 3);
         CHECK(sh_ms_set_root(store3));
         memset(&info, 0, sizeof info);
-        CHECK(!modsync_install_archive(archive, salt, hash, &place, &info, cause, sizeof cause) && info.game_lacks);
+        CHECK(!HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))) && info.game_lacks);
         sh_modstock_set_install(d1);
         memset(&info, 0, sizeof info);
-        CHECK(modsync_install_archive(archive, salt, hash, &place, &info, cause, sizeof cause));
+        CHECK(HO(cause, modsync_install_archive(archive, salt, hash, &place, &info, HO_P(0))));
         CHECK(info.files == 1 && info.stock_files == 3);
     }
     stub_stop();
@@ -1136,10 +1137,10 @@ static void measure(const char *data, const char *doom)
         QueryPerformanceCounter(&t0);
         for (k = 0; k < b->file_count; k++) {
             const sh_mb_file *f = &b->files[k];
-            char src[SH_MB_REQUEST_MAX + 1];
+            char src[HO_TEXT + 1];
             if (f->stock) { ptr++; continue; }
             bytes += f->size;
-            if (sh_modstock_match(f->request, f->size, f->blob, src, sizeof src) == SH_MB_STOCK_OK) {
+            if (HO(src, sh_modstock_match(f->request, f->size, f->blob, HO_P(0))) == SH_MB_STOCK_OK) {
                 ptr++;
                 kept += f->size;
                 if (!strcmp(src, f->request)) same++;
@@ -1311,7 +1312,7 @@ static void test_text_identity(const char *tmp)
     r7_write_bytes(dir, R7_TW_PVS, vs);
     r7_write_bytes(dir, R7_TW_PFS, fs);
     CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0);
-    if (b.errors) fprintf(stderr, "  text identity: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  text identity: %s\n", sh_mb_first_cause(&b));
     CHECK(b.file_count == 8 && b.stock_count == 8 && b.total_size == 0 && b.classes.surfaces == 8 && !b.edits);
     f = find(&b, R7_TW_PERM);
     hex_of(R7_PERM, sizeof R7_PERM - 1, sha);
@@ -1338,7 +1339,7 @@ static void test_text_identity(const char *tmp)
     mt_write(dir, "mod.json", "{\"name\":\"Text identity\"}");
     r7_write_lf(dir, R7_SNAP_DEF, "{\n\tinherit = \"prop\";\n\tedit = {\n\t\tsize = 8;\n\t}\n}\n", "");
     CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0 && b.stock_count == 0 && b.edit_files == 1 && b.classes.edits == 1);
-    if (b.errors) fprintf(stderr, "  edited copy: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  edited copy: %s\n", sh_mb_first_cause(&b));
     f = find(&b, R7_SNAP_DEF);
     CHECK(f && !f->stock && f->edited && f->edit && strstr(f->edit, "\"set\"") != NULL);
     sh_mb_free(&b);
@@ -1351,7 +1352,7 @@ static void test_text_identity(const char *tmp)
                                  "\t\tblend GL_ONE GL_SRC_ALPHA\n\t}\n}\n", "");
     CHECK(!sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 1);
     CHECK_CAUSE(b, "edits the game's render-program permutation " R7_TW_PERM);
-    CHECK(!strstr(b.first_cause, "a binary"));
+    CHECK(!strstr(sh_mb_first_cause(&b), "a binary"));
     sh_mb_free(&b);
 }
 
@@ -1377,7 +1378,7 @@ static void test_shader_closure(const char *tmp)
     mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
     r7_write_lf(dir, "generated/decls/material/mods/tident07/water.decl", "{\nstageprogram\ttw\n}\n", "");
     CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
-    if (b.errors) fprintf(stderr, "  shader closure: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  shader closure: %s\n", sh_mb_first_cause(&b));
     CHECK(b.file_count == 9 && b.stock_count == 8);
     for (i = 0; i < sizeof whole / sizeof whole[0]; i++) {
         f = find(&b, whole[i]);
@@ -1389,8 +1390,8 @@ static void test_shader_closure(const char *tmp)
     sh_mb_free(&b);
     /* Stable: a rebuild after writing mod.json derives the same set and hash. */
     {
-        char cause[SH_MB_CAUSE_MAX], hash[65];
-        CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && sh_mb_write(&b, dir, cause, sizeof cause));
+        char cause[HO_TEXT], hash[65];
+        CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && HO(cause, sh_mb_write(&b, dir, HO_P(0))));
         memcpy(hash, b.hash, sizeof hash);
         sh_mb_free(&b);
         CHECK(sh_mb_build(dir, "tident07", &RESOLVER, &b) && b.errors == 0 && b.stock_count == 8 && !strcmp(b.hash, hash));

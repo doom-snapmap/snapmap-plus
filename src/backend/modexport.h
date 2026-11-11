@@ -56,9 +56,8 @@
 #define MODEXPORT_MAP_FALLBACK "map.json"
 /* The retired index name: an export.json without ~type is that index. */
 #define MODEXPORT_INDEX        "export.json"
-/* Room for an import or export refusal: a mod named, plus the builder's own
- * cause (SH_MB_CAUSE_MAX), with its file path, whole. */
-#define MODEXPORT_CAUSE_MAX    1024
+/* Every refusal below is a sentence in *cause (malloc'd, any length; the
+ * old one freed; the caller frees it), NULL cause for none. */
 /* The refusal of an export in an earlier shape (ONE-SHAPE rule 6). */
 #define MODEXPORT_EARLIER "This export was saved in a format this version does not read."
 
@@ -82,16 +81,16 @@ int   modexport_is_zip_path(const char *path);
  * Every mod the map's manifest rows name must be installed and usable.
  * Returns 1 on success, else 0 with the cause. */
 int   modexport_write(const char *map_json, size_t len, const char *zip_path, modexport_stats *st,
-                      char *cause, size_t cause_cap);
+                      char **cause);
 
 /* Check a map's export without installing anything: a readable ZIP, not
  * in an earlier shape, holding one top-level .json that is a map. */
-int   modexport_probe(const char *zip_path, char *cause, size_t cause_cap);
+int   modexport_probe(const char *zip_path, char **cause);
 
 /* Import a map's export: install the carried folders the map's rows name, as
  * above, then return the map text (malloc'd, NUL-terminated), or NULL with
  * the cause (nothing stays installed). */
-char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st, char *cause, size_t cause_cap);
+char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st, char **cause);
 
 /* ---------------------------------------------- prefab exports ------ */
 /* A prefab's export is written for every prefab, with or without mods, in
@@ -115,7 +114,7 @@ typedef char *(*modexport_prefab_fn)(void *ctx, const sh_modmanifest_list *rows,
  * (the prefab text is carried as given). zip_path is UTF-8. */
 int modexport_write_prefab(const char *name, const char *prefab, size_t len, const sh_modmanifest_list *rows,
                            modexport_prefab_fn text_for, void *ctx, const char *zip_path, modexport_stats *st,
-                           char *cause, size_t cause_cap);
+                           char **cause);
 
 /* The rows a prefab text names (its block's); the importer installs the
  * carried folders among them. Returns the count, -1 to refuse, -2 to refuse
@@ -130,7 +129,7 @@ typedef int (*modexport_rows_fn)(void *ctx, const char *prefab, size_t len, sh_m
  * leaves nothing installed. st->bundles_absent counts rows naming a build the
  * export does not carry and nothing here serves. */
 int modexport_read_prefab(const char *path, modexport_rows_fn rows_of, void *ctx, char **prefab, size_t *prefab_len,
-                          char *name, size_t name_cap, modexport_stats *st, char *cause, size_t cause_cap);
+                          char **name, modexport_stats *st, char **cause);
 
 /* The stock existence check the import's builds use for needs (the game's
  * installed archives; thread-safe). NULL leaves a need on a stock name
@@ -149,25 +148,26 @@ unsigned long long modexport_write_text(const char *data, size_t len, const char
  * says why (a mod the map names is not installed, the folder is not
  * writable). */
 unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
-                                               unsigned *bundles, char *cause, size_t cause_cap);
+                                               unsigned *bundles, char **cause);
 /* The reader for a caller that tells the player: the map text as
  * modexport_read returns it (its place recorded), in a NUL-terminated
  * process-heap buffer (HeapFree), or NULL with the importer's words in
- * `cause` (MODEXPORT_CAUSE_MAX is room enough). */
-char *modexport_read_text_report(const char *path, size_t *out_len, char *cause, size_t cause_cap);
-/* The source check: 1 when the export can be loaded, else 0 with a reason. */
-int   modexport_validate_source(const char *path, char *out_msg, int msg_capacity);
+ * *cause. */
+char *modexport_read_text_report(const char *path, size_t *out_len, char **cause);
+/* The source check: 1 when the export can be loaded, else 0 with a reason
+ * (*out_msg, malloc'd: "ok" or the reason). */
+int   modexport_validate_source(const char *path, char **out_msg);
 
 /* ---------------------------------------------- received builds ---- */
 /* Fetch the row's build from the mod store (modsync_fetch_build_for) to
  * where a map whose place is `place` finds it (modserve.h): that place's
  * folder of the salt ("maps\<segment>"), or, for "" (the player's own map, a
  * prefab), the root, where it installs as the player's own mod
- * (sh_ms_install_to_root). Worker thread. 1 with `where` its folder under
- * mods\; 0 with st->code and st->cause. */
+ * (sh_ms_install_to_root). Worker thread. 1 with *where (malloc'd) its
+ * folder under mods\; 0 with st->code and st->cause. */
 struct modnet_io;
 struct modsync_stats;
 int modexport_fetch_build(const sh_modmanifest_row *row, const char *place, const struct modnet_io *io,
-                          struct modsync_stats *st, char *where, size_t where_cap);
+                          struct modsync_stats *st, char **where);
 
 #endif /* SNAPMAP_PLUS_MODEXPORT_H */

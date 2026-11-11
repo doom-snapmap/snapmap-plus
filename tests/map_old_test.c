@@ -55,7 +55,7 @@ static void salt_of(sh_map_old_salt *m, const char *key, const char *salt, const
     strcpy_s(m->key, sizeof m->key, key);
     strcpy_s(m->salt, sizeof m->salt, salt);
     strcpy_s(m->build, sizeof m->build, build);
-    strcpy_s(m->name, sizeof m->name, name);
+    m->name = name;
 }
 
 /* Every variable family at once: smpmod1 rows, smpprod1, both settings, one

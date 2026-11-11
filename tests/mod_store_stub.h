@@ -23,6 +23,7 @@
 #ifndef SNAPMAP_PLUS_MOD_STORE_STUB_H
 #define SNAPMAP_PLUS_MOD_STORE_STUB_H
 
+#include "heap_out.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -32,6 +33,7 @@
 
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modzip.h"
+#include "../src/common/text.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -189,7 +191,7 @@ static void stub_json(SOCKET s, int status, const char *json)
 static const char *stub_check_archive(const char *hash, const unsigned char *body, size_t len, char *why, size_t cap,
                                       unsigned *scripts)
 {
-    char path[MAX_PATH], dir[MAX_PATH], cause[256];
+    char path[MAX_PATH], dir[MAX_PATH], cause[HO_TEXT];
     sh_zip_reader zr;
     sh_mb_bundle b;
     unsigned char *text;
@@ -203,25 +205,26 @@ static const char *stub_check_archive(const char *hash, const unsigned char *bod
     fwrite(body, 1, len, f);
     fclose(f);
     memset(&b, 0, sizeof b);
-    if (!sh_zip_reader_open(&zr, path, cause, sizeof cause)) {
+    if (!HO(cause, sh_zip_reader_open(&zr, path, HO_P(0)))) {
         DeleteFileA(path);
         _snprintf_s(why, cap, _TRUNCATE, "not a stored ZIP: %s", cause);
         return why;
     }
     idx = sh_zip_reader_find(&zr, "mod.json");
     *scripts = 0;
-    text = idx < 0 ? NULL : sh_zip_reader_read(&zr, idx, (size_t)-1, &tlen, cause, sizeof cause);
+    text = idx < 0 ? NULL : HOT(unsigned char *, cause, sh_zip_reader_read(&zr, idx, (size_t)-1, &tlen, HO_P(0)));
     if (!text) bad = "the archive has no mod.json";
     else if (!sh_mb_load_text((const char *)text, tlen, &b)) {
-        _snprintf_s(why, cap, _TRUNCATE, "mod.json: %s", b.first_cause);
+        _snprintf_s(why, cap, _TRUNCATE, "mod.json: %s", sh_mb_first_cause(&b));
         bad = why;
     } else if (strcmp(b.hash, hash) != 0) bad = "mod.json build does not match the path";
     for (i = 0; !bad && i < b.file_count; i++) {
-        char entry[512];
+        char *entry;
         if (b.files[i].stock) continue;
         carried++;
-        _snprintf_s(entry, sizeof entry, _TRUNCATE, "assets/%s", b.files[i].request);
-        if (sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
+        entry = sh_textf("assets/%s", b.files[i].request);   /* a request of any length */
+        if (!entry || sh_zip_reader_find(&zr, entry) < 0) bad = "a file mod.json lists is not in the archive";
+        free(entry);
     }
     if (!bad && zr.n != carried + 1) bad = "the archive holds entries mod.json does not list";
     if (!bad) *scripts = b.script_files;

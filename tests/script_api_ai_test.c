@@ -22,6 +22,7 @@
  * primitives with a wall in the world; can_see and find_position against
  * that wall (the trace half of the sight); the pain-string stub run on a
  * synthetic pain request; the per-demon pain records. */
+#include "heap_out.h"
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -301,7 +302,7 @@ static const char *log_of(const char *salt)
 static char g_stop[4096];
 static const char *stop_of(const char *salt)
 {
-    sh_script_stop_line(salt, g_stop, sizeof g_stop);
+    HOS(g_stop, sh_script_stop_line_dup(salt));
     return g_stop;
 }
 

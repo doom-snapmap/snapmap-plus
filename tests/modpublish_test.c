@@ -12,6 +12,7 @@
  *   both sides of the bound; the launch step releases leftover provisional
  *   claims and retries the queue.
  */
+#include "heap_out.h"
 #include "mod_store_stub.h"
 #include "../src/backend/modpublish.h"
 #include "../src/backend/modmanifest.h"
@@ -170,10 +171,10 @@ static int install(const char *folder, char hash[65], char mod[MODSYNC_MOD_MAX +
 {
     sh_ms_install_stats st;
     sh_mb_bundle b;
-    char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char key[HO_TEXT + 1], cause[HO_TEXT];
     int ok;
     memset(&b, 0, sizeof b);
-    ok = sh_ms_install_from_folder(folder, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+    ok = HO2(key, cause, sh_ms_install_from_folder(folder, NULL, HO_P(0), &st, &b, HO_P(1)));
     if (!ok) fprintf(stderr, "install %s: %s\n", folder, cause);
     if (ok) {
         strcpy_s(hash, 65, b.hash);
@@ -200,7 +201,7 @@ static char *map_with(const char *const *hashes, const char *const *ids, int n, 
     for (int i = 0; i < n; i++) {
         sh_modmanifest_row row;
         memset(&row, 0, sizeof row);
-        strcpy_s(row.name, sizeof row.name, ids[i]);
+        sh_modmanifest_row_set_name(&row, ids[i]);
         (void)modsync_parse_mod(hashes[i], row.salt, row.build);
         row.size = 1000 + (unsigned long long)i;
         row.attached = g_attach_second && i == 1;
@@ -274,7 +275,7 @@ int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], store[MAX_PATH * 2], dir[MAX_PATH * 2], cache[MAX_PATH * 2], path[MAX_PATH * 2], url[64];
     wchar_t wtmp[MAX_PATH * 2];
-    char hA[65], hB[65], mA[MODSYNC_MOD_MAX + 1], mB[MODSYNC_MOD_MAX + 1], provisional[MODNET_REF_MAX * 4 + 1];
+    char hA[65], hB[65], mA[MODSYNC_MOD_MAX + 1], mB[MODSYNC_MOD_MAX + 1], provisional[HO_TEXT * 4 + 1];
     const char *both_h[2], *both_id[2] = { "test.alpha", "test.beta" };
     char *text;
     size_t len = 0;
@@ -751,7 +752,7 @@ int main(int argc, char **argv)
     printf("-- a claim refused because a release raced it (409) uploads again once\n");
     {
         int resumes = F.resumes, pending = modsync_pending_count();
-        char prov3[MODNET_REF_MAX * 4 + 1];
+        char prov3[HO_TEXT * 4 + 1];
         sh_modpublish_save_seen(text, len);
         CHECK(sh_modpublish_after_save(EDITOR) == 0);
         strcpy_s(prov3, sizeof prov3, sh_modpublish_test_provisional());
@@ -823,7 +824,7 @@ int main(int argc, char **argv)
 
     printf("-- launch: the queue first; a provisional claim waits for its item's claim\n");
     {
-        char prov2[MODNET_REF_MAX * 4 + 1], want_claim[96], want_release[96];
+        char prov2[HO_TEXT * 4 + 1], want_claim[96], want_release[96];
         const char *claim_at, *release_at;
         const char *item = "kkkkkkkkkkkkkkkkkkkkkk12";
         int blobs, bundles;

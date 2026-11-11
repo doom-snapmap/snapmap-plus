@@ -55,7 +55,9 @@
  * request body limit. The store's own answer names the part size it uses. */
 #define MODNET_PART_SIZE      (95ull * 1024u * 1024u)
 #define MODNET_ARCHIVE_TYPE   "application/zip"
-#define MODNET_REF_MAX        64                      /* UTF-16 code units, as the store counts */
+/* A claim reference (the published item a claim names) has no length of the
+ * product's or the store's: any text without control characters. */
+#define MODNET_REF_RULE       "the ref must be text without control characters"
 
 /* Result codes. 0 is success; every failure is negative. */
 enum {
@@ -97,7 +99,8 @@ typedef struct modnet_result {
     unsigned long long received;  /* response body bytes read, summed over the call */
     unsigned requests;            /* HTTP exchanges made */
     double ms;                    /* wall time of the call */
-    char message[200];            /* short cause, never a body */
+    const char *message;          /* the cause, whole (the store's own sentence when it gave one), never a
+                                     body; valid until this thread's next modnet call */
 } modnet_result;
 
 /* Progress of the current transfer: done of total bytes (total 0 when unknown). */
@@ -128,8 +131,8 @@ void modnet_shutdown(void);
 
 /* 1 when `text` is exactly 64 lowercase hex characters. */
 int  modnet_valid_hash(const char *text);
-/* 1 when `ref` is a claim reference the store accepts: 1-64 UTF-16 code units
- * of valid UTF-8 without control characters. */
+/* 1 when `ref` is a claim reference the store accepts: valid UTF-8 text of
+ * any length without control characters (MODNET_REF_RULE). */
 int  modnet_valid_ref(const char *ref);
 
 /* HEAD /mods/build/<hash>. MODNET_OK with *size (optional) the archive's

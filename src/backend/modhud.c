@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../common/text.h"
 #include "modhud.h"
 #include "config_json.h"
 #include "modmanifest.h"
@@ -16,11 +17,10 @@
 #endif
 
 #define HUD_JSON_DEPTH   24
-#define HUD_OWNER_CAP    120
 
 typedef struct hud_rule {
     char *name;              /* the weapon decl, malloc'd, any length */
-    char owner[HUD_OWNER_CAP];
+    char *owner;             /* the mod's name, malloc'd, any length */
     int weapon_mode;
     int conflicted;          /* two mods ask different displays: the game's stays */
 } hud_rule;
@@ -37,12 +37,13 @@ static int (*g_reload)(void);   /* the table from the serving index (engine), or
 #else
 static void hud_log(const char *fmt, ...)
 {
-    char line[768];
+    char *line;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    line = sh_vtextf(fmt, ap);
     va_end(ap);
-    backend_log(line);
+    backend_log(line ? line : "weapon-hud: (out of memory)");
+    free(line);
 }
 #endif
 
@@ -75,7 +76,7 @@ static int hud_string(const char *raw, char *out, size_t cap)
 static void hud_table_free(hud_table *t)
 {
     size_t i;
-    for (i = 0; i < t->count; i++) free(t->rules[i].name);
+    for (i = 0; i < t->count; i++) { free(t->rules[i].name); free(t->rules[i].owner); }
     free(t->rules);
     memset(t, 0, sizeof *t);
 }
@@ -119,9 +120,14 @@ static void hud_add(const char *weapon, int weapon_mode, const char *owner)
     {
         hud_rule *r = &g_pending.rules[g_pending.count];
         r->name = _strdup(weapon);
-        if (!r->name) { hud_log("weapon-hud: out of memory; the rule %s gives %s is not used", owner, weapon); return; }
+        r->owner = _strdup(owner);
+        if (!r->name || !r->owner) {
+            free(r->name);
+            free(r->owner);
+            hud_log("weapon-hud: out of memory; the rule %s gives %s is not used", owner, weapon);
+            return;
+        }
         g_pending.count++;
-        strncpy_s(r->owner, sizeof r->owner, owner, _TRUNCATE);
         r->weapon_mode = weapon_mode;
         r->conflicted = 0;
     }
@@ -228,7 +234,7 @@ static void hud_visit(void *context, const char *salt, const char *hash, int pla
     hud_load *c = (hud_load *)context;
     sh_json_object root = {0};
     const char *raw;
-    char owner[HUD_OWNER_CAP];
+    char *owner;
     (void)place;
     if (!salt || !hash || !extra || c->failed) return;
     /* One build per salt: the one the open map serves. */
@@ -237,11 +243,11 @@ static void hud_visit(void *context, const char *salt, const char *hash, int pla
     if (!sh_json_parse_object(extra, strlen(extra), HUD_JSON_DEPTH, &root)) return;
     raw = sh_json_object_get(&root, "hud");
     if (raw) {
-        if (c->label) c->label(salt, hash, owner, sizeof owner);
-        else strncpy_s(owner, sizeof owner, salt, _TRUNCATE);
-        if (!sh_modhud_parse(raw, strlen(raw), owner))
+        owner = c->label ? c->label(salt, hash) : NULL;
+        if (!sh_modhud_parse(raw, strlen(raw), owner ? owner : salt))
             hud_log("weapon-hud: the hud entry of %s is not a valid weapon ammo-display table; its rules are not used",
-                    owner);
+                    owner ? owner : salt);
+        free(owner);
     }
     sh_json_object_free(&root);
 }
@@ -388,17 +394,23 @@ static int hud_serves_now(const char *hash)
     return sh_modserve_bundle_scope(hash, &info) && info.names_live;
 }
 
-/* A mod by its name, else its folder, for the log. */
-static void hud_label(const char *salt, const char *hash, char *out, size_t cap)
+/* A mod by its name, else its folder, for the log (malloc'd). */
+static char *hud_label(const char *salt, const char *hash)
 {
     sh_modmanifest_row row;
     sh_modserve_bundle_ref ref;
+    char *out;
     memset(&row, 0, sizeof row);
-    strncpy_s(row.salt, sizeof row.salt, salt, _TRUNCATE);
-    strncpy_s(row.build, sizeof row.build, hash, _TRUNCATE);
-    if (sh_modserve_row_build(&row, &ref) && ref.name[0]) strncpy_s(out, cap, ref.name, _TRUNCATE);
-    else if (ref.folder[0]) strncpy_s(out, cap, ref.folder, _TRUNCATE);
-    else strncpy_s(out, cap, salt, _TRUNCATE);
+    memset(&ref, 0, sizeof ref);
+    /* A salt and a build hash have one width each. */
+    if (strlen(salt) < sizeof row.salt && strlen(hash) < sizeof row.build) {
+        strcpy_s(row.salt, sizeof row.salt, salt);
+        strcpy_s(row.build, sizeof row.build, hash);
+        (void)sh_modserve_row_build(&row, &ref);
+    }
+    out = _strdup(ref.name && ref.name[0] ? ref.name : ref.folder && ref.folder[0] ? ref.folder : salt);
+    sh_modserve_bundle_ref_free(&ref);
+    return out;
 }
 
 static int hud_reload_index(void) { return sh_modhud_load(sh_modserve_each_bundle_extra, hud_serves_now, hud_label); }

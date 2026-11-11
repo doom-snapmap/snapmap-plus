@@ -27,6 +27,7 @@
  * SH_MODMODULE_PREFAB may name a module prefab (the acceptance placement file);
  * it is read with the Prefabs tab's own parser and must name the bundle's module.
  */
+#include "heap_out.h"
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modserve.h"
@@ -47,9 +48,9 @@ static int g_failed, g_checks;
 } while (0)
 #define CHECK_CAUSE(b, needle) do {                                                    \
     g_checks++;                                                                        \
-    if (!strstr((b).first_cause, (needle))) {                                          \
+    if (!strstr(sh_mb_first_cause(&(b)), (needle))) {                                          \
         fprintf(stderr, "%s:%d: first cause '%s' lacks '%s'\n", __FILE__, __LINE__,    \
-                (b).first_cause, (needle));                                            \
+                sh_mb_first_cause(&(b)), (needle));                                            \
         g_failed++;                                                                    \
     }                                                                                  \
 } while (0)
@@ -189,21 +190,21 @@ static void test_slots(void)
 static void test_names(void)
 {
     char type[64], name[512], info[512];
-    CHECK(sh_mb_logical_name(R_DECL, type, sizeof type, name, sizeof name) && !strcmp(type, "snapModule") && !strcmp(name, R_DECL));
-    CHECK(sh_mb_logical_name("maps/modules/classic/classic_90.decl", type, sizeof type, name, sizeof name) &&
+    CHECK(HO(name, sh_mb_logical_name(R_DECL, type, HO_P(0))) && !strcmp(type, "snapModule") && !strcmp(name, R_DECL));
+    CHECK(HO(name, sh_mb_logical_name("maps/modules/classic/classic_90.decl", type, HO_P(0))) &&
           !strcmp(type, "snapModule"));
     /* The render model and the palette's own mega material are not modules. */
-    CHECK(sh_mb_logical_name(R_MODEL, type, sizeof type, name, sizeof name) && !strcmp(type, "model"));
-    CHECK(sh_mb_logical_name("maps/modules/palettes/mega_blessed/mega.decl", type, sizeof type, name, sizeof name) &&
+    CHECK(HO(name, sh_mb_logical_name(R_MODEL, type, HO_P(0))) && !strcmp(type, "model"));
+    CHECK(HO(name, sh_mb_logical_name("maps/modules/palettes/mega_blessed/mega.decl", type, HO_P(0))) &&
           !strcmp(type, "file"));
-    CHECK(sh_mb_logical_name(R_INFO, type, sizeof type, name, sizeof name) && !strcmp(type, "snapModuleInfo") &&
+    CHECK(HO(name, sh_mb_logical_name(R_INFO, type, HO_P(0))) && !strcmp(type, "snapModuleInfo") &&
           !strcmp(name, "mods/" ID "/arena"));
-    CHECK(sh_mb_logical_name(R_MEGA, type, sizeof type, name, sizeof name) && !strcmp(type, "material") && !strcmp(name, S_MEGA));
-    CHECK(sh_mb_module_info_request(R_DECL, info, sizeof info) && !strcmp(info, R_INFO));
-    CHECK(sh_mb_module_info_request("Maps/Modules/Mods/" ID "/Arena.decl", info, sizeof info) && !strcmp(info, R_INFO));
-    CHECK(!sh_mb_module_info_request(R_MODEL, info, sizeof info));
-    CHECK(!sh_mb_module_info_request("maps/modules/palettes/mega_blessed/mega.decl", info, sizeof info));
-    CHECK(!sh_mb_module_info_request("maps/game/mp/x.decl", info, sizeof info));
+    CHECK(HO(name, sh_mb_logical_name(R_MEGA, type, HO_P(0))) && !strcmp(type, "material") && !strcmp(name, S_MEGA));
+    CHECK(HOS(info, sh_mb_module_info_request(R_DECL)) && !strcmp(info, R_INFO));
+    CHECK(HOS(info, sh_mb_module_info_request("Maps/Modules/Mods/" ID "/Arena.decl")) && !strcmp(info, R_INFO));
+    CHECK(!HOS(info, sh_mb_module_info_request(R_MODEL)));
+    CHECK(!HOS(info, sh_mb_module_info_request("maps/modules/palettes/mega_blessed/mega.decl")));
+    CHECK(!HOS(info, sh_mb_module_info_request("maps/game/mp/x.decl")));
 
     CHECK(sh_mb_pointer_only_kind(R_SBSP) && sh_mb_pointer_only_kind(R_AMB) && sh_mb_pointer_only_kind(R_TOME) &&
           sh_mb_pointer_only_kind(S_PAGES) && sh_mb_pointer_only_kind("X/Y.SBSP"));
@@ -233,7 +234,7 @@ static void test_builder(const char *tmp, const char *install)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\arena", tmp);
     make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
     CHECK(sh_mb_build(dir, "tarenaaa", &RESOLVER, &b));
-    if (b.errors) fprintf(stderr, "  module build refused: %s\n", b.first_cause);
+    if (b.errors) fprintf(stderr, "  module build refused: %s\n", sh_mb_first_cause(&b));
     CHECK(b.errors == 0 && b.file_count == 12 && b.stock_count == 10);
     CHECK(b.total_size == sizeof MODULE_TEXT - 1 + sizeof INFO_TEXT - 1);
     f = find(&b, R_DECL);
@@ -260,8 +261,8 @@ static void test_builder(const char *tmp, const char *install)
     CHECK(b.shadow_count == 0);
     CHECK(b.canonical && strstr(b.canonical, "\"provides\":{\"name\":\"" R_DECL "\",\"type\":\"snapModule\"}"));
     {
-        char cause[SH_MB_CAUSE_MAX];
-        CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
+        char cause[HO_TEXT];
+        CHECK(HO(cause, sh_mb_write(&b, dir, HO_P(0))));
     }
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
     CHECK(sh_mb_load(path, &back));
@@ -344,7 +345,7 @@ static void visit(void *context, const char *bundle_id, const char *bundle_hash,
 
 static void test_serving(const char *tmp, const char *install)
 {
-    char dir[MAX_PATH * 2], store[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX], hash[65];
+    char dir[MAX_PATH * 2], store[MAX_PATH * 2], key[HO_TEXT + 1], cause[HO_TEXT], hash[65];
     sh_ms_install_stats st;
     sh_mb_bundle b;
     sh_modserve_hit hit;
@@ -361,7 +362,7 @@ static void test_serving(const char *tmp, const char *install)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\src", tmp);
     make_module_mod(dir, R_DECL, 1, MODULE_TEXT);
     CHECK(sh_ms_set_root(store));
-    CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(HO2(key, cause, sh_ms_install_from_folder(dir, &RESOLVER, HO_P(0), &st, &b, HO_P(1))));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
     CHECK(st.stock_files == 10 && st.copied == 12);
     strcpy_s(hash, sizeof hash, b.hash);
@@ -531,7 +532,7 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
                 memset(&rows, 0, sizeof rows);
                 memset(&row, 0, sizeof row);
                 strncpy_s(row.salt, sizeof row.salt, b->id, _TRUNCATE);
-                if (b->name) strncpy_s(row.name, sizeof row.name, b->name, _TRUNCATE);
+                if (b->name) sh_modmanifest_row_set_name(&row, b->name);
                 strcpy_s(row.build, sizeof row.build, hash);
                 row.size = b->total_size;
                 CHECK(sh_modmanifest_row_add_name(&row, sum.modules[0].name));
@@ -554,7 +555,7 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
 static void build_acceptance(const char *source, const char *doom, const char *prefab)
 {
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX];
+    char cause[HO_TEXT];
     size_t i, modules = 0, restores = 0;
     sh_modstock_stats ms;
     double t0 = (double)GetTickCount64();
@@ -571,10 +572,10 @@ static void build_acceptance(const char *source, const char *doom, const char *p
            source, b.errors, b.warnings, b.file_count, b.stock_count, restores, b.total_size, b.stock_bytes, modules,
            b.canonical_len, b.needs.total, b.needs.stock, b.needs.unresolved, b.hash,
            (double)GetTickCount64() - t0, ms.bytes_hashed);
-    if (b.errors) printf("  first cause: %s\n", b.first_cause);
+    if (b.errors) printf("  first cause: %s\n", sh_mb_first_cause(&b));
     if (b.warnings) printf("  first warning: %s\n", b.first_warning);
     CHECK(b.errors == 0);
-    if (!b.errors) CHECK(sh_mb_write(&b, source, cause, sizeof cause));
+    if (!b.errors) CHECK(HO(cause, sh_mb_write(&b, source, HO_P(0))));
     if (prefab && prefab[0]) inspect_prefab(prefab, &b, b.hash);
     sh_mb_free(&b);
 }

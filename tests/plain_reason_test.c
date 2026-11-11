@@ -6,6 +6,7 @@
  */
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../src/backend/plain_reason.h"
@@ -22,8 +23,10 @@ static int g_failed, g_checks;
 
 static const char *R(int kind, long code, const char *subject, unsigned long long bytes)
 {
-    static char out[512];
-    return sh_reason(kind, code, subject, bytes, out, sizeof out);
+    static char *out;
+    free(out);
+    out = sh_reason(kind, code, subject, bytes);
+    return out ? out : "";
 }
 
 int main(void)
@@ -75,13 +78,19 @@ int main(void)
     CHECK(!strcmp(R(SH_REASON_STORE, 12345, NULL, 0), "the mod store did not answer; try again in a few minutes"));
     CHECK(!strcmp(R(SH_REASON_WIN32, ERROR_ACCESS_DENIED, NULL, 0),
                   "Windows refused to write the file; close the program holding it or run the game once as the same user"));
-    /* The per-thread form and a small buffer. */
+    /* The per-thread form, and a subject of any length named whole. */
     CHECK(strstr(sh_reason_win32(ERROR_SHARING_VIOLATION, "mod.json", 0), "mod.json is open in another program") != NULL);
     {
-        char tiny[16];
-        sh_reason(SH_REASON_WIN32, ERROR_ACCESS_DENIED, "x", 0, tiny, sizeof tiny);
-        CHECK(strlen(tiny) == sizeof tiny - 1);
-        CHECK(sh_reason(SH_REASON_WIN32, 5, "x", 0, NULL, 0) == NULL);
+        size_t n = 40000;
+        char *long_path = (char *)malloc(n + 1);
+        CHECK(long_path != NULL);
+        if (long_path) {
+            memset(long_path, 'a', n);
+            long_path[n] = 0;
+            t = sh_reason_win32(ERROR_ACCESS_DENIED, long_path, 0);
+            CHECK(strstr(t, long_path) != NULL && strstr(t, "; close the program holding it") != NULL);
+            free(long_path);
+        }
     }
 
     printf("plain_reason_test: %d checks, %d failed\n", g_checks, g_failed);

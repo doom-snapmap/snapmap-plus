@@ -10,6 +10,7 @@
  * and they can be checked without a game running.
  */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 
 #include <stdio.h>
@@ -629,7 +630,7 @@ static void large_sources_use_native_lengths(void)
     CHECK(sh_rawmap_swap_set_source(path));
     {
         int importing = 0;
-        body = read_source_file_why(&length, NULL, 0, &importing);
+        body = read_source_file_why(&length, NULL, &importing);
     }
     CHECK(body && length == (size_t)1040 * sizeof(block) + 2);
     if (body) {
@@ -671,7 +672,7 @@ static void refused_plainly(int parses_before, int refusals_before)
     char refusal[256];
     CHECK(g_parses == parses_before);
     CHECK(log_refused == refusals_before + 1);
-    CHECK(sh_modmanifest_load_refusal(refusal, sizeof refusal) &&
+    CHECK(HO(refusal, sh_modmanifest_load_refusal(HO_P(0))) &&
           !strcmp(refusal, "This map was saved in a format this version does not read."));
     (void)sh_modmanifest_load_notes_flush(0);
 }
@@ -760,7 +761,7 @@ static int open_through_reload(const char *borrowed)
 {
     char why[1280];
     int rc;
-    if (!sh_rawmap_prepare_reload(why, (int)sizeof why)) return -1;
+    if (!HO(why, sh_rawmap_prepare_reload(HO_P(0)))) return -1;
     rc = sh_deser_detour(borrowed, (void *)1);
     sh_rawmap_reload_done(0, 0);
     return rc;
@@ -852,7 +853,7 @@ static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"nam
 extern unsigned long long g_mod_stub_export_result;
 extern int g_mod_stub_export_calls;
 extern char g_mod_stub_export_path[520];
-extern char g_mod_stub_import_cause[MODEXPORT_CAUSE_MAX];
+extern char g_mod_stub_import_cause[HO_TEXT];
 extern const char *g_mod_stub_import_text;
 extern int g_mod_stub_import_calls;
 
@@ -894,7 +895,7 @@ static int r_resume(void *c, const sh_modpub_resume *r)
     R.resumes++;
     R.resume_hook = r->hook;
     /* What the engine's resume does for a rawmap hold. */
-    return sh_rawmap_reopen_after_mods(R.resume_note, sizeof R.resume_note);
+    return HO(R.resume_note, sh_rawmap_reopen_after_mods(HO_P(0)));
 }
 static int r_store_probe(void *c, const char *hash, volatile int *cancel, sh_modpub_probe *out)
 {
@@ -948,10 +949,10 @@ static void transport_settle(void)
 /* A load of a ZIP: the import off the main thread, then the load again. */
 static int prepare_zip(char *why, int cap)
 {
-    int rc = sh_rawmap_prepare_reload(why, cap);
+    int rc = HOC(why, cap, sh_rawmap_prepare_reload(HO_P(0)));
     if (rc || !strstr(why, "it opens when that is done")) return rc;
     transport_settle();
-    return sh_rawmap_prepare_reload(why, cap);
+    return HOC(why, cap, sh_rawmap_prepare_reload(HO_P(0)));
 }
 
 static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
@@ -965,7 +966,7 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(sh_rawmap_swap_set_source(staged));
     swaps = sh_rawmap_swap_count();
     g_parses = 0;
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "rawmap_mods_missing.json needs 1 mod(s) you do not have") != NULL);
     CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
     CHECK(sh_modpub_test_state() == 4 && R.prints == 1);
@@ -991,7 +992,7 @@ static void a_fault_in_the_mod_check_refuses_the_rawmap(void)
     CHECK(sh_rawmap_swap_set_source(staged));
     swaps = sh_rawmap_swap_count();
     g_parses = 0;
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(!strcmp(why, "rawmap_mods_fault.json was not opened: Snapmap+ could not check this map, so it was not "
                        "opened. Restart DOOM and open it again."));
     CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
@@ -1009,7 +1010,7 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
     R.store = 1;
     CHECK(write_file("rawmap_mods_offer.json", MOD_MAP, staged, sizeof staged));
     CHECK(sh_rawmap_swap_set_source(staged));
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
     ticks(3);
     CHECK(R.asks == 1 && !strcmp(R.ask, "This map needs 1 mod: test.alpha (1.0 MB). Download and install now?"));
@@ -1021,7 +1022,7 @@ static void a_rawmap_whose_mods_the_store_has_is_offered_then_opens(void)
                                  "rawmap_mods_offer.json again from File > Load Rawmap."));
 
     printf("-- with the mods installed the reload keeps the bytes it checked for the parse\n");
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && g_in_reload);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 1 && g_prepared && g_in_reload);
     {
         char again[MAX_PATH];
         unsigned long swaps = sh_rawmap_swap_count();
@@ -1050,12 +1051,12 @@ static void a_held_zip_is_imported_once(void)
     CHECK(sh_rawmap_swap_set_source(staged));
     g_mod_stub_import_text = MOD_MAP;
     g_mod_stub_import_calls = 0;
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "Importing rawmap_held_once.zip and its mods; it opens when that is done.") != NULL);
     CHECK(sh_rawmap_transport_busy());
     transport_settle();
     CHECK(!sh_rawmap_transport_busy());
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(strstr(why, "checking whether it can download them") != NULL);
     CHECK(g_mod_stub_import_calls == 1);
     ticks(3);
@@ -1064,7 +1065,7 @@ static void a_held_zip_is_imported_once(void)
     CHECK(R.fetches == 1 && R.installed && R.resumes == 1);
     CHECK(g_mod_stub_import_calls == 1);   /* the resume itself reads nothing */
     /* The reopened load: the hold's bytes, not a second import. */
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 1 && g_prepared && strstr(g_prepared, "RAWMAP_MARK"));
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 1 && g_prepared && strstr(g_prepared, "RAWMAP_MARK"));
     CHECK(g_mod_stub_import_calls == 1);
     sh_rawmap_reload_done(0, 0);
     /* The next load of the file is a new load: imported again. */
@@ -1172,7 +1173,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
 
 static void a_refused_zip_tells_the_player_why(void)
 {
-    char staged[MAX_PATH], why[1280], cause[MODEXPORT_CAUSE_MAX], want[sizeof cause + 64];
+    char staged[MAX_PATH], why[1280], cause[HO_TEXT], want[sizeof cause + 64];
     size_t n;
     printf("\n-- a ZIP the importer refuses: the player hears the importer's reason, whole, and nothing loads\n");
     mods_begin();
@@ -1185,7 +1186,7 @@ static void a_refused_zip_tells_the_player_why(void)
     strcat_s(cause, sizeof cause, "); nothing was installed. Ask whoever shared it for a new export saved with this release");
     strcpy_s(g_mod_stub_import_cause, sizeof g_mod_stub_import_cause, cause);
     _snprintf_s(want, sizeof want, _TRUNCATE, "shared-map.zip was not opened: %s.", cause);
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(!strcmp(why, "Importing shared-map.zip and its mods; it opens when that is done."));
     CHECK(g_prepared == NULL && !g_in_reload);
     sh_rawmap_poll_main();   /* the import note */
@@ -1198,7 +1199,7 @@ static void a_refused_zip_tells_the_player_why(void)
     CHECK(temp_path("no-such-map.json", staged, sizeof staged));
     DeleteFileA(staged);
     CHECK(sh_rawmap_swap_set_source(staged));
-    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 0);
     CHECK(!strncmp(why, "no-such-map.json was not opened: ", 33) && strstr(why, "is missing") && strstr(why, "try again"));
     strcpy_s(g_mod_stub_import_cause, sizeof g_mod_stub_import_cause, "the rawmap export is not linked into this test");
     sh_rawmap_swap_set_source(NULL);
@@ -1368,7 +1369,7 @@ static void a_unicode_path_is_read_and_written(void)
     CHECK(sh_rawmap_swap_set_source(path));
     {
         int importing = 0;
-        text = read_source_file_why(&len, why, sizeof why, &importing);
+        text = HOT(char *, why, read_source_file_why(&len, HO_P(0), &importing));
     }
     CHECK(text != NULL && len == sizeof BODY - 1);
     if (text) { memcpy(out, text, len < sizeof out - 1 ? len : sizeof out - 1); HeapFree(GetProcessHeap(), 0, text); }

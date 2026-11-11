@@ -7,6 +7,7 @@
  * registration plan's dependency order and blocking, plan runs through fake
  * engine operations, the save-time bundle closure and a rescan. */
 #define WIN32_LEAN_AND_MEAN
+#include "heap_out.h"
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -510,12 +511,12 @@ static void test_index_and_isolation(void)
     CHECK(!log_has("superseded"));
     CHECK(log_has("MODS: index built in ") && log_has("(6 bundles, "));
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/ivyneste/thing.decl", NULL) != NULL);
-    CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
+    CHECK(sh_modserve_bundle_state(g_hash_a, NULL) == 1);
     {
         char cause[200];
-        CHECK(sh_modserve_bundle_state(g_hash_c, cause, sizeof cause) == -1 && strstr(cause, "size mismatch"));
+        CHECK(HO(cause, sh_modserve_bundle_state(g_hash_c, HO_P(0))) == -1 && strstr(cause, "size mismatch"));
     }
-    CHECK(sh_modserve_bundle_state("0000000000000000000000000000000000000000000000000000000000000000", NULL, 0) == 0);
+    CHECK(sh_modserve_bundle_state("0000000000000000000000000000000000000000000000000000000000000000", NULL) == 0);
     printf("modserve_test: fixture index built in %.2f ms (%d bundles seen, %d files, %d keys)\n", st.build_ms,
            st.bundles_seen, st.files, st.keys);
 }
@@ -846,13 +847,13 @@ static int text_index(const char *cvar)
     for (i = 0; i < FAKE_TEXT; ++i) if (!strcmp(cvar, FAKE_NAMES[i])) return i;
     return -1;
 }
-static int gate_read(void *c, const char *cvar, char *value, size_t cap)
+static int gate_read(void *c, const char *cvar, char **value)
 {
     int g = gate_index(cvar), t = text_index(cvar);
     (void)c;
     g_gate_reads++;
-    if (g >= 0) { _snprintf_s(value, cap, _TRUNCATE, "%d", g_gate_val[g]); return 1; }
-    if (t >= 0) { strncpy_s(value, cap, g_text_val[t], _TRUNCATE); return 1; }
+    if (g >= 0) { ho_setf(value, "%d", g_gate_val[g]); return 1; }
+    if (t >= 0) { ho_set(value, g_text_val[t]); return 1; }
     return 0;
 }
 static int gate_set(void *c, const char *cvar, const char *value)
@@ -3065,15 +3066,15 @@ static void test_refusals(void)
     CHECK(sh_modserve_index_build(root) == 1);
 
     /* The check alone: the engine lookup decides a load now. */
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf, model, sizeof model) == 1 &&
+    CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf, HO_P(0))) == 1 &&
           !strcmp(model, "zion/objects/props_set/kiosks/wallhealthstation.md6"));
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/turret.decl", &g_rf, model, sizeof model) == 1 &&
+    CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/turret.decl", &g_rf, HO_P(0))) == 1 &&
           !strcmp(model, "zion/objects/weapons/turret_campaign.md6"));
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/fine.decl", &g_rf, model, sizeof model) == 0);
-    CHECK(sh_modserve_animweb_check("generated/decls/md6def/zion/none.md6.decl", &g_rf, model, sizeof model) == -1);
+    CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/fine.decl", &g_rf, HO_P(0))) == 0);
+    CHECK(HO(model, sh_modserve_animweb_check("generated/decls/md6def/zion/none.md6.decl", &g_rf, HO_P(0))) == -1);
     /* Without the lookup the archives answer, which is what let issue 132's
      * campaign models through. */
-    CHECK(sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf_old, model, sizeof model) == 0);
+    CHECK(HO(model, sh_modserve_animweb_check("generated/decls/animweb/mods/dzpack00/med_station.decl", &g_rf_old, HO_P(0))) == 0);
 
     g_console_seen[0] = 0;
     sh_modserve_set_console(rf_console);
@@ -4121,33 +4122,33 @@ static void test_additive_same_key(void)
     strcpy_s(row.salt, sizeof row.salt, "kfork000");
     strcpy_s(row.build, sizeof row.build, h1);
     CHECK(sh_modserve_place_set("maps\\Other map") >= 0);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
-    CHECK(sh_modserve_row_served_in(&row, "Fork map", NULL, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
+    CHECK(HO(cause, sh_modserve_row_served_in(&row, "Fork map", NULL, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     CHECK(sh_modserve_place_set("maps\\Fork map") >= 0);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h1) && !strcmp(ref.place, "maps\\Fork map"));
     strcpy_s(row.build, sizeof row.build, h2);   /* the root holds this one: the root answers first */
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
     strcpy_s(row.build, sizeof row.build, h3);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses Fork, which is not installed."));
     CHECK(!sh_modserve_row_build(&row, &ref));
     CHECK(sh_modserve_place_set(NULL) >= 0);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h2) && !ref.place[0]);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     /* Not a place: refused, and nothing changes. */
     CHECK(sh_modserve_place_set("maps\\..\\..\\Windows") == -1 && sh_modserve_place_set("..") == -1);
     CHECK(sh_modserve_place_set("maps\\con") == -1);
     {
-        char now[SH_MODSERVE_PLACE_CAP];
-        sh_modserve_place_get(now, sizeof now);
+        char now[HO_TEXT];
+        HOS(now, sh_modserve_place_get());
         CHECK(!now[0]);
         /* A parse remembers the place it replaces; a failed one puts it back. */
         CHECK(sh_modserve_place_load("Fork map") >= 0);
-        sh_modserve_place_get(now, sizeof now);
+        HOS(now, sh_modserve_place_get());
         CHECK(!strcmp(now, "maps\\Fork map"));
         CHECK(sh_modserve_place_restore() == 1);
-        sh_modserve_place_get(now, sizeof now);
+        HOS(now, sh_modserve_place_get());
         CHECK(!now[0] && sh_modserve_place_restore() == 0);
     }
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
@@ -4573,7 +4574,7 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_place_set("maps\\Elsewhere") >= 0);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "kown0000");
-    strcpy_s(row.name, sizeof row.name, "Doors Pack");
+    row.name = (char *)"Doors Pack";   /* borrowed: this test never frees the row */
     strcpy_s(row.build, sizeof row.build, hm);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm) && !ref.place[0] && !strcmp(ref.id, "kown0000") &&
           !strcmp(ref.folder, "My doors (work)") && !strcmp(ref.name, "Doors Pack"));
@@ -4581,7 +4582,7 @@ static void test_salt_and_place(void)
     CHECK(!sh_modserve_row_build(&row, &ref));
     strcpy_s(row.build, sizeof row.build, hx);
     CHECK(!sh_modserve_row_build(&row, &ref));
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map uses Doors Pack, which is not installed."));
     /* In a map's place: that place's folder first (the segment alone names it too). */
     CHECK(sh_modserve_place_set("maps\\Gates") >= 0);
@@ -4608,18 +4609,18 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
     strcpy_s(row.build, sizeof row.build, hx);
     CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, hm));
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     /* A salt whose only folder is skipped: the folder's cause. */
     CHECK(sh_modserve_place_set(NULL) >= 0);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "saltonly");
     strcpy_s(row.build, sizeof row.build, hx);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map uses Salted, which is installed but cannot be used: not built yet (Refresh in the Mods tab "
                          "builds it)."));
     /* A row that names no salt (an earlier shape the detour let through). */
     memset(&row, 0, sizeof row);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This map names a mod this version does not read."));
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     sh_modserve_scope_enable(0);
@@ -4725,23 +4726,23 @@ static void test_row_served(void)
 
     /* No folder of the salt: missing. */
     CHECK(sh_modserve_index_build(root) >= 0);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses a mod that is not installed."));
-    CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_MISSING &&
+    CHECK(HO(cause, sh_modserve_row_served_for(&row, "prefab", HO_P(0))) == SH_MODSERVE_ROW_MISSING &&
           !strcmp(cause, "This prefab uses a mod that is not installed."));
 
     /* The folder at the row's hash: served. */
     g_bundle_name = "Hell Guards";
     make_bundle(root, "localhel", "localhel", 'd', NULL, HG, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED && !cause[0]);
 
     /* Recreated with the same salt and paths but new bytes (a new hash): another build, not this map's. */
     remove_tree(top);
     mkdirs(root);
     make_bundle(root, "hand-made", "localhel", 'e', NULL, HG_NEW, 2, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_MISSING);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_MISSING);
     CHECK(!strcmp(cause, "This map uses Hell Guards, which is not installed."));
     /* The player's own map saved before the author edited and rebuilt the
      * folder: it follows the root at any build, in the editor, at Play and
@@ -4750,12 +4751,12 @@ static void test_row_served(void)
         sh_modserve_bundle_ref ref;
         char e_hash[65];
         hash64('e', e_hash);
-        CHECK(sh_modserve_row_served_in(&row, "", "map", cause, sizeof cause) == SH_MODSERVE_ROW_SERVED && !cause[0]);
+        CHECK(HO(cause, sh_modserve_row_served_in(&row, "", "map", HO_P(0))) == SH_MODSERVE_ROW_SERVED && !cause[0]);
         CHECK(sh_modserve_row_build_in(&row, "", &ref) && !strcmp(ref.hash, e_hash) && !strcmp(ref.folder, "hand-made"));
         CHECK(sh_modserve_place_set(NULL) >= 0);
-        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+        CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
-        CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+        CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
         CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) >= 0);
         CHECK(sh_modserve_place_set("maps\\Their map") >= 0);
     }
@@ -4765,7 +4766,7 @@ static void test_row_served(void)
     mkdirs(root);
     make_bundle(root, "localhel", "localhel", 'd', NULL, HG + 1, 1, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_INCOMPLETE);
     /* Named under the mod, never by its salt. */
     CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
                          "hell_guard_combo_enc, which this map uses."));
@@ -4774,13 +4775,13 @@ static void test_row_served(void)
     names[3] = "mods/localhel/b";
     names[4] = "mods/localhel/c";
     row.name_count = 5;
-    CHECK(sh_modserve_row_served_for(&row, "prefab", cause, sizeof cause) == SH_MODSERVE_ROW_INCOMPLETE);
+    CHECK(HO(cause, sh_modserve_row_served_for(&row, "prefab", HO_P(0))) == SH_MODSERVE_ROW_INCOMPLETE);
     CHECK(!strcmp(cause, "Hell Guards is installed but does not provide "
                          "hell_guard_combo_enc, a, b and 1 more, "
                          "which this prefab uses."));
     /* A row that lists no names (a map-level row) is served by its build alone. */
     row.name_count = 0;
-    CHECK(sh_modserve_row_served(&row, cause, sizeof cause) == SH_MODSERVE_ROW_SERVED);
+    CHECK(HO(cause, sh_modserve_row_served(&row, HO_P(0))) == SH_MODSERVE_ROW_SERVED);
     /* Another salt's folder providing the names does not serve the row. */
     remove_tree(top);
     mkdirs(root);
@@ -4793,7 +4794,7 @@ static void test_row_served(void)
         make_bundle(root, "localoth", "localoth", 'c', NULL, OTHER, 1, NULL);
     }
     CHECK(sh_modserve_index_build(root) == 1);
-    CHECK(sh_modserve_row_served(&row, NULL, 0) == SH_MODSERVE_ROW_MISSING);
+    CHECK(sh_modserve_row_served(&row, NULL) == SH_MODSERVE_ROW_MISSING);
     CHECK(sh_modserve_place_set(NULL) >= 0);
     remove_tree(top);
     CHECK(sh_modserve_index_build(g_root) >= 0);

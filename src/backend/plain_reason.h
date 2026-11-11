@@ -3,22 +3,26 @@
  * step, so no message carries a bare number ("error 5", "did not answer",
  * "character 0xc3").
  *
- *   sh_reason(SH_REASON_WIN32, GetLastError(), path, bytes_needed, out, cap)
+ *   sh_reason(SH_REASON_WIN32, GetLastError(), path, bytes_needed)
  *       subject: the file or folder the call used (its drive names a full disk);
  *       bytes: what the write needed (0 when unknown).
- *   sh_reason(SH_REASON_STORE, modnet code, next_step, 0, out, cap)
+ *   sh_reason(SH_REASON_STORE, modnet code, next_step, 0)
  *       code: a MODNET_E_ value (modnet.h); subject: the caller's next step
  *       ("it is retried at the next launch"), NULL for the table's own.
- *   sh_reason(SH_REASON_NAME, code point, path, 0, out, cap)
+ *   sh_reason(SH_REASON_NAME, code point, path, 0)
  *       code: the character the game cannot read in a file name; subject: the file.
  *
  * Header-only: every module that reports a failure includes it without a
- * link change. Returns out. */
+ * link change. Returns the sentence, malloc'd and sized to the subject it
+ * names (free it), or NULL when memory runs out. */
 #ifndef SNAPMAP_PLUS_PLAIN_REASON_H
 #define SNAPMAP_PLUS_PLAIN_REASON_H
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "../common/text.h"
 
 #define SH_REASON_WIN32 1
 #define SH_REASON_STORE 2
@@ -65,13 +69,10 @@ static const sh_reason_row SH_REASON_TABLE[] = {
     { SH_REASON_STORE, -10, "it is over the mod store's size limit", "make it smaller" },
 };
 
-static __inline const char *sh_reason(int kind, long code, const char *subject, unsigned long long bytes,
-                                      char *out, size_t cap)
+static __inline char *sh_reason(int kind, long code, const char *subject, unsigned long long bytes)
 {
     const char *what = subject && subject[0] ? subject : (kind == SH_REASON_STORE ? NULL : "the file");
     size_t i;
-    if (!out || !cap) return out;
-    out[0] = 0;
     if (kind == SH_REASON_WIN32 && (code == 112 || code == 39)) {
         char drive[4] = "";
         char need[48];
@@ -80,9 +81,8 @@ static __inline const char *sh_reason(int kind, long code, const char *subject, 
             _snprintf_s(need, sizeof need, _TRUNCATE, "at least %llu MB", (bytes + 1024ull * 1024ull - 1) / (1024ull * 1024ull));
         else if (bytes) _snprintf_s(need, sizeof need, _TRUNCATE, "at least %llu KB", (bytes + 1023) / 1024);
         else strcpy_s(need, sizeof need, "some space");
-        _snprintf_s(out, cap, _TRUNCATE, "the drive %s is full (writing %s); free %s on it and try again",
-                    drive[0] ? drive : "holding it", what, need);
-        return out;
+        return sh_textf("the drive %s is full (writing %s); free %s on it and try again",
+                        drive[0] ? drive : "holding it", what, need);
     }
     if (kind == SH_REASON_NAME) {
         char ch[8] = "";
@@ -97,37 +97,36 @@ static __inline const char *sh_reason(int kind, long code, const char *subject, 
         }
         /* The allowed set is modbundle.c mb_path_char's. */
         if (ch[0] && cp >= 0x80)
-            _snprintf_s(out, cap, _TRUNCATE, "%s has the character '%s' (U+%04lX) in its name; the game reads only "
-                        "ASCII file names (letters, digits, spaces and . _ - $ + @ ~ ( )), so rename it", what, ch, cp);
-        else if (ch[0])
-            _snprintf_s(out, cap, _TRUNCATE, "%s has the character '%s' (U+%04lX) in its name, which the game does "
-                        "not accept; file names use letters, digits, spaces and . _ - $ + @ ~ ( ), so rename it",
-                        what, ch, cp);
-        else
-            _snprintf_s(out, cap, _TRUNCATE, "%s has a control character (U+%04lX) in its name; file names use "
-                        "letters, digits, spaces and . _ - $ + @ ~ ( ), so rename it", what, cp);
-        return out;
+            return sh_textf("%s has the character '%s' (U+%04lX) in its name; the game reads only ASCII file names "
+                            "(letters, digits, spaces and . _ - $ + @ ~ ( )), so rename it", what, ch, cp);
+        if (ch[0])
+            return sh_textf("%s has the character '%s' (U+%04lX) in its name, which the game does not accept; file "
+                            "names use letters, digits, spaces and . _ - $ + @ ~ ( ), so rename it", what, ch, cp);
+        return sh_textf("%s has a control character (U+%04lX) in its name; file names use letters, digits, spaces "
+                        "and . _ - $ + @ ~ ( ), so rename it", what, cp);
     }
     for (i = 0; i < sizeof SH_REASON_TABLE / sizeof SH_REASON_TABLE[0]; i++) {
         const sh_reason_row *r = &SH_REASON_TABLE[i];
         if (r->kind != kind || r->code != code) continue;
-        if (kind == SH_REASON_STORE) _snprintf_s(out, cap, _TRUNCATE, "%s; %s", r->text, what ? what : r->next);
-        else _snprintf_s(out, cap, _TRUNCATE, r->text, what);
-        return out;
+        if (kind == SH_REASON_STORE) return sh_textf("%s; %s", r->text, what ? what : r->next);
+        return sh_textf(r->text, what);
     }
     if (kind == SH_REASON_STORE)
-        _snprintf_s(out, cap, _TRUNCATE, "the mod store did not answer; %s", what ? what : "try again in a few minutes");
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "Windows could not use %s (system error %ld); close programs that may "
-                    "hold it and try again", what, code);
-    return out;
+        return sh_textf("the mod store did not answer; %s", what ? what : "try again in a few minutes");
+    return sh_textf("Windows could not use %s (system error %ld); close programs that may hold it and try again",
+                    what, code);
 }
 
-/* sh_reason(SH_REASON_WIN32, ...) in a per-thread buffer: one call per message. */
+/* sh_reason(SH_REASON_WIN32, ...) in a per-thread buffer that the next call
+ * on the thread replaces: one call per message. Never NULL. */
 static __inline const char *sh_reason_win32(unsigned long err, const char *subject, unsigned long long bytes)
 {
-    static __declspec(thread) char buf[768];
-    return sh_reason(SH_REASON_WIN32, (long)err, subject, bytes, buf, sizeof buf);
+    static __declspec(thread) char *held;
+    char *text = sh_reason(SH_REASON_WIN32, (long)err, subject, bytes);
+    if (!text) return "Windows could not use the file, and memory ran out describing why; close other programs";
+    free(held);
+    held = text;
+    return held;
 }
 
 #endif

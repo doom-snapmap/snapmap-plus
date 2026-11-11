@@ -21,6 +21,7 @@
  * the same layout; its mods install at the root (DECISIONS 12); each
  * importer refuses the other's ZIP. The rawmap hooks return process-heap
  * text. Pure file work: no network. */
+#include "heap_out.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,16 +81,17 @@ static int install(const char *src, char *name, size_t cap, sh_modmanifest_row *
 {
     sh_ms_install_stats st;
     sh_mb_bundle b;
-    char cause[SH_MB_CAUSE_MAX] = "";
+    char cause[HO_TEXT] = "";
     int ok;
     memset(&b, 0, sizeof b);
-    ok = sh_ms_install_from_folder(src, NULL, name, cap, &st, &b, cause, sizeof cause);
+    ok = (int)ho_take(name, cap, 0, ho_take(cause, sizeof cause, 1,
+                      (ho_reset(), (intptr_t)sh_ms_install_from_folder(src, NULL, HO_P(0), &st, &b, HO_P(1)))));
     if (!ok) fprintf(stderr, "install %s: %s\n", src, cause);
     memset(row, 0, sizeof *row);
     if (ok) {
         strcpy_s(row->salt, sizeof row->salt, b.id);
         strcpy_s(row->build, sizeof row->build, b.hash);
-        if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
+        if (b.name) sh_modmanifest_row_set_name(row, b.name);
         row->size = b.total_size;
     }
     sh_mb_free(&b);
@@ -136,7 +138,7 @@ static void zip_names(const char *zip, char *out, size_t cap)
     char cause[256];
     size_t i, k;
     out[0] = 0;
-    if (!sh_zip_reader_open(&r, zip, cause, sizeof cause)) return;
+    if (!HO(cause, sh_zip_reader_open(&r, zip, HO_P(0)))) return;
     for (i = 0; i < r.n; i++) {
         k = r.sorted ? r.sorted[i] : i;
         strncat_s(out, cap, r.e[k].name, _TRUNCATE);
@@ -154,9 +156,9 @@ static int entry_is_file(const char *zip, const char *name, const char *path)
     size_t al = 0, bl = 0;
     long at;
     int same = 0;
-    if (!sh_zip_reader_open(&r, zip, cause, sizeof cause)) return 0;
+    if (!HO(cause, sh_zip_reader_open(&r, zip, HO_P(0)))) return 0;
     at = sh_zip_reader_find(&r, name);
-    if (at >= 0) a = sh_zip_reader_read(&r, at, 64u << 20, &al, cause, sizeof cause);
+    if (at >= 0) a = HOT(unsigned char *, cause, sh_zip_reader_read(&r, at, 64u << 20, &al, HO_P(0)));
     b = slurp(path, &bl);
     same = a && b && al == bl && !memcmp(a, b, al);
     free(a);
@@ -229,10 +231,10 @@ static void store_at(const char *root)
 /* `text` is `map` with the member's place set to `segment` (NULL: none). */
 static int recorded_as(const char *text, size_t len, const char *map, const char *segment)
 {
-    char place[SH_CARRIER_PLACE_CAP], err[96];
+    char place[HO_TEXT], err[96];
     size_t n = 0;
     char *bare;
-    int got = sh_carrier_place(text, len, place, sizeof place), ok;
+    int got = HO(place, sh_carrier_place(text, len, HO_P(0))), ok;
     if (segment ? got != 1 || strcmp(place, segment) : got != 0) return 0;
     if (!segment) return len == strlen(map) && !memcmp(text, map, len);
     bare = sh_carrier_put_place(text, len, NULL, &n, err, sizeof err);
@@ -244,15 +246,15 @@ static int recorded_as(const char *text, size_t len, const char *map, const char
 /* The loaded map's place is still none. */
 static int loaded_place_none(void)
 {
-    char now[SH_MODSERVE_PLACE_CAP];
-    sh_modserve_place_get(now, sizeof now);
+    char now[HO_TEXT];
+    HOS(now, sh_modserve_place_get());
     return !now[0];
 }
 
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], a_root[MAX_PATH], b_root[MAX_PATH], c_root[MAX_PATH], src_pink[MAX_PATH], src_room[MAX_PATH];
-    char zip[MAX_PATH], zip2[MAX_PATH], path[MAX_PATH * 2], names[4096], cause[MODEXPORT_CAUSE_MAX], name[SH_MS_NAME_MAX + 1];
+    char zip[MAX_PATH], zip2[MAX_PATH], path[MAX_PATH * 2], names[4096], cause[HO_TEXT], name[HO_TEXT + 1];
     sh_modmanifest_row rows[3];
     modexport_stats st;
     unsigned char *z1 = NULL, *z2 = NULL;
@@ -294,7 +296,7 @@ int main(int argc, char **argv)
         if (e) {
             strcpy_s(rows[1].salt, sizeof rows[1].salt, e->salt);
             strcpy_s(rows[1].build, sizeof rows[1].build, e->bundle.hash);
-            strcpy_s(rows[1].name, sizeof rows[1].name, "Bob Room");
+            sh_modmanifest_row_set_name(&rows[1], "Bob Room");
             rows[1].size = e->bundle.total_size;
         }
         sh_ms_list_free(&l);
@@ -302,7 +304,7 @@ int main(int argc, char **argv)
     (void)sh_modserve_index_build(a_root);
     map = map_with(rows, 2);
     CHECK(map != NULL);
-    CHECK(map && modexport_write(map, strlen(map), zip, &st, cause, sizeof cause));
+    CHECK(map && HO(cause, modexport_write(map, strlen(map), zip, &st, HO_P(0))));
     if (cause[0]) fprintf(stderr, "  export: %s\n", cause);
     CHECK(st.bundles == 2 && st.files == 4 && st.entries == 7);
     zip_names(zip, names, sizeof names);
@@ -318,15 +320,15 @@ int main(int argc, char **argv)
         CHECK(entry_is_file(zip, entry, want));
     }
     z1 = slurp(zip, &z1l);
-    CHECK(map && modexport_write(map, strlen(map), zip, &st, cause, sizeof cause));
+    CHECK(map && HO(cause, modexport_write(map, strlen(map), zip, &st, HO_P(0))));
     z2 = slurp(zip, &z2l);
     CHECK(z1 && z2 && z1l == z2l && !memcmp(z1, z2, z1l));
     free(z2); z2 = NULL;
 
     printf("-- import into an empty store: each folder in the ZIP's place, the map records it\n");
     store_at(b_root);
-    CHECK(modexport_probe(zip, cause, sizeof cause));
-    back = modexport_read(zip, &len, &st, cause, sizeof cause);
+    CHECK(HO(cause, modexport_probe(zip, HO_P(0))));
+    back = HOT(char *, cause, modexport_read(zip, &len, &st, HO_P(0)));
     if (!back) fprintf(stderr, "  import: %s\n", cause);
     CHECK(back && recorded_as(back, len, map, "Pink Arena"));
     free(back);
@@ -336,16 +338,16 @@ int main(int argc, char **argv)
     {
         char dir[MAX_PATH], key[MAX_PATH + 8];
         _snprintf_s(key, sizeof key, _TRUNCATE, "zip:%s", zip);
-        CHECK(sh_ms_place_of(key, dir, sizeof dir, NULL, 0) && !strcmp(dir, "maps\\Pink Arena"));
+        CHECK(HO(dir, sh_ms_place_of(key, HO_P(0), NULL)) && !strcmp(dir, "maps\\Pink Arena"));
     }
     /* The import changed nothing the loaded map serves; the map opened from
      * the text is served from its place. */
     CHECK(loaded_place_none());
-    CHECK(sh_modserve_row_served(&rows[0], NULL, 0) != SH_MODSERVE_ROW_SERVED);
-    CHECK(sh_modserve_row_served_in(&rows[0], "Pink Arena", NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_row_served(&rows[0], NULL) != SH_MODSERVE_ROW_SERVED);
+    CHECK(sh_modserve_row_served_in(&rows[0], "Pink Arena", NULL, NULL) == SH_MODSERVE_ROW_SERVED);
 
     printf("-- a second import installs nothing\n");
-    back = modexport_read(zip, &len, &st, cause, sizeof cause);
+    back = HOT(char *, cause, modexport_read(zip, &len, &st, HO_P(0)));
     CHECK(back && st.bundles_installed == 0 && st.bundles_present == 2 && count_entries() == 2);
     free(back);
 
@@ -359,7 +361,7 @@ int main(int argc, char **argv)
         CHECK(mt_copy_tree(from, to));
         (void)sh_modserve_index_build(c_root);
     }
-    back = modexport_read(zip, &len, &st, cause, sizeof cause);
+    back = HOT(char *, cause, modexport_read(zip, &len, &st, HO_P(0)));
     CHECK(back && st.bundles_installed == 1 && st.bundles_present == 1);
     CHECK(entry_at("pink", rows[0].build) && entry_at("maps\\Pink Arena\\Bob Room", rows[1].build));
     CHECK(!entry_at("maps\\Pink Arena\\Pink Imp", rows[0].build));
@@ -376,7 +378,7 @@ int main(int argc, char **argv)
         CHECK(patch_entry(bad, z1l, entry, "second", "SECOND"));
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bad.zip", tmp);
         CHECK(spit(path, bad, z1l));
-        back = modexport_read(path, &len, &st, cause, sizeof cause);
+        back = HOT(char *, cause, modexport_read(path, &len, &st, HO_P(0)));
         CHECK(!back && strstr(cause, "Bob Room"));
         if (g_echo) printf("    damaged: %s\n", cause);
         CHECK(count_entries() == 0 && st.bundles_installed == 0 && loaded_place_none());
@@ -395,12 +397,12 @@ int main(int argc, char **argv)
         strcpy_s(three[2].salt, sizeof three[2].salt, "ghostmod");
         memset(three[2].build, '9', 64);
         three[2].build[64] = 0;
-        strcpy_s(three[2].name, sizeof three[2].name, "Ghost");
+        sh_modmanifest_row_set_name(&three[2], "Ghost");
         three[2].size = 1;
         m3 = map_with(three, 3);
         /* Written by hand: the export itself refuses a row it cannot carry. */
         store_at(a_root);
-        CHECK(m3 && !modexport_write(m3, strlen(m3), zip2, &st, cause, sizeof cause) &&
+        CHECK(m3 && !HO(cause, modexport_write(m3, strlen(m3), zip2, &st, HO_P(0))) &&
               strstr(cause, "this map uses Ghost, which is not installed or does not build") && !strstr(cause, "ghostmod"));
         {
             sh_zip_reader r;
@@ -409,10 +411,10 @@ int main(int argc, char **argv)
             unsigned char *bufs[16];
             size_t k, n = 0, bl;
             char err[256];
-            CHECK(sh_zip_reader_open(&r, zip, err, sizeof err));
+            CHECK(HO(err, sh_zip_reader_open(&r, zip, HO_P(0))));
             for (k = 0; k < r.n && n < 15; k++) {
                 if (!strcmp(r.e[k].name, "Pink Arena.json")) continue;
-                bufs[n] = sh_zip_reader_read(&r, (long)k, 1u << 20, &bl, err, sizeof err);
+                bufs[n] = HOT(unsigned char *, err, sh_zip_reader_read(&r, (long)k, 1u << 20, &bl, HO_P(0)));
                 nm[n] = r.e[k].name;
                 data[n] = (const char *)bufs[n];
                 n++;
@@ -426,7 +428,7 @@ int main(int argc, char **argv)
             sh_zip_reader_close(&r);
         }
         store_at(e);
-        back = modexport_read(path, &len, &st, cause, sizeof cause);
+        back = HOT(char *, cause, modexport_read(path, &len, &st, HO_P(0)));
         if (!back) fprintf(stderr, "  absent: %s\n", cause);
         CHECK(back && st.bundles_installed == 2 && st.bundles_absent == 1);
         free(back);
@@ -443,16 +445,16 @@ int main(int argc, char **argv)
         moved[0] = rows[0];
         memset(moved[0].build, 'c', 64);
         m1 = map_with(moved, 1);
-        CHECK(m1 && modexport_write(m1, strlen(m1), zip2, &st, cause, sizeof cause));
+        CHECK(m1 && HO(cause, modexport_write(m1, strlen(m1), zip2, &st, HO_P(0))));
         {
             sh_zip_reader r;
             char err[256];
             unsigned char *t = NULL;
             size_t tl = 0;
             long at;
-            CHECK(sh_zip_reader_open(&r, zip2, err, sizeof err));
+            CHECK(HO(err, sh_zip_reader_open(&r, zip2, HO_P(0))));
             at = sh_zip_reader_find(&r, "again.json");
-            if (at >= 0) t = sh_zip_reader_read(&r, at, 1u << 20, &tl, err, sizeof err);
+            if (at >= 0) t = HOT(unsigned char *, err, sh_zip_reader_read(&r, at, 1u << 20, &tl, HO_P(0)));
             memset(&got, 0, sizeof got);
             CHECK(t && sh_modmanifest_read((const char *)t, tl, &got, &rej) == 1 &&
                   !strcmp(got.rows[0].build, rows[0].build) && !strcmp(got.rows[0].salt, rows[0].salt));
@@ -472,11 +474,11 @@ int main(int argc, char **argv)
         nm[0] = "old1.json"; data[0] = BASE_MAP;
         nm[1] = "mods/x/bundle.canonical.json"; data[1] = "{}";
         CHECK(mt_zip_stored(f, 2, nm, data));
-        CHECK(!modexport_read(f, &len, &st, cause, sizeof cause) && !strcmp(cause, MODEXPORT_EARLIER));
-        CHECK(!modexport_probe(f, cause, sizeof cause) && !strcmp(cause, MODEXPORT_EARLIER));
+        CHECK(!HOT(char *, cause, modexport_read(f, &len, &st, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
+        CHECK(!HO(cause, modexport_probe(f, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
         nm[1] = "export.json"; data[1] = "{\"format\":1,\"bundles\":[]}";
         CHECK(mt_zip_stored(f, 2, nm, data));
-        CHECK(!modexport_read(f, &len, &st, cause, sizeof cause) && !strcmp(cause, MODEXPORT_EARLIER));
+        CHECK(!HOT(char *, cause, modexport_read(f, &len, &st, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
         /* A carried mod.json in an earlier shape (a format-1 block). */
         _snprintf_s(old_modjson, sizeof old_modjson, _TRUNCATE,
                     "{\"id\":\"alex.pink-imp\",\"name\":\"Pink\",\"snapmap-plus\":{\"format\":1,\"bundle\":\"%s\",\"files\":[]}}",
@@ -484,7 +486,7 @@ int main(int argc, char **argv)
         nm[0] = "old1.json"; data[0] = map;
         nm[1] = "mods/pink/mod.json"; data[1] = old_modjson;
         CHECK(mt_zip_stored(f, 2, nm, data));
-        CHECK(!modexport_read(f, &len, &st, cause, sizeof cause) && !strcmp(cause, MODEXPORT_EARLIER));
+        CHECK(!HOT(char *, cause, modexport_read(f, &len, &st, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
         /* A map whose rows name "id" and "bundle". */
         {
             char oldmap[600];
@@ -493,7 +495,7 @@ int main(int argc, char **argv)
                         "{\"id\":\"alex.pink-imp\",\"version\":\"1\",\"bundle\":\"%s\",\"size\":1}]}}", rows[0].build);
             nm[0] = "old1.json"; data[0] = oldmap;
             CHECK(mt_zip_stored(f, 1, nm, data));
-            CHECK(!modexport_read(f, &len, &st, cause, sizeof cause) && !strcmp(cause, MODEXPORT_EARLIER));
+            CHECK(!HOT(char *, cause, modexport_read(f, &len, &st, HO_P(0))) && !strcmp(cause, MODEXPORT_EARLIER));
         }
         CHECK(count_entries() == 2);   /* c's own two, nothing added */
     }
@@ -508,17 +510,17 @@ int main(int argc, char **argv)
         sh_modmanifest_list_add(&pr, &rows[0]);
         store_at(a_root);
         _snprintf_s(pz, sizeof pz, _TRUNCATE, "%s\\door kit export.zip", tmp);
-        CHECK(modexport_write_prefab("Door Kit", PREFAB, strlen(PREFAB), &pr, NULL, NULL, pz, &st, cause, sizeof cause));
+        CHECK(HO(cause, modexport_write_prefab("Door Kit", PREFAB, strlen(PREFAB), &pr, NULL, NULL, pz, &st, HO_P(0))));
         zip_names(pz, names, sizeof names);
         CHECK(strstr(names, "Door Kit.json\n") && strstr(names, "mods/pink/mod.json\n") && !strstr(names, "room"));
         _snprintf_s(g, sizeof g, _TRUNCATE, "%s\\g", tmp);
         store_at(g);
         /* The open map has a place; a prefab import never changes it. */
         CHECK(sh_modserve_place_set("maps\\Open map") >= 0);
-        CHECK(modexport_read_prefab(pz, NULL, NULL, &text, &tl, pname, sizeof pname, &st, cause, sizeof cause));
+        CHECK(HO2(pname, cause, modexport_read_prefab(pz, NULL, NULL, &text, &tl, HO_P(0), &st, HO_P(1))));
         {
-            char now[SH_MODSERVE_PLACE_CAP];
-            sh_modserve_place_get(now, sizeof now);
+            char now[HO_TEXT];
+            HOS(now, sh_modserve_place_get());
             CHECK(!strcmp(now, "maps\\Open map"));
             CHECK(sh_modserve_place_set(NULL) >= 0);
         }
@@ -531,8 +533,8 @@ int main(int argc, char **argv)
         }
         free(text);
         /* Each importer refuses the other's export. */
-        CHECK(!modexport_read(pz, &len, &st, cause, sizeof cause) && strstr(cause, "prefab's export, not a map's"));
-        CHECK(!modexport_read_prefab(zip, NULL, NULL, &text, &tl, pname, sizeof pname, &st, cause, sizeof cause) &&
+        CHECK(!HOT(char *, cause, modexport_read(pz, &len, &st, HO_P(0))) && strstr(cause, "prefab's export, not a map's"));
+        CHECK(!HO2(pname, cause, modexport_read_prefab(zip, NULL, NULL, &text, &tl, HO_P(0), &st, HO_P(1))) &&
               strstr(cause, "map's export, not a prefab's"));
         sh_modmanifest_list_free(&pr);
     }
@@ -546,10 +548,10 @@ int main(int argc, char **argv)
         store_at(a_root);
         /* A name no ANSI code page spells: the hooks take UTF-8. */
         _snprintf_s(utf8, sizeof utf8, _TRUNCATE, "%s\\hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5.zip", tmp);
-        CHECK(map && modexport_write_text_report(map, strlen(map), utf8, &bundles, cause, sizeof cause) > 0 && bundles == 2);
-        CHECK(modexport_validate_source(utf8, cause, (int)sizeof cause) && !strcmp(cause, "ok"));
+        CHECK(map && HOZ(cause, modexport_write_text_report(map, strlen(map), utf8, &bundles, HO_P(0))) > 0 && bundles == 2);
+        CHECK(HO(cause, modexport_validate_source(utf8, HO_P(0))) && !strcmp(cause, "ok"));
         store_at(h);
-        heap = modexport_read_text_report(utf8, &len, cause, sizeof cause);
+        heap = HOT(char *, cause, modexport_read_text_report(utf8, &len, HO_P(0)));
         CHECK(heap && recorded_as(heap, len, map, "hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5"));
         if (heap) HeapFree(GetProcessHeap(), 0, heap);
         CHECK(entry_at("maps\\hook\xc3\xa9 \xe2\x80\x94 \xe6\x97\xa5\\Pink Imp", rows[0].build));
@@ -557,7 +559,7 @@ int main(int argc, char **argv)
 
     printf("-- an import that would replace another build in its place takes a place of its own\n");
     {
-        char pinkasset[MAX_PATH * 2], dir[MAX_PATH], key[MAX_PATH + 8], *m1, segment[SH_CARRIER_PLACE_CAP];
+        char pinkasset[MAX_PATH * 2], dir[MAX_PATH], key[MAX_PATH + 8], *m1, segment[HO_TEXT];
         sh_ms_sync_stats ss;
         sh_modmanifest_list got;
         unsigned rej = 0;
@@ -569,22 +571,22 @@ int main(int argc, char **argv)
         CHECK(sh_ms_sync(NULL, &ss));
         (void)sh_modserve_index_build(a_root);
         m1 = map_with(rows, 1);
-        CHECK(m1 && modexport_write(m1, strlen(m1), zip, &st, cause, sizeof cause));
+        CHECK(m1 && HO(cause, modexport_write(m1, strlen(m1), zip, &st, HO_P(0))));
         /* b's place holds the earlier build: the import goes beside it. */
         store_at(b_root);
-        back = modexport_read(zip, &len, &st, cause, sizeof cause);
+        back = HOT(char *, cause, modexport_read(zip, &len, &st, HO_P(0)));
         if (!back) fprintf(stderr, "  beside: %s\n", cause);
         CHECK(back && st.bundles_installed == 1);
         CHECK(entry_at("maps\\Pink Arena\\Pink Imp", rows[0].build));   /* the earlier import's, kept */
-        CHECK(back && sh_carrier_place(back, len, segment, sizeof segment) == 1 && strcmp(segment, "Pink Arena") != 0);
+        CHECK(back && HO(segment, sh_carrier_place(back, len, HO_P(0))) == 1 && strcmp(segment, "Pink Arena") != 0);
         memset(&got, 0, sizeof got);
         CHECK(back && sh_modmanifest_read(back, len, &got, &rej) == 1);
         if (got.count)
-            CHECK(sh_modserve_row_served_in(&got.rows[0], segment, NULL, NULL, 0) == SH_MODSERVE_ROW_SERVED &&
+            CHECK(sh_modserve_row_served_in(&got.rows[0], segment, NULL, NULL) == SH_MODSERVE_ROW_SERVED &&
                   strcmp(got.rows[0].build, rows[0].build) != 0);
         sh_modmanifest_list_free(&got);
         _snprintf_s(key, sizeof key, _TRUNCATE, "zip:%s", zip);
-        CHECK(sh_ms_place_of(key, dir, sizeof dir, NULL, 0) && !strcmp(dir, "maps\\Pink Arena"));
+        CHECK(HO(dir, sh_ms_place_of(key, HO_P(0), NULL)) && !strcmp(dir, "maps\\Pink Arena"));
         CHECK(loaded_place_none());
         free(back);
         free(m1);
