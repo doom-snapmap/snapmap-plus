@@ -116,6 +116,11 @@ void sh_typeinfo_table_free(sh_typeinfo_table *t, void (*destroy)(void *context,
     t->count = t->capacity = 0;
 }
 
+int sh_typeinfo_check_due(int cache_count, int max_types, int game_ready)
+{
+    return cache_count > 0 && cache_count <= max_types && game_ready;
+}
+
 #ifndef SH_MODTYPEINFO_PURE
 #include "signatures.h"
 #include "engine_globals.h"
@@ -203,7 +208,7 @@ static int g_checked, g_ok;      /* the boot self-check ran; it passed (the tabl
 static int g_depth;              /* inside the product's builder: the game's own path answers */
 static sh_typeinfo_table g_table;
 static long g_served, g_built, g_failed;
-static int g_reported_mods, g_reported_missing;
+static int g_reported_mods, g_reported_missing, g_reported_checked = -2;
 static int g_log_lines;
 
 static void ti_log(const char *fmt, ...)
@@ -282,6 +287,19 @@ static void *ti_game_slot(void *game, size_t slot)
     if (!game || !ti_rd_ptr(game, &vtbl) || !vtbl) return NULL;
     if (!ti_rd_ptr((unsigned char *)vtbl + slot, &fn)) return NULL;
     return fn;
+}
+
+/* 1 when the game object and the three calls a type is built through are there. */
+static int ti_game_ready(void)
+{
+    void *game = NULL;
+    int ready = 0;
+    __try {
+        game = ti_game();
+        ready = game && ti_game_slot(game, GSLOT_CREATE) && ti_game_slot(game, GSLOT_WRITE_STATE) &&
+                ti_game_slot(game, GSLOT_DESTROY);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ready = 0; }
+    return ready;
 }
 
 /* Build the default tree of the entityDef `key` names, as idSnapTypeInfoCache::Build
@@ -424,7 +442,8 @@ static int ti_tree_eq(const void *mine, const void *game, int *nodes, char *why,
 
 /* Once per boot, when the game's cache has entries: build stock types the
  * product's way and compare them with the game's entries. The table serves
- * only after this passes. Returns g_ok; -1 while the cache is still empty. */
+ * only after this passes. Returns g_ok; -1 while the cache is still empty or
+ * the game object is not there yet (sh_typeinfo_check_due). */
 static int ti_self_check(void)
 {
     int n, picks[SELF_CHECK_TYPES], i, k = 0, nodes[SELF_CHECK_TYPES];
@@ -433,7 +452,10 @@ static int ti_self_check(void)
     if (g_checked) return g_ok;
     if (!g_installed || ti_on_main() != 1) return 0;
     n = ti_cache_count();
-    if (n <= 0 || n > SH_TYPEINFO_MAX_TYPES) return -1;
+    /* Not yet: the cache is empty, or the game object the check builds its
+     * types through is not there (the first map of a session that already
+     * uses mods asks during its load). Asked again at the next use. */
+    if (!sh_typeinfo_check_due(n, SH_TYPEINFO_MAX_TYPES, ti_game_ready())) return -1;
     g_checked = 1;
     picks[0] = 0; picks[1] = n / 2; picks[2] = n - 1;
     detail[0] = '\0';
@@ -635,13 +657,17 @@ void sh_modtypeinfo_after_palette(void *palette)
         if (n > 0 && sh_typeinfo_cache_index(g_cache, key) < 0) missing++;
     }
     checked = ti_self_check();
-    if (mods == g_reported_mods && missing == g_reported_missing) return;
+    if (mods == g_reported_mods && missing == g_reported_missing && checked == g_reported_checked) return;
     g_reported_mods = mods;
     g_reported_missing = missing;
+    g_reported_checked = checked;
     if (n <= 0) ti_log("MODS: typeinfo: %d mod rows in the palette; the game has not built its type-info cache yet", mods);
     else if (checked == 1)
         ti_log("MODS: typeinfo: %d of %d mod rows resolve through the product's table (the game's cache holds %d of at most %d "
                "types; %d rows registered)", missing, mods, n, SH_TYPEINFO_MAX_TYPES, rows);
+    else if (checked < 0)
+        ti_log("MODS: typeinfo: %d of %d mod rows are not in the game's cache of %d types (%d rows registered); the "
+               "product's table serves them once its self-check can run", missing, mods, n, rows);
     else
         ti_log("MODS: typeinfo: %d of %d mod rows are not in the game's cache of %d types (%d rows registered) and the "
                "product's table is not serving them", missing, mods, n, rows);

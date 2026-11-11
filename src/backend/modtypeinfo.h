@@ -79,6 +79,11 @@ void *sh_typeinfo_table_remove(sh_typeinfo_table *t, const void *key);
 int sh_typeinfo_table_forget_name(sh_typeinfo_table *t, const char *name);
 void sh_typeinfo_table_free(sh_typeinfo_table *t, void (*destroy)(void *context, void *tree), void *context);
 
+/* 1 when the boot self-check can run now: the game's cache has entries and
+ * the game object the product builds a type through is there. While it
+ * cannot, the check is not held against the session: it is asked again. Pure. */
+int sh_typeinfo_check_due(int cache_count, int max_types, int game_ready);
+
 #ifndef SH_MODTYPEINFO_PURE
 struct sig_result;
 /* Resolve the engine and install the two detours. Returns 1 when they are

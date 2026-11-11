@@ -49,6 +49,11 @@ int main(void)
     CHECK(sh_typeinfo_cache_index(cache, pool[4]) == 1);
     CHECK(sh_typeinfo_cache_index(cache, pool[7]) == 2);
     CHECK(sh_typeinfo_cache_index(cache, pool[0]) == -1);
+    /* the boot self-check waits for the cache and for the game object; neither failure is final */
+    CHECK(sh_typeinfo_check_due(1330, 1499, 1) == 1);
+    CHECK(sh_typeinfo_check_due(1330, 1499, 0) == 0);
+    CHECK(sh_typeinfo_check_due(0, 1499, 1) == 0);
+    CHECK(sh_typeinfo_check_due(1500, 1499, 1) == 0);
     CHECK(sh_typeinfo_cache_index(cache, pool[2]) == -1);
     CHECK(sh_typeinfo_cache_index(cache, NULL) == -1);
     CHECK(sh_typeinfo_cache_index(NULL, pool[1]) == -1);
