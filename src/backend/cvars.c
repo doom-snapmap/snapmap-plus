@@ -23,8 +23,9 @@ typedef int (*name_hash_fn)(const char *name);
 
 /* Full-table offsets follow RegisterStaticVars. The developer-table alias exposes
  * this same list to the console. Resolve the singleton from CmdSystemLea +0x10,
- * then an independent global anchor, then the Vulkan-name-gated pinned RVA. */
-#define CVARSYS_SLOT_RVA          SH_RVA(0x2F451D0u, 0x2F8D1D0u)   /* Pinned Vulkan slot; the fallback gate checks its filename, not its hash. */
+ * then an independent global anchor, then the recorded slot RVA, which is applied
+ * only to an executable whose SHA-256 is a supported build's. */
+#define CVARSYS_SLOT_RVA          SH_RVA(0x2F451D0u, 0x2F8D1D0u)   /* recorded slot, per renderer */
 #define CVARSYS_OFF_FROM_CMDSYS   0x10         /* cvarSys .data slot == cmdSystem .data slot + 0x10 (adjacent) */
 #define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
 #define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
@@ -172,14 +173,14 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
             uint8_t *obj = NULL;
             if (sh_safe_read(cvarsys_slot, (uint8_t *)&obj, sizeof obj) && obj) {
                 _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B2: cvarSys decoded slot=%p (cmdSystem+0x10) -> obj=%p (portable)",
+                    "cvars: cvarSys decoded slot=%p (cmdSystem+0x10) -> obj=%p",
                     (void *)cvarsys_slot, (void *)obj);
                 backend_log(line);
                 return obj;
             }
             break;
         }
-        backend_log("B2: cvarSys portable decode failed -- trying the signed data-global anchor");
+        backend_log("cvars: cvarSys decode failed; trying the signed data-global anchor");
     }
 
     /* Independent anchor also works when CmdSystemLea has been detoured. */
@@ -190,18 +191,18 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
             uint8_t *obj = NULL;
             if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&obj, sizeof obj) && obj) {
                 _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B2: cvarSys glb slot=%p -> obj=%p (portable)", (void *)slot, (void *)obj);
+                    "cvars: cvarSys global slot=%p -> obj=%p", (void *)slot, (void *)obj);
                 backend_log(line);
                 return obj;
             }
         } else {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cvarSys glb anchor unresolved (status=%d)", (int)gst);
+                "cvars: cvarSys global anchor unresolved (status=%d)", (int)gst);
             backend_log(line);
         }
     }
 
-    /* Last resort: pinned Vulkan RVA, gated by host filename rather than hash. */
+    /* Last resort: the recorded slot RVA, applied only to a supported executable (by its hash). */
     if (module_base && sh_host_is_supported_build()) {
         uint8_t *obj = NULL;
         __try {
@@ -211,12 +212,12 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
         }
         if (obj) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cvarSys pinned-build fallback *(base+0x55b7290)=%p", (void *)obj);
+                "cvars: cvarSys from the recorded slot *(base+0x%x)=%p", (unsigned)CVARSYS_SLOT_RVA, (void *)obj);
             backend_log(line);
             return obj;
         }
     }
-    backend_log("B2: cvarSys UNRESOLVED -- cvar findable-insert will be skipped");
+    backend_log("cvars: cvarSys unresolved; the Snapmap+ cvars are registered but not findable by name");
     return NULL;
 }
 
@@ -225,16 +226,16 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
     char line[160];
 
     if (cvar_register == NULL) {
-        backend_log("B2: cvars SKIPPED -- CvarRegister not resolved");
+        backend_log("cvars: not registered, CvarRegister did not resolve");
         return 0;
     }
     if (!SH_CVARSYS_LAYOUT_ESTABLISHED) {
-        backend_log("B2: cvars SKIPPED -- the idCVarSystem list/hash layout is not established for "
+        backend_log("cvars: not registered, the idCVarSystem list/hash layout is not established for "
                     "build 13954591");
         return 0;
     }
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) {
-        backend_log("B2: cvars already registered (one-shot latch) -- skipping double-register");
+        backend_log("cvars: already registered");
         return 0;
     }
 
@@ -244,7 +245,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         ok += register_one(reg, i);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 2 of OG's 9 rows)",
+        "cvars: registered %d/%d (register=%p; NOCHEAT, so console sets work without dev mode)",
         ok, CVAR_COUNT, cvar_register);
     backend_log(line);
 
@@ -256,7 +257,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         if (r & 1) mutated++;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvar readback -- %d/%d name@+0x%x matched, %d/%d object-mutated (DIRECT engine-populated proof)",
+        "cvars: readback %d/%d name@+0x%x matched, %d/%d objects written by the engine",
         matched, CVAR_COUNT, (unsigned)IDCVAR_NAME_OFF, mutated, CVAR_COUNT);
     backend_log(line);
 
@@ -279,7 +280,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
     int inserted = 0, full_skips = 0, faults = 0;
     if (cvarSys == NULL || hashfn == NULL) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: cvar findable-insert SKIPPED -- cvarSys=%p hashfn=%p (module_base=%p)",
+            "cvars: not inserted for lookup (cvarSys=%p hashfn=%p module_base=%p)",
             (void *)cvarSys, (void *)hashfn, (void *)module_base);
         backend_log(line);
     } else {
@@ -295,7 +296,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
             cap_after   = *(volatile int *)(cvarSys + CVARSYS_LIST_CAP_OFF);
         } __except (EXCEPTION_EXECUTE_HANDLER) { count_after = -1; cap_after = -1; }
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: cvar findable-insert %d/%d (cvarSys=%p count=%d cap=%d full-skip=%d fault=%d)",
+            "cvars: inserted for lookup %d/%d (cvarSys=%p count=%d cap=%d full-skip=%d fault=%d)",
             inserted, CVAR_COUNT, (void *)cvarSys, count_after, cap_after, full_skips, faults);
         backend_log(line);
     }

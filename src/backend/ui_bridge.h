@@ -1,6 +1,6 @@
 /* Backend ownership and startup of the shared frontend interface. */
-#ifndef BACKEND_B2_UI_BRIDGE_H
-#define BACKEND_B2_UI_BRIDGE_H
+#ifndef BACKEND_UI_BRIDGE_H
+#define BACKEND_UI_BRIDGE_H
 
 #include "snapmap_plus_iface.h"
 
@@ -19,4 +19,4 @@ sh_iface *sh_ui_get_iface(void);
  * fails, or 0 on allocation failure. Only interface creation is idempotent. */
 int sh_ui_bridge_install(void);
 
-#endif /* BACKEND_B2_UI_BRIDGE_H */
+#endif /* BACKEND_UI_BRIDGE_H */
