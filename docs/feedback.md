@@ -33,7 +33,7 @@ Invalid UTF-8, malformed JSON and non-object payloads return 400; excess bytes o
 characters return 413. The UI receives a failed response and retains the draft.
 
 - **Title:** `[Bug] <the user's title>` (or `[Feature]` / `[Docs]` / `[Other]`).
-- **Body:** the user's details, then a metadata block: `- Version: 0.2.0-beta.3 (beta)`, a
+- **Body:** the user's details, then a metadata block: `- Version: v1.0.0 (stable)`, a
   `- Renderer: Vulkan` (or `OpenGL`) line, a `- Game:` line, an optional `- Contact:` line, and an
   invisible `<!-- report-sig:… -->` marker (the dedup signature: a hash of category + normalized
   title). Nothing else is collected — no telemetry, and no system or hardware information beyond the
@@ -51,7 +51,7 @@ A filed bug report's metadata block reads, for example:
 
 ```text
 ---
-- Version: v0.2.2-beta.1 (beta)
+- Version: v1.0.1 (stable)
 - Renderer: Vulkan
 - Game: DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
 - Contact: `someone@example.com`

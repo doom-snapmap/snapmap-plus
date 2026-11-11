@@ -184,7 +184,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   notes, `desktop.ini`) are ignored and never carried. A mistake in `scenes` or `hud` fails the
   build with a sentence naming the block. A mod that brings campaign content gets the requirement
   `g_useResourceBlackList` 0 and `g_useImageBlackList` 0 without writing it. Everything about mods is in `mods\`: the folders and one product file,
-  `snapmap-plus.json` (publish claims, the migration record, the maps' places).
+  `snapmap-plus.json` (publish claims, the installer's conversion record, the maps' places).
 - A mod's identity is its salt: eight characters the product writes once into `mod.json`. The
   folder name is yours; rename a folder any time and it stays the same mod. A folder you drop into
   `mods\` with a `mod.json` of your own (no `snapmap-plus` part) is a new mod: at the next Refresh
@@ -261,9 +261,9 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   the game keeps all three for the session together and never finds a model whose skeleton was
   released.
 - Installed mods are served after the product's own files and before the game's archives. A mod's
-  new editor rows appear in the palette when the editor is first opened; a mod installed after that
-  needs `sh_mods palette rebuild`. A mod that fails a check is skipped on its own with one logged
-  reason; the rest still load.
+  editor rows appear in the palette when the editor is first opened, and a Refresh, install or New
+  mod adds, changes or removes them in the open editor (`sh_mods palette rebuild` does the same by
+  hand). A mod that fails a check is skipped on its own with one logged reason; the rest still load.
 - A map serves exactly the mods it uses, at the build it was saved with, then the game: while a map
   is open in the editor or played, a mod it does not use serves nothing in it, and one mod never takes
   precedence over another. A map uses a mod when it places something the mod provides or when the mod
@@ -273,16 +273,15 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   with no map open, a mod the map does not use still offers its Toybox rows and everything under
   `mods/<salt>/` (what you wrote under `mods/<folder name>/`) (placing one makes the map use the mod at the next save), never its replacements; in
   Play it offers nothing. A mod that adds Toybox rows keeps its requirements in the editor, since its
-  rows are offered in every map, but not in the Play of a map that does not use it. `"scope"` in a `mod.json` no longer changes anything. A mod that
+  rows are offered in every map, but not in the Play of a map that does not use it. A mod that
   replaces something the editor itself uses (an editor settings, palette or property-inspector decl, or
-  the editor's own movies: the editor tweaks, and the older packages whose Toybox rows are such
-  replacements) applies in every map as before, with one log line. When several mods a map uses
+  the editor's own movies: the editor tweaks) applies in every map, with one log line. When several mods a map uses
   replace the same file with different bytes, the one whose needs the map's mods satisfy, then the
   bytes most of them carry, then the first in the map's list serves, with their list entries combined
   (the encounter conductor, the player body's event rows); the order you installed them never
   matters. Opening the Settings screen from the editor's Start menu keeps
-  the map's mods applied. `sh_mods status`, `sh_mods doctor` and `sh_mods map` print each mod's scope
-  and whether it is active in the open map, and `sh_mods doctor` prints which mod serves each replaced
+  the map's mods applied. `sh_mods status`, `sh_mods doctor` and `sh_mods map` print whether each mod
+  is active in the open map, and `sh_mods doctor` prints which mod serves each replaced
   file for the open map. A published map played from the hub keeps its mods applied until the next map
   opens.
 - Every game file a mod edits is generated per map from the game's text and the edits of the mods
@@ -417,7 +416,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folder when it is at that very build; otherwise it is downloaded there, and refused as above
   when that build is gone.
 
-- Maps saved by v0.2.1-beta.6 to beta.19 with packages in them are converted on this machine by
+- Maps saved by earlier releases with packages in them are converted on this machine by
   the installer's store tool: each complete package becomes an ordinary mod folder (unless an
   installed mod already serves the same content) and the map gets a mod row for it. A map in such
   a shape that the installer has not converted is refused on load with "This map was saved in a
@@ -428,7 +427,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   Play; a replaced movie the game already holds changes at the next map load, and one held since
   startup after a restart.
 - A mod's `requirements` set console variables and run console commands while a map that uses it is
-  open or played (or while it is installed, for a mod whose scope is `always`):
+  open or played:
   `"requirements": {"cvars": {"<cvar>": <value>}, "commands": {"activate": ["<line>"], "deactivate":
   ["<line>"]}}`. Any cvar works at any value (a string, an integer, or `true`/`false` for 1/0; write a
   decimal as a string), up to 32 per mod; each command is one console line without `;`, up to 16 per
@@ -441,7 +440,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   requirement's state for that mod: live, not active for this map (also when another mod holds the
   same value), refused with the reason, or restored after it stopped. When two mods ask different values for one cvar the later
   install loses, both are named in the log, and none of its requirements apply. The Mods tab lists
-  them under Requirements.
+  them under Console settings.
 - A mod's `hud` setting chooses how the ammo panel shows a weapon: `"ammo_display": "weapon"` for a
   weapon decl lets the panel show the weapon's own capacity (the campaign pistol's infinity symbol
   and full bar) instead of SnapMap's forced number. It changes only the display and follows the mods
@@ -454,7 +453,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   frame the scene starts and `ae_showHudForContextPrompt` on the frame it releases the player, in
   the mod's `player/mp/tp_body_mp.md6` event rows for that animation. In the engine the hide event
   reaches nothing and the show event only restores the campaign HUD screen, so during SnapMap Play
-  the backend turns the two events into `g_showHud` 0 and 1 (the base event dispatcher, R306); in
+  the backend turns the two events into `g_showHud` 0 and 1 (the base event dispatcher); in
   the editor and the campaign they are left to the engine. A hide whose show never fired (a show row
   on a frame the sync no longer plays) is undone when a mod scene node raises On Scene Finished, and
   otherwise at the next Play entry. The log says `scene-hud installed` and, once
@@ -466,7 +465,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   and when the node raises On Scene Finished (`SNAP_EVENT_INTERACTABLE_USED`) it teleports that player
   back to where they stood, with the same view angles. An Activate on such a row from anything but a
   player (a demon walking into a trigger) is dropped, and the engine's interaction request with no
-  requester, which used to end Play with an engine error, is refused (R312, R313). Other
+  requester, which would end Play with an engine error, is refused. Other
   interaction actions and the editor are left to the engine. The log says `scene-place installed`
   and, once per Play, `a scene node plays at`, `returned after the scene`, `dropped an Activate` and
   `refused interaction action`.
@@ -540,8 +539,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   are, and it then moves, saves and plays like a stock module. Saved maps name its mod in their
   Snapmap+ data.
 - A mod can carry its own virtual-texture board (the pages a lit material streams its diffuse,
-  specular and normal detail from): the members `virtualtextures/mods/<salt>/<name>_sq<N>.mega2`
-  (N 1 to 16), and materials naming it with `landpagefile "mods/<salt>/<name>"` and explicit mapping
+  specular and normal detail from): the members `virtualtextures/mods/<folder name>/<name>_sq<N>.mega2`
+  (N 1 to 16), and materials naming it with `landpagefile "mods/<folder name>/<name>"` and explicit mapping
   lines, on the game's own demon programs (`skinvmtr`, `skinvmtrwounds`). The board draws in full
   fidelity like the game's own, on Vulkan and on OpenGL with any graphics card; nothing of it goes
   into the game's own board and no game file changes. A board is registered for each mod the loaded
@@ -674,9 +673,9 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_event` | The live engine event registry: `sh_event info <name>` prints an event's number, argument format, types and names; `sh_event list [filter]` prints every event (1611 on this build), or those whose line contains the filter. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_scripts` | Mod scripts in this map: for each mod, whether its scripts are waiting for Play, running (files loaded, handlers registered, entities driven), stopped (the stop line with file and line) or ended with the map. `sh_scripts log [mod]` prints a mod's script log (its prints, warnings and the stop line); `sh_scripts reload` during Play ends the scripts and starts them again from their files at the next frame, and outside Play compiles every script of the open map's mods and prints any error with its file and line. |
-| `sh_mods` | Installed mods (see [Mods](#mods)). Bare or `status`: what the serving table holds and serves. `rescan` (or `refresh`) rereads the mods folder; `palette rebuild` adds rows of mods installed after the editor first opened. `rescan` also builds every mod folder whose files or `mod.json` changed and applies what changed to the running game, printing one `MODS: refresh:` line per category: decls re-parsed by type, models and images reloaded, anims waiting for the next map load, new names that need a map reload or `palette rebuild`, changes that need a restart, and changes left pending during Play; `status` says when changes are pending. `held [filter]` prints what the game was served under each name this session (bundle, file, serves, and whether the game holds the name and for how long) and the names it holds for the session by type. `build "<folder>"` checks a mod and writes the `snapmap-plus` member of its `mod.json`; `install "<folder>"` copies it into the mods folder under its own name, verifies it and rescans; `list` shows every mod folder and its state; `verify "<folder>"` rehashes one installed mod. `copystock "<engine path>" "<file>"` writes the bytes of an installed game file to a new file, so a stock mesh or animation can be placed in a mod under a new name; it never replaces a file. `map` prints the open map (name, last save, published and uploaded state, search tag) and each mod it uses, by its name and folder, with its placed entities and the wires and Timelines pointing at them and whether it is used by the whole map. `map add "<mod folder>"` uses that mod in the whole open map without placing anything (the Mods tab's Use in this map). `status` and `doctor` print each mod's scope and whether it is active in the open map. `map remove "<mod folder>"` prints what removing that mod from the open map does, and with `--yes` does it (the Mods tab's Remove from map); `uninstall "<mod folder>"` prints what uninstalling does (the open map first, the Toybox rows, the folder moved to the Windows Recycle Bin, how many of your saved maps use it, and that the undo history is cleared) and does it with `--yes`; it removes the one folder it names (your own before a downloaded map's copy), as the Mods tab does; `rebuild "<folder>"` builds one of your mod folders again and rescans (in the tab, Refresh builds every changed folder). `choose "<game file>/<path>" "<mod folder>"` picks whose edit serves a field several of the open map's mods set to different values (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; none clears). `new "<name>"` makes a mod folder named after the mod. `doctor` prints every mod folder with its state and its plain cause, which layer serves each path several mods carry, and the registries with their clashes. `push "<mod folder>" "<ref>"`, `release "<ref>"` and `retry` upload to and release from the mod store on a worker thread; `export "<path.zip>"` writes the open map with its mods; `import "<path.zip>"` opens such a ZIP as File > Load Rawmap does. Console lines name mods by name or folder. A folder or file without a drive is taken relative to the mods folder. |
+| `sh_mods` | Installed mods (see [Mods](#mods)). Bare or `status`: what the serving table holds and serves. `rescan` (or `refresh`) rereads the mods folder; `palette rebuild` adds rows of mods installed after the editor first opened. `rescan` also builds every mod folder whose files or `mod.json` changed and applies what changed to the running game, printing one `MODS: refresh:` line per category: decls re-parsed by type, models and images reloaded, anims waiting for the next map load, new names that need a map reload or `palette rebuild`, changes that need a restart, and changes left pending during Play; `status` says when changes are pending. `build "<folder>"` checks a mod and writes the `snapmap-plus` member of its `mod.json`; `install "<folder>"` copies it into the mods folder under its own name, verifies it and rescans; `list` shows every mod folder and its state; `verify "<folder>"` rehashes one installed mod. `copystock "<engine path>" "<file>"` writes the bytes of an installed game file to a new file, so a stock mesh or animation can be placed in a mod under a new name; it never replaces a file. `map` prints the open map (name, last save, published and uploaded state, search tag) and each mod it uses, by its name and folder, with its placed entities and the wires and Timelines pointing at them and whether it is used by the whole map. `map add "<mod folder>"` uses that mod in the whole open map without placing anything (the Mods tab's Use in this map). `status` and `doctor` print whether each mod is active in the open map. `map remove "<mod folder>"` prints what removing that mod from the open map does, and with `--yes` does it (the Mods tab's Remove from map); `uninstall "<mod folder>"` prints what uninstalling does (the open map first, the Toybox rows, the folder moved to the Windows Recycle Bin, how many of your saved maps use it, and that the undo history is cleared) and does it with `--yes`; it removes the one folder it names (your own before a downloaded map's copy), as the Mods tab does; `rebuild "<folder>"` builds one of your mod folders again and rescans (in the tab, Refresh builds every changed folder). `choose "<game file>/<path>" "<mod folder>"` picks whose edit serves a field several of the open map's mods set to different values (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; none clears). `new "<name>"` makes a mod folder named after the mod. `doctor` prints every mod folder with its state and its plain cause, which layer serves each path several mods carry, and the registries with their clashes. `push "<mod folder>" "<ref>"`, `release "<ref>"` and `retry` upload to and release from the mod store on a worker thread; `export "<path.zip>"` writes the open map with its mods; `import "<path.zip>"` opens such a ZIP as File > Load Rawmap does. Console lines name mods by name or folder. A folder or file without a drive is taken relative to the mods folder. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — for each marked module copy, each demon size's outcome (built, built with parts left out, keeps its shipped navigation, or not baked yet) with its reason and which faces of each marked box carry a floor climb for how many demons (or the commonest reason none does), and every box the map read left out with why; it also says which map the last Play read its boxes from. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. `sh_navmesh reads` counts what reading the editor's boxes has cost this session; `sh_navmesh detail` adds the bake's internal state (geometry revision, map tables, the engine's navigation opens and the bake cache). |
-| `sh_overrides_off`, `sh_resread`, `sh_dialogtest`, `sh_dialogpoll`, `sh_dialogdump`, `sh_debugrender`, `sh_superscriptop`, `cs_dumpeventdefs`, `cs_fieldinfo`, `cs_start_render_logging`, `sh_vt`, `cs_dontuse`, `sh_alginfo`, `sh_navmesh marks` | Developer diagnostics, registered only by the diagnostic build (`build.ps1 -Diag`); a release has none of them. |
+| `sh_mods held`, `sh_mods palette check`, `sh_overrides_off`, `sh_resread`, `sh_dialogtest`, `sh_dialogpoll`, `sh_dialogdump`, `sh_debugrender`, `sh_superscriptop`, `cs_dumpeventdefs`, `cs_fieldinfo`, `cs_start_render_logging`, `sh_vt`, `cs_dontuse`, `sh_alginfo`, `sh_navmesh marks` | Developer diagnostics, registered only by the diagnostic build (`build.ps1 -Diag`); a release has none of them. |
 | `sh_disable_devmode` | Turn developer features off while keeping Bethesda.net connectivity. |
 | `sh_reenable_devmode` | Turn developer features back on. |
 | `noClip` / `infiniteHealth` / `noPlayerDeath` / `noPlayerKill` / `noTarget` | The five player-cheat toggles for the local player: no-collision flight, infinite health, can't die, can't be killed, enemies ignore you. |
@@ -742,7 +741,7 @@ goes to the `~` console with a summary toast.
 ## The Studio window
 
 The Snapmap+ window — HTML/CSS/JS rendered in a WebView2 control, opened inside the SnapMap
-editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview-ui.md`](webview-ui.md).
+editor, beside the game. Full detail: [`webview-ui.md`](webview-ui.md).
 The backend loads it from `<DOOM>\snapmap-plus\snapmap-plus-ui-13954591.dll`, a path that names the
 supported build; a `snapmap-plus\snapmap-plus-ui.dll` is the 2018 release's frontend, which this build
 never loads and the installer removes (see [packaging](packaging.md#the-installed-file-contract)).
@@ -918,7 +917,7 @@ Engine detours and resource-loader shadows the backend installs.
 | Rawmap load | **File ▸ Load Rawmap...** and `sh_rawmaps load` open a rawmap in the editor at once, through an editor reload whose one parse reads the rawmap instead of the saved map it borrows; no other map load is ever replaced, so a published or lobby map always loads as itself. A `.zip` installs the mods it carries first. A rawmap that names a mod you do not have is never opened as it is: the game offers the download when the mod store has the mod, serves it with the installed build when another build of that mod is installed, and otherwise refuses with a notice and a console line naming each missing mod and asking for the author's `.zip`. |
 | Rawmap save | **Save Rawmap** and `sh_rawmaps save` write the open map's JSON to the save path. That is `%LOCALAPPDATA%\snapmap-plus\rawmap.json` until **File ▸ Save Rawmap As...** or `sh_rawmaps savepath` names another file, and opening a different map returns it to the default. A file someone downloads and opens is an archive entry, so nothing about opening one aims a save at it. The engine's own Save never writes a rawmap. A map that uses mods also gets `<name>.zip` beside the `.json` on every rawmap save, with a toast and a console line saying to share it. Paths may hold any characters Windows allows. |
 | Rawmap branch answer | A map opened from a rawmap counts as a new map, so the engine's own Save asks for a name instead of replacing whichever map the rawmap opened over. Detours `idSnapEditorLocal::IsBranchMap`, the one function the editor's save menus ask, and answers for a substituted map without writing to the map. A sibling function in the image has the same body around the `map:new` check, so the scan confirms its target by the literal the callee names. `sh_rawmaps overwrite on` allows the replacement instead, for that session only, and says so when it is turned on. Loads are refused if the protective hook is unavailable unless overwrite was explicitly enabled. |
-| Rawmap file menu | **File > Load Rawmap...** picks a `.json` or `.zip` file (both are listed) and, after a confirmation that unsaved editor work is discarded, opens it in place at once; with no map open in the editor it is refused; a `.zip` brings its mods, and missing mods are offered for download or refused before the map opens. **Save Rawmap As...** offers `.zip` first when the map uses mods, and the menu names the `.zip` to share after a save. **Open Rawmap as New Map** confirms before replacing unsaved editor work. **Save Rawmap / Save Rawmap As...** serialize the live map, including unsaved edits; a missing or busy editor is refused, and a map change cancels queued saves. The File menu shows both paths and lets the user release a chosen save destination. See the [rawmap guide](https://www.snapmapplus.com/snapmap-plus-guide.html#rawmaps). |
+| Rawmap file menu | **File > Load Rawmap...** picks a `.json` or `.zip` file (both are listed) and, after a confirmation that unsaved editor work is discarded, opens it in place at once; with no map open in the editor it is refused; a `.zip` brings its mods, and missing mods are offered for download or refused before the map opens. **Save Rawmap As...** offers `.zip` first when the map uses mods, and the menu names the `.zip` to share after a save. **Open Rawmap Again** (named after the file) confirms before replacing unsaved editor work. **Save Rawmap / Save Rawmap As...** serialize the live map, including unsaved edits; a missing or busy editor is refused, and a map change cancels queued saves. The File menu shows both paths and lets the user release a chosen save destination. See the [rawmap guide](https://www.snapmapplus.com/snapmap-plus-guide.html#rawmaps). |
 | Overrides file-shadow | Serves map navigation, the generated Grid Room variants, the built-in default declarations and then installed mods through native file opens, falling back to installed originals, which it reads through the provider's own open (`read_installed_resource`). The only user files it reads are the files of installed mod bundles, through a table built at startup. The custom stream requires the audited native ABI. |
 | Installed mods | Serves the files of every admitted bundle in `mods\` below the product's own sources and above the game's archives, from one table read at startup (sizes checked, never hashes) and replaced only by a rescan. Answers the decl existence probe for served decls, detoured only when a bundle provides one. Registers the bundles' new editor rows inside the palette build, and a map's gameplay decls when a map whose manifest names their bundle loads, at the engine's own map lifetime (the decls of a mod that adds Toybox rows are kept for the session, as the editor pass keeps its rows' decls, unless the game already holds them permanently). A runtime palette rebuild runs inside process heap 0 and is refused while the editor holds an entity or a wire. With an empty `mods\` folder every hook passes through. See [Mods](#mods). |
 | Maps in an earlier shape | A map saved or published by an earlier release in a shape this one does not read (its packages, mod rows, settings or navigation as `smpkg.`, `smpmod1.`, `smpprod1.`, `smp.render.v1`, `smp.bounds.v1`, `smnav1.`, `smpbind.` or `smpref.` string variables, or mod rows that name an `id` and a `bundle`) is refused before the engine parses it, with "This map was saved in a format this version does not read." Its file is not changed. See [Mods](#mods). |
@@ -976,7 +975,7 @@ prefab exports, installs); a Play runs the scripts as they were built at the las
 In the Mods tab a mod with scripts reads "runs scripts" on its row and has a Scripts section in
 plain words (the objects its scripts drive and on which events, the Script nodes they answer and
 fire, the files, which open in the Files view as text with Lua colours) and a Script log: its
-scripts' state in the current or last Play, the last 200 `print` and `warn` lines and the stop line,
+scripts' state in the current or last Play, their `print` and `warn` lines and the stop line,
 with Copy log. While a script is stopped, its stop line is the row's state until the next Play; a
 script that does not build shows its file, line and sentence as the row's cause and on that file in
 the Files view. A downloaded map's mod with scripts says so in its short view ("Runs scripts (N

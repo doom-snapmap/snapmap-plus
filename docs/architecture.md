@@ -1121,10 +1121,10 @@ Bin") and one summary ("removed-mods: 3 folder(s) moved to the Recycle Bin; the
 bin is retired"); a later run finds nothing. An entry that cannot be moved
 stays for the next run.
 
-The store migration tool. The game runs no store migration at boot.
+The store tool. The game converts nothing at boot.
 `snapmap-plus-store.exe` (`src/store/`) links the store sources (`modstore.c`,
-`modstore_upgrade.c`, the store tool's half of the store: the Contract 2
-layout, the second upgrade step over format-1 folders read with
+`modstore_upgrade.c`, the store tool's half of the store: the earliest
+per-build layout, the second upgrade step over format-1 folders read with
 `modbundle_old.c`, and the bin sweep, never linked into the game DLL;
 `modmigrate.c`, `modlegacy.c`, `modbundle.c`, `modstock.c` and what they use)
 with a stand-in for the serving layer (`store_seam.c`), and no engine, DLL or
@@ -1150,7 +1150,7 @@ lines as its action lines and a summary, and exits 0 when nothing is left to do,
 nothing and changes nothing. The installer runs it on install and update (see
 [installer/README.md](../installer/README.md#mods-and-retired-package-folders)).
 A folder without a builder block is salted and built at the next scan, or at
-the next boot (below). A Contract 2 folder is written as a format-1 `mod.json`
+the next boot (below). A folder in that earliest layout is written as a format-1 `mod.json`
 (its manifest's author fields and a block naming its key and build) for the
 conversion below; one whose `bundle.json` does not read is left as it was and
 logged.
@@ -1279,16 +1279,16 @@ left alone with its id under `<id>@<version>` to `<id>` and any folder named
 after a generated version, and collapses a completed `migration` section to
 `complete`, `migratedAt`, `source`, the rows of folders not done (skipped,
 refused or pending) and `trees`, which maps each converted overrides tree to
-its folder and still resolves maps published before Contract 5 (aliases map
+its folder and still resolves maps published by the earliest releases (aliases map
 hashes, not trees); the folder names in it follow the drops and renames. A
 pass of the overrides migration writes the same collapsed section when it
-completes, and the Migrate button counts an `overrides\` entry the section
+completes, and the next run counts an `overrides\` entry the section
 does not list as done unless it was created or written after `migratedAt`.
 The product block's `legacy` record (tree fingerprint, grandfathered shadows)
 is kept as it is. One `MODS: store:` line per dropped or renamed folder and a
 summary.
 
-A bundle file may be a stock pointer instead of carried bytes: Contract 1's
+A bundle file may be a stock pointer instead of carried bytes: the
 file kind `stock`, `{"needs", "path", "provides", "request", "stock":
 {"sha256", "source"}}` with no `blob` and no `size`, where `source` is an
 installed resource path and `sha256` the hash of the installed bytes
@@ -1780,8 +1780,7 @@ feature.
   plain sentence at the calling line) before touching the engine.
 
 Registration also covers `on.pain`, `on.frame_event` and `on.projectile`
-(the combat part). Not built in version 1: `e:pain_anim`, `weapon_ready`,
-`recoil`, `path_points`, `nav_ground` and `anim_valid`.
+(the combat part). Not built in version 1: `e:pain_anim`.
 `tests/script_sandbox_test.c` covers the runtime without the game;
 `tests/modscript_test.c` the builder's checks, the static pass, the serving
 index (scripts and the Script node row), the archives and the fixture mods.
@@ -3032,9 +3031,10 @@ it keeps its canonical text and hash; it is ignored.
 `sh_modserve_index_boot` enables scope for the product's index; the native
 tests enable it where they test it (`sh_modserve_scope_enable`).
 `sh_mods status`, `sh_mods doctor` and `sh_mods map` print
-`sh_modserve_scope_report`: one header per key installed as several bundles
-("scope: key <key>: N bundles installed; ..."), one line per bundle (key, version, hash, its names, shadows and surfaces, and
-what it serves for the open map), then per path several bundles provide with
+`sh_modserve_scope_report`: one header per mod installed as several builds
+("scope: <mod> is installed N times: your own copy and the copies downloaded maps
+brought. ..."), one line per build (the mod, where it is, its names, shadows and
+surfaces, and what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
 <mod name>, declared (row N): <why>; not served: ...` or
 `the game (no declared bundle provides it)`), and the counts per layer. The
@@ -3183,7 +3183,7 @@ map's choices).
 
 ### Migration of the retired overrides folder
 
-Releases up to v0.2.1-beta.19 kept packages in `overrides\`. The store tool's
+Earlier releases kept packages in `overrides\`. The store tool's
 `migrate`, after the store upgrade and the bin sweep, runs `modmigrate.c`'s
 pass once when `overrides\` exists and the record's `migration` section does
 not (or records an unfinished pass), with the `--doom` folder as the stock
@@ -3206,13 +3206,13 @@ bridge's install (`sh_modstock_set_install`):
   folder's salt (`sh_ms_assign_salt_as`). Two folders with one id are both built,
   each in its own folder with its own salt, and the duplicate is reported;
 - each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a mod
-  folder `mods\<id>\` the same way; the record's `trees` gives its beta.19 tree
+  folder `mods\<id>\` the same way; the record's `trees` gives its earlier tree
   fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
   byte, the NUL-terminated relative path and the file's SHA-256) to it, which is
   how a map's carrier `delivery.<tree>` of the same delivery is answered when the
   store tool converts that map;
 - a folder without a descriptor whose only package is one direct child folder
-  (beta.19 read unmarked folders as groups) has that child migrated under the
+  (earlier releases read unmarked folders as groups) has that child migrated under the
   child's own id, and its line says so; a folder without a descriptor and with
   several such children and a ZIP are skipped with the reason (every other
   file, and a folder with no descriptor and no package child, is the loose
@@ -3272,7 +3272,7 @@ step is idempotent). Each folder logs one `MODS: migration:` line and the pass
 one summary line; a line that leaves files out names how many and how many of
 them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
 by `modswf.c`). A migrated pack that shares its old key with a delivered or
-converted package (the beta.19 `doors` packs) is converted below like any
+converted package (such as the `doors` packs) is converted below like any
 copied folder: one keeps the salt and the other gets its own. Stock names are not checked during the migration because the
 pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.

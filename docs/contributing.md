@@ -84,7 +84,7 @@ This compiles both DLLs into **`build/`**: the backend `XINPUT1_4.dll` and the f
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
 sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.) It also builds
-`build/snapmap-plus-store.exe`, the store migration tool the installer runs, from the backend's store sources
+`build/snapmap-plus-store.exe`, the store tool the installer runs, from the backend's store sources
 (`src/store/build.ps1`).
 
 `build.ps1` is the one top-level build script (used above, by CI and by the release workflow); build
@@ -330,20 +330,20 @@ to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
 For a local preview, install `tools/requirements.txt` in your existing Python environment with
 `python -m pip install --require-hashes -r tools/requirements.txt` and supply `ANTHROPIC_API_KEY`
 through your local environment or secret manager. Do not put the key in tracked files.
-Run `python tools/draft_changelog.py --dry-run --tag v0.2.2-beta.1 --base <previous-tag>`
+Run `python tools/draft_changelog.py --dry-run --tag v1.0.1 --base <previous-tag>`
 from the repository root. This reads local commits and documentation through `HEAD`, including local
 prompt edits but not uncommitted product changes. It prints notes to stdout and supporting commits
 to stderr, without creating files or contacting GitHub. It still calls the paid drafting API.
 A failed or rejected draft exits nonzero rather than printing a fallback as a successful preview.
 
-For a GitHub-hosted preview, run `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1 -F dry_run=true`.
+For a GitHub-hosted preview, run `gh workflow run prepare-release.yml -f version=v1.0.1 -F dry_run=true`.
 This uses the same paid drafting API and saves `section.md` and `sources.md` in the run's
 `changelog-draft` artifact, available for one day. It skips the proposal job, so it does not create
 a changelog branch or pull request, edit `CHANGELOG.md`, or publish a release. Download the artifact
 with `gh run download <run-id> -n changelog-draft` and review both files. The normal version checks
 still apply, so choose a version that has no tag, changelog entry or draft branch yet.
 
-1. `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1` -- drafts that release's `CHANGELOG.md`
+1. `gh workflow run prepare-release.yml -f version=v1.0.1` -- drafts that release's `CHANGELOG.md`
    entry and opens a pull request. It refuses a version that is already tagged, already has an entry, or
    already has an open branch, and it refuses a malformed version string before spending anything.
 2. Review the pull request. Its description lists which commit backs each bullet, so a claim can be
@@ -370,15 +370,15 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
 
    **Read every bullet as a claim about the product, not as prose.** The drafter is given the commits and
    the diff of the user-facing docs, and it is told never to name a part of the interface those sources do
-   not name; a draft that does is rejected outright. That guard exists because it happened: the first
-   v0.2.1-beta.8 draft opened with "A Navigation tab lets you mark which Blocking Box surfaces demons are
+   not name; a draft that does is rejected outright. That guard exists because it happened: one early
+   draft opened with "A Navigation tab lets you mark which Blocking Box surfaces demons are
    allowed to walk on" when no Navigation tab was ever built -- the feature is a property in DOOM's own
    object settings, and the word appeared in no commit. Nothing downstream can tell a plausible sentence
    from a true one. This review is the only place that happens, which is also why section 9's rule that a
    behaviour change updates the docs in the SAME pull request matters here: those docs are what the drafter
    is grounded on, and a release whose docs were not updated gives it nothing to be right from.
 3. Merge it.
-4. Tag the merged commit on `main`: `git tag v0.2.2-beta.1 && git push origin v0.2.2-beta.1`. The website's
+4. Tag the merged commit on `main`: `git tag v1.0.1 && git push origin v1.0.1`. The website's
    changelog reads published releases only, so the entry appears there when `release.yml` publishes it.
 5. `release.yml` refuses a tag with no entry, a `NEEDS WRITING` entry or a commit off `main`, so step 4
    cannot silently ship notes-free.
@@ -407,7 +407,7 @@ workflow refuses to draft from the entire history. Pass the last beta as the bas
 tag. The release is created as a draft, every asset is uploaded and read back unchanged, and only then is
 it published, so the newest release never lacks its downloads.
 
-Release binaries are not code-signed yet. `release.yml` holds a disabled signing step after compilation and
+Release binaries are not code-signed. `release.yml` holds a disabled signing step after compilation and
 before packaging, hashing and attestation, naming the repository variables and secrets it needs; enabling
 it is a change to that step's condition once a signing account exists (see [services](services.md)).
 
@@ -503,7 +503,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
-| `src/store/` | `snapmap-plus-store.exe`, the console tool that migrates a mods folder of earlier releases (the installer runs it) |
+| `src/store/` | `snapmap-plus-store.exe`, the console tool that converts the mods, maps and override folders of earlier releases (the installer runs it) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |

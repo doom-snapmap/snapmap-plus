@@ -77,7 +77,7 @@ The header defines the complete ABI. These are the main entry points:
 | Create prefab | `serialize_selection` at `+0xB0`; the engine's copy check (PrefabPopulate) requires the hovered entity to be one of the selected ones. In one `run_on_main` call the host reads `get_selection` and `hovered_id` (`prefab_host.h`), serializes and reads the grab-frame verdict, then writes the file on its own thread. It answers `createPrefabResult` 0 nothing selected, 2 nothing hovered, 4 the hovered entity is not selected, 5 the copy check refused for its other causes (a wired or referenced entity left out, or one the editor does not copy; the backend logs its status), 6 the file was not written whole (the partial file is removed), 7 the game did not run the request in time, -1 the name is one Windows cannot hold. |
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. The game thread decides on its next frame whether the paste was queued or the prefab only staged, and why (`prefab_watch`'s `place_seq`, `place_result`, `place_reason`); the host waits up to 2.5 s for that and posts `loadPrefabResult` with `placed`. |
 | Prefabs tab watch | `prefab_watch` at `+0x380` (ext 35): the modules selected in Blueprint, whether a Load / Place is held in the 3D view (`SH_PREFAB_HELD_OBJECTS` while EntityMode `+0x1AC` reads 4 after a queued paste, `SH_PREFAB_HELD_MODULES` from a module placement's install to Space or Esc) and the last paste decision. Guarded reads from the host's thread, nothing waits for the game. |
-| Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
+| Timeline Save | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
 | Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), except the file work of Install, New mod and Refresh, which the window runs on its own worker with no time limit before APPLY brings the change into the game; FETCH copies it on any thread, ROOT returns the store folder, STORE says whether a store write holds the store lock. See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
@@ -92,8 +92,7 @@ The header defines the complete ABI. These are the main entry points:
 Prefab files use the path returned by `resolve_prefab_path` (UTF-8); every file call
 on it is the wide Windows one. Names are refused when Windows cannot hold them
 (`prefab_host.h`: reserved characters, a trailing dot or space, device names such as
-CON). Rename, delete and folder operations are native filesystem work (an older
-prefab's read-only sidecar moves with it), and a failure carries its `reason`
+CON). Rename, delete and folder operations are native filesystem work, and a failure carries its `reason`
 (`exists`, `inUse`, `missing`, `notEmpty`) so the page can say what to do. Feedback and
 crash submission use a short-lived HTTPS worker in the host and the
 [feedback pipeline](feedback.md).
@@ -112,7 +111,7 @@ crash submission use a short-lived HTTPS worker in the host and the
 | host to page | `loadPrefabResult {result, name, placed, reason}` | For an object prefab, posted once the game thread has decided: `placed` is `queued` ("<name>" is in hand: position it and press Space, or Esc to cancel), `staged` ("<name>" is staged but not in hand because <reason>: press Ctrl+V in the 3D view to place it; for a hovered entity, move the cursor off it first) or `unknown` (no decision within 2.5 s). Module prefabs and the mod outcomes below keep their own fields. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
-| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block (else its older sidecar) records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, version, bundle, size, installed}]}`); see [Prefabs and their mods](#prefabs-and-their-mods). |
+| host to page | `prefabs {..., mods}` / `prefabDetail {..., modsStatus}` | The mods each prefab's block records, keyed like `meta`, as escaped `MODS_STATUS` JSON (`{count, missing, mods: [{id, salt, build, size, installed, state, cause}]}`, `id` being the mod's name, never its salt); see [Prefabs and their mods](#prefabs-and-their-mods). |
 | host to page | `loadPrefabResult {result: 3 \| -7, message}` | 3: the placement is held while its missing mods are asked for online; -7: refused because of its mods (the message says why, or is empty when the game's own notice did). |
 | page to host | `exportPrefab {name, folder}` / `importPrefab` | Open the Windows Save dialog for a prefab's ZIP, or the Open dialog for a ZIP or an extracted export's `.json`; the host answers `prefabFileResult {op, ok, message, name?, cancelled?}` and refreshes the list after an import. |
 
@@ -258,18 +257,19 @@ so the preview and Limits never see it).
 
 The page reads a prefab's details as the view, the flat object
 `{desc, tags, ...summary..., mods}` that `META_READ` returns from the block.
-A prefab saved before the block has none; when a `<name>.meta.json` sits beside
-it, the view is that sidecar, read-only: the first description or tag edit
-writes the block into the file and leaves the sidecar as it was. The list
+A prefab whose file has no block but a `<name>.meta.json` beside it, or a block
+in an earlier shape, is refused for placement and export with "This prefab was
+saved by an earlier version of Snapmap+ and cannot be used. Ask its author to
+export it again."; its details show nothing and an edit writes nothing. The list
 reads each prefab's view from at most the last 1 MB of its file (where the
 block is) for its tags, module kind and mods; it still never sends a scene,
 and a `.meta.json` is never listed as a prefab.
 
-The list shows a pill per prefab that records mods: "Mods: <id>" when every
-one is installed, "Needs mods: <id>" (warning colours) naming the missing ones
+The list shows a pill per prefab that records mods: "Mods: <name>" when every
+one is installed, "Needs mods: <name>" (warning colours) naming the missing ones
 otherwise, "+N" when there are more, and every mod with its state in the
 tooltip; the filter matches "mods" and "needs mods". A mod counts as installed
-under the asset rule (an installed folder of its id provides every name the
+under the asset rule (an installed folder of its salt provides every name the
 prefab's row lists, whatever its hash; `MODS_STATUS` rows carry `state`
 `served`, `missing` or `incomplete` and the refusal sentence as `cause`).
 Prefab Details shows a Mods section under the module warning: one row per mod
@@ -286,16 +286,16 @@ think-loop turn and places the prefab again, through the same Load / Place,
 once the mods are installed), a module the player cannot get, or refused. The
 page shows the backend's text as a toast. Export (Prefab Details head) always
 writes one ZIP, `<name>.json` and each mod as it is installed,
-`mods/<id>/mod.json` and `mods/<id>/assets/...`, through the rawmap pickers'
+`mods/<folder name>/mod.json` and `mods/<folder name>/assets/...`, through the rawmap pickers'
 Save dialog with a "Prefab export (*.zip)" type, proposing `<name>.zip`; it and
 Import open in the last folder used for each, Downloads the first time (see
 File dialog folders above).
 Import (the list head) uses the Open dialog with "Prefab exports (*.zip,
 *.json)": a ZIP, or the `.json` inside an extracted export folder, whose
 `mods/` folder holds the mod folders (`rawmap_picker.h`, `for_prefab_dialog`).
-Import is the ordinary install of each mod folder, as the Mods tab's install
-button does it; a carried folder whose id an installed folder declares and
-whose names that folder provides is skipped. The backend reads and writes them
+Import is the ordinary install of each mod folder into the root of `mods\`, as the
+Mods tab's install button does it; a carried folder whose salt an installed folder
+holds and whose names that folder provides is skipped. The backend reads and writes them
 on the UI thread, with no network.
 
 The list follows the prefabs folder: the host's folder watcher (`folder_watch.h`)

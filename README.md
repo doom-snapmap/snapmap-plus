@@ -3,7 +3,7 @@
 ## Purpose
 
 Snapmap+ extends DOOM 2016's SnapMap editor with entity and declaration editing,
-prefabs, timelines, asset browsing, override packages and navigation tools. It
+prefabs, timelines, asset browsing, mods with Lua scripts and navigation tools. It
 ships two Windows DLLs and a standalone installer, supporting the Vulkan and
 OpenGL executables.
 
@@ -21,10 +21,10 @@ SnapHak binary content; game assets are read from the player's installation.
 | [tools/](tools/README.md) | Release-note tooling and signature derivation. |
 | [feedback/](feedback/README.md) | In-app feedback relay. |
 | [.github/](.github/AUTOMATION.md) | CI, releases, publishing and repository policy. |
+| `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
 
 The website and player guide live in the separate
 [snapmap-web](https://github.com/doom-snapmap/snapmap-web) repository.
-| `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
 
 ## Working here
 
@@ -51,19 +51,19 @@ snapmap-plus status
 snapmap-plus uninstall
 ```
 
-Release binaries are not code-signed yet, so Windows SmartScreen may say
+Release binaries are not code-signed, so Windows SmartScreen may say
 "Windows protected your PC" for `snapmap-plus.exe`; choose **More info**, check
 that the file came from this repository's Releases page, then **Run anyway**.
 `gh attestation verify snapmap-plus.exe --repo doom-snapmap/snapmap-plus` proves
 the file was built here from source.
 
-Close DOOM before installing or updating. Launch it afterward and enter SnapMap;
-run `sh` in the game console if the companion window does not open. See the
+Close DOOM before installing or updating. Launch it afterward and open a map in
+the SnapMap editor; the companion window appears beside the game. See the
 [player guide](https://www.snapmapplus.com/snapmap-plus-guide.html).
 
 The installer and player data live under `%LOCALAPPDATA%\snapmap-plus`.
 Uninstall restores recorded backups and preserves settings, mods, prefabs
-and rawmaps. Original SnapHak user data is copied forward during migration;
+and rawmaps. Original SnapHak user data is copied forward by the installer;
 see the [installer README](installer/README.md).
 
 ## Build and test
@@ -111,20 +111,21 @@ recovery. Deleting it resets preferences on the next startup. Manual changes
 are read at startup; UI settings use the registered service. The installer
 preserves this file.
 
-Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\` and are added with the
-`sh_mods` console command; a saved map names the mods it uses, and the next load
-activates them. A map that names a mod you do not have asks first; it downloads
-only what you approve in the dialog, verified by hash. A map saved or published with packages by an
-earlier release has a complete package converted into a local mod on load; any
-other package is removed. Nothing is loaded from
-`%LOCALAPPDATA%\snapmap-plus\overrides\`: on install and update the installer
-runs `snapmap-plus-store.exe`, which converts a mods folder of earlier releases,
-moves the packages in `overrides\` into `mods\` (packages you add there later
-included) and its loose files and `strings\strids.json` into the mod
+Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. Authors make, install and
+refresh them in the window's Mods tab or with the `sh_mods` console command; a
+saved map names the mods it uses, and the next load activates them. A map that
+names a mod you do not have asks first and downloads only what you approve,
+verified by hash, into that map's own folder under `mods\maps\`. A mod may carry
+Lua scripts that run during Play, sandboxed, on the host only.
+
+On install and update the installer runs `snapmap-plus-store.exe`, which converts
+what earlier releases left: every mod folder and saved map, the packages in
+`overrides\`, and its loose files and `strings\strids.json` into the mod
 `mods\my-overrides`, then sends `overrides\` and `strings\` to the Recycle Bin
 once everything in them is in `mods\`. Nothing is deleted for good: an item the
-Recycle Bin cannot take stays where it is, and the tool says so.
-`snapmap-plus migrate` runs that conversion by itself, without reinstalling. See
+Recycle Bin cannot take stays where it is, and the tool says so. A mod folder or
+map in an earlier shape that the installer has not converted is refused with a
+plain sentence; running the installer again converts it. See
 [Mods](docs/capabilities.md#mods).
 
 ## Credits
