@@ -1665,7 +1665,12 @@ feature.
   edited.
 - **Bounds.** The product imposes none of its own (DECISIONS 26): event texts
   (an `ae_notify` row, a damage decl, a Script node's name) and the stop line
-  are kept whole, of any length; a state's
+  are kept whole, of any length; entityDef and decl names in calls and
+  bindings have any length (the script layer sets none; no fixed bound in the
+  engine's decl-name handling is established, and a mod's own names are paths
+  of its build, which the builder's request rule bounds); a mod's display name
+  is whatever its map row holds (320 bytes, the builder refuses longer); a
+  state's
   memory, the work of a call or a frame, timers, log lines, the size of a
   text a pattern searches, entities spawned, projectiles launched, remembered
   or steered, and every table of the script layer grow as far as the process
