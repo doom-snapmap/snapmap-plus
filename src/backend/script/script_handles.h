@@ -27,6 +27,7 @@
  * a fake one. */
 #ifndef SH_SCRIPT_HANDLES_H
 #define SH_SCRIPT_HANDLES_H
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -64,11 +65,33 @@ void sh_script_handles_reset(void);
  * full (*full is then set to 1 when full is not NULL). */
 sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full);
 
+/* The same, keeping the entity's entityDef chain with the record: `names`
+ * is its entityDef's name then the names it inherits, a newline between them, as
+ * the runtime dispatches on it (copied; NULL keeps none). */
+sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const char *names, int *full);
+
+/* A handle for an entity no scripted mod owns (a player, an attacker), so a
+ * script can be handed it: the existing record when the spawn id is already
+ * recorded, else a new one that the sweep never reports and no mod owns
+ * (sh_script_handle_mod answers SH_SCRIPT_HANDLE_FOREIGN). 0 for none, the
+ * world or a full table. Any thread. */
+#define SH_SCRIPT_HANDLE_FOREIGN (-2)
+sh_script_handle sh_script_handles_ref(uint32_t spawn_id);
+
+/* The entityDef chain recorded with `h` into out ("" when none). Returns its
+ * length, or -1 when h is not a handle of this map. Any thread. */
+int sh_script_handle_names(sh_script_handle h, char *out, size_t cap);
+
+/* 1 while h is recorded and not yet reported gone (waiting for its first
+ * sweep, or live), else 0. Any thread. */
+int sh_script_handle_known(sh_script_handle h);
+
 /* The handle recorded for `spawn_id`, or 0; *mod (may be NULL) gets its mod.
  * Any thread. A dead entry is still found (its handle resolves to nothing). */
 sh_script_handle sh_script_handles_find(uint32_t spawn_id, int *mod);
 
-/* The mod that owns `h`, or -1 when h is not a handle of this map. Any thread. */
+/* The mod that owns `h`, SH_SCRIPT_HANDLE_FOREIGN for a handle no mod owns,
+ * or -1 when h is not a handle of this map. Any thread. */
 int sh_script_handle_mod(sh_script_handle h);
 
 /* The spawn id behind `h`, or SH_SCRIPT_SPAWN_ID_NONE. */

@@ -80,11 +80,25 @@ const char *sh_script_hooks_mod_name(int mod)
     return mod >= 0 && mod < SH_SCRIPT_MODS_MAX && g_mods[mod].used ? g_mods[mod].name : NULL;
 }
 
+int sh_script_hooks_mod_find(const char *salt)
+{
+    int i;
+    if (!salt) return -1;
+    for (i = 0; i < SH_SCRIPT_MODS_MAX; i++)
+        if (g_mods[i].used && !_stricmp(g_mods[i].salt, salt)) return i;
+    return -1;
+}
+
 static void mods_clear(void)
 {
     memset(g_mods, 0, sizeof g_mods);
     g_mod_count = 0;
     sh_script_queue_close_all();
+}
+
+void sh_script_hooks_mods_reset(void)
+{
+    mods_clear();
 }
 
 static int lower(int c)
@@ -124,6 +138,26 @@ int sh_script_hooks_owner_of(const char *const *names, int count)
     return -1;
 }
 
+sh_script_handle sh_script_hooks_record(uint32_t spawn_id, const char *const *names, int count, int *full)
+{
+    char chain[SH_SCRIPT_NAMES_CAP];
+    size_t used = 0;
+    int i, mod;
+    if (full) *full = 0;
+    mod = sh_script_hooks_owner_of(names, count);
+    if (mod < 0) return 0;
+    chain[0] = 0;
+    for (i = 0; i < count; i++) {
+        size_t n = names[i] ? strlen(names[i]) : 0, k;
+        if (!n || used + n + 2 > sizeof chain) continue;
+        if (used) chain[used++] = '\n';
+        for (k = 0; k < n; k++) chain[used + k] = (char)lower((unsigned char)names[i][k]);
+        used += n;
+        chain[used] = 0;
+    }
+    return sh_script_handles_add_named(mod, spawn_id, chain, full);
+}
+
 /* ---- decisions ------------------------------------------------------------ */
 
 int sh_script_tick_decide(const sh_script_tick_state *s)
@@ -133,7 +167,7 @@ int sh_script_tick_decide(const sh_script_tick_state *s)
     if (s->on_main != 1) return s->on_main == 0 ? SH_SCRIPT_TICK_OFF_MAIN : SH_SCRIPT_TICK_UNKNOWN;
     if (s->is_client == 1) return SH_SCRIPT_TICK_CLIENT;
     if (s->is_client != 0) return SH_SCRIPT_TICK_UNKNOWN;
-    if (s->loading == 1) return SH_SCRIPT_TICK_LOADING;
+    if (s->loading == 1) return s->started ? SH_SCRIPT_TICK_LEFT : SH_SCRIPT_TICK_LOADING;
     if (s->loading != 0) return SH_SCRIPT_TICK_UNKNOWN;
     if (s->in_play == 1) return SH_SCRIPT_TICK_RUN;
     if (s->in_play == 0) return s->started ? SH_SCRIPT_TICK_END : SH_SCRIPT_TICK_NOT_PLAY;
@@ -145,6 +179,7 @@ const char *sh_script_tick_name(int d)
     switch (d) {
     case SH_SCRIPT_TICK_RUN: return "run";
     case SH_SCRIPT_TICK_END: return "end";
+    case SH_SCRIPT_TICK_LEFT: return "left the map";
     case SH_SCRIPT_TICK_CLIENT: return "client";
     case SH_SCRIPT_TICK_IDLE: return "idle";
     case SH_SCRIPT_TICK_REENTERED: return "re-entered";
@@ -156,9 +191,14 @@ const char *sh_script_tick_name(int d)
     }
 }
 
-int sh_script_gate_opens(const char *phase)
+int sh_script_gate_opens(int gate)
 {
-    return phase && (!strcmp(phase, "map") || !strcmp(phase, "play"));
+    return gate == SH_SCRIPT_GATE_PLAY;
+}
+
+static const char *gate_name(int gate)
+{
+    return gate == SH_SCRIPT_GATE_PLAY ? "Play build" : gate == SH_SCRIPT_GATE_MAP_LOAD ? "map load" : "gate";
 }
 
 #ifdef SH_SCRIPT_PURE
@@ -174,19 +214,31 @@ void sh_script_hooks_test_reset(void)
     mods_clear();
 }
 
+/* Without the engine there is no Play: nothing is open and nothing reloads. */
+int sh_script_hooks_open(void)
+{
+    return 0;
+}
+
+int sh_script_hooks_reload(void)
+{
+    return 0;
+}
+
 #else /* the engine side ------------------------------------------------- */
 
 #include "../backend_log.h"
 #include "../entity.h"
 #include "../hook.h"
-#include "../modserve.h"
 #include "../engine_globals.h"
 #include "../companion_engine.h"
 #include "../../fault_shield/load_screen_stop.h"
+#include "script_source.h"
 
 #define LOG_LINES_MAX            64
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
-#define SWEEP_BATCH              256
+#define EDITOR_ACTIVE_BYTE       0x09    /* idSnapEditorLocal: set while editing, clear during every SnapMap Play */
+#define CHAIN_MAX                9       /* an entityDef and its inherits in the mods namespace */
 
 typedef void (*tick_fn)(void *superscript);
 typedef unsigned char (*is_client_fn)(void *gm);
@@ -198,6 +250,7 @@ static is_client_fn  g_is_client;
 static void         *g_lookup;           /* idGameLocal vtable +0x7F0, checked against the live vtable */
 static const uint32_t *g_main_tid;
 static const uint8_t *g_load_screen;     /* idLoadScreen; its first field is the thread object */
+static const uint8_t *g_editor;          /* the idSnapEditorLocal singleton (glb "editor_singleton") */
 static int           g_resolved;
 
 static int           g_open;             /* states this map opened */
@@ -210,6 +263,8 @@ static volatile LONG g_routing;          /* records are accepted for this map's 
 static volatile LONG g_full_logged;
 static int           g_log_lines;
 static int           g_vtable_checked;   /* 1 verified, -1 refused */
+static double        g_time;             /* seconds of script frames this Play */
+static LARGE_INTEGER g_last_frame;       /* the previous script frame */
 
 static void hooks_log(const char *fmt, ...)
 {
@@ -264,6 +319,17 @@ static int loading(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
+}
+
+/* 1 during SnapMap Play of any kind (the editor is inactive), 0 while the
+ * editor is active, -1 unknown. */
+static int editor_inactive(void)
+{
+    uint8_t active;
+    if (!g_editor) return -1;
+    __try { active = *(const volatile uint8_t *)(g_editor + EDITOR_ACTIVE_BYTE); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return active ? 0 : 1;
 }
 
 static int is_client(void)
@@ -327,6 +393,8 @@ static void map_close(int run_end_handlers)
     g_open = 0;
     g_started = 0;
     g_frame = 0;
+    g_time = 0;
+    g_last_frame.QuadPart = 0;
     g_close_pending = 0;
 }
 
@@ -338,18 +406,18 @@ static int prologue_ok(void)
     return same;
 }
 
-static void report_drops(void)
+/* The frame time: the wall time since the previous script frame (0 for the
+ * first). The game's own clock is the entity API's to adopt. */
+static double frame_seconds(void)
 {
-    int m, first;
-    for (m = 0; m < SH_SCRIPT_MODS_MAX; m++) {
-        long n;
-        if (!g_mods[m].used) continue;
-        n = sh_script_queue_take_dropped(m, &first);
-        if (n && first)
-            hooks_log("Mod scripts: %s missed %ld game events because more than %d arrived between two frames; "
-                      "its scripts may react late or not at all to some of them.", g_mods[m].name, n,
-                      SH_SCRIPT_QUEUE_CAP);
-    }
+    LARGE_INTEGER now, freq;
+    double dt = 0;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (g_last_frame.QuadPart && freq.QuadPart) dt = (double)(now.QuadPart - g_last_frame.QuadPart) / (double)freq.QuadPart;
+    g_last_frame = now;
+    g_time += dt;
+    return dt;
 }
 
 static void run_tick(void)
@@ -363,18 +431,27 @@ static void run_tick(void)
     s.on_main = on_main();
     s.is_client = s.on_main == 1 ? is_client() : -1;
     s.loading = loading();
-    s.in_play = sh_modserve_engine_in_play();
+    s.in_play = editor_inactive();
     s.started = g_started;
     d = sh_script_tick_decide(&s);
     switch (d) {
-    case SH_SCRIPT_TICK_RUN:
+    case SH_SCRIPT_TICK_RUN: {
+        double dt;
         g_in_tick = 1;
+        if (!g_started) {
+            int walked = 0;
+            __try { walked = sh_script_hooks_walk_live(); }
+            __except (av_only(GetExceptionCode())) {
+                hooks_log("Mod scripts: a fault while reading the map's entities was contained; entities the spawn "
+                          "hook did not see are not driven by their scripts.");
+            }
+            if (walked) hooks_log("SCRIPTS: %d placed entities recorded from the live entity list", walked);
+        }
         g_started = 1;
         g_frame++;
-        sh_script_queue_set_drain_thread(GetCurrentThreadId());
-        report_drops();
+        dt = frame_seconds();
         __try {
-            sh_script_tick();
+            sh_script_tick(g_time, dt);
         } __except (av_only(GetExceptionCode())) {
             hooks_log("Mod scripts stopped for this map after an internal fault in Snapmap+; the game goes on. "
                       "Please report it with this log.");
@@ -384,8 +461,12 @@ static void run_tick(void)
         g_in_tick = 0;
         if (g_close_pending) map_close(g_close_pending_handlers);
         break;
+    }
     case SH_SCRIPT_TICK_END:
         map_close(1);
+        break;
+    case SH_SCRIPT_TICK_LEFT:
+        map_close(0);
         break;
     case SH_SCRIPT_TICK_CLIENT:
         hooks_log("Mod scripts: this machine joined as a client, so the host runs the map's scripts and this "
@@ -429,28 +510,86 @@ static int commit_tick(const char *phase)
     return 1;
 }
 
-void sh_script_hooks_gate(const char *phase)
+void sh_script_hooks_gate(int gate)
 {
     int n;
-    if (!g_resolved || !sh_script_gate_opens(phase)) return;
-    if (on_main() != 1) return;   /* every gate that opens is a main-thread gate; another caller is ignored */
+    if (!g_resolved) return;
+    if (on_main() != 1) return;   /* both gates are main-thread gates; another caller is ignored */
     if (g_in_tick) return;        /* a gate cannot run inside the frame; never close under the runtime */
     map_close(0);                 /* the departed map's entities are gone at a map gate */
     InterlockedExchange(&g_full_logged, 0);
     g_log_lines = 0;
     sh_script_handles_reset();
+    if (!sh_script_gate_opens(gate)) return;
     n = sh_script_map_open();
     if (n <= 0) {
+        if (n < 0) hooks_log("Mod scripts do not run in this map: its mods could not be read.");
+        sh_script_map_close(0);
         mods_clear();
         return;
     }
-    if (!commit_tick(phase)) {
+    if (!commit_tick(gate_name(gate))) {
         sh_script_map_close(0);
         mods_clear();
         return;
     }
     g_open = n;
+    g_started = 0;
+    g_time = 0;
+    g_last_frame.QuadPart = 0;
     InterlockedExchange(&g_routing, 1);
+    hooks_log("SCRIPTS: %d mod(s) with scripts prepared at the %s", n, gate_name(gate));
+}
+
+int sh_script_hooks_open(void)
+{
+    return g_open > 0;
+}
+
+int sh_script_hooks_reload(void)
+{
+    int n;
+    if (!g_resolved || !g_open || g_in_tick || on_main() != 1) return 0;
+    InterlockedExchange(&g_routing, 0);
+    sh_script_map_close(g_started);
+    mods_clear();
+    sh_script_handles_reset();
+    g_open = 0;
+    g_started = 0;
+    g_time = 0;
+    g_last_frame.QuadPart = 0;
+    n = sh_script_map_open();
+    if (n <= 0) {
+        sh_script_map_close(0);
+        mods_clear();
+        return 0;
+    }
+    g_open = n;
+    InterlockedExchange(&g_routing, 1);
+    return n;
+}
+
+int sh_script_hooks_walk_live(void)
+{
+    void *gm = sh_entity_gamemgr();
+    int num, added = 0;
+    if (!g_open || !gm || !vtable_ok()) return 0;
+    for (num = 0; num < SH_SCRIPT_ENT_NUMBER_WORLD; num++) {
+        const char *names[CHAIN_MAX];
+        uint32_t id;
+        void *ent;
+        int n, full = 0;
+        id = *(const uint32_t *)((const uint8_t *)gm + SH_SCRIPT_GAME_SPAWN_IDS + (size_t)num * 4);
+        if (id == SH_SCRIPT_SPAWN_ID_NONE || id == SH_SCRIPT_SPAWN_ID_WORLD) continue;
+        if (sh_script_handles_find(id, NULL)) continue;
+        ent = resolve_spawn_id(id);
+        if (!ent) continue;
+        n = sh_companions_def_chain(ent, names, CHAIN_MAX);
+        if (n <= 0) continue;
+        if (sh_script_hooks_record(id, names, n, &full)) added++;
+        else if (full) break;
+    }
+    return added;
 }
 
 int sh_script_hooks_spawn_wanted(void)
@@ -467,7 +606,7 @@ void sh_script_hooks_after_spawn(void *entity, const char *const *names, int cou
     if (mod < 0) return;
     if (is_client() == 1) return;   /* a client's entities are the server's; it runs no script */
     id = spawn_id_of(entity);
-    if (!sh_script_handles_add(mod, id, &full) && full && !InterlockedExchange(&g_full_logged, 1))
+    if (!sh_script_hooks_record(id, names, count, &full) && full && !InterlockedExchange(&g_full_logged, 1))
         hooks_log("Mod scripts: this map spawned more than %d entities of mods with scripts; %s's later ones are "
                   "not driven by its scripts.", SH_SCRIPT_HANDLES_MAX, g_mods[mod].name);
 }
@@ -509,8 +648,8 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     if (!module_base) return 0;
     for (i = 0; i < SH_SCRIPT_SIG_COUNT; i++) {
         if (sig_resolve_one(module_base, &SH_SCRIPT_SIGNATURES[i], &r[i]) != SIG_OK && i <= SH_SCRIPT_SIG_IS_CLIENT) {
-            hooks_log("SCRIPTS: %s did not resolve on this executable; mod scripts are unavailable",
-                      SH_SCRIPT_SIGNATURES[i].name);
+            hooks_log("Mod scripts are unavailable in this session: the game function they need (%s) was not found "
+                      "in this executable.", SH_SCRIPT_SIGNATURES[i].name);
             return 0;
         }
     }
@@ -519,18 +658,20 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     g_is_client = (is_client_fn)own(r, SH_SCRIPT_SIG_IS_CLIENT);
     g_main_tid = (const uint32_t *)glb_resolve(module_base, "main_thread_id", NULL);
     g_load_screen = (const uint8_t *)glb_resolve(module_base, "load_screen", NULL);
-    if (!g_main_tid || !g_load_screen) {
-        hooks_log("SCRIPTS: the main_thread_id or load_screen global did not resolve; mod scripts are unavailable");
+    g_editor = (const uint8_t *)glb_resolve(module_base, "editor_singleton", NULL);
+    if (!g_main_tid || !g_load_screen || !g_editor) {
+        hooks_log("Mod scripts are unavailable in this session: the game state they check (%s) was not found in "
+                  "this executable.", !g_main_tid ? "main thread" : !g_load_screen ? "loading screen" : "editor");
         return 0;
     }
     if (!prologue_ok()) {
-        hooks_log("SCRIPTS: the frame function's prologue is not the expected one (another detour?); mod scripts "
-                  "are unavailable");
+        hooks_log("Mod scripts are unavailable in this session: the game's frame function is not the expected one "
+                  "(another tool may have changed it).");
         return 0;
     }
     sh_script_handles_set_resolver(resolve_spawn_id);
+    sh_script_source_install();
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
-    sh_companions_set_gate_subscriber(sh_script_hooks_gate);
     sh_load_screen_stop_set_map_end(sh_script_hooks_map_cancel);
     g_resolved = 1;
     backend_log("SCRIPTS: engine side resolved; the frame hook is installed at the first map with scripts");

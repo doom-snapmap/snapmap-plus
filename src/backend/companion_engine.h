@@ -80,20 +80,21 @@ int sh_companions_ensure(const char *phase);
  * next gate. */
 void sh_companions_refresh(void);
 
-/* Other subscribers of the spawn chain and the gates (mod scripts,
- * script/script_hooks.h). The spawn subscriber runs after the companions of
- * every spawned idEntity whose entityDef or first inherit is in the mods
- * namespace, on the main thread, with the entityDef's name and then its
- * inherits while they stay in that namespace (at most 8). `wanted` says
- * whether it needs the detour: when it returns 1 at a gate, the detour is
- * armed even with no companion owner. The gate subscriber is called first at
- * every sh_companions_ensure, with its phase, on the caller's thread. Set once
- * at boot; NULL clears. */
+/* Another subscriber of the spawn chain (mod scripts, script/script_hooks.h).
+ * It runs after the companions of every spawned idEntity whose entityDef or
+ * first inherit is in the mods namespace, on the main thread, with the
+ * entityDef's name and then its inherits while they stay in that namespace
+ * (at most 8 inherits). `wanted` says whether it needs the detour: when it
+ * returns 1 at a gate (sh_companions_ensure), the detour is armed even with no
+ * companion owner. Set once at boot; NULL clears. */
 typedef void (*sh_spawn_subscriber_fn)(void *entity, const char *const *def_names, int count);
 typedef int  (*sh_spawn_wanted_fn)(void);
-typedef void (*sh_gate_subscriber_fn)(const char *phase);
 void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_wanted_fn wanted);
-void sh_companions_set_gate_subscriber(sh_gate_subscriber_fn fn);
+
+/* The same names for a live idEntity (mod scripts' walk of the live
+ * entities): up to cap written, 0 when its entityDef is not in the mods
+ * namespace or the decl lookups did not resolve. Main thread. */
+int sh_companions_def_chain(void *entity, const char **names, int cap);
 
 /* The private signature table, for the two-image test. NULL-terminated. */
 extern const sig_entry SH_COMPANION_SIGNATURES[];

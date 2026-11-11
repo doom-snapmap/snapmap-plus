@@ -1445,12 +1445,13 @@ and `scripts/lib/*.lua` (loaded only by `require`). The runtime is
 `src/backend/script/` on the vendored Lua 5.4.9 core (`src/third_party/lua`,
 its README records the version, hashes and the one local change).
 
-- **States.** One `lua_State` per scripted mod per map, created by
-  `sh_script_map_start` (the mods the map serves, a file source, the map seed)
-  and closed by `sh_script_map_end`. Nothing crosses states. The file source
-  (`sh_script_source`) is the serving layer's: it lists the files the serving
-  build of a salt carries under `mods/<salt>/scripts/` and reads them through
-  the serving index. A mod with no entry file gets no state.
+- **States.** The Play gate prepares the map's scripted mods
+  (`sh_script_map_open`: the provider's mods, their file source and the map
+  seed; each mod is listed and registered with the hooks, nothing runs). The
+  first frame opens one `lua_State` per prepared mod; `sh_script_map_close`
+  closes them. Nothing crosses states. The file source (`sh_script_source`)
+  lists the files under `scripts/` of the folder that serves the mod and reads
+  them. A mod with no entry file gets no state.
 - **Loading.** Entry files run once at map start in byte-wise name order, then
   the `on.map_start` handlers. Each entry file must start with `api = 1`
   (comments and a byte order mark may precede it); a missing or newer version
@@ -1493,16 +1494,19 @@ its README records the version, hashes and the one local change).
   `mods/<salt>/ai/tyrant`); `mods/<other salt>/...` and `game(...)` names are
   refused (`sh_script_check_name` applies the same rule to every API call).
   Names, notify strings and node names compare without case.
-- **Queue and tick.** Hooks on any thread call `sh_script_enqueue` (1,024
-  records per mod; overflow is counted and logged once). `sh_script_binds`
-  answers which running mod binds a full entityDef name and
-  `sh_script_entity_owner` which mod a spawned entity belongs to, both from any
-  thread. Lua runs only inside `sh_script_tick` (and map start and end), one
-  caller at a time: queued records, then `think(self, dt)` for every bound
-  live entity (an entity the engine reports gone gets `remove(self)` once and
-  its object answers nothing), then due timers and coroutines, then what those
-  raised, up to 4 queue passes a frame. A map end requested while Lua runs
-  waits until it returns.
+- **Queue and tick.** Hooks on any thread post records to the mod's queue
+  and the spawn subscriber records entities in the handle table (the engine
+  side, below). `sh_script_binds` answers which running mod binds a full
+  entityDef name and `sh_script_entity_owner` which running mod an entity
+  belongs to, both from any thread; ownership is the handle table's (placed
+  from the mod's entityDefs or spawned by its scripts). Lua runs only inside
+  `sh_script_tick` (and map start and end), one caller at a time: the handle
+  table's spawns (an entity whose entityDef chain the mod binds gets
+  `spawn(self)`) and removals (`remove(self)` once; its object answers
+  nothing), then per mod its queued records, `think(self, dt)` for every
+  driven entity, due timers and coroutines, then what those raised, up to 4
+  queue passes a frame. A map end requested while Lua runs waits until it
+  returns.
 - **Time.** `now()`, `after(s, fn)`, `every(s, fn)`, `run(fn)` with `wait(s)`
   inside it, each returning a handle with `cancel()`; game time, per mod,
   dropped at map end. A coroutine resume is one call.
@@ -1513,62 +1517,98 @@ its README records the version, hashes and the one local change).
   `sh_script_owns_entity`, and refuse a call with `sh_script_refuse` (one
   plain sentence at the calling line) before touching the engine.
 
-Not wired into the game yet: the tick detour, the engine hooks, the entity, AI
-and logic API, the builder's script checks and the serving layer's file source
-come with the scripting work that follows. `tests/script_sandbox_test.c` covers
-the runtime without the game.
+Not here yet: the entity, AI, combat and logic calls, the damage, death,
+animation-notify and Script node hooks that post records, and the builder's
+script checks come with the scripting work that follows.
+`tests/script_sandbox_test.c` covers the runtime without the game.
 
 ### Mod scripts: the engine side
 
 `src/backend/script/script_hooks.c` connects mod scripts to the engine; the
-runtime that runs them is `script_runtime.c`, behind three calls
-(`script_hooks.h`): `sh_script_map_open` at a map gate, `sh_script_tick` once
-per host game frame, `sh_script_map_close` at map end. No script code runs
-anywhere else.
+runtime that runs them is `script_runtime.c`, behind three calls:
+`sh_script_map_open` at the Play gate, `sh_script_tick(now, dt)` once per host
+game frame of that Play, `sh_script_map_close(run_end_handlers)` when it ends.
+No script code runs anywhere else.
 
+- **Gates.** The serving layer calls `sh_script_hooks_gate` directly, on the
+  main thread, before it arms the companions detour. The map-load gate
+  (`modserve_activate_bundles`: the editor's load, a launch at the hub) ends
+  the last map's scripts without end handlers and opens nothing, so nothing
+  runs in the editor. The Play gate (`sh_modserve_play_begin`, from the
+  SnapBuild detour, after the Play's map scope is set) ends them too and
+  prepares this Play's scripted mods: the editor's Play, a My Maps play, a
+  published map from the browser or the feed, and a lobby's host all pass it.
+  A Play that prepares a mod arms the CallSpawn chain in the same pass
+  (`sh_companions_ensure`), before the level's spawns.
+- **Where the scripts come from.** `script_source.c`: the builds the Play's
+  map scope declares (`sh_modserve_scope_hashes`: the builds serving the
+  map's rows, then the placed names' closure), each resolved to the folder
+  that serves it for the open map (`sh_modserve_row_build`: a stranger's
+  map's own place, the author's root folder), kept when that folder has
+  `assets\mods\<salt>\scripts\`. The files are read from that folder:
+  `scripts\*.lua` (entry files) and `scripts\lib\*.lua`, so a downloaded map
+  runs the copy it brought. The builder's own source replaces this one behind
+  the same `sh_script_source` contract.
 - **Tick.** A 15-byte detour on the SuperScript per-frame wrapper (VK
   0x140E9C9D0, GL 0x140E9BF10). Its only caller is `idGameLocal::RunFrame`
   (game vtable `+0x08`), after the entity think loop; RunFrame is reached from
   `idCommonLocal::Frame` on DOOM's main thread, through the host's game-frame
   loop and the two client frame loops, so the tick also runs on clients. It
-  runs the scripts only when this map opened states, on the main thread, not
+  runs the scripts only when a Play opened mods, on the main thread, not
   re-entrantly, on the host (`idGameLocal::IsClient`), while no loading screen
-  draws (`load_screen` thread byte `+0x4B2`), during SnapMap Play
-  (`sh_modserve_engine_in_play`); an unreadable state runs nothing
-  (`sh_script_tick_decide`). The detour is committed at the first map gate
-  that opens a state, on the main thread with its prologue verified, and is
-  never unhooked.
-- **Map start and end.** The map gates are the main-thread gates that arm the
-  companions detour (`sh_companions_ensure` calls a gate subscriber first):
-  the map load (`map`) and the Play start (`play`) end the previous map's
-  scripts without end handlers (its entities are gone) and open the new map's
-  states before its spawns. A tick that finds Play over closes them with end
-  handlers. The CancelMapChange detour (`load_screen_stop.c`) calls a map-end
-  subscriber: end handlers run unless a loading screen was still drawing. A
-  map end during the tick waits for the tick to return.
+  draws (`load_screen` thread byte `+0x4B2`) and while the editor is inactive
+  (`idSnapEditorLocal +0x09`, clear during every SnapMap Play). The editor's
+  deactivate reason is not used: it is 3 only for the editor's own Play and
+  stays 0 for a published or My Maps play, so `sh_modserve_engine_in_play`
+  would keep scripts off there. An unreadable state runs nothing
+  (`sh_script_tick_decide`). The frame time is the wall time since the last
+  script frame. The detour is committed at the first Play gate that prepares
+  a mod, on the main thread with its prologue verified, and is never unhooked.
+- **Map start and end.** Before the first frame the tick walks the live
+  entities once (every entity number's spawn id through the game's lookup)
+  and records every entity of a scripted mod the spawn chain did not; the
+  runtime then runs the files and `map_start`. The scripts end at the next
+  gate; when the editor is active again (the return from the editor's Play:
+  end handlers run); when a loading screen draws after they started (the
+  session left the map: no end handlers, since a handle could name the next
+  map's entity); at CancelMapChange (`load_screen_stop.c` calls a map-end
+  subscriber: end handlers run unless a loading screen was still drawing); and
+  on a client (none run there). A map end during the tick waits for the tick
+  to return.
 - **Spawns and handles.** The CallSpawn detour calls a spawn subscriber after
-  the companions, with the entityDef's name and its `mods/` inherits; the
-  detour is armed for scripts as for companions. An entity whose names reach
-  `mods/<salt>/` of a mod with states is recorded by its engine spawn id
-  (idGameLocal `+0x653F8` + 4 x idEntity `+0x08`) in `script_handles.c`. A
-  script holds a handle (the record's index and the map's epoch), never a
-  pointer: every use resolves the spawn id through game vtable `+0x7F8` (the
-  `+0x7F0` lookup and the idEntity cast), which fails once the entity is gone.
-  Each tick sweeps the table and reports new entities as spawns and vanished
-  ones once as removals. 8,192 entities per map.
+  the companions, with the entityDef's name and its `mods/` inherits. An
+  entity whose names reach `mods/<salt>/` of a prepared mod is recorded with
+  that chain by its engine spawn id (idGameLocal `+0x653F8` + 4 x idEntity
+  `+0x08`) in `script_handles.c`. A script holds a handle (the record's index
+  and the map's epoch), never a pointer: every use resolves the spawn id
+  through game vtable `+0x7F8` (the `+0x7F0` lookup and the idEntity cast),
+  which fails once the entity is gone. Each frame the runtime sweeps the
+  table: a new entity whose chain the mod binds gets `spawn(self)` and is
+  driven from then on, a vanished one gets `remove(self)` once. An entity no
+  mod owns (a player, an attacker) gets a foreign handle
+  (`sh_script_handles_ref`) that resolves the same way and is never swept.
+  8,192 entities per map.
 - **Queues.** Hooks on any thread (damage, death, animation notify, Script
-  node input) enqueue fixed-size records with copied strings into the owning
-  mod's queue (`script_queue.c`, a spin lock per mod, 1,024 records). Only the
-  tick's thread drains; a full queue drops and counts, and the tick writes one
-  line per map for that mod.
+  node input) post fixed-size records with copied strings into the owning
+  mod's queue (`script_queue.c`, a spin lock per mod, 1,024 records, strings
+  of 127 bytes). Only the tick's thread drains; a full queue drops and counts,
+  and the mod's script log gets one line per map.
+- **Console.** `sh_scripts` (`script_console.c`) prints each mod's state from
+  `sh_script_mod_info_get`, `sh_scripts log [mod]` its script log, and
+  `sh_scripts reload` either ends and prepares the open Play's mods again
+  (they start at the next frame) or, outside Play, compiles every script of
+  the open map's mods (`sh_script_check_files`) and prints each error in the
+  stop line's words.
 
 The signatures are private to `script_sigs.c` (the tick, the spawn-id lookup,
 IsClient, and the OnDamage, Killed and Relay DoAction sites for the event
 hooks; OnAnimNotify shares its bytes with OnMoverNotify and is resolved by the
 callback name it loads). `script_sigs_test` checks all of them, their detour
 windows, the tick's single caller and the resolver's vtable slots on both
-executables; `script_hooks_test` covers the queues, the handle table and the
-tick's guards.
+executables; `script_hooks_test` covers the queues, the handle table, the mod
+table and the tick's guards; `script_e2e_test` runs fixture mod folders from
+disk (`tests/fixtures/scripts/`) through the source, the runtime and the
+console with the hooks' part played as the hooks play it.
 
 ### Mod modules
 

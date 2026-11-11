@@ -33,6 +33,7 @@
 #include "modcmd.h"
 #include "vt_harness.h"
 #include "prefab_mods.h"
+#include "script/script_console.h"
 
 /* Engine call contracts. */
 
@@ -1766,6 +1767,7 @@ static const cmd_entry CMD_TABLE[] = {
     { SH_VT_CMD_NAME,        (void *)h_sh_vt,       SH_VT_CMD_HELP },
 #endif
     { SH_PREFAB_CMD_NAME,    (void *)h_sh_prefab,   SH_PREFAB_CMD_HELP },
+    { SH_SCRIPT_CMD_NAME,    (void *)h_sh_scripts,  SH_SCRIPT_CMD_HELP },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },

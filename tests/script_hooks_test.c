@@ -288,16 +288,52 @@ static void test_tick(void)
     s.in_play = 0; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_CLIENT); s.in_play = 1;   /* client first */
     s.is_client = -1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_UNKNOWN); s.is_client = 0;
     s.loading = 1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_LOADING);
-    s.started = 1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_LOADING); s.started = 0;
+    /* a loading screen after the scripts started: the session left the map */
+    s.started = 1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_LEFT); s.started = 0;
     s.loading = -1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_UNKNOWN); s.loading = 0;
     s.in_play = 0; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_NOT_PLAY);   /* the editor */
     s.started = 1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_END);        /* Play ended */
     s.in_play = -1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_UNKNOWN);
     s.in_play = 1; CHECK(sh_script_tick_decide(&s) == SH_SCRIPT_TICK_RUN);
     CHECK(!strcmp(sh_script_tick_name(SH_SCRIPT_TICK_LOADING), "loading"));
-    CHECK(sh_script_gate_opens("map") && sh_script_gate_opens("play"));
-    CHECK(!sh_script_gate_opens("editor") && !sh_script_gate_opens("rescan") && !sh_script_gate_opens("launch") &&
-          !sh_script_gate_opens("return to the editor") && !sh_script_gate_opens(NULL));
+    /* only the Play build opens a map's mods; a map load only ends the last ones */
+    CHECK(sh_script_gate_opens(SH_SCRIPT_GATE_PLAY));
+    CHECK(!sh_script_gate_opens(SH_SCRIPT_GATE_MAP_LOAD) && !sh_script_gate_opens(0));
+}
+
+/* ---- recording entities: owner, chain, foreign references ------------------------ */
+
+static void test_record(void)
+{
+    const char *chain[] = { "mods/abcd1234/AI/Brute", "MODS/abcd1234/ai/base" };
+    const char *stock[] = { "ai/fodder/imp" };
+    char names[256];
+    sh_script_handle h, f, g;
+    int a, full = 0, mod = 0;
+    sh_script_hooks_test_reset();
+    sh_script_handles_reset();
+    a = sh_script_hooks_mod_add("abcd1234", "Brutes");
+    CHECK(sh_script_hooks_mod_find("ABCD1234") == a && sh_script_hooks_mod_find("nope") == -1);
+    h = sh_script_hooks_record(500, chain, 2, &full);
+    CHECK(h != 0 && !full && sh_script_handle_mod(h) == a);
+    CHECK(sh_script_handle_names(h, names, sizeof names) > 0);
+    CHECK(!strcmp(names, "mods/abcd1234/ai/brute\nmods/abcd1234/ai/base"));
+    CHECK(sh_script_hooks_record(500, chain, 2, NULL) == h);           /* recorded once */
+    CHECK(sh_script_hooks_record(501, stock, 1, NULL) == 0);           /* no scripted mod owns it */
+    CHECK(sh_script_handle_known(h) && !sh_script_handle_alive(h));    /* waiting for its first sweep */
+    /* a foreign reference (a player, an attacker): live at once, owned by nobody, never swept */
+    f = sh_script_handles_ref(77);
+    CHECK(f != 0 && sh_script_handles_ref(77) == f);
+    CHECK(sh_script_handle_mod(f) == SH_SCRIPT_HANDLE_FOREIGN && sh_script_handle_alive(f));
+    CHECK(sh_script_handles_find(77, &mod) == f && mod == SH_SCRIPT_HANDLE_FOREIGN);
+    CHECK(sh_script_handle_names(f, names, sizeof names) == 0 && names[0] == 0);
+    g = sh_script_handles_ref(500);
+    CHECK(g == h);                                                     /* an owned entity keeps its record */
+    CHECK(sh_script_handles_ref(SH_SCRIPT_SPAWN_ID_NONE) == 0 && sh_script_handles_ref(SH_SCRIPT_SPAWN_ID_WORLD) == 0);
+    CHECK(sh_script_handles_live(-1) == 0);                            /* foreign references are not counted */
+    sh_script_handles_reset();
+    CHECK(sh_script_handle_names(h, names, sizeof names) == -1 && !sh_script_handle_known(h));
+    sh_script_hooks_test_reset();
 }
 
 int main(void)
@@ -307,6 +343,7 @@ int main(void)
     test_handles();
     test_mods();
     test_tick();
+    test_record();
     printf(g_fail ? "script_hooks_test: FAIL\n" : "script_hooks_test: PASS\n");
     return g_fail;
 }

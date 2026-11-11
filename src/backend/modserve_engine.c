@@ -70,6 +70,7 @@
 #include "modledger.h"
 #include "modtypeinfo.h"
 #include "companion_engine.h"
+#include "script/script_hooks.h"   /* mod scripts' map gates */
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -981,6 +982,13 @@ void sh_modserve_play_begin(void)
     /* Map scope: entities placed since the load or the last save may list a
      * bundle; its shadows and requirements come in before the level loads. */
     if (on_main == 1 && sh_modserve_scope_source(SH_MODSERVE_AT_PLAY) > 0) (void)sh_modserve_scope_apply("play");
+    /* Mod scripts: the mods this Play declares (the listing just set) are
+     * prepared before its spawns, and the companions' pass arms the spawn
+     * chain for them when they need it. */
+    if (on_main == 1) {
+        sh_script_hooks_gate(SH_SCRIPT_GATE_PLAY);
+        if (sh_script_hooks_open()) (void)sh_companions_ensure("play scripts");
+    }
     /* What the editor's spawns created for a kept decl since the last pass
      * is still level 1: kept before the level load's purge frees it. */
     if (on_main == 1 && g_bound && sh_modserve_active()) me_keep_holds("play");
@@ -2655,6 +2663,8 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     sh_modserve_plan plan;
     int unknown = 0, ready, main = me_on_main();
     double t0;
+    /* A new map: the last one's mod scripts end (they start at its Play). */
+    if (main == 1) sh_script_hooks_gate(SH_SCRIPT_GATE_MAP_LOAD);
     /* Companions follow the index at every map load, a map with no rows included. */
     if (main == 1) (void)sh_companions_ensure("map");
     /* A map without manifest rows: nothing to do, nothing logged. */

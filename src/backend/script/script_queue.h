@@ -25,7 +25,7 @@ extern "C" {
 
 #define SH_SCRIPT_QUEUE_CAP   1024   /* records per mod */
 #define SH_SCRIPT_MODS_MAX    32     /* mods with scripts in one map */
-#define SH_SCRIPT_EVENT_TEXT  64     /* bytes of each copied string, NUL included */
+#define SH_SCRIPT_EVENT_TEXT  128    /* bytes of each copied string, NUL included (a full decl name fits) */
 
 /* What happened. Spawn and removal are not queued: the handle table finds
  * them each tick (script_handles.h). */

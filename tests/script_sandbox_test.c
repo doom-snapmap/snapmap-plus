@@ -2,6 +2,12 @@
  * no engine: an in-memory file source stands in for the serving layer and a
  * handle set for the engine's entity table.
  *
+ * The engine hooks are stood in for as they behave: a spawn is recorded in
+ * the handle table under its mod with its entityDef chain
+ * (sh_script_hooks_record), a removal is the resolver no longer finding the
+ * spawn id, and damage, death, animation and input records are posted to
+ * the mod's queue (sh_script_queue_post). Test ids are spawn ids.
+ *
  * Covers: each forbidden facility absent; bytecode refused (an entry file
  * and a required one, real lua_dump output); a runaway loop, also inside
  * pcall and inside run(), stopped by the step budget; an allocation bomb
@@ -20,6 +26,7 @@
 #include <string.h>
 #include "script/script_runtime.h"
 #include "script/script_reason.h"
+#include "script/script_hooks.h"
 #include "../src/third_party/lua/lauxlib.h"
 #include "../src/third_party/lua/lualib.h"
 
@@ -88,14 +95,67 @@ static const sh_script_source g_src = { NULL, src_list, src_read, src_release };
 
 static uint64_t g_dead[64];
 static int g_ndead;
-static int ent_alive(void *ctx, uint64_t h)
+static int g_live_token;
+
+/* The engine's lookup: every spawn id resolves until the test marks it dead. */
+static void *fake_resolve(uint32_t spawn_id)
 {
     int i;
-    (void)ctx;
-    for (i = 0; i < g_ndead; i++) if (g_dead[i] == h) return 0;
-    return 1;
+    for (i = 0; i < g_ndead; i++) if (g_dead[i] == spawn_id) return NULL;
+    return &g_live_token;
 }
-static const sh_script_entity_ops g_ops = { NULL, ent_alive };
+
+#define TEV_SPAWN  1
+#define TEV_DAMAGE 2
+#define TEV_DEATH  3
+#define TEV_ANIM   4
+#define TEV_INPUT  5
+
+/* What a hook knows about an event, before it becomes a record. */
+typedef struct {
+    int      kind;
+    uint64_t entity, other, inflictor;
+    double   amount;
+    char     names[SH_SCRIPT_NAMES_CAP];
+    char     text[SH_SCRIPT_EVENT_TEXT];
+    char     location[SH_SCRIPT_EVENT_TEXT];
+} tev;
+
+/* The handle a hook hands over for a spawn id: the mod's record, else a
+ * reference no mod owns. */
+static sh_script_handle hid(uint64_t id)
+{
+    sh_script_handle h;
+    if (!id) return 0;
+    h = sh_script_handles_find((uint32_t)id, NULL);
+    return h ? h : sh_script_handles_ref((uint32_t)id);
+}
+
+/* Do what the hooks do with the event; 1 when a running mod's queue or
+ * handle table took it. */
+static int t_enqueue(const char *salt, const tev *ev)
+{
+    static const int kinds[] = { 0, 0, SH_SCRIPT_EV_DAMAGE, SH_SCRIPT_EV_DEATH, SH_SCRIPT_EV_ANIM, SH_SCRIPT_EV_INPUT };
+    int slot = sh_script_hooks_mod_find(salt);
+    if (slot < 0 || sh_script_status(salt) != SH_SCRIPT_RUNNING || ev->kind < TEV_SPAWN || ev->kind > TEV_INPUT) return 0;
+    if (ev->kind == TEV_SPAWN) {
+        const char *names[16];
+        char buf[SH_SCRIPT_NAMES_CAP], *p, *next = NULL;
+        int n = 0;
+        strcpy_s(buf, sizeof buf, ev->names);
+        for (p = strtok_s(buf, "\n", &next); p && n < 16; p = strtok_s(NULL, "\n", &next)) names[n++] = p;
+        return sh_script_hooks_record((uint32_t)ev->entity, names, n, NULL) != 0;
+    }
+    return sh_script_queue_post(slot, (sh_script_event_kind)kinds[ev->kind], hid(ev->entity), hid(ev->other),
+                                hid(ev->inflictor), (float)ev->amount,
+                                ev->kind == TEV_INPUT ? ev->names : ev->text, ev->location) == 1;
+}
+
+static int t_owner(uint64_t id, char *salt, size_t cap)
+{
+    sh_script_handle h = id ? sh_script_handles_find((uint32_t)id, NULL) : 0;
+    return sh_script_entity_owner(h, salt, cap);
+}
 
 /* ---------------------------------------------------------------- logs */
 
@@ -150,21 +210,23 @@ static int t_resolve(lua_State *L)
 /* poke(salt, kind, handle, names): a hook firing while Lua runs */
 static int t_poke(lua_State *L)
 {
-    sh_script_event ev;
+    tev ev;
     memset(&ev, 0, sizeof ev);
     ev.kind = (int)luaL_checkinteger(L, 2);
     ev.entity = (uint64_t)luaL_checkinteger(L, 3);
     strncpy(ev.names, luaL_optstring(L, 4, ""), sizeof ev.names - 1);
     strncpy(ev.text, luaL_optstring(L, 5, ""), sizeof ev.text - 1);
-    lua_pushboolean(L, sh_script_enqueue(luaL_checkstring(L, 1), &ev));
+    lua_pushboolean(L, t_enqueue(luaL_checkstring(L, 1), &ev));
     return 1;
 }
 
 static int t_end_map(lua_State *L) { (void)L; sh_script_map_end(); return 0; }
 
+/* handle(e): the entity's spawn id, 0 once it is removed */
 static int t_handle(lua_State *L)
 {
-    lua_pushinteger(L, (lua_Integer)sh_script_check_entity(L, 1, "handle"));
+    uint64_t h = sh_script_check_entity(L, 1, "handle");
+    lua_pushinteger(L, h ? (lua_Integer)sh_script_handle_spawn_id((sh_script_handle)h) : 0);
     return 1;
 }
 
@@ -296,12 +358,12 @@ static void test_budget(void)
              "api = 1\non.think('ai/x', function(self) local n = 0 for i = 1, 600000 do n = n + i end end)\n");
     start1("aaaaaaaa", "Test Mod", 1);
     {
-        sh_script_event ev;
+        tev ev;
         int i;
         memset(&ev, 0, sizeof ev);
-        ev.kind = SH_SCRIPT_EV_SPAWN;
+        ev.kind = TEV_SPAWN;
         strcpy(ev.names, "mods/aaaaaaaa/ai/x");
-        for (i = 1; i <= 8; i++) { ev.entity = (uint64_t)i; CHECK(sh_script_enqueue("aaaaaaaa", &ev)); }
+        for (i = 1; i <= 8; i++) { ev.entity = (uint64_t)i; CHECK(t_enqueue("aaaaaaaa", &ev)); }
     }
     sh_script_tick(0.016, 0.016);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
@@ -507,7 +569,7 @@ static int g_input_handled;
 
 static void test_dispatch(void)
 {
-    sh_script_event ev;
+    tev ev;
     char salt[16];
     unsigned kinds = 0;
     files_clear();
@@ -538,45 +600,45 @@ static void test_dispatch(void)
     CHECK(sh_script_binds("mods/aaaaaaaa/ai/other", salt, sizeof salt, &kinds) == 0);
 
     memset(&ev, 0, sizeof ev);
-    ev.kind = SH_SCRIPT_EV_SPAWN;
+    ev.kind = TEV_SPAWN;
     ev.entity = 77;
     strcpy(ev.names, "mods/aaaaaaaa/ai/child\nmods/aaaaaaaa/ai/base\nai/stock");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev) == 1);
-    CHECK(sh_script_entity_owner(77, salt, sizeof salt) == 1 && !strcmp(salt, "aaaaaaaa"));
-    CHECK(sh_script_entity_owner(78, salt, sizeof salt) == 0);
-    CHECK(sh_script_enqueue("cccccccc", &ev) == 0);
+    CHECK(t_enqueue("aaaaaaaa", &ev) == 1);
+    CHECK(t_owner(77, salt, sizeof salt) == 1 && !strcmp(salt, "aaaaaaaa"));
+    CHECK(t_owner(78, salt, sizeof salt) == 0);
+    CHECK(t_enqueue("cccccccc", &ev) == 0);
 
     sh_script_tick(1.0, 0.5);
     CHECK(strstr(log_of("aaaaaaaa"), "spawn child 77\nspawn base\nthink 11 0.5\n") != NULL);
 
     memset(&ev, 0, sizeof ev);
-    ev.kind = SH_SCRIPT_EV_DAMAGE;
+    ev.kind = TEV_DAMAGE;
     ev.entity = 77;
     ev.other = 5;
     ev.amount = 12.5;
     strcpy(ev.text, "damage/rocket");
     strcpy(ev.location, "head");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    ev.kind = SH_SCRIPT_EV_ANIM;
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    ev.kind = TEV_ANIM;
     strcpy(ev.text, "THROW");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    ev.kind = SH_SCRIPT_EV_ANIM;
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    ev.kind = TEV_ANIM;
     strcpy(ev.text, "other");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    ev.kind = SH_SCRIPT_EV_DEATH;
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    ev.kind = TEV_DEATH;
     ev.other = 0;
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    ev.kind = SH_SCRIPT_EV_INPUT;
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    ev.kind = TEV_INPUT;
     ev.entity = 900;
     ev.other = 5;
     strcpy(ev.names, "count_switch");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
     strcpy(ev.names, "nobody");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
-    ev.kind = SH_SCRIPT_EV_DAMAGE;
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
+    ev.kind = TEV_DAMAGE;
     ev.entity = 12345;                       /* not a bound entity: nothing runs */
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
     sh_script_tick(2.0, 0.25);
     log_of("aaaaaaaa");
     CHECK(strstr(g_log, "damage 12.5 damage/rocket head 5 nil\nanim throw\ndeath nil\ninput 900 5\n") != NULL);
@@ -598,7 +660,7 @@ static void test_dispatch(void)
     log_of("aaaaaaaa");
     CHECK(strstr(strstr(g_log, "removed 0\n") + 1, "removed") == NULL);
     CHECK(strstr(g_log, "think 13") == NULL);
-    CHECK(sh_script_entity_owner(77, salt, sizeof salt) == 0);
+    CHECK(t_owner(77, salt, sizeof salt) == 0);
     g_ndead = 0;
     sh_script_map_end();
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_ENDED);
@@ -623,7 +685,7 @@ static void test_dispatch(void)
 
 static void test_isolation(void)
 {
-    sh_script_event ev;
+    tev ev;
     int i;
     files_clear();
     file_add("aaaaaaaa", "main.lua", "api = 1\non.think('e', function(self) if now() > 1.5 then local x = nil; x.y = 1 end print('a') end)\n");
@@ -634,13 +696,13 @@ static void test_isolation(void)
         CHECK(sh_script_map_start(d, 2, &g_src, 3, 0.0) == 2);
     }
     memset(&ev, 0, sizeof ev);
-    ev.kind = SH_SCRIPT_EV_SPAWN;
+    ev.kind = TEV_SPAWN;
     ev.entity = 1;
     strcpy(ev.names, "mods/aaaaaaaa/e");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
     ev.entity = 2;
     strcpy(ev.names, "mods/bbbbbbbb/e");
-    CHECK(sh_script_enqueue("bbbbbbbb", &ev));
+    CHECK(t_enqueue("bbbbbbbb", &ev));
     for (i = 1; i <= 4; i++) sh_script_tick((double)i, 1.0);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
     CHECK(sh_script_status("bbbbbbbb") == SH_SCRIPT_RUNNING);
@@ -649,10 +711,10 @@ static void test_isolation(void)
     CHECK(strstr(log_of("bbbbbbbb"), "b 4.0\ntick b\n") != NULL);
     ev.entity = 3;
     strcpy(ev.names, "mods/aaaaaaaa/e");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev) == 0);          /* a stopped mod's queue refuses */
+    CHECK(t_enqueue("aaaaaaaa", &ev) == 0);          /* a stopped mod's queue refuses */
     CHECK(sh_script_binds("mods/aaaaaaaa/e", NULL, 0, NULL) == 0);
-    CHECK(sh_script_entity_owner(1, NULL, 0) == 0);
-    CHECK(sh_script_entity_owner(2, NULL, 0) == 1);
+    CHECK(t_owner(1, NULL, 0) == 0);
+    CHECK(t_owner(2, NULL, 0) == 1);
     sh_script_map_end();
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_STOPPED);
     CHECK(sh_script_status("bbbbbbbb") == SH_SCRIPT_ENDED);
@@ -672,7 +734,7 @@ static void test_isolation(void)
 
 static void test_reentrancy(void)
 {
-    sh_script_event ev;
+    tev ev;
     files_clear();
     /* each input raises another while Lua runs: delivered after the handler
      * returns, in up to four passes a tick, the rest next tick */
@@ -683,10 +745,10 @@ static void test_reentrancy(void)
         "on.input('end', function() end_map() print('still here') end)\n");
     start1("aaaaaaaa", "Test Mod", 1);
     memset(&ev, 0, sizeof ev);
-    ev.kind = SH_SCRIPT_EV_INPUT;
+    ev.kind = TEV_INPUT;
     ev.entity = 1;
     strcpy(ev.names, "chain");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
     sh_script_tick(1.0, 1.0);
     log_of("aaaaaaaa");
     CHECK(strstr(g_log, "in 1 at 1.0\nafter poke 1\nin 2 at 1.0\n") != NULL);
@@ -700,7 +762,7 @@ static void test_reentrancy(void)
 
     /* a map end requested while Lua runs waits until it returns */
     strcpy(ev.names, "end");
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev));
+    CHECK(t_enqueue("aaaaaaaa", &ev));
     sh_script_tick(4.0, 1.0);
     CHECK(strstr(log_of("aaaaaaaa"), "still here") != NULL);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_ENDED);
@@ -713,13 +775,15 @@ static void test_reentrancy(void)
     start1("aaaaaaaa", "Test Mod", 1);
     {
         int i, ok = 0;
-        for (i = 0; i < 1100; i++) ok += sh_script_enqueue("aaaaaaaa", &ev);
+        for (i = 0; i < 1100; i++) ok += t_enqueue("aaaaaaaa", &ev);
         CHECK(ok == SH_SCRIPT_QUEUE_CAP);
+        sh_script_tick(1.0, 1.0);
+        for (i = 0; i < 1100; i++) t_enqueue("aaaaaaaa", &ev);
         log_of("aaaaaaaa");
         CHECK(strstr(g_log, "more than 1024 arrived in one frame") != NULL);
-        CHECK(strstr(strstr(g_log, "more than 1024") + 1, "more than 1024") == NULL);
+        CHECK(strstr(strstr(g_log, "more than 1024") + 1, "more than 1024") == NULL);   /* once a map */
     }
-    sh_script_tick(1.0, 1.0);
+    sh_script_tick(2.0, 1.0);
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
     sh_script_map_end();
 }
@@ -820,7 +884,7 @@ static void test_random(void)
 static void test_teardown(void)
 {
     int i;
-    sh_script_event ev;
+    tev ev;
     files_clear();
     file_add("aaaaaaaa", "main.lua",
         "api = 1\nlocal big = {}\nfor i = 1, 20000 do big[i] = { i, tostring(i) } end\n"
@@ -833,9 +897,9 @@ static void test_teardown(void)
         CHECK(sh_script_map_start(d, 2, &g_src, 3, 0.0) == 2);
     }
     memset(&ev, 0, sizeof ev);
-    ev.kind = SH_SCRIPT_EV_SPAWN;
+    ev.kind = TEV_SPAWN;
     strcpy(ev.names, "mods/aaaaaaaa/e");
-    for (i = 1; i <= 50; i++) { ev.entity = (uint64_t)i; sh_script_enqueue("aaaaaaaa", &ev); }
+    for (i = 1; i <= 50; i++) { ev.entity = (uint64_t)i; t_enqueue("aaaaaaaa", &ev); }
     for (i = 1; i <= 20; i++) sh_script_tick(i * 0.1, 0.1);
     CHECK(sh_script_bytes_in_use() > 1000000);
     CHECK(sh_script_active());
@@ -846,10 +910,10 @@ static void test_teardown(void)
     CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_ENDED);
     CHECK(sh_script_status("bbbbbbbb") == SH_SCRIPT_STOPPED);      /* its map_end ran too long */
     CHECK(strstr(stop_of("bbbbbbbb"), "took too long") != NULL);
-    CHECK(sh_script_entity_owner(1, NULL, 0) == 0);
+    CHECK(t_owner(1, NULL, 0) == 0);
     /* calls after the map are harmless */
     sh_script_tick(5.0, 0.1);
-    CHECK(sh_script_enqueue("aaaaaaaa", &ev) == 0);
+    CHECK(t_enqueue("aaaaaaaa", &ev) == 0);
     sh_script_map_end();
 
     /* a mod with no entry files gets no state; a list failure is a stop line */
@@ -920,15 +984,15 @@ static void test_fuzz(void)
         if (rnd() % 3 == 0) file_add_bytes("aaaaaaaa", "lib/x.lua", buf, len);
         start1("aaaaaaaa", "Fuzz", iter);
         {
-            sh_script_event ev;
+            tev ev;
             memset(&ev, 0, sizeof ev);
-            ev.kind = SH_SCRIPT_EV_SPAWN;
+            ev.kind = TEV_SPAWN;
             ev.entity = 1;
             strcpy(ev.names, "mods/aaaaaaaa/e");
-            sh_script_enqueue("aaaaaaaa", &ev);
-            ev.kind = SH_SCRIPT_EV_INPUT;
+            t_enqueue("aaaaaaaa", &ev);
+            ev.kind = TEV_INPUT;
             strcpy(ev.names, "x");
-            sh_script_enqueue("aaaaaaaa", &ev);
+            t_enqueue("aaaaaaaa", &ev);
         }
         sh_script_tick(0.5, 0.5);
         sh_script_tick(1.5, 1.0);
@@ -978,7 +1042,7 @@ int main(void)
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "end_map", t_end_map);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "handle", t_handle);
     sh_script_api_add(SH_SCRIPT_API_METHOD, "owns", t_owns);
-    sh_script_set_entity_ops(&g_ops);
+    sh_script_handles_set_resolver(fake_resolve);
 
     test_reason_table();
     test_absent();

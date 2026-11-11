@@ -58,13 +58,17 @@ typedef struct shs_mod {
     char      err_file[128]; /* where the current error was raised, by the message handler */
     int       err_line;
 
-    /* queue: guarded by the runtime's lock */
-    sh_script_event *queue;
-    unsigned  qhead, qcount;
-    unsigned  dropped;
-    int       drop_logged;
+    /* this map: the hooks' slot (its queue and its handles), the entry files */
+    int       hook;          /* sh_script_hooks_mod_add slot, -1 when none */
+    int       prepared;      /* registered for this map; its state opens at the first tick */
+    char    (*files)[128];   /* entry files, sorted */
+    int       nfiles;
+    int       files_found;   /* entry files listed for this map (kept after the list is freed) */
+    int       files_run;
+    int       handlers;
+    uint64_t  seed;
 
-    /* bound live entities, bindings, timers: game thread */
+    /* driven entities, bindings, timers: game thread */
     shs_ent  *ents;
     int       nents, cents;
     shs_bind *binds;         /* guarded by the runtime's lock */

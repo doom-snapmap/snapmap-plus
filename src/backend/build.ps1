@@ -42,6 +42,10 @@ param(
                            # Mod scripts: the sandboxed Lua runtime and the vendored Lua 5.4 core
                            # (lstrlib.c is compiled only through script_lstrlib.c).
                            "script/script_runtime.c", "script/script_reason.c", "script/script_lib_base.c", "script/script_lstrlib.c",
+                           # Mod scripts' engine side: the frame hook, map gates, entity handles and queues,
+                           # the served folders' file source and the sh_scripts console command.
+                           "script/script_hooks.c", "script/script_sigs.c", "script/script_queue.c", "script/script_handles.c",
+                           "script/script_source.c", "script/script_console.c",
                            "../third_party/lua/lapi.c", "../third_party/lua/lauxlib.c", "../third_party/lua/lbaselib.c", "../third_party/lua/lcode.c", "../third_party/lua/lcorolib.c", "../third_party/lua/lctype.c", "../third_party/lua/ldebug.c", "../third_party/lua/ldo.c", "../third_party/lua/ldump.c", "../third_party/lua/lfunc.c", "../third_party/lua/lgc.c", "../third_party/lua/llex.c", "../third_party/lua/lmathlib.c", "../third_party/lua/lmem.c", "../third_party/lua/lobject.c", "../third_party/lua/lopcodes.c", "../third_party/lua/lparser.c", "../third_party/lua/lstate.c", "../third_party/lua/lstring.c", "../third_party/lua/ltable.c", "../third_party/lua/ltablib.c", "../third_party/lua/ltm.c", "../third_party/lua/lundump.c", "../third_party/lua/lutf8lib.c", "../third_party/lua/lvm.c", "../third_party/lua/lzio.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.

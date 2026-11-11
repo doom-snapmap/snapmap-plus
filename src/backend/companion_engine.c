@@ -86,7 +86,6 @@ static int  g_log_lines;
 static __declspec(thread) int g_depth;
 static sh_spawn_subscriber_fn g_spawn_sub;   /* mod scripts (companion_engine.h) */
 static sh_spawn_wanted_fn     g_spawn_wanted;
-static sh_gate_subscriber_fn  g_gate_sub;
 
 static void cl_log(const char *fmt, ...)
 {
@@ -355,30 +354,45 @@ static void after_spawn(void *obj)
     spawn_companions(ent, o, gm, manager);
 }
 
-/* The spawn subscriber's view: the entityDef's name, then each inherit
- * while it stays in the mods namespace (the walk owner_for makes). */
-static void spawn_fanout(void *obj)
+/* The spawn subscriber's view of an idEntity: the entityDef's name, then
+ * each inherit while it stays in the mods namespace (the walk owner_for
+ * makes). Returns the names written, 0 when neither the entityDef nor its
+ * first inherit is in that namespace. */
+static int def_chain(void *ent, const char **names, int cap)
 {
-    const char *names[INHERIT_DEPTH + 1];
-    void *ent, *decl, *manager = NULL;
+    void *decl, *manager = NULL;
     int n = 0;
-    ent = g_is_entity(obj);
-    if (!ent) return;
+    if (!ent || cap <= 0) return 0;
     decl = read_ptr(ent, ENT_DECL);
-    if (!decl) return;
+    if (!decl) return 0;
     names[n] = decl_str(decl, DECL_NAME);
     if (!sh_companion_owner_namespace(names[n]) && !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
-        return;
+        return 0;
     if (names[n]) n++;
-    while (n <= INHERIT_DEPTH) {
+    while (n < cap) {
         const char *inherit = decl_str(decl, DECL_INHERIT);
         if (!inherit || !sh_companion_owner_namespace(inherit)) break;
         names[n++] = inherit;
         if (!manager) manager = entitydef_manager();
-        if (!manager || n > INHERIT_DEPTH) break;
+        if (!manager || n >= cap) break;
         decl = g_decl(manager, inherit, 0);
         if (!decl) break;
     }
+    return n;
+}
+
+int sh_companions_def_chain(void *entity, const char **names, int cap)
+{
+    if (!g_resolved || !g_decl) return 0;
+    if (cap > INHERIT_DEPTH + 1) cap = INHERIT_DEPTH + 1;
+    return def_chain(entity, names, cap);
+}
+
+static void spawn_fanout(void *obj)
+{
+    const char *names[INHERIT_DEPTH + 1];
+    void *ent = g_is_entity(obj);
+    int n = ent ? def_chain(ent, names, INHERIT_DEPTH + 1) : 0;
     if (n) g_spawn_sub(ent, names, n);
 }
 
@@ -546,7 +560,6 @@ int sh_companions_ensure(const char *phase)
     sh_companion_arm a;
     int d;
     const char *at = phase ? phase : "gate";
-    if (g_gate_sub) g_gate_sub(at);
     memset(&a, 0, sizeof a);
     a.resolved = g_resolved;
     a.installed = g_orig && hook_is_installed((void *)g_orig);
@@ -595,9 +608,4 @@ void sh_companions_set_spawn_subscriber(sh_spawn_subscriber_fn fn, sh_spawn_want
 {
     g_spawn_wanted = fn ? wanted : NULL;
     g_spawn_sub = fn;
-}
-
-void sh_companions_set_gate_subscriber(sh_gate_subscriber_fn fn)
-{
-    g_gate_sub = fn;
 }

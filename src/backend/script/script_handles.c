@@ -1,5 +1,6 @@
 /* script_handles.c -- see script_handles.h. */
 #include <windows.h>
+#include <stdlib.h>
 #include <string.h>
 #include "script_handles.h"
 
@@ -11,8 +12,9 @@ enum { ST_FREE = 0, ST_PENDING, ST_LIVE, ST_DEAD };
 
 typedef struct entry {
     uint32_t spawn_id;
-    int16_t  mod;
+    int16_t  mod;            /* SH_SCRIPT_HANDLE_FOREIGN for a reference no mod owns */
     uint8_t  state;
+    char    *names;          /* malloc'd entityDef chain, or NULL */
 } entry;
 
 static entry    g_entries[SH_SCRIPT_HANDLES_MAX];
@@ -65,7 +67,9 @@ void sh_script_handles_set_resolver(sh_script_resolve_fn fn)
 void sh_script_handles_reset(void)
 {
     LONG e;
+    int i;
     AcquireSRWLockExclusive(&g_lock);
+    for (i = 0; i < (int)g_count; i++) free(g_entries[i].names);
     memset(g_entries, 0, sizeof g_entries);
     memset(g_hash, 0, sizeof g_hash);
     g_count = 0;
@@ -75,17 +79,14 @@ void sh_script_handles_reset(void)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full)
+/* Add or find under the lock. A foreign record is live at once and never
+ * reported; an owned one waits for its first sweep. */
+static sh_script_handle add_locked(int mod, uint32_t spawn_id, const char *names, int *full)
 {
     sh_script_handle h = 0;
-    int i;
-    if (full) *full = 0;
-    if (mod < 0 || mod > 0x7FFF || spawn_id == SH_SCRIPT_SPAWN_ID_NONE || spawn_id == SH_SCRIPT_SPAWN_ID_WORLD)
-        return 0;
-    AcquireSRWLockExclusive(&g_lock);
-    i = find_locked(spawn_id);
+    int i = find_locked(spawn_id);
     if (i >= 0) {
-        if (g_entries[i].mod == mod) h = handle_of(i);
+        if (g_entries[i].mod == mod || mod == SH_SCRIPT_HANDLE_FOREIGN) h = handle_of(i);
     } else if (g_count >= SH_SCRIPT_HANDLES_MAX) {
         if (full) *full = 1;
     } else {
@@ -93,14 +94,66 @@ sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full)
         i = (int)g_count;
         g_entries[i].spawn_id = spawn_id;
         g_entries[i].mod = (int16_t)mod;
-        g_entries[i].state = ST_PENDING;
+        g_entries[i].state = mod == SH_SCRIPT_HANDLE_FOREIGN ? ST_LIVE : ST_PENDING;
+        g_entries[i].names = names && names[0] ? _strdup(names) : NULL;
         while (g_hash[s]) s = (s + 1) & (HASH_SLOTS - 1);
         g_hash[s] = i + 1;
         g_count = i + 1;
         h = handle_of(i);
     }
+    return h;
+}
+
+sh_script_handle sh_script_handles_add_named(int mod, uint32_t spawn_id, const char *names, int *full)
+{
+    sh_script_handle h;
+    if (full) *full = 0;
+    if (mod < 0 || mod > 0x7FFF || spawn_id == SH_SCRIPT_SPAWN_ID_NONE || spawn_id == SH_SCRIPT_SPAWN_ID_WORLD)
+        return 0;
+    AcquireSRWLockExclusive(&g_lock);
+    h = add_locked(mod, spawn_id, names, full);
     ReleaseSRWLockExclusive(&g_lock);
     return h;
+}
+
+sh_script_handle sh_script_handles_add(int mod, uint32_t spawn_id, int *full)
+{
+    return sh_script_handles_add_named(mod, spawn_id, NULL, full);
+}
+
+sh_script_handle sh_script_handles_ref(uint32_t spawn_id)
+{
+    sh_script_handle h;
+    if (spawn_id == SH_SCRIPT_SPAWN_ID_NONE || spawn_id == SH_SCRIPT_SPAWN_ID_WORLD) return 0;
+    AcquireSRWLockExclusive(&g_lock);
+    h = add_locked(SH_SCRIPT_HANDLE_FOREIGN, spawn_id, NULL, NULL);
+    ReleaseSRWLockExclusive(&g_lock);
+    return h;
+}
+
+int sh_script_handle_names(sh_script_handle h, char *out, size_t cap)
+{
+    int i, n = -1;
+    if (out && cap) out[0] = 0;
+    AcquireSRWLockShared(&g_lock);
+    i = index_of(h);
+    if (i >= 0) {
+        const char *s = g_entries[i].names ? g_entries[i].names : "";
+        n = (int)strlen(s);
+        if (out && cap) strncpy_s(out, cap, s, _TRUNCATE);
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return n;
+}
+
+int sh_script_handle_known(sh_script_handle h)
+{
+    int i, known = 0;
+    AcquireSRWLockShared(&g_lock);
+    i = index_of(h);
+    if (i >= 0) known = g_entries[i].state == ST_PENDING || g_entries[i].state == ST_LIVE;
+    ReleaseSRWLockShared(&g_lock);
+    return known;
 }
 
 sh_script_handle sh_script_handles_find(uint32_t spawn_id, int *mod)
@@ -169,6 +222,7 @@ int sh_script_handles_sweep(sh_script_handle_change *out, int cap)
         entry *e = &g_entries[i];
         int present;
         if (e->state != ST_PENDING && e->state != ST_LIVE) continue;
+        if (e->mod < 0) continue;               /* a foreign reference: resolved at each use, never reported */
         present = g_resolve && g_resolve(e->spawn_id) != NULL;
         if (e->state == ST_PENDING) {
             if (!present) { e->state = ST_DEAD; continue; }
@@ -192,7 +246,7 @@ int sh_script_handles_live(int mod)
     int i, n = 0;
     AcquireSRWLockShared(&g_lock);
     for (i = 0; i < (int)g_count; i++)
-        if (g_entries[i].state == ST_LIVE && (mod < 0 || g_entries[i].mod == mod)) n++;
+        if (g_entries[i].state == ST_LIVE && g_entries[i].mod >= 0 && (mod < 0 || g_entries[i].mod == mod)) n++;
     ReleaseSRWLockShared(&g_lock);
     return n;
 }

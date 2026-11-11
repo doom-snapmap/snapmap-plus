@@ -80,6 +80,7 @@
 #include "host_image.h"
 #include "engine_build.h"
 #include "engine_globals.h"
+#include "script/script_hooks.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -549,6 +550,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * when an admitted bundle declares companions; uses the game manager and
          * the decl registry resolved above. */
         if (overrides_installed) (void)sh_companions_install(results, db, g_doom_base);
+
+        /* Mod scripts (script/script_hooks.h): the frame hook, the spawn
+         * subscriber on the companions' CallSpawn chain and the map-end
+         * subscriber; the frame hook is committed only at a Play whose mods
+         * carry scripts. A failed install writes its one plain line. */
+        if (overrides_installed && !sh_script_hooks_install(results, db, g_doom_base)) {
+            /* Feature registry: record mod scripts as unavailable for this
+             * session here once the registry is on this branch. */
+        }
 
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
