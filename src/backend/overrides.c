@@ -695,6 +695,9 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
     free(generated);return copy;
 }
 
+static sh_overrides_open_fn volatile g_vt_open;
+void sh_overrides_set_vt_open(sh_overrides_open_fn fn) { InterlockedExchangePointer((PVOID volatile *)&g_vt_open, (PVOID)fn); }
+
 static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
 #ifndef SH_OVERRIDES_TESTING
@@ -767,6 +770,16 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
     if (mode < 2 && name != NULL && sh_modserve_active()) {
         unsigned char *bytes = NULL;
         size_t length = 0;
+        sh_overrides_open_fn vt = (sh_overrides_open_fn)InterlockedCompareExchangePointer((PVOID volatile *)&g_vt_open, NULL, NULL);
+        /* Mods' lit pages first: the merged square 16 at the game's name and
+         * the lit materials moved to it (modvt.h). */
+        if (vt && vt(name, &bytes, &length) > 0) {
+            ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
+            if (s) return s;
+            HeapFree(GetProcessHeap(), 0, bytes);
+            bytes = NULL;
+            length = 0;
+        }
         if (sh_modserve_open(name, &bytes, &length) > 0) {
             ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
             if (s) return s;

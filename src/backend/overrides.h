@@ -58,6 +58,13 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
  */
 int sh_overrides_uninstall(void);
 
+/* A layer answered before the mods' serving: the lit virtual-texture pages
+ * (modvt.h sh_modvt_open: the merged square 16 of the stock family and the
+ * lit materials moved to it). It returns 1 with a process-heap copy, else 0.
+ * NULL removes it. */
+typedef int (*sh_overrides_open_fn)(const char *name, unsigned char **bytes, size_t *length);
+void sh_overrides_set_vt_open(sh_overrides_open_fn fn);
+
 #ifdef SH_OVERRIDES_TESTING
 void *sh_overrides_test_open(const char *name, unsigned int mode);
 void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length);

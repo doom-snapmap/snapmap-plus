@@ -26,6 +26,7 @@
 #include "../src/backend/signatures.h"
 #include "../src/backend/host_image.h"
 #include "mod_test_util.h"
+#include "vt_fixture.h"
 
 static int g_failed, g_checks;
 #define CHECK(expr) do {                                                         \
@@ -518,6 +519,177 @@ static void families_follow_the_map(void)
     mt_remove_tree(root);
 }
 
+/* ------------------------------------------------------------------ lit pages */
+
+static void put_bytes(const char *folder, const char *rel, const uint8_t *p, size_t n)
+{
+    char path[MAX_PATH * 2];
+    FILE *f = NULL;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(p, 1, n, f); fclose(f); }
+}
+
+static char *read_text(const char *folder, const char *rel)
+{
+    char path[MAX_PATH * 2];
+    FILE *f = NULL;
+    char *t = NULL;
+    long n;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    if (fopen_s(&f, path, "rb") || !f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    t = (char *)calloc(1, (size_t)n + 1);
+    if (t) fread(t, 1, (size_t)n, f);
+    fclose(f);
+    return t;
+}
+
+/* A lit material of `salt` mapping w x h texels at x, y of its member (relative form). */
+static void put_lit_material(const char *folder, const char *salt, const char *name, int x, int y, int w, int h)
+{
+    char rel[256], text[1024];
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\material\\mods\\%s\\%s.decl", salt, name);
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\nambientprogram\tskinvmtr\nshadowprogram\tshadowvmtrclipspheres\nlandpagefile\t\"mods/%s/vmtr\"\n"
+                "usevirtualmapping\t1.000000\nvirtualmapping\t{ %.10f, %.10f, %.10f, %.10f }\n"
+                "virtualtexturefeedbackfloat\t{ 1.000000, 2048.000000, 245760.000000, 16.000000 }\n}\n",
+                salt, w / 245760.0, h / 245760.0, x / 245760.0, y / 245760.0);
+    mt_write(folder, rel, text);
+}
+
+static void lit_pages(void)
+{
+    char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    char hash_a[65], hash_b[65], *json, *orig, *out = NULL;
+    size_t ns, n, olen;
+    uint8_t *stock = stock_member(&ns), *m, *merged = NULL;
+    sh_modvt_lit_info ia, ib, info;
+    sh_vtp_member vm;
+    sh_vtp_node node;
+    uint64_t sig;
+    int k, ka = -1, kb = -1;
+    const char *list[1];
+
+    printf("-- lit pages: the builder's record, the places, the merged member and the served materials\n");
+    CHECK(mt_temp_dir("modvt_lit", root, sizeof root));
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\litmod00", mods);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\litmod11", mods);
+    _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\badlit00", root);
+    CreateDirectoryA(mods, NULL);
+
+    /* Builder refusals: a block too large ever to fit, pages in another square, a
+     * material naming pages the mod does not carry, a mapping past the pages. */
+    put_mod(c, "badlit00");
+    m = lit_member(300, 10, 5, 1, 0, &n);
+    put_bytes(c, "assets\\virtualtextures\\mods\\badlit00\\vmtr.mega2", m, n);
+    free(m);
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "300 x 10 level-0 pages") != NULL || (printf("  cause: %s\n", cause), 0));
+    m = lit_member(20, 12, 5, 2, 0, &n);
+    put_bytes(c, "assets\\virtualtextures\\mods\\badlit00\\vmtr.mega2", m, n);
+    free(m);
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "relative form") != NULL || (printf("  cause: %s\n", cause), 0));
+    mt_delete(c, "assets\\virtualtextures\\mods\\badlit00\\vmtr.mega2");
+    put_lit_material(c, "badlit00", "body", 0, 0, 960, 960);
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "carries no virtualtextures/mods/badlit00/vmtr.mega2") != NULL ||
+          (printf("  cause: %s\n", cause), 0));
+    m = lit_member(4, 4, 5, 1, 0, &n);
+    put_bytes(c, "assets\\virtualtextures\\mods\\badlit00\\vmtr.mega2", m, n);
+    free(m);
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "reaches past the 4 x 4 pages") != NULL || (printf("  cause: %s\n", cause), 0));
+    mt_write(c, "assets\\virtualtextures\\mods\\other000\\vmtr.mega2", "MEGA");
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "mods/other000/") != NULL || (printf("  cause: %s\n", cause), 0));
+    mt_remove_tree(c);
+    CHECK(sh_mb_vt_lit_member("virtualtextures/mods/ab12cd34/vmtr.mega2", cause, sizeof cause) && !strcmp(cause, "ab12cd34"));
+    CHECK(!sh_mb_vt_lit_member("virtualtextures/mods/ab12cd34/x/vmtr.mega2", NULL, 0));
+    CHECK(!sh_mb_vt_lit_member("virtualtextures/mods/ab12cd34/vmtr_sq1.mega2", NULL, 0));
+    CHECK(sh_mb_extension_allowed("virtualtextures/mods/ab12cd34/vmtr.mega2"));
+
+    /* Two mods: 20 x 12 pages (block 32) with two materials, 5 x 3 (block 8) with one. */
+    put_mod(a, "litmod00");
+    m = lit_member(20, 12, 100, 1, 0, &n);
+    put_bytes(a, "assets\\virtualtextures\\mods\\litmod00\\vmtr.mega2", m, n);
+    free(m);
+    put_lit_material(a, "litmod00", "body", 0, 0, 960, 960);
+    put_lit_material(a, "litmod00", "head", 960, 0, 1440, 1440);
+    put_mod(b, "litmod11");
+    m = lit_member(5, 3, 900, 1, 0, &n);
+    put_bytes(b, "assets\\virtualtextures\\mods\\litmod11\\vmtr.mega2", m, n);
+    free(m);
+    put_lit_material(b, "litmod11", "skin", 0, 0, 600, 360);
+    CHECK(build_folder(a, hash_a) && build_folder(b, hash_b));
+    json = read_text(a, "mod.json");
+    CHECK(json && strstr(json, "\"vt\"") && strstr(json, "\"node\": 32") &&
+          strstr(json, "generated/decls/material/mods/litmod00/head.decl"));
+    free(json);
+
+    sh_modvt_lit_reset();
+    CHECK(sh_modvt_lit_set_stock(stock, ns) == 1);
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(mods) == 2);
+    /* No map open (the editor offers both): both served, each in a 256 block of its own. */
+    CHECK(sh_modvt_lit_refresh() == 2);
+    for (k = 0; sh_modvt_lit_state(k, &info); ++k) {
+        if (!strcmp(info.salt, "litmod00")) { ka = k; ia = info; }
+        if (!strcmp(info.salt, "litmod11")) { kb = k; ib = info; }
+    }
+    CHECK(ka >= 0 && kb >= 0);
+    CHECK(ka >= 0 && ia.placed && ia.served && ia.size == 32 && ia.x == 0 && ia.y == 256 && ia.materials == 2);
+    CHECK(kb >= 0 && ib.placed && ib.served && ib.size == 8 && ib.x == 256 && ib.y == 256 && ib.materials == 1);
+    sig = sh_modvt_lit_signature();
+    CHECK(sig != 0);
+    CHECK(sh_modvt_lit_compose(&merged, &n, cause, sizeof cause) && sh_vtp_open(&vm, merged, n, cause, sizeof cause) &&
+          vm.square == 16);
+    free(merged);
+    merged = NULL;
+
+    /* The served material moves to its block; another file is not touched. */
+    CHECK(sh_modvt_lit_wanted("generated/decls/material/mods/litmod00/head.decl"));
+    CHECK(sh_modvt_lit_wanted("Generated\\Decls\\Material\\Mods\\LitMod00\\Head.decl"));
+    CHECK(!sh_modvt_lit_wanted("generated/decls/material/mods/litmod00/other.decl"));
+    orig = read_text(a, "assets\\generated\\decls\\material\\mods\\litmod00\\head.decl");
+    olen = orig ? strlen(orig) : 0;
+    CHECK(sh_modvt_lit_material("generated/decls/material/mods/litmod00/head.decl", orig, olen, &out, &n) == 1);
+    node.x = ia.x; node.y = ia.y; node.size = ia.size;
+    {
+        size_t wn;
+        char *want = sh_vtp_material_moved(orig, olen, node, &wn);
+        CHECK(out && want && n == wn && !strcmp(out, want));
+        CHECK(out && strstr(out, "virtualmapping\t{ 0.0058593750, 0.0058593750, 0.7539062500, 0.8750000000 }") &&
+              !strstr(out, "landpagefile") && strstr(out, "pagetablemap\t_vmtrpagetable"));
+        free(want);
+    }
+    free(out);
+    out = NULL;
+    CHECK(sh_modvt_lit_material("generated/decls/material/mods/litmod11/skin.decl", orig, olen, &out, &n) == 0);
+    free(orig);
+
+    /* A map that declares only litmod11, played: litmod00 is not served, litmod11
+     * keeps its place, and the set (so the member's name) changes. */
+    list[0] = hash_b;
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+    CHECK(sh_modvt_lit_refresh() == 1);
+    CHECK(sh_modvt_lit_state(ka, &info) && !info.served && info.placed && info.x == ia.x && info.y == ia.y);
+    CHECK(sh_modvt_lit_state(kb, &info) && info.served && info.x == ib.x && info.y == ib.y);
+    CHECK(sh_modvt_lit_signature() != sig && sh_modvt_lit_signature() != 0);
+    CHECK(!sh_modvt_lit_wanted("generated/decls/material/mods/litmod00/head.decl"));
+    /* A map with neither: nothing is served, square 16 is the game's. */
+    CHECK(sh_modserve_scope_set(NULL, 0, 1) >= 0);
+    CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
+    CHECK(sh_modvt_lit_refresh() == 0 && sh_modvt_lit_signature() == 0);
+    /* Back in the editor: the first set again, the same places, the same name. */
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+    CHECK(sh_modvt_lit_refresh() == 2 && sh_modvt_lit_signature() == sig);
+    sh_modserve_scope_enable(0);
+    sh_modvt_lit_reset();
+    free(stock);
+    mt_remove_tree(root);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -526,6 +698,7 @@ int main(int argc, char **argv)
     decode_helpers();
     families();
     families_follow_the_map();
+    lit_pages();
     if (argc < 2) printf("[skip] the executables (pass DOOMx64vk.exe and DOOMx64.exe)\n");
     for (i = 1; i < argc; ++i) image(argv[i]);
     printf("modvt_test: %d of %d checks passed\n", g_checks - g_failed, g_checks);

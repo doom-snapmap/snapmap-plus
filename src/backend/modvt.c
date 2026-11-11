@@ -29,6 +29,8 @@
 #include "modserve.h"
 #include "modbundle.h"
 #include "backend_log.h"
+#include "vtpack.h"
+#include "mp_json.h"
 
 /* ------------------------------------------------------------------ log */
 
@@ -427,6 +429,375 @@ int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, co
     return 1;
 }
 
+/* ================================================================== lit pages
+ *
+ * Mods' lit pages (vtpack.h): the mods the loaded map serves are packed into
+ * square 16 of the stock `_vmtr` family. A mod is placed once per session
+ * (its place is kept while DOOM runs, so a material read once stays right);
+ * the merged member holds the pages of the mods served now. */
+
+#define MV_LIT_MAX      64
+#define MV_LIT_MATS     256
+#define MV_LIT_SQ16     "virtualtextures/_vmtr_sq16.mega2"
+
+typedef struct mv_lit_mod {
+    char salt[SH_MB_ID_MAX + 1];
+    char hash[65];
+    char key[SH_MB_ID_MAX + 70];          /* "<salt>@<hash>": orders placement and the member */
+    char request[SH_MB_ID_MAX + 40];      /* virtualtextures/mods/<salt>/vmtr.mega2 */
+    int size;                             /* its node (the block's record) */
+    int placed;
+    sh_vtp_node node;
+    int served;                           /* the loaded map serves it now */
+    int told;                             /* the "does not fit" line was written for this set */
+    char **mats;                          /* lower-cased material requests (the block's record) */
+    int nmats;
+} mv_lit_mod;
+
+static mv_lit_mod g_lit[MV_LIT_MAX];      /* every build seen this session, placed or not */
+static int g_nlit;
+static SRWLOCK g_lit_lock = SRWLOCK_INIT;
+static uint8_t *g_stock;                  /* the installed square 16 member */
+static size_t g_stock_len;
+static sh_vtp_member g_stock_m;
+static int g_stock_ok;
+static uint64_t g_lit_sig;                /* the served set's signature; 0 when nothing is served */
+static volatile LONG g_lit_known;         /* a refresh ran */
+
+int sh_modvt_lit_set_stock(const uint8_t *bytes, size_t len)
+{
+    char why[200];
+    uint8_t *copy = len ? (uint8_t *)malloc(len) : NULL;
+    AcquireSRWLockExclusive(&g_lit_lock);
+    free(g_stock);
+    g_stock = NULL;
+    g_stock_len = 0;
+    g_stock_ok = 0;
+    if (copy) {
+        memcpy(copy, bytes, len);
+        g_stock = copy;
+        g_stock_len = len;
+        g_stock_ok = sh_vtp_open(&g_stock_m, g_stock, g_stock_len, why, sizeof why) && g_stock_m.square == SH_VTP_SQUARE;
+        if (!g_stock_ok) mv_log("lit pages: the game's %s cannot be read as square 16 (%s); mods' lit textures are not served",
+                                MV_LIT_SQ16, why);
+    }
+    ReleaseSRWLockExclusive(&g_lit_lock);
+    return g_stock_ok;
+}
+
+static void mv_lower(char *s) { for (; *s; ++s) { if (*s == '\\') *s = '/'; else if (*s >= 'A' && *s <= 'Z') *s += 32; } }
+
+static void mv_lit_free(mv_lit_mod *m)
+{
+    int i;
+    for (i = 0; i < m->nmats; ++i) free(m->mats[i]);
+    free(m->mats);
+    memset(m, 0, sizeof *m);
+}
+
+void sh_modvt_lit_reset(void)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_lit_lock);
+    for (i = 0; i < g_nlit; ++i) mv_lit_free(&g_lit[i]);
+    g_nlit = 0;
+    g_lit_sig = 0;
+    InterlockedExchange(&g_lit_known, 0);
+    ReleaseSRWLockExclusive(&g_lit_lock);
+}
+
+/* The served lit members, collected from the index. */
+typedef struct mv_lit_seen { char salt[SH_MB_ID_MAX + 1]; char hash[65]; } mv_lit_seen;
+typedef struct mv_lit_walk { mv_lit_seen v[MV_LIT_MAX]; int n; } mv_lit_walk;
+
+static void mv_lit_file(void *context, const char *request, uint64_t size, const char *bundle_id, const char *bundle_hash)
+{
+    mv_lit_walk *w = (mv_lit_walk *)context;
+    char salt[SH_MB_ID_MAX + 1];
+    (void)size;
+    (void)bundle_id;
+    if (!sh_mb_vt_lit_member(request, salt, sizeof salt) || w->n >= MV_LIT_MAX) return;
+    strcpy_s(w->v[w->n].salt, sizeof w->v[0].salt, salt);
+    mv_lower(w->v[w->n].salt);
+    strncpy_s(w->v[w->n].hash, sizeof w->v[0].hash, bundle_hash, _TRUNCATE);
+    w->n++;
+}
+
+static int mv_lit_find(const char *salt, const char *hash)
+{
+    int i;
+    for (i = 0; i < g_nlit; ++i) if (!strcmp(g_lit[i].salt, salt) && !strcmp(g_lit[i].hash, hash)) return i;
+    return -1;
+}
+
+/* The block's record, registries "vt": the node and the materials. */
+typedef struct mv_lit_reg { mv_lit_walk *w; int found; } mv_lit_reg;
+static void mv_lit_registry(void *context, const char *id, const char *hash, const char *registries)
+{
+    mv_lit_reg *r = (mv_lit_reg *)context;
+    mpj *root, *vt, *node, *mats;
+    char salt[SH_MB_ID_MAX + 1];
+    int i, k;
+    (void)r;
+    if (!registries || !strstr(registries, "\"vt\"")) return;
+    strncpy_s(salt, sizeof salt, id ? id : "", _TRUNCATE);
+    mv_lower(salt);
+    if (mv_lit_find(salt, hash) >= 0) return;            /* read once per build */
+    root = mpj_parse(registries, strlen(registries));
+    vt = root ? mpj_get(root, "vt") : NULL;
+    node = vt ? mpj_get(vt, "node") : NULL;
+    mats = vt ? mpj_get(vt, "materials") : NULL;
+    if (node && mpj_is_num(node) && g_nlit < MV_LIT_MAX) {
+        mv_lit_mod *m = &g_lit[g_nlit];
+        memset(m, 0, sizeof *m);
+        strcpy_s(m->salt, sizeof m->salt, salt);
+        strncpy_s(m->hash, sizeof m->hash, hash, _TRUNCATE);
+        _snprintf_s(m->key, sizeof m->key, _TRUNCATE, "%s@%s", m->salt, m->hash);
+        _snprintf_s(m->request, sizeof m->request, _TRUNCATE, "virtualtextures/mods/%s/vmtr.mega2", m->salt);
+        m->size = (int)mpj_int(node);
+        if (mats && mats->type == MPJ_ARR && mats->n) {
+            m->mats = (char **)calloc((size_t)mats->n, sizeof(char *));
+            for (i = 0, k = 0; m->mats && i < mats->n && k < MV_LIT_MATS; ++i)
+                if (mats->items[i]->type == MPJ_STR && (m->mats[k] = _strdup(mats->items[i]->text)) != NULL)
+                    mv_lower(m->mats[k++]);
+            m->nmats = k;
+        }
+        g_nlit++;
+    }
+    mpj_free(root);
+}
+
+static uint64_t mv_fnv(uint64_t h, const char *s)
+{
+    for (; *s; ++s) h = (h ^ (unsigned char)*s) * 1099511628211ull;
+    return (h ^ '|') * 1099511628211ull;
+}
+
+static int mv_lit_key_cmp(const void *a, const void *b)
+{
+    return strcmp(g_lit[*(const int *)a].key, g_lit[*(const int *)b].key);
+}
+
+/* Who the loaded map serves now, every newcomer placed (held places kept).
+ * Caller holds g_lit_lock exclusively. Returns how many are served. */
+static int mv_lit_refresh_locked(void)
+{
+    static mv_lit_walk w;
+    mv_lit_reg reg;
+    sh_vtp_req reqs[MV_LIT_MAX];
+    int order[MV_LIT_MAX];
+    int i, k, n = 0, served = 0;
+    uint64_t sig = 1469598103934665603ull;
+    memset(&w, 0, sizeof w);
+    sh_modserve_each_served_here(mv_lit_file, &w);
+    reg.w = &w;
+    reg.found = 0;
+    if (w.n) (void)sh_modserve_each_bundle_registries(mv_lit_registry, &reg);
+    for (i = 0; i < g_nlit; ++i) g_lit[i].served = 0;
+    for (k = 0; k < w.n; ++k) {
+        i = mv_lit_find(w.v[k].salt, w.v[k].hash);
+        if (i >= 0) g_lit[i].served = 1;
+    }
+    /* A rebuilt mod takes the place its earlier build held when that build is
+     * not served and the new block fits in it, so its materials stay right. */
+    for (i = 0; i < g_nlit; ++i) {
+        mv_lit_mod *m = &g_lit[i];
+        if (!m->served || m->placed) continue;
+        for (k = 0; k < g_nlit; ++k) {
+            mv_lit_mod *o = &g_lit[k];
+            if (k == i || !o->placed || o->served || strcmp(o->salt, m->salt) || m->size > o->node.size) continue;
+            m->node = o->node;
+            m->node.size = m->size;
+            m->placed = 1;
+            o->placed = 0;
+            break;
+        }
+    }
+    if (g_stock_ok) {
+        for (i = 0; i < g_nlit; ++i) {
+            if (!g_lit[i].placed && !g_lit[i].served) continue;   /* a held place, or a newcomer to place */
+            memset(&reqs[n], 0, sizeof reqs[n]);
+            reqs[n].key = g_lit[i].key;
+            reqs[n].size = g_lit[i].size;
+            reqs[n].held = g_lit[i].placed;
+            reqs[n].node = g_lit[i].node;
+            order[n++] = i;
+        }
+        (void)sh_vtp_place(&g_stock_m, reqs, n);
+        for (k = 0; k < n; ++k)
+            if (reqs[k].placed && !g_lit[order[k]].placed) { g_lit[order[k]].placed = 1; g_lit[order[k]].node = reqs[k].node; }
+    }
+    n = 0;
+    for (i = 0; i < g_nlit; ++i) if (g_lit[i].served) { order[n++] = i; served++; }
+    qsort(order, (size_t)n, sizeof order[0], mv_lit_key_cmp);
+    {
+        int any = 0;
+        char num[48];
+        sig = mv_fnv(sig, g_stock_ok ? "stock" : "none");
+        _snprintf_s(num, sizeof num, _TRUNCATE, "%zu", g_stock_len);
+        sig = mv_fnv(sig, num);
+        for (k = 0; k < n; ++k) {
+            const mv_lit_mod *m = &g_lit[order[k]];
+            if (!m->placed) continue;
+            any = 1;
+            sig = mv_fnv(sig, m->key);
+            _snprintf_s(num, sizeof num, _TRUNCATE, "%d,%d,%d", m->node.x, m->node.y, m->node.size);
+            sig = mv_fnv(sig, num);
+        }
+        g_lit_sig = any ? (sig ? sig : 1) : 0;
+    }
+    InterlockedExchange(&g_lit_known, 1);
+    return served;
+}
+
+int sh_modvt_lit_refresh(void)
+{
+    int n;
+    AcquireSRWLockExclusive(&g_lit_lock);
+    n = mv_lit_refresh_locked();
+    ReleaseSRWLockExclusive(&g_lit_lock);
+    return n;
+}
+
+uint64_t sh_modvt_lit_signature(void)
+{
+    uint64_t s;
+    AcquireSRWLockShared(&g_lit_lock);
+    s = g_lit_sig;
+    ReleaseSRWLockShared(&g_lit_lock);
+    return s;
+}
+
+int sh_modvt_lit_state(int k, sh_modvt_lit_info *out)
+{
+    int r = 0;
+    AcquireSRWLockShared(&g_lit_lock);
+    if (k >= 0 && k < g_nlit && out) {
+        const mv_lit_mod *m = &g_lit[k];
+        memset(out, 0, sizeof *out);
+        strcpy_s(out->salt, sizeof out->salt, m->salt);
+        strcpy_s(out->hash, sizeof out->hash, m->hash);
+        out->size = m->size;
+        out->placed = m->placed;
+        out->served = m->served;
+        out->x = m->node.x;
+        out->y = m->node.y;
+        out->materials = m->nmats;
+        r = 1;
+    }
+    ReleaseSRWLockShared(&g_lit_lock);
+    return r;
+}
+
+static unsigned char *mv_read_disk(const char *utf8, size_t max, size_t *len)
+{
+    wchar_t wide[1024];
+    HANDLE h;
+    LARGE_INTEGER size;
+    unsigned char *buf = NULL;
+    size_t done = 0;
+    *len = 0;
+    if (!MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, (int)(sizeof wide / sizeof wide[0]))) return NULL;
+    h = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && (uint64_t)size.QuadPart <= max &&
+        (buf = (unsigned char *)malloc((size_t)size.QuadPart)) != NULL) {
+        while (done < (size_t)size.QuadPart) {
+            DWORD got = 0, want = (DWORD)((size_t)size.QuadPart - done > (1u << 24) ? (1u << 24) : (size_t)size.QuadPart - done);
+            if (!ReadFile(h, buf + done, want, &got, NULL) || !got) break;
+            done += got;
+        }
+        if (done != (size_t)size.QuadPart) { free(buf); buf = NULL; } else *len = done;
+    }
+    CloseHandle(h);
+    return buf;
+}
+
+int sh_modvt_lit_compose(uint8_t **out, size_t *out_len, char *why, size_t cap)
+{
+    sh_vtp_mod mods[MV_LIT_MAX];
+    sh_vtp_member mem[MV_LIT_MAX];
+    uint8_t *bytes[MV_LIT_MAX];
+    int i, n = 0, ok;
+    *out = NULL;
+    *out_len = 0;
+    memset(bytes, 0, sizeof bytes);
+    AcquireSRWLockShared(&g_lit_lock);
+    if (!g_stock_ok) {
+        ReleaseSRWLockShared(&g_lit_lock);
+        _snprintf_s(why, cap, _TRUNCATE, "the game's square 16 member is not available");
+        return 0;
+    }
+    for (i = 0; i < g_nlit; ++i) {
+        mv_lit_mod *m = &g_lit[i];
+        sh_modserve_hit hit;
+        size_t len = 0;
+        sh_vtp_lit lit;
+        char w2[300];
+        if (!m->served || !m->placed) continue;
+        if (!sh_modserve_lookup(m->request, &hit) || strcmp(hit.bundle_hash, m->hash) ||
+            !(bytes[n] = mv_read_disk(hit.disk_path, SH_MODSERVE_MAX_FILE, &len))) {
+            mv_log("lit pages: %s of %s could not be read; its textures are left out", m->request, m->salt);
+            continue;
+        }
+        if (!sh_vtp_open(&mem[n], bytes[n], len, w2, sizeof w2) || !sh_vtp_lit_info(&mem[n], &lit, w2, sizeof w2) ||
+            lit.node != m->size) {
+            mv_log("lit pages: %s of %s is not what its build recorded (%s); its textures are left out", m->request,
+                   m->salt, lit.node != m->size ? "another block size" : w2);
+            free(bytes[n]);
+            bytes[n] = NULL;
+            continue;
+        }
+        mods[n].key = m->key;
+        mods[n].m = &mem[n];
+        mods[n].node = m->node;
+        n++;
+    }
+    ok = sh_vtp_compose(&g_stock_m, mods, n, out, out_len, why, cap);
+    ReleaseSRWLockShared(&g_lit_lock);
+    for (i = 0; i < n; ++i) free(bytes[i]);
+    return ok;
+}
+
+int sh_modvt_lit_wanted(const char *request)
+{
+    char req[512];
+    int i, k, r = 0;
+    if (!request || !InterlockedCompareExchange(&g_lit_known, 0, 0)) return 0;
+    strncpy_s(req, sizeof req, request, _TRUNCATE);
+    mv_lower(req);
+    if (strncmp(req, "generated/decls/material", 24)) return 0;
+    AcquireSRWLockShared(&g_lit_lock);
+    for (i = 0; i < g_nlit && !r; ++i)
+        for (k = 0; g_lit[i].served && k < g_lit[i].nmats && !r; ++k) r = !strcmp(g_lit[i].mats[k], req);
+    ReleaseSRWLockShared(&g_lit_lock);
+    return r;
+}
+
+int sh_modvt_lit_material(const char *request, const char *text, size_t len, char **out, size_t *out_len)
+{
+    char req[512];
+    int i, k, r = 0;
+    *out = NULL;
+    *out_len = 0;
+    if (!request) return 0;
+    strncpy_s(req, sizeof req, request, _TRUNCATE);
+    mv_lower(req);
+    if (strncmp(req, "generated/decls/material", 24)) return 0;
+    AcquireSRWLockShared(&g_lit_lock);
+    for (i = 0; i < g_nlit && !r; ++i) {
+        const mv_lit_mod *m = &g_lit[i];
+        if (!m->served) continue;
+        for (k = 0; k < m->nmats && strcmp(m->mats[k], req); ++k) {}
+        if (k == m->nmats || !sh_vtp_material_names(text, len, m->salt)) continue;
+        *out = m->placed ? sh_vtp_material_moved(text, len, m->node, out_len) : sh_vtp_material_plain(text, len, out_len);
+        r = *out ? 1 : -1;
+    }
+    ReleaseSRWLockShared(&g_lit_lock);
+    return r;
+}
+
 #ifndef SH_MODVT_PURE
 /* ================================================================== engine */
 #include "signatures.h"
@@ -434,6 +805,8 @@ int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, co
 #include "engine_globals.h"
 #include "host_image.h"
 #include "process_heap_scope.h"
+#include "modstore.h"
+#include "overrides.h"
 
 #define MV_CODE 0xC0
 
@@ -672,12 +1045,15 @@ static void mv_index_changed(void)
     }
 }
 
+static void mv_lit_pass(const char *phase);   /* lit pages, below */
+
 void sh_modvt_before_pass(const char *phase)
 {
     if (!g_bound) return;
     if (sh_modvt_engine_on_main() != 1) return;
     mv_sync_now(phase);
     sh_modvt_mark_exposed();
+    if (sh_modvt_engine_ready()) mv_lit_pass(phase);
 }
 
 void sh_modvt_print_status(void)
@@ -697,6 +1073,7 @@ void sh_modvt_print_status(void)
               g_vulkan == 1 ? "Vulkan" : g_vulkan == 0 ? "OpenGL" : "unknown renderer",
               g_bound ? sh_modvt_engine_flavor() : -1,
               g_pending ? "; a sync is pending" : "");
+    sh_modvt_lit_status();
 }
 
 /* sh_vt sync: run the sync now from the console (main thread). */
@@ -706,6 +1083,292 @@ void sh_modvt_console_sync(void)
     if (sh_modvt_engine_on_main() != 1) { sh_printf("VT: sync refused: not on the main thread\n"); return; }
     mv_sync_now("console");
     sh_modvt_print_status();
+}
+
+/* ------------------------------------------------------------------ lit pages: serving */
+
+typedef void (*mv_exec_fn)(void *cmdsys, const char *text);
+static void *g_cmdsys;
+static volatile LONG64 g_engine_sig;      /* what the engine's record 1 reads for square 16: 0 the game's file */
+static volatile LONG g_lit_opens;
+static char g_lit_cache[MAX_PATH * 3];    /* the merged member served now (UTF-8) */
+static uint64_t g_lit_cache_sig;
+static uint64_t g_lit_cache_bytes;
+static SRWLOCK g_cache_lock2 = SRWLOCK_INIT;
+
+static int mv_is_sq16(const char *request)
+{
+    char r[64];
+    if (!request || strlen(request) >= sizeof r) return 0;
+    strcpy_s(r, sizeof r, request);
+    mv_lower(r);
+    return !strcmp(r, MV_LIT_SQ16);
+}
+
+/* <mods>\.served\vt: the merged members, one per served set. */
+static int mv_lit_dir(char *out, size_t cap)
+{
+    char root[MAX_PATH * 3];
+    if (!sh_ms_root(root, sizeof root)) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\.served\\vt", root);
+    return 1;
+}
+
+static int mv_mkdirs_utf8(const char *dir)
+{
+    wchar_t w[1024], *p;
+    if (!MultiByteToWideChar(CP_UTF8, 0, dir, -1, w, (int)(sizeof w / sizeof w[0]))) return 0;
+    for (p = w + 3; *p; ++p)
+        if (*p == L'\\') { *p = 0; CreateDirectoryW(w, NULL); *p = L'\\'; }
+    return CreateDirectoryW(w, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static int mv_write_atomic(const char *path, const uint8_t *bytes, size_t len)
+{
+    wchar_t w[1024], t[1040];
+    HANDLE h;
+    size_t done = 0;
+    int ok = 1;
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, (int)(sizeof w / sizeof w[0]))) return 0;
+    _snwprintf_s(t, sizeof t / sizeof t[0], _TRUNCATE, L"%s.%lu.tmp", w, GetCurrentProcessId());
+    h = CreateFileW(t, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    while (ok && done < len) {
+        DWORD got = 0, want = (DWORD)(len - done > (1u << 24) ? (1u << 24) : len - done);
+        ok = WriteFile(h, bytes + done, want, &got, NULL) && got == want;
+        done += got;
+    }
+    ok = CloseHandle(h) && ok;
+    if (ok) ok = MoveFileExW(t, w, MOVEFILE_REPLACE_EXISTING) != 0;
+    if (!ok) DeleteFileW(t);
+    return ok;
+}
+
+/* Remove every other merged member of this folder. */
+static void mv_lit_prune(const char *dir, const char *keep_name)
+{
+    wchar_t pat[1024], wkeep[128], path[1100];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    char pdir[MAX_PATH * 3];
+    _snprintf_s(pdir, sizeof pdir, _TRUNCATE, "%s\\sq16-*.mega2", dir);
+    if (!MultiByteToWideChar(CP_UTF8, 0, pdir, -1, pat, (int)(sizeof pat / sizeof pat[0]))) return;
+    if (!MultiByteToWideChar(CP_UTF8, 0, keep_name ? keep_name : "", -1, wkeep, (int)(sizeof wkeep / sizeof wkeep[0]))) return;
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        wchar_t wdir[1024];
+        if (!_wcsicmp(fd.cFileName, wkeep)) continue;
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, (int)(sizeof wdir / sizeof wdir[0]));
+        _snwprintf_s(path, sizeof path / sizeof path[0], _TRUNCATE, L"%s\\%s", wdir, fd.cFileName);
+        DeleteFileW(path);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* The merged member of the served set, written once under .served\vt.
+ * 1 with its path, 0 when nothing is served, -1 when it could not be built. */
+static int mv_lit_member(char *path, size_t cap, uint64_t *sig_out)
+{
+    char dir[MAX_PATH * 3], name[64], why[300];
+    uint64_t sig = sh_modvt_lit_signature();
+    uint8_t *img = NULL;
+    size_t len = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    wchar_t w[1024];
+    *sig_out = sig;
+    if (!sig) return 0;
+    AcquireSRWLockExclusive(&g_cache_lock2);
+    if (g_lit_cache_sig == sig && g_lit_cache[0]) {
+        strcpy_s(path, cap, g_lit_cache);
+        ReleaseSRWLockExclusive(&g_cache_lock2);
+        return 1;
+    }
+    if (!mv_lit_dir(dir, sizeof dir) || !mv_mkdirs_utf8(dir)) {
+        ReleaseSRWLockExclusive(&g_cache_lock2);
+        mv_log("lit pages: the mods folder's .served\\vt folder could not be made; mods' lit textures are not served");
+        return -1;
+    }
+    _snprintf_s(name, sizeof name, _TRUNCATE, "sq16-%016llx.mega2", (unsigned long long)sig);
+    _snprintf_s(path, cap, _TRUNCATE, "%s\\%s", dir, name);
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, w, (int)(sizeof w / sizeof w[0])) &&
+        GetFileAttributesExW(w, GetFileExInfoStandard, &fa)) {
+        /* Built earlier for this set (by this or another session): keyed by the set. */
+        g_lit_cache_bytes = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+    } else {
+        double t0 = (double)GetTickCount64();
+        if (!sh_modvt_lit_compose(&img, &len, why, sizeof why)) {
+            ReleaseSRWLockExclusive(&g_cache_lock2);
+            mv_log("lit pages: the merged square 16 could not be built (%s); mods' lit textures are not served", why);
+            return -1;
+        }
+        if (!mv_write_atomic(path, img, len)) {
+            free(img);
+            ReleaseSRWLockExclusive(&g_cache_lock2);
+            mv_log("lit pages: %s could not be written; mods' lit textures are not served", path);
+            return -1;
+        }
+        free(img);
+        g_lit_cache_bytes = len;
+        mv_log("lit pages: built %s (%zu bytes) in %.0f ms", name, len, (double)GetTickCount64() - t0);
+    }
+    strcpy_s(g_lit_cache, sizeof g_lit_cache, path);
+    g_lit_cache_sig = sig;
+    ReleaseSRWLockExclusive(&g_cache_lock2);
+    mv_lit_prune(dir, name);
+    return 1;
+}
+
+int sh_modvt_open(const char *request, unsigned char **bytes, size_t *length)
+{
+    *bytes = NULL;
+    *length = 0;
+    if (!request) return 0;
+    if (mv_is_sq16(request)) {
+        char path[MAX_PATH * 3];
+        uint64_t sig = 0;
+        size_t len = 0;
+        unsigned char *raw, *heap;
+        if (!InterlockedCompareExchange(&g_lit_known, 0, 0)) (void)sh_modvt_lit_refresh();
+        if (mv_lit_member(path, sizeof path, &sig) != 1) { InterlockedExchange64(&g_engine_sig, 0); return 0; }
+        raw = mv_read_disk(path, (size_t)-1 / 2, &len);
+        heap = raw ? (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len) : NULL;
+        if (!heap) {
+            free(raw);
+            mv_log("lit pages: %s could not be read; the game's own square 16 is used", path);
+            InterlockedExchange64(&g_engine_sig, 0);
+            return 0;
+        }
+        memcpy(heap, raw, len);
+        free(raw);
+        InterlockedExchange64(&g_engine_sig, (LONG64)sig);
+        InterlockedIncrement(&g_lit_opens);
+        *bytes = heap;
+        *length = len;
+        return 1;
+    }
+    if (sh_modvt_lit_wanted(request)) {
+        unsigned char *orig = NULL;
+        size_t olen = 0, nlen = 0;
+        char *moved = NULL;
+        int r;
+        if (sh_modserve_open(request, &orig, &olen) != 1) return 0;
+        r = sh_modvt_lit_material(request, (const char *)orig, olen, &moved, &nlen);
+        if (r == 1) {
+            unsigned char *heap = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, nlen ? nlen : 1);
+            if (heap) {
+                memcpy(heap, moved, nlen);
+                free(moved);
+                HeapFree(GetProcessHeap(), 0, orig);
+                *bytes = heap;
+                *length = nlen;
+                return 1;
+            }
+        }
+        free(moved);
+        if (r < 0) mv_log("lit pages: %s names its mod's lit pages but has no virtualmapping or closing brace line; it is "
+                          "served as the mod carries it", request);
+        /* Not a lit material: the caller's own serving answers it. */
+        HeapFree(GetProcessHeap(), 0, orig);
+    }
+    return 0;
+}
+
+/* Run the engine's own reload of the stock family's members
+ * (vt_reloadMega2Vmtrs: VK 0x1417E3830, GL see docs/vt-baker.md), which
+ * re-opens _vmtr_sq1.._sq16 through the provider, inside process heap 0. */
+static int mv_lit_reload(const char *phase, uint64_t want)
+{
+    sh_process_heap_scope heap = { 0 };
+    uint8_t *rec = sh_modvt_engine_record(1);
+    void *before = NULL, *after = NULL;
+    mv_exec_fn exec = NULL;
+    int ok = 0;
+    if (!g_cmdsys || !rec) {
+        mv_log("%s: lit pages: the console command system is unbound; the texture files are not reloaded", phase);
+        return 0;
+    }
+    __try { exec = *(mv_exec_fn *)(*(uint8_t **)g_cmdsys + 0x48); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { exec = NULL; }
+    if (!exec) return 0;
+    (void)mv_rd_ptr(rec + SH_VT_REC_MEGA2, &before);
+    if (!sh_process_heap_enter(&g_heap, &heap)) return 0;
+    __try {
+        __try { exec(g_cmdsys, "vt_reloadMega2Vmtrs"); ok = 1; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    } __finally {
+        if (!sh_process_heap_leave(&heap)) mv_log("vt_reloadMega2Vmtrs: the process heap scope did not balance");
+    }
+    (void)mv_rd_ptr(rec + SH_VT_REC_MEGA2, &after);
+    if (!ok) { mv_log("%s: lit pages: vt_reloadMega2Vmtrs FAULTED", phase); return 0; }
+    if (after == before) {
+        mv_log("%s: lit pages: the engine did not reload its texture files (it refuses while a texture family's member "
+               "count changed; a mod's private family registered this session does that); the change shows after DOOM "
+               "restarts", phase);
+        return 0;
+    }
+    if ((uint64_t)InterlockedCompareExchange64(&g_engine_sig, 0, 0) != want) {
+        mv_log("%s: lit pages: the engine reloaded but did not read the merged square 16", phase);
+        return 0;
+    }
+    return 1;
+}
+
+static void mv_lit_pass(const char *phase)
+{
+    int i, served, placed = 0, notfit = 0;
+    uint64_t want, have;
+    char path[MAX_PATH * 3];
+    AcquireSRWLockExclusive(&g_lit_lock);
+    served = mv_lit_refresh_locked();
+    for (i = 0; i < g_nlit; ++i) {
+        mv_lit_mod *m = &g_lit[i];
+        if (!m->served) { m->told = 0; continue; }
+        if (m->placed) { placed++; continue; }
+        notfit++;
+        if (!m->told) {
+            char label[300];
+            if (!sh_modserve_bundle_label(m->hash, label, sizeof label)) strcpy_s(label, sizeof label, "a mod");
+            mv_log("%s: %s's lit textures do not fit in the game's texture square beside the other mods this map uses, so "
+                   "its demons draw with their plain images; remove a mod with lit textures from this map, or ask the "
+                   "mod's author to bake its textures smaller", phase, label);
+            m->told = 1;
+        }
+    }
+    want = g_lit_sig;
+    ReleaseSRWLockExclusive(&g_lit_lock);
+    have = (uint64_t)InterlockedCompareExchange64(&g_engine_sig, 0, 0);
+    if (want == have) return;
+    if (want) {
+        uint64_t sig;
+        if (mv_lit_member(path, sizeof path, &sig) != 1) return;
+    }
+    if (mv_lit_reload(phase, want))
+        mv_log("%s: lit pages: square 16 now holds %d mod%s' pages (%d served, %d without room)%s; the engine reloaded "
+               "its texture files", phase, placed, placed == 1 ? "'s" : "s", served, notfit,
+               want ? "" : " (the game's own file)");
+}
+
+void sh_modvt_lit_status(void)
+{
+    int i, served = 0, placed = 0;
+    uint64_t have = (uint64_t)InterlockedCompareExchange64(&g_engine_sig, 0, 0), want = sh_modvt_lit_signature();
+    AcquireSRWLockShared(&g_lit_lock);
+    for (i = 0; i < g_nlit; ++i) {
+        if (g_lit[i].served) served++;
+        if (g_lit[i].served && g_lit[i].placed) placed++;
+    }
+    for (i = 0; i < g_nlit; ++i) {
+        const mv_lit_mod *m = &g_lit[i];
+        if (m->placed)
+            sh_printf("VT: lit %s@%.12s: block %d at %d,%d of square 16, %d material%s%s\n", m->salt, m->hash, m->size,
+                      m->node.x, m->node.y, m->nmats, m->nmats == 1 ? "" : "s", m->served ? ", served" : "");
+        else
+            sh_printf("VT: lit %s@%.12s: block %d, no place%s\n", m->salt, m->hash, m->size, m->served ? ", served" : "");
+    }
+    ReleaseSRWLockShared(&g_lit_lock);
+    sh_printf("VT: lit pages: %d served, %d placed; square 16 the engine reads: %s (%d opens)%s\n", served, placed,
+              have ? "merged" : "the game's", (int)g_lit_opens, want != have ? "; a reload is pending" : "");
 }
 
 /* ------------------------------------------------------------------ install */
@@ -753,10 +1416,28 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
         g_sparse_cvar = (const int32_t *)(module_base + l.sparse_cvar_rva);
     }
     g_bound = 1;
+    g_cmdsys = sh_resolve_cmdsys(results, count, module_base);
+    {
+        /* The game's own square 16, the base of every merged member. */
+        const wchar_t *dir = sh_host_dir();
+        wchar_t path[1024];
+        char utf8[MAX_PATH * 3];
+        size_t len = 0;
+        unsigned char *stock = NULL;
+        if (dir) {
+            _snwprintf_s(path, sizeof path / sizeof path[0], _TRUNCATE, L"%s\\virtualtextures\\_vmtr_sq16.mega2", dir);
+            if (WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, (int)sizeof utf8, NULL, NULL))
+                stock = mv_read_disk(utf8, 64u << 20, &len);
+        }
+        if (stock) (void)sh_modvt_lit_set_stock(stock, len);
+        else mv_log("lit pages: the game's %s could not be read; mods' lit textures are not served", MV_LIT_SQ16);
+        free(stock);
+    }
     mv_log("mod families bound on %s: SetSource rva 0x%X, Release rva 0x%X, VirtualTextureForMaterial rva 0x%X, VT "
            "system rva 0x%X, record table sys+0x%X", g_vulkan == 1 ? "Vulkan" : g_vulkan == 0 ? "OpenGL" : "an unknown image",
            ss->rva, l.release_rva, vf->rva, l.sys_rva, l.table_off);
     sh_modserve_set_index_listener(mv_index_changed);
+    sh_overrides_set_vt_open(sh_modvt_open);
     n = sh_modvt_collect(NULL, 0);
     if (n) {
         InterlockedExchange(&g_pending, 1);

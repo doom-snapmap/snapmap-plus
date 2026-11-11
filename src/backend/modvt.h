@@ -155,6 +155,47 @@ int sh_modvt_owned_count(void);
 /* Forget every product record (tests only). */
 void sh_modvt_reset(void);
 
+/* ------------------------------------------------------------------ lit pages */
+
+/* Mods' lit pages (vtpack.h, docs/vt-baker.md "Lit pages"). A mod carries
+ * them as virtualtextures/mods/<salt>/vmtr.mega2 in the relative form and its
+ * build records registries "vt" (block size, materials). For the mods the
+ * loaded map serves (sh_modserve_each_served_here: in the editor also the
+ * root folder's builds the Toybox offers), the product places each block in
+ * square 16 of the stock `_vmtr` family (once per session: a block keeps its
+ * place while DOOM runs, and a rebuilt mod takes its earlier build's place
+ * when it fits), builds the merged member under <mods>\.served\vt\ (named by
+ * the served set; rebuilt only when that set changes), serves it as
+ * virtualtextures/_vmtr_sq16.mega2 and serves each listed material moved to
+ * its block (or, with no room, without virtual-texture lines). The engine
+ * reads it when the VT system opens the stock members at start, and through
+ * vt_reloadMega2Vmtrs, run at a registration pass whenever the served set
+ * differs from what the engine read. */
+typedef struct sh_modvt_lit_info {
+    char salt[65], hash[65];
+    int size, placed, served, x, y, materials;
+} sh_modvt_lit_info;
+
+/* The game's square 16 member (copied). 1 when it opens as square 16. */
+int      sh_modvt_lit_set_stock(const uint8_t *bytes, size_t len);
+/* Recompute who is served and place newcomers. Returns how many are served. */
+int      sh_modvt_lit_refresh(void);
+/* The served set's signature (names the merged member), 0 when none is placed. */
+uint64_t sh_modvt_lit_signature(void);
+/* Entry k of the session's lit builds: 1 filled, 0 past the end. */
+int      sh_modvt_lit_state(int k, sh_modvt_lit_info *out);
+/* The merged member of the served set (malloc'd). 1, or 0 with the cause. */
+int      sh_modvt_lit_compose(uint8_t **out, size_t *len, char *why, size_t cap);
+/* 1 when `request` is a material a served mod's build lists. */
+int      sh_modvt_lit_wanted(const char *request);
+/* `text` (the served bytes of `request`) as the lit pages are served now: 1
+ * with a malloc'd text (moved to its block, or plain without room), 0 when it
+ * is not a served mod's lit material, -1 when it names the pages but cannot be
+ * rewritten. */
+int      sh_modvt_lit_material(const char *request, const char *text, size_t len, char **out, size_t *out_len);
+/* Forget the session's places (tests only). */
+void     sh_modvt_lit_reset(void);
+
 /* ------------------------------------------------------------------ decoding */
 
 /* What modvt reads out of the two signed functions. RVAs are relative to the
@@ -220,6 +261,14 @@ int      sh_modvt_engine_on_main(void);             /* 1 main thread, 0 not, -1 
 int      sh_modvt_engine_set_source(int k, const char *name, const char *path, int flavor, int *result,
                                     double *ms, unsigned *fault);
 int      sh_modvt_engine_release(int k, unsigned *fault);
+
+/* Serve virtualtextures/_vmtr_sq16.mega2 (the merged member, when mods' lit
+ * pages are served) and the served lit materials. Called by the provider
+ * before the mods' serving (overrides.c); any thread. 1 with a process-heap
+ * copy, 0 when this layer does not answer the name. */
+int      sh_modvt_open(const char *request, unsigned char **bytes, size_t *length);
+/* One line per lit build and the square 16 state (sh_vt status, sh_mods status). */
+void     sh_modvt_lit_status(void);
 #endif
 
 #ifdef __cplusplus
