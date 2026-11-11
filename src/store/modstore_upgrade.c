@@ -171,6 +171,14 @@ typedef struct ms_up_ctx {
     sh_ms_upgrade_stats *st;
 } ms_up_ctx;
 
+/* A folder of the retired layout that may be a package: not the layout's
+ * own blobs\ and legacy\ (legacy\ is read on its own, as delivered
+ * packages). The game reads both as ordinary folder names now. */
+static int ms_up_candidate(const WIN32_FIND_DATAW *fd)
+{
+    return ms_candidate(fd) && _wcsicmp(fd->cFileName, L"blobs") && _wcsicmp(fd->cFileName, L"legacy");
+}
+
 /* Something of the retired layout is present. */
 static int ms_up_needed(const wchar_t *root)
 {
@@ -188,7 +196,7 @@ static int ms_up_needed(const wchar_t *root)
     if (h == INVALID_HANDLE_VALUE) return 0;
     do {
         wchar_t *child;
-        if (!ms_candidate(&fd)) continue;
+        if (!ms_up_candidate(&fd)) continue;
         child = ms_wjoin(root, fd.cFileName);
         found = child && (ms_has_file(child, L"bundle.json") || ms_has_file(child, L".state.json") ||
                           ms_has_file(child, L"bundle.canonical.json"));
@@ -596,7 +604,7 @@ static void ms_up_scan(ms_up_ctx *c, const wchar_t *dir, int legacy)
         ms_up_item *it;
         char *leaf;
         int r;
-        if (!ms_candidate(&fd)) continue;
+        if (!ms_up_candidate(&fd)) continue;
         it = ms_up_add(c);
         if (!it) break;
         it->dir = ms_wjoin(dir, fd.cFileName);
@@ -1275,7 +1283,7 @@ int sh_ms_upgrade_scan(sh_ms_upgrade_check *out)
     if (h != INVALID_HANDLE_VALUE) {
         do {
             wchar_t *child;
-            if (!ms_candidate(&fd)) continue;
+            if (!ms_up_candidate(&fd)) continue;
             child = ms_wjoin(root, fd.cFileName);
             if (child && (ms_has_file(child, L"bundle.json") || ms_has_file(child, L".state.json") ||
                           ms_has_file(child, L"bundle.canonical.json"))) out->layout_folders++;

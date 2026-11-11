@@ -143,9 +143,18 @@ static void test_upgrade_steps(const char *tmp)
         mt_write(bad, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
     }
     mt_write(root, "claims.json", "{\"claims\":{\"x\":{\"ref\":\"1\"}}}");
+    /* The layout's own blobs\ and legacy\ are not packages, whatever they hold. */
+    {
+        char lay[MAX_PATH];
+        _snprintf_s(lay, sizeof lay, _TRUNCATE, "%s\\blobs", root);
+        mt_write(lay, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+        _snprintf_s(lay, sizeof lay, _TRUNCATE, "%s\\legacy", root);
+        mt_write(lay, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+    }
     g_logged = 0;
     CHECK(sh_ms_upgrade(&us) == 1 && us.ran && us.failed == 1 && us.records == 1);
     CHECK(log_has("noid@1.0.0+1: left as it was") && !mt_has(root, "claims.json"));
+    CHECK(!log_has("blobs: left as it was") && !log_has("legacy: left as it was"));
     CHECK(log_has("alex.c2@1.0.0+1: mod.json written for alex.c2@1.0.0+1"));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2", root);
     CHECK(mt_has(path, "mod.json") && !mt_has(path, "bundle.json") && sh_mb_old_is_old(path));
