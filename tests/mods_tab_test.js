@@ -1290,7 +1290,7 @@ test('host and interface contract', () => {
   assert.match(iface, /SH_STATIC_ASSERT\(offsetof\(sh_iface_vtbl, mods\) == 0x378\);/);
   assert.match(iface, /#define SH_MODS_ACT_REMOVE      7\n#define SH_MODS_ACT_MIGRATE     8/);
   assert.ok(host.includes('} else if (cmd == L"modsAction") {'));
-  assert.match(host, /else if \(code == SH_MODS_ACT_INSTALL\) poc_mods_begin\(code, true, std::string\(\)\);/, 'install takes its folder from the native picker only');
+  assert.match(host, /else if \(code == SH_MODS_ACT_INSTALL\) ui_mods_begin\(code, true, std::string\(\)\);/, 'install takes its folder from the native picker only');
   assert.ok(host.includes('L"{\\"kind\\":\\"mods\\",\\"data\\":"'));
   assert.ok(host.includes('{\\"kind\\":\\"modsActionResult\\",\\"action\\":\\"'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
@@ -1301,13 +1301,13 @@ test('host and interface contract', () => {
     assert.ok(host.includes('if (name == L"' + a + '")'), 'host maps ' + a);
   for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
-  assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
-  assert.ok(host.includes('poc_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
+  assert.ok(host.includes('if (act == L"openFolder") ui_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.ok(host.includes('ui_mods_relative_folder(folder)'), 'openFolder takes a folder under the mods folder by its relative path');
   assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
   assert.match(iface, /#define SH_MODS_ACT_REMOVED_EMPTY      14/);
   assert.match(iface, /#define SH_MODS_ACT_MAP_ADD            16/);
   assert.ok(host.includes('case SH_MODS_ACT_MAP_ADD:            return L"mapAddMod";'));
-  assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
+  assert.ok(host.includes('ui_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 
 /* ---- organizing folders, the Files modal and New mod (L28) ------------------------------------ */

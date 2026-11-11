@@ -1216,7 +1216,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var i = 0; i < num; i++) { var k = 'item[' + i + ']'; if (obj[k] !== undefined) out.push(obj[k]); }
     return out;
   }
-  // the eventDef key has three OG spellings (tl_event_def).
+  // the eventDef key has three spellings in the engine's serialized JSON.
   function tlEventDef(eventCall) {
     if (!eventCall) return '';
     return eventCall['eventDef'] || eventCall['eventHandle_t eventDef'] || eventCall['\neventHandle_t eventDef'] || '';
@@ -3613,14 +3613,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         share.title = st.lastZip;
         note.appendChild(share);
       }
-      // No status line here on purpose. It used to report a running count of rawmap substitutions,
-      // which was engine vocabulary describing something already finished -- it never answered the
-      // only question the menu is asked, which is what happens when you click. The paths above say
-      // what is set; the log says what happened, with timestamps and full destinations, and that is
-      // where diagnosis actually happens. A line nobody reads is a line that makes the two that
-      // matter harder to see.
-      // Leaving it on is not scoped to this menu, and that is the part worth saying out loud: it is
-      // easy to tick, forget, and then wonder why an ordinary map opened as someone else's rawmap.
     }
   }
 
@@ -3631,9 +3623,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Save again to wherever the last one went. The page already knows that path -- the readout shows
   // it -- so it hands it straight back rather than making the person re-pick it every export.
   document.getElementById('menuRawmapSave').addEventListener('click', function(){
-    // No "pick a location first" branch: the backend always resolves a destination, defaulting to
-    // %LOCALAPPDATA%\snapmap-plus\rawmap.json, so RAWMAP_SAVE_PATH is never empty and the guard
-    // that used to be here could not fire. Save Rawmap therefore always has somewhere to write.
+    // The backend always resolves a destination, defaulting to %LOCALAPPDATA%\snapmap-plus\rawmap.json.
     post({cmd: 'rawmapSaveNow'});
     closeMenus();
   });
@@ -6072,7 +6062,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
       if (e.target && e.target.id === 'tlAddEventcall' && tlModel) {
         tlMarkDirty();
-        tlModel.tabs[tlModel.active].events.push({ time: '', eventDef: '', args: [] });   // blank time -> no eventTime committed (OG default)
+        tlModel.tabs[tlModel.active].events.push({ time: '', eventDef: '', args: [] });   // blank time -> no eventTime committed (the editor's default)
         renderTlBody();
         return;
       }

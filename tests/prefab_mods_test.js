@@ -94,39 +94,39 @@ check(src.indexOf("pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.module
       'the module check warning is kept');
 
 /* The host's side. */
-check(host.indexOf('cmd == L"exportPrefab"') !== -1 && host.indexOf('poc_begin_pick(2)') !== -1, 'host: exportPrefab opens the Save dialog');
-check(host.indexOf('cmd == L"importPrefab"') !== -1 && host.indexOf('poc_begin_pick(3)') !== -1, 'host: importPrefab opens the Open dialog');
+check(host.indexOf('cmd == L"exportPrefab"') !== -1 && host.indexOf('ui_begin_pick(2)') !== -1, 'host: exportPrefab opens the Save dialog');
+check(host.indexOf('cmd == L"importPrefab"') !== -1 && host.indexOf('ui_begin_pick(3)') !== -1, 'host: importPrefab opens the Open dialog');
 check(host.indexOf('for_prefab_dialog(save)') !== -1, 'host: the prefab dialogs offer the prefab ZIP type');
 check(host.indexOf('SH_MODULE_PREFAB_EXPORT') !== -1 && host.indexOf('SH_MODULE_PREFAB_IMPORT') !== -1, 'host: export and import ops');
-const load = host.indexOf('static void poc_apply_load_prefab()');
-check(load !== -1 && host.indexOf('if (!poc_resolve_prefab_mods(body)) return;', load) !== -1 &&
-      host.indexOf('if (!poc_resolve_prefab_mods(body)) return;', load) < host.indexOf('poc_apply_place_module_prefab(body);', load) &&
-      host.indexOf('if (!poc_resolve_prefab_mods(body)) return;', load) < host.indexOf('it.kind = 2;', load),
+const load = host.indexOf('static void ui_apply_load_prefab()');
+check(load !== -1 && host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) !== -1 &&
+      host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) < host.indexOf('ui_apply_place_module_prefab(body);', load) &&
+      host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) < host.indexOf('it.kind = 2;', load),
       'host: the mods are resolved before either kind reaches the engine');
 check(host.indexOf('SH_MODULE_PREFAB_MODS_RESOLVE') !== -1 && host.indexOf('SH_MODULE_PREFAB_MODS_POLL') !== -1,
       'host: resolve and poll');
-check(host.indexOf('poc_poll_prefab_mods();') !== -1, 'host: the think loop follows a held placement');
+check(host.indexOf('ui_poll_prefab_mods();') !== -1, 'host: the think loop follows a held placement');
 check(host.indexOf('SH_MODULE_PREFAB_MODS_RECORD') !== -1 && host.indexOf('SH_MODULE_PREFAB_META_WRITE') !== -1,
       'host: Save records the mods and description writes keep them');
 check(host.indexOf('L"},\\"mods\\":{"') !== -1 && host.indexOf('\\"modsStatus\\":\\"') !== -1, 'host: the list and details carry the status');
 
 /* One file per prefab: the host reads details from the block, strips it before the engine, writes no sidecar. */
 const strip = host.indexOf('body.resize(sh_prefab_block_strip(&body[0], body.size()));', load);
-check(strip !== -1 && strip > host.indexOf('if (!poc_resolve_prefab_mods(body)) return;', load) &&
-      strip < host.indexOf('poc_apply_place_module_prefab(body);', load) && strip < host.indexOf('it.kind = 2;', load),
+check(strip !== -1 && strip > host.indexOf('if (!ui_resolve_prefab_mods(body)) return;', load) &&
+      strip < host.indexOf('ui_apply_place_module_prefab(body);', load) && strip < host.indexOf('it.kind = 2;', load),
       'host: Load / Place strips the block after resolving the mods and before either kind reaches the engine');
-const resolve = host.indexOf('static bool poc_resolve_prefab_mods(');
+const resolve = host.indexOf('static bool ui_resolve_prefab_mods(');
 check(resolve !== -1 && host.indexOf('GetFileAttributesA(meta) == INVALID_FILE_ATTRIBUTES', resolve) === -1,
       'host: the mods are resolved whether or not a sidecar exists (the block holds them)');
-const detail = host.indexOf('static void poc_send_prefab_detail(');
+const detail = host.indexOf('static void ui_send_prefab_detail(');
 check(detail !== -1 && host.indexOf('sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));', detail) !== -1,
       'host: the selected prefab\'s scene ships without its block');
-check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('poc_prefab_view(path, mp, nullptr)') !== -1,
+check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path, mp, nullptr)') !== -1,
       'host: the list and details read the view from the file (else its sidecar)');
 const rec = host.indexOf('call.op = SH_MODULE_PREFAB_MODS_RECORD;');
 check(rec !== -1 && host.indexOf('call.path = path;', rec) !== -1 && host.indexOf('call.path = path;', rec) < rec + 200,
       'host: Create has the backend write the block into the prefab file');
-const save = host.indexOf('static void poc_apply_save_prefab_meta(');
+const save = host.indexOf('static void ui_apply_save_prefab_meta(');
 const saveEnd = host.indexOf('\n}\n', save);
 check(save !== -1 && host.slice(save, saveEnd).indexOf('fopen_s') === -1 && host.slice(save, saveEnd).indexOf('DeleteFileA') === -1 &&
       host.slice(save, saveEnd).indexOf('call.path = path;') !== -1,

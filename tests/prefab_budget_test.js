@@ -222,7 +222,7 @@ check(html.includes("if (!pfBudgetAsked) { pfBudgetAsked = true; post({cmd:'budg
 check((html.match(/prefabBudget\.sum\(/g) || []).length === 1 &&
       html.indexOf('prefabBudget.sum(') > html.indexOf('function pfRenderLimits()'), 'only the selected prefab is summed');
 check(viewport.includes('function load(sceneText, parsedDoc)'), 'the viewport accepts a parsed scene');
-check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUsage"') && host.includes('poc_budget_poll();'),
+check(host.includes('cmd == L"budgetTable"') && host.includes('cmd == L"budgetUsage"') && host.includes('ui_budget_poll();'),
       'host routes budget requests and re-sends the table after a rebuild');
 check(host.includes('\\"sig\\":\\""'), 'prefabDetail carries a content signature');
 
