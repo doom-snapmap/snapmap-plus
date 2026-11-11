@@ -1103,7 +1103,7 @@ static void download_progress_and_cancel(void)
     F.answer = 1;   /* Yes to the question */
     for (int i = 0; i < 200 && F.asks < 2; i++) { tick(1); Sleep(1); }
     CHECK(F.asks == 2 && F.ask_buttons == 6 && sh_modpub_test_state() == 3);
-    CHECK(!strncmp(F.last_ask, "Downloading alex.pink-imp (1 of 1): ", 36) && strstr(F.last_ask, "%. Keep downloading?"));
+    CHECK(!strncmp(F.last_ask, "Downloading alex.pink-imp (1 of 1): ", 36) && strstr(F.last_ask, ". Keep downloading? No cancels it"));
     /* Yes: the dialog goes, the download goes on, and the numbers come back. */
     t0 = GetTickCount64();
     tick(1);
