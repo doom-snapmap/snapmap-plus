@@ -1,6 +1,8 @@
 /* store_recycle.c -- see store_recycle.h. */
+#define COBJMACROS
 #include <windows.h>
-#include <shellapi.h>
+#include <shobjidl.h>
+#include <shlobj.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,14 +67,112 @@ static int rc_unlink_inside(const wchar_t *dir)
     return ok;
 }
 
+/* ---------------------------------------------- the delete's progress sink ---- */
+
+/* The shell tells the sink, before each item, whether it can recycle it. An item the Recycle Bin
+ * cannot take (the bin is turned off for the drive or the item is larger than it) would be deleted
+ * for good, so the sink stops the operation there and the item stays where it is. */
+typedef struct rc_sink {
+    IFileOperationProgressSink iface;
+    LONG refs;
+    int refused;       /* an item would have been deleted for good */
+    int recycled;      /* the shell reported an item moved to the Recycle Bin */
+} rc_sink;
+
+static HRESULT STDMETHODCALLTYPE rc_qi(IFileOperationProgressSink *This, REFIID riid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IFileOperationProgressSink)) {
+        *out = This;
+        This->lpVtbl->AddRef(This);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE rc_addref(IFileOperationProgressSink *This)
+{
+    return (ULONG)InterlockedIncrement(&((rc_sink *)This)->refs);
+}
+static ULONG STDMETHODCALLTYPE rc_release(IFileOperationProgressSink *This)
+{
+    return (ULONG)InterlockedDecrement(&((rc_sink *)This)->refs);  /* the sink lives on the stack */
+}
+static HRESULT STDMETHODCALLTYPE rc_start(IFileOperationProgressSink *This) { (void)This; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_finish(IFileOperationProgressSink *This, HRESULT hr) { (void)This; (void)hr; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_prerename(IFileOperationProgressSink *This, DWORD f, IShellItem *i, LPCWSTR n)
+{ (void)This; (void)f; (void)i; (void)n; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_postrename(IFileOperationProgressSink *This, DWORD f, IShellItem *i, LPCWSTR n, HRESULT hr, IShellItem *c)
+{ (void)This; (void)f; (void)i; (void)n; (void)hr; (void)c; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_premove(IFileOperationProgressSink *This, DWORD f, IShellItem *i, IShellItem *d, LPCWSTR n)
+{ (void)This; (void)f; (void)i; (void)d; (void)n; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_postmove(IFileOperationProgressSink *This, DWORD f, IShellItem *i, IShellItem *d, LPCWSTR n, HRESULT hr, IShellItem *c)
+{ (void)This; (void)f; (void)i; (void)d; (void)n; (void)hr; (void)c; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_predelete(IFileOperationProgressSink *This, DWORD flags, IShellItem *item)
+{
+    (void)item;
+    if (flags & TSF_DELETE_RECYCLE_IF_POSSIBLE) return S_OK;
+    ((rc_sink *)This)->refused = 1;
+    return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+}
+static HRESULT STDMETHODCALLTYPE rc_postdelete(IFileOperationProgressSink *This, DWORD flags, IShellItem *item, HRESULT hr, IShellItem *created)
+{
+    (void)flags; (void)item;
+    if (SUCCEEDED(hr) && created) ((rc_sink *)This)->recycled = 1;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE rc_prenew(IFileOperationProgressSink *This, DWORD f, IShellItem *d, LPCWSTR n)
+{ (void)This; (void)f; (void)d; (void)n; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_postnew(IFileOperationProgressSink *This, DWORD f, IShellItem *d, LPCWSTR n, LPCWSTR t, DWORD a, HRESULT hr, IShellItem *c)
+{ (void)This; (void)f; (void)d; (void)n; (void)t; (void)a; (void)hr; (void)c; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_progress(IFileOperationProgressSink *This, UINT total, UINT sofar)
+{ (void)This; (void)total; (void)sofar; return S_OK; }
+static HRESULT STDMETHODCALLTYPE rc_timer(IFileOperationProgressSink *This) { (void)This; return S_OK; }
+
+static IFileOperationProgressSinkVtbl rc_sink_vtbl = {
+    rc_qi, rc_addref, rc_release, rc_start, rc_finish, rc_prerename, rc_postrename, rc_premove, rc_postmove,
+    rc_premove, rc_postmove, rc_predelete, rc_postdelete, rc_prenew, rc_postnew, rc_progress, rc_timer, rc_timer, rc_timer,
+};
+
+/* Move plain to the Recycle Bin, never deleting it for good. Returns 1 when the shell recycled it. */
+static int rc_shell_recycle(const wchar_t *plain)
+{
+    rc_sink sink;
+    IFileOperation *op = NULL;
+    IShellItem *item = NULL;
+    DWORD cookie = 0;
+    HRESULT hr, init;
+    BOOL aborted = FALSE;
+    int ok = 0;
+    memset(&sink, 0, sizeof sink);
+    sink.iface.lpVtbl = &rc_sink_vtbl;
+    sink.refs = 1;
+    init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    hr = CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_ALL, &IID_IFileOperation, (void **)&op);
+    if (SUCCEEDED(hr))
+        hr = IFileOperation_SetOperationFlags(op, FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_NOCONFIRMATION |
+                                                  FOF_SILENT | FOF_NOERRORUI | FOFX_EARLYFAILURE);
+    if (SUCCEEDED(hr)) hr = SHCreateItemFromParsingName(plain, NULL, &IID_IShellItem, (void **)&item);
+    if (SUCCEEDED(hr)) hr = IFileOperation_Advise(op, &sink.iface, &cookie);
+    if (SUCCEEDED(hr)) hr = IFileOperation_DeleteItem(op, item, NULL);
+    if (SUCCEEDED(hr)) hr = IFileOperation_PerformOperations(op);
+    if (SUCCEEDED(hr)) hr = IFileOperation_GetAnyOperationsAborted(op, &aborted);
+    if (SUCCEEDED(hr) && !aborted && !sink.refused && sink.recycled) ok = 1;
+    if (cookie) IFileOperation_Unadvise(op, cookie);
+    if (item) IShellItem_Release(item);
+    if (op) IFileOperation_Release(op);
+    if (SUCCEEDED(init)) CoUninitialize();
+    if (!ok) SetLastError(sink.refused ? ERROR_NOT_SUPPORTED : (FAILED(hr) ? (DWORD)HRESULT_CODE(hr) : ERROR_CANCELLED));
+    return ok;
+}
+
 int sh_store_recycle(void *context, const wchar_t *path)
 {
     sh_store_recycle_stats *st = (sh_store_recycle_stats *)context;
-    wchar_t *plain, *from, drive[4];
-    SHFILEOPSTRUCTW op;
+    wchar_t *plain, drive[4];
     DWORD a;
     size_t n;
-    int r, ok = 0;
+    int ok = 0;
     if (!path || !path[0]) { SetLastError(ERROR_INVALID_PARAMETER); return 0; }
     a = GetFileAttributesW(path);
     if (a == INVALID_FILE_ATTRIBUTES) {
@@ -109,19 +209,8 @@ int sh_store_recycle(void *context, const wchar_t *path)
         if (st) st->refused++;
         return 0;
     }
-    /* pFrom is a list: the path, then an empty one. */
-    from = (wchar_t *)calloc(n + 2, sizeof(wchar_t));
-    if (!from) { free(plain); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return 0; }
-    memcpy(from, plain, sizeof(wchar_t) * n);
-    memset(&op, 0, sizeof op);
-    op.wFunc = FO_DELETE;
-    op.pFrom = from;
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
-    r = SHFileOperationW(&op);
-    if (r == 0 && !op.fAnyOperationsAborted && GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) ok = 1;
-    else SetLastError(r ? (DWORD)r : ERROR_CANCELLED);
+    if (rc_shell_recycle(plain) && GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) ok = 1;
     if (st) { if (ok) st->recycled++; else st->refused++; }
-    free(from);
     free(plain);
     return ok;
 }
