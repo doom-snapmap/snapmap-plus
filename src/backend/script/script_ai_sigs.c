@@ -19,8 +19,32 @@
  *                      GL 0x1403D49C0), the load of the query's first word (VK 0x145B64F00 / GL
  *                      0x14446A580) and the move FSM's path query call (VK 0x140515300 / GL 0x140514030).
  *                      The query's own bytes repeat in a sibling (VK 0x140515660 / GL 0x140514390), so it
- *                      is reached through this unique call site. */
+ *                      is reached through this unique call site.
+ *   AiRecoilPlay       VK 0x1403D9520  GL 0x1403D8A40  inside the recoil play (VK 0x1403D9300): the weapon's
+ *                      distance alpha (recoilAnimAlphas over recoilAlphaRanges) times the float at ai+0x24EB0
+ *                      becomes the recoil animator's weight. The FSM states write their recoilStrength there
+ *                      on enter and 1.0 on exit (VK 0x14062B630, 0x14062C3F0).
+ *   AiNextPull         VK 0x1404447D0  GL 0x1404436F0  the weapon holder's next-pull writer: game clock
+ *                      (vtable +0x810, group 1) + interval into holder +(slot+4)*0x10, slot = table[fire decl
+ *                      +0x1B4]; the fire decl call (VK 0x140F137B0 / GL 0x140F12C10) and the slot table.
+ *                      The can-fire check (VK 0x1404439D0) refuses with "cooldown" while the clock is below it.
+ *   AiAimFocusSite     VK 0x140438D71  GL 0x140437CE1  ae_selectAimFocusPoint (VK 0x140438CD0): its call of
+ *                      the set-focus-to-position (VK 0x14041BBA0 / GL 0x14041AD60; ai, focus 0/2/3, idVec3*,
+ *                      true, -1, 14).
+ *   AiPainStringSite   VK 0x1403F5EDD  GL 0x1403F53BD  inside the pain request (VK 0x1403F5440 / GL
+ *                      0x1403F4920): the second accessor branch of the painString, the atomic-string set
+ *                      (VK 0x14032B3D0 / GL 0x14032B040) into [rbp+0x88], then the 14 bytes where the string
+ *                      is final; the request later compares each pain anim's +0x48 string with [rbp+0x88].
+ *   AiThreatRow        VK 0x1406E08D0  GL 0x1406DFD00  the threat table's check of one SDPSReaction_t row
+ *                      (threat, actor, row, ...), called for every row by the evaluator (VK 0x1406DFE70);
+ *                      the row's reaction is at +0x1C. Detoured; 15-byte window.
+ *   AiPathLength       VK 0x14050EA60  GL 0x14050D790  the length of a computed path (move FSM, path): the
+ *                      path query (VK 0x140515300) calls it with the path it just built (segments +0x90,
+ *                      count +0x70, stride 0x1C, from +4, to +0x10). Detoured; 14-byte window.
+ *   AiAnimOfProp       VK 0x141712C60  GL 0x141713650  an animWeb node's animation (prop, model, 0) -> idMD6Anim.
+ *   AiAnimDelta        VK 0x1415C5290  GL 0x1415C63F0  an animation's total root motion (anim, idVec3*, NULL). */
 #include <stddef.h>
+#include <string.h>
 #include "script_api_ai.h"
 
 const sig_entry SH_AI_SIGNATURES[] = {
@@ -42,5 +66,106 @@ const sig_entry SH_AI_SIGNATURES[] = {
       "48 8D 85 50 01 00 00 48 89 44 24 28 48 8D 44 24 40 48 89 44 24 20 F3 41 0F 10 9F F8 00 00 00 "
       "48 8D 54 24 50 48 8B CB E8 ?? ?? ?? ?? 83 F8 02 75 25",
       0x5F6A00u, 0x5F5C20u },
+    { "AiRecoilPlay",
+      "74 0C FF C3 83 FB 04 7C DC E9 ?? ?? ?? ?? 48 8D 4C 24 50 E8 ?? ?? ?? ?? 8B 94 24 F8 00 00 00 "
+      "48 8D 4C 24 50 E8 ?? ?? ?? ?? F3 0F 59 B6 B0 4E 02 00 48 63 C3 48 69 C8 F8 00 00 00",
+      0x3D9520u, 0x3D8A40u },
+    { "AiNextPull",
+      "48 89 5C 24 10 44 89 44 24 18 55 56 57 48 83 EC 20 48 8B F1 48 8B FA 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 40 "
+      "41 B8 01 00 00 00 48 8B 01 FF 90 10 08 00 00 8B 5C 24 50 48 8B 4E 08 03 18 48 85 C9 75 0B 8B 97 D4 08 00 00 "
+      "48 8B CF EB 06 8B 91 D4 08 00 00 E8 ?? ?? ?? ?? 48 8D 2D ?? ?? ?? ?? 48 63 80 B4 01 00 00",
+      0x4447D0u, 0x4436F0u },
+    { "AiAimFocusSite",
+      "C7 44 24 28 0E 00 00 00 4C 8D 44 24 48 41 B1 01 C7 44 24 20 FF FF FF FF 33 D2 48 8B CB F3 0F 10 00 "
+      "F3 0F 11 44 24 48 F3 0F 10 48 04 F3 0F 11 4C 24 4C F3 0F 10 40 08 F3 0F 11 44 24 50 E8 ?? ?? ?? ??",
+      0x438D71u, 0x437CE1u },
+    { "AiPainStringSite",
+      "48 8B 8B 80 CD 02 00 48 85 C9 74 2A 48 8D 95 60 01 00 00 E8 ?? ?? ?? ?? 90 48 8B 50 10 48 8D 8D 88 00 00 00 "
+      "E8 ?? ?? ?? ?? 90 48 8D 8D 60 01 00 00 E8 ?? ?? ?? ?? 48 8B 83 20 C1 00 00 48 8B 88 90 00 00 00 48 89 4D 50",
+      0x3F5EDDu, 0x3F53BDu },
+    { "AiThreatRow",
+      "48 89 5C 24 10 48 89 6C 24 18 56 48 83 EC 40 41 0F B6 40 46 41 8B E9 49 8B D8 48 8B F2 38 84 24 A0 00 00 00 "
+      "74 12 32 C0",
+      0x6E08D0u, 0x6DFD00u },
+    { "AiPathLength",
+      "48 83 EC 28 48 63 4A 70 0F 57 E4 48 85 C9 0F 8E ?? ?? ?? ?? 48 8B 82 90 00 00 00 0F 28 2D ?? ?? ?? ?? "
+      "48 83 C0 08 0F 29 74 24 10",
+      0x50EA60u, 0x50D790u },
+    { "AiAnimOfProp",
+      "40 53 48 83 EC 20 48 8B 01 4C 8B CA 49 63 D8 48 85 C0 75 41 48 8D 51 08 B8 FF FF 00 00 66 39 02 74 31 "
+      "4D 85 C9 74 2C 41 B0 01 49 8B C9",
+      0x1712C60u, 0x1713650u },
+    { "AiAnimDelta",
+      "40 53 56 57 48 81 EC D0 00 00 00 48 8B 41 58 33 FF 48 89 AC 24 F0 00 00 00 49 8B E8 48 8B F2 8B DF "
+      "48 85 C0 74 08 48 8D 58 28 48 8D 78 58 0F 29 B4 24 C0 00 00 00 0F 29 BC 24 B0 00 00 00",
+      0x15C5290u, 0x15C63F0u },
     { NULL, NULL, 0, 0 }
 };
+
+/* aiMonsterType_t (the engine's {name, value} table, VK 0x143557480 / GL
+ * 0x14358E090: one bit per type, NONE 0). */
+const char *const SH_AI_MONSTER_NAMES[SH_AI_MONSTER_TYPES] = {
+    "AI_MONSTER_NONE", "AI_MONSTER_GENERIC", "AI_MONSTER_ZOMBIE", "AI_MONSTER_IMP", "AI_MONSTER_HELLIFIED_SOLDIER",
+    "AI_MONSTER_LASER_SOLDIER", "AI_MONSTER_HELLIFIED_SHOTGUNNER", "AI_MONSTER_LOSTSOUL", "AI_MONSTER_MAX_COMMON",
+    "AI_MONSTER_ARCHVILE", "AI_MONSTER_HELLKNIGHT", "AI_MONSTER_MANCUBUS", "AI_MONSTER_PINKY",
+    "AI_MONSTER_PINKY_SPECTRE", "AI_MONSTER_NPC", "AI_MONSTER_CACODEMON", "AI_MONSTER_REVENANT", "AI_MONSTER_BARON",
+    "AI_MONSTER_MAX_HEAVY", "AI_MONSTER_CYBERDEMON", "AI_MONSTER_OLIVIASGUARD", "AI_MONSTER_TALISMANGUARD",
+    "AI_MONSTER_CYBERDEMON_HELL", "AI_MONSTER_SPIDER_MASTERMIND"
+};
+
+/* The pain-string stub (script_api_ai.h). Entered by the 14-byte jump that
+ * replaces the two loads at the site, with rbx the demon and rbp the pain
+ * request's frame:
+ *   push rax, rcx, rdx, r8, r9, r10, r11      the volatile registers
+ *   mov r11,rsp; and rsp,-16; sub rsp,0x90    an aligned frame
+ *   mov [rsp+0x88],r11                         (the stack before it)
+ *   movdqu [rsp+0x20..0x70],xmm0..xmm5         the volatile vector registers
+ *   mov rcx,rbx; mov rax,fetch; call rax       fetch(demon) -> string or NULL
+ *   movdqu xmm0..xmm5,[rsp+0x20..0x70]
+ *   mov rsp,[rsp+0x88]
+ *   test rax,rax; jz +7; mov [rbp+0x88],rax     the request's string, when the script set one
+ *   pop r11, r10, r9, r8, rdx, rcx, rax
+ *   jmp [rip+0]; dq resume                     the trampoline: the two loads, then back
+ * Flags are not live at the site (the next instruction that reads them is a
+ * cmp after three moves). */
+size_t sh_ai_pain_stub_build(uint8_t *code, size_t cap, const void *fetch, const void *resume)
+{
+    static const uint8_t head[] = {
+        0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,
+        0x4C, 0x8B, 0xDC,                                     /* mov r11,rsp */
+        0x48, 0x83, 0xE4, 0xF0,                               /* and rsp,-16 */
+        0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00,             /* sub rsp,0x90 */
+        0x4C, 0x89, 0x9C, 0x24, 0x88, 0x00, 0x00, 0x00,       /* mov [rsp+0x88],r11 */
+        0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x20,                   /* movdqu [rsp+0x20],xmm0 */
+        0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x30,
+        0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x40,
+        0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x50,
+        0xF3, 0x0F, 0x7F, 0x64, 0x24, 0x60,
+        0xF3, 0x0F, 0x7F, 0x6C, 0x24, 0x70,                   /* movdqu [rsp+0x70],xmm5 */
+        0x48, 0x8B, 0xCB,                                     /* mov rcx,rbx */
+        0x48, 0xB8                                            /* mov rax, imm64 (fetch) */
+    };
+    static const uint8_t mid[] = {
+        0xFF, 0xD0,                                           /* call rax */
+        0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x20,                   /* movdqu xmm0,[rsp+0x20] */
+        0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x30,
+        0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x40,
+        0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x50,
+        0xF3, 0x0F, 0x6F, 0x64, 0x24, 0x60,
+        0xF3, 0x0F, 0x6F, 0x6C, 0x24, 0x70,
+        0x48, 0x8B, 0xA4, 0x24, 0x88, 0x00, 0x00, 0x00,       /* mov rsp,[rsp+0x88] */
+        0x48, 0x85, 0xC0,                                     /* test rax,rax */
+        0x74, 0x07,                                           /* jz +7 */
+        0x48, 0x89, 0x85, 0x88, 0x00, 0x00, 0x00,             /* mov [rbp+0x88],rax */
+        0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x58,
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00                    /* jmp [rip+0] */
+    };
+    size_t n = 0;
+    uint64_t f = (uint64_t)(uintptr_t)fetch, r = (uint64_t)(uintptr_t)resume;
+    if (!code || cap < sizeof head + 8 + sizeof mid + 8 || !fetch || !resume) return 0;
+    memcpy(code + n, head, sizeof head); n += sizeof head;
+    memcpy(code + n, &f, 8); n += 8;
+    memcpy(code + n, mid, sizeof mid); n += sizeof mid;
+    memcpy(code + n, &r, 8); n += 8;
+    return n;
+}

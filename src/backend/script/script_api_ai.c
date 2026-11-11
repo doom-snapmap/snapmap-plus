@@ -22,13 +22,41 @@
  *                 goal, navTolerance, out reachable point, out length,
  *                 flag) -> 0 or 1 found, 2 still searching, above 2 none;
  *   trigger       the weapon's trigger word, as Shared_TriggerPulled reads
- *                 it (weapon +0x8F8 + 4 * [+0x8D4], 0 = pulled). */
+ *                 it (weapon +0x8F8 + 4 * [+0x8D4], 0 = pulled);
+ *   can_see       isEntityVisible (the perception saw the entity within the
+ *                 last second: its record's last-seen time, VK 0x1404AA3E0)
+ *                 and the world trace from the demon's eye to 40 inches above
+ *                 the entity's origin (world geometry, players and demons);
+ *   recoil        the float at ai+0x24EB0, which the recoil play multiplies
+ *                 into the recoil animator's weight (VK 0x1403D9300);
+ *   weapon_ready  the weapon holder's next-pull time for the active trigger
+ *                 against the game clock, the "cooldown" test of the can-fire
+ *                 check (VK 0x1404439D0);
+ *   aim_point     the set-focus-to-position ae_selectAimFocusPoint uses
+ *                 (VK 0x14041BBA0 / GL 0x14041AD60), foci 0, 2 and 3;
+ *   anim_valid    the node's animations (VK 0x141712C60) and their total root
+ *                 motion (VK 0x1415C5290), tested with the world trace, the
+ *                 ground under the end point and the path query;
+ *   path_points   the path query above, its computed path read through a
+ *                 detour of the path length (VK 0x14050EA60 / GL 0x14050D790);
+ *   firing_position, spline_clear  compositions of the path query, the world
+ *                 trace and the ground under a point (sh_ai_*_run);
+ *   monster_type  the getMonsterType event (the behaviour decl's
+ *                 aiMonsterType_t, VK 0x14040D070);
+ *   pain_string   the pain request's string (VK 0x1403F5440 / GL 0x1403F4920,
+ *                 [rbp+0x88], compared with each pain anim's +0x48 string),
+ *                 replaced at its last write by a stub (sh_ai_pain_stub_build);
+ *   block_pain    a detour of the threat table's row check (VK 0x1406E08D0 /
+ *                 GL 0x1406DFD00) refusing a blocked reaction's rows. */
+#include <windows.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "script_api_ai.h"
 #include "script_runtime.h"
+#include "script_api_common.h"
+#include "script_api_combat.h"
 #include "../../third_party/lua/lauxlib.h"
 
 #define AI_PI 3.14159265358979323846
@@ -58,6 +86,7 @@ const sh_ai_event_def SH_AI_EVENTS[SH_AI_EV_COUNT] = {
     { "setScriptAbort",              "bb" },
     { "setScriptAbortFlags",         "bb" },
     { "ae_setLaserState",            "4bs" },
+    { "getMonsterType",              "" },
 };
 
 /* ------------------------------------------------------------------ pure */
@@ -165,7 +194,13 @@ static const sh_script_ai_engine *g_engine;
 
 void sh_script_ai_set_engine(const sh_script_ai_engine *engine) { g_engine = engine; }
 
-void sh_script_ai_reset(void) { memset(g_recs, 0, sizeof g_recs); }
+static void force_via_reset(void);
+void sh_script_ai_reset(void)
+{
+    memset(g_recs, 0, sizeof g_recs);
+    force_via_reset();
+    sh_ai_pain_records_reset();
+}
 
 /* The record of `h` (made when missing); a record whose handle no longer
  * belongs to this map is reused. NULL when the table is full. */
@@ -613,21 +648,44 @@ static int l_enemy(lua_State *L)
     return 1;
 }
 
-/* ai:can_see(e) -> the demon's perception sees e now */
+#define AI_SIGHT_RAISE 40.0f   /* can_see and find_position aim this far above the target's origin */
+
+/* The world-trace half of can_see and find_position: from `from` (or the
+ * demon's eye) to AI_SIGHT_RAISE above the target's origin. 1 clear, 0
+ * blocked, -1 the engine cannot say. */
+static int sight_to(void *ai, const float *from, void *target, const float target_at[3])
+{
+    float eye[3], to[3];
+    if (!g_engine->sight) return -1;
+    if (!from) {
+        if (!g_engine->eye || !g_engine->eye(ai, eye)) return -1;
+        from = eye;
+    }
+    to[0] = target_at[0]; to[1] = target_at[1]; to[2] = target_at[2] + AI_SIGHT_RAISE;
+    return g_engine->sight(ai, from, to, target);
+}
+
+/* ai:can_see(e) -> the demon's perception has seen e within the last second
+ * and nothing in the world stands between its eyes and e now */
 static int l_can_see(lua_State *L)
 {
     void *ai, *e;
     double v = 0;
+    float at[3];
+    int s;
     sh_script_check_entity(L, 2, "can_see");
     ai = self_ai(L, "can_see", NULL);
     if (!ai) { lua_pushnil(L); return 1; }
     e = other_entity(L, 2, "can_see");
-    if (!e) { lua_pushboolean(L, 0); return 1; }
+    if (!e || !g_engine->origin(e, at)) { lua_pushboolean(L, 0); return 1; }
     {
         sh_ai_arg a = arg_e(e);
         if (!run(ai, SH_AI_EV_IS_ENTITY_VISIBLE, &a, 1, &v)) { lua_pushnil(L); return 1; }
     }
-    lua_pushboolean(L, v != 0);
+    if (v == 0) { lua_pushboolean(L, 0); return 1; }
+    s = sight_to(ai, NULL, e, at);
+    if (s < 0) { lua_pushnil(L); return 1; }
+    lua_pushboolean(L, s == 1);
     return 1;
 }
 
@@ -720,18 +778,20 @@ static int l_can_reach(lua_State *L)
 }
 
 /* ai:find_position(parms) -> pos, or nil, "searching" | "none".
- * Made of the navigation path query: `count` points on the circle of
- * radius `ideal` around the target (its enemy when parms.target is
- * omitted), each asked for a path; the reachable one with the lowest
- * score |distance to target - ideal| + path length * path_weight wins,
- * skipping those whose path is longer than max_path. parms: target, min,
- * max, ideal, count (2..16), path_weight, max_path. */
+ * Made of the navigation path query and the world trace: `count` points on
+ * the circle of radius `ideal` around the target (its enemy when
+ * parms.target is omitted); a point counts when the demon's eyes would see
+ * the target from there (unless parms.visible is false) and a path reaches
+ * it; the one with the lowest score |distance to target - ideal| + path
+ * length * path_weight wins, skipping those whose path is longer than
+ * max_path. parms: target, min, max, ideal, count (2..16), path_weight,
+ * max_path, visible. */
 static int l_find_position(lua_State *L)
 {
     sh_script_handle h = 0;
     float center[3], at[3], ring[AI_FIND_MAX][3], best[3];
-    float mn, mx, ideal, weight, max_path, best_score = 0;
-    int count, i, have = 0, searching = 0, has_target;
+    float mn, mx, ideal, weight, max_path, best_score = 0, head = 64.0f;
+    int count, i, have = 0, searching = 0, has_target, visible;
     void *ai, *target = NULL;
     if (!lua_isnoneornil(L, 2) && lua_type(L, 2) != LUA_TTABLE)
         sh_script_refuse(L, "\"find_position\" takes a table of settings, as { ideal = 400 }, got %s", luaL_typename(L, 2));
@@ -743,6 +803,9 @@ static int l_find_position(lua_State *L)
     count = (int)opt_num_field(L, 2, "count", 8, "find_position", 2, AI_FIND_MAX);
     weight = opt_num_field(L, 2, "path_weight", 0.5f, "find_position", 0, 100);
     max_path = opt_num_field(L, 2, "max_path", 0, "find_position", 0, 1e6f);
+    lua_getfield(L, 2, "visible");
+    visible = lua_isnil(L, -1) ? 1 : lua_toboolean(L, -1);
+    lua_pop(L, 1);
     lua_getfield(L, 2, "target");
     has_target = !lua_isnil(L, -1);
     if (has_target && !is_entity(L, -1) && lua_type(L, -1) != LUA_TTABLE)
@@ -757,10 +820,20 @@ static int l_find_position(lua_State *L)
         if (!target || !g_engine->origin(target, center)) { lua_pushnil(L); lua_pushstring(L, "none"); return 2; }
     }
     if (!g_engine->origin(ai, at)) { lua_pushnil(L); return 1; }
+    {
+        float eye[3];
+        if (g_engine->eye && g_engine->eye(ai, eye) && eye[2] > at[2]) head = eye[2] - at[2];
+    }
     sh_ai_ring(center, at, ideal, count, ring);
     for (i = 0; i < count; i++) {
         float len = 0, d, score;
-        int st = path_of(ai, h, ring[i], 1 + i, &len);
+        int st;
+        if (visible) {
+            float from[3];
+            from[0] = ring[i][0]; from[1] = ring[i][1]; from[2] = ring[i][2] + head;
+            if (sight_to(ai, from, target, center) != 1) continue;   /* no line of sight from there */
+        }
+        st = path_of(ai, h, ring[i], 1 + i, &len);
         if (st == 1) { searching = 1; continue; }
         if (st != 0 || (max_path > 0 && len > max_path)) continue;
         d = ideal;   /* every candidate is on the ideal circle */
@@ -889,6 +962,919 @@ static int l_focus_tag(lua_State *L)
     return 0;
 }
 
+/* ------------------------------------------- the brain's calls: pure parts */
+
+static const struct { const char *word; unsigned bits; } k_tests[] = {
+    { "TF_NAV_DIRECT", SH_AI_TF_NAV_DIRECT },
+    { "TF_NAV_ENDPOINT", SH_AI_TF_NAV_ENDPOINT },
+    { "TF_NAV_GROUND", SH_AI_TF_NAV_ENDPOINT },
+    { "TF_CLAMP_TO_GROUND", SH_AI_TF_CLAMP_TO_GROUND },
+    { "TF_BOUNDS", SH_AI_TF_BOUNDS },
+    { "TF_EYE_VISIBILITY", SH_AI_TF_EYE_VISIBILITY },
+    { "TF_MUZZLE_VISIBILITY", SH_AI_TF_MUZZLE_VISIBILITY },
+    { "TF_TRANSLATION_TO_ENEMY_FORCE", SH_AI_TF_TO_ENEMY_FORCE },
+    { "TF_AVOID_ENEMY_FOV", SH_AI_TF_AVOID_ENEMY_FOV },
+    { "VALIDATE_ANIM_DELTA", SH_AI_TF_ANIM_DELTA },
+};
+
+unsigned sh_ai_tests_parse(const char *words, char *bad, size_t cap)
+{
+    unsigned bits = 0;
+    const char *p = words;
+    if (bad && cap) bad[0] = 0;
+    if (!words) return 0;
+    while (*p) {
+        const char *s;
+        size_t n, k;
+        int found = 0;
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == '|') p++;
+        if (!*p) break;
+        s = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != '|') p++;
+        n = (size_t)(p - s);
+        for (k = 0; k < sizeof k_tests / sizeof k_tests[0]; k++)
+            if (strlen(k_tests[k].word) == n && !_strnicmp(s, k_tests[k].word, n)) { bits |= k_tests[k].bits; found = 1; }
+        if (!found) {
+            if (bad && cap) _snprintf_s(bad, cap, _TRUNCATE, "%.*s", (int)n, s);
+            return 0;
+        }
+    }
+    return bits;
+}
+
+const char *sh_ai_monster_name(uint32_t value)
+{
+    int k;
+    if (value == 0) return SH_AI_MONSTER_NAMES[0];
+    for (k = 1; k < SH_AI_MONSTER_TYPES; k++) if (value == (1u << (k - 1))) return SH_AI_MONSTER_NAMES[k];
+    return NULL;
+}
+
+void sh_ai_line_offset(const float a[3], const float b[3], float t, float offset, float roll_deg, float out[3])
+{
+    double d[3], h, left[3], dir[3], r = roll_deg * AI_PI / 180.0;
+    int k;
+    for (k = 0; k < 3; k++) d[k] = (double)b[k] - a[k];
+    h = sqrt(d[0] * d[0] + d[1] * d[1]);
+    if (h > 1e-6) { left[0] = -d[1] / h; left[1] = d[0] / h; } else { left[0] = 0; left[1] = 1; }
+    left[2] = 0;
+    dir[0] = sin(r) * left[0];
+    dir[1] = sin(r) * left[1];
+    dir[2] = cos(r);
+    for (k = 0; k < 3; k++) out[k] = (float)(a[k] + d[k] * t + dir[k] * offset);
+}
+
+float sh_ai_table_at(const sh_ai_table *tb, float t)
+{
+    int i;
+    if (!tb || tb->n <= 0) return 0.0f;
+    if (t < tb->t[0]) {
+        if (tb->t[0] <= 0.0f) return tb->v[0];
+        return t <= 0.0f ? 0.0f : tb->v[0] * (t / tb->t[0]);           /* from 0 at the start */
+    }
+    for (i = 0; i + 1 < tb->n; i++) {
+        if (t <= tb->t[i + 1]) {
+            float span = tb->t[i + 1] - tb->t[i];
+            float f = span > 1e-6f ? (t - tb->t[i]) / span : 1.0f;
+            return tb->v[i] + (tb->v[i + 1] - tb->v[i]) * f;
+        }
+    }
+    if (tb->t[tb->n - 1] >= 1.0f) return tb->v[tb->n - 1];
+    return t >= 1.0f ? 0.0f : tb->v[tb->n - 1] * ((1.0f - t) / (1.0f - tb->t[tb->n - 1]));   /* to 0 at the end */
+}
+
+int sh_ai_spline_points(const float from[3], const float to[3], const sh_ai_table *tb, float roll_deg,
+                        float (*out)[3], int cap)
+{
+    double dx = (double)to[0] - from[0], dy = (double)to[1] - from[1];
+    float h = (float)sqrt(dx * dx + dy * dy);
+    int n = 0, i;
+    if (cap < 2) return 0;
+    memcpy(out[n++], from, sizeof out[0]);
+    for (i = 0; tb && i < tb->n && n < cap - 1; i++) {
+        float t = tb->t[i];
+        if (!(t > 0.0f && t < 1.0f)) continue;
+        sh_ai_line_offset(from, to, t, tb->v[i] * h, roll_deg, out[n++]);
+    }
+    memcpy(out[n++], to, sizeof out[0]);
+    return n;
+}
+
+int sh_ai_position_kind(const char *word)
+{
+    if (!word || !_stricmp(word, "any")) return SH_AI_POS_ANY;
+    if (!_stricmp(word, "new")) return SH_AI_POS_NEW;
+    if (!_stricmp(word, "superior")) return SH_AI_POS_SUPERIOR;
+    if (!_stricmp(word, "reposition")) return SH_AI_POS_REPOSITION;
+    return -1;
+}
+
+/* ------------------------------------ per-demon records other threads read */
+
+#define AI_PAIN_RECORDS 512
+typedef struct ai_pain_rec {
+    void *volatile        ai;
+    volatile LONG         spawn_id;
+    const char *volatile  pain_string;
+    volatile LONG         until[SH_AI_PAIN_REACTIONS];   /* game ms; 0 none */
+} ai_pain_rec;
+static ai_pain_rec g_pain[AI_PAIN_RECORDS];
+static volatile LONG g_pain_used;   /* a record was ever made: the engine's threads look only then */
+
+void sh_ai_pain_records_reset(void)
+{
+    int i;
+    InterlockedExchange(&g_pain_used, 0);
+    for (i = 0; i < AI_PAIN_RECORDS; i++) InterlockedExchangePointer((PVOID volatile *)&g_pain[i].ai, NULL);
+    memset(g_pain, 0, sizeof g_pain);
+}
+
+static ai_pain_rec *pain_find(void *ai, uint32_t id)
+{
+    int i;
+    if (!g_pain_used || !ai || id == SH_SCRIPT_SPAWN_ID_NONE) return NULL;
+    for (i = 0; i < AI_PAIN_RECORDS; i++)
+        if (g_pain[i].ai == ai && (uint32_t)g_pain[i].spawn_id == id) return &g_pain[i];
+    return NULL;
+}
+
+/* Game thread only: the record of (ai, id), made when missing (a slot whose
+ * demon is another one may be reused; the writer publishes the key last). */
+static ai_pain_rec *pain_make(void *ai, uint32_t id)
+{
+    ai_pain_rec *r = pain_find(ai, id);
+    int i;
+    if (r || !ai || id == SH_SCRIPT_SPAWN_ID_NONE) return r;
+    for (i = 0; i < AI_PAIN_RECORDS && !r; i++) if (!g_pain[i].ai) r = &g_pain[i];
+    if (!r) {
+        /* every slot taken: reuse the one with nothing standing (no string, no block) */
+        for (i = 0; i < AI_PAIN_RECORDS && !r; i++) {
+            int k, idle = g_pain[i].pain_string == NULL;
+            for (k = 0; k < SH_AI_PAIN_REACTIONS && idle; k++) if (g_pain[i].until[k]) idle = 0;
+            if (idle) r = &g_pain[i];
+        }
+    }
+    if (!r) return NULL;
+    InterlockedExchange(&g_pain_used, 1);
+    InterlockedExchangePointer((PVOID volatile *)&r->ai, NULL);
+    r->pain_string = NULL;
+    for (i = 0; i < SH_AI_PAIN_REACTIONS; i++) r->until[i] = 0;
+    InterlockedExchange(&r->spawn_id, (LONG)id);
+    InterlockedExchangePointer((PVOID volatile *)&r->ai, ai);
+    return r;
+}
+
+int sh_ai_pain_string_set(void *ai, uint32_t id, const char *interned)
+{
+    ai_pain_rec *r = interned ? pain_make(ai, id) : pain_find(ai, id);
+    if (!r) return interned == NULL;
+    InterlockedExchangePointer((PVOID volatile *)&r->pain_string, (PVOID)interned);
+    return 1;
+}
+
+const char *sh_ai_pain_string_get(void *ai, uint32_t id)
+{
+    ai_pain_rec *r = pain_find(ai, id);
+    return r ? r->pain_string : NULL;
+}
+
+int sh_ai_block_set(void *ai, uint32_t id, int reaction, int until_ms)
+{
+    ai_pain_rec *r;
+    if (reaction <= 0 || reaction >= SH_AI_PAIN_REACTIONS) return 0;
+    r = pain_make(ai, id);
+    if (!r) return 0;
+    InterlockedExchange(&r->until[reaction], (LONG)(until_ms ? until_ms : 1));
+    return 1;
+}
+
+int sh_ai_blocked(void *ai, uint32_t id, int reaction, int now_ms)
+{
+    ai_pain_rec *r;
+    LONG until;
+    if (reaction <= 0 || reaction >= SH_AI_PAIN_REACTIONS) return 0;
+    r = pain_find(ai, id);
+    if (!r) return 0;
+    until = r->until[reaction];
+    return until != 0 && now_ms < (int)until;
+}
+
+/* --------------------------------------------- compositions over primitives */
+
+#define AI_KNEE        24.0f     /* the low line of TF_BOUNDS */
+#define AI_CHEST       64.0f     /* the high line of TF_BOUNDS */
+#define AI_EYE_DEFAULT 64.0f     /* the eye height when the engine cannot say */
+#define AI_MUZZLE_PART 0.75f     /* weapon height as a part of the eye height */
+#define AI_SPLINE_RAISE 32.0f    /* spline_clear traces this far above each point */
+#define AI_STEP        48.0f     /* the most a clip's end may sit above or below the ground under it */
+#define AI_TARGET_RAISE 40.0f    /* sights aim this far above the target's origin */
+
+static float dist3(const float a[3], const float b[3])
+{
+    double x = (double)a[0] - b[0], y = (double)a[1] - b[1], z = (double)a[2] - b[2];
+    return (float)sqrt(x * x + y * y + z * z);
+}
+
+static float dist2(const float a[3], const float b[3])
+{
+    double x = (double)a[0] - b[0], y = (double)a[1] - b[1];
+    return (float)sqrt(x * x + y * y);
+}
+
+/* The eye's height above the demon's origin. */
+static float eye_height(const sh_script_ai_engine *e, void *ai, const float origin[3])
+{
+    float eye[3];
+    if (e->eye && e->eye(ai, eye) && eye[2] > origin[2]) return eye[2] - origin[2];
+    return AI_EYE_DEFAULT;
+}
+
+/* 1 when from `from` the target point is seen (nothing in between, or the
+ * target is the first thing hit); 0 when not; -1 when the engine cannot say. */
+static int sees(const sh_script_ai_engine *e, void *ai, const float from[3], const float to[3], void *target)
+{
+    if (!e->sight) return -1;
+    return e->sight(ai, from, to, target);
+}
+
+int sh_ai_firing_run(const sh_script_ai_engine *e, void *ai, const sh_ai_position_query *q, int key_base,
+                     float out[3])
+{
+    float at[3], center[3], ring[AI_FIND_MAX][3], best[3], head, cur_score = 1e30f, best_score = 0;
+    int count, i, have = 0, searching = 0;
+    if (!e || !ai || !q || !e->origin || !e->path || !e->origin(ai, at)) return -1;
+    memcpy(center, q->at, sizeof center);
+    if (q->target && !e->origin(q->target, center)) return 2;
+    count = q->count < 2 ? 2 : q->count > AI_FIND_MAX ? AI_FIND_MAX : q->count;
+    head = eye_height(e, ai, at);
+    /* the current place: within the band, and (when asked) seeing the target */
+    {
+        float d = dist2(at, center), from[3], to[3];
+        int ok = d >= q->min && d <= q->max;
+        if (ok && q->visible) {
+            from[0] = at[0]; from[1] = at[1]; from[2] = at[2] + head;
+            to[0] = center[0]; to[1] = center[1]; to[2] = center[2] + AI_TARGET_RAISE;
+            ok = sees(e, ai, from, to, q->target) == 1;
+        }
+        if (ok) cur_score = sh_ai_position_score(d, q->ideal, 0, q->path_weight);
+    }
+    if (q->kind == SH_AI_POS_REPOSITION) {
+        /* the far side: the ring begins opposite the demon */
+        float away[3];
+        away[0] = 2 * center[0] - at[0]; away[1] = 2 * center[1] - at[1]; away[2] = at[2];
+        sh_ai_ring(center, away, q->ideal, count, ring);
+    } else {
+        sh_ai_ring(center, at, q->ideal, count, ring);
+    }
+    for (i = 0; i < count; i++) {
+        float p[3], g[3], len = 0, score, from[3], to[3];
+        int st;
+        memcpy(p, ring[i], sizeof p);
+        if (q->kind != SH_AI_POS_ANY && dist2(p, at) < SH_AI_POS_MOVE_MIN) continue;
+        if (q->kind == SH_AI_POS_REPOSITION) {
+            /* only the half of the ring away from the demon */
+            double ax = (double)at[0] - center[0], ay = (double)at[1] - center[1];
+            double px = (double)p[0] - center[0], py = (double)p[1] - center[1];
+            if (ax * px + ay * py > 0) continue;
+        }
+        if (e->ground) {
+            float above[3];
+            above[0] = p[0]; above[1] = p[1]; above[2] = p[2] + AI_CHEST;
+            if (!e->ground(above, g)) continue;   /* nothing to stand on there */
+            p[2] = g[2];
+        }
+        if (q->visible) {
+            from[0] = p[0]; from[1] = p[1]; from[2] = p[2] + head;
+            to[0] = center[0]; to[1] = center[1]; to[2] = center[2] + AI_TARGET_RAISE;
+            if (sees(e, ai, from, to, q->target) != 1) continue;
+        }
+        st = e->path(ai, p, key_base + i, &len);
+        if (st == 1) { searching = 1; continue; }
+        if (st != 0) continue;
+        score = sh_ai_position_score(dist2(p, center), q->ideal, len, q->path_weight);
+        if (!have || score < best_score) { have = 1; best_score = score; memcpy(best, p, sizeof best); }
+    }
+    if (q->kind == SH_AI_POS_ANY && cur_score < 1e29f && (!have || cur_score <= best_score)) {
+        memcpy(out, at, sizeof best);
+        return 0;
+    }
+    if (have && q->kind == SH_AI_POS_SUPERIOR && !(best_score + SH_AI_POS_MARGIN < cur_score)) have = 0;
+    if (have) { memcpy(out, best, sizeof best); return 0; }
+    return searching ? 1 : 2;
+}
+
+int sh_ai_spline_run(const sh_script_ai_engine *e, void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap,
+                     int *n)
+{
+    float from[3];
+    int count, i;
+    if (n) *n = 0;
+    if (!e || !ai || !q || !out || cap < 2 || !e->origin || !e->origin(ai, from)) return -1;
+    count = sh_ai_spline_points(from, q->to, &q->table, q->roll, out, cap);
+    if (q->nav_ground) {
+        if (!e->ground) return -1;
+        for (i = 0; i < count; i++) {
+            float above[3], g[3];
+            above[0] = out[i][0]; above[1] = out[i][1]; above[2] = out[i][2] + AI_SPLINE_RAISE;
+            if (!e->ground(above, g) || fabsf(g[2] - out[i][2]) > AI_STEP * 2) return 0;
+            out[i][2] = g[2];
+        }
+    }
+    for (i = 0; i + 1 < count; i++) {
+        float a[3], b[3];
+        int s;
+        memcpy(a, out[i], sizeof a); a[2] += AI_SPLINE_RAISE;
+        memcpy(b, out[i + 1], sizeof b); b[2] += AI_SPLINE_RAISE;
+        s = sees(e, ai, a, b, q->target);
+        if (s < 0) return -1;
+        if (!s) return 0;
+    }
+    if (n) *n = count;
+    return 1;
+}
+
+int sh_ai_anim_valid_run(const sh_script_ai_engine *e, void *ai, const char *node, unsigned tests, int side,
+                         int key_base, int *index)
+{
+    float at[3], d[3], yaw = 0, head, enemy_at[3];
+    void *enemy;
+    int count = 0, first, last, i, pending = 0;
+    if (index) *index = -1;
+    if (!e || !ai || !node || !e->anim_delta || !e->origin || !e->origin(ai, at)) return -1;
+    if (e->anim_delta(ai, node, 0, d, &count) < 0) return -1;
+    if (count <= 0) return 0;                                   /* a node with no animation never fits */
+    if (e->yaw) e->yaw(ai, &yaw);
+    head = eye_height(e, ai, at);
+    enemy = e->enemy ? e->enemy(ai) : NULL;
+    if (enemy && !e->origin(enemy, enemy_at)) enemy = NULL;
+    if ((tests & SH_AI_TF_TO_ENEMY_FORCE) && enemy)             /* the clip is played facing the enemy */
+        yaw = (float)(atan2((double)enemy_at[1] - at[1], (double)enemy_at[0] - at[0]) * 180.0 / AI_PI);
+    first = side >= 0 ? side % count : 0;
+    last = side >= 0 ? first : count - 1;
+    for (i = first; i <= last; i++) {
+        float end[3], c, s, from[3], to[3], g[3];
+        double r = yaw * AI_PI / 180.0;
+        int ok = 1;
+        if (e->anim_delta(ai, node, i, d, &count) != 1) continue;
+        c = (float)cos(r); s = (float)sin(r);
+        end[0] = at[0] + d[0] * c - d[1] * s;
+        end[1] = at[1] + d[0] * s + d[1] * c;
+        end[2] = at[2] + d[2];
+        if (tests & (SH_AI_TF_NAV_ENDPOINT | SH_AI_TF_CLAMP_TO_GROUND)) {
+            float above[3];
+            above[0] = end[0]; above[1] = end[1]; above[2] = end[2] + AI_STEP;
+            if (e->ground && e->ground(above, g)) {
+                if ((tests & SH_AI_TF_NAV_ENDPOINT) && fabsf(g[2] - end[2]) > AI_STEP) ok = 0;
+                end[2] = g[2];
+            } else if (tests & SH_AI_TF_NAV_ENDPOINT) {
+                ok = 0;
+            }
+        }
+        if (ok && (tests & SH_AI_TF_BOUNDS)) {
+            float h[2] = { AI_KNEE, AI_CHEST };
+            int k;
+            for (k = 0; k < 2 && ok; k++) {
+                from[0] = at[0]; from[1] = at[1]; from[2] = at[2] + h[k];
+                to[0] = end[0]; to[1] = end[1]; to[2] = end[2] + h[k];
+                if (sees(e, ai, from, to, NULL) != 1) ok = 0;
+            }
+        }
+        if (ok && (tests & (SH_AI_TF_EYE_VISIBILITY | SH_AI_TF_MUZZLE_VISIBILITY))) {
+            if (!enemy) ok = 0;
+            else {
+                to[0] = enemy_at[0]; to[1] = enemy_at[1]; to[2] = enemy_at[2] + AI_TARGET_RAISE;
+                from[0] = end[0]; from[1] = end[1];
+                if (tests & SH_AI_TF_EYE_VISIBILITY) {
+                    from[2] = end[2] + head;
+                    if (sees(e, ai, from, to, enemy) != 1) ok = 0;
+                }
+                if (ok && (tests & SH_AI_TF_MUZZLE_VISIBILITY)) {
+                    from[2] = end[2] + head * AI_MUZZLE_PART;
+                    if (sees(e, ai, from, to, enemy) != 1) ok = 0;
+                }
+            }
+        }
+        if (ok && (tests & SH_AI_TF_AVOID_ENEMY_FOV) && enemy && e->yaw) {
+            float ey;
+            if (e->yaw(enemy, &ey) && fabsf(sh_ai_angle_to(enemy_at, ey, end)) < SH_AI_FOV_CENTRE_DEG) ok = 0;
+        }
+        if (ok && (tests & SH_AI_TF_NAV_DIRECT)) {
+            float len = 0;
+            int st = e->path ? e->path(ai, end, key_base + i, &len) : -1;
+            if (st == 1) { pending = 1; continue; }
+            if (st != 0 || len > dist2(at, end) * 1.5f + AI_STEP) ok = 0;
+        }
+        if (ok) {
+            if (index) *index = i;
+            return 1;
+        }
+    }
+    return pending ? 2 : 0;
+}
+
+/* ------------------------------------------------ the brain's calls: Lua */
+
+/* The engine operation `op` of the seam, or a plain refusal naming `call`
+ * when this session's engine side lacks it. */
+#define NEED_OP(L, op, call) \
+    do { if (g_engine && !g_engine->op) sh_script_refuse(L, "\"%s\" is not available in this session (Snapmap+ could not find " \
+                                             "the game function it needs; see the backend log)", call); } while (0)
+
+/* ai:recoil(alpha): the weight of the weapon's recoil animation, 0 none .. 1 full */
+static int l_recoil(lua_State *L)
+{
+    double a = sh_script_api_check_number(L, 2, "recoil", "the recoil weight");
+    void *ai;
+    if (a < 0 || a > 1) sh_script_refuse(L, "\"recoil\" needs a weight from 0 (no recoil) to 1 (full), got %g", a);
+    NEED_OP(L, set_recoil, "recoil");
+    ai = self_ai(L, "recoil", NULL);
+    if (ai) g_engine->set_recoil(ai, (float)a);
+    return 0;
+}
+
+/* ai:weapon_ready() -> the weapon may be fired again (its wait between
+ * bursts has passed); nil when the demon holds no weapon */
+static int l_weapon_ready(lua_State *L)
+{
+    void *ai;
+    int st;
+    NEED_OP(L, weapon_ready, "weapon_ready");
+    ai = self_ai(L, "weapon_ready", NULL);
+    if (!ai || (st = g_engine->weapon_ready(ai)) < 0) { lua_pushnil(L); return 1; }
+    lua_pushboolean(L, st == 1);
+    return 1;
+}
+
+/* ai:aim_point(pos) aims the weapon at a position; ai:aim_point(nil) stops aiming */
+static int l_aim_point(lua_State *L)
+{
+    sh_script_handle h = 0;
+    float p[3];
+    int has = !lua_isnoneornil(L, 2);
+    void *ai;
+    if (has) check_vec(L, 2, "aim_point", p);
+    NEED_OP(L, aim_point, "aim_point");
+    ai = self_ai(L, "aim_point", &h);
+    if (!ai || !park(ai, h)) return 0;
+    if (has) g_engine->aim_point(ai, p);
+    else run(ai, SH_AI_EV_CLEAR_AIM_FOCUS, NULL, 0, NULL);
+    return 0;
+}
+
+static const char *check_node(lua_State *L, int idx, const char *call, const char *what)
+{
+    size_t n = 0, i;
+    const char *s = lua_type(L, idx) == LUA_TSTRING ? lua_tolstring(L, idx, &n) : NULL;
+    if (!s || !n || n > SH_SCRIPT_ANIM_NAME_CAP - 1)
+        sh_script_refuse(L, "\"%s\" needs %s as \"subweb/state\" text, got %s", call, what,
+                         lua_isnoneornil(L, idx) ? "nothing" : luaL_typename(L, idx));
+    for (i = 0; i < n; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9') ||
+              s[i] == '_' || s[i] == '/' || s[i] == '.'))
+            sh_script_refuse(L, "\"%s\": \"%s\" is not an animWeb node name (letters, digits, _ / and . only)", call, s);
+    return s;
+}
+
+/* ai:anim_valid(node, tests, [side]) -> true, index | false | nil, "searching"
+ * Whether one of the node's animations fits where the demon stands: its root
+ * motion, turned by the demon's facing, tested by the words of `tests`
+ * (TF_NAV_DIRECT, TF_NAV_ENDPOINT, TF_CLAMP_TO_GROUND, TF_BOUNDS,
+ * TF_EYE_VISIBILITY, TF_MUZZLE_VISIBILITY, TF_TRANSLATION_TO_ENEMY_FORCE,
+ * TF_AVOID_ENEMY_FOV, or VALIDATE_ANIM_DELTA). `side` picks one animation
+ * (0 first); without it every animation is tried. */
+static int l_anim_valid(lua_State *L)
+{
+    sh_script_handle h = 0;
+    const char *node = check_node(L, 2, "anim_valid", "the animWeb node");
+    const char *words = lua_isnoneornil(L, 3) ? "VALIDATE_ANIM_DELTA" : NULL;
+    char bad[64];
+    unsigned tests;
+    int side = -1, st, index = -1;
+    void *ai;
+    ai_rec *r;
+    if (!words) {
+        if (lua_type(L, 3) != LUA_TSTRING)
+            sh_script_refuse(L, "\"anim_valid\" needs its tests as words, as \"TF_BOUNDS TF_NAV_ENDPOINT\", got %s",
+                             luaL_typename(L, 3));
+        words = lua_tostring(L, 3);
+    }
+    tests = sh_ai_tests_parse(words, bad, sizeof bad);
+    if (!tests && bad[0])
+        sh_script_refuse(L, "\"anim_valid\" does not know the test \"%s\"; use TF_NAV_DIRECT, TF_NAV_ENDPOINT, "
+                         "TF_CLAMP_TO_GROUND, TF_BOUNDS, TF_EYE_VISIBILITY, TF_MUZZLE_VISIBILITY, "
+                         "TF_TRANSLATION_TO_ENEMY_FORCE, TF_AVOID_ENEMY_FOV or VALIDATE_ANIM_DELTA", bad);
+    if (!lua_isnoneornil(L, 4)) {
+        if (!lua_isinteger(L, 4) || lua_tointeger(L, 4) < 0 || lua_tointeger(L, 4) > 63)
+            sh_script_refuse(L, "\"anim_valid\" needs the animation to try as a whole number from 0 to 63");
+        side = (int)lua_tointeger(L, 4);
+    }
+    NEED_OP(L, anim_valid, "anim_valid");
+    ai = self_ai(L, "anim_valid", &h);
+    if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
+    st = g_engine->anim_valid(ai, node, tests, side, &index);
+    if (st == 1) { lua_pushboolean(L, 1); lua_pushinteger(L, index); return 2; }
+    if (st == 0) { lua_pushboolean(L, 0); return 1; }
+    lua_pushnil(L);
+    lua_pushstring(L, st == 2 ? "searching" : "no such node");
+    return 2;
+}
+
+/* ------------------------------------------- forced animation through a via */
+
+#define AI_FORCE_VIA_MAX 64
+#define AI_FORCE_VIA_FRAMES 600   /* a via node not seen this many frames is given up */
+typedef struct ai_force_via {
+    sh_script_handle handle;
+    char dest[SH_SCRIPT_ANIM_NAME_CAP];
+    char via[SH_SCRIPT_ANIM_NAME_CAP];
+    uint32_t issued;
+} ai_force_via;
+static ai_force_via g_force_via[AI_FORCE_VIA_MAX];
+static void force_via_reset(void) { memset(g_force_via, 0, sizeof g_force_via); }
+
+/* Every frame: a forced via whose node has played and ended hands the web
+ * to the destination (ssaction_ChangeAnimState). */
+static uint32_t g_seen_frame;
+
+static void force_via_step(void)
+{
+    int i;
+    uint32_t frame;
+    if (!g_engine) return;
+    /* The frame count starts again with each map: the per-demon pain
+     * records and forced animations of the last map are dropped. */
+    frame = g_engine->frame();
+    if (frame < g_seen_frame) {
+        sh_ai_pain_records_reset();
+        force_via_reset();
+    }
+    g_seen_frame = frame;
+    for (i = 0; i < AI_FORCE_VIA_MAX; i++) {
+        ai_force_via *f = &g_force_via[i];
+        void *ai;
+        int requested = 0;
+        unsigned flags;
+        char dest[SH_SCRIPT_ANIM_NAME_CAP];
+        if (!f->handle) continue;
+        ai = g_engine->entity(f->handle);
+        if (!ai || !sh_script_api_anim_dest(f->handle, dest, sizeof dest) || _stricmp(dest, f->dest)) {
+            memset(f, 0, sizeof *f);                 /* gone, or another animation was asked for since */
+            continue;
+        }
+        flags = sh_script_api_anim_flags(f->handle, ai, &requested);
+        if (flags & SH_SCRIPT_ANIM_DEST) { memset(f, 0, sizeof *f); continue; }
+        if (flags & SH_SCRIPT_ANIM_VIA_OUT) {
+            (void)sh_script_ai_anim(ai, f->handle, f->dest, NULL, 0, 0);
+            memset(f, 0, sizeof *f);
+        } else if (!(flags & SH_SCRIPT_ANIM_VIA_IN) && g_engine->frame() - f->issued > AI_FORCE_VIA_FRAMES) {
+            memset(f, 0, sizeof *f);
+        }
+    }
+}
+
+/* ai:anim_force_via(dest, via, [blend]): play `via` now whatever the web is
+ * doing (blending `blend` seconds), then go to `dest` when it ends. Observed
+ * like anim_force: anim_event VIA_BLEND_IN_START, VIA_BLEND_OUT_START,
+ * DEST_REACHED. */
+static int l_anim_force_via(lua_State *L)
+{
+    sh_script_handle h = 0;
+    const char *dest = check_node(L, 2, "anim_force_via", "the node to end in");
+    const char *via = check_node(L, 3, "anim_force_via", "the node to force first");
+    double blend = 0;
+    void *ai;
+    int i, slot = -1;
+    if (sh_script_api_opt_number(L, 4, "anim_force_via", "the blend time in seconds", &blend) && (blend < 0 || blend > 10))
+        sh_script_refuse(L, "\"anim_force_via\" needs a blend time from 0 to 10 seconds, got %g", blend);
+    ai = self_ai(L, "anim_force_via", &h);
+    if (!ai) return 0;
+    for (i = 0; i < AI_FORCE_VIA_MAX; i++) {
+        if (g_force_via[i].handle == h) { slot = i; break; }
+        if (slot < 0 && !g_force_via[i].handle) slot = i;
+    }
+    sh_script_api_anim_request(h, dest, via);
+    if (!sh_script_ai_anim(ai, h, via, NULL, 1, (int)(blend * 1000.0 + 0.5))) return 0;
+    if (slot < 0) return 0;   /* more than AI_FORCE_VIA_MAX demons at once: the via plays, the web returns on its own */
+    memset(&g_force_via[slot], 0, sizeof g_force_via[slot]);
+    g_force_via[slot].handle = h;
+    strncpy_s(g_force_via[slot].dest, sizeof g_force_via[slot].dest, dest, _TRUNCATE);
+    strncpy_s(g_force_via[slot].via, sizeof g_force_via[slot].via, via, _TRUNCATE);
+    g_force_via[slot].issued = g_engine->frame();
+    return 0;
+}
+
+/* ----------------------------------------------------- places and routes */
+
+static void push_points(lua_State *L, float (*p)[3], int n)
+{
+    int i;
+    lua_createtable(L, n, 0);
+    for (i = 0; i < n; i++) { push_vec(L, p[i]); lua_rawseti(L, -2, i + 1); }
+}
+
+/* ai:path_points(pos) -> the points of the navigation path, nil, "searching"
+ * while the engine is still finding it, nil, "no path" when there is none */
+static int l_path_points(lua_State *L)
+{
+    sh_script_handle h = 0;
+    float goal[3], pts[SH_AI_PATH_POINTS_MAX][3];
+    void *ai;
+    ai_rec *r;
+    int st, n = 0;
+    check_target(L, 2, "path_points");
+    NEED_OP(L, path_points, "path_points");
+    ai = self_ai(L, "path_points", &h);
+    if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
+    if (!target_point(L, 2, "path_points", goal, NULL)) { lua_pushnil(L); lua_pushstring(L, "no path"); return 2; }
+    st = g_engine->path_points(ai, goal, 0x53500000 | (rec_index(r) << 5), pts, SH_AI_PATH_POINTS_MAX, &n);
+    if (st == 0) {
+        if (n == 0) { memcpy(pts[0], goal, sizeof pts[0]); n = 1; }   /* already there: the goal alone */
+        push_points(L, pts, n);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, st == 1 ? "searching" : st == 2 || st == 0 ? "no path" : "unavailable");
+    return 2;
+}
+
+/* ai:firing_position(parms) -> pos | nil, "searching" | nil, "none"
+ * parms: target (an entity or a position; its enemy when omitted), kind
+ * ("any", "new", "superior", "reposition"), min, max, ideal (inches from the
+ * target), visible (the place must see the target; true when omitted),
+ * count (candidates, 2..16), path_weight, parms (the positioning profile it
+ * came from; carried, not read). */
+static int l_firing_position(lua_State *L)
+{
+    sh_script_handle h = 0;
+    sh_ai_position_query q;
+    float out[3];
+    void *ai;
+    ai_rec *r;
+    int st, has_target;
+    memset(&q, 0, sizeof q);
+    if (lua_type(L, 2) != LUA_TTABLE)
+        sh_script_refuse(L, "\"firing_position\" takes a table of settings, as { kind = \"new\", ideal = 600 }, got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    lua_pushnil(L);
+    while (lua_next(L, 2)) {
+        const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
+        static const char *const known[] = { "target", "kind", "min", "max", "ideal", "visible", "count",
+                                             "path_weight", "parms", NULL };
+        int j, ok = 0;
+        for (j = 0; k && known[j]; j++) if (!strcmp(k, known[j])) ok = 1;
+        if (!ok)
+            sh_script_refuse(L, "\"firing_position\" knows target, kind, min, max, ideal, visible, count, path_weight "
+                             "and parms, not \"%s\"", k ? k : "?");
+        lua_pop(L, 1);
+    }
+    lua_getfield(L, 2, "kind");
+    if (!lua_isnil(L, -1)) {
+        if (lua_type(L, -1) != LUA_TSTRING || (q.kind = sh_ai_position_kind(lua_tostring(L, -1))) < 0)
+            sh_script_refuse(L, "\"firing_position\": kind is \"any\", \"new\", \"superior\" or \"reposition\"");
+    }
+    lua_pop(L, 1);
+    q.min = opt_num_field(L, 2, "min", 0, "firing_position", 0, 65536);
+    q.max = opt_num_field(L, 2, "max", 2048, "firing_position", 0, 65536);
+    if (q.max < q.min) sh_script_refuse(L, "\"firing_position\": max must not be less than min");
+    q.ideal = opt_num_field(L, 2, "ideal", (q.min + q.max) / 2, "firing_position", q.min, q.max);
+    q.count = (int)opt_num_field(L, 2, "count", 8, "firing_position", 2, AI_FIND_MAX);
+    q.path_weight = opt_num_field(L, 2, "path_weight", 0.5f, "firing_position", 0, 100);
+    lua_getfield(L, 2, "visible");
+    q.visible = lua_isnil(L, -1) ? 1 : lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 2, "target");
+    has_target = !lua_isnil(L, -1);
+    if (has_target && !is_entity(L, -1) && lua_type(L, -1) != LUA_TTABLE)
+        sh_script_refuse(L, "\"firing_position\": target must be an entity or a position");
+    if (has_target && lua_type(L, -1) == LUA_TTABLE) check_vec(L, lua_gettop(L), "firing_position", q.at);
+    NEED_OP(L, firing_position, "firing_position");
+    ai = self_ai(L, "firing_position", &h);
+    if (!ai || !(r = rec_of(h))) { lua_pushnil(L); return 1; }
+    if (has_target && is_entity(L, -1)) {
+        if (!target_point(L, lua_gettop(L), "firing_position", q.at, &q.target)) {
+            lua_pushnil(L); lua_pushstring(L, "none"); return 2;
+        }
+    } else if (!has_target) {
+        q.target = g_engine->enemy(ai);
+        if (!q.target || !g_engine->origin(q.target, q.at)) { lua_pushnil(L); lua_pushstring(L, "none"); return 2; }
+    }
+    st = g_engine->firing_position(ai, &q, out);
+    if (st == 0) { push_vec(L, out); return 1; }
+    lua_pushnil(L);
+    lua_pushstring(L, st == 1 ? "searching" : st == 2 ? "none" : "unavailable");
+    return 2;
+}
+
+/* A control table's knots from a Lua table: { times = {...}, values = {...} }
+ * (arrays, or keys "times[1]" and "values[1]" as converted tables write
+ * them). A value missing for the last time is 0. */
+static int read_list(lua_State *L, int idx, const char *field, const char *prefix, float *out, int cap)
+{
+    int n = 0, i;
+    lua_getfield(L, idx, field);
+    if (lua_type(L, -1) != LUA_TTABLE) { lua_pop(L, 1); return -1; }
+    for (i = 1; i <= cap; i++) {
+        char key[32];
+        int isnum = 0;
+        lua_Number v;
+        lua_rawgeti(L, -1, i);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s[%d]", prefix, i);
+            lua_getfield(L, -1, key);
+        }
+        if (lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+        v = lua_tonumberx(L, -1, &isnum);
+        lua_pop(L, 1);
+        if (!isnum || v != v) { lua_pop(L, 1); return -2; }
+        out[n++] = (float)v;
+    }
+    lua_pop(L, 1);
+    return n;
+}
+
+/* Knots as a list { {t = 0.2, v = 0.1}, ... } (as a brain keeps its control
+ * tables) into the table; the count, or -1 when the list is not knots. */
+static int read_knots(lua_State *L, int idx, sh_ai_table *tb)
+{
+    int n = 0, i;
+    for (i = 1; i <= SH_AI_SPLINE_KNOTS + 1; i++) {
+        int t_ok = 0, v_ok = 0;
+        lua_Number t, v;
+        if (lua_rawgeti(L, idx, i) == LUA_TNIL) { lua_pop(L, 1); break; }
+        if (lua_type(L, -1) != LUA_TTABLE || n == SH_AI_SPLINE_KNOTS) { lua_pop(L, 1); return -1; }
+        lua_getfield(L, -1, "t"); t = lua_tonumberx(L, -1, &t_ok); lua_pop(L, 1);
+        lua_getfield(L, -1, "v"); v = lua_tonumberx(L, -1, &v_ok); lua_pop(L, 1);
+        lua_pop(L, 1);
+        if (!t_ok || t != t) return -1;
+        tb->t[n] = (float)t;
+        tb->v[n] = v_ok && v == v ? (float)v : 0.0f;
+        n++;
+    }
+    return n;
+}
+
+static void check_spline(lua_State *L, int idx, sh_ai_spline_query *q)
+{
+    int tbl, nt, nv, i;
+    float v[SH_AI_SPLINE_KNOTS];
+    if (lua_type(L, idx) != LUA_TTABLE)
+        sh_script_refuse(L, "\"spline_clear\" needs the spline as a table { times = {...}, values = {...}, roll = 90 }, "
+                         "got %s", lua_isnoneornil(L, idx) ? "nothing" : luaL_typename(L, idx));
+    lua_getfield(L, idx, "table");
+    tbl = lua_type(L, -1) == LUA_TTABLE ? lua_gettop(L) : idx;
+    if (lua_rawgeti(L, tbl, 1) == LUA_TTABLE) {
+        lua_pop(L, 1);
+        nt = read_knots(L, tbl, &q->table);
+        if (nt < 1)
+            sh_script_refuse(L, "\"spline_clear\" needs the spline's knots as { {t = 0.5, v = 0.2}, ... } (at most %d, "
+                             "t a number)", SH_AI_SPLINE_KNOTS);
+    } else {
+        lua_pop(L, 1);
+        nt = read_list(L, tbl, "times", "times", q->table.t, SH_AI_SPLINE_KNOTS);
+        nv = read_list(L, tbl, "values", "values", v, SH_AI_SPLINE_KNOTS);
+        if (nt < 1 || nv < 1 || nv > nt)
+            sh_script_refuse(L, "\"spline_clear\" needs the spline's times and values (numbers, at most %d, one value "
+                             "for each time but the last)", SH_AI_SPLINE_KNOTS);
+        for (i = 0; i < nt; i++) q->table.v[i] = i < nv ? v[i] : 0.0f;
+    }
+    for (i = 0; i < nt; i++)
+        if (q->table.t[i] < 0 || q->table.t[i] > 1 || (i && q->table.t[i] < q->table.t[i - 1]))
+            sh_script_refuse(L, "\"spline_clear\" needs the spline's times rising from 0 to 1");
+    q->table.n = nt;
+    lua_pop(L, 1);
+    lua_getfield(L, idx, "roll");
+    if (lua_type(L, -1) == LUA_TTABLE) { lua_getfield(L, -1, "value"); lua_remove(L, -2); }
+    if (!lua_isnil(L, -1)) {
+        int isnum = 0;
+        lua_Number r = lua_tonumberx(L, -1, &isnum);
+        if (!isnum || r != r || r < -360 || r > 360)
+            sh_script_refuse(L, "\"spline_clear\": the spline's roll is degrees from -360 to 360");
+        q->roll = (float)r;
+    } else {
+        q->roll = 90.0f;
+    }
+    lua_pop(L, 1);
+}
+
+/* ai:spline_clear(target, spline, seconds, [flags]) -> true, points | false
+ * The curve from the demon to where the target will be `seconds` ahead (its
+ * velocity), bent by the spline's control table across the line (roll 90:
+ * to the left, -90: to the right); clear when no world geometry is in the
+ * way and, with flags "TF_NAV_GROUND", every point stands on the ground. */
+static int l_spline_clear(lua_State *L)
+{
+    sh_script_handle h = 0;
+    sh_ai_spline_query q;
+    float pts[SH_AI_SPLINE_KNOTS + 2][3];
+    double secs;
+    void *ai, *t;
+    int st, n = 0;
+    memset(&q, 0, sizeof q);
+    sh_script_check_entity(L, 2, "spline_clear");
+    check_spline(L, 3, &q);
+    secs = sh_script_api_check_number(L, 4, "spline_clear", "the seconds ahead to predict the target");
+    if (secs < 0 || secs > 10) sh_script_refuse(L, "\"spline_clear\" needs the seconds ahead from 0 to 10, got %g", secs);
+    if (!lua_isnoneornil(L, 5)) {
+        const char *f = lua_type(L, 5) == LUA_TSTRING ? lua_tostring(L, 5) : NULL;
+        char bad[64];
+        unsigned bits = f ? sh_ai_tests_parse(f, bad, sizeof bad) : 0;
+        if (!f || (!bits && bad[0]) || (bits & ~SH_AI_TF_NAV_ENDPOINT))
+            sh_script_refuse(L, "\"spline_clear\" knows the flag \"TF_NAV_GROUND\" only");
+        q.nav_ground = bits != 0;
+    }
+    NEED_OP(L, spline_clear, "spline_clear");
+    ai = self_ai(L, "spline_clear", &h);
+    if (!ai) { lua_pushnil(L); return 1; }
+    t = other_entity(L, 2, "spline_clear");
+    if (!t || !g_engine->origin(t, q.to)) { lua_pushboolean(L, 0); return 1; }
+    q.target = t;
+    if (secs > 0) {
+        sh_script_earg v;
+        if (sh_script_api_event(t, "getLinearVelocity", NULL, 0, &v) && v.type == 'v') {
+            q.to[0] += (float)(v.v[0] * secs);
+            q.to[1] += (float)(v.v[1] * secs);
+            q.to[2] += (float)(v.v[2] * secs);
+        }
+    }
+    st = g_engine->spline_clear(ai, &q, pts, SH_AI_SPLINE_KNOTS + 2, &n);
+    if (st == 1) { lua_pushboolean(L, 1); push_points(L, pts, n); return 2; }
+    if (st == 0) { lua_pushboolean(L, 0); return 1; }
+    lua_pushnil(L);
+    return 1;
+}
+
+/* ------------------------------------------------------- what it is, pain */
+
+/* e:monster_type() -> the engine's monster type of a demon ("AI_MONSTER_BARON"),
+ * nil for an entity that is not a demon */
+static int l_monster_type(lua_State *L)
+{
+    uint64_t h = sh_script_check_entity(L, 1, "monster_type");
+    void *e;
+    double v = 0;
+    const char *name;
+    if (!g_engine)
+        sh_script_refuse(L, "\"monster_type\" is not available in this session (Snapmap+ could not find the game's AI "
+                         "functions; see the backend log)");
+    if (!h || !(e = g_engine->entity((sh_script_handle)h)) || !g_engine->is_ai(e)) { lua_pushnil(L); return 1; }
+    if (!run(e, SH_AI_EV_GET_MONSTER_TYPE, NULL, 0, &v) || !(name = sh_ai_monster_name((uint32_t)v))) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, name);
+    return 1;
+}
+
+/* ai:pain_string(text): the demon's pain clips are picked among those whose
+ * pain graph string is `text` (as an attack sets it); ai:pain_string(nil)
+ * gives the choice back to the engine's own string. */
+static int l_pain_string(lua_State *L)
+{
+    const char *text = NULL;
+    void *ai;
+    if (!lua_isnoneornil(L, 2)) {
+        size_t n = 0, i;
+        if (lua_type(L, 2) != LUA_TSTRING) sh_script_refuse(L, "\"pain_string\" needs text or nil, got %s", luaL_typename(L, 2));
+        text = lua_tolstring(L, 2, &n);
+        if (n > 63) sh_script_refuse(L, "\"pain_string\" needs text of at most 63 characters");
+        for (i = 0; i < n; i++)
+            if (!((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') ||
+                  (text[i] >= '0' && text[i] <= '9') || text[i] == '_' || text[i] == '.'))
+                sh_script_refuse(L, "\"pain_string\": \"%s\" is not a usable string (letters, digits, _ and . only)", text);
+        if (!n) text = NULL;
+    }
+    NEED_OP(L, pain_string, "pain_string");
+    ai = self_ai(L, "pain_string", NULL);
+    if (ai) g_engine->pain_string(ai, text);
+    return 0;
+}
+
+/* ai:block_pain(reaction, seconds): the engine's damage table may not choose
+ * `reaction` ("PAIN_FALTER", ...) for the demon for that long. */
+static int l_block_pain(lua_State *L)
+{
+    const char *name;
+    double secs;
+    int reaction = -1, i;
+    void *ai;
+    if (lua_type(L, 2) != LUA_TSTRING)
+        sh_script_refuse(L, "\"block_pain\" needs a pain reaction name, as \"PAIN_FALTER\", got %s",
+                         lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    name = lua_tostring(L, 2);
+    for (i = 1; i < SH_AI_PAIN_REACTIONS; i++) {
+        const char *n = sh_script_combat_pain_name(i);
+        if (n && (!_stricmp(name, n) || !_stricmp(name, n + 5))) reaction = i;
+    }
+    if (reaction < 0) sh_script_refuse(L, "\"block_pain\" does not know the pain reaction \"%s\"", name);
+    secs = sh_script_api_check_number(L, 3, "block_pain", "the seconds to block it");
+    if (secs < 0 || secs > 600) sh_script_refuse(L, "\"block_pain\" needs seconds from 0 to 600, got %g", secs);
+    NEED_OP(L, block_pain, "block_pain");
+    ai = self_ai(L, "block_pain", NULL);
+    if (ai) g_engine->block_pain(ai, reaction, (int)(secs * 1000.0 + 0.5));
+    return 0;
+}
+
 int sh_script_ai_park(void *ai, sh_script_handle h)
 {
     return g_engine && ai && park(ai, h) != NULL;
@@ -927,6 +1913,12 @@ static const struct { const char *name; lua_CFunction fn; } k_calls[] = {
     { "equip", l_equip },               { "laser", l_laser },
     { "laser_sweep", l_laser_sweep },   { "focus_tag", l_focus_tag },
     { "turn_done", l_turn_done },       { "laser_state", l_laser_state },
+    { "recoil", l_recoil },             { "weapon_ready", l_weapon_ready },
+    { "aim_point", l_aim_point },       { "anim_valid", l_anim_valid },
+    { "anim_force_via", l_anim_force_via }, { "firing_position", l_firing_position },
+    { "path_points", l_path_points },   { "spline_clear", l_spline_clear },
+    { "monster_type", l_monster_type }, { "pain_string", l_pain_string },
+    { "block_pain", l_block_pain },
 };
 
 int sh_script_ai_register(void)
@@ -935,6 +1927,7 @@ int sh_script_ai_register(void)
     int i, n = 0;
     if (done) return 0;
     done = 1;
+    sh_script_api_on_frame(force_via_step);
     for (i = 0; i < (int)(sizeof k_calls / sizeof k_calls[0]); i++)
         n += sh_script_api_add(SH_SCRIPT_API_METHOD, k_calls[i].name, k_calls[i].fn);
     return n;
@@ -965,6 +1958,7 @@ typedef int (*ai_path_query_fn)(void *move_fsm, void *query, const float *goal, 
                                 float *out_reachable, float *out_length, uint8_t flag);
 
 static uint8_t          *g_base;
+static int32_t rel32_at(const uint8_t *p) { int32_t v; memcpy(&v, p, 4); return v; }
 static ai_irs_fn         g_irs_target;
 static ai_irs_fn         g_irs_orig;
 static ai_awareness_fn   g_get_awareness;
@@ -1232,12 +2226,415 @@ static int e_park(void *ai)
     return 1;
 }
 
-static const sh_script_ai_engine k_engine = {
-    e_entity, e_handle_of, e_is_ai, e_origin, e_yaw, e_event, e_park, e_enemy, e_awareness,
-    e_move_status, e_trigger_state, e_path, e_frame
+/* ------------------------------------------ the brain's calls: engine side */
+
+typedef void *(*ai_anim_of_prop_fn)(void *prop, void *model, int variant);
+typedef void  (*ai_anim_delta_fn)(void *anim, float *delta, float *axis);
+typedef void *(*ai_fire_decl_fn)(void *weapon, int mode);
+typedef void  (*ai_focus_fn)(void *ai, int focus, const float *pos, uint8_t keep, int ms, int reason);
+typedef void  (*ai_intern_fn)(const char **slot, const char *text);
+typedef uint64_t (*ai_threat_row_fn)(void *threat, void *actor, const uint8_t *row, int64_t state, uint64_t a5,
+                                     uint64_t a6, uint64_t a7, uint64_t a8, uint64_t a9, uint64_t a10, uint64_t a11);
+typedef float (*ai_path_length_fn)(void *move_fsm, const uint8_t *path);
+typedef int  *(*ai_clock_fn)(void *gm, int *out, int group);
+
+static ai_anim_of_prop_fn g_anim_of_prop;
+static ai_anim_delta_fn   g_anim_delta;
+static ai_fire_decl_fn    g_fire_decl;
+static const int32_t     *g_slot_table;
+static ai_focus_fn        g_focus;
+static ai_intern_fn       g_intern;
+static uint8_t           *g_recoil_site;      /* checked again before each write */
+static uint8_t           *g_pain_site;        /* the 14 bytes the stub replaces */
+static ai_threat_row_fn   g_threat_target, g_threat_orig;
+static ai_path_length_fn  g_plen_target, g_plen_orig;
+static void              *g_pain_tramp;
+static uint8_t           *g_pain_stub;
+static int                g_threat_failed, g_plen_failed, g_pain_failed;
+
+#define AI_NODE_LIST        0x58u    /* animWeb decl: node pointers, count +0x60 */
+#define AI_NODE_COUNT       0x60u
+#define AI_NODE_SUBWEB      0x02u    /* node: short subweb index, short state-name index */
+#define AI_NODE_STATE       0x04u
+#define AI_NODE_MODELS      0x38u    /* node: model rows (stride 0x40, short key +0), count +0x40 */
+#define AI_NODE_MODEL_COUNT 0x40u
+#define AI_MODEL_ROW        0x40u
+#define AI_MODEL_PROPS      0x18u    /* model row: animation props (stride 0x18), count +0x20 */
+#define AI_MODEL_PROP_COUNT 0x20u
+#define AI_PROP_STRIDE      0x18u
+#define AI_WEB_MODELS       0xA0u    /* animWeb decl: model list (+8 of its first row), count +0xA8 */
+#define AI_WEB_MODEL_COUNT  0xA8u
+#define AI_WEB_SUBWEBS      0x70u
+#define AI_WEB_SUBWEB_COUNT 0x78u
+#define AI_WEB_STATES       0x88u
+#define AI_WEB_STATE_COUNT  0x90u
+#define AI_ANIM_FRAMES      0x58u    /* idMD6Anim: the frame data the delta reads (NULL: none) */
+#define AI_HOLDER_SLOT_BASE 4        /* holder + (slot + 4) * 0x10: the next-pull time */
+
+/* The game clock the weapon holder and the threat table read: idGameLocal
+ * vtable +0x810 (game, out, group 1) -> int milliseconds, the slot the
+ * next-pull writer's own pattern calls. Any thread; 1 when read. */
+#define AI_GAME_CLOCK_SLOT 0x810u
+static int gm_clock(int *ms)
+{
+    void *gm = sh_entity_gamemgr();
+    ai_clock_fn f = (ai_clock_fn)vfn(gm, AI_GAME_CLOCK_SLOT);
+    int buf[4] = { 0, 0, 0, 0 }, ok = 0;
+    if (!gm || !f) return 0;
+    __try {
+        const int *t = f(gm, buf, 1);
+        if (t) { *ms = *t; ok = 1; }
+    } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
+static int e_eye(void *ai, float out[3])
+{
+    sh_script_earg r;
+    float o[3];
+    if (!e_origin(ai, o) || !sh_script_api_event(ai, "getMaxs", NULL, 0, &r) || r.type != 'v' || r.v[2] <= 0) return 0;
+    out[0] = o[0]; out[1] = o[1]; out[2] = o[2] + r.v[2] * 0.9f;   /* nine tenths of the demon's height */
+    return 1;
+}
+
+static int e_sight(void *ai, const float from[3], const float to[3], void *target)
+{
+    const sh_script_engine *c = sh_script_api_engine();
+    sh_script_trace t;
+    if (!c || !c->trace || !c->trace(from, to, spawn_id_of(ai), &t)) return -1;
+    if (!(t.fraction < 1.0f)) return 1;
+    return target && t.hit_spawn_id != SH_SCRIPT_SPAWN_ID_NONE && t.hit_spawn_id == spawn_id_of(target);
+}
+
+static int e_ground(const float pos[3], float out[3])
+{
+    const sh_script_engine *c = sh_script_api_engine();
+    return c && c->ground && c->ground(pos, out);
+}
+
+static int read_name(const char *src, char *out, size_t cap)
+{
+    size_t i = 0;
+    out[0] = 0;
+    if (!src) return 0;
+    for (; i + 1 < cap && src[i]; i++) out[i] = src[i];
+    out[i] = 0;
+    return 1;
+}
+
+/* The node of the demon's animWeb named "subweb/state" (or "state"). */
+static const uint8_t *web_node(const uint8_t *web, const char *name)
+{
+    const uint8_t *const *nodes = *(const uint8_t *const *const *)(web + AI_NODE_LIST);
+    int n = *(const int *)(web + AI_NODE_COUNT), i;
+    const uint8_t *subwebs = *(const uint8_t *const *)(web + AI_WEB_SUBWEBS);
+    const char *const *states = *(const char *const *const *)(web + AI_WEB_STATES);
+    int nsub = *(const int *)(web + AI_WEB_SUBWEB_COUNT), nstate = *(const int *)(web + AI_WEB_STATE_COUNT);
+    const char *slash = strrchr(name, '/');
+    if (!nodes || n <= 0 || n > 100000) return NULL;
+    for (i = 0; i < n; i++) {
+        const uint8_t *node = nodes[i];
+        char sub[96], state[96];
+        short si, ti;
+        if (!node) continue;
+        si = *(const short *)(node + AI_NODE_SUBWEB);
+        ti = *(const short *)(node + AI_NODE_STATE);
+        if (ti < 0 || ti >= nstate || !read_name(states[ti], state, sizeof state)) continue;
+        if (_stricmp(state, slash ? slash + 1 : name)) continue;
+        if (!slash) return node;
+        sub[0] = 0;
+        if (si >= 0 && si < nsub)
+            read_name(*(const char *const *)(subwebs + (size_t)si * 0x38u + 0x18u), sub, sizeof sub);
+        if (strlen(sub) == (size_t)(slash - name) && !_strnicmp(sub, name, (size_t)(slash - name))) return node;
+    }
+    return NULL;
+}
+
+static int e_anim_delta(void *ai, const char *name, int index, float out[3], int *count)
+{
+    int st = -1;
+    if (count) *count = 0;
+    if (!g_anim_of_prop || !g_anim_delta) return -1;
+    __try {
+        const uint8_t *web = *(const uint8_t *const *)((const uint8_t *)ai + SH_AI_OFF_ANIMWEB);
+        const uint8_t *node = web ? web_node(web, name) : NULL, *row = NULL;
+        void *model = NULL;
+        int k, nrows;
+        if (!node) return -1;
+        st = 0;
+        if (*(const int *)(web + AI_WEB_MODEL_COUNT) > 0)
+            model = *(void *const *)(*(const uint8_t *const *)(web + AI_WEB_MODELS) + 8);
+        nrows = *(const int *)(node + AI_NODE_MODEL_COUNT);
+        for (k = 0; k < nrows && k < 64; k++) {
+            const uint8_t *r = *(const uint8_t *const *)(node + AI_NODE_MODELS) + (size_t)k * AI_MODEL_ROW;
+            if (*(const short *)r == 0) { row = r; break; }
+        }
+        if (row) {
+            int nprops = *(const int *)(row + AI_MODEL_PROP_COUNT);
+            if (count) *count = nprops;
+            if (index >= 0 && index < nprops) {
+                uint8_t *prop = *(uint8_t *const *)(row + AI_MODEL_PROPS) + (size_t)index * AI_PROP_STRIDE;
+                uint8_t *anim = (uint8_t *)g_anim_of_prop(prop, model, 0);
+                if (anim && *(void *const *)(anim + AI_ANIM_FRAMES)) {
+                    g_anim_delta(anim, out, NULL);
+                    st = out[0] == out[0] && out[1] == out[1] && out[2] == out[2];
+                }
+            }
+        }
+    } __except (av_only(GetExceptionCode())) { st = -1; }
+    return st;
+}
+
+static int e_set_recoil(void *ai, float alpha)
+{
+    int ok = 0;
+    if (!g_recoil_site || memcmp(g_recoil_site + SH_AI_RECOIL_SITE_MUL, "\xF3\x0F\x59\xB6\xB0\x4E\x02\x00", 8)) return 0;
+    __try { *(float *)((uint8_t *)ai + SH_AI_OFF_RECOIL) = alpha; ok = 1; }
+    __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
+/* 1 when the game clock has reached the weapon's next-pull time for its
+ * active trigger, 0 while it waits, -1 when the demon holds no weapon. */
+static int e_weapon_ready(void *ai)
+{
+    int v = -1, now;
+    if (!g_fire_decl || !g_slot_table || !gm_clock(&now)) return -1;
+    __try {
+        uint8_t *holder = *(uint8_t **)((uint8_t *)ai + SH_AI_OFF_WEAPON_HOLDER);
+        uint8_t *w = holder ? *(uint8_t **)(holder + 8) : NULL;
+        if (!w) {
+            ai_vfn0 f = (ai_vfn0)vfn(ai, SH_AI_VSLOT_WEAPON);
+            w = f ? (uint8_t *)f(ai) : NULL;
+        }
+        if (holder && w) {
+            const uint8_t *decl = (const uint8_t *)g_fire_decl(w, *(const int *)(w + SH_AI_OFF_ACTIVE_FIRE));
+            if (decl) {
+                int type = *(const int *)(decl + SH_AI_DECL_FIRE_TRIGGER), slot;
+                if (type >= 0 && type < 12) {
+                    slot = g_slot_table[type];
+                    if (slot >= -1 && slot < 8)   /* -1 reads the record at +0x30, as the engine does */
+                        v = now >= *(const int *)(holder + (size_t)(slot + AI_HOLDER_SLOT_BASE) * 0x10u);
+                }
+            }
+        }
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_aim_point(void *ai, const float pos[3])
+{
+    int ok = 0, focus;
+    if (!g_focus) return 0;
+    __try {
+        static const int foci[3] = { 0, 2, 3 };   /* as ae_selectAimFocusPoint sets them */
+        for (focus = 0; focus < 3; focus++) g_focus(ai, foci[focus], pos, 1, -1, 14);
+        ok = 1;
+    } __except (av_only(GetExceptionCode())) { ok = 0; }
+    return ok;
+}
+
+/* ---- path points: the computed path, read by the path length the query calls */
+
+typedef struct path_capture {
+    volatile DWORD thread;
+    float (*out)[3];
+    int cap, n;
+} path_capture;
+static path_capture g_capture;
+
+static float plen_detour(void *move_fsm, const uint8_t *path)
+{
+    if (g_capture.thread && g_capture.thread == GetCurrentThreadId() && path) {
+        __try {
+            int n = *(const int *)(path + SH_AI_PATH_SEGMENT_COUNT), i, k = 0;
+            const uint8_t *seg = *(const uint8_t *const *)(path + SH_AI_PATH_SEGMENTS);
+            if (seg && n > 0) {
+                memcpy(g_capture.out[k++], seg + 4, 12);
+                for (i = 0; i < n && k < g_capture.cap; i++) memcpy(g_capture.out[k++], seg + (size_t)i * 0x1C + 0x10, 12);
+            }
+            g_capture.n = k;
+        } __except (av_only(GetExceptionCode())) { g_capture.n = 0; }
+    }
+    return g_plen_orig(move_fsm, path);
+}
+
+static const uint8_t k_threat_prologue[SH_AI_THREAT_STOLEN] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x48, 0x83, 0xEC, 0x40
+};
+static const uint8_t k_plen_prologue[SH_AI_PATH_LENGTH_STOLEN] = {
+    0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0x4A, 0x70, 0x0F, 0x57, 0xE4, 0x48, 0x85, 0xC9
 };
 
-static int32_t rel32_at(const uint8_t *p) { int32_t v; memcpy(&v, p, 4); return v; }
+static int commit_hook(void *target, void *detour, size_t stolen, void **orig, int *failed, const char *what)
+{
+    void *tramp;
+    const uint8_t *want = stolen == SH_AI_THREAT_STOLEN ? k_threat_prologue : k_plen_prologue;
+    if (*orig && hook_is_installed(*orig)) return 1;
+    if (*failed || !target) return 0;
+    if (memcmp(target, want, stolen)) {
+        *failed = 1;
+        ai_log("Mod scripts: %s is unavailable in this session: the game function it needs is not the expected one "
+               "(another tool may have changed it).", what);
+        return 0;
+    }
+    tramp = hook_prepare(target, detour, stolen);
+    if (!tramp) {
+        *failed = 1;
+        ai_log("Mod scripts: %s is unavailable in this session; the hook could not be prepared (%s).", what,
+               hook_last_failure());
+        return 0;
+    }
+    *orig = tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) *orig = NULL;
+        *failed = 1;
+        ai_log("Mod scripts: %s is unavailable in this session; the hook could not be installed.", what);
+        return 0;
+    }
+    ai_log("SCRIPTS: %s hook installed at %p", what, target);
+    return 1;
+}
+
+static int e_path_points(void *ai, const float goal[3], int key, float (*out)[3], int cap, int *n)
+{
+    float len = 0;
+    int st;
+    *n = 0;
+    if (!commit_hook((void *)g_plen_target, (void *)plen_detour, SH_AI_PATH_LENGTH_STOLEN, (void **)&g_plen_orig,
+                     &g_plen_failed, "path_points"))
+        return -1;
+    g_capture.out = out;
+    g_capture.cap = cap;
+    g_capture.n = 0;
+    g_capture.thread = GetCurrentThreadId();
+    st = e_path(ai, goal, key, &len);
+    g_capture.thread = 0;
+    if (st == 0) *n = g_capture.n;
+    return st;
+}
+
+/* ---- the threat table: a blocked reaction's rows are refused */
+
+static uint64_t threat_row_detour(void *threat, void *actor, const uint8_t *row, int64_t state, uint64_t a5,
+                                  uint64_t a6, uint64_t a7, uint64_t a8, uint64_t a9, uint64_t a10, uint64_t a11)
+{
+    if (actor && row) {
+        int reaction = -1, now = 0;
+        __try { reaction = *(const int *)(row + SH_AI_THREAT_ROW_REACTION); } __except (av_only(GetExceptionCode())) { reaction = -1; }
+        if (reaction > 0 && gm_clock(&now) && sh_ai_blocked(actor, spawn_id_of(actor), reaction, now)) return 0;
+    }
+    return g_threat_orig(threat, actor, row, state, a5, a6, a7, a8, a9, a10, a11);
+}
+
+static int e_block_pain(void *ai, int reaction, int ms)
+{
+    int now;
+    if (!commit_hook((void *)g_threat_target, (void *)threat_row_detour, SH_AI_THREAT_STOLEN, (void **)&g_threat_orig,
+                     &g_threat_failed, "block_pain"))
+        return 0;
+    if (!gm_clock(&now)) return 0;
+    return sh_ai_block_set(ai, spawn_id_of(ai), reaction, now + ms);
+}
+
+/* ---- the pain string: interned by the engine, put in the request by the stub */
+
+#define AI_INTERNED_MAX 64
+static struct { char text[64]; const char *atom; } g_interned[AI_INTERNED_MAX];
+
+/* Called by the stub on the pain request's thread: the demon's string or NULL. */
+static const char *pain_fetch(void *ai)
+{
+    return sh_ai_pain_string_get(ai, spawn_id_of(ai));
+}
+
+static int commit_pain_stub(void)
+{
+    DWORD old;
+    if (g_pain_tramp && hook_is_installed(g_pain_tramp)) return 1;
+    if (g_pain_failed || !g_pain_site || !g_intern) return 0;
+    if (memcmp(g_pain_site, k_ai_pain_stolen, SH_AI_PAIN_STUB_STOLEN)) {
+        g_pain_failed = 1;
+        ai_log("Mod scripts: pain_string is unavailable in this session: the game's pain request is not the expected "
+               "one (another tool may have changed it).");
+        return 0;
+    }
+    g_pain_stub = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_pain_stub) { g_pain_failed = 1; return 0; }
+    g_pain_tramp = hook_prepare(g_pain_site, g_pain_stub, SH_AI_PAIN_STUB_STOLEN);
+    if (!g_pain_tramp ||
+        !sh_ai_pain_stub_build(g_pain_stub, 4096, (const void *)pain_fetch, g_pain_tramp) ||
+        !VirtualProtect(g_pain_stub, 4096, PAGE_EXECUTE_READ, &old)) {
+        g_pain_failed = 1;
+        ai_log("Mod scripts: pain_string is unavailable in this session; the hook could not be prepared (%s).",
+               hook_last_failure());
+        return 0;
+    }
+    FlushInstructionCache(GetCurrentProcess(), g_pain_stub, 4096);
+    if (hook_commit(g_pain_tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(g_pain_tramp)) g_pain_tramp = NULL;
+        g_pain_failed = 1;
+        ai_log("Mod scripts: pain_string is unavailable in this session; the hook could not be installed.");
+        return 0;
+    }
+    ai_log("SCRIPTS: pain_string hook installed at %p", (void *)g_pain_site);
+    return 1;
+}
+
+static int e_pain_string(void *ai, const char *text)
+{
+    const char *atom = NULL;
+    int i;
+    if (!text) return sh_ai_pain_string_set(ai, spawn_id_of(ai), NULL);
+    if (!commit_pain_stub()) return 0;
+    for (i = 0; i < AI_INTERNED_MAX && g_interned[i].atom; i++)
+        if (!strcmp(g_interned[i].text, text)) { atom = g_interned[i].atom; break; }
+    if (!atom) {
+        if (i >= AI_INTERNED_MAX) return 0;
+        __try { g_intern(&atom, text); } __except (av_only(GetExceptionCode())) { atom = NULL; }
+        if (!atom) return 0;
+        strncpy_s(g_interned[i].text, sizeof g_interned[i].text, text, _TRUNCATE);
+        g_interned[i].atom = atom;
+    }
+    return sh_ai_pain_string_set(ai, spawn_id_of(ai), atom);
+}
+
+/* ---- the compositions */
+
+static const sh_script_ai_engine k_engine;
+
+/* Path-cache keys of the compositions: 64 per demon (anim_valid +0, firing_position +32). */
+static int ai_key(void *ai)
+{
+    return 0x41500000 | (int)((((uintptr_t)ai >> 4) & 0x3FF) << 6);
+}
+
+static int e_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
+{
+    return sh_ai_anim_valid_run(&k_engine, ai, node, tests, side, ai_key(ai), index);
+}
+
+static int e_firing_position(void *ai, const sh_ai_position_query *q, float out[3])
+{
+    return sh_ai_firing_run(&k_engine, ai, q, ai_key(ai) + 32, out);
+}
+
+static int e_spline_clear(void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap, int *n)
+{
+    return sh_ai_spline_run(&k_engine, ai, q, out, cap, n);
+}
+
+static const sh_script_ai_engine k_engine = {
+    e_entity, e_handle_of, e_is_ai, e_origin, e_yaw, e_event, e_park, e_enemy, e_awareness,
+    e_move_status, e_trigger_state, e_path, e_frame,
+    e_eye, e_sight, e_ground, e_anim_delta,
+    e_set_recoil, e_weapon_ready, e_aim_point, e_anim_valid, e_path_points, e_firing_position, e_spline_clear,
+    e_pain_string, e_block_pain
+};
+/* The table the calls use: k_engine less the calls whose game parts this
+ * executable lacks (those calls then refuse plainly). */
+static sh_script_ai_engine g_live;
+
 
 int sh_script_ai_install(const uint8_t *module_base)
 {
@@ -1247,7 +2644,7 @@ int sh_script_ai_install(const uint8_t *module_base)
     sh_script_ai_register();
     if (!module_base) return 0;
     g_base = (uint8_t *)module_base;
-    for (i = 0; i < SH_AI_SIG_COUNT; i++) {
+    for (i = 0; i <= SH_AI_SIG_PATH_SITE; i++) {
         if (sig_resolve_one(module_base, &SH_AI_SIGNATURES[i], &r[i]) != SIG_OK) {
             ai_log("Mod scripts cannot drive demons in this session: the game function they need (%s) was not "
                    "found in this executable.", SH_AI_SIGNATURES[i].name);
@@ -1273,7 +2670,42 @@ int sh_script_ai_install(const uint8_t *module_base)
                "expected one (another tool may have changed it).");
         return 0;
     }
-    sh_script_ai_set_engine(&k_engine);
+    /* The parts of the calls the Tyrant's brain added; a missing one takes
+     * only its own call away. */
+    g_live = k_engine;
+    for (i = SH_AI_SIG_PATH_SITE + 1; i < SH_AI_SIG_COUNT; i++) {
+        if (sig_resolve_one(module_base, &SH_AI_SIGNATURES[i], &r[i]) != SIG_OK) {
+            r[i].addr = 0;
+            ai_log("Mod scripts: the game function %s was not found in this executable; the script call that needs "
+                   "it is unavailable in this session.", SH_AI_SIGNATURES[i].name);
+        }
+    }
+    if (r[SH_AI_SIG_RECOIL_PLAY].addr) g_recoil_site = (uint8_t *)r[SH_AI_SIG_RECOIL_PLAY].addr;
+    else g_live.set_recoil = NULL;
+    if ((site = (const uint8_t *)r[SH_AI_SIG_NEXT_PULL].addr) != NULL) {
+        g_fire_decl = (ai_fire_decl_fn)(site + SH_AI_NEXT_PULL_DECL_CALL + 5 + rel32_at(site + SH_AI_NEXT_PULL_DECL_CALL + 1));
+        g_slot_table = (const int32_t *)(site + SH_AI_NEXT_PULL_SLOT_TABLE + 7 +
+                                         rel32_at(site + SH_AI_NEXT_PULL_SLOT_TABLE + 3));
+    } else g_live.weapon_ready = NULL;
+    if ((site = (const uint8_t *)r[SH_AI_SIG_AIM_FOCUS_SITE].addr) != NULL)
+        g_focus = (ai_focus_fn)(site + SH_AI_AIM_FOCUS_CALL + 5 + rel32_at(site + SH_AI_AIM_FOCUS_CALL + 1));
+    else g_live.aim_point = NULL;
+    if ((site = (const uint8_t *)r[SH_AI_SIG_PAIN_STRING_SITE].addr) != NULL) {
+        g_intern = (ai_intern_fn)(site + SH_AI_PAIN_INTERN_CALL + 5 + rel32_at(site + SH_AI_PAIN_INTERN_CALL + 1));
+        g_pain_site = (uint8_t *)site + SH_AI_PAIN_STUB_AT;
+    } else g_live.pain_string = NULL;
+    if (r[SH_AI_SIG_THREAT_ROW].addr) g_threat_target = (ai_threat_row_fn)r[SH_AI_SIG_THREAT_ROW].addr;
+    else g_live.block_pain = NULL;
+    if (r[SH_AI_SIG_PATH_LENGTH].addr) g_plen_target = (ai_path_length_fn)r[SH_AI_SIG_PATH_LENGTH].addr;
+    else g_live.path_points = NULL;
+    if (r[SH_AI_SIG_ANIM_OF_PROP].addr && r[SH_AI_SIG_ANIM_DELTA].addr) {
+        g_anim_of_prop = (ai_anim_of_prop_fn)r[SH_AI_SIG_ANIM_OF_PROP].addr;
+        g_anim_delta = (ai_anim_delta_fn)r[SH_AI_SIG_ANIM_DELTA].addr;
+    } else {
+        g_live.anim_delta = NULL;
+        g_live.anim_valid = NULL;
+    }
+    sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;
 }

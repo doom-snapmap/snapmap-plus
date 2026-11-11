@@ -101,7 +101,7 @@ static void check_image(const char *path)
         rva[n] = r.rva;
         printf("  %-24s rva=0x%X\n", e->name, r.rva);
     }
-    CHECK(n == 5);
+    CHECK(n == 6);
 
     /* class vtables */
     {
@@ -129,6 +129,13 @@ static void check_image(const char *path)
         uint32_t game_vt = vk ? 0x201E3D8u : 0x20381A8u;
         uint64_t t = qword_at(base, game_vt + 0x220) - image_base;
         CHECK(t < size && !memcmp(base + t, "\x48\x81\xC1\x10\xD2\x49\x00\x48\x8B\x01\x48\xFF\xA0\xC8\x00\x00\x00", 17));
+        /* the difficulty: idGameLocal vtable +0x670 holds ScriptDifficulty, which reads the
+         * g_gameDifficulty cvar's int (+0x30) and falls back to currentGameDifficulty (+0x2C3010) */
+        if (rva[5]) {
+            CHECK(qword_at(base, game_vt + 0x670) - image_base == rva[5]);
+            CHECK(!memcmp(base + rva[5] + 0x25, "\x8B\x42\x30", 3));
+            CHECK(!memcmp(base + rva[5] + 0x3E, "\x8B\x83\x10\x30\x2C\x00", 6));
+        }
     }
 
     /* the trace: the laser hazard's call site passes idGameLocal + 0xE0878 and

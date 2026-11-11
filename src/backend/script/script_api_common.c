@@ -38,6 +38,26 @@ int sh_script_api_now_ms(int *ms)
     return ENG(game_time_ms) ? g_engine.game_time_ms(ms) : 0;
 }
 
+int sh_script_api_ground_trace(int (*trace)(const float from[3], const float to[3], uint32_t ignore_spawn_id,
+                                            sh_script_trace *out),
+                               const float pos[3], float out[3])
+{
+    float from[3], to[3];
+    sh_script_trace t;
+    if (!trace || !pos || !out) return 0;
+    from[0] = to[0] = pos[0];
+    from[1] = to[1] = pos[1];
+    from[2] = pos[2] + SH_SCRIPT_GROUND_ABOVE;
+    to[2] = pos[2] - SH_SCRIPT_GROUND_DEPTH;
+    memset(&t, 0, sizeof t);
+    if (!trace(from, to, SH_SCRIPT_SPAWN_ID_NONE, &t)) return 0;
+    if (!(t.fraction < 1.0f) || t.normal[2] < SH_SCRIPT_GROUND_FLAT) return 0;
+    out[0] = t.end[0];
+    out[1] = t.end[1];
+    out[2] = t.end[2];
+    return 1;
+}
+
 void sh_script_api_register(void)
 {
     static int done;
@@ -390,6 +410,24 @@ unsigned sh_script_api_anim_flags(sh_script_handle h, void *ent, int *requested)
     return r->flags;
 }
 
+#define FRAME_FNS 4
+static void (*g_frame_fns[FRAME_FNS])(void);
+
+void sh_script_api_on_frame(void (*fn)(void))
+{
+    int i;
+    for (i = 0; i < FRAME_FNS; i++) {
+        if (g_frame_fns[i] == fn) return;
+        if (!g_frame_fns[i]) { g_frame_fns[i] = fn; return; }
+    }
+}
+
+static void frame_fns(void)
+{
+    int i;
+    for (i = 0; i < FRAME_FNS; i++) if (g_frame_fns[i]) g_frame_fns[i]();
+}
+
 void sh_script_api_frame(void)
 {
     int i;
@@ -405,6 +443,7 @@ void sh_script_api_frame(void)
         ent = resolve_handle(r->handle);
         if (ent) observe_row(r, ent);
     }
+    frame_fns();
 }
 
 #ifdef SH_SCRIPT_PURE
@@ -424,10 +463,13 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
 #include "../typeinfo.h"
 #include "../modscene_decl.h"
 
-enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRACE, API_SIG_COUNT };
+/* The first API_SIG_COUNT are required; the difficulty is optional. */
+enum { API_SIG_PROCESS, API_SIG_POST, API_SIG_CLEAR, API_SIG_ENTITY, API_SIG_TRACE, API_SIG_COUNT,
+       API_SIG_DIFFICULTY = API_SIG_COUNT };
 
 /* idGameLocal */
 #define GAME_TIME_SLOT      0x220u
+#define GAME_DIFFICULTY_SLOT 0x670u
 #define GAME_CREATE_SLOT    0x448u
 #define GAME_FINISH_SLOT    0x458u
 #define GAME_LOOKUP_SLOT    0x7F0u      /* +0x7F8: the same, then the idEntity cast */
@@ -483,6 +525,7 @@ typedef void *(*trace_fn)(void *traces, uint64_t *handle, void *result, const fl
                           const char *name, uint32_t pass2);
 typedef void *(*lookup_fn)(void *gm, const uint32_t *spawn_id);
 typedef int   (*time_fn)(void *gm, int group);
+typedef int   (*difficulty_fn)(void *gm);
 typedef const float *(*phys_get_fn)(void *phys, int id);
 typedef void  (*set_vec_fn)(void *ent, const float *v);
 typedef void  (*vfn0_fn)(void *ent);
@@ -509,6 +552,7 @@ static const uint8_t *g_decl_anchor;
 static void         *g_decl_register;
 static type_fn       g_decl_type;
 static find_decl_fn  g_decl_find;
+static difficulty_fn g_difficulty;
 static uintptr_t     g_vt_ai, g_vt_player, g_vt_health;
 static int           g_log_lines;
 static const float   k_identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
@@ -940,6 +984,24 @@ static int e_game_time_ms(int *ms)
     return ok;
 }
 
+static int e_ground(const float pos[3], float out[3])
+{
+    return sh_script_api_ground_trace(e_trace, pos, out);
+}
+
+/* The game's own difficulty (idGameLocal +0x670), only when the live vtable
+ * holds the function the signature found. */
+static int e_difficulty(int *level)
+{
+    void *gm = sh_entity_gamemgr();
+    int ok = 0, v = 0;
+    if (!gm || !g_difficulty || vfn(gm, GAME_DIFFICULTY_SLOT) != (void *)g_difficulty) return 0;
+    __try { v = g_difficulty(gm); ok = 1; } __except (av_only(GetExceptionCode())) { ok = 0; }
+    if (!ok || v < 0 || v > 4) return 0;
+    *level = v;
+    return 1;
+}
+
 static void *clean(const sig_result *r, size_t n, const char *name)
 {
     size_t i;
@@ -952,9 +1014,10 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
 {
     static const sh_script_engine engine = {
         e_resolve, e_spawn_id, e_slots, e_slot_spawn_id, e_kind, e_origin, e_axis, e_place, e_def_name, e_event,
-        e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms
+        e_ai_health, e_ai_heal, e_ai_set_health, e_anim_node, e_spawn, e_trace, e_game_time_ms, e_ground,
+        e_difficulty
     };
-    sig_result own[API_SIG_COUNT], lookup;
+    sig_result own[API_SIG_COUNT + 1], lookup;
     int i;
     if (!module_base) return 0;
     g_base = module_base;
@@ -983,6 +1046,10 @@ int sh_script_api_install(const sig_result *results, size_t count, const uint8_t
     g_clear = (clear_fn)own[API_SIG_CLEAR].addr;
     g_arg_entity = (arg_entity_fn)own[API_SIG_ENTITY].addr;
     g_trace = (trace_fn)own[API_SIG_TRACE].addr;
+    if (sig_resolve_one(module_base, &SH_SCRIPT_API_SIGNATURES[API_SIG_DIFFICULTY], &own[API_SIG_DIFFICULTY]) == SIG_OK)
+        g_difficulty = (difficulty_fn)own[API_SIG_DIFFICULTY].addr;
+    else
+        api_log("Mod scripts: the game's difficulty was not found in this executable, so difficulty() answers nil.");
     g_lookup = (void *)lookup.addr;
     /* spawning: the idTarget_Spawn create and finish calls and the decl registry */
     g_decl_anchor = (const uint8_t *)clean(results, count, "DeclRegistryAnchor");
