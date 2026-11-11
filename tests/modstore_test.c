@@ -513,6 +513,60 @@ static void test_fresh_folder_refusals(const char *tmp)
     }
 }
 
+/* An outside converter (Doomforge) writes a new folder already salted: its
+ * builder part is only {"format":2,"salt":"<salt>"}, and its binaries name
+ * that salt. The first scan keeps the salt and builds it; a second such folder
+ * of the same salt is a copy of the first, and as its binaries name the salt
+ * it cannot be given another: it is refused with a plain cause, untouched. */
+static void conv_make(const char *dir, const char *salt)
+{
+    char rel[MAX_PATH * 2], text[600], path[MAX_PATH * 2];
+    FILE *f = NULL;
+    static const char bytes[] = "MD6\0\0\0material mods/cvsalt00/skin\0";
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\r\n  \"name\": \"Converted demon\",\r\n  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\"}\r\n}\r\n", salt);
+    mt_write(dir, "mod.json", text);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, salt);
+    mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\basemodel\\md6\\mods\\%s\\m.bmd6model", dir, salt);
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
+}
+
+static void test_converter_salt(const char *tmp)
+{
+    char root[MAX_PATH], a[MAX_PATH], b[MAX_PATH], salt[SH_SALT_LEN + 1], before[2048], after[2048], *mj0, *mj1;
+    sh_ms_sync_stats ss;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    int usable;
+    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is refused\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\converted\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\Converted demon", root);
+    conv_make(a, "cvsalt00");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0 && ss.resalted == 0);
+    CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));
+    /* The same converter output again, in another folder. */
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\Converted demon again", root);
+    conv_make(b, "cvsalt00");
+    dir_names(b, before, sizeof before);
+    mj0 = slurp(b, "mod.json", NULL);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 0);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "Converted demon again");
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "inside a binary file"));
+    if (e) printf("   %s\n", e->cause);
+    CHECK(sh_ms_entry_usable(find_entry(&list, "Converted demon")));
+    sh_ms_list_free(&list);
+    dir_names(b, after, sizeof after);
+    mj1 = slurp(b, "mod.json", NULL);
+    CHECK(!strcmp(before, after) && same_text(mj0, mj1));
+    free(mj0);
+    free(mj1);
+    CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));
+}
+
 static void test_copy_gets_new_salt(const char *tmp)
 {
     char root[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], sa[SH_SALT_LEN + 1], sb[SH_SALT_LEN + 1], sc[SH_SALT_LEN + 1];
@@ -1271,6 +1325,7 @@ int main(int argc, char **argv)
     test_fresh_folder_strings(tmp);
     test_fresh_folder_refusals(tmp);
     test_copy_gets_new_salt(tmp);
+    test_converter_salt(tmp);
     test_earlier_shapes(tmp);
     test_place_folders(fixture, tmp);
     test_new_mod(tmp);

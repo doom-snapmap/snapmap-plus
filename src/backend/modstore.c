@@ -957,12 +957,21 @@ static void ms_mark_duplicates(sh_ms_list *l)
         sh_ms_entry *e = &l->items[i];
         if (keeper[i] == (size_t)-1) continue;
         e->refused = 1;
-        if (e->place[0])
+        if (e->place[0]) {
             _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, SH_MB_SHAPE "another folder of this map has the same mod: "
                         "mods\\%s", l->items[keeper[i]].name);
-        else
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "mods\\%s is a copy of mods\\%s; Refresh in the Mods tab "
-                        "makes it a new mod", e->name, l->items[keeper[i]].name);
+        } else {
+            /* A copy the scan could not give a new salt (its binaries name
+             * the salt, as an outside converter's do) says why, plainly;
+             * any other waits for the scan's new salt. */
+            char why[SH_MB_CAUSE_MAX];
+            sh_ms_build_cause(e->folder, why, sizeof why);
+            if (why[0])
+                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "%s", why);
+            else
+                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "mods\\%s is a copy of mods\\%s; Refresh in the Mods tab "
+                            "makes it a new mod", e->name, l->items[keeper[i]].name);
+        }
     }
     free(keeper);
 }

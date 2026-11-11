@@ -186,6 +186,10 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   it is built. A binary file that names `mods/<folder name>/`, or files under another mod's
   `mods/<x>/`, refuse that folder alone and leave it untouched. A copy of a mod folder is a new
   mod: the folder built first keeps the salt and the copy gets its own, with one line saying so.
+  A new folder whose `mod.json` already names a salt (`"snapmap-plus": {"format": 2, "salt":
+  "<salt>"}`, as an outside converter such as Doomforge writes it, its binaries naming that salt)
+  keeps that salt and is built; when another root folder built earlier holds the salt, the copy
+  rule applies, and a copy whose binaries name the salt is refused with that cause, untouched.
   A folder whose files or `mod.json` changed is built again at the next Refresh; a build that fails
   shows its cause and the mod serves nothing until it is fixed.
   The rescan (the Mods tab's refresh, `sh_mods rescan`) also brings what changed into the running
