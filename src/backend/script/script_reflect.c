@@ -262,7 +262,7 @@ int sh_rf_element(const sh_rf_host *h, const sh_rf_loc *list, uint32_t index, sh
     n = sh_rf_count(h, list);
     if (n < 0) { set_err(err, err_cap, "the list could not be read"); return 0; }
     if ((long long)index >= n) {
-        set_err(err, err_cap, "the list holds %lld element%s, so it has no [%u] (the first is [0])", n, n == 1 ? "" : "s", index);
+        set_err(err, err_cap, "the list holds %lld element%s, so it has no [%u]", n, n == 1 ? "" : "s", index + 1);
         return 0;
     }
     if (!list->size) { set_err(err, err_cap, "the game does not say how large one %s is", list->type ? list->type : "element"); return 0; }
@@ -334,12 +334,13 @@ int sh_rf_resolve(const sh_rf_host *h, const void *object, const char *cls, cons
             sh_rf_loc next;
             if (end == p + 1 || !end || *end != CH_CLOSE) { set_err(err, err_cap, "\"%s\" has a [ without a number and ] after it", path); goto done; }
             p = end + 1;
+            if (!index) { set_err(err, err_cap, "\"%s\" asks for [0]; a list's first element is [1]", path); goto done; }
             if (cur.kind != SH_RF_LIST && cur.kind != SH_RF_ARRAY) {
                 set_err(err, err_cap, "%s is %s, not a list, so it has no [%lu]", sofar[0] ? sofar : "the object",
                         kind_word(cur.kind), index);
                 goto done;
             }
-            if (!sh_rf_element(h, &cur, (uint32_t)index, &next, err, err_cap)) {
+            if (!sh_rf_element(h, &cur, (uint32_t)(index - 1), &next, err, err_cap)) {
                 char why[200];
                 set_err(why, sizeof why, "%s", err ? err : "");
                 set_err(err, err_cap, "%s: %s", sofar, why);

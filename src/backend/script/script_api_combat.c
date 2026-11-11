@@ -986,6 +986,11 @@ static void *c_decl(const char *type, const char *name)
     return (state & 3) ? NULL : decl;
 }
 
+void *sh_script_combat_decl(const char *type, const char *name)
+{
+    return g_decl_find ? c_decl(type, name) : NULL;
+}
+
 static int c_radius_damage(const float pos[3], void *decl, void *inflictor, void *attacker)
 {
     void *gm = sh_entity_gamemgr();

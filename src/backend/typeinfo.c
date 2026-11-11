@@ -497,6 +497,83 @@ int sh_typeinfo_collect_records(sh_ti_record **out)
 #define ENTITYDEF_MGR_ARRAY_OFF  0x20
 #define ENTITYDEF_MGR_COUNT_OFF  0x28
 #define DECL_NAME_OFF            0x08
+/* ---- classes and enums by name (the script layer's reflection) ---- */
+#define REC_SIZE_OFF        0x10    /* type record -> the class's size in bytes (int) */
+
+/* The last class looked up: a field walk asks for the same record many times. */
+static char  g_rec_name[256];
+static void *g_rec_cached;
+
+static void *ti_class_record(const char *name)
+{
+    void *reflect, *rec;
+    if (!name || !name[0]) return NULL;
+    if (g_rec_cached && !strcmp(g_rec_name, name)) return g_rec_cached;
+    reflect = ti_get_reflect();
+    rec = reflect ? ti_find_type(reflect, name) : NULL;
+    if (rec && strlen(name) < sizeof g_rec_name) { strcpy_s(g_rec_name, sizeof g_rec_name, name); g_rec_cached = rec; }
+    return rec;
+}
+
+int sh_typeinfo_class(const char *name, uint32_t *size, const char **super)
+{
+    void *rec = ti_class_record(name);
+    uint32_t n = 0;
+    if (!rec) return 0;
+    if (size) { if (!ti_read_u32(rec, REC_SIZE_OFF, &n)) return 0; *size = n; }
+    if (super) { const char *s2 = ti_read_cstr(rec, REC_SUPER_OFF); *super = s2 ? s2 : ""; }
+    return 1;
+}
+
+int sh_typeinfo_class_field(const char *name, uint32_t index, sh_ti_field *out)
+{
+    void *rec = ti_class_record(name);
+    const uint8_t *fields, *f;
+    uint32_t i;
+    if (!rec || !out) return 0;
+    fields = (const uint8_t *)ti_read_ptr(rec, REC_FIELDS_OFF);
+    if (!fields) return 0;
+    /* the array ends at the first field without a name: never read past it */
+    for (i = 0; i <= index; i++) {
+        const char *fname = ti_read_cstr(fields + (size_t)i * FIELD_STRIDE, FIELD_NAME_OFF);
+        if (!fname || !fname[0]) return 0;
+    }
+    f = fields + (size_t)index * FIELD_STRIDE;
+    out->name = ti_read_cstr(f, FIELD_NAME_OFF);
+    out->type = ti_read_cstr(f, FIELD_VARTYPE_OFF);
+    out->ops = ti_read_cstr(f, FIELD_VAROPS_OFF);
+    if (!out->type) out->type = "";
+    if (!out->ops) out->ops = "";
+    out->offset = out->size = 0;
+    ti_read_u32(f, FIELD_OFFSET_OFF, &out->offset);
+    ti_read_u32(f, FIELD_SIZE_OFF, &out->size);
+    return 1;
+}
+
+int sh_typeinfo_enum_member(const char *name, uint32_t index, const char **member, long long *value)
+{
+    void *reflect = ti_get_reflect(), *en;
+    const uint8_t *members, *m;
+    uint32_t i;
+    if (!reflect || !name || !name[0]) return 0;
+    en = ti_find_enum(reflect, name);
+    if (!en) return 0;
+    members = (const uint8_t *)ti_read_ptr(en, ENUM_MEMBERS_OFF);
+    if (!members) return 0;
+    for (i = 0; i <= index; i++) {
+        const char *mn = ti_read_cstr(members + (size_t)i * ENUM_MEMBER_STRIDE, EMEMBER_NAME_OFF);
+        if (!mn || !mn[0]) return 0;
+    }
+    m = members + (size_t)index * ENUM_MEMBER_STRIDE;
+    if (member) *member = ti_read_cstr(m, EMEMBER_NAME_OFF);
+    if (value) {
+        uint32_t v = 0;                        /* the engine keeps the value in 32 bits */
+        if (!ti_read_u32(m, EMEMBER_VALUE_OFF, &v)) return 0;
+        *value = (long long)(int32_t)v;
+    }
+    return 1;
+}
+
 int sh_typeinfo_collect_inherits(const char ***out)
 {
     const uint8_t *mgr = (const uint8_t *)g_resource_mgr_ctx;

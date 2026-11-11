@@ -73,4 +73,21 @@ int sh_ti_pack_finish(sh_ti_pack *p, int names, char **out, int *out_count);
  * into buf. Optional dimension/probe failures do not invalidate the hit. */
 int sh_typeinfo_find_material(const char *name, char *buf, size_t cap);
 
+/* The game's reflected classes and enums by name, for the script layer's
+ * reflection (script/script_reflect.h). Strings are the engine's own and
+ * stay valid for the session. Every call answers 0 when the type system is
+ * unavailable or the name is unknown. */
+typedef struct sh_ti_field {
+    const char *type;      /* "float", "idVec3", "idList < idStr , TAG_IDLIST , false >" */
+    const char *ops;       /* "", "*", "[4]" */
+    const char *name;
+    uint32_t offset, size;
+} sh_ti_field;
+/* 1 with the class's size and its superclass's name ("" at a root). */
+int sh_typeinfo_class(const char *name, uint32_t *size, const char **super);
+/* The index-th field the class itself declares; 0 past the last. */
+int sh_typeinfo_class_field(const char *name, uint32_t index, sh_ti_field *out);
+/* The index-th member of an enum; 0 past the last or when `name` is no enum. */
+int sh_typeinfo_enum_member(const char *name, uint32_t index, const char **member, long long *value);
+
 #endif /* BACKEND_B2_TYPEINFO_H */

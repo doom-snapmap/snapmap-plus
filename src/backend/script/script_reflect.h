@@ -6,7 +6,7 @@
  *
  * This file is the walk, pure: the host supplies the types (the engine's, or
  * a test's) and reads memory. A path is names separated by dots, with [n]
- * after a list or array. A pointer or an entity reference met inside a path
+ * after a list or array (the first element is [1], as in Lua). A pointer or an entity reference met inside a path
  * is followed.
  *
  * Kinds of value a path can end in:

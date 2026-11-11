@@ -929,6 +929,14 @@ void sh_script_node_play_begin(const char *json, size_t len)
     (void)commit_relay();
 }
 
+int sh_script_node_idstr_assign(void *str, const char *text)
+{
+    int ok = 1;
+    if (!g_idstr_assign || !str || !text) return 0;
+    __try { g_idstr_assign(str, text); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    return ok;
+}
+
 int sh_script_node_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     sig_result r;
