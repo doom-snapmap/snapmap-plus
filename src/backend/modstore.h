@@ -188,12 +188,12 @@ int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len
                      char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
 
 typedef struct sh_ms_install_stats {
-    unsigned copied;            /* carried files copied into the store */
+    unsigned copied;            /* files copied into the store (the game files the folder holds too) */
     int in_place;               /* the source folder was inside the store */
     int replaced;               /* the named target (as_name), or the place's folder of the salt, was replaced */
     int present;                /* a usable folder already holds this build: nothing was copied */
     int resalted;               /* a copy of a root mod: it was given a new salt */
-    unsigned stock_files;       /* stock pointers: nothing stored for them */
+    unsigned stock_files;       /* stock pointers (borrows); a copy the folder holds is kept */
     unsigned long long stock_bytes;   /* their installed size */
 } sh_ms_install_stats;
 
@@ -203,8 +203,9 @@ typedef struct sh_ms_install_stats {
  *     when taken), salted with its references to mods/<its name>/ rewritten,
  *     and built; a refused build leaves nothing installed;
  *   - a built mod is built in memory; when the root folder of its salt holds
- *     this very build, that folder is the install (stats->present); else its
- *     carried files and mod.json are copied to mods\<its name> (" (2)" ...),
+ *     this very build, that folder is the install (stats->present); else
+ *     every file it holds (the game files it carries too: nothing is dropped)
+ *     and its mod.json are copied to mods\<its name> (" (2)" ...),
  *     verified, and, when the root already holds the salt, the arriving copy
  *     gets a new salt (stats->resalted) and is built under it.
  * `as_name` (sh_ms_install_as: the store tool's target) names the folder under

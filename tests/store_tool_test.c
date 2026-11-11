@@ -303,7 +303,7 @@ static void test_check_and_migrate(const char *fixture, const char *tmp)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\mod.json", data);
     CHECK(mt_exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tinypack\\assets\\generated\\image\\stock\\b.bimage", data);
-    CHECK(!mt_exists(path));   /* a pointer: the store never receives installed content */
+    CHECK(mt_exists(path));   /* a pointer whose file the folder keeps: nothing is dropped at install */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", data);
     CHECK(sh_mb_record_get(path, "migration", &record) == 1 && record && strstr(record, "\"complete\":true"));
     free(record);
@@ -439,7 +439,7 @@ static void test_loose_layer(const char *fixture, const char *tmp)
     CHECK(t && !strcmp(t, DECL_X));
     free(t);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\image\\stock\\b.bimage", folder);
-    CHECK(!mt_exists(path));   /* a pointer: the store never receives installed content */
+    CHECK(mt_exists(path));   /* a pointer whose file the folder keeps: nothing is dropped at install */
     memset(&b, 0, sizeof b);
     CHECK(sh_mb_load_folder(folder, &b));
     CHECK(sh_salt_valid(b.id, strlen(b.id)) && b.name && !strcmp(b.name, "My overrides"));

@@ -2621,9 +2621,11 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         ok = 1;
         goto done;
     }
+    /* DECISIONS 10: every file the folder holds is installed, the game's own
+     * files included (the builder decides what is a borrow); only a pointer
+     * the folder does not carry (the closure's) has nothing to copy. */
     for (i = 0; i < b.file_count; i++) {
         if (!b.files[i].stock) continue;
-        b.files[i].absent = 1;   /* the store never receives installed content */
         st->stock_files++;
         st->stock_bytes += b.files[i].size;
     }
@@ -2634,7 +2636,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
-        if (b.files[i].stock) continue;
+        if (b.files[i].stock && b.files[i].absent) continue;
         from = ms_wjoin_utf8(src, b.files[i].path);
         to = ms_wjoin_utf8(staging, b.files[i].path);
         copied = from && to && sh_ms_copy_file(from, to);

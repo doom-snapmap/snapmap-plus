@@ -1205,10 +1205,12 @@ bytes equal installed content, and an author writes one in the descriptor's
 `stock` object (`{"<request>": {"source": "<installed path>", "sha256":
 "<optional>"}}`, the hash filled in by the builder) to alias installed content
 under a mod name. Pointers do not count toward the 64 MiB and 256 MiB caps and
-the extension whitelist does not apply to them, because nothing is carried;
-the store never receives their bytes (no copied file, nothing uploaded), so a
-converted package or a copy-of-stock mod uploads only its authored and edited
-files. `modstock.c` answers them from the player's own
+the extension whitelist does not apply to them, because nothing is carried
+for them; an upload never sends their bytes, so a converted package or a
+copy-of-stock mod uploads only its authored and edited files. An install keeps
+every file of the folder it installs, a copy of a game file included (the
+builder decides what is a borrow; nothing is dropped at install), and the
+folder's own copy answers when the player's game lacks those bytes. `modstock.c` answers them from the player's own
 install, read-only: it parses `base\snap_gameresources.pindex` and
 `base\gameresources.pindex` once, on the first question (about 171,000 rows
 with bytes, 20 MB held, 125 ms on build 13954591; an empty `mods\` never loads
@@ -2410,7 +2412,7 @@ bridge's install (`sh_modstock_set_install`):
   512 MiB or 8192 files is skipped before it is read, and one whose carried part
   is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
 - a file byte-identical to installed game content becomes a stock pointer (see
-  above): the store never receives it and an upload never sends it. Each
+  above): its file stays in the folder and an upload never sends it. Each
   folder's line says `N file(s), P of them stock pointer(s) to installed
   content, K KiB not stored`, the summary line totals them, and the record
   carries `stockPointers` and `stockBytes`. Measured on the owner's packs:

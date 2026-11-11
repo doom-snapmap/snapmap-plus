@@ -70,7 +70,7 @@
  * or a loose file under the install's base\ or root), lower-cased with '/';
  * "sha256" is the SHA-256 of the installed bytes (64 lowercase hex). The
  * builder emits one when a file's bytes equal an installed entry. Pointers are not counted in the size caps and the extension whitelist does
- * not apply to them; the store never receives their bytes, and a client whose
+ * not apply to them; an upload never sends their bytes, and a client whose
  * game lacks the entry with that hash refuses the bundle with the first cause.
  * Some kinds are admitted only as pointers (sh_mb_pointer_only_kind): the
  * per-map sound BSP, light grid, occlusion tome and virtual-texture page file.

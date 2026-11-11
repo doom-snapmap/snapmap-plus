@@ -229,8 +229,8 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   `sh_mods verify` and `sh_mods status` report what is installed, whether its files still match,
   and what it serves. The Studio window's Mods tab runs the same actions and shows what the open
   map needs (see [The Studio window](#the-studio-window)).
-- A mod file that is an unchanged copy of the game's own content is not stored or uploaded: the
-  bundle names it as a stock pointer to the installed file (any archive, the `.patch` store
+- A mod file that is an unchanged copy of the game's own content is not uploaded (an install keeps
+  it in the folder, as every file of the folder): the bundle names it as a stock pointer to the installed file (any archive, the `.patch` store
   included, or a loose file such as a `.pages`), and it is read from your install when the game
   asks for it. `sh_mods build` and `sh_mods install` say how many files are installed content; the
   Mods tab shows them as "from the installed game". A player whose game lacks that content, or holds a different revision
