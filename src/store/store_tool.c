@@ -477,7 +477,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.layout_work) && g_steam) doom = st_steam_doom();
+    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.layout_work || before.cv.maps) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
@@ -550,7 +550,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         sh_conv_stats cs;
         st_store *ws = (st_store *)s;
         memset(&cs, 0, sizeof cs);
-        if ((before.cv.folders || before.layout_work) && doom && !ws->stock) {
+        if ((before.cv.folders || before.layout_work || before.cv.maps) && doom && !ws->stock) {
             if (!doom_u8) {
                 doom_u8 = st_utf8(doom, CP_UTF8, NULL);
                 sh_modstock_set_install(doom_u8);
