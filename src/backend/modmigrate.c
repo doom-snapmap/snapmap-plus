@@ -11,6 +11,7 @@
 #include "modlegacy.h"
 #include "modbundle.h"
 #include "modstore.h"
+#include "modstore_upgrade.h"
 #include "modserve.h"
 #include "config_json.h"
 #include "backend_log.h"

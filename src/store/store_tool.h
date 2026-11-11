@@ -36,6 +36,7 @@
 
 #include <stddef.h>
 #include "modstore.h"
+#include "modstore_upgrade.h"
 
 enum { SH_STORE_OK = 0, SH_STORE_WORK = 1, SH_STORE_PARTIAL = 1, SH_STORE_ERROR = 2 };
 
