@@ -154,33 +154,13 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
  *
  * Paths are UTF-8, as everywhere in the backend; the folder walks below use the wide calls. */
 
-/* Split a FILE path into the folder that holds it. 0 when there is no separator to split on,
- * which is the default resolver's relative fallback and has no folder to speak of. */
-static int rawmap_dir_of(const char *path, char *out, size_t cap)
+/* The folder holding a FILE path (malloc'd). NULL when there is no separator to split on, which
+ * is the default resolver's relative fallback and has no folder to speak of. */
+static char *rawmap_dir_of(const char *path)
 {
-    char *slash;
-    if (path == NULL || path[0] == '\0') return 0;
-    strncpy_s(out, cap, path, _TRUNCATE);
-    slash = strrchr(out, '\\');
-    if (slash == NULL) return 0;
-    *slash = '\0';
-    return (out[0] != '\0') ? 1 : 0;
-}
-
-/* The folder rawmaps default to; it does not move when the load path points elsewhere. */
-static int rawmap_default_dir(char *out, size_t cap)
-{
-    char probe[SH_RAWMAP_PATH_MAX] = "";
-    sh_rawmap_get_default_paths(probe, (int)sizeof probe, NULL, 0);
-    return rawmap_dir_of(probe, out, cap);
-}
-
-/* The folder the CURRENT load path lives in: where the person keeps their files. */
-static int rawmap_current_load_dir(char *out, size_t cap)
-{
-    char probe[SH_RAWMAP_PATH_MAX] = "";
-    sh_rawmap_get_paths(probe, (int)sizeof probe, NULL, 0);
-    return rawmap_dir_of(probe, out, cap);
+    const char *slash = path ? strrchr(path, '\\') : NULL;
+    if (slash == NULL || slash == path) return NULL;
+    return sh_textn(path, (size_t)(slash - path));
 }
 
 /* One folder's rawmaps: *.zip exports holding one map (nothing is installed by looking), then the
@@ -190,31 +170,36 @@ static int rawmap_current_load_dir(char *out, size_t cap)
 static int rawmap_list_one_dir(const char *dir, const char *prefix)
 {
     static const wchar_t *const patterns[] = { L"*.zip", L"*.json" };
-    wchar_t wdir[MAX_PATH], glob[MAX_PATH];
+    wchar_t *wdir = sh_rawmap_path_wide(dir), *glob;
     WIN32_FIND_DATAW fd;
     int n = 0, k;
 
-    if (!sh_rawmap_path_wide(dir, wdir, MAX_PATH)) return 0;
+    if (!wdir) return 0;
     for (k = 0; k < 2; k++) {
         HANDLE h;
-        _snwprintf_s(glob, MAX_PATH, _TRUNCATE, L"%s\\%s", wdir, patterns[k]);
-        h = FindFirstFileW(glob, &fd);
+        glob = sh_wtextf(L"%s\\%s", wdir, patterns[k]);
+        h = glob ? FindFirstFileW(glob, &fd) : INVALID_HANDLE_VALUE;
+        free(glob);
         if (h == INVALID_HANDLE_VALUE) continue;
         do {
-            char name[SH_RAWMAP_PATH_MAX], full[SH_RAWMAP_PATH_MAX];
+            char *name, *full;
             int ok;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            if (!sh_rawmap_path_utf8(fd.cFileName, name, sizeof name)) continue;
-            _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, name);
-            ok = k == 0 ? modexport_validate_source(full, NULL) : sh_rawmap_looks_like_rawmap(full);
-            if (!ok) continue;
-            sh_printf("  %s%-38s %llu bytes%s\n", prefix ? prefix : "", name,
-                      ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
-                      k == 0 ? "  (the map and its mods)" : "");
-            n++;
+            if ((name = sh_rawmap_path_utf8(fd.cFileName)) == NULL) continue;
+            full = sh_textf("%s\\%s", dir, name);
+            ok = full && (k == 0 ? modexport_validate_source(full, NULL) : sh_rawmap_looks_like_rawmap(full));
+            if (ok) {
+                sh_printf("  %s%-38s %llu bytes%s\n", prefix ? prefix : "", name,
+                          ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
+                          k == 0 ? "  (the map and its mods)" : "");
+                n++;
+            }
+            free(full);
+            free(name);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
+    free(wdir);
     return n;
 }
 
@@ -223,23 +208,28 @@ static int rawmap_list_one_dir(const char *dir, const char *prefix)
  * enumerating the disk while the game waits on the console callback. */
 static int rawmap_list_dir_tree(const char *dir)
 {
-    wchar_t wdir[MAX_PATH], glob[MAX_PATH];
+    wchar_t *wdir, *glob;
     WIN32_FIND_DATAW fd;
     HANDLE h;
     int n = rawmap_list_one_dir(dir, NULL);
 
-    if (!sh_rawmap_path_wide(dir, wdir, MAX_PATH)) return n;
-    _snwprintf_s(glob, MAX_PATH, _TRUNCATE, L"%s\\*", wdir);
-    h = FindFirstFileW(glob, &fd);
+    if ((wdir = sh_rawmap_path_wide(dir)) == NULL) return n;
+    glob = sh_wtextf(L"%s\\*", wdir);
+    free(wdir);
+    h = glob ? FindFirstFileW(glob, &fd) : INVALID_HANDLE_VALUE;
+    free(glob);
     if (h == INVALID_HANDLE_VALUE) return n;
     do {
-        char name[SH_RAWMAP_PATH_MAX], sub[SH_RAWMAP_PATH_MAX], prefix[SH_RAWMAP_PATH_MAX];
+        char *name, *sub, *prefix;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        if (!sh_rawmap_path_utf8(fd.cFileName, name, sizeof name)) continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, name);
-        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s\\", name);
-        n += rawmap_list_one_dir(sub, prefix);
+        if ((name = sh_rawmap_path_utf8(fd.cFileName)) == NULL) continue;
+        sub = sh_textf("%s\\%s", dir, name);
+        prefix = sh_textf("%s\\", name);
+        if (sub && prefix) n += rawmap_list_one_dir(sub, prefix);
+        free(sub);
+        free(prefix);
+        free(name);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return n;
@@ -256,12 +246,12 @@ static void rawmap_list_section(const char *dir, const char *what)
 /* `arg` = a folder to list, or NULL for the default folder and the load path's folder. */
 static void rawmap_print_list(const char *arg)
 {
-    char def_dir[SH_RAWMAP_PATH_MAX] = "", cur_dir[SH_RAWMAP_PATH_MAX] = "";
-    int have_def, have_cur;
+    char *def_path, *cur_path, *def_dir, *cur_dir;
 
     if (arg != NULL && arg[0] != '\0') {
-        wchar_t w[MAX_PATH];
-        DWORD attrs = sh_rawmap_path_wide(arg, w, MAX_PATH) ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        wchar_t *w = sh_rawmap_path_wide(arg);
+        DWORD attrs = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
         if (attrs == INVALID_FILE_ATTRIBUTES) { sh_printf("No such folder: %s\n", arg); return; }
         if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
             sh_printf("That is a file, not a folder: %s\n", arg);
@@ -271,53 +261,62 @@ static void rawmap_print_list(const char *arg)
         return;
     }
 
-    have_def = rawmap_default_dir(def_dir, sizeof def_dir);
-    have_cur = rawmap_current_load_dir(cur_dir, sizeof cur_dir);
+    /* The folder rawmaps default to does not move when the load path points elsewhere; the load
+     * path's folder is where the person keeps their files. */
+    def_path = sh_rawmap_default_path();
+    cur_path = sh_rawmap_load_path();
+    def_dir = rawmap_dir_of(def_path);
+    cur_dir = rawmap_dir_of(cur_path);
+    free(def_path);
+    free(cur_path);
 
-    if (!have_def && !have_cur) { sh_printf("Could not work out the rawmap folder.\n"); return; }
-
-    if (have_def) rawmap_list_section(def_dir, "   (the default folder)");
-    if (have_cur && (!have_def || _stricmp(def_dir, cur_dir) != 0)) {
-        sh_printf("\n");
-        rawmap_list_section(cur_dir, "   (where your load path points)");
+    if (!def_dir && !cur_dir) {
+        sh_printf("Could not work out the rawmap folder.\n");
+    } else {
+        if (def_dir) rawmap_list_section(def_dir, "   (the default folder)");
+        if (cur_dir && (!def_dir || _stricmp(def_dir, cur_dir) != 0)) {
+            sh_printf("\n");
+            rawmap_list_section(cur_dir, "   (where your load path points)");
+        }
+        sh_printf("\n'sh_rawmaps list <folder>' lists any other folder.\n");
     }
-
-    sh_printf("\n'sh_rawmaps list <folder>' lists any other folder.\n");
+    free(def_dir);
+    free(cur_dir);
 }
+
+static const char *rawmap_or(const char *text, const char *none) { return text && text[0] ? text : none; }
 
 static void rawmap_print_state(void)
 {
-    char load_path[SH_RAWMAP_PATH_MAX] = "", save_path[SH_RAWMAP_PATH_MAX] = "", why[192] = "";
-    int readable;
+    char *load_path = sh_rawmap_load_path(), *save_path = sh_rawmap_save_path(), *target, *why = NULL;
+    int readable = sh_rawmap_source_ok(&why);
 
-    sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
-    readable = sh_rawmap_source_ok(why, (int)sizeof why);
-
-    sh_printf("  load from: %s%s\n", load_path[0] ? load_path : "(none)",
+    sh_printf("  load from: %s%s\n", rawmap_or(load_path, "(none)"),
               readable ? "" : "   <-- cannot be opened right now");
-    if (!readable && why[0]) sh_printf("             %s\n", why);
-    {
-        /* Say whether this is the default file or one the person chose. */
-        char target[SH_RAWMAP_PATH_MAX] = "";
-        sh_rawmap_get_save_target(target, (int)sizeof target);
-        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
-                  target[0] ? "   (you chose this file)" : "   (the default file)");
-    }
+    if (!readable && why && why[0]) sh_printf("             %s\n", why);
+    /* Say whether this is the default file or one the person chose. */
+    target = sh_rawmap_save_target();
+    sh_printf("  save to:   %s%s\n", rawmap_or(save_path, "(none)"),
+              target && target[0] ? "   (you chose this file)" : "   (the default file)");
+    free(target);
+    free(why);
+    free(load_path);
+    free(save_path);
     {
         /* What the last save wrote, and which file to share. */
         sh_rawmap_save_report last;
         sh_rawmap_last_save(&last);
         if (last.sequence) {
-            if (last.json[0])
+            if (last.json)
                 sh_printf("  last save: %s (%llu bytes)\n", last.json, last.json_bytes);
-            if (last.zip[0] && last.zip_bytes)
+            if (last.zip && last.zip_bytes)
                 sh_printf("  %s %s (%llu bytes) carries the map and its %u mod%s: share that file\n",
-                          last.json[0] ? "beside it:" : "last save:", last.zip, last.zip_bytes, last.mods,
+                          last.json ? "beside it:" : "last save:", last.zip, last.zip_bytes, last.mods,
                           last.mods == 1 ? "" : "s");
-            else if (last.zip[0])
+            else if (last.zip)
                 sh_printf("  the map uses %u mod%s, but %s was not written: %s\n", last.mods,
-                          last.mods == 1 ? "" : "s", last.zip, last.zip_error && last.zip_error[0] ? last.zip_error : "unknown cause");
-            else if (last.json[0])
+                          last.mods == 1 ? "" : "s", last.zip, rawmap_or(last.zip_error, "unknown cause"));
+            else if (last.json)
                 sh_printf("  the map uses no mods, so the .json is all anyone needs\n");
         }
         sh_rawmap_save_report_free(&last);
@@ -398,16 +397,16 @@ static void h_sh_rawmaps(idCmdArgs *a)
      * it cannot damage a SAVED map -- the rawmap opens as a new map that has to be named. Nothing
      * is kept for a later map: a rawmap that cannot open now is refused now. */
     if (_stricmp(verb, "load") == 0) {
-        char why[SH_RAWMAP_PATH_MAX + 192] = "", path[SH_RAWMAP_PATH_MAX] = "";
-        if (arg != NULL && arg[0] != '\0') strncpy_s(path, sizeof path, arg, _TRUNCATE);
-        else sh_rawmap_get_paths(path, (int)sizeof path, NULL, 0);
-        if (sh_rawmap_open_now(arg && arg[0] ? arg : NULL, why, (int)sizeof why)) {
-            sh_printf("Opening %s as a new map.\n", path);
+        char *why = NULL, *path = arg && arg[0] ? sh_text(arg) : sh_rawmap_load_path();
+        if (sh_rawmap_open_now(arg && arg[0] ? arg : NULL, &why)) {
+            sh_printf("Opening %s as a new map.\n", rawmap_or(path, "the rawmap"));
             sh_printf("Unsaved edits in the editor are discarded. Save will ask you to name it.\n");
         } else {
-            sh_printf("Cannot open %s\n", path[0] ? path : "(no load path)");
-            sh_printf("  %s.\n", why[0] ? why : "it cannot be read");
+            sh_printf("Cannot open %s\n", rawmap_or(path, "(no load path)"));
+            sh_printf("  %s.\n", rawmap_or(why, "it cannot be read"));
         }
+        free(why);
+        free(path);
         return;
     }
 
@@ -416,23 +415,24 @@ static void h_sh_rawmaps(idCmdArgs *a)
      * file I have loaded". Opening a different map clears whatever was set, so a downloaded map is
      * never written over by a choice made while some other map was open. */
     if (_stricmp(verb, "savepath") == 0) {
-        char target[SH_RAWMAP_PATH_MAX] = "";
-        char why[192] = "";
+        char *target, *why = NULL;
 
         if (arg != NULL && arg[0] != '\0') {
             if (_stricmp(arg, "default") == 0) {
                 sh_rawmap_set_save_target(NULL);
             } else if (_stricmp(arg, "rawmap") == 0) {
-                char loaded[SH_RAWMAP_PATH_MAX] = "";
-                sh_rawmap_get_paths(loaded, (int)sizeof loaded, NULL, 0);
-                if (loaded[0] == '\0' || !sh_rawmap_set_save_target(loaded)) {
+                char *loaded = sh_rawmap_load_path();
+                int set = loaded && loaded[0] && sh_rawmap_set_save_target(loaded);
+                free(loaded);
+                if (!set) {
                     sh_printf("No rawmap is loaded, so there is nothing to save back over.\n");
                     return;
                 }
-            } else if (!sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
+            } else if (!sh_rawmap_dest_path_is_usable(arg, &why)) {
                 sh_printf("Cannot save to %s\n", arg);
-                sh_printf("  %s\n", why[0] ? why : "that is not a usable save path");
+                sh_printf("  %s\n", rawmap_or(why, "that is not a usable save path"));
                 sh_printf("Use 'default', 'rawmap', or a full path. Nothing was changed.\n");
+                free(why);
                 return;
             } else if (!sh_rawmap_set_save_target(arg)) {
                 sh_printf("That path could not be used as a save path.\n");
@@ -440,44 +440,47 @@ static void h_sh_rawmaps(idCmdArgs *a)
             }
         }
 
-        sh_rawmap_get_save_target(target, (int)sizeof target);
-        if (target[0])
+        target = sh_rawmap_save_target();
+        if (target && target[0])
             sh_printf("Saves go to %s until you open a different map.\n", target);
         else
             sh_printf("Saves go to the default rawmap.json, so a map you opened is left alone.\n");
+        free(target);
         rawmap_print_state();
         return;
     }
 
     if (_stricmp(verb, "save") == 0) {
-        char why[SH_RAWMAP_PATH_MAX + 192] = "";
-        char save_path[SH_RAWMAP_PATH_MAX] = "";
+        char *why = NULL, *save_path;
 
         /* Ask before changing anything: a refused save must not move the save path. */
-        if (!sh_editor_frame_can_rawmap_save(why, (int)sizeof why)) {
-            sh_printf("Cannot save: %s. Nothing was changed.\n", why[0] ? why : "open a map in the editor first");
+        if (!sh_editor_frame_can_rawmap_save(&why)) {
+            sh_printf("Cannot save: %s. Nothing was changed.\n", rawmap_or(why, "open a map in the editor first"));
+            free(why);
             return;
         }
 
         /* The candidate destination is only aimed at once every check has passed. */
-        if (arg != NULL && arg[0] != '\0')
-            strncpy_s(save_path, sizeof save_path, arg, _TRUNCATE);
-        else
-            sh_rawmap_get_paths(NULL, 0, save_path, (int)sizeof save_path);
-
-        if (!sh_rawmap_dest_writable_now(save_path, why, (int)sizeof why)) {
-            sh_printf("Cannot save to %s\n", save_path);
-            sh_printf("  %s\n", why[0] ? why : "that file cannot be written");
+        save_path = arg && arg[0] ? sh_text(arg) : sh_rawmap_save_path();
+        if (!sh_rawmap_dest_writable_now(save_path, &why)) {
+            sh_printf("Cannot save to %s\n", rawmap_or(save_path, "(no save path)"));
+            sh_printf("  %s\n", rawmap_or(why, "that file cannot be written"));
             sh_printf("Nothing was changed. The save path is untouched.\n");
+            free(why);
+            free(save_path);
             return;
         }
+        free(why);
+        why = NULL;
+        free(save_path);
 
         /* Queued onto the editor frame -- serializing the open map touches engine state. Only ever
          * the OPEN map, never a save read off disk. The outcome is told when the write lands. */
-        if (sh_editor_frame_request_rawmap_save_to(arg && arg[0] ? arg : NULL, why, (int)sizeof why))
-            sh_printf("%s\n", why);
+        if (sh_editor_frame_request_rawmap_save_to(arg && arg[0] ? arg : NULL, &why))
+            sh_printf("%s\n", rawmap_or(why, "Saving the open map."));
         else
-            sh_printf("Cannot save: %s.\n", why[0] ? why : "open a map in the editor first");
+            sh_printf("Cannot save: %s.\n", rawmap_or(why, "open a map in the editor first"));
+        free(why);
         return;
     }
 

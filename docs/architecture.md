@@ -3671,8 +3671,10 @@ map; try again when it is done"). An import says "Importing <file> and its
 mods; it opens when that is done."; the main tick (`sh_rawmap_poll_main`) then
 holds the imported text and asks the editor to open the map again, which parses
 exactly those bytes. The store lock is taken only to choose and install
-builds, never while files are copied or read. Every path is UTF-8 and opened
-through the wide calls (`SH_RAWMAP_PATH_MAX`).
+builds, never while files are copied or read. Every path is UTF-8, held in a
+heap string sized to it (the process heap, never an engine heap), and opened
+through the wide calls in the long form (`sh_rawmap_path_wide`), so a path of
+any depth Windows accepts loads, saves, exports and imports.
 
 Saving. After every rawmap write of a map with at least one row (the File menu's
 Save Rawmap and Save Rawmap As, and `sh_rawmaps save`), the export is written beside the JSON at the same path with `.zip`

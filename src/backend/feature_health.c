@@ -48,14 +48,13 @@ int sh_feature_is_off(const char *feature)
 }
 
 #ifdef SH_DIAG
-int sh_feature_off_name(int index, char *out, size_t cap)
+char *sh_feature_off_name(int index)
 {
-    int ok;
+    char *out = NULL;
     AcquireSRWLockShared(&g_lock);
-    ok = index >= 0 && index < g_count && out && cap;
-    if (ok) strncpy_s(out, cap, g_off[index], _TRUNCATE);
+    if (index >= 0 && index < g_count) out = _strdup(g_off[index]);
     ReleaseSRWLockShared(&g_lock);
-    return ok;
+    return out;
 }
 #endif
 

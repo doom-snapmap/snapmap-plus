@@ -67,8 +67,9 @@ struct sh_iface;
 size_t sh_feature_health_slot(struct sh_iface *self, char *out, size_t cap);
 
 #ifdef SH_DIAG
-/* The diagnostic build's status export: the index-th feature off, by name; 0 past the end. */
-int sh_feature_off_name(int index, char *out, size_t cap);
+/* The diagnostic build's status export: the index-th feature off, by name (malloc'd); NULL past
+ * the end. */
+char *sh_feature_off_name(int index);
 #endif
 
 #ifdef SH_FEATURE_HEALTH_TESTING

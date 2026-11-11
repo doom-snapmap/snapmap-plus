@@ -4,6 +4,7 @@
  * incompatible layout can still produce incorrect engine state. */
 #include <windows.h>
 #include <shlobj.h>
+#include <knownfolders.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,7 @@
 #include "modpublish.h"
 #include "engine_build.h"
 #include "feature_health.h"
+#include "../common/text.h"
 
 /* Editor layout. */
 /* Extraction RVA for re-derivation only; runtime uses editor_singleton.
@@ -1190,19 +1192,23 @@ static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_c
 static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const char *name,
                                     char *out_path, int cap)
 {
-    wchar_t wide[MAX_PATH];
-    char base[MAX_PATH * 3];
+    PWSTR wide = NULL;
+    char *base = NULL, *path;
+    int ok = 0;
     (void)self;
     if (!out_path || cap <= 0) return 0;
     out_path[0] = '\0';
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, wide))) return 0;
-    if (!sh_rawmap_path_utf8(wide, base, sizeof base)) return 0;
-    if (_snprintf_s(out_path, (size_t)cap, _TRUNCATE, "%s/snapmap-plus/%s%s",
-                    base, prefix ? prefix : "", name ? name : "") < 0) {
-        out_path[0] = '\0';   /* a truncated path names another file */
-        return 0;
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &wide)) && wide)
+        base = sh_rawmap_path_utf8(wide);
+    if (wide) CoTaskMemFree(wide);
+    path = base ? sh_textf("%s/snapmap-plus/%s%s", base, prefix ? prefix : "", name ? name : "") : NULL;
+    free(base);
+    if (path && strlen(path) < (size_t)cap) {   /* a cut path names another file */
+        memcpy(out_path, path, strlen(path) + 1);
+        ok = 1;
     }
-    return out_path[0] != '\0';
+    free(path);
+    return ok;
 }
 
 /* Cache registry objects, whose lifetimes match the engine process. */
@@ -1386,7 +1392,13 @@ static int ie_mods_map_info(sh_modui_map_info *out)
     ie_mods_idstr(edit + IE_EDIT_LOCAL_ID, out->local_id, sizeof out->local_id);
     ie_mods_idstr(edit + IE_EDIT_CLOUD_ID, out->cloud_id, sizeof out->cloud_id);
     out->tagged = sh_modpublish_edit_tag(edit, "mods", 0);
-    (void)sh_rawmap_open_unsaved(out->opened_from, sizeof out->opened_from);
+    {
+        /* modui.h keeps the name in a fixed field; it reads it as "opened from a rawmap" and logs it. */
+        char *name = NULL;
+        if (sh_rawmap_open_unsaved(&name) && name)
+            strncpy_s(out->opened_from, sizeof out->opened_from, name, _TRUNCATE);
+        free(name);
+    }
     return 1;
 }
 

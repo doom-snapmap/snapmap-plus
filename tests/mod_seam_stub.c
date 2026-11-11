@@ -99,10 +99,17 @@ int modexport_is_zip_path(const char *path)
  * checks the folder the path is in. */
 static int stub_utf8_exists(const char *path, int dir)
 {
-    wchar_t w[MAX_PATH * 2], *slash;
-    if (!path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, w, MAX_PATH * 2)) return 0;
+    wchar_t *w, *slash;
+    int n, found;
+    if (!path || (n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0)) <= 0) return 0;
+    if ((w = (wchar_t *)malloc(((size_t)n + 4) * sizeof *w)) == NULL) return 0;
+    /* A drive path in its long form, so a path of any depth is found. */
+    wcscpy_s(w, (size_t)n + 4, path[0] && path[1] == ':' ? L"\\\\?\\" : L"");
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, w + wcslen(w), n);
     if (dir && (slash = wcsrchr(w, L'\\')) != NULL) *slash = 0;
-    return GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+    found = GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+    free(w);
+    return found;
 }
 
 unsigned long long modexport_write_text(const char *data, size_t len, const char *path)
@@ -116,14 +123,15 @@ unsigned long long modexport_write_text(const char *data, size_t len, const char
  * are recorded. */
 unsigned long long g_mod_stub_export_result;
 int g_mod_stub_export_calls;
-char g_mod_stub_export_path[520];
+char *g_mod_stub_export_path;   /* malloc'd */
 
 unsigned long long modexport_write_text_report(const char *data, size_t len, const char *path,
                                                unsigned *bundles, char **cause)
 {
     (void)data; (void)len;
     g_mod_stub_export_calls++;
-    strncpy_s(g_mod_stub_export_path, sizeof g_mod_stub_export_path, path ? path : "", _TRUNCATE);
+    free(g_mod_stub_export_path);
+    g_mod_stub_export_path = _strdup(path ? path : "");
     if (bundles) *bundles = 0;
     if (!stub_utf8_exists(path, 1)) {
         if (cause) *cause = _strdup("the path did not arrive in UTF-8");
