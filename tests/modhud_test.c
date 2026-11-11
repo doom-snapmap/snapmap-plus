@@ -1,21 +1,21 @@
-/* modhud_test.c -- bundle-declared weapon ammo displays (modhud.c).
+/* modhud_test.c -- a mod's weapon ammo displays (modhud.c).
  *
- * Offline: the hud object grammar, conflicts across bundles, the tree read
- * (mod folders at the root, in organizing folders and in a map's place,
- * admitted builds only, using the owner's sp-pistol descriptor shape), and
- * the call-site relay against an
- * owned synthetic caller. With build 13954591 executables as arguments: the
- * call site and predicate resolve uniquely at their recorded RVAs, the call
- * decodes to the predicate, its rel32 is 4-byte aligned, and the widget
- * register and decl field are the ones the handler reads. */
+ * Offline: the hud object grammar; two mods that disagree about one weapon
+ * leave only that weapon to the game; the table built from the builds the
+ * open map serves (one build per salt, builds the map does not use left out,
+ * a mod whose hud entry does not read skipped alone); the table read again on
+ * the HUD's next question after an index change or a Play entry, with no
+ * restart; and the call-site relay against an owned synthetic caller. With
+ * build 13954591 executables as arguments: the call site and predicate
+ * resolve uniquely at their recorded RVAs, the call decodes to the predicate,
+ * its rel32 is 4-byte aligned, and the widget register and decl field are the
+ * ones the handler reads. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <shlobj.h>
 #include "modhud.h"
-#include "modbundle.h"
 #include "signatures.h"
 #include "host_image.h"
 
@@ -29,151 +29,151 @@ static int parse_one(const char *json, const char *owner)
     int ok;
     sh_modhud_begin();
     ok = sh_modhud_parse(json, strlen(json), owner);
-    sh_modhud_publish(ok);
+    sh_modhud_publish();
     return ok;
 }
 
+#define PISTOL "weapon/zion/player/sp/pistol"
+#define CHARGE "weapon/zion/player/sp/pistol_secondary_charge_shot"
+#define SHOTGUN "weapon/zion/player/mp/shotgun"
+
 static void test_grammar(void)
 {
-    static const char sp[] = "{\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"weapon\"},"
-                             " \"weapon/zion/player/sp/pistol_secondary_charge_shot\": {\"ammo_display\": \"weapon\"}}}";
-    CHECK(parse_one(sp, "local.sp-pistol") && sh_modhud_count() == 2);
-    CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 0);
-    CHECK(sh_modhud_select("weapon/zion/player/sp/pistol_secondary_charge_shot", 1) == 0);
-    CHECK(sh_modhud_select("weapon/zion/player/mp/shotgun", 1) == 1);
+    static const char sp[] = "{\"weapons\": {\"" PISTOL "\": {\"ammo_display\": \"weapon\"},"
+                             " \"" CHARGE "\": {\"ammo_display\": \"weapon\"}}}";
+    static const char eng[] = "{\"weapons\": {\"" PISTOL "\": {\"ammo_display\": \"engine\"}}}";
+    CHECK(parse_one(sp, "Campaign pistol") && sh_modhud_count() == 2);
+    CHECK(sh_modhud_select(PISTOL, 1) == 0);
+    CHECK(sh_modhud_select(CHARGE, 1) == 0);
+    CHECK(sh_modhud_select(SHOTGUN, 1) == 1);
     CHECK(sh_modhud_select(NULL, 1) == 1);
-    CHECK(parse_one("{\"weapons\": {\"weapon/a\": {\"ammo_display\": \"engine\"}}}", "x") && sh_modhud_count() == 1);
+    CHECK(parse_one("{\"weapons\": {\"weapon/a\": {\"ammo_display\": \"engine\"}}}", "x") && sh_modhud_count() == 0);
     CHECK(sh_modhud_select("weapon/a", 1) == 1);
-    /* The beta.13 form with a "schema" is not read. */
-    CHECK(!parse_one("{\"schema\": \"snapmap-plus.weapon-hud.v1\", \"weapons\": {\"weapon/a\": {\"ammo_display\": \"weapon\"}}}", "x"));
     CHECK(parse_one("{}", "x") && sh_modhud_count() == 0);
-    /* Refusals clear the live table. */
-    CHECK(parse_one(sp, "a") && sh_modhud_count() == 2);
+    /* Objects that do not read add nothing. */
+    CHECK(!parse_one("{\"schema\": \"snapmap-plus.weapon-hud.v1\", \"weapons\": {\"weapon/a\": {\"ammo_display\": \"weapon\"}}}", "x"));
     CHECK(!parse_one("{\"weapons\": {\"weapon/a\": {\"ammo_display\": \"magic\"}}}", "x") && sh_modhud_count() == 0);
     CHECK(!parse_one("{\"weapons\": {\"weapon/a\": {\"ammo_display\": \"weapon\", \"color\": \"red\"}}}", "x"));
     CHECK(!parse_one("{\"weapons\": {\"Weapon/A\": {\"ammo_display\": \"weapon\"}}}", "x"));
     CHECK(!parse_one("{\"weapons\": {\"weapon/../a\": {\"ammo_display\": \"weapon\"}}}", "x"));
     CHECK(!parse_one("{\"weapons\": {}, \"crosshair\": 1}", "x"));
-    CHECK(!parse_one("{\"schema\": \"other\", \"weapons\": {}}", "x"));
     CHECK(!parse_one("[1]", "x"));
-    /* Identical rules compose; different rules for one weapon refuse the table. */
-    sh_modhud_begin();
-    CHECK(sh_modhud_parse(sp, strlen(sp), "a") && sh_modhud_parse(sp, strlen(sp), "b"));
-    sh_modhud_publish(1);
-    CHECK(sh_modhud_count() == 2);
+    /* A mod's table is used whole or not at all: one bad member adds none of it. */
     sh_modhud_begin();
     CHECK(sh_modhud_parse(sp, strlen(sp), "a"));
     {
-        static const char eng[] = "{\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}}";
-        CHECK(!sh_modhud_parse(eng, strlen(eng), "b"));
+        static const char half[] = "{\"weapons\": {\"" SHOTGUN "\": {\"ammo_display\": \"weapon\"},"
+                                   " \"weapon/b\": {\"ammo_display\": \"magic\"}}}";
+        CHECK(!sh_modhud_parse(half, strlen(half), "b"));
     }
-    sh_modhud_publish(0);
-    CHECK(sh_modhud_count() == 0);
-}
-
-/* ------------------------------------------------------------ tree */
-
-static char g_root[MAX_PATH * 4];   /* UTF-8, as the store spells it */
-static const char H_PISTOL[] = "7259ac447432f2a95e4d98e53710f6c8ebe6d122938c55c9b4326cd2a85a7907";
-static const char H_OTHER[]  = "1111111111111111111111111111111111111111111111111111111111111111";
-static const char H_GONE[]   = "2222222222222222222222222222222222222222222222222222222222222222";
-static int admitted(const char *hash) { return !strcmp(hash, H_PISTOL) || !strcmp(hash, H_OTHER); }
-
-/* A UTF-8 path in wide form (no long-path prefix: SHCreateDirectoryExW refuses it). */
-static void wide(const char *path, wchar_t *out, int cap)
-{
-    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, out, cap)) out[0] = 0;
-}
-
-static void put(const char *rel, const char *text)
-{
-    char path[MAX_PATH * 4], dir[MAX_PATH * 4], *slash;
-    wchar_t w[MAX_PATH];
-    FILE *f = NULL;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, rel);
-    strcpy_s(dir, sizeof dir, path);
-    slash = strrchr(dir, '\\');
-    *slash = 0;
-    wide(dir, w, MAX_PATH);
-    SHCreateDirectoryExW(NULL, w, NULL);
-    wide(path, w, MAX_PATH);
-    if (_wfopen_s(&f, w, L"wb") || !f) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fputs(text, f);
-    fclose(f);
-}
-
-/* A built mod folder: the author's part (with keys such as "hud") and the
- * builder block naming the salt and the build hash. */
-static void bundle(const char *rel, const char *salt, const char *hash, const char *author)
-{
-    char text[2048];
-    _snprintf_s(text, sizeof text, _TRUNCATE,
-        "{\"name\": \"%s\", \"version\": \"1\", %s\n\n"
-        "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"build\": \"%s\", \"files\": []}}",
-        salt, author, salt, hash);
-    put(rel, text);
-}
-
-/* `top` names the folder above mods\ (a non-ASCII one too: the scan reads
- * the store through UTF-8 paths). */
-static void test_tree(const char *top)
-{
-    char tmp[MAX_PATH];
-    GetTempPathA(sizeof tmp, tmp);
-    _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%s%s_%lu\\mods", tmp, top, GetCurrentProcessId());
-    /* The owner's converted sp-pistol, as the migration wrote it: a delivered
-     * package is an ordinary folder now. */
-    bundle("local.sp-pistol\\mod.json", "pistolsp", H_PISTOL,
-           "\"description\": \"Enable campaign pistol firing\", \"hud\": {\"weapons\": "
-           "{\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"weapon\"}, "
-           "\"weapon/zion/player/sp/pistol_secondary_charge_shot\": {\"ammo_display\": \"weapon\"}}},");
-    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "");
-    /* Not admitted: its conflicting rule is ignored. */
-    bundle("alex.gone\\mod.json", "gonealex", H_GONE,
-           "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
-    /* A folder without mod.json is not a mod. */
-    put("notes\\readme.txt", "x");
-    CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
-    CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 0);
-    /* An admitted bundle with a different rule for the pistol refuses the table. */
-    bundle("alex.other\\mod.json", "otheralx", H_OTHER,
-           "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
-    CHECK(sh_modhud_load_tree(g_root, admitted) == -1 && sh_modhud_count() == 0);
-    CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 1);
-    /* A malformed hud object refuses too. */
-    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "\"hud\": {\"weapons\": 3},");
-    CHECK(sh_modhud_load_tree(g_root, admitted) == -1);
-    bundle("alex.other\\mod.json", "otheralx", H_OTHER, "");
-    CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
-    /* A map's place (mods\maps\<map>\<mod>) and an organizing folder are read too. */
-    bundle("maps\\Map One\\shotgun\\mod.json", "shotgunm", H_OTHER,
-           "\"hud\": {\"weapons\": {\"weapon/zion/player/mp/shotgun\": {\"ammo_display\": \"weapon\"}}},");
-    CHECK(sh_modhud_load_tree(g_root, admitted) == 3);
-    /* A missing folder is an empty table. */
-    CHECK(sh_modhud_load_tree("C:\\nonexistent\\sh_modhud\\mods", admitted) == 0);
+    sh_modhud_publish();
+    CHECK(sh_modhud_count() == 2 && sh_modhud_select(SHOTGUN, 1) == 1 && sh_modhud_select(PISTOL, 1) == 0);
+    /* Identical rules compose. */
+    sh_modhud_begin();
+    CHECK(sh_modhud_parse(sp, strlen(sp), "a") && sh_modhud_parse(sp, strlen(sp), "b"));
+    sh_modhud_publish();
+    CHECK(sh_modhud_count() == 2);
+    /* Two mods that disagree about the pistol: the pistol keeps the game's
+     * display, every other rule stays. */
+    sh_modhud_begin();
+    CHECK(sh_modhud_parse(sp, strlen(sp), "a"));
+    CHECK(sh_modhud_parse(eng, strlen(eng), "b"));
     {
-        static const char *const files[] = { "local.sp-pistol\\mod.json",
-            "alex.other\\mod.json", "alex.gone\\mod.json", "notes\\readme.txt", "maps\\Map One\\shotgun\\mod.json", NULL };
-        static const char *const dirs[] = { "local.sp-pistol", "alex.other", "alex.gone", "notes", "maps\\Map One\\shotgun",
-                                            "maps\\Map One", "maps", NULL };
-        char path[MAX_PATH * 4];
-        wchar_t w[MAX_PATH];
-        for (int i = 0; files[i]; i++) {
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, files[i]);
-            wide(path, w, MAX_PATH);
-            DeleteFileW(w);
-        }
-        for (int i = 0; dirs[i]; i++) {
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, dirs[i]);
-            wide(path, w, MAX_PATH);
-            RemoveDirectoryW(w);
-        }
-        wide(g_root, w, MAX_PATH);
-        RemoveDirectoryW(w);
-        *strrchr(g_root, '\\') = 0;
-        wide(g_root, w, MAX_PATH);
-        RemoveDirectoryW(w);
+        static const char third[] = "{\"weapons\": {\"" PISTOL "\": {\"ammo_display\": \"weapon\"}}}";
+        CHECK(sh_modhud_parse(third, strlen(third), "c"));   /* a third mod does not bring it back */
     }
+    sh_modhud_publish();
+    CHECK(sh_modhud_count() == 1);
+    CHECK(sh_modhud_select(PISTOL, 1) == 1);
+    CHECK(sh_modhud_select(CHARGE, 1) == 0);
+}
+
+/* ------------------------------------------------------------ the builds */
+
+/* The serving index's builds: salt, build hash, place, author keys, and
+ * whether the open map serves it. */
+typedef struct fake_build { const char *salt, *hash; int place; const char *extra; int serves; } fake_build;
+static fake_build g_builds[8];
+static int g_nbuilds, g_each_fails, g_loads;
+
+static int fake_each(sh_modserve_extra_fn fn, void *context)
+{
+    int i;
+    if (g_each_fails) return -1;
+    for (i = 0; i < g_nbuilds; i++) fn(context, g_builds[i].salt, g_builds[i].hash, g_builds[i].place, g_builds[i].extra);
+    return g_nbuilds;
+}
+static int fake_serves(const char *hash)
+{
+    int i;
+    for (i = 0; i < g_nbuilds; i++) if (!strcmp(g_builds[i].hash, hash)) return g_builds[i].serves;
+    return 0;
+}
+static int fake_reload(void) { g_loads++; return sh_modhud_load(fake_each, fake_serves, NULL); }
+
+static void build(const char *salt, const char *hash, int place, const char *extra, int serves)
+{
+    fake_build *b = &g_builds[g_nbuilds++];
+    b->salt = salt; b->hash = hash; b->place = place; b->extra = extra; b->serves = serves;
+}
+
+#define H1 "1111111111111111111111111111111111111111111111111111111111111111"
+#define H2 "2222222222222222222222222222222222222222222222222222222222222222"
+#define H3 "3333333333333333333333333333333333333333333333333333333333333333"
+#define H4 "4444444444444444444444444444444444444444444444444444444444444444"
+#define HUD_WEAPON(w) "{\"hud\": {\"weapons\": {\"" w "\": {\"ammo_display\": \"weapon\"}}}}"
+#define HUD_ENGINE(w) "{\"hud\": {\"weapons\": {\"" w "\": {\"ammo_display\": \"engine\"}}}}"
+
+static void test_builds(void)
+{
+    /* The root build of a salt and a downloaded map's build of it differ:
+     * only the one the open map serves counts. */
+    g_nbuilds = 0;
+    build("pistolsp", H1, 0, HUD_WEAPON(PISTOL), 1);
+    build("pistolsp", H2, 1, HUD_ENGINE(PISTOL), 0);
+    build("shotgunm", H3, 0, "{\"strings\": {}}", 1);
+    build("unusedmd", H4, 0, HUD_WEAPON(SHOTGUN), 0);   /* the map does not use it */
+    CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 1);
+    CHECK(sh_modhud_select(PISTOL, 1) == 0 && sh_modhud_select(SHOTGUN, 1) == 1);
+    /* The map now serves the place's build: its rule, not the root's. */
+    g_builds[0].serves = 0;
+    g_builds[1].serves = 1;
+    CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 0);
+    CHECK(sh_modhud_select(PISTOL, 1) == 1);
+    /* Two builds of one salt both served (map scope off): the first is read. */
+    g_builds[0].serves = 1;
+    CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 1 && sh_modhud_select(PISTOL, 1) == 0);
+    /* A mod whose hud entry does not read is skipped; the others apply. */
+    g_builds[2].extra = "{\"hud\": {\"weapons\": 3}}";
+    g_builds[3].serves = 1;
+    CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == 2 && sh_modhud_select(SHOTGUN, 1) == 0);
+    /* Builds that cannot be visited leave the game's displays. */
+    g_each_fails = 1;
+    CHECK(sh_modhud_load(fake_each, fake_serves, NULL) == -1 && sh_modhud_count() == 0);
+    g_each_fails = 0;
+}
+
+/* An index change (an install, a Refresh, a removal) or a Play entry marks the
+ * table stale; the HUD's next question reads it again, with no restart. */
+static void test_follows_index(void)
+{
+    g_nbuilds = 0;
+    g_loads = 0;
+    build("pistolsp", H1, 0, HUD_WEAPON(PISTOL), 1);
+    sh_modhud_test_reload_with(fake_reload);
+    sh_modhud_mark_stale();
+    CHECK(sh_modhud_select(PISTOL, 1) == 0 && g_loads == 1);
+    CHECK(sh_modhud_select(PISTOL, 1) == 0 && g_loads == 1);     /* not read again until something changed */
+    /* The mod is removed. */
+    g_nbuilds = 0;
+    CHECK(sh_modhud_select(PISTOL, 1) == 0);                      /* nothing told the HUD yet */
+    sh_modhud_mark_stale();
+    CHECK(sh_modhud_select(PISTOL, 1) == 1 && g_loads == 2);
+    /* A mod is installed mid-session. */
+    build("shotgunm", H3, 0, HUD_WEAPON(SHOTGUN), 1);
+    sh_modhud_mark_stale();
+    CHECK(sh_modhud_select(SHOTGUN, 1) == 0 && g_loads == 3);
+    sh_modhud_test_reload_with(NULL);
 }
 
 /* ------------------------------------------------------------ images */
@@ -243,13 +243,8 @@ static void test_image(const char *path)
 int main(int argc, char **argv)
 {
     test_grammar();
-    test_tree("sh_modhud_test");
-    {
-        /* "sh_modhud_sme" with an acute accent, in UTF-8. */
-        char *accent = sh_mb_utf8(L"sh_modhud_sm\x00e9");
-        CHECK(accent != NULL);
-        if (accent) { test_tree(accent); free(accent); }
-    }
+    test_builds();
+    test_follows_index();
     /* The relay reads the live table: weapon/test/unlimited is a weapon rule. */
     CHECK(parse_one("{\"weapons\": {\"weapon/test/unlimited\": {\"ammo_display\": \"weapon\"}}}", "test"));
     CHECK(sh_modhud_test_relay());

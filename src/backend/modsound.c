@@ -668,24 +668,42 @@ static void ms_carry(sh_modsound_table *nt, const sh_modsound_table *old)
             if (!strcmp(nt->banks[i].leaf, old->banks[j].leaf) && old->banks[j].submitted_gen) {
                 nt->banks[i].submitted_gen = old->banks[j].submitted_gen;
                 if (strcmp(nt->banks[i].disk_path, old->banks[j].disk_path) || nt->banks[i].size != old->banks[j].size)
-                    ms_log("%s changed (%s); Wwise keeps the bank it loaded, so the new bytes take effect at the next "
-                           "launch", nt->banks[i].leaf, nt->banks[i].bundle);
+                    ms_log("Restart DOOM to hear the new %s: Wwise keeps the bank it loaded first", nt->banks[i].leaf);
             }
     for (j = 0; j < old->count; j++) {
         int kept = 0;
         for (i = 0; i < nt->count; i++) if (!strcmp(nt->banks[i].leaf, old->banks[j].leaf)) kept = 1;
         if (!kept && old->banks[j].submitted_gen)
-            ms_log("%s (%s) is no longer installed; it stays loaded until the game restarts", old->banks[j].leaf,
-                   old->banks[j].bundle);
+            ms_log("%s is no longer served; it stays loaded until DOOM restarts", old->banks[j].leaf);
     }
 }
 
-static void ms_publish(sh_modsound_table *nt)
+static int ms_same_table(const sh_modsound_table *a, const sh_modsound_table *b)
+{
+    int i;
+    if (!a || !b || a->count != b->count) return 0;
+    for (i = 0; i < a->count; i++)
+        if (strcmp(a->banks[i].leaf, b->banks[i].leaf) || strcmp(a->banks[i].disk_path, b->banks[i].disk_path) ||
+            a->banks[i].size != b->banks[i].size)
+            return 0;
+    return 1;
+}
+
+/* Publish a rebuilt table; one that serves what the current one serves is
+ * dropped, so the passes that rebuild it publish only a change. Returns 1
+ * when published. */
+static int ms_publish(sh_modsound_table *nt)
 {
     sh_modsound_table *old = g_table;
+    if (ms_same_table(nt, old)) {
+        sh_modsound_table_free(nt);
+        free(nt);
+        return 0;
+    }
     ms_carry(nt, old);
     InterlockedExchangePointer((void *volatile *)&g_table, nt);
     /* `old` is retired, never freed: an open on Wwise's thread may hold it. */
+    return 1;
 }
 
 #ifdef SH_MODSOUND_TESTING
@@ -751,13 +769,13 @@ static void ms_collect_file(void *context, const char *request, uint64_t size, c
     ms_collect *c = (ms_collect *)context;
     sh_modserve_hit hit;
     char leaf[SH_MODSOUND_LEAF_MAX];
-    (void)bundle_hash;
+    (void)size; (void)bundle_id; (void)bundle_hash;
     if (!sh_modsound_leaf(request, leaf, sizeof leaf)) return;
     if (!sh_modserve_lookup(request, &hit)) return;
-    switch (sh_modsound_table_add(c->t, request, hit.disk_path, size, bundle_id, hit.is_stock)) {
+    switch (sh_modsound_table_add(c->t, request, hit.disk_path, hit.size, hit.bundle_id, hit.is_stock)) {
     case 1: c->banks++; break;
-    case -1: ms_log("%s from %s is not delivered (a stock pointer, a duplicate name or more than %d banks)", leaf,
-                    bundle_id ? bundle_id : "", SH_MODSOUND_MAX_BANKS); break;
+    case -1: ms_log("%s is not loaded: it is a stock pointer, or the mods in use carry more than %d banks", leaf,
+                    SH_MODSOUND_MAX_BANKS); break;
     default: break;
     }
 }
@@ -822,16 +840,24 @@ static void ms_rebuild_needs(void)
     }
 }
 
-static void ms_rebuild(void)
+/* The banks the open map serves: each served bank name and the file of the
+ * build serving it now (sh_modserve_lookup, in the open map's context). */
+static void ms_rebuild_banks(void)
 {
     sh_modsound_table *t = (sh_modsound_table *)calloc(1, sizeof *t);
     ms_collect c;
+    int count;
     if (!t) { ms_log("bank table refused (out of memory); the previous one stays"); return; }
     c.t = t;
     c.banks = 0;
     sh_modserve_each_served(ms_collect_file, &c);
-    ms_publish(t);
-    if (t->count) ms_log("%d bank(s) indexed", t->count);
+    count = t->count;
+    if (ms_publish(t) && count) ms_log("%d bank(s) indexed", count);
+}
+
+static void ms_rebuild(void)
+{
+    ms_rebuild_banks();
     ms_rebuild_needs();
 }
 
@@ -853,8 +879,12 @@ static void ms_index_changed(void)
 void sh_modsound_before_pass(const char *phase)
 {
     if (!g_live || ms_on_main() != 1) return;
+    /* A map pass serves the builds that map uses (one salt can be at the root
+     * and in a map's place at two builds). */
+    ms_rebuild_banks();
     (void)ms_pass(phase);
 }
+
 
 void sh_modsound_print_status(void)
 {

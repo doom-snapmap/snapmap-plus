@@ -90,7 +90,7 @@ check(lp !== -1 && src.indexOf('var pml = pfModsLoadToast(d);', lp) !== -1 &&
       src.indexOf('var pml = pfModsLoadToast(d);', lp) < src.indexOf("d.prefabKind === 'modules'", lp),
       'mods answers are told before the kind-specific toasts');
 check(src.indexOf("d.kind === 'prefabFileResult'") !== -1, 'Export and Import answers are handled');
-/* P29's warning stays. */
+/* A module prefab's missing-module warning is shown. */
 check(src.indexOf("pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.moduleCheck : null)") !== -1 && /id="pcNeeds"/.test(src),
       'the module check warning is kept');
 
@@ -123,7 +123,7 @@ const detail = host.indexOf('static void ui_send_prefab_detail(');
 check(detail !== -1 && host.indexOf('sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));', detail) !== -1,
       'host: the selected prefab\'s scene ships without its block');
 check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path, mp, nullptr)') !== -1,
-      'host: the list and details read the view from the file (else its sidecar)');
+      'host: the list and details read the view from the file');
 const rec = host.indexOf('call.op = SH_MODULE_PREFAB_MODS_RECORD;');
 check(rec !== -1 && host.indexOf('call.path = path;', rec) !== -1 && host.indexOf('call.path = path;', rec) < rec + 200,
       'host: Create has the backend write the block into the prefab file');

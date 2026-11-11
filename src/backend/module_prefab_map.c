@@ -835,10 +835,11 @@ int sh_mp_missing_toast(const sh_mp_module_check *c, char *out, size_t cap)
     mp_join_missing(c, 1, names, sizeof names);
     if (c->missing_count == 1)
         n = snprintf(out, cap, "Not placed: this prefab needs module %s, which is not in your palette "
-                               "(DLC or a mod you do not have)", names);
+                               "(DLC or a mod you do not have). Install the DLC or the mod that adds it.", names);
     else
         n = snprintf(out, cap, "Not placed: this prefab needs %d modules that are not in your palette "
-                               "(DLC or a mod you do not have): %s", c->missing_count, names);
+                               "(DLC or a mod you do not have); install the DLC or the mods that add them: %s",
+                     c->missing_count, names);
     return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
 }
 
@@ -886,7 +887,7 @@ int sh_mp_is_module_file(const char *text, size_t len)
     return 0;
 }
 
-/* ------------------------------------------------------------ sidecar */
+/* ------------------------------------------------------------ summary view */
 
 typedef struct mp_buf { char *p; size_t n, cap; int bad; } mp_buf;
 
@@ -938,7 +939,7 @@ static void buf_str(mp_buf *b, const char *s)
     buf_put(b, "\"");
 }
 
-char *sh_mp_sidecar_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels)
+char *sh_mp_summary_view_json(const sh_mp_summary *s, const float (*bounds)[6], const char *const *labels)
 {
     mp_buf b = {0};
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};

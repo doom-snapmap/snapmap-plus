@@ -47,18 +47,14 @@ static int plain_name(const char *s)
     return n < SH_SCENE_NAME_CAP;
 }
 
-/* Owner names live under mods/<id>/; ids may be spelled with '_' for '-'. */
-static int in_namespace(const char *owner, const char *bundle_id)
+/* Owner names live under mods/<salt>/. */
+static int in_namespace(const char *owner, const char *salt)
 {
-    size_t i, n = strlen(bundle_id);
+    size_t i, n = strlen(salt);
     if (!sh_scene_owner_namespace(owner)) return 0;
     owner += 5;
-    for (i = 0; i < n; i++) {
-        char a = lower_sep(owner[i]), b = lower_sep(bundle_id[i]);
-        if (a == '_') a = '-';
-        if (b == '_') b = '-';
-        if (!owner[i] || a != b) return 0;
-    }
+    for (i = 0; i < n; i++)
+        if (!owner[i] || lower_sep(owner[i]) != lower_sep(salt[i])) return 0;
     return owner[n] == '/' && owner[n + 1] != 0;
 }
 
@@ -176,12 +172,12 @@ static int grow(sh_scene_table *t, int need)
     return 1;
 }
 
-int sh_scene_add_bundle(sh_scene_table *t, const char *bundle_id, const char *extra_json, size_t length,
+int sh_scene_add_bundle(sh_scene_table *t, const char *salt, const char *extra_json, size_t length,
                         sh_scene_log_fn log, void *context)
 {
     mpj *root, *block;
     int i, j, start, added = 0;
-    if (!t || !bundle_id || !extra_json || !length) return 0;
+    if (!t || !salt || !extra_json || !length) return 0;
     root = mpj_parse(extra_json, length);
     if (!root || root->type != MPJ_OBJ) {
         mpj_free(root);
@@ -193,7 +189,7 @@ int sh_scene_add_bundle(sh_scene_table *t, const char *bundle_id, const char *ex
         return 0;
     }
     if (block->type != MPJ_OBJ) {
-        say(log, context, "SCENES: %s REFUSED: \"scenes\" must be an object of scene nodes%s", bundle_id, NULL);
+        say(log, context, "its \"scenes\" entry must be an object of scene nodes%s%s", NULL, NULL);
         goto refused;
     }
     start = t->count;
@@ -201,46 +197,42 @@ int sh_scene_add_bundle(sh_scene_table *t, const char *bundle_id, const char *ex
         const char *owner = block->keys[i];
         const char *why;
         sh_scene_entry *e;
-        if (!plain_name(owner) || !in_namespace(owner, bundle_id)) {
-            say(log, context, "SCENES: %s REFUSED: '%s' is not one of the bundle's own names", bundle_id, owner);
+        if (!plain_name(owner) || !in_namespace(owner, salt)) {
+            say(log, context, "its scenes entry '%s' names a node outside this mod (it must start with mods/%s/)", owner, salt);
             goto rollback;
         }
         for (j = start; j < t->count; j++)
             if (name_equal(t->rows[j].node, owner)) {
-                say(log, context, "SCENES: %s REFUSED: '%s' is listed twice", bundle_id, owner);
+                say(log, context, "its scenes entry '%s' is listed twice%s", owner, NULL);
                 goto rollback;
             }
-        if (sh_scene_find(t, owner)) {
-            say(log, context, "SCENES: %s: '%s' is already declared by an earlier bundle; kept that one", bundle_id, owner);
-            t->refused++;
-            continue;
-        }
         if (t->count >= SH_SCENE_MAX_OWNERS) {
-            say(log, context, "SCENES: %s REFUSED: more than 256 scene nodes in all%s", bundle_id, NULL);
+            say(log, context, "the mods in use declare more than 256 scene nodes in all%s%s", NULL, NULL);
             goto rollback;
         }
         if (!grow(t, t->count + 1)) {
-            say(log, context, "SCENES: %s REFUSED: out of memory%s", bundle_id, NULL);
+            say(log, context, "its scenes could not be read (out of memory)%s%s", NULL, NULL);
             goto rollback;
         }
         e = &t->rows[t->count];
         memset(e, 0, sizeof *e);
         strncpy_s(e->node, sizeof e->node, owner, _TRUNCATE);
-        strncpy_s(e->bundle, sizeof e->bundle, bundle_id, _TRUNCATE);
+        strncpy_s(e->bundle, sizeof e->bundle, salt, _TRUNCATE);
         why = parse_entry(block->items[i], e);
         if (why) {
             char line[512];
             if (log) {
-                _snprintf_s(line, sizeof line, _TRUNCATE, "SCENES: %s REFUSED: '%s': %s", bundle_id, owner, why);
+                _snprintf_s(line, sizeof line, _TRUNCATE, "its scenes entry '%s': %s", owner, why);
                 log(context, line);
             }
             goto rollback;
         }
         for (j = 0; j < e->spawn_count; j++)
             if (name_equal(e->spawns[j].entitydef, owner)) {
-                say(log, context, "SCENES: %s REFUSED: '%s' spawns itself", bundle_id, owner);
+                say(log, context, "its scenes entry '%s' spawns itself%s", owner, NULL);
                 goto rollback;
             }
+
         t->count++;
         added++;
     }
@@ -254,7 +246,53 @@ refused:
     return -1;
 }
 
+typedef struct sc_load {
+    sh_scene_table *t;
+    int (*serves_now)(const char *);
+    sh_scene_log_fn log;
+    void *context;
+    const char *salt;      /* the mod being read, for its refusal line */
+} sc_load;
+
+static void sc_refusal(void *context, const char *clause)
+{
+    sc_load *c = (sc_load *)context;
+    char line[640];
+    _snprintf_s(line, sizeof line, _TRUNCATE, "SCENES: %s: %s; its scene nodes play at the player", c->salt, clause);
+    c->log(c->context, line);
+}
+
+static void sc_visit(void *context, const char *salt, const char *hash, int place, const char *extra)
+{
+    sc_load *c = (sc_load *)context;
+    int i;
+    (void)place;
+    if (!salt || !hash || !extra || (c->serves_now && !c->serves_now(hash))) return;
+    for (i = 0; i < c->t->count; i++) if (!strcmp(c->t->rows[i].bundle, salt)) return;   /* one build per salt */
+    c->salt = salt;
+    (void)sh_scene_add_bundle(c->t, salt, extra, strlen(extra), c->log ? sc_refusal : NULL, c);
+}
+
+int sh_scene_table_load(sh_scene_table *t, sh_scene_each_fn each, int (*serves_now)(const char *bundle_hash),
+                        sh_scene_log_fn log, void *context)
+{
+    sc_load c;
+    if (!t) return -1;
+    sh_scene_table_free(t);
+    memset(&c, 0, sizeof c);
+    c.t = t;
+    c.serves_now = serves_now;
+    c.log = log;
+    c.context = context;
+    if (!each || each(sc_visit, &c) < 0) {
+        sh_scene_table_free(t);
+        return -1;
+    }
+    return t->count;
+}
+
 const sh_scene_entry *sh_scene_find(const sh_scene_table *t, const char *name)
+
 {
     int i;
     if (!t || !name) return NULL;

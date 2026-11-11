@@ -4,7 +4,7 @@
  * and, when stored smaller than decoded, inflated. Loose files are read from
  * <doom>\base\<path>, then <doom>\<path>. Nothing here writes a file.
  *
- * pindex layout (13954591, as the retired bridge read it): 0x05 "SER", a
+ * pindex layout (13954591): 0x05 "SER", a
  * big-endian length of the rest past 0x20, a big-endian row count at 0x20,
  * then per row 4 bytes, three length-prefixed (little-endian) ASCII strings
  * (type, name, path) and 21 fixed bytes: offset (be64), decoded size (be32),
@@ -592,8 +592,8 @@ int sh_modstock_match(const char *request, unsigned long long size, const char *
     if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
     /* The file's own path. */
     if (mst_match_at(request, size, want, sha256, source, source_cap)) return SH_MB_STOCK_OK;
-    /* The path with its mods/<key>/ segment removed: where a copy moved under
-     * a key came from. */
+    /* The path with its mods/<salt>/ segment removed: a game file the author
+     * copied under the mod's own folder is a borrow of the game's file there. */
     if (sh_mb_strip_key(request, stripped, sizeof stripped) &&
         mst_match_at(stripped, size, want, sha256, source, source_cap))
         return SH_MB_STOCK_OK;

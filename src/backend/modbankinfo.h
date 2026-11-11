@@ -1,10 +1,9 @@
 /* modbankinfo.h -- the game's own Wwise bank index (soundbanksinfo.xml) and
- * which stock banks a mod's borrowed sound events need (DESIGN-additive 2.4,
- * "Sound events").
+ * which stock banks a mod's borrowed sound events need.
  *
  * A sound decl's name is the Wwise event it starts: the engine posts the event
  * whose id is FNV-1 of the decl name, or of "play_" plus the name's last path
- * component (snaphak-re lanes C1f and V2c). A mod that borrows a stock event
+ * component. A mod that borrows a stock event
  * plays it only when a bank holding the event is loaded. SnapMap's listed-bank
  * filter (game mode 2) skips every bank whose name contains "_sp" (build
  * 13954591: only doom_weapon_sp.bnk, whose 4 single-player-only events are

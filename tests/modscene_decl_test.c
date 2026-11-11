@@ -1,7 +1,6 @@
 /* modscene_decl_test.c -- a mod's "scenes" block (modscene_decl.c, modscene_sigs.c).
  *
- * Offline: the grammar, its defaults and refusals, the namespace and
- * first-bundle rules, the yaw-only pose algebra and where a scene plays (at the
+ * Offline: the grammar, its defaults and refusals, the namespace rule, the yaw-only pose algebra and where a scene plays (at the
  * node; at the player keeping their feet, with and without the turn toward the
  * anchor), and the queue of spawns that wait for a node's sync to start. With
  * build 13954591 executables as arguments: the two spawn signatures and the
@@ -46,31 +45,31 @@ static void test_grammar(void)
     const sh_scene_entry *e;
     static const char ok[] =
         "{\"name\":\"x\",\"scenes\":{"
-        "\"mods/alex.scenes/imp_arrival\":{\"anchor\":[563.09,16.7,0,180],\"player\":[-33.68,0,0,0],"
-        "\"spawn\":[{\"entityDef\":\"mods/alex.scenes/entrance/imp\"}]},"
-        "\"mods/alex.scenes/slam\":{\"plays\":\"at_node\",\"anchor\":[-1530.1,-524.7,0,0],"
+        "\"mods/alxscene/imp_arrival\":{\"anchor\":[563.09,16.7,0,180],\"player\":[-33.68,0,0,0],"
+        "\"spawn\":[{\"entityDef\":\"mods/alxscene/entrance/imp\"}]},"
+        "\"mods/alxscene/slam\":{\"plays\":\"at_node\",\"anchor\":[-1530.1,-524.7,0,0],"
         "\"spawn\":[{\"entityDef\":\"ai/demon/imp_coop\",\"at\":[1,2,3,90]},{\"entityDef\":\"func/x\"}],\"return\":true},"
-        "\"mods/alex.scenes/plain\":{\"reaim\":false}}}";
-    CHECK(add(&t, "alex.scenes", ok) == 3);
-    e = sh_scene_find(&t, "MODS\\alex.scenes\\IMP_ARRIVAL");
+        "\"mods/alxscene/plain\":{\"reaim\":false}}}";
+    CHECK(add(&t, "alxscene", ok) == 3);
+    e = sh_scene_find(&t, "MODS\\alxscene\\IMP_ARRIVAL");
     CHECK(e != NULL);
     if (e) {
         CHECK(!e->at_node && e->has_player && e->reaim && !e->return_player);
-        CHECK(e->spawn_count == 1 && !strcmp(e->spawns[0].entitydef, "mods/alex.scenes/entrance/imp"));
+        CHECK(e->spawn_count == 1 && !strcmp(e->spawns[0].entitydef, "mods/alxscene/entrance/imp"));
         CHECK(approx(e->spawns[0].at.x, 563.09f, 1e-3f) && approx(e->spawns[0].at.yaw, 180.0f, 1e-4f));
-        CHECK(approx(e->player.x, -33.68f, 1e-4f) && !strcmp(e->bundle, "alex.scenes"));
+        CHECK(approx(e->player.x, -33.68f, 1e-4f) && !strcmp(e->bundle, "alxscene"));
     }
-    e = sh_scene_find(&t, "mods/alex.scenes/slam");
+    e = sh_scene_find(&t, "mods/alxscene/slam");
     CHECK(e && e->at_node && !e->has_player && !e->reaim && e->return_player && e->spawn_count == 2);
     if (e) {
         CHECK(approx(e->spawns[0].at.z, 3.0f, 0) && approx(e->spawns[0].at.yaw, 90.0f, 0));
         CHECK(approx(e->spawns[1].at.x, -1530.1f, 1e-3f));           /* "at" defaults to the anchor */
     }
-    e = sh_scene_find(&t, "mods/alex.scenes/plain");
+    e = sh_scene_find(&t, "mods/alxscene/plain");
     CHECK(e && !e->at_node && !e->has_player && !e->reaim && e->return_player && !e->spawn_count);
     CHECK(e && e->anchor.x == 0 && e->anchor.yaw == 0);
     CHECK(add(&t, "other", "{\"strings\":{}}") == 0);
-    CHECK(sh_scene_find(&t, "mods/alex.scenes/nothing") == NULL);
+    CHECK(sh_scene_find(&t, "mods/alxscene/nothing") == NULL);
     sh_scene_table_free(&t);
 }
 
@@ -78,31 +77,31 @@ static void test_refusals(void)
 {
     static const char *bad[] = {
         "{\"scenes\":[]}",                                                                    /* not an object */
-        "{\"scenes\":{\"mods/other.mod/n\":{}}}",                                             /* foreign owner */
+        "{\"scenes\":{\"mods/othermod/n\":{}}}",                                             /* foreign owner */
         "{\"scenes\":{\"maps/x/n\":{}}}",                                                     /* stock owner */
-        "{\"scenes\":{\"mods/a.b/n\":[]}}",                                                   /* entry not an object */
-        "{\"scenes\":{\"mods/a.b/n\":{\"plays\":\"elsewhere\"}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"anchr\":[0,0,0,0]}}}",                                /* typo */
-        "{\"scenes\":{\"mods/a.b/n\":{\"anchor\":[0,0,0]}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"anchor\":[1e9,0,0,0]}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"plays\":\"at_node\",\"player\":[0,0,0,0]}}}",         /* no player at the node */
-        "{\"scenes\":{\"mods/a.b/n\":{\"reaim\":true}}}",                                     /* reaim without player */
-        "{\"scenes\":{\"mods/a.b/n\":{\"reaim\":1,\"player\":[0,0,0,0]}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"return\":\"no\"}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[]}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[{\"at\":[0,0,0,0]}]}}}",                     /* no entityDef */
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[{\"entityDef\":\"a b\"}]}}}",                /* space */
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[{\"entityDef\":\"x\",\"origin\":[0,0,0]}]}}}",
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},"
+        "{\"scenes\":{\"mods/aaaabbbb/n\":[]}}",                                                   /* entry not an object */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"plays\":\"elsewhere\"}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"anchr\":[0,0,0,0]}}}",                                /* typo */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"anchor\":[0,0,0]}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"anchor\":[1e9,0,0,0]}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"plays\":\"at_node\",\"player\":[0,0,0,0]}}}",         /* no player at the node */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"reaim\":true}}}",                                     /* reaim without player */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"reaim\":1,\"player\":[0,0,0,0]}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"return\":\"no\"}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[]}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"at\":[0,0,0,0]}]}}}",                     /* no entityDef */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"a b\"}]}}}",                /* space */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"x\",\"origin\":[0,0,0]}]}}}",
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},{\"entityDef\":\"x\"},"
         "{\"entityDef\":\"x\"},{\"entityDef\":\"x\"}]}}}",                                    /* five */
-        "{\"scenes\":{\"mods/a.b/n\":{\"spawn\":[{\"entityDef\":\"mods/a.b/N\"}]}}}",         /* itself */
-        "{\"scenes\":{\"mods/a.b/n\":{},\"mods/a.b/N\":{}}}",                                  /* twice */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{\"spawn\":[{\"entityDef\":\"mods/aaaabbbb/N\"}]}}}",         /* itself */
+        "{\"scenes\":{\"mods/aaaabbbb/n\":{},\"mods/aaaabbbb/N\":{}}}",                                  /* twice */
     };
     size_t i;
     for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         sh_scene_table t = {0};
         int before = g_lines;
-        int r = add(&t, "a.b", bad[i]);
+        int r = add(&t, "aaaabbbb", bad[i]);
         if (r != -1 || t.count != 0 || g_lines != before + 1) printf("case %u\n", (unsigned)i);
         CHECK(r == -1 && t.count == 0 && g_lines == before + 1);
         sh_scene_table_free(&t);
@@ -113,13 +112,69 @@ static void test_namespace_and_order(void)
 {
     sh_scene_table t = {0};
     const sh_scene_entry *e;
-    CHECK(add(&t, "campaign-interactables-2", "{\"scenes\":{\"mods/campaign_interactables-2/scene_x\":{\"plays\":\"at_node\"}}}") == 1);
-    CHECK(add(&t, "late", "{\"scenes\":{\"mods/late/scene_y\":{}}}") == 1);
-    CHECK(add(&t, "campaign-interactables-2", "{\"scenes\":{\"MODS/campaign_interactables-2/SCENE_X\":{}}}") == 0);
-    CHECK(t.refused == 1);
-    e = sh_scene_find(&t, "mods/campaign_interactables-2/scene_x");
-    CHECK(e && e->at_node);
+    int before = g_lines;
+    /* An owner is under mods/<salt>/ exactly (any case of the folder words). */
+    CHECK(add(&t, "k3m9q2xa", "{\"scenes\":{\"MODS/k3m9q2xa/Scene_X\":{\"plays\":\"at_node\"}}}") == 1);
+    CHECK(add(&t, "late0001", "{\"scenes\":{\"mods/late0001/scene_y\":{}}}") == 1);
+    /* Another salt's node, or one that only nearly matches, is refused whole. */
+    CHECK(add(&t, "late0002", "{\"scenes\":{\"mods/late0001/scene_z\":{}}}") == -1);
+    CHECK(add(&t, "late0002", "{\"scenes\":{\"mods/late000/scene_z\":{}}}") == -1);
+    CHECK(add(&t, "late0002", "{\"scenes\":{\"mods/late0002/\":{}}}") == -1);
+    CHECK(t.refused == 3 && t.count == 2 && g_lines == before + 3);
+    e = sh_scene_find(&t, "mods/k3m9q2xa/scene_x");
+    CHECK(e && e->at_node && !strcmp(e->bundle, "k3m9q2xa"));
+
     CHECK(sh_scene_owner_namespace("Mods/x") && !sh_scene_owner_namespace("ai/demon/imp"));
+    sh_scene_table_free(&t);
+}
+
+/* The builds the open map serves: one build per salt, the one serving now. */
+typedef struct fake_build { const char *salt, *hash; int place; const char *extra; int serves; } fake_build;
+static fake_build g_builds[4];
+static int g_nbuilds;
+static int fake_each(sh_scene_build_fn fn, void *context)
+{
+    int i;
+    for (i = 0; i < g_nbuilds; i++) fn(context, g_builds[i].salt, g_builds[i].hash, g_builds[i].place, g_builds[i].extra);
+    return g_nbuilds;
+}
+static int fake_serves(const char *hash)
+{
+    int i;
+    for (i = 0; i < g_nbuilds; i++) if (!strcmp(g_builds[i].hash, hash)) return g_builds[i].serves;
+    return 0;
+}
+
+static void test_served_builds(void)
+{
+    sh_scene_table t = {0};
+    const sh_scene_entry *e;
+    int before;
+    static fake_build builds[] = {
+        { "rootsalt", "1111", 0, "{\"scenes\":{\"mods/rootsalt/node\":{\"plays\":\"at_node\"}}}", 1 },
+        { "rootsalt", "2222", 1, "{\"scenes\":{\"mods/rootsalt/node\":{}}}", 0 },
+        { "unusedmd", "3333", 0, "{\"scenes\":{\"mods/unusedmd/node\":{}}}", 0 },
+        { "brokenmd", "4444", 0, "{\"scenes\":{\"mods/othermod/node\":{}}}", 1 },
+    };
+    memcpy(g_builds, builds, sizeof builds);
+    g_nbuilds = 4;
+    /* The open map serves the root build: its entry. */
+    before = g_lines;
+    CHECK(sh_scene_table_load(&t, fake_each, fake_serves, count_line, NULL) == 1);
+    e = sh_scene_find(&t, "mods/rootsalt/node");
+    CHECK(e && e->at_node && sh_scene_find(&t, "mods/unusedmd/node") == NULL);
+    CHECK(g_lines == before + 1);   /* the broken block, once */
+    /* A downloaded map serves its own build of the salt: that build's entry. */
+    g_builds[0].serves = 0;
+    g_builds[1].serves = 1;
+    CHECK(sh_scene_table_load(&t, fake_each, fake_serves, count_line, NULL) == 1);
+    e = sh_scene_find(&t, "mods/rootsalt/node");
+    CHECK(e && !e->at_node);
+    /* Both served (map scope off): the first, never a second declarer. */
+    g_builds[0].serves = 1;
+    CHECK(sh_scene_table_load(&t, fake_each, fake_serves, NULL, NULL) == 1);
+    e = sh_scene_find(&t, "mods/rootsalt/node");
+    CHECK(e && e->at_node && t.count == 1);
     sh_scene_table_free(&t);
 }
 
@@ -316,6 +371,8 @@ int main(int argc, char **argv)
     test_grammar();
     test_refusals();
     test_namespace_and_order();
+    test_served_builds();
+
     test_math();
     for (i = 1; i < argc; i++) test_image(argv[i]);
     if (g_fail) { printf("modscene_decl_test: FAILED\n"); return 1; }

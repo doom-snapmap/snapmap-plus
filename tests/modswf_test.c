@@ -261,8 +261,6 @@ static void test_builder(void)
     drop("assets/generated/image/mods/screensx/stray.bswf");
     for (i = 0; movies[i]; i++) drop(movies[i]);
     drop("mod.json");
-    drop("bundle.json");
-    drop("bundle.canonical.json");
     {
         static const char *const dirs[] = { "assets\\generated\\image\\mods\\screensx", "assets\\generated\\image\\mods",
             "assets\\generated\\image", "assets\\generated\\swf\\mods\\screensx", "assets\\generated\\swf\\mods",

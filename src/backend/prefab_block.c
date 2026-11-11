@@ -262,3 +262,32 @@ size_t sh_prefab_block_strip_comments(char *s, size_t len)
     if (w < len) s[w] = 0;
     return w;
 }
+
+int sh_prefab_block_valid_name(const char *name)
+{
+    static const char *const DEVICES[] = { "con", "prn", "aux", "nul" };
+    char base[8];
+    size_t n, i, stem;
+    if (!name) return 0;
+    n = strlen(name);
+    if (!n || n > SH_PREFAB_NAME_MAX) return 0;
+    if (name[0] == ' ' || name[0] == '.' || name[n - 1] == ' ' || name[n - 1] == '.') return 0;
+    if (strstr(name, "..")) return 0;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20 || c == 0x7f || strchr("<>:\"/\\|?*", c)) return 0;
+    }
+    if (n >= 5 && (name[n - 5] == '.') && (name[n - 4] | 32) == 'm' && (name[n - 3] | 32) == 'e' &&
+        (name[n - 2] | 32) == 't' && (name[n - 1] | 32) == 'a')
+        return 0;
+    /* The device names, alone or before an extension, with spaces before the dot. */
+    for (stem = 0; stem < n && name[stem] != '.'; stem++) {}
+    while (stem > 0 && name[stem - 1] == ' ') stem--;
+    if (stem == 3 || stem == 4) {
+        for (i = 0; i < stem; i++) base[i] = (char)((name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i]);
+        base[stem] = 0;
+        for (i = 0; stem == 3 && i < sizeof DEVICES / sizeof DEVICES[0]; i++) if (!strcmp(base, DEVICES[i])) return 0;
+        if (stem == 4 && (!strncmp(base, "com", 3) || !strncmp(base, "lpt", 3)) && base[3] >= '0' && base[3] <= '9') return 0;
+    }
+    return 1;
+}

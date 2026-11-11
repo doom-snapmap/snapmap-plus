@@ -25,13 +25,8 @@ typedef struct mc_scene { char why[400]; } mc_scene;
 static void mc_scene_line(void *context, const char *line)
 {
     mc_scene *s = (mc_scene *)context;
-    const char *at = strstr(line, " REFUSED: ");
-    const char *word = at ? strstr(at, "the bundle's own names") : NULL;
-    if (s->why[0] || !at) return;
-    if (word)   /* the reader's wording, in the author's terms */
-        _snprintf_s(s->why, sizeof s->why, _TRUNCATE, "%.*sthis mod's own names (mods/<this mod's salt>/...)%s",
-                    (int)(word - (at + 10)), at + 10, word + 22);
-    else strncpy_s(s->why, sizeof s->why, at + 10, _TRUNCATE);
+    /* The reader's first refusal is the cause; its lines name the entry. */
+    if (!s->why[0]) strncpy_s(s->why, sizeof s->why, line, _TRUNCATE);
 }
 
 /* The HUD rule's weapon name, as modhud.c reads it. */

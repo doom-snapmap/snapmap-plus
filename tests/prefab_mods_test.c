@@ -15,19 +15,23 @@
  *     bundle that provides its inherit, stock names nothing) into the file's
  *     block and no sidecar; description and tag edits rewrite the block and
  *     keep the rows; a prefab without mods gets a block naming none; a module
- *     prefab's file carries its summary and rows; a prefab saved before the
- *     block reads its sidecar, and the first edit writes the block and leaves
- *     the sidecar as it was;
+ *     prefab's file carries its summary and rows; a prefab an earlier version
+ *     saved (a sidecar and no block, or rows naming "id" and "bundle") is not
+ *     read, its placement and export are refused and an edit writes nothing;
  *   resolution through the real hold (modpublished.c, engine doubles): every
  *     mod installed (activated, attached to the open map with one console
  *     line, or left alone when the map lists it); the store has the missing
  *     one (the prefab's question, Yes downloads, the ready step, then ready);
  *     the store lacks it; the store cannot be reached; No; no gates bound;
  *     a DLC module no row provides, with and without a block; a second
- *     placement while one waits; the slot's rows from the block or a sidecar,
- *     META_READ from the file, a tail or a sidecar;
+ *     placement while one waits; the slot's rows from the block, META_READ
+ *     from the file or a tail;
+ *   decision 12: an imported prefab's placement installs its mod at the root
+ *     (named as its folder), in the open map's own context, once; the status
+ *     and `sh_prefab mods` count it installed and change nothing; a failed
+ *     import takes out the prefab it added;
  *   the ZIP: <name>.json as on disk and the mod's installed folder
- *     (mods/<id>/mod.json and assets/ byte for byte), no index, also for a
+ *     (its mod.json and assets/ byte for byte), no index, also for a
  *     prefab without mods; refused by the map importer and refusing a map's
  *     ZIP and the retired bundle form; imported into an empty store and
  *     library, imported again without a write, a differing prefab of the same
@@ -143,19 +147,8 @@ static void f_toast(const char *text) { F.toasts++; strcpy_s(F.last_toast, sizeo
 static int f_refresh(void) { F.refreshes++; return 1; }
 static int f_call_main(int (*fn)(void *), void *ctx) { F.main_calls++; return fn(ctx) ? 1 : 1; }
 
-/* As the engine's: the prefab's place, the player's own root first. */
-static void f_scope_place(const char *name)
-{
-    char dir[SH_MODSERVE_PLACE_CAP] = "";
-    sh_ms_place place;
-    place.title = name && name[0] ? name : NULL;
-    place.map_id = NULL;
-    if (!place.title || !sh_ms_place_dir(&place, dir, sizeof dir)) dir[0] = 0;
-    (void)sh_modserve_scope_set_place(dir, 1);
-}
-
 static const sh_prefab_mods_ops PM_OPS = {
-    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main, f_scope_place
+    f_row_state, f_listed, f_attach, f_activate, f_module_known, f_print, f_toast, f_refresh, f_call_main
 };
 
 /* modpublished's doubles: the hold runs as in the game, its jobs inline. */
@@ -252,7 +245,7 @@ static int install_mod(const char *src, const char *salt, const char *name, cons
     sh_mb_bundle b;
     int ok;
     _snprintf_s(json, sizeof json, _TRUNCATE,
-                "{\"name\":\"%s\",\"version\":\"1.0.0\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
+                "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
     mt_write(src, "mod.json", json);
     mt_write(src, decl_rel, decl);
     memset(&b, 0, sizeof b);
@@ -301,7 +294,23 @@ static void names(void)
     CHECK(sh_prefab_mods_valid_name("Door (2)"));
     CHECK(sh_prefab_mods_valid_name("console"));
     CHECK(!sh_prefab_mods_valid_name("con") && !sh_prefab_mods_valid_name("NUL") && !sh_prefab_mods_valid_name("aux.json"));
-    CHECK(!sh_prefab_mods_valid_name("COM1") && !sh_prefab_mods_valid_name("lpt9.zip") && sh_prefab_mods_valid_name("com0"));
+    CHECK(!sh_prefab_mods_valid_name("COM1") && !sh_prefab_mods_valid_name("lpt9.zip"));
+    /* One rule with the Prefabs tab: COM0 and LPT0 are device names too, ".."
+     * is refused anywhere, a device name before spaces and an extension too,
+     * and the length is the tab's, in bytes. */
+    CHECK(!sh_prefab_mods_valid_name("com0") && !sh_prefab_mods_valid_name("LPT0") && !sh_prefab_mods_valid_name("a..b"));
+    CHECK(!sh_prefab_mods_valid_name("nul .txt") && sh_prefab_mods_valid_name("con2") && sh_prefab_mods_valid_name("v1.2"));
+    {
+        char longest[SH_PREFAB_NAME_MAX + 2];
+        memset(longest, 'a', SH_PREFAB_NAME_MAX);
+        longest[SH_PREFAB_NAME_MAX] = 0;
+        CHECK(sh_prefab_mods_valid_name(longest));
+        longest[SH_PREFAB_NAME_MAX] = 'a';
+        longest[SH_PREFAB_NAME_MAX + 1] = 0;
+        CHECK(!sh_prefab_mods_valid_name(longest));
+    }
+    CHECK(sh_prefab_mods_valid_name("J\xc3\xb6rg's crates"));
+
     CHECK(!sh_prefab_mods_valid_name("a/b") && !sh_prefab_mods_valid_name("a\\b") && !sh_prefab_mods_valid_name("a:b"));
     CHECK(!sh_prefab_mods_valid_name(" x") && !sh_prefab_mods_valid_name("x.") && !sh_prefab_mods_valid_name(""));
     CHECK(!sh_prefab_mods_valid_name("door.meta") && !sh_prefab_mods_valid_name(".."));
@@ -760,7 +769,7 @@ static void resolving(const sh_modmanifest_row *door)
         r = sh_prefab_mods_resolve_main(DLC, sizeof DLC - 1, &rows, "Rooms", &seq, msg, sizeof msg);
         CHECK(r == SH_PREFAB_MODS_NEEDS_MODULE && F.asks == 0 && !sh_modpublished_holding());
         CHECK(!strcmp(msg, "Not placed: this prefab needs module ind_dlc/dlc_room, which is not in your palette "
-                           "(DLC or a mod you do not have)"));
+                           "(DLC or a mod you do not have). Install the DLC or the mod that adds it."));
         CHECK(!strcmp(F.last_print, "Module prefab: needs module maps/modules/ind_dlc/dlc_room.decl; this room is not in "
                                     "your palette (DLC or a mod you do not have)"));
         {
@@ -822,7 +831,8 @@ static void resolve_through_slot(const char *lib, const sh_modmanifest_row *door
         call.meta_path = old;
         call.name = "Old hall";
         CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_REFUSED && !strcmp(out, SH_PREFAB_EARLIER_TEXT) &&
-              !strcmp(F.last_print, "Prefab Old hall was not placed. " SH_PREFAB_EARLIER_TEXT));
+              !strcmp(F.last_print, "Prefab Old hall was not placed: it was saved by an earlier version of Snapmap+. "
+                                     "Ask its author to export it again."));
     }
 
     printf("-- META_READ: the view from the block or from a tail of the file; an old sidecar is not read\n");
@@ -1044,7 +1054,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             size_t wl = 0;
             _snprintf_s(lone, sizeof lone, _TRUNCATE, "%s\\Ghost door.json", tmp);
             side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod@" GHOST
-                   "\",\"name\":\"ghost.mod\",\"version\":\"2.0\",\"size\":1,\"names\":[]}]}";
+                   "\",\"name\":\"ghost.mod\",\"size\":1,\"names\":[]}]}";
+
             with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
             CHECK(with && sh_prefab_mods_write_file(lone, with, wl));
             free(with);
@@ -1053,6 +1064,90 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
                   !strcmp(msg, "Imported prefab Ghost door: 0 mods installed, 0 already installed. It also needs ghost.mod, "
                                "which the export does not carry."));
         }
+    }
+
+    printf("-- placing a prefab whose mod only a map's place holds installs it at the root\n");
+    {
+        sh_module_prefab_call call;
+        sh_ms_list list;
+        char out[700], *pt, placed[MAX_PATH * 2];
+        size_t tl = 0, missing = 9;
+        sh_modmanifest_list rows;
+        char *json;
+        /* The prefab's import put the mod at the root; here it is a downloaded map's mod instead. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\door", storeB);
+        _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps", storeB);
+        CHECK(CreateDirectoryA(placed, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+        _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps\\Some map", storeB);
+        CHECK(CreateDirectoryA(placed, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+        _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps\\Some map\\door", storeB);
+        CHECK(MoveFileA(path, placed));
+        CHECK(sh_ms_set_root(storeB));
+        CHECK(sh_modserve_index_build(storeB) >= 0);
+        /* The open map: the player's own, no place. Only the downloaded map's place holds the mod. */
+        (void)sh_modserve_scope_set_place(NULL, 1);
+        CHECK(sh_modserve_row_served(door, NULL, 0) != SH_MODSERVE_ROW_SERVED);
+        memset(&list, 0, sizeof list);
+        CHECK(sh_ms_enumerate(&list) && !sh_ms_find_salt(&list, door->salt, NULL, NULL));
+        sh_ms_list_free(&list);
+        /* The Prefabs tab shows it installed: its placement takes it to the root. */
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door (2).json", libB);
+        pt = slurp(path, &tl);
+        CHECK(pt && sh_prefab_mods_rows_of(pt, tl, NULL, &rows) == 1);
+        json = sh_prefab_mods_status_json(&rows, &missing);
+        CHECK(json && missing == 0 && strstr(json, "\"installed\":true"));
+        free(json);
+        sh_modmanifest_list_free(&rows);
+        /* `sh_prefab mods` reads, in the open map's context, and changes nothing. */
+        {
+            const char *mods_argv[] = { "mods", "Door (2)" };
+            sh_prefab_mods_set_root(libB);
+            F.prints_all[0] = 0;
+            sh_prefab_mods_command(2, mods_argv);
+            CHECK(strstr(F.prints_all, "  test.door: in a downloaded map's folder; placing it puts it in your mods "
+                                       "folder") && !strstr(F.prints_all, "testdoor@"));
+            CHECK(sh_modserve_row_served(door, NULL, 0) != SH_MODSERVE_ROW_SERVED);
+            sh_prefab_mods_set_root(NULL);
+        }
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+        call.text = pt;
+        call.text_len = tl;
+        call.name = "Door (2)";
+        call.out = out;
+        call.out_cap = (int)sizeof out;
+        F.prints_all[0] = 0;
+        CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE);
+        CHECK(strstr(F.prints_all, "Prefab Door (2): 1 mod it uses was installed in your mods folder, where your own "
+                                   "maps find it.") != NULL);
+        memset(&list, 0, sizeof list);
+        CHECK(sh_ms_enumerate(&list) && sh_ms_find_salt(&list, door->salt, NULL, NULL) != NULL &&
+              !strcmp(sh_ms_find_salt(&list, door->salt, NULL, NULL)->name, "door"));
+        sh_ms_list_free(&list);
+        CHECK(sh_modserve_row_served(door, NULL, 0) == SH_MODSERVE_ROW_SERVED);
+        /* A second placement installs nothing. */
+        F.prints_all[0] = 0;
+        CHECK(sh_prefab_mods_slot(&call) == SH_PREFAB_MODS_PLACE && !strstr(F.prints_all, "installed in your mods folder"));
+        free(pt);
+    }
+
+    printf("-- a failed import leaves nothing: the prefab it added is taken out again\n");
+    {
+        char libE[MAX_PATH * 2], storeE[MAX_PATH * 2];
+        _snprintf_s(libE, sizeof libE, _TRUNCATE, "%s\\libE", tmp);
+        _snprintf_s(storeE, sizeof storeE, _TRUNCATE, "%s\\storeE", tmp);
+        /* The mods folder is a file: the carried mod cannot be installed. */
+        CHECK(put_file(storeE, "not a folder"));
+        (void)sh_ms_set_root(storeE);
+        (void)sh_modserve_index_build(storeE);
+        CHECK(sh_prefab_mods_import(zipA, libE, name, sizeof name, msg, sizeof msg) == -1);
+
+        CHECK(!strncmp(msg, "The prefab was not imported", 27));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Door.json", libE);
+        CHECK(!mt_exists(path));
+        CHECK(sh_modserve_bundle_state(door->build, NULL, 0) == 0);
+        CHECK(sh_ms_set_root(storeB));
+        CHECK(sh_modserve_index_build(storeB) >= 0);
     }
 
     printf("-- the console: mods, export and import of a ZIP and of a folder\n");
@@ -1065,8 +1160,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         F.prints_all[0] = 0;
         mods_argv[1] = "Door (2)";
         sh_prefab_mods_command(2, mods_argv);
-        CHECK(strstr(F.prints_all, "Prefab Door (2) needs 1 mod:") && strstr(F.prints_all, "test.door (testdoor@") &&
-              strstr(F.prints_all, "): installed"));
+        CHECK(strstr(F.prints_all, "Prefab Door (2) needs 1 mod:") && strstr(F.prints_all, "  test.door: installed\n"));
         mods_argv[1] = "Door";
         sh_prefab_mods_command(2, mods_argv);
         CHECK(!strcmp(F.last_print, "Prefab Door records no mods."));
@@ -1122,7 +1216,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         _snprintf_s(p3, sizeof p3, _TRUNCATE, "%s\\Ghost.json", libA);
         _snprintf_s(z3, sizeof z3, _TRUNCATE, "%s\\ghost.zip", tmp);
         side = "{\"desc\":\"\",\"tags\":[],\"mods\":[{\"mod\":\"ghostmod@" GHOST
-               "\",\"name\":\"ghost.mod\",\"version\":\"2.0\",\"size\":1,\"names\":[]}]}";
+               "\",\"name\":\"ghost.mod\",\"size\":1,\"names\":[]}]}";
         with = sh_prefab_mods_embed(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, side, strlen(side), NULL, &wl);
         CHECK(with && sh_prefab_mods_write_file(p3, with, wl));
         free(with);
@@ -1150,7 +1244,8 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         /* With an earlier version's sidecar and no block: refused. */
         CHECK(put_file(m4, "{\"desc\":\"From the sidecar\",\"tags\":[\"old\"]}"));
         CHECK(sh_prefab_mods_export(p4, m4, "Old door", z4, msg, sizeof msg) == -1 &&
-              !strcmp(msg, "Prefab Old door was not exported. " SH_PREFAB_EARLIER_TEXT));
+              !strcmp(msg, "Prefab Old door was not exported: it was saved by an earlier version of Snapmap+. Ask its "
+                           "author to export it again."));
 
     }
 }
@@ -1288,7 +1383,7 @@ static int e_install(const char *src, const char *salt, const char *name, const 
     sh_mb_bundle b;
     int ok;
     _snprintf_s(json, sizeof json, _TRUNCATE,
-                "{\"name\":\"%s\",\"version\":\"1.0.0\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
+                "{\"name\":\"%s\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", name, salt);
     mt_write(src, "mod.json", json);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\own.bimage", salt);
     mt_write(src, rel, bytes);

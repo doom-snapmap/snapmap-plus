@@ -29,12 +29,17 @@
  * {"desc","tags",...summary members...,"mods"}. A block reads as a view and a
  * view composes into a block.
  *
- * Load and Place resolve the rows before the engine sees the prefab:
- *   every row served      (the asset rule, modserve.h sh_modserve_row_served,
- *                         in the placement's context: the open map's root
- *                         folders first, then the place the prefab's ZIP
- *                         import filled, mods\maps\<prefab name>\) the
- *                         mods are activated for the open map, a mod the
+ * Load and Place resolve the rows before the engine sees the prefab, in the
+ * open map's own context (the root folders, else the map's own place); a
+ * placement never changes where the map finds its mods (decision 12):
+ *   held by an import     a row's build that a place holds (a prefab ZIP's
+ *                         import) and the open map does not serve, while
+ *                         the root holds no folder of its salt, is installed
+ *                         at the root first (off the game thread, one console
+ *                         line): the player is putting the mod to use in
+ *                         their own maps, and the import was the approval;
+ *   every row served      (the asset rule, modserve.h sh_modserve_row_served)
+ *                         the mods are activated for the open map, a mod the
  *                         open map does not list is attached to it (a
  *                         map-level row, as the Mods tab's Use in this map)
  *                         with one console line, and the placement goes on;
@@ -52,11 +57,13 @@
  * (module_prefab_map.h): nothing can install it.
  *
  * Export always writes one ZIP (modexport.h): <name>.json, the prefab file
- * with its block, and every mod its rows name as its folder
- * (mods/<folder name>/mod.json and assets/). Import takes that ZIP, or a .json
- * inside an extracted export folder, installs each carried folder nothing
- * serves into mods\maps\<prefab name>\, and adds the prefab to the library.
- * Importing an export whose mods and prefab are already there writes nothing.
+ * with its block, and every mod its rows name as its folder (its mod.json and
+ * assets/). Import takes that ZIP, or a .json inside an extracted export
+ * folder, adds the prefab to the library, then installs each carried folder
+ * nothing serves (modexport_read_prefab: into the ZIP's place, from which the
+ * first placement installs it at the root); when the install fails the
+ * prefab is taken out again, so a failed import leaves nothing. Importing an
+ * export whose mods and prefab are already there writes nothing.
  *
  * Paths and prefab names are UTF-8 end to end, opened with the wide file
  * calls; only the console's arguments are ANSI, converted on entry.
@@ -90,7 +97,8 @@ extern "C" {
 
 /* A prefab saved by an earlier version: the rows functions return this. */
 #define SH_PREFAB_ROWS_EARLIER (-2)
-#define SH_PREFAB_EARLIER_TEXT "This prefab was saved in a format this version does not read."
+#define SH_PREFAB_EARLIER_TEXT "This prefab was saved by an earlier version of Snapmap+ and cannot be used. " \
+    "Ask its author to export it again."
 
 /* ------------------------------------------------------------ rows */
 
@@ -121,7 +129,8 @@ void  sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap)
  * "installed","state","cause"}...]}, "id" the row's name (else its salt),
  * with each row's state under the asset rule
  * (row_state): "served", "missing" or "incomplete", and the refusal sentence
- * for the last two. malloc'd. */
+ * for the last two; a build a ZIP's import holds counts as served (its
+ * placement installs it at the root). malloc'd. */
 char *sh_prefab_mods_status_json(const sh_modmanifest_list *rows, size_t *missing);
 
 /* ------------------------------------------------------------ the block */
@@ -159,10 +168,10 @@ char *sh_prefab_mods_strip_copy(const char *text, size_t len, size_t *out_len);
 
 /* Read a whole file (at most SH_PREFAB_MODS_FILE_MAX). malloc'd,
  * NUL-terminated; NULL when it cannot be read. */
-char *sh_prefab_mods_read_file(const char *path_acp, size_t *len);
+char *sh_prefab_mods_read_file(const char *path_utf8, size_t *len);
 
 /* Write a file through a temporary beside it. 1 written. */
-int   sh_prefab_mods_write_file(const char *path_acp, const char *data, size_t len);
+int   sh_prefab_mods_write_file(const char *path_utf8, const char *data, size_t len);
 
 /* Create: `text` is the prefab the engine just serialized to `path` (the host
  * has removed its comments, sh_prefab_block_strip_comments; any left are
@@ -213,19 +222,17 @@ int   sh_prefab_mods_export(const char *prefab_path, const char *meta_path, cons
 
 /* Import a prefab's export (a .zip, or a .json inside an extracted export
  * folder; UTF-8) into prefabs_dir (UTF-8, with or without a trailing
- * separator): install the carried mod folders nothing serves into the
- * prefab's place (modexport_read_prefab), then add the prefab under
- * the .json's file name. A prefab of that name with the same bytes is left
- * alone; one with other bytes gets the next free "<name> (N)". 1 added, 0
- * already there (nothing written), -1 refused. name_out receives the name it
- * has in the library. */
+ * separator): add the prefab under the .json's file name, then install the
+ * carried mod folders nothing serves (modexport_read_prefab); a failed
+ * install takes the prefab out again. A prefab of that name with the same
+ * bytes is left alone; one with other bytes gets the next free "<name> (N)".
+ * 1 added, 0 already there (nothing written), -1 refused (nothing of the
+ * import stays). name_out receives the name it has in the library. */
 int   sh_prefab_mods_import(const char *src_utf8, const char *prefabs_dir, char *name_out, size_t name_cap,
                             char *msg, size_t cap);
 
-/* 1 when `name` can be a prefab file name: 1-120 characters, none of
- * \ / : * ? " < > | or a control character, no leading or trailing space or
- * dot, not a device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without
- * an extension) and not ending in ".meta". */
+/* 1 when `name` can be a prefab file name: the one rule the Prefabs tab
+ * uses too (prefab_block.h, sh_prefab_block_valid_name). */
 int   sh_prefab_mods_valid_name(const char *name);
 
 /* ------------------------------------------------------------ engine */
@@ -244,11 +251,6 @@ typedef struct sh_prefab_mods_ops {
     void (*toast)(const char *text);                               /* one editor toast */
     int  (*refresh)(void);                                         /* after an import installed bundles */
     int  (*call_main)(int (*fn)(void *), void *ctx);               /* run fn on the game thread; 1 ran */
-    /* The placement's serving context (sh_modserve_scope_set_place): the
-     * player's own (root folders first), with the place the prefab's import
-     * filled, mods\maps\<name>\. */
-    void (*scope_place)(const char *name);
-
 } sh_prefab_mods_ops;
 void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 
@@ -257,7 +259,9 @@ void  sh_prefab_mods_bind(const sh_prefab_mods_ops *ops);
 void  sh_prefab_mods_set_root(const char *dir);
 
 /* `sh_prefab`: argv[0] is the verb (NULL or "help" prints the verbs):
- *   mods "<name>"                 the prefab's rows and whether each is installed
+ *   mods "<name>"                 the prefab's mods and whether each is installed, in
+ *                                 the open map's context (it changes nothing)
+
  *   export "<name>" "<path.zip>"  the prefab with its mods, as one ZIP
  *   import "<path>"               a .zip, or a .json in an extracted export folder:
  *                                 install the mods, add the prefab to the library

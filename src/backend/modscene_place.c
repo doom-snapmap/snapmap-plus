@@ -203,6 +203,8 @@ static sp_type_fn g_decl_type;
 static sp_find_decl_fn g_decl_find;
 static void *g_ev_show;
 static sh_scene_table g_scenes;
+static volatile LONG g_scenes_stale;   /* read again at the first scene after a Play entry */
+static void sp_scenes_current(void);
 static sp_home g_homes[SP_HOMES];
 static int g_home_count;
 static volatile LONG g_scene_lines, g_logged_homes;
@@ -408,6 +410,7 @@ static const sh_scene_entry *sp_scene_of(void *node)
     char name[SH_SCENE_NAME_CAP];
     const sh_scene_entry *e;
     int depth;
+    sp_scenes_current();
     if (!decl || !g_scenes.count) return NULL;
     if (sp_read_cstr((const char *)sp_read_ptr(decl, SP_DECL_NAME), name, sizeof name) &&
         (e = sh_scene_find(&g_scenes, name)) != NULL)
@@ -566,7 +569,7 @@ static void sp_place_targets(void *self, void *player)
         if (!node) continue;
         e = sp_scene_of(node);
         if (e && !sp_entity_pose(node, &now)) {
-            sp_scene_log("scene-place: %s's placement could not be read; it plays at the player as before", e->node);
+            sp_scene_log("Scene %s: its placement could not be read; it plays at the player", e->node);
             e = NULL;
         }
         home = e ? sp_home_of(node, now) : me;
@@ -585,10 +588,10 @@ static void sp_place_targets(void *self, void *player)
             continue;
         }
         if (e->at_node)
-            sp_scene_log("scene-place: %s plays at its node (scene at %.1f %.1f %.1f, yaw %.1f)",
+            sp_scene_log("Scene %s: plays at its node (scene at %.1f %.1f %.1f, yaw %.1f)",
                          e->node, play.x, play.y, play.z, play.yaw);
         else
-            sp_scene_log("scene-place: %s plays at %s (%.1f %.1f %.1f, view yaw %.1f; scene at %.1f %.1f %.1f, yaw %.1f%s; anchor %.1f %.1f %.1f, yaw %.1f%s)",
+            sp_scene_log("Scene %s: plays at %s (%.1f %.1f %.1f, view yaw %.1f; scene at %.1f %.1f %.1f, yaw %.1f%s; anchor %.1f %.1f %.1f, yaw %.1f%s)",
                          e->node, who, me.x, me.y, me.z, me.yaw, play.x, play.y, play.z, play.yaw,
                          reaimed ? ", turned toward the anchor" : "", home.x, home.y, home.z, home.yaw,
                          e->return_player ? "" : "; no return");
@@ -605,7 +608,7 @@ static void sp_place_targets(void *self, void *player)
             AcquireSRWLockExclusive(&g_lock);
             pending = sh_scene_pending_set(&g_pending, node, e->node, at, e->spawn_count);
             ReleaseSRWLockExclusive(&g_lock);
-            if (!pending) sp_scene_log("scene-place: %s's spawns could not be queued", e->node);
+            if (!pending) sp_scene_log("Scene %s: its spawns could not be queued; nothing it lists is spawned", e->node);
         }
     }
     if (!moved) sp_log(&g_logged_fail, "scene-place: no scene node could be moved; the scene plays at the node");
@@ -652,7 +655,7 @@ static void sp_syncstart(void *link, void *owner, void *arg3, void *link_data, v
     if (!have) return;
     after = sp_link_sync(link);
     if (!after || after == before) {
-        sp_scene_log("scene-place: %s's sync did not start; nothing was spawned", queued.node_name);
+        sp_scene_log("Scene %s: its sync did not start; nothing was spawned", queued.node_name);
         return;
     }
     if (sh_modserve_engine_in_play() != 1) return;
@@ -660,9 +663,9 @@ static void sp_syncstart(void *link, void *owner, void *arg3, void *link_data, v
         const sh_scene_spawn *s = &queued.spawns[k];
         const char *why = sp_spawn_scene_entity(s->entitydef, s->at);
         if (why)
-            sp_scene_log("scene-place: %s could not spawn %s: %s", queued.node_name, s->entitydef, why);
+            sp_scene_log("Scene %s: could not spawn %s: %s", queued.node_name, s->entitydef, why);
         else
-            sp_scene_log("scene-place: %s spawned %s at %.1f %.1f %.1f, yaw %.1f with its sync", queued.node_name,
+            sp_scene_log("Scene %s: spawned %s at %.1f %.1f %.1f, yaw %.1f with its sync", queued.node_name,
                          s->entitydef, s->at.x, s->at.y, s->at.z, s->at.yaw);
     }
 }
@@ -704,7 +707,7 @@ static void sp_used(void *self)
     if (sh_modserve_engine_in_play() == 1) {
         const sh_scene_entry *e = have ? NULL : sp_scene_of(self);
         if (have) sp_return(&rec);
-        else if (e) sp_scene_log("scene-place: %s finished its scene; the player stays", e->node);
+        else if (e) sp_scene_log("Scene %s: finished; the player stays", e->node);
         /* A scene node's scene is over: a HUD its scene hid and never showed comes back
          * (its show row can sit on a frame the sync no longer plays). */
         if ((have || e) && sh_modhud_scene_restore())
@@ -829,28 +832,36 @@ static void sp_scene_refusal(void *context, const char *line)
     backend_log(line);
 }
 
-static void sp_read_scenes(void *context, const char *id, const char *hash, int legacy, const char *extra)
+/* The build the open map serves for its salt: its names serve now. */
+static int sp_serves_now(const char *hash)
 {
-    (void)context; (void)hash; (void)legacy;
-    if (id && extra) (void)sh_scene_add_bundle(&g_scenes, id, extra, strlen(extra), sp_scene_refusal, NULL);
+    sh_modserve_scope_info info;
+    return hash && sh_modserve_bundle_scope(hash, &info) && info.names_live;
+}
+
+/* The scenes of the builds this Play serves, read at the first scene after
+ * the Play entry, once the Play's map scope is set. Game thread. */
+static void sp_scenes_current(void)
+{
+    if (!InterlockedExchange(&g_scenes_stale, 0)) return;
+    (void)sh_scene_table_load(&g_scenes, sh_modserve_each_bundle_extra, sp_serves_now, sp_scene_refusal, NULL);
+    if (g_scenes.count)
+
+        backend_log(g_scenes.count == 1 ? "scene-place: 1 mod scene node declares where its scene plays"
+                                        : "scene-place: mod scene nodes declare where their scenes play");
 }
 
 void sh_modscene_place_play_begin(void)
 {
-    int declared;
     AcquireSRWLockExclusive(&g_lock);
     sh_modscene_place_table_clear(&g_table);
     memset(g_homes, 0, sizeof g_homes);
     g_home_count = 0;
     sh_scene_pending_clear(&g_pending);
     ReleaseSRWLockExclusive(&g_lock);
-    /* The scenes blocks of the admitted bundles, read again for every Play. */
-    sh_scene_table_free(&g_scenes);
-    if (sh_modserve_each_bundle_extra(sp_read_scenes, NULL) < 0) sh_scene_table_free(&g_scenes);
-    declared = g_scenes.count;
-    if (declared)
-        backend_log(declared == 1 ? "scene-place: 1 mod scene node declares where its scene plays"
-                                  : "scene-place: mod scene nodes declare where their scenes play");
+    /* The scenes blocks are read again for every Play, from the builds it serves. */
+    InterlockedExchange(&g_scenes_stale, 1);
+
     InterlockedExchange(&g_scene_lines, 0);
     InterlockedExchange(&g_logged_homes, 0);
     InterlockedExchange(&g_logged_place, 0);

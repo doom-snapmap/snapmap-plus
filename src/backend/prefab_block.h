@@ -69,6 +69,17 @@ size_t sh_prefab_block_strip_comments(char *text, size_t len);
  * Returns 1 when found, 0 when the object has none, -1 not an object. */
 int    sh_prefab_block_top_type(const char *text, size_t len, char *out, size_t cap);
 
+/* The one prefab name rule, for the Prefabs tab and the backend alike: `name`
+ * (UTF-8) can be a prefab or folder name when it is 1 to
+ * SH_PREFAB_NAME_MAX bytes, holds no control character and none of
+ * < > : " / \ | ? *, does not begin with a space or a dot, does not end with
+ * a space or a dot, holds no "..", does not end in ".meta" (an earlier
+ * version's sidecar) and is not a Windows device name (CON, PRN, AUX, NUL,
+ * COM0-9, LPT0-9, in any case, alone or before an extension). 1 or 0. */
+#define SH_PREFAB_NAME_MAX 200
+int    sh_prefab_block_valid_name(const char *name);
+
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,8 +1,7 @@
-/* modhud.c -- see modhud.h. The beta.19 weapon_hud policy and call-site relay,
- * fed from admitted bundles instead of compiled packages. */
+/* modhud.c -- see modhud.h. The weapon ammo-display policy and its call-site
+ * relay, fed from the builds the loaded map serves. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <shlobj.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,29 +9,27 @@
 #include <string.h>
 #include "modhud.h"
 #include "config_json.h"
-#include "modbundle.h"
+#include "modmanifest.h"
 #ifndef SH_MODHUD_PURE
 #include "backend_log.h"
 #include "patch.h"
-#ifndef SH_MODHUD_TESTING
-#include "modserve.h"
-#include "modstore.h"
-#endif
 #endif
 
 #define HUD_JSON_DEPTH   24
-#define HUD_BUNDLE_CAP   (4u << 20)        /* mod.json, as modserve caps it */
-#define HUD_OWNER_CAP    80
+#define HUD_OWNER_CAP    120
 
 typedef struct hud_rule {
     char name[SH_MODHUD_NAME_CAP];
     char owner[HUD_OWNER_CAP];
     int weapon_mode;
+    int conflicted;          /* two mods ask different displays: the game's stays */
 } hud_rule;
-typedef struct hud_table { size_t count; hud_rule rules[SH_MODHUD_MAX_RULES]; int refused; } hud_table;
+typedef struct hud_table { size_t count; hud_rule rules[SH_MODHUD_MAX_RULES]; } hud_table;
 
 static hud_table g_live, g_pending;
 static SRWLOCK g_lock = SRWLOCK_INIT;
+static volatile LONG g_stale;
+static int (*g_reload)(void);   /* the table from the serving index (engine), or a test's */
 
 #ifdef SH_MODHUD_PURE
 #define hud_log(...) ((void)0)
@@ -76,61 +73,81 @@ static int hud_string(const char *raw, char *out, size_t cap)
 
 void sh_modhud_begin(void) { memset(&g_pending, 0, sizeof g_pending); }
 
+/* One weapon's member: 1 "weapon", 0 "engine", -1 when it does not read. */
+static int hud_member_mode(const sh_json_member *m)
+{
+    sh_json_object settings = {0};
+    char mode[24];
+    int valid;
+    if (strlen(m->key) != m->key_length || !hud_name_valid(m->key) ||
+        !sh_json_parse_object(m->value_json, strlen(m->value_json), 2, &settings)) return -1;
+    valid = settings.count == 1 && hud_string(sh_json_object_get(&settings, "ammo_display"), mode, sizeof mode);
+    sh_json_object_free(&settings);
+    if (!valid || (strcmp(mode, "weapon") && strcmp(mode, "engine"))) return -1;
+    return strcmp(mode, "weapon") == 0;
+}
+
+static void hud_add(const char *weapon, int weapon_mode, const char *owner)
+{
+    size_t j;
+    for (j = 0; j < g_pending.count; j++) {
+        hud_rule *r = &g_pending.rules[j];
+        if (strcmp(r->name, weapon)) continue;
+        if (r->weapon_mode != weapon_mode && !r->conflicted) {
+            r->conflicted = 1;
+            hud_log("weapon-hud: %s and %s ask different ammo displays for %s; the game's display is kept for that "
+                    "weapon", r->owner, owner, weapon);
+        }
+        return;
+    }
+    if (g_pending.count == SH_MODHUD_MAX_RULES) {
+        hud_log("weapon-hud: more than %d weapons have rules; the rule %s gives %s is not used", SH_MODHUD_MAX_RULES,
+                owner, weapon);
+        return;
+    }
+    {
+        hud_rule *r = &g_pending.rules[g_pending.count++];
+        strcpy_s(r->name, sizeof r->name, weapon);
+        strncpy_s(r->owner, sizeof r->owner, owner, _TRUNCATE);
+        r->weapon_mode = weapon_mode;
+        r->conflicted = 0;
+    }
+}
+
 int sh_modhud_parse(const char *json, size_t length, const char *owner)
 {
     sh_json_object root = {0}, weapons = {0};
     const char *raw;
+    size_t i;
     int ok = 0;
-    if (g_pending.refused) return 0;
+    if (!owner) owner = "a mod";
     if (!json || length > SH_MODHUD_FILE_CAP || !sh_json_parse_object(json, length, 5, &root)) goto done;
     if (!root.count) { ok = 1; goto done; }
     /* Exactly {"weapons": {...}}. */
     if (root.count != 1) goto done;
     raw = sh_json_object_get(&root, "weapons");
     if (!raw || !sh_json_parse_object(raw, strlen(raw), 3, &weapons)) goto done;
-    for (size_t i = 0; i < weapons.count; i++) {
-        sh_json_member *m = &weapons.members[i];
-        sh_json_object settings = {0};
-        char mode[24];
-        int weapon_mode, valid;
-        size_t j;
-        if (strlen(m->key) != m->key_length || !hud_name_valid(m->key) ||
-            !sh_json_parse_object(m->value_json, strlen(m->value_json), 2, &settings)) goto done;
-        valid = settings.count == 1 && hud_string(sh_json_object_get(&settings, "ammo_display"), mode, sizeof mode);
-        sh_json_object_free(&settings);
-        if (!valid || (strcmp(mode, "weapon") && strcmp(mode, "engine"))) goto done;
-        weapon_mode = strcmp(mode, "weapon") == 0;
-        for (j = 0; j < g_pending.count; j++) {
-            if (strcmp(g_pending.rules[j].name, m->key)) continue;
-            if (g_pending.rules[j].weapon_mode != weapon_mode) {
-                hud_log("weapon-hud REFUSED: conflicting ammo_display for %s in bundles %s and %s",
-                        m->key, g_pending.rules[j].owner, owner ? owner : "?");
-                goto done;
-            }
-            break;
-        }
-        if (j < g_pending.count) continue;
-        if (g_pending.count == SH_MODHUD_MAX_RULES) goto done;
-        {
-            hud_rule *r = &g_pending.rules[g_pending.count++];
-            strcpy_s(r->name, sizeof r->name, m->key);
-            strncpy_s(r->owner, sizeof r->owner, owner ? owner : "?", _TRUNCATE);
-            r->weapon_mode = weapon_mode;
-        }
-    }
+    /* Every member reads before any is added: a mod's table is used whole or not at all. */
+    for (i = 0; i < weapons.count; i++) if (hud_member_mode(&weapons.members[i]) < 0) goto done;
+    for (i = 0; i < weapons.count; i++) hud_add(weapons.members[i].key, hud_member_mode(&weapons.members[i]), owner);
     ok = 1;
 done:
     sh_json_object_free(&weapons);
     sh_json_object_free(&root);
-    if (!ok) g_pending.refused = 1;
     return ok;
 }
 
-void sh_modhud_publish(int ok)
+static size_t hud_count_of(const hud_table *t)
+{
+    size_t i, n = 0;
+    for (i = 0; i < t->count; i++) if (t->rules[i].weapon_mode && !t->rules[i].conflicted) n++;
+    return n;
+}
+
+void sh_modhud_publish(void)
 {
     AcquireSRWLockExclusive(&g_lock);
-    if (ok && !g_pending.refused) g_live = g_pending;
-    else memset(&g_live, 0, sizeof g_live);
+    g_live = g_pending;
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -138,19 +155,24 @@ size_t sh_modhud_count(void)
 {
     size_t n;
     AcquireSRWLockShared(&g_lock);
-    n = g_live.count;
+    n = hud_count_of(&g_live);
     ReleaseSRWLockShared(&g_lock);
     return n;
 }
 
+void sh_modhud_mark_stale(void) { InterlockedExchange(&g_stale, 1); }
+
 unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode)
 {
     unsigned char result = engine_mode;
+    /* The HUD asks on the game thread: after an index change or a Play entry
+     * the table is read again here, from the builds the open map serves. */
+    if (InterlockedExchange(&g_stale, 0) && g_reload) (void)g_reload();
     if (!weapon) return result;
     AcquireSRWLockShared(&g_lock);
     for (size_t i = 0; i < g_live.count; i++) {
         if (!strcmp(weapon, g_live.rules[i].name)) {
-            if (g_live.rules[i].weapon_mode) result = 0;
+            if (g_live.rules[i].weapon_mode && !g_live.rules[i].conflicted) result = 0;
             break;
         }
     }
@@ -158,87 +180,74 @@ unsigned char sh_modhud_select(const char *weapon, unsigned char engine_mode)
     return result;
 }
 
-/* ------------------------------------------------------------------ bundles */
+/* ------------------------------------------------------------------ the builds */
 
-/* Store paths are UTF-8 (modbundle.h sh_mb_wpath), as the store writes them. */
-static char *hud_read(const char *path, size_t cap, size_t *len)
+typedef struct hud_load {
+    int (*serves_now)(const char *);
+    sh_modhud_label_fn label;
+    char (*seen)[SH_MODMANIFEST_SALT_CAP];
+    size_t nseen, cap;
+    int failed;
+} hud_load;
+
+/* 1 when a build of `salt` was read already (or the list cannot grow). */
+static int hud_seen(hud_load *c, const char *salt)
 {
-    char *buf = (char *)sh_mb_read_file(path, cap, len);
-    if (buf && !*len) { free(buf); buf = NULL; }
-    return buf;
+    size_t i;
+    for (i = 0; i < c->nseen; i++) if (!strcmp(c->seen[i], salt)) return 1;
+    if (c->nseen == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 32;
+        void *grown = realloc(c->seen, cap * sizeof *c->seen);
+        if (!grown) { c->failed = 1; return 1; }
+        c->seen = (char (*)[SH_MODMANIFEST_SALT_CAP])grown;
+        c->cap = cap;
+    }
+    strncpy_s(c->seen[c->nseen++], sizeof c->seen[0], salt, _TRUNCATE);
+    return 0;
 }
 
-/* One mod folder: 1 parsed (or no hud), 0 refused, -1 no mod.json (an
- * organizing folder, or a map's place under maps\). Unadmitted bundles and
- * unreadable mod.json files are skipped (the index logs those). The rules are
- * the author's "hud" key; the build hash and the salt are the builder
- * block's. */
-static int hud_bundle(const char *dir, int (*admitted)(const char *))
+static void hud_visit(void *context, const char *salt, const char *hash, int place, const char *extra)
 {
-    char path[MAX_PATH * 4], hash[80], id[HUD_OWNER_CAP];
-    size_t len = 0;
-    char *text;
-    sh_json_object root = {0}, block = {0};
+    hud_load *c = (hud_load *)context;
+    sh_json_object root = {0};
     const char *raw;
-    int ok = 1;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
-    text = hud_read(path, HUD_BUNDLE_CAP, &len);
-    if (!text) return -1;
-    if (!sh_json_parse_object(text, len, HUD_JSON_DEPTH, &root)) goto done;
-    raw = sh_json_object_get(&root, "snapmap-plus");
-    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), HUD_JSON_DEPTH, &block)) goto done;
-    if (!hud_string(sh_json_object_get(&block, "build"), hash, sizeof hash) || !admitted || !admitted(hash)) goto done;
+    char owner[HUD_OWNER_CAP];
+    (void)place;
+    if (!salt || !hash || !extra || c->failed) return;
+    /* One build per salt: the one the open map serves. */
+    if (c->serves_now && !c->serves_now(hash)) return;
+    if (hud_seen(c, salt)) return;
+    if (!sh_json_parse_object(extra, strlen(extra), HUD_JSON_DEPTH, &root)) return;
     raw = sh_json_object_get(&root, "hud");
-    if (!raw) goto done;
-    if (!hud_string(sh_json_object_get(&block, "salt"), id, sizeof id)) strcpy_s(id, sizeof id, "?");
-    ok = sh_modhud_parse(raw, strlen(raw), id);
-    if (!ok) hud_log("weapon-hud REFUSED: the hud object of %s is not a valid weapon ammo-display table", id);
-done:
-    sh_json_object_free(&block);
+    if (raw) {
+        if (c->label) c->label(salt, hash, owner, sizeof owner);
+        else strncpy_s(owner, sizeof owner, salt, _TRUNCATE);
+        if (!sh_modhud_parse(raw, strlen(raw), owner))
+            hud_log("weapon-hud: the hud entry of %s is not a valid weapon ammo-display table; its rules are not used",
+                    owner);
+    }
     sh_json_object_free(&root);
-    free(text);
-    return ok;
 }
 
-/* Mod folders under `folder`, through organizing folders and the maps\
- * places (mods\maps\<map>\<mod>), to the store's nesting depth. */
-#define HUD_NEST_MAX 4
-static int hud_scan(const char *folder, int (*admitted)(const char *), int depth)
+int sh_modhud_load(sh_modhud_each_fn each, int (*serves_now)(const char *bundle_hash), sh_modhud_label_fn label)
 {
-    char pattern[MAX_PATH * 4], sub[MAX_PATH * 4];
-    wchar_t *wpattern;
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    int ok = 1;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", folder);
-    wpattern = sh_mb_wpath(pattern);
-    h = wpattern ? FindFirstFileW(wpattern, &fd) : INVALID_HANDLE_VALUE;
-    free(wpattern);
-    if (h == INVALID_HANDLE_VALUE) return 1;
-    do {
-        char *name;
-        int r;
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            fd.cFileName[0] == L'.' || !_wcsicmp(fd.cFileName, L"blobs")) continue;
-        if ((name = sh_mb_utf8(fd.cFileName)) == NULL) continue;
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", folder, name);
-        free(name);
-        r = hud_bundle(sub, admitted);
-        if (r < 0 && depth + 1 < HUD_NEST_MAX) r = hud_scan(sub, admitted, depth + 1);
-        if (r == 0) ok = 0;
-    } while (ok && FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
-}
-
-int sh_modhud_load_tree(const char *mods_root, int (*admitted)(const char *bundle_hash))
-{
-    int ok;
+    hud_load c;
+    int visited;
+    memset(&c, 0, sizeof c);
+    c.serves_now = serves_now;
+    c.label = label;
     sh_modhud_begin();
-    ok = mods_root && hud_scan(mods_root, admitted, 0);
-    sh_modhud_publish(ok);
-    hud_log("weapon-hud %s: %zu rules", ok ? "compiled" : "REFUSED", sh_modhud_count());
-    return ok ? (int)sh_modhud_count() : -1;
+    visited = each ? each(hud_visit, &c) : -1;
+    free(c.seen);
+    if (visited < 0 || c.failed) sh_modhud_begin();
+    sh_modhud_publish();
+    if (visited < 0 || c.failed) {
+        hud_log("weapon-hud: the mods' rules could not be read; the game's ammo displays are used");
+        return -1;
+    }
+    hud_log("weapon-hud: %zu rule%s from the mods the open map uses", sh_modhud_count(),
+            sh_modhud_count() == 1 ? "" : "s");
+    return (int)sh_modhud_count();
 }
 
 /* ------------------------------------------------------------------ the call */
@@ -266,7 +275,7 @@ static unsigned char hud_mode(void *game, const unsigned char *widget)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { result = original; }
     if (result != original && InterlockedCompareExchange(&g_reported, 1, 0) == 0)
-        hud_log("weapon-hud active: package weapon-capacity display selected");
+        hud_log("weapon-hud active: a mod's weapon-capacity display is in use");
     return result;
 }
 
@@ -348,21 +357,38 @@ refused:
 }
 
 #ifndef SH_MODHUD_TESTING
-static int hud_admitted(const char *hash) { return sh_modserve_bundle_state(hash, NULL, 0) == 1; }
-
-int sh_modhud_reload(void)
+/* The build the open map serves for its salt: its names serve now. */
+static int hud_serves_now(const char *hash)
 {
-    char root[MAX_PATH * 4];
-    if (!sh_ms_root(root, sizeof root)) { sh_modhud_publish(0); return -1; }
-    return sh_modhud_load_tree(root, hud_admitted);
+    sh_modserve_scope_info info;
+    return sh_modserve_bundle_scope(hash, &info) && info.names_live;
 }
+
+/* A mod by its name, else its folder, for the log. */
+static void hud_label(const char *salt, const char *hash, char *out, size_t cap)
+{
+    sh_modmanifest_row row;
+    sh_modserve_bundle_ref ref;
+    memset(&row, 0, sizeof row);
+    strncpy_s(row.salt, sizeof row.salt, salt, _TRUNCATE);
+    strncpy_s(row.build, sizeof row.build, hash, _TRUNCATE);
+    if (sh_modserve_row_build(&row, &ref) && ref.name[0]) strncpy_s(out, cap, ref.name, _TRUNCATE);
+    else if (ref.folder[0]) strncpy_s(out, cap, ref.folder, _TRUNCATE);
+    else strncpy_s(out, cap, salt, _TRUNCATE);
+}
+
+static int hud_reload_index(void) { return sh_modhud_load(sh_modserve_each_bundle_extra, hud_serves_now, hud_label); }
 
 int sh_modhud_install(const sig_result *results, size_t count)
 {
-    (void)sh_modhud_reload();
+    g_reload = hud_reload_index;
+    sh_modserve_set_index_listener(sh_modhud_mark_stale);
+    sh_modhud_mark_stale();
     return hud_route(results, count);
 }
 #else
+void sh_modhud_test_reload_with(int (*load)(void)) { g_reload = load; }
+
 /* ------------------------------------------------------------------ test */
 typedef struct hud_test_runner {
     unsigned char (*call)(void *, void *);
