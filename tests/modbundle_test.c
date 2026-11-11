@@ -1145,10 +1145,19 @@ static void test_refusals(const char *fixture, const char *tmp)
     refused(fixture, tmp, m_bad_line_key, &RESOLVER, "requirements.commands key start is not supported");
     refused(fixture, tmp, m_bad_line_count, &RESOLVER, "requirements.commands.activate has more than 16 lines");
     refused(fixture, tmp, m_bad_home, &RESOLVER, "homepage");
-    refused(fixture, tmp, m_both, &RESOLVER, "only the descriptor and assets/ may be in the mod folder: package.json");
     refused(fixture, tmp, m_no_desc, &RESOLVER, "the mod folder has no mod.json");
     refused(fixture, tmp, m_bad_ext, &RESOLVER, "file type not allowed");
-    refused(fixture, tmp, m_outside, &RESOLVER, "only the descriptor and assets/");
+    {
+        /* Files beside mod.json and assets/ are ignored and never carried
+         * (DECISIONS 16), package.json among them. */
+        sh_mb_bundle ok;
+        size_t k;
+        accepted(fixture, tmp, m_outside, &ok);
+        for (k = 0; k < ok.file_count; k++) CHECK(strncmp(ok.files[k].path, "assets/", 7) == 0);
+        sh_mb_free(&ok);
+        accepted(fixture, tmp, m_both, &ok);
+        sh_mb_free(&ok);
+    }
     refused(fixture, tmp, m_empty, &RESOLVER, "empty file");
     refused(fixture, tmp, m_unns_decl, &RESOLVER, "outside mods/alexrimp/");
     refused(fixture, tmp, m_unns_raw, &RESOLVER, "does not contain /mods/alexrimp/");

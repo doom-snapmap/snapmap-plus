@@ -412,7 +412,8 @@ static void test_fresh_folder_strings(const char *tmp)
     _snprintf_s(want, sizeof want, _TRUNCATE, "#str_%s_probe_desc", s2);
     CHECK(t && strstr(t, want));
     free(t);
-    /* After the first scan a key without the prefix is refused, naming it. */
+    /* A key added without the prefix after the first scan gains it at the
+     * next scan, and the folder builds (DECISIONS 20). */
     t = slurp(dir, "mod.json", NULL);
     if (t) {
         char *at = strstr(t, "\"en\": {");
@@ -427,10 +428,10 @@ static void test_fresh_folder_strings(const char *tmp)
         }
         free(t);
     }
-    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0);
     t = slurp(dir, "mod.json", NULL);
-    _snprintf_s(want, sizeof want, _TRUNCATE, "strings key late_key is not named %s_<name>", salt);
-    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_late_key\": \"Late\"", salt);
+    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
     free(t);
 }
 
@@ -472,11 +473,13 @@ static void test_fresh_folder_refusals(const char *tmp)
     free(mj1);
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "binprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, SH_MB_SHAPE) &&
-          strstr(e->cause, "m.bmd6model names mods/binprobe/ inside a binary file, which Snapmap+ cannot rewrite"));
+    CHECK(e && !sh_ms_entry_usable(e) &&
+          strstr(e->cause, "m.bmd6model names mods/binprobe/ inside a binary file, which Snapmap+ cannot rename") &&
+          strstr(e->cause, "New mod"));
     if (e) printf("   %s\n", e->cause);
     e = find_entry(&list, "foreignprobe");
-    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") && strstr(e->cause, "not mods/foreignprobe/"));
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "are under mods/someoneelse/") &&
+          strstr(e->cause, "not this folder's name"));
     sh_ms_list_free(&list);
     CHECK(entry_of("goodprobe", salt, NULL, &usable) && usable && salt[0]);
     /* Called directly: refused with the cause; an already salted folder answers 0. */
@@ -512,7 +515,7 @@ static void test_fresh_folder_refusals(const char *tmp)
         _snprintf_s(rel, sizeof rel, _TRUNCATE, "%s\\assets\\generated\\decls\\entitydef\\mods\\lockedprobe\\probe.decl", path);
         h = CreateFileA(rel, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
         CHECK(h != INVALID_HANDLE_VALUE);
-        CHECK(sh_ms_assign_salt(path, "lockedprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "cannot read"));
+        CHECK(sh_ms_assign_salt(path, "lockedprobe", salt, cause, sizeof cause) == -1 && strstr(cause, "could not be read"));
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         t = slurp(path, "mod.json", NULL);
         CHECK(t && !strstr(t, "salt"));
@@ -1224,6 +1227,132 @@ static void test_crash_leftovers(const char *tmp)
     mt_remove_tree(dir);
 }
 
+/* The scripts' compile check, standing in for script_compile.c. */
+static int script_ok(const char *file, int entry, const char *text, size_t len, int *line, char *what, size_t what_cap,
+                     char *todo, size_t todo_cap)
+{
+    (void)file; (void)entry; (void)text; (void)len; (void)what; (void)what_cap; (void)todo; (void)todo_cap;
+    if (line) *line = 0;
+    return 1;
+}
+
+/* A Wwise bank header (version 113) carrying `id`, padded to 32 bytes. */
+static void write_bank(const char *folder, const char *rel, unsigned long id)
+{
+    unsigned char bytes[32];
+    char path[MAX_PATH * 2];
+    FILE *f;
+    memset(bytes, 0, sizeof bytes);
+    memcpy(bytes, "BKHD", 4);
+    mt_put32(bytes + 4, 24);
+    mt_put32(bytes + 8, 0x71);
+    mt_put32(bytes + 12, id);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
+}
+
+static unsigned long bank_id(const char *folder, const char *rel)
+{
+    size_t len = 0;
+    char *t = slurp(folder, rel, &len);
+    unsigned long id = 0;
+    if (t && len >= 16) memcpy(&id, t + 12, 4);
+    free(t);
+    return id;
+}
+
+/* DECISIONS 20 and 16: what an author writes under the folder's name moves
+ * under the salt at every scan, not only the first; a rename between scans
+ * changes nothing already moved; a bank named for the folder takes the
+ * salt's name and id; a README beside mod.json is ignored. */
+static void test_rehome(const char *tmp)
+{
+    char root[MAX_PATH], dir[MAX_PATH * 2], renamed[MAX_PATH * 2], salt[SH_SALT_LEN + 1], s2[SH_SALT_LEN + 1];
+    char rel[MAX_PATH], want[200], *t;
+    sh_ms_sync_stats ss;
+    int usable;
+    printf("-- scan: new content under the folder's name moves under the salt at every scan\n");
+    sh_mb_set_script_check(script_ok);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\rehome\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\imp", root);
+    make_small_mod(dir, "imp");
+    mt_write(dir, "README.txt", "notes about mods/imp/ that stay as written");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.failed == 0);
+    CHECK(entry_of("imp", salt, NULL, &usable) && usable && salt[0]);
+    t = slurp(dir, "README.txt", NULL);
+    CHECK(t && !strcmp(t, "notes about mods/imp/ that stay as written"));
+    free(t);
+    /* A second file, a second string and a script, all under the folder's name. */
+    mt_write(dir, "assets\\generated\\image\\mods\\imp\\b.bimage", "second image of imp");
+    mt_write(dir, "assets\\mods\\imp\\scripts\\door.lua",
+             "api = 1\r\nlocal image = \"mods/imp/b\"\r\nlocal title = \"#str_imp_title\"\r\n");
+    t = slurp(dir, "mod.json", NULL);
+    if (t) {
+        size_t n = strlen(t) + 128;
+        char *edited = (char *)malloc(n);
+        if (edited) {
+            _snprintf_s(edited, n, _TRUNCATE, "{\r\n  \"strings\": {\"en\": {\"imp_title\": \"Imp\"}},%s", t + 1);
+            mt_write(dir, "mod.json", edited);
+            free(edited);
+        }
+        free(t);
+    }
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.rebuilt == 1);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
+    CHECK(mt_has(dir, rel) && !mt_has(dir, "assets\\generated\\image\\mods\\imp\\b.bimage"));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\mods\\%s\\scripts\\door.lua", salt);
+    t = slurp(dir, rel, NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"mods/%s/b\"", salt);
+    CHECK(t && strstr(t, want));
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"#str_%s_imp_title\"", salt);
+    CHECK(t && strstr(t, want));
+    free(t);
+    t = slurp(dir, "mod.json", NULL);
+    _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s_imp_title\": \"Imp\"", salt);
+    CHECK(t && strstr(t, want) && strstr(t, "\"build\""));
+    free(t);
+    CHECK(entry_of("imp", s2, NULL, &usable) && usable && !strcmp(s2, salt));
+    /* Renamed: what was moved stays; new content under the new name moves,
+     * and a bank named for the folder takes the salt's name and id. */
+    _snprintf_s(renamed, sizeof renamed, _TRUNCATE, "%s\\beast", root);
+    CHECK(MoveFileA(dir, renamed));
+    mt_write(renamed, "assets\\generated\\image\\mods\\beast\\c.bimage", "third image");
+    write_bank(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk", 12345);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 0 && ss.salted == 0);
+    if (ss.failed) log_dump("rehome");
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\c.bimage", salt);
+    CHECK(mt_has(renamed, rel));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\b.bimage", salt);
+    CHECK(mt_has(renamed, rel));
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\sound\\soundbanks\\pc\\%s_music.bnk", salt);
+    CHECK(mt_has(renamed, rel) && !mt_has(renamed, "assets\\sound\\soundbanks\\pc\\beast_music.bnk"));
+    {
+        char stem[32];
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%s_music", salt);
+        CHECK(bank_id(renamed, rel) == (unsigned long)sh_mb_fnv1_lower(stem, strlen(stem)));
+    }
+    CHECK(entry_of("beast", s2, NULL, &usable) && usable && !strcmp(s2, salt));
+    /* A current folder is not moved again: nothing to do, nothing written. */
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    /* A new folder named like another mod's salt: that name is the other
+     * mod's, so nothing is moved for it and it says so. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, salt);
+    make_small_mod(dir, salt);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
+    {
+        sh_ms_list list;
+        const sh_ms_entry *e;
+        CHECK(sh_ms_enumerate(&list));
+        e = find_entry(&list, salt);
+        CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "is another mod's salt") && strstr(e->cause, "rename this folder"));
+        if (e) printf("   %s\n", e->cause);
+        sh_ms_list_free(&list);
+    }
+    sh_mb_set_script_check(NULL);
+}
+
 /* Folder names an earlier layout used are ordinary names now. */
 static void test_ordinary_names(const char *tmp)
 {
@@ -1439,6 +1568,7 @@ int main(int argc, char **argv)
     test_crash_leftovers(tmp);
     test_nested(tmp);
     test_ordinary_names(tmp);
+    test_rehome(tmp);
     test_bin_sweep(tmp);
     test_upgrade_steps(tmp);
     test_boot_sync(fixture, tmp);

@@ -731,7 +731,7 @@ static void test_beta26(const char *fixture, const char *tmp)
 
     CHECK(run("migrate", data, "--doom", doom) == SH_STORE_OK);
     CHECK(said("  mods\\alex.beta: converted: old key alex.beta, salt "));
-    CHECK(said("  mods\\alex.bin: left as it was: This mod folder is not in a shape Snapmap+ can build: "
+    CHECK(said("  mods\\alex.bin: left as it was: "
                "assets/generated/image/mods/alex.bin/x.bimage names mods/alex.bin/ inside a binary file"));
     CHECK(said("  mods\\alex.beta@0123456789abcdef: a second build of alex.beta that Snapmap+ made; moved to the stand-in bin"));
     CHECK(said("  mods\\downloads\\Old Map\\alex.beta: a second build of alex.beta that Snapmap+ made"));

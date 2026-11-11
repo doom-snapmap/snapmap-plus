@@ -2746,12 +2746,6 @@ typedef struct mb_walk {
 
 static const char *mb_rp_forbidden(const char *request);
 
-static int mb_is_top_allowed(const char *name)
-{
-    /* The descriptor and mod.json's write-through temporary. */
-    return _stricmp(name, "mod.json") == 0 || _strnicmp(name, "mod.json.tmp", 12) == 0;
-}
-
 static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int depth)
 {
     WIN32_FIND_DATAW fd;
@@ -2851,18 +2845,19 @@ static void mb_walk_top(mb_walk *w)
     if (h == INVALID_HANDLE_VALUE) { mb_error(w->b, "cannot list the mod folder: %s", sh_reason_win32(GetLastError(), "the mod folder", 0)); return; }
     do {
         char *name;
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        /* Only mod.json and assets\ are the mod (DECISIONS 16): anything else
+         * beside them (a README, desktop.ini, a .git folder) is ignored and
+         * never carried. */
+        if (_wcsicmp(fd.cFileName, L"assets") != 0 || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         name = sh_mb_utf8(fd.cFileName);
-        if (!name) { mb_error(w->b, "a file name in the mod folder is not valid Unicode"); continue; }
+        if (!name) { mb_error(w->b, "out of memory"); continue; }
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-            mb_error(w->b, "symbolic link or junction not allowed: %s", name);
-        } else if (_stricmp(name, "assets") == 0 && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            mb_error(w->b, "assets is a link to another folder; make it a real folder and press Refresh");
+        } else {
             wchar_t *sub = mb_wjoin(w->root, fd.cFileName);
             have_assets = 1;
             if (sub) { mb_walk_dir(w, sub, "assets", 1); free(sub); }
             else mb_error(w->b, "out of memory");
-        } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !mb_is_top_allowed(name)) {
-            mb_error(w->b, "only the descriptor and assets/ may be in the mod folder: %s", name);
         }
         free(name);
     } while (FindNextFileW(h, &fd));
@@ -5716,10 +5711,13 @@ char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const cha
 
 
 /* ------------------------------------------- a new mod's strings keys ---- */
-/* DECISIONS 6: at a folder's first scan its strings keys gain the "<salt>_"
- * prefix and its "#str_<key>" references follow (sh_ms_assign_salt). A key
- * is found by a byte-exact walk of the author's text: the top-level
- * "strings" member, each language object in it, each of its keys. */
+/* At every scan that moves a folder's own content under its salt, its strings
+ * keys without the "<salt>_" prefix (string edits aside) gain it and their
+ * "#str_<key>" references follow (sh_ms_assign_salt). A key is found by a
+ * byte-exact walk of the author's text: the top-level "strings" member, each
+ * language object in it, each of its keys. A new key that would equal one the
+ * object already holds takes "_2", "_3", ... */
+
 
 /* Past one JSON value at p (whitespace before it skipped); NULL when it does
  * not read. Only the extent is checked, not the grammar of literals. */
@@ -5802,8 +5800,27 @@ typedef struct mb_sk_ctx {
     size_t n, cap;
     sh_mb_strkey *keys;
     size_t nkeys, kcap;
+    const char *lang, *lang_end;   /* the language object being walked */
     int failed;
 } mb_sk_ctx;
+
+/* Whether the language object [lang, end) already has the key `name`. */
+typedef struct mb_sk_find { const char *name; int hit; } mb_sk_find;
+static int mb_sk_find_cb(void *vctx, const char *key, size_t key_len, const char *value, const char *value_end)
+{
+    mb_sk_find *f = (mb_sk_find *)vctx;
+    (void)value; (void)value_end;
+    if (key_len - 2 == strlen(f->name) && !_strnicmp(key + 1, f->name, key_len - 2)) f->hit = 1;
+    return 1;
+}
+static int mb_sk_has_key(const mb_sk_ctx *c, const char *name)
+{
+    mb_sk_find f;
+    f.name = name;
+    f.hit = 0;
+    if (c->lang) (void)mb_sk_members(c->lang, c->lang_end, mb_sk_find_cb, &f);
+    return f.hit;
+}
 
 static int mb_sk_is_name(char c)
 {
@@ -5864,6 +5881,7 @@ static int mb_sk_key(void *vctx, const char *key, size_t key_len, const char *va
             for (;;) {
                 int clash = 0;
                 for (j = 0; j < c->nkeys && !clash; j++) clash = !_stricmp(c->keys[j].to, to);
+                if (!clash) clash = mb_sk_has_key(c, to);   /* a key the mod already has */
                 if (!clash) break;
                 {
                     char *next = (char *)malloc(tl + 16);
@@ -5894,8 +5912,11 @@ static int mb_sk_key(void *vctx, const char *key, size_t key_len, const char *va
 
 static int mb_sk_language(void *vctx, const char *key, size_t key_len, const char *value, const char *value_end)
 {
+    mb_sk_ctx *c = (mb_sk_ctx *)vctx;
     (void)key; (void)key_len;
     if (*value != '{') return 1;
+    c->lang = value;
+    c->lang_end = value_end;
     return mb_sk_members(value, value_end, mb_sk_key, vctx) != NULL;
 }
 
