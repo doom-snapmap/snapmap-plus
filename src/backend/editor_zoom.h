@@ -9,7 +9,7 @@
  * 2.75, range 1..4; the native height follows unlocked map bounds). The
  * default fits the whole map square in the top-down view: the Blueprint camera
  * sees about 0.40 x its height to the top and bottom screen edges at 16:9
- * (measured live, R-009), so 2.75 x bounds shows +/-1.1 x bounds.
+ * (measured live), so 2.75 x bounds shows +/-1.1 x bounds.
  *
  * Far clip: while the blueprint blend is active the editor camera update
  * forces r_zfar to 33000 every frame and the environment blend writes the
@@ -17,8 +17,10 @@
  * Both writers are raised to the same Blueprint far plane (33000 * the zoom
  * height ratio): the editor's two 33000 loads are repointed at the published
  * value, and sh_editor_zoom_far_plane() is called from the blend's
- * maxViewDistance read (map_render_native.c) under exactly the editor's own
- * condition. Above the editor environment volume (+/-33000) the blend stops
+ * maxViewDistance read (map_render_native.c) under the editor's own
+ * condition. That condition calls the editor's view objects, so it is sampled
+ * on the main thread each editor frame (sh_editor_zoom_tick) and the job
+ * threads read only the sample. Above the editor environment volume (+/-33000) the blend stops
  * writing, so there the editor's write alone decides; without it the height
  * is capped at SH_ZOOM_BLEND_CEILING.
  *
@@ -41,7 +43,7 @@
  * A camera more than 50000 units from a module could not hover or select it.
  * Both cvar loads are repointed at a published pick length that keeps the
  * native 50000:33000 ratio to the Blueprint far plane, so anything drawn can
- * be picked (R-011). */
+ * be picked. */
 #ifndef SH_EDITOR_ZOOM_H
 #define SH_EDITOR_ZOOM_H
 #include <stddef.h>
@@ -115,7 +117,11 @@ void sh_editor_zoom_update(float module_bounds);
  * SH_ZOOM_FAR_MAX while it unlocks its view distance (map_render), else 0.
  * Both Blueprint r_zfar writers then use at least this value. */
 void sh_editor_zoom_set_far_floor(float floor_value);
-/* Any thread. Returns blended unchanged unless the editor camera update would
- * force r_zfar this frame; then at least the Blueprint far plane. */
+/* Main thread, once per editor frame (editor_frame.c): sample whether the
+ * editor camera update forces r_zfar this frame. */
+void sh_editor_zoom_tick(void);
+/* Any thread. Returns blended unchanged unless the last editor-frame sample
+ * (no older than a quarter second) says the editor camera update forces
+ * r_zfar; then at least the Blueprint far plane. Calls no engine code. */
 float sh_editor_zoom_far_plane(float blended);
 #endif

@@ -1,6 +1,6 @@
 /* Blueprint zoom-out and the matching Blueprint far plane.
  *
- * Build 13954591 evidence (snaphak-re editor-fixes-13954591 R-004):
+ * Build 13954591 evidence:
  *   OrbitDollyClamp VK 0x12b57a0 / GL 0x12b4e80: camera mode 0 dolly,
  *     z = clamp(z + d, -limit, limit); MOVSS xmm3,[cameraDistanceLimit] at +0.
  *   OrbitPanClamp VK 0x12b5ae3 / GL 0x12b51c3: mode 0 pan clamps X, Y, Z to
@@ -21,7 +21,7 @@
  *     LEA rcx,[r_zfar]; MOV r8b,1; CALL idCVar::SetFloat. The environment
  *     blend stops writing r_zfar once the camera leaves the editor environment
  *     volume (+/-snapEdit_environmentFogBounds, 33000), so above z 33000 these
- *     writes alone decide the far clip (editor-fixes-13954591 R-006, R-007).
+ *     writes alone decide the far clip.
  *   EditorFogVolume VK 0x12397b0 / GL 0x1238c50: called once from the editor
  *     render-world setup (VK 0x123e210, GL 0x123d6a0) with the render world at
  *     editor+0x198. Creates _unitCube (render world vtable +0x90), stores
@@ -29,7 +29,7 @@
  *     +0x43/+0x4d/+0x57), then MOVSS xmm1,[snapEdit_environmentFogBounds+0x34]
  *     at +0x67 (disp32 +0x6b) for the +/-value area it adds through render
  *     world vtable +0x38 (AddEnvironmentArea, VK 0x1907ae0). Result kept at
- *     editor+0x418 (R-009).
+ *     editor+0x418.
  *   Ground plane VK 0x123aac0 / GL 0x1239f60: _unitSquare with scale
  *     (bounds, bounds, 1) at +0xf8/+0xfc/+0x100, kept at editor+0x1a0; the
  *     render entity update RenderEntityUpdate (VK 0x15d8020, GL 0x15d92a0)
@@ -43,7 +43,7 @@
  *   ModulePickFocus VK 0x1257a58 / GL 0x1256f58: the same length in
  *     idSnapEditorState_ModuleMode vtable +0x10 (VK FUN_141257870), MOVSS
  *     xmm0,[rip+disp32] (F3 0F 10 05). These are the cvar's only two readers
- *     on each renderer (R-011). */
+ *     on each renderer. */
 #include "editor_zoom.h"
 #include <math.h>
 
@@ -168,6 +168,13 @@ static uintptr_t g_vtables[3];
 static LONG g_faulted;
 static int g_installed,g_far_live;
 static float g_far_floor;
+/* The editor camera's far-plane condition, sampled on the main thread each
+ * editor frame (sh_editor_zoom_tick) and read by the render job threads. A
+ * sample older than ZOOM_SAMPLE_MS (the editor frame stopped: Play, the hub)
+ * reads as no Blueprint frame. */
+#define ZOOM_SAMPLE_MS 250u
+static volatile LONG g_blueprint_now;
+static volatile LONG64 g_blueprint_at;
 
 static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 {
@@ -280,16 +287,28 @@ static int blueprint_frame(void)
     return *g_threshold<sh_editor_zoom_blend(cur,prev,busy,
         busy&&cur!=prev?(*(view_fraction_fn*)(*(uintptr_t*)current+0x30))(current,t):0);
 }
-float sh_editor_zoom_far_plane(float blended)
+/* Main thread: the editor's view objects and clock are only called here. */
+void sh_editor_zoom_tick(void)
 {
     int blueprint=0;
-    if(!g_installed||InterlockedCompareExchange(&g_faulted,0,0))return blended;
+    if(!g_installed||InterlockedCompareExchange(&g_faulted,0,0)){InterlockedExchange(&g_blueprint_now,0);return;}
     __try {blueprint=blueprint_frame();}
     __except(EXCEPTION_EXECUTE_HANDLER) {
         if(!InterlockedExchange(&g_faulted,1))backend_log("ZOOM: Blueprint far plane disabled after an engine exception");
-        return blended;
+        blueprint=0;
     }
-    return blueprint?sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,blended),g_far_floor):blended;
+    InterlockedExchange(&g_blueprint_now,blueprint);
+    InterlockedExchange64(&g_blueprint_at,(LONG64)GetTickCount64());
+}
+/* Any thread (the environment blend's job threads): reads only the sample. */
+float sh_editor_zoom_far_plane(float blended)
+{
+    LONG64 at;
+    if(!g_installed||InterlockedCompareExchange(&g_faulted,0,0))return blended;
+    if(!InterlockedCompareExchange(&g_blueprint_now,0,0))return blended;
+    at=InterlockedCompareExchange64(&g_blueprint_at,0,0);
+    if((ULONGLONG)GetTickCount64()-(ULONGLONG)at>ZOOM_SAMPLE_MS)return blended;
+    return sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,blended),g_far_floor);
 }
 
 /* Repoint one rip-relative disp32 after checking it addresses expected_at. */

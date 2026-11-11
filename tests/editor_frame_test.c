@@ -14,6 +14,7 @@ void sh_fly_to_tick(void *editor) { (void)editor; ++ticks; }
 void sh_module_prefab_tick(void *editor) { (void)editor; }
 void sh_timeline_tile_tick(void *editor) { (void)editor; }
 void sh_budget_table_tick(void *editor) { (void)editor; }
+void sh_editor_zoom_tick(void) {}
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 void *hook_prepare(void *target, void *detour, size_t stolen)

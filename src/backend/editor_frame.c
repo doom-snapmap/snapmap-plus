@@ -20,6 +20,7 @@
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "budget_table.h"
+#include "editor_zoom.h"
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -361,6 +362,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     sh_timeline_tile_tick(editor);
     /* The budget usage snapshot, and the Prefabs tab's table after a palette build. */
     sh_budget_table_tick(editor);
+    /* Whether the editor camera forces the Blueprint far plane this frame. */
+    sh_editor_zoom_tick();
 
     /* Service only explicit save requests after the engine has settled this frame. */
     if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);
