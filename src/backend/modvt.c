@@ -12,7 +12,9 @@
  *   VtForMaterial  VirtualTextureForMaterial(sys, material), VK 0x17E8230, GL 0x17E9100: its
  *                  MOV RAX,[R13+disp32] returns record 1 for "_vmtr", so disp32 - 8 is the
  *                  record pointer table (VK sys+0x8B00, GL sys+0xA400). On OpenGL its sparse test
- *                  (CMP QWORD [ext],0; CMP DWORD [cvar],0; MOV EAX,4) gives the two globals.
+ *                  (CMP QWORD [ext],0; CMP DWORD [cvar],0; MOV EAX,4) gives the two globals,
+ *                  __glewTexStorageSparseAMD and vt_enablePRT: with both set a material's flavor
+ *                  1 or 2 becomes 4, so a family's record must carry the same flavor to match.
  * SetSource runs the VT system's synchronisation at entry and allocates from
  * the current heap, so it is called on the main thread inside process heap 0
  * (the page tables live as long as the record).
@@ -117,7 +119,7 @@ static mv_owned g_owned[SH_MODVT_SLOTS];
 static struct { char name[SH_MODVT_NAME_MAX]; char hash[65]; int cause; } g_refused[MV_REFUSALS];
 static int g_nrefused;
 
-enum { MV_TAKEN = 1, MV_RENDERER, MV_FULL, MV_SETSOURCE, MV_FAULT };
+enum { MV_TAKEN = 1, MV_FULL, MV_SETSOURCE, MV_FAULT };
 
 static int mv_refusal_new(const sh_modvt_family *f, int cause)
 {
@@ -259,14 +261,6 @@ int sh_modvt_sync(const sh_modvt_family *wanted, int n, const sh_modvt_ops *ops,
             continue;
         }
         flavor = ops->flavor(ops->context);
-        if (flavor != 2 && flavor != 4) {
-            if (mv_refusal_new(f, MV_RENDERER))
-                mv_log("%s: family '%s' (%s) cannot be served on this renderer: OpenGL binds a private family only "
-                       "through sparse page tables (GL_AMD_sparse_texture and its cvar); its materials draw with "
-                       "default images", phase, f->name, f->bundle);
-            res.refused++;
-            continue;
-        }
         idx = mv_free_owned(f->name);
         if (idx >= 0 && g_owned[idx].record >= 1 && g_owned[idx].record <= SH_MODVT_LAST_USED &&
             !strcmp(g_owned[idx].name, f->name) && ops->is_free(ops->context, g_owned[idx].record) == 1)
@@ -342,6 +336,11 @@ void sh_modvt_reset(void)
 {
     memset(g_owned, 0, sizeof g_owned);
     g_nrefused = 0;
+}
+
+int sh_modvt_flavor(int vulkan, uint64_t sparse_ext, int32_t enable_prt)
+{
+    return !vulkan && sparse_ext && enable_prt ? 4 : 2;
 }
 
 /* ------------------------------------------------------------------ decoding */
@@ -420,6 +419,8 @@ int sh_modvt_decode_layout(const uint8_t *ss, size_t ss_len, uint32_t ss_rva, co
             }
         }
     }
+    /* On OpenGL the record's flavor follows the material's, which this test decides. */
+    if (opengl && !l.sparse_ext_rva) return 0;
     *out = l;
     return 1;
 }
@@ -509,12 +510,12 @@ int sh_modvt_engine_ready(void)
 int sh_modvt_engine_flavor(void)
 {
     uint64_t ext = 0;
-    int32_t cvar = 0;
-    if (g_vulkan) return 2;
-    if (!g_sparse_ext || !g_sparse_cvar) return 2;
-    __try { ext = *g_sparse_ext; cvar = *g_sparse_cvar; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 2; }
-    return (ext && cvar) ? 4 : 2;
+    int32_t prt = 0;
+    if (!g_vulkan && g_sparse_ext) {
+        __try { ext = *g_sparse_ext; prt = *g_sparse_cvar; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ext = 0; prt = 0; }
+    }
+    return sh_modvt_flavor(g_vulkan != 0, ext, prt);
 }
 
 static DWORD g_fault_code;
@@ -572,12 +573,7 @@ int sh_modvt_engine_release(int k, unsigned *fault)
 
 static int op_ready(void *c) { (void)c; return sh_modvt_engine_ready(); }
 
-static int op_flavor(void *c)
-{
-    (void)c;
-    if (g_vulkan) return 2;
-    return sh_modvt_engine_flavor() == 4 ? 4 : 0;
-}
+static int op_flavor(void *c) { (void)c; return sh_modvt_engine_flavor(); }
 
 static int op_find(void *c, const char *name)
 {
@@ -742,23 +738,22 @@ int sh_modvt_install(const sig_result *results, size_t count, const uint8_t *mod
     if (!mv_rd_code((const uint8_t *)ss->addr, sc, sizeof sc) || !mv_rd_code((const uint8_t *)vf->addr, vc, sizeof vc) ||
         !sh_modvt_decode_layout(sc, sizeof sc, ss->rva, vc, sizeof vc, vf->rva, g_vulkan == 0, &l) ||
         !mv_rd_code(module_base + l.release_rva, rc, sizeof rc) || !sh_modvt_release_head_ok(rc, sizeof rc)) {
-        mv_log("mod families unavailable: the VT system, Release or the record table could not be decoded from the "
-               "signed code");
+        mv_log("mod families unavailable: the VT system, Release, the record table or (OpenGL) the sparse test could not "
+               "be decoded from the signed code");
         return 0;
     }
     g_sys = (uint8_t *)module_base + l.sys_rva;
     g_table = l.table_off;
     g_release = (mv_release_fn)(module_base + l.release_rva);
     g_setsource = (mv_setsource_fn)ss->addr;
-    if (l.sparse_ext_rva && l.sparse_cvar_rva) {
+    if (l.sparse_ext_rva) {
         g_sparse_ext = (const uint64_t *)(module_base + l.sparse_ext_rva);
         g_sparse_cvar = (const int32_t *)(module_base + l.sparse_cvar_rva);
     }
     g_bound = 1;
     mv_log("mod families bound on %s: SetSource rva 0x%X, Release rva 0x%X, VirtualTextureForMaterial rva 0x%X, VT "
-           "system rva 0x%X, record table sys+0x%X%s", g_vulkan == 1 ? "Vulkan" : g_vulkan == 0 ? "OpenGL" : "an unknown image",
-           ss->rva, l.release_rva, vf->rva, l.sys_rva, l.table_off,
-           g_vulkan ? "" : (g_sparse_ext ? "; sparse test decoded" : "; sparse test NOT decoded (families are not served on OpenGL)"));
+           "system rva 0x%X, record table sys+0x%X", g_vulkan == 1 ? "Vulkan" : g_vulkan == 0 ? "OpenGL" : "an unknown image",
+           ss->rva, l.release_rva, vf->rva, l.sys_rva, l.table_off);
     sh_modserve_set_index_listener(mv_index_changed);
     n = sh_modvt_collect(NULL, 0);
     if (n) {

@@ -515,9 +515,9 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   present at startup, when the editor is first opened or a map using it loads), before any of its
   materials is read, with no console command; `sh_mods status` shows it. Each family
   takes one of the game's 30 usable page-source records and about 14 MB of memory; a family that
-  finds them all in use is not registered and its materials draw with default images. On OpenGL a
-  family is registered only when the graphics driver offers AMD sparse textures; otherwise the log
-  says it cannot be served. Removing the mod releases the family, unless the editor or a map has
+  finds them all in use is not registered and its materials draw with default images. It works on
+  Vulkan and on OpenGL with any graphics card, through the same page cache the game's own virtual
+  textures use. Removing the mod releases the family, unless the editor or a map has
   been opened since it was registered, in which case it stays until DOOM exits. The format a tool
   must write is in [vt-baker.md](vt-baker.md).
 - DOOM no longer converts anything at startup: the installer does, on install and update, by
