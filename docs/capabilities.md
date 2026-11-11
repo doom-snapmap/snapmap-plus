@@ -645,6 +645,10 @@ Console variables; defaults shown in parentheses.
 
 Subcommands of `sh`, operating on numbered entity-id stacks and named groups. A numbered stack
 is one-shot scratch — apply/use ops drain it; move a set into a named group (`pop2g`) to reuse it.
+Stacks and groups hold the open map's entity ids, so opening another map empties them all. A bulk
+edit (`bss`, `bsi`, `bsf`, `bsb`, `bse`, `accl`, `acctargets`, `bsin`, `bscls`, `bsincls`) changes at
+most 512 entities at once; a larger stack is refused before anything changes and stays as it was.
+Each edit reports the true count: "Changed N of M entities".
 
 The SnapStack stores + all 20 handlers live in the **backend** (`src/backend/snapstack.c` +
 `json_patch.c`), registered once before the frontend loads. See
@@ -659,7 +663,7 @@ letter-first **group name** in place of the stack index):
 | `popsel` | Add the stacked ids (or a named group's) back into the editor selection. |
 | `phov` | Push the hovered entity onto the stack (de-duplicated). |
 | `pr` | Push every valid id in an inclusive `[lo..hi]` range. |
-| `pg` | Push a named group's ids onto the stack. `sh pg <grp>` alone implies stack 0. |
+| `pg` | `sh pg <stack> <grp>`: push a named group's ids onto the stack. `sh pg <grp>` alone implies stack 0; a group that does not exist is named in the refusal. |
 | `pop2g` | Move the stack into a named group. `sh pop2g <grp>` alone implies stack 0. |
 | `cstk` | Empty the stack. |
 | `filtinh` | Keep only the stacked ids whose inherit matches the argument. |
@@ -669,9 +673,9 @@ letter-first **group name** in place of the stack index):
 | `bsf` | Bulk-set a float property. |
 | `bsb` | Bulk-set a boolean property. |
 | `bse` | Pop the last id; set each remaining id's chosen property to that id's id-string. |
-| `bsin` | Set the inherit of each stacked entity. |
-| `bscls` | Set the classname of each stacked entity. |
-| `bsincls` | Apply a validated inherit/classname pair, rebuild its declaration, and reassert the pair. Reports completed, refused and partial outcomes separately. |
+| `bsin` | Set the inherit of each stacked entity. The resulting pair is checked first, so an inherit the classname cannot take is refused instead of faulting the game. |
+| `bscls` | Set the classname of each stacked entity, checked the same way. |
+| `bsincls` | Set an inherit and classname together, checked as one pair. Each of the three reports how many changed, how many were refused, and how many need the command run again. |
 | `accl` | Pop the last id as the receiver; reference-assign the remaining ids to it. |
 | `acctargets` | Pop the last id; append the remaining ids to its `targets` list. |
 | `mkcmd` | Synthesize a reusable command-entity macro from the stacked ids. |
@@ -685,7 +689,6 @@ goes to the `~` console with a summary toast.
 | `chkstk [N]` | Inspect stack `N` (ids + id-strings); omit `N` to summarize every non-empty stack. |
 | `chkgrp [name]` | Inspect a group's ids; omit `name` to list all groups + counts. |
 | `clrgrp <name>\|*` | Delete a named group entirely (`*` deletes all). |
-| `snapstack_diag` | Report, per subcommand, which loaded DLL currently owns the handler. |
 
 ## The Studio window
 
