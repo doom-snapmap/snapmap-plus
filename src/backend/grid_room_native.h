@@ -29,6 +29,8 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size);
 void *sh_grid_native_wrapper(const sh_grid_size *size);
 /* The sentence most recently logged by an edit: applied, unchanged, limited or refused. */
 const char *sh_grid_native_last_message(void);
+/* Where a refused or limited room size edit is told (iface_engine.c binds the editor toast). */
+void sh_grid_native_set_toast(void (*toast)(const char *title,const char *text));
 /* Console entry (sh_gridsize). instance<0 selects the Blueprint selection, else
  * the module whose properties are open. requested NULL only reads the size. */
 int sh_grid_native_selected(int instance,const float *requested,sh_grid_size *out,int *resolved);

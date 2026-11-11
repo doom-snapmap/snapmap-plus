@@ -24,8 +24,9 @@ in the editor and a later map load or Play compute the same values from the
 installed room declaration.
 
 A size edit changes only the axes you changed. When the world limit stops an
-axis, the panel shows the value that fits and the backend log names the axis,
-the limiting module, the coordinate it reached and the limit. A room that
+axis, the panel shows the value that fits and a toast names the axis, the
+limiting module, the coordinate it reached and the limit; a refused edit says
+why in the same toast, and "Room size not changed: ..." on the console. A room that
 already extends past the limit (a lowered cvar, an older map) can still be
 shrunk. `sh_gridsize` resizes the selected room from the console through the
 same path.

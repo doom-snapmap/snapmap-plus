@@ -28,6 +28,7 @@
 #include "wiring_cleandirect.h"
 #include "snapstack.h"
 #include "rawmap.h"
+#include "grid_room_native.h"
 #include "editor_delete.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
@@ -1549,6 +1550,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         /* The rawmap save's "share the .zip" line and toast. */
         sh_rawmap_set_notify(ie_mods_toast, ie_mods_print);
         sh_rawmap_set_edit_id_reader(ie_mods_edit_id);
+        /* A refused or limited Grid Room size edit. */
+        sh_grid_native_set_toast(ie_mods_toast);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */
 
