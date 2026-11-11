@@ -858,6 +858,7 @@ extern int g_mod_stub_import_calls;
 
 static struct {
     int installed, store, asks, answer, answered, fetches, resumes, resume_hook, prints, toasts;
+    int fault;                                   /* the mod check faults (an access violation) */
     char ask[256], print[1600], toast[1600], resume_note[256];
 } R;
 
@@ -867,6 +868,7 @@ static int r_row_state(void *c, const sh_modmanifest_row *row, const char *place
 {
     (void)c; (void)place; (void)subject;
     if (cause && cap) cause[0] = 0;
+    if (R.fault) *(volatile int *)(uintptr_t)R.fault = 0;
     return !strcmp(row->build, HASH_A) && R.installed ? SH_MODPUB_ROW_SERVED : SH_MODPUB_ROW_MISSING;
 }
 static int r_rescan(void *c) { (void)c; return 1; }
@@ -958,6 +960,27 @@ static void a_rawmap_without_its_mods_never_reaches_the_engine(void)
     CHECK(!strcmp(R.print, "This map needs test.alpha, which is not installed and was never published. "
                            "Restore its folder from the Recycle Bin or load the map's rawmap ZIP."));
     CHECK(R.asks == 1 && !strcmp(R.ask, R.print));
+    DeleteFileA(staged);
+    mods_end();
+}
+
+static void a_fault_in_the_mod_check_refuses_the_rawmap(void)
+{
+    char staged[MAX_PATH], why[256];
+    unsigned long swaps;
+    printf("\n-- a fault while checking a rawmap's mods refuses it: the engine never gets it\n");
+    mods_begin();
+    R.fault = 8;   /* an address no process maps */
+    CHECK(write_file("rawmap_mods_fault.json", MOD_MAP, staged, sizeof staged));
+    CHECK(sh_rawmap_swap_set_source(staged));
+    swaps = sh_rawmap_swap_count();
+    g_parses = 0;
+    CHECK(sh_rawmap_prepare_reload(why, (int)sizeof why) == 0);
+    CHECK(!strcmp(why, "rawmap_mods_fault.json was not opened: Snapmap+ could not check this map, so it was not "
+                       "opened. Restart DOOM and open it again."));
+    CHECK(g_prepared == NULL && !g_in_reload && g_parses == 0 && sh_rawmap_swap_count() == swaps);
+    CHECK(!sh_modpublished_holding());
+    R.fault = 0;
     DeleteFileA(staged);
     mods_end();
 }
@@ -1335,6 +1358,7 @@ int main(void)
     a_reload_into_the_same_map_object_is_a_new_map();
     saves_carry_no_package_payload();
     a_rawmap_open_is_unsaved_until_its_first_save();
+    a_fault_in_the_mod_check_refuses_the_rawmap();
     a_rawmap_without_its_mods_never_reaches_the_engine();
     a_rawmap_whose_mods_the_store_has_is_offered_then_opens();
     a_held_zip_is_imported_once();

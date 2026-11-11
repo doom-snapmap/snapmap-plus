@@ -220,17 +220,23 @@ static char *read_source_file_why(size_t *out_len, char *why, size_t why_cap)
     return buf;
 }
 
+/* The refusal of a map whose Snapmap+ data a check could not finish: the
+ * engine never gets a map that was not checked. */
+#define RAWMAP_CHECK_FAULTED "Snapmap+ could not check this map, so it was not opened. Restart DOOM and open it again."
+
 /* A map in an earlier shape (map_carrier.h, sh_map_old_shape) is refused
  * before anything reads it: one line, and the plain sentence held as the
- * load's refusal (sh_modmanifest_load_refuse). Returns 1 when refused. */
+ * load's refusal (sh_modmanifest_load_refuse). A check that faults refuses
+ * too. Returns 1 when refused. */
 static int old_shape_refused(const char *json, size_t len)
 {
     int shape;
     __try {
         shape = sh_map_old_shape(json, len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("CARRIER: the earlier-shape check FAULTED; the map is read as it is");
-        return 0;
+        backend_log("CARRIER: the earlier-shape check FAULTED; the map is refused");
+        sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
+        return 1;
     }
     if (shape == SH_MAP_OLD_NONE) return 0;
     backend_log(shape == SH_MAP_OLD_ROWS
@@ -242,14 +248,19 @@ static int old_shape_refused(const char *json, size_t len)
 
 /* Read the map manifest, keep it for the load, strip its rows before the
  * engine parses and activate the bundles it names. Runs on every parse.
- * Returns an owned process-heap buffer, or NULL to keep the input. */
-static char *manifest_prepare_guarded(const char *json, size_t len)
+ * Returns an owned process-heap buffer, or NULL to keep the input; a read
+ * that faults sets *faulted and the map is refused (its mods were not
+ * activated, and its placed entities would fail the editor's validator). */
+static char *manifest_prepare_guarded(const char *json, size_t len, int *faulted)
 {
+    *faulted = 0;
     __try {
         size_t out_len = 0;
         return sh_modmanifest_prepare_load(json, len, &out_len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("MODS: map manifest read FAULTED; the map loads without mod activation");
+        backend_log("MODS: map manifest read FAULTED; the map is refused");
+        sh_modmanifest_load_refuse(RAWMAP_CHECK_FAULTED);
+        *faulted = 1;
         return NULL;
     }
 }
@@ -524,6 +535,7 @@ static char *prepare_map_buffer(const char *json, int *refused)
 {
     char *manifest, *settings, *current = NULL, *bare;
     size_t len = json ? strlen(json) : 0;
+    int faulted = 0;
 
     *refused = 0;
     if (len == 0) return NULL;
@@ -536,7 +548,8 @@ static char *prepare_map_buffer(const char *json, int *refused)
     sh_nav_bake_set_map(json, len);
 
     place_prepare_guarded(json, len);
-    manifest = manifest_prepare_guarded(json, len);
+    manifest = manifest_prepare_guarded(json, len, &faulted);
+    if (faulted) { *refused = 1; return NULL; }
     if (manifest) current = manifest;
     /* The map's Snapmap+ settings (map_settings.h), held for the map. */
     settings = settings_prepare_guarded(current ? current : json, current ? strlen(current) : len);
@@ -594,6 +607,9 @@ static void rawmap_base_name(const char *path, char *out, size_t cap)
     strncpy_s(out, cap, b, _TRUNCATE);
 }
 
+/* The rows the rawmap names that nothing serves, or (size_t)-1 when the
+ * check faulted: the map is then refused, never handed to the engine. */
+#define RAWMAP_MISSING_FAULTED ((size_t)-1)
 static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows, char *place,
                                      size_t place_cap)
 {
@@ -601,9 +617,9 @@ static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifes
     __try {
         return sh_modpub_rawmap_missing(text, len, rows, place, place_cap);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("MODS: the rawmap's mod check FAULTED; the map loads as it is");
+        backend_log("MODS: the rawmap's mod check FAULTED; the map is refused");
         memset(rows, 0, sizeof *rows);   /* leaked on purpose: its state is unknown */
-        return 0;
+        return RAWMAP_MISSING_FAULTED;
     }
 }
 
@@ -655,6 +671,14 @@ int sh_rawmap_prepare_reload(char *why, int cap)
         return 0;
     }
     missing = rawmap_missing_guarded(text, len, &rows, place, sizeof place);
+    if (missing == RAWMAP_MISSING_FAULTED) {
+        HeapFree(GetProcessHeap(), 0, text);
+        _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s", name, RAWMAP_CHECK_FAULTED);
+        rawmap_tell(sentence);
+        RAWMAP_DIAG(0, "refused", path, 0, sentence, len, 0);
+        if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
+        return 0;
+    }
     if (missing) {
         char line[MAX_PATH + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
