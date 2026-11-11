@@ -149,7 +149,7 @@ text with your edits and those of every other mod it uses, so two mods that add 
 body both apply. A copy that differs from the game's only in line endings (CRLF or LF, a final newline)
 is the game's own file and is borrowed, not edited. A copy that does not read as a decl is refused with
 the line it stops at, and a binary at a game name with other bytes (a model, an image) is refused: put
-it under `mods/<key>/` and point your decls at it. A render program's permutation decl is text, but an
+it under `mods/<key>/` and point your decls at it, or delete your copy and the mod borrows the game's. A render program's permutation decl is text, but an
 edited one is refused too, since the game file cannot be generated per map: delete the copy, or ship
 your program whole under `mods/<key>/`. A material that names a shader only the campaign ships
 brings the shader's whole program along from the player's install (its decl, compiled files and

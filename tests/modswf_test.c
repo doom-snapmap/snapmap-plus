@@ -242,8 +242,9 @@ static void test_builder(void)
                     "\"replaces\": [\"generated/swf/screens_tech/vega_flat.bswf\"]}");
     for (i = 0; movies[i]; i++) put(movies[i], "BSW movie bytes");
     CHECK(!sh_mb_build(g_dir, &resolver, &b) &&
-          strstr(b.first_cause, "would replace the game's generated/swf/screens_tech/") &&
-          strstr(b.first_cause, "put it under mods/alex.screens/"));
+          strstr(b.first_cause, "assets/generated/swf/screens_tech/") &&
+          strstr(b.first_cause, ": the game ships this file and a mod cannot replace it with other bytes; delete your "
+                                "copy and the mod borrows the game's, or put your version under mods/alex.screens/"));
     sh_mb_free(&b);
     sh_mb_keep_replacements_here(1);   /* an import of received content */
     CHECK(sh_mb_build(g_dir, &resolver, &b));

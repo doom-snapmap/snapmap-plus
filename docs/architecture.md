@@ -2128,8 +2128,11 @@ map's choices).
   `classes.replaces`, the Mods tab's replaced stock files or a doctor conflict). Refused: a copy
   or a game text outside the grammar ("does not parse as a decl (line N: ...);
   the product derives the edits from the whole edited copy"); a game text the
-  reader cannot supply; a binary at a game name with other bytes ("a binary at
-  a game name cannot be merged with other mods: put it under mods/<key>/"),
+  reader cannot supply; a binary at a game name with other bytes ("<path>: the
+  game ships this file and a mod cannot replace it with other bytes; delete
+  your copy and the mod borrows the game's, or put your version under
+  mods/<key>/ and point your decls at it"; a binary at a name the game does
+  not ship keeps "the game has no file of that name for it to replace"),
   except in a folder the product received (origin `download`, `delivery`,
   `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
   where it stays a replacement, as does a decl whose game text cannot be read

@@ -4871,12 +4871,13 @@ names:
                 /* A decl at a game name is an edited copy (mb_derive_edits);
                  * a binary has no structure to diff and the game loads it by
                  * its fixed name, so it is refused, except in a folder the
-                 * product received. */
+                 * product received. The game ships the file, so the copy can
+                 * also simply go: the mod then borrows the game's. */
                 if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !mb_received(b) &&
                     !g_mb_keep_here) {
-                    mb_error(b, "%s would replace the game's %s with other bytes; a binary at a game name cannot be "
-                             "merged with other mods: put it under mods/%s/ and point your decls at it", f->path,
-                             f->request, b->id);
+                    mb_error(b, "%s: the game ships this file and a mod cannot replace it with other bytes; delete your "
+                             "copy and the mod borrows the game's, or put your version under mods/%s/ and point your "
+                             "decls at it", f->path, b->id);
                 } else if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {

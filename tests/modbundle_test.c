@@ -1209,8 +1209,9 @@ static void test_refusals(const char *fixture, const char *tmp)
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
     /* A binary at a game name with other bytes is refused. */
     refused(fixture, tmp, m_binary_replace, &RESOLVER,
-            "would replace the game's cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim with other "
-            "bytes; a binary at a game name cannot be merged with other mods: put it under mods/alex.r2-imp/");
+            "assets/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
+            "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
+            "version under mods/alex.r2-imp/ and point your decls at it");
     /* Received content keeps a binary replacement: an import on its own thread, a downloaded folder. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
