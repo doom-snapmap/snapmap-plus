@@ -3,7 +3,7 @@
  *
  * A mod's campaign scene node is a SnapMap logic hexagon over an invisible
  * interactable. Its Activate input is an idSnapMapAction_Interaction whose palette
- * row is mods/<id>/actions/scene_play (IA_ACTIVATE); a placed copy has its own
+ * row is mods/<salt>/actions/scene_play (IA_ACTIVATE); a placed copy has its own
  * entityDef that inherits that row, so both names are checked. The engine plays
  * the node's sync wherever the node entity stands: the interaction's
  * sync-start helper copies the owner's physics origin and axis into the sync
@@ -45,8 +45,12 @@
  * put.
  *
  * Every other interaction action, every stock row and the editor are left to
- * the engine. Records are cleared, and the scenes blocks read again, at each
- * Play entry.
+ * the engine. Records are cleared at each Play entry, and the scenes blocks
+ * are read again at the Play's first scene, from the builds the Play serves:
+ * one build per salt, the one whose names serve now (sh_modserve_bundle_scope,
+ * names_live), so a downloaded map's own build of a mod plays its own scenes.
+ * A scenes block that does not read is logged ("SCENES: <salt>: its scenes
+ * entry ...") and that mod's nodes play at the player.
  *
  * Logs (backend log and console; the runtime lines once per Play each):
  *   scene-place installed: mod scene nodes play at the activating player
@@ -58,12 +62,12 @@
  *   scene-place: refused interaction action <n> for <owner>: it has no requester
  *   scene-place: <a reason the scene plays at the node or the player stays>
  *   scene-place: scene spawns available: a mod's scenes block can spawn at its node when its sync starts
- *   scene-place: <node> plays at <player> (... scene at x y z, yaw[, turned toward the anchor]; anchor ...)
- *   scene-place: <node> plays at its node (scene at x y z, yaw)
- *   scene-place: <node> spawned <entityDef> at x y z, yaw with its sync
- *   scene-place: <node> could not spawn <entityDef>: <reason>
- *   scene-place: <node>'s sync did not start; nothing was spawned
- *   scene-place: <node> finished its scene; the player stays
+ *   Scene <node>: plays at <player> (... scene at x y z, yaw[, turned toward the anchor]; anchor ...)
+ *   Scene <node>: plays at its node (scene at x y z, yaw)
+ *   Scene <node>: spawned <entityDef> at x y z, yaw with its sync
+ *   Scene <node>: could not spawn <entityDef>: <reason>
+ *   Scene <node>: its sync did not start; nothing was spawned
+ *   Scene <node>: finished; the player stays
  *   scene-place: the HUD was shown again when the scene finished
  * (When a scene node raises On Scene Finished and a scene hid the HUD without
  * its show event firing, the HUD is shown again: sh_modhud_scene_restore.)
@@ -80,7 +84,7 @@
 #define SH_MODSCENE_PLACE_RECORDS    16
 
 /* 1 when an entityDef name is a mod's scene_play Activate row
- * (mods/<id>/actions/scene_play), else 0. */
+ * (mods/<salt>/actions/scene_play), else 0. */
 static __inline int sh_modscene_place_is_scene_row(const char *name)
 {
     size_t n, p = sizeof SH_MODSCENE_PLACE_ROW_PREFIX - 1, s = sizeof SH_MODSCENE_PLACE_ROW_SUFFIX - 1;

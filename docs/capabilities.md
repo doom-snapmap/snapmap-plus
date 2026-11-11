@@ -449,7 +449,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   and, once per Play, `a scene node plays at`, `returned after the scene`, `dropped an Activate` and
   `refused interaction action`.
 - A mod's `scenes` setting can give each of its scene nodes a second frame: an anchor, which is the
-  node's own placement in the editor. The entry for a node (its `mods/<id>/...` entityDef) gives
+  node's own placement in the editor. The entry for a node (its `mods/<salt>/...` entityDef) gives
   poses as `[x, y, z, yaw]` in the frame of the node's sync: `anchor` is the scene pose the node
   marks (where a demon arrives, facing the way the node is turned), and `player` is the player's first
   pose in the scene. Each `spawn` entity (up to 4, an `entityDef` and optionally its own `at` pose,
@@ -465,16 +465,19 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   `spawn` or `at_node`, on otherwise) teleports the player back after On Scene Finished as above.
   A node's anchor is where it was placed in the editor for the whole Play, even after the backend
   moved it onto a player. A mod may only list its own nodes; an unknown key, a malformed pose or a
-  foreign name refuses the mod's whole block with a log line, and the first mod to list a node
-  keeps it. Spawned entityDefs are recorded as needs of their node, as companions are. Numbers are
+  foreign name refuses the mod's whole block with a log line (`SCENES: <salt>: its scenes entry
+  ...`), and that mod's nodes then play at the player. The entries come from the builds the Play
+  serves, read again at every Play, so a downloaded map that carries its own build of a mod plays
+  that build's scenes. Spawned entityDefs are recorded as needs of their node, as companions are. Numbers are
   plain integers or fixed decimals. The log says `scene spawns available` once, and for each
-  activation `plays at <player> (... turned toward the anchor ...)`, `plays at its node`,
-  `spawned <entityDef> at ... with its sync`, `could not spawn`, `sync did not start` and `finished
-  its scene; the player stays` (48 lines a Play at most):
+  activation, each starting `Scene <node>:`, `plays at <player> (... turned toward the anchor ...)`,
+  `plays at its node`, `spawned <entityDef> at ... with its sync`, `could not spawn`, `its sync did
+  not start` and `finished; the player stays` (48 lines a Play at most):
 
-      "scenes": { "mods/<id>/imp_arrival": {
+      "scenes": { "mods/<salt>/imp_arrival": {
         "anchor": [563.095, 16.698, 0.352, 179.998], "player": [-33.678, 0, 0, 0],
-        "spawn": [ { "entityDef": "mods/<id>/entrance/imp" } ] } }
+        "spawn": [ { "entityDef": "mods/<salt>/entrance/imp" } ] } }
+
 - A mod's `companions` setting gives one of its tiles its own helper entities: GUI displays, props
   or speakers that appear with every placed copy of the tile when the map plays, sit where the
   author put them relative to that copy, move with it, are removed with it, and are switched on in

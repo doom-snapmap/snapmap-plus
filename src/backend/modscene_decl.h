@@ -5,7 +5,7 @@
  * it under "extra"):
  *
  *   "scenes": {
- *     "mods/<id>/<scene node entityDef>": {
+ *     "mods/<salt>/<scene node entityDef>": {
  *       "plays":  "at_player",            or "at_node"; default "at_player"
  *       "anchor": [x, y, z, yaw],         the scene-frame pose the node marks; default 0 0 0 0
  *       "player": [x, y, z, yaw],         the player's first pose in the scene frame
@@ -35,9 +35,10 @@
  * false otherwise. A node without an entry plays at the player and returns
  * them, as before. "reaim" needs "player" and at_player.
  *
- * Owners must be the declaring bundle's own names (mods/<id>/..., '-' and '_'
- * equivalent in the id); a block naming another namespace is refused whole.
- * The first bundle to declare an owner keeps it. Unknown keys are refused.
+ * Owners must be the declaring mod's own names (mods/<salt>/...); a block
+ * naming another namespace is refused whole. Unknown keys are refused. The
+ * table holds one build per salt (the one the open map serves,
+ * modscene_place.c), so no owner is declared twice.
  *
  * This file is pure: parsing, validation, lookup and the frame math. */
 #ifndef SH_MODSCENE_DECL_H
@@ -67,7 +68,7 @@ typedef struct sh_scene_spawn {
 
 typedef struct sh_scene_entry {
     char node[SH_SCENE_NAME_CAP];
-    char bundle[SH_SCENE_NAME_CAP];
+    char bundle[SH_SCENE_NAME_CAP];   /* the declaring mod's salt */
     int at_node;                   /* 1: "plays": "at_node" */
     sh_scene_pose anchor;          /* scene-frame pose the node's placed transform marks */
     int has_player;
@@ -86,14 +87,30 @@ typedef struct sh_scene_table {
 
 typedef void (*sh_scene_log_fn)(void *context, const char *line);
 
-/* Parse one bundle's extra object (the manifest's "extra" JSON text) and add
- * its "scenes" owners. Returns the number added, 0 when the bundle declares
+/* Parse one mod's author keys (the serving index's "extra" JSON text) and add
+ * its "scenes" owners. Returns the number added, 0 when the mod declares
  * none, or -1 when its block was refused (nothing of it is added); `log` (may
- * be NULL) receives one line per refusal. */
-int sh_scene_add_bundle(sh_scene_table *t, const char *bundle_id, const char *extra_json, size_t length,
+ * be NULL) receives one clause per refusal, beginning "its scenes entry ..."
+ * (a caller names the mod before it). */
+int sh_scene_add_bundle(sh_scene_table *t, const char *salt, const char *extra_json, size_t length,
+                        sh_scene_log_fn log, void *context);
+
+
+/* The table of the builds the open map serves: `each` visits every admitted
+ * build with its salt, hash, place flag and author keys (the serving layer's
+ * sh_modserve_each_bundle_extra, root folders first), `serves_now(hash)` says
+ * whether the open map uses that build (NULL: every build). The first build
+ * of a salt that serves now is read; a block that does not read logs one line
+ * ("SCENES: <salt>: its scenes entry ...; its scene nodes play at the
+ * player") and adds nothing. Returns the entries, -1 when the builds could not
+ * be visited (the table is empty). */
+typedef void (*sh_scene_build_fn)(void *context, const char *salt, const char *hash, int place, const char *extra);
+typedef int (*sh_scene_each_fn)(sh_scene_build_fn fn, void *context);
+int sh_scene_table_load(sh_scene_table *t, sh_scene_each_fn each, int (*serves_now)(const char *bundle_hash),
                         sh_scene_log_fn log, void *context);
 
 /* The entry for `name` (ASCII case-insensitive, either separator), or NULL. */
+
 const sh_scene_entry *sh_scene_find(const sh_scene_table *t, const char *name);
 
 /* 1 when `name` could name an owner (it starts with "mods/", any case). */
