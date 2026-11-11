@@ -647,7 +647,7 @@ static int apply_light(void *edit_data,grid_light_change *light,int restore)
         if((light->target.has_radius&&fabsf(*(float*)(body+0xa0+4*k)-light->target.radius[k])>.01f)||
            fabsf(*(float*)(body+0xac+4*k)-light->target.center[k])>.01f){
             char message[200];
-            /* The probe and dynamic point readback layout is verified (R-012).
+            /* The probe and dynamic point readback layout is verified.
              * Other built-in light kinds are committed through the same tree;
              * a readback difference there is reported, not treated as fatal. */
             if(strcmp(light->target.inherit,"light/probe")&&
@@ -1403,7 +1403,7 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
         /* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
          * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
          * delete only when its two leading calls reach the resolved getter and applier.
-         * Its live destroy/free check stays open: R-012 could not reach it before the stream-slot fix. */
+         * Its live destroy/free check stays open: no live check has reached it yet. */
         if(p&&g_entity_tree&&g_apply_tree&&p[0x17]==0xe8&&p[0x25]==0xe8&&p[0x38]==0xe8&&p[0x45]==0xe8&&
            !memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8)){
             memcpy(&displacement,p+0x18,4);

@@ -623,7 +623,7 @@ static void h_sh_listres(idCmdArgs *a)
         return;
     }
     if (!g_get_decls) {
-        sh_printf("sh_listres: GetDeclsOfType unresolved -- cannot list.\n");
+        sh_printf("sh_listres is unavailable on this game build.\n");
         return;
     }
 
@@ -694,7 +694,7 @@ static void h_sh_entlist(idCmdArgs *a)
             printed++;
         }
         if (k >= SH_ENTLIST_MAX)
-            sh_printf("(registry list truncated at %d -- raise SH_ENTLIST_MAX)\n", SH_ENTLIST_MAX);
+            sh_printf("(list truncated)\n");
     } else {
         for (int i = 0; i < B2_ENTLIST_CLASS_COUNT; i++) {
             const char *name = B2_ENTLIST_CLASSES[i];
@@ -875,7 +875,7 @@ static void h_cs_start_render_logging(idCmdArgs *a)
 #define STUB_HANDLER(fn, help_text)                                              \
     static void fn(idCmdArgs *a) {                                              \
         (void)a;                                                                \
-        sh_printf("%s\n(not yet implemented in clone)\n", help_text);          \
+        sh_printf("%s\n(this command is not available in Snapmap+)\n", help_text); \
     }
 
 /* Model compilation and render-debug commands. Engine calls resolve at use.
@@ -984,22 +984,22 @@ static void h_sh_genmd6model(idCmdArgs *a)
     unsigned char outS[GEN_IDSTR_BYTES];   memset(outS,   0, sizeof outS);
 
     if (!eng_default_idstr_ctor(opts)) {
-        sh_printf("sh_genmd6model: idStr ctor unresolved -- cannot compile.\n");
+        sh_printf("sh_genmd6model is unavailable on this game build.\n");
         return;
     }
     if (!eng_md6_ctor(md6)) {
-        sh_printf("sh_genmd6model: md6 builder unresolved -- cannot compile.\n");
+        sh_printf("sh_genmd6model is unavailable on this game build.\n");
         eng_idstr_dtor(opts);
         return;
     }
 
     if (!eng_idstr_assign(inS, input) || !eng_idstr_ctor_copy(outS, output)) {
-        sh_printf("sh_genmd6model: idStr assign/ctor unresolved -- cannot compile.\n");
+        sh_printf("sh_genmd6model is unavailable on this game build.\n");
         eng_idstr_dtor(opts);
         return;
     }
     if (!eng_md6_setoutput(md6, outS)) {
-        sh_printf("sh_genmd6model: md6 SetOutput unresolved/faulted.\n");
+        sh_printf("sh_genmd6model: the model builder could not be set up; nothing was written.\n");
         eng_idstr_dtor(outS);
         eng_idstr_dtor(opts);
         return;
@@ -1012,7 +1012,7 @@ static void h_sh_genmd6model(idCmdArgs *a)
     if (built)
         sh_printf("sh_genmd6model: compiled '%s' -> '%s'\n", input, output);
     else
-        sh_printf("sh_genmd6model: md6 build unresolved/faulted ('%s').\n", input);
+        sh_printf("sh_genmd6model: '%s' could not be compiled; nothing was written.\n", input);
 }
 
 /* Generate a BModel using a 0xD0 result buffer and a constructed options idStr. */
@@ -1031,7 +1031,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
     unsigned char optsS [GEN_IDSTR_BYTES]; memset(optsS,  0,    sizeof optsS);
 
     if (!eng_default_idstr_ctor(optsS)) {
-        sh_printf("sh_genbmodel: idStr ctor unresolved -- cannot generate.\n");
+        sh_printf("sh_genbmodel is unavailable on this game build.\n");
         return;
     }
     int built = eng_bmodel_builder(out208, input, output, optsS);
@@ -1040,7 +1040,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
     if (built)
         sh_printf("sh_genbmodel: generated bmodel '%s' -> '%s'\n", input, output);
     else
-        sh_printf("sh_genbmodel: bmodel builder unresolved/faulted ('%s').\n", input);
+        sh_printf("sh_genbmodel: '%s' could not be generated; nothing was written.\n", input);
 }
 
 /* Render inspection uses signed render-world anchors; showcursor writes one
@@ -1180,19 +1180,19 @@ static void h_sh_debugrender(idCmdArgs *a)
     /* Deliberately refused legacy operations. */
     if (strcmp(sub, "loadimg_n_break") == 0) {
         sh_printf("sh_debugrender: '%s' not available -- it ends in a debugger INT3 trap (halts the game). "
-                  "Refused by the clone.\n", sub);
+                  "It is not available in Snapmap+.\n", sub);
         return;
     }
     if (strcmp(sub, "dump_megatex") == 0) {
         sh_printf("sh_debugrender: '%s' not available -- it hardcodes a write to C:\\Users\\Chris\\megatex.raw "
-                  "(a dev path). Refused by the clone.\n", sub);
+                  "(a developer's own folder). It is not available in Snapmap+.\n", sub);
         return;
     }
 
     /* Unsupported engine-mutating debug operations. */
     if (strcmp(sub, "test_rm_commit") == 0 || strcmp(sub, "test_sum_shit") == 0 ||
         strcmp(sub, "testnewgui") == 0) {
-        sh_printf("sh_debugrender: '%s' is an internal render mutator of the original tool -- not ported.\n", sub);
+        sh_printf("sh_debugrender: '%s' changes the renderer's internals and is not available in Snapmap+.\n", sub);
         return;
     }
 
@@ -1240,7 +1240,7 @@ static void h_sh_dispatch(idCmdArgs *a)
     __try {
         handler(ctx, sub_argc, sub_argv);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sh_printf("sh %s: handler faulted (recovered; the op did not complete)\n", sub);
+        sh_printf("sh %s failed with an engine error and did not finish; check the entities it was working on.\n", sub);
     }
 }
 
