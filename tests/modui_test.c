@@ -1332,7 +1332,7 @@ int main(int argc, char **argv)
     /* Use in this map: twin_a, nothing placed. */
     g_marks = 0;
     doc = run_doc(SH_MODS_ACT_MAP_ADD, "twin_a");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Twin A is now used by the whole of Imp Arena."));
+    CHECK(has(doc, "\"ok\":true,\"message\":\"Twin A is now used by the whole of Imp Arena; save the map to keep it.\""));
     CHECK(g_marks == 1 && doc_prose_ok(doc));
     free(doc);
     doc = run_doc(SH_MODS_ACT_MAP_ADD, "twin_a");
@@ -1347,7 +1347,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"entityCount\":0,") && has(doc, "\"manifestRow\":true"));
     free(doc);
     doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "twin_a");
-    CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Twin A from Imp Arena: no entity used it, so only its row was dropped.\""));
+    CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Twin A from Imp Arena; nothing placed used it.\""));
     free(doc);
     /* Remove from map never leaves objects without a row: the row goes once the delete has committed and
      * the map holds none of the mod's objects; objects still there keep it. */

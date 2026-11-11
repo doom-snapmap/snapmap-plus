@@ -2822,14 +2822,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (!st || !st.count) return {rows: [], note: ''};
     var rows = st.mods.map(function(m){ return {label: pfModLabel(m), state: m.installed === true ? 'Installed' : 'Not installed', missing: m.installed !== true}; });
     var note = st.missing
-      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Load / Place offers to download them when the mod store has them; otherwise ask the prefab\'s author for its ZIP export.'
+      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Load / Place offers to download them when they are available online; otherwise ask the prefab\'s author for its export.'
       : 'Every mod this prefab needs is installed.';
     return {rows: rows, note: note};
   }
-  // A Load / Place answer about mods: 3 the mod store is being asked, -7 refused. Others are null.
+  // A Load / Place answer about mods: 3 the download is being asked for, -7 refused. Others are null.
   function pfModsLoadToast(d) {
     if (!d) return null;
-    if (d.result === 3) return {text: d.message || ('Checking the mod store for the mods "' + d.name + '" needs'), level: 'ok'};
+    if (d.result === 3) return {text: d.message || ('Checking online for the mods "' + d.name + '" needs'), level: 'ok'};
     if (d.result === -7) return {text: d.message || ('"' + d.name + '" was not placed: its mods are not installed'), level: 'warn'};
     return null;
   }

@@ -1404,7 +1404,7 @@ static void ui_apply_place_module_prefab(const std::string &body)
 }
 /* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
  * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
- * g_load_result is 3 (held while the mod store is asked, followed by ui_poll_prefab_mods),
+ * g_load_result is 3 (held while the download is asked for, followed by ui_poll_prefab_mods),
  * -6 (a module the player cannot get) or -7 (refused), with the message in g_load_message.
  * The rows are the file's block's, else (a prefab saved before the block) its sidecar's; a
  * prefab naming none goes on as before, and the backend answers that without the game. */
@@ -1428,7 +1428,7 @@ static bool ui_resolve_prefab_mods(const std::string &body)
                 call.seq, msg);
     ui_log(l);
     if (r == 1) return true;                       /* every mod installed and in the open map */
-    if (r == 2 && call.seq > 0) {                  /* the mod store is asked; Yes downloads, then it is placed */
+    if (r == 2 && call.seq > 0) {                  /* the download is asked for; Yes downloads, then it is placed */
         g_mods_wait_seq = call.seq;
         g_mods_wait_name = g_load_prefab_name;
         g_mods_wait_folder = g_load_prefab_folder;
@@ -3257,7 +3257,7 @@ static void ui_mods_finish()
         /* A Files read: the page keeps its document. */
     } else ui_post_json(job.list_rc == -1
         ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
-        : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
+        : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"Snapmap+ could not read your mods. Press Refresh; if it stays, use Send feedback.\"}");
     job.run_doc.clear();
     job.list_doc.clear();
     InterlockedExchange(&g_mods_phase, 0);

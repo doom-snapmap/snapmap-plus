@@ -66,9 +66,9 @@ var modsTab = (function () {
     replace: 'Replaces a game file',
     editor: 'An editor tweak, on this computer only',
     surface: 'A game file SnapMap cannot see on its own',
-    '': 'Not read yet'
+    '': 'Not part of the mod; Snapmap+ ignores it'
   };
-  var NOT_SERVED_TITLE = 'Snapmap+ reads this file when you press Refresh in the Mods tab.';
+  var NOT_SERVED_TITLE = 'Snapmap+ builds a mod from mod.json and its assets folder when you press Refresh; this file is not in that build.';
   /* Where a game file's bytes come from: the archive the install bridge matched. */
   var FILE_SOURCES = {
     gameresources: "from the game's campaign and multiplayer files",
@@ -103,7 +103,7 @@ var modsTab = (function () {
   function uninstallHead(pv) { return pv && pv.install && pv.install.undoCleared ? UNINSTALL_HEAD.undo : UNINSTALL_HEAD.plain; }
   /* The saved maps that use the mod (the dry run's savedMaps), and the undo history. */
   function savedMapsText(n) {
-    return n + ' of your saved maps use it; they will not open until a mod folder provides its files again.';
+    return n + ' of your saved maps use it; they will not open until you restore it from the Recycle Bin.';
   }
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
   var SCOPE = {
@@ -444,7 +444,7 @@ var modsTab = (function () {
                 ' sounds, which SnapMap leaves out, for a map that uses it.',
                 list: f.stockBanks.map(function (s) {
                   return s.bank + ': ' + (s.state === 'loaded' && s.ms ? 'loaded (' + s.ms + ' ms)' :
-                                          s.state === 'failed' ? 'did not load (error ' + s.result + ')' : s.state);
+                                          s.state === 'failed' ? 'did not load; restart DOOM and try again' : s.state);
                 }), kind: 'banks', items: f.stockBanks});
     }
     if (f.editor) out.push({text: 'Tweaks ' + plural(f.editor, 'editor file') + ' on this computer only: ' + EDITOR_TWEAKS_TEXT + '.',
@@ -1116,7 +1116,7 @@ var modsTab = (function () {
       var list = section(body, 'mapMods', 'Mods in this map');
       if (!m.mods.length) {
         list.appendChild(el('div', 'mods-vanilla', m.vanilla === false ? 'This map lists no mods.'
-          : 'This map is now vanilla: it uses no mods and plays without Snapmap+.'));
+          : 'This map uses no mods now; it plays without Snapmap+.'));
         return;
       }
       m.mods.forEach(function (r) { list.appendChild(mapModRow(r)); });

@@ -321,9 +321,9 @@ bookkeeping. Every folder's state, conflicts, replaced game files and verificati
 `sh_mods doctor [verify]`.
 
 **Vocabulary.** Nothing a player reads names a salt, a hash, a build number, "bundle", "key",
-"pointer", "surface", "legacy" or "migrate". The backend says every cause, warning and result as
-plain sentences (`mu_plain_cause`, `mu_plain`: the builder's shape and build causes are rewritten,
-a salt in a path becomes `<mod id>`); the mod's salt reaches the page only as `salt`, which the
+"pointer", "surface", "legacy" or "migrate". Each cause, warning and result is one plain sentence
+written where it is raised; the window adds the next step only for the causes it knows one for
+(`mu_plain_cause`), and there is no rewrite table. The mod's salt reaches the page only as `salt`, which the
 Files view's paths show; an author never needs it.
 `tests/mods_tab_test.js` and `tests/modui_test.c` check every text a player reads against that list.
 

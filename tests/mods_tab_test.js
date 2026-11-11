@@ -236,7 +236,7 @@ function standIn(initial, folders) {
         else docu.map.mods.push({key: key, salt: str(b.salt), name: str(b.name), state: 'installed',
                                  placedEntities: [], placedCount: 0, placedModules: 0, references: [], size: num(b.size),
                                  inManifest: true, viaNeeds: false, attached: true, nothingPlaced: true, build: ''});
-        msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '.';
+        msg = nameOf(key) + ' is now used by the whole of ' + docu.map.name + '; save the map to keep it.';
       }
     } else if (a === 'chooseRegistry') {
       var tab = key.indexOf('\t'), slot = tab < 0 ? key : key.slice(0, tab), pick = tab < 0 ? '' : key.slice(tab + 1);
@@ -259,7 +259,7 @@ function standIn(initial, folders) {
                            editorRows: arr(b.editorRowNames).slice()};
     } else if (a === 'mapRemoveMod') {
       if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
-      else { msg = 'Removed ' + nameOf(r.key, r.name) + ' from ' + docu.map.name + ': ' + plural(num(r.placedCount), 'entity', 'entities') + ' deleted.'; removeFromMap(r); }
+      else { msg = 'Removed ' + nameOf(r.key, r.name) + ' from ' + docu.map.name + ': ' + plural(num(r.placedCount), 'object') + ' deleted.'; removeFromMap(r); }
     } else if (a === 'uninstall') {
       if (!b) { ok = false; msg = key + ' is not installed.'; }
       else {
@@ -757,7 +757,7 @@ test('Remove from map: the dry run drives the confirmation; the document drives 
   modalButtons(h)[1].click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapRemoveMod', arg: 'alex.r2-imp'});
   assert.equal(h.nodes.modsMapHost.all('mods-map-row').length, 2);
-  assert.match(h.toasts.pop().text, /^Removed R2 Imp copy from Hell Guard Arena: 3 entities deleted\./);
+  assert.match(h.toasts.pop().text, /^Removed R2 Imp copy from Hell Guard Arena: 3 objects deleted\./);
   assert.equal(iconOf(rowOf(h, 'alex.r2-imp')), 'ok', 'the row loses the in-this-map glyph');
 });
 test('a choice between mods can be cleared; Remove from map is the one wording', () => {
@@ -781,7 +781,7 @@ test('Use in this map from the details pane, and back', () => {
   assert.equal(use.textContent, 'Use in this map');
   use.click();
   assert.deepEqual(h.sent.slice(-1)[0], {cmd: 'modsAction', action: 'mapAddMod', arg: 'Arena Gates'});
-  assert.match(h.toasts.pop().text, /^Arena Gates is now used by the whole of Hell Guard Arena\./);
+  assert.match(h.toasts.pop().text, /^Arena Gates is now used by the whole of Hell Guard Arena; save the map to keep it\.$/);
   assert.equal(use.textContent, 'Remove from map');
   use.click();
   assert.equal(h.ui.state().modal.page, 'confirm');
@@ -813,7 +813,7 @@ test('Uninstall: the confirmation lists what it does; the folder goes to the Rec
      'Another folder of this mod stays installed (mods\\Hell Guards); maps that use the mod open with it.']);
   assert.deepEqual(modsTab.consequenceLines(modsTab.normPreview({action: 'uninstall', install: {folder: 'a', savedMaps: 3}})).map(c => c.text),
     ['Moves the folder mods\\a to the Windows Recycle Bin.',
-     '3 of your saved maps use it; they will not open until a mod folder provides its files again.']);
+     '3 of your saved maps use it; they will not open until you restore it from the Recycle Bin.']);
 });
 
 /* ---- New mod and the Files view --------------------------------------------------------------- */
@@ -872,7 +872,7 @@ test('the Files modal: the folder tree with the salt in its paths, one glyph per
   assert.ok(names.indexOf('mods/alexrimp') >= 0, 'the Files view shows the salt in its paths');
   const pane = host.all('mf-file')[0];
   assert.equal(pane.all('prob')[0].textContent, 'This mod could not be built: the file is empty; fix that in its folder and press Refresh.');
-  assert.equal(pane.all('mf-meta')[0].children[0].textContent, 'Not read yet');
+  assert.equal(pane.all('mf-meta')[0].children[0].textContent, 'Not part of the mod; Snapmap+ ignores it');
   h.ui.selectFile(IMP);
   const ta = host.all('mf-file')[0].all('code-editor')[0].tags('textarea')[0];
   assert.equal(ta.readOnly, true);
