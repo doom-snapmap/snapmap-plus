@@ -110,10 +110,13 @@ void sh_modpublished_notice(const char *text);
 
 /* The question as raised: "This map needs N mod(s): <names> (<size>).
  * Download and install now?", the mods' names, those that do not fit
- * summarized as "and K more", and the total size of their archives. Always
- * shorter than 256 bytes (the native dialog body). */
+ * summarized as "and K more", and the total size of their archives. When
+ * `scripts` is a sentence (the store says some of the builds carry scripts:
+ * modui.h sh_modui_scripts_approval), it stands before "Download and install
+ * now?" whole, and the names give way to it. Always shorter than 256 bytes
+ * (the native dialog body). */
 void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
-                                      unsigned long long bytes);
+                                      unsigned long long bytes, const char *scripts);
 
 /* ------------------------------------------------------------ seam */
 
@@ -161,8 +164,13 @@ typedef struct sh_modpub_resume {
  * without changing what the loaded map serves), asks the mod store about
  * each one on the worker (the probe: HEAD of the build's archive) and then
  * makes one decision per build, sh_modpub_gate_decide. A build the store
- * holds is obtainable: the player is asked once, with the mods' names and the
- * total size, and Yes fetches each archive into that place (the root, or
+ * holds is obtainable. The store also says how many scripts each carries:
+ * when any does and the player turned off "Play maps whose mods include
+ * scripts" (sh_modpub_ops scripted_maps_allowed), nothing is downloaded and
+ * the map is refused with that setting's sentence (modui.h
+ * SH_MODUI_SCRIPTS_OFF); otherwise the player is asked once, with the mods'
+ * names, the total size and, when they carry scripts, the scripts sentence,
+ * and Yes fetches each archive into that place (the root, or
  * mods\maps\<segment>\<mod name>\). A gate that lets a map through, or a
  * hold that resumes it, makes its place the loaded map's (the place_set op)
  * and the place its launch serves from (sh_modpub_launch_place). Every other
@@ -236,6 +244,7 @@ typedef struct sh_modpub_probe {
     int found;          /* sh_modpub_store_answer */
     int code;           /* unreachable: the MODNET_E_ code of the failure, 0 when unknown */
     unsigned long long size;   /* found: the archive's bytes (what Yes downloads) */
+    unsigned scripts;          /* found: the script files the build carries */
 } sh_modpub_probe;
 
 /* Everything the state machine asks of the engine and of the lanes it depends
@@ -304,6 +313,12 @@ typedef struct sh_modpub_ops {
     /* `place` as a place (modserve.h sh_modserve_place_norm): 1 with it in
      * `out`, 0 when it is not one. */
     int  (*place_norm)(void *c, const char *place, char *out, size_t cap);
+    /* The player's setting "Play maps whose mods include scripts" (modui.h
+     * sh_modui_scripted_maps_allowed): 1 on. NULL counts as on. */
+    int  (*scripted_maps_allowed)(void *c);
+    /* The question's sentence for builds carrying `files` script files
+     * (modui.h sh_modui_scripts_approval). */
+    void (*scripts_approval)(void *c, unsigned files, char *out, size_t cap);
 } sh_modpub_ops;
 
 #define SH_MODPUB_PLACE_CAP 300

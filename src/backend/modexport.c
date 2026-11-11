@@ -19,6 +19,7 @@
 #include "modzip.h"
 #include "map_carrier.h"
 #include "modsync.h"
+#include "modui.h"
 
 static int me_cause(char *cause, size_t cap, const char *fmt, ...)
 {
@@ -979,6 +980,19 @@ static int me_install(me_import *im, const sh_modmanifest_list *rows, const char
         left++;
     }
     if (!left) { ok = 1; goto done; }
+    /* The player turned off "Play maps whose mods include scripts": an
+     * import that would bring in mods carrying scripts installs nothing, and
+     * the sentence says what to turn on and where. */
+    if (!sh_modui_scripted_maps_allowed()) {
+        for (i = 0; i < im->nc; i++) {
+            const me_carry *c = &im->c[i];
+            if (c->present || !c->b.script_files) continue;
+            me_log("MODS: import: mods/%s carries %u script file(s) and the player turned scripts off", c->name,
+                   c->b.script_files);
+            me_cause(cause, cap, "%s", SH_MODUI_SCRIPTS_OFF);
+            goto done;
+        }
+    }
 
     /* The files are copied out of the export without the store lock: a large
      * import never holds up a save, a download or a build. */

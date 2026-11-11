@@ -71,6 +71,9 @@ static int g_failed, g_checks, g_echo;
     }                                                                            \
 } while (0)
 
+/* The player's setting "Play maps whose mods include scripts" (modui.c): on. */
+int sh_modui_scripted_maps_allowed(void) { return 1; }
+
 void backend_log(const char *line)
 {
     if (g_echo && line) printf("    %s\n", line);

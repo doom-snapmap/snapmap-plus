@@ -46,6 +46,7 @@
 #include <string.h>
 
 #include "modpublished.h"
+#include "modui.h"
 #include "plain_reason.h"
 #include "modmanifest.h"
 #include "map_carrier.h"
@@ -373,6 +374,7 @@ typedef struct pub_hold {
     size_t *missing;                     /* indexes into rows */
     sh_modpub_probe *probes;             /* per missing row: the store's answer (after PROBING) */
     unsigned long long missing_bytes;    /* the rows' sizes, then (after PROBING) the archives' */
+    unsigned missing_scripts;            /* after PROBING: script files the missing builds carry */
     int ticket;
     int waited;
     pub_job *job;
@@ -461,15 +463,18 @@ static void pub_size_text(char *out, size_t cap, unsigned long long bytes)
 }
 
 static void pub_compose_question(char *out, size_t cap, const char *thing, const char *const *names, size_t count,
-                                 unsigned long long bytes)
+                                 unsigned long long bytes, const char *scripts)
 {
-    static const char tail[] = "). Download and install now?";
-    char head[64], size[32], list[PUB_TEXT_CAP];
+    static const char ask[] = "Download and install now?";
+    char head[64], size[32], list[PUB_TEXT_CAP], tail[PUB_TEXT_CAP];
     size_t room;
     if (!out || !cap) return;
     if (cap > PUB_TEXT_CAP) cap = PUB_TEXT_CAP;
     _snprintf_s(head, sizeof head, _TRUNCATE, "This %s needs %u mod%s: ", thing, (unsigned)count, count == 1 ? "" : "s");
     pub_size_text(size, sizeof size, bytes);
+    /* The scripts sentence is said whole; the names give way to it. */
+    if (scripts && scripts[0]) _snprintf_s(tail, sizeof tail, _TRUNCATE, "). %s %s", scripts, ask);
+    else _snprintf_s(tail, sizeof tail, _TRUNCATE, "). %s", ask);
     room = cap - 1;
     room = room > strlen(head) + strlen(size) + strlen(tail) + 2 ? room - strlen(head) - strlen(size) - strlen(tail) - 2 : 1;
     if (room > sizeof list) room = sizeof list;
@@ -478,9 +483,9 @@ static void pub_compose_question(char *out, size_t cap, const char *thing, const
 }
 
 void sh_modpublished_compose_question(char *out, size_t cap, const char *const *names, size_t count,
-                                      unsigned long long bytes)
+                                      unsigned long long bytes, const char *scripts)
 {
-    pub_compose_question(out, cap, "map", names, count, bytes);
+    pub_compose_question(out, cap, "map", names, count, bytes, scripts);
 }
 
 /* ------------------------------------------------------------ the denial gate */
@@ -636,7 +641,10 @@ static const char **pub_missing_names(const pub_hold *h)
 static void pub_hold_question(const pub_hold *h, char *out, size_t cap)
 {
     const char **names = pub_missing_names(h);
-    pub_compose_question(out, cap, pub_thing(h->hook), names, names ? h->missing_count : 0, h->missing_bytes);
+    char scripts[PUB_TEXT_CAP] = "";
+    if (h->missing_scripts && g_ops.scripts_approval)
+        g_ops.scripts_approval(g_ops.context, h->missing_scripts, scripts, sizeof scripts);
+    pub_compose_question(out, cap, pub_thing(h->hook), names, names ? h->missing_count : 0, h->missing_bytes, scripts);
     free((void *)names);
 }
 
@@ -1008,6 +1016,20 @@ static int pub_job_rows(pub_job *job, const pub_hold *h)
     return 1;
 }
 
+/* The download's progress, as the player sees it: one console line every
+ * PUB_PROGRESS_MS while a download runs. */
+static void pub_progress_line(const char *name, long current, size_t count, long long done, long long total)
+{
+    char line[PUB_TEXT_CAP];
+    if (total > 0)
+        _snprintf_s(line, sizeof line, _TRUNCATE, "Downloading %s (%ld of %u): %.1f of %.1f MB, %d%%.", name, current + 1,
+                    (unsigned)count, done / 1048576.0, total / 1048576.0, (int)(done * 100 / total));
+    else
+        _snprintf_s(line, sizeof line, _TRUNCATE, "Downloading %s (%ld of %u): %.1f MB.", name, current + 1,
+                    (unsigned)count, done / 1048576.0);
+    pub_print(line);
+}
+
 static void pub_start_fetch(void)
 {
     pub_hold *h = &g_hold;
@@ -1024,6 +1046,7 @@ static void pub_start_fetch(void)
     h->job = job;
     h->state = HOLD_FETCHING;
     h->progress_at = GetTickCount64();
+    pub_progress_line(job->names[0], 0, job->count, 0, (long long)h->missing_bytes);
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "Snapmap+ is busy with another upload or download. %s Try again in a moment.", pub_not_done(h->hook));
@@ -1475,10 +1498,22 @@ static void pub_probe_finish(void)
         pub_deny(verdicts, h->probes, NULL, "the gate denied the launch");
     } else {
         /* The question names the size the store reported for each archive
-         * (the row's own size when it reported none). */
+         * (the row's own size when it reported none) and the scripts the
+         * builds carry. */
         h->missing_bytes = 0;
-        for (size_t i = 0; i < h->missing_count; i++)
+        h->missing_scripts = 0;
+        for (size_t i = 0; i < h->missing_count; i++) {
             h->missing_bytes += h->probes[i].size ? h->probes[i].size : h->rows.rows[h->missing[i]].size;
+            h->missing_scripts += h->probes[i].scripts;
+        }
+        /* The player turned scripts off: such a map is neither downloaded
+         * nor played, and the sentence says what to turn on and where. */
+        if (h->missing_scripts && g_ops.scripted_maps_allowed && !g_ops.scripted_maps_allowed(g_ops.context)) {
+            pub_print(SH_MODUI_SCRIPTS_OFF);
+            pub_drop(SH_MODUI_SCRIPTS_OFF, "the map's mods include scripts and the player turned scripts off");
+            free(verdicts);
+            return;
+        }
         pub_logf("MODS: the mod store holds all %u missing mod(s) of the %s of '%s'", (unsigned)h->missing_count,
                  pub_hook_name(h->hook), h->id[0] ? h->id : "local map");
         pub_job_free(job);
@@ -1563,8 +1598,8 @@ void sh_modpublished_poll(void)
                 long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
                 h->progress_at = now;
                 pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->names[current],
-
                          current + 1, (unsigned)job->count, done / 1048576.0, total / 1048576.0);
+                pub_progress_line(job->names[current], current, job->count, done, total);
             }
             break;
         }
@@ -2185,8 +2220,16 @@ static int eng_store_probe(void *c, const char *hash, volatile int *cancel, sh_m
     out->found = p.found > 0 ? SH_MODPUB_STORE_HAS : p.found == 0 ? SH_MODPUB_STORE_ABSENT : SH_MODPUB_STORE_UNREACHABLE;
     out->code = p.found < 0 ? p.code : 0;
     out->size = p.found > 0 ? p.size : 0;
+    out->scripts = p.found > 0 ? p.scripts : 0;
     if (p.found <= 0) pub_logf("MODS: store check of %.16s: %s", hash, modnet_code_text(p.code));
     return out->found;
+}
+
+static int eng_scripted_maps_allowed(void *c) { (void)c; return sh_modui_scripted_maps_allowed(); }
+static void eng_scripts_approval(void *c, unsigned files, char *out, size_t cap)
+{
+    (void)c;
+    sh_modui_scripts_approval(files, out, cap);
 }
 
 static int eng_claimed(void *c, const char *hash) { (void)c; return modsync_claim_names(hash); }
@@ -2209,7 +2252,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_release, eng_worker_run, eng_fetch_for, eng_metadata_copy, eng_metadata_free, eng_metadata_ids,
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
-    eng_own_item, eng_item_place, eng_place_set, eng_place_norm
+    eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval
 };
 
 /* ------------------------------------------------------------ detours */

@@ -93,6 +93,8 @@ typedef struct fake {
     HANDLE worker;
     int store_a, store_b;            /* the probe: 1 held, 0 absent, -1 unreachable */
     unsigned long long size_a;       /* the archive size the store reports for alexpink */
+    unsigned scripts_a;              /* the script files the store says alexpink's build carries */
+    int scripts_off;                 /* the player turned off "Play maps whose mods include scripts" */
     int store_calls;
     int incomplete_a;                /* the build serving alexpink lacks a name the row lists */
     int prints;
@@ -328,8 +330,15 @@ static int f_store_probe(void *c, const char *hash, volatile int *cancel, sh_mod
     memset(out, 0, sizeof *out);
     F.store_calls++;
     out->found = !strcmp(hash, HASH_A) ? F.store_a : !strcmp(hash, HASH_B) ? F.store_b : 0;
-    if (out->found > 0 && !strcmp(hash, HASH_A)) out->size = F.size_a;
+    if (out->found > 0 && !strcmp(hash, HASH_A)) { out->size = F.size_a; out->scripts = F.scripts_a; }
     return out->found;
+}
+static int f_scripted_maps_allowed(void *c) { (void)c; return !F.scripts_off; }
+static void f_scripts_approval(void *c, unsigned files, char *out, size_t cap)
+{
+    (void)c;
+    _snprintf_s(out, cap, _TRUNCATE, "These mods include scripts (%u file%s). Scripts run only inside this map and cannot "
+                "read or change your files.", files, files == 1 ? "" : "s");
 }
 static int f_claimed(void *c, const char *hash) { (void)c; return F.claimed_a && !strcmp(hash, HASH_A); }
 static int f_fetch_detail(void *c, const char *hash, char *out, size_t cap)
@@ -373,7 +382,7 @@ static const sh_modpub_ops OPS = {
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
-    f_item_place, f_place_set, f_place_norm
+    f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval
 };
 
 static void reset(void)
@@ -1008,20 +1017,73 @@ static void the_question(void)
     const char *names[40];
     char storage[40][40];
     printf("-- the question fits the native body and summarizes what does not fit\n");
-    sh_modpublished_compose_question(text, sizeof text, names, 0, 0);
+    sh_modpublished_compose_question(text, sizeof text, names, 0, 0, NULL);
     for (int i = 0; i < 40; i++) {
         _snprintf_s(storage[i], sizeof storage[i], _TRUNCATE, "author%02d.a-rather-long-mod-name", i);
         names[i] = storage[i];
     }
-    sh_modpublished_compose_question(text, sizeof text, names, 1, 52428);
+    sh_modpublished_compose_question(text, sizeof text, names, 1, 52428, NULL);
     CHECK(!strcmp(text, "This map needs 1 mod: author00.a-rather-long-mod-name (under 0.1 MB). "
                         "Download and install now?"));
-    sh_modpublished_compose_question(text, sizeof text, names, 40, 40ull << 20);
+    sh_modpublished_compose_question(text, sizeof text, names, 40, 40ull << 20, "");
     CHECK(strlen(text) < 256);
     CHECK(!strncmp(text, "This map needs 40 mods: author00.a-rather-long-mod-name, ", 57));
     CHECK(strstr(text, " more (40.0 MB). Download and install now?") != NULL);
-    sh_modpublished_compose_question(text, 64, names, 40, 40ull << 20);
+    sh_modpublished_compose_question(text, 64, names, 40, 40ull << 20, NULL);
     CHECK(strlen(text) < 64);
+    /* The scripts sentence is said whole; the names give way to it. */
+    {
+        static const char lua[] = "These mods include scripts (15 files). Scripts run only inside this map and cannot "
+                                  "read or change your files.";
+        sh_modpublished_compose_question(text, sizeof text, names, 1, 98ull << 20, lua);
+        CHECK(!strcmp(text, "This map needs 1 mod: author00.a-rather-long-mod-name (98.0 MB). These mods include "
+                            "scripts (15 files). Scripts run only inside this map and cannot read or change your "
+                            "files. Download and install now?"));
+        sh_modpublished_compose_question(text, sizeof text, names, 40, 40ull << 20, lua);
+        CHECK(strlen(text) < 256 && strstr(text, lua) && strstr(text, " more (40.0 MB). These mods include scripts"));
+    }
+}
+
+static void scripts_and_the_setting(void)
+{
+    printf("-- a map whose missing builds carry scripts: the question says so; with scripts off it is refused\n");
+    reset();
+    F.size_a = 98u << 20;
+    F.scripts_a = 15;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1);
+    CHECK(!strcmp(F.last_ask, "This map needs 1 mod: alex.pink-imp (98.0 MB). These mods include scripts (15 files). "
+                              "Scripts run only inside this map and cannot read or change your files. Download and "
+                              "install now?"));
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.fetch_calls == 1 && F.resumes == 1);
+    /* The download says how far it is, on the console. */
+    CHECK(strstr(F.prints_all, "Downloading alex.pink-imp (1 of 1): 0.0 of 98.0 MB, 0%.") != NULL);
+
+    /* Turned off: nothing is asked or downloaded, and the player is told what
+     * to turn on and where. */
+    reset();
+    F.scripts_a = 2;
+    F.scripts_off = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    tick_until_idle();
+    CHECK(F.store_calls == 1 && F.fetch_calls == 0 && F.resumes == 0);
+    CHECK(!strcmp(F.last_ask, "This map's mods include scripts, which you turned off in the Mods tab; turn on \"Play "
+                              "maps whose mods include scripts\" there to play it."));
+    CHECK(strstr(F.prints_all, "turned off in the Mods tab") != NULL);
+
+    /* Off, but the builds carry no scripts: asked as always. */
+    reset();
+    F.scripts_off = 1;
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    CHECK(F.asks == 1 && strstr(F.last_ask, "Download and install now?") && !strstr(F.last_ask, "scripts"));
 }
 
 /* Tick until the store check has finished and the hold moved on. */
@@ -1572,6 +1634,7 @@ int main(void)
     my_maps_play();
     a_newer_launch_replaces();
     the_question();
+    scripts_and_the_setting();
     rawmap_missing_counts_rows();
     a_map_carries_its_place();
     one_notice_queue();
