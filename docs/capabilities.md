@@ -916,9 +916,12 @@ entities and the world it can `spawn` its own entities, read any entity's positi
 velocity, health and animation, move, turn, push, heal, animate and remove its own, heal players,
 find `players()` and `entities_near`, and `trace` lines through the world. It drives the mod's own
 demons (`move_to`, `move_done`, `face`, `turn_done`, `set_enemy`, `can_see`, `awareness`,
-`path_length`, `find_position`, `trigger`, `equip`, `laser`, `focus_tag` and the rest; `anim_state`
-and `anim_force` work on demons too): a commanded demon waits in the engine's own script state and
-keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
+`path_length`, `path_points`, `find_position`, `firing_position`, `trigger`, `weapon_ready`,
+`recoil`, `aim_point`, `equip`, `laser`, `focus_tag`, `anim_valid`, `anim_force_via`,
+`spline_clear`, `pain_string`, `block_pain` and the rest; `anim_state` and `anim_force` work on
+demons too; `monster_type` names any demon's type, `nav_ground` finds the floor under a point and
+`difficulty` reads the game's difficulty): a commanded demon waits in the engine's own script state
+and keeps its pain and death. In combat it deals its own damage decls to any entity (`damage`,
 `hitscan`, `radius_damage`, `explode`), fires its own projectiles from its demons (`ai:fire`) and
 steers or explodes them, starts and stops effects (`fx`, `fx_move`, `fx_stop`), plays its own sounds
 (`sound`), reads a joint (`e:tag`) and the pain a demon is in (`e:pain`); the game reports damage
