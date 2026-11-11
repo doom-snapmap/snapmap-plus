@@ -622,6 +622,30 @@ test('details: a downloaded map\'s mod has the short view: its name, its map, Ad
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Remove Lava Floor?');
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Remove']);
 });
+test('a map that uses only part of a mod: no Add to my mods, and a file players lacked said beside the published map', () => {
+  const data = clone(v4);
+  data.mods.find(b => b.key === 'maps\\Hell Guard Arena\\Hell Guards').part = true;
+  data.map.asked = [{mod: 'Hell Guards', request: 'generated/decls/entitydef/mods/urdebxyn/staff_fx.decl', by: 'mods/urdebxyn/staff'},
+                    {mod: '', request: 'generated/image/mods/urdebxyn/glow.bimage', by: ''}];
+  const h = live(data);
+  h.ui.select('maps\\Hell Guard Arena\\Hell Guards');
+  assert.equal(h.nodes.modsUseBtn.style.display, 'none', 'the files one map uses stay with that map');
+  assert.equal(h.nodes.modsUninstallBtn.textContent, 'Remove');
+  h.ui.select('maps\\Hell Guard Arena\\Lava Floor');
+  assert.equal(h.nodes.modsUseBtn.textContent, 'Add to my mods');
+  h.nodes.modsMapBtn.click();
+  const lines = section(h, 'asked', h.nodes.modsMapHost).all('mods-line').map(n => n.textContent);
+  assert.deepEqual(lines, [
+    'Players of this map were missing generated/decls/entitydef/mods/urdebxyn/staff_fx.decl from Hell Guards, which ' +
+      'mods/urdebxyn/staff asks for. Publish the map again and it goes with the map.',
+    'Players of this map were missing generated/image/mods/urdebxyn/glow.bimage from one of its mods. Publish the map ' +
+      'again and it goes with the map.']);
+  assert.ok(!/slice/i.test(modalText(h)), 'no new word');
+  /* nothing missing: no section */
+  const plain = live();
+  plain.nodes.modsMapBtn.click();
+  assert.ok(modalText(plain).indexOf('Missing for players') < 0);
+});
 test('an author never needs the salt: no Copy mod id, and the folder rule said where they look', () => {
   const h = harness();
   shown(h);
@@ -1199,7 +1223,7 @@ test('page contract', () => {
   for (const k of ['"salt"', '"place"', '"placeTitle"', '"borrows"', '"sameFilesAs"', '"cause"', '"editorRowNames"', '"facts"',
                    '"requirements"', '"publishedMaps"', '"warnings"', 'mapRemoveModPreview', 'uninstallPreview', 'mapAddMod',
                    '"placedEntities"', '"references"', '"vanilla"', '"savedMaps"', '"undoCleared"', '"attached"', 'addToMine', 'openFile',
-                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps'])
+                   '"scripts"', '"scriptRun"', '"restartBanks"', 'modsScripts', 'mods.scripted_maps', '"part"', '"asked"'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {

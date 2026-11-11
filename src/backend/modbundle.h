@@ -132,6 +132,17 @@
 /* mod.json "requirements" (sh_mb_requirements_canonical): any cvar, any
  * console line, as many and as long as the author writes (DECISIONS 26). */
 #define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's builder block */
+/* The author key a cut of a build carries (modslice.h): the source build's
+ * hash, 64 lowercase hex. Kept in "extra", so it is inside the build hash. A
+ * folder carrying it holds only the files one published map uses: the store
+ * serves it to that map alone and never takes it as one of the player's own
+ * mods (SH_MB_SLICE_ROOT). */
+#define SH_MB_SLICE_KEY       "slice-of"
+/* Beside such a folder's mod.json: the canonical manifest of the build it was
+ * cut from, whose SHA-256 is "slice-of". */
+#define SH_MB_SLICE_SOURCE    "source.json"
+#define SH_MB_SLICE_ROOT      "This mod folder holds only the files one published map uses, so it cannot be one of " \
+                              "your own mods; it stays with that map"
 
 typedef struct sh_mb_need {
     char *type;            /* engine spelling: md6Def, baseModel, anim, material, ... */
@@ -213,6 +224,7 @@ typedef struct sh_mb_bundle {
     char  prev_hash[SH_MB_HASH_HEX + 1];   /* sh_mb_build: the build hash the folder's block named before this
                                               build, "" when none */
     char  tree[SH_MB_HASH_HEX + 1];   /* block "tree": the folder's tree hash when built, "" when absent */
+    char  slice_of[SH_MB_HASH_HEX + 1];   /* author "slice-of": the build this one was cut from, "" when whole */
     long long built;       /* block "built": the first successful build of this salt in this folder, 0 when none */
     int   validated;       /* 1 when the block records no "cause" (a build without errors) */
     int   rules;           /* block "rules": the builder's SH_MB_RULES that wrote it; 0 when absent */

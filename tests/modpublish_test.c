@@ -308,10 +308,16 @@ int main(int argc, char **argv)
     printf("-- the question text\n");
     {
         char q[256];
-        sh_modpublish_compose_question(q, sizeof q, 2, 3u * 1024u * 1024u);
+        sh_modpublish_compose_question(q, sizeof q, 2, 3u * 1024u * 1024u, 3u * 1024u * 1024u);
         CHECK(!strcmp(q, "This map uses 2 mods (3.0 MB). Upload them to the mod store so other players can download them? You are asked this only once."));
-        sh_modpublish_compose_question(q, sizeof q, 1, 512);
+        sh_modpublish_compose_question(q, sizeof q, 1, 512, 512);
         CHECK(strstr(q, "uses 1 mod (512 bytes). Upload it") != NULL && strlen(q) < 256);
+        /* The map uses only part of a mod: what goes up, against the whole. No new word. */
+        sh_modpublish_compose_question(q, sizeof q, 2, 1258291u, 147u * 1024u * 1024u);
+        CHECK(!strcmp(q, "This map uses 2 mods and needs 1.2 MB of their 147.0 MB of files. Upload those to the mod store so "
+                         "other players can download them? You are asked this only once."));
+        sh_modpublish_compose_question(q, sizeof q, 1, 2048, 1024u * 1024u);
+        CHECK(strstr(q, "uses 1 mod and needs 2048 bytes of its 1.0 MB of files.") && strlen(q) < 256 && !strstr(q, "slice"));
     }
 
     printf("-- a save whose mod list has a row the reader refuses is not published, naming the mod\n");
@@ -817,9 +823,12 @@ int main(int argc, char **argv)
         CHECK(left == 0);
         CHECK(strstr(g_log, "MODS: launch: queued uploads and releases: 1 retried, 0 dropped; 2 provisional ref(s) "
                             "settled, 0 kept while their item claim is pending; 0 left") != NULL);
-        /* Nothing to settle: no job. */
+        /* Nothing to settle: the launch still asks the store what players of
+         * the published maps asked for, and ends. */
         sh_modpublish_launch();
+        PUMP_UNTIL(idle_all());
         CHECK(!sh_modpublish_test_background_busy());
+        CHECK(modsync_pending_count() == 0);
     }
 
     printf("-- launch: the queue first; a provisional claim waits for its item's claim\n");

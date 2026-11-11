@@ -127,6 +127,11 @@ void modsync_install_info_free(modsync_install_info *info);
  * store lock. Returns 1 on success. */
 int  modsync_install_archive(const char *archive, const char *salt, const char *hash, const struct sh_ms_place *place,
                              modsync_install_info *info, char **cause);
+/* The same for a row naming part of a build: the archive must be cut from
+ * `of` (its mod.json's "slice-of", and its source.json hashing to it). `of`
+ * NULL or "" is modsync_install_archive. */
+int  modsync_install_archive_of(const char *archive, const char *salt, const char *hash, const char *of,
+                                const struct sh_ms_place *place, modsync_install_info *info, char **cause);
 
 /* Fetch the row's build into `place` (NULL: the root) and rescan the serving
  * index. Returns 1 on success, also when the root (at the row's hash) or the
@@ -168,6 +173,59 @@ int  modsync_pending_waits_on(const char *provisional);
 
 /* The claim stored for ref: 1 and the id (secret_out optional), else 0. */
 int  modsync_claim_lookup(const char *ref, char claim_out[MODNET_CLAIM_HEX + 1], char secret_out[MODNET_HASH_HEX + 1]);
+
+/* ------------------------------------------------------ part of a mod ---- */
+
+/* A published map names, for each mod it uses only part of, the cut of the
+ * files it needs (modslice.h). The publish save makes it from the root folder
+ * of the row's salt at the row's build: staged, built against the game alone
+ * and proved under <data>\mods\.slices\<cut hash>\ (a folder no scan reads),
+ * from where the publish's upload sends it like any build, with the source
+ * build's canonical manifest as source.json beside mod.json; the folder goes
+ * once its upload and claim are done (a queued upload keeps it).
+ *
+ * The download of such a row lands in the map's place like any build, after
+ * the archive's mod.json names the row's "of" and its source.json hashes to
+ * it; source.json stays beside it (the miss check reads it). The root folder
+ * of the salt at the row's "of" serves the row without a download. A map
+ * without a place (the player's own maps) cannot use one: the root holds
+ * whole mods only (MODSYNC_PART_ONLY). */
+#define MODSYNC_SLICES ".slices"
+#define MODSYNC_PART_ONLY \
+    "%s was published with this map only in part, and a map in My Maps needs the whole mod: get %s from its " \
+    "author, or play the map from the published maps"
+
+/* The stock check the cut's build uses (the game's installed archives; any
+ * thread). Without one the publish ships whole builds. */
+void modsync_set_stock(sh_mb_exists_fn stock, void *ctx);
+
+/* The publish save's cut of `row` (the save's row of the player's own map):
+ * the root folder of row->salt at row->build, cut to what row->names need
+ * plus `asked` (requests players of an earlier cut asked for; NULL for none).
+ * 1 with row->build, row->size and row->of replaced by the cut's; 0 when the
+ * whole build ships (*why, malloc'd, says why when not NULL). Logs one MODS:
+ * line either way. Store lock taken while the cut is made. */
+int  modsync_cut_row(struct sh_modmanifest_row *row, const char *const *asked, size_t asked_count, char **why);
+
+/* Remove every folder under .slices\ no queued upload names (a publish that
+ * ended before its upload). Returns the number removed. */
+int  modsync_slices_tidy(void);
+
+/* What players asked for of this machine's published cuts and did not get
+ * (sh_modserve_note_miss on their side, modnet_report_asked). The "asked"
+ * section of mods\snapmap-plus.json holds, per claim ref (a published item),
+ * [{"salt","build","request","by"}]. modsync_asked_refresh asks the store for
+ * every stored claim and replaces the section; it returns the number of
+ * entries, or -1 when the store could not be asked (the section stays).
+ * modsync_asked_for lists the distinct requests of `salt` over every item
+ * (malloc'd strings in *out; free with modsync_asked_free), which the next
+ * publish's cut adds to what the map needs; modsync_asked_of_ref lists an
+ * item's entries as "<salt>\t<request>\t<by>" lines. Each returns the count. */
+#define MODSYNC_ASKED_SECTION "asked"
+int    modsync_asked_refresh(const modnet_io *io);
+size_t modsync_asked_for(const char *salt, char ***out);
+size_t modsync_asked_of_ref(const char *ref, char ***out);
+void   modsync_asked_free(char **list, size_t n);
 
 /* ------------------------------------------------------ the gate's probe ---- */
 

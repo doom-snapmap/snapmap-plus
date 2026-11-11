@@ -4645,6 +4645,110 @@ static void test_salt_and_place(void)
     CHECK(sh_modserve_index_build(g_root) >= 0);
 }
 
+/* A published map's part of a mod (modslice.h): served from the map's place
+ * to that map alone, the root's whole build it was cut from serving the row
+ * as well; never a root folder; a file it left out that the game asks for is
+ * noted once, with the build it came from saying it had that file. */
+static char g_miss_salt[16], g_miss_hash[65], g_miss_request[200];
+static int g_miss_reports;
+static void part_report(const char *salt, const char *cut, const char *request, const char *by)
+{
+    (void)by;
+    g_miss_reports++;
+    strcpy_s(g_miss_salt, sizeof g_miss_salt, salt);
+    strcpy_s(g_miss_hash, sizeof g_miss_hash, cut);
+    strncpy_s(g_miss_request, sizeof g_miss_request, request, _TRUNCATE);
+}
+
+#define PT_THING "generated/decls/entitydef/mods/kpart000/thing.decl"
+#define PT_GONE  "generated/decls/entitydef/mods/kpart000/gone.decl"
+
+static void test_part_rows(void)
+{
+    static const fx_file whole[] = {
+        { PT_THING, "entityDef thing { whole }", -1, "entityDef", "mods/kpart000/thing", NULL, '1' },
+        { PT_GONE, "entityDef gone { }", -1, "entityDef", "mods/kpart000/gone", NULL, '2' },
+    };
+    static const fx_file part[] = {
+        { PT_THING, "entityDef thing { whole }", -1, "entityDef", "mods/kpart000/thing", NULL, '1' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], path[MAX_PATH], hw[65], hp[65], extra[200], source[400], *slash;
+    sh_modserve_bundle_ref ref;
+    sh_modmanifest_row row;
+    const char *list[1];
+    printf("-- part of a build: a published map's own, served to that map only\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\partplace\\mods", top);
+    mkdirs(root);
+    hash64('a', hw);
+    hash64('b', hp);
+    g_bundle_name = "Pack";
+    _snprintf_s(extra, sizeof extra, _TRUNCATE, "\"" SH_MB_SLICE_KEY "\": \"%s\",", hw);
+    g_bundle_extra = extra;
+    make_bundle(root, "maps\\Arena\\Pack", "kpart000", 'b', NULL, part, 1, NULL);
+    make_bundle(root, "Copied by hand", "kpart000", 'b', NULL, part, 1, NULL);
+    g_bundle_extra = NULL;
+    g_bundle_name = NULL;
+    /* What the build it was cut from held, beside the place's mod.json. */
+    _snprintf_s(source, sizeof source, _TRUNCATE, "{\"files\":[{\"path\":\"assets/%s\",\"request\":\"%s\"},"
+                "{\"path\":\"assets/%s\",\"request\":\"%s\"}],\"id\":\"kpart000\"}", PT_THING, PT_THING, PT_GONE, PT_GONE);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\maps\\Arena\\Pack\\" SH_MB_SLICE_SOURCE, root);
+    write_file(path, source, strlen(source));
+    sh_modserve_scope_enable(0);
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(log_has("bundle 'Copied by hand' skipped: " SH_MB_SLICE_ROOT));
+    sh_modserve_scope_enable(1);
+
+    /* The map's row names the part and the build it was cut from. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.salt, sizeof row.salt, "kpart000");
+    strcpy_s(row.build, sizeof row.build, hp);
+    strcpy_s(row.of, sizeof row.of, hw);
+    CHECK(sh_modserve_row_build_in(&row, "maps\\Arena", &ref) && !strcmp(ref.hash, hp) && !strcmp(ref.place, "maps\\Arena"));
+    sh_modserve_bundle_ref_free(&ref);
+    CHECK(!sh_modserve_row_build_in(&row, "maps\\Other", &ref));   /* never another map's */
+    CHECK(!sh_modserve_row_build_in(&row, "", &ref));              /* never the player's own maps */
+    /* The root's whole build at "of" serves the row without a download. */
+    make_bundle(root, "Pack", "kpart000", 'a', NULL, whole, 2, NULL);
+    CHECK(sh_modserve_index_build(root) == 2);
+    CHECK(sh_modserve_row_build_in(&row, "maps\\Arena", &ref) && !strcmp(ref.hash, hw) && !ref.place[0]);
+    sh_modserve_bundle_ref_free(&ref);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\Pack", root);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(root) == 1);
+
+    /* Played: a request the part left out, which the whole build had, is noted once. */
+    sh_modserve_set_miss_reporter(part_report);
+    g_miss_reports = 0;
+    CHECK(sh_modserve_note_miss(PT_GONE) == 0);   /* no map declares the part yet */
+    CHECK(sh_modserve_place_set("maps\\Arena") >= 0);
+    list[0] = hp;
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 0);
+    log_clear();
+    CHECK(sh_modserve_note_miss(PT_GONE) == 1 && g_miss_reports == 1);
+    CHECK(!strcmp(g_miss_salt, "kpart000") && !strcmp(g_miss_hash, hp) && !strcmp(g_miss_request, PT_GONE));
+    CHECK(log_has("Pack came with this map without " PT_GONE "; the map goes on without it"));
+    CHECK(sh_modserve_note_miss(PT_GONE) == 0 && g_miss_reports == 1);   /* once */
+    /* A second spelling the whole build never had, and another mod's file: not noted. */
+    CHECK(sh_modserve_note_miss("generated/decls/entitydef/mods/kpart000/never.decl") == 0);
+    CHECK(sh_modserve_note_miss("generated/decls/entitydef/mods/kother00/gone.decl") == 0);
+    CHECK(g_miss_reports == 1);
+    {
+        int lines = sh_modserve_misses_report(NULL, NULL);
+        CHECK(lines >= 1);
+    }
+    sh_modserve_set_miss_reporter(NULL);
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_place_set(NULL) >= 0);
+    sh_modserve_scope_enable(0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\partplace", top);
+    remove_tree(path);
+    CHECK(sh_modserve_index_build(g_root) >= 0);
+}
+
 /* The list walks take the engine's resource lock; a callback runs after it is released. */
 static CRITICAL_SECTION g_fake_cs;
 static CRITICAL_SECTION *g_fake_lock_slot = &g_fake_cs;
@@ -5454,6 +5558,7 @@ int main(void)
     test_serving_build_needs();
     test_additive_compose();
     test_salt_and_place();
+    test_part_rows();
     test_resource_lock();
     test_row_served();
     test_dependency_names();

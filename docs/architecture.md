@@ -3946,7 +3946,9 @@ sentence. It changes nothing.
 
 What is sent: the builds the published map names in its manifest rows
 (`<salt>@<build hash>`), one archive per build the store lacks, and only
-those, at publish time. The `SerializeToJson` detour reports each save's
+those, at publish time; of a mod the map uses only part of, the row names the
+cut of the files it needs (see [Part of a mod in a published
+map](#part-of-a-mod-in-a-published-map)). The `SerializeToJson` detour reports each save's
 final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
 state's callback that runs before the first request to the map service, is
 detoured (`modpublish.c`). A save without rows publishes natively. A text over
@@ -4044,6 +4046,105 @@ keeps the builds on the store until that claim succeeds. Releasing it first
 would let the store delete a build the retry then has to upload again. The
 worker logs the counts.
 
+### Part of a mod in a published map
+
+A published map carries, of each mod it uses, only the files it needs
+(`modslice.c`, `modsync_cut_row`), so a player of a map that places one
+object of a large pack downloads that object's files and not the pack. Nobody
+sees a word for it: the row names a build like any other, the publish question
+says what goes up ("This map uses 2 mods and needs 1.2 MB of their 147.0 MB
+of files. Upload those ..."), and the download question states the archive's
+size.
+
+The cut point is the publish's own save. `PublishStart` arms it
+(`sh_modpublish_publish_started`); the `SerializeToJson` step
+(`sh_modmanifest_on_save`) hands every row it writes to the bound slicer
+(`sh_modmanifest_set_slicer`, `mp_slice_row` in `modpublish.c`), which cuts it
+only while the arm is fresh. Every other save, every rawmap and prefab
+export and the open map's own record keep whole builds, and the player's own
+maps always follow the root build (a cut row's own map resolves to the root at
+any build, like any row of an own map).
+
+The needed set (`sh_slice_needed`) is static and deterministic, from the
+row's placed names and the root folder's build. A map-level row (attached:
+the map uses the mod as a whole), a build with scripts (`sh_mb_sliceable`: a
+script builds names while it runs) and a row with no placed name ship whole.
+Otherwise the walk starts from every file a placed name names, the Toybox rows
+(`snapEditorEntityDef`) of the mod whose bytes name a placed name, and what
+players of an earlier cut asked for (below); always kept are every file at a
+game name that is not an editor tweak (the edited copies, whose edits apply per
+map, and a received build's replacements) and every decl of a type the game
+finds by number rather than by name (`snapAIScore`, `snapAIEncounter`,
+`snapAIEncounterTable`, which the conductor numbers); never kept are editor
+tweaks and the closure pointers the cut's own build derives again. From each
+kept file the walk follows every need the build recorded (companions and scene
+spawns included) and every name its bytes spell under `mods/<salt>/`, text and
+binary alike (a decl's tokens, a mesh's materials, a movie's dictionary): a
+spelled name, read with its last segment's extensions and anything after `$`
+cut and every character but `[a-z0-9/._]` as `_`, reaches the file of that
+name and the file of each of its leading folders (a node path inside an
+animWeb names the animWeb). A stock pointer the folder holds (a borrow or a
+surface) is walked by its needs alone, its bytes being the game's. A reached
+file brings its whole unit: every member of a virtual-texture family (so a
+mod's texture board travels whole), every sound bank once a sound decl is
+kept, every render program once one is, and a module's every file below its own
+name. A reached file that cannot be read, or one of a kind the walk does not
+read, ships the whole build. When the needed set holds every carried file
+but the editor tweaks, or its files and the source's list of files
+(`source.json`, below) come to more than three quarters of the whole build's
+carried bytes, the whole build ships: a second archive of nearly the same size
+saves a player little, and the cut costs the save its build.
+
+The cut (`sh_slice_cut`) stages the kept files under
+`mods\.slices\<cut hash>\` (a dot folder no scan reads), with `mod.json`
+holding the source's author part plus the author key `slice-of`
+(`SH_MB_SLICE_KEY`, the source build's hash) and `source.json`
+(`SH_MB_SLICE_SOURCE`, the source build's canonical manifest, whose SHA-256 is
+`slice-of`) beside it; builds it against the game alone (no other mod); and
+proves it: the build succeeds, every carried file is the source's own bytes,
+and every need a kept file resolved inside the source resolves inside the cut.
+Any failure ships the whole build with one `MODS: publish: <mod> goes with the
+map whole: <why>` line. Because `slice-of` is an author key it is in the
+canonical manifest: two maps that need the same files of one build name one
+hash and share one archive, and the key cannot be edited away. The row is
+`{"mod":"<salt>@<cut hash>","of":"<source hash>",...}` with the cut's carried
+size. The publish's upload finds the staged folder by its hash
+(`msy_slice_find`), sends `source.json` with the archive, and removes the folder
+once its upload and claim are done; a queued upload keeps it, and the launch
+removes any other (`modsync_slices_tidy`).
+
+Serving: the one place resolver takes the root folder of the salt at the row's
+hash or at its `of`, so a player who has the whole mod at that build downloads
+nothing; else the map's place. A cut is never a root folder: the scan refuses
+a folder with `slice-of` at the root (`SH_MB_SLICE_ROOT`, in `modstore.c` and
+the serving index), Add to my mods and every install to the root refuse it
+with the same sentence, and the Mods tab offers no Add to my mods for it
+(`part`). A download verifies the archive as any build and also that its
+`slice-of` is the row's `of` and its `source.json` hashes to it, and keeps
+`source.json` beside `mod.json`. A map without a place (My Maps) cannot use a
+cut: the fetch says so in one sentence (`MODSYNC_PART_ONLY`) and downloads
+nothing.
+
+The miss: the provider (`ov_open_body`) calls `sh_modserve_note_miss` for
+every request it found nowhere. One under `mods/<salt>/` of a mod the open map
+declares by a cut, which the source build had (its `source.json` lists it), is
+a defect of the cut: the map plays on if the game can, and the request is
+noted once per cut with the name of the load that asked for it (the main
+thread's open loads, `sh_modserve_attrib_enter`), logged (`<mod> came with
+this map without <request>, which <load> asked for; the map goes on without
+it`), listed by `sh_mods status`, and posted to the store
+(`modnet_report_asked`, `POST /mods/build/<cut>/asked`, a pool thread; only
+the request and the asking name are sent). The author's launch job asks the
+store, for every claim it holds, what players asked for
+(`modsync_asked_refresh`, `POST /mods/asked` with the claim's secret) and keeps
+it in the record's `asked` section; the Mods tab's map view lists each under
+"Missing for players" beside the published map ("Players of this map were
+missing <file> from <mod>, which <load> asks for. Publish the map again and it
+goes with the map."), and the next publish's cut of that mod seeds the walk
+with every request asked of it (`modsync_asked_for`), so republishing carries
+it; the re-claim replaces the earlier cut, which the store deletes once nothing
+claims it.
+
 ### The mod store transport
 
 The store keeps one object per build (ONE-SHAPE rule 5): a stored ZIP
@@ -4060,7 +4161,12 @@ chunk at a time with progress, of any size), `POST /mods/claim`
 number of builds, 409 when a build is not stored) and `POST /mods/release`,
 after which the store deletes every build no claim names. There is no blob
 store and no manifest of its own: two mods with the same files are two
-archives.
+archives. Part of a build (a published map's cut, see [Part of a mod in a
+published map](#part-of-a-mod-in-a-published-map)) is an archive like any
+other plus `source.json`; `POST /mods/build/<hash>/asked {"request","by"}`
+(`modnet_report_asked`) tells the store a player's game lacked a file of such
+a part, and `POST /mods/asked {"claim","secret"}` (`modnet_list_asked`) lists
+those reports for the claim's holder.
 
 Nothing limits a build (DECISIONS 26). One request body is the platform's
 limit (100 MB on the Worker's plan), so an archive larger than one part

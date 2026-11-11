@@ -1213,6 +1213,8 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const
     title = mu_place_title(e);
     mu_kstr(b, "placeTitle", title ? title : "", 0);
     free(title);
+    /* Only the files of the mod that map uses: it stays with that map. */
+    mu_kbool(b, "part", e->loaded && e->bundle.slice_of[0], 0);
     {
         char *desc = e->loaded ? mu_extra_string(bd, "description") : NULL;
         mu_kstr(b, "description", desc ? desc : "", 0);
@@ -2124,6 +2126,42 @@ static void mu_put_entity_names(mu_buf *b, const mu_model *m, const mu_map *mp, 
     mu_putn(b, "]", 1);
 }
 
+/* "asked": what players of the published map asked for of a mod and did
+ * not get, because the map carried only part of the mod: the record's
+ * "asked" section under the item (modsync.h modsync_asked_refresh),
+ * [{"mod","request","by"}], the mod named by its name. */
+static void mu_put_asked(mu_buf *b, const mu_model *m, const char *item)
+{
+    char *text = NULL;
+    mpj *x = m->root_ok && sh_mb_record_get(m->root, "asked", &text) == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
+    const mpj *list = x && x->type == MPJ_OBJ && item ? mpj_get(x, item) : NULL;
+    size_t k;
+    int i, first = 1;
+    free(text);
+    mu_puts(b, ",\"asked\":[");
+    for (i = 0; list && list->type == MPJ_ARR && i < list->n; i++) {
+        char *salt = mu_copy_str(mpj_get(list->items[i], "salt")), *request = mu_copy_str(mpj_get(list->items[i], "request"));
+        char *by = mu_copy_str(mpj_get(list->items[i], "by")), *name = NULL;
+        for (k = 0; salt && k < m->list.count && !name; k++)
+            if (!m->list.items[k].place[0] && !_stricmp(m->list.items[k].salt, salt)) name = mu_folder_name(&m->list.items[k]);
+        if (salt && request && request[0]) {
+            if (!first) mu_putn(b, ",", 1);
+            first = 0;
+            mu_putn(b, "{", 1);
+            mu_kstr(b, "mod", name ? name : "", 1);
+            mu_kstr(b, "request", request, 0);
+            mu_kstr(b, "by", by ? by : "", 0);
+            mu_putn(b, "}", 1);
+        }
+        free(name);
+        free(salt);
+        free(request);
+        free(by);
+    }
+    mu_putn(b, "]", 1);
+    mpj_free(x);
+}
+
 /* The map entries the payload lists: every manifest row and every mod a
  * placed name reaches (one only another mod needs is listed too). */
 static size_t mu_map_mod_count(const mu_map *mp) { return mp->mod_count; }
@@ -2202,6 +2240,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
             mu_kbool(b, "claimed", mp->claim != NULL, 1);
             mu_knum(b, "at", mp->claim && mp->claim->updated > 0 ? (unsigned long long)mp->claim->updated : 0, 0);
             mu_putn(b, "}", 1);
+            mu_put_asked(b, m, mp->link->item);
         }
         mu_puts(b, ",\"mods\":[");
         for (i = 0; i < mu_map_mod_count(mp); i++) {
@@ -5119,6 +5158,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
         }
     }
     (void)sh_modserve_requirements_report(mu_say_requirement, &o);
+    (void)sh_modserve_misses_report(mu_say_requirement, &o);   /* files a map's part of a mod left out */
     mu_print_shadows(&o, &m);
     if (verify) {
         sh_ms_verify_stats sum;

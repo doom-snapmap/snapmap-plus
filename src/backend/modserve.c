@@ -121,6 +121,7 @@ typedef struct ms_bundle {
     const char *dir, *folder, *id, *hash, *name;
     const char *extra;                    /* the author block's other keys as JSON, or NULL */
     const char *place;                    /* "maps\<segment>" for a folder in a map's place; NULL at the root */
+    const char *slice_of;                 /* the build it was cut from (author "slice-of"), NULL for a whole build */
     int admitted, first_file, file_count;
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
     const char *req_text;                 /* canonical requirements (sh_mb_requirements_canonical), or NULL */
@@ -1017,6 +1018,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
         else if (!strcmp(key, "author") || !strcmp(key, "homepage")) continue;
         else {
+            if (!strcmp(key, SH_MB_SLICE_KEY)) b->slice_of = ms_jstr(x, v, ve, 64);
             /* Everything else is the author's, kept for the readers of
              * "extra" (strids.c, modhud.c, companions, scenes). */
             if (!strcmp(key, "hud") && v < ve && *v == '{') {
@@ -1099,6 +1101,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     }
     else if (state_cause && state_cause[0]) ms_fail(b, "not built: %s", state_cause);
     else if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "not built yet (Refresh in the Mods tab builds it)");
+    /* A map's own part of a mod serves that map from its place, never as the whole mod. */
+    else if (b->slice_of && !b->place) ms_fail(b, SH_MB_SLICE_ROOT);
     if (!b->id) b->id = "";
     if (!b->cause && !files_v && !stock_v) ms_fail(b, "mod.json lists no files");
     if (shadows_v && !b->cause) {
@@ -4959,6 +4963,7 @@ int sh_modserve_index_retire(void)
     return freed;
 }
 
+
 #ifdef SH_MODSERVE_TESTING
 void sh_modserve_test_cache(int enabled)
 {
@@ -5897,9 +5902,12 @@ int sh_modserve_attrib_keep(void *resource)
 static void *g_nest[SH_MODSERVE_NEST_MAX];
 static int g_nest_depth;
 
+static volatile DWORD g_nest_thread;   /* the thread whose loads g_nest holds */
+
 int sh_modserve_attrib_enter(void *resource, int heap, int *kept)
 {
     int depth = g_nest_depth, k = 0;
+    if (!depth) g_nest_thread = GetCurrentThreadId();
     if (heap > 0) { if (ms_aset_add(&g_mapheap, (uintptr_t)resource, MS_KEPT_MAX) < 0) g_attrib_full = 1; }
     else if (heap == 0) ms_aset_del(&g_mapheap, (uintptr_t)resource);
     if (depth > 0 && depth <= SH_MODSERVE_NEST_MAX) k = sh_modserve_attrib_note(g_nest[depth - 1], resource);
@@ -5938,6 +5946,150 @@ void sh_modserve_attrib_reset(void)
     g_pairs_cap = g_pairs_n = 0;
     g_attrib_full = 0;
     g_attrib_raised_at_load = 0;
+}
+
+/* ------------------------------------------------------------------ misses */
+
+typedef struct ms_miss { char hash[SH_MODSERVE_HASH_HEX + 1]; char *label, *request; } ms_miss;
+static SRWLOCK g_miss_lock = SRWLOCK_INIT;
+static ms_miss *g_miss;
+static int g_nmiss, g_cmiss;
+static sh_modserve_miss_fn volatile g_miss_fn;
+
+void sh_modserve_set_miss_reporter(sh_modserve_miss_fn fn) { g_miss_fn = fn; }
+
+/* The salt of the first mods/<salt>/ segment of `request`, or 0. */
+static int ms_request_salt(const char *request, char salt[SH_MODSERVE_HASH_HEX + 1])
+{
+    const char *p;
+    for (p = request; p && *p; p++) {
+        const char *seg, *end;
+        if ((p != request && p[-1] != '/') || _strnicmp(p, "mods/", 5)) continue;
+        seg = p + 5;
+        end = strchr(seg, '/');
+        if (!end || !end[1] || !sh_salt_valid(seg, (size_t)(end - seg))) continue;
+        memcpy(salt, seg, (size_t)(end - seg));
+        salt[end - seg] = 0;
+        ms_lower(salt);
+        return 1;
+    }
+    return 0;
+}
+
+/* The name of the load that opened the one asking now, when this thread's
+ * loads are the ones the detour reports (malloc'd), else NULL. */
+static char *ms_asker(void)
+{
+    int depth = g_nest_depth;
+    char *out = NULL;
+    if (depth < 2 || depth > SH_MODSERVE_NEST_MAX || g_nest_thread != GetCurrentThreadId()) return NULL;
+#ifndef SH_MODSERVE_PURE
+    __try {
+#endif
+        const char *name = *(const char *const *)((const unsigned char *)g_nest[depth - 2] + MS_RES_NAME);
+        if (name) out = _strdup(name);
+#ifndef SH_MODSERVE_PURE
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out = NULL;
+    }
+#endif
+    return out;
+}
+
+/* Whether the build a cut came from carries `lower` (a request, lower case):
+ * the cut's source.json (modslice.h), the source's canonical manifest, lists
+ * every file as "request":"<request>". A request the whole build never had
+ * (the engine trying a second spelling) is not a file the cut left out.
+ * Under g_miss_lock; the texts read stay for the process. */
+typedef struct ms_source { char hash[SH_MODSERVE_HASH_HEX + 1]; char *text; } ms_source;
+static ms_source *g_sources;
+static int g_nsources, g_csources;
+
+static int ms_source_has(const char *hash, const char *dir, const char *lower)
+{
+    int i;
+    char *needle, *path;
+    const char *text = NULL;
+    for (i = 0; i < g_nsources && !text; i++) if (!strcmp(g_sources[i].hash, hash)) text = g_sources[i].text;
+    if (!text) {
+        size_t len = 0;
+        if (!(path = sh_textf("%s\\" SH_MB_SLICE_SOURCE, dir))) return 0;
+        text = (const char *)sh_mb_read_file(path, (size_t)-1, &len);
+        free(path);
+        if (!text || !ms_grow((void **)&g_sources, &g_csources, g_nsources + 1, sizeof *g_sources)) {
+            free((void *)text);
+            return 0;
+        }
+        strcpy_s(g_sources[g_nsources].hash, sizeof g_sources[g_nsources].hash, hash);
+        g_sources[g_nsources++].text = (char *)text;
+    }
+    if (!(needle = sh_textf("\"request\":\"%s\"", lower))) return 0;
+    i = strstr(text, needle) != NULL;
+    free(needle);
+    return i;
+}
+
+int sh_modserve_note_miss(const char *request)
+{
+    const ms_index *x;
+    const ms_bundle *cut = NULL;
+    char salt[SH_MODSERVE_HASH_HEX + 1], hash[SH_MODSERVE_HASH_HEX + 1], *lower, *label = NULL, *by, *dir = NULL;
+    const char *shown = NULL;
+    sh_modserve_miss_fn fn = g_miss_fn;
+    int i, b, fresh = 1;
+    if (!request || !ms_request_salt(request, salt)) return 0;
+    InterlockedIncrement(&g_readers);
+    x = g_index;
+    for (b = 0; x && b < x->nbundles && !cut; ++b) {
+        const ms_bundle *bd = &x->bundles[b];
+        if (bd->admitted && bd->slice_of && bd->id && !strcmp(bd->id, salt) && bd->rank >= 0) cut = bd;
+    }
+    if (cut) {
+        strcpy_s(hash, sizeof hash, cut->hash);
+        label = _strdup(ms_label(cut));
+        dir = cut->dir ? _strdup(cut->dir) : NULL;
+    }
+    InterlockedDecrement(&g_readers);
+    if (!cut) return 0;
+    if (!label || !dir || !(lower = _strdup(request))) { free(label); free(dir); return 0; }
+    ms_lower(lower);
+    AcquireSRWLockExclusive(&g_miss_lock);
+    if (!ms_source_has(hash, dir, lower)) fresh = 0;
+    free(dir);
+    for (i = 0; i < g_nmiss && fresh; i++) fresh = strcmp(g_miss[i].hash, hash) || strcmp(g_miss[i].request, lower);
+    if (fresh && ms_grow((void **)&g_miss, &g_cmiss, g_nmiss + 1, sizeof *g_miss)) {
+        strcpy_s(g_miss[g_nmiss].hash, sizeof g_miss[g_nmiss].hash, hash);
+        g_miss[g_nmiss].label = label;
+        g_miss[g_nmiss].request = lower;
+        g_nmiss++;
+        shown = label;   /* kept until the process ends */
+        label = lower = NULL;
+    } else fresh = 0;
+    ReleaseSRWLockExclusive(&g_miss_lock);
+    if (fresh) {
+        by = ms_asker();
+        if (by) ms_log("%s came with this map without %s, which %s asked for; the map goes on without it", shown,
+                          request, by);
+        else ms_log("%s came with this map without %s; the map goes on without it", shown, request);
+        if (fn) fn(salt, hash, request, by ? by : "");
+        free(by);
+    }
+    free(label);
+    free(lower);
+    return fresh;
+}
+
+int sh_modserve_misses_report(sh_modserve_line_fn fn, void *context)
+{
+    int i, n = 0;
+    AcquireSRWLockShared(&g_miss_lock);
+    for (i = 0; i < g_nmiss; i++, n++) {
+        char *line = sh_textf("missing from a map's mods: %s: %s", g_miss[i].label, g_miss[i].request);
+        if (fn && line) fn(context, line);
+        free(line);
+    }
+    ReleaseSRWLockShared(&g_miss_lock);
+    return n;
 }
 
 static int ms_pair_parent_cmp(const void *a, const void *b)
@@ -7400,10 +7552,10 @@ static int ms_salt_in(const ms_index *x, const char *salt, const char *hash, con
 
 /* The one place resolver (modserve.h, DECISIONS 1 and 11): the build that
  * serves a row of a map whose place is `place` ("" the root): the root folder
- * of the salt at the row's hash; then, with a place, that place's folder of
- * the salt at the row's hash, and without one, the root folder of the salt
- * at any build. Never another map's place. -1 when none: the row is
- * missing. */
+ * of the salt at the row's hash, or at the build the row's files were cut
+ * from ("of"); then, with a place, that place's folder of the salt at the
+ * row's hash, and without one, the root folder of the salt at any build.
+ * Never another map's place. -1 when none: the row is missing. */
 static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, const char *place)
 {
     char salt[SH_MODMANIFEST_SALT_CAP];
@@ -7412,6 +7564,9 @@ static int ms_row_build_in(const ms_index *x, const sh_modmanifest_row *row, con
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
     if (row->build[0]) at = ms_salt_in(x, salt, row->build, "");
+    /* A row naming part of a build: the root's whole build it was cut from
+     * serves it as well. */
+    if (at < 0 && row->of[0]) at = ms_salt_in(x, salt, row->of, "");
     if (at >= 0) return at;
     if (place && place[0]) return row->build[0] ? ms_salt_in(x, salt, row->build, place) : -1;
     return ms_salt_in(x, salt, NULL, "");

@@ -1022,6 +1022,74 @@ static void choices(void)
     g_installed_count = 2;
 }
 
+/* The publish save's cut: a row names the files of a mod the map needs and
+ * the build they were cut from ("of"); every other save, and the open map's
+ * own record, keep the whole build. */
+#define HASH_CUT "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+static int g_cut_calls;
+/* parse_value on a NUL-terminated row. */
+static int pv(const char *json, sh_modmanifest_row *row, char *err, size_t cap)
+{
+    return sh_modmanifest_parse_value(json, strlen(json), row, err, cap);
+}
+static int fake_slicer(sh_modmanifest_row *row)
+{
+    g_cut_calls++;
+    if (strcmp(row->salt, "alexpink")) return 0;
+    strcpy_s(row->of, sizeof row->of, row->build);
+    strcpy_s(row->build, sizeof row->build, HASH_CUT);
+    row->size = 99;
+    return 1;
+}
+
+static void part_rows(void)
+{
+    sh_modmanifest_row row, back;
+    char err[192], *text, *out;
+    size_t n = 0;
+    sh_modmanifest_list rows = {0}, cur = {0};
+    printf("-- a row naming part of a build\n");
+    CHECK(pv("{\"mod\":\"alexpink@" HASH_CUT "\",\"of\":\"" HASH_A "\",\"name\":\"Pink\",\"size\":9,"
+                                     "\"names\":[\"mods/alexpink/imp\"]}", &row, err, sizeof err));
+    CHECK(!strcmp(row.build, HASH_CUT) && !strcmp(row.of, HASH_A));
+    text = sh_modmanifest_format_value(&row, &n);
+    CHECK(text && strstr(text, "\"of\":\"" HASH_A "\""));
+    CHECK(text && sh_modmanifest_parse_value(text, n, &back, err, sizeof err) && !strcmp(back.of, HASH_A));
+    sh_modmanifest_row_free(&back);
+    free(text);
+    sh_modmanifest_row_free(&row);
+    /* An "of" that is not a build hash refuses the row; a whole row writes none. */
+    CHECK(!pv("{\"mod\":\"alexpink@" HASH_CUT "\",\"of\":\"nope\",\"name\":\"\",\"size\":9}", &row,
+                                      err, sizeof err) && strstr(err, "source build"));
+    CHECK(pv("{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"\",\"size\":9}", &row, err, sizeof err));
+    text = sh_modmanifest_format_value(&row, &n);
+    CHECK(text && !strstr(text, "\"of\""));
+    free(text);
+    sh_modmanifest_row_free(&row);
+
+    /* The save with the slicer bound: the written row names the cut; the open map keeps the whole build. */
+    g_installed = INSTALLED;
+    g_installed_count = 2;
+    sh_modmanifest_reset();
+    sh_modmanifest_set_slicer(fake_slicer);
+    g_cut_calls = 0;
+    out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
+    CHECK(out && g_cut_calls == 1);
+    CHECK(out && sh_modmanifest_read(out, n, &rows, NULL) == 1 && !strcmp(rows.rows[0].build, HASH_CUT) &&
+          !strcmp(rows.rows[0].of, HASH_A) && rows.rows[0].size == 99 && rows.rows[0].name_count == 2);
+    CHECK(sh_modmanifest_current(&cur) == 1 && !strcmp(cur.rows[0].build, HASH_A) && !cur.rows[0].of[0]);
+    sh_modmanifest_list_free(&cur);
+    sh_modmanifest_list_free(&rows);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    /* Unbound: every save names the whole build. */
+    sh_modmanifest_set_slicer(NULL);
+    out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
+    CHECK(out && !strstr(out, HASH_CUT) && !strstr(out, "\"of\""));
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    sh_modmanifest_reset();
+    g_installed_count = 0;
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -1039,6 +1107,7 @@ int main(void)
     mod_json();
     map_level();
     choices();
+    part_rows();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

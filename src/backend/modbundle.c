@@ -2641,6 +2641,8 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root)
  * key refuses the folder (ONE-SHAPE rule 6); every other key that is not a
  * known field is kept verbatim in "extra" (strings, hud, companions,
  * description, ...). */
+static int mb_is_hex64(const mbj *v);
+
 static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block, int building)
 {
     char *cause = NULL;
@@ -2659,6 +2661,11 @@ static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block
     }
     if (block && block->t != MBJ_OBJ) { mb_error(b, "mod.json \"" SH_MB_BLOCK_KEY "\" must be an object"); return 0; }
     if (!mb_common_fields(b, root)) return 0;
+    {
+        const mbj *of = mbj_get(root, SH_MB_SLICE_KEY);
+        if (of && !mb_is_hex64(of)) { mb_error(b, "mod.json \"" SH_MB_SLICE_KEY "\" is not a build"); return 0; }
+        if (of) memcpy(b->slice_of, of->s, SH_MB_HASH_HEX + 1);
+    }
     {
         mbj tmp;
         memset(&tmp, 0, sizeof tmp);
