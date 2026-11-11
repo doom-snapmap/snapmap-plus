@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include "signatures.h"
 
-#define SH_RENDER_VARIABLE "smp.render.v1"
 #define SH_RENDER_NATIVE_DISTANCE 8192.0f
 #define SH_RENDER_MIN_DISTANCE 256.0f
 #define SH_RENDER_MAX_DISTANCE 200000.0f

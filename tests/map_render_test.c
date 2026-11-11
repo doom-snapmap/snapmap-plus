@@ -55,7 +55,7 @@ int main(void)
     assert(refused("")&&refused("on")&&!sh_map_render_decode(NULL,&a)&&!sh_map_render_decode("4;0",NULL));
     /* Snapmap+'s own settings are the "smp." variables; author strings and
      * other Snapmap+ carriers are not. */
-    assert(sh_map_render_own_variable("smp.bounds.v1",13)&&sh_map_render_own_variable(SH_RENDER_VARIABLE,13));
+    assert(sh_map_render_own_variable("smp.bounds.v1",13)&&sh_map_render_own_variable("smp.render.v1",13));
     assert(!sh_map_render_own_variable("String 1",8)&&!sh_map_render_own_variable("smpkg.x.0.1.abcd",16));
     assert(!sh_map_render_own_variable("smp.",4)&&!sh_map_render_own_variable(NULL,13)&&!sh_map_render_own_variable("Smp.x",5));
     /* The fog stretch: r = 200000 / native, floored like the engine's read
