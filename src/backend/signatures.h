@@ -11,10 +11,8 @@
 #include <stddef.h>
 
 /* IDA-style pattern with ?/?? wildcards. rva_vk / rva_gl are the function's
- * RVAs in the two build 13954591 executables; 0 = not on that renderer. An
- * entry with both zero is a code-site anchor of the globals table
- * (engine_globals.c), whose recorded RVAs are those of the global itself; it is
- * still located by scanning. */
+ * RVAs in the two build 13954591 executables; 0 = not on that renderer. The
+ * globals table's code-site anchors (engine_globals.c) are checked the same way. */
 typedef struct sig_entry {
     const char *name;
     const char *pattern;

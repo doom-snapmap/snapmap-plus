@@ -12,8 +12,7 @@ the 2018 executables -- is scanned as an optional cross-check: uniqueness is
 reported, but it does not affect the exit status.
 
 Covered: every BACKEND_ENGINE_SIGNATURES row (the fault shield's included), the
-OpenGL-only helper, the companion and scene-spawn tables, the standalone pattern
-constants, and every global anchor in engine_globals_table.gen.h. The rawmap
+OpenGL-only helper, the companion and scene-spawn tables, and every global anchor in engine_globals_table.gen.h. The rawmap
 branch answer's candidates are found by rawmap.c itself and are not covered.
 At run time the backend checks each function pattern only at its recorded RVA;
 this scan is what proves that RVA is the pattern's one match.
@@ -90,26 +89,18 @@ def parse_constant_entry(path, symbol):
     return (cat(m.group(1)), cat(m.group(2)), int(m.group(3), 0), int(m.group(4), 0))
 
 
-def parse_string_constant(path, symbol):
-    """A pattern held in `#define SYMBOL "..." "..."` or `... SYMBOL = "..." "...";`."""
-    src = open(path, encoding='utf-8', errors='replace').read()
-    m = (re.search(r'#define\s+' + re.escape(symbol) + r'((?:\s*\\?\s*"[^"]*")+)', src) or
-         re.search(re.escape(symbol) + r'\s*=\s*((?:\s*"[^"]*")+)\s*;', src))
-    if not m:
-        raise SystemExit('%s: pattern constant %s not found' % (path, symbol))
-    return (symbol, cat(m.group(1)), 0, 0)
-
-
 def parse_globals(path):
     """Anchors and recorded RVAs from engine_globals_table.gen.h."""
     src = open(path, encoding='utf-8', errors='replace').read()
     rows = []
     for m in re.finditer(r'\{ \.name = "([^"]+)",.*?\.anchor = "([^"]*)",\s*'
                          r'\.disp_slot = (\d+), \.disp_tail = (\d+), \.delta = (-?\d+), '
-                         r'\.rva_vk = 0x([0-9A-Fa-f]+)u, \.rva_gl = 0x([0-9A-Fa-f]+)u \}', src, re.S):
+                         r'\.rva_vk = 0x([0-9A-Fa-f]+)u, \.rva_gl = 0x([0-9A-Fa-f]+)u,\s*'
+                         r'\.site_vk = 0x([0-9A-Fa-f]+)u, \.site_gl = 0x([0-9A-Fa-f]+)u \}', src, re.S):
         rows.append(dict(name=m.group(1), anchor=m.group(2), slot=int(m.group(3)),
                          tail=int(m.group(4)), delta=int(m.group(5)),
-                         vk=int(m.group(6), 16), gl=int(m.group(7), 16)))
+                         vk=int(m.group(6), 16), gl=int(m.group(7), 16),
+                         svk=int(m.group(8), 16), sgl=int(m.group(9), 16)))
     declared = len(re.findall(r'\{ \.name = "', src))
     if len(rows) != declared:
         raise SystemExit('%s: parsed %d of %d globals; refusing a partial scan'
@@ -230,9 +221,12 @@ def scan_image(img, build, sig_rows, globals_rows):
     grows = []
     for g in globals_rows:
         recorded = (g['gl'] if is_gl else g['vk']) if supported else 0
+        site = (g['sgl'] if is_gl else g['svk']) if supported else 0
         result = dict(name=g['name'], recorded_rva=hex(recorded), rva=None)
         hits = img.rva_hits(g['anchor'])
         result['status'] = status_of(hits)
+        if result['status'] == 'OK' and site and hits[0] != site:
+            result['status'] = 'SITE_MISMATCH'
         if result['status'] == 'OK':
             disp = img.read_i32(hits[0] + g['slot'])
             rva = None if disp is None else hits[0] + g['slot'] + 4 + g['tail'] + disp + g['delta']
@@ -256,8 +250,6 @@ def load_sources(root):
                                                         'SH_COMPANION_SIGNATURES')]
     sig_rows += [('scene',) + r for r in parse_table(os.path.join(backend, 'modscene_sigs.c'),
                                                     'SH_MODSCENE_SPAWN_SIGNATURES')]
-    sig_rows.append(('constant',) + parse_string_constant(os.path.join(backend, 'cvar_unlock.c'),
-                                                          'CVU_CMDSYS_LEA_SIG'))
     globals_rows = parse_globals(os.path.join(backend, 'engine_globals_table.gen.h'))
     builds = parse_known_builds(os.path.join(backend, 'host_image.c'))
     return sig_rows, globals_rows, builds

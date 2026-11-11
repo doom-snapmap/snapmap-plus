@@ -209,8 +209,6 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
     uint32_t rva;
     int nsec, s;
     reset(sig, out);
-    /* Code-site anchors of the globals table record the global, not the site. */
-    if (sig->rva_vk == 0 && sig->rva_gl == 0) return sig_scan_one(module_base, sig, out);
 
     n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
     if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
