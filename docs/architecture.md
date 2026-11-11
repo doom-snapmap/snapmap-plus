@@ -497,8 +497,8 @@ These backend files share the work:
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
   below, rules 4 its effects, movies and atlases, rules 5 a closure no
   other installed mod stands in for, rules 6 whole models and rules 7
-  textual identity of decl-grammar files, so every installed folder is built
-  again once.
+  textual identity of decl-grammar files and a material's whole render
+  program, so every installed folder is built again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -580,7 +580,27 @@ These backend files share the work:
   `colormaskmap`) needs nothing when the material has a row in the installed
   `virtualtextures/_vmtr*.vmtr`, whose baked pages the engine samples. A
   name of these kinds no archive holds is reported, not refused, like an
-  animWeb clip. A model is one unit (`mb_model_needs`): the engine loads an
+  animWeb clip. A material's render program (`stageprogram` and the other
+  `*Program` keys) is one unit too (`mb_closure_program`): when only
+  `gameresources` holds the program's decl, the closure brings the decl,
+  `generated/renderprogs/<name>_pc_vulkan.bin` (and an OpenGL `_pc.bin` if
+  the archive has one), the SPIR-V the archive holds at
+  `sh_mb_spirv_request`'s names (split names included), and every
+  permutation `generated/renderprogs/permutations/<name>_<mask>.decl` the
+  installed indexes list (`sh_modstock_list`) with its own `.bin` and
+  SPIR-V; the shared includes under `decls/renderprogs/` never come along.
+  This reproduces `archive_renderprog.py`'s closure for all 488
+  `gameresources` and 435 `snap_gameresources` programs of 13954591 (59
+  are campaign-only, `newwater` among them). A program served without its
+  permutation files stops the game (0xE06D7363 when the permutation open
+  fails), so a missing `.bin` or a program with no permutation fails the
+  build naming the member, and the stage files are then checked from the
+  `.bin` as for a mod's own program (see [Render programs](#render-programs)).
+  A program SnapMap holds adds nothing (the 429 programs both archives
+  hold have the same files in each). Measured on the owner's water mod: a
+  folder of `mod.json` and the `templar_water` material gains the 8 files
+  of `newwater`, and the folder with its two `.bin` files deleted gains
+  those two. A model is one unit (`mb_model_needs`): the engine loads an
   md6Def's mesh, then the skeleton whose name the cooked mesh carries (a
   little-endian u32 length at 0x0C, then the name; "MM" at byte 2), then that
   skeleton's default clip `<skeleton>/_default.md6anim`
@@ -1227,7 +1247,9 @@ and `.fspv` for the program, and the same for each
 files on GPUs without AMD's three shader extensions and the permutation on GPUs
 with them; a missing stage file is fatal at bind). A permutation decl is named
 by its request path, the string the engine looks it up by; it is served, not
-registered. A bare program name in a material, shared includes under
+registered. A material naming a campaign-only program brings the program's
+files along as pointers (the closure under [Mods](#mods)), checked the same
+way from the installed bytes. A bare program name in a material, shared includes under
 `decls/renderprogs/`, `vulkan_pipelines.bin`, `generated/glslBinaries/` and
 `generated/glsl/` are refused. MD5fold is MD5 with its four words XORed
 together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`

@@ -151,7 +151,9 @@ is the game's own file and is borrowed, not edited. A copy that does not read as
 the line it stops at, and a binary at a game name with other bytes (a model, an image) is refused: put
 it under `mods/<key>/` and point your decls at it. A render program's permutation decl is text, but an
 edited one is refused too, since the game file cannot be generated per map: delete the copy, or ship
-your program whole under `mods/<key>/`. The keys `player`, `extends` and `replaces` of earlier releases are ignored,
+your program whole under `mods/<key>/`. A material that names a shader only the campaign ships
+brings the shader's whole program along from the player's install (its decl, compiled files and
+permutations), so a mod of just that material works. The keys `player`, `extends` and `replaces` of earlier releases are ignored,
 and a partial file they named is refused with "put the whole edited copy of <game file> at its game
 name". Mods you download or import are never refused on their files. A map whose mods need Snapmap+ features records the version it needs.
 

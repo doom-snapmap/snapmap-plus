@@ -4470,6 +4470,120 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
     return 1;
 }
 
+/* One member of a program, by its request path. */
+static int mb_closure_member(mb_closure *c, size_t file, const char *request)
+{
+    char cand[1][SH_MB_REQUEST_MAX + 1];
+    sh_mb_need need;
+    if (strlen(request) > SH_MB_REQUEST_MAX) return 0;
+    memcpy(cand[0], request, strlen(request) + 1);
+    need.type = "renderProg";
+    need.name = cand[0];
+    return mb_closure_offer(c, file, &need, cand, 1);
+}
+
+static void mb_closure_missing(mb_closure *c, size_t file, const char *program, const char *member)
+{
+    mb_error(c->b, "%s uses the campaign render program %s, but no archive holds its %s; a program is served whole or "
+             "not at all, since the game stops when it binds a missing one (check the game's files in Steam)",
+             c->b->files[file].path, program, member);
+    c->stopped = 1;
+}
+
+/* A program unit (the program or one permutation): its cooked Vulkan .bin
+ * (required), an OpenGL .bin and the SPIR-V stages the archive holds. Which
+ * stages a unit needs is checked afterwards from the .bin itself
+ * (mb_check_renderprogs). */
+static void mb_closure_unit(mb_closure *c, size_t file, const char *program, const char *stem, const char *spirv_name)
+{
+    static const char *const ext[3] = { ".vspv", ".fspv", ".cspv" };
+    char req[SH_MB_REQUEST_MAX + 32];
+    int k;
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc_vulkan.bin", stem);
+    if (!mb_closure_member(c, file, req)) {
+        if (!c->stopped) mb_closure_missing(c, file, program, req);
+        return;
+    }
+    if (c->stopped) return;
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc.bin", stem);
+    (void)mb_closure_member(c, file, req);
+    for (k = 0; k < 3 && !c->stopped; k++)
+        if (sh_mb_spirv_request(spirv_name, ext[k], req, sizeof req)) (void)mb_closure_member(c, file, req);
+}
+
+typedef struct mb_perm_list {
+    const char *program;
+    char (*req)[SH_MB_REQUEST_MAX + 1];
+    size_t n, cap;
+    int oom;
+} mb_perm_list;
+
+static void mb_perm_cb(void *context, const char *path)
+{
+    mb_perm_list *l = (mb_perm_list *)context;
+    char program[SH_MB_REQUEST_MAX + 1];
+    size_t i;
+    if (l->oom || strlen(path) > SH_MB_REQUEST_MAX || !sh_mb_rp_permutation(path, program, sizeof program, NULL) ||
+        strcmp(program, l->program) != 0)
+        return;
+    for (i = 0; i < l->n; i++) if (!strcmp(l->req[i], path)) return;
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 8;
+        void *g = realloc(l->req, cap * sizeof *l->req);
+        if (!g) { l->oom = 1; return; }
+        l->req = (char (*)[SH_MB_REQUEST_MAX + 1])g;
+        l->cap = cap;
+    }
+    memcpy(l->req[l->n++], path, strlen(path) + 1);
+}
+
+/* A material's program is one unit with its files (archive_renderprog.py's
+ * closure, reproduced for all 923 programs of 13954591): the decl, the cooked
+ * .bin and SPIR-V, and every permutation's decl, .bin and SPIR-V, at the
+ * paths the archive stores (split SPIR-V names included; the shared includes
+ * under decls/renderprogs/ never). Shipping a program without its permutation
+ * files is fatal (0xE06D7363 when the permutation open fails), so a
+ * campaign-only program comes whole or the build fails naming the first
+ * missing member. SnapMap's own programs add nothing. */
+static void mb_closure_program(mb_closure *c, size_t file, const char *name)
+{
+    char program[SH_MB_REQUEST_MAX + 1], decl[SH_MB_REQUEST_MAX + 48], stem[SH_MB_REQUEST_MAX + 48], where[32];
+    mb_perm_list perms;
+    size_t i, n = strlen(name);
+    if (n == 0 || n > SH_MB_REQUEST_MAX - 40 || (n > 5 && mb_ieq_n(name, 5, "mods/"))) return;
+    memcpy(program, name, n + 1);
+    mb_lower(program);
+    _snprintf_s(decl, sizeof decl, _TRUNCATE, "generated/decls/renderprog/%s.decl", program);
+    if (c->ops->container(c->ops->context, decl, NULL, where, sizeof where) != SH_MB_STOCK_OK ||
+        strcmp(where, "gameresources") != 0 || !c->ops->list)
+        return;
+    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/%s", program);
+    mb_closure_unit(c, file, program, stem, program);
+    if (c->stopped) return;
+    memset(&perms, 0, sizeof perms);
+    perms.program = program;
+    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/permutations/%s_", program);
+    if (c->ops->list(c->ops->context, stem, mb_perm_cb, &perms) != SH_MB_STOCK_OK) {
+        mb_error(c->b, "%s: the permutations of render program %s cannot be listed (the installed-content reader is "
+                 "unavailable)", c->b->files[file].path, program);
+        c->stopped = 1;
+    } else if (perms.oom) {
+        mb_error(c->b, "out of memory");
+        c->stopped = 1;
+    } else if (!perms.n) {
+        char member[SH_MB_REQUEST_MAX + 80];
+        _snprintf_s(member, sizeof member, _TRUNCATE, "permutation (generated/renderprogs/permutations/%s_<16 hex "
+                    "digits>.decl)", program);
+        mb_closure_missing(c, file, program, member);
+    }
+    for (i = 0; i < perms.n && !c->stopped; i++) {
+        if (!mb_closure_member(c, file, perms.req[i]) || c->stopped) continue;
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%.*s", (int)(strlen(perms.req[i]) - 5), perms.req[i]);
+        mb_closure_unit(c, file, program, stem, perms.req[i]);
+    }
+    free(perms.req);
+}
+
 static void mb_closure_need(mb_closure *c, size_t file, size_t k)
 {
     char cand[2][SH_MB_REQUEST_MAX + 1];
@@ -4478,7 +4592,11 @@ static void mb_closure_need(mb_closure *c, size_t file, size_t k)
     if (n <= 0) return;
     held = mb_closure_offer(c, file, &need, cand, n);
     if (c->stopped) return;
-    if (strcmp(need.type, "swf") == 0) {
+    if (_stricmp(need.type, "renderProg") == 0) {
+        char name[SH_MB_REQUEST_MAX + 1];
+        strncpy_s(name, sizeof name, need.name, _TRUNCATE);   /* the files array may move while the closure grows */
+        mb_closure_program(c, file, name);
+    } else if (strcmp(need.type, "swf") == 0) {
         /* The movie's atlas is its sibling: generated/swf/<stem>.bimage. */
         size_t m = strlen(cand[0]);
         if (m > 5 && m + 3 <= SH_MB_REQUEST_MAX && !strcmp(cand[0] + m - 5, ".bswf")) {

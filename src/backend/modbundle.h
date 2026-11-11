@@ -331,6 +331,11 @@ typedef struct sh_mb_stock_ops {
      * is not NULL): SH_MB_STOCK_OK with "snap_gameresources", "gameresources"
      * or "loose" in `out`, ABSENT or UNAVAILABLE. May be NULL. */
     int (*container)(void *context, const char *source, const char *sha256, char *out, size_t cap);
+    /* Every installed archive path starting with `prefix` (lower case),
+     * passed to `fn` (a path several rows hold may come more than once): OK
+     * or UNAVAILABLE. May be NULL. The builder lists a campaign render
+     * program's permutations with it. */
+    int (*list)(void *context, const char *prefix, void (*fn)(void *fn_context, const char *path), void *fn_context);
 } sh_mb_stock_ops;
 
 /* Register the installed-content reader (copied; NULL clears). Without one the

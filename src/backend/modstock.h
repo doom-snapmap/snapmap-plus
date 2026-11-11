@@ -52,6 +52,10 @@ int sh_modstock_read(const char *source, const char *sha256, unsigned char **byt
  * or the install root); ABSENT or UNAVAILABLE. Hashes only a name both
  * archives hold. */
 int sh_modstock_container(const char *source, const char *sha256, char *out, size_t cap);
+/* Every archive path (folded to lower case) starting with `prefix`, passed
+ * to `fn` once per row: SH_MB_STOCK_OK or UNAVAILABLE. A linear walk of the
+ * table; loose files are not listed. */
+int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *path), void *context);
 
 /* 1 when the installed game holds `path` (an archive row or a loose file),
  * 0 when not, -1 when the installed indexes cannot be read. */

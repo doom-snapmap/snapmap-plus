@@ -1445,6 +1445,70 @@ static void test_text_identity(const char *tmp)
     sh_mb_free(&b);
 }
 
+/* The closure follows a material's shader: a material naming a campaign-only
+ * program brings the program whole (decl, cooked .bin, SPIR-V, the
+ * permutation's decl, .bin and SPIR-V), one naming a SnapMap program records
+ * the name and brings nothing, and a campaign program whose permutation lacks
+ * its .bin fails the build naming that file. */
+static void test_shader_closure(const char *tmp)
+{
+    static const char *const whole[] = { R7_TW_DECL, R7_TW_BIN, R7_TW_VS, R7_TW_FS, R7_TW_PERM, R7_TW_PBIN, R7_TW_PVS,
+                                         R7_TW_PFS };
+    char d7[MAX_PATH * 2], dir[MAX_PATH * 2];
+    sh_mb_bundle b;
+    const sh_mb_file *f;
+    size_t i;
+
+    _snprintf_s(d7, sizeof d7, _TRUNCATE, "%s\\d7s", tmp);
+    make_install7(d7);
+    sh_modstock_set_install(d7);
+
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade1", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
+    r7_write_lf(dir, "generated/decls/material/mods/shade1/water.decl", "{\nstageprogram\ttw\n}\n", "");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.warnings == 0);
+    if (b.errors) fprintf(stderr, "  shader closure: %s\n", b.first_cause);
+    CHECK(b.file_count == 9 && b.stock_count == 8);
+    for (i = 0; i < sizeof whole / sizeof whole[0]; i++) {
+        f = find(&b, whole[i]);
+        CHECK(f && f->stock && f->absent && f->closure && f->cls == SH_MB_CLASS_SURFACE && f->stock_source &&
+              !strcmp(f->stock_source, whole[i]));
+        if (!f) fprintf(stderr, "  shader closure lacks %s\n", whole[i]);
+    }
+    CHECK(has_note(&b, "8 game files borrowed for completeness"));
+    sh_mb_free(&b);
+    /* Stable: a rebuild after writing mod.json derives the same set and hash. */
+    {
+        char cause[SH_MB_CAUSE_MAX], hash[65];
+        CHECK(sh_mb_build(dir, &RESOLVER, &b) && sh_mb_write(&b, dir, cause, sizeof cause));
+        memcpy(hash, b.hash, sizeof hash);
+        sh_mb_free(&b);
+        CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.stock_count == 8 && !strcmp(b.hash, hash));
+        sh_mb_free(&b);
+    }
+
+    /* SnapMap's own program: the name is a need, nothing is added. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade2", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
+    r7_write_lf(dir, "generated/decls/material/mods/shade2/glass.decl", "{\nstageprogram\tsw\n}\n", "");
+    CHECK(sh_mb_build(dir, &RESOLVER, &b) && b.errors == 0 && b.file_count == 1 && b.stock_count == 0 &&
+          b.needs.stock == 1);
+    f = find(&b, "generated/decls/material/mods/shade2/glass.decl");
+    CHECK(f && f->need_count == 1 && has_need(f, "renderProg", "sw"));
+    CHECK(!has_note(&b, "borrowed for completeness"));
+    sh_mb_free(&b);
+
+    /* A campaign program whose permutation has no .bin: the build fails
+     * naming it, so a partial program is never served. */
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\shade3", tmp);
+    mt_write(dir, "mod.json", "{\"name\":\"Shader closure\"}");
+    r7_write_lf(dir, "generated/decls/material/mods/shade3/broken.decl", "{\nstageprogram\ttp\n}\n", "");
+    CHECK(!sh_mb_build(dir, &RESOLVER, &b) && b.errors == 1);
+    CHECK_CAUSE(b, "uses the campaign render program tp, but no archive holds its "
+                   "generated/renderprogs/permutations/tp_0000000000000001_pc_vulkan.bin");
+    sh_mb_free(&b);
+}
+
 int main(void)
 {
     char tmp[MAX_PATH], d1[MAX_PATH * 2], d2[MAX_PATH * 2], data[MAX_PATH * 2], doom[MAX_PATH * 2];
@@ -1463,6 +1527,7 @@ int main(void)
     test_whole_models(tmp);
     test_closure_store_path(tmp);
     test_text_identity(tmp);
+    test_shader_closure(tmp);
     sh_modstock_set_install(d1);
     test_store(tmp, d1, d2);
     sh_modstock_reset();
