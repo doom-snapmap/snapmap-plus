@@ -3732,7 +3732,7 @@ static void mb_registries(sh_mb_bundle *b)
     }
     mbj_free(extra);
     if (b->vt) {
-        mb_puts(&o, first ? "\"vt\":" : ",\"vt\":");
+        mb_puts(&o, o.n > 1 ? ",\"vt\":" : "\"vt\":");   /* "strings" leaves `first` set */
         mb_puts(&o, b->vt);
         first = 0;
     }

@@ -616,6 +616,9 @@ static void lit_pages(void)
     put_lit_material(a, "litmod00", "body", 0, 0, 960, 960);
     put_lit_material(a, "litmod00", "head", 960, 0, 1440, 1440);
     put_mod(b, "litmod11");
+    /* With strings too: the block's registries hold "strings" and "vt" side by side. */
+    mt_write(b, "mod.json", "{\"name\":\"litmod11\",\"strings\":{\"en\":{\"litmod11_name\":\"Lit\"}},"
+                            "\"snapmap-plus\":{\"format\":2,\"salt\":\"litmod11\"}}");
     m = lit_member(5, 3, 900, 1, 0, &n);
     put_bytes(b, "assets\\virtualtextures\\mods\\litmod11\\vmtr.mega2", m, n);
     free(m);
