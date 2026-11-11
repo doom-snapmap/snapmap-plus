@@ -1,34 +1,39 @@
 /* modui.h -- the WebView Mods tab's backend (the `mods` interface slot).
  *
- * One JSON document describes what a player needs to see:
- *   mods      one row per installed mod. The store's folders (modstore
- *             enumeration) are grouped by id; the row shows the build that
- *             serves (sh_modserve_bundle_state, sh_modserve_lookup), else the
- *             newest, and counts the other builds. Two folders declaring one
- *             id (the overrides folder a migrated bundle came from, or a
- *             folder built in place, differ) are a row each, marked
- *             duplicateId. A row is "installed" when its build serves with no
- *             warning, else "attention" with the first cause. Map-delivered
- *             bundles under legacy\ are not listed.
- *   migrate   whether the retired overrides\ folder holds entries the
- *             migration record does not cover (sh_modmigrate_pending)
+ * One JSON document (payload v4, docs/webview-ui.md) describes what a player
+ * needs to see:
+ *   mods      one row per mod folder of the store (modstore enumeration):
+ *             the player's own mods at the root of mods\ (with their
+ *             organizing folders as "group"), and the mods a downloaded map
+ *             brought, in that map's place mods\maps\<map title>\ ("place"
+ *             and "placeTitle"). A row is "ready" when its build serves, else
+ *             "attention" with one plain sentence saying what is wrong and
+ *             what to do ("cause"). It carries what the details pane shows:
+ *             the Toybox rows the mod adds, what it changes in the game (its
+ *             derived edits, editor tweaks, replacements), what it borrows
+ *             from the game, its console settings, the builder's warnings in
+ *             plain words, and the informational same-files hint (another of
+ *             the player's mods carries at least half of its files). "salt"
+ *             is the mod's identity for the page's Copy mod id and the Files
+ *             view; no sentence names a salt, a hash or a build number.
  *   map       the manifest rows the last map load carried (modmanifest's
  *             current record), each with its state under the asset rule
- *             (modserve.h sh_modserve_row_served: active, superseded,
- *             incomplete, skipped, missing) and the refusal sentence, and the bundles the placed entities resolve to now (the
- *             save-time closure, modserve_bundles_for_names_visit); with the
- *             map's JSON bound (payload v3) also its name, saved-map id, last
- *             save, published and uploaded state (the record's links and
- *             claims), the search tag, and one entry per mod it uses with the
- *             entities that use it and the wires and Timelines pointing at
- *             them (modmap.h)
- * The actions are install a folder, rebuild one, verify one, uninstall one
- * (the open map cleaned of it first), attach a mod to the open map (a
- * map-level row, modmanifest.h) and remove a mod from it, their dry runs,
- * migrate, rescan, and the older palette rebuild, Remove and removal
- * of covered builds, which the tab no longer offers. What the tab stopped showing (every bundle's state,
- * legacy ones included, conflicts with their winners, shadows, verification)
- * is printed by sh_modui_doctor, the `sh_mods doctor` console verb.
+ *             (modserve.h sh_modserve_row_served: active, incomplete,
+ *             skipped, missing) and the refusal sentence, and the builds the
+ *             placed entities resolve to now (the save-time closure,
+ *             modserve_bundles_for_names_visit); with the map's JSON bound
+ *             also its name, last save, published and uploaded state (the
+ *             record's links and claims), the search tag, and one entry per
+ *             mod it uses with the entities that use it and the wires and
+ *             Timelines pointing at them (modmap.h)
+ * The actions are install a folder, rebuild one, uninstall one (the open map
+ * cleaned of it first), attach a mod to the open map (a map-level row,
+ * modmanifest.h) and remove a mod from it, their dry runs, the registry
+ * choice, rescan (the tab's Refresh: there is no folder watcher, so Refresh
+ * is how edits are picked up), New mod, the read-only Files view, and the
+ * console's verify and palette rebuild. What the tab does not show (every
+ * folder's state, conflicts with their winners, the game files mods replace,
+ * verification) is printed by sh_modui_doctor, the `sh_mods doctor` verb.
  *
  * Threads: every operation except FETCH and ROOT runs on DOOM's main thread
  * (the frontend calls the slot inside run_on_main), serialized with the
@@ -78,10 +83,6 @@ typedef struct sh_modui_engine {
     /* Existence of an installed game resource: 1 present, 0 absent, -1 the
      * reader is unavailable (stock shadows and needs cannot be checked). */
     int (*stock_exists)(const char *request);
-    /* The overrides migration (modmigrate.h; none in a SH_MODUI_PURE build). */
-    int (*migrate_pending)(unsigned *entries);   /* sh_modmigrate_pending */
-    int (*migrate_start)(int again);             /* sh_modmigrate_start */
-    int (*migrate_busy)(void);                   /* sh_modmigrate_busy */
     /* The open editor map serialized as a save would (no save side effects),
      * in a process-heap buffer the caller frees with HeapFree. 1 with *out,
      * 0 no editor map, -1 failed. Main thread only. */
@@ -163,27 +164,25 @@ int  sh_modui_list(void);
 
 /* Run one action (SH_MODS_ACT_*) and keep its result document
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
- * INSTALL (absolute), the key for VERIFY ("" verifies every installed build),
- * newline-separated keys for PRUNE_APPLY and a row's key for REMOVE, which
- * removes every build of that row unless the open map uses one. REMOVE,
- * PRUNE_APPLY and UNINSTALL move the folders to the Windows Recycle Bin
- * (sh_ms_delete_mod_folder; deleted outright, and the result says so, when the
- * bin cannot take one) and drop their aliases; the product never brings them
- * back, the player can restore one from the bin by hand. UNINSTALL, in order:
- * the open map's entities of the mod through the native delete (refused, with
- * nothing deleted, while Play runs, a map loads or the editor is busy), the
- * open map's undo and redo history cleared to the current state (after the
- * delete's own commit, on the tick), the folder moved to the Recycle Bin,
- * the rescan. REMOVED_EMPTY and REMOVED_RESTORE are retired with the
- * product's own bin and answer a refusal. MIGRATE starts the migration on its worker (sh_modui_wait
- * follows it). Returns the result length, or -1 when refused before the
- * action ran.
+ * INSTALL (absolute; several separated by newlines), a row's key (its folder
+ * name under mods\) for REBUILD, UNINSTALL and the map actions, and "" or a
+ * key for VERIFY (the console's check). UNINSTALL, in order: the open map's
+ * entities of the mod through the native delete (refused, with nothing
+ * deleted, while Play runs, a map loads or the editor is busy), the open
+ * map's undo and redo history cleared to the current state (after the
+ * delete's own commit, on the tick), the folder moved to the Windows Recycle
+ * Bin (sh_ms_delete_mod_folder; deleted outright, and the result says so,
+ * when the bin cannot take it), the rescan. The product never brings a
+ * folder back; the player can restore one from the bin by hand. The retired
+ * actions (MIGRATE, PRUNE_*, REMOVE, REMOVED_*) answer a refusal. Returns the
+ * result length, or -1 when refused before the action ran.
  *
- * MAP_ADD (arg: a key, or an installed id) attaches that mod to the open map:
- * the current manifest gets a map-level row for the build that serves, the
- * map scope is recomputed and applied at once, and the next save writes the
- * row (so the map publishes, downloads and lists the mod); MAP_REMOVE drops
- * the row again, deleting nothing when no entity uses the mod.
+ * MAP_ADD (arg: a key) attaches that mod to the open map: the current
+ * manifest gets a map-level row for the mod's build, the map scope is
+ * recomputed and applied at once, and the next save writes the row (so the
+ * map publishes, downloads and lists the mod); MAP_REMOVE drops the row
+ * again, deleting nothing when no entity uses the mod. A mod a downloaded map
+ * brought (a place folder) serves only that map and is not attached.
  *
  * Map scope: binding also registers the manifest's scope hook, its row
  * resolver and the serving layer's scope source. At every load the listing is
@@ -204,26 +203,27 @@ int  sh_modui_list(void);
  * row of the mod ("savedMaps") and whether the undo history is cleared
  * ("undoCleared": a map is open).
  *
- * FILES (arg: a key) lists the mod folder's files and the pointers its last
- * good build reads from the install: {key, name, cause, files: [{path, size,
+ * FILES (arg: a key) lists the mod folder's files and the game files its
+ * build reads from the install: {key, name, cause, files: [{path, size,
  * kind, class, game, container, inFolder, cause}], truncated}. FILE_TEXT
  * (arg: "<key>\t<path below the folder>") answers one text file, at most
  * 1 MiB of UTF-8 ({key, path, size, text, productBlock, cause}; mod.json
- * without its product block); a path outside the folder, a binary kind and
- * a file the folder does not hold are refused. Both read only and change
- * nothing. NEW_MOD (arg: a display name) makes a mod folder with a working
- * example (sh_ms_new_mod_example) and rescans, so its first build runs:
- * {key, file: the example Toybox row's path}. */
+ * without the part Snapmap+ writes); a path outside the folder, a binary
+ * kind and a file the folder does not hold are refused. Both read only and
+ * change nothing. NEW_MOD (arg: a display name) makes a mod folder with a
+ * working example (sh_ms_new_mod_example) and rescans, so its first build
+ * runs: {key, file: the example Toybox row's path}. */
 int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:
  *   map                         the open map: details, then each mod it uses
- *                               with its placed entities and references, whether
- *                               it is map-level, its scope and whether it is
- *                               active, then every bundle's scope
- *   map add "<key|id>"          attach the mod to the open map (a map-level row)
- *   map remove "<key|id>" [--yes]   the dry run; with --yes it is performed
- *   uninstall "<key>" [--yes]       the dry run; with --yes it is performed
+ *                               with its placed entities and references and
+ *                               whether the whole map uses it
+ *   map add "<mod>"             attach the mod to the open map (a map-level row)
+ *   map remove "<mod>" [--yes]  the dry run; with --yes it is performed
+ *   uninstall "<mod>" [--yes]   the dry run; with --yes it is performed
+ * where <mod> is a mod's folder (its path under mods\, or a nested folder's
+ * own name). Lines name mods by their names and folders.
  * argv[0] is the verb. Lines start "MODS: ". Returns 1 when the verb was
  * handled (whatever its outcome), 0 for a verb that is not one of these, -1
  * off the main thread. */
@@ -245,8 +245,15 @@ int  sh_modui_poll_main(void *context);
  * serving mode is Play. The Play entry then keeps this listing instead of
  * reading the editor, and the tick clears it once that Play has run and is
  * over (launched, loading, playing, running, ended: modui.c). Main thread.
- * Returns the bundles whose serving changed. */
+ * Returns the builds whose serving changed. sh_modui_scope_launch keeps the
+ * serving context the gate set; sh_modui_scope_launch_at first sets it
+ * (sh_modserve_scope_set_place): `place` the launched map's place
+ * ("maps\<segment>", NULL for none) and `own` 1 for the player's own map (a
+ * My Maps play, a map this machine published), whose rows follow the root
+ * folders. When the editor leaves its map, or a launched Play is over, the
+ * context returns to no place, own. */
 int  sh_modui_scope_launch(const char *why);
+int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
 
 /* A hub launch the published-map gate refused (denied, or dropped from its
  * hold): nothing was launched, so its parse's rows are not declared. With
@@ -256,15 +263,15 @@ int  sh_modui_scope_launch(const char *why);
  * Main thread. Returns the bundles whose serving changed. */
 int  sh_modui_scope_launch_refused(const char *why);
 
-/* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
+/* The slot's WAIT: nothing of the tab runs in the background (no migration,
+ * no folder watcher), so it answers 1 (idle) at once. Any thread. */
 int  sh_modui_wait(unsigned ms);
 
 
-/* `sh_mods doctor [verify]`: every store folder with its state and cause
- * (legacy ones included), duplicate ids, the migration's pending entries,
- * conflicts with their winners, shadows, and with `verify` a rehash of every
- * build. Each line starts "MODS: doctor:". Returns 1, or -1 off the main
- * thread or out of memory. */
+/* `sh_mods doctor [verify]`: every mod folder with its state and its plain
+ * cause, conflicts with their winners, the game files mods replace, and with
+ * `verify` a check of every mod's files. Each line starts "MODS: doctor:".
+ * Returns 1, or -1 off the main thread or out of memory. */
 int  sh_modui_doctor(int verify, sh_modui_line_fn line, void *context);
 
 /* Copy the shared buffer. Returns 1 copied, -1 when out is NULL or too small

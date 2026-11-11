@@ -333,9 +333,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
-  <!-- Mods tab (mods_tab.js): the installed mods grouped by origin, the selected mod's details, and the
-       player's actions. The host runs modsAction on the game thread and follows each with a fresh list;
-       showing the tab asks for a rescan. Nothing polls. Diagnostics are the console's sh_mods doctor. -->
+  <!-- Mods tab (mods_tab.js): Your mods and one group per downloaded map, the selected mod's details,
+       and the player's actions. The host runs modsAction on the game thread and follows each with a
+       fresh list; showing the tab and Refresh ask for a rescan (there is no folder watcher). Nothing
+       polls. Diagnostics are the console's sh_mods doctor. -->
   <div class="content" id="panel-mods" role="tabpanel" aria-labelledby="tab-mods" style="display:none;">
     <div class="split-workspace primary-split" data-split-workspace>
     <div class="panel left-pane">
@@ -344,17 +345,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="panel-actions">
           <button type="button" class="btn icon icon-button mods-attn" id="modsAttnBtn" aria-pressed="false" style="display:none" title="Show only the mods that need attention" aria-label="Show only the mods that need attention"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-triangle-alert"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsMapBtn" title="This map: its details and the mods it uses" aria-label="This map: its details and the mods it uses" aria-haspopup="dialog"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-map"></use></svg></button>
-          <button type="button" class="btn icon icon-button" id="modsRefreshBtn" title="Read the mods folder again" aria-label="Read the mods folder again"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
+          <button type="button" class="btn icon icon-button" id="modsRefreshBtn" title="Refresh: read the mods folder again, after you change a mod's files" aria-label="Refresh: read the mods folder again"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsFolderBtn" title="Open mods folder" aria-label="Open mods folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-open"></use></svg></button>
-          <button type="button" class="btn icon icon-button" id="modsMigrateBtn" style="display:none" title="Migrate: move the mods of the old overrides folder into the mods folder" aria-label="Migrate the old overrides folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-input"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="modsNewBtn" aria-haspopup="dialog" title="New mod: make a mod of your own, with an example to start from" aria-label="New mod"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-plus"></use></svg></button>
           <button type="button" class="btn primary icon icon-button" id="modsInstallBtn" title="Install a mod folder: choose it, and it is checked, copied into the mods folder and verified" aria-label="Install a mod folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
         </div>
       </div>
       <div class="panel-toolbar">
-        <input type="text" id="modsFilter" placeholder="Filter by name or id..." aria-label="Filter mods by name or id">
+        <input type="text" id="modsFilter" placeholder="Filter by name or folder..." aria-label="Filter mods by name or folder">
       </div>
-      <div class="panel-body list mods-list" id="modsList" role="listbox" tabindex="0" aria-label="Installed mods"><div class="list-empty">Open this tab to list installed mods.</div></div>
+      <div class="panel-body list mods-list" id="modsList" role="listbox" tabindex="0" aria-label="Mods"><div class="list-empty">Open this tab to list your mods.</div></div>
       <div class="mods-foot">
         <div class="mods-status" id="modsStatus" role="status" aria-live="polite"></div>
         <div class="mods-root" id="modsRoot"></div>
@@ -372,7 +372,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="panel-actions">
           <button type="button" class="btn icon icon-button" id="modsFilesBtn" disabled aria-haspopup="dialog" title="Files: browse this mod's files" aria-label="Files: browse this mod's files"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-tree"></use></svg></button>
           <button type="button" class="btn" id="modsUseBtn" disabled style="display:none" title="Use the selected mod in the whole open map without placing anything; the map lists it when you save">Use in this map</button>
-          <button type="button" class="btn" id="modsVerifyBtn" disabled title="Check every file of the selected mod against its recorded hash">Verify</button>
           <button type="button" class="btn" id="modsRebuildBtn" disabled title="Build the selected mod again from its folder">Rebuild</button>
           <button type="button" class="btn danger" id="modsUninstallBtn" disabled title="Uninstall the selected mod; you see everything it changes before you decide">Uninstall</button>
         </div>
@@ -3842,6 +3841,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     byId: function(id){ return document.getElementById(id); },
     // Organizing folders close for the session only: the retired mods.collapsed_groups setting is neither read nor written.
     post: post, toast: toast,
+    // Copy mod id, for authors.
+    copy: copyText,
     // The Files view highlights a file's text with the Decl Text editor's tokens.
     tokens: function(text){ var t = declLanguage.tokenize(text); declLanguage.parse(t); return t; },
     // New mod's right-click entry on the list, in the page's context menu.

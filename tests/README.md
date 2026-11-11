@@ -253,14 +253,17 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   the old folder.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
-  install through the tab, every state string, manifest rows and the placed
-  closure, stock shadows and a conflict, the removal of a covered build, the
-  main-thread refusal and the slot's size query. It also checks that every key
-  in `fixtures\mods_tab_payload.json` is one the backend writes (including a
-  bundle's `pointers` and a shadow's `installed`, for stock pointers).
+  install through the tab, a hand-made folder salted at Refresh, the
+  same-files hint, the plain causes of a failed build and of earlier shapes,
+  a downloaded map's place, the open map's rows by salt, Use in this map,
+  Remove from map and Uninstall with their dry runs, the console verbs, the
+  Files view, New mod, the doctor, and the vocabulary rule over every
+  sentence a player reads. It also checks that every key in
+  `fixtures\mods_tab_payload_v4.json` is one the backend writes.
 - `mods_tab_test.js` renders the Mods tab from that fixture with a minimal DOM:
-  the windowed lists, the lazily built shadow list, the action messages, the
-  empty and error states, and the page, host and interface contract.
+  the two kinds of groups, the details sections, the vocabulary rule, the
+  map modal and its confirmations, the Files view, New mod, the stand-in host,
+  and the page, host and interface contract.
 - `startup_dirs_test.c` runs the startup folder creation and settings
   initialization against a temporary root and checks that only the root,
   `strings\` and `prefabs\` appear, then scans the backend, frontend and
