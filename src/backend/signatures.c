@@ -867,7 +867,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
       "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
       0x1A4BC80u, 0x1A64C70u },
-    /* Mod virtual-texture families (modvt.c) and the sh_vt diagnostic. */
+    /* Mod virtual-texture boards (modvt.c) and the sh_vt diagnostic. */
     { "VtSetSource",        /* idVirtualTexture::SetSource(rec, name, path, flavor, type, direct, reader) -> bool.
                              * Its head calls the VT-system flush with LEA RCX,[sys] and then Release(rec). */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? BE FF FF B8 ?? 42 00 00 E8 ?? ?? ?? ?? "
@@ -878,6 +878,21 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 ?? 41 ?? 48 81 EC 88 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
       "4C 8B ?? E0 00 00 00 4C 8B E9 48 89 54 24 40 4D 85 ??",
       0x17E8230u, 0x17E9100u },
+    { "VtMaterialBind",     /* void(parms, record): a material's virtual-texture parameters from its record.
+                             * Called by the material parse and VtMaterialRebind; modvt.c detours it. CALL
+                             * feedback at +0x4E, CALL vec4 set at +0x66, then the texture setter. */
+      "48 89 74 24 20 57 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40 83 3D ?? ?? ?? ?? 00 "
+      "48 8B FA 48 8B F1 0F 85 92 01 00 00 48 83 BA D8 03 00 00 00 0F 84 84 01 00 00 48 89 5C 24 70 "
+      "48 8D 54 24 20 48 8B 1D ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 4C 8D 44 24 30 48 8B D3 48 8B CE "
+      "0F 10 00 0F 11 44 24 30 E8",
+      0x16CCCF0u, 0x16CD9A0u },
+    { "VtMaterialRebind",   /* void(material): VirtualTextureForMaterial, then VtMaterialBind (its
+                             * successor, CALL +0x16) and the parameter-block copy (tail JMP). */
+      "40 53 48 83 EC 20 48 83 B9 E0 00 00 00 00 48 8B D9 74 54 48 8B D1 48 8D 0D ?? ?? ?? ?? "
+      "E8 ?? ?? ?? ?? 48 85 C0 74 40 48 83 B8 D0 02 00 00 00 74 36 8B 88 C0 02 00 00 89 8B D8 00 00 00 "
+      "8B 08 89 8B DC 00 00 00 83 3D ?? ?? ?? ?? 00 75 19 48 8D 4B 70 48 8B D0 E8 16 00 00 00 "
+      "48 8B CB 48 83 C4 20 5B E9",
+      0x16CCC80u, 0x16CD930u },
     { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",

@@ -526,18 +526,20 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   or a module prefab that names it loads it into its own private palette, as resized Grid Rooms
   are, and it then moves, saves and plays like a stock module. Saved maps name its mod in their
   Snapmap+ data.
-- A mod can carry its own virtual-texture family (the page format a material streams its
-  diffuse, specular and normal detail from): the members `virtualtextures/mods/<folder name>/<family>_sq<N>.mega2`
-  (N 1 to 16), and materials naming it with `landpagefile "mods/<folder name>/<family>"` and an explicit
-  `virtualmapping`. The family is registered with the game when the mod is installed (or, for mods
-  present at startup, when the editor is first opened or a map using it loads), before any of its
-  materials is read, with no console command; `sh_mods status` shows it. Each family
-  takes one of the game's 30 usable page-source records and about 14 MB of memory; a family that
-  finds them all in use is not registered and its materials draw with default images. It works on
-  Vulkan and on OpenGL with any graphics card, through the same page cache the game's own virtual
-  textures use. Removing the mod releases the family, unless the editor or a map has
-  been opened since it was registered, in which case it stays until DOOM exits. The format a tool
-  must write is in [vt-baker.md](vt-baker.md).
+- A mod can carry its own virtual-texture board (the pages a lit material streams its diffuse,
+  specular and normal detail from): the members `virtualtextures/mods/<salt>/<name>_sq<N>.mega2`
+  (N 1 to 16), and materials naming it with `landpagefile "mods/<salt>/<name>"` and explicit mapping
+  lines, on the game's own demon programs (`skinvmtr`, `skinvmtrwounds`). The board draws in full
+  fidelity like the game's own, on Vulkan and on OpenGL with any graphics card; nothing of it goes
+  into the game's own board and no game file changes. A board is registered for each mod the loaded
+  map uses (in the editor, each mod the Toybox shows) before any of its materials is read, and
+  released once the map no longer uses it; `sh_mods status` shows them. Each board takes one of the
+  game's page-source records (DOOM has 31; the game's own board, the map's own textures and one the
+  engine keeps for itself use some, so about 26 to 28 boards fit at once) and about 14 MB of memory,
+  its pages sharing the game's page pool. A map that needs more is told "DOOM has no room for another
+  mod texture board on this map, so <mod> draws with plain textures; a map with fewer mods that
+  carry their own textures avoids this." The format a tool must write is in
+  [vt-baker.md](vt-baker.md).
 - DOOM no longer converts anything at startup: the installer does, on install and update, by
   running `snapmap-plus-store.exe` (kept beside `snapmap-plus.exe` in `%LOCALAPPDATA%\snapmap-plus`).
   It first runs `check`, which lists what it finds from earlier releases, and runs `migrate` only

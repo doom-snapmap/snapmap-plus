@@ -1,19 +1,22 @@
-/* modvt_test.c -- mod virtual-texture families (modvt.c, pure half).
+/* modvt_test.c -- a mod's own lit virtual-texture board (modvt.c, pure half).
  *
  *   modvt_test.exe [<DOOMx64vk.exe> [<DOOMx64.exe>]]
  *
  * Bundles are built by the real builder and admitted by the real serving
- * index; the engine is a fake 32-slot record table. Checked: the member path
- * rule, which bundles register (one record per family, several families per
- * bundle), the index listener, rescan idempotence, release on removal, a
- * changed build, the hold after a registration pass, a full table (stock
- * records and record 31 untouched, one line), a name another record holds, a
- * record the engine took back, the flavor on each renderer (OpenGL without
- * sparse page tables registers with flavor 2, as Vulkan does) and a VT system
- * that is not up. With executables: VtSetSource and VtForMaterial resolve on
- * each, the VT system, Release, the record table and (OpenGL) the sparse
- * globals decode to the recorded addresses, and SetSource's flavor-2 branch
- * gives the record the VT system's UniqueVmtrs page cache on both. */
+ * index; the engine is a fake 32-slot record table with record memory, a fake
+ * material-format cache and a fake parameter set. Checked: the member path
+ * rule, which boards register (one record per board, several per mod), each
+ * pointed at the material-format cache, rescan idempotence, release only at
+ * the frame boundary (pending before), a changed build, a full table (stock
+ * records and record 31 untouched, one line, one player notice), a name
+ * another record holds, a record the engine took back, a cache that cannot be
+ * adopted, the lookup returning a board for its own name only, the binder
+ * addition on board materials (two boards at once), a stock material's
+ * parameters and record 1 byte-identical with and without boards, and earlier
+ * materials bound again when a board returns. With executables: the four
+ * signatures resolve at their recorded RVAs on each, and everything modvt.c
+ * decodes from them matches the recorded addresses and the signatures it is
+ * checked against. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -57,16 +60,20 @@ static int log_count(const char *needle)
 
 /* ------------------------------------------------------------------ fake engine */
 
+#define REC_BYTES 0x420
+
 typedef struct fake {
-    int ready, flavor;
+    int ready;
     char name[SH_MODVT_SLOTS][SH_MODVT_NAME_MAX];
     char path[SH_MODVT_SLOTS][SH_MODVT_PATH_MAX];
-    int fl[SH_MODVT_SLOTS];
-    int sets, releases, refuse_set;
+    uint8_t rec[SH_MODVT_SLOTS][REC_BYTES];
+    int cache_vmtr[4], cache_unique_vmtrs[4];     /* first int: the cache's flavor */
+    uint8_t ptimage[SH_MODVT_SLOTS][8];           /* stands for each record's page-table image */
+    int sets, releases, refuse_set, adopts, refuse_adopt, rebinds, notices;
+    char notice[256];
 } fake;
 
 static int f_ready(void *c) { return ((fake *)c)->ready; }
-static int f_flavor(void *c) { return ((fake *)c)->flavor; }
 static int f_find(void *c, const char *name)
 {
     fake *f = (fake *)c;
@@ -75,7 +82,10 @@ static int f_find(void *c, const char *name)
     return -1;
 }
 static int f_is_free(void *c, int k) { fake *f = (fake *)c; return !f->name[k][0] && !f->path[k][0]; }
-static int f_set(void *c, int k, const char *name, const char *path, int flavor)
+static void *f_record(void *c, int k) { return ((fake *)c)->rec[k]; }
+static void put_ptr(uint8_t *at, void *p) { memcpy(at, &p, sizeof p); }
+static void *get_ptr(const uint8_t *at) { void *p; memcpy(&p, at, sizeof p); return p; }
+static int f_set(void *c, int k, const char *name, const char *path)
 {
     fake *f = (fake *)c;
     f->sets++;
@@ -83,7 +93,21 @@ static int f_set(void *c, int k, const char *name, const char *path, int flavor)
     if (f->refuse_set) return 0;   /* the engine clears a record whose open fails */
     strcpy_s(f->name[k], sizeof f->name[k], name);
     strcpy_s(f->path[k], sizeof f->path[k], path);
-    f->fl[k] = flavor;
+    /* SetSource with flavor 2: the UniqueVmtrs cache, a page-table image, the source index. */
+    memset(f->rec[k], 0, REC_BYTES);
+    *(int *)(f->rec[k] + SH_VT_REC_TYPE) = 2;
+    *(int *)(f->rec[k] + SH_VT_REC_SOURCE) = k;
+    put_ptr(f->rec[k] + SH_VT_REC_CACHE, f->cache_unique_vmtrs);
+    put_ptr(f->rec[k] + SH_VT_REC_PTIMAGE, f->ptimage[k]);
+    return 1;
+}
+static int f_adopt(void *c, int k)
+{
+    fake *f = (fake *)c;
+    int *cache = (int *)get_ptr(f->rec[1] + SH_VT_REC_CACHE);
+    f->adopts++;
+    if (f->refuse_adopt || !cache || cache[0] != 0 || k < 2) return 0;
+    put_ptr(f->rec[k] + SH_VT_REC_CACHE, cache);
     return 1;
 }
 static int f_release(void *c, int k)
@@ -92,6 +116,74 @@ static int f_release(void *c, int k)
     f->releases++;
     f->name[k][0] = 0;
     f->path[k][0] = 0;
+    memset(f->rec[k], 0, REC_BYTES);
+    return 1;
+}
+static void f_notice(void *c, const char *text)
+{
+    fake *f = (fake *)c;
+    f->notices++;
+    strcpy_s(f->notice, sizeof f->notice, text);
+}
+
+/* ---- the fake material and binder: a parameter set of 16-byte slots by handle */
+
+#define PARMS 8
+enum { H_FEEDBACK_U = 1, H_PAGETABLE_U, H_PHYS_U, H_VMTR_FEEDBACK, H_VMTR_PAGETABLE };
+typedef struct fake_material {
+    uint8_t head[SH_VT_MAT_PARMS];
+    uint8_t parms[PARMS][16];
+    int record;
+    const char *landpage;
+} fake_material;
+
+static float *b_feedback(void *rec, float *out)
+{
+    out[0] = (float)*(int *)((uint8_t *)rec + SH_VT_REC_SOURCE);
+    out[1] = 2048.0f;
+    out[2] = 120.0f * 2048.0f;
+    out[3] = 16.0f;
+    return out;
+}
+static void b_vec4(void *parms, void *handle, const float *v) { memcpy((uint8_t *)parms + 16 * (size_t)handle, v, 16); }
+static void b_tex(void *parms, void *handle, void *image)
+{
+    memset((uint8_t *)parms + 16 * (size_t)handle, 0, 16);
+    memcpy((uint8_t *)parms + 16 * (size_t)handle, &image, sizeof image);
+}
+static const sh_modvt_bind_ops g_bops = { b_feedback, b_vec4, b_tex, (void *)(uintptr_t)H_VMTR_FEEDBACK,
+                                          (void *)(uintptr_t)H_VMTR_PAGETABLE };
+
+/* The engine binder's own writes (the unprefixed names lit programs never
+ * read), then the detour's addition. */
+static void fake_binder(void *parms, void *rec)
+{
+    float w[4];
+    b_vec4(parms, (void *)(uintptr_t)H_FEEDBACK_U, b_feedback(rec, w));
+    b_tex(parms, (void *)(uintptr_t)H_PAGETABLE_U, get_ptr((uint8_t *)rec + SH_VT_REC_PTIMAGE));
+    b_tex(parms, (void *)(uintptr_t)H_PHYS_U, get_ptr((uint8_t *)rec + SH_VT_REC_CACHE));
+    (void)sh_modvt_bind_board(parms, rec, &g_bops);
+}
+
+/* The material parse: the record whose name equals the landpagefile. */
+static void fake_parse(fake *f, fake_material *m, const char *landpage)
+{
+    int k = f_find(f, landpage);
+    memset(m, 0, sizeof *m);
+    m->landpage = landpage;
+    m->record = k < 0 ? 1 : k;
+    fake_binder(m->parms, f->rec[m->record]);
+}
+
+static int f_rebind(void *c, void *material, int k, const char *name)
+{
+    fake *f = (fake *)c;
+    fake_material *m = (fake_material *)material;
+    if (strcmp(m->landpage, name)) return 0;
+    f->rebinds++;
+    m->record = k;
+    memset(m->parms, 0, sizeof m->parms);
+    fake_binder(m->parms, f->rec[k]);
     return 1;
 }
 
@@ -99,23 +191,35 @@ static void fake_init(fake *f)
 {
     memset(f, 0, sizeof *f);
     f->ready = 1;
-    f->flavor = 2;
+    f->cache_vmtr[0] = 0;
+    f->cache_unique_vmtrs[0] = 2;
     strcpy_s(f->name[1], sizeof f->name[1], "_vmtr");
     strcpy_s(f->path[1], sizeof f->path[1], "virtualtextures/_vmtr.pages");
+    *(int *)(f->rec[1] + SH_VT_REC_TYPE) = 2;
+    *(int *)(f->rec[1] + SH_VT_REC_SOURCE) = 1;
+    put_ptr(f->rec[1] + SH_VT_REC_CACHE, f->cache_vmtr);
+    put_ptr(f->rec[1] + SH_VT_REC_PTIMAGE, f->ptimage[1]);
     strcpy_s(f->name[2], sizeof f->name[2], "maps/game/sp/shell/shell");      /* the hub's unique family */
     strcpy_s(f->path[2], sizeof f->path[2], "virtualtextures/maps/game/sp/shell/shell.pages");
+    *(int *)(f->rec[2] + SH_VT_REC_TYPE) = 1;
     strcpy_s(f->name[3], sizeof f->name[3], "maps/modules/palettes/mega_blessed/mega");
     strcpy_s(f->path[3], sizeof f->path[3], "virtualtextures/maps/modules/palettes/mega_blessed/mega.pages");
+    *(int *)(f->rec[3] + SH_VT_REC_TYPE) = 1;
+    *(int *)(f->rec[3] + SH_VT_REC_SOURCE) = 3;
+    put_ptr(f->rec[3] + SH_VT_REC_CACHE, f->cache_unique_vmtrs);
+    put_ptr(f->rec[3] + SH_VT_REC_PTIMAGE, f->ptimage[3]);
 }
 
 /* ------------------------------------------------------------------ helpers */
 
-static int sync_index(fake *f, const char *phase, sh_modvt_result *res)
+static int sync_index(fake *f, const char *phase, int release_now, sh_modvt_result *res)
 {
-    sh_modvt_family fams[SH_MODVT_MAX];
-    sh_modvt_ops ops = { f, f_ready, f_flavor, f_find, f_is_free, f_set, f_release };
-    int n = sh_modvt_collect(fams, SH_MODVT_MAX);
-    return sh_modvt_sync(fams, n, &ops, phase, res);
+    sh_modvt_family *fams = NULL;
+    sh_modvt_ops ops = { f, f_ready, f_find, f_is_free, f_set, f_adopt, f_release, f_record, f_rebind, f_notice };
+    int n = sh_modvt_collect(&fams), r;
+    r = sh_modvt_sync(fams, n, &ops, phase, release_now, res);
+    free(fams);
+    return r;
 }
 
 static int stock_exists(void *ctx, const char *request) { (void)ctx; return strstr(request, "mods/") == NULL; }
@@ -184,7 +288,7 @@ static void member_rule(void)
 
 static void decode_helpers(void)
 {
-    /* SetSource +0x50 (VK) and +0x4E (GL): LEA RCX,[sys]; CALL; MOV RCX,RSI; CALL Release. */
+    /* SetSource +0x50 (VK) and +0x4E (GL): LEA RCX,[sys]; CALL sync; MOV RCX,RSI; CALL Release. */
     static const unsigned char vk[] = { 0x48, 0x89, 0xF1, 0x48, 0x8D, 0x0D, 0xB9, 0x5C, 0xE8, 0x04, 0xE8, 0x64, 0xAD,
                                         0xF8, 0xFF, 0x48, 0x8B, 0xCE, 0xE8, 0xEC, 0xE7, 0xFF, 0xFF, 0x48, 0x8D };
     static const unsigned char gl[] = { 0x48, 0x8D, 0x0D, 0x3B, 0xA4, 0x78, 0x03, 0xE8, 0x86, 0xAB, 0xF8, 0xFF, 0x48,
@@ -192,6 +296,9 @@ static void decode_helpers(void)
     /* VirtualTextureForMaterial +0x61 (VK) / +0x81 (GL): MOV RAX,[R13+table+8]; JMP. */
     static const unsigned char tvk[] = { 0x75, 0x0C, 0x49, 0x8B, 0x85, 0x08, 0x8B, 0x00, 0x00, 0xE9, 0x38, 0x01 };
     static const unsigned char tgl[] = { 0x49, 0x8B, 0x85, 0x08, 0xA4, 0x00, 0x00, 0xE9, 0x38, 0x01, 0x00, 0x00 };
+    /* Its DeclFind(renderParm type, "landDimensions", 1) (VK +0x2C6). */
+    static const unsigned char dvk[] = { 0x41, 0xB0, 0x01, 0x48, 0x8D, 0x15, 0xC0, 0x4F, 0x07, 0x01, 0x48, 0x8D, 0x0D,
+                                         0xD9, 0xC1, 0xED, 0x04, 0xE8, 0x84, 0x29, 0xD7, 0xFF };
     static const unsigned char rel[] = { 0x48, 0x8B, 0xC4, 0x55, 0x90, 0x83, 0xB9, 0xC0, 0x02, 0x00, 0x00, 0x00 };
     printf("-- decoding helpers\n");
     CHECK(sh_modvt_find_setsource_head(vk, sizeof vk) == 3);
@@ -203,32 +310,54 @@ static void decode_helpers(void)
     CHECK(sh_modvt_release_head_ok(rel, sizeof rel));
     CHECK(!sh_modvt_release_head_ok(rel, 8));
     {
-        /* OpenGL needs the sparse test: without it the record's flavor cannot follow the material's. */
-        unsigned char ss[0xC0], vf[0xC0];
+        static unsigned char ss[0xC0], vf[0x400], bd[0xC0], rb[0x70];
         sh_modvt_layout l;
+        sh_modvt_binder b;
+        sh_modvt_rebind r;
         memset(ss, 0x90, sizeof ss);
         memcpy(ss + 0x40, gl, sizeof gl);
         memset(vf, 0x90, sizeof vf);
         memcpy(vf + 0x81, tgl, sizeof tgl);
-        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, 0, &l) == 1 && l.table_off == 0xA400u);
-        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, 1, &l) == 0);
+        /* Without the DeclFind call the renderParm type is unknown: refused. */
+        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, &l) == 0);
+        memcpy(vf + 0x2C6, dvk, sizeof dvk);
+        CHECK(sh_modvt_decode_layout(ss, sizeof ss, 0x1000, vf, sizeof vf, 0x8000, &l) == 1);
+        CHECK(l.table_off == 0xA400u && l.sys_rva == 0x1000u + 0x40 + 7 + 0x0378A43Bu &&
+              l.sync_rva == 0x1000u + 0x40 + 12 - 0x7547Au && l.release_rva == 0x1000u + 0x40 + 20 - 0x1892u &&
+              l.parmtype_rva == 0x8000u + 0x2C6 + 17 + 0x04EDC1D9u && l.declfind_rva == 0x8000u + 0x2C6 + 22 - 0x28D67Cu);
+        /* Binder: CALL at +0x4E and +0x66, the texture setter after them. */
+        memset(bd, 0x90, sizeof bd);
+        CHECK(sh_modvt_decode_binder(bd, sizeof bd, 0x2000, &b) == 0);
+        memcpy(bd + 0x4E, "\xE8\x10\x00\x00\x00", 5);
+        memcpy(bd + 0x66, "\xE8\x20\x00\x00\x00", 5);
+        CHECK(sh_modvt_decode_binder(bd, sizeof bd, 0x2000, &b) == 0);
+        memcpy(bd + 0xA8, "\x48\x8B\x15\x00\x00\x00\x00\x48\x8B\xCE\xE8\x30\x00\x00\x00", 15);
+        CHECK(sh_modvt_decode_binder(bd, sizeof bd, 0x2000, &b) == 1 && b.feedback_rva == 0x2000u + 0x53 + 0x10 &&
+              b.set_vec4_rva == 0x2000u + 0x6B + 0x20 && b.set_texture_rva == 0x2000u + 0xB7 + 0x30);
+        /* Rebind: the five fixed sites. */
+        memset(rb, 0x90, sizeof rb);
+        CHECK(sh_modvt_decode_rebind(rb, sizeof rb, 0x3000, &r) == 0);
+        memcpy(rb + 0x16, "\x48\x8D\x0D\x00\x01\x00\x00", 7);
+        memcpy(rb + 0x1D, "\xE8\x00\x02\x00\x00", 5);
+        memcpy(rb + 0x45, "\x83\x3D\x00\x03\x00\x00\x00", 7);
+        memcpy(rb + 0x55, "\xE8\x16\x00\x00\x00", 5);
+        memcpy(rb + 0x62, "\xE9\x00\xF0\xFF\xFF", 5);
+        CHECK(sh_modvt_decode_rebind(rb, sizeof rb, 0x3000, &r) == 1 && r.sys_rva == 0x3000u + 0x1D + 0x100 &&
+              r.vf_rva == 0x3000u + 0x22 + 0x200 && r.vt_off_rva == 0x3000u + 0x4C + 0x300 &&
+              r.binder_rva == 0x3000u + 0x5A + 0x16 && r.copy_rva == 0x3000u + 0x67 - 0x1000);
     }
-    /* The flavor a matched material carries. */
-    CHECK(sh_modvt_flavor(1, 0, 0) == 2 && sh_modvt_flavor(1, 1, 1) == 2);
-    CHECK(sh_modvt_flavor(0, 0, 0) == 2 && sh_modvt_flavor(0, 0, 1) == 2 && sh_modvt_flavor(0, 1, 0) == 2);
-    CHECK(sh_modvt_flavor(0, 0x7FF812345678ull, 1) == 4);
 }
 
 static void families(void)
 {
     char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], cause[SH_MB_CAUSE_MAX];
     char hash_a[65], hash_a2[65];
-    sh_modvt_family fams[SH_MODVT_MAX];
+    sh_modvt_family *fams = NULL;
     sh_modvt_result res;
-    fake f;
-    int n, k, sets, rec_fam, rec_other;
+    static fake f;
+    int n, k, rec_fam, rec_other;
 
-    printf("-- families from the serving index, registration and release with a fake engine\n");
+    printf("-- boards from the serving index, registration and release with a fake engine\n");
     CHECK(mt_temp_dir("modvt", root, sizeof root));
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
     _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\vtmod000", mods);
@@ -245,10 +374,10 @@ static void families(void)
     CHECK(strstr(build_cause(c, cause, sizeof cause), "is under mods/other/, which is neither this mod folder") != NULL || (printf("  cause: %s\n", cause), 0));
     mt_delete(c, "assets\\virtualtextures\\mods\\other\\fam_sq1.mega2");
     mt_write(c, "assets\\virtualtextures\\mods\\badvt000\\mods\\badvt000\\fam_sq1.mega2", "MEGA");
-    CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested family name */
+    CHECK(strstr(build_cause(c, cause, sizeof cause), "virtual-texture family member") == NULL);   /* nested board name */
     mt_remove_tree(c);
 
-    /* vtmod000: two families (fam: members 1 and 3; other: member 2). plain000: none. */
+    /* vtmod000: two boards (fam: members 1 and 3; other: member 2). plain000: none. */
     put_mod(a, "vtmod000");
     mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq3.mega2", "member three");
@@ -261,81 +390,73 @@ static void families(void)
     sh_modserve_set_index_listener(listener);
     CHECK(sh_modserve_index_build(mods) == 2);
     CHECK(g_listener_calls == 1);
-    n = sh_modvt_collect(fams, SH_MODVT_MAX);
+    n = sh_modvt_collect(&fams);
     CHECK(n == 2);
     CHECK(n == 2 && !strcmp(fams[0].name, "mods/vtmod000/fam") && fams[0].members == 0x5u && fams[0].bytes == 22 &&
           !strcmp(fams[0].path, "virtualtextures/mods/vtmod000/fam.pages") && !strcmp(fams[0].bundle, "vtmod000") &&
           !strcmp(fams[0].bundle_hash, hash_a));
     CHECK(n == 2 && !strcmp(fams[1].name, "mods/vtmod000/other") && fams[1].members == 0x2u);
-    CHECK(sh_modvt_collect(NULL, 0) == 2);
+    free(fams);
+    CHECK(sh_modvt_collect(NULL) == 2);
 
     /* Not up yet: nothing is called. */
     fake_init(&f);
     f.ready = 0;
     sh_modvt_reset();
-    CHECK(sync_index(&f, "boot", &res) == -1 && res.not_ready && f.sets == 0);
+    CHECK(sync_index(&f, "boot", 0, &res) == -1 && res.not_ready && f.sets == 0);
 
-    /* Up: one record per family, first free records, flavor 2, type 2 path. */
+    /* Up: one record per board in the first free records, each on the material-format cache. */
     f.ready = 1;
     g_nlog = 0;
-    CHECK(sync_index(&f, "index", &res) == 2 && res.registered == 2 && f.sets == 2);
+    CHECK(sync_index(&f, "editor", 0, &res) == 2 && res.registered == 2 && f.sets == 2 && f.adopts == 2);
     rec_fam = f_find(&f, "mods/vtmod000/fam");
     rec_other = f_find(&f, "mods/vtmod000/other");
     CHECK(rec_fam == 4 && rec_other == 5);
-    CHECK(!strcmp(f.path[4], "virtualtextures/mods/vtmod000/fam.pages") && f.fl[4] == 2);
+    CHECK(!strcmp(f.path[4], "virtualtextures/mods/vtmod000/fam.pages"));
+    CHECK(get_ptr(f.rec[4] + SH_VT_REC_CACHE) == (void *)f.cache_vmtr && get_ptr(f.rec[5] + SH_VT_REC_CACHE) == (void *)f.cache_vmtr);
     CHECK(sh_modvt_record_owner(4) && !strcmp(sh_modvt_record_owner(4), "mods/vtmod000/fam"));
     CHECK(sh_modvt_record_owner(3) == NULL && sh_modvt_owned_count() == 2);
-    CHECK(log_count("registered family 'mods/vtmod000/fam' (vtmod000, 2 members, 22 bytes) as record 4") == 1);
+    CHECK(log_count("registered board 'mods/vtmod000/fam' (vtmod000, 2 members, 22 bytes) as record 4") == 1);
 
     /* Rescan: idempotent. */
     CHECK(sh_modserve_index_build(mods) == 2 && g_listener_calls == 2);
-    CHECK(sync_index(&f, "index", &res) == 2 && res.kept == 2 && res.registered == 0 && f.sets == 2 && f.releases == 0);
-    CHECK(sync_index(&f, "editor", &res) == 2 && f.sets == 2);
+    CHECK(sync_index(&f, "frame", 1, &res) == 2 && res.kept == 2 && res.registered == 0 && f.sets == 2 && f.releases == 0);
+    CHECK(sync_index(&f, "editor", 0, &res) == 2 && f.sets == 2);
 
-    /* A changed build of the same mod, no pass yet: released and registered again. */
+    /* A changed build of the same mod: at a pass the release waits for the
+     * frame boundary (the old board keeps drawing meanwhile); there it is
+     * released and the new build registered in the same record. */
     mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one, rebaked");
     CHECK(build_folder(a, hash_a2) && strcmp(hash_a, hash_a2) != 0);
     CHECK(sh_modserve_index_build(mods) == 2);
-    CHECK(sync_index(&f, "index", &res) == 2 && res.released == 2 && res.registered == 2 && f.releases == 2 && f.sets == 4);
+    CHECK(sync_index(&f, "map", 0, &res) == 2 && res.pending == 2 && res.released == 0 && res.registered == 0 &&
+          f.releases == 0 && f.sets == 2);
+    CHECK(sync_index(&f, "frame", 1, &res) == 2 && res.released == 2 && res.registered == 2 && f.releases == 2 && f.sets == 4);
     CHECK(f_find(&f, "mods/vtmod000/fam") == 4);
 
-    /* Removal with no pass since registration: released. */
+    /* No longer served: released at the frame boundary only. */
     mt_remove_tree(a);
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(sh_modvt_collect(NULL, 0) == 0);
+    CHECK(sh_modvt_collect(NULL) == 0);
     g_nlog = 0;
-    CHECK(sync_index(&f, "index", &res) == 0 && res.released == 2 && f.releases == 4);
+    CHECK(sync_index(&f, "editor", 0, &res) == 2 && res.pending == 2 && f.releases == 2);
+    CHECK(sync_index(&f, "frame", 1, &res) == 0 && res.released == 2 && f.releases == 4);
     CHECK(f_find(&f, "mods/vtmod000/fam") < 0 && f_is_free(&f, 4) && f_is_free(&f, 5));
-    CHECK(log_count("released record 4, family 'mods/vtmod000/fam'") == 1);
-
-    /* Reinstall, a pass runs, then removal: held until exit, logged once. */
-    put_mod(a, "vtmod000");
-    mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
-    CHECK(build_folder(a, NULL));
-    CHECK(sh_modserve_index_build(mods) == 2);
-    CHECK(sync_index(&f, "index", &res) == 1 && res.registered == 1);
-    sh_modvt_mark_exposed();
-    mt_remove_tree(a);
-    CHECK(sh_modserve_index_build(mods) == 1);
-    g_nlog = 0;
-    sets = f.sets;
-    CHECK(sync_index(&f, "index", &res) == 1 && res.held == 1 && res.released == 0 && f.releases == 4);
-    CHECK(sync_index(&f, "editor", &res) == 1 && res.held == 1 && f.sets == sets);
-    CHECK(log_count("is kept until DOOM exits") == 1);
+    CHECK(log_count("released record 4, board 'mods/vtmod000/fam'") == 1);
 
     /* The engine took the record back: registered again in the same record. */
     put_mod(a, "vtmod000");
     mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
     CHECK(sh_modserve_index_build(mods) == 2);
-    CHECK(sync_index(&f, "index", &res) == 1 && res.kept == 1);
+    CHECK(sync_index(&f, "editor", 0, &res) == 1 && res.registered == 1);
     k = f_find(&f, "mods/vtmod000/fam");
     CHECK(k == 4);
     f.name[k][0] = 0;
     f.path[k][0] = 0;
     strcpy_s(f.name[6], sizeof f.name[6], "maps/x/y");    /* something else took the next free record */
     strcpy_s(f.path[6], sizeof f.path[6], "virtualtextures/maps/x/y.pages");
-    CHECK(sync_index(&f, "map", &res) == 1 && res.lost == 1 && res.registered == 1 && f_find(&f, "mods/vtmod000/fam") == 4);
+    CHECK(sync_index(&f, "map", 0, &res) == 1 && res.lost == 1 && res.registered == 1 && f_find(&f, "mods/vtmod000/fam") == 4);
     f.name[6][0] = f.path[6][0] = 0;
 
     /* A name another record already holds is never taken over or released. */
@@ -344,13 +465,13 @@ static void families(void)
     strcpy_s(f.name[7], sizeof f.name[7], "mods/vtmod000/fam");
     strcpy_s(f.path[7], sizeof f.path[7], "virtualtextures/mods/vtmod000/fam.pages");
     g_nlog = 0;
-    CHECK(sync_index(&f, "editor", &res) == 0 && res.refused == 1 && f.sets == 0);
-    CHECK(sync_index(&f, "map", &res) == 0 && log_count("already holds that name") == 1);
+    CHECK(sync_index(&f, "editor", 0, &res) == 0 && res.refused == 1 && f.sets == 0);
+    CHECK(sync_index(&f, "map", 0, &res) == 0 && log_count("already holds that name") == 1);
     mt_remove_tree(a);
     CHECK(sh_modserve_index_build(mods) == 1);
-    CHECK(sync_index(&f, "index", &res) == 0 && f.releases == 0 && f_find(&f, "mods/vtmod000/fam") == 7);
+    CHECK(sync_index(&f, "frame", 1, &res) == 0 && f.releases == 0 && f_find(&f, "mods/vtmod000/fam") == 7);
 
-    /* Records 1..30 full: refused once; no stock record and not record 31 touched. */
+    /* Records 1..30 full: refused once, one player notice; no stock record and not record 31 touched. */
     put_mod(a, "vtmod000");
     mt_write(a, "assets\\virtualtextures\\mods\\vtmod000\\fam_sq1.mega2", "member one");
     CHECK(build_folder(a, NULL));
@@ -361,35 +482,142 @@ static void families(void)
         _snprintf_s(f.path[k], sizeof f.path[k], _TRUNCATE, "virtualtextures/maps/stock/%d.pages", k);
     }
     g_nlog = 0;
-    CHECK(sync_index(&f, "editor", &res) == 0 && res.full == 1 && f.sets == 0 && f.releases == 0);
-    CHECK(sync_index(&f, "map", &res) == 0 && res.full == 1 && log_count("are all in use") == 1);
+    CHECK(sync_index(&f, "editor", 0, &res) == 0 && res.full == 1 && f.sets == 0 && f.releases == 0);
+    CHECK(sync_index(&f, "map", 0, &res) == 0 && res.full == 1 && log_count("are all in use") == 1);
+    CHECK(f.notices == 1 && strstr(f.notice, "no room for another mod texture board") && strstr(f.notice, "vtmod000") &&
+          strlen(f.notice) < 256);
+    printf("    notice: %s\n", f.notice);
     CHECK(f_is_free(&f, 31));
-    /* A slot frees up: the family registers in it. */
+    /* A slot frees up: the board registers in it. */
     f.name[17][0] = f.path[17][0] = 0;
-    CHECK(sync_index(&f, "map", &res) == 1 && f_find(&f, "mods/vtmod000/fam") == 17);
+    CHECK(sync_index(&f, "map", 0, &res) == 1 && f_find(&f, "mods/vtmod000/fam") == 17);
 
-    /* OpenGL without sparse page tables (any card, vt_enablePRT 0): flavor 2, as on Vulkan. */
+    /* The material-format cache cannot be adopted: released at once, refused. */
     sh_modvt_reset();
     fake_init(&f);
-    f.flavor = sh_modvt_flavor(0, 0, 0);
+    f.refuse_adopt = 1;
     g_nlog = 0;
-    CHECK(sync_index(&f, "editor", &res) == 1 && res.registered == 1 && res.refused == 0 &&
-          f.fl[f_find(&f, "mods/vtmod000/fam")] == 2);
-    /* OpenGL with them: flavor 4. */
-    sh_modvt_reset();
-    fake_init(&f);
-    f.flavor = sh_modvt_flavor(0, 1, 1);
-    CHECK(sync_index(&f, "map", &res) == 1 && f.fl[f_find(&f, "mods/vtmod000/fam")] == 4);
+    CHECK(sync_index(&f, "editor", 0, &res) == 0 && res.refused == 1 && f.sets == 1 && f.releases == 1 &&
+          f_find(&f, "mods/vtmod000/fam") < 0 && log_count("material-format page cache") == 1);
 
     /* SetSource refused (no member opened): logged once, retried at later syncs. */
     sh_modvt_reset();
     fake_init(&f);
     f.refuse_set = 1;
     g_nlog = 0;
-    CHECK(sync_index(&f, "editor", &res) == 0 && res.refused == 1 && f.sets == 1);
-    CHECK(sync_index(&f, "map", &res) == 0 && f.sets == 2 && log_count("SetSource on record 4 refused") == 1);
+    CHECK(sync_index(&f, "editor", 0, &res) == 0 && res.refused == 1 && f.sets == 1);
+    CHECK(sync_index(&f, "map", 0, &res) == 0 && f.sets == 2 && log_count("SetSource on record 4 refused") == 1);
 
     sh_modserve_set_index_listener(NULL);
+    sh_modvt_reset();
+    mt_remove_tree(root);
+}
+
+/* The detours with the fake engine: the lookup, the binder addition, a stock
+ * material untouched, a board's materials bound again when it returns. */
+static void detours(void)
+{
+    char root[MAX_PATH], mods[MAX_PATH], a[MAX_PATH], b[MAX_PATH];
+    static fake f;
+    static fake_material stock_before, stock_after, map_before, body, wounds, other, m;
+    static uint8_t rec1_before[REC_BYTES], rec3_before[REC_BYTES];
+    sh_modvt_result res;
+    float w[4];
+    int kt, ks;
+
+    printf("-- the lookup and binder detours with a fake engine\n");
+    CHECK(mt_temp_dir("modvt_bind", root, sizeof root));
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\tyrant00", mods);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\second00", mods);
+    CreateDirectoryA(mods, NULL);
+    put_mod(a, "tyrant00");
+    mt_write(a, "assets\\virtualtextures\\mods\\tyrant00\\tyrant_sq1.mega2", "tyrant square one");
+    put_mod(b, "second00");
+    mt_write(b, "assets\\virtualtextures\\mods\\second00\\skin_sq2.mega2", "second square two");
+    CHECK(build_folder(a, NULL) && build_folder(b, NULL));
+    CHECK(sh_modserve_index_build(mods) == 2);
+    sh_modvt_reset();
+    fake_init(&f);
+
+    /* Before any board: a stock material (the game's board) and a map module material. */
+    fake_parse(&f, &stock_before, "_vmtr");
+    fake_parse(&f, &map_before, "maps/modules/palettes/mega_blessed/mega");
+    CHECK(sh_modvt_board_record("mods/tyrant00/tyrant") == NULL);
+    memcpy(rec1_before, f.rec[1], REC_BYTES);
+    memcpy(rec3_before, f.rec[3], REC_BYTES);
+
+    /* Two boards at once. */
+    CHECK(sync_index(&f, "editor", 0, &res) == 2 && res.registered == 2);
+    kt = f_find(&f, "mods/tyrant00/tyrant");
+    ks = f_find(&f, "mods/second00/skin");
+    CHECK(kt >= 4 && kt <= 5 && ks >= 4 && ks <= 5 && kt != ks);
+    if (kt < 0 || ks < 0) { mt_remove_tree(root); return; }
+    CHECK(memcmp(rec1_before, f.rec[1], REC_BYTES) == 0 && memcmp(rec3_before, f.rec[3], REC_BYTES) == 0);
+
+    /* The lookup returns a board only for its own name. */
+    CHECK(sh_modvt_board_record("mods/tyrant00/tyrant") == (void *)f.rec[kt]);
+    CHECK(sh_modvt_board_record("mods/second00/skin") == (void *)f.rec[ks]);
+    CHECK(sh_modvt_board_record("_vmtr") == NULL && sh_modvt_board_record("mods/tyrant00/other") == NULL &&
+          sh_modvt_board_record("") == NULL && sh_modvt_board_record(NULL) == NULL);
+
+    /* A stock material bound with two boards registered: byte-identical. */
+    fake_parse(&f, &stock_after, "_vmtr");
+    CHECK(memcmp(&stock_before, &stock_after, sizeof stock_before) == 0);
+    fake_parse(&f, &stock_after, "maps/modules/palettes/mega_blessed/mega");
+    CHECK(memcmp(&map_before, &stock_after, sizeof map_before) == 0);
+    CHECK(sh_modvt_bind_board(stock_after.parms, f.rec[1], &g_bops) == 0 &&
+          memcmp(&map_before, &stock_after, sizeof map_before) == 0);
+
+    /* A board material: the engine's own writes, plus the two the lit programs read. */
+    fake_parse(&f, &body, "mods/tyrant00/tyrant");
+    fake_parse(&f, &wounds, "mods/tyrant00/tyrant");
+    fake_parse(&f, &other, "mods/second00/skin");
+    CHECK(body.record == kt && other.record == ks);
+    CHECK(memcmp(body.parms[H_FEEDBACK_U], body.parms[H_VMTR_FEEDBACK], 16) == 0 &&
+          ((float *)body.parms[H_VMTR_FEEDBACK])[0] == (float)kt && ((float *)other.parms[H_VMTR_FEEDBACK])[0] == (float)ks);
+    CHECK(get_ptr(body.parms[H_VMTR_PAGETABLE]) == (void *)f.ptimage[kt] &&
+          get_ptr(other.parms[H_VMTR_PAGETABLE]) == (void *)f.ptimage[ks]);
+    CHECK(get_ptr(body.parms[H_PHYS_U]) == (void *)f.cache_vmtr);   /* the material-format cache */
+    CHECK(sh_modvt_material_count("mods/tyrant00/tyrant") == 2 && sh_modvt_material_count("mods/second00/skin") == 1);
+    /* Missing handles: nothing added. */
+    {
+        sh_modvt_bind_ops none = g_bops;
+        none.pagetable_handle = NULL;
+        memset(&m, 0, sizeof m);
+        CHECK(sh_modvt_bind_board(m.parms, f.rec[kt], &none) == 0 && get_ptr(m.parms[H_VMTR_PAGETABLE]) == NULL);
+    }
+
+    /* The map stops serving the Tyrant: released at the frame boundary; the
+     * second board stays. Its materials are remembered. */
+    mt_remove_tree(a);
+    CHECK(sh_modserve_index_build(mods) == 1);
+    CHECK(sync_index(&f, "map", 0, &res) == 2 && res.pending == 1);
+    CHECK(sync_index(&f, "frame", 1, &res) == 1 && res.released == 1 && f_find(&f, "mods/tyrant00/tyrant") < 0);
+    CHECK(sh_modvt_board_record("mods/tyrant00/tyrant") == NULL &&
+          sh_modvt_board_record("mods/second00/skin") == (void *)f.rec[ks]);
+    CHECK(sh_modvt_bind_board(m.parms, f.rec[kt], &g_bops) == 0);
+
+    /* Served again: the same record, and both earlier materials bound again
+     * (index, page table, feedback) before the pass parses anything. */
+    put_mod(a, "tyrant00");
+    mt_write(a, "assets\\virtualtextures\\mods\\tyrant00\\tyrant_sq1.mega2", "tyrant square one");
+    CHECK(build_folder(a, NULL));
+    CHECK(sh_modserve_index_build(mods) == 2);
+    memset(body.parms, 0, sizeof body.parms);
+    f.rebinds = 0;
+    g_nlog = 0;
+    CHECK(sync_index(&f, "map", 0, &res) == 2 && res.registered == 1 && res.rebound == 2 && f.rebinds == 2);
+    CHECK(f_find(&f, "mods/tyrant00/tyrant") == kt);
+    CHECK(body.record == kt && get_ptr(body.parms[H_VMTR_PAGETABLE]) == (void *)f.ptimage[kt] &&
+          ((float *)body.parms[H_VMTR_FEEDBACK])[0] == (float)kt);
+    CHECK(log_count("2 materials of board 'mods/tyrant00/tyrant' bound again") == 1);
+    b_feedback(f.rec[kt], w);
+    CHECK(memcmp(w, body.parms[H_VMTR_FEEDBACK], 16) == 0);
+    /* And the stock material and record 1 are still untouched. */
+    fake_parse(&f, &stock_after, "_vmtr");
+    CHECK(memcmp(&stock_before, &stock_after, sizeof stock_before) == 0 && memcmp(rec1_before, f.rec[1], REC_BYTES) == 0);
+
     sh_modvt_reset();
     mt_remove_tree(root);
 }
@@ -438,46 +666,73 @@ static int lea_to(const uint8_t *code, size_t len, uint32_t rva, uint32_t target
     return 0;
 }
 
+static const sig_result *find_sig(sig_result *results, size_t total, const char *name)
+{
+    size_t i;
+    for (i = 0; i < total; ++i)
+        if (!strcmp(results[i].name, name)) return results[i].status == SIG_OK ? &results[i] : NULL;
+    return NULL;
+}
+
 static void image(const char *path)
 {
-    size_t sz = 0, total, i;
+    size_t sz = 0, total;
     uint8_t *base = map_pe_by_rva(path, &sz);
     wchar_t wide[MAX_PATH];
     const sh_build_identity *id;
-    sig_result results[SIG_RESULTS_MAX];
-    const sig_result *ss = NULL, *vf = NULL;
+    static sig_result results[SIG_RESULTS_MAX];
+    const sig_result *ss, *vf, *bd, *rb, *df;
     sh_modvt_layout l;
+    sh_modvt_binder b;
+    sh_modvt_rebind r;
+    int vk;
     printf("-- %s\n", path);
     CHECK(base != NULL);
     if (!base) return;
     MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH);
     id = sh_host_test_bind_image(base, wide);
     CHECK(id != NULL);
+    if (!id) { free(base); return; }
+    vk = id->vulkan;
     total = sig_db_count();
     sig_resolve_all(base, results, SIG_RESULTS_MAX);
-    for (i = 0; i < total; ++i) {
-        if (!strcmp(results[i].name, "VtSetSource")) ss = &results[i];
-        if (!strcmp(results[i].name, "VtForMaterial")) vf = &results[i];
-    }
-    CHECK(ss && ss->status == SIG_OK && vf && vf->status == SIG_OK);
-    if (!id || !ss || !vf || ss->status != SIG_OK || vf->status != SIG_OK) { free(base); return; }
-    CHECK(ss->rva == (id->vulkan ? 0x185AC30u : 0x185BC90u));
-    CHECK(vf->rva == (id->vulkan ? 0x17E8230u : 0x17E9100u));
-    CHECK(sh_modvt_decode_layout(base + ss->rva, 0xC0, ss->rva, base + vf->rva, 0xC0, vf->rva, !id->vulkan, &l) == 1);
+    ss = find_sig(results, total, "VtSetSource");
+    vf = find_sig(results, total, "VtForMaterial");
+    bd = find_sig(results, total, "VtMaterialBind");
+    rb = find_sig(results, total, "VtMaterialRebind");
+    df = find_sig(results, total, "DeclFind");
+    CHECK(ss && vf && bd && rb && df);
+    if (!ss || !vf || !bd || !rb || !df) { free(base); return; }
+    CHECK(ss->rva == (vk ? 0x185AC30u : 0x185BC90u));
+    CHECK(vf->rva == (vk ? 0x17E8230u : 0x17E9100u));
+    CHECK(bd->rva == (vk ? 0x16CCCF0u : 0x16CD9A0u));
+    CHECK(rb->rva == (vk ? 0x16CCC80u : 0x16CD930u));
+    CHECK(sh_modvt_decode_layout(base + ss->rva, 0xC0, ss->rva, base + vf->rva, 0x400, vf->rva, &l) == 1);
     CHECK(l.release_rva + 0x50 <= sz && sh_modvt_release_head_ok(base + l.release_rva, 0x50));
-    printf("    %s: SetSource 0x%X, VirtualTextureForMaterial 0x%X, VT system 0x%X, Release 0x%X, table sys+0x%X, "
-           "sparse ext 0x%X cvar 0x%X\n", id->vulkan ? "Vulkan" : "OpenGL", ss->rva, vf->rva, l.sys_rva, l.release_rva,
-           l.table_off, l.sparse_ext_rva, l.sparse_cvar_rva);
-    if (id->vulkan) {
-        CHECK(l.sys_rva == 0x66E0940u && l.release_rva == 0x1859480u && l.table_off == 0x8B00u);
-        CHECK(l.sparse_ext_rva == 0 && l.sparse_cvar_rva == 0);
+    CHECK(sh_modvt_decode_binder(base + bd->rva, 0xC0, bd->rva, &b) == 1);
+    CHECK(sh_modvt_decode_rebind(base + rb->rva, 0x70, rb->rva, &r) == 1);
+    printf("    %s: VT system 0x%X, sync 0x%X, Release 0x%X, table sys+0x%X, renderParm type 0x%X; binder feedback "
+           "0x%X, vec4 0x%X, texture 0x%X; rebind copy 0x%X, VT off 0x%X\n", vk ? "Vulkan" : "OpenGL", l.sys_rva,
+           l.sync_rva, l.release_rva, l.table_off, l.parmtype_rva, b.feedback_rva, b.set_vec4_rva, b.set_texture_rva,
+           r.copy_rva, r.vt_off_rva);
+    /* The cross-checks the install makes. */
+    CHECK(r.sys_rva == l.sys_rva && r.vf_rva == vf->rva && r.binder_rva == bd->rva && l.declfind_rva == df->rva);
+    if (vk) {
+        CHECK(l.sys_rva == 0x66E0940u && l.sync_rva == 0x17E59F0u && l.release_rva == 0x1859480u && l.table_off == 0x8B00u);
+        CHECK(l.parmtype_rva == 0x66C46E0u && b.feedback_rva == 0x1859780u && b.set_vec4_rva == 0x15B9560u &&
+              b.set_texture_rva == 0x15B93C0u && r.copy_rva == 0x16C9BD0u && r.vt_off_rva == 0x5D490A0u);
     } else {
         CHECK(l.sys_rva == 0x4FE6120u && l.release_rva == 0x185A460u && l.table_off == 0xA400u);
-        CHECK(l.sparse_cvar_rva == 0x4FE60B0u && l.sparse_ext_rva != 0 && l.sparse_ext_rva < sz);
+        CHECK(l.parmtype_rva == 0x4FC9CA0u && b.feedback_rva == 0x185A7E0u && b.set_vec4_rva == 0x15BA410u &&
+              b.set_texture_rva == 0x15BA270u && r.copy_rva == 0x16CA880u && r.vt_off_rva == 0x464E720u);
     }
-    /* SetSource's flavor-2 branch stores the VT system's UniqueVmtrs page cache (VK sys+0xFEB0,
-     * GL sys+0x11870; the start-up builds it and every frame services it, sparse or not). */
-    CHECK(ss->rva + 0x1000 <= sz && lea_to(base + ss->rva, 0x1000, ss->rva, l.sys_rva + (id->vulkan ? 0xFEB0u : 0x11870u)));
+    /* SetSource gives flavor 0 the material-format cache and flavor 2 UniqueVmtrs
+     * (VK sys+0xFCA0 / +0xFEB0, GL sys+0x115A0 / +0x11870): record 1's cache,
+     * which a board adopts, is the first. */
+    CHECK(ss->rva + 0x1000 <= sz && lea_to(base + ss->rva, 0x1000, ss->rva, l.sys_rva + (vk ? 0xFCA0u : 0x115A0u)));
+    CHECK(lea_to(base + ss->rva, 0x1000, ss->rva, l.sys_rva + (vk ? 0xFEB0u : 0x11870u)));
+    /* The detours' stolen bytes end in the security-cookie load, at +11 and +10. */
+    CHECK(!memcmp(base + vf->rva + 11, "\x48\x8B\x05", 3) && !memcmp(base + bd->rva + 10, "\x48\x8B\x05", 3));
     free(base);
 }
 
@@ -488,9 +743,9 @@ static void families_follow_the_map(void)
 {
     char root[MAX_PATH], mods[MAX_PATH], own[MAX_PATH], placed[MAX_PATH], hash_own[65], hash_placed[65];
     const char *list[1];
-    sh_modvt_family fams[SH_MODVT_MAX];
+    sh_modvt_family *fams = NULL;
     int n;
-    printf("-- a family comes from the build the loaded map serves\n");
+    printf("-- a board comes from the build the loaded map serves\n");
     CHECK(mt_temp_dir("modvt_place", root, sizeof root));
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
     _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\vtplace0", mods);
@@ -504,14 +759,16 @@ static void families_follow_the_map(void)
     CHECK(build_folder(own, hash_own) && build_folder(placed, hash_placed));
     sh_modserve_scope_enable(1);
     CHECK(sh_modserve_index_build(mods) == 2);
-    n = sh_modvt_collect(fams, SH_MODVT_MAX);
+    n = sh_modvt_collect(&fams);
     CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_own) && fams[0].members == 0x1u);
+    free(fams);
     CHECK(sh_modserve_place_set("maps\\Vt map") >= 0);
     list[0] = hash_placed;
     CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
-    n = sh_modvt_collect(fams, SH_MODVT_MAX);
+    n = sh_modvt_collect(&fams);
     CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_placed) && fams[0].members == 0x3u &&
           fams[0].bytes == strlen("the map's own one") + strlen("the map's two"));
+    free(fams);
     CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
     CHECK(sh_modserve_place_set(NULL) >= 0);
     sh_modserve_scope_enable(0);
@@ -525,6 +782,7 @@ int main(int argc, char **argv)
     member_rule();
     decode_helpers();
     families();
+    detours();
     families_follow_the_map();
     if (argc < 2) printf("[skip] the executables (pass DOOMx64vk.exe and DOOMx64.exe)\n");
     for (i = 1; i < argc; ++i) image(argv[i]);

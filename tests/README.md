@@ -208,25 +208,30 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   two read-only slots hold the open by name and one the LoadBanks.
   `SH_MODSOUND_FIXTURE` names a source mod folder (snaphak-re's `p6probe`)
   to build and print.
-- `modvt_test.c` checks mod virtual-texture families: the builder's member
+- `modvt_test.c` checks mod virtual-texture boards: the builder's member
   rule (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, N 1 to 16, no
-  `_vmtr`, the mod's own id), the families the real serving index yields (two
-  per bundle, members folded) and the index listener, then registration
-  against a fake 32-slot record table: first free records with flavor 2 and
-  the `.pages` path, rescan idempotence, a changed build released and
-  registered again, release on removal, the hold after a registration pass
-  (logged once), a record the engine took back registered again in the same
-  slot, a name another record holds never taken or released, a full table
-  refused once with the stock records and record 31 untouched, OpenGL without
-  sparse page tables refused and with them flavor 4, a refused SetSource
-  retried, and a VT system that is not up. With the executables, VtSetSource
-  and VtForMaterial resolve at their recorded addresses and the VT system,
-  Release, the record table and (OpenGL) the sparse globals decode to the
-  recorded values. `MODVT_ECHO=1` prints the log lines.
+  `_vmtr`, the mod's own id), the boards the real serving index yields (two
+  per bundle, members folded), then registration against a fake 32-slot
+  record table with record memory: first free records, each pointed at the
+  material-format cache, rescan idempotence, release only at the frame
+  boundary (pending at a pass), a changed build released and registered
+  again, a record the engine took back registered again in the same slot, a
+  name another record holds never taken or released, a full table refused
+  once with one player notice and the stock records and record 31 untouched,
+  a cache that cannot be adopted, a refused SetSource retried, and a VT
+  system that is not up. The detours with a fake binder and parameter set:
+  the lookup returns a board for its own name only, two boards' materials get
+  their own page table and feedback word, a stock material's parameters and
+  record 1 are byte-identical with and without boards, and a board served
+  again binds its earlier materials again. With the executables, VtSetSource,
+  VtForMaterial, VtMaterialBind and VtMaterialRebind resolve at their recorded
+  addresses and the VT system, its synchronisation, Release, the record table,
+  the renderParm type, the binder's setters and the rebind's copy decode to
+  the recorded values and cross-check. `MODVT_ECHO=1` prints the log lines.
 - `vt_harness_test.c` checks the `sh_vt` decoder's page-header swap and member
   cell lookup; with `SH_VT_RCTEST` naming the reference family bundle (built
   by snaphak-re's lane RC `make_family.py`; it holds stock page bytes, so it is
-  not in the repository) it builds, admits and serves it, collects its family
+  not in the repository) it builds, admits and serves it, collects its board
   as `modvt.c` registers it, and checks the editor plan's order.
 - `modhud_test.c` checks the `hud` ammo-display grammar, conflicts across
   bundles, the tree read of admitted installed and legacy bundles, and the
