@@ -518,9 +518,11 @@ static int ba_move_status(void *e) { (void)e; return 0; }
 static int ba_trigger(void *e) { (void)e; return -1; }
 static int ba_path(void *ai, const float goal[3], int key, float *len) { (void)ai; (void)goal; (void)key; *len = 0; return 0; }
 static uint32_t ba_frame(void) { return (uint32_t)g_ms; }
+static int ba_eye(void *e, float out[3]) { b_origin(e, out); out[2] += 64; return 1; }
+static int ba_sight(void *ai, const float a[3], const float b[3], void *t) { (void)ai; (void)a; (void)b; (void)t; return 1; }
 static const sh_script_ai_engine k_brute_ai = {
     ba_entity, ba_handle_of, ba_is_ai, b_origin, ba_yaw, ba_event, ba_park, ba_enemy, ba_awareness,
-    ba_move_status, ba_trigger, ba_path, ba_frame
+    ba_move_status, ba_trigger, ba_path, ba_frame, ba_eye, ba_sight
 };
 
 /* the combat calls' seam */

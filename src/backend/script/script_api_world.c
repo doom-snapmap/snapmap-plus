@@ -2,7 +2,9 @@
  *   entities_near(pos, radius) -> the entities within radius, nearest first
  *   trace(from, to, [radius], [ignore]) -> what a line (or a thick line) from
  *                                          `from` to `to` hits, or nil
- * `pos`, `from` and `to` are positions or entities (their positions). Both
+ *   nav_ground(pos) -> the point on the ground under pos, or nil
+ *   difficulty() -> the game's difficulty, 0 easy .. 4 nightmare
+ * `pos`, `from` and `to` are positions or entities (their positions). These
  * calls only read, so they work on any entity.
  *
  * Engine paths (script_api_common.h):
@@ -11,8 +13,14 @@
  *   trace           the game's trace query run at once (the SnapMap laser hazard's call shape: a point
  *                   trace against the world, players and demons, contents 0x103085). With a radius the
  *                   line is thick: nine parallel traces, one on the line and eight around it at that
- *                   radius, and the nearest hit is the answer. The time and log calls (now, after,
- *                   every, run, wait, print, warn) are the runtime's (script_lib_base.c). */
+ *                   radius, and the nearest hit is the answer.
+ *   nav_ground      the same trace straight down from 16 inches above pos for 4,096 inches; the first
+ *                   surface hit counts when it is flat enough to stand on (normal at least 0.7 up),
+ *                   sh_script_api_ground_trace. It does not consult the navigation areas.
+ *   difficulty      idGameLocal vtable +0x670, the game's own difficulty (the g_gameDifficulty cvar when
+ *                   set, else the game's current difficulty), VK 0x140391A80 / GL 0x140391350.
+ * The time and log calls (now, after, every, run, wait, print, warn) are the
+ * runtime's (script_lib_base.c). */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -146,8 +154,36 @@ static int l_trace(lua_State *L)
     return 1;
 }
 
+/* nav_ground(pos) -> the point on the ground under pos, or nil */
+static int l_nav_ground(lua_State *L)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    float pos[3], at[3];
+    if (!sh_script_api_check_point(L, 1, "nav_ground", "the position to look under", pos) || !e || !e->ground ||
+        !e->ground(pos, at)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    sh_script_api_push_vec(L, at);
+    return 1;
+}
+
+/* difficulty() -> 0 easy, 1 medium, 2 hard, 3 ultra-violent, 4 nightmare;
+ * nil when the game's difficulty cannot be read */
+static int l_difficulty(lua_State *L)
+{
+    const sh_script_engine *e = sh_script_api_engine();
+    int level = 0;
+    if (lua_gettop(L) > 0) sh_script_refuse(L, "\"difficulty\" takes no values; call it as difficulty()");
+    if (!e || !e->difficulty || !e->difficulty(&level)) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, level);
+    return 1;
+}
+
 void sh_script_api_world_register(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "entities_near", l_entities_near);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "trace", l_trace);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "nav_ground", l_nav_ground);
+    sh_script_api_add(SH_SCRIPT_API_GLOBAL, "difficulty", l_difficulty);
 }

@@ -9,7 +9,14 @@
  *   - idAI2's GetType (vtable slot 0) returns the typeinfo the demon check
  *     reads;
  *   - the move FSM status (Shared_MoveFailedAny) and the weapon trigger
- *     (Shared_TriggerPulled) are read at the offsets the calls use.
+ *     (Shared_TriggerPulled) are read at the offsets the calls use;
+ *   - the calls the Tyrant's brain needs: the recoil play reads ai+0x24EB0;
+ *     the next-pull writer's fire-decl call, slot table and clock slot; the
+ *     aim focus call; the pain request's two loads (the stub's window), its
+ *     atomic-string set and its later compare of each anim's +0x48 string
+ *     with [rbp+0x88]; the threat row and path length detour windows; the
+ *     animation and root-motion functions; the monster type names against
+ *     the executable's own enum table.
  * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
@@ -146,6 +153,82 @@ static void check_image(const char *path)
         ti = rel_target(base, get_type, 7, 3);
         printf("  idAI2 typeinfo 0x%X\n", ti);
         CHECK(ti == (vk ? 0x5CF7A90u : 0x45FD110u));
+    }
+
+    /* The brain's calls. */
+    if (rva[SH_AI_SIG_RECOIL_PLAY])
+        CHECK(!memcmp(base + rva[SH_AI_SIG_RECOIL_PLAY] + SH_AI_RECOIL_SITE_MUL, "\xF3\x0F\x59\xB6\xB0\x4E\x02\x00", 8));
+    if (rva[SH_AI_SIG_NEXT_PULL]) {
+        uint32_t s = rva[SH_AI_SIG_NEXT_PULL];
+        uint32_t decl = rel_target(base, s + SH_AI_NEXT_PULL_DECL_CALL, 5, 1);
+        uint32_t table = rel_target(base, s + SH_AI_NEXT_PULL_SLOT_TABLE, 7, 3);
+        int32_t slots[3];
+        CHECK(base[s + SH_AI_NEXT_PULL_DECL_CALL] == 0xE8);
+        CHECK(!memcmp(base + s + SH_AI_NEXT_PULL_SLOT_TABLE, "\x48\x8D\x2D", 3));
+        printf("  fire decl 0x%X, trigger slots 0x%X\n", decl, table);
+        CHECK(decl == (vk ? 0xF137B0u : 0xF12C10u));
+        CHECK(table == (vk ? 0x2038F88u : 0x2052D58u));
+        memcpy(slots, base + table, sizeof slots);
+        CHECK(slots[0] == -1 && slots[1] == 0 && slots[2] == 1);   /* -1: the holder record at +0x30, as the engine reads it */
+        /* the fire decl reads the weapon's fire mode table: +0x1898 + mode * 400 */
+        CHECK(window_has(base, decl, 0x30, "\x48\x69\xD0\x90\x01\x00\x00\x48\x8B\x84\x0A\x98\x18\x00\x00", 15));
+    }
+    if (rva[SH_AI_SIG_AIM_FOCUS_SITE]) {
+        uint32_t f = rel_target(base, rva[SH_AI_SIG_AIM_FOCUS_SITE] + SH_AI_AIM_FOCUS_CALL, 5, 1);
+        printf("  aim focus 0x%X\n", f);
+        CHECK(f == (vk ? 0x41BBA0u : 0x41AD60u));
+        /* the focus array at ai+0xDFE0, 0xEC0 apart */
+        CHECK(window_has(base, f, 0x60, "\x48\x8D\x8E\xE0\xDF\x00\x00", 7) || window_has(base, f, 0x60, "\xE0\xDF\x00\x00", 4));
+    }
+    if (rva[SH_AI_SIG_PAIN_STRING_SITE]) {
+        uint32_t s = rva[SH_AI_SIG_PAIN_STRING_SITE];
+        uint32_t intern = rel_target(base, s + SH_AI_PAIN_INTERN_CALL, 5, 1);
+        unsigned flags = 0;
+        CHECK(!memcmp(base + s + SH_AI_PAIN_STUB_AT, k_ai_pain_stolen, SH_AI_PAIN_STUB_STOLEN));
+        CHECK(sh_x64_stolen_boundary(base + s + SH_AI_PAIN_STUB_AT, 64, 14, 48, &flags) == SH_AI_PAIN_STUB_STOLEN);
+        CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        /* the atomic-string set writes [rbp+0x88]: lea rcx,[rbp+0x88] just before it */
+        CHECK(!memcmp(base + s + SH_AI_PAIN_INTERN_CALL - 7, "\x48\x8D\x8D\x88\x00\x00\x00", 7));
+        printf("  atomic string set 0x%X\n", intern);
+        CHECK(intern == (vk ? 0x32B3D0u : 0x32B040u));
+        /* later in the request: mov rax,[rbp+0x88]; cmp [r13+0x48],rax (each pain anim's string) */
+        CHECK(window_has(base, s, 0x900, "\x48\x8B\x85\x88\x00\x00\x00\x49\x39\x45\x48", 11));
+    }
+    {
+        static const int win[2] = { SH_AI_SIG_THREAT_ROW, SH_AI_SIG_PATH_LENGTH };
+        static const size_t len[2] = { SH_AI_THREAT_STOLEN, SH_AI_PATH_LENGTH_STOLEN };
+        int k;
+        for (k = 0; k < 2; k++) {
+            unsigned flags = 0;
+            if (!rva[win[k]]) continue;
+            CHECK(sh_x64_stolen_boundary(base + rva[win[k]], 64, 14, 48, &flags) == len[k]);
+            CHECK((flags & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL | SH_X64_LEAVES)) == 0);
+        }
+        /* the row check reads the row's reaction at +0x1C (mov eax,[r8+0x1C]) */
+        if (rva[SH_AI_SIG_THREAT_ROW]) CHECK(window_has(base, rva[SH_AI_SIG_THREAT_ROW], 0x180, "\x41\x8B\x40\x1C", 4));
+        /* the path length walks segments 0x1C apart from +0x90, count +0x70 */
+        if (rva[SH_AI_SIG_PATH_LENGTH])
+            CHECK(!memcmp(base + rva[SH_AI_SIG_PATH_LENGTH] + 4, "\x48\x63\x4A\x70", 4) &&
+                  window_has(base, rva[SH_AI_SIG_PATH_LENGTH], 0x40, "\x48\x8B\x82\x90\x00\x00\x00", 7));
+    }
+    /* the monster type names: the executable's {name, value} table */
+    {
+        uint32_t k, found = 0;
+        for (k = 0x1000; k + 0x10 * SH_AI_MONSTER_TYPES < size && !found; k += 8) {
+            uint64_t p0 = qword_at(base, k), v0 = qword_at(base, k + 8);
+            int j, ok = 1;
+            if (v0 != 0 || p0 < image_base || p0 - image_base >= size) continue;
+            if (strcmp((const char *)base + (p0 - image_base), "AI_MONSTER_NONE")) continue;
+            for (j = 0; j < SH_AI_MONSTER_TYPES && ok; j++) {
+                uint64_t pn = qword_at(base, k + 0x10u * (uint32_t)j), vn = qword_at(base, k + 0x10u * (uint32_t)j + 8);
+                if (pn < image_base || pn - image_base >= size) { ok = 0; break; }
+                if (strcmp((const char *)base + (pn - image_base), SH_AI_MONSTER_NAMES[j])) ok = 0;
+                if (vn != (j ? (1ull << (j - 1)) : 0)) ok = 0;
+            }
+            if (ok) found = k;
+        }
+        printf("  aiMonsterType_t table 0x%X\n", found);
+        CHECK(found != 0);
     }
 
     /* Offsets: Shared_MoveFailedAny reads *(ai+0x23198)+0xD20 against 5;

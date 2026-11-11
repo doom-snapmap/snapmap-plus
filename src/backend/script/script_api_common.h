@@ -100,7 +100,23 @@ typedef struct sh_script_engine {
     void    *(*spawn)(const char *def, const float origin[3], float yaw, const char **why);
     int      (*trace)(const float from[3], const float to[3], uint32_t ignore_spawn_id, sh_script_trace *out);
     int      (*game_time_ms)(int *ms);
+    /* The floor under pos (1 found, with the point in out). */
+    int      (*ground)(const float pos[3], float out[3]);
+    /* The game difficulty, 0 easy .. 4 nightmare (1 when read). */
+    int      (*difficulty)(int *level);
 } sh_script_engine;
+
+/* The floor under pos made of the engine's world trace: straight down from
+ * SH_SCRIPT_GROUND_ABOVE inches above pos for SH_SCRIPT_GROUND_DEPTH inches;
+ * the first surface hit counts when it is flat enough to stand on (its normal
+ * at least SH_SCRIPT_GROUND_FLAT up). 1 with the point; 0 none. Pure (the
+ * engine side answers ground with it; the tests run it over a fake trace). */
+#define SH_SCRIPT_GROUND_ABOVE 16.0f
+#define SH_SCRIPT_GROUND_DEPTH 4096.0f
+#define SH_SCRIPT_GROUND_FLAT  0.7f
+int sh_script_api_ground_trace(int (*trace)(const float from[3], const float to[3], uint32_t ignore_spawn_id,
+                                            sh_script_trace *out),
+                               const float pos[3], float out[3]);
 
 void sh_script_api_set_engine(const sh_script_engine *engine);
 const sh_script_engine *sh_script_api_engine(void);
@@ -128,6 +144,9 @@ void sh_script_api_world_register(void);
  * animation of every entity whose script asked for one (anim_event,
  * anim_finished). */
 void sh_script_api_frame(void);
+/* Run fn at the end of every sh_script_api_frame (the AI calls finish a
+ * forced animation through a via node there). Up to 4; idempotent. */
+void sh_script_api_on_frame(void (*fn)(void));
 
 /* The game clock in milliseconds (idGameLocal vtable +0x220). 1 when read. */
 int sh_script_api_now_ms(int *ms);

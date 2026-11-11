@@ -12,7 +12,11 @@
  *   ScriptEventArgEntity    VK 0x140B44300  GL 0x140B438F0  (arg, idEntity*) -> an 'e' argument
  *   ScriptTraceQuery        VK 0x141637CE0  GL 0x141638B60  (traces, handle*, result*, start*, end*, clip,
  *                           axis*, contents, pass spawn id, keep, name, pass spawn id 2); a result pointer
- *                           runs the trace at once (VK 0x141638340 / GL 0x1416391C0). */
+ *                           runs the trace at once (VK 0x141638340 / GL 0x1416391C0).
+ *   ScriptDifficulty        VK 0x140391A80  GL 0x140391350  idGameLocal vtable +0x670 (game) -> int: the
+ *                           g_gameDifficulty cvar when it is 0 or more, else the game's currentGameDifficulty
+ *                           (+0x2C3010); 0 easy, 1 medium, 2 hard, 3 ultra-violent, 4 nightmare. Optional: the
+ *                           calls work without it and difficulty() then answers nil. */
 const sig_entry SH_SCRIPT_API_SIGNATURES[] = {
     { "ScriptProcessEventArgs",
       "44 89 4C 24 20 53 55 56 57 41 56 41 57 48 81 EC 28 01 00 00", 0xB47350u, 0xB46940u },
@@ -28,5 +32,9 @@ const sig_entry SH_SCRIPT_API_SIGNATURES[] = {
       "0F 87 ?? ?? ?? ?? 8B 93 28 01 12 00 81 FA 00 10 00 00 0F 83 ?? ?? ?? ?? 48 8D 41 01 48 89 6C 24 70 "
       "48 89 83 98 82 18 00 33 C9 25 FF 1F 00 00 48 89 7C 24 78 48 05 70 E5 00 00 48 8D BB 30 01 12 00",
       0x1637CE0u, 0x1638B60u },
+    { "ScriptDifficulty",
+      "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 48 8B C8 48 8B 10 FF 92 B8 00 00 00 80 BB 88 0B 30 00 00 "
+      "48 8B 50 38 8B 42 30 74 10 83 F8 01 7E 0B B8 01 00 00 00",
+      0x391A80u, 0x391350u },
     { NULL, NULL, 0, 0 }
 };

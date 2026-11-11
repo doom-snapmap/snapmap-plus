@@ -1838,8 +1838,12 @@ the map, as any error does).
   `e:is_player()`, `e:remove()`, `e:view_angle_to(other, [use_view_pos])`;
   `e:anim_state(node, [via])`, `e:anim_force(node, [blend])`,
   `e:anim_finished()`, `e:anim_current()`, `e:anim_event(name)`;
-  `entities_near(pos, radius)` (nearest first, at most 256) and
-  `trace(from, to, [radius], [ignore])`. Positions are tables `{x, y, z}`; an
+  `entities_near(pos, radius)` (nearest first, at most 256),
+  `trace(from, to, [radius], [ignore])`, `nav_ground(pos)` (the floor under a
+  point: the trace straight down from 16 inches above it, the first surface
+  flat enough to stand on, normal at least 0.7 up; it does not consult the
+  navigation areas) and `difficulty()` (idGameLocal vtable +0x670, the game's
+  own difficulty, 0 easy to 4 nightmare). Positions are tables `{x, y, z}`; an
   entity stands for its position wherever a position is asked for.
 - **Engine.** Every call goes through one table of engine operations
   (`sh_script_engine`), filled at boot by `sh_script_api_install` from private
@@ -1855,6 +1859,9 @@ the map, as any error does).
   is the game's trace query run at once, with the SnapMap laser hazard's
   contents mask; a radius makes the line thick (nine parallel traces, the
   nearest hit wins).
+- **Per frame.** `sh_script_api_frame` also runs the steps other call
+  groups register with `sh_script_api_on_frame` (the AI calls finish a forced
+  animation through a via node there).
 - **Animation.** idAI2 ignores the stock `changeAnimState` events, so on a
   demon `anim_state` and `anim_force` hand the request to the AI calls
   (`sh_script_ai_anim`): the demon is parked (below) and
@@ -1910,7 +1917,10 @@ is touched, and a removed demon answers nil.
   `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
   (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
-  (`isEntityVisible`, the perception's own answer), `aware()`
+  (`isEntityVisible`, which is true when the perception's record of `e` was
+  seen within the last second, VK 0x1404AA3E0, and then the world trace from
+  the demon's eye to 40 inches above `e`'s origin, so a wall between them
+  answers false), `aware()`
   (`hasAwarenessOfEnemy`), `awareness([e])` (`GetAwareness` on the perception
   at ai+0x29A88: unaware, lost, suspected, confirmed), `angle_to(t)`
   (physics origin and axis), `move_done()` (the move FSM status
@@ -1922,8 +1932,47 @@ is touched, and a removed demon answers nil.
   `Shared_TargetDistanceFilter` calls, VK 0x140515300 / GL 0x140514030,
   reached through that unique call site; the query is asynchronous, so a call
   may answer "searching" and the script asks again), `find_position(parms)`
-  (points on a circle around the target scored by distance band and path
+  (points on a circle around the target that see it through the world trace
+  from eye height, unless `visible = false`, scored by distance band and path
   length).
+- **The calls a full enemy brain needs** (each made of the engine part named;
+  every address is in `script_ai_sigs.c` with its pattern on both
+  executables, and a call whose part is missing refuses plainly):
+  `recoil(alpha)` writes the float at ai+0x24EB0 that the engine's recoil play
+  (VK 0x1403D9300) multiplies into the recoil animator's weight, the field the
+  combat states set from their `recoilStrength`; `weapon_ready()` compares the
+  game clock with the weapon holder's next-pull time for the active trigger
+  (holder +(slot+4)*0x10, slot from the trigger-slot table by the fire decl's
+  +0x1B4), the "cooldown" test of the can-fire check (VK 0x1404439D0);
+  `aim_point(pos | nil)` calls the set-focus-to-position
+  `ae_selectAimFocusPoint` uses (VK 0x14041BBA0, foci 0, 2 and 3);
+  `anim_valid(node, tests, [side])` reads the node's animations (VK
+  0x141712C60) and their total root motion (VK 0x1415C5290), turns it by the
+  demon's facing (by the direction to its enemy with
+  `TF_TRANSLATION_TO_ENEMY_FORCE`) and tests the end point with the ground
+  under it, the world trace at knee and chest height, sights to the enemy from
+  eye and weapon height, the enemy's view centre (20 degrees) and the path
+  query, as the test words ask; `anim_force_via(dest, via, [blend])` forces
+  `via` (`ssaction_ForceAnimState`) and, when the observer sees the web leave
+  it, asks for `dest` (`ssaction_ChangeAnimState`) from the per-frame step;
+  `path_points(pos)` is the path query's computed path, read by a detour of
+  the path length the query calls with it (VK 0x14050EA60 / GL 0x14050D790,
+  14-byte window, segments at +0x90); `firing_position(parms)` (kinds any, new,
+  superior, reposition) and `spline_clear(target, spline, seconds, [flags])`
+  are compositions of the path query, the world trace and the ground under a
+  point (`sh_ai_firing_run`, `sh_ai_spline_run`; the spline is a control
+  table and a roll the script passes); `monster_type()` is the
+  `getMonsterType` event named from the executable's aiMonsterType_t table;
+  `pain_string(text | nil)` interns the text with the engine's atomic-string
+  set and a 14-byte jump at the end of the pain request's painString branch
+  (VK 0x1403F5F13 / GL 0x1403F53F3) runs a stub (`sh_ai_pain_stub_build`) that
+  stores the demon's string in the request's [rbp+0x88], which the request
+  then compares with each pain anim's +0x48 string; `block_pain(reaction,
+  seconds)` makes a detour of the threat table's row check (VK 0x1406E08D0 /
+  GL 0x1406DFD00, 15-byte window) refuse that reaction's rows for the demon
+  until the game clock passes the time. The per-demon pain records are read
+  lock-free by spawn id from the threads the engine runs pain on. Each detour
+  is committed on the game thread at the first call that needs it.
 - **Shared with the entity calls.** `distance`, `anim_state` and `anim_force`
   are the entity calls' and work on any entity; on a demon the two animation
   calls come back here (`sh_script_ai_anim`), which parks it first.
@@ -1932,8 +1981,12 @@ is touched, and a removed demon answers nil.
 
 `tests/script_api_ai_test.c` runs every call through real scripts over a fake
 engine (the animation commands through `sh_script_ai_anim`) and checks the catalogue against `tests/fixtures/scripts/
-event_registry_13954591.txt`; `tests/script_ai_sigs_test.c` checks the
-signatures, the detour window, the path site and the offsets on both
+event_registry_13954591.txt`; it also runs the compositions over fake
+primitives with a wall and a hole in the world, `can_see` and
+`find_position` against that wall, and the pain-string stub on a synthetic
+pain request. `tests/script_ai_sigs_test.c` checks the signatures, the
+detour windows, the path site, the call targets and slot table the new calls
+read, the pain request's compare and the monster type table on both
 executables.
 
 ### Mod scripts: combat calls and the events of damage, death, pain and animation

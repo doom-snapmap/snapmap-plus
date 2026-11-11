@@ -13,7 +13,15 @@
  * (enemy, sight, awareness, path length while searching and once found,
  * find_position, trigger state), the refusals (another mod's demon, an
  * entity that is not a demon, a bad position, an unknown option) as plain
- * stop lines, and a removed demon answering nil. */
+ * stop lines, and a removed demon answering nil.
+ *
+ * The calls the Tyrant's brain needs: recoil, weapon_ready, aim_point,
+ * anim_valid, anim_force_via, firing_position, path_points, spline_clear,
+ * monster_type, pain_string, block_pain through scripts; their compositions
+ * (sh_ai_firing_run, sh_ai_spline_run, sh_ai_anim_valid_run) over fake
+ * primitives with a wall in the world; can_see and find_position against
+ * that wall (the trace half of the sight); the pain-string stub run on a
+ * synthetic pain request; the per-demon pain records. */
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
@@ -23,6 +31,7 @@
 #include "script/script_runtime.h"
 #include "script/script_hooks.h"
 #include "script/script_api_ai.h"
+#include "script/script_api_common.h"
 #include "../src/third_party/lua/lauxlib.h"
 
 static int g_fail;
@@ -87,7 +96,21 @@ typedef struct fent {
     int   path_calls;      /* path() calls so far; searching until path_ready of them */
     int   path_ready;
     int   path_none;       /* answer "no path" */
+    /* the calls the brain needs */
+    float recoil;
+    int   ready;           /* weapon_ready answer (-1 no weapon) */
+    float aim[3];
+    int   aimed;
+    char  pain[64];
+    int   block_reaction, block_ms;
+    uint32_t monster;      /* getMonsterType */
+    char  node[96];        /* the animWeb node playing */
+    float vel[3];
 } fent;
+
+/* The world: a wall across x = g_wall_x (0: none) up to g_wall_top, and no
+ * ground past x = g_hole_x (0: ground everywhere at z 0). */
+static float g_wall_x, g_wall_top = 1000.0f, g_hole_x;
 
 #define NENT 16
 static fent g_ent[NENT];
@@ -115,6 +138,7 @@ static void ev_cat(const char *s)
 
 static int f_event(void *e, int ev, const sh_ai_arg *args, int n, double *ret)
 {
+    if (ev == SH_AI_EV_GET_MONSTER_TYPE) { if (ret) *ret = ((fent *)e)->monster; return 1; }
     char line[256];
     int i;
     CHECK(sh_ai_args_fit(SH_AI_EVENTS[ev].format, args, n));
@@ -159,9 +183,94 @@ static int f_path(void *ai, const float goal[3], int key, float *len)
 }
 static uint32_t f_frame(void) { return g_frame; }
 
+static int f_eye(void *ai, float out[3]) { memcpy(out, ((fent *)ai)->origin, 12); out[2] += 80; return 1; }
+static int f_sight(void *ai, const float a[3], const float b[3], void *target)
+{
+    (void)ai; (void)target;
+    if (g_wall_x != 0 && (a[0] - g_wall_x) * (b[0] - g_wall_x) < 0) {
+        float t = (g_wall_x - a[0]) / (b[0] - a[0]);
+        if (a[2] + (b[2] - a[2]) * t < g_wall_top) return 0;
+    }
+    return 1;
+}
+static int f_ground(const float pos[3], float out[3])
+{
+    if (g_hole_x != 0 && pos[0] > g_hole_x) return 0;
+    out[0] = pos[0]; out[1] = pos[1]; out[2] = 0;
+    return 1;
+}
+/* node "evade/side": two clips, 200 inches left and right; "evade/still": no clip */
+static int f_anim_delta(void *ai, const char *node, int index, float out[3], int *count)
+{
+    (void)ai;
+    if (!_stricmp(node, "evade/side")) {
+        *count = 2;
+        if (index < 0 || index > 1) return 0;
+        out[0] = 0; out[1] = index ? -200.0f : 200.0f; out[2] = 0;
+        return 1;
+    }
+    if (!_stricmp(node, "evade/still")) { *count = 0; return 0; }
+    *count = 0;
+    return -1;
+}
+static int f_set_recoil(void *ai, float a) { ((fent *)ai)->recoil = a; return 1; }
+static int f_weapon_ready(void *ai) { return ((fent *)ai)->ready; }
+static int f_aim_point(void *ai, const float p[3]) { memcpy(((fent *)ai)->aim, p, 12); ((fent *)ai)->aimed = 1; return 1; }
+static const sh_script_ai_engine g_fake;
+static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
+{
+    return sh_ai_anim_valid_run(&g_fake, ai, node, tests, side, 100, index);
+}
+static int f_path_points(void *ai, const float goal[3], int key, float (*out)[3], int cap, int *n)
+{
+    fent *f = (fent *)ai;
+    (void)key; (void)cap;
+    if (f->path_none) return 2;
+    if (++f->path_calls <= f->path_ready) return 1;
+    memcpy(out[0], f->origin, 12);
+    out[1][0] = goal[0]; out[1][1] = f->origin[1]; out[1][2] = 0;
+    memcpy(out[2], goal, 12);
+    *n = 3;
+    return 0;
+}
+static int f_firing(void *ai, const sh_ai_position_query *q, float out[3]) { return sh_ai_firing_run(&g_fake, ai, q, 200, out); }
+static int f_spline(void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap, int *n)
+{
+    return sh_ai_spline_run(&g_fake, ai, q, out, cap, n);
+}
+static int f_pain_string(void *ai, const char *t) { strcpy(((fent *)ai)->pain, t ? t : "(engine)"); return 1; }
+static int f_block_pain(void *ai, int r, int ms) { ((fent *)ai)->block_reaction = r; ((fent *)ai)->block_ms = ms; return 1; }
+
 static const sh_script_ai_engine g_fake = {
     f_entity, f_handle_of, f_is_ai, f_origin, f_yaw, f_event, f_park, f_enemy, f_awareness,
-    f_move_status, f_trigger, f_path, f_frame
+    f_move_status, f_trigger, f_path, f_frame,
+    f_eye, f_sight, f_ground, f_anim_delta,
+    f_set_recoil, f_weapon_ready, f_aim_point, f_anim_valid, f_path_points, f_firing, f_spline,
+    f_pain_string, f_block_pain
+};
+
+/* The entity side of the engine the AI calls also use: the node playing
+ * (anim_force_via) and velocity (spline_clear's prediction). */
+static void *c_resolve(uint32_t id) { return id < NENT && g_ent[id].live ? &g_ent[id] : NULL; }
+static uint32_t c_spawn_id(void *e) { return e ? (uint32_t)idx_of(e) : SH_SCRIPT_SPAWN_ID_NONE; }
+static int c_kind(void *e) { return ((fent *)e)->is_ai ? SH_SCRIPT_KIND_AI : SH_SCRIPT_KIND_OTHER; }
+static int c_origin(void *e, float out[3]) { memcpy(out, ((fent *)e)->origin, 12); return 1; }
+static int c_event(void *e, const char *name, const sh_script_earg *args, int n, sh_script_earg *ret, int post)
+{
+    (void)args; (void)n; (void)post;
+    if (ret) memset(ret, 0, sizeof *ret);
+    if (ret && !strcmp(name, "getLinearVelocity")) { ret->type = 'v'; memcpy(ret->v, ((fent *)e)->vel, 12); }
+    return 1;
+}
+static int c_anim_node(void *e, char *out, size_t cap)
+{
+    if (!((fent *)e)->node[0]) return 0;
+    strcpy_s(out, cap, ((fent *)e)->node);
+    return 1;
+}
+static const sh_script_engine g_common = {
+    c_resolve, c_spawn_id, NULL, NULL, c_kind, c_origin, NULL, NULL, NULL, c_event,
+    NULL, NULL, NULL, c_anim_node, NULL, NULL, NULL, f_ground, NULL
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -205,6 +314,8 @@ static void spawn(uint32_t id, const char *name)
  * AI of mod B. */
 static void world(void)
 {
+    g_wall_x = 0; g_wall_top = 1000.0f; g_hole_x = 0;
+    sh_script_api_anim_reset();
     memset(g_ent, 0, sizeof g_ent);
     g_events[0] = 0;
     g_frame = 0;
@@ -232,6 +343,7 @@ static int start(const char *a_body)
 static void tick(void)
 {
     g_frame++;
+    sh_script_api_frame();
     sh_script_tick(g_frame * 0.1, 0.1);
 }
 
@@ -560,6 +672,340 @@ static void test_removed_and_unavailable(void)
     sh_script_ai_set_engine(&g_fake);
 }
 
+/* ------------------------------------------- the calls the brain needs */
+
+static void test_brain_pure(void)
+{
+    char bad[64];
+    float a[3] = { 0, 0, 0 }, b[3] = { 100, 0, 0 }, o[3], pts[8][3];
+    sh_ai_table tb;
+    int n;
+    printf("-- the brain's calls: words, names, curves\n");
+    CHECK(sh_ai_tests_parse("TF_BOUNDS TF_NAV_ENDPOINT", bad, sizeof bad) == (SH_AI_TF_BOUNDS | SH_AI_TF_NAV_ENDPOINT));
+    CHECK(sh_ai_tests_parse("VALIDATE_ANIM_DELTA", bad, sizeof bad) == SH_AI_TF_ANIM_DELTA);
+    CHECK(sh_ai_tests_parse("TF_BOUNDS TF_FLY", bad, sizeof bad) == 0 && !strcmp(bad, "TF_FLY"));
+    CHECK(sh_ai_tests_parse("", bad, sizeof bad) == 0 && bad[0] == 0);
+    CHECK(!strcmp(sh_ai_monster_name(0), "AI_MONSTER_NONE"));
+    CHECK(!strcmp(sh_ai_monster_name(1), "AI_MONSTER_GENERIC"));
+    CHECK(!strcmp(sh_ai_monster_name(65536), "AI_MONSTER_BARON"));
+    CHECK(!strcmp(sh_ai_monster_name(4194304), "AI_MONSTER_SPIDER_MASTERMIND"));
+    CHECK(sh_ai_monster_name(3) == NULL && sh_ai_monster_name(1u << 23) == NULL);
+    CHECK(sh_ai_position_kind("superior") == SH_AI_POS_SUPERIOR && sh_ai_position_kind(NULL) == SH_AI_POS_ANY);
+    CHECK(sh_ai_position_kind("best") == -1);
+    sh_ai_line_offset(a, b, 0.5f, 10, 90, o);           /* to the left of +x is +y */
+    CHECK(fabsf(o[0] - 50) < 1e-3f && fabsf(o[1] - 10) < 1e-3f && fabsf(o[2]) < 1e-3f);
+    sh_ai_line_offset(a, b, 0.5f, 10, -90, o);
+    CHECK(fabsf(o[1] + 10) < 1e-3f);
+    sh_ai_line_offset(a, b, 0.25f, 10, 0, o);           /* roll 0: up */
+    CHECK(fabsf(o[0] - 25) < 1e-3f && fabsf(o[2] - 10) < 1e-3f);
+    memset(&tb, 0, sizeof tb);
+    tb.n = 3; tb.t[0] = 0.25f; tb.v[0] = 0.2f; tb.t[1] = 0.5f; tb.v[1] = 0.4f; tb.t[2] = 1.0f; tb.v[2] = 0;
+    CHECK(fabsf(sh_ai_table_at(&tb, 0.125f) - 0.1f) < 1e-5f);   /* from 0 at the start */
+    CHECK(fabsf(sh_ai_table_at(&tb, 0.375f) - 0.3f) < 1e-5f);
+    CHECK(fabsf(sh_ai_table_at(&tb, 1.0f)) < 1e-5f);
+    n = sh_ai_spline_points(a, b, &tb, 90, pts, 8);
+    CHECK(n == 4);                                        /* the ends and the two inner knots */
+    CHECK(fabsf(pts[1][0] - 25) < 1e-3f && fabsf(pts[1][1] - 20) < 1e-3f);   /* 0.2 x 100 to the left */
+    CHECK(fabsf(pts[2][0] - 50) < 1e-3f && fabsf(pts[2][1] - 40) < 1e-3f);
+    CHECK(pts[3][0] == 100 && pts[3][1] == 0);
+}
+
+/* The compositions over the fake primitives: the demon (1) at the origin
+ * facing +x, its enemy (2) 600 inches ahead. */
+static void test_compositions(void)
+{
+    sh_ai_position_query q;
+    sh_ai_spline_query sq;
+    float out[3], pts[20][3];
+    int idx = -1, n = 0;
+    printf("-- the compositions: anim_valid, firing_position, spline_clear\n");
+    world();
+    g_ent[1].enemy = 2;
+    g_ent[2].origin[0] = 600; g_ent[2].origin[1] = 0;
+    g_ent[2].yaw = 180;                                   /* the enemy looks back at the demon */
+    /* anim_valid: both side steps fit an open floor; the first one is the answer */
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == 1 && idx == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_ANIM_DELTA, 1, 0, &idx) == 1 && idx == 1);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/still", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == 0);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/none", SH_AI_TF_ANIM_DELTA, -1, 0, &idx) == -1);
+    /* the enemy's view centre: a side step out of a straight line keeps 18 degrees: refused at 20 */
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_AVOID_ENEMY_FOV, -1, 0, &idx) == 0);
+    /* the eyes from the end point: a wall between the step and the enemy */
+    g_wall_x = 300;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_EYE_VISIBILITY, -1, 0, &idx) == 0);
+    g_wall_x = 0;
+    /* a path still being searched answers 2, then the step fits */
+    g_ent[1].path_ready = 1; g_ent[1].path_calls = 0;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, &idx) == 2);
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_DIRECT, 0, 0, &idx) == 1);
+    /* no ground where the step ends */
+    g_hole_x = -1;
+    CHECK(sh_ai_anim_valid_run(&g_fake, &g_ent[1], "evade/side", SH_AI_TF_NAV_ENDPOINT, -1, 0, &idx) == 0);
+    g_hole_x = 0;
+
+    /* firing_position: the current place (600 from the target, ideal 600, seeing it) is kept for "any";
+     * "new" moves; "superior" finds nothing better; a wall at x 300 makes every place on the near side blind */
+    memset(&q, 0, sizeof q);
+    q.target = &g_ent[2];
+    q.min = 300; q.max = 900; q.ideal = 600; q.visible = 1; q.count = 8; q.path_weight = 0.5f;
+    q.kind = SH_AI_POS_ANY;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] == 0 && out[1] == 0);
+    q.kind = SH_AI_POS_NEW;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && (out[0] != 0 || out[1] != 0));
+    q.kind = SH_AI_POS_SUPERIOR;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 2);
+    g_wall_x = 300;   /* the demon is blind now: any place that sees over the wall is superior */
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 300);
+    q.kind = SH_AI_POS_REPOSITION;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 0 && out[0] > 600);   /* the far half */
+    g_wall_x = 0;
+    g_ent[1].path_none = 1;
+    q.kind = SH_AI_POS_NEW;
+    CHECK(sh_ai_firing_run(&g_fake, &g_ent[1], &q, 0, out) == 2);
+    g_ent[1].path_none = 0;
+
+    /* spline_clear: open ground is clear, with the points on it; a wall or a hole is not */
+    memset(&sq, 0, sizeof sq);
+    sq.target = &g_ent[2];
+    memcpy(sq.to, g_ent[2].origin, 12);
+    sq.table.n = 2; sq.table.t[0] = 0.5f; sq.table.v[0] = 0.25f; sq.table.t[1] = 1.0f; sq.table.v[1] = 0;
+    sq.roll = -90; sq.nav_ground = 1;
+    CHECK(sh_ai_spline_run(&g_fake, &g_ent[1], &sq, pts, 20, &n) == 1 && n == 3);
+    CHECK(fabsf(pts[1][0] - 300) < 1e-3f && fabsf(pts[1][1] + 150) < 1e-3f);   /* 0.25 x 600 to the right */
+    g_wall_x = 250;
+    CHECK(sh_ai_spline_run(&g_fake, &g_ent[1], &sq, pts, 20, &n) == 0);
+    g_wall_x = 0;
+    g_hole_x = 200;
+    CHECK(sh_ai_spline_run(&g_fake, &g_ent[1], &sq, pts, 20, &n) == 0);
+    sq.nav_ground = 0;
+    CHECK(sh_ai_spline_run(&g_fake, &g_ent[1], &sq, pts, 20, &n) == 1);   /* without TF_NAV_GROUND the hole is fine */
+    g_hole_x = 0;
+}
+
+/* can_see and find_position against an occluder: the trace path they use
+ * (the sight primitive from the eye) answers false behind a wall even while
+ * the perception says it has seen the player. */
+static void test_sight_against_a_wall(void)
+{
+    const char *log;
+    printf("-- can_see and find_position against a wall\n");
+    CHECK(start(
+        "api = 1\n"
+        "on.think('ai/brute', function(self)\n"
+        "  print('see ' .. tostring(self:can_see(ent(2))))\n"
+        "  local p, why = self:find_position({ target = ent(2), min = 100, max = 300, ideal = 200, count = 8 })\n"
+        "  print('pos ' .. (p and string.format('%.0f %.0f', p.x, p.y) or why))\n"
+        "  local q = self:find_position({ target = ent(2), ideal = 200, min = 100, max = 300, count = 8, visible = false })\n"
+        "  print('blind ' .. tostring(q ~= nil))\n"
+        "end)\n"));
+    g_ent[1].visible = 1;
+    g_ent[2].origin[0] = 600; g_ent[2].origin[1] = 0;
+    tick();                                  /* open room: seen, a place found */
+    g_wall_x = 300; g_wall_top = 1000;
+    tick();                                  /* a wall between them, perception still remembers */
+    g_ent[1].visible = 0; g_wall_x = 0;
+    tick();                                  /* no wall, perception has not seen it: not seen */
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "see true\npos ") != NULL);
+    CHECK(strstr(log, "see false\npos ") != NULL);
+    /* with the wall, only the places beyond it (x > 300) see the player */
+    {
+        const char *second = strstr(log, "see false\npos ");
+        float x = 0, y = 0;
+        CHECK(second && sscanf(second + 14, "%f %f", &x, &y) == 2 && x > 300);
+    }
+    CHECK(strstr(log, "blind true") != NULL);
+    sh_script_map_end();
+}
+
+static void test_brain_calls(void)
+{
+    const char *log;
+    printf("-- the brain's calls through scripts\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then\n"
+        "    self:recoil(0.2)\n"
+        "    print('ready ' .. tostring(self:weapon_ready()))\n"
+        "    self:aim_point({x = 1, y = 2, z = 3})\n"
+        "    print('valid ' .. tostring(self:anim_valid('evade/side', 'TF_NAV_ENDPOINT TF_BOUNDS', 1)))\n"
+        "    print('valid2 ' .. tostring(self:anim_valid('evade/side')))\n"
+        "    print('valid3 ' .. tostring(self:anim_valid('evade/still', 'VALIDATE_ANIM_DELTA')))\n"
+        "    print('valid4 ' .. table.concat({tostring(select(1, self:anim_valid('evade/none'))), select(2, self:anim_valid('evade/none'))}, ' '))\n"
+        "    local p, why = self:path_points({x = 30, y = 40, z = 0})\n"
+        "    print('pts ' .. tostring(p) .. ' ' .. tostring(why))\n"
+        "    print('mt ' .. tostring(ent(4):monster_type()) .. ' ' .. tostring(ent(3):monster_type()) .. ' ' .. tostring(self:monster_type()))\n"
+        "    self:pain_string('combo')\n"
+        "    self:block_pain('PAIN_PUSHBACK', 7)\n"
+        "  else\n"
+        "    local p = self:path_points({x = 30, y = 40, z = 0})\n"
+        "    print('pts2 ' .. #p .. ' ' .. p[2].x .. ' ' .. p[3].y)\n"
+        "    local f, why = self:firing_position({ target = ent(2), kind = 'new', min = 50, max = 400, ideal = 200, visible = true, parms = {} })\n"
+        "    print('fp ' .. tostring(f ~= nil) .. ' ' .. tostring(why))\n"
+        "    local g = self:firing_position({ kind = 'superior', min = 50, max = 400, ideal = 141 })\n"
+        "    print('fp2 ' .. tostring(g) .. ' ' .. tostring(select(2, self:firing_position({ kind = 'superior', min = 50, max = 400, ideal = 141 }))))\n"
+        "    local ok, pts = self:spline_clear(ent(2), { times = {0.5, 1}, values = {0.25}, roll = { value = 90 } }, 1, 'TF_NAV_GROUND')\n"
+        "    print('spline ' .. tostring(ok) .. ' ' .. #pts .. string.format(' %.0f %.0f', pts[3].x, pts[3].y))\n"
+        "    local ok2 = self:spline_clear(ent(2), { table = { times = { ['times[1]'] = 0.5, ['times[2]'] = 1 }, values = { ['values[1]'] = 0.1 } } }, 0)\n"
+        "    print('spline2 ' .. tostring(ok2))\n"
+        "    local ok3, p3 = self:spline_clear(ent(2), { table = { {t = 0, v = 0}, {t = 0.5, v = 0.25}, {t = 1, v = 0} }, roll = -90 }, 0)\n"
+        "    print(string.format('spline3 %s %d %.0f', tostring(ok3), #p3, p3[2].y))\n"
+        "    self:pain_string(nil)\n"
+        "    self:aim_point(nil)\n"
+        "    print('ready2 ' .. tostring(self:weapon_ready()))\n"
+        "  end\n"
+        "end)\n"));
+    g_ent[1].ready = 1;
+    g_ent[1].path_ready = 1;
+    g_ent[4].monster = 65536;
+    tick();
+    g_ent[1].enemy = 2;
+    g_ent[1].ready = 0;
+    g_ent[2].vel[0] = 10;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(fabsf(g_ent[1].recoil - 0.2f) < 1e-6f);
+    CHECK(strstr(log, "ready true\n") != NULL && strstr(log, "ready2 false\n") != NULL);
+    CHECK(g_ent[1].aimed && g_ent[1].aim[0] == 1 && g_ent[1].aim[2] == 3);
+    CHECK(strstr(log, "valid true\nvalid2 true\nvalid3 false\nvalid4 nil no such node\n") != NULL);
+    CHECK(strstr(log, "pts nil searching\n") != NULL);
+    CHECK(strstr(log, "mt AI_MONSTER_BARON nil AI_MONSTER_NONE\n") != NULL);
+    CHECK(g_ent[1].block_reaction == 7 && g_ent[1].block_ms == 7000);    /* PAIN_PUSHBACK */
+    CHECK(!strcmp(g_ent[1].pain, "(engine)"));                            /* combo, then nil */
+    CHECK(strstr(log, "pts2 3 30.0 40.0\n") != NULL);
+    CHECK(strstr(log, "fp true nil\n") != NULL);
+    CHECK(strstr(log, "fp2 nil none\n") != NULL);
+    CHECK(strstr(log, "spline3 true 3 ") != NULL);   /* the knot at 0.5 is inside: three points */
+    CHECK(strstr(log, "spline true 3 110 100\n") != NULL);                  /* the player one second ahead */
+    CHECK(strstr(log, "spline2 true\n") != NULL);
+    CHECK(strstr(g_events, "1:clearAimFocus()\n") != NULL);
+    CHECK(sh_script_status("aaaaaaaa") == SH_SCRIPT_RUNNING);
+    sh_script_map_end();
+}
+
+static void test_brain_refusals(void)
+{
+    printf("-- the brain's calls refuse plainly\n");
+    expect_stop("self:recoil(2)", "\"recoil\" needs a weight from 0 (no recoil) to 1 (full), got 2");
+    expect_stop("ent(4):recoil(0.5)", "\"recoil\" works only on this mod's own demons");
+    expect_stop("self:aim_point(5)", "\"aim_point\" needs a position");
+    expect_stop("self:anim_valid('evade/side', 'TF_FLY')", "\"anim_valid\" does not know the test \"TF_FLY\"");
+    expect_stop("self:anim_valid('a b')", "\"anim_valid\": \"a b\" is not an animWeb node name");
+    expect_stop("self:anim_valid('evade/side', 'TF_BOUNDS', -1)", "\"anim_valid\" needs the animation to try as a whole number");
+    expect_stop("self:anim_force_via('idle', nil)", "\"anim_force_via\" needs the node to force first as \"subweb/state\" text, got nothing");
+    expect_stop("self:firing_position({ kind = 'best' })", "\"firing_position\": kind is \"any\", \"new\", \"superior\" or \"reposition\"");
+    expect_stop("self:firing_position({ near = 5 })", "\"firing_position\" knows target, kind, min, max, ideal, visible, count, path_weight and parms, not \"near\"");
+    expect_stop("self:spline_clear(ent(2), 'shallow_right', 1)", "\"spline_clear\" needs the spline as a table");
+    expect_stop("self:spline_clear(ent(2), { times = {0.5, 0.2}, values = {1} }, 1)", "\"spline_clear\" needs the spline's times rising from 0 to 1");
+    expect_stop("self:spline_clear(ent(2), { times = {1}, values = {1} }, 1, 'TF_BOUNDS')", "\"spline_clear\" knows the flag \"TF_NAV_GROUND\" only");
+    expect_stop("self:pain_string('a b')", "\"pain_string\": \"a b\" is not a usable string");
+    expect_stop("self:block_pain('PAIN_SNEEZE', 1)", "\"block_pain\" does not know the pain reaction \"PAIN_SNEEZE\"");
+    expect_stop("self:block_pain('falter', 9999)", "\"block_pain\" needs seconds from 0 to 600, got 9999");
+}
+
+/* anim_force_via: the via node is forced now; when the web has played it
+ * and moved on, the destination is asked for; the observer reports the
+ * via's blend in and out, then the destination. */
+static void test_anim_force_via(void)
+{
+    const char *log;
+    printf("-- anim_force_via\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then self:anim_force_via('rocket_combat/idle', 'evade/left', 0.25) end\n"
+        "  print('s' .. step .. ' ' .. tostring(self:anim_event('VIA_BLEND_IN_START')) .. ' ' ..\n"
+        "        tostring(self:anim_event('VIA_BLEND_OUT_START')) .. ' ' .. tostring(self:anim_event('DEST_REACHED')))\n"
+        "end)\n"));
+    strcpy(g_ent[1].node, "rocket_combat/walk");
+    tick();                                                  /* forced */
+    strcpy(g_ent[1].node, "evade/left"); tick();             /* the via plays */
+    strcpy(g_ent[1].node, "evade/left_out"); tick();         /* the web left it: the destination is asked for */
+    strcpy(g_ent[1].node, "rocket_combat/idle"); tick();     /* reached */
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(g_events, "1:ssaction_ForceAnimState(0,evade/left,250,0)\n") != NULL);
+    CHECK(strstr(g_events, "1:ssaction_ChangeAnimState(0,rocket_combat/idle,0)\n") != NULL);
+    CHECK(strstr(g_events, "ChangeAnimState(0,rocket_combat/idle") > strstr(g_events, "ForceAnimState(0,evade/left"));
+    CHECK(strstr(log, "s1 false false false\n") != NULL);
+    CHECK(strstr(log, "s4 true true true\n") != NULL);
+    sh_script_map_end();
+}
+
+static void test_pain_records(void)
+{
+    int a, b;
+    printf("-- per-demon pain records\n");
+    sh_ai_pain_records_reset();
+    CHECK(sh_ai_pain_string_get(&a, 5) == NULL);
+    CHECK(sh_ai_pain_string_set(&a, 5, "combo") && !strcmp(sh_ai_pain_string_get(&a, 5), "combo"));
+    CHECK(sh_ai_pain_string_get(&a, 6) == NULL);              /* a new entity in the same memory */
+    CHECK(sh_ai_pain_string_get(&b, 5) == NULL);
+    CHECK(sh_ai_pain_string_set(&a, 5, NULL) && sh_ai_pain_string_get(&a, 5) == NULL);
+    CHECK(sh_ai_block_set(&a, 5, 7, 10000));
+    CHECK(sh_ai_blocked(&a, 5, 7, 9999) && !sh_ai_blocked(&a, 5, 7, 10000) && !sh_ai_blocked(&a, 5, 6, 0));
+    CHECK(!sh_ai_blocked(&b, 5, 7, 0) && !sh_ai_blocked(&a, 6, 7, 0));
+    CHECK(!sh_ai_block_set(&a, 5, 0, 1) && !sh_ai_block_set(&a, 5, SH_AI_PAIN_REACTIONS, 1));
+    sh_ai_pain_records_reset();
+    CHECK(!sh_ai_blocked(&a, 5, 7, 0));
+}
+
+/* The pain-string stub on a synthetic pain request: the two loads the stub
+ * replaces, then the request reads its string from [rbp+0x88]. */
+static const char *g_stub_answer;
+static void *g_stub_seen;
+static const char *stub_fetch(void *ai) { g_stub_seen = ai; return g_stub_answer; }
+
+static void test_pain_stub(void)
+{
+    static const uint8_t fn_head[] = { 0x53, 0x55, 0x48, 0x89, 0xCB, 0x48, 0x89, 0xD5 };   /* push rbx, rbp; rbx=rcx; rbp=rdx */
+    static const uint8_t fn_tail[] = { 0x48, 0x89, 0x4D, 0x50,                           /* mov [rbp+0x50],rcx */
+                                       0x48, 0x8B, 0x85, 0x88, 0x00, 0x00, 0x00,         /* mov rax,[rbp+0x88] */
+                                       0x5D, 0x5B, 0xC3 };
+    uint8_t *mem = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    uint8_t *fn, *site, *tramp, *stub;
+    static uint8_t ai[0xC200], decl[0x100], frame[0x100];
+    const char *(*call)(void *, void *);
+    const char *engine_string = "engine", *r;
+    void *p;
+    size_t n;
+    printf("-- the pain-string stub\n");
+    CHECK(mem != NULL);
+    if (!mem) return;
+    fn = mem; site = fn + sizeof fn_head; tramp = mem + 256; stub = mem + 512;
+    memcpy(fn, fn_head, sizeof fn_head);
+    memcpy(site, k_ai_pain_stolen, SH_AI_PAIN_STUB_STOLEN);
+    memcpy(site + SH_AI_PAIN_STUB_STOLEN, fn_tail, sizeof fn_tail);
+    /* the trampoline: the stolen loads, then back after them */
+    memcpy(tramp, k_ai_pain_stolen, SH_AI_PAIN_STUB_STOLEN);
+    tramp[14] = 0xFF; tramp[15] = 0x25; memset(tramp + 16, 0, 4);
+    p = site + SH_AI_PAIN_STUB_STOLEN; memcpy(tramp + 20, &p, 8);
+    n = sh_ai_pain_stub_build(stub, SH_AI_PAIN_STUB_SIZE, (const void *)stub_fetch, tramp);
+    CHECK(n > 0 && n <= SH_AI_PAIN_STUB_SIZE);
+    CHECK(sh_ai_pain_stub_build(stub, 100, (const void *)stub_fetch, tramp) == 0);
+    /* the 14-byte jump at the site */
+    site[0] = 0xFF; site[1] = 0x25; memset(site + 2, 0, 4);
+    p = stub; memcpy(site + 6, &p, 8);
+    FlushInstructionCache(GetCurrentProcess(), mem, 4096);
+    p = decl; memcpy(ai + 0xC120, &p, 8);
+    p = (void *)(uintptr_t)0x1234; memcpy(decl + 0x90, &p, 8);
+    memcpy(frame + 0x88, &engine_string, 8);
+    call = (const char *(*)(void *, void *))fn;
+    g_stub_answer = "combo";
+    r = call(ai, frame);
+    CHECK(r == g_stub_answer && g_stub_seen == ai);
+    CHECK(*(uint64_t *)(frame + 0x50) == 0x1234);          /* the stolen loads still ran */
+    memcpy(frame + 0x88, &engine_string, 8);
+    g_stub_answer = NULL;
+    r = call(ai, frame);
+    CHECK(r == engine_string);                              /* no script string: the engine's own */
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
 /* test only: ai_anim(self, node, [via], [blend_ms]) is what the entity calls
  * anim_state and anim_force do for a demon (sh_script_ai_anim). */
 static int t_ai_anim(lua_State *L)
@@ -577,8 +1023,10 @@ int main(int argc, char **argv)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ai_anim", t_ai_anim);
-    CHECK(sh_script_ai_register() == 23);
+    CHECK(sh_script_ai_register() == 34);
     sh_script_ai_set_engine(&g_fake);
+    sh_script_api_set_engine(&g_common);
+    sh_script_api_register();
     sh_script_handles_set_resolver(fake_resolve);
 
     test_catalogue(argc > 1 ? argv[1] : "fixtures\\scripts\\event_registry_13954591.txt");
@@ -591,6 +1039,14 @@ int main(int argc, char **argv)
     test_refusals();
     test_turn_done();
     test_removed_and_unavailable();
+    test_brain_pure();
+    test_compositions();
+    test_sight_against_a_wall();
+    test_brain_calls();
+    test_brain_refusals();
+    test_anim_force_via();
+    test_pain_records();
+    test_pain_stub();
     files_clear();
     CHECK(sh_script_bytes_in_use() == 0);
     printf(g_fail ? "script_api_ai_test: FAILED\n" : "script_api_ai_test: ok\n");

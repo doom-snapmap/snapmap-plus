@@ -1071,7 +1071,8 @@ void sh_mb_script_scan(const char *t, size_t n, sh_mb_script_call_fn fn, void *c
                                 memcpy(ev, t + j, el);
                                 ev[el] = 0;
                                 if (!strcmp(ev, "spawn") || !strcmp(ev, "think") || !strcmp(ev, "remove") ||
-                                    !strcmp(ev, "damage") || !strcmp(ev, "death") || !strcmp(ev, "anim"))
+                                    !strcmp(ev, "damage") || !strcmp(ev, "death") || !strcmp(ev, "anim") ||
+                                    !strcmp(ev, "pain") || !strcmp(ev, "projectile") || !strcmp(ev, "frame_event"))
                                     what = SH_MB_SCRIPT_BIND;
                                 else if (!strcmp(ev, "input")) what = SH_MB_SCRIPT_INPUT;
                             }
@@ -4374,7 +4375,8 @@ static void mb_close_campaign(sh_mb_bundle *b, const sh_mb_resolver *r, const wc
 
 /* The event words of on.<event>(name, ...) that bind an entityDef, in the
  * order the builder block lists them. */
-static const char *const mb_script_events[] = { "spawn", "think", "remove", "damage", "death", "anim", NULL };
+static const char *const mb_script_events[] = { "spawn", "think", "remove", "damage", "death", "anim", "pain",
+                                                 "projectile", "frame_event", NULL };
 
 typedef struct mb_script_use {
     int what;              /* SH_MB_SCRIPT_BIND .. SH_MB_SCRIPT_REQUIRE */

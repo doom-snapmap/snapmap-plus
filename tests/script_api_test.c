@@ -202,9 +202,32 @@ static int f_trace(const float a[3], const float b[3], uint32_t ignore, sh_scrip
 
 static int f_time(int *ms) { *ms = g_ms; return 1; }
 
+/* The floor for nav_ground: z 0 everywhere, a slope too steep to stand on
+ * past x 1000, nothing at all below x -1000. */
+static int g_floor_traces;
+static int floor_trace(const float a[3], const float b[3], uint32_t ignore, sh_script_trace *t)
+{
+    (void)ignore;
+    g_floor_traces++;
+    memset(t, 0, sizeof *t);
+    t->fraction = 1;
+    memcpy(t->end, b, 12);
+    t->hit_spawn_id = SH_SCRIPT_SPAWN_ID_NONE;
+    if (a[0] < -1000 || !(a[2] >= 0 && b[2] < 0)) return 1;
+    t->fraction = a[2] / (a[2] - b[2]);
+    t->end[2] = 0;
+    t->hit_spawn_id = SH_SCRIPT_SPAWN_ID_WORLD;
+    if (a[0] > 1000) { t->normal[0] = 0.8f; t->normal[2] = 0.6f; }
+    else t->normal[2] = 1;
+    return 1;
+}
+static int f_ground(const float pos[3], float out[3]) { return sh_script_api_ground_trace(floor_trace, pos, out); }
+static int g_difficulty = 2;
+static int f_difficulty(int *level) { if (g_difficulty < 0) return 0; *level = g_difficulty; return 1; }
+
 static const sh_script_engine k_engine = {
     f_resolve, f_spawn_id, f_slots, f_slot_spawn_id, f_kind, f_origin, f_axis, f_place, f_def_name, f_event,
-    f_ai_health, f_ai_heal, f_ai_set_health, f_anim_node, f_spawn, f_trace, f_time
+    f_ai_health, f_ai_heal, f_ai_set_health, f_anim_node, f_spawn, f_trace, f_time, f_ground, f_difficulty
 };
 
 /* The AI calls' engine seam, as far as a demon's animation needs it: the
@@ -499,6 +522,45 @@ static void test_world(void)
             "3", "\"entities_near\" needs the radius as a number, got nothing");
 }
 
+/* nav_ground: the trace straight down, a flat enough surface only;
+ * difficulty: the engine's value, nil when it cannot be read. */
+static void test_ground_and_difficulty(void)
+{
+    float pos[3] = { 10, 20, 300 }, out[3];
+    printf("-- nav_ground and difficulty\n");
+    g_floor_traces = 0;
+    CHECK(sh_script_api_ground_trace(floor_trace, pos, out) == 1 && out[0] == 10 && out[1] == 20 && out[2] == 0);
+    CHECK(g_floor_traces == 1);
+    pos[2] = -10;    /* just under the floor: the trace starts SH_SCRIPT_GROUND_ABOVE higher and finds it */
+    CHECK(sh_script_api_ground_trace(floor_trace, pos, out) == 1 && out[2] == 0);
+    pos[0] = 2000; pos[2] = 50;
+    CHECK(sh_script_api_ground_trace(floor_trace, pos, out) == 0);   /* too steep */
+    pos[0] = -2000;
+    CHECK(sh_script_api_ground_trace(floor_trace, pos, out) == 0);   /* nothing below */
+    CHECK(sh_script_api_ground_trace(NULL, pos, out) == 0);
+    run("api = 1\n"
+        "on.spawn('ai/brute', function(self)\n"
+        "  local g = nav_ground({x = 5, y = 6, z = 100})\n"
+        "  print('ground', g.x, g.y, g.z)\n"
+        "  print('steep', nav_ground({x = 1500, y = 0, z = 100}))\n"
+        "  print('under self', nav_ground(self).z)\n"
+        "  print('difficulty', difficulty())\n"
+        "end)\n");
+    CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
+    CHECK(has(log_now(), "ground\t5.0\t6.0\t0.0"));
+    CHECK(has(g_log, "steep\tnil"));
+    CHECK(has(g_log, "under self\t0.0"));
+    CHECK(has(g_log, "difficulty\t2"));
+    g_difficulty = -1;
+    run("api = 1\non.spawn('ai/brute', function(self) print('unread', difficulty()) end)\n");
+    CHECK(has(log_now(), "unread\tnil"));
+    g_difficulty = 2;
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  difficulty(1)\nend)\n",
+            "3", "\"difficulty\" takes no values; call it as difficulty()");
+    refused("api = 1\non.spawn('ai/brute', function(self)\n  nav_ground(5)\nend)\n",
+            "3", "\"nav_ground\" needs the position to look under");
+}
+
 static void test_animation(void)
 {
     fent *ai;
@@ -585,6 +647,7 @@ int main(void)
     test_refusals();
     test_spawn();
     test_world();
+    test_ground_and_difficulty();
     test_animation();
     test_view_angle();
     sh_script_map_end();

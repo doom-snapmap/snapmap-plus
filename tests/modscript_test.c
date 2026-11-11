@@ -161,10 +161,14 @@ static void test_scan(void)
         "on.input(\"switch_used\", function(n) node(\"open_door\"):fire() end)\n"   /* 7 */
         "on.spawn(name, f) on.damage(\"a\" .. b, f) on.map_start(f)\n"  /* 8 */
         "local m = require \"fsm\" local u = require(\"util\") require(mod)\n"       /* 9 */
-        "on.input(\"esc\\\"aped\", f) on . death ( [[ai/long]] , f)\n";  /* 10 */
+        "on.input(\"esc\\\"aped\", f) on . death ( [[ai/long]] , f)\n"   /* 10 */
+        "on.pain('ai/demon/tyrant', f) on.projectile(\"ai/demon/tyrant\", f)\n"   /* 11 */
+        "on.frame_event('ai/demon/tyrant', 'blackboard', f) on.frame_event(def, 'x', f)\n";  /* 12 */
     static const char want[] =
         "5:bind.spawn:ai/door|5:bind.think:ai/door|6:bind.anim:ai/brute|7:input:switch_used|7:output:open_door|"
-        "8:bind.spawn?:|8:bind.damage?:|9:require:fsm|9:require:util|9:require?:|10:input?:|10:bind.death:ai/long|";
+        "8:bind.spawn?:|8:bind.damage?:|9:require:fsm|9:require:util|9:require?:|10:input?:|10:bind.death:ai/long|"
+        "11:bind.pain:ai/demon/tyrant|11:bind.projectile:ai/demon/tyrant|12:bind.frame_event:ai/demon/tyrant|"
+        "12:bind.frame_event?:|";
     printf("-- the static pass: literal calls only, comments and strings skipped\n");
     g_scan[0] = 0;
     sh_mb_script_scan(text, sizeof text - 1, scan_cb, NULL);
