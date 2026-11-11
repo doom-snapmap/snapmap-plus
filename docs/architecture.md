@@ -886,8 +886,9 @@ folder rebuilt with new bytes is installed beside the build a map pins, never
 over it; `sh_modserve_row_other_build` answers the other build for the launch
 gate's wording. `sh_modserve_bundle_serving` with a hash answers exactly that
 build (an alias resolves), never a newer one of the key, so activation and the
-save keep each row's pin; without a hash it answers the newest build of the
-key. The scope listing is keyed by hash too ([Map scope](#map-scope)).
+save keep each row's pin; without a hash it answers the build of the key that
+serves with no map open: the player's own folder when one is admitted, else the
+newest. The scope listing is keyed by hash too ([Map scope](#map-scope)).
 What a placed entity depends on. The save closure and the map listing resolve
 each placed name (`sh_modmanifest_placed_names`: the `inherit` and
 `moduleName` values and every string in an entity's `edit` state) through
@@ -1132,8 +1133,14 @@ played (see [Map scope](#map-scope)); a new name applies once it is registered: 
 `sh_mods palette rebuild`, or the load of a map that names their bundle, below),
 gameplay decls when a map that names their bundle loads. Two builds of one key
 are never a conflict: each map serves the build its rows pin and the other is
-inert for it; with no map open the newest build (built time, then folder) serves
-its names for the Toybox, and the index build logs one `MODS: key <key>: bundles
+inert for it; with no map open the player's own folder of the key (origin
+by-hand, install or migration) serves its names for the Toybox when one is
+admitted, else the newest build (built time, then folder): a build the product
+received for a map (a download, an import, a delivered package) never serves
+over the folder its author edits (owner 2026-11-10, `ms_preferred`: the legacy
+SP doors download had become "newest" over the owner's folder). The gate's
+"installed at another build" answer (`sh_modserve_row_other_build`) follows the
+same rule. The index build logs one `MODS: key <key>: bundles
 <hash16> (<version>) and <hash16> (<version>) both provide paths with other
 bytes; ...` line.
 
@@ -1969,7 +1976,8 @@ the listing and read lock-free (`sv`: names under its key, shadows, surfaces):
   builder rules rebuilds at boot, and a map with string-variable rows
   migrates at its next save);
 - otherwise, in the editor and with no map open: the names under its key, for
-  the newest build of the key only (the Toybox offers its rows; placing one
+  the one build of the key that serves with no map (the player's own folder,
+  else the newest; the Toybox offers its rows; placing one
   declares it at the next save), and its surfaces; never its shadows. In Play:
   nothing.
 
@@ -1987,7 +1995,8 @@ are off, and gating on it blocked every row of the key.
 A `mod.json` `"scope"` key no longer chooses (logged once). Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the
-newest build first for one key, index order for identical bytes), and
+player's own build, then the newest, first for one key, index order for
+identical bytes), and
 `ms_scope_compute` chooses the file that serves it for the listing
 (`scope_alt`, read by `ms_scoped` on every lookup): among the declared (and
 editor-time) providers by the conflict rules above, composed when their texts
@@ -2330,7 +2339,7 @@ by `modswf.c`; a pack migrated before that was left out can be migrated again
 with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
 shares one with a delivered or converted package (the beta.19 `doors` packs),
 the two are builds of one key: each map serves the build it pins, and with no
-map open the newest serves. Stock names are not checked during the migration because the
+map open the migrated pack (the player's own) serves. Stock names are not checked during the migration because the
 pass runs without the game's resource reader, so unresolved needs only warn, as
 for a converted carrier.
 

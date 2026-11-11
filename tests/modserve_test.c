@@ -3960,7 +3960,55 @@ static void test_additive_determinism(void)
     sh_modserve_scope_enable(0);
 }
 
+/* Owner 2026-11-10: with no map open the player's own folder of a key
+ * serves, not a newer download of it (the legacy SP doors download became
+ * "newest" over the owner's folder); an own published map's row follows
+ * the own folder (sh_modserve_row_follow_own). */
 #define OWN_THING "generated/decls/entitydef/mods/k.own/thing.decl"
+static void test_own_folder_over_download(void)
+{
+    static const fx_file mine[] = {
+        { OWN_THING, "entityDef thing { mine }", -1, "entityDef", "mods/k.own/thing", NULL, '1' },
+    };
+    static const fx_file theirs[] = {
+        { OWN_THING, "entityDef thing { downloaded }", -1, "entityDef", "mods/k.own/thing", NULL, '2' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], hm[65], hd[65], hx[65];
+    char *slash;
+    sh_modserve_bundle_ref ref;
+    sh_modmanifest_row row;
+    printf("-- with no map open the player's own folder serves, never a newer download of its key\n");
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownkey\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "k.own", "k.own", "1.0.0", 'a', NULL, mine, 1, "{\"installedAt\": 100}");
+    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
+                "{\"installedAt\": 900, \"origin\": \"download\"}");
+    hash64('a', hm); hash64('b', hd); hash64('c', hx);
+    sh_modserve_scope_enable(0);
+    CHECK(sh_modserve_index_build(root) == 2);
+    sh_modserve_scope_enable(1);
+    CHECK(!strcmp(ad_served(OWN_THING), "entityDef thing { mine }"));
+    CHECK(sh_modserve_bundle_serving(NULL, "k.own", &ref) && !strcmp(ref.hash, hm));
+    /* A map that pins the download still gets exactly it. */
+    CHECK(sh_modserve_bundle_serving(hd, "k.own", &ref) && !strcmp(ref.hash, hd));
+    /* The other build the gate words for a missing pin is the own folder. */
+    memset(&row, 0, sizeof row);
+    strcpy_s(row.id, sizeof row.id, "k.own");
+    strcpy_s(row.bundle, sizeof row.bundle, hx);
+    CHECK(sh_modserve_row_other_build(&row, &ref) && !strcmp(ref.hash, hm));
+    sh_modserve_scope_enable(0);
+    /* Only a download of the key: it serves as the newest. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\ownkey2\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "downloads\\Doors\\k.own", "k.own", "1.0.0", 'b', NULL, theirs, 1,
+                "{\"installedAt\": 900, \"origin\": \"download\"}");
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_bundle_serving(NULL, "k.own", &ref) && !strcmp(ref.hash, hd));
+}
+
 /* Owner 2026-11-10: an own published map's row follows the own folder of
  * its key (sh_modserve_row_follow_own), whatever build it pins; a key only
  * a download holds keeps the pin. */
@@ -5241,6 +5289,7 @@ int main(void)
     test_additive_determinism();
     test_additive_same_key();
     test_follow_own();
+    test_own_folder_over_download();
     test_two_builds_requirements();
     test_additive_compose();
     test_additive_key_and_snapshot();

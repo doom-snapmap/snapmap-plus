@@ -800,8 +800,10 @@ int sh_modserve_row_served_for(const struct sh_modmanifest_row *row, const char 
 /* The admitted build that serves a mod: with `bundle_hash`, exactly that
  * bundle (aliases resolve), or none when it is not installed, whatever other
  * build of the key is (a map pins its build, DESIGN-additive 2.5); without
- * one, the newest admitted bundle of `id` (built time, then folder). 1 with
- * *out filled, 0 when none. */
+ * one, the admitted bundle of `id` that serves with no map open: the
+ * player's own folder (origin by-hand, install, migration) when one exists,
+ * else the newest (built time, then folder). 1 with *out filled, 0 when
+ * none. */
 typedef struct sh_modserve_bundle_ref {
     char id[96], version[160], hash[SH_MODSERVE_HASH_HEX + 1];
     unsigned long long size;   /* carried bytes, as a manifest row's size */

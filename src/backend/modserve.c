@@ -1389,6 +1389,18 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
     return strcmp(ba->folder, bb->folder) > 0;
 }
 
+/* Of two builds of one key, the one that serves with no map declaring the
+ * key (owner 2026-11-10): the player's own folder (origin by-hand, install
+ * or migration) over one the product received with a map (a download, an
+ * import, a delivery), else the newer. A download never becomes "newest"
+ * over the folder its author edits. */
+static int ms_preferred(const ms_index *x, int a, int b)
+{
+    const ms_bundle *ba = &x->bundles[a], *bb = &x->bundles[b];
+    if (ba->own != bb->own && ba->id && bb->id && !strcmp(ba->id, bb->id)) return ba->own;
+    return ms_newer(x, a, b);
+}
+
 /* ------------------------------------------------------------------ decl list composition
  *
  * Several mods often shadow one stock list decl to append their own entries:
@@ -1985,7 +1997,7 @@ static int ms_static_before(const ms_index *x, int a, int b)
     const ms_bundle *ba = &x->bundles[a], *bb = &x->bundles[b];
     int c;
     if (a == b) return 0;
-    if (!strcmp(ba->id, bb->id)) return ms_newer(x, a, b);
+    if (!strcmp(ba->id, bb->id)) return ms_preferred(x, a, b);
     c = strcmp(ba->id, bb->id);
     if (c) return c < 0;
     return strcmp(ba->hash, bb->hash) < 0;
@@ -2049,7 +2061,7 @@ static void ms_record_alts(ms_index *x, const ms_avail *av, const ms_key *keys, 
         int b = 0, q;
         if (ordered == 1 && av && m > 1) b = ms_pick(x, av, rest, 0, m, &why);
         else if (ordered == 2)
-            for (q = 1; q < m; ++q) if (ms_newer(x, x->files[rest[q].file].bundle, x->files[rest[b].file].bundle)) b = q;
+            for (q = 1; q < m; ++q) if (ms_preferred(x, x->files[rest[q].file].bundle, x->files[rest[b].file].bundle)) b = q;
         x->alts[x->nalts++] = rest[b].file;
         x->files[rest[b].file].alt_of = winner;
         memmove(&rest[b], &rest[b + 1], sizeof *rest * (size_t)(m - b - 1));
@@ -2112,9 +2124,10 @@ static int ms_resolve(ms_index *x)
         } else if (same_id) {
             /* Two builds of one key (a fork, or an update beside the build a
              * map pins): never a conflict. Each map serves the build it
-             * declares; the newest is the static winner (no map open). */
+             * declares; the player's own folder, else the newest, is the
+             * static winner (no map open; ms_preferred). */
             for (k = i + 1; k < j; ++k)
-                if (ms_newer(x, x->files[keys[k].file].bundle, x->files[winner].bundle)) winner = keys[k].file;
+                if (ms_preferred(x, x->files[keys[k].file].bundle, x->files[winner].bundle)) winner = keys[k].file;
             x->files[winner].served = 1;
             ms_record_alts(x, NULL, keys, i, j, winner, 2);
             for (k = i; k < j; ++k)
@@ -4088,15 +4101,16 @@ int sh_modserve_index_build(const char *mods_root)
     ms_mark_editor_closure(x);
     for (i = 0; i < x->nbundles; ++i) x->admitted += x->bundles[i].admitted;
     ms_registry_relevant(x);
-    /* The newest admitted build of each key: what serves for the Toybox with
-     * no map declaring the key (built time, then folder name). */
+    /* The build of each key that serves for the Toybox with no map declaring
+     * the key: the player's own folder when one is admitted, else the newest
+     * admitted build (built time, then folder name; ms_preferred). */
     for (i = 0; i < x->nbundles; ++i) {
         ms_bundle *b = &x->bundles[i];
         int k;
         b->newest = b->admitted;
         b->rank = -1;
         for (k = 0; b->newest && k < x->nbundles; ++k)
-            if (k != i && x->bundles[k].admitted && !strcmp(x->bundles[k].id, b->id) && ms_newer(x, k, i)) b->newest = 0;
+            if (k != i && x->bundles[k].admitted && !strcmp(x->bundles[k].id, b->id) && ms_preferred(x, k, i)) b->newest = 0;
     }
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
@@ -6612,7 +6626,7 @@ int sh_modserve_bundle_serving(const char *bundle_hash, const char *id, sh_modse
         for (i = 0; i < x->nbundles; ++i) {
             const ms_bundle *b = &x->bundles[i];
             if (!b->admitted || !b->id || strcmp(b->id, lower)) continue;
-            if (at < 0 || ms_newer(x, i, at)) at = i;
+            if (at < 0 || ms_preferred(x, i, at)) at = i;
         }
     }
     if (at < 0) return 0;
@@ -6680,14 +6694,15 @@ static int ms_bundle_carries(const ms_index *x, int b, const char *lower)
     return 0;
 }
 
-/* The newest admitted build of `id` (lowercase) other than `not`, or -1. */
+/* The admitted build of `id` (lowercase) other than `not` that serves with
+ * no map (ms_preferred: the player's own, else the newest), or -1. */
 static int ms_other_build(const ms_index *x, const char *id, int not)
 {
     int i, at = -1;
     for (i = 0; x && i < x->nbundles; ++i) {
         const ms_bundle *b = &x->bundles[i];
         if (i == not || !b->admitted || !b->id || strcmp(b->id, id)) continue;
-        if (at < 0 || ms_newer(x, i, at)) at = i;
+        if (at < 0 || ms_preferred(x, i, at)) at = i;
     }
     return at;
 }
