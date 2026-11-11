@@ -1,5 +1,5 @@
 /* mkcmd_template.inc -- AUTO-GENERATED, C-compatible copy of src/ui/mkcmd_template.inc (byte-exact
- * OG idSnapEntityPrefab template: prefix @0x1ca30 + the __SH_MKCMD_COMMANDTEXT__ placeholder +
+ * idSnapEntityPrefab template: prefix @0x1ca30 + the __SH_MKCMD_COMMANDTEXT__ placeholder +
  * suffix @0x1cb50). C has no raw string literal, so this is the SAME payload with '"' escaped as
  * '\"' instead of a R"json(...)json" wrapper. Mechanically regenerated from src/ui/mkcmd_template.inc
  * whenever that changes (do NOT hand-edit either copy independently -- they must stay byte-identical
