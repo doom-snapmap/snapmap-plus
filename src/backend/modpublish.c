@@ -147,6 +147,8 @@ typedef struct mp_save {
     char (*hashes)[MP_MOD_CAP];
     unsigned long long bytes;                  /* their sizes, summed */
     int carrier;                               /* the text carries the snapmap-plus member */
+    int unreadable;                            /* rows the reader refused, or the read failed: never published */
+    char unreadable_name[96];                  /* the first refused row's mod name, "" when it has none */
 } mp_save;
 
 static mp_save g_save;
@@ -156,6 +158,42 @@ static void mp_save_clear(mp_save *s)
 {
     free(s->hashes);
     memset(s, 0, sizeof(*s));
+}
+
+/* The name a refused row gives its mod, read from the member itself: each
+ * row of the "mods" part is read alone, and the first the manifest reader
+ * refuses names it ("" when it has no name either). */
+static void mp_refused_name(const char *text, size_t length, char *out, size_t cap)
+{
+    size_t from = 0, to = 0;
+    const char *cursor, *elem;
+    size_t elem_len;
+    out[0] = 0;
+    if (sh_carrier_part(text, length, "mods", &from, &to) != 1) return;
+    cursor = text + from;
+    while (sh_carrier_array_next(&cursor, text + to, &elem, &elem_len) == 1) {
+        static const char head[] = "{\"" SH_CARRIER_KEY "\":{\"format\":1,\"mods\":[";
+        sh_modmanifest_list one;
+        unsigned refused = 0;
+        char *alone = (char *)malloc(sizeof head + elem_len + 4);
+        const char *name = NULL;
+        size_t name_len = 0;
+        if (!alone) return;
+        memcpy(alone, head, sizeof head - 1);
+        memcpy(alone + sizeof head - 1, elem, elem_len);
+        memcpy(alone + sizeof head - 1 + elem_len, "]}}", 4);
+        memset(&one, 0, sizeof one);
+        (void)sh_modmanifest_read(alone, strlen(alone), &one, &refused);
+        sh_modmanifest_list_free(&one);
+        free(alone);
+        if (!refused) continue;
+        if (sh_carrier_object_string(elem, elem + elem_len, "name", &name, &name_len) == 1 && name_len < cap &&
+            !memchr(name, '\\', name_len)) {
+            memcpy(out, name, name_len);
+            out[name_len] = 0;
+        }
+        return;
+    }
 }
 
 void sh_modpublish_save_seen(const char *text, size_t length)
@@ -177,6 +215,7 @@ void sh_modpublish_save_seen(const char *text, size_t length)
             g_save.carrier = sh_carrier_view_read(text, length, &view) && view.state != SH_CARRIER_ABSENT;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_save.carrier = 0;
+            g_save.unreadable = 1;
         }
     }
     if (!g_save.carrier) return;
@@ -184,14 +223,15 @@ void sh_modpublish_save_seen(const char *text, size_t length)
     __try {
         (void)sh_modmanifest_read(text, length, &rows, &rejected);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_save.valid = 0;
-        mp_log("MODS: publish: the saved map's manifest rows could not be read");
+        memset(&rows, 0, sizeof rows);   /* left as it is: its state is unknown */
+        g_save.unreadable = 1;
+        mp_log("MODS: publish: the saved map's mod list could not be read; it will not be published");
         return;
     }
     if (rows.count) {
         g_save.hashes = calloc(rows.count, sizeof(*g_save.hashes));
         if (!g_save.hashes) {
-            g_save.valid = 0;
+            g_save.unreadable = 1;
             sh_modmanifest_list_free(&rows);
             return;
         }
@@ -202,10 +242,13 @@ void sh_modpublish_save_seen(const char *text, size_t length)
         g_save.count = rows.count;
     }
     if (rejected) {
-        /* A row the reader refused names a bundle the upload cannot know:
-         * publishing would leave players without it. */
-        g_save.valid = 0;
-        mp_logf("MODS: publish: %u manifest row(s) of the save did not read; the publish will not be gated", rejected);
+        /* A row the reader refused names a mod the upload cannot know:
+         * publishing would leave players without it, so the map is not
+         * published until it is fixed. */
+        g_save.unreadable = 1;
+        mp_refused_name(text, length, g_save.unreadable_name, sizeof g_save.unreadable_name);
+        mp_logf("MODS: publish: %u row(s) of the saved map's mod list did not read (first: %s); it will not be published",
+                rejected, g_save.unreadable_name[0] ? g_save.unreadable_name : "a mod with no name");
     }
     sh_modmanifest_list_free(&rows);
 }
@@ -673,6 +716,20 @@ int sh_modpublish_after_save(void *editor)
                     "This map is %s, over the map service's 10.0 MB limit by %s. It was not published.", size, over);
         mp_logf("MODS: publish refused: the saved text is %zu bytes, over the %llu-byte bound", g_save.length,
                 SH_MODPUBLISH_TEXT_BOUND);
+        if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
+        mp_editor_notice(editor, line);
+        memset(&g_ctx, 0, sizeof g_ctx);
+        return 0;
+    }
+    if (g_save.unreadable) {
+        if (g_save.unreadable_name[0])
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "The map was not published: Snapmap+ cannot read the mod %s in its list. Remove that mod in "
+                        "the Mods tab, save, and publish again.", g_save.unreadable_name);
+        else
+            strcpy_s(line, sizeof line, "The map was not published: its list of mods cannot be read. Save the map "
+                                        "again, then publish it.");
+        mp_logf("MODS: publish refused: %s", line);
         if (g_ops.publish_fail) g_ops.publish_fail(g_ops.context, editor);
         mp_editor_notice(editor, line);
         memset(&g_ctx, 0, sizeof g_ctx);

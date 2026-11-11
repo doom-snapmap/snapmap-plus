@@ -319,6 +319,20 @@ int main(int argc, char **argv)
         CHECK(strstr(q, "uses 1 mod (512 bytes). Upload it") != NULL && strlen(q) < 256);
     }
 
+    printf("-- a save whose mod list has a row the reader refuses is not published, naming the mod\n");
+    {
+        static const char BAD[] = "{\"name\":\"t\",\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+            "\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"NOT A SALT@abc\",\"name\":\"Hell Guards\",\"size\":1,"
+            "\"names\":[]}]}}";
+        int fails = F.fails, requests = g_stub.requests;
+        sh_modpublish_save_seen(BAD, strlen(BAD));
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        CHECK(!sh_modpublish_holding() && F.fails == fails + 1 && g_stub.requests == requests);
+        CHECK(!strcmp(F.toast, "The map was not published: Snapmap+ cannot read the mod Hell Guards in its list. "
+                               "Remove that mod in the Mods tab, save, and publish again."));
+        F.fails = fails;   /* the counts below start here */
+    }
+
     printf("-- a save without rows passes through\n");
     {
         int claims = g_stub.claim_calls, requests = g_stub.requests;
