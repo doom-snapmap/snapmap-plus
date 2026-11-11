@@ -391,7 +391,7 @@ size for a player to download, last save) and one row per mod the map uses: its 
 size, the entities placed from it and the wires and Timelines pointing at them, each with Remove
 from map. A map-level mod (`attached`) reads "Used by the whole map", or "Used by the whole map,
 nothing placed" (`nothingPlaced`). A mod the map needs that is not installed reads "not installed on
-this computer; playing the map downloads it". When several of the map's mods edit one field of a
+this computer" (a map never published, and the editor's own Play, download nothing). When several of the map's mods edit one field of a
 game file to different values (`registryClashes`), **Choices between mods** shows one select per
 slot ("<path> in <game file>") naming the mods; a change sends `chooseRegistry` with
 `"<slot>\t<salt>"`. Remove from map and Uninstall first send a dry run; its answer is the
@@ -506,7 +506,7 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `openFolder` | The host's own: opens the mods folder, or with `arg` that folder under it. |
 | `mapAddMod` | Attach the mod to the open map without placing anything (a map-level row for the build of its folder at the root); the next save writes it. A folder a downloaded map or a prefab brought names its mod: the root folder of its salt is attached, and without one the answer sends the player to Add to my mods. The window never sets where a map finds its mods. |
 | `chooseRegistry` | `"<slot>\t<salt>"` (an empty salt clears): the open map's choice of whose edit serves that slot. |
-| `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |
+| `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, then its row, and with the last mod the search tag. With placed entities the row goes only once the editor's delete has committed and the map holds none of the mod's objects; objects still there keep their row. |
 | `uninstallPreview`, `uninstall` | The dry run and the uninstall: the open map cleaned of the mod, its undo history cleared, the folder moved to the Recycle Bin, the rescan. |
 | `modFiles`, `modFileText` | The Files view's reads (no fresh document follows). |
 | `openFile` | `"<folder>\t<path below it>"`: the host opens one file of the mod folder in the program Windows opens it with (Windows' Open with dialog for a kind with none); answered by the host, nothing reaches the backend. |

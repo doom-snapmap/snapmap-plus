@@ -89,8 +89,10 @@ var modsTab = (function () {
      Other reference kinds are not consequences of the removal and are not shown. */
   var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok'};
-  /* A map needs the files its rows list; a mod folder provides them (the asset rule). */
-  var NOT_INSTALLED = 'not installed on this computer; playing the map downloads it';
+  /* A map needs the files its rows list; a mod folder provides them (the asset rule). Whether a Play
+     can download it depends on the map (a map never published, the editor's own Play cannot), so the
+     line says only what is true in every case. */
+  var NOT_INSTALLED = 'not installed on this computer';
   var MAP_CAUSES = {missing: NOT_INSTALLED, incomplete: 'installed, but it lacks files this map uses',
                     skipped: 'installed, but it cannot be used right now'};
   /* Under the Uninstall confirmation's scope line: what Ctrl+Z and the Recycle Bin can still do. */

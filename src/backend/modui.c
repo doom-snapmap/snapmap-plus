@@ -2882,6 +2882,16 @@ static char g_undo_owed_key[SH_MS_NAME_MAX + 1];
 static ULONGLONG g_poll_next;
 #define MU_UNDO_WAIT_MS 10000
 
+/* A map remove's owed row drop (mu_drop_tick, with mu_map_apply). */
+#define MU_DROP_MAX 16
+static volatile LONG g_drop_owed;
+static ULONGLONG g_drop_owed_at;
+static char g_drop_key[SH_MS_NAME_MAX + 1];
+static char g_drop_hash[SH_MODSERVE_HASH_HEX + 1], g_drop_salt[SH_MB_ID_MAX + 1];
+static char g_drop_builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+static int g_drop_n, g_drop_tag;
+static void mu_drop_tick(void);
+
 /* Clear now. 1 cleared, 0 no editor map (nothing to clear), -1 failed. */
 static int mu_undo_clear_now(const char *key)
 {
@@ -3079,21 +3089,6 @@ static void mu_listing_push(const char ***arr, size_t *n, size_t *cap, const cha
     (*arr)[(*n)++] = s;
 }
 
-/* Builds a map remove just took out of the map: its entity delete commits
- * after the call returns (SH_EDITOR_DELETE_DISPATCHED), so the placed names
- * read for the listing may still name them; they are not listed again by
- * that closure. Main thread; set and cleared around the remove's listing. */
-#define MU_LISTING_SKIP 8
-static char g_listing_skip[MU_LISTING_SKIP][SH_MODSERVE_HASH_HEX + 1];
-static int g_listing_skip_n;
-
-static int mu_listing_skipped(const char *hash)
-{
-    int i;
-    for (i = 0; hash && i < g_listing_skip_n; i++) if (!_stricmp(g_listing_skip[i], hash)) return 1;
-    return 0;
-}
-
 /* The build a placed name (or its closure) lists. The closure resolves each
  * name under the listing in force, which at a load is the previous map's, so
  * the build it reports may be one that map declared (a rawmap opened over a
@@ -3110,7 +3105,6 @@ static void mu_listing_visit(void *context, const char *bundle_id, const char *b
     sh_modmanifest_row probe;
     size_t i;
     (void)size; (void)name;
-    if (mu_listing_skipped(bundle_hash)) return;
     for (i = 0; bundle_id && i < l->ni; i++) if (!_stricmp(l->ids[i], bundle_id)) return;   /* a row declares the salt */
     memset(&probe, 0, sizeof probe);
     if (bundle_id && strlen(bundle_id) < sizeof probe.salt && bundle_hash && strlen(bundle_hash) < sizeof probe.build) {
@@ -3118,7 +3112,6 @@ static void mu_listing_visit(void *context, const char *bundle_id, const char *b
         strcpy_s(probe.build, sizeof probe.build, bundle_hash);
     }
     if (probe.salt[0] && sh_modserve_row_build(&probe, &serving) && _stricmp(serving.hash, bundle_hash)) {
-        if (mu_listing_skipped(serving.hash)) return;
         if (l->no == l->co) {
             size_t nc = l->co ? l->co * 2 : 8;
             char **na = (char **)realloc((void *)l->own, nc * sizeof *na);
@@ -3396,7 +3389,7 @@ int sh_modui_poll_due(void)
     ULONGLONG now;
     /* An owed undo clear is checked after every native frame: it must land
      * before the next frame's input can step the history back. */
-    if (InterlockedCompareExchange(&g_undo_owed, 0, 0)) return 1;
+    if (InterlockedCompareExchange(&g_undo_owed, 0, 0) || InterlockedCompareExchange(&g_drop_owed, 0, 0)) return 1;
     if (!(sh_modserve_scope_enabled() && (InterlockedCompareExchange(&g_scope_owed, 0, 0) || sh_modserve_scope_map_open() ||
                                           sh_modserve_scope_relevant())))
         return 0;
@@ -3420,9 +3413,11 @@ int sh_modui_poll_main(void *context)
     if (!e->map_info || e->map_info(&info) != 1) {                  /* the editor, with a map */
         /* The map the clear was owed for is gone; so is its history. */
         if (InterlockedExchange(&g_undo_owed, 0)) mu_log("uninstall %s: the editor left the map before the clear", g_undo_owed_key);
+        if (InterlockedExchange(&g_drop_owed, 0)) mu_log("map remove %s: the editor left the map before the delete committed", g_drop_key);
         mu_scope_tick(0);
         return 0;
     }
+    mu_drop_tick();
     mu_undo_tick();
     mu_scope_tick(1);
     return 1;
@@ -3513,17 +3508,69 @@ static const char *mu_delete_cause(int status)
     }
 }
 
+/* The rows a map remove drops: never before the map holds none of the
+ * mod's objects. With placed entities the native delete releases them at
+ * once but commits its undo step on later editor frames, so the drop is owed
+ * to the tick (mu_drop_tick), which waits for that commit, reads the map
+ * again and drops the rows only when no object of the mod is left; objects
+ * that are still there (a delete the editor did not finish) keep their row.
+ * Main thread (the state sits with the undo history's, above). */
+
+/* Drop the noted rows, with the last mod the search tag, and bring the
+ * change into the game. */
+static void mu_drop_rows(const char *key, char builds[][SH_MODMANIFEST_HASH_CAP], int n, int untag)
+{
+    const sh_modui_engine *e = mu_engine();
+    size_t rows = 0;
+    int i, tag = 0;
+    for (i = 0; i < n; i++) rows += sh_modmanifest_current_remove(builds[i]);
+    if (untag && e->remove_tag) tag = e->remove_tag(MU_TAG);
+    (void)mu_scope_now("map remove");
+    InterlockedIncrement(&g_gen);
+    mu_log("map remove %s: %zu row(s) of the map's list of mods dropped%s", key, rows,
+           !untag ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
+                                                                   : ", the search tag could not be removed");
+}
+
+/* The tick's part: once the delete has committed (or MU_UNDO_WAIT_MS went
+ * by), the owed drop happens when the map holds none of the mod's objects. */
+static void mu_drop_tick(void)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_model m;
+    mu_map mp;
+    size_t i;
+    int left = 0;
+    if (!InterlockedCompareExchange(&g_drop_owed, 0, 0)) return;
+    if (e->undo_pending && e->undo_pending() > 0 && GetTickCount64() - g_drop_owed_at < MU_UNDO_WAIT_MS) return;
+    InterlockedExchange(&g_drop_owed, 0);
+    if (!mu_model_build(&m)) { mu_model_free(&m); return; }
+    mu_map_build(&mp, &m, NULL);
+    for (i = 0; i < mp.mod_count; i++) {
+        const mu_mapmod *x = &mp.mods[i];
+        if ((g_drop_hash[0] && mu_same_bundle(&m, x->hash, g_drop_hash)) || (g_drop_salt[0] && !_stricmp(x->id, g_drop_salt)))
+            left += (int)x->uid_count + x->modules;
+    }
+    if (mp.entities < 0 || left)
+        mu_log("map remove %s: %d of its objects are still in the map, so its row stays", g_drop_key, left);
+    else mu_drop_rows(g_drop_key, g_drop_builds, g_drop_n, g_drop_tag);
+    mu_map_free(&mp);
+    mu_model_free(&m);
+}
+
 /* Remove the planned mod from the open map: its entities in one native
  * Delete Selection (one undo step; the editor drops the wires and references
- * to them with the entities), its manifest row, and with the last mod the
- * search tag. 1 done, 0 refused (msg says why; nothing changed). */
+ * to them with the entities), then its manifest row, and with the last mod
+ * the search tag, at once when it has no entities, else once the delete has
+ * committed (mu_drop_tick). 1 done, 0 refused (msg says why; nothing
+ * changed). */
 static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const char *key, char *msg, size_t cap)
 {
     const sh_modui_engine *e = mu_engine();
     const mu_mapmod *x = &mp->mods[p->mod];
-    size_t i, rows = 0, at = 0;
-    int tag = 0;
-    char dropped[400] = "";
+    char builds[MU_DROP_MAX][SH_MODMANIFEST_HASH_CAP];
+    size_t i;
+    int n = 0;
     if (p->refusal[0]) { _snprintf_s(msg, cap, _TRUNCATE, "%s", p->refusal); return 0; }
     if (x->uid_count) {
         int st;
@@ -3537,46 +3584,33 @@ static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const c
         }
     }
     /* Its row goes; with the last mod, so do the rows of mods only it needed. */
-    g_listing_skip_n = 0;
-    if (x->hash[0]) strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, x->hash);
-    for (i = 0; i < mp->rows.count; i++) {
+    for (i = 0; i < mp->rows.count && n < MU_DROP_MAX; i++) {
         const sh_modmanifest_row *row = &mp->rows.rows[i];
-        size_t k, n;
+        size_t k;
         int drop = 0;
         /* By salt: a row another build serves is the mod's row too. */
         for (k = 0; k < mp->mod_count && !drop; k++)
             if (mu_row_is_mod(m, row, &mp->mods[k]))
                 drop = (int)k == p->mod || (p->vanilla_after && mu_mapmod_follows(&mp->mods[k]));
-        if (!drop) continue;
-        n = sh_modmanifest_current_remove(row->build);
-        rows += n;
-        if (n && at < sizeof dropped - 1) {
-            int w;
-            if (!strcmp(row->build, x->hash) || _stricmp(row->salt, x->id))
-                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s at build %.16s", at ? ", " : " (",
-                                row->salt, row->build);
-            else
-                w = _snprintf_s(dropped + at, sizeof dropped - at, _TRUNCATE, "%s%s declared at build %.16s, served by "
-                                "build %.16s", at ? ", " : " (", row->salt, row->build, x->hash);
-            if (w > 0) at += (size_t)w;
-        }
-        if (g_listing_skip_n < MU_LISTING_SKIP && strlen(mp->rows.rows[i].build) == SH_MODSERVE_HASH_HEX &&
-            !mu_listing_skipped(mp->rows.rows[i].build))
-            strcpy_s(g_listing_skip[g_listing_skip_n++], SH_MODSERVE_HASH_HEX + 1, mp->rows.rows[i].build);
+        if (drop) strcpy_s(builds[n++], SH_MODMANIFEST_HASH_CAP, row->build);
     }
-    if (p->tag_removed && e->remove_tag) tag = e->remove_tag(MU_TAG);
-    /* The mod's shadows, registries and requirements leave with it at once:
-     * its deleted entities, whose delete has not committed yet, do not keep
-     * it listed. The next listing (a save, the Play entry) reads the map as
-     * it is then. */
-    (void)mu_scope_now("map remove");
-    g_listing_skip_n = 0;
-    InterlockedIncrement(&g_gen);
-    if (at && at < sizeof dropped - 1) strcat_s(dropped, sizeof dropped, ")");
-    mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s%s", key, x->uid_count,
-           x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows, dropped,
-           !p->tag_removed ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
-                                                                             : ", the search tag could not be removed");
+    if (!x->uid_count) {
+        mu_log("map remove %s: nothing of it is placed", key);
+        mu_drop_rows(key, builds, n, p->tag_removed);
+    } else {
+        mu_log("map remove %s: %zu entit%s deleted in one undo step; the row goes once the delete has committed", key,
+               x->uid_count, x->uid_count == 1 ? "y" : "ies");
+        strncpy_s(g_drop_key, sizeof g_drop_key, key, _TRUNCATE);
+        strncpy_s(g_drop_hash, sizeof g_drop_hash, x->hash, _TRUNCATE);
+        strncpy_s(g_drop_salt, sizeof g_drop_salt, x->id, _TRUNCATE);
+        memcpy(g_drop_builds, builds, sizeof builds);
+        g_drop_n = n;
+        g_drop_tag = p->tag_removed;
+        g_drop_owed_at = GetTickCount64();
+        g_poll_next = 0;
+        InterlockedExchange(&g_drop_owed, 1);
+        InterlockedIncrement(&g_gen);
+    }
     msg[0] = 0;
     return 1;
 }

@@ -210,7 +210,9 @@ static int fake_map_info(sh_modui_map_info *out)
     return 1;
 }
 
-static int g_delete_status = SH_EDITOR_DELETE_DISPATCHED, g_delete_calls, g_deleted[16], g_deleted_n;
+/* g_delete_keeps: the delete dispatches but its objects are back by the commit (an editor that did not
+ * finish it, or a Ctrl+Z before the row would go). */
+static int g_delete_status = SH_EDITOR_DELETE_DISPATCHED, g_delete_calls, g_deleted[16], g_deleted_n, g_delete_keeps;
 static int fake_delete(const int *ids, int count)
 {
     int i, k;
@@ -218,9 +220,21 @@ static int fake_delete(const int *ids, int count)
     if (g_delete_status != SH_EDITOR_DELETE_DISPATCHED) return g_delete_status;
     for (i = 0; i < count; i++) {
         if (g_deleted_n < 16) g_deleted[g_deleted_n++] = ids[i];
-        for (k = 0; k < g_ent_n; k++) if (g_ents[k].uid == ids[i]) g_ents[k].alive = 0;
+        for (k = 0; k < g_ent_n && !g_delete_keeps; k++) if (g_ents[k].uid == ids[i]) g_ents[k].alive = 0;
     }
     return SH_EDITOR_DELETE_DISPATCHED;
+}
+
+/* Whether the open map's list of mods (the current manifest) has a row of `salt`. */
+static int current_has(const char *salt)
+{
+    sh_modmanifest_list rows;
+    size_t i;
+    int hit = 0;
+    if (!sh_modmanifest_current(&rows)) return 0;
+    for (i = 0; i < rows.count; i++) hit |= !_stricmp(rows.rows[i].salt, salt);
+    sh_modmanifest_list_free(&rows);
+    return hit;
 }
 
 static int g_tag_removals;
@@ -1335,6 +1349,23 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "twin_a");
     CHECK(has(doc, "\"ok\":true,\"message\":\"Removed Twin A from Imp Arena: no entity used it, so only its row was dropped.\""));
     free(doc);
+    /* Remove from map never leaves objects without a row: the row goes once the delete has committed and
+     * the map holds none of the mod's objects; objects still there keep it. */
+    g_delete_keeps = 1;
+    g_undo_pending = 1;
+    log_clear();
+    doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.r2-imp");
+    CHECK(has(doc, "\"ok\":true") && current_has("alexrimp"));
+    free(doc);
+    CHECK(sh_modui_poll_due() == 1);
+    (void)sh_modui_poll_main(NULL);
+    CHECK(current_has("alexrimp"));                 /* not committed yet: nothing dropped */
+    g_undo_pending = 0;
+    (void)sh_modui_poll_main(NULL);
+    CHECK(current_has("alexrimp") && has(g_logbuf, "of its objects are still in the map, so its row stays"));
+    CHECK(ent_alive(1) && ent_alive(2) && g_tagged == 1);
+    g_delete_keeps = 0;
+    g_deleted_n = 0;
     /* The imp mod: the dry run of Remove from map and of Uninstall. */
     doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, "alex.r2-imp");
     CHECK(has(doc, "\"entityCount\":2,") && has(doc, "\"tagRemoved\":true,\"vanillaAfter\":true"));
@@ -1382,15 +1413,16 @@ int main(int argc, char **argv)
         CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
         CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp: Uninstalled R2 Imp copy and removed it from the open map."));
         CHECK(lines_prose_ok(g_doctor));
-        CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
+        CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2));
+        CHECK(current_has("alexrimp") && g_tagged == 1);   /* the delete has not committed: the row and the tag stay */
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp", g_root);
         CHECK(!mt_exists(path));
-        /* The undo history is cleared once the delete committed. */
+        /* The row, the tag and the undo history go once the delete committed. */
         g_undo_clears = 0;
         g_undo_pending = 0;
         CHECK(sh_modui_poll_due() == 1);
         (void)sh_modui_poll_main(NULL);
-        CHECK(g_undo_clears == 1);
+        CHECK(g_undo_clears == 1 && !current_has("alexrimp") && g_tagged == 0);
     }
     g_map_on = 0;
     sh_modmanifest_reset();

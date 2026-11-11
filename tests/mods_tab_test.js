@@ -721,7 +721,7 @@ test('the map modal: the open map\'s details and mods, in plain words', () => {
   assert.match(mr[0].textContent, /^R2 Imp copy 1\.8 MB 3 placed entities use it Also used by timeline: Wave 2: spawn the imps, wire: Relay: all imps dead Remove from map$/);
   assert.match(mr[1].textContent, /^Doors 3\.6 MB Used by the whole map, nothing placed/);
   assert.equal(iconOf(mr[2]), 'warn');
-  assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer; playing the map downloads it/);
+  assert.match(mr[2].textContent, /^Spiked Walls 51 KB 2 placed entities use it; not installed on this computer Remove from map$/);
   /* a choice between mods names the mods, never their ids */
   const opts = h.nodes.modsMapHost.tags('option').map(o => o.textContent);
   assert.deepEqual(opts, ['The first mod the map lists (R2 Imp copy)', 'R2 Imp copy', 'Doors']);
