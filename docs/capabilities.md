@@ -326,9 +326,10 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   size: an archive larger than one request (95 MB) goes in parts, and a publish that was cut off
   sends only the parts the store does not hold yet. A map may use any number of mods, and a mod may
   have any number of files of any size (past 4 GB or 65,535 files the archive is ZIP64). A download
-  streams to disk, of any size, and shows how far it is in the game's own dialog every two seconds
-  ("Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%. Keep downloading? No cancels it and installs
-  nothing more."); No cancels it, nothing is installed half way, and the map is not loaded. It is
+  streams to disk, of any size, and shows how far it is in the game's own progress line, updated in
+  place every two seconds ("Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%."). A download still
+  running after two seconds asks once "Keep downloading? No cancels it and installs nothing more.";
+  No cancels it, nothing is installed half way, and the map is not loaded. It is
   unpacked into the map's own folder,
   `mods\maps\<map title>\<mod name>\`, and only after every file matches the map's record of the
   build. The first time, the game asks once (the `mods.upload_confirmed` setting records

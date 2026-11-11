@@ -378,9 +378,10 @@ typedef struct pub_hold {
     int ticket;
     int waited;
     pub_job *job;
-    ULONGLONG progress_at;
-    int progress_due;                    /* fresh numbers wait for the dialog surface */
-    int cancelled;                       /* the player answered No to the progress dialog */
+    ULONGLONG fetch_at, progress_at;     /* the fetch's start; the progress line's last update */
+    int progress_shown;                  /* the progress line is up */
+    int cancel_asked;                    /* the one "Keep downloading?" question was raised */
+    int cancelled;                       /* the player answered No to it */
 } pub_hold;
 
 static pub_hold g_hold;
@@ -667,6 +668,15 @@ static void pub_hold_free(void)
     memset(h, 0, sizeof(*h));
 }
 
+/* The progress line goes when the download ends, is cancelled or is dropped.
+ * An abandoned hold leaves it: another load owns the screen and its line. */
+static void pub_progress_hide(pub_hold *h)
+{
+    if (!h->progress_shown) return;
+    h->progress_shown = 0;
+    if (g_ops.progress) g_ops.progress(g_ops.context, h->hook, h->owner, NULL);
+}
+
 /* Silent: another load owns the screen now. */
 static void pub_abandon(const char *why)
 {
@@ -683,6 +693,7 @@ static void pub_drop(const char *notice, const char *why)
     if (g_hold.state == HOLD_IDLE) return;
     pub_logf("MODS: the held %s of '%s' was dropped: %s", pub_hook_name(g_hold.hook),
              g_hold.id[0] ? g_hold.id : "local map", why);
+    pub_progress_hide(&g_hold);
     if (g_ops.drop_ui) g_ops.drop_ui(g_ops.context, g_hold.hook, g_hold.owner);
     hook = g_hold.hook;
     pub_hold_free();
@@ -1058,14 +1069,16 @@ static void pub_progress_text(char *out, size_t cap, const char *name, long curr
                     done / 1048576.0);
 }
 
-/* Every PUB_PROGRESS_MS while a download runs, the player sees where it is
- * in the game's own dialog (the one the question used), with the choice to
- * keep waiting (Yes) or cancel (No), and one console line. The dialog is
- * raised again with fresh numbers at each step; the engine's dialog shows
- * fixed text, so the old one is taken down first. */
+/* While a download runs the player sees where it is in the game's own
+ * progress line, the one the game shows while it downloads a published map:
+ * its text is replaced in place every PUB_PROGRESS_MS, never taken down and
+ * raised again, and the same words go to the console. The game's dialog
+ * shows the text it was raised with and cannot change it, so it is raised
+ * once, for a download still running after PUB_PROGRESS_MS: Yes keeps
+ * downloading and is not asked again, No cancels. */
 static void pub_progress_step(pub_hold *h, pub_job *job)
 {
-    char text[PUB_TEXT_CAP], ask[PUB_TEXT_CAP];
+    char text[PUB_TEXT_CAP];
     ULONGLONG now = GetTickCount64();
     if (h->ticket) {
         int answer = g_ops.poll ? g_ops.poll(g_ops.context, h->ticket) : PUB_DIALOG_PENDING;
@@ -1077,33 +1090,28 @@ static void pub_progress_step(pub_hold *h, pub_job *job)
                  * is removed and nothing is installed half way. */
                 job->cancel = 1;
                 h->cancelled = 1;
+                pub_progress_hide(h);
                 pub_logf("MODS: the player cancelled the download of the %s's mods", pub_thing(h->hook));
                 return;
             }
         }
     }
-    if (h->progress_due || now - h->progress_at >= PUB_PROGRESS_MS) {
+    if (!h->progress_shown || now - h->progress_at >= PUB_PROGRESS_MS) {
         LONG current = InterlockedCompareExchange(&job->current, 0, 0);
         long long done = InterlockedCompareExchange64(&job->progress_done, 0, 0);
         long long total = InterlockedCompareExchange64(&job->progress_total, 0, 0);
-        if (!h->progress_due) {
-            h->progress_at = now;
-            pub_logf("MODS: downloading %s (%ld of %u): %.1f of %.1f MB", job->names[current], current + 1,
-                     (unsigned)job->count, done / 1048576.0, total / 1048576.0);
-            pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
-            pub_print(text);
-            if (h->ticket) {
-                if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
-                h->ticket = 0;
-            }
-            h->progress_due = 1;
-        }
-        if (!h->ticket && g_ops.can_ask && g_ops.can_ask(g_ops.context) && g_ops.ask) {
-            pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
-            _snprintf_s(ask, sizeof ask, _TRUNCATE, "%s Keep downloading? No cancels it and installs nothing more.", text);
-            h->ticket = g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_YES_NO, ask);
-            h->progress_due = 0;
-        }
+        h->progress_at = now;
+        pub_progress_text(text, sizeof text, job->names[current], current, job->count, done, total);
+        if (h->progress_shown) pub_print(text);   /* the first line says only "0.0 MB" */
+        if (g_ops.progress) g_ops.progress(g_ops.context, h->hook, h->owner, text);
+        h->progress_shown = 1;
+    }
+    if (!h->cancel_asked && now - h->fetch_at >= PUB_PROGRESS_MS && g_ops.can_ask && g_ops.can_ask(g_ops.context) &&
+        g_ops.ask) {
+        _snprintf_s(text, sizeof text, _TRUNCATE, "Downloading the %s's mods; the progress shows on screen and on the "
+                    "console. Keep downloading? No cancels it and installs nothing more.", pub_thing(h->hook));
+        h->ticket = g_ops.ask(g_ops.context, PUB_GDM_ID, PUB_BUTTONS_YES_NO, text);
+        h->cancel_asked = 1;
     }
 }
 
@@ -1122,8 +1130,9 @@ static void pub_start_fetch(void)
     strcpy_s(job->place, sizeof job->place, h->place);
     h->job = job;
     h->state = HOLD_FETCHING;
-    h->progress_at = GetTickCount64();
-    h->progress_due = 1;   /* the progress dialog follows the question at once */
+    h->fetch_at = GetTickCount64();
+    h->progress_shown = 0;   /* the progress line follows the question at once */
+    h->cancel_asked = 0;
     if (!g_ops.worker_run || !g_ops.worker_run(g_ops.context, pub_job_main, job)) {
         char line[PUB_TEXT_CAP];
         _snprintf_s(line, sizeof line, _TRUNCATE, "Snapmap+ is busy with another upload or download. %s Try again in a moment.", pub_not_done(h->hook));
@@ -1682,6 +1691,7 @@ void sh_modpublished_poll(void)
             if (g_ops.release) g_ops.release(g_ops.context, h->ticket);
             h->ticket = 0;
         }
+        pub_progress_hide(h);
         if (h->cancelled) {
             char line[PUB_TEXT_CAP];
             _snprintf_s(line, sizeof line, _TRUNCATE, "The download was cancelled. %s", pub_not_done(h->hook));
@@ -2180,6 +2190,31 @@ static void eng_drop_ui(void *c, int hook, void *owner)
     __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
+/* The download's progress in the manager's progress line, the widget
+ * CacheMapForLobby fills with its wait text while the game downloads a
+ * published map (show_wait replaces the line's text in place; hide_progress
+ * takes it down). A rawmap or prefab hold has no owner: the shell's manager.
+ * The widget keeps its own copy of the text, made in process heap 0 as the
+ * engine's own call makes it. */
+static void eng_progress(void *c, int hook, void *owner, const char *text)
+{
+    void *manager = owner ? eng_manager_of(hook, owner) : eng_shell_manager();
+    sh_process_heap_scope scope;
+    (void)c;
+    if (!manager || !g_eng.show_wait || !g_eng.hide_progress || !sh_process_heap_enter(&g_eng.heap, &scope)) return;
+    __try {
+        if (text) {
+            uint8_t line[ENG_STRING_SIZE];
+            g_eng.idstr_ctor(line, text);
+            g_eng.show_wait(manager, line);
+            g_eng.idstr_dtor(line);
+        } else {
+            g_eng.hide_progress(manager);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: the download's progress line faulted"); }
+    (void)sh_process_heap_leave(&scope);
+}
+
 /* The joiner's cold branch of CacheMapForLobby, replayed: the wait text, the
  * two bound callbacks (CacheReady and the read-error handler), and the read. */
 static int eng_cold_read(void *manager, const char *id, const char *revision)
@@ -2359,7 +2394,7 @@ static const sh_modpub_ops ENG_OPS = {
     eng_hold_token, eng_owner_current, eng_host_matches, eng_hold_ui, eng_drop_ui, eng_resume, eng_log,
     eng_print, eng_store_probe, eng_claimed, eng_fetch_detail, eng_launch_refused, eng_metadata_title,
     eng_own_item, eng_item_place, eng_place_set, eng_place_norm, eng_scripted_maps_allowed, eng_scripts_approval,
-    eng_served_scripts
+    eng_served_scripts, eng_progress
 };
 
 /* ------------------------------------------------------------ detours */

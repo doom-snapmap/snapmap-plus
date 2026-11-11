@@ -97,6 +97,9 @@ typedef struct fake {
     int scripts_off;                 /* the player turned off "Play maps whose mods include scripts" */
     unsigned served_scripts;         /* script files of the builds a place serves */
     int served_scripts_calls;
+    int progress_shows, progress_hides;   /* the progress line: text set, taken down */
+    int progress_up;
+    char last_progress[256];
     int store_calls;
     int incomplete_a;                /* the build serving alexpink lacks a name the row lists */
     int prints;
@@ -342,6 +345,12 @@ static unsigned f_served_scripts(void *c, const sh_modmanifest_list *rows, const
     F.served_scripts_calls++;
     return place && place[0] ? F.served_scripts : 0;
 }
+static void f_progress(void *c, int hook, void *owner, const char *text)
+{
+    (void)c; (void)hook; (void)owner;
+    if (text) { F.progress_shows++; F.progress_up = 1; strcpy_s(F.last_progress, sizeof F.last_progress, text); }
+    else { F.progress_hides++; F.progress_up = 0; }
+}
 static void f_scripts_approval(void *c, unsigned files, char *out, size_t cap)
 {
     (void)c;
@@ -390,7 +399,8 @@ static const sh_modpub_ops OPS = {
     f_worker_run, f_fetch_for, f_metadata_copy, f_metadata_free, f_metadata_ids, f_hold_token,
     f_owner_current, f_host_matches, f_hold_ui, f_drop_ui, f_resume, f_log,
     f_print, f_store_probe, f_claimed, f_fetch_detail, f_launch_refused, f_metadata_title, f_own_item,
-    f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts
+    f_item_place, f_place_set, f_place_norm, f_scripted_maps_allowed, f_scripts_approval, f_served_scripts,
+    f_progress
 };
 
 static void reset(void)
@@ -1093,7 +1103,8 @@ static void scripts_off_at_launch(void)
 static void download_progress_and_cancel(void)
 {
     ULONGLONG t0;
-    printf("-- the download shows its progress in the game's dialog: Yes keeps waiting, No cancels and installs nothing\n");
+    int shows;
+    printf("-- the download's progress line is updated in place; the cancel question is raised once\n");
     reset();
     F.fetch_gate = CreateEventW(NULL, TRUE, FALSE, NULL);
     parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
@@ -1101,22 +1112,58 @@ static void download_progress_and_cancel(void)
     tick(1);
     CHECK(F.asks == 1);
     F.answer = 1;   /* Yes to the question */
-    for (int i = 0; i < 200 && F.asks < 2; i++) { tick(1); Sleep(1); }
-    CHECK(F.asks == 2 && F.ask_buttons == 6 && sh_modpub_test_state() == 3);
-    CHECK(!strncmp(F.last_ask, "Downloading alex.pink-imp (1 of 1): ", 36) && strstr(F.last_ask, ". Keep downloading? No cancels it"));
-    /* Yes: the dialog goes, the download goes on, and the numbers come back. */
     t0 = GetTickCount64();
     tick(1);
+    tick(1);
+    /* The progress line comes up at once; no dialog yet. */
+    CHECK(sh_modpub_test_state() == 3 && F.asks == 1 && F.progress_up && F.progress_hides == 0);
+    CHECK(!strncmp(F.last_progress, "Downloading alex.pink-imp (1 of 1): ", 36));
+    /* A download still running after two seconds: one question, raised once. */
+    for (int i = 0; i < 5000 && F.asks < 2; i++) { tick(1); Sleep(1); }
+    CHECK(F.asks == 2 && F.ask_buttons == 6 && GetTickCount64() - t0 >= 1900);
+    CHECK(strstr(F.last_ask, "Keep downloading? No cancels it and installs nothing more.") != NULL);
+    CHECK(!strstr(F.last_ask, "MB"));   /* the dialog's words never change, so they carry no numbers */
+    /* Yes: the dialog goes and is never raised again; the line keeps updating
+     * in place, never taken down while the download runs. */
+    F.answer = 1;
+    tick(1);
+    shows = F.progress_shows;
+    t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < 4200) { tick(1); Sleep(5); }
+    CHECK(F.asks == 2 && F.progress_shows >= shows + 2 && F.progress_hides == 0 && F.progress_up);
     CHECK(sh_modpub_test_state() == 3 && F.fetch_cancelled == 0);
-    F.answer = 2;   /* No, when it comes back */
-    for (int i = 0; i < 5000 && F.asks < 3; i++) { tick(1); Sleep(1); }
-    CHECK(F.asks == 3 && GetTickCount64() - t0 >= 1900);
     CHECK(strstr(F.prints_all, "Downloading alex.pink-imp (1 of 1): ") != NULL);
+    SetEvent(F.fetch_gate);
+    tick_until_idle();
+    CHECK(F.resumes == 1 && F.progress_hides == 1 && !F.progress_up);
+    CloseHandle(F.fetch_gate);
+    F.fetch_gate = NULL;
+
+    printf("-- No to the cancel question stops the download and installs nothing\n");
+    reset();
+    F.fetch_gate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    for (int i = 0; i < 5000 && F.asks < 2; i++) { tick(1); Sleep(1); }
+    CHECK(F.asks == 2);
+    F.answer = 2;   /* No */
     tick_until_idle();
     CHECK(F.fetch_cancelled == 1 && F.resumes == 0 && !F.installed_a && !F.place_a[0]);
+    CHECK(F.progress_hides >= 1 && !F.progress_up);
     CHECK(strstr(F.prints_all, "The download was cancelled. The map was not loaded.") != NULL);
     CloseHandle(F.fetch_gate);
     F.fetch_gate = NULL;
+
+    printf("-- a short download asks nothing more than the question\n");
+    reset();
+    parse(SH_MODPUB_PARSE_PUBLISHED_ONLINE, ONE_MOD, MAP);
+    CHECK(sh_modpub_decide(SH_MODPUB_ON_SNAP_PLAY, MANAGER, METADATA, MAP, NULL, NULL, NULL) == 0);
+    tick(1);
+    F.answer = 1;
+    tick_until_idle();
+    CHECK(F.asks == 1 && F.releases == 1 && F.resumes == 1 && !F.progress_up);
 }
 
 static void rawmap_scripts_follow_the_setting(void)

@@ -4001,11 +4001,17 @@ in parts. Then one claim names every build, however many the map names.
 Download (`modsync_fetch_build_for(row, place)`): when the root holds the
 row's salt at the row's hash, or the map's place holds it, nothing is
 fetched. Otherwise the archive is streamed to a temporary file and
-`modsync_install_archive` installs it. While the hold downloads, every two
-seconds the game's own dialog (the question's) shows "Downloading <mod> (i of
-n): x of y MB, p%. Keep downloading? No cancels it and installs nothing
-more." and the console the same line; Yes keeps waiting, No sets the job's
-cancel flag, the download stops at its next chunk, its temporary file is
+`modsync_install_archive` installs it. While the hold downloads, the game's own
+progress line (the manager's progress widget, which CacheMapForLobby fills
+with its wait text while the game downloads a published map) shows
+"Downloading <mod> (i of n): x of y MB, p%.", its text replaced in place every
+two seconds (`show_wait` again; `hide_progress` when the download ends), and
+the console prints the same line. The game's dialog cannot change the text it
+was raised with (ShowDialog copies the descriptor's text once), so a download
+still running after two seconds raises it once, with fixed words: "Downloading
+the map's mods; the progress shows on screen and on the console. Keep
+downloading? No cancels it and installs nothing more." Yes closes it for good;
+No sets the job's cancel flag, the download stops at its next chunk, its temporary file is
 deleted, no further mod is installed, and the map is not loaded ("The
 download was cancelled. The map was not loaded."). An install itself is
 atomic (staging folder, then one rename), so nothing is ever half installed.

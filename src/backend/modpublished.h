@@ -325,6 +325,10 @@ typedef struct sh_modpub_ops {
     /* The script files of the builds that serve `rows` in `place` (a map
      * that arrived with its mods), as their folders record them. */
     unsigned (*served_scripts)(void *c, const sh_modmanifest_list *rows, const char *place);
+    /* The download's progress in the game's own progress line (the one it
+     * shows while it downloads a published map), its text replaced in place:
+     * `text` shows or updates it, NULL hides it. */
+    void (*progress)(void *c, int hook, void *owner, const char *text);
 } sh_modpub_ops;
 
 #define SH_MODPUB_PLACE_CAP 300
