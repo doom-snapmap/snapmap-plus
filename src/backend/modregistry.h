@@ -1,4 +1,4 @@
-/* modregistry.h -- derived edits applied per map (DESIGN-additive 2.4).
+/* modregistry.h -- derived edits applied per map.
  *
  * A mod that edits a game file carries the edited copy at the game's name;
  * the builder records the structural diff against the game's text in the
@@ -48,8 +48,8 @@ typedef struct sh_mr_decl {
 
 /* One bundle that serves for the listing, in serving order. */
 typedef struct sh_mr_source {
-    const char *key;           /* its key */
-    const char *who;           /* key@version (hash16), for lines */
+    const char *key;           /* its salt */
+    const char *who;           /* the mod's name, for lines */
     const char *edits;         /* its product block's "edits" (JSON array), or NULL */
     size_t edits_len;
     const sh_mr_decl *decls;   /* its encounters and scores (the conductor's bit rewrite) */
@@ -130,9 +130,10 @@ int  sh_modregistry_slot_valid(const char *slot);
 int  sh_modregistry_choices_set(const char *slot, const char *key);
 /* 1 with the key chosen for `slot`, 0 when the map has no choice for it. */
 int  sh_modregistry_choices_get(const char *slot, char *key, size_t cap);
-/* The console verb `sh_mods choose "<game file>/<path>" "<key>"` (modcmd calls
- * it; an empty key clears): one line for the console in `out`. Returns as
- * sh_modregistry_choices_set. */
-int  sh_modregistry_choose_command(const char *slot, const char *key, char *out, size_t cap);
+/* The console verb `sh_mods choose "<game file>/<path>" "<mod name>"` (an empty
+ * name clears): the mod is one the open map uses, named by its name, its
+ * folder or its salt (sh_modserve_listed_mod). One line for the console in
+ * `out`, naming the mod by its name. Returns as sh_modregistry_choices_set. */
+int  sh_modregistry_choose_command(const char *slot, const char *mod, char *out, size_t cap);
 
 #endif /* SNAPMAP_PLUS_MODREGISTRY_H */

@@ -742,11 +742,13 @@ These backend files share the work:
   The table serves only after a boot self-check that builds three of the
   game's own cached types the product's way and finds them equal node for
   node; one `MODS: typeinfo:` line per boot says how many mod rows resolve
-  through the table. An entityDef whose served bytes change at a refresh
-  loses its entry and is rebuilt at its next use.
+  through the table. An entityDef re-parsed from other bytes (a refresh, a
+  map that serves its own copy of the salt) loses its entry and is rebuilt at
+  its next use; the old tree is never freed, since the lookup handed the
+  engine the tree itself and the engine may still hold it.
 - `modledger.c` is the served-bytes ledger: per request path, the bytes the
   provider gave the engine this session, read lock-free by the refresh
-  decision and `sh_mods held`.
+  decision and `sh_mods held` (the diagnostic build, `build.ps1 -Diag`).
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
   carrier). A row is `{"mod":"<salt>@<build hash>","name","size",
@@ -861,12 +863,14 @@ not parse is listed with its parse error (`sh_ms_descriptor_unparsable`),
 nothing in it is written, and it serves nothing either (its cause is the
 store's, `sh_ms_build_cause`, else the parse error). The serving index reads a
 folder's identity from the block's `salt` only (`ms_parse_bundle`), and
-refuses every earlier shape with the builder's sentence (`SH_MB_SHAPE`, "This
-mod folder is not in a shape Snapmap+ can build: ..."): a block of another
-format ("it was built by an earlier version of Snapmap+"), a retired author key
-(`id`, `key`, `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`,
-`legacy`, `composes`, `schema`, `hud.schema`), `package.json`, a block without
-a valid salt, and a folder in a map's place that the store did not build. A
+refuses every earlier shape with one sentence and the next step: a block of
+another format and `package.json` with "This mod was made for an earlier
+version of Snapmap+. Run the Snapmap+ installer again and it converts it.", a
+retired author key (`id`, `key`, `shadows`, `stock`, `scope`, `player`,
+`extends`, `replaces`, `legacy`, `composes`, `schema`, `hud.schema`) with the
+builder's sentence (`SH_MB_SHAPE`) naming the key to remove, a block without
+a valid salt as a damaged block, and a folder in a map's place that the store
+did not build. A
 root folder with no block is "not built yet": the store's next scan salts and
 builds it. The
 product writes the block by splicing: the old member is cut from the end of
@@ -1035,13 +1039,10 @@ shadow changes what the author can set, never what plays, so an author's
 editor overrides never become a dependency of a map, vanilla or not. A
 gameplay shadow (an entityDef, a material, a model) still does.
 
-The player side of the same rule: a fetch whose bundle manifest holds only
-editor-time content and no requirements (`sh_mb_editor_only`) installs
-nothing, logs `MODS: pull <hash>: <name> (<id>) changes only the editor (...);
-not installed, the map plays without it`, and records the hash in the
-`editorOnly` section; `sh_modserve_row_served_for` serves a row whose bundle
-that section names, so maps published before this rule neither ask for nor
-download an author's editor overrides again.
+The player side of the same rule: a row is served only by an installed build
+(`sh_modserve_row_served_for`); the serving index no longer reads the record's
+former `editorOnly` section, so a build a map names is installed like any
+other (an install drops nothing).
 
 `mods\snapmap-plus.json` is the product's one record:
 `claims`, `links`, `pending`, `migration`, `editorOnly` (bundle hash to id,
@@ -1502,8 +1503,13 @@ A bundle's `companions` key (author block of `mod.json`, kept under `extra`)
 maps owner entityDefs, which must be the bundle's own `mods/<id>/` names, to
 1..16 companions `{entityDef, origin, axis, activate, bind}` (`companion.h`
 has the grammar and refusals; a refused block adds nothing and is logged
-`COMPANIONS: <id> REFUSED: ...`; the first bundle to declare an owner keeps
-it). `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
+`COMPANIONS: <id> REFUSED: ...`). Each admitted build that declares companions
+has a table of its own, and an owner's companions come from the build that
+serves the owner's entityDef for the open map (`sh_modserve_lookup`), so a map
+that brought its own copy of a salt spawns that copy's companions, never the
+root folder's. A new serving index is read at the next outermost spawn of a
+mods entity, never inside a companion's own spawn, whose owner's loop is still
+reading the tables. `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
 0x141584A90, 14 stolen bytes) only once an admitted bundle declares an owner:
 at startup when one does, otherwise at the first main-thread gate after one is
 installed (`sh_companions_ensure`, called beside the probe's own lazy commit at
@@ -2093,6 +2099,10 @@ no path of its own and never reads a private family's `.vmtr` rows, so
 SetSource's mega2 loader opens the served `_sq1` to `_sq16` members through the
 provider; no `.pages` file is needed, and materials carry an explicit
 `virtualmapping` instead of rows.
+The families are read from the build each path is served from for the loaded
+map (`sh_modserve_each_served_here`): a map that brought its own copy of a
+salt pages that copy's members, never the root folder's; with no map open the
+root folder's build serves.
 
 - Thread and time: DOOM's main thread, inside process heap 0, once the VT
   system has built record 1 (`_vmtr`). The serving index calls a listener after
@@ -2337,12 +2347,25 @@ gore md6Defs, meshes and skeletons with a map heap selected, and the next
 Play load releases that heap: the skeleton the holds-by-name raise had
 lifted to level 4 kept its object and lost its joints, and the chainsaw
 pickup's attachment animator read them (G1, VK 0x16f7f0b; 2 of 2 before
-this rule). So the load hook records the heap each load runs with, and no
-keep (watermark, holds, lookups, attribution) raises a resource whose last
-load ran with a heap other than 0: it stays at level 1, the purge frees it
-whole and the next load recreates it. A load in heap 0 clears the mark. A
-log line `<phase>: N keep(s) left at level 1 because the map's heap holds
-what their load allocated` names them.
+this rule). So the load hook records the heap each load runs with, and a
+resource whose last load ran with a heap other than 0 stays at level 1: the
+purge frees it whole and the next load recreates it. A load in heap 0 clears
+the mark. A log line `<phase>: N keep(s) left at level 1 because the map's
+heap holds what their load allocated` names them.
+
+The keepability invariant: nothing raises a resource to level 4 except
+`sh_modserve_keep`, and it raises only a resource `sh_modserve_keepable`
+allows, one whose last load did not run with a map's heap selected. Every
+keep goes through that one call: the watermark, the holds by name, the
+recorded lookups, the attribution, the engine side's keep of an editor row's
+animWeb or material (`me_keep_ref`), a kept step's decl after its load
+(`op_load`) and a held render model (`me_held_one`). Only a step that keeps
+its decl (an editor row's closure) joins the kept set before its native load;
+a map pass's decls return to the engine's level after it and nothing they
+load is kept, so a mod without editor rows is never made permanent by the
+next Play entry. The one other level write is the native load of a new
+identity at level 4, which `op_load` sets back to the engine's level as soon
+as the load returns.
 
 A kept decl's render models are loaded by the product itself, in process heap
 0, while their files serve (`sh_modserve_held_models`, `me_hold_models`, run at
@@ -2438,10 +2461,17 @@ row of a mod that is not installed is kept as it is.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
-store, a legacy conversion, the end of the overrides migration's worker,
-`sh_mods rescan`). Readers see one complete table;
-retired tables are never freed, because a provider open on another thread may
-still read one. Registration, activation and the palette rebuild run on DOOM's
+store, a download or import,
+`sh_mods rescan`). Readers see one complete table. A new table carries what
+later questions need from the one it replaces (the salts registered this
+session, which bytes the engine already read, the removed paths a refresh
+still owes, `ms_carry_forward` and the gone list), so no question reads an
+older table after its build; at the start of each registration pass on the
+main thread, `sh_modserve_index_retire` frees every table two or more builds
+behind the published one when no provider call is in flight on any thread
+(each counts itself in and out) and no plan is alive, and drops the file
+cache's entries for it. A string the index hands out stays valid until then;
+a consumer that keeps one longer copies it. Registration, activation and the palette rebuild run on DOOM's
 main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
@@ -2618,7 +2648,8 @@ longer than its old one; a row grown by the second sort kept a map-heap
 string, the return to the editor freed it, and the next Play's first sort
 read it (the review's A-D3 fault at DOOM+0x339c40, a row's clipModelName).
 The Timeline tile's sort detour (`tl_palette_sort`) runs every sort inside
-a verified process-heap scope; `sh_mods palette check` reports where each
+a verified process-heap scope; `sh_mods palette check` (the diagnostic build)
+reports where each
 row's strings live and how many sorts ran. What stays reported
 rather than applied: new names of a mod no map has used this session (they
 register when a map that names the mod loads), a changed movie (read at the
@@ -2655,7 +2686,7 @@ for its parent's change, not its own), keep the marks alone. At each map pass
 the ledger is also swept: a held name the provider served whose bytes differ
 from what the declared builds serve, which the marks left, is refreshed by its
 type's route (`MODS: map: ledger: ...`), and a held skeleton or other raw type
-is reported as a restart. `sh_mods held [filter]` prints the ledger (request,
+is reported as a restart. `sh_mods held [filter]` (the diagnostic build) prints the ledger (request,
 bundle, file identity, serves, whether and at which level the engine holds the
 name) and the census of level-4 names the product served, by type, ending with
 the count of mod skeletons held at level 4.
@@ -2700,7 +2731,14 @@ gated by the requirements of the build that serves its path for the listing
 winner's: with two builds of one salt installed (the root and a place) the
 winner of a path both carry can be the build the open map, or the Toybox, does
 not use, whose requirements are off, and gating on it blocked every row of the
-salt. A `mod.json` `"scope"` key is a retired key: the folder is refused. Per path,
+salt. The same holds for every per-path decision: a plan's order and blocking
+and the holds by name read the needs of the build that serves the path for the
+open map (`ms_serving_file`), so a map that brought its own copy of a salt
+keeps what its copy needs, never the root folder's; the editor closure, marked
+once per index before any map is open, follows the needs of every build of
+the salt; and a re-parse of an entityDef drops its default type-info tree
+whatever asked for it, so the tree follows the bytes now served. A `mod.json`
+`"scope"` key is a retired key: the folder is refused. Per path,
 `ms_resolve` records every provider of a path several bundles carry on its
 static winner (`alt_first`: the static rules' order for different bytes, the
 root folder's build first for one salt, index order for
@@ -2909,7 +2947,9 @@ map's choices).
   (`entitydef/player/coop/edit/handsModelMPUseDoomHands`; a keyed entry adds its
   name, a named block segment is `word:name`). Two sources setting one slot to
   different values: the map's choice (`"choices"` in the manifest rows,
-  `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<key>"`),
+  `sh_modregistry_choices_set`, `sh_mods choose "<game file>/<path>" "<mod name>"`,
+  the mod named by its name, its folder or its salt among the mods the open
+  map uses, `sh_modserve_listed_mod`),
   else the first in row order, with one line naming the slot and the command;
   the Mods tab lists them from the declared rows' edits (`sh_dt_edits_slots`),
   a row resolved as serving resolves it: its own build, else the build the
@@ -3820,14 +3860,17 @@ index equals the engine's "no variable" constant (-1), held in an `idStr` at
 `+0xCB0` (length `+0x08`, data `+0x10`). It acts only when all of these hold:
 the master switch (`sh_smp on|off`) is on, the game manager reports the host
 (`IsServer`, gameMgr `+0x2BB3A4`), the SnapMap logic manager exists (the same
-check every stock action makes), and the optional map gate
-(`sh_modaction_set_map_gate`, unset by default because the `smp:` prefix is the
-map's own opt-in) admits the open map. Logic only runs on the host, so a client
-never reaches the hook. The activator becomes a player by an `idPlayer` cast,
-else through the owner slot (vtable `+0x558`) the stock Give Item action uses.
-The command runs on the game thread inside `DoAction`, then the stock write
-proceeds unchanged; a fault inside the command is caught and logged and never
-stops the write.
+check every stock action makes); the `smp:` prefix is the map's own opt-in.
+Logic only runs on the host, so a client never reaches the hook. The literal
+must have a command's shape (`smp_check`: the verb is `event` with an event
+name, or `doomhands` with one bool); any registered engine event may fire, as
+a stock Timeline in plain map data can. The activator becomes a player by an
+`idPlayer` cast, else through the owner slot (vtable `+0x558`) the stock Give
+Item action uses. The command runs on the game thread inside `DoAction`, then
+the stock write proceeds unchanged. Every engine call it makes catches an
+access violation only (`ma_filter`): that stops the command with one `SMP:`
+line and the write still runs; any other exception (an `idException` is a C++
+throw) is named in one line and passed on to the engine's own handler.
 
 `smp:event` looks the event up through the decl manager's event interface
 (`+0x90`, FindByName `+0x10`), types the arguments from the record's compact

@@ -216,8 +216,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   name a mod no longer carries stays registered until the game restarts, since the engine cannot
   unregister a name, but nothing serves it. Two builds
   of one mod played in one session each get their own animations, models, images and decls at
-  their map load, with no restart. `sh_mods held` lists what the game was served under each name
-  this session and which of those names it holds for the session. A shadow a newly installed mod adds for a decl, model or image the game already holds is
+  their map load, with no restart. A shadow a newly installed mod adds for a decl, model or image the game already holds is
   treated like a changed one and takes effect the same way. Toybox rows a rescan adds or changes
   keep what their editor previews name (a private md6Def and its poses, an `fxInfo` FX, an
   attachment's model) for the rest of the session, as rows present at startup do, so Play and the
@@ -291,7 +290,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   packs never collide), the player body's clips (two packs that add rows to one clip both keep them), the
   player entity, weapons, AI FSM states, whitelists. Identical edits merge and additions combine. When two
   mods a map uses set one field to different values, the map's choice (`sh_mods choose "<game file>/<path>"
-  "<mod key>"`, which applies now and is saved with the map's next save) decides, else the first in the map's list, with one log line.
+  "<mod name>"`, the mod named by its name or its folder, which applies now and is saved with the map's next save) decides, else the first in the map's list, with one log line.
 - A saved map records each mod a placed entity needs in its Snapmap+ data (one `snapmap-plus`
   section of the map file, never a map variable, so the Toybox variables list shows only the
   author's own), and the next load activates exactly those mods. A map saved by an earlier build
@@ -628,6 +627,10 @@ switches them off for the session.
 |---|---|
 | `smp:event <eventName> [args...]` | Fires any engine event on the activating player at once. The arguments are read by the event's own signature: integers (an enum takes its number), floats, text, `1/0`, `true/false`, `on/off` or `yes/no` for a bool, and an entity name. `sh_event info <name>` prints a signature. An unknown event, a wrong argument count, a value that does not parse, an argument type it cannot build (vectors, colours, declarations) or an activator that is not a player prints one line and does nothing. Example: `smp:event forcePraetorHandsAndBody 1` swaps the player's hands to the Praetor slot, which on the SnapMap player draws no arms, and `... 0` brings the multiplayer glove back. |
 | `smp:doomhands <0\|1>` | Sets the player's Doom-hands switch, the per-player form of `g_weaponDoomMPUseDoomHands`, and rebuilds the hands and body. With a mod that points `handsModelMPUseDoomHands` at another model (the `alex.bare-hands` example shows bare arms) the hands change at once. A player who spawned with the multiplayer hands keeps that armour's forearm attachment drawn over the new hands; a respawn resets the switch to the map's setting. |
+
+If the game stops an event part way, the command stops with one `SMP:` line naming the event and
+the node still stores its string; an error the game raises itself is named in one line and left to
+the game.
 
 For a whole map, the switch needs no command: a map whose **useSPModels** setting is on gives the
 player the Doom-hands slot at every spawn while fewer than two players are in the game, the same

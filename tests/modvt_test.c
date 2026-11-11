@@ -147,7 +147,7 @@ static void put_mod(const char *folder, const char *id)
     char json[256];
     /* The block the store's scan writes for a fresh folder: the salt alone. */
     _snprintf_s(json, sizeof json, _TRUNCATE,
-                "{\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"t\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", id, id);
+                "{\"name\":\"%s\",\"author\":\"t\",\"snapmap-plus\":{\"format\":2,\"salt\":\"%s\"}}", id, id);
     mt_write(folder, "mod.json", json);
 }
 
@@ -481,6 +481,43 @@ static void image(const char *path)
     free(base);
 }
 
+/* One salt at the root and in a map's own folder: a stranger's map that
+ * brought its copy pages the family from that copy, not the root folder's;
+ * with no map open the root folder's serves. */
+static void families_follow_the_map(void)
+{
+    char root[MAX_PATH], mods[MAX_PATH], own[MAX_PATH], placed[MAX_PATH], hash_own[65], hash_placed[65];
+    const char *list[1];
+    sh_modvt_family fams[SH_MODVT_MAX];
+    int n;
+    printf("-- a family comes from the build the loaded map serves\n");
+    CHECK(mt_temp_dir("modvt_place", root, sizeof root));
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
+    _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\vtplace0", mods);
+    _snprintf_s(placed, sizeof placed, _TRUNCATE, "%s\\maps\\Vt map\\vtplace0", mods);
+    CreateDirectoryA(mods, NULL);
+    put_mod(own, "vtplace0");
+    mt_write(own, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq1.mega2", "root one");
+    put_mod(placed, "vtplace0");
+    mt_write(placed, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq1.mega2", "the map's own one");
+    mt_write(placed, "assets\\virtualtextures\\mods\\vtplace0\\fam_sq2.mega2", "the map's two");
+    CHECK(build_folder(own, hash_own) && build_folder(placed, hash_placed));
+    sh_modserve_scope_enable(1);
+    CHECK(sh_modserve_index_build(mods) == 2);
+    n = sh_modvt_collect(fams, SH_MODVT_MAX);
+    CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_own) && fams[0].members == 0x1u);
+    CHECK(sh_modserve_scope_set_place("maps\\Vt map", 0) >= 0);
+    list[0] = hash_placed;
+    CHECK(sh_modserve_scope_set(list, 1, 1) >= 1);
+    n = sh_modvt_collect(fams, SH_MODVT_MAX);
+    CHECK(n == 1 && !strcmp(fams[0].bundle_hash, hash_placed) && fams[0].members == 0x3u &&
+          fams[0].bytes == strlen("the map's own one") + strlen("the map's two"));
+    CHECK(sh_modserve_scope_set(NULL, 0, 0) >= 0);
+    CHECK(sh_modserve_scope_set_place(NULL, 0) >= 0);
+    sh_modserve_scope_enable(0);
+    mt_remove_tree(root);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -488,6 +525,7 @@ int main(int argc, char **argv)
     member_rule();
     decode_helpers();
     families();
+    families_follow_the_map();
     if (argc < 2) printf("[skip] the executables (pass DOOMx64vk.exe and DOOMx64.exe)\n");
     for (i = 1; i < argc; ++i) image(argv[i]);
     printf("modvt_test: %d of %d checks passed\n", g_checks - g_failed, g_checks);

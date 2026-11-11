@@ -59,7 +59,7 @@ static void mv_collect_file(void *context, const char *request, uint64_t size, c
     if (!sh_mb_vt_member(request, fam, sizeof fam, &member)) return;
     for (i = 0; i < c->n && i < c->cap; ++i)
         if (!strcmp(c->out[i].name, fam)) {
-            /* A second bundle serving the same family name: the first keeps it. */
+            /* Two salts serving one family name: the first keeps it. */
             if (!strcmp(c->out[i].bundle_hash, bundle_hash)) {
                 c->out[i].members |= 1u << (member - 1);
                 c->out[i].bytes += size;
@@ -93,7 +93,9 @@ int sh_modvt_collect(sh_modvt_family *out, int cap)
     c.out = out;
     c.cap = cap;
     c.n = 0;
-    sh_modserve_each_served(mv_collect_file, &c);
+    /* From the build the loaded map serves (a map's own copy of a salt, not
+     * the root folder's), as scenes and banks are. */
+    sh_modserve_each_served_here(mv_collect_file, &c);
     free(scratch);
     return c.n;
 }

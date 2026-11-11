@@ -2,15 +2,14 @@
  * backend links them: a folder built by the bundle builder (modbundle.c) is
  * admitted by the serving index (modserve.c); a save writes one smpmod1 row
  * through the serving layer's closure (modmanifest.c); the next load strips
- * the row and activates exactly that bundle's gameplay decls.
+ * the row and activates exactly that bundle's gameplay decls; a skins decl
+ * outside the salt's namespace is refused; and a cut-content bundle's
+ * requirements are applied before its registration.
  *
  * Engine stand-ins: modserve_activate_bundles runs the real plan against
  * fake registry operations and then the real map-row check against a fake
  * palette (lane M6: rows of a named bundle that the built palette lacks are
- * registered by one rebuild before the map parses), and
- * modbundle_build_folder is the real builder
- * with a fixed stock list (the product's own entry in modcmd.c reads the
- * game's archives instead). */
+ * registered by one rebuild before the map parses). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -33,12 +32,10 @@ static int g_failed, g_checks;
     }                                                                            \
 } while (0)
 
-static int g_echo;
 static char g_log[16384];
 void backend_log(const char *line)
 {
     size_t at = strlen(g_log), n = line ? strlen(line) : 0;
-    if (g_echo && line) printf("    %s\n", line);
     if (line && at + n + 2 < sizeof g_log) { memcpy(g_log + at, line, n); g_log[at + n] = '\n'; g_log[at + n + 1] = 0; }
 }
 
@@ -67,14 +64,12 @@ static int stock_exists(void *ctx, const char *request)
 
 /* ---- builder entry (modcmd.c in the product) ------------------------------------------------ */
 
-static int g_builds;
 int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
 {
     sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
     sh_mb_bundle b;
     char cause[SH_MB_CAUSE_MAX];
     int ok = 0;
-    g_builds++;
     if (!sh_mb_build(folder, NULL, &r, &b)) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
     else if (!sh_mb_write(&b, folder, cause, sizeof cause)) strncpy_s(first_cause, n, cause, _TRUNCATE);
     else ok = 1;
@@ -426,7 +421,7 @@ static void skins_namespace(const char *root)
 /* ---- 5: a cut-content bundle's requirements ----------------------------------------------------- */
 
 static const char CUT_DESC[] =
-    "{\"version\":\"1.0.0\",\"name\":\"Cut\","
+    "{\"name\":\"Cut\","
     "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":\"0\",\"g_useImageBlackList\":\"0\"}},"
     "\"snapmap-plus\":{\"format\":2,\"salt\":\"localcut\"}}";
 

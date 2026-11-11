@@ -3084,7 +3084,7 @@ static int mu_listing_set(const sh_modmanifest_list *rows, const char *const *na
     }
     if (names && name_count && sh_modserve_active())
         (void)modserve_bundles_for_names_visit(names, name_count, mu_listing_visit, &l);
-    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, l.ids, (int)l.ni, map_open);
+    changed = sh_modserve_scope_set(l.hashes, (int)l.nh, map_open);
     free((void *)l.hashes);
     free((void *)l.ids);
     for (i = 0; i < l.no; i++) free(l.own[i]);
@@ -3247,7 +3247,7 @@ int sh_modui_scope_launch_refused(const char *why)
         sh_modmanifest_current_close();
         mu_settings_close();
         InterlockedExchange(&g_scope_editor, 0);
-        changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
+        changed = sh_modserve_scope_set(NULL, 0, 0);
         mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
     }
     if (changed || moved) (void)mu_scope_apply("launch refused");
@@ -3292,7 +3292,7 @@ static void mu_scope_tick(int editor_map)
             InterlockedIncrement(&g_gen);
             sh_modmanifest_current_close();
             mu_settings_close();
-            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+            if (sh_modserve_scope_set(NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
             }
@@ -3304,7 +3304,7 @@ static void mu_scope_tick(int editor_map)
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             mu_settings_close();
-            if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
+            if (sh_modserve_scope_set(NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
                 (void)mu_scope_apply("hub");
             }
@@ -4661,22 +4661,12 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     if (!mu_on_main()) return -1;
     if (!_stricmp(verb, "choose")) {
         if (argc < 2 || argc > 3 || !argv[1][0]) {
-            mu_line(&o, "choose: usage: sh_mods choose \"<slot>\" \"<mod folder>\" (none clears the choice)");
+            mu_line(&o, "choose: usage: sh_mods choose \"<setting>\" \"<mod name>\" (no name clears the choice)");
             return 1;
         }
-        {
-            /* The console names a mod by its folder; the registry takes its salt. */
-            char salt[SH_SALT_LEN + 1] = "";
-            sh_ms_list l;
-            size_t q;
-            if (argc == 3 && argv[2][0] && sh_ms_enumerate(&l)) {
-                for (q = 0; q < l.count && !salt[0]; q++)
-                    if (sh_ms_entry_matches(&l.items[q], argv[2]) && l.items[q].salt[0])
-                        strcpy_s(salt, sizeof salt, l.items[q].salt);
-                sh_ms_list_free(&l);
-            }
-            (void)mu_choose(argv[1], salt[0] ? salt : argc == 3 ? argv[2] : "", &o);
-        }
+        /* The mod by its name or folder, among the mods the open map uses
+         * (sh_modregistry_choose_command resolves it). */
+        (void)mu_choose(argv[1], argc == 3 ? argv[2] : "", &o);
         return 1;
     }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }

@@ -8,7 +8,7 @@
  * map stays loadable and playable everywhere.
  *
  * Commands:
- *   smp:event <eventName> [args...]   fire an engine event on the activating
+ *   smp:event <eventName> [args...]   fire any engine event on the activating
  *                                     player; arguments are typed by the
  *                                     event's own format string.
  *   smp:doomhands <0|1>               set the player's Doom-hands switch (the
@@ -74,6 +74,12 @@ int smp_type_args(const char *format, const char values[][SMP_MAX_TOKEN], int co
 /* Parse a bool token; returns 1 and sets *v, or 0. */
 int smp_parse_bool(const char *s, int *v);
 
+/* The shape a literal must have before it runs: it parses, its verb is
+ * event (with an event name) or doomhands (with one bool). Returns 1, or 0
+ * with a plain reason in err. Whether the event exists and its arguments fit
+ * its signature is checked against the engine's registry when it fires. */
+int smp_check(const char *literal, smp_command *out, char *err, size_t err_cap);
+
 #ifndef SH_MODACTION_PURE
 #include <stdint.h>
 #include "signatures.h"
@@ -93,16 +99,8 @@ int sh_modaction_install(const sig_result *results, size_t count, const uint8_t 
 void h_sh_smp(idCmdArgs *a);
 void h_sh_event(idCmdArgs *a);
 
-/* The map-level gate. The hook acts only on the host, during a SnapMap
- * session whose logic manager exists, with the master switch on, and when
- * the installed gate (if any) returns nonzero for the open map. NULL (the
- * default) admits every map that reaches the hook, because the literal's
- * prefix is itself the map's opt-in. */
-typedef int (*sh_modaction_map_gate_fn)(void);
-void sh_modaction_set_map_gate(sh_modaction_map_gate_fn fn);
-
 /* The live event registry as UTF-8 lines "name\tformat\ttypes\tnames\n", for
- * the Timeline tab. Returns the bytes needed excluding the NUL, writing at
+ * `sh_event list`. Returns the bytes needed excluding the NUL, writing at
  * most cap bytes (always NUL terminated when cap > 0); 0 when the registry
  * is not reachable. Any thread; reads only. */
 int sh_modaction_registry_text(char *out, int cap);

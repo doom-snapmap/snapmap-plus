@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "companion.h"
 #include "companion_engine.h"
@@ -74,7 +75,13 @@ static find_decl_fn  g_decl;
 static create_fn     g_create;   /* idGameLocal vtable +0x448, modscene_sigs.c */
 static finish_fn     g_finish;   /* +0x458: register, then CallSpawn */
 
-static sh_companion_table g_table;
+/* One companions table per admitted build that declares any: a salt can be
+ * installed twice (the root folder and a map's own copy), and an owner's
+ * companions come from the build that serves the owner's entityDef for the
+ * open map. */
+typedef struct cl_build { char hash[SH_MODSERVE_HASH_HEX + 1]; sh_companion_table table; } cl_build;
+static cl_build *g_builds;
+static int g_nbuilds, g_owners;
 static volatile LONG g_stale = 1;
 static sh_modserve_stats g_built_from;
 static int  g_resolved;
@@ -105,22 +112,63 @@ static void table_log(void *context, const char *line)
     backend_log(line);
 }
 
-static void read_bundle(void *context, const char *id, const char *hash, int legacy, const char *extra)
+static void free_tables(void)
 {
-    (void)context; (void)hash; (void)legacy;
-    if (id && extra) (void)sh_companion_add_bundle(&g_table, id, extra, strlen(extra), table_log, NULL);
+    int i;
+    for (i = 0; i < g_nbuilds; i++) sh_companion_table_free(&g_builds[i].table);
+    free(g_builds);
+    g_builds = NULL;
+    g_nbuilds = g_owners = 0;
 }
 
+static void read_bundle(void *context, const char *id, const char *hash, int place, const char *extra)
+{
+    cl_build *b;
+    int *oom = (int *)context;
+    (void)place;
+    if (!id || !hash || !extra || *oom) return;
+    b = (cl_build *)realloc(g_builds, sizeof *g_builds * (size_t)(g_nbuilds + 1));
+    if (!b) { *oom = 1; return; }
+    g_builds = b;
+    b = &g_builds[g_nbuilds];
+    memset(b, 0, sizeof *b);
+    strncpy_s(b->hash, sizeof b->hash, hash, _TRUNCATE);
+    if (sh_companion_add_bundle(&b->table, id, extra, strlen(extra), table_log, NULL) <= 0 || !b->table.count) {
+        sh_companion_table_free(&b->table);
+        return;
+    }
+    g_owners += b->table.count;
+    g_nbuilds++;
+}
+
+/* Replace the tables. Only where no spawn iterates them: a gate on the main
+ * thread, or the outermost spawn before it reads them (after_spawn). */
 static int build_table(void)
 {
+    int oom = 0;
     sh_modserve_get_stats(&g_built_from);
-    sh_companion_table_free(&g_table);
-    if (sh_modserve_each_bundle_extra(read_bundle, NULL) < 0) {
+    free_tables();
+    if (sh_modserve_each_bundle_extra(read_bundle, &oom) < 0 || oom) {
         backend_log("COMPANIONS: the bundles could not be read (out of memory); none are spawned");
-        sh_companion_table_free(&g_table);
+        free_tables();
         return 0;
     }
-    return g_table.count;
+    return g_owners;
+}
+
+/* The owner named `name` in the build that serves its entityDef for the
+ * open map, or NULL. */
+static const sh_companion_owner *find_owner(const char *name)
+{
+    char request[SH_COMPANION_NAME_CAP + 48];
+    sh_modserve_hit hit;
+    int i;
+    if (!name || !g_nbuilds) return NULL;
+    _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/entitydef/%s.decl", name);
+    if (!sh_modserve_lookup(request, &hit) || !hit.bundle_hash) return NULL;
+    for (i = 0; i < g_nbuilds; i++)
+        if (!strcmp(g_builds[i].hash, hit.bundle_hash)) return sh_companion_find(&g_builds[i].table, name);
+    return NULL;
 }
 
 /* Only access violations are contained; an engine idException (a C++ throw)
@@ -184,12 +232,12 @@ static const sh_companion_owner *owner_for(void *decl, void *manager)
 {
     int depth;
     const char *name = decl_str(decl, DECL_NAME);
-    const sh_companion_owner *o = sh_companion_find(&g_table, name);
+    const sh_companion_owner *o = find_owner(name);
     if (o) return o;
     for (depth = 0; depth < INHERIT_DEPTH; depth++) {
         name = decl_str(decl, DECL_INHERIT);
         if (!name || !sh_companion_owner_namespace(name)) return NULL;
-        o = sh_companion_find(&g_table, name);
+        o = find_owner(name);
         if (o) return o;
         if (!manager) return NULL;
         decl = g_decl(manager, name, 0);
@@ -216,10 +264,10 @@ static int owner_frame(void *owner, float origin[3], float axis[9])
 }
 
 /* Spawn `decl` at a world pose the way idTarget_Spawn::SpawnSingleEntity does
- * (snaphak-re R320): create it, write spawnPosition and spawnOrientation,
+ *: create it, write spawnPosition and spawnOrientation,
  * then finish, whose CallSpawn runs the class's Spawn with that pose. The
  * class places itself, which is the only placement an idProp_Coop keeps
- * (ADD-L6 G). NULL when the route is unavailable, or when the created object
+ *. NULL when the route is unavailable, or when the created object
  * is not an entity (it is still finished, and returned in *loose). */
 
 static void *spawn_posed(void *gm, void *decl, const float pose[SH_COMPANION_SPAWN_POSE_FLOATS], void **loose)
@@ -338,8 +386,11 @@ static void after_spawn(void *obj)
     if (!sh_companion_owner_namespace(decl_str(decl, DECL_NAME)) &&
         !sh_companion_owner_namespace(decl_str(decl, DECL_INHERIT)))
         return;
-    refresh_if_changed();
-    if (!g_table.count) return;
+    /* A new index (an install or a download that finished on another thread)
+     * is read at the outermost spawn only: a companion's own spawn runs inside
+     * the loop that iterates its owner's entries. */
+    if (g_depth == 1) refresh_if_changed();
+    if (!g_owners) return;
     manager = entitydef_manager();
     o = owner_for(decl, manager);
     if (!o) return;
@@ -505,8 +556,8 @@ static int commit_detour(const char *phase)
         backend_log("COMPANIONS: the CallSpawn detour commit failed");
         return 0;
     }
-    if (phase) cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s) (%s)", g_target, g_table.count, phase);
-    else cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s)", g_target, g_table.count);
+    if (phase) cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s) (%s)", g_target, g_owners, phase);
+    else cl_log("COMPANIONS: installed on CallSpawn at %p for %d owner(s)", g_target, g_owners);
     return 1;
 }
 
@@ -520,7 +571,7 @@ int sh_companions_install(const sig_result *results, size_t count, const uint8_t
     if (g_orig && hook_is_installed((void *)g_orig)) return 1;
     if (!g_resolved) {
         if (!module_base || !resolve(results, count, module_base, &g_target)) return 0;
-        /* For the runtime arm: only DOOM's main thread runs CallSpawn (ADD-G2, ADD-V1). */
+        /* For the runtime arm: only DOOM's main thread runs CallSpawn. */
         g_main_thread_at = (const uint32_t *)glb_resolve(module_base, "main_thread_id", NULL);
         g_resolved = 1;
     }

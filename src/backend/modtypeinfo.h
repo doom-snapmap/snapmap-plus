@@ -23,7 +23,9 @@
  * inside process heap 0 for the life of the process. Get runs on a one-entry
  * view of the table so its own copy-and-apply path produces the result; the
  * lookup returns the tree itself. An entityDef whose served bytes change at a
- * refresh loses its entry and is rebuilt at its next use.
+ * refresh, or that is parsed from another build's bytes, loses its entry and
+ * is rebuilt at its next use; the old tree stays allocated for the process,
+ * since the engine may keep the pointer the lookup returned.
  *
  * The pure part (the table, the engine cache's search and the view) has no
  * engine dependency and is tested with buffers; the rest binds it to the
@@ -71,10 +73,10 @@ void *sh_typeinfo_table_find(const sh_typeinfo_table *t, const void *key);
 int sh_typeinfo_table_insert(sh_typeinfo_table *t, const void *key, void *tree);
 /* Remove one key; returns its tree (the caller destroys it) or NULL. */
 void *sh_typeinfo_table_remove(sh_typeinfo_table *t, const void *key);
-/* Remove every entry whose key names `name` (case-insensitive, the engine's
- * decl-name rule), handing each tree to `destroy`. Returns the count. */
-int sh_typeinfo_table_remove_name(sh_typeinfo_table *t, const char *name,
-                                  void (*destroy)(void *context, void *tree), void *context);
+/* Forget every entry whose key names `name` (case-insensitive, the engine's
+ * decl-name rule). The trees are never destroyed: the lookup handed the
+ * engine the tree itself, and the engine may still hold it. Returns the count. */
+int sh_typeinfo_table_forget_name(sh_typeinfo_table *t, const char *name);
 void sh_typeinfo_table_free(sh_typeinfo_table *t, void (*destroy)(void *context, void *tree), void *context);
 
 #ifndef SH_MODTYPEINFO_PURE

@@ -9,7 +9,7 @@
  * Keys per file: the request path; for a decl also its decltree/ spelling
  * (DeclRegisterFile reads the source through that name); and the engine's
  * sanitised spelling when it differs (the resource name builder turns every
- * character outside a-z 0-9 $ . / into '_', lane R1 section 1i).
+ * character outside a-z 0-9 $ . / into '_').
  */
 #include <windows.h>
 #include <stdint.h>
@@ -56,6 +56,7 @@ typedef struct ms_file {
     volatile LONG plan_seen;              /* a plan run settled it ready (registered, or left to the game) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
+    int settled;                          /* an earlier table served these bytes and the engine read them */
     volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
     volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
@@ -151,18 +152,24 @@ static const char *ms_label(const ms_bundle *b)
 #define MS_SV_NEW     1                   /* names under its salt */
 #define MS_SV_SHADOW  2                   /* files at game names that differ from the game's */
 #define MS_SV_RESTORE 4                   /* surfaces: the game's own bytes under the game's name */
-#define MS_SV_EDITOR  8                   /* editor tweaks: editor-only types at game names (DESIGN-additive 2.6) */
+#define MS_SV_EDITOR  8                   /* editor tweaks: editor-only types at game names */
 #define MS_SV_ALL     (MS_SV_NEW | MS_SV_SHADOW | MS_SV_RESTORE | MS_SV_EDITOR)
 
 typedef struct ms_slot { uint64_t h; const char *key; int file; } ms_slot;
 
 #define MS_PATH_MAX 1024                  /* a UTF-8 store path (ms_wide) */
+/* A cause naming a damaged builder block: %s is the file, or "its file list". */
+#define MS_DAMAGED "The part of mod.json Snapmap+ writes is damaged (%s). Press Refresh to build the mod again."
 
 typedef struct ms_chunk { struct ms_chunk *next; size_t used, cap; char data[1]; } ms_chunk;
 
-/* A request the replaced table served and this one does not (refresh). */
-struct ms_index;
-typedef struct ms_gone { const struct ms_index *from; int file; volatile LONG pending; } ms_gone;
+/* A request the replaced table served and this one does not (refresh), with
+ * what the refresh needs copied into this table's arena. */
+typedef struct ms_gone {
+    const char *type, *name, *request, *bundle_id;
+    int is_shadow;
+    volatile LONG pending;
+} ms_gone;
 
 typedef struct ms_index {
     char root[MS_PATH_MAX];
@@ -174,10 +181,10 @@ typedef struct ms_index {
     ms_slot *pslots; uint32_t pmask;
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
     int *alts; int nalts, calts;          /* shadow paths' other providers (ms_file.alt_first) */
-    const char **editor_only; int neditor_only;                        /* record "editorOnly": bundles a map named that change only the editor */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
-    struct ms_index *prev;                /* the table this one replaced (retired, never freed) */
+    struct ms_index *prev;                /* the table this one replaced (sh_modserve_index_retire frees it later) */
+    const char **reg_ids; int nreg_ids;   /* salts a registration pass registered a decl of, this session */
     ms_gone *gone; int ngone;             /* refresh: requests no longer served (pending gone shadows carried) */
     sh_modserve_diff diff;                /* refresh: this table against prev */
     volatile LONG expanded;               /* refresh: the inheritance closure was marked */
@@ -194,6 +201,11 @@ typedef struct ms_index {
 } ms_index;
 
 static ms_index *volatile g_index;
+/* What holds a table besides the main thread's own calls
+ * (sh_modserve_index_retire): provider calls in flight on any thread, and
+ * plans, whose steps name a table's strings. */
+static volatile LONG g_readers, g_plans_alive;
+static sh_modserve_step *ms_steps_alloc(int n);
 static volatile LONG g_scope_on;      /* map scope (ms_scope_compute) */
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static int ms_bundle_describe(const ms_index *x, const char *hash, int admitted_only);
@@ -283,7 +295,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
-    free(x->editor_only); free(x->gone); free(x->alts);
+    free(x->gone); free(x->alts); free((void *)x->reg_ids);
     free(x);
 }
 
@@ -291,9 +303,9 @@ static void ms_index_free(ms_index *x)
 
 /* A surface: a stock pointer at the game's own path (the game's bytes
  * under the game's name, modbundle.h sh_mb_stock_restore). No pass
- * registers, re-parses or refreshes one (ADD-L11); the gated reload alone
+ * registers, re-parses or refreshes one; the gated reload alone
  * loads a surface model or image again when the game loaded it before its
- * bundle's requirements were live (ADD-L13). */
+ * bundle's requirements were live. */
 static int ms_surface(const ms_file *f) { return f->is_restore != 0; }
 
 static __inline char ms_fold(char c)
@@ -342,19 +354,6 @@ static int ms_sanitize(const char *in, char *out, size_t cap)
     }
     out[i] = 0;
     return changed && !in[i];
-}
-
-static int ms_valid_id(const char *id)
-{
-    size_t i, n = strlen(id);
-    if (!n || n > 64) return 0;
-    if (!((id[0] >= 'a' && id[0] <= 'z') || (id[0] >= '0' && id[0] <= '9'))) return 0;
-    for (i = 0; i < n; ++i) {
-        char c = id[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0;
-        if (c == '.' && id[i + 1] == '.') return 0;
-    }
-    return 1;
 }
 
 static int ms_valid_hash(char *h)
@@ -586,11 +585,11 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     double size = -1;
     int need_first = x->nneeds, need_count = 0;
     ms_file *f;
-    if (!ms_jenter(c, '{')) { ms_fail(b, "a files[] entry is not an object"); return; }
+    if (!ms_jenter(c, '{')) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
     while (ms_jnext(c, '}')) {
-        if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, "malformed files[] entry"); return; }
+        if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, MS_DAMAGED, "its file list"); return; }
         if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, 511);
-        else if (!strcmp(key, "sha256") || !strcmp(key, "blob")) blob = ms_jstr(x, v, ve, 64);
+        else if (!strcmp(key, "sha256")) blob = ms_jstr(x, v, ve, 64);
         else if (pointer && !strcmp(key, "source")) stock = ms_jstr(x, v, ve, 511);
         else if (!strcmp(key, "stock")) {
             /* A stock pointer (modbundle.h): installed content, no blob, no size. */
@@ -640,12 +639,12 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
     }
     if (pointer && !stock) stock = "";
-    if (!path || !ms_valid_rel(path)) { ms_fail(b, "files[] path '%s' is not a plain assets/ path", path ? path : "?"); return; }
+    if (!path || !ms_valid_rel(path)) { ms_fail(b, MS_DAMAGED, path ? path : "its file list"); return; }
     if (stock) {
         if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
         size = 0;
     } else if (size < 0 || size > (double)SH_MODSERVE_MAX_FILE || size != (double)(uint64_t)size) {
-        ms_fail(b, "'%s' has no valid size", path);
+        ms_fail(b, MS_DAMAGED, path);
         return;
     }
     {
@@ -654,7 +653,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         ms_lower(derived);
         if (request) {
             ms_lower(request);
-            if (strcmp(request, derived)) { ms_fail(b, "'%s' declares request '%s'", path, request); return; }
+            if (strcmp(request, derived)) { ms_fail(b, MS_DAMAGED, path); return; }
         }
         request = derived;
     }
@@ -676,7 +675,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         const char *rest = request + 16, *slash = strchr(rest, '/');
         size_t n = strlen(rest);
         if (!slash || slash == rest || n < 6 || strcmp(rest + n - 5, ".decl") || (size_t)(slash - rest) + 6 > n) {
-            ms_fail(b, "'%s' is not generated/decls/<type>/<name>.decl", request);
+            ms_fail(b, MS_DAMAGED, request);
             return;
         }
         {
@@ -685,7 +684,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             if (pname) {
                 ms_lower(pname);
                 if (strcmp(pname, derived_name)) {
-                    ms_fail(b, "'%s' provides '%s', not the name its path gives", request, pname);
+                    ms_fail(b, MS_DAMAGED, request);
                     return;
                 }
             }
@@ -693,7 +692,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
         if (!ptype) ptype = ms_strndup(x, rest, (size_t)(slash - rest));
         else if (_strnicmp(ptype, rest, (size_t)(slash - rest)) || ptype[slash - rest]) {
-            ms_fail(b, "'%s' provides type '%s', not its folder", request, ptype);
+            ms_fail(b, MS_DAMAGED, request);
             return;
         }
         f->is_decl = 1;
@@ -711,31 +710,26 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     /* Namespace: new names live under mods/<salt>/ (ONE-SHAPE rule 1, the
      * builder's sh_mb_salt_paths_check). Raw files (and skins decls, which
      * are named by their mesh path) may sit deeper, below a folder of their
-     * own; the sanitised spelling is the salt itself (a salt has no '-'). */
+     * own. */
     if (!f->is_shadow && !f->is_restore) {
-        char ns[96], ns_s[96], sid[80];
+        char ns[96];
         int inside;
         _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
-        ms_sanitize(b->id, sid, sizeof sid);
-        _snprintf_s(ns_s, sizeof ns_s, _TRUNCATE, "mods/%s/", sid);
         if (f->is_decl && _stricmp(ptype, "skins")) inside = !strncmp(f->pname, ns, strlen(ns));
         else if (!_stricmp(ptype, "soundBank")) {
             /* A bank lives in the one folder Wwise lists, so its namespace is
              * its stem: <salt>_<rest>, as the builder requires
              * (sh_mb_bank_stem). */
-            char stem[96], bid[80], *q;
+            char stem[96], bid[80];
             size_t k;
             _snprintf_s(bid, sizeof bid, _TRUNCATE, "%s_", b->id);
-            for (q = bid; *q; ++q) if (*q == '.' || *q == '-') *q = '_';
             k = strlen(bid);
             inside = sh_mb_bank_stem(request, stem, sizeof stem) && !_strnicmp(stem, bid, k);
         } else {
             const char *subject = f->is_decl ? f->pname : request;
-            char mid[100], mid_s[100];
+            char mid[100];
             _snprintf_s(mid, sizeof mid, _TRUNCATE, "/%s", ns);
-            _snprintf_s(mid_s, sizeof mid_s, _TRUNCATE, "/%s", ns_s);
-            inside = !strncmp(subject, ns, strlen(ns)) || strstr(subject, mid) != NULL ||
-                     !strncmp(subject, ns_s, strlen(ns_s)) || strstr(subject, mid_s) != NULL;
+            inside = !strncmp(subject, ns, strlen(ns)) || strstr(subject, mid) != NULL;
         }
         if (!inside) {
             ms_fail(b, "'%s' is outside mods/%s/ (its salt) and not listed in shadows", request, b->id);
@@ -905,9 +899,13 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     if (!text) {
         char pkg[MS_PATH_MAX];
         _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
-        if (ms_file_size(path) >= 0) ms_fail(b, "mod.json unreadable or over %u MiB", SH_MODSERVE_MAX_JSON >> 20);
-        else if (ms_file_size(pkg) >= 0) ms_fail(b, SH_MB_SHAPE "its descriptor is package.json, which this version does not read");
-        else ms_fail(b, "no mod.json");
+        if (ms_file_size(path) >= 0)
+            ms_fail(b, "mod.json could not be read (it may be open in another program, or larger than %u MB). Close it "
+                    "and press Refresh.", SH_MODSERVE_MAX_JSON >> 20);
+        else if (ms_file_size(pkg) >= 0)
+            ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                    "converts it.");
+        else ms_fail(b, "This folder has no mod.json. Add one (New mod writes an example) and press Refresh.");
         return;
     }
     if (!sh_json_validate_ex((const char *)text, len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT) {
@@ -916,8 +914,8 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         sh_modserve_build_cause_fn cause_fn = g_build_cause;
         if (cause_fn && b->dir) cause_fn(b->dir, last, sizeof last);
         if (last[0]) ms_fail(b, "not built: %s", last);
-        else ms_fail(b, "mod.json is not a valid JSON object (%s at byte %zu)", err.reason ? err.reason : "not an object",
-                     err.offset);
+        else ms_fail(b, "mod.json has a mistake near character %zu (%s). Fix it and press Refresh.", err.offset,
+                     err.reason ? err.reason : "it is not an object");
         HeapFree(GetProcessHeap(), 0, text);
         return;
     }
@@ -964,7 +962,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
                 else if (!strcmp(key, "cause")) {
                     /* Any cause stops the build serving, even one too long to show whole. */
                     state_cause = ms_jstr(x, v, ve, 4 * SH_MB_CAUSE_MAX);
-                    if (!state_cause) state_cause = (char *)"its mod.json records a cause that cannot be read";
+                    if (!state_cause)
+                        state_cause = (char *)"The part of mod.json Snapmap+ writes is damaged. Press Refresh to build "
+                                              "the mod again.";
                 }
                 else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
                 else if (!strcmp(key, "registries") && v < ve && *v == '{') b->registries = ms_strndup(x, v, (size_t)(ve - v));
@@ -996,10 +996,14 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     /* The shape (ONE-SHAPE rule 6), in the order the builder's
      * sh_mb_descriptor_state_why words it. */
     if (block_v && (!block_object || format != (double)SH_MB_FORMAT))
-        ms_fail(b, SH_MB_SHAPE "it was built by an earlier version of Snapmap+");
-    else if (retired) ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read", retired);
+        ms_fail(b, "This mod was made for an earlier version of Snapmap+. Run the Snapmap+ installer again and it "
+                "converts it.");
+    else if (retired)
+        ms_fail(b, SH_MB_SHAPE "mod.json uses \"%s\", which this version does not read. Remove \"%s\" from mod.json and "
+                "press Refresh.", retired, retired);
     else if (block_v && (!salt || !sh_salt_valid(salt, strlen(salt))))
-        ms_fail(b, SH_MB_SHAPE "its \"" SH_MB_BLOCK_KEY "\" block has no valid salt");
+        ms_fail(b, "The part of mod.json Snapmap+ writes is damaged. Delete the \"" SH_MB_BLOCK_KEY "\" block and press "
+                "Refresh to build the mod again.");
     else if (!block_v) {
         /* A fresh folder: the store's scan salts and builds a root folder; a
          * map's place holds only builds the product received. */
@@ -1042,7 +1046,10 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
             if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
                 ms_json one = { a.p, ms_jskip(a.p, a.e) };
                 a.p = one.e;
-                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u files", SH_MODSERVE_MAX_FILES); break; }
+                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) {
+                    ms_fail(b, "This mod has more than %u files; split it into two mods.", SH_MODSERVE_MAX_FILES);
+                    break;
+                }
                 ms_parse_file(x, b, &one, shadows, nshadows, pass);
             }
         }
@@ -1066,7 +1073,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
         if (f->stock) continue;   /* resolved against the installed game at install, read when served */
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
-        if (got < 0) ms_fail(b, "'%s' is missing", f->request);
+        if (got < 0)
+            ms_fail(b, "assets/%s is missing from the folder. Put it back, or press Refresh to build the mod without it.",
+                    f->request);
         else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
@@ -1402,7 +1411,7 @@ static void ms_one_per_area(ms_index *x)
             first = o->installed_at != b->installed_at ? o->installed_at < b->installed_at : _stricmp(o->folder, b->folder) < 0;
             if (!first) continue;
             if (b->place)
-                ms_fail(b, SH_MB_SHAPE "another folder of this map has the same mod: %s", o->folder);
+                ms_fail(b, "This map's folder holds this mod twice (also in %s). Delete one of the two folders.", o->folder);
             else
                 ms_fail(b, "it is a copy of mods\\%s (the same salt %s); Refresh in the Mods tab makes it a new mod",
                         o->folder, b->id);
@@ -1412,47 +1421,6 @@ static void ms_one_per_area(ms_index *x)
             break;
         }
     }
-}
-
-/* The record's "editorOnly" section: bundles a map named whose fetch found
- * only editor-time content (modsync.c). Their rows are served without a
- * folder: the map plays without them. Keyed by bundle hash; the values (id,
- * name, when) are for the player reading the record. */
-static void ms_load_editor_only(ms_index *x, const char *mods_root)
-{
-    char *text = NULL, key[80];
-    ms_json o;
-    const char *v, *ve;
-    int cap = 0;
-    if (sh_mb_record_get(mods_root, "editorOnly", &text) != 1 || !text) { free(text); return; }
-    o.p = text;
-    o.e = text + strlen(text);
-    if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
-        const char *hash;
-        if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
-        ms_lower(key);
-        if (strlen(key) != 64 || !ms_valid_hash(key)) continue;
-        if (!ms_grow((void **)&x->editor_only, &cap, x->neditor_only + 1, sizeof *x->editor_only)) break;
-        hash = ms_strdup(x, key);
-        if (hash) x->editor_only[x->neditor_only++] = hash;
-    }
-    free(text);
-}
-
-static int ms_editor_only_recorded(const ms_index *x, const char *bundle_hash)
-{
-    char lower[SH_MODSERVE_HASH_HEX + 1];
-    int i;
-    if (!x || !bundle_hash || strlen(bundle_hash) != SH_MODSERVE_HASH_HEX) return 0;
-    strcpy_s(lower, sizeof lower, bundle_hash);
-    ms_lower(lower);
-    for (i = 0; i < x->neditor_only; ++i) if (!strcmp(x->editor_only[i], lower)) return 1;
-    return 0;
-}
-
-int sh_modserve_editor_only_recorded(const char *bundle_hash)
-{
-    return ms_editor_only_recorded(g_index, bundle_hash);
 }
 
 /* ------------------------------------------------------------------ conflicts and table */
@@ -2015,7 +1983,7 @@ char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
  *
  * When several bundles provide one path with different bytes, which one
  * serves is decided per map among the bundles the map declares
- * (ms_scope_compute, DESIGN-additive 2.3): no installed mod takes precedence
+ * (ms_scope_compute): no installed mod takes precedence
  * over another, and nothing about the install (time, folder, who delivered it)
  * counts. In order:
  *   1. the provider with the fewest needs the declared bundles do not provide
@@ -2194,7 +2162,8 @@ static int ms_resolve(ms_index *x)
             for (k = i + 1; k < j; ++k)
                 if (x->files[keys[k].file].bundle == x->files[keys[k - 1].file].bundle) {
                     ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                    ms_fail(b, "'%s' is listed twice", keys[k].key);
+                    ms_fail(b, "The part of mod.json Snapmap+ writes is damaged (a file is listed twice). Press Refresh "
+                            "to build the mod again.");
                     b->admitted = 0;
                     ms_log("bundle '%s' skipped: %s", b->folder, b->cause);
                 }
@@ -2451,30 +2420,40 @@ static void ms_resolve_needs(ms_index *x)
  * closure, so every pass treats them the same way (sh_modserve_step.persist,
  * the closure part of sh_modserve_each_refresh_part). The whole bundle counts,
  * not only what its rows need today: a later build's row can name a decl a
- * map pass already registered (R315 live: an open map's activation had made
+ * map pass already registered (seen live: an open map's activation had made
  * the keycard md6Def a new row attaches, at level 1, and the keeper could
  * only raise the decl, not its model). Needs are closed under this mark, so a
- * closure decl's parents and models are in it too. */
+ * closure decl's parents and models are in it too. A path two builds of one
+ * salt carry (the root folder and a map's place) is marked on its winner, and
+ * the needs of every build of it are followed: the mark is made once per
+ * index, before any map says which build it serves. */
 static void ms_mark_editor_closure(ms_index *x)
 {
-    int *queue, nq = 0, qh = 0, i, k;
+    int *queue, nq = 0, qh = 0, i, k, a;
     if (!x->nfiles) return;
     queue = (int *)malloc(sizeof(int) * (size_t)x->nfiles);
     if (!queue) return;
     for (i = 0; i < x->nfiles; ++i) {
-        ms_file *f = &x->files[i];
-        if (f->served && x->bundles[f->bundle].admitted && (f->is_sedef || x->bundles[f->bundle].has_rows)) {
-            f->editor_closure = 1;
-            queue[nq++] = i;
-        }
+        const ms_file *f = &x->files[i];
+        int w = f->served ? i : f->alt_of;
+        if (w >= 0 && w != i && strcmp(x->bundles[x->files[w].bundle].id, x->bundles[f->bundle].id)) w = -1;
+        if (w < 0 || x->files[w].editor_closure || !x->bundles[f->bundle].admitted ||
+            !(f->is_sedef || x->bundles[f->bundle].has_rows))
+            continue;
+        x->files[w].editor_closure = 1;
+        queue[nq++] = w;
     }
     while (qh < nq) {
-        const ms_file *f = &x->files[queue[qh++]];
-        for (k = 0; k < f->need_count; ++k) {
-            int p = x->needs[f->need_first + k].file;
-            if (p < 0 || x->files[p].editor_closure || !x->files[p].served) continue;
-            x->files[p].editor_closure = 1;
-            queue[nq++] = p;
+        const ms_file *w = &x->files[queue[qh++]];
+        for (a = -1; a < w->alt_count; ++a) {
+            const ms_file *f = a < 0 ? w : &x->files[x->alts[w->alt_first + a]];
+            if (f != w && strcmp(x->bundles[f->bundle].id, x->bundles[w->bundle].id)) continue;
+            for (k = 0; k < f->need_count; ++k) {
+                int p = x->needs[f->need_first + k].file;
+                if (p < 0 || x->files[p].editor_closure || !x->files[p].served) continue;
+                x->files[p].editor_closure = 1;
+                queue[nq++] = p;
+            }
         }
     }
     free(queue);
@@ -2490,6 +2469,16 @@ static int ms_scoped(const ms_index *x, int f)
 {
     if (!InterlockedCompareExchange((volatile LONG *)&g_scope_on, 0, 0)) return f;
     return (int)InterlockedCompareExchange((volatile LONG *)&x->files[f].scope_alt, 0, 0);
+}
+
+/* The file whose recorded needs describe winner `f` for the open map: the
+ * build that serves its path now (a map's own copy of a salt, not the root
+ * folder's), or `f` itself when nothing serves the path in this scope (the
+ * engine may still hold what an earlier scope parsed). */
+static const ms_file *ms_serving_file(const ms_index *x, int f)
+{
+    int s = ms_scoped(x, f);
+    return &x->files[s >= 0 ? s : f];
 }
 
 /* The composed text a file serves instead of its own bytes, or NULL: the
@@ -2521,7 +2510,7 @@ static int ms_kind(const ms_file *f)
     if (f->is_decl) return SH_MODSERVE_RF_DECL;
     if (f->ptype && !_stricmp(f->ptype, "baseModel")) return SH_MODSERVE_RF_MODEL;
     if (f->ptype && !_stricmp(f->ptype, "image")) return SH_MODSERVE_RF_IMAGE;
-    /* Held anims (level 4) are reloaded in place at a map pass (report ADD-G1);
+    /* Held anims (level 4) are reloaded in place at a map pass;
      * a skeleton has no in-place route and stays a restart. */
     if (f->ptype && !_stricmp(f->ptype, "anim") && !strncmp(f->request, "cooked/anim/", 12)) return SH_MODSERVE_RF_ANIM;
     return 0;
@@ -2538,26 +2527,65 @@ static void ms_diff_note(char *out, size_t cap, const char *request)
     _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s", at ? ", " : "", request);
 }
 
-static int ms_add_gone(ms_index *x, int *cap, const ms_index *from, int file, int pending)
+static int ms_add_gone(ms_index *x, int *cap, const char *type, const char *name, const char *request,
+                       const char *bundle_id, int is_shadow, int pending)
 {
+    ms_gone *g;
     if (!ms_grow((void **)&x->gone, cap, x->ngone + 1, sizeof *x->gone)) return 0;
-    x->gone[x->ngone].from = from;
-    x->gone[x->ngone].file = file;
-    x->gone[x->ngone].pending = pending;
+    g = &x->gone[x->ngone];
+    g->type = type ? ms_strdup(x, type) : NULL;
+    g->name = name ? ms_strdup(x, name) : NULL;
+    g->request = ms_strdup(x, request);
+    g->bundle_id = ms_strdup(x, bundle_id);
+    if ((type && !g->type) || (name && !g->name) || !g->request || !g->bundle_id) return 0;
+    g->is_shadow = is_shadow;
+    g->pending = pending;
     x->ngone++;
     return 1;
 }
 
-/* A registration pass registered a decl of mod `id` from this table (or an
- * earlier one): the mod is in use this session. */
+/* A registration pass registered a decl of mod `id` from table `t`, or from
+ * a table before it (t->reg_ids): the mod is in use this session. */
 static int ms_id_registered(const ms_index *t, const char *id)
 {
     int i;
-    for (; t; t = t->prev)
-        for (i = 0; i < t->nfiles; ++i)
-            if (t->files[i].reg_state == 1 && !t->files[i].is_sedef && !strcmp(t->bundles[t->files[i].bundle].id, id))
-                return 1;
+    if (!t) return 0;
+    for (i = 0; i < t->nreg_ids; ++i) if (!strcmp(t->reg_ids[i], id)) return 1;
+    for (i = 0; i < t->nfiles; ++i)
+        if (t->files[i].reg_state == 1 && !t->files[i].is_sedef && !strcmp(t->bundles[t->files[i].bundle].id, id))
+            return 1;
     return 0;
+}
+
+/* What the new table carries from the one it replaces, so no later question
+ * reads an earlier table: the salts registered this session, and per file
+ * whether an earlier table served the same bytes the engine read. */
+static void ms_carry_forward(ms_index *x, const ms_index *old)
+{
+    int i, j, cap = 0;
+    for (i = 0; i < old->nreg_ids + old->nfiles; ++i) {
+        const char *id;
+        if (i < old->nreg_ids) id = old->reg_ids[i];
+        else {
+            const ms_file *f = &old->files[i - old->nreg_ids];
+            if (f->reg_state != 1 || f->is_sedef) continue;
+            id = old->bundles[f->bundle].id;
+        }
+        for (j = 0; j < x->nreg_ids && strcmp(x->reg_ids[j], id); ++j) {}
+        if (j < x->nreg_ids) continue;
+        if (!ms_grow((void **)&x->reg_ids, &cap, x->nreg_ids + 1, sizeof *x->reg_ids)) return;
+        x->reg_ids[x->nreg_ids] = ms_strdup(x, id);
+        if (x->reg_ids[x->nreg_ids]) x->nreg_ids++;
+    }
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = &x->files[i];
+        int o = old->nkeys ? ms_find(old->slots, old->mask, f->request) : -1;
+        const ms_file *of = o >= 0 ? &old->files[o] : NULL;
+        if (of && ms_same_bytes(f, of) &&
+            (of->settled || InterlockedCompareExchange((volatile LONG *)&of->opens, 0, 0) ||
+             InterlockedCompareExchange((volatile LONG *)&of->reparse_tried, 0, 0)))
+            f->settled = 1;
+    }
 }
 
 /* Per served request path, the new table against the one it replaces. Marks
@@ -2636,12 +2664,14 @@ static void ms_diff(ms_index *x, const ms_index *old)
         if (of->is_sedef && of->ptype && of->pname) d->gone_rows++;
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
-            if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
+            if (!ms_add_gone(x, &cap, of->ptype, of->pname, of->request, old->bundles[of->bundle].id, of->is_shadow, 1))
+                ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
         } else if (of->is_sedef && !of->is_restore && of->ptype && of->pname) {
-            if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed editor row stays in the palette");
+            if (!ms_add_gone(x, &cap, of->ptype, of->pname, of->request, old->bundles[of->bundle].id, of->is_shadow, 1))
+                ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
     }
-    /* Registries (L2b deviation 7): a rescan that changes the text a registry
+    /* Registries: a rescan that changes the text a registry
      * generates for the listing (a mod rebuilt with other edits) marks the path that serves it, as a changed
      * decl is marked. */
     for (i = 0; i < x->reg_count; ++i) {
@@ -2666,15 +2696,15 @@ static void ms_diff(ms_index *x, const ms_index *old)
         const ms_gone *g = &old->gone[i];
         int n;
         if (!InterlockedCompareExchange((volatile LONG *)&g->pending, 0, 0)) continue;
-        n = x->nkeys ? ms_find(x->slots, x->mask, g->from->files[g->file].request) : -1;
+        n = x->nkeys ? ms_find(x->slots, x->mask, g->request) : -1;
         if (n >= 0 && x->files[n].served) continue;
-        (void)ms_add_gone(x, &cap, g->from, g->file, 1);
+        (void)ms_add_gone(x, &cap, g->type, g->name, g->request, g->bundle_id, g->is_shadow, 1);
     }
 }
 
 /* ------------------------------------------------------------------ map scope */
 
-/* The current map's listing (DESIGN-additive 2.3, 2.5): the bundle hashes it
+/* The current map's listing: the bundle hashes it
  * declares, in the order of its rows, written by sh_modserve_scope_set under
  * g_build_lock and g_scope_lock and read by the index build under the same
  * build lock. The per-bundle and per-path results it gives are read
@@ -2716,15 +2746,15 @@ static void ms_scope_place(char *out, size_t cap)
 #define MS_WHY_SURFACE   9   /* not declared: a surface (the game's own bytes), served outside Play */
 #define MS_WHY_REGISTRY  10  /* a registry the product generates from the serving bundles' intent */
 static const char *const g_why_text[] = {
-    "the only provider", "identical bytes", "its needs resolve against the declared bundles",
-    "most declared providers carry these bytes", "the first of the map's rows", "composed from the declared providers",
-    "not declared; offered for the Toybox", "editor-time content, served in every map", "no declared bundle provides it",
+    "the only provider", "identical bytes", "its needs resolve against the mods the map uses",
+    "most of the mods the map uses carry these bytes", "the first of the map's rows", "composed from the mods the map uses",
+    "not declared; offered for the Toybox", "editor-time content, served in every map", "no mod the map uses provides it",
     "not declared; a surface (the game's own bytes)",
-    "generated by the product from the serving bundles (a registry)",
+    "generated by Snapmap+ from the mods in use (a registry)",
 };
 
 /* Editor-time content: a bundle whose shadows include the editor's own decls
- * or movies. Those files are editor tweaks (DESIGN-additive 2.6): client-side,
+ * or movies. Those files are editor tweaks: client-side,
  * they serve in every map this editor opens, a downloaded map included, and
  * nothing else of the bundle follows them: its names, surfaces, other shadows,
  * edits and requirements obey the declared rule like any bundle's. */
@@ -2831,7 +2861,7 @@ static ms_body *ms_scope_compose(ms_index *x, int winner, const int *cand, int n
 
 /* ------------------------------------------------------------------ registries
  *
- * DESIGN-additive 2.4 (modregistry.h): derived edits. The index carries one
+ * Derived edits (modregistry.h). The index carries one
  * synthetic file per game file an admitted bundle's product block "edits"
  * names (the conductor, the player body and entity, weapons, FSM states,
  * whitelists, ...). Each belongs to the product's pseudo-bundle
@@ -2865,7 +2895,7 @@ static int g_scope_nchoice;           /* the open map's choices between mods' ed
 
 /* The bundle whose requirement gates gate what `f` serves: its own, or, for
  * a generated text, the first source with requirements whose edits changed
- * it (L2b deviation 8). */
+ * it. */
 static const ms_bundle *ms_gate_of(const ms_index *x, const ms_file *f)
 {
     if (f->registry) {
@@ -3562,11 +3592,10 @@ int sh_modserve_scope_hashes(char (*out)[SH_MODSERVE_HASH_HEX + 1], int cap)
     return n;
 }
 
-int sh_modserve_scope_set(const char *const *hashes, int nhashes, const char *const *ids, int nids, int map_open)
+int sh_modserve_scope_set(const char *const *hashes, int nhashes, int map_open)
 {
     ms_index *x;
     int i, changed;
-    (void)ids; (void)nids;   /* a row names its build by hash; a key alone declares nothing (DESIGN-additive 2.5) */
     AcquireSRWLockExclusive(&g_build_lock);
     x = (ms_index *)g_index;
     AcquireSRWLockExclusive(&g_scope_lock);
@@ -3872,7 +3901,7 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
                 at += (size_t)w;
             }
             _snprintf_s(tail, sizeof tail, _TRUNCATE, "%s%s%s%s", mt ? "; with the entries of: " : "", merged,
-                        at ? "; not served: " : "", others);
+                        at ? "; not used: " : "", others);
             if (p >= 0) {
                 const ms_bundle *b = &x->bundles[x->files[p].bundle];
                 const char *text = why < 0 ? "map scope is off" :
@@ -3885,7 +3914,7 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
                 else
                     _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: %s: %s%s", f->request, who, text, tail);
             } else
-                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not served: %s", f->request,
+                _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %s: the game (%s); not used: %s", f->request,
                             g_why_text[MS_WHY_NONE], others);
         }
         fn(context, line);
@@ -3893,19 +3922,19 @@ static int ms_layer_lines(const ms_index *x, sh_modserve_line_fn fn, void *conte
         shown++;
     }
     if (multi > shown) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several bundles provide with different bytes",
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d more path(s) several mods provide with different bytes",
                     multi - shown);
         fn(context, line);
         lines++;
     }
     if (same) {
-        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several bundles carry with the same bytes; one copy "
-                    "serves when any provider may", same);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "serving: %d path(s) several mods carry with the same bytes; one copy "
+                    "is used when any of them may be", same);
         fn(context, line);
         lines++;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "serving: %d path(s) from bundles the open map declares, %d from undeclared bundles (Toybox names, "
+                "serving: %d path(s) from mods the open map uses, %d from mods it does not use (Toybox names, "
                 "surfaces, editor-time content), %d left to the game", declared, editor, game);
     fn(context, line);
     return lines + 1;
@@ -3930,8 +3959,8 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
             if (k < i) first = 0;
         }
         if (builds > 1 && first) {
-            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: mod %s: %d builds installed (the root folder and maps' places); "
-                        "each map serves the build it declares, and with no map open the root folder's", ms_label(b), builds);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "scope: %s is installed %d times: your own copy and the copies downloaded maps "
+                        "brought. Each map uses its own copy.", ms_label(b), builds);
             fn(context, line);
             lines++;
         }
@@ -3941,7 +3970,7 @@ int sh_modserve_scope_report(sh_modserve_line_fn fn, void *context)
                     si.requirements ? ", requirements" : "");
         if (!on) strcpy_s(state, sizeof state, "map scope is off: serves everything it carries");
         else if (si.listed) _snprintf_s(state, sizeof state, _TRUNCATE, "declared by the open map (row %d): serves everything it carries", si.rank + 1);
-        else if (si.inert) strcpy_s(state, sizeof state, "inert: the open map declares another build of its salt");
+        else if (si.inert) strcpy_s(state, sizeof state, "not used here: this map uses its own copy of this mod");
         else if (si.scope == SH_MODSERVE_SCOPE_ALWAYS)
             _snprintf_s(state, sizeof state, _TRUNCATE, "editor-time content (%s): its editor tweaks serve in every map; "
                         "the rest only in maps that declare it", si.editor_path);
@@ -4093,23 +4122,79 @@ static int ms_mkdirs_for(const char *path)
     return ms_wide(dir, wide, sizeof wide / sizeof wide[0]) && (CreateDirectoryW(wide, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
 }
 
-/* Write `bytes` at `path` unless it already holds exactly them. 1 the file holds them. */
+/* Write `bytes` at `path` unless it already holds exactly them. 1 the file
+ * holds them. The bytes go to a temporary beside it first and replace it
+ * whole, so another game instance reading the name never sees a part. */
 static int ms_write_served(const char *path, const unsigned char *bytes, size_t len)
 {
     size_t have_len = 0;
     unsigned char *have = ms_read_whole(path, (size_t)SH_MODSERVE_MAX_FILE, &have_len);
-    wchar_t wide[MS_PATH_MAX + 8];
+    char tmp[MS_PATH_MAX];
+    wchar_t wide[MS_PATH_MAX + 8], wtmp[MS_PATH_MAX + 8];
     HANDLE h;
     DWORD put = 0;
     int same = have && have_len == len && !memcmp(have, bytes, len), ok;
     if (have) HeapFree(GetProcessHeap(), 0, have);
     if (same) return 1;
-    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
-    h = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
+    if (!ms_mkdirs_for(path) || !ms_wide(path, wide, sizeof wide / sizeof wide[0]) ||
+        !ms_wide(tmp, wtmp, sizeof wtmp / sizeof wtmp[0]))
+        return 0;
+    h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
     ok = WriteFile(h, bytes, (DWORD)len, &put, NULL) && put == (DWORD)len;
     CloseHandle(h);
+    if (ok) ok = MoveFileExW(wtmp, wide, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) DeleteFileW(wtmp);
     return ok;
+}
+
+/* Delete every file under <root>\.served\<sub> that no file of `x` is served
+ * from. Returns the count. */
+static int ms_prune_served_dir(const ms_index *x, const char *sub)
+{
+    char dir[MS_PATH_MAX], path[MS_PATH_MAX], name[MS_PATH_MAX];
+    wchar_t wide[MS_PATH_MAX + 8];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int removed = 0, i, used;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\.served\\%s", x->root, sub);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\*", dir);
+    if (!ms_wide(path, wide, sizeof wide / sizeof wide[0])) return 0;
+    h = FindFirstFileW(wide, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fd.cFileName, -1, name, (int)sizeof name, NULL, NULL))
+            continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, name);
+        for (used = 0, i = 0; i < x->nfiles && !used; ++i) used = x->files[i].disk && !_stricmp(x->files[i].disk, path);
+        if (!used && ms_wide(path, wide, sizeof wide / sizeof wide[0]) && DeleteFileW(wide)) removed++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return removed;
+}
+
+int sh_modserve_served_prune(void)
+{
+    static HANDLE instance;
+    const ms_index *x;
+    int removed;
+    /* Another game instance on this account may serve files this table does
+     * not name (it read the folder at another time): it is left whole. */
+    if (!instance) {
+        instance = CreateMutexW(NULL, FALSE, L"Local\\snapmap-plus-served");
+        if (instance && GetLastError() == ERROR_ALREADY_EXISTS) {
+            ms_log("index: another game instance uses the mods folder; mods\\.served is left as it is");
+            return 0;
+        }
+    }
+    AcquireSRWLockShared(&g_build_lock);
+    x = g_index;
+    removed = x ? ms_prune_served_dir(x, "banks") + ms_prune_served_dir(x, "files") : 0;
+    ReleaseSRWLockShared(&g_build_lock);
+    if (removed) ms_log("index: %d file(s) no mod uses any more removed from mods\\.served", removed);
+    return removed;
 }
 
 /* Serve `f` from rewritten bytes, written under mods\.served\ by their own
@@ -4152,7 +4237,7 @@ static void ms_bank_stems(ms_index *x)
                 ms_log("bundle '%s': %s has no recorded hash; it keeps its name", b->id, f->request);
                 continue;
             }
-            /* The bank's own hash names it (ONE-SHAPE plan R8): two builds
+            /* The bank's own hash names it: two builds
              * with one bank's bytes share it, and Wwise loads it once. */
             _snprintf_s(renamed[n], sizeof renamed[0], _TRUNCATE, "%s.%.16s", stem, f->blob);
             bytes = ms_read_whole(f->disk, (size_t)SH_MODSERVE_MAX_FILE, &len);
@@ -4218,7 +4303,6 @@ int sh_modserve_index_build(const char *mods_root)
     strncpy_s(g_last_root, sizeof g_last_root, mods_root, _TRUNCATE);
     ms_scan_folder(x, mods_root, "", 0, NULL);
     ms_one_per_area(x);
-    ms_load_editor_only(x, mods_root);
     ms_bank_stems(x);
     ms_mark_edits(x);
     if (!ms_resolve(x) || !ms_registry_files(x) || !ms_build_tables(x)) {
@@ -4285,10 +4369,10 @@ int sh_modserve_index_build(const char *mods_root)
     (void)ms_scope_compute(x, 0);
     ReleaseSRWLockShared(&g_scope_lock);
     ms_scope_log(x, old);
-    if (old) ms_diff(x, old);
+    if (old) { ms_diff(x, old); ms_carry_forward(x, old); }
     x->prev = old;
-    /* Publish the complete table; the old one is retired, never freed, since
-     * a provider open on another thread may be inside it. */
+    /* Publish the complete table; the old one stays while a reader may hold
+     * it, and sh_modserve_index_retire frees it two tables later. */
     InterlockedExchangePointer((void *volatile *)&g_index, x);
     ReleaseSRWLockExclusive(&g_build_lock);
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
@@ -4330,10 +4414,13 @@ int sh_modserve_index_boot(void)
         ms_log("index empty: the user-data folder is unavailable");
         return 0;
     }
+    int admitted;
     /* The product's index is map-scoped from its first table: no map is open
      * at boot, so no map-scoped shadow serves before a map lists it. */
     InterlockedExchange(&g_scope_on, 1);
-    return sh_modserve_index_build(root);
+    admitted = sh_modserve_index_build(root);
+    if (admitted >= 0) (void)sh_modserve_served_prune();
+    return admitted;
 }
 
 int sh_modserve_index_rescan(void)
@@ -4410,8 +4497,23 @@ static int ms_lookup_hit(const char *request, sh_modserve_hit *out, int scoped)
     return 1;
 }
 
-int sh_modserve_lookup(const char *request, sh_modserve_hit *out) { return ms_lookup_hit(request, out, 1); }
-int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out) { return ms_lookup_hit(request, out, 0); }
+int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_lookup_hit(request, out, 1);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
+int sh_modserve_lookup_indexed(const char *request, sh_modserve_hit *out)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_lookup_hit(request, out, 0);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
 
 /* The bytes of one indexed file (process heap), or NULL: a stock pointer's
  * installed bytes, else the file at its indexed size. A pointer the reader
@@ -4512,8 +4614,8 @@ void sh_modserve_set_serve_listener(sh_modserve_serve_fn fn)
     InterlockedExchangePointer((PVOID volatile *)&g_serve_listener, (PVOID)fn);
 }
 
-int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
-                               const unsigned char **body, size_t *body_len, uint64_t *size)
+static int ms_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                             const unsigned char **body, size_t *body_len, uint64_t *size)
 {
     const ms_index *x = NULL;
     const ms_file *f = ms_lookup_file(&x, request);
@@ -4532,7 +4634,17 @@ int sh_modserve_serve_identity(const char *request, const char **bundle_hash, co
     return 1;
 }
 
-int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
+int sh_modserve_serve_identity(const char *request, const char **bundle_hash, const char **file_hash,
+                               const unsigned char **body, size_t *body_len, uint64_t *size)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_serve_identity(request, bundle_hash, file_hash, body, body_len, size);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
+static int ms_open(const char *request, unsigned char **bytes, size_t *length)
 {
     sh_modserve_serve_fn listen;
     const ms_index *x = NULL;
@@ -4594,12 +4706,64 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     return 1;
 }
 
+int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
+{
+    int r;
+    InterlockedIncrement(&g_readers);
+    r = ms_open(request, bytes, length);
+    InterlockedDecrement(&g_readers);
+    return r;
+}
+
 int sh_modserve_probe_claims(const char *path)
 {
-    const ms_file *f = ms_lookup_file(NULL, path);
-    if (!f || !f->is_decl) return 0;
+    const ms_file *f;
+    int claimed;
+    InterlockedIncrement(&g_readers);
+    f = ms_lookup_file(NULL, path);
+    claimed = f && f->is_decl;
+    InterlockedDecrement(&g_readers);
+    if (!claimed) return 0;
     InterlockedIncrement(&g_probe_claims);
     return 1;
+}
+
+/* Free the tables two or more generations behind the published one
+ * (modserve.h). Everything a later question needs from them was carried into
+ * the newer tables at their build (ms_carry_forward, the gone list), so only
+ * a reader still inside one holds it: a provider call in flight, a plan, or a
+ * caller that kept a pointer from the table before the published one, which
+ * stays. */
+int sh_modserve_index_retire(void)
+{
+    ms_index *x, *t, *next;
+    int freed = 0, i;
+    AcquireSRWLockExclusive(&g_build_lock);
+    x = g_index;
+    if (!x || !x->prev || !x->prev->prev || InterlockedCompareExchange(&g_readers, 0, 0) ||
+        InterlockedCompareExchange(&g_plans_alive, 0, 0)) {
+        ReleaseSRWLockExclusive(&g_build_lock);
+        return 0;
+    }
+    t = x->prev->prev;
+    x->prev->prev = NULL;
+    for (; t; t = next) {
+        next = t->prev;
+        /* The file cache is keyed by file address: a later table may reuse it. */
+        AcquireSRWLockExclusive(&g_cache_lock);
+        for (i = 0; i < MS_CACHE_SLOTS; ++i)
+            if (g_cache[i].file && g_cache[i].file >= t->files && g_cache[i].file < t->files + t->nfiles) {
+                g_cache_bytes -= g_cache[i].len;
+                HeapFree(GetProcessHeap(), 0, g_cache[i].bytes);
+                memset(&g_cache[i], 0, sizeof g_cache[i]);
+            }
+        ReleaseSRWLockExclusive(&g_cache_lock);
+        ms_index_free(t);
+        freed++;
+    }
+    ReleaseSRWLockExclusive(&g_build_lock);
+    if (freed) ms_log("index: %d earlier table(s) freed", freed);
+    return freed;
 }
 
 #ifdef SH_MODSERVE_TESTING
@@ -4634,7 +4798,7 @@ static int ms_need_blocks(const char *name)
  * game parses it, never reloaded by a plan). A surface (a stock pointer at the game's own path: the game's
  * bytes under the game's name, sh_mb_stock_restore) is never planned by any
  * pass: the provider serves it whenever the game parses it, at the game's
- * own time and level, so no pass registers or re-parses it (ADD-L11). */
+ * own time and level, so no pass registers or re-parses it. */
 static int ms_plannable(const ms_index *x, const ms_file *f)
 {
     (void)x;
@@ -4656,18 +4820,21 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     if (!in_plan || !queue || !cause) goto oom;
     for (i = 0; i < nf; ++i)
         if (root_mark[i]) { in_plan[i] = 1; queue[nq++] = i; }
+    /* Every step's needs are those of the build that serves its path for the
+     * open map (ms_serving_file); a step is still named by the path's winner. */
     while (qh < nq) {
-        const ms_file *f = &x->files[queue[qh++]];
+        int at = queue[qh++];
+        const ms_file *f = ms_serving_file(x, at);
         for (k = 0; k < f->need_count; ++k) {
             const ms_need *nd = &x->needs[f->need_first + k];
             int p = nd->file;
             if (p < 0) {
-                if (ms_need_blocks(nd->name) && !cause[f - x->files]) {
+                if (ms_need_blocks(nd->name) && !cause[at]) {
                     char buf[MS_CAUSE_MAX];
                     _snprintf_s(buf, sizeof buf, _TRUNCATE, "needs %s '%s', which no admitted bundle provides",
                                 nd->type, nd->name);
-                    cause[f - x->files] = ms_strdup((ms_index *)x, buf);
-                    if (!cause[f - x->files]) cause[f - x->files] = "needs a missing mod identity";
+                    cause[at] = ms_strdup((ms_index *)x, buf);
+                    if (!cause[at]) cause[at] = "needs a file no installed mod provides";
                 }
                 continue;
             }
@@ -4678,7 +4845,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     do {
         changed = 0;
         for (i = 0; i < nf; ++i) {
-            const ms_file *f = &x->files[i];
+            const ms_file *f = ms_serving_file(x, i);
             if (!in_plan[i] || cause[i]) continue;
             for (k = 0; k < f->need_count; ++k) {
                 const ms_need *nd = &x->needs[f->need_first + k];
@@ -4700,8 +4867,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
     step_of = (int *)malloc(sizeof(int) * ((size_t)nf + 1));
     if (!order || !indeg || !step_of) goto oom;
     for (i = 0; i < nf; ++i) {
-        const ms_file *f = &x->files[i];
+        const ms_file *f;
         if (!in_plan[i]) continue;
+        f = ms_serving_file(x, i);
         for (k = 0; k < f->need_count; ++k) {
             int p = x->needs[f->need_first + k].file;
             if (p >= 0 && p != i && in_plan[p]) indeg[i]++;
@@ -4720,7 +4888,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         order[n++] = best;
         /* Release the steps that needed this one. */
         for (i = 0; i < nf; ++i) {
-            const ms_file *f = &x->files[i];
+            const ms_file *f = ms_serving_file(x, i);
             if (in_plan[i] != 1) continue;
             for (k = 0; k < f->need_count; ++k) {
                 int p = x->needs[f->need_first + k].file;
@@ -4728,7 +4896,7 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
             }
         }
     }
-    out->steps = (sh_modserve_step *)calloc((size_t)(n ? n : 1), sizeof(sh_modserve_step));
+    out->steps = ms_steps_alloc(n);
     if (!out->steps) goto oom;
     for (i = 0; i < n; ++i) {
         const ms_file *f = &x->files[order[i]];
@@ -4847,7 +5015,7 @@ int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserv
 }
 
 /* The editor rows of the bundles a map names, checked against the built
- * palette at load (lane M6). A row counts as missing when the palette lacks
+ * palette at load. A row counts as missing when the palette lacks
  * it and no editor pass has visited it yet (reg_state 0): a row registered
  * before an earlier build that is still absent was rejected by the builder's
  * admission, and another rebuild would not admit it. Bundles are selected as
@@ -4906,9 +5074,18 @@ done:
     return r;
 }
 
+/* Steps for a plan; the plan holds its table until sh_modserve_plan_free. */
+static sh_modserve_step *ms_steps_alloc(int n)
+{
+    sh_modserve_step *s = (sh_modserve_step *)calloc((size_t)(n > 0 ? n : 1), sizeof(sh_modserve_step));
+    if (s) InterlockedIncrement(&g_plans_alive);
+    return s;
+}
+
 void sh_modserve_plan_free(sh_modserve_plan *plan)
 {
     if (!plan) return;
+    if (plan->steps) InterlockedDecrement(&g_plans_alive);
     free(plan->steps);
     memset(plan, 0, sizeof *plan);
 }
@@ -5021,7 +5198,8 @@ int sh_modserve_withdraw(const char *request, const char *type, const char *name
     bundle = x->bundles[f->bundle].id;
     InterlockedExchange(&f->withdrawn, 1);
     ms_log("withdrawn: %s '%s' (%s): %s", type ? type : "?", name ? name : request, bundle, why ? why : "");
-    ms_console("%s: %s '%s' not loaded: %s", bundle, type ? type : "decl", name ? name : request, why ? why : "");
+    ms_console("%s: assets/%s was not loaded: %s. Fix the file and press Refresh in the Mods tab.",
+               ms_label(&x->bundles[f->bundle]), f->request, why ? why : "the game could not use it");
     return 1;
 }
 
@@ -5060,7 +5238,7 @@ static int ms_uptr_cmp(const void *a, const void *b)
 
 /* Visit every resource: fn(context, list, resource). 1 when the walk completed. */
 typedef void (*ms_res_fn)(void *context, const unsigned char *list, unsigned char *res);
-/* The engine's resource lock (report ADD-G3): list add, remove and find run
+/* The engine's resource lock: list add, remove and find run
  * under one CRITICAL_SECTION, and list add swap-removes and grows the entry
  * array, so a walk takes it. `g_res_lock` is the address of the static struct
  * whose first qword is the CRITICAL_SECTION pointer (VK RVA 0x5D79238, GL
@@ -5160,9 +5338,9 @@ static void ms_aset_free(ms_aset *s)
 /* Resources whose last load ran with a map heap selected (sh_modserve_attrib_enter
  * with heap != 0): what the load allocated with the current heap (an MD6
  * skeleton's joints, VK 0x1416d0770 at +0x40) belongs to that heap, which the
- * next map load releases whatever the resource's level (report F9: the
+ * next map load releases whatever the resource's level (the
  * chainsaw gore skeleton raised by name kept its object and lost its joints,
- * G1 at 0x16f7f0b). No keep raises one; the purge and the next load recreate
+ * a fault at VK 0x16f7f0b). No keep raises one; the purge and the next load recreate
  * it whole. A load in process heap 0 clears the mark. */
 static ms_aset g_mapheap;
 static unsigned g_left_n;
@@ -5187,9 +5365,12 @@ static void ms_aset_del(ms_aset *s, uintptr_t key)
     }
 }
 
-/* 1 when a keep may raise `res`; 0 (counted, named) when the map's heap owns it. */
-static int ms_keepable(const unsigned char *res)
+/* The keepability rule (modserve.h): 1 when `resource` may be kept; 0
+ * (counted and named for the next left_to_map) when its last load ran with a
+ * map's heap selected. */
+int sh_modserve_keepable(const void *resource)
 {
+    const unsigned char *res = (const unsigned char *)resource;
     const char *name;
     size_t at;
     if (!ms_aset_has(&g_mapheap, (uintptr_t)res)) return 1;
@@ -5199,6 +5380,19 @@ static int ms_keepable(const unsigned char *res)
     if (name && at + strlen(name) + 3 < sizeof g_left_first)
         _snprintf_s(g_left_first + at, sizeof g_left_first - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
     return 0;
+}
+
+/* Every write that keeps a resource for the session goes through here. */
+int sh_modserve_keep(void *resource)
+{
+    unsigned char *res = (unsigned char *)resource;
+    if (!res) return 0;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 4) {
+        if (!sh_modserve_keepable(res)) return 0;
+        *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    }
+    sh_modserve_kept_add(res);
+    return 1;
 }
 
 unsigned sh_modserve_left_to_map(char *names, size_t cap)
@@ -5249,9 +5443,7 @@ static void ms_raise_one(void *context, const unsigned char *list, unsigned char
     if (r->w->n && bsearch(&key, r->w->res, r->w->n, sizeof(uintptr_t), ms_uptr_cmp)) return;
     r->out->created++;
     if (*(unsigned *)(res + MS_RES_LEVEL) == 4) sh_modserve_kept_add(res);
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !sh_modserve_keep(res)) return;
     r->out->raised++;
     for (c = 0; c < r->ncls && r->cls[c].list != list; ++c) {}
     if (c == r->ncls && r->ncls < 64) { r->cls[c].list = list; r->cls[c].n = 0; r->ncls++; }
@@ -5291,7 +5483,7 @@ int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_waterma
 
 /* Every resource the engine's lists hold: fn(context, list class, resource, name). */
 /* Collected under the lock; the callback (a reload, a re-parse) runs after it
- * is released, since GenericLoad under the lock was not analysed (ADD-G3). */
+ * is released, since GenericLoad under the lock was not analysed. */
 typedef struct ms_res_item { const char *list; void *res; const char *name; } ms_res_item;
 typedef struct ms_res_items { ms_res_item *v; size_t n, cap; int oom; } ms_res_items;
 static void ms_each_res_one(void *context, const unsigned char *list, unsigned char *res)
@@ -5404,9 +5596,7 @@ static void ms_lookups_raise_one(void *context, const unsigned char *list, unsig
     (void)list;
     if (g_lookups[ms_lookup_slot(g_lookups, g_lookups_cap, (uintptr_t)res)] != (uintptr_t)res) return;
     out->live++;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !sh_modserve_keep(res)) return;
     out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(out->first);
@@ -5499,7 +5689,7 @@ int sh_modserve_attrib_keep(void *resource)
     int raised = 0;
     if (!r || !ms_aset_has(&g_kept, (uintptr_t)r)) return 0;
     __try {
-        if (*(unsigned *)(r + MS_RES_LEVEL) == 1 && ms_keepable(r)) { *(unsigned *)(r + MS_RES_LEVEL) = 4; raised = 1; }
+        if (*(unsigned *)(r + MS_RES_LEVEL) == 1) raised = sh_modserve_keep(r);
     } __except (EXCEPTION_EXECUTE_HANDLER) { raised = 0; }
     g_attrib_raised_at_load += (unsigned)raised;
     return raised;
@@ -5574,8 +5764,7 @@ static void ms_attrib_raise_one(void *context, const unsigned char *list, unsign
     const char *name;
     size_t at;
     (void)list;
-    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_aset_has(&g_kept, (uintptr_t)res) || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_aset_has(&g_kept, (uintptr_t)res) || !sh_modserve_keep(res)) return;
     out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(out->first);
@@ -5678,8 +5867,13 @@ done:
 
 /* What kept decls hold (sh_modserve_holds_raise). A (type, name) key: the
  * type case-insensitive, the name folded as the raw-name match folds it
- * (case, a backslash as '/', '-' as '_'). */
-typedef struct ms_hold { const char *type, *name; int file; } ms_hold;
+ * (case, a backslash as '/', '-' as '_': the engine's binary names spell a
+ * source path's '-' as '_', ms_sanitize). */
+typedef struct ms_hold {
+    const char *type, *name;
+    int file;              /* the file that describes it for the open map, or -1 */
+    int live;              /* that file serves its path in the open map's scope */
+} ms_hold;
 
 static char ms_hold_fold(char c)
 {
@@ -5730,9 +5924,7 @@ static void ms_holds_raise_one(void *context, const unsigned char *list, unsigne
     ms_holds_walk *w = (ms_holds_walk *)context;
     const char *name;
     size_t at;
-    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !ms_keepable(res)) return;
-    *(unsigned *)(res + MS_RES_LEVEL) = 4;
-    sh_modserve_kept_add(res);
+    if (*(const unsigned *)(res + MS_RES_LEVEL) != 1 || !ms_holds_find(w, list, res) || !sh_modserve_keep(res)) return;
     w->out->raised++;
     name = *(const char *const *)(res + MS_RES_NAME);
     at = strlen(w->out->first);
@@ -5758,13 +5950,16 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
     queue = (int *)malloc(sizeof *queue * (size_t)x->nfiles);
     if (!cands || !w.root || !queue) goto done;
     /* The roots: decls of admitted bundles the product serves (a surface is
-     * the game's own decl, kept at the game's level). */
+     * the game's own decl, kept at the game's level), each described by the
+     * build that serves its path for the open map (ms_serving_file): a map
+     * that brought its own copy of a salt holds what that copy needs. */
     for (i = 0; i < x->nfiles; ++i) {
         const ms_file *f = &x->files[i];
         if (!f->is_decl || !f->served || ms_surface(f) || !f->ptype || !f->pname || !x->bundles[f->bundle].admitted) continue;
         cands[nc].type = f->ptype;
         cands[nc].name = f->pname;
-        cands[nc].file = i;
+        cands[nc].file = (int)(ms_serving_file(x, i) - x->files);
+        cands[nc].live = 1;
         nc++;
     }
     if (nc > 1) qsort(cands, nc, sizeof *cands, ms_hold_cmp);
@@ -5787,12 +5982,18 @@ static int ms_holds_closure(const ms_index *x, const void *head_slot, ms_hold **
             }
             set[ns].type = nd->type;
             set[ns].name = nd->name;
-            set[ns].file = nd->file;
-            ns++;
-            if (nd->file >= 0 && nd->file < x->nfiles && !w.root[nd->file]) {
-                w.root[nd->file] = 1;
-                queue[nq++] = nd->file;
+            set[ns].file = -1;
+            set[ns].live = 0;
+            if (nd->file >= 0 && nd->file < x->nfiles) {
+                int s = ms_scoped(x, nd->file), p = s >= 0 ? s : nd->file;
+                set[ns].file = p;
+                set[ns].live = s >= 0;
+                if (!w.root[p]) {
+                    w.root[p] = 1;
+                    queue[nq++] = p;
+                }
             }
+            ns++;
         }
     }
     if (ns > 1) qsort(set, ns, sizeof *set, ms_hold_cmp);
@@ -5819,7 +6020,7 @@ done:
  * watermark (an open map's own load created the chainsaw pickup's web at level
  * 1 and its parse created the clip; the pass then raised the web, and the
  * clip, older than the watermark, stayed at 1 and was freed under the web by
- * the Play purge, report X1), so the watermark alone cannot keep what it
+ * the Play purge), so the watermark alone cannot keep what it
  * holds. Each named resource found at level 1 is raised to 4; one the engine
  * does not hold yet is raised by the first pass after it is created. */
 int sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out)
@@ -5889,8 +6090,8 @@ static void ms_held_model_one(void *context, const unsigned char *list, unsigned
     /* Held for the session and whole: nothing to do. Loaded at level 1 in
      * process heap 0: the holds raise keeps it. The default box (the engine's
      * model for a file it could not read: loaded where the file was not
-     * served, report X2), or one whose load allocated from a map heap
-     * (ms_keepable), is loaded again. */
+     * served), or one whose load allocated from a map heap
+     * (sh_modserve_keepable), is loaded again. */
     if (state & (MS_RES_FAILED | MS_RES_DEFAULT)) w->load[i] = 1;
     else if (*(const unsigned *)(res + MS_RES_LEVEL) == 4) w->load[i] = 0;
     else w->load[i] = ms_aset_has(&g_mapheap, (uintptr_t)res) ? 1 : 0;
@@ -5917,8 +6118,7 @@ int sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn,
     if (!models) goto done;
     for (i = 0; i < ns; ++i)
         if (!_stricmp(set[i].type, SH_MODSERVE_HELD_MODEL_TYPE) && set[i].file >= 0 && set[i].file < x->nfiles &&
-            x->files[set[i].file].served && x->bundles[x->files[set[i].file].bundle].admitted &&
-            ms_scoped(x, set[i].file) >= 0)
+            set[i].live && x->bundles[x->files[set[i].file].bundle].admitted)
             models[nm++] = set[i];
     visited = 0;
     if (!nm) goto done;
@@ -6058,16 +6258,18 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                     stock[i] = 2;
                     ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
                            "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
-                    ms_console("%s: animWeb '%s' not applied: it names model '%s', which SnapMap cannot load; the "
-                               "game's own animWeb is used", s->bundle_id, s->name, model);
+                    ms_console("%s: its animation file assets/%s names the model %s, which SnapMap cannot load, so "
+                               "the game's own animation is used. Name a model SnapMap has, then press Refresh.",
+                               ms_label(&x->bundles[f->bundle]), f->request, model);
                 } else {
                     failed[i] = 1;
                     InterlockedExchange(&f->reg_state, -1);
                     ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
                            "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
                            s->bundle_id, model);
-                    ms_console("%s: animWeb '%s' not loaded: it names model '%s', which SnapMap cannot load "
-                               "(campaign-only or missing)", s->bundle_id, s->name, model);
+                    ms_console("%s: assets/%s was not loaded because it names the model %s, which SnapMap cannot "
+                               "load (it is campaign-only or missing). Name a model SnapMap has, then press Refresh.",
+                               ms_label(&x->bundles[f->bundle]), f->request, model);
                 }
                 continue;
             }
@@ -6163,8 +6365,12 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             InterlockedExchange(&f->withdrawn, 1);
             ms_log("%s: %s '%s' (%s) NOT READY: the engine refused its parse%s%s; withdrawn, not loaded again", phase,
                    s->type, s->name, s->bundle_id, why[0] ? ": " : "", why);
-            ms_console("%s: %s '%s' not loaded: the game refused it%s%s", s->bundle_id, s->type, s->name,
-                       why[0] ? ": " : "", why);
+            {
+                char *nl = strpbrk(why, "\r\n");
+                if (nl) *nl = 0;
+                ms_console("%s: the game could not read assets/%s%s%s. Fix the file and press Refresh.",
+                           ms_label(&x->bundles[f->bundle]), f->request, why[0] ? ": " : "", why);
+            }
         } else if (loaded) {
             InterlockedExchange(&f->reg_state, 1);
             s->ready = 1;
@@ -7023,9 +7229,6 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
         if (cause && cap) _snprintf_s(cause, cap, _TRUNCATE, "This %s names a mod this version does not read.", what);
         return SH_MODSERVE_ROW_MISSING;
     }
-    /* A build the record knows changes only the editor: the map plays
-     * without it, whatever folders are installed. */
-    if (ms_editor_only_recorded(x, row->build)) return SH_MODSERVE_ROW_SERVED;
     strcpy_s(salt, sizeof salt, row->salt);
     ms_lower(salt);
     declared = sh_modserve_place_norm(place, norm, sizeof norm) ? ms_row_build_in(x, row, norm) : -1;
@@ -7047,7 +7250,8 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
         const char *n;
         for (i = 0; !b && x && i < x->nbundles; ++i)   /* another build of the salt names it */
             if (x->bundles[i].id && !strcmp(x->bundles[i].id, salt) && x->bundles[i].name && x->bundles[i].name[0]) b = &x->bundles[i];
-        n = b && b->name && b->name[0] ? b->name : row->name[0] ? row->name : salt;
+        /* Never the salt: a player who only plays maps never sees one. */
+        n = b && b->name && b->name[0] ? b->name : row->name[0] ? row->name : "";
         strncpy_s(title, sizeof title, n, _TRUNCATE);
     }
     if (declared < 0) {
@@ -7055,7 +7259,8 @@ int sh_modserve_row_served_in(const sh_modmanifest_row *row, const char *place, 
             if (skipped >= 0)
                 _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is installed but cannot be used: %s.", what,
                             title, x->bundles[skipped].cause[0] ? x->bundles[skipped].cause : "its folder was skipped");
-            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
+            else if (title[0]) _snprintf_s(cause, cap, _TRUNCATE, "This %s uses %s, which is not installed.", what, title);
+            else _snprintf_s(cause, cap, _TRUNCATE, "This %s uses a mod that is not installed.", what);
         }
         return SH_MODSERVE_ROW_MISSING;
     }
@@ -7313,6 +7518,23 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
     }
 }
 
+/* Each path's file as the open map serves it (sh_modserve_each_served_here). */
+void sh_modserve_each_served_here(sh_modserve_file_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i, s;
+    if (!x || !fn) return;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f;
+        const ms_bundle *b;
+        if (!x->files[i].served || x->files[i].withdrawn || !x->bundles[x->files[i].bundle].admitted) continue;
+        if ((s = ms_scoped(x, i)) < 0) continue;   /* nothing serves the path in this scope */
+        f = &x->files[s];
+        b = &x->bundles[f->bundle];
+        fn(context, f->request, f->size, b->id ? b->id : b->folder, b->hash ? b->hash : "");
+    }
+}
+
 int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -7348,7 +7570,6 @@ int sh_modserve_script_files(const char *salt, sh_modserve_script_fn fn, void *c
 /* An earlier table served these bytes or re-parsed them: an open on the
  * provider thread can land in the table a rescan is replacing, after the
  * rescan copied the marks. */
-static int ms_settled_before(const ms_index *x, const ms_file *f);
 
 /* The bundle has cvar requirements and they are all live now. */
 static int ms_gates_live_for(const ms_index *x, const ms_file *f)
@@ -7362,22 +7583,10 @@ static int ms_gates_live_for(const ms_index *x, const ms_file *f)
  * before the bundle's requirement gates were live and live now. */
 static int ms_stale(const ms_index *x, const ms_file *f)
 {
-    if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !ms_settled_before(x, f);
+    if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !f->settled;
     return InterlockedCompareExchange((volatile LONG *)&f->opened_ungated, 0, 0) && ms_gates_live_for(x, f);
 }
 
-static int ms_settled_before(const ms_index *x, const ms_file *f)
-{
-    const ms_index *p;
-    for (p = x->prev; p; p = p->prev) {
-        int o = p->nkeys ? ms_find(p->slots, p->mask, f->request) : -1;
-        if (o >= 0 && ms_same_bytes(f, &p->files[o]) &&
-            (InterlockedCompareExchange((volatile LONG *)&p->files[o].opens, 0, 0) ||
-             InterlockedCompareExchange((volatile LONG *)&p->files[o].reparse_tried, 0, 0)))
-            return 1;
-    }
-    return 0;
-}
 
 int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
 {
@@ -7402,7 +7611,7 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
 
 /* Raw resources first served before their bundle's gates were live: the
  * models and images whose load resolved names against the blacklists,
- * surfaces included (ADD-L13). */
+ * surfaces included. */
 int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
 {
     const ms_index *x = g_index;
@@ -7419,14 +7628,14 @@ int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
          * game loaded at boot with the blacklists on holds no materials for
          * its blacklisted names until it is loaded again with them off (the
          * stock spider mesh, ADD-V7a D1). This is the one pass that touches
-         * a surface; no plan registers or re-parses one (ADD-L11). A surface
+         * a surface; no plan registers or re-parses one. A surface
          * never opened through the provider is offered as well, as ms_stale
          * offers a decl: on a boot that builds the mod folders the game loads
          * the mesh while the index is still empty, so the open never reaches
          * the provider and is never marked ungated (ADD-V7b D1). */
         if (InterlockedCompareExchange(&ef->reparse_tried, 0, 0) || !ms_gates_live_for(x, ef) ||
             !(InterlockedCompareExchange(&ef->opened_ungated, 0, 0) ||
-              (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ms_settled_before(x, ef))))
+              (ms_surface(ef) && !InterlockedCompareExchange(&ef->opens, 0, 0) && !ef->settled)))
             continue;
         visited++;
         if (fn(context, f->ptype, f->pname, f->request, x->bundles[ef->bundle].id) == 1)
@@ -7487,12 +7696,20 @@ int sh_modserve_refresh_expand(void)
     if (!types) return 0;
     /* The types and names of the changed and gone decls (generation 0). */
     for (i = 0; i < x->nfiles + x->ngone; ++i) {
-        const ms_file *f = i < x->nfiles ? &x->files[i] : &x->gone[i - x->nfiles].from->files[x->gone[i - x->nfiles].file];
+        const char *type, *name;
         int t, seen = 0;
-        if (i < x->nfiles ? (!f->refresh || !f->is_decl) : !x->gone[i - x->nfiles].pending) continue;
-        if (!f->ptype || !f->pname) continue;
-        for (t = 0; t < ntypes; ++t) if (!_stricmp(types[t], f->ptype)) seen = 1;
-        if (!seen && ntypes < 64) strncpy_s(types[ntypes++], 64, f->ptype, _TRUNCATE);
+        if (i < x->nfiles) {
+            const ms_file *f = &x->files[i];
+            if (!f->refresh || !f->is_decl) continue;
+            type = f->ptype; name = f->pname;
+        } else {
+            const ms_gone *g = &x->gone[i - x->nfiles];
+            if (!g->pending) continue;
+            type = g->type; name = g->name;
+        }
+        if (!type || !name) continue;
+        for (t = 0; t < ntypes; ++t) if (!_stricmp(types[t], type)) seen = 1;
+        if (!seen && ntypes < 64) strncpy_s(types[ntypes++], 64, type, _TRUNCATE);
     }
     if (!ntypes) { free(types); return 0; }
     /* Each served decl of those types: its top-level parent. */
@@ -7520,11 +7737,17 @@ int sh_modserve_refresh_expand(void)
             int j;
             if (!parent[i] || f->refresh || ms_surface(f)) continue;
             for (j = 0; j < x->nfiles + x->ngone; ++j) {
-                const ms_file *p = j < x->nfiles ? &x->files[j] : &x->gone[j - x->nfiles].from->files[x->gone[j - x->nfiles].file];
+                const char *ptype, *pname;
                 if (j < x->nfiles) {
+                    const ms_file *p = &x->files[j];
                     if (!p->refresh || !p->is_decl || (int)p->refresh_gen != gen - 1) continue;
-                } else if (gen != 1 || !x->gone[j - x->nfiles].pending) continue;
-                if (!p->ptype || !p->pname || _stricmp(p->ptype, f->ptype) || _stricmp(p->pname, parent[i])) continue;
+                    ptype = p->ptype; pname = p->pname;
+                } else {
+                    const ms_gone *g = &x->gone[j - x->nfiles];
+                    if (gen != 1 || !g->pending) continue;
+                    ptype = g->type; pname = g->name;
+                }
+                if (!ptype || !pname || _stricmp(ptype, f->ptype) || _stricmp(pname, parent[i])) continue;
                 InterlockedExchange(&f->refresh_gen, gen);
                 InterlockedExchange(&f->refresh, 1);
                 x->diff.dependents++;
@@ -7599,12 +7822,11 @@ int sh_modserve_each_refresh_part(sh_modserve_refresh_fn fn, void *context, int 
             if (part == SH_MODSERVE_PART_EDITOR) continue;
             for (i = 0; i < x->ngone; ++i) {
                 ms_gone *g = (ms_gone *)&x->gone[i];
-                const ms_file *of = &g->from->files[g->file];
                 sh_modserve_refresh_item it;
                 if (!InterlockedCompareExchange(&g->pending, 0, 0)) continue;
-                it.type = of->ptype; it.name = of->pname; it.request = of->request;
-                it.bundle_id = g->from->bundles[of->bundle].id;
-                it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = of->is_shadow; it.gates_live = 1;
+                it.type = g->type; it.name = g->name; it.request = g->request;
+                it.bundle_id = g->bundle_id;
+                it.kind = SH_MODSERVE_RF_DECL; it.gone = 1; it.shadow = g->is_shadow; it.gates_live = 1;
                 visited++;
                 if (fn(context, &it) == 1) InterlockedExchange(&g->pending, 0);
             }
@@ -7719,8 +7941,8 @@ int sh_modserve_plan_split(const sh_modserve_plan *plan, sh_modserve_plan *kept,
         if (ms_split_keeps(x, s)) nk++;
     }
     if (!nk) return 0;
-    kept->steps = (sh_modserve_step *)calloc((size_t)nk, sizeof(sh_modserve_step));
-    rest->steps = (sh_modserve_step *)calloc((size_t)(plan->count - nk ? plan->count - nk : 1), sizeof(sh_modserve_step));
+    kept->steps = ms_steps_alloc(nk);
+    rest->steps = ms_steps_alloc(plan->count - nk);
     if (!kept->steps || !rest->steps) { sh_modserve_plan_free(kept); sh_modserve_plan_free(rest); return -1; }
     for (i = 0; i < plan->count; ++i) {
         const sh_modserve_step *s = &plan->steps[i];
@@ -7830,4 +8052,45 @@ int sh_modserve_is_mod_sedef(const char *name)
     strcpy_s(lower, sizeof lower, name);
     ms_lower(lower);
     return ms_provider(x, "snapeditorentitydef", lower) >= 0;
+}
+
+/* A mod the open map uses, named as a player names it (sh_modserve_listed_mod). */
+int sh_modserve_listed_mod(const char *name, char *salt, size_t salt_cap, char *label, size_t label_cap)
+{
+    const ms_index *x = g_index;
+    int i, found = -1;
+    if (salt && salt_cap) salt[0] = 0;
+    if (label && label_cap) label[0] = 0;
+    if (!x || !name || !name[0]) return 0;
+    for (i = 0; i < x->nbundles && found < 0; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        const char *seg = b->folder ? strrchr(b->folder, '\\') : NULL;
+        if (!b->admitted || InterlockedCompareExchange((volatile LONG *)&b->rank, 0, 0) < 0) continue;
+        if ((b->id && !_stricmp(b->id, name)) || (b->name && !_stricmp(b->name, name)) ||
+            (b->folder && !_stricmp(b->folder, name)) || (seg && !_stricmp(seg + 1, name)))
+            found = i;
+    }
+    if (found < 0) return 0;
+    if (salt && salt_cap) strncpy_s(salt, salt_cap, x->bundles[found].id, _TRUNCATE);
+    if (label && label_cap) strncpy_s(label, label_cap, ms_label(&x->bundles[found]), _TRUNCATE);
+    return 1;
+}
+
+/* A bundle as a status line names it: "<name> (mods\<folder>)". */
+int sh_modserve_bundle_label(const char *bundle_hash, char *out, size_t cap)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    for (i = 0; x && bundle_hash && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!b->hash || _stricmp(b->hash, bundle_hash)) continue;
+        if (b->name && b->name[0] && b->folder && b->folder[0])
+            _snprintf_s(out, cap, _TRUNCATE, "%s (mods\\%s)", b->name, b->folder);
+        else _snprintf_s(out, cap, _TRUNCATE, "mods\\%s", b->folder && b->folder[0] ? b->folder : "?");
+        return 1;
+    }
+    strncpy_s(out, cap, "a mod", _TRUNCATE);
+    return 0;
 }

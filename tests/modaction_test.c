@@ -115,12 +115,30 @@ static void test_typing(void)
     CHECK(smp_type_args("iiiiiiiii", (const char (*)[SMP_MAX_TOKEN])&c.argv[1], 9, a, err, sizeof err) == -1);
 }
 
+/* The shape a literal needs: event with any event name, doomhands with one
+ * bool; anything else is refused with a plain reason. Whether the event
+ * exists is the engine's to say (modaction_engine_test). */
+static void test_check(void)
+{
+    smp_command c;
+    char err[160];
+    CHECK(smp_check("smp:event forcePraetorHandsAndBody 1", &c, err, sizeof err) && c.argc == 2);
+    CHECK(smp_check("smp:event anyRegisteredEvent 3 1.5 text", &c, err, sizeof err) && c.argc == 4);
+    CHECK(!smp_check("smp:event", &c, err, sizeof err) && strstr(err, "usage: smp:event"));
+    CHECK(smp_check("smp:doomhands on", &c, err, sizeof err));
+    CHECK(!smp_check("smp:doomhands maybe", &c, err, sizeof err) && strstr(err, "usage: smp:doomhands"));
+    CHECK(!smp_check("smp:doomhands 1 2", &c, err, sizeof err));
+    CHECK(!smp_check("smp:status", &c, err, sizeof err) && !strcmp(err, "unknown command 'status'"));
+    CHECK(!smp_check("hello", &c, err, sizeof err) && strstr(err, "not an smp: command"));
+}
+
 int main(void)
 {
     test_prefix();
     test_parse();
     test_bool();
     test_typing();
+    test_check();
     if (g_fail) return 1;
     printf("modaction_test: ok\n");
     return 0;

@@ -129,8 +129,8 @@ static void install_features(const sig_result *results, size_t db)
 {
     int clean = 0;
 
-    /* Map loading: rawmaps, the map carrier (mods, map settings) and retired
-     * package payloads all run inside the DeserializeFromJson detour. */
+    /* Map loading: rawmaps and the map carrier (mods, map settings) run inside
+     * the DeserializeFromJson detour. */
     void *deser = sig_fn(results, db, "DeserializeFromJson", &clean);
     need(sh_rawmap_swap_install(deser, clean), "map loads cannot be intercepted",
          SH_FEATURE_RAWMAPS, SH_FEATURE_MODS, SH_FEATURE_MAP_SETTINGS);

@@ -2,7 +2,7 @@
  * engine under each name this session.
  *
  * The engine records no byte identity for raw resources and, after a
- * production read, none for decls other than entityDef (report ADD-G3), so
+ * production read, none for decls other than entityDef, so
  * "the engine holds this name, but with which bytes?" is answered here. Every
  * serve through the provider (sh_modserve_open: the +0x148 open the raw
  * loaders and the decl read path both reach) records, per request path, the
@@ -14,7 +14,7 @@
  * The refresh decision at a map transition compares the record with what the
  * open map's declared builds serve now (sh_modledger_decide): equal bytes keep
  * the held object as it is, other bytes refresh it in place, and a name the
- * provider never served under a key carries no mod bytes and is never
+ * provider never served carries no mod bytes and is never
  * refreshed. A stock path (a shadow) or a withdrawn one is left to the
  * serving index's own marks, since the game's bytes may be what it holds.
  *
@@ -125,7 +125,7 @@ sh_modledger_tally_type *sh_modledger_tally_add(sh_modledger_tally *t, const cha
 int sh_modledger_tally_truncated(const sh_modledger_tally_type *row);
 
 /* 1 when `needle` occurs in `text` under the product's name folding: ASCII
- * case, '-' as '_' (a mod id is spelled with either) and '\' as '/'. An empty
+ * case, '-' as '_' (the engine's binary names spell a '-' as '_') and '\' as '/'. An empty
  * needle matches. `sh_mods held <filter>` uses it. Pure. */
 int sh_modledger_name_contains(const char *text, const char *needle);
 
