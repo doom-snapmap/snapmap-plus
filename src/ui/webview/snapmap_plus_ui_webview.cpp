@@ -269,8 +269,6 @@ static void poc_log(const char *msg)
     if (!rolled) {
         rolled = true;
         log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES);
-        /* Remove the obsolete log filename after the rename. */
-        DeleteFileA("snapmap-plus\\logs\\webview_poc.log");
     }
     if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
         SYSTEMTIME t; GetLocalTime(&t);
@@ -460,6 +458,16 @@ static void poc_read_version()
     k = data.find('"', k);  if (k == std::string::npos) return; k++;
     size_t e = data.find('"', k); if (e == std::string::npos) return;
     g_version = data.substr(k, e - k);
+}
+
+/* Engine reads and edits run on DOOM's main thread while this thread waits. */
+#define POC_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
+#define POC_MAIN_CAM_WAIT_MS   100   /* a held camera writes again next pass */
+static bool poc_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
+{
+    int r = 0;
+    return g_iface && g_iface->vtbl && g_iface->vtbl->run_on_main &&
+           g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
 }
 
 /* Guarded engine access. */
@@ -720,9 +728,28 @@ static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char 
     }
     return n > 0 ? n : 0;
 }
-/* Serialize the timeline with reusable storage that can grow for generated content. */
+/* Serialize an entity on DOOM's main thread into reusable storage that can grow for
+ * generated content. 0 when it failed or the game did not run the request. */
+struct PocSerializeMain { int id; std::vector<char> *buf; const char *what; int n; };
+static int poc_serialize_entity_main(void *ctx)
+{
+    PocSerializeMain *m = (PocSerializeMain *)ctx;
+    m->n = poc_serialize_entity_grow(m->id, *m->buf, m->what);
+    return 1;
+}
+static int poc_serialize_entity_on_main(int id, std::vector<char> &buf, const char *what)
+{
+    PocSerializeMain m = { id, &buf, what, 0 };
+    if (!poc_on_main(poc_serialize_entity_main, &m, POC_MAIN_WAIT_MS)) {
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d not read -- the game did not run the request within the wait", what, id);
+        poc_log(l);
+        return 0;
+    }
+    return m.n;
+}
 static std::vector<char> g_tl_json;
-static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_grow(id, g_tl_json, "timeline-open"); }
+static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_on_main(id, g_tl_json, "timeline-open"); }
 /* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
  * `json` and walks entityDef.state.edit.componentTimeLine / encounterComponent itself (the engine's
  * serialized entity is valid JSON). */
@@ -738,7 +765,7 @@ static void poc_emit_timeline_data(int eid, int json_len)
 /* Serialize the event's target entity into its own buffer. The page reads
  * entityDef.inherit to select the appropriate model/animation choices. */
 static std::vector<char> g_resolve_json;
-static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_grow(id, g_resolve_json, "entity-resolve"); }
+static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_on_main(id, g_resolve_json, "entity-resolve"); }
 static void poc_emit_entity_inherit(int eid, int json_len)
 {
     if (!g_webview) return;
@@ -785,15 +812,6 @@ static void poc_apply_deselect()
     __try {
         if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) g_iface->vtbl->clear_selection(g_iface);
     } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("deselect: SEH in apply"); }
-}
-/* Engine edits run on DOOM's main thread while this thread waits. */
-#define POC_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
-#define POC_MAIN_CAM_WAIT_MS   100   /* a held camera writes again next pass */
-static bool poc_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
-{
-    int r = 0;
-    return g_iface && g_iface->vtbl && g_iface->vtbl->run_on_main &&
-           g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
 }
 struct PocMainEdits { bool save, del, select, deselect, cam, names; };
 /* Write each display name through the setter slot. PODs only in scope (SEH). */
@@ -891,11 +909,35 @@ static int poc_prefab_grab_status(sh_prefab_grab_info *info)
  * that line misses the hovered entity the backend rebuilds the frame from it
  * (reported as corrected). Without that guard, a file whose frame missed is
  * refused rather than written with collapsed positions.
+ * The selection, hover and serialize run together on DOOM's main thread; the
+ * file is written here.
  * Results: 1 = saved, 0 = empty, 2 = nothing hovered, 3 = no usable grab frame,
  * 4 = the hovered entity is not selected, 5 = the copy check refused a selection
- * it was otherwise given, -1 = resolve/serialize/write failure. */
+ * it was otherwise given, 6 = the file could not be written whole, 7 = the game
+ * did not run the request, -1 = the name or its path was refused. */
 static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
 static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
+struct PocCreateMain {
+    char *buf; int cap;
+    int  count, hovered, pre, n, grab_status;
+    sh_prefab_grab_info grab;
+};
+/* Runs on DOOM's main thread inside run_on_main. */
+static int poc_create_prefab_main(void *ctx)
+{
+    PocCreateMain *c = (PocCreateMain *)ctx;
+    /* DOOM's copy check refuses an empty selection and a hovered entity that is not
+     * selected alike; tell the page which (prefab_host.h). */
+    static int sel[POC_MAX_ENTS];
+    c->count = poc_get_selection(sel, POC_MAX_ENTS);
+    bool have_hover = g_iface->vtbl->hovered_id != nullptr;
+    c->hovered = have_hover ? poc_hovered_id_seh() : -1;
+    c->pre = sh_prefab_host::create_precheck(sel, c->count, c->hovered, have_hover);
+    if (c->pre != sh_prefab_host::CREATE_GO) return 1;
+    c->n = poc_serialize_selection_raw(c->buf, c->cap);
+    c->grab_status = poc_prefab_grab_status(&c->grab);
+    return 1;
+}
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
@@ -905,27 +947,8 @@ static void poc_apply_create_prefab()
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
         return;
     }
-    {
-        /* DOOM's copy check refuses an empty selection and a hovered entity that is not
-         * selected alike; tell the page which (prefab_host.h). */
-        static int sel[POC_MAX_ENTS];
-        int count = poc_get_selection(sel, POC_MAX_ENTS);
-        bool have_hover = g_iface->vtbl->hovered_id != nullptr;
-        int hovered = have_hover ? poc_hovered_id_seh() : -1;
-        int pre = sh_prefab_host::create_precheck(sel, count, hovered, have_hover);
-        if (pre != sh_prefab_host::CREATE_GO) {
-            char l[200];
-            _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
-                        pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
-                        : pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
-                        : "hovering an entity that is not selected", count, hovered);
-            poc_log(l);
-            g_create_result = pre;
-            return;
-        }
-    }
     if (!poc_valid_name(g_create_prefab_name)) {
-        poc_log("create-prefab: ABORT (name rejected -- '..' or path separator)");
+        poc_log("create-prefab: ABORT (the name is not one Windows can hold)");
         return;
     }
     char path[1024]; path[0] = '\0';
@@ -934,12 +957,29 @@ static void poc_apply_create_prefab()
         poc_log("create-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    { char l[1200]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: path='%s' -- about to serialize_selection (+0xb0)", path); poc_log(l); }
     static char buf[4 * 1024 * 1024];
-    int n = poc_serialize_selection_raw(buf, (int)sizeof buf);
+    PocCreateMain cm;
+    memset(&cm, 0, sizeof cm);
+    cm.buf = buf; cm.cap = (int)sizeof buf; cm.pre = sh_prefab_host::CREATE_GO;
+    if (!poc_on_main(poc_create_prefab_main, &cm, POC_MAIN_WAIT_MS)) {
+        poc_log("create-prefab: ABORT (the game did not run the request within the wait)");
+        g_create_result = 7;
+        return;
+    }
+    if (cm.pre != sh_prefab_host::CREATE_GO) {
+        char l[200];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: ABORT (%s; %d selected, hovered %d)",
+                    cm.pre == sh_prefab_host::CREATE_EMPTY ? "nothing selected"
+                    : cm.pre == sh_prefab_host::CREATE_NO_HOVER ? "not hovering an entity in the selection"
+                    : "hovering an entity that is not selected", cm.count, cm.hovered);
+        poc_log(l);
+        g_create_result = cm.pre;
+        return;
+    }
+    int n = cm.n;
+    int grab_status = cm.grab_status;
+    const sh_prefab_grab_info &grab = cm.grab;
     poc_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
-    sh_prefab_grab_info grab;
-    int grab_status = poc_prefab_grab_status(&grab);
     if (n <= 0) {
         if (grab_status == SH_PREFAB_GRAB_REFUSED) {
             poc_log("create-prefab: ABORT (no finite grab frame could be built from the hovered entity)");
