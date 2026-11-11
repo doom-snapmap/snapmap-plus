@@ -289,16 +289,15 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   folder it is installed as.
 - A rawmap of a map that uses mods is shared as a `.zip`: every rawmap save of such a map writes
   `<name>.zip` beside the `.json` (for the default file, `rawmap.zip`), holding the map as
-  `<name>.json` and every mod it uses at the build the map records, exactly as that build sits in
-  your mods folder (`mods/<folder>/mod.json` and `mods/<folder>/assets/...`; a build whose folder
-  moved on is taken from its last good build snapshot), and one toast and one console line say to
+  `<name>.json` and every mod it uses as its folder (`mods/<folder name>/mod.json` and
+  `mods/<folder name>/assets/...`, byte for byte; a row naming an older build of one of your mods
+  carries your current build), and one toast and one console line say to
   share the `.zip`, because the `.json` alone does not load for anyone who lacks the mods. **Save
   Rawmap As...** offers `.zip` first for such a map. Opening a `.zip` (**Load Rawmap...**,
-  `sh_rawmaps load`) is the ordinary install by hash of each mod folder it carries: a build you
-  already have is left as it is, any other build of a mod you have (another version, or the same
-  version with other files) is installed beside yours, and the map opens; nothing is refused for a
-  mod reason. A `.zip` saved by an earlier release is
-  refused with a request to save it again; a refusal in **Load Rawmap...** (a prefab's export, an
+  `sh_rawmaps load`, `sh_mods import`) installs each mod folder it carries into
+  `mods\maps\<zip name>\<mod name>\` unless one of your own mods (any build of it) or that folder
+  already serves it, and the map opens. A `.zip` saved by an earlier release is
+  refused: "This export was saved in a format this version does not read."; a refusal in **Load Rawmap...** (a prefab's export, an
   earlier release's `.zip`) is also written to the console ("The rawmap was not loaded: ...") and
   the logs. **Load Rawmap...** and **Save Rawmap As...** each open in the folder last used for them
   (`dialogs.rawmap_load`, `dialogs.rawmap_save` in `config.json`), the rawmaps folder
@@ -374,15 +373,13 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   A My Maps map, rawmap or prefab counts as published when a map published from this machine (and
   not unpublished) used that build. With several, the dialog names the first and says how many
   more; the console has one line each. A lobby join words them the same way.
-- Your own maps play with the build you have. When a My Maps map, a rawmap or a prefab names a
-  build that is not installed and cannot be downloaded (the mod store lacks it, did not answer, or
-  it needs a game file you do not have) while another build of the same mod is installed, it is
-  not refused: the installed build serves it, as it does when you open the map in the editor, and
-  the console says so once per mod: "My Maps play: <key>: uses the installed mod; the next save of
-  the map records it". The Play declares that installed build, the same map plays again in that session
-  without asking, and a prefab placed this way adds the installed build to the map. A build the
-  mod store has is still offered for download first. A community map you play from the browser, a
-  lobby or the feed keeps its author's build and is refused as above when that build is gone.
+- Your own maps follow your own mods. A My Maps map, a rawmap, a prefab and a map you published
+  from this machine are served by your folder of each mod at whatever build it is now; the next
+  save records that build. A community map you play from the browser, a lobby or the feed is
+  served by the build it pins, from its own folder under `mods\maps\<map title>\`, else by your
+  folder when it is at that very build; otherwise it is downloaded there, and refused as above
+  when that build is gone.
+
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes an ordinary mod folder `mods\<id>\`
   (unless an installed mod already serves the same content) and the map gets a manifest row for it;

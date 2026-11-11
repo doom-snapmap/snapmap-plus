@@ -2548,6 +2548,24 @@ engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
 "This map needs N mod(s): <names> (<size>). Download and install now?". Each
 row it asks for prints the asset rule's sentence on the console first.
 
+The map's serving context. Before anything counts what is missing, each gate
+sets the map's context (`sh_modserve_scope_set_place` through the gate's
+`scope_place` op): a published map's place is the one the record gives its
+item (`sh_ms_place_of`), else the one its title names (`sh_ms_place_dir`), and
+it is the player's own when this machine published the item (a claim keyed by
+it, or `sh_modpublish_item_linked`); a My Maps play has no place and is own; a
+rawmap is own with the place its file name names (`zip:<file name>` for a ZIP,
+the place its import filled; `sh_modpub_rawmap_source`, which the rawmap
+layer calls before `sh_modpub_rawmap_missing`, and the hold again); a prefab
+placement is own with the place named after the prefab (prefab_mods.c). An own
+map's rows follow the root folder of each salt at whatever build it holds; a
+stranger's are served by its own place's folder at the row's build, else by
+the root's when it holds that build (`sh_modserve_row_build`). There is no
+substitution: the root folder is the player's own build. The launch itself
+(the lobby and offline launches, a My Maps play, a held map's resume) goes
+through `sh_modui_scope_launch_at` with that place and own flag, and the Mods
+tab's tick returns the context to no place, own, when the Play is over.
+
 The denial gate (DESIGN-additive 2.8). Before the question, every hold (the
 completions, the launch boundary, My Maps, rawmaps, prefabs) runs one job on
 the modsync worker that asks the store about each missing bundle
@@ -2563,19 +2581,19 @@ claim this machine holds names the bundle, `modsync_claim_names`). Held and
 installable is obtainable; any other answer denies the launch in one of four
 causes, `sh_modpub_gate_wording`:
 
-| cause | when | sentence (after "This map needs <name> (<key>), which ") |
+| cause | when | sentence (after "This map needs <name>, which ", the row's name, else its salt) |
 |---|---|---|
 | 1 gone | absent, published | "is no longer available: its author unpublished it, or it was removed. This is permanent on this machine." |
 | 2 unreachable | the store did not answer | "could not be downloaded: " and the store's failure in words (`plain_reason.h`): "the mod store is busy; try again in a few minutes." for 429 and 5xx, "the mod store could not be reached; check the internet connection and try again." when nothing answers, "the address in mods.store answered, but not as the mod store; check the mods.store setting." for another server, "the mod store did not answer; try again in a few minutes." when the cause is unknown |
 | 3 never published | absent, not published | "is not installed and was never published. Restore its folder from the Recycle Bin or load the map's rawmap ZIP." |
 | 4 game revision | held, a borrow the game lacks | "needs a file this game does not hold (<source>): a different game revision. This is permanent on this machine." |
 
-An editor open asks no store, so its note for a key with no installed build
+An editor open asks no store, so its note for a salt no root folder holds
 (`sh_modpub_editor_substitute`) says only what this computer knows: "not
 installed on this computer, so the editor opens the map without it. Playing
 the map asks the mod store for it." The causes above, which depend on the
 store's answer, are said where the store is asked. When the map's placed
-entities name that mod's namespace (`mods/<id>/`, read by
+entities name that mod's namespace (`mods/<salt>/`, read by
 `sh_modmanifest_placed_names`), the engine's validator refuses the map
 (`GetLocalSavedMapEdit`'s RepairAndMigrate, then its damaged-save dialog,
 which the fault shield's save guard dismisses), so the editor cannot open it
@@ -2591,37 +2609,16 @@ A denial drops the hold before anything is asked or fetched: the first denied
 bundle's sentence is the one-button notice (with "N more mods cannot be
 obtained; see the console." when there are more) and every denied bundle gets
 one console line. A prefab's sentences say "prefab" and "the prefab's ZIP
-export". The title is the store manifest's name, else an installed build's,
-else the key alone. A key installed at another build (`sh_modserve_row_other_build`)
-is never a cause, and never mentioned. When the store holds the declared build
-it is the obtainable case, asked with the ordinary question above; the
-download lands beside the installed build by hash without a word about builds
-(owner 2026-11-09). When the declared build cannot be obtained, the player's own
-content substitutes (verdict `SH_MODPUB_GATE_SUBSTITUTE`, fact `own`): a My
-Maps play, a rawmap load or a prefab placement goes on with the installed build
-of the key, as an editor open does (DESIGN-additive 2.5). Each such row prints
-`<hold>: <key>: uses the installed mod; the next save of the map records it`
-(the hashes on the backend log), leaves the hold's missing list, and is
-remembered for the session (`sh_modpub_row_substitute`, checked against the
-key's installed build on every use), so the hold's resume, a rawmap's reopen,
-the next launch of the same map and the Prefabs tab's second placement find
-the row served. When no row is left the hold resumes without a question;
-otherwise only the rest is offered. A fetch that fails after Yes for a row
-that can substitute substitutes it and fetches the others again. The launched
-map's listing declares the installed build through the manifest's
-substitution table, which the My Maps parse and the hold's resume parse fill
-as an editor parse does, so the Play's per-map pinning matches what serves it;
-a prefab adds its row to the map at the installed build. A map from the map
-service (browser, lobby, feed, launch boundary) keeps its author's build and is
-denied as before: substituting there would change what its author
-published. A fetch that fails after Yes
+export". The title is the row's name, else its salt. The question's size is
+the total of the archives' sizes the store reported (`HEAD`), else the rows'.
+A fetch that fails after Yes
 is decided by the same function (404 and 451, a network failure, and
 `MODNET_E_GAME`, the download's own borrow refusal, whose source the fetch
 keeps). A placeholder system (phase 6) would plug in at `sh_modpub_gate_decide`
 with a verdict of its own and touch nothing else.
 
-Yes starts one job on the modsync worker that fetches every missing bundle by
-hash and logs a progress line every two seconds. When the job is done, on a main
+Yes starts one job on the modsync worker that fetches every missing build's
+archive (`modsync_fetch_build_for`) and logs a progress line every two seconds. When the job is done, on a main
 tick, the index is rescanned, every fetched bundle must be admitted, the screen
 the hold came from must still be current (and, for a joiner, the lobby must
 still host that item and revision), the manifest's bundles are activated, a
@@ -2633,8 +2630,9 @@ a one-button notice names the mod. Another map load, or a newer held launch,
 abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled. After No, a hold that
 asked for one row shows that row's sentence and "The map was not loaded."
-(for example "This map uses Hell Guards (local.hell-guard), which is not
-installed. The map was not loaded."). The download is unpacked into the map's place,
+(for example "This map uses Hell Guards, which is not installed. The map was
+not loaded."). The download is unpacked into the map's place,
+
 `mods\maps\<map title>\<mod name>\` (`modsync_fetch_build_for`; the title is the
 published item's, an idStr at metadata +0x398 beside the id at +0 and the revision at
 +0x30, a rawmap's file name, a prefab's name), replacing that place's earlier
@@ -2684,99 +2682,65 @@ rows writes only the JSON. `sh_rawmaps status` and the File menu's status
 for the open map) report what the last save wrote. A ZIP left beside a JSON by
 an earlier save is not deleted when the map later stops using mods.
 
-The ZIP (`modexport.h`) carries the map and each mod its rows name, at the
-bundle hash the row declares, as that build is installed:
+The ZIP (`modexport.h`) carries the map and each mod its rows name
+(`<salt>@<build hash>`) as its folder, in the one shape of a mod folder:
 
 ```
 <name>.json                the map text, its snapmap-plus member included, named after the ZIP
-mods/<folder>/mod.json     the store folder's name under mods\ (<key>, imports/<ZIP name>/<key>,
-mods/<folder>/assets/...   downloads/<map title>/<key>, or an author's organizing folders), byte for byte
+mods/<folder>/mod.json     the last segment of the mod's folder below mods\ (" (2)" when two
+mods/<folder>/assets/...   carried mods share it), mod.json and carried files byte for byte
 ```
 
-Entry names separate with `/` only, as the ZIP format requires: a mod in an
-organizing folder (`mods\campaign-interactables\campaign-interactables-1\`) is
-carried as `mods/campaign-interactables/campaign-interactables-1/`, and the
-importer takes a carried folder at any depth the store enters (one whose
-ancestors carry no `mod.json`). The importer refuses a backslash in an entry
-name, except under `mods/`, where an export written before this fix used one
-as that folder's separator and it reads as `/`.
-
-Each row's build is taken from the installed folder at exactly that hash (while
-that folder's latest build is failed, its carried files are read from its last
-good build snapshot, `mods\.builds\<key>@<hash16>\`, whose bytes the hash
-names); else from a snapshot at that hash whose folder moved on (its
-`bundle.json` is carried as the folder's `mod.json`); else from the folder an
-alias of the hash names, as below.
-
-There is no `export.json`, no `bundle.json` and no `bundle.canonical.json`, no
-`legacy/` level and no `+<build>` suffix: the rows name the bundles, and each
-carried `mod.json` records its bundle hash in its product block (with its
-`legacy` record, if any). A stock pointer is an entry of `mod.json`, so the
-folder carries it; installed game content is never written into the ZIP, so a
+A mod in an organizing folder (`mods\campaign-interactables\campaign-interactables-1\`),
+or in a map's place, is carried under its own folder name
+(`mods/campaign-interactables-1/`). Each row's build is taken from the usable
+folder of its salt at exactly the row's build (the root's first, else a
+place's); else from the root folder of the salt at another build: an export is
+of the author's own map, which follows the root folders, so the exported rows
+are moved to that build. There is no `export.json`, no `bundle.json` and no
+`bundle.canonical.json`: the rows name the builds, and each carried `mod.json`
+records its own salt and build hash in its builder block. A stock pointer is an
+entry of `mod.json`; installed game content is never written into the ZIP, so a
 pointer whose bytes an author's folder holds under `assets\` travels without
-them. A row whose build only an alias still answers (the author rebuilt that
-folder in place) carries the folder serving it now, and the exported map's rows
-name that build.
+them.
 
-Importing it is the ordinary install by hash of each carried folder whose
-bundle a row names (`modexport_read`, on whichever thread loads the map; a
-carried folder no row names is left out):
+Importing it (`modexport_read`, on whichever thread loads the map; a carried
+folder no row names is left out) first sets the serving context to the map
+about to open (own, the ZIP's place), then:
 
-- a carried folder the store already holds (by its hash, or an alias of it) is
-  skipped and counted as already installed; nothing in that folder is written.
-  Another build of its key never counts: a map pins its build;
+- a carried folder whose row something already serves in that context
+  (`sh_modserve_row_served`: the root folder of its salt at any build, or the
+  ZIP's place at the row's build) is skipped and counted as already installed;
 - each remaining folder is copied out of the ZIP into a temporary folder (with
   the bytes of a pointer the folder held filled from this player's own game)
-  and installed from there as any folder from elsewhere is
-  (`sh_ms_install_placed`, origin `imported`: built, copied into the store,
-  verified) as `mods\imports\<ZIP name>\<key>\` (`<key>-2` ... when another build
-  holds that name), never beside the player's own folders and never over one,
-  whatever the carried folder was called and whatever its version.
-  Same version with other files is not a refusal. A mod that needs another
-  carried mod is built after it;
-- the built bundle hash must equal the one the carried `mod.json` names;
-  otherwise, and on any other refusal, exactly the folders this import
-  installed are removed and the load is refused ("<id> <version> in the export
-  does not build to the bundle the map names", or "<id> <version>, a mod this
-  map carries, does not install on this computer (<the builder's reason>);
-  nothing was installed. Ask whoever shared it for a new export saved with
-  this release");
-- a carried `mod.json` whose block an earlier builder's rules wrote (its
-  `"rules"` absent or below `SH_MB_RULES`, and its recorded hash not the one
-  today's rules give: `sh_mb_load_text_earlier_rules`) is not left out: it is
-  rebuilt under today's rules, as the store rebuilds its own folders once
-  after a rules change, and installed (or found installed) under the hash
-  they give. The map's row keeps naming the recorded hash, so the hold then
-  treats it as another build of an installed key: the store's copy of the
-  recorded build is offered beside it, else the installed build substitutes.
-  A block with today's `"rules"` whose hash does not match was edited by hand
-  and is still left out. A folder from earlier rules that today's rules refuse
-  (the development builds of 2026-11-04 to 11-07 wrote retired intent keys,
-  whose partials today's builder refuses: "this is a partial; put the whole
-  edited copy ...") is that one mod's failure: it is left out with one log
-  line naming the builder's reason, the rest of the export installs, and the
-  map's row for it is a mod this computer does not have, which the hold then
-  settles as for any map (the store, the installed build of its key, or the
-  gate's sentences);
-- after an install the serving index is rebuilt, as before.
+  and installed into the ZIP's place, `mods\maps\<ZIP name>\<mod name>\`
+  (`sh_ms_install_placed`, the record's `zip:<file name>`), replacing that
+  place's folder of the salt; its replacements are kept, as for any received
+  build. A mod that needs another carried mod is built after it;
+- the built hash must equal the one the carried `mod.json` records; otherwise,
+  and on any other refusal, exactly the folders this import installed are
+  removed and the load is refused ("<name> in the export does not build to the
+  build the map names", or "<name>, a mod this map carries, does not install on
+  this computer (<the builder's reason>); nothing was installed");
+- after an install the serving index is rebuilt, and the context stays on the
+  ZIP's place for the map that opens from it.
+
+An export in an earlier shape installs nothing and is refused with one
+sentence, "This export was saved in a format this version does not read.": a
+`bundle.canonical.json` anywhere or an `export.json` index (the bundle form of
+earlier releases), a carried `mod.json` in an earlier shape (`SH_MB_SHAPE`), a
+map in an earlier shape (`sh_map_old_shape`), a prefab whose rows name `id` and
+`bundle`. A carried `mod.json` that is not built is left out with one log line.
 
 A refused import reaches the player whole: the editor reload
 (`sh_rawmap_prepare_reload`) prints and toasts "<file> was not opened:
 <the importer's cause>." (a `.json` that cannot be read gets Windows' reason
 through `plain_reason.h`), and the backend log line carries the same cause
-uncut (`MODEXPORT_CAUSE_MAX`).
-
-A map's ZIP in the bundle form beta.20 wrote (`map.rawmap.json`, an
-`export.json` index, and per bundle `mods/[legacy/]<id>@<version>+<build>/`
-with `bundle.canonical.json` and its files, each distinct file stored once)
-opens: each canonical manifest a row names is installed as a download is
-(`modsync_install_manifest`), its files taken from the ZIP by hash, so the
-bundle keeps the hash the map pins (`me_install_retired`). Any other ZIP in
-that form (no `map.rawmap.json`) is refused: "this export was made by an
-earlier release; save the rawmap again". The map importer tells a map from a prefab by
+uncut (`MODEXPORT_CAUSE_MAX`). The map importer tells a map from a prefab by
 the carried `.json`: an `idSnapMap` (or an object without `~type`) without a
 `snapmapPlus` block is a map; a prefab's export is refused with "this is a
-prefab's export, not a map's". The published-map download path is not used.
+prefab's export, not a map's". `sh_mods import "<path.zip>"` installs the mods
+and opens the map at once (`sh_rawmap_open_now`).
 
 ### Prefabs that name mods
 
@@ -2791,7 +2755,7 @@ top-level member, `snapmapPlus`, after the engine's own members
 
 ```
 "snapmapPlus":{"format":1,"description":"","tags":[],
-               "mods":[{"id","version","bundle","size","names"}...],
+               "mods":[{"mod":"<salt>@<build hash>","name","version","size","names"}...],
                "summary":{...}}
 ```
 
@@ -2823,34 +2787,37 @@ earlier builds have them; the engine's deserializer reads comment-free text
 Recording. Saving a prefab finds its mods exactly as a map's save does: the
 placed names of the prefab text (`sh_modmanifest_placed_names`: every
 `inherit`, `moduleName` and string inside an `edit` object) go through
-`modserve_bundles_for_names_visit`, which names every admitted bundle that
-provides one and the bundles its needs reach. Each bundle is one row in the
-manifest's form; a pinned hash an alias names resolves to the current build
-wherever a row is used, as for a map. Create writes the file the engine
+`modserve_bundles_for_names_visit`, which names every admitted build that
+provides one and the builds its needs reach. Each build is one row in the
+manifest's form (`<salt>@<build hash>`, its name and version from the build).
+Create writes the file the engine
 serialized and then has the backend write a fresh block into it (`MODS_RECORD`:
 empty description and tags, the rows, `[]` when there are none); a module
 prefab's save writes the file with its block in one step. The Prefabs tab's
 description and tag edits rewrite the block in place (`META_WRITE`), keeping its
 summary and rows. No sidecar is written.
 
-The read-only sidecar. A prefab saved before the block has none. When a
-`<name>.meta.json` sits beside it, the list and Prefab Details show that
-sidecar's description, tags, summary and `"mods"` rows, and Load / Place,
-export and `sh_prefab mods` use its rows. It is not migrated: the first
-description or tag edit writes the block into the file from the sidecar's
-details and leaves the sidecar on disk as it was; from then on the block wins.
-A prefab with neither names no mods and loads as before. A sidecar is never
-listed as a prefab, and it follows its prefab when that is moved, renamed or
-deleted.
+An earlier shape. A prefab with a `<name>.meta.json` sidecar and no block, or a
+block whose rows name `id` and `bundle`, was saved by an earlier version: its
+details are not read (`META_READ` answers `SH_PREFAB_META_EARLIER` with an
+empty view), Load / Place, export and `sh_prefab mods` refuse it with "This
+prefab was saved in a format this version does not read.", and a description
+edit writes nothing. A prefab with neither names no mods and loads as before.
+A sidecar is never listed as a prefab, and it follows its prefab when that is
+moved, renamed or deleted. Prefab paths and names are UTF-8 and every file is
+opened with the wide calls.
 
 The page and the slot see a prefab's details as one flat object, the view:
-the sidecar's shape, `{"desc","tags",...summary members...,"mods"}`. A block
-reads as a view and a view composes into a block (`prefab_mods.c`).
-`META_READ` returns the view of a file (its block, else its sidecar); the
-Prefabs list reads at most the last 1 MB of each file, where the block is.
+`{"desc","tags",...summary members...,"mods"}`. A block reads as a view and a
+view composes into a block (`prefab_mods.c`). `META_READ` returns the view of
+a file's block; the Prefabs list reads at most the last 1 MB of each file,
+where the block is. `MODS_STATUS` names each row's mod by its name ("id",
+else its salt), with its salt and build.
 
 Resolving. Load / Place first reads the rows (`MODS_RESOLVE`, on the game
-thread):
+thread) and sets the placement's serving context: the player's own (the open
+map's root folders first), with the place the prefab's import filled,
+`mods\maps\<prefab name>\`:
 
 - a module prefab naming a module no row provides and the palette lacks (DLC
   the player does not own) is refused with the module guard's toast and
@@ -2860,16 +2827,15 @@ thread):
   (`modserve_activate_bundles`) and each one the open map does not list (its
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`, given the
-  folder of the build at the row's hash, so the map declares the prefab's
-  build and not the newest of its key), with one
-  console line: "Prefab <name> uses <id> <version>; this map did not list it,
+  folder of the build that serves the row, else its salt), with one
+  console line: "Prefab <name> uses <mod name> <version>; this map did not list it,
   so it was added to the map (the Mods tab's Remove from map takes it out).".
   Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
   with its own hook (`SH_MODPUB_PREFAB_PLACE`): the denial gate asks the store
   on the worker; when every missing bundle is obtainable the engine's Yes/No asks
   "This prefab needs N mod(s): <names> (<size>). Download and install now?", Yes
-  fetches and installs them by hash, and the ready callback runs the step above;
+  fetches each archive into `mods\maps\<prefab name>\`, and the ready callback runs the step above;
   only rows the asset rule reports missing or incomplete are asked for; the
   Prefabs tab, polling `MODS_POLL`, then places the prefab through its ordinary
   Load / Place. Otherwise the placement is denied with the gate's prefab
@@ -2888,17 +2854,17 @@ write one ZIP, also for a prefab that uses no mods, in a map's layout
 
 ```
 <name>.json                the prefab file, its block naming the builds carried
-mods/<folder>/mod.json     each mod the block's rows name, at the hash the row records,
-mods/<folder>/assets/...   as that build is installed: the store folder's name and its files
+mods/<folder>/mod.json     each mod the block's rows name, as its folder (the last segment
+mods/<folder>/assets/...   of its folder below mods\), mod.json and files byte for byte
 ```
 
 There is no `export.json`, no sidecar and no bundle manifest: the prefab's own
-block is the index, and each `mod.json` carries its bundle hash.
+block is the index, and each `mod.json` carries its salt and build hash.
 `<name>.json` is the file's bytes as they are on disk. A prefab with no block
-(saved before it, with or without a sidecar), one saved before rows were
-recorded (its rows are then the closure of its text) and one whose rows pin an
-earlier build are carried with their block written for the rows the ZIP
-carries; the file in the library is not changed. The Export dialog proposes
+and no sidecar, one saved before rows were recorded (its rows are then the
+closure of its text) and one whose rows pin another build of a root salt are
+carried with their block written for the rows the ZIP carries; the file in the
+library is not changed. The Export dialog proposes
 `<name>.zip`.
 
 Import. `sh_prefab import "<path.zip or path.json>"` and the tab's Import (the
@@ -2907,28 +2873,34 @@ inside an extracted export folder: that folder is the export, the picked file is
 the prefab and a `mods/` folder beside it holds the mod folders. The importer
 takes the one top-level `.json` (an `idSnapEntityPrefab`, or an `idSnapMap` that
 carries a block) and installs each carried `mods/<folder>/` whose `mod.json`
-names a bundle the block's rows name, exactly as a map's import does (see
-[Rawmaps that name mods](#rawmaps-that-name-mods)): skipped when the store holds
-its hash, installed by hash under `mods\imports\<ZIP name>\<key>\` otherwise, and removed again when it does not build to the hash its own
-`mod.json` names; a carried folder no row names is left out. It then rescans and adds the prefab under the `.json`'s file
+names a build the block's rows name, exactly as a map's import does (see
+[Rawmaps that name mods](#rawmaps-that-name-mods)), in the placement's context:
+skipped when something serves its row, installed into the prefab's place,
+`mods\maps\<prefab name>\<mod name>\`, otherwise (a library name of
+"<name> (2)" is noted on the same place), and removed again when it does not
+build to the hash its own `mod.json` names; a carried folder no row names is
+left out. It then rescans and adds the prefab under the `.json`'s file
 name. A prefab of that name with the same bytes is left alone (an
 import that finds everything already there writes nothing); one with other bytes
 is kept and the import takes "<name> (2)" and so on. A row the export does not
-carry is named in the result ("It also needs <id> <version>, which the export
+carry is named in the result ("It also needs <name> <version>, which the export
 does not carry."), and Load / Place asks for it as above. Each importer refuses
 the other's ZIP, told apart by the carried `.json` ("this is a map's export, not
 a prefab's"), and the prefab importer also refuses a map's JSON and two prefabs
-in one ZIP. An export in the bundle form of earlier releases (any
-`bundle.canonical.json`, in a ZIP or an extracted folder, or an `export.json`
-index) is refused with "this export was made by an earlier release; export it
-again".
-`sh_prefab mods "<name>"` lists the block's rows (else the sidecar's) and
-whether each is installed, with the asset rule's sentence for one that is not.
+in one ZIP. An export in an earlier shape (any `bundle.canonical.json`, in a
+ZIP or an extracted folder, an `export.json` index, a carried `mod.json` or
+rows in an earlier shape) is refused with "The prefab was not imported. This
+export was saved in a format this version does not read."
+`sh_prefab mods "<name>"` lists the block's rows, each as `<name> <version>
+(<salt>@<build16>)`, and whether each is served in the placement's context,
+with the asset rule's sentence for one that is not.
+
 
 ### Publishing a map with mods
 
-What is sent: the bundles the published map names in its manifest rows, and
-only those, at publish time. The `SerializeToJson` detour reports each save's
+What is sent: the builds the published map names in its manifest rows
+(`<salt>@<build hash>`), one archive per build the store lacks, and only
+those, at publish time. The `SerializeToJson` detour reports each save's
 final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
 state's callback that runs before the first request to the map service, is
 detoured (`modpublish.c`). A save without rows publishes natively. A text over
@@ -2943,7 +2915,10 @@ that publish, and treats the next one as the agreement. One worker job then
 uploads every build the rows name (`modsync_upload_builds`, see [The mod store
 transport](#the-mod-store-transport): a HEAD per build, an archive PUT for each
 the store lacks, one claim) under a provisional ref `publish-pending-<16 hex>`,
-and a main tick resumes the original `PublishAfterSave`. The store checks each
+and a main tick resumes the original `PublishAfterSave`. A claim the store
+refuses with 409 (a release of the same build, by another publish's
+unpublish, deleted its archive between the HEAD and the claim) uploads again
+once (`mp_upload`); `sh_mods push` does the same. The store checks each
 archive at its PUT and answers a refusal with its first cause, which stops the
 publish. The rules of the store's that the
 builder would otherwise admit (an author key outside `^[a-z][a-z0-9_-]{0,63}$`
@@ -2977,7 +2952,7 @@ and a toast naming the cause; nothing reached the map service. The editor
 leaving abandons the hold; another save cancels it.
 
 The claim and its secret: `PublishFeedPost`, the one function both success
-paths reach, carries the item id and revision. The worker claims the bundle
+paths reach, carries the item id and revision. The worker claims the build
 set under the item id. On a republish the stored secret re-claims that ref,
 which replaces the set; a republish without rows releases the
 item's claim. The claim id and secret live in the record's `claims`
