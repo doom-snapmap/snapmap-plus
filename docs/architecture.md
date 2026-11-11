@@ -3550,9 +3550,9 @@ the master switch (`sh_smp on|off`) is on, the game manager reports the host
 (`IsServer`, gameMgr `+0x2BB3A4`), the SnapMap logic manager exists (the same
 check every stock action makes); the `smp:` prefix is the map's own opt-in.
 Logic only runs on the host, so a client never reaches the hook. The literal
-must pass `smp_check` (the verb is `event` or `doomhands`, an event is one of
-the verified names `smp_event_allowed` lists, as the guide's table does), so a
-downloaded map fires nothing else. The activator becomes a player by an
+must have a command's shape (`smp_check`: the verb is `event` with an event
+name, or `doomhands` with one bool); any registered engine event may fire, as
+a stock Timeline in plain map data can. The activator becomes a player by an
 `idPlayer` cast, else through the owner slot (vtable `+0x558`) the stock Give
 Item action uses. The command runs on the game thread inside `DoAction`, then
 the stock write proceeds unchanged. Every engine call it makes catches an

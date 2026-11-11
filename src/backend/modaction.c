@@ -144,31 +144,12 @@ int smp_type_args(const char *format, const char values[][SMP_MAX_TOKEN], int co
     return want;
 }
 
-/* The events smp:event may fire, each verified on the SnapMap player; the
- * guide's String Set table lists the same names. */
-static const char *const k_smp_events[] = {
-    "forcePraetorHandsAndBody",   /* event 678: the hands and body slot (bool) */
-};
-
-int smp_event_allowed(const char *name)
-{
-    size_t i;
-    if (!name) return 0;
-    for (i = 0; i < sizeof k_smp_events / sizeof k_smp_events[0]; i++)
-        if (!strcmp(name, k_smp_events[i])) return 1;
-    return 0;
-}
-
 int smp_check(const char *literal, smp_command *out, char *err, size_t err_cap)
 {
     int on;
     if (!smp_parse(literal, out, err, err_cap)) return 0;
     if (!strcmp(out->verb, "event")) {
         if (out->argc < 1) { smp_err(err, err_cap, "usage: smp:event <eventName> [args...]", NULL); return 0; }
-        if (!smp_event_allowed(out->argv[0])) {
-            smp_err(err, err_cap, "String Set commands cannot fire the event", out->argv[0]);
-            return 0;
-        }
         return 1;
     }
     if (!strcmp(out->verb, "doomhands")) {

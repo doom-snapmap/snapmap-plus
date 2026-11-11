@@ -8,8 +8,7 @@
  * map stays loadable and playable everywhere.
  *
  * Commands:
- *   smp:event <eventName> [args...]   fire one of the engine events listed in
- *                                     smp_event_allowed on the activating
+ *   smp:event <eventName> [args...]   fire any engine event on the activating
  *                                     player; arguments are typed by the
  *                                     event's own format string.
  *   smp:doomhands <0|1>               set the player's Doom-hands switch (the
@@ -75,16 +74,10 @@ int smp_type_args(const char *format, const char values[][SMP_MAX_TOKEN], int co
 /* Parse a bool token; returns 1 and sets *v, or 0. */
 int smp_parse_bool(const char *s, int *v);
 
-/* 1 when smp:event may fire the event `name` (exact spelling): the events
- * the guide lists, each verified on the SnapMap player. A map can fire
- * nothing else. */
-int smp_event_allowed(const char *name);
-
-/* The rule a literal must meet before it runs: it parses, its verb is event
- * or doomhands, an event is one smp_event_allowed lists, doomhands takes one
- * bool. Returns 1, or 0 with a plain reason in err. Arguments an event's
- * engine signature types are checked when it fires. Pure; the fire path and
- * a check of a map's literals both use it. */
+/* The shape a literal must have before it runs: it parses, its verb is
+ * event (with an event name) or doomhands (with one bool). Returns 1, or 0
+ * with a plain reason in err. Whether the event exists and its arguments fit
+ * its signature is checked against the engine's registry when it fires. */
 int smp_check(const char *literal, smp_command *out, char *err, size_t err_cap);
 
 #ifndef SH_MODACTION_PURE

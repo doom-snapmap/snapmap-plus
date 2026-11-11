@@ -115,18 +115,15 @@ static void test_typing(void)
     CHECK(smp_type_args("iiiiiiiii", (const char (*)[SMP_MAX_TOKEN])&c.argv[1], 9, a, err, sizeof err) == -1);
 }
 
-/* What a map may run: the listed events and doomhands with one bool; any
- * other event, verb or shape is refused with a plain reason. */
+/* The shape a literal needs: event with any event name, doomhands with one
+ * bool; anything else is refused with a plain reason. Whether the event
+ * exists is the engine's to say (modaction_engine_test). */
 static void test_check(void)
 {
     smp_command c;
     char err[160];
-    CHECK(smp_event_allowed("forcePraetorHandsAndBody"));
-    CHECK(!smp_event_allowed("forcepraetorhandsandbody"));
-    CHECK(!smp_event_allowed("remove") && !smp_event_allowed("kill") && !smp_event_allowed(NULL));
     CHECK(smp_check("smp:event forcePraetorHandsAndBody 1", &c, err, sizeof err) && c.argc == 2);
-    CHECK(!smp_check("smp:event remove", &c, err, sizeof err) &&
-          !strcmp(err, "String Set commands cannot fire the event 'remove'"));
+    CHECK(smp_check("smp:event anyRegisteredEvent 3 1.5 text", &c, err, sizeof err) && c.argc == 4);
     CHECK(!smp_check("smp:event", &c, err, sizeof err) && strstr(err, "usage: smp:event"));
     CHECK(smp_check("smp:doomhands on", &c, err, sizeof err));
     CHECK(!smp_check("smp:doomhands maybe", &c, err, sizeof err) && strstr(err, "usage: smp:doomhands"));
