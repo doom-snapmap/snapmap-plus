@@ -6,13 +6,13 @@
  *   sh_mods palette rebuild        add editor rows of bundles indexed after the first palette build
  *   sh_mods build "<folder>"       build and validate a mod, write mod.json's product block
  *   sh_mods install "<folder>"     build, copy into the store as mods\<id>, verify, rescan
- *   sh_mods list                   mod folders in the store and their state (a failed rebuild:
- *                                  the cause and the last good build serving, from its snapshot)
+ *   sh_mods list                   mod folders in the store, their salts and their state (a
+ *                                  failed build: its cause; the folder serves nothing until fixed)
  *   sh_mods new "<name>"           make mods\<key>\ for a new mod under a generated key (modstore.h)
  *   sh_mods doctor [verify]        what the Mods tab does not show: every bundle's state and
  *                                  cause, one line per build of a key installed at several,
  *                                  per path the layer that serves it and why, the registries
- *                                  and their clashes, migration, shadows; `verify` rehashes
+ *                                  and their clashes, shadows; `verify` rehashes
  *                                  every build
  *   sh_mods held [filter]          what the game was served under each name this session and
  *                                  what it holds (modserve_engine.c)

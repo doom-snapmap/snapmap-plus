@@ -553,8 +553,7 @@ on their files. A map whose mods need Snapmap+ features records the version it n
   keeps `strings\`, each with a line saying why.
   The outcome is in the tool's `migration:` lines; once the move completes, `mods\snapmap-plus.json`
   keeps only when it ran, from where, and the folders it skipped or refused. An `overrides\` entry
-  added or changed afterwards shows the **Migrate** button again; `sh_mods migrate --again` repeats
-  the move in the game.
+  added or changed afterwards is moved by the next run of the installer.
 
 ## Map behaviour: String Set commands
 

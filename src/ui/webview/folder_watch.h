@@ -1,100 +1,47 @@
-/* folder_watch.h -- the debounce behind the window's folder watchers.
+/* folder_watch.h -- the debounce behind the window's prefabs folder watcher.
  *
- * The window watches %LOCALAPPDATA%\snapmap-plus\prefabs\ and mods\ (one
+ * The window watches %LOCALAPPDATA%\snapmap-plus\prefabs\ (one
  * ReadDirectoryChangesW thread, subtree, file and folder names, writes and
- * sizes) so the Prefabs list and the Mods tab follow the disk. A watcher
- * thread notes each change here; the window's think loop asks whether a
- * refresh is due:
+ * sizes) so the Prefabs list follows the disk. The watcher thread notes each
+ * change here; the window's think loop asks whether a refresh is due, once
+ * 300 ms pass without a change (a burst of writes is one list refresh).
  *
- *   prefabs  due once 300 ms pass without a change (a burst of writes is one
- *            list refresh);
- *   mods     due once 1500 ms pass without a change; a refresh the backend
- *            defers (Play, a map load, a store write) is retried later.
- *
- * The product's own store writes fire the watcher too. A change seen while
- * the store lock is held, or within the grace after a hold ended (the
- * trailing notifications of that write), is the product's own and is dropped,
- * so a rescan never runs mid-write. A change the player made during the hold
- * looks the same, so when a hold ends with a change dropped, one rescan
- * follows it (an unchanged tree is cheap to rescan), unless a rescan of the
- * window's own already read the folder after those changes: New mod, an
- * install, a rebuild and Refresh end with one, so their writes are followed by
- * that rescan alone (sh_fw_covered). Pure C, no Windows
- * calls: the caller passes the time and the store's state, so the native
- * tests run it with a fake clock. */
+ * The mods folder is not watched: the store is scanned at boot, on Refresh,
+ * and after an install, a download or New mod. Pure C, no Windows calls: the
+ * caller passes the time, so the native tests run it with a fake clock. */
 #ifndef SNAPMAP_PLUS_FOLDER_WATCH_H
 #define SNAPMAP_PLUS_FOLDER_WATCH_H
 
 #define SH_FW_PREFABS_QUIET_MS 300ull
-#define SH_FW_MODS_QUIET_MS    1500ull
-#define SH_FW_STORE_GRACE_MS   1000ull
-#define SH_FW_RETRY_MS         2000ull
 
 typedef struct sh_fw_debounce {
     unsigned long long quiet_ms;   /* quiet time before a refresh is due */
-    unsigned long long last;       /* time of the last change kept */
-    unsigned long long not_before; /* a deferred refresh is not due before this */
-    unsigned long long grace_until;/* changes before this are the product's own */
-    unsigned events;               /* changes kept since the last refresh */
-    unsigned dropped;              /* changes dropped as the product's own */
-    unsigned store_gen;            /* the store lock's released holds last seen */
+    unsigned long long last;       /* time of the last change */
+    unsigned events;               /* changes since the last refresh */
     int pending;
-    int owed;                      /* a change was dropped: one rescan follows the hold */
-    int store_seen;                /* store_gen holds a value */
 } sh_fw_debounce;
 
 static __inline void sh_fw_init(sh_fw_debounce *d, unsigned long long quiet_ms)
 {
     d->quiet_ms = quiet_ms;
-    d->last = d->not_before = d->grace_until = 0;
-    d->events = d->dropped = d->store_gen = 0;
-    d->pending = d->store_seen = d->owed = 0;
+    d->last = 0;
+    d->events = 0;
+    d->pending = 0;
 }
 
-/* The store's state at `now` (the think loop asks every tick): while a hold
- * lasts, and for the grace after one ends, changes are the product's own.
- * Once the grace is over, a change dropped meanwhile schedules one rescan,
- * due after the quiet time. */
-static __inline void sh_fw_store(sh_fw_debounce *d, unsigned long long now, int store_busy, unsigned store_gen)
+/* One change at `now`. */
+static __inline void sh_fw_note(sh_fw_debounce *d, unsigned long long now)
 {
-    if (store_busy || (d->store_seen && store_gen != d->store_gen)) d->grace_until = now + SH_FW_STORE_GRACE_MS;
-    else if (d->owed && now >= d->grace_until) {
-        d->owed = 0;
-        d->last = now;
-        d->events++;
-        d->pending = 1;
-    }
-    d->store_gen = store_gen;
-    d->store_seen = 1;
-}
-
-/* One change at `now`; store_busy is the store lock's state when it was seen
- * (0 for the prefabs folder). Returns 1 kept, 0 dropped as the product's own
- * write. */
-static __inline int sh_fw_note(sh_fw_debounce *d, unsigned long long now, int store_busy)
-{
-    if (store_busy) d->grace_until = now + SH_FW_STORE_GRACE_MS;
-    if (store_busy || now < d->grace_until) { d->dropped++; d->owed = 1; return 0; }
     d->last = now;
     d->events++;
     d->pending = 1;
-    return 1;
 }
 
-/* A rescan the window ran (its own action's, or the watcher's) finished: it
- * read the folder after every change dropped so far, so the rescan those
- * changes owe is paid. A change dropped after this (the grace's trailing
- * notifications, or an edit during a later hold) owes one again. */
-static __inline void sh_fw_covered(sh_fw_debounce *d)
-{
-    d->owed = 0;
-}
-
-/* 1 when the refresh is due at `now`: a change is pending, the quiet time
- * has passed since the last one, and no deferral holds it back. */
+/* 1 when the refresh is due at `now`: a change is pending and the quiet time
+ * has passed since the last one. */
 static __inline int sh_fw_due(const sh_fw_debounce *d, unsigned long long now)
 {
-    return d->pending && now >= d->last + d->quiet_ms && now >= d->not_before;
+    return d->pending && now >= d->last + d->quiet_ms;
 }
 
 /* The refresh ran: start over. Returns the changes it covered. */
@@ -103,16 +50,7 @@ static __inline unsigned sh_fw_done(sh_fw_debounce *d)
     unsigned n = d->events;
     d->pending = 0;
     d->events = 0;
-    d->not_before = 0;
     return n;
-}
-
-/* The refresh could not run now (Play, a load, a store write, another job):
- * keep it pending and ask again after `delay_ms`. */
-static __inline void sh_fw_retry(sh_fw_debounce *d, unsigned long long now, unsigned long long delay_ms)
-{
-    d->pending = 1;
-    d->not_before = now + delay_ms;
 }
 
 #endif /* SNAPMAP_PLUS_FOLDER_WATCH_H */

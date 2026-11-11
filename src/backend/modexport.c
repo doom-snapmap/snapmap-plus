@@ -15,18 +15,11 @@
 #include "modsync.h"
 #include "mp_json.h"
 #include "prefab_block.h"
-#include "raw_deflate.h"
 #include "backend_log.h"
 #include "plain_reason.h"
+#include "modzip.h"
 
-#define ME_NAME_MAX        1024u
-#define ME_MAX_ENTRIES     65535u
-#define ME_LIMIT           0xFFFFFFFFull
-#define ME_CD_MAX          (16u * 1024u * 1024u)
 #define ME_INDEX_MAX       (1024u * 1024u)
-#define ME_DOS_DATE        0x0021u     /* 1980-01-01: exports of the same content are byte-identical */
-#define ME_DOS_TIME        0x0000u
-#define ME_FLAG_UTF8       0x0800u
 
 static int me_cause(char *cause, size_t cap, const char *fmt, ...)
 {
@@ -64,454 +57,6 @@ int modexport_is_zip_path(const char *path)
     return n > 4 && _stricmp(path + n - 4, ".zip") == 0;
 }
 
-/* ------------------------------------------------------------ crc32 ----- */
-
-static uint32_t g_crc_table[256];
-static INIT_ONCE g_crc_once = INIT_ONCE_STATIC_INIT;
-
-static BOOL CALLBACK me_crc_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
-{
-    uint32_t i, k, c;
-    (void)once; (void)p; (void)ctx;
-    for (i = 0; i < 256; i++) {
-        c = i;
-        for (k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-        g_crc_table[i] = c;
-    }
-    return TRUE;
-}
-
-static uint32_t me_crc32(const unsigned char *p, size_t n)
-{
-    uint32_t c = 0xFFFFFFFFu;
-    size_t i;
-    InitOnceExecuteOnce(&g_crc_once, me_crc_init, NULL, NULL);
-    for (i = 0; i < n; i++) c = g_crc_table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
-}
-
-static void me_put16(unsigned char *p, unsigned v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
-static void me_put32(unsigned char *p, uint32_t v)
-{
-    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
-}
-static unsigned me_get16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
-static uint32_t me_get32(const unsigned char *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static int me_ascii(const char *s)
-{
-    for (; *s; s++) if ((unsigned char)*s >= 0x80) return 0;
-    return 1;
-}
-
-/* ------------------------------------------------------------ writer ---- */
-
-typedef struct me_went { char *name; uint32_t crc, size, offset; unsigned flags; } me_went;
-
-typedef struct me_writer {
-    HANDLE h;
-    unsigned long long off;
-    me_went *e;
-    size_t n, cap;
-    int failed;
-    char cause[256];
-} me_writer;
-
-static int me_wraw(me_writer *w, const void *p, size_t n)
-{
-    size_t off = 0;
-    if (w->failed) return 0;
-    while (off < n) {
-        DWORD chunk = (DWORD)((n - off) > (1u << 24) ? (1u << 24) : (n - off)), put = 0;
-        if (!WriteFile(w->h, (const unsigned char *)p + off, chunk, &put, NULL) || put != chunk) {
-            w->failed = 1;
-            me_cause(w->cause, sizeof w->cause, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), "the ZIP", chunk));
-            return 0;
-        }
-        off += put;
-    }
-    w->off += n;
-    return 1;
-}
-
-static int me_add(me_writer *w, const char *name, const void *data, size_t len)
-{
-    unsigned char hdr[30];
-    size_t nl = strlen(name);
-    me_went *e;
-    if (w->failed) return 0;
-    if (w->n >= ME_MAX_ENTRIES || nl == 0 || nl > ME_NAME_MAX) {
-        w->failed = 1;
-        return me_cause(w->cause, sizeof w->cause, w->n >= ME_MAX_ENTRIES ? "more than 65535 files" : "a file name is too long");
-    }
-    if (w->off + 30 + nl + len + 46 + nl + 22 >= ME_LIMIT) {
-        w->failed = 1;
-        return me_cause(w->cause, sizeof w->cause, "the export would exceed 4 GiB");
-    }
-    if (w->n == w->cap) {
-        size_t c2 = w->cap ? w->cap * 2 : 64;
-        me_went *g = (me_went *)realloc(w->e, sizeof *g * c2);
-        if (!g) { w->failed = 1; return me_cause(w->cause, sizeof w->cause, "out of memory"); }
-        w->e = g;
-        w->cap = c2;
-    }
-    e = &w->e[w->n];
-    e->name = _strdup(name);
-    if (!e->name) { w->failed = 1; return me_cause(w->cause, sizeof w->cause, "out of memory"); }
-    e->crc = me_crc32((const unsigned char *)data, len);
-    e->size = (uint32_t)len;
-    e->offset = (uint32_t)w->off;
-    e->flags = me_ascii(name) ? 0 : ME_FLAG_UTF8;
-    w->n++;
-    me_put32(hdr, 0x04034b50u);
-    me_put16(hdr + 4, 20);
-    me_put16(hdr + 6, e->flags);
-    me_put16(hdr + 8, 0);
-    me_put16(hdr + 10, ME_DOS_TIME);
-    me_put16(hdr + 12, ME_DOS_DATE);
-    me_put32(hdr + 14, e->crc);
-    me_put32(hdr + 18, e->size);
-    me_put32(hdr + 22, e->size);
-    me_put16(hdr + 26, (unsigned)nl);
-    me_put16(hdr + 28, 0);
-    return me_wraw(w, hdr, sizeof hdr) && me_wraw(w, name, nl) && me_wraw(w, data, len);
-}
-
-static int me_finish(me_writer *w)
-{
-    unsigned char hdr[46], end[22];
-    unsigned long long cd = w->off;
-    size_t i;
-    for (i = 0; i < w->n && !w->failed; i++) {
-        const me_went *e = &w->e[i];
-        size_t nl = strlen(e->name);
-        me_put32(hdr, 0x02014b50u);
-        me_put16(hdr + 4, 20);
-        me_put16(hdr + 6, 20);
-        me_put16(hdr + 8, e->flags);
-        me_put16(hdr + 10, 0);
-        me_put16(hdr + 12, ME_DOS_TIME);
-        me_put16(hdr + 14, ME_DOS_DATE);
-        me_put32(hdr + 16, e->crc);
-        me_put32(hdr + 20, e->size);
-        me_put32(hdr + 24, e->size);
-        me_put16(hdr + 28, (unsigned)nl);
-        me_put16(hdr + 30, 0);
-        me_put16(hdr + 32, 0);
-        me_put16(hdr + 34, 0);
-        me_put16(hdr + 36, 0);
-        me_put32(hdr + 38, 0);
-        me_put32(hdr + 42, e->offset);
-        if (!me_wraw(w, hdr, sizeof hdr) || !me_wraw(w, e->name, nl)) return 0;
-    }
-    if (w->failed) return 0;
-    if (w->off >= ME_LIMIT) { w->failed = 1; return me_cause(w->cause, sizeof w->cause, "the export would exceed 4 GiB"); }
-    me_put32(end, 0x06054b50u);
-    me_put16(end + 4, 0);
-    me_put16(end + 6, 0);
-    me_put16(end + 8, (unsigned)w->n);
-    me_put16(end + 10, (unsigned)w->n);
-    me_put32(end + 12, (uint32_t)(w->off - cd));
-    me_put32(end + 16, (uint32_t)cd);
-    me_put16(end + 20, 0);
-    return me_wraw(w, end, sizeof end);
-}
-
-static void me_writer_free(me_writer *w)
-{
-    size_t i;
-    for (i = 0; i < w->n; i++) free(w->e[i].name);
-    free(w->e);
-    w->e = NULL;
-    w->n = w->cap = 0;
-}
-
-/* ------------------------------------------------------------ reader ---- */
-
-typedef struct me_rent {
-    char *name;
-    unsigned method, flags;
-    uint32_t crc, csize, usize, lho;
-} me_rent;
-
-typedef struct me_reader {
-    HANDLE h;
-    unsigned long long size;
-    me_rent *e;
-    size_t n, cap;
-    size_t *sorted;     /* indexes sorted by name */
-    wchar_t *dir;       /* an extracted export: each entry is a file under this folder */
-} me_reader;
-
-#define ME_METHOD_FILE 0xFFFFu   /* a folder export's entry: read from the file */
-
-static int me_read_at(HANDLE h, unsigned long long at, void *buf, size_t n)
-{
-    LARGE_INTEGER li;
-    size_t off = 0;
-    li.QuadPart = (LONGLONG)at;
-    if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) return 0;
-    while (off < n) {
-        DWORD chunk = (DWORD)((n - off) > (1u << 24) ? (1u << 24) : (n - off)), rd = 0;
-        if (!ReadFile(h, (unsigned char *)buf + off, chunk, &rd, NULL) || rd == 0) return 0;
-        off += rd;
-    }
-    return 1;
-}
-
-/* A name an import may trust: relative, '/'-separated, no empty, "." or ".."
- * segment, no drive, backslash or control character. */
-static int me_name_ok(const char *s, size_t n)
-{
-    size_t i, seg = 0;
-    if (n == 0 || n > ME_NAME_MAX || s[0] == '/') return 0;
-    for (i = 0; i <= n; i++) {
-        unsigned char c = i < n ? (unsigned char)s[i] : '/';
-        if (c < 0x20 || c == 0x7f || c == '\\' || c == ':') return 0;
-        if (c == '/') {
-            size_t len = i - seg;
-            if (len == 0 && i < n) return 0;
-            if ((len == 1 && s[seg] == '.') || (len == 2 && s[seg] == '.' && s[seg + 1] == '.')) return 0;
-            seg = i + 1;
-        }
-    }
-    return 1;
-}
-
-static const me_reader *g_sort_reader;
-static int me_sort_cmp(const void *a, const void *b)
-{
-    return strcmp(g_sort_reader->e[*(const size_t *)a].name, g_sort_reader->e[*(const size_t *)b].name);
-}
-
-static void me_reader_close(me_reader *r)
-{
-    size_t i;
-    if (r->h && r->h != INVALID_HANDLE_VALUE) CloseHandle(r->h);
-    for (i = 0; i < r->n; i++) free(r->e[i].name);
-    free(r->e);
-    free(r->sorted);
-    free(r->dir);
-    memset(r, 0, sizeof *r);
-}
-
-static INIT_ONCE g_sort_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_sort_cs;
-static BOOL CALLBACK me_sort_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
-{
-    (void)once; (void)p; (void)ctx;
-    InitializeCriticalSection(&g_sort_cs);
-    return TRUE;
-}
-
-/* Index the entries by name; two entries of one name refuse the export. */
-static int me_reader_sort(me_reader *r, char *cause, size_t cap)
-{
-    size_t i;
-    free(r->sorted);
-    r->sorted = (size_t *)malloc(sizeof(size_t) * (r->n ? r->n : 1));
-    if (!r->sorted) { me_reader_close(r); return me_cause(cause, cap, "out of memory"); }
-    for (i = 0; i < r->n; i++) r->sorted[i] = i;
-    InitOnceExecuteOnce(&g_sort_once, me_sort_init, NULL, NULL);
-    EnterCriticalSection(&g_sort_cs);
-    g_sort_reader = r;
-    qsort(r->sorted, r->n, sizeof(size_t), me_sort_cmp);
-    g_sort_reader = NULL;
-    LeaveCriticalSection(&g_sort_cs);
-    for (i = 1; i < r->n; i++)
-        if (strcmp(r->e[r->sorted[i - 1]].name, r->e[r->sorted[i]].name) == 0) {
-            me_reader_close(r);
-            return me_cause(cause, cap, "the export holds two files with one name");
-        }
-    return 1;
-}
-
-static int me_reader_open(me_reader *r, const char *path, char *cause, size_t cap)
-{
-    wchar_t *w = sh_mb_wpath(path);
-    LARGE_INTEGER sz;
-    unsigned char tail[65557], *cd = NULL;
-    size_t tail_n, i, pos, found = (size_t)-1;
-    uint32_t cd_size, cd_off;
-    unsigned entries;
-    memset(r, 0, sizeof *r);
-    r->h = w ? CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
-    free(w);
-    if (r->h == INVALID_HANDLE_VALUE) { r->h = NULL; return me_cause(cause, cap, "cannot open the export"); }
-    if (!GetFileSizeEx(r->h, &sz) || sz.QuadPart < 22) { me_reader_close(r); return me_cause(cause, cap, "the export is not a ZIP file"); }
-    r->size = (unsigned long long)sz.QuadPart;
-    tail_n = r->size < sizeof tail ? (size_t)r->size : sizeof tail;
-    if (!me_read_at(r->h, r->size - tail_n, tail, tail_n)) { me_reader_close(r); return me_cause(cause, cap, "cannot read the export"); }
-    for (pos = tail_n - 22 + 1; pos-- > 0;) {
-        if (me_get32(tail + pos) == 0x06054b50u && pos + 22 + me_get16(tail + pos + 20) == tail_n) { found = pos; break; }
-    }
-    if (found == (size_t)-1) { me_reader_close(r); return me_cause(cause, cap, "the export is not a ZIP file (no end record)"); }
-    entries = me_get16(tail + found + 10);
-    cd_size = me_get32(tail + found + 12);
-    cd_off = me_get32(tail + found + 16);
-    if (me_get16(tail + found + 4) != 0 || me_get16(tail + found + 6) != 0 || me_get16(tail + found + 8) != entries ||
-        entries == 0xFFFF || cd_off == 0xFFFFFFFFu || cd_size == 0xFFFFFFFFu) {
-        me_reader_close(r);
-        return me_cause(cause, cap, "the export is a split or ZIP64 archive, which is not supported");
-    }
-    if ((unsigned long long)cd_off + cd_size > r->size - tail_n + found || cd_size > ME_CD_MAX) {
-        me_reader_close(r);
-        return me_cause(cause, cap, "the export's file list is damaged");
-    }
-    cd = (unsigned char *)malloc(cd_size ? cd_size : 1);
-    r->e = (me_rent *)calloc(entries ? entries : 1, sizeof *r->e);
-    if (!cd || !r->e || !me_read_at(r->h, cd_off, cd, cd_size)) {
-        free(cd);
-        me_reader_close(r);
-        return me_cause(cause, cap, "cannot read the export's file list");
-    }
-    for (i = 0, pos = 0; i < entries; i++) {
-        me_rent *e = &r->e[i];
-        unsigned nl, xl, cl;
-        if (pos + 46 > cd_size || me_get32(cd + pos) != 0x02014b50u) { free(cd); me_reader_close(r); return me_cause(cause, cap, "the export's file list is damaged"); }
-        e->flags = me_get16(cd + pos + 8);
-        e->method = me_get16(cd + pos + 10);
-        e->crc = me_get32(cd + pos + 16);
-        e->csize = me_get32(cd + pos + 20);
-        e->usize = me_get32(cd + pos + 24);
-        nl = me_get16(cd + pos + 28);
-        xl = me_get16(cd + pos + 30);
-        cl = me_get16(cd + pos + 32);
-        e->lho = me_get32(cd + pos + 42);
-        if (pos + 46 + nl + xl + cl > cd_size) {
-            free(cd);
-            me_reader_close(r);
-            return me_cause(cause, cap, "the export's file list is damaged");
-        }
-        e->name = (char *)malloc(nl + 1);
-        if (!e->name) { free(cd); me_reader_close(r); return me_cause(cause, cap, "out of memory"); }
-        memcpy(e->name, cd + pos + 46, nl);
-        e->name[nl] = 0;
-        /* An export written before the entry names were fixed named a mod in
-         * an organizing folder mods/<group>\<folder>/...: under mods/ only, a
-         * backslash reads as the separator it stood for. Anywhere else, and
-         * after that, a backslash is refused. */
-        if (nl > 5 && !memcmp(e->name, "mods/", 5)) {
-            unsigned k;
-            for (k = 5; k < nl; k++) if (e->name[k] == '\\') e->name[k] = '/';
-        }
-        if (!me_name_ok(e->name, nl)) {
-            char shown[120];
-            unsigned k, w = 0;
-            for (k = 0; k < nl && w + 1 < sizeof shown; k++)
-                shown[w++] = (unsigned char)e->name[k] < 0x20 || (unsigned char)e->name[k] == 0x7f ? '?' : e->name[k];
-            shown[w] = 0;
-            free(e->name);
-            e->name = NULL;
-            free(cd);
-            me_reader_close(r);
-            return me_cause(cause, cap, "the export holds a file with an unsafe name, \"%s%s\" (an absolute path, a "
-                            "'..' step, a backslash, a colon or a control character); it was not imported. Export it "
-                            "again with Snapmap+, or remove that entry from the ZIP", shown, nl >= sizeof shown ? "..." : "");
-        }
-        r->n++;
-        pos += 46 + nl + xl + cl;
-    }
-    free(cd);
-    return me_reader_sort(r, cause, cap);
-}
-
-static long me_find(const me_reader *r, const char *name)
-{
-    size_t lo = 0, hi = r->n;
-    while (lo < hi) {
-        size_t mid = (lo + hi) / 2;
-        int c = strcmp(r->e[r->sorted[mid]].name, name);
-        if (c == 0) return (long)r->sorted[mid];
-        if (c < 0) lo = mid + 1; else hi = mid;
-    }
-    return -1;
-}
-
-/* A folder export's file: the entry name is relative to r->dir, '/'-separated. */
-static wchar_t *me_dir_path(const me_reader *r, const char *name)
-{
-    size_t dl = wcslen(r->dir), i;
-    int wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, NULL, 0);
-    wchar_t *out;
-    if (wl <= 0) return NULL;
-    out = (wchar_t *)malloc(sizeof(wchar_t) * (dl + 1 + (size_t)wl));
-    if (!out) return NULL;
-    memcpy(out, r->dir, sizeof(wchar_t) * dl);
-    out[dl] = L'\\';
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, out + dl + 1, wl);
-    for (i = dl + 1; out[i]; i++) if (out[i] == L'/') out[i] = L'\\';
-    return out;
-}
-
-static unsigned char *me_read_dir_entry(const me_reader *r, const me_rent *e, size_t max, size_t *out_len, char *cause,
-                                        size_t cap)
-{
-    wchar_t *w = me_dir_path(r, e->name);
-    HANDLE h = w ? CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
-                 : INVALID_HANDLE_VALUE;
-    LARGE_INTEGER sz;
-    unsigned char *dst;
-    free(w);
-    if (h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot open %s", e->name); return NULL; }
-    if (!GetFileSizeEx(h, &sz) || (unsigned long long)sz.QuadPart > max) {
-        CloseHandle(h);
-        me_cause(cause, cap, "%s is larger than %zu bytes", e->name, max);
-        return NULL;
-    }
-    dst = (unsigned char *)malloc((size_t)sz.QuadPart + 1);
-    if (!dst || (sz.QuadPart && !me_read_at(h, 0, dst, (size_t)sz.QuadPart))) {
-        free(dst);
-        CloseHandle(h);
-        me_cause(cause, cap, "cannot read %s", e->name);
-        return NULL;
-    }
-    CloseHandle(h);
-    dst[sz.QuadPart] = 0;
-    if (out_len) *out_len = (size_t)sz.QuadPart;
-    return dst;
-}
-
-/* One entry's bytes (malloc'd, NUL-terminated), at most max bytes. */
-static unsigned char *me_read_entry(const me_reader *r, long idx, size_t max, size_t *out_len, char *cause, size_t cap)
-{
-    const me_rent *e;
-    unsigned char lh[30], *src = NULL, *dst = NULL;
-    unsigned long long data;
-    if (out_len) *out_len = 0;
-    if (idx < 0 || (size_t)idx >= r->n) { me_cause(cause, cap, "no such file in the export"); return NULL; }
-    e = &r->e[idx];
-    if (e->method == ME_METHOD_FILE) return me_read_dir_entry(r, e, max, out_len, cause, cap);
-    if (e->flags & 1) { me_cause(cause, cap, "%s is encrypted", e->name); return NULL; }
-    if (e->method != 0 && e->method != 8) { me_cause(cause, cap, "%s uses an unsupported compression", e->name); return NULL; }
-    if (e->usize > max) { me_cause(cause, cap, "%s is larger than %zu bytes", e->name, max); return NULL; }
-    if (e->method == 0 && e->csize != e->usize) { me_cause(cause, cap, "%s is damaged", e->name); return NULL; }
-    if (!me_read_at(r->h, e->lho, lh, sizeof lh) || me_get32(lh) != 0x04034b50u) { me_cause(cause, cap, "%s is damaged", e->name); return NULL; }
-    data = (unsigned long long)e->lho + 30 + me_get16(lh + 26) + me_get16(lh + 28);
-    if (data + e->csize > r->size) { me_cause(cause, cap, "%s is damaged", e->name); return NULL; }
-    dst = (unsigned char *)malloc((size_t)e->usize + 1);
-    if (!dst) { me_cause(cause, cap, "out of memory"); return NULL; }
-    if (e->method == 0) {
-        if (!me_read_at(r->h, data, dst, e->usize)) { free(dst); me_cause(cause, cap, "cannot read %s", e->name); return NULL; }
-    } else {
-        src = (unsigned char *)malloc(e->csize ? e->csize : 1);
-        if (!src || !me_read_at(r->h, data, src, e->csize) || !sh_inflate_raw_exact(src, e->csize, dst, e->usize)) {
-            free(src);
-            free(dst);
-            me_cause(cause, cap, "%s does not decompress", e->name);
-            return NULL;
-        }
-        free(src);
-    }
-    if (me_crc32(dst, e->usize) != e->crc) { free(dst); me_cause(cause, cap, "%s fails its checksum", e->name); return NULL; }
-    dst[e->usize] = 0;
-    if (out_len) *out_len = e->usize;
-    return dst;
-}
-
 /* ------------------------------------------------------------ helpers --- */
 
 #define ME_MODJSON_MAX   (16u * 1024u * 1024u)
@@ -536,7 +81,7 @@ static void me_map_entry(const char *zip_path, char *out, size_t cap)
     if (n > 4 && !_stricmp(base + n - 4, ".zip")) n -= 4;
     if (!n || n > 200) { strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK); return; }
     _snprintf_s(out, cap, _TRUNCATE, "%.*s.json", (int)n, base);
-    if (!me_name_ok(out, strlen(out))) strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK);
+    if (!sh_zip_name_ok(out, strlen(out))) strcpy_s(out, cap, MODEXPORT_MAP_FALLBACK);
 }
 
 /* ------------------------------------------------------------ write ----- */
@@ -567,7 +112,7 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
                     char *cause, size_t cap)
 {
     me_payload pl;
-    char entry[ME_NAME_MAX];
+    char entry[SH_ZIP_NAME_MAX];
     memset(&pl, 0, sizeof pl);
     me_map_entry(zip_path ? zip_path : "", entry, sizeof entry);
     pl.entry = entry;
@@ -582,14 +127,14 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
 {
     me_payload pl;
     sh_modmanifest_list none;
-    char entry[ME_NAME_MAX];
+    char entry[SH_ZIP_NAME_MAX];
     size_t n;
     memset(&pl, 0, sizeof pl);
     memset(&none, 0, sizeof none);
     if (stp) memset(stp, 0, sizeof *stp);
     if (!name || !name[0]) return me_cause(cause, cap, "the prefab has no name");
     n = strlen(name);
-    if (n > 200 || strchr(name, '/') || strchr(name, '\\') || !me_name_ok(name, n))
+    if (n > 200 || strchr(name, '/') || strchr(name, '\\') || !sh_zip_name_ok(name, n))
         return me_cause(cause, cap, "the prefab's name cannot name a file in the ZIP");
     if (len > MODEXPORT_PREFAB_MAX) return me_cause(cause, cap, "the prefab is larger than %u bytes", MODEXPORT_PREFAB_MAX);
     _snprintf_s(entry, sizeof entry, _TRUNCATE, "%s.json", name);
@@ -609,10 +154,10 @@ int modexport_write_prefab(const char *name, const char *prefab, size_t len, con
  * folder's last good build snapshot, DESIGN-additive 2.8, or the folder
  * itself). A stock pointer is an entry of mod.json and has no file here:
  * installed game content never leaves the machine. */
-static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *b, const char *modjson_path,
+static int me_add_build(sh_zip_writer *w, const char *zip_name, const sh_mb_bundle *b, const char *modjson_path,
                         const char *files_dir, const char *alt_dir, modexport_stats *st, char *cause, size_t cap)
 {
-    char name[ME_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], folder[ME_NAME_MAX + 1], *c;
+    char name[SH_ZIP_NAME_MAX + 1], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], folder[SH_ZIP_NAME_MAX + 1], *c;
     unsigned char *bytes;
     size_t blen = 0, k;
     sh_mb_bundle check;
@@ -632,7 +177,7 @@ static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *
         return me_cause(cause, cap, "mods\\%s\\mod.json changed since the store was read; rescan and export again", zip_name);
     }
     _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/mod.json", folder);
-    me_add(w, name, bytes, blen);
+    sh_zip_writer_add(w, name, bytes, blen);
     free(bytes);
     for (k = 0; k < b->file_count && !w->failed; k++) {
         const sh_mb_file *f = &b->files[k];
@@ -651,7 +196,7 @@ static int me_add_build(me_writer *w, const char *zip_name, const sh_mb_bundle *
         }
         if (!bytes) return me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", zip_name, f->path);
         _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/%s", folder, f->path);
-        me_add(w, name, bytes, blen);
+        sh_zip_writer_add(w, name, bytes, blen);
         free(bytes);
         st->files++;
     }
@@ -723,7 +268,7 @@ static int me_pick_row(const sh_ms_list *l, const char *root, const char *hash, 
     return 0;
 }
 
-static int me_add_pick(me_writer *w, const me_pick *p, modexport_stats *st, char *cause, size_t cap)
+static int me_add_pick(sh_zip_writer *w, const me_pick *p, modexport_stats *st, char *cause, size_t cap)
 {
     char mj[MAX_PATH * 4];
     if (p->snap) {
@@ -771,7 +316,7 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
     sh_ms_list l;
     me_pick *picked = NULL;
     char root[MAX_PATH * 4] = "";
-    me_writer w;
+    sh_zip_writer w;
     wchar_t *wfinal = NULL, *wtmp = NULL;
     char tmp[MAX_PATH * 4];
     unsigned rejected = 0;
@@ -885,17 +430,16 @@ rows_done:
     wfinal = sh_mb_wpath(zip_path);
     wtmp = sh_mb_wpath(tmp);
     if (!wfinal || !wtmp) { me_cause(cause, cap, "the destination path is not usable"); goto done; }
-    w.h = CreateFileW(wtmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (w.h == INVALID_HANDLE_VALUE) { me_cause(cause, cap, "cannot create %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
+    if (!sh_zip_writer_open(&w, wtmp)) { me_cause(cause, cap, "cannot create %s: %s", zip_path, sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
 
-    me_add(&w, pl->entry, map_json, len);
+    sh_zip_writer_add(&w, pl->entry, map_json, len);
     for (i = 0; i < rows.count && !w.failed; i++) {
         int dup = 0;
         for (k = 0; k < i && !dup; k++) dup = !strcmp(me_pick_bundle(&picked[k])->hash, me_pick_bundle(&picked[i])->hash);
         if (dup) continue;
         if (!me_add_pick(&w, &picked[i], st, cause, cap)) goto done;
     }
-    me_finish(&w);
+    sh_zip_writer_finish(&w);
     if (w.failed) { me_cause(cause, cap, "%s", w.cause); goto done; }
     if (!FlushFileBuffers(w.h)) { me_cause(cause, cap, "writing the ZIP failed: %s", sh_reason_win32(GetLastError(), zip_path, 0)); goto done; }
     CloseHandle(w.h);
@@ -908,9 +452,8 @@ rows_done:
     st->zip_bytes = w.off;
     ok = 1;
 done:
-    if (w.h != INVALID_HANDLE_VALUE) CloseHandle(w.h);
+    sh_zip_writer_free(&w);
     if (!ok && wtmp) DeleteFileW(wtmp);
-    me_writer_free(&w);
     if (picked) for (i = 0; i < rows.count; i++) me_pick_free(&picked[i]);
     free(picked);
     free(moved_map);
@@ -953,7 +496,7 @@ typedef struct me_carry {
 } me_carry;
 
 typedef struct me_import {
-    me_reader zr;
+    sh_zip_reader zr;
     me_carry *c;
     size_t nc, cap;
     int kind;                           /* what the export holds */
@@ -966,7 +509,7 @@ static void me_import_free(me_import *im)
     size_t i;
     for (i = 0; i < im->nc; i++) sh_mb_free(&im->c[i].b);
     free(im->c);
-    me_reader_close(&im->zr);
+    sh_zip_reader_close(&im->zr);
     memset(im, 0, sizeof *im);
 }
 
@@ -977,27 +520,6 @@ static int me_top_json(const char *name)
     return n > 5 && !strchr(name, '/') && !_stricmp(name + n - 5, ".json");
 }
 
-static int me_reader_add(me_reader *r, const char *name, unsigned long long size)
-{
-    me_rent *e;
-    if (r->n >= ME_MAX_ENTRIES || size > ME_LIMIT) return 0;
-    if (r->n == r->cap) {
-        size_t c2 = r->cap ? r->cap * 2 : 64;
-        me_rent *g = (me_rent *)realloc(r->e, sizeof *g * c2);
-        if (!g) return 0;
-        r->e = g;
-        r->cap = c2;
-    }
-    e = &r->e[r->n];
-    memset(e, 0, sizeof *e);
-    e->name = _strdup(name);
-    if (!e->name) return 0;
-    e->method = ME_METHOD_FILE;
-    e->usize = (uint32_t)size;
-    r->n++;
-    return 1;
-}
-
 static int me_w_to_utf8(const wchar_t *w, char *out, size_t cap)
 {
     return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) > 0;
@@ -1005,7 +527,7 @@ static int me_w_to_utf8(const wchar_t *w, char *out, size_t cap)
 
 /* Add every file under abs (the folder rel names) as an entry. Links and
  * junctions are not followed. */
-static int me_walk(me_reader *r, const wchar_t *abs, const char *rel, int depth, char *cause, size_t cap)
+static int me_walk(sh_zip_reader *r, const wchar_t *abs, const char *rel, int depth, char *cause, size_t cap)
 {
     wchar_t pattern[MAX_PATH * 2];
     WIN32_FIND_DATAW fd;
@@ -1016,16 +538,16 @@ static int me_walk(me_reader *r, const wchar_t *abs, const char *rel, int depth,
     if (h == INVALID_HANDLE_VALUE) return 1;
     do {
         wchar_t child[MAX_PATH * 2];
-        char leaf[MAX_PATH * 3], name[ME_NAME_MAX + 1];
+        char leaf[MAX_PATH * 3], name[SH_ZIP_NAME_MAX + 1];
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         if (!me_w_to_utf8(fd.cFileName, leaf, sizeof leaf)) continue;
         _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", rel, leaf);
-        if (!me_name_ok(name, strlen(name))) continue;
+        if (!sh_zip_name_ok(name, strlen(name))) continue;
         _snwprintf_s(child, MAX_PATH * 2, _TRUNCATE, L"%s\\%s", abs, fd.cFileName);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (!me_walk(r, child, name, depth + 1, cause, cap)) { FindClose(h); return 0; }
-        } else if (!me_reader_add(r, name, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow)) {
+        } else if (!sh_zip_reader_add(r, name, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow)) {
             FindClose(h);
             return me_cause(cause, cap, "the export folder holds too many files");
         }
@@ -1039,7 +561,7 @@ static int me_walk(me_reader *r, const wchar_t *abs, const char *rel, int depth,
 /* The retired bundle form of earlier releases: a bundle.canonical.json
  * anywhere, or an export.json that is an index rather than a prefab or map
  * named "export". */
-static int me_retired(const me_reader *r)
+static int me_retired(const sh_zip_reader *r)
 {
     static const char LEAF[] = "bundle.canonical.json";
     const size_t ll = sizeof LEAF - 1;
@@ -1050,11 +572,11 @@ static int me_retired(const me_reader *r)
         size_t n = strlen(name);
         if (n >= ll && !_stricmp(name + n - ll, LEAF) && (n == ll || name[n - ll - 1] == '/')) return 1;
     }
-    idx = me_find(r, MODEXPORT_INDEX);
+    idx = sh_zip_reader_find(r, MODEXPORT_INDEX);
     if (idx >= 0) {
         char ignored[64], type[64];
         size_t len = 0;
-        unsigned char *text = me_read_entry(r, idx, ME_INDEX_MAX, &len, ignored, sizeof ignored);
+        unsigned char *text = sh_zip_reader_read(r, idx, ME_INDEX_MAX, &len, ignored, sizeof ignored);
         int t = text ? sh_prefab_block_top_type((const char *)text, len, type, sizeof type) : -1;
         free(text);
         if (t != 1) return 1;
@@ -1120,24 +642,24 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         }
         slash = wcsrchr(w, L'\\');
         if (!slash) slash = wcsrchr(w, L'/');
-        if (!slash || !me_w_to_utf8(slash + 1, leaf, sizeof leaf) || !me_name_ok(leaf, strlen(leaf))) {
+        if (!slash || !me_w_to_utf8(slash + 1, leaf, sizeof leaf) || !sh_zip_name_ok(leaf, strlen(leaf))) {
             free(w);
             return me_cause(cause, cap, "the prefab file's path is not usable");
         }
         *slash = 0;
         im->zr.dir = w;
         im->zr.h = NULL;
-        if (!me_reader_add(&im->zr, leaf, ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow)) {
+        if (!sh_zip_reader_add(&im->zr, leaf, ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow)) {
             me_import_free(im);
             return me_cause(cause, cap, "out of memory");
         }
         *idx = 0;
         dir = 1;
     } else {
-        if (!me_reader_open(&im->zr, path, cause, cap)) return 0;
+        if (!sh_zip_reader_open(&im->zr, path, cause, cap)) return 0;
         if (me_retired(&im->zr)) {
             /* beta.20's map export: its map is always map.rawmap.json. */
-            *idx = want == ME_KIND_MAP ? me_find(&im->zr, ME_RETIRED_MAP) : -1;
+            *idx = want == ME_KIND_MAP ? sh_zip_reader_find(&im->zr, ME_RETIRED_MAP) : -1;
             if (*idx < 0) {
                 me_import_free(im);
                 return me_cause(cause, cap, "%s", want == ME_KIND_PREFAB ? MODEXPORT_RETIRED_PREFAB : MODEXPORT_RETIRED_MAP);
@@ -1154,7 +676,7 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
         }
         if (*idx < 0) { me_import_free(im); return me_cause(cause, cap, "the export holds no %s", me_kind_word(want)); }
     }
-    *text = (char *)me_read_entry(&im->zr, *idx, MODEXPORT_MAP_MAX, len, cause, cap);
+    *text = (char *)sh_zip_reader_read(&im->zr, *idx, MODEXPORT_MAP_MAX, len, cause, cap);
     if (!*text) { me_import_free(im); return 0; }
     kind = me_classify(*text, *len);
     if (kind != want) {
@@ -1179,7 +701,7 @@ static int me_open(me_import *im, const char *path, int want, char **text, size_
          * the picked .json (the only top-level one) is found again. */
         wchar_t mods[MAX_PATH * 2];
         _snwprintf_s(mods, MAX_PATH * 2, _TRUNCATE, L"%s\\mods", im->zr.dir);
-        if (!me_walk(&im->zr, mods, "mods", 0, cause, cap) || !me_reader_sort(&im->zr, cause, cap)) {
+        if (!me_walk(&im->zr, mods, "mods", 0, cause, cap) || !sh_zip_reader_sort(&im->zr, cause, cap)) {
             me_open_fail(im, text);
             return 0;
         }
@@ -1209,15 +731,15 @@ static int me_carried(const me_import *im, const char *hash)
 /* Whether a folder's path below mods/ lies inside another folder the export
  * carries (an ancestor with its own mod.json), or deeper than the store
  * enters organizing folders. */
-static int me_inside_carried(const me_reader *r, const char *seg, size_t sl)
+static int me_inside_carried(const sh_zip_reader *r, const char *seg, size_t sl)
 {
-    char probe[ME_NAME_MAX + 1];
+    char probe[SH_ZIP_NAME_MAX + 1];
     size_t i, depth = 0;
     for (i = 0; i < sl; i++) {
         if (seg[i] != '/') continue;
         if (++depth >= SH_MS_NEST_MAX) return 1;
         _snprintf_s(probe, sizeof probe, _TRUNCATE, "mods/%.*s/mod.json", (int)i, seg);
-        if (me_find(r, probe) >= 0) return 1;
+        if (sh_zip_reader_find(r, probe) >= 0) return 1;
     }
     return 0;
 }
@@ -1242,7 +764,7 @@ static int me_collect(me_import *im, const sh_modmanifest_list *rows, int all, c
         if (!slash || strcmp(slash, "/mod.json")) continue;
         sl = (size_t)(slash - seg);
         if (!sl || sl > SH_MS_NAME_MAX || me_inside_carried(&im->zr, seg, sl)) continue;
-        text = (char *)me_read_entry(&im->zr, (long)i, ME_MODJSON_MAX, &len, cause, cap);
+        text = (char *)sh_zip_reader_read(&im->zr, (long)i, ME_MODJSON_MAX, &len, cause, cap);
         if (!text) return 0;
         memset(&b, 0, sizeof b);
         if (!sh_mb_load_text(text, len, &b)) {
@@ -1407,7 +929,7 @@ static int me_stage(me_import *im, me_carry *c, const char *stage, size_t index,
             me_log("MODS: import: %s is not part of a mod folder; left out", name);
             continue;
         }
-        bytes = me_read_entry(&im->zr, (long)i, (size_t)SH_MB_MAX_FILE, &len, cause, cap);
+        bytes = sh_zip_reader_read(&im->zr, (long)i, (size_t)SH_MB_MAX_FILE, &len, cause, cap);
         if (!bytes) return 0;
         put = me_put_file(c->stage, rel, bytes, len);
         free(bytes);
@@ -1674,14 +1196,14 @@ static void me_count_absent(const me_import *im, const sh_modmanifest_list *rows
 static int me_retired_blob(void *ctx, const char *sha, unsigned long long size, unsigned char **bytes, size_t *len,
                            char *cause, size_t cap)
 {
-    const me_reader *r = (const me_reader *)ctx;
+    const sh_zip_reader *r = (const sh_zip_reader *)ctx;
     char got[SH_MB_HASH_HEX + 1];
     size_t i;
     for (i = 0; i < r->n; i++) {
         unsigned char *b;
         size_t n = 0;
         if (r->e[i].usize != size || strncmp(r->e[i].name, "mods/", 5) || !strstr(r->e[i].name, "/assets/")) continue;
-        b = me_read_entry(r, (long)i, (size_t)size + 1, &n, cause, cap);
+        b = sh_zip_reader_read(r, (long)i, (size_t)size + 1, &n, cause, cap);
         if (!b) continue;
         sh_mb_sha256_hex(b, n, got);
         if (!strcmp(got, sha)) { *bytes = b; *len = n; return 1; }
@@ -1706,7 +1228,7 @@ static int me_install_retired(me_import *im, const sh_modmanifest_list *rows, mo
         char why[SH_MB_CAUSE_MAX] = "";
         unsigned char *text;
         if (n <= ll || strcmp(name + n - ll, LEAF) || strncmp(name, "mods/", 5)) continue;
-        text = me_read_entry(&im->zr, (long)i, ME_INDEX_MAX, &len, cause, cap);
+        text = sh_zip_reader_read(&im->zr, (long)i, ME_INDEX_MAX, &len, cause, cap);
         if (!text) { ok = 0; break; }
         sh_mb_sha256_hex(text, len, hash);
         if (!me_rows_name(rows, hash)) { free(text); continue; }
