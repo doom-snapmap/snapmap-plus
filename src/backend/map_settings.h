@@ -14,14 +14,6 @@
  *  - every save (rawmap.c sh_ser_detour and the rawmap export) puts them into
  *    the member.
  *
- * Legacy: earlier builds wrote them as the string variables smp.render.v1 and
- * smp.bounds.v1. A load reads those when the member has no settings part (the
- * member wins when both exist) and removes them; a save removes them too. A
- * variable is bound by index, so a row is only removed when nothing but
- * Snapmap+ rows follows it; a row an author's variable follows stays where it
- * is, is read as above, and is rewritten at save to the native value that
- * reads as off ("4;8192", "1;0"), the member carrying the setting.
- *
  * The settings are the map's, not the undo history's: an undo leaves them as
  * they were applied, like the map's mod rows. Applying a change marks the map
  * modified (editor_undo.h) so the editor asks to save. */
@@ -40,25 +32,20 @@ typedef struct sh_map_settings {
 void sh_map_settings_default(sh_map_settings *settings);
 
 typedef struct sh_map_settings_report {
-    unsigned found;    /* rows with either name */
-    unsigned removed;  /* rows removed from the text */
-    unsigned kept;     /* rows left in place because an author variable follows */
-    unsigned refused;  /* rows that did not read (malformed or duplicated); the setting is off */
+    unsigned refused;  /* load: member values that did not read; the setting is off */
     unsigned written;  /* save: settings written into the member */
     int member;        /* load: the settings came from the member's "settings" part */
     int failed;        /* the map text did not read; nothing was changed */
 } sh_map_settings_report;
 
-/* Load: read both settings from map text (the member's part, else the legacy
- * rows; absent is off) and return the text without the legacy rows that may
- * be removed (allocCount[4] rewritten), as a process-heap buffer, or NULL when
- * nothing was removed (keep the input). The member is left for the parse
+/* Load: read both settings from the member's "settings" part (absent is off).
+ * Returns NULL: nothing is removed here; the member is left for the parse
  * detour's final strip. */
 char *sh_map_settings_take(const char *json, size_t len, sh_map_settings *out, size_t *out_len,
                            sh_map_settings_report *report);
-/* Save: return the text carrying exactly `settings` in the member, with no
- * legacy row left that can be removed, as a process-heap buffer, or NULL when
- * the input already does (or on failure, report.failed). */
+/* Save: return the text carrying exactly `settings` in the member, as a
+ * process-heap buffer, or NULL when the input already does (or on failure,
+ * report.failed). */
 char *sh_map_settings_put(const char *json, size_t len, const sh_map_settings *settings,
                           size_t *out_len, sh_map_settings_report *report);
 

@@ -1,8 +1,9 @@
 /* Maps saved or published with the retired first-generation package system
  * carry their packages as "smpkg." string variables; unreleased v2 builds
  * also wrote "smpbind." and "smpref." rows. This module owns their header
- * grammar and their removal. Conversion of complete packages into bundles is
- * modlegacy.c's (DESIGN.md section 11). */
+ * grammar and their removal, for the store tool only (src/store/build.ps1;
+ * map_old.h): the game refuses such a map (map_carrier.h, sh_map_old_shape).
+ * Conversion of complete packages into bundles is modlegacy.c's. */
 #ifndef SNAPMAP_PLUS_MAP_LEGACY_PAYLOAD_H
 #define SNAPMAP_PLUS_MAP_LEGACY_PAYLOAD_H
 

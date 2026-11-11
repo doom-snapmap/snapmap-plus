@@ -7,12 +7,6 @@
  * "geom":"<16 hex>","data":["<base64 chunk>",...]}. A save writes it there
  * (sh_navmesh_embed_all), never as variables.
  *
- * Legacy: earlier builds wrote each chunk as a string variable named
- * smnav1.<category>/<module>.<class>.<idx>.<total>.<digest16>.<geom16> (parse
- * the five trailing fields from the right). A load reads those when the
- * member has no "nav" part (the member wins when both exist) and
- * sh_navmesh_strip removes them; the next save carries them in the member.
- *
  * Resource aliases use maps/modules/.../<module>.aas_<class> and
  * generated/maps/modules/.../<module>.baas_<class>.
  *
@@ -24,8 +18,8 @@
  * served copies use the process heap.
  *
  * Chunk size (SH_SMNAV_CARRIER_CHUNK): the product strips the member before
- * the engine parses, so only a machine without Snapmap+ ever lexes it. The
- * old variable rows failed native deserialization at 16384 characters. The
+ * the engine parses, so only a machine without Snapmap+ ever lexes it. String
+ * variables failed native deserialization at 16384 characters. The
  * member was measured live on Vulkan (13954591, 2026-11-09, lane L17) with
  * Snapmap+ leaving an unknown root member to the engine: a single string of
  * 8192, 65536 and 1048576 characters and an array of 2048 strings of 4096
@@ -45,8 +39,6 @@
 
 /* ---- the frozen wire format ------------------------------------------- */
 
-#define SH_SMNAV_MAGIC          "smnav1."
-#define SH_SMNAV_MAGIC_LEN      7
 #define SH_SMNAV_DIGEST_CHARS   16          /* sha256 prefix over the payload */
 #define SH_SMNAV_GEOM_CHARS     16          /* sha256 prefix over the source geometry */
 #define SH_SMNAV_MODULE_CAP     128         /* "category/module" + NUL */
@@ -61,7 +53,7 @@
 
 /* ---- budgets ----------------------------------------------------------- */
 
-#define SH_SMNAV_MAX_PAYLOAD    (8u * 1024u * 1024u)    /* one embedded smnav1 payload */
+#define SH_SMNAV_MAX_PAYLOAD    (8u * 1024u * 1024u)    /* one baked payload */
 #define SH_SMNAV_MAX_TOTAL      (32u * 1024u * 1024u)   /* all of them, per map */
 #define SH_SMNAV_MAX_SETS       192                     /* (module, class) pairs per map */
 #define SH_SMNAV_MAX_MODULES    64
@@ -96,11 +88,6 @@ void sh_navmesh_install(void);
  * from this map's shards; a map with no shards leaves it empty. Never throws:
  * a fault inside disables the feature for the session. */
 void sh_navmesh_build_from_map(const char *json, size_t len);
-
-/* Remove every smnav shard variable from a map buffer, AFTER the table has been
- * built from it. Returns a new NUL-terminated HeapAlloc'd buffer (caller
- * HeapFrees) with *out_len set, or NULL meaning "use the original". */
-char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len);
 
 /* THE AUTHOR SIDE. Re-embed every payload the current map is holding, so a
  * load-then-save with no fresh bake preserves the navigation the map arrived

@@ -115,8 +115,8 @@ static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 }
 
 /* The setting belongs to the open map and is held by map_settings.c: every
- * map parse reads it from the map's smp.bounds.v1 row and removes the row
- * before the engine sees it, and every save writes it back. */
+ * map parse reads it from the "bounds" key of the map's member's settings
+ * part, which goes before the engine sees it, and every save writes it back. */
 int sh_map_bounds_read(void *map,sh_map_bounds *settings)
 {
     sh_map_settings current;

@@ -1,4 +1,4 @@
-/* Read, validate and serve map-scoped smnav1 payloads. Keep SEH inside the
+/* Read, validate and serve map-scoped baked navigation payloads. Keep SEH inside the
  * table lock so error handling still releases it. Header paths and payload
  * sizes are bounded before native parsing.
  */
@@ -183,67 +183,6 @@ static int nav_copy_hex(const char *p, size_t n, char *out, size_t want)
     memcpy(out, p, n);
     out[n] = '\0';
     return 1;
-}
-
-static int nav_parse_uint(const char *p, size_t n, unsigned *out)
-{
-    unsigned long v = 0;
-    size_t i;
-    if (n == 0 || n > 7) return 0;
-    for (i = 0; i < n; i++) {
-        if (!sh_shard_is_digit(p[i])) return 0;
-        v = v * 10 + (unsigned long)(p[i] - '0');
-    }
-    *out = (unsigned)v;
-    return 1;
-}
-
-/* Parse one header text (magic included, quotes excluded).
- *
- * FIVE trailing dot-separated fields are taken FROM THE RIGHT, and everything
- * between the magic and them is the module field -- which is exactly why a
- * module name containing '/' is safe here and one containing '.' is not
- * representable. Returns 1 only when every field is well formed. */
-static int nav_parse_header(const char *p, size_t plen, nav_hdr *h)
-{
-    const char *f[5];
-    size_t fl[5];
-    size_t end = plen;
-    int i;
-
-    if (plen <= SH_SMNAV_MAGIC_LEN) return 0;
-    if (memcmp(p, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN) != 0) return 0;
-
-    for (i = 4; i >= 0; i--) {
-        size_t d = end;
-        while (d > 0 && p[d - 1] != '.') d--;
-        if (d == 0) return 0;            /* ran out of separators */
-        f[i] = p + d;
-        fl[i] = end - d;
-        end = d - 1;                     /* step over the '.' itself */
-    }
-    if (end <= SH_SMNAV_MAGIC_LEN) return 0;
-
-    if (!nav_copy_module(p + SH_SMNAV_MAGIC_LEN, end - SH_SMNAV_MAGIC_LEN,
-                         h->module, sizeof h->module)) return 0;
-    if (!nav_copy_class(f[0], fl[0], h->cls, sizeof h->cls)) return 0;
-    if (!nav_parse_uint(f[1], fl[1], &h->idx)) return 0;
-    if (!nav_parse_uint(f[2], fl[2], &h->total)) return 0;
-    if (h->total == 0 || h->total > SH_SMNAV_MAX_SHARDS) return 0;
-    if (!nav_copy_hex(f[3], fl[3], h->digest, SH_SMNAV_DIGEST_CHARS)) return 0;
-    if (!nav_copy_hex(f[4], fl[4], h->geom, SH_SMNAV_GEOM_CHARS)) return 0;
-    return 1;
-}
-
-/* ctx == NULL: every smnav shard. ctx == a set: only that set's own shards,
- * which is what makes a re-embed replace rather than accumulate. */
-static int nav_shard_filter(const char *hdr, size_t hdr_len, void *ctx)
-{
-    nav_hdr parsed;
-    const nav_set *only = (const nav_set *)ctx;
-    if (!nav_parse_header(hdr, hdr_len, &parsed)) return 0;
-    if (!only) return 1;
-    return strcmp(parsed.module, only->module) == 0 && strcmp(parsed.cls, only->cls) == 0;
 }
 
 /* ==================================================================== */
@@ -821,23 +760,6 @@ static void nav_overflow(void)
                "the surplus is ignored", (int)SH_SMNAV_MAX_SETS);
 }
 
-/* Pass 1 from legacy smnav1 string variables. */
-static void nav_collect(const char *json, size_t len)
-{
-    size_t pos = 0;
-    const char *hdr, *chunk;
-    size_t hdr_len, chunk_len;
-    nav_hdr h;
-    int overflow = 0;
-
-    while (sh_shard_next(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN, &pos,
-                         &hdr, &hdr_len, &chunk, &chunk_len)) {
-        if (!nav_parse_header(hdr, hdr_len, &h)) continue;   /* prose, not a shard */
-        if (!nav_collect_one(&h, chunk, chunk_len)) overflow = 1;
-    }
-    if (overflow) nav_overflow();
-}
-
 /* One string member of a member set object, copied with the grammar's checks. */
 static int nav_member_field(const char *obj, const char *end, const char *key, char *out, size_t cap,
                             int (*copy)(const char *, size_t, char *, size_t))
@@ -1027,19 +949,14 @@ static void nav_accept(const char *json, size_t len)
     }
 }
 
-/* The scan itself, guarded, with the lock already held. The member's "nav"
- * part wins; without one, the legacy smnav1 variables are read. */
+/* The scan itself, guarded, with the lock already held: the member's "nav"
+ * part. */
 static void nav_build_locked(const char *json, size_t len)
 {
     __try {
         size_t from = 0, to = 0;
         if (json && len && sh_carrier_part(json, len, "nav", &from, &to) == 1) {
             nav_collect_member(json + from, json + to);
-            nav_reassemble();
-            nav_accept(json, len);
-        } else if (json && len && sh_shard_find(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN)) {
-            /* Reset state even for shard-free maps; scanning then uses a cheap reject. */
-            nav_collect(json, len);
             nav_reassemble();
             nav_accept(json, len);
         }
@@ -1095,50 +1012,6 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
                 "NAV: this map carries %zu baked module/class set(s); serving %zu of them for "
                 "%zu module(s), holding %zu bytes", sets, served, modules, held);
     backend_log(line);
-}
-
-/* ==================================================================== */
-/* strip                                                                 */
-/* ==================================================================== */
-
-static char *nav_strip_inner(const char *json, size_t len, size_t *out_len)
-{
-    unsigned elements = 0, runs = 0;
-    int doc_failed = 0;
-    size_t w = 0;
-    char *out;
-    char line[224];
-
-    __try {
-        out = sh_shard_strip(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN,
-                             nav_shard_filter, NULL, SH_SMNAV_MAX_SHARDS,
-                             &w, &elements, &runs, &doc_failed);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        nav_fault("the shard strip");
-        return NULL;
-    }
-    if (!out) {
-        if (doc_failed)
-            backend_log("NAV: shard strip SKIPPED -- the map's JSON structure did not read "
-                        "cleanly; handing the engine the original buffer");
-        return NULL;
-    }
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "NAV: navigation shards STRIPPED -- %u variable(s) removed in %u run(s), "
-                "%zu -> %zu bytes; the delivery envelope never becomes map state",
-                elements, runs, len, w);
-    backend_log(line);
-    if (out_len) *out_len = w;
-    return out;
-}
-
-char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
-{
-    if (out_len) *out_len = 0;
-    if (!json || len == 0) return NULL;
-    /* When disabled, retain shards as map variables instead of stripping them. */
-    if (!sh_navmesh_enabled()) return NULL;
-    return nav_strip_inner(json, len, out_len);
 }
 
 /* ==================================================================== */
@@ -1224,20 +1097,18 @@ static char *nav_part_locked(size_t *out_len, size_t *sets_out, char *err, size_
     return out;
 }
 
-/* Guarded, with the lock already held: the legacy shards removed, then the
- * member's "nav" part put (removed when nothing is held). */
+/* Guarded, with the lock already held: the member's "nav" part put (removed
+ * when nothing is held). */
 static char *nav_embed_locked(const char *json, size_t len,
                               size_t *cur_len_out, size_t *embedded_out)
 {
-    char *base = NULL, *part = NULL, *out = NULL;
-    size_t base_len = 0, part_len = 0, out_len = 0, sets = 0;
+    char *part = NULL, *out = NULL;
+    size_t part_len = 0, out_len = 0, sets = 0;
     char err[SH_SMNAV_REASON_CAP] = "";
 
     *cur_len_out = len;
     *embedded_out = 0;
     __try {
-        base = sh_shard_strip(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN, nav_shard_filter, NULL,
-                              SH_SMNAV_MAX_SHARDS * SH_SMNAV_MAX_SETS, &base_len, NULL, NULL, NULL);
         part = nav_part_locked(&part_len, &sets, err, sizeof err);
         if (!part) {
             char warn[SH_SMNAV_REASON_CAP + 96];
@@ -1245,7 +1116,7 @@ static char *nav_embed_locked(const char *json, size_t len,
                         "NAV: the navigation could NOT be written into this save (%s)", err);
             backend_log(warn);
         } else {
-            out = sh_carrier_put(base ? base : json, base ? base_len : len, "nav",
+            out = sh_carrier_put(json, len, "nav",
                                  sets ? part : NULL, sets ? part_len : 0, &out_len, err, sizeof err);
             if (!out && err[0]) {
                 char warn[SH_SMNAV_REASON_CAP + 96];
@@ -1254,14 +1125,12 @@ static char *nav_embed_locked(const char *json, size_t len,
                 backend_log(warn);
             }
         }
-        if (!out && base && !err[0]) { out = base; out_len = base_len; base = NULL; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         nav_fault("the save-time re-embed");
         if (out) HeapFree(GetProcessHeap(), 0, out);
         out = NULL;
         sets = 0;
     }
-    if (base) HeapFree(GetProcessHeap(), 0, base);
     if (part) HeapFree(GetProcessHeap(), 0, part);
     if (out) {
         *cur_len_out = out_len;
@@ -1440,9 +1309,9 @@ void sh_navmesh_install(void)
 {
     if (InterlockedExchange(&g_installed, 1) != 0) return;
     backend_log(nav_config_on(NAV_CONFIG_ENABLED)
-        ? "NAV: baked-navigation serving ARMED -- a map carrying validated smnav1 shards has its "
+        ? "NAV: baked-navigation serving ARMED -- a map carrying validated baked navigation has its "
           "modules' navmeshes replaced for as long as it is loaded"
-        : "NAV: baked-navigation serving OFF by config; maps keep their shards and the engine "
+        : "NAV: baked-navigation serving OFF by config; maps keep their baked navigation and the engine "
           "serves its own navigation");
 }
 

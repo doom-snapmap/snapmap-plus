@@ -5,6 +5,7 @@
 #include <string.h>
 #include "map_legacy_payload.h"
 #include "map_shards.h"
+#include "map_old.h"
 
 /* Every map carries far fewer variables than this bound. */
 #define LEGACY_MAX_CUTS  (1u << 20)

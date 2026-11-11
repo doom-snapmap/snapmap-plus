@@ -34,8 +34,8 @@ static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 }
 
 /* The setting belongs to the open map and is held by map_settings.c: every
- * map parse reads it from the map's smp.render.v1 row and removes the row
- * before the engine sees it, and every save writes it back. The engine's own
+ * map parse reads it from the "render" key of the map's member's settings
+ * part, which goes before the engine sees it, and every save writes it back. The engine's own
  * variable lists never carry it, so the map argument only names the map the
  * caller means. */
 int sh_map_render_read(void *map,sh_map_render *settings)

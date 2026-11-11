@@ -15,6 +15,7 @@
 #include "modserve.h"
 #include "map_legacy_payload.h"
 #include "map_shards.h"
+#include "map_old.h"
 #include "raw_deflate.h"
 #include "config_json.h"
 #include "backend_log.h"
