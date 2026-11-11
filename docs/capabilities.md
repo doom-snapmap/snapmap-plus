@@ -188,6 +188,9 @@ name". Mods you download or import are never refused on their files. A map whose
   while the editor is open no longer crashes the next Play. Everything a mod's objects use is kept
   with them for the session, whenever the game loads it, so Play after Play never finds a freed
   model or material; what the map's own memory holds is left for the next load to recreate whole.
+  A mod prop's model is loaded for the session while the mod serves it, so a Play in a map that
+  does not use the mod no longer turns its rocks and other props into black boxes in the next map
+  that does.
   The rescan's result
   and the backend log's `MODS: refresh:` lines say which applied.
   `sh_mods build "<folder>"` does it at once; `sh_mods install "<folder>"` copies a folder from

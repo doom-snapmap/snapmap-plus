@@ -1034,6 +1034,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 9C 24 D0 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 90 01 00 00 48 8B F2 "
       "48 8B F9 48 89 4C 24 20 48 8D 4D 60 E8 ?? ?? ?? ?? 90 C6 85 90 00 00 00 00",
       0x1571D50u, 0x1572EE0u },
+    { "ResourceMaterialize", /* idResourceList find-or-load: resource*(list, name, makeDefault,
+                             * quiet). Asks ResourceLookup first, creates an object at the current
+                             * level for an unknown name and loads it through ResourceGenericLoad
+                             * (+0x249). Called, not detoured: the product loads the render models a
+                             * kept decl holds with it (modserve_engine.c, me_hold_models). Vulkan
+                             * 0x1572660, OpenGL 0x15737F0; one match in each image. */
+      "41 54 41 56 41 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 "
+      "48 89 7C 24 68 45 0F B6 F9 45 0F B6 E0 4C 8B F2 48 8B F1 48 8B 49 08 48 85 C9 75 0D 48 8D 0D",
+      0x1572660u, 0x15737F0u },
     /* Native module properties and XYZ inspector. Independently matched on
      * Vulkan/OpenGL at D0BCA0/D0B3B0, D0A0B0/D09980, D071F0/D06B70 and
      * D306F0/D2FDB0. No pinned-image RVA fallback is authorized. */

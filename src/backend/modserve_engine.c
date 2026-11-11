@@ -95,6 +95,7 @@ typedef unsigned char (*cvar_set_fn)(void *, const char *, unsigned char);
 typedef void (*buffer_cmd_fn)(void *, const char *);
 typedef unsigned char (*probe_fn)(void *, const char *, void *, void *, void *, void *, uint64_t);
 typedef void *(*lookup_fn)(void *, const char *, uint64_t);
+typedef void *(*materialize_fn)(void *, const char *, char, char);
 typedef union ms_string { void *align; unsigned char bytes[48]; } ms_string;
 
 static str_ctor_fn g_ctor;
@@ -105,6 +106,7 @@ static register_fn g_register;
 static source_fn g_source;
 static find_decl_fn g_decl;
 static generic_load_fn g_generic_load;
+static materialize_fn g_materialize;   /* ResourceMaterialize: find-or-load in one resource list */
 static sh_process_heap_api g_heap;
 static int g_bound;
 static const char *g_last_error;
@@ -724,12 +726,110 @@ static void me_closure_begin(me_closure *c)
     c->counted = 1;
 }
 
+static void me_closure_end(me_closure *c, const char *phase, const char *what);
+static int me_in_play(void);
+
+/* The render models kept decls hold, loaded here while their files serve
+ * (sh_modserve_held_models): each one not held yet is created (DeclFind with
+ * create, as op_load) and loaded; a default box or a model a map heap holds is
+ * loaded again in place. All inside process heap 0 and a keeper of its own
+ * (what the load creates, its materials and images, lives as long as the
+ * model, ADD-G6), then held at level 4. A load that still ends in a default
+ * stays at the engine's level and is named. */
+typedef struct me_held_load {
+    int loaded, reloaded, failed, faulted, skipped;
+    char first[400], bad[300];
+} me_held_load;
+
+static void me_held_note(char *buf, size_t cap, const char *name)
+{
+    size_t at = strlen(buf);
+    if (at + strlen(name) + 3 < cap) _snprintf_s(buf + at, cap - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+}
+
+static int me_held_one(void *context, const char *name, void *resource)
+{
+    me_held_load *r = (me_held_load *)context;
+    char before[ERROR_TEXT_MAX];
+    me_error_text(before, sizeof before);
+    __try {
+        unsigned char *d = (unsigned char *)resource;
+        if (!d) {
+            /* Not held: the engine's own find-or-load (the model manager's
+             * FindModel runs it on this list), quiet, with a default made on
+             * failure as the spawn would. */
+            void *list = sh_modserve_resource_list(g_res_head, SH_MODSERVE_HELD_MODEL_TYPE);
+            if (!list || !g_materialize) { r->skipped++; return 1; }
+            d = (unsigned char *)g_materialize(list, name, 1, 1);
+            if (!d) { r->failed++; me_held_note(r->bad, sizeof r->bad, name); return 1; }
+        } else {
+            /* Loaded again in place: the failed, unloaded and default bits
+             * cleared first, as op_load does for a new identity. */
+            d[RES_STATE_OFF] = (unsigned char)(d[RES_STATE_OFF] & ~7);
+            g_generic_load(d);
+        }
+        if (d[RES_STATE_OFF] & 5) {
+            /* Still the default: not kept, so the next load can read it whole. */
+            *(unsigned *)(d + RES_LIFETIME_OFF) = 1;
+            r->failed++;
+            me_held_note(r->bad, sizeof r->bad, name);
+            return 1;
+        }
+        *(unsigned *)(d + RES_LIFETIME_OFF) = 4;
+        sh_modserve_kept_add(d);
+        if (resource) r->reloaded++; else r->loaded++;
+        me_held_note(r->first, sizeof r->first, name);
+    } __except (me_fault_filter(GetExceptionCode())) {
+        me_log_fault("held model load", SH_MODSERVE_HELD_MODEL_TYPE, name, before);
+        r->faulted++;
+    }
+    return 1;
+}
+
+static void me_hold_models(const char *phase)
+{
+    static int busy;
+    me_held_load r;
+    sh_modserve_holds h;
+    sh_process_heap_scope heap = { 0 };
+    me_closure keeper;
+    int n = -1, own;
+    if (busy || !g_bound || !g_res_head || !g_generic_load || !sh_modserve_active() || me_on_main() != 1 ||
+        me_in_play() == 1)
+        return;
+    busy = 1;
+    memset(&r, 0, sizeof r);
+    if (!sh_process_heap_enter(&g_heap, &heap)) {
+        me_log("%s: models kept decls hold not loaded (process heap scope unavailable)", phase);
+        busy = 0;
+        return;
+    }
+    own = sh_modserve_inplace_keeper(g_mark_depth, 1);
+    if (own) me_closure_begin(&keeper);
+    __try { n = sh_modserve_held_models(g_res_head, me_held_one, &r, &h); }
+    __finally {
+        if (own) me_closure_end(&keeper, phase, "held model load");
+        if (!sh_process_heap_leave(&heap)) me_log("%s: held model load heap scope did not balance", phase);
+    }
+    if (n < 0) me_log("%s: resource lists could not be walked; models kept decls hold were not loaded", phase);
+    else if (r.skipped)
+        me_log("%s: %d model(s) kept decls hold not loaded: the resource find-or-load is unavailable on this build; "
+               "they are loaded per map", phase, r.skipped);
+    if (n > r.skipped)
+        me_log("%s: %d model(s) kept decls hold loaded for the session while their bundles serve them (%d new, %d "
+               "loaded again: a default or a map heap's; %d still a default, %d faulted)%s%s%s%s%s", phase,
+               r.loaded + r.reloaded, r.loaded, r.reloaded, r.failed, r.faulted, r.first[0] ? ": " : "", r.first,
+               strlen(r.first) + 40 >= sizeof r.first ? ", ..." : "", r.bad[0] ? "; still a default: " : "", r.bad);
+    busy = 0;
+}
+
 /* Keep what the kept decls hold (sh_modserve_holds_raise): after every
  * serving pass, and before the Play level load purges level 1. */
 static void me_keep_holds(const char *phase)
 {
     sh_modserve_holds h;
     if (!g_res_head) return;
+    me_hold_models(phase);
     if (!sh_modserve_holds_raise(g_res_head, &h)) {
         me_log("%s: resource lists could not be walked; what kept decls hold was not checked", phase);
         return;
@@ -1072,6 +1172,8 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_source = (source_fn)me_clean(results, count, "DeclSourceFind");
     g_decl = (find_decl_fn)me_clean(results, count, "DeclFind");
     g_generic_load = (generic_load_fn)me_clean(results, count, "ResourceGenericLoad");
+    /* Optional: without it the held models are loaded only when the engine has created them. */
+    g_materialize = (materialize_fn)me_clean(results, count, "ResourceMaterialize");
     /* Requirements: optional, so a build without them still registers every
      * bundle that needs none. */
     g_cvar_set = (cvar_set_fn)me_clean(results, count, "CvarSetString");

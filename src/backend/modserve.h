@@ -391,6 +391,26 @@ typedef struct sh_modserve_holds {
 } sh_modserve_holds;
 int  sh_modserve_holds_raise(const void *head_slot, sh_modserve_holds *out);
 
+/* The render models of that same closure the product loads itself, in
+ * process heap 0, so that they are held for the session with the decls that
+ * hold them: a mod prop's model is not loaded by its entityDef's parse but at
+ * the entity's spawn, in the map's heap, and the Play purge frees it; the
+ * next Play of a map that does not declare the bundle (whose files it then
+ * does not serve) loads it again from the kept decl and gets the engine's
+ * default box, which no editor map change purges (report X2). For each
+ * "model" need whose providing file the index serves in the current scope
+ * and which the lists hold not at all, as a default (+0x2c bit 0 or 2), or at
+ * level 1 loaded under a map heap: fn(context, name, resource or NULL),
+ * outside the resource lock; fn returns 0 to stop. A stock model (no
+ * provider) is the game's bytes in every scope and is left to the engine.
+ * Returns the number of calls, -1 when a walk failed. */
+#define SH_MODSERVE_HELD_MODEL_TYPE "model"
+typedef int (*sh_modserve_held_model_fn)(void *context, const char *name, void *resource);
+int  sh_modserve_held_models(const void *head_slot, sh_modserve_held_model_fn fn, void *context,
+                             sh_modserve_holds *out);
+/* The resource list whose type name (+0x08) is `type`, or NULL. */
+void *sh_modserve_resource_list(const void *head_slot, const char *type);
+
 /* What a kept pass looks up. A pass that registers while the previous map's
  * level-1 objects are still alive (an in-editor rawmap reload, `sh_mods map
  * add`) parses decls that bind to those objects: they are older than its

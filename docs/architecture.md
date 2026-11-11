@@ -1566,6 +1566,31 @@ whole and the next load recreates it. A load in heap 0 clears the mark. A
 log line `<phase>: N keep(s) left at level 1 because the map's heap holds
 what their load allocated` names them.
 
+A kept decl's render models are loaded by the product itself, in process heap
+0, while their files serve (`sh_modserve_held_models`, `me_hold_models`, run at
+the start of every `me_keep_holds`). An entityDef's parse does not load its
+`renderModelInfo.model`; the entity's spawn does, at level 1 in the map's heap,
+so no keep holds it and every Play purge frees it. The rows' decls stay
+registered in every map, and the Play level load of a map that does not
+declare the bundle loads all of its prop models again from them (all 17 of
+`local.rocks` in an empty map); in Play an undeclared bundle serves nothing,
+so each load ends as the engine's default box (state bit 2, bounds +-8), and
+the editor after the Play exit makes the same defaults. The editor's own map
+changes purge nothing, so a later open of a map that places the props drew
+black cubes until its next Play (snaphak-re X2: fresh boot, empty map, Play,
+exit, rocks map: 3 of 3 black; fresh rocks map: whole). So for each `model`
+need of the holds closure whose providing file the index serves in the
+current scope, the product loads it when the lists do not hold it
+(`ResourceMaterialize`, VK 0x141572660 / GL 0x1415737f0, quiet, the find-or-load
+the model manager's FindModel runs), and loads it again in place when the
+lists hold a default, a failed load, or one a map heap owns; it then holds it
+at level 4 inside its own keeper, so what the load creates (materials,
+images) is kept with it. A load that still ends in a default stays at level 1
+and is named. A stock model (no provider) is the game's bytes in every scope
+and is left to the engine; nothing is loaded during Play. The log line is
+`<phase>: N model(s) kept decls hold loaded for the session while their
+bundles serve them`.
+
 Requirements. A bundle's `requirements` (`{"cvars": {...}, "commands":
 {"activate": [...], "deactivate": [...]}}`) are read only through the builder's
 canonical form (`sh_mb_requirements_canonical`): sorted cvar names with string
