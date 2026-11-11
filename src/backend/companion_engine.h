@@ -75,9 +75,13 @@ int sh_companions_install(const sig_result *results, size_t count, const uint8_t
  * it commits. Returns 1 when the detour is live. */
 int sh_companions_ensure(const char *phase);
 
-/* Mark the table stale: a new serving index (the index listener calls it).
- * The live detour re-reads it at the next owner spawn, an unarmed one at the
- * next gate. */
+/* Mark the tables stale: a new serving index (the index listener calls it).
+ * The live detour re-reads them at the next outermost spawn of a mods
+ * entity, never inside a companion's own spawn (its owner's loop is still
+ * reading them); an unarmed one at the next gate. There is one table per
+ * build that declares companions, and an owner's companions come from the
+ * build that serves the owner's entityDef for the open map (a map's own copy
+ * of a salt, not the root folder's). */
 void sh_companions_refresh(void);
 
 /* Another subscriber of the spawn chain (mod scripts, script/script_hooks.h).

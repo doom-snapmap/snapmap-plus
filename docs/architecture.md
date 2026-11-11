@@ -1436,8 +1436,13 @@ A bundle's `companions` key (author block of `mod.json`, kept under `extra`)
 maps owner entityDefs, which must be the bundle's own `mods/<id>/` names, to
 1..16 companions `{entityDef, origin, axis, activate, bind}` (`companion.h`
 has the grammar and refusals; a refused block adds nothing and is logged
-`COMPANIONS: <id> REFUSED: ...`; the first bundle to declare an owner keeps
-it). `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
+`COMPANIONS: <id> REFUSED: ...`). Each admitted build that declares companions
+has a table of its own, and an owner's companions come from the build that
+serves the owner's entityDef for the open map (`sh_modserve_lookup`), so a map
+that brought its own copy of a salt spawns that copy's companions, never the
+root folder's. A new serving index is read at the next outermost spawn of a
+mods entity, never inside a companion's own spawn, whose owner's loop is still
+reading the tables. `companion_engine.c` detours `idClass::CallSpawn` (VK 0x141583A00, GL
 0x141584A90, 14 stolen bytes) only once an admitted bundle declares an owner:
 at startup when one does, otherwise at the first main-thread gate after one is
 installed (`sh_companions_ensure`, called beside the probe's own lazy commit at

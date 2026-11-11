@@ -190,6 +190,8 @@ $tests += @{ name = "modsound_test"; serial = $true; src = 'modsound_test.c ..\s
 $tests += @{ name = "modhud_test"; src = 'modhud_test.c ..\src\backend\modhud.c ..\src\backend\modbundle.c ..\src\backend\strkeys.c ..\src\backend\modsalt.c ..\src\backend\companion.c ..\src\backend\mp_json.c ..\src\backend\decl_text.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_MODHUD_TESTING /DSH_PATCH_TESTING /DSH_HOST_IMAGE_TESTING'; libs = 'shell32.lib'; arg = $identityImages }
 # Owner-bound companions: the grammar and transform; with images, the private
 # signatures, CallSpawn's stolen bytes, the idEntity cast and Bind's error text.
+# The engine side of companions against a faked engine table: the serving build, rebuilds at a safe point.
+$tests += @{ name = "companion_engine_test"; src = 'companion_engine_test.c ..\src\backend\companion.c ..\src\backend\mp_json.c'; arg = "" }
 $tests += @{ name = "companion_test"; src = 'companion_test.c ..\src\backend\companion.c ..\src\backend\companion_sigs.c ..\src\backend\modscene_sigs.c ..\src\backend\mp_json.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Mod scripts' engine side: the queues, the entity handles, the mod table and
 # the tick's guards (pure); with images, the private signatures, the detour
