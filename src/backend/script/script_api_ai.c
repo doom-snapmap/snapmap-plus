@@ -49,6 +49,7 @@
  *   block_pain    a detour of the threat table's row check (VK 0x1406E08D0 /
  *                 GL 0x1406DFD00) refusing a blocked reaction's rows. */
 #include <windows.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -881,54 +882,142 @@ static int l_find_position(lua_State *L)
     return 2;
 }
 
-/* ai:trigger(on, [hand]) pulls (true) or releases (false) the trigger of the weapon in `hand`:
- * "right" (the default, where most demons hold theirs) or "left" (a weapon whose equipSlot is
- * EQUIP_LEFT_HAND, as the Tyrant's arm cannon). */
+/* ---- the weapon: which hand, which item
+ *
+ * The game fires a demon's weapons from its fire control, which runs only
+ * while the hand its aibehavior decl names in weaponSlot (default the right
+ * hand) holds a weapon; it then fires the weapon of each hand. equip puts an
+ * inventory item in the hand its own decl's equipSlot names. So trigger,
+ * trigger_pulled and weapon_ready act on the weapon in one hand: the one a
+ * script names ("left" or "right"), else the demon's weapon hand; equip takes
+ * the item by its decl name (or its inventory index) and answers the hand it
+ * went to. */
+
+static const char *hand_name(int hand)
+{
+    return hand == SH_AI_HAND_LEFT ? "left" : hand == SH_AI_HAND_RIGHT ? "right" : NULL;
+}
+
+/* An optional hand at `idx`: 0 (the demon's weapon hand) when absent. */
+static int check_hand(lua_State *L, int idx, const char *call)
+{
+    const char *s;
+    if (lua_isnoneornil(L, idx)) return 0;
+    s = lua_type(L, idx) == LUA_TSTRING ? lua_tostring(L, idx) : NULL;
+    if (s && !strcmp(s, "left")) return SH_AI_HAND_LEFT;
+    if (s && !strcmp(s, "right")) return SH_AI_HAND_RIGHT;
+    return sh_script_refuse(L, "\"%s\" needs the hand as \"left\" or \"right\" (or nothing for the demon's weapon "
+                            "hand), got %s", call, s ? s : luaL_typename(L, idx));
+}
+
+/* The hand a call acts on: `hand`, or the demon's weapon hand; 0 when that
+ * is not a hand the game has a trigger for. */
+static int hand_of(void *ai, int hand)
+{
+    if (!hand && g_engine->weapon_hand) hand = g_engine->weapon_hand(ai);
+    return hand == SH_AI_HAND_LEFT || hand == SH_AI_HAND_RIGHT ? hand : 0;
+}
+
+/* ai:trigger(on, [hand]) pulls (true) or releases (false) the trigger of the weapon in `hand`. */
 static int l_trigger(lua_State *L)
 {
     sh_script_handle h = 0;
     void *ai;
-    int on, left = 0;
+    int on, hand;
     luaL_checkany(L, 2);
     on = lua_toboolean(L, 2);
-    if (!lua_isnoneornil(L, 3)) {
-        const char *hand = luaL_checkstring(L, 3);
-        if (strcmp(hand, "left") == 0) left = 1;
-        else if (strcmp(hand, "right") != 0)
-            return luaL_error(L, "trigger: the hand is \"left\" or \"right\", not \"%s\"", hand);
-    }
+    hand = check_hand(L, 3, "trigger");
     ai = self_ai(L, "trigger", &h);
-    if (!ai || !park(ai, h)) return 0;
-    if (left) run(ai, on ? SH_AI_EV_PULL_TRIGGER_LEFT : SH_AI_EV_RELEASE_TRIGGER_LEFT, NULL, 0, NULL);
+    if (!ai) return 0;
+    if (!(hand = hand_of(ai, hand)))
+        return sh_script_refuse(L, "\"trigger\": this demon's weapon hand (weaponSlot in its aibehavior decl) is "
+                                "not a hand; name the hand, \"left\" or \"right\"");
+    if (!park(ai, h)) return 0;
+    if (hand == SH_AI_HAND_LEFT) run(ai, on ? SH_AI_EV_PULL_TRIGGER_LEFT : SH_AI_EV_RELEASE_TRIGGER_LEFT, NULL, 0, NULL);
     else run(ai, on ? SH_AI_EV_PULL_TRIGGER : SH_AI_EV_RELEASE_TRIGGER, NULL, 0, NULL);
     return 0;
 }
 
-/* ai:trigger_pulled() -> the weapon's trigger is held (a burst running) */
+/* ai:trigger_pulled([hand]) -> the trigger of the weapon in `hand` is held
+ * (a burst running); nil when that hand holds no weapon */
 static int l_trigger_pulled(lua_State *L)
 {
+    int hand = check_hand(L, 2, "trigger_pulled");
     void *ai = self_ai(L, "trigger_pulled", NULL);
     int st;
-    if (!ai) { lua_pushnil(L); return 1; }
-    st = g_engine->trigger_state(ai);
+    if (g_engine && !g_engine->trigger_state)
+        sh_script_refuse(L, "\"trigger_pulled\" is not available in this session (Snapmap+ could not find the game "
+                         "function it needs; see the backend log)");
+    if (!ai || !(hand = hand_of(ai, hand))) { lua_pushnil(L); return 1; }
+    st = g_engine->trigger_state(ai, hand);
+    if (st < 0) { lua_pushnil(L); return 1; }
     lua_pushboolean(L, st == 1);
     return 1;
 }
 
-/* ai:equip(index) equips item `index` (0 first) of the demon's inventory. */
+/* The mod's own name of a decl: "mods/<salt>/x" as "x". */
+static const char *own_name(lua_State *L, const char *full)
+{
+    const char *salt = sh_script_salt(L);
+    size_t n = salt ? strlen(salt) : 0;
+    if (n && !_strnicmp(full, "mods/", 5) && !_strnicmp(full + 5, salt, n) && full[5 + n] == '/' && full[6 + n])
+        return full + 6 + n;
+    return full;
+}
+
+/* ai:equip(item) -> the hand it went to. `item` is the decl of an inventory
+ * item the demon carries (as its entityDef's startingInventory names it), or
+ * its inventory index (0 first). */
 static int l_equip(lua_State *L)
 {
     sh_script_handle h = 0;
     void *ai;
-    lua_Integer idx;
+    lua_Integer idx = -1;
+    const char *want = NULL;
+    char decl[512];
+    int hand = -1, r, i;
     sh_ai_arg a;
-    if (!lua_isinteger(L, 2) || (idx = lua_tointeger(L, 2)) < 0 || idx > 63)
-        sh_script_refuse(L, "\"equip\" needs an inventory index from 0 to 63");
+    decl[0] = 0;
+    if (lua_isinteger(L, 2)) {
+        if ((idx = lua_tointeger(L, 2)) < 0 || idx > INT_MAX)
+            sh_script_refuse(L, "\"equip\" needs an inventory index of 0 or more, got %s", lua_tostring(L, 2));
+    } else if (lua_type(L, 2) == LUA_TSTRING && lua_rawlen(L, 2)) {
+        want = lua_tostring(L, 2);
+    } else {
+        sh_script_refuse(L, "\"equip\" needs the item (its decl name, as the demon's startingInventory names it, or "
+                         "its inventory index), got %s", lua_isnoneornil(L, 2) ? "nothing" : luaL_typename(L, 2));
+    }
     ai = self_ai(L, "equip", &h);
-    if (!ai || !park(ai, h)) return 0;
+    if (!ai) { lua_pushnil(L); return 1; }
+    if (g_engine->item) {
+        if (want) {
+            luaL_Buffer have;
+            int n = 0;
+            luaL_buffinit(L, &have);
+            for (i = 0; (r = g_engine->item(ai, i, decl, sizeof decl, &hand)) == 1; i++) {
+                const char *mine = own_name(L, decl);
+                if (!_stricmp(decl, want) || !_stricmp(mine, want)) { idx = i; break; }
+                if (n++) luaL_addstring(&have, ", ");
+                luaL_addstring(&have, mine);
+            }
+            if (idx < 0) {
+                luaL_pushresult(&have);
+                if (r < 0) { lua_pushnil(L); return 1; }
+                return sh_script_refuse(L, "\"equip\": this demon carries no \"%s\" (it carries: %s)", want,
+                                        n ? lua_tostring(L, -1) : "nothing");
+            }
+        } else if ((r = g_engine->item(ai, (int)idx, decl, sizeof decl, &hand)) == 0) {
+            return sh_script_refuse(L, "\"equip\": this demon has no inventory item %d", (int)idx);
+        } else if (r < 0) hand = -1;
+    } else if (want) {
+        return sh_script_refuse(L, "\"equip\" by name is not available in this session (Snapmap+ could not find the "
+                                "game's inventory function; see the backend log); give the inventory index");
+    }
+    if (!park(ai, h)) { lua_pushnil(L); return 1; }
     a = arg_i((int)idx);
     run(ai, SH_AI_EV_EQUIP_ITEM, &a, 1, NULL);
-    return 0;
+    if (hand_name(hand)) lua_pushstring(L, hand_name(hand)); else lua_pushnil(L);
+    return 1;
 }
 
 static const char *check_tag(lua_State *L, int idx, const char *call, const char *what)
@@ -1444,15 +1533,15 @@ static int l_recoil(lua_State *L)
     return 0;
 }
 
-/* ai:weapon_ready() -> the weapon may be fired again (its wait between
- * bursts has passed); nil when the demon holds no weapon */
+/* ai:weapon_ready([hand]) -> the weapon in `hand` may be fired again (its
+ * wait between bursts has passed); nil when that hand holds no weapon */
 static int l_weapon_ready(lua_State *L)
 {
     void *ai;
-    int st;
+    int st, hand = check_hand(L, 2, "weapon_ready");
     NEED_OP(L, weapon_ready, "weapon_ready");
     ai = self_ai(L, "weapon_ready", NULL);
-    if (!ai || (st = g_engine->weapon_ready(ai)) < 0) { lua_pushnil(L); return 1; }
+    if (!ai || !(hand = hand_of(ai, hand)) || (st = g_engine->weapon_ready(ai, hand)) < 0) { lua_pushnil(L); return 1; }
     lua_pushboolean(L, st == 1);
     return 1;
 }
@@ -2095,6 +2184,8 @@ static ai_irs_fn         g_irs_target;
 static ai_irs_fn         g_irs_orig;
 static ai_awareness_fn   g_get_awareness;
 static ai_ptr_get_fn     g_ptr_get;
+static void *(*g_weapon_in_slot)(void *ai, int slot);         /* the weapon in an equipSlot_t, or NULL */
+static void *(*g_inventory_item)(void *list, int index);      /* the inventory list's item, or NULL */
 static ai_path_key_fn    g_path_key;
 static ai_path_query_fn  g_path_query;
 static const uint64_t   *g_path_global;
@@ -2244,16 +2335,57 @@ static int e_move_status(void *ai)
     return v;
 }
 
-static int e_trigger_state(void *ai)
+/* The hand the game fires the demon's weapon from: vtable +0xB20, its
+ * aibehavior decl's weaponSlot. */
+static int e_weapon_hand(void *ai)
+{
+    typedef int (*ai_hand_fn)(void *self);
+    ai_hand_fn f = (ai_hand_fn)vfn(ai, SH_AI_VSLOT_WEAPON_HAND);
+    int v = -1;
+    if (!f) return -1;
+    __try { v = f(ai); } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+/* The weapon in `hand` (an equipSlot_t), as the engine's own per-hand reads
+ * take it; NULL when that hand holds none. */
+static uint8_t *weapon_in(void *ai, int hand)
+{
+    uint8_t *w = NULL;
+    if (!g_weapon_in_slot) return NULL;
+    __try { w = (uint8_t *)g_weapon_in_slot(ai, hand); } __except (av_only(GetExceptionCode())) { w = NULL; }
+    return w;
+}
+
+static int e_item(void *ai, int index, char *decl, size_t cap, int *hand)
+{
+    typedef void *(*ai_list_fn)(void *self);
+    ai_list_fn f = (ai_list_fn)vfn(ai, SH_AI_VSLOT_INVENTORY);
+    int v = -1;
+    if (!f || !g_inventory_item || !decl || !cap) return -1;
+    decl[0] = 0;
+    __try {
+        void *list = f(ai);
+        const uint8_t *item, *d;
+        const char *name;
+        if (!list) return -1;
+        if (index >= *(const int *)((const uint8_t *)list + 8)) return 0;
+        item = (const uint8_t *)g_inventory_item(list, index);
+        d = item ? *(const uint8_t * const *)(item + SH_AI_ITEM_DECL) : NULL;
+        name = d ? *(const char * const *)(d + 8) : NULL;
+        if (!name) return -1;
+        strncpy_s(decl, cap, name, _TRUNCATE);
+        if (hand) *hand = *(const int *)(d + SH_AI_DECL_EQUIP_SLOT);
+        v = 1;
+    } __except (av_only(GetExceptionCode())) { v = -1; }
+    return v;
+}
+
+static int e_trigger_state(void *ai, int hand)
 {
     int v = -1;
+    uint8_t *w = weapon_in(ai, hand);
     __try {
-        const uint8_t *holder = *(const uint8_t * const *)((const uint8_t *)ai + SH_AI_OFF_WEAPON_HOLDER);
-        const uint8_t *w = holder ? *(const uint8_t * const *)(holder + 8) : NULL;
-        if (!w) {
-            ai_vfn0 f = (ai_vfn0)vfn(ai, SH_AI_VSLOT_WEAPON);
-            w = f ? (const uint8_t *)f(ai) : NULL;
-        }
         if (w) {
             int slot = *(const int *)(w + SH_AI_OFF_WEAPON_SLOT);
             if (slot >= 0 && slot < 4) v = *(const int *)(w + SH_AI_OFF_WEAPON_TRIGGER + 4 * slot) == 0;
@@ -2531,17 +2663,14 @@ static int e_set_recoil(void *ai, float alpha)
 
 /* 1 when the game clock has reached the weapon's next-pull time for its
  * active trigger, 0 while it waits, -1 when the demon holds no weapon. */
-static int e_weapon_ready(void *ai)
+static int e_weapon_ready(void *ai, int hand)
 {
     int v = -1, now;
+    uint8_t *w;
     if (!g_fire_decl || !g_slot_table || !gm_clock(&now)) return -1;
+    w = weapon_in(ai, hand);
     __try {
         uint8_t *holder = *(uint8_t **)((uint8_t *)ai + SH_AI_OFF_WEAPON_HOLDER);
-        uint8_t *w = holder ? *(uint8_t **)(holder + 8) : NULL;
-        if (!w) {
-            ai_vfn0 f = (ai_vfn0)vfn(ai, SH_AI_VSLOT_WEAPON);
-            w = f ? (uint8_t *)f(ai) : NULL;
-        }
         if (holder && w) {
             const uint8_t *decl = (const uint8_t *)g_fire_decl(w, *(const int *)(w + SH_AI_OFF_ACTIVE_FIRE));
             if (decl) {
@@ -2780,7 +2909,7 @@ static const sh_script_ai_engine k_engine = {
     e_move_status, e_trigger_state, e_path, e_frame,
     e_eye, e_sight, e_ground, e_anim_delta,
     e_set_recoil, e_weapon_ready, e_aim_point, e_anim_valid, e_path_points, e_firing_position, e_spline_clear,
-    e_pain_string, e_block_pain
+    e_pain_string, e_block_pain, e_weapon_hand, e_item
 };
 /* The table the calls use: k_engine less the calls whose game parts this
  * executable lacks (those calls then refuse plainly). */
@@ -2856,6 +2985,11 @@ int sh_script_ai_install(const uint8_t *module_base)
         g_live.anim_delta = NULL;
         g_live.anim_valid = NULL;
     }
+    /* Without the hand read the weapon calls have no weapon to read. */
+    if (r[SH_AI_SIG_WEAPON_IN_SLOT].addr) g_weapon_in_slot = (void *(*)(void *, int))r[SH_AI_SIG_WEAPON_IN_SLOT].addr;
+    else { g_live.trigger_state = NULL; g_live.weapon_ready = NULL; }
+    if (r[SH_AI_SIG_INVENTORY_ITEM].addr) g_inventory_item = (void *(*)(void *, int))r[SH_AI_SIG_INVENTORY_ITEM].addr;
+    else g_live.item = NULL;
     sh_script_ai_set_engine(&g_live);
     backend_log("SCRIPTS: AI calls resolved; the demon park hook is installed at the first command");
     return 1;

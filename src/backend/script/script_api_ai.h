@@ -260,7 +260,9 @@ typedef struct sh_script_ai_engine {
     void    *(*enemy)(void *ai);                      /* the current enemy entity, or NULL */
     int      (*awareness)(void *ai, void *target);    /* AIAWARE_ level, -1 unreadable */
     int      (*move_status)(void *ai);                /* move FSM status word, -1 unreadable */
-    int      (*trigger_state)(void *ai);              /* 1 trigger held, 0 not, -1 no weapon */
+    /* The weapon calls act on the weapon in one hand (SH_AI_HAND_*; 0 the
+     * demon's weapon hand, below). */
+    int      (*trigger_state)(void *ai, int hand);    /* 1 trigger held, 0 not, -1 no weapon there */
     /* Path from the demon to `goal`: 0 found (*len inches), 1 still being
      * searched (ask again), 2 no path, -1 unavailable. `key` names the
      * request in the engine's path cache. */
@@ -280,7 +282,7 @@ typedef struct sh_script_ai_engine {
     /* Engine answers (the engine side composes the queries from the
      * primitives with sh_ai_*_run below; a test engine answers directly). */
     int      (*set_recoil)(void *ai, float alpha);
-    int      (*weapon_ready)(void *ai);               /* 1 ready, 0 cooling down, -1 no weapon */
+    int      (*weapon_ready)(void *ai, int hand);     /* 1 ready, 0 cooling down, -1 no weapon there */
     int      (*aim_point)(void *ai, const float pos[3]);
     /* 1 valid (*index: the animation), 0 not, 2 still being asked, -1 no such node */
     int      (*anim_valid)(void *ai, const char *node, unsigned tests, int side, int *index);
@@ -293,7 +295,18 @@ typedef struct sh_script_ai_engine {
     int      (*spline_clear)(void *ai, const sh_ai_spline_query *q, float (*out)[3], int cap, int *n);
     int      (*pain_string)(void *ai, const char *text);        /* NULL: the engine's own again */
     int      (*block_pain)(void *ai, int reaction, int ms);     /* refuse `reaction` for ms */
+    /* The hand the game fires the demon's weapon from: its aibehavior decl's
+     * weaponSlot (an equipSlot_t, SH_AI_HAND_* for the hands), -1 unreadable. */
+    int      (*weapon_hand)(void *ai);
+    /* Inventory item `index` (0 first): 1 with its decl's whole name in decl
+     * and the equipSlot_t its decl puts it in; 0 past the last item; -1
+     * unreadable. */
+    int      (*item)(void *ai, int index, char *decl, size_t cap, int *hand);
 } sh_script_ai_engine;
+
+/* equipSlot_t: the two hands a demon holds a weapon in. */
+#define SH_AI_HAND_LEFT  1
+#define SH_AI_HAND_RIGHT 2
 
 /* The compositions the engine side answers queries with, over an engine's
  * primitives (pure: the tests run them over a fake). key_base names the
@@ -366,6 +379,8 @@ enum sh_ai_sig {
     SH_AI_SIG_PATH_LENGTH,         /* the path length of a computed path (detoured) */
     SH_AI_SIG_ANIM_OF_PROP,        /* an animWeb node's animation for a model */
     SH_AI_SIG_ANIM_DELTA,          /* an animation's total root motion */
+    SH_AI_SIG_WEAPON_IN_SLOT,      /* the weapon in an equip slot (the demon, equipSlot_t) */
+    SH_AI_SIG_INVENTORY_ITEM,      /* inventory item by index (the inventory list, index) */
     SH_AI_SIG_COUNT
 };
 extern const sig_entry SH_AI_SIGNATURES[];   /* enum order, NULL-terminated */
@@ -425,7 +440,12 @@ static const uint8_t k_ai_irs_prologue[SH_AI_IRS_STOLEN] = {
 #define SH_AI_OFF_MOVE_FSM        0x23198u  /* move FSM pointer; status int at +0xD20 */
 #define SH_AI_OFF_MOVE_STATUS     0xD20u
 #define SH_AI_OFF_WEAPON_HOLDER   0x22278u  /* +8: the equipped weapon (else vtable +0xB28) */
-#define SH_AI_VSLOT_WEAPON        0xB28u
+#define SH_AI_VSLOT_WEAPON        0xB28u    /* the weapon in the weapon hand (below) */
+#define SH_AI_VSLOT_WEAPON_HAND   0xB20u    /* int: the aibehavior decl's weaponSlot (decl +0x134) */
+#define SH_AI_VSLOT_INVENTORY     0x660u    /* the inventory list (ai +0x9900): entries +0, count +8 */
+#define SH_AI_INVENTORY_STRIDE    0x20u     /* one idEntityPtr per item */
+#define SH_AI_ITEM_DECL           0x30u     /* inventory item: its decl */
+#define SH_AI_DECL_EQUIP_SLOT     0x1B4u    /* inventory decl: equipSlot_t */
 #define SH_AI_OFF_WEAPON_SLOT     0x8D4u    /* weapon: active trigger index */
 #define SH_AI_OFF_WEAPON_TRIGGER  0x8F8u    /* weapon: trigger state per index, 0 = pulled */
 #define SH_AI_OFF_ENEMY           0x25050u  /* idEntityPtr of the current enemy */

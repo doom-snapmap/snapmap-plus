@@ -1983,11 +1983,23 @@ is touched, and a removed demon answers nil.
   move-to-entity overshoots), `stop()` (`ssaction_Idle`), `face(e)`
   (`setFocus`), `face(pos)` (a zero-length `ssaction_MoveToPoint` with align),
   `aim_at(e | nil)`, `set_enemy([e])` (`setEnemy` locked, or
-  `setPlayerEnemy` closest), `trigger(on)` (`pull/releaseTriggerRight`),
-  `equip(index)` (`equipInventoryItemByIndex`), `laser(tag, on)`
+  `setPlayerEnemy` closest), `trigger(on, [hand])`
+  (`pull/releaseTriggerLeft` or `Right`), `equip(item)` (the item's decl
+  name, as the entityDef's startingInventory names it, or its index;
+  `equipInventoryItemByIndex`; answers `"left"` or `"right"`), `laser(tag, on)`
   (`setLaserState`), `laser_state(tag, on)` (`ae_setLaserState`),
   `laser_sweep(name)` (`ae_startLaserSweep`), `focus_tag(tag | nil)`
   (`ae_setOverrideFocusTagName` / `ae_clearOverrideFocusTag`, aim focus).
+- **The weapon's hand.** The game fires a demon's weapons from its fire
+  control (VK 0x1404456E0), which the AI think (VK 0x1403E0D40) runs only
+  while the hand the aibehavior decl names in `weaponSlot` (vtable +0xB20,
+  decl +0x134, the right hand unless set) holds a weapon (vtable +0xB28); it
+  then fires the weapon of each hand. `equip` puts an item in the hand its
+  own decl's `equipSlot` names (+0x1B4). `trigger`, `trigger_pulled([hand])`
+  and `weapon_ready([hand])` act on the weapon in the hand named, else in
+  the weapon hand, read through the engine's own per-hand read (VK
+  0x14074AB30 / GL 0x14074A440); `equip` by name reads the inventory (vtable
+  +0x660, item VK 0x140EEDC50 / GL 0x140EED200).
 - **Queries.** `enemy()` (the idEntityPtr at ai+0x25050), `can_see(e)`
   (`isEntityVisible`, which is true when the perception's record of `e` was
   seen within the last second, VK 0x1404AA3E0, and then the world trace from

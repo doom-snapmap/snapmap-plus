@@ -107,6 +107,13 @@ typedef struct fent {
     uint32_t monster;      /* getMonsterType */
     char  node[96];        /* the animWeb node playing */
     float vel[3];
+    /* the weapon: the hand the behaviour fires from (0: the engine's default,
+     * the right hand), the inventory and the hand each read asked */
+    int   weapon_hand;
+    int   nitems;
+    const char *item[4];
+    int   item_hand[4];
+    int   asked_hand;
 } fent;
 
 /* The world: a wall across x = g_wall_x (0: none) up to g_wall_top, and no
@@ -172,7 +179,7 @@ static int f_park(void *e) { if (!((fent *)e)->parked) ev_cat("park\n"); ((fent 
 static void *f_enemy(void *e) { int id = ((fent *)e)->enemy; return id ? &g_ent[id] : NULL; }
 static int f_awareness(void *ai, void *t) { (void)t; return ((fent *)ai)->awareness; }
 static int f_move_status(void *e) { return ((fent *)e)->move_status; }
-static int f_trigger(void *e) { return ((fent *)e)->trigger; }
+static int f_trigger(void *e, int hand) { ((fent *)e)->asked_hand = hand; return ((fent *)e)->trigger; }
 static int f_path(void *ai, const float goal[3], int key, float *len)
 {
     fent *f = (fent *)ai;
@@ -215,7 +222,16 @@ static int f_anim_delta(void *ai, const char *node, int index, float out[3], int
     return -1;
 }
 static int f_set_recoil(void *ai, float a) { ((fent *)ai)->recoil = a; return 1; }
-static int f_weapon_ready(void *ai) { return ((fent *)ai)->ready; }
+static int f_weapon_ready(void *ai, int hand) { ((fent *)ai)->asked_hand = hand; return ((fent *)ai)->ready; }
+static int f_weapon_hand(void *ai) { return ((fent *)ai)->weapon_hand ? ((fent *)ai)->weapon_hand : SH_AI_HAND_RIGHT; }
+static int f_item(void *ai, int index, char *decl, size_t cap, int *hand)
+{
+    fent *e = (fent *)ai;
+    if (index >= e->nitems) return 0;
+    strcpy_s(decl, cap, e->item[index]);
+    *hand = e->item_hand[index];
+    return 1;
+}
 static int f_aim_point(void *ai, const float p[3]) { memcpy(((fent *)ai)->aim, p, 12); ((fent *)ai)->aimed = 1; return 1; }
 static const sh_script_ai_engine g_fake;
 static int f_anim_valid(void *ai, const char *node, unsigned tests, int side, int *index)
@@ -257,7 +273,7 @@ static const sh_script_ai_engine g_fake = {
     f_move_status, f_trigger, f_path, f_frame,
     f_eye, f_sight, f_ground, f_anim_delta,
     f_set_recoil, f_weapon_ready, f_aim_point, f_anim_valid, f_path_points, f_firing, f_spline,
-    f_pain_string, f_block_pain
+    f_pain_string, f_block_pain, f_weapon_hand, f_item
 };
 
 /* The entity side of the engine the AI calls also use: the node playing
@@ -331,6 +347,13 @@ static void world(void)
     g_events[0] = 0;
     g_frame = 0;
     g_ent[1].live = 1; g_ent[1].is_ai = 1;
+    g_ent[1].nitems = 3;   /* claw (right hand), cannon (left), mortar (left) */
+    g_ent[1].item[0] = "mods/aaaaaaaa/weapon/ai/brute/claw";
+    g_ent[1].item_hand[0] = SH_AI_HAND_RIGHT;
+    g_ent[1].item[1] = "mods/aaaaaaaa/weapon/ai/brute/cannon";
+    g_ent[1].item_hand[1] = SH_AI_HAND_LEFT;
+    g_ent[1].item[2] = "mods/aaaaaaaa/weapon/ai/brute/mortar";
+    g_ent[1].item_hand[2] = SH_AI_HAND_LEFT;
     g_ent[2].live = 1; g_ent[2].origin[0] = 100; g_ent[2].origin[1] = 100;
     g_ent[3].live = 1;
     g_ent[4].live = 1; g_ent[4].is_ai = 1;
@@ -635,7 +658,7 @@ static void test_refusals(void)
     expect_stop("self:move_to({x = 1, y = 2, z = 3}, 5, { fly = true })",
                 "\"move_to\" knows the options run, strafe and aim_while_moving, not \"fly\"");
     expect_stop("self:face(42)", "\"face\" needs a position");
-    expect_stop("self:equip(-1)", "\"equip\" needs an inventory index from 0 to 63");
+    expect_stop("self:equip(-1)", "\"equip\" needs an inventory index of 0 or more, got -1");
     expect_stop("self:laser('a b', true)", "\"laser\": \"a b\" is not a usable name");
     expect_stop("self:find_position({ min = 10, max = 5 })", "\"find_position\": max must not be less than min");
     expect_stop("ent(2):enemy()", "\"enemy\" works only on this mod's own demons");
@@ -924,6 +947,68 @@ static void test_brain_calls(void)
 
 /* A long path: path_points answers every point the engine's path has (the old
  * buffer held 64). */
+/* trigger, trigger_pulled, weapon_ready and equip act on the same weapon:
+ * the one in the hand a script names, else the demon's weapon hand; equip
+ * takes the item by its decl and says where it went. */
+static void test_weapon_hands(void)
+{
+    const char *log;
+    printf("-- the weapon calls agree on the hand and the item\n");
+    CHECK(start(
+        "api = 1\n"
+        "local step = 0\n"
+        "on.think('ai/brute', function(self)\n"
+        "  step = step + 1\n"
+        "  if step == 1 then\n"
+        "    print('hand ' .. tostring(self:equip('weapon/ai/brute/cannon')))\n"
+        "    print('hand2 ' .. tostring(self:equip('weapon/ai/brute/cannon')))\n"
+        "    print('hand3 ' .. tostring(self:equip(0)))\n"
+        "    self:trigger(true)\n"
+        "    print('pulled ' .. tostring(self:trigger_pulled()))\n"
+        "    self:trigger(true, 'left')\n"
+        "    print('ready ' .. tostring(self:weapon_ready('left')))\n"
+        "    self:trigger(false, 'right')\n"
+        "    print('full ' .. tostring(self:equip('mods/aaaaaaaa/weapon/ai/brute/claw')))\n"
+        "  elseif step == 2 then\n"
+        "    self:trigger(true)\n"
+        "    print('pulled2 ' .. tostring(self:trigger_pulled()))\n"
+        "    print(pcall(self.equip, self, 'weapon/none'))\n"
+        "    print(pcall(self.equip, self, 9))\n"
+        "    print(pcall(self.trigger, self, true, 'third'))\n"
+        "    print(pcall(self.equip, self, -1))\n"
+        "  end\n"
+        "end)\n"));
+    g_ent[1].nitems = 2;   /* this test carries two */
+    g_ent[1].item[0] = "mods/aaaaaaaa/weapon/ai/brute/claw";
+    g_ent[1].item_hand[0] = SH_AI_HAND_RIGHT;
+    g_ent[1].item[1] = "mods/aaaaaaaa/weapon/ai/brute/cannon";
+    g_ent[1].item_hand[1] = SH_AI_HAND_LEFT;
+    g_ent[1].trigger = 1;
+    g_ent[1].ready = 1;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(log, "hand left\nhand2 left\nhand3 right\n") != NULL);
+    CHECK(strstr(g_events, "1:equipInventoryItemByIndex(1)\n1:equipInventoryItemByIndex(1)\n"
+                           "1:equipInventoryItemByIndex(0)\n1:pullTriggerRight()\n") != NULL);
+    CHECK(strstr(log, "pulled true\n") != NULL);
+    CHECK(strstr(g_events, "1:pullTriggerLeft()\n1:releaseTriggerRight()\n") != NULL);
+    CHECK(strstr(log, "ready true\n") != NULL && g_ent[1].asked_hand == SH_AI_HAND_LEFT);
+    CHECK(strstr(log, "full right\n") != NULL);
+    /* a demon whose behaviour fires from the left hand: no hand named means the left one */
+    g_ent[1].weapon_hand = SH_AI_HAND_LEFT;
+    g_events[0] = 0;
+    tick();
+    log = log_of("aaaaaaaa");
+    CHECK(strstr(g_events, "1:pullTriggerLeft()\n") != NULL && g_ent[1].asked_hand == SH_AI_HAND_LEFT);
+    CHECK(strstr(log, "pulled2 true\n") != NULL);
+    CHECK(strstr(log, "this demon carries no \"weapon/none\" (it carries: weapon/ai/brute/claw, "
+                      "weapon/ai/brute/cannon)") != NULL);
+    CHECK(strstr(log, "this demon has no inventory item 9") != NULL);
+    CHECK(strstr(log, "\"trigger\" needs the hand as \"left\" or \"right\"") != NULL);
+    CHECK(strstr(log, "\"equip\" needs an inventory index of 0 or more, got -1") != NULL);
+    sh_script_map_end();
+}
+
 static void test_long_path(void)
 {
     const char *log;
@@ -1097,6 +1182,7 @@ int main(int argc, char **argv)
     test_brain_pure();
     test_compositions();
     test_long_path();
+    test_weapon_hands();
     test_sight_against_a_wall();
     test_brain_calls();
     test_brain_refusals();
