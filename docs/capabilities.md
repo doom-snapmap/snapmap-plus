@@ -37,7 +37,9 @@ the loading screen and returns to the menu with DOOM's error). A single modern r
 reaches that at about 32768 x 32768. Snapmap+ counts the areas when Play
 builds the map: a map that fits keeps DOOM's 512-unit areas exactly, and a
 larger one is built with the smallest coarser size (1024, 2048 and so on)
-that fits, so oversized rooms load. Coarser areas mean coarser visibility
+that fits, so oversized rooms load. A map too large even for the coarsest size is
+told in the editor, before Play, as soon as an edit makes it so: a toast ("Map Too Large")
+says how many world areas it needs and that it must be made smaller. Coarser areas mean coarser visibility
 culling, so very large maps draw more of themselves each frame. The log names
 the size Play uses when a map is opened, on each Play and after a resize that
 needs a coarser size. On a build where the size cannot be changed, a resize
