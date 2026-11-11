@@ -604,7 +604,6 @@ still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods
 | `sh_mods verify "<folder>"` | Verify (`verify`) |
 | `sh_mods install "<folder>"` | the install button (`install`) |
 | `sh_mods rescan` | the refresh button (`rescan`) |
-| `sh_mods migrate` | Migrate (`migrate`) |
 | `sh_mods new "<name>"` | New mod makes the same folder, with its example (`newMod`) |
 | `sh_mods doctor [verify]` | none (every bundle's state; one line per build of a key; per path the layer that serves it; the registries and their clashes) |
 | `sh_mods held [filter]` | none (what the game was served and holds this session) |

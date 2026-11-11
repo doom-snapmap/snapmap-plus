@@ -17,7 +17,6 @@
 #include "rawmap.h"
 #include "editor_frame.h"
 #include "apply_engine.h"
-#include "modmigrate.h"
 #include "modstock.h"
 #include "modui.h"
 
@@ -134,43 +133,51 @@ static int mc_in_store(const char *folder)
 
 static void mc_needs_line(const char *verb, const sh_mb_bundle *b)
 {
-    mc_line("MODS: %s %s@%s+%llu: needs %u (in bundle %u, installed mods %u, game %u, unresolved %u)",
-            verb, b->id, b->version, b->build, b->needs.total, b->needs.local, b->needs.installed,
+    mc_line("MODS: %s %s@%s: needs %u (in bundle %u, installed mods %u, game %u, unresolved %u)",
+            verb, b->id, b->version, b->needs.total, b->needs.local, b->needs.installed,
             b->needs.stock, b->needs.unresolved);
     if (b->warnings)
-        mc_line("MODS: %s %s@%s+%llu: %u warning(s), first: %s", verb, b->id, b->version, b->build, b->warnings, b->first_warning);
+        mc_line("MODS: %s %s@%s: %u warning(s), first: %s", verb, b->id, b->version, b->warnings, b->first_warning);
 }
 
-/* The key, the classes and the builder's report lines (additive mods). */
+/* The salt, the classes and the builder's report lines (additive mods). */
 static void mc_classes_line(const char *verb, const char *folder, const sh_mb_bundle *b)
 {
-    static const char *const from[] = { "", " (the author id, deprecated)", " (the product block)", " (the folder's name)" };
     char classes[160];
     size_t i;
     sh_mb_classes_text(&b->classes, classes, sizeof classes);
-    mc_line("MODS: %s %s: key %s%s; %s", verb, folder, b->id,
-            from[b->key_source >= 0 && b->key_source <= 3 ? b->key_source : 0], classes);
+    mc_line("MODS: %s %s: salt %s; %s", verb, folder, b->id, classes);
     for (i = 0; i < b->note_count; i++) mc_line("MODS: %s %s: %s", verb, folder, b->notes[i]);
 }
 
-/* A hand-made store folder's first build renames it (sh_ms_first_key):
- * `folder` becomes the new path. 0 when the rename was refused. */
-static int mc_first_key(const char *verb, char *folder, size_t cap)
+/* The folder's own name (its last path segment) in `out`. */
+static void mc_leaf(const char *folder, char *out, size_t cap)
 {
-    char moved[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
-    switch (sh_ms_first_key(folder, moved, sizeof moved, cause, sizeof cause)) {
+    const char *leaf = folder, *p;
+    size_t n;
+    for (p = folder; *p; p++)
+        if ((*p == '\\' || *p == '/') && p[1] && p[1] != '\\' && p[1] != '/') leaf = p + 1;
+    strncpy_s(out, cap, leaf, _TRUNCATE);
+    n = strlen(out);
+    while (n && (out[n - 1] == '\\' || out[n - 1] == '/')) out[--n] = 0;
+}
+
+/* A folder with no builder block is a new mod: it gets its salt before its
+ * first build (sh_ms_assign_salt), its references to mods/<its folder name>/
+ * rewritten to mods/<salt>/; the folder keeps its name. A folder that has its
+ * salt is left as it is. 0 when refused. */
+static int mc_assign_salt(const char *verb, const char *folder)
+{
+    char leaf[MAX_PATH * 4], salt[9], cause[SH_MB_CAUSE_MAX];
+    mc_leaf(folder, leaf, sizeof leaf);
+    salt[0] = 0;
+    switch (sh_ms_assign_salt(folder, leaf, salt, cause, sizeof cause)) {
     case -1:
         mc_line("MODS: %s %s: refused: %s", verb, folder, cause);
         return 0;
     case 1:
-        {
-            char from[SH_MS_NAME_MAX + 1];
-            unsigned refs = 0;
-            sh_ms_renamed_from(moved, from, sizeof from, &refs);
-            mc_line("MODS: %s %s: renamed to %s at its first build (a generated key); %u reference(s) rewritten", verb,
-                    folder, moved, refs);
-            strncpy_s(folder, cap, moved, _TRUNCATE);
-        }
+        mc_line("MODS: %s %s: a new mod: salt %s; its files under mods/%s/ now read mods/%s/", verb, folder, salt, leaf,
+                salt);
         return 1;
     default:
         return 1;
@@ -186,7 +193,7 @@ static void mc_build(const char *folder_in)
     char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
     int listed;
     strncpy_s(folder, sizeof folder, folder_in, _TRUNCATE);
-    if (!mc_first_key("build", folder, sizeof folder)) return;
+    if (!mc_assign_salt("build", folder)) return;
     listed = sh_ms_enumerate(&list);
     if (!listed) memset(&list, 0, sizeof list);
     mc_line("MODS: build %s: reading the descriptor and assets/ (%zu installed bundle(s) consulted)", folder, list.count);
@@ -195,41 +202,30 @@ static void mc_build(const char *folder_in)
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
     if (!sh_mb_build(folder, &r, &b)) {
-        sh_mb_bundle last;
         if (b.id[0]) {
-            mc_line("MODS: build %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.build,
-                    b.descriptor, b.file_count, b.total_size);
+            mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.file_count,
+                    b.total_size);
             mc_needs_line("build", &b);
             mc_classes_line("build", folder, &b);
         }
         if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
         mc_line("MODS: build %s: refused, %u error(s), first: %s", folder, b.errors, b.first_cause);
-        /* The last good build stays in force: mod.json is not written. */
-        if (sh_mb_load_folder(folder, &last)) {
-            char snap[MAX_PATH * 4];
-            if (mc_in_store(folder) && sh_ms_snapshot_of(folder, snap, sizeof snap))
-                mc_line("MODS: build %s: build failed: %s; the last working version keeps serving (bundle %.16s, kept in %s)",
-                        folder, b.first_cause, last.hash, snap);
-            else
-                mc_line("MODS: build %s: build failed: %s; the last working version keeps serving (bundle %.16s)", folder,
-                        b.first_cause, last.hash);
-        } else
-            mc_line("MODS: build %s: build failed: %s; no earlier build serves", folder, b.first_cause);
-        sh_mb_free(&last);
+        /* A folder that fails to build serves nothing until it is fixed. */
+        mc_line("MODS: build %s: build failed: %s; the folder serves nothing until it builds", folder, b.first_cause);
         if (mc_in_store(folder)) sh_ms_note_build_failure(folder, b.first_cause);
         sh_mb_free(&b);
         sh_ms_list_free(&list);
         return;
     }
-    mc_line("MODS: build %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.build,
-            b.descriptor, b.file_count, b.total_size);
+    mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.file_count,
+            b.total_size);
     mc_needs_line("build", &b);
     mc_stock_line("build", folder, &b);
     mc_classes_line("build", folder, &b);
     if (!sh_mb_write(&b, folder, cause, sizeof cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     else {
-        mc_line("MODS: build %s: bundle %s written to mod.json's \"snapmap-plus\" block", folder, b.hash);
+        mc_line("MODS: build %s: build %s written to mod.json's \"snapmap-plus\" block", folder, b.hash);
         if (mc_in_store(folder)) {
             sh_ms_note_build(folder, &b);
             mc_rescan("build");
@@ -245,17 +241,17 @@ static void mc_install_one(const char *folder, int rescan)
     sh_ms_install_stats st;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
-    char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
     int ok;
     mc_line("MODS: install %s: building", folder);
     r.installed = NULL;
     r.installed_context = NULL;
     r.stock = mc_stock_exists;
     r.stock_context = &stock;
-    ok = sh_ms_install_from_folder(folder, &r, key, sizeof key, &st, &b, cause, sizeof cause);
+    ok = sh_ms_install_from_folder(folder, &r, name, sizeof name, &st, &b, cause, sizeof cause);
     if (b.id[0]) {
-        mc_line("MODS: install %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s)%s", folder, b.id, b.version, b.build,
-                b.descriptor, b.file_count, b.total_size, b.errors ? "" : ", mod.json written");
+        mc_line("MODS: install %s: %s@%s, %zu file(s), %llu byte(s)%s", folder, b.id, b.version, b.file_count,
+                b.total_size, b.errors ? "" : ", mod.json written");
         mc_needs_line("install", &b);
     }
     if (b.id[0]) mc_stock_line("install", folder, &b);
@@ -265,7 +261,7 @@ static void mc_install_one(const char *folder, int rescan)
     if (st.in_place && ok) mc_line("MODS: install %s: already in the store; built in place", folder);
     if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause);
     else {
-        mc_line("MODS: install %s: installed and verified as mods\\%s (bundle %s)", folder, key, b.hash);
+        mc_line("MODS: install %s: installed and verified as mods\\%s (salt %s, build %s)", folder, name, b.id, b.hash);
         if (rescan) mc_rescan("install");
     }
     sh_mb_free(&b);
@@ -319,16 +315,9 @@ static void mc_list(void)
         if (e->loaded) {
             char classes[160];
             sh_mb_classes_text(&e->bundle.classes, classes, sizeof classes);
-            mc_line("MODS: list: mods\\%s  %s%s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->key,
-                    e->delivered ? " (delivered by a map)" : "", e->bundle.hash, e->bundle.file_count,
-                    e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
-            mc_line("MODS: list: mods\\%s  key %s%s; %s", e->name, e->bundle.id, e->bundle.legacy ? " (converted package)" : "", classes);
-            if (e->build_failed[0] && e->snapshot)
-                mc_line("MODS: list: mods\\%s  build failed: %s; the last working version keeps serving (kept in %s)",
-                        e->name, e->build_failed, e->snapshot);
-            else if (e->build_failed[0])
-                mc_line("MODS: list: mods\\%s  build failed: %s; the last working version keeps serving", e->name,
-                        e->build_failed);
+            mc_line("MODS: list: mods\\%s  %s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->bundle.id,
+                    e->bundle.hash, e->bundle.file_count, e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
+            mc_line("MODS: list: mods\\%s  salt %s; %s", e->name, e->bundle.id, classes);
         } else
             mc_line("MODS: list: mods\\%s  %s: %s", e->name, state, e->cause);
     }
@@ -694,7 +683,6 @@ void h_sh_mods(idCmdArgs *a)
         sh_printf("%s\n", SH_MODCMD_HELP_TAB);
         sh_printf("%s\n", SH_MODCMD_HELP_AUTHOR);
         sh_printf("%s\n", SH_MODCMD_HELP_STORE);
-        sh_printf("Migration: the installer moves the retired overrides folder into the mods store (snapmap-plus-store migrate); 'sh_mods migrate' runs the same move by hand when the migration section of mods\\snapmap-plus.json does not record it as done, 'sh_mods migrate --again' repeats it after you change overrides.\n");
         return;
     }
     /* Serving verbs (modserve_engine.c): status (also the bare command),
@@ -705,21 +693,6 @@ void h_sh_mods(idCmdArgs *a)
     /* The rebuild rule first; then the serving index and the refresh. */
     if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) mc_sync();
     if (sh_modserve_command(a, verb)) return;
-    if (!_stricmp(verb, "migrate")) {
-        /* The migration of the retired overrides folder (modmigrate.c), on its worker thread. */
-        const char *flag = cmd_argv(a, 2);
-        int again = flag && !_stricmp(flag, "--again"), r;
-        if (flag && flag[0] && !again) { sh_printf("usage: sh_mods migrate [--again]\n"); return; }
-        modstore_lock();   /* the pass's scan waits for a store step in progress */
-        r = sh_modmigrate_start(again);
-        modstore_unlock();
-        if (r > 0) mc_line("MODS: migration: started on a background thread%s; its MODS: migration: lines go to the "
-                           "backend log, then the serving index is rebuilt ('sh_mods list' shows the result)", again ? " (--again)" : "");
-        else if (r < 0) mc_line("MODS: migration: a migration pass is already running or could not start");
-        else sh_printf("MODS: migration: nothing to do (no overrides folder, or mods\\snapmap-plus.json says it is done; "
-                       "'sh_mods migrate --again' repeats it)\n");
-        return;
-    }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
     if (!_stricmp(verb, "removed")) {
         mc_line("MODS: removed: Uninstalled mods go to the Windows Recycle Bin.");
@@ -737,7 +710,7 @@ void h_sh_mods(idCmdArgs *a)
     }
     if (!_stricmp(verb, "doctor")) {
         /* What the Mods tab does not show (modui.c): every bundle's state, duplicate ids,
-         * migration, conflicts, shadows and, with 'verify', a rehash of every build. */
+         * conflicts, shadows and, with 'verify', a rehash of every build. */
         const char *flag = cmd_argv(a, 2);
         int verify = flag && !_stricmp(flag, "verify");
         if (flag && flag[0] && !verify) { sh_printf("usage: sh_mods doctor [verify]\n"); return; }
@@ -747,14 +720,14 @@ void h_sh_mods(idCmdArgs *a)
     }
     mc_join_args(a, 2, arg, sizeof arg);
     if (!_stricmp(verb, "new")) {
-        /* New mod: a folder named by a generated key, built at the next rescan. */
+        /* New mod: a folder with a working example, salted and built at the next rescan. */
         char key[SH_MB_ID_MAX + 1], cause[SH_MB_CAUSE_MAX];
         if (!arg[0]) { sh_printf("usage: sh_mods new \"<name>\"\n"); return; }
         if (!sh_ms_new_mod(arg, key, folder, sizeof folder, cause, sizeof cause)) {
             mc_line("MODS: new \"%s\": refused: %s", arg, cause);
             return;
         }
-        mc_line("MODS: new \"%s\": key %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
+        mc_line("MODS: new \"%s\": salt %s, folder %s; put its decls under assets\\generated\\decls\\<type>\\mods\\%s\\ "
                 "(any other file under its engine path, with mods\\%s\\ in it) and rescan", arg, key, folder, key, key);
         return;
     }
@@ -787,7 +760,7 @@ void h_sh_mods(idCmdArgs *a)
         mc_build(folder);
         if (!mc_in_store(folder)) mc_rescan("rebuild");
     } else {
-        /* Waits for a migration folder or a download in progress. */
+        /* Waits for a store write or a download in progress. */
         modstore_lock();
         mc_install(folder);
         modstore_unlock();
@@ -803,21 +776,23 @@ int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
     char cause[SH_MB_CAUSE_MAX], folder[MAX_PATH * 4];
     int listed, ok = 0;
     if (first_cause && n) first_cause[0] = 0;
-    /* The legacy converter's paths are UTF-8, as the builder's are (sh_mb_user_root). */
+    /* The store tool's paths are UTF-8, as the builder's are (sh_mb_user_root). */
     if (!folder_utf8 || !folder_utf8[0] || strlen(folder_utf8) >= sizeof folder ||
         strncpy_s(folder, sizeof folder, folder_utf8, _TRUNCATE) != 0) {
         if (first_cause && n) strncpy_s(first_cause, n, "no usable folder path", _TRUNCATE);
         return 0;
     }
     {
-        /* A converted package carries its id; a keyless store folder gets its key first. */
-        char moved[MAX_PATH * 4];
-        if (sh_ms_first_key(folder, moved, sizeof moved, cause, sizeof cause) < 0) {
+        /* A folder with no builder block gets its salt first; one that has it
+         * (the store tool salts a migrated folder from its package's id) is
+         * left as it is. */
+        char leaf[MAX_PATH * 4], salt[9];
+        mc_leaf(folder, leaf, sizeof leaf);
+        salt[0] = 0;
+        if (sh_ms_assign_salt(folder, leaf, salt, cause, sizeof cause) < 0) {
             if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
             mc_line("MODS: build %s: refused: %s", folder, cause);
             return 0;
-        } else if (moved[0]) {
-            strncpy_s(folder, sizeof folder, moved, _TRUNCATE);
         }
     }
     listed = sh_ms_enumerate(&list);
@@ -834,9 +809,9 @@ int modbundle_build_folder(const char *folder_utf8, char *first_cause, size_t n)
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     } else {
         ok = 1;
-        if (mc_in_store(folder)) sh_ms_note_build(folder, &b);   /* built from its current tree; an earlier build becomes an alias */
-        mc_line("MODS: build %s: %s@%s+%llu, %zu file(s), %llu byte(s); bundle %s written", folder, b.id,
-                b.version, b.build, b.file_count, b.total_size, b.hash);
+        if (mc_in_store(folder)) sh_ms_note_build(folder, &b);   /* built from its current tree */
+        mc_line("MODS: build %s: %s@%s, %zu file(s), %llu byte(s); build %s written", folder, b.id,
+                b.version, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);
         mc_stock_line("build", folder, &b);
         mc_classes_line("build", folder, &b);

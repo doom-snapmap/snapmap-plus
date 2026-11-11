@@ -737,8 +737,7 @@ These backend files share the work:
   the mods before Load / Place, and writes and reads a prefab's ZIP, as in
   [Prefabs that name mods](#prefabs-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree and `strings\strids.json`
-  into the store once (the store tool runs it, and `sh_mods migrate` by hand
-  for the packages), as in
+  into the store once (the store tool runs it; the DLL does not link it), as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, and loads the
   stock banks SnapMap skips that a declared mod's sound events need, with
@@ -2344,22 +2343,17 @@ entry of it is in `mods\` (a package entry the record marks done, a loose entry
 the loose step moved), and `strings\` once it holds no document left to move,
 both through `sh_ms_retire_sibling`, which acts only when a discard is set: the
 store tool's Recycle Bin. An entry still skipped (a ZIP, an over-cap folder)
-keeps `overrides\`, and one line names the first. In the game, `sh_mods migrate`
-runs neither the loose step nor the retirement.
+keeps `overrides\`, and one line names the first.
 
-The tool runs the pass on its own thread, folder by folder. In the game,
-`sh_mods migrate [--again]` (and the Mods tab's **Migrate**) runs it on a worker
-thread that writes the record and rebuilds the serving table when it is done
-(editor rows it adds after the first palette build need
-`sh_mods palette rebuild`). The record lists every folder with its kind,
+The tool runs the pass on its own thread, folder by folder, and writes the
+record when it is done. The record lists every folder with its kind,
 outcome, reason, id, version, store folder, bundle hash and tree, and a `trees`
 map from tree to store folder; it says `"complete": false` until the pass
 ends, and an unfinished record makes the next run do the pass again (every
 step is idempotent). Each folder logs one `MODS: migration:` line and the pass
 one summary line; a line that leaves files out names how many and how many of
 them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
-by `modswf.c`; a pack migrated before that was left out can be migrated again
-with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
+by `modswf.c`). A migrated pack keeps its id, so where it
 shares one with a delivered or converted package (the beta.19 `doors` packs),
 the two are builds of one key: each map serves the build it pins, and with no
 map open the migrated pack (the player's own) serves. Stock names are not checked during the migration because the
@@ -2369,7 +2363,7 @@ for a converted carrier.
 Every writer of the store serialises on one recursive lock, `modstore_lock`
 (`modstore.c`; `modsync_store_lock` is the same lock under its older name).
 Each install and verification takes it; each migration folder, a download
-install, `sh_mods install`, `sh_mods migrate` and an export hold it around their
+install, `sh_mods install` and an export hold it around their
 whole step. A second writer waits for the first instead of failing, and logs
 one `MODS: store: waiting` line; because the migration takes the lock per
 folder, an install on the main thread (the Mods tab or `sh_mods install`) waits

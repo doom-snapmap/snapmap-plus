@@ -3,7 +3,7 @@
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
-                           "rawmap.c", "map_legacy_payload.c", "modmanifest.c", "modlegacy.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_carrier.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_overlay.c", "nav_preview.c", "engine_dialog.c", "strids.c",
+                           "rawmap.c", "modmanifest.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_carrier.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_overlay.c", "nav_preview.c", "engine_dialog.c", "strids.c",
                            "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_areas.c", "world_area_cell.c", "object_entry.c", "place_anywhere.c", "grid_room_snap.c", "grid_room_edit.c", "raw_deflate.c", "decl_text.c", "decl_tree.c",
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
@@ -33,8 +33,6 @@ param(
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
                            "modbundle.c", "modbankinfo.c", "modstock.c", "modstore.c", "modcmd.c", "modui.c", "modmap.c",
-                           # The one-time move of the retired overrides folder into the mods store.
-                           "modmigrate.c",
                            # The mod store client (WinHTTP), upload/download, the rawmap ZIP export and the ZIP form.
                            "modnet.c", "modsync.c", "modexport.c", "modzip.c",
                            # Mod virtual-texture families, and the sh_vt diagnostic.
