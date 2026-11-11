@@ -9,7 +9,7 @@
 #include "crash_report.h"
 #include "fault_record.h"
 #include "recovery.h"    /* shield_last_engine_msg */
-#include "veh.h"         /* shield_capture_stack */
+#include "veh.h"         /* shield_capture_stack, shield_second_chance */
 #include "engine_layout.h"
 #include "../backend/host_image.h"   /* sh_host_renderer_name -- snapshotted at init, never at fault time */
 #include "../common/wide_path.h"
@@ -227,6 +227,10 @@ static LONG CALLBACK crash_fatal_veh(PEXCEPTION_POINTERS ep)
 static LONG WINAPI crash_uef(EXCEPTION_POINTERS *ep)
 {
     LPTOP_LEVEL_EXCEPTION_FILTER prev = g_prev_filter;
+    LONG redirected = EXCEPTION_CONTINUE_SEARCH;
+    /* A hardware fault no engine handler took may still be recoverable (veh.h). */
+    __try { redirected = shield_second_chance(ep); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (redirected == EXCEPTION_CONTINUE_EXECUTION) return redirected;
     if (InterlockedIncrement(&g_uef_entered) == 1) {
         __try { crash_capture_fatal(ep); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }

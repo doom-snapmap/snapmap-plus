@@ -13,6 +13,7 @@ uint8_t *g_doom_base;
 static int write_mode, emitted;
 void shield_emit(const shield_fault *f) { (void)f; emitted++; }
 int shield_last_engine_msg(char *out, size_t n) { if (n) out[0] = 0; return 0; }
+LONG shield_second_chance(PEXCEPTION_POINTERS ep) { (void)ep; return EXCEPTION_CONTINUE_SEARCH; }
 void shield_capture_stack(const CONTEXT *ctx, char *out, size_t cap, int frames)
 { (void)ctx; (void)frames; if (cap) out[0] = 0; }
 const char *sh_host_renderer_name(void) { return "vulkan"; }

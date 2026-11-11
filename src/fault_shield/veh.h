@@ -7,6 +7,12 @@
 
 int veh_install(void);   /* AddVectoredExceptionHandler(first=1); returns 1 on success. */
 
+/* For the unhandled-exception filter: redirect a non-AV hardware fault in DOOM
+ * code (divide, floating point, misalignment, in-page, illegal instruction)
+ * that no engine handler took, as Class B does a wild access violation.
+ * EXCEPTION_CONTINUE_EXECUTION when redirected, else EXCEPTION_CONTINUE_SEARCH. */
+LONG shield_second_chance(PEXCEPTION_POINTERS ep);
+
 /* Walk a COPY of `ctx` with the OS unwinder into a compact "MOD+0xRVA <- ..." string. SEH-guarded per
  * frame (a wild frame ends the walk, never re-faults). Shared with the crash-record writer. */
 void shield_capture_stack(const CONTEXT *ctx, char *out, size_t cap, int maxframes);

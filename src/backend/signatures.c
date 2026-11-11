@@ -1499,5 +1499,28 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "83 3D ?? ?? ?? ?? 00 7E 12 48 8B 03 C6 80 B1 04 00 00 01 48 8B 0B E8 ?? ?? ?? ?? "
       "48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 F0 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 B8 00 00 00"
       , 0x1676770u, 0x16774B0u },
+    /* Fault shield (fault_shield/shield_sigs.c). */
+    /* Recoverable Error(6) wrapper, not the shared dispatcher; the level
+     * immediate distinguishes it from FatalError7. Class-B recovery supplies fmt in RCX. */
+    { "Error6",
+      "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
+      "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 06 00 00 00",
+      0x282B50u, 0x282D40u },
+    /* FatalError7 differs from Error6 at MOV ECX,7 (+0x27); recovery.c patches that
+     * immediate to request the recoverable exception class. */
+    { "FatalError7",
+      "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 "
+      "E8 ?? ?? ?? ?? 48 8B 54 24 30 4C 8D 44 24 38 B9 07 00 00 00",
+      0x282B90u, 0x282D80u },
+    /* idCommonLocal::Frame, the recovery frame-hook target; recovery.c steals its
+     * first 15 bytes (five pushes and MOV EAX,0x11DC0), compared exactly before the detour. */
+    { "Frame",
+      "40 57 41 54 41 55 41 56 41 57 B8 C0 ?? 01 00 E8 ?? ?? ?? ?? 48 2B E0",
+      0x159D930u, 0x159E9A0u },
+    /* Connection resolver entry; start of the Class-A repair range. */
+    { "Resolver",
+      "44 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 53 56 57 "
+      "41 54 41 55 41 56 41 57 48 8D 6C 24 E9 48 81 EC 88 00 00 00",
+      0x123C660u, 0x123BB00u },
     { NULL, NULL, 0 }   /* terminator */
 };

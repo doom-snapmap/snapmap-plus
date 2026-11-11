@@ -11,8 +11,8 @@ every global anchor must decode to its recorded RVA. Any other image -- for exam
 the 2018 executables -- is scanned as an optional cross-check: uniqueness is
 reported, but it does not affect the exit status.
 
-Covered: every BACKEND_ENGINE_SIGNATURES row, the OpenGL-only helper, the
-fault-shield table, the companion and scene-spawn tables, the standalone pattern
+Covered: every BACKEND_ENGINE_SIGNATURES row (the fault shield's included), the
+OpenGL-only helper, the companion and scene-spawn tables, the standalone pattern
 constants, and every global anchor in engine_globals_table.gen.h. The rawmap
 branch answer's candidates are found by rawmap.c itself and are not covered.
 At run time the backend checks each function pattern only at its recorded RVA;
@@ -248,13 +248,10 @@ def scan_image(img, build, sig_rows, globals_rows):
 
 def load_sources(root):
     backend = os.path.join(root, 'src', 'backend')
-    shield = os.path.join(root, 'src', 'fault_shield')
     sig_rows = [('backend',) + r for r in parse_table(os.path.join(backend, 'signatures.c'),
                                                      'BACKEND_ENGINE_SIGNATURES')]
     sig_rows.append(('backend',) + parse_constant_entry(os.path.join(backend, 'signatures.c'),
                                                         'NAV_RENDER_TARGET_GL_SIGNATURE'))
-    sig_rows += [('shield',) + r for r in parse_table(os.path.join(shield, 'shield_sigs.c'),
-                                                     'SHIELD_ENGINE_SIGNATURES')]
     sig_rows += [('companion',) + r for r in parse_table(os.path.join(backend, 'companion_sigs.c'),
                                                         'SH_COMPANION_SIGNATURES')]
     sig_rows += [('scene',) + r for r in parse_table(os.path.join(backend, 'modscene_sigs.c'),

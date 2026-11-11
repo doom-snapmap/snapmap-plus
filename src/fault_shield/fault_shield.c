@@ -42,9 +42,9 @@ void shield_raw(const char *msg)
 /* Resolve engine functions before installing the VEH and frame hook. */
 int veh_install(void);        /* veh.c */
 int recovery_install(void);   /* recovery.c */
-static int shield_install_hooks(void)
+static int shield_install_hooks(const sig_result *results, size_t count)
 {
-    shield_resolve_engine(g_doom_base);   /* Cache engine addresses before recovery can run. */
+    shield_resolve_engine(results, count);   /* Cache engine addresses before recovery can run. */
     return veh_install() && recovery_install();
 }
 
@@ -65,9 +65,9 @@ static void shield_wait_for_instr(void)
 }
 #endif
 
-/* Called by the backend bootstrap with the live module range; a NULL base
- * skips installation. */
-void shield_install(uint8_t *doom_base, size_t doom_size)
+/* Called by the backend bootstrap with the live module range and its
+ * signature results; a NULL base skips installation. */
+void shield_install(uint8_t *doom_base, size_t doom_size, const sig_result *results, size_t count)
 {
     g_doom_base = doom_base;
     g_doom_size = doom_size;
@@ -75,7 +75,7 @@ void shield_install(uint8_t *doom_base, size_t doom_size)
 #ifdef SH_DIAG
     shield_wait_for_instr();
 #endif
-    if (shield_install_hooks()) shield_raw("shield_install: armed (VEH + frame hook)");
+    if (shield_install_hooks(results, count)) shield_raw("shield_install: armed (VEH + frame hook)");
     else shield_raw("shield_install: FAILED to install hooks");
     /* Arm crash capture even if recovery installation failed. This runs outside
      * the loader lock on the bootstrap thread. */

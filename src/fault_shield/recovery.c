@@ -1,16 +1,16 @@
 /* Recover a failed editor load by driving the normal exit to the map browser.
  * The Frame catch alone can resume with an incomplete render world and fault
  * again. The main-thread Frame hook opens StartMenu, requests exit, and waits
- * for editor teardown. It also services notices and save-dialog protection. */
+ * for editor teardown. It also runs the damaged-save guard. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "engine_layout.h"
-#include "../backend/host_image.h"     /* sh_host_is_supported_build -- gates every pinned-RVA backstop */
 #include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
 #include "../backend/apply_engine.h"
-#include "../backend/signatures.h"
+#include "../backend/engine_dialog.h"
+#include "../backend/patch.h"
 #include "fault_record.h"
 #include "hook.h"
 #include "recovery.h"
@@ -18,8 +18,12 @@
 
 extern uint8_t *g_doom_base;
 
-typedef void    (*setstate_t)(void *editor, int state);   /* SetState 0x5298A0 (synchronous) */
-typedef int64_t (*frame_t)(void *self);                   /* idCommonLocal::Frame 0x17ce360 */
+const char SHIELD_RECOVERED_TEXT[] =
+    "Snapmap+ caught a problem in the game and returned you to the menu. "
+    "Unsaved changes to this map were lost.";
+
+typedef void    (*setstate_t)(void *editor, int state);   /* idSnapEditorLocal::SetState (synchronous) */
+typedef int64_t (*frame_t)(void *self);                   /* idCommonLocal::Frame */
 static frame_t orig_frame = NULL;
 typedef void (*clear_dialog_t)(void *shell, void *params);
 static clear_dialog_t g_clear_dialog;
@@ -31,8 +35,6 @@ static uint8_t *g_load_state_at  = NULL;   /* load_state -- 3 == RUNNING */
 static uint8_t *g_last_err_at    = NULL;   /* the engine's last formatted Error/FatalError text */
 static uint8_t *g_shell_slot_at  = NULL;   /* .data slot holding idMenuShellLocal* */
 static uint8_t *g_suppr_a_at     = NULL;   /* throw-gate suppressor A */
-/* Cache the immutable host-build check for the frame hook. */
-static int      g_pinned_build   = 0;
 
 /* Resolve suppressor B through its instruction anchor; skip an unresolved
  * address. The caller guards this access with SEH. */
@@ -46,8 +48,13 @@ static void write_suppressor_b(void)
         *(volatile int32_t *)b = 0;
 }
 
-/* 5 pushes + `mov eax,0x119c0` => boundary 0x17ce36f, all position-independent (disassembly-verified). */
+/* Frame's first 15 bytes on both build 13954591 executables: five pushes and
+ * MOV EAX,0x11DC0, all position-independent. They are compared before the
+ * detour, so a function another program changed is never patched. */
 #define FRAME_STOLEN 15
+static const uint8_t k_frame_prologue[FRAME_STOLEN] = {
+    0x40, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0xB8, 0xC0, 0x1D, 0x01, 0x00
+};
 #define RECOVER_BUDGET_FRAMES 600   /* ~10s @ 60fps backstop */
 
 static volatile LONG g_armed = 0;
@@ -94,7 +101,10 @@ void recovery_arm(void)
 
 /* Drive exit only with a live editor, RUNNING load state, and a menu screen.
  * Play transitions tear down the screen; calling StartMenu Begin then would
- * dereference null. Waits are bounded by RECOVER_BUDGET_FRAMES. */
+ * dereference null. Waits are bounded by RECOVER_BUDGET_FRAMES. The exit
+ * prompt is answered Yes: the editor's state is not trusted after the fault,
+ * and the sentence the player was shown (SHIELD_RECOVERED_TEXT) says that
+ * unsaved changes are lost. */
 static void recovery_tick(void)
 {
     if (!g_armed) return;
@@ -105,13 +115,10 @@ static void recovery_tick(void)
         return;
     }
     uint8_t *ed = editor();
-    /* Without both the editor and SetState, disarm this exit attempt. */
-    setstate_t SetState = (setstate_t)(uintptr_t)(g_eng.setstate ? g_eng.setstate
-                            : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_SETSTATE) : (uintptr_t)0));
+    setstate_t SetState = (setstate_t)g_eng.setstate;
     if (!ed || !SetState) {
         shield_fault f = { "load", -1,
-            "recovery: the editor singleton or SetState is unresolved on this build -- editor-exit "
-            "drive declined (no address is guessed)", 0, 0 };
+            "recovery: the editor singleton or SetState is unresolved -- editor-exit drive declined", 0, 0 };
         shield_emit(&f);
         InterlockedExchange(&g_armed, 0);
         return;
@@ -157,30 +164,19 @@ static void recovery_tick(void)
     }
 }
 
-/* Show one transient toast on the editor screen. Using a shell dialog here
- * would activate the browser. Destroy both temporary idStr values after use. */
-typedef void (*idstr_ctor_t)(void *buf, const char *s);
-typedef void (*idstr_dtor_t)(void *buf);
-typedef void (*toast_show_t)(void *screen, void *title, void *text);
-
-static volatile LONG g_notice_armed = 0;   /* 1 = generic toast (Class-A), 2 = harvest engine text (Class-B) */
-
-void notice_request(void)     { InterlockedExchange(&g_notice_armed, 1); }
-void notice_request_msg(void) { InterlockedExchange(&g_notice_armed, 2); }
-
 /* Read the engine's last formatted error. Return 1 for a nonempty bounded
- * C string; unreadable or unavailable text leaves callers using a generic notice. */
+ * C string; unreadable or unavailable text returns 0. */
 static int harvest_engine_msg(char *out, size_t n)
 {
     if (!out || n == 0 || g_last_err_at == NULL) return 0;
     out[0] = '\0';
     __try {
         const char *p = (const char *)g_last_err_at;
-        if (p[0] == '\0') return 0;                 /* engine never stashed a message -> generic */
+        if (p[0] == '\0') return 0;
         lstrcpynA(out, p, (int)n);                  /* bounded copy; always NUL-terminates */
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         out[0] = '\0';
-        return 0;                                   /* unreadable page -> generic */
+        return 0;
     }
     return out[0] != '\0';
 }
@@ -191,77 +187,22 @@ int shield_last_engine_msg(char *out, size_t n)
     return harvest_engine_msg(out, n);
 }
 
-/* Log engine error text even when no editor screen exists for a toast.
- * Called from the C++-throw path; reads are guarded and logging is capped. */
+/* Log engine error text. Called from the C++-throw path; reads are guarded
+ * and logging is capped. */
 static volatile LONG g_harvest_logged = 0;
 void log_engine_error_text(void)
 {
     char msgbuf[HARVEST_MSG_MAX];
-    if (g_harvest_logged >= 16) return;                 /* rate-limit the record */
+    if (g_harvest_logged >= 16) return;
     if (harvest_engine_msg(msgbuf, sizeof msgbuf)) {
         InterlockedIncrement(&g_harvest_logged);
         shield_fault hf = { "load", -1, msgbuf, 0, 0 };
-        shield_emit(&hf);                               /* the verbatim engine error, on the load-time path too */
+        shield_emit(&hf);
     }
-}
-
-static void notice_tick(void)
-{
-    uint8_t      *ed = editor();
-    uint8_t      *screen;
-    idstr_ctor_t  mk;
-    idstr_dtor_t  rm;
-    toast_show_t  toast;
-    const char   *text;
-    LONG          mode;
-    char          msgbuf[HARVEST_MSG_MAX];
-    /* idStr OBJECTS are stack locals (the engine uses 48-byte locals; long tokens heap-alloc internally,
-     * freed by the dtor). Align for safety. */
-    __declspec(align(16)) unsigned char title_buf[IDSTR_BUF_SIZE];
-    __declspec(align(16)) unsigned char text_buf[IDSTR_BUF_SIZE];
-
-    mode = g_notice_armed;
-    if (!mode) return;
-    if (!ed) return;   /* no editor object located on this build -> no editor-native surface to draw on */
-    /* The editor screen object exists only in-editor (null elsewhere); also require an in-editor state. */
-    if (ed_state() == 0) return;
-    screen = *(uint8_t **)(ed + ED_MENU_SCREEN);
-    if (!screen) return;
-
-    /* An unresolved function disables the toast; literal fallback is pinned-only. */
-    mk    = (idstr_ctor_t)(uintptr_t)(g_eng.idstr_ctor ? g_eng.idstr_ctor
-              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_IDSTR_CTOR) : (uintptr_t)0));
-    rm    = (idstr_dtor_t)(uintptr_t)(g_eng.idstr_dtor ? g_eng.idstr_dtor
-              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_IDSTR_DTOR) : (uintptr_t)0));
-    toast = (toast_show_t)(uintptr_t)(g_eng.toast_show ? g_eng.toast_show
-              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_TOAST_SHOW) : (uintptr_t)0));
-    if (!mk || !rm || !toast) {
-        InterlockedExchange(&g_notice_armed, 0);   /* nothing to show; do not re-check every frame */
-        return;
-    }
-
-    /* Only an engine error populates this buffer. Generic hardware-fault notices
-     * must not display stale text from an earlier error. */
-    text = NOTICE_TEXT_STR;
-    if (mode == 2 && harvest_engine_msg(msgbuf, sizeof msgbuf)) {
-        text = msgbuf;
-        {
-            shield_fault hf = { "load", -1, msgbuf, 0, 0 };
-            shield_emit(&hf);   /* record the harvested engine message alongside the toast */
-        }
-    }
-
-    mk(title_buf, NOTICE_TITLE_STR);
-    mk(text_buf,  text);
-    toast(screen, title_buf, text_buf);    /* (screen, TITLE, TEXT) -- self-dedups via toast+0x1b0 */
-    rm(text_buf);
-    rm(title_buf);
-
-    InterlockedExchange(&g_notice_armed, 0);   /* fire once; the toast's own guard prevents dup re-shows */
 }
 
 /* Keep resolved throw suppressors clear so Error(6) can throw to Frame instead
- * of exiting. Read before writing; both are normally zero on the pinned image. */
+ * of exiting. Read before writing; both are normally zero. */
 static void keep_throw_gate_open(void)
 {
     if (g_doom_base == NULL) return;
@@ -272,13 +213,53 @@ static void keep_throw_gate_open(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
-/* Native dismissal hides the widget before Think releases its callbacks.
- * It holds the shell lock and invokes no button action that could delete a save. */
+/* The damaged-save guard.
+ *
+ * When a save file is damaged the engine offers to delete it. The guard
+ * dismisses that offer through the shell's own ClearDialog (no button action
+ * runs, so nothing is deleted) and then tells the player, in the engine's own
+ * dialog, why the map did not open. */
 static int is_corrupt_save_gdm(int gdm)
 {
     /* CORRUPT_CONTINUE acknowledges a failed load; it does not resume loading. */
     return gdm == GDM_LOAD_DAMAGED_FILE || gdm == GDM_CORRUPT_CONTINUE
         || gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT;
+}
+
+const char *shield_damaged_save_text(int gdm)
+{
+    if (gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT)
+        return "A saved map could not be read because its save file is damaged. "
+               "Snapmap+ kept the file instead of letting the game delete it.";
+    return "This map could not be opened because its save file is damaged. "
+           "Snapmap+ kept the file instead of letting the game delete it.";
+}
+
+/* The reason waits until the dismissed dialog has left the queue. */
+#define DAMAGED_NOTICE_WAIT_FRAMES 600
+static const char *g_damaged_text;
+static int         g_damaged_wait;
+static int         g_damaged_ticket;
+
+static void damaged_notice_tick(void)
+{
+    if (g_damaged_ticket) {
+        if (sh_engine_dialog_poll(g_damaged_ticket) != SH_ENGINE_DIALOG_PENDING) {
+            sh_engine_dialog_release(g_damaged_ticket);
+            g_damaged_ticket = 0;
+        }
+        return;
+    }
+    if (!g_damaged_text) return;
+    if (sh_engine_dialog_can_ask()) {
+        g_damaged_ticket = sh_engine_dialog_ask(NOTICE_GDM_ID, NOTICE_BUTTONSET, g_damaged_text);
+        if (g_damaged_ticket) { g_damaged_text = NULL; return; }
+    }
+    if (--g_damaged_wait <= 0) {
+        shield_fault f = { "save", -1, "save-guard: the damaged-save notice could not be shown", 0, 0 };
+        shield_emit(&f);
+        g_damaged_text = NULL;
+    }
 }
 
 static void save_guard_tick(void)
@@ -319,36 +300,29 @@ static void save_guard_tick(void)
                 dismissed++;
             }
             if (dismissed) {
+                char msg[128];
+                _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                            "save-guard: dismissed the engine's delete offer (gdm=0x%x); save kept", first_gdm);
                 {
-                    /* Preserve the dialog ID: damaged files and rejected map content need
-                     * different diagnosis even though both are save errors. */
-                    char msg[128];
-                    const char *which =
-                        first_gdm == GDM_LOAD_DAMAGED_FILE        ? "LOAD_DAMAGED_FILE" :
-                        first_gdm == GDM_CORRUPT_CONTINUE         ? "CORRUPT_CONTINUE" :
-                        first_gdm == GDM_SNAPMAP_DETECTED_CORRUPT ? "SNAPMAP_DETECTED_CORRUPT" :
-                        first_gdm == GDM_SNAPMAP_REMOVED_CORRUPT  ? "SNAPMAP_REMOVED_CORRUPT" :
-                                                                    "UNKNOWN";
-                    _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                                "save-guard: dismissed %s (gdm=%d) (save protected)",
-                                which, first_gdm);
-                    {
-                        shield_fault f = { "save", -1, msg, 0, 0 };
-                        shield_emit(&f);
-                    }
+                    shield_fault f = { "save", -1, msg, 0, 0 };
+                    shield_emit(&f);
+                }
+                if (!g_damaged_ticket) {
+                    g_damaged_text = shield_damaged_save_text(first_gdm);
+                    g_damaged_wait = DAMAGED_NOTICE_WAIT_FRAMES;
                 }
             }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { /* shell not mapped / shifted RVA -> skip this frame */ }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* shell not mapped -> skip this frame */ }
 }
 
 static int64_t frame_detour(void *self)
 {
     int64_t result;
-    keep_throw_gate_open();      /* LAYER 2: gate clear so engine Error(6)/downgraded-FatalError recovers */
-    save_guard_tick();           /* B: resident save-deletion guard (dismiss the corrupt-save dialogs) */
+    keep_throw_gate_open();      /* gate clear so engine Error(6)/downgraded-FatalError recovers */
+    save_guard_tick();           /* dismiss the engine's offer to delete a damaged save */
+    damaged_notice_tick();       /* then say why the map did not open */
     recovery_tick();             /* advance a pending editor-exit recovery */
-    notice_tick();               /* show a pending editor-native notice */
     InterlockedIncrement(&g_frame_seq);
     result = orig_frame(self);
     InterlockedIncrement(&g_frame_seq);
@@ -356,50 +330,30 @@ static int64_t frame_detour(void *self)
     return result;
 }
 
-/* Change FatalError's level immediate from 7 to 6, allowing its throw to use
- * the recoverable engine path. Verify MOV ECX,7 in the identified wrapper before
- * writing; direct dispatcher calls and failures outside Frame may still exit. */
+/* Change FatalError's level immediate (MOV ECX,7 at +0x27; the byte at +0x28)
+ * from 7 to 6, so its throw takes the recoverable engine path that Frame's
+ * catch handles. The wrapper's whole signature, which ends in that MOV, was
+ * checked at its recorded address; code_patch checks the byte again. Direct
+ * dispatcher calls and failures outside Frame may still exit. */
+#define FATALERROR_LEVEL_OFF 0x28
+static sh_patch_handle g_fatal_patch;
+
 static void patch_fatalerror_downgrade(void)
 {
-    /* Patch only a resolved wrapper or the exact pinned-build fallback. */
-    uint8_t *fe = (uint8_t *)(uintptr_t)(g_eng.fatalerror7 ? g_eng.fatalerror7
-                    : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FATALERROR7) : (uintptr_t)0));
+    static const uint8_t seven = 0x07, six = 0x06;
+    uint8_t *fe = (uint8_t *)g_eng.fatalerror7;
+    sh_patch_status st;
     if (fe == NULL) {
-        shield_fault f = { "sig", -1,
-            "FatalError downgrade declined: the wrapper is unresolved and this is not the pinned "
-            "extraction build", 0, 0 };
+        shield_fault f = { "sig", -1, "FatalError downgrade declined: the wrapper is unresolved", 0, 0 };
         shield_emit(&f);
         return;
     }
-    __try {
-        int i, at = -1;
-        for (i = 0; i < 0x40; i++) {
-            if (fe[i] == 0xB9 && fe[i + 1] == 0x07 &&
-                fe[i + 2] == 0 && fe[i + 3] == 0 && fe[i + 4] == 0) { at = i; break; }
-        }
-        if (at < 0) {
-            shield_fault f = { "sig", -1,
-                "FatalError downgrade: MOV ECX,7 not found in wrapper (re-derive 0x1a089e0)", 0, 0 };
-            shield_emit(&f);
-            return;
-        }
-        {
-            DWORD old;
-            uint8_t *imm = fe + at + 1;                      /* the level immediate byte (0x07) */
-            if (VirtualProtect(imm, 1, PAGE_EXECUTE_READWRITE, &old)) {
-                *imm = 0x06;                                 /* 7 -> 6: throws recoverable idException now */
-                VirtualProtect(imm, 1, old, &old);
-                FlushInstructionCache(GetCurrentProcess(), imm, 1);
-                shield_fault f = { "action", -1,
-                    "FatalError(7) downgraded to recoverable Error(6) (level 7->6)", 0, 0 };
-                shield_emit(&f);
-            } else {
-                shield_fault f = { "sig", -1, "FatalError downgrade: VirtualProtect failed", 0, 0 };
-                shield_emit(&f);
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        shield_fault f = { "sig", -1, "FatalError downgrade write faulted (re-derive 0x1a089e0)", 0, 0 };
+    if (g_fatal_patch.live) return;
+    st = code_patch(fe + FATALERROR_LEVEL_OFF, &seven, &six, 1, &g_fatal_patch);
+    {
+        shield_fault f = { st == B2_PATCH_OK ? "action" : "sig", -1,
+            st == B2_PATCH_OK ? "FatalError(7) downgraded to recoverable Error(6)"
+                              : "FatalError downgrade declined: the level byte could not be patched", 0, 0 };
         shield_emit(&f);
     }
 }
@@ -412,17 +366,8 @@ int recovery_install(void)
         orig_frame = NULL;
     }
     /* Cache globals before installing the frame hook. */
-    g_pinned_build = sh_host_is_supported_build();
-    g_clear_dialog = NULL;
+    g_clear_dialog = (clear_dialog_t)g_eng.clear_dialog;
     if (g_doom_base) {
-        const sig_entry *entry;
-        for (entry = BACKEND_ENGINE_SIGNATURES; entry->name; entry++) {
-            sig_result result;
-            if (strcmp(entry->name, "ClearDialogWrapper") != 0) continue;
-            if (sig_resolve_one(g_doom_base, entry, &result) == SIG_OK)
-                g_clear_dialog = (clear_dialog_t)result.addr;
-            break;
-        }
         g_editor_at     = (uint8_t *)glb_resolve(g_doom_base, "editor_singleton", NULL);
         g_load_state_at = (uint8_t *)glb_resolve(g_doom_base, "load_state", NULL);
         g_last_err_at   = (uint8_t *)glb_resolve(g_doom_base, "last_error_msg", NULL);
@@ -430,19 +375,20 @@ int recovery_install(void)
         g_suppr_a_at    = (uint8_t *)glb_resolve(g_doom_base, "throw_suppressor_a", NULL);
     }
     if (!g_clear_dialog) {
-        shield_fault f = { "sig", -1,
-            "save guard unavailable: ClearDialogWrapper requires a clean unique signature", 0, 0 };
+        shield_fault f = { "sig", -1, "save guard unavailable: ClearDialogWrapper is unresolved", 0, 0 };
         shield_emit(&f);
     }
 
-    /* The Frame signature covers the 15 position-independent bytes stolen here.
- * Refuse unresolved targets unless the exact pinned-build fallback applies. */
-    void *target = (void *)(uintptr_t)(g_eng.frame ? g_eng.frame
-                     : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FRAME) : (uintptr_t)0));
-    if (target == NULL) {
-        shield_fault f = { "sig", -1,
-            "recovery REFUSED: idCommonLocal::Frame is unresolved and this is not the pinned extraction "
-            "build -- the frame hook is not installed rather than detouring a guessed address", 0, 0 };
+    void *target = (void *)g_eng.frame;
+    int intact = 0;
+    if (target) {
+        __try { intact = memcmp(target, k_frame_prologue, FRAME_STOLEN) == 0; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { intact = 0; }
+    }
+    if (!intact) {
+        shield_fault f = { "sig", -1, target
+            ? "recovery not installed: idCommonLocal::Frame's first bytes are not the expected prologue"
+            : "recovery not installed: idCommonLocal::Frame is unresolved", 0, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -452,6 +398,6 @@ int recovery_install(void)
         if (hook_unpatch((void *)orig_frame)) orig_frame = NULL;
         return 0;
     }
-    patch_fatalerror_downgrade();   /* LAYER 2: FatalError(7) -> recoverable Error(6) (one-byte level patch) */
+    patch_fatalerror_downgrade();
     return 1;
 }

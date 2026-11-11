@@ -472,7 +472,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     }
 
     /* Arm the resident fault shield after startup resolution. */
-    shield_install(g_doom_base, g_doom_size);
+    shield_install(g_doom_base, g_doom_size, results, patching_ok ? db : 0);
 
     /* The install is done with the mod store: the boot build may start. */
     sh_ms_boot_release();
