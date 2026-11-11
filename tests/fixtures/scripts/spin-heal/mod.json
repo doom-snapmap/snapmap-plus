@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "name": "Spin Heal",
+  "author": "Snapmap+",
+
+  "snapmap-plus": {
+    "format": 2,
+    "salt": "spinheal"
+  }
+}

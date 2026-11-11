@@ -1,0 +1,3 @@
+{
+	inherit = "snapmaps/logic/relay";
+}

@@ -1,0 +1,3 @@
+{
+	inherit = "snapmaps/props/building_blocks/building_blocks_16W_128D_128H";
+}

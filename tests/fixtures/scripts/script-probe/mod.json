@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "name": "Script Probe",
+  "author": "Snapmap+",
+
+  "snapmap-plus": {
+    "format": 2,
+    "salt": "scprobe1"
+  }
+}
