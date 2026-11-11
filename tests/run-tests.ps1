@@ -121,6 +121,7 @@ $tests = @(
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "clipboard_test";   src = 'clipboard_test.c ..\src\backend\clipboard.c';          arg = "" }
     @{ name = "swf_textedit_test"; src = 'swf_textedit_test.c';                                   arg = "" }
+    @{ name = "target_any_test";  src = 'target_any_test.c';                                      arg = "" }
     @{ name = "backend_log_test"; src = 'backend_log_test.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
