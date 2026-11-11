@@ -618,7 +618,7 @@ static void test_reader(void)
             sh_navmesh_build_from_map(map, map_len);
             bare = sh_carrier_strip(map, map_len, &bare_len);
             CHECK(bare != NULL);
-            back = bare ? sh_navmesh_embed_all(bare, bare_len, &back_len) : NULL;
+            back = bare ? sh_navmesh_embed_all(bare, bare_len, &back_len, NULL) : NULL;
             CHECK(back != NULL);
             if (back) {
                 unsigned char *again = NULL;
@@ -836,7 +836,7 @@ static void test_carrier(void)
     CHECK(sh_navmesh_test_served_count() == 1 && serves_exactly("monster48", &big));
     bare = sh_carrier_strip(made, made_len, &bare_len);
     CHECK(bare && !strcmp(bare, base));
-    saved = bare ? sh_navmesh_embed_all(bare, bare_len, &saved_len) : NULL;
+    saved = bare ? sh_navmesh_embed_all(bare, bare_len, &saved_len, NULL) : NULL;
     CHECK(saved && saved_len == strlen(saved));
     if (saved) {
         CHECK(strstr(saved, "\"string\":[]") && strstr(saved, "\"allocCount\":[0,0,0,0,0,0,0,0,0,16]"));
@@ -860,7 +860,7 @@ static void test_carrier(void)
         {
             char *plain = sh_carrier_strip(saved, saved_len, &again_len);
             CHECK(plain && !strcmp(plain, base));
-            again = plain ? sh_navmesh_embed_all(plain, again_len, &again_len) : NULL;
+            again = plain ? sh_navmesh_embed_all(plain, again_len, &again_len, NULL) : NULL;
             CHECK(again && again_len == saved_len && !strcmp(again, saved));
             if (again) HeapFree(GetProcessHeap(), 0, again);
             if (plain) HeapFree(GetProcessHeap(), 0, plain);
@@ -906,15 +906,18 @@ static void test_carrier(void)
         sh_navmesh_test_reset();
         sh_navmesh_build_from_map(saved, saved_len);
         CHECK(sh_navmesh_test_served_count() == 0);
-        again = sh_navmesh_embed_all(base, base_len, &again_len);
+        again = sh_navmesh_embed_all(base, base_len, &again_len, NULL);
         CHECK(again && !strcmp(again, saved));
         if (again) HeapFree(GetProcessHeap(), 0, again);
         g_nav_on = 1;
 
-        /* Nothing held: a save is the engine's bytes. */
+        /* Nothing held: a save is the engine's bytes, and nothing failed. */
         sh_navmesh_test_reset();
         sh_navmesh_build_from_map(base, base_len);
-        CHECK(sh_navmesh_embed_all(base, base_len, &again_len) == NULL);
+        {
+            int failed = -1;
+            CHECK(sh_navmesh_embed_all(base, base_len, &again_len, &failed) == NULL && failed == 0);
+        }
         HeapFree(GetProcessHeap(), 0, saved);
     }
     if (bare) HeapFree(GetProcessHeap(), 0, bare);

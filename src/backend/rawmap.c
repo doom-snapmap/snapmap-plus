@@ -566,10 +566,12 @@ static void rawmap_base_name(const char *path, char *out, size_t cap)
     strncpy_s(out, cap, b, _TRUNCATE);
 }
 
-static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows)
+static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows,
+                                     const char *source)
 {
     memset(rows, 0, sizeof *rows);
     __try {
+        sh_modpub_rawmap_source(source);
         return sh_modpub_rawmap_missing(text, len, rows);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap's mod check FAULTED; the map loads as it is");
@@ -623,7 +625,7 @@ int sh_rawmap_prepare_reload(char *why, int cap)
         if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
         return 0;
     }
-    missing = rawmap_missing_guarded(text, len, &rows);
+    missing = rawmap_missing_guarded(text, len, &rows, name);
     if (missing) {
         char line[MAX_PATH + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -932,18 +934,22 @@ static SRWLOCK g_tell_lock = SRWLOCK_INIT;
 static char g_tell[MODEXPORT_CAUSE_MAX + MAX_PATH];
 static volatile LONG g_tell_pending;
 static volatile LONG g_tell_console_only;   /* the page shows its own toast for this one */
+static const char *volatile g_tell_title = "Rawmap";
 
-static void rawmap_tell(const char *text)
+static void tell_titled(const char *title, const char *text)
 {
     char line[sizeof g_tell + 32];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: %s", text);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", title, text);
     backend_log(line);
     AcquireSRWLockExclusive(&g_tell_lock);
     strncpy_s(g_tell, sizeof g_tell, text, _TRUNCATE);
+    g_tell_title = title;
     ReleaseSRWLockExclusive(&g_tell_lock);
     InterlockedExchange(&g_tell_console_only, 0);
     InterlockedExchange(&g_tell_pending, 1);
 }
+
+static void rawmap_tell(const char *text) { tell_titled("Rawmap", text); }
 
 void sh_rawmap_tell(const char *text)
 {
@@ -960,6 +966,7 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
     backend_log(line);
     AcquireSRWLockExclusive(&g_tell_lock);
     _snprintf_s(g_tell, sizeof g_tell, _TRUNCATE, "The rawmap was not loaded: %s.", reason && reason[0] ? reason : "it cannot be read");
+    g_tell_title = "Rawmap";
     ReleaseSRWLockExclusive(&g_tell_lock);
     InterlockedExchange(&g_tell_console_only, 1);
     InterlockedExchange(&g_tell_pending, 1);
@@ -968,14 +975,16 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
 void sh_rawmap_poll_main(void)
 {
     char text[sizeof g_tell];
+    const char *title;
     void (*toast)(const char *, const char *) = g_notify_toast;
     void (*print)(const char *) = g_notify_print;
     if (!InterlockedExchange(&g_tell_pending, 0)) return;
     AcquireSRWLockShared(&g_tell_lock);
     strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
+    title = g_tell_title;
     ReleaseSRWLockShared(&g_tell_lock);
     if (print) print(text);
-    if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast("Rawmap", text);
+    if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast(title, text);
 }
 
 void sh_rawmap_last_save(sh_rawmap_save_report *out)
@@ -1631,7 +1640,7 @@ void sh_rawmap_embed_install(const void *module_base)
         sig_status st;
         if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "IdStrAssignFromStr") != 0) continue;
         st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &ra);
-        if (st == SIG_OK || st == SIG_OK_HOOKED) g_idstr_assign = (idstr_assign_fn)ra.addr;
+        if (st == SIG_OK) g_idstr_assign = (idstr_assign_fn)ra.addr;
         break;
     }
     backend_log(g_idstr_assign != NULL
@@ -1693,17 +1702,19 @@ static void nav_embed_on_save(void *out_idstr)
     int len = 0;
     char *body = NULL;
     size_t body_len = 0;
+    int failed = 0;
 
     if (!g_idstr_assign || out_idstr == NULL) return;
     if (!read_out_idstr(out_idstr, &data, &len)) return;
 
-    body = sh_navmesh_embed_all(data, (size_t)len, &body_len);
-    if (body == NULL) return;
-
-    if (!replace_out_idstr(out_idstr, body, body_len))
-        backend_log("NAV: the saved map could not be written back; its navigation shards are "
-                    "not in this save");
-    HeapFree(GetProcessHeap(), 0, body);
+    body = sh_navmesh_embed_all(data, (size_t)len, &body_len, &failed);
+    if (body != NULL) {
+        failed = !replace_out_idstr(out_idstr, body, body_len);
+        HeapFree(GetProcessHeap(), 0, body);
+    }
+    if (failed)
+        tell_titled("Navigation", "This save does not carry the map's AI navigation. "
+                    "Save again to retry.");
 }
 
 /* Put the open map's settings into the map's member (map_settings.h). */
