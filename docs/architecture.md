@@ -471,19 +471,34 @@ These backend files share the work:
   tweak (an editor-only type outside the key), a surface (the game's own bytes
   at the game's own name, served from the player's disk, never carried and
   never refused; SnapMap's provider cannot see campaign-only content without
-  it), or a replacement (any other file at a game name). Replacements and
-  editor tweaks are the bundle's `shadows`, derived and never declared. A
-  replacement that is a decl is an edited copy: its structural diff against
-  the game's text is the product block's `edits` and the game file is
-  generated per map (see [Derived edits](#derived-edits)); a binary
-  replacement fails the build, except in a folder the product received, and
-  so does a copy outside the decl grammar. The retired author keys `player`,
+  it), or a replacement (any other file at a game name). Whether a file is
+  the game's own bytes is decided by bytes for a binary and by text for a
+  file in the decl grammar (a decl, a snapModule decl, or a render
+  program's permutation decl `generated/renderprogs/permutations/<program>_<mask>.decl`,
+  `{ permutations { } parms { } state { } hlsl_vp { } hlsl_fp { } }`):
+  line ends are not content (CRLF equals LF, the final run of line ends is
+  ignored, `sh_mb_text_same`), so a copy an export turned from CRLF to LF
+  is a pointer recording the game's hash and size (`mb_text_pointer`).
+  Replacements and editor tweaks are the bundle's `shadows`, derived and
+  never declared. A replacement that is a decl is an edited copy: its
+  structural diff against the game's text is the product block's `edits`
+  and the game file is generated per map (see [Derived edits](#derived-edits));
+  a binary replacement fails the build, except in a folder the product
+  received, and so does a copy outside the decl grammar. An edited
+  permutation decl is decl text, never a binary, but it fails the build with
+  what to do instead: the product generates edited game files under
+  `generated/decls/` only (`ms_registry_files`), and a permutation is opened
+  with its program's cooked `.bin` and SPIR-V, so the author either deletes
+  the copy (the mod borrows the game's) or ships a whole program under
+  `mods/<key>/`. Of the 494 permutation decls the installed archives hold,
+  324 parse as decl trees; the rest carry HLSL with `=` at statement level. The retired author keys `player`,
   `extends` and `replaces` are ignored with one line each; a partial they name
   is refused with "this is a partial; put the whole edited copy of <game file>
   at its game name". Rules 3 (`SH_MB_RULES`) added the campaign-only closure
   below, rules 4 its effects, movies and atlases, rules 5 a closure no
-  other installed mod stands in for, and rules 6 whole models, so every
-  installed folder is built again once.
+  other installed mod stands in for, rules 6 whole models and rules 7
+  textual identity of decl-grammar files and a material's whole render
+  program, so every installed folder is built again once.
   The author keys `shadows`, `stock`
   and `scope` are accepted and ignored (an author `stock` entry with no file
   still builds a pointer and is reported), so an existing mod keeps its hash.
@@ -565,7 +580,27 @@ These backend files share the work:
   `colormaskmap`) needs nothing when the material has a row in the installed
   `virtualtextures/_vmtr*.vmtr`, whose baked pages the engine samples. A
   name of these kinds no archive holds is reported, not refused, like an
-  animWeb clip. A model is one unit (`mb_model_needs`): the engine loads an
+  animWeb clip. A material's render program (`stageprogram` and the other
+  `*Program` keys) is one unit too (`mb_closure_program`): when only
+  `gameresources` holds the program's decl, the closure brings the decl,
+  `generated/renderprogs/<name>_pc_vulkan.bin` (and an OpenGL `_pc.bin` if
+  the archive has one), the SPIR-V the archive holds at
+  `sh_mb_spirv_request`'s names (split names included), and every
+  permutation `generated/renderprogs/permutations/<name>_<mask>.decl` the
+  installed indexes list (`sh_modstock_list`) with its own `.bin` and
+  SPIR-V; the shared includes under `decls/renderprogs/` never come along.
+  This reproduces `archive_renderprog.py`'s closure for all 488
+  `gameresources` and 435 `snap_gameresources` programs of 13954591 (59
+  are campaign-only, `newwater` among them). A program served without its
+  permutation files stops the game (0xE06D7363 when the permutation open
+  fails), so a missing `.bin` or a program with no permutation fails the
+  build naming the member, and the stage files are then checked from the
+  `.bin` as for a mod's own program (see [Render programs](#render-programs)).
+  A program SnapMap holds adds nothing (the 429 programs both archives
+  hold have the same files in each). Measured on the owner's water mod: a
+  folder of `mod.json` and the `templar_water` material gains the 8 files
+  of `newwater`, and the folder with its two `.bin` files deleted gains
+  those two. A model is one unit (`mb_model_needs`): the engine loads an
   md6Def's mesh, then the skeleton whose name the cooked mesh carries (a
   little-endian u32 length at 0x0C, then the name; "MM" at byte 2), then that
   skeleton's default clip `<skeleton>/_default.md6anim`
@@ -1212,7 +1247,9 @@ and `.fspv` for the program, and the same for each
 files on GPUs without AMD's three shader extensions and the permutation on GPUs
 with them; a missing stage file is fatal at bind). A permutation decl is named
 by its request path, the string the engine looks it up by; it is served, not
-registered. A bare program name in a material, shared includes under
+registered. A material naming a campaign-only program brings the program's
+files along as pointers (the closure under [Mods](#mods)), checked the same
+way from the installed bytes. A bare program name in a material, shared includes under
 `decls/renderprogs/`, `vulkan_pipelines.bin`, `generated/glslBinaries/` and
 `generated/glsl/` are refused. MD5fold is MD5 with its four words XORed
 together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
@@ -2091,8 +2128,11 @@ map's choices).
   `classes.replaces`, the Mods tab's replaced stock files or a doctor conflict). Refused: a copy
   or a game text outside the grammar ("does not parse as a decl (line N: ...);
   the product derives the edits from the whole edited copy"); a game text the
-  reader cannot supply; a binary at a game name with other bytes ("a binary at
-  a game name cannot be merged with other mods: put it under mods/<key>/"),
+  reader cannot supply; a binary at a game name with other bytes ("<path>: the
+  game ships this file and a mod cannot replace it with other bytes; delete
+  your copy and the mod borrows the game's, or put your version under
+  mods/<key>/ and point your decls at it"; a binary at a name the game does
+  not ship keeps "the game has no file of that name for it to replace"),
   except in a folder the product received (origin `download`, `delivery`,
   `migration`, or a thread that called `sh_mb_keep_replacements_here(1)`,
   where it stays a replacement, as does a decl whose game text cannot be read

@@ -3623,6 +3623,71 @@ static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
 
 /* ------------------------------------------------------ classification ---- */
 
+static size_t mb_text_end(const unsigned char *t, size_t n)
+{
+    while (n && (t[n - 1] == '\n' || t[n - 1] == '\r')) n--;
+    return n;
+}
+
+int sh_mb_text_same(const unsigned char *a, size_t an, const unsigned char *b, size_t bn)
+{
+    size_t i = 0, j = 0;
+    if (!a || !b) return 0;
+    an = mb_text_end(a, an);
+    bn = mb_text_end(b, bn);
+    for (;;) {
+        if (i + 1 < an && a[i] == '\r' && a[i + 1] == '\n') i++;
+        if (j + 1 < bn && b[j] == '\r' && b[j + 1] == '\n') j++;
+        if (i == an || j == bn) return i == an && j == bn;
+        if (a[i] != b[j]) return 0;
+        i++;
+        j++;
+    }
+}
+
+/* Decl-grammar text: a decl under generated/decls/, a snapModule decl, or a
+ * render program's permutation decl (generated/renderprogs/permutations/
+ * <program>_<mask>.decl, `{ permutations { } parms { } state { } hlsl_vp { }
+ * hlsl_fp { } }`), which the engine parses like its program's decl. Its
+ * identity is its text and a copy at a game name is never a binary. */
+static int mb_decl_text(const sh_mb_file *f)
+{
+    char program[SH_MB_REQUEST_MAX + 1];
+    return f->is_decl || f->is_module || sh_mb_rp_permutation(f->request, program, sizeof program, NULL);
+}
+
+/* A decl-grammar copy at a game name whose text is the game's but for line
+ * ends (an export that turned CRLF into LF) is the game's file: a pointer
+ * recording the game's bytes, served from the player's disk. Anything else
+ * is left as it was (an edited copy, or a name the game does not hold). */
+static wchar_t *mb_file_wpath(const wchar_t *root, const char *path);
+static void mb_text_pointer(sh_mb_bundle *b, sh_mb_file *f, const wchar_t *root)
+{
+    char sha[SH_MB_HASH_HEX + 1], cause[SH_MB_CAUSE_MAX];
+    unsigned long long size = 0;
+    unsigned char *game = NULL, *copy;
+    size_t glen = 0, clen = 0;
+    wchar_t *full;
+    if (sh_mb_stock_identify(f->request, sha, &size) != SH_MB_STOCK_OK || size > SH_MB_MAX_FILE) return;
+    if (sh_mb_stock_read(f->request, sha, &game, &glen, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) return;
+    full = mb_file_wpath(root, f->path);
+    copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
+    free(full);
+    if (copy && sh_mb_text_same(game, glen, copy, clen)) {
+        char *source = mb_strdup(f->request);
+        if (!source) {
+            mb_error(b, "out of memory");
+        } else {
+            f->stock = 1;
+            f->stock_source = source;
+            memcpy(f->blob, sha, sizeof sha);
+            f->size = size;
+        }
+    }
+    free(copy);
+    HeapFree(GetProcessHeap(), 0, game);
+}
+
 /* Whether f's name is under the mod's own namespace (DESIGN-additive 2.1,
  * 2.2): 1 yes; 0 no, with the rule it misses in `why`. A decl is named
  * mods/<key>/...; a skins decl by the mesh it skins and a raw file by its
@@ -3886,6 +3951,17 @@ static void mb_derive_edits(sh_mb_bundle *b, const wchar_t *root)
         char *json;
         free(f->edit);
         f->edit = NULL;
+        if (f->shadowed && !f->stock && !f->is_decl && !f->is_module && !received && mb_decl_text(f)) {
+            /* modserve generates edited game files under generated/decls/
+             * only (ms_registry_files): an edit here would build and never
+             * apply. */
+            mb_error(b, "%s edits the game's render-program permutation %s, which the product cannot generate per map "
+                     "(it generates edited decls under generated/decls/ only, and a permutation is opened with its "
+                     "program's cooked .bin and SPIR-V); delete your copy and the mod borrows the game's, or ship your "
+                     "program whole under mods/%s/ (decl, .bin, SPIR-V and permutations) and point your material at it",
+                     f->path, f->request, b->id);
+            continue;
+        }
         if (!f->shadowed || !f->is_decl || f->stock || f->is_module || sh_mb_editor_time(f->request)) continue;
         full = mb_file_wpath(root, f->path);
         copy = full ? mb_read_wfile(full, SH_MB_MAX_FILE, &clen) : NULL;
@@ -4394,6 +4470,120 @@ static int mb_closure_offer(mb_closure *c, size_t file, const sh_mb_need *need,
     return 1;
 }
 
+/* One member of a program, by its request path. */
+static int mb_closure_member(mb_closure *c, size_t file, const char *request)
+{
+    char cand[1][SH_MB_REQUEST_MAX + 1];
+    sh_mb_need need;
+    if (strlen(request) > SH_MB_REQUEST_MAX) return 0;
+    memcpy(cand[0], request, strlen(request) + 1);
+    need.type = "renderProg";
+    need.name = cand[0];
+    return mb_closure_offer(c, file, &need, cand, 1);
+}
+
+static void mb_closure_missing(mb_closure *c, size_t file, const char *program, const char *member)
+{
+    mb_error(c->b, "%s uses the campaign render program %s, but no archive holds its %s; a program is served whole or "
+             "not at all, since the game stops when it binds a missing one (check the game's files in Steam)",
+             c->b->files[file].path, program, member);
+    c->stopped = 1;
+}
+
+/* A program unit (the program or one permutation): its cooked Vulkan .bin
+ * (required), an OpenGL .bin and the SPIR-V stages the archive holds. Which
+ * stages a unit needs is checked afterwards from the .bin itself
+ * (mb_check_renderprogs). */
+static void mb_closure_unit(mb_closure *c, size_t file, const char *program, const char *stem, const char *spirv_name)
+{
+    static const char *const ext[3] = { ".vspv", ".fspv", ".cspv" };
+    char req[SH_MB_REQUEST_MAX + 32];
+    int k;
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc_vulkan.bin", stem);
+    if (!mb_closure_member(c, file, req)) {
+        if (!c->stopped) mb_closure_missing(c, file, program, req);
+        return;
+    }
+    if (c->stopped) return;
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc.bin", stem);
+    (void)mb_closure_member(c, file, req);
+    for (k = 0; k < 3 && !c->stopped; k++)
+        if (sh_mb_spirv_request(spirv_name, ext[k], req, sizeof req)) (void)mb_closure_member(c, file, req);
+}
+
+typedef struct mb_perm_list {
+    const char *program;
+    char (*req)[SH_MB_REQUEST_MAX + 1];
+    size_t n, cap;
+    int oom;
+} mb_perm_list;
+
+static void mb_perm_cb(void *context, const char *path)
+{
+    mb_perm_list *l = (mb_perm_list *)context;
+    char program[SH_MB_REQUEST_MAX + 1];
+    size_t i;
+    if (l->oom || strlen(path) > SH_MB_REQUEST_MAX || !sh_mb_rp_permutation(path, program, sizeof program, NULL) ||
+        strcmp(program, l->program) != 0)
+        return;
+    for (i = 0; i < l->n; i++) if (!strcmp(l->req[i], path)) return;
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 8;
+        void *g = realloc(l->req, cap * sizeof *l->req);
+        if (!g) { l->oom = 1; return; }
+        l->req = (char (*)[SH_MB_REQUEST_MAX + 1])g;
+        l->cap = cap;
+    }
+    memcpy(l->req[l->n++], path, strlen(path) + 1);
+}
+
+/* A material's program is one unit with its files (archive_renderprog.py's
+ * closure, reproduced for all 923 programs of 13954591): the decl, the cooked
+ * .bin and SPIR-V, and every permutation's decl, .bin and SPIR-V, at the
+ * paths the archive stores (split SPIR-V names included; the shared includes
+ * under decls/renderprogs/ never). Shipping a program without its permutation
+ * files is fatal (0xE06D7363 when the permutation open fails), so a
+ * campaign-only program comes whole or the build fails naming the first
+ * missing member. SnapMap's own programs add nothing. */
+static void mb_closure_program(mb_closure *c, size_t file, const char *name)
+{
+    char program[SH_MB_REQUEST_MAX + 1], decl[SH_MB_REQUEST_MAX + 48], stem[SH_MB_REQUEST_MAX + 48], where[32];
+    mb_perm_list perms;
+    size_t i, n = strlen(name);
+    if (n == 0 || n > SH_MB_REQUEST_MAX - 40 || (n > 5 && mb_ieq_n(name, 5, "mods/"))) return;
+    memcpy(program, name, n + 1);
+    mb_lower(program);
+    _snprintf_s(decl, sizeof decl, _TRUNCATE, "generated/decls/renderprog/%s.decl", program);
+    if (c->ops->container(c->ops->context, decl, NULL, where, sizeof where) != SH_MB_STOCK_OK ||
+        strcmp(where, "gameresources") != 0 || !c->ops->list)
+        return;
+    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/%s", program);
+    mb_closure_unit(c, file, program, stem, program);
+    if (c->stopped) return;
+    memset(&perms, 0, sizeof perms);
+    perms.program = program;
+    _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/permutations/%s_", program);
+    if (c->ops->list(c->ops->context, stem, mb_perm_cb, &perms) != SH_MB_STOCK_OK) {
+        mb_error(c->b, "%s: the permutations of render program %s cannot be listed (the installed-content reader is "
+                 "unavailable)", c->b->files[file].path, program);
+        c->stopped = 1;
+    } else if (perms.oom) {
+        mb_error(c->b, "out of memory");
+        c->stopped = 1;
+    } else if (!perms.n) {
+        char member[SH_MB_REQUEST_MAX + 80];
+        _snprintf_s(member, sizeof member, _TRUNCATE, "permutation (generated/renderprogs/permutations/%s_<16 hex "
+                    "digits>.decl)", program);
+        mb_closure_missing(c, file, program, member);
+    }
+    for (i = 0; i < perms.n && !c->stopped; i++) {
+        if (!mb_closure_member(c, file, perms.req[i]) || c->stopped) continue;
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "%.*s", (int)(strlen(perms.req[i]) - 5), perms.req[i]);
+        mb_closure_unit(c, file, program, stem, perms.req[i]);
+    }
+    free(perms.req);
+}
+
 static void mb_closure_need(mb_closure *c, size_t file, size_t k)
 {
     char cand[2][SH_MB_REQUEST_MAX + 1];
@@ -4402,7 +4592,11 @@ static void mb_closure_need(mb_closure *c, size_t file, size_t k)
     if (n <= 0) return;
     held = mb_closure_offer(c, file, &need, cand, n);
     if (c->stopped) return;
-    if (strcmp(need.type, "swf") == 0) {
+    if (_stricmp(need.type, "renderProg") == 0) {
+        char name[SH_MB_REQUEST_MAX + 1];
+        strncpy_s(name, sizeof name, need.name, _TRUNCATE);   /* the files array may move while the closure grows */
+        mb_closure_program(c, file, name);
+    } else if (strcmp(need.type, "swf") == 0) {
         /* The movie's atlas is its sibling: generated/swf/<stem>.bimage. */
         size_t m = strlen(cand[0]);
         if (m > 5 && m + 3 <= SH_MB_REQUEST_MAX && !strcmp(cand[0] + m - 5, ".bswf")) {
@@ -4628,6 +4822,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
             }
         }
+        /* Identity of decl text is textual: line ends are not content. */
+        if (!f->stock && !b->legacy && stock && mb_decl_text(f)) mb_text_pointer(b, f, root);
         if (!f->stock && f->deferred) {
             if (f->deferred == 1 && sh_mb_pointer_only_kind(f->request))
                 mb_error(b, "%s is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a "
@@ -4675,12 +4871,13 @@ names:
                 /* A decl at a game name is an edited copy (mb_derive_edits);
                  * a binary has no structure to diff and the game loads it by
                  * its fixed name, so it is refused, except in a folder the
-                 * product received. */
-                if (got == 1 && !f->is_decl && !f->is_module && !sh_mb_editor_time(f->request) && !mb_received(b) &&
+                 * product received. The game ships the file, so the copy can
+                 * also simply go: the mod then borrows the game's. */
+                if (got == 1 && !mb_decl_text(f) && !sh_mb_editor_time(f->request) && !mb_received(b) &&
                     !g_mb_keep_here) {
-                    mb_error(b, "%s would replace the game's %s with other bytes; a binary at a game name cannot be "
-                             "merged with other mods: put it under mods/%s/ and point your decls at it", f->path,
-                             f->request, b->id);
+                    mb_error(b, "%s: the game ships this file and a mod cannot replace it with other bytes; delete your "
+                             "copy and the mod borrows the game's, or put your version under mods/%s/ and point your "
+                             "decls at it", f->path, b->id);
                 } else if (got == 1) {
                     f->shadowed = 1;
                 } else if (got == 0) {

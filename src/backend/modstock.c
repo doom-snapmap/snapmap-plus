@@ -801,6 +801,22 @@ int sh_modstock_container(const char *source, const char *sha256, char *out, siz
     return SH_MB_STOCK_ABSENT;
 }
 
+int sh_modstock_list(const char *prefix, void (*fn)(void *context, const char *path), void *context)
+{
+    char folded[MST_MAX_FIELD + 1];
+    size_t n, i;
+    uint32_t r;
+    if (!prefix || !fn) return SH_MB_STOCK_ABSENT;
+    n = strlen(prefix);
+    if (n > MST_MAX_FIELD) return SH_MB_STOCK_OK;
+    for (i = 0; i < n; i++) folded[i] = mst_fold(prefix[i]);
+    folded[n] = 0;
+    if (!mst_ready()) return SH_MB_STOCK_UNAVAILABLE;
+    for (r = 0; r < g_nrows; r++)
+        if (!strncmp(g_names + g_rows[r].name, folded, n)) fn(context, g_names + g_rows[r].name);
+    return SH_MB_STOCK_OK;
+}
+
 /* ------------------------------------------------------- registration ---- */
 
 static int op_match(void *c, const char *request, unsigned long long size, const char *sha, char *src, size_t cap)
@@ -813,6 +829,8 @@ static int op_read(void *c, const char *source, const char *sha, unsigned char *
 { (void)c; return sh_modstock_read(source, sha, bytes, len); }
 static int op_container(void *c, const char *source, const char *sha, char *out, size_t cap)
 { (void)c; return sh_modstock_container(source, sha, out, cap); }
+static int op_list(void *c, const char *prefix, void (*fn)(void *context, const char *path), void *context)
+{ (void)c; return sh_modstock_list(prefix, fn, context); }
 
 void sh_modstock_register(void)
 {
@@ -823,6 +841,7 @@ void sh_modstock_register(void)
     ops.verify = op_verify;
     ops.read = op_read;
     ops.container = op_container;
+    ops.list = op_list;
     sh_mb_set_stock_ops(&ops);
 }
 

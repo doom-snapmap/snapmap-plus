@@ -1209,8 +1209,9 @@ static void test_refusals(const char *fixture, const char *tmp)
             "whole edited copy of generated/decls/entitydef/monster/imp.decl");
     /* A binary at a game name with other bytes is refused. */
     refused(fixture, tmp, m_binary_replace, &RESOLVER,
-            "would replace the game's cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim with other "
-            "bytes; a binary at a game name cannot be merged with other mods: put it under mods/alex.r2-imp/");
+            "assets/cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim: the game ships this file "
+            "and a mod cannot replace it with other bytes; delete your copy and the mod borrows the game's, or put your "
+            "version under mods/alex.r2-imp/ and point your decls at it");
     /* Received content keeps a binary replacement: an import on its own thread, a downloaded folder. */
     sh_mb_keep_replacements_here(1);
     accepted(fixture, tmp, m_binary_replace, &b);
@@ -1314,6 +1315,22 @@ static void test_refusals(const char *fixture, const char *tmp)
             printf("modbundle_test: symbolic link case skipped (no symlink rights, error %lu)\n", GetLastError());
         }
     }
+}
+
+/* Decl text compares without its line ends: CRLF equals LF, the final run
+ * of line ends is ignored, and any other byte is content. */
+static void test_text_same(void)
+{
+    const unsigned char crlf[] = "{\r\n\tx = 1;\r\n}\r\n", lf[] = "{\n\tx = 1;\n}", more[] = "{\n\tx = 1;\n}\n\n\r\n",
+                        other[] = "{\n\tx = 2;\n}\n", lone_cr[] = "{\r\tx = 1;\r\n}\r\n", gap[] = "{\n\n\tx = 1;\n}\n";
+    CHECK(sh_mb_text_same(crlf, sizeof crlf - 1, lf, sizeof lf - 1));
+    CHECK(sh_mb_text_same(lf, sizeof lf - 1, more, sizeof more - 1));
+    CHECK(sh_mb_text_same(crlf, sizeof crlf - 1, crlf, sizeof crlf - 1));
+    CHECK(!sh_mb_text_same(crlf, sizeof crlf - 1, other, sizeof other - 1));
+    CHECK(!sh_mb_text_same(lone_cr, sizeof lone_cr - 1, lf, sizeof lf - 1));   /* a lone CR is content */
+    CHECK(!sh_mb_text_same(gap, sizeof gap - 1, lf, sizeof lf - 1));           /* an inner blank line too */
+    CHECK(!sh_mb_text_same(lf, sizeof lf - 1, (const unsigned char *)"{", 1));
+    CHECK(sh_mb_text_same((const unsigned char *)"\r\n", 2, (const unsigned char *)"", 0));
 }
 
 /* ------------------------------------------------------ render programs ---- */
@@ -1510,6 +1527,7 @@ static void rp_case(const char *tmp, int which, const char *needle)
 
 static void test_renderprogs(const char *tmp)
 {
+    test_text_same();
     test_md5fold();
     test_spirv_names();
     {
