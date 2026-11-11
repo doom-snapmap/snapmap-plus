@@ -4,8 +4,8 @@
  * (modstore.c, modmigrate.c, modbundle.c, modstock.c and what they pull in)
  * and no engine, DLL or WebView code.
  *
- *   snapmap-plus-store check <store>
- *   snapmap-plus-store migrate <store> [--doom <DOOM folder>]
+ *   snapmap-plus-store check <store> [--saves <savegame.user folder>]
+ *   snapmap-plus-store migrate <store> [--doom <DOOM folder>] [--saves <folder>]
  *
  * <store> is the data folder, %LOCALAPPDATA%\snapmap-plus (mods\ and the
  * retired removed-mods\ and overrides\ are inside it).
@@ -14,19 +14,27 @@
  * layout, blobs\, legacy\, the old record files, the second upgrade step,
  * removed-mods\ and its record section, package entries of overrides\ the
  * record does not mark as migrated, the loose files of overrides\ and
- * strings\strids.json not yet moved (or a document that cannot be), and an
- * overrides\ or strings\ folder ready to retire. It changes nothing. Exit 0
- * clean, 1 work to do, 2 error.
+ * strings\strids.json not yet moved (or a document that cannot be), an
+ * overrides\ or strings\ folder ready to retire, mod folders of an earlier
+ * shape and the second builds the product made of them, mods\.builds\ and
+ * the record's retired sections, and maps of an earlier shape (My Maps, the
+ * data folder's rawmap.json, prefabs\); what an earlier run left as it was
+ * and that has not changed since is listed but is not work. It changes
+ * nothing. Exit 0 clean, 1 work to do, 2 error.
  *
  * migrate runs, in order, the layout upgrade (sh_ms_upgrade), the bin sweep
  * (sh_ms_bin_sweep), the overrides migration (sh_modmigrate_run), the loose
- * step into mods\my-overrides (sh_modmigrate_loose_run) and the retirement of
- * overrides\ and strings\ (sh_modmigrate_retire), each only when check finds
- * its work, with every delete going to the Windows Recycle Bin
+ * step into mods\my-overrides (sh_modmigrate_loose_run), the retirement of
+ * overrides\ and strings\ (sh_modmigrate_retire), then the conversion to the
+ * one shape (store_convert.h: mod folders, maps, then .builds\ and the
+ * record's retired sections), each only when check finds its work, with
+ * every delete going to the Windows Recycle Bin
  * (store_recycle.h). The overrides migration and the loose files read the
  * game's archives for stock pointers (modstock.h): the folder given with
  * --doom, else the one Steam names; without either they are reported and left
- * for a later run. One line per
+ * for a later run; so are the mod folders to convert, which are built. My
+ * Maps is the player's Saved Games\id Software\DOOM\base\savegame.user unless
+ * --saves names another (a copy, for a test). One line per
  * action and a summary. Exit 0 done (or nothing to do), 1 partial (work is
  * left that a later run can do), 2 error. Idempotent: a second run finds
  * nothing and changes nothing. It refuses to run while DOOM is running.
@@ -54,5 +62,8 @@ void sh_store_tool_set_output(sh_store_out_fn fn, void *context);
 void sh_store_tool_set_discard(sh_ms_discard_fn fn, void *context, const char *verb);
 void sh_store_tool_set_doom_running(int (*fn)(void));
 void sh_store_tool_set_steam(int steam);
+/* The savegame.user folder the tool reads My Maps from (NULL or "" none);
+ * without a call, the player's own. */
+void sh_store_tool_set_saves(const wchar_t *root);
 
 #endif /* SNAPMAP_PLUS_STORE_TOOL_H */

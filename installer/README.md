@@ -299,6 +299,36 @@ everything in `overrides\` is in `mods\` that folder goes to the Recycle Bin, an
 `strings\` once its strings are moved; a skipped entry (a ZIP) keeps `overrides\`.
 A package added to `overrides\` after that first move is moved by the next check
 and migrate, so running `update` again (or `migrate`) picks it up.
+
+The same run converts, once, everything an earlier release left in an earlier
+shape, because the game reads only the current one:
+
+- every mod folder in `mods\` (outside `mods\maps\`) with a mod.json of an
+  earlier release (a format-1 block, an author `id`, `shadows`, `stock` or
+  another retired key, a `package.json`): it gets its salt, its own
+  `mods/<old key>/` paths and texts become `mods/<salt>/`, its strings keys
+  become `<salt>_<key>` with every `#str_` reference to them, the block is
+  written in the current format and the folder is built under the current
+  rules. The folder keeps its name; the folder as it was goes to the Recycle
+  Bin. A folder that cannot be converted (a binary file naming its old key, a
+  build the current rules refuse) is left exactly as it was, with a line
+  saying why, and is not tried again until it changes;
+- second builds of one mod that Snapmap+ made (`<key>@<hash16>` folders and
+  those under `downloads\` or `imports\`) go to the Recycle Bin once the
+  player's own folder is converted, and so does `mods\.builds\`;
+- every saved map in My Maps (both renderers share
+  `Saved Games\id Software\DOOM\base\savegame.user`), `rawmap.json` and every
+  prefab under `prefabs\`: their mod rows and placed names follow the salts,
+  their retired carriers move into the map's member, and the file is written
+  back with a copy of it as it was beside it (`<name>.before-snapmap-plus-1.0`;
+  a saved map's `map.decl.verify` is signed again for the account its present
+  signature matches). A map that names a mod no converted folder provides, or
+  whose signature matches no account, is left untouched with its cause.
+
+What was converted is kept in the `converted` section of
+`mods\snapmap-plus.json` (each old key and old build hash with its salt), and
+the record's retired sections (`cache`, `aliases`, `snapshots`, `renamed`,
+`downloads`) are removed. Building needs the DOOM folder, as `overrides\` does.
 Everything it deletes goes to the Recycle Bin. A missing tool, an altered one, or a
 check or migrate that does not finish is a warning, never a failed install; the
 warning gives the command to run by hand with DOOM closed,

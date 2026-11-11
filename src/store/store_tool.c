@@ -9,6 +9,8 @@
 
 #include "store_tool.h"
 #include "store_recycle.h"
+#include "store_convert.h"
+#include "store_saves.h"
 #include "modstore.h"
 #include "modmigrate.h"
 #include "modlegacy.h"
@@ -27,6 +29,8 @@ static int (*g_running)(void);
 static int g_steam = 1;
 static int g_log_on;
 static sh_store_recycle_stats g_rc;
+static const wchar_t *g_saves_seam;
+static int g_saves_seam_set;
 
 void sh_store_tool_set_output(sh_store_out_fn fn, void *context) { g_out = fn; g_out_ctx = context; }
 void sh_store_tool_set_discard(sh_ms_discard_fn fn, void *context, const char *verb)
@@ -37,6 +41,7 @@ void sh_store_tool_set_discard(sh_ms_discard_fn fn, void *context, const char *v
 }
 void sh_store_tool_set_doom_running(int (*fn)(void)) { g_running = fn; }
 void sh_store_tool_set_steam(int steam) { g_steam = steam; }
+void sh_store_tool_set_saves(const wchar_t *root) { g_saves_seam = root; g_saves_seam_set = 1; }
 
 /* ------------------------------------------------------------ output ---- */
 
@@ -210,6 +215,8 @@ typedef struct st_store {
     wchar_t *dir;                       /* the data folder, absolute */
     char *u8;                           /* the same, UTF-8 */
     char mods[ST_PATH_MAX];             /* <store>\mods, UTF-8 */
+    wchar_t *saves;                     /* savegame.user (My Maps), or NULL */
+    int stock;                          /* the game's archives are registered */
 } st_store;
 
 typedef struct st_scan {
@@ -219,8 +226,24 @@ typedef struct st_scan {
     unsigned ov_entries;
     int ov_changed;                     /* entries added or changed since a completed migration */
     sh_modmigrate_loose_check lc;       /* the loose layer, the strings document, the retirements */
+    sh_conv_check cv;                   /* folders and maps of earlier shapes, .builds\, retired sections */
+    int conv_kinds;
     int kinds;
 } st_scan;
+
+static void st_line(void *context, int err, const char *line);
+static void st_conv_opts(const st_store *s, sh_conv_opts *o)
+{
+    memset(o, 0, sizeof *o);
+    o->data = s->u8;
+    o->mods = s->mods;
+    o->saves = s->saves;
+    o->stock = s->stock;
+    o->discard = g_discard ? g_discard : sh_store_recycle;
+    o->discard_context = g_discard ? g_discard_ctx : (void *)&g_rc;
+    o->line = st_line;
+    o->line_context = NULL;
+}
 
 static unsigned st_count(const wchar_t *dir)
 {
@@ -265,11 +288,17 @@ static int st_scan_store(const st_store *s, st_scan *out)
     free(ov);
     /* overrides\ goes only after the passes leave nothing in it. */
     if (out->ov_due || out->ov_changed > 0) out->lc.overrides_done = 0;
+    {
+        sh_conv_opts o;
+        st_conv_opts(s, &o);
+        out->conv_kinds = sh_conv_scan(&o, &out->cv, 0);
+        if (out->conv_kinds < 0) out->conv_kinds = 0;
+    }
     g_log_on = saved;
     out->kinds = (out->lc.loose > 0 || out->lc.strings_due) + out->lc.strings_bad + out->lc.overrides_done +
                  out->lc.strings_done + (out->uc.layout_folders > 0) + out->uc.blobs_present + out->uc.legacy_present + (out->uc.record_files > 0) +
                  (out->uc.tidy_drops + out->uc.tidy_renames > 0 || out->uc.tidy_migration) + out->uc.bin_present +
-                 (out->uc.bin_section && !out->uc.bin_present) + (out->ov_due || out->ov_changed > 0);
+                 (out->uc.bin_section && !out->uc.bin_present) + (out->ov_due || out->ov_changed > 0) + out->conv_kinds;
     return 1;
 }
 
@@ -322,6 +351,26 @@ static void st_list(const st_scan *sc)
         st_say(0, "  strings\\strids.json: %s; fix it (a JSON object of \"id\": \"text\" pairs) or remove it", sc->lc.why);
     if (sc->lc.overrides_done) st_say(0, "  overrides\\: every entry is in mods\\; the folder goes to the Recycle Bin");
     if (sc->lc.strings_done) st_say(0, "  strings\\: nothing left to move; the folder goes to the Recycle Bin");
+    if (sc->cv.folders)
+        st_say(0, "  mods\\: %u mod folder(s) of an earlier release to convert to this version's shape (a salt, mods/<salt>/ "
+               "paths, strings named <salt>_<key>)", sc->cv.folders);
+    if (sc->cv.duplicates)
+        st_say(0, "  mods\\: %u second build(s) of a mod that Snapmap+ made, to go to the Recycle Bin", sc->cv.duplicates);
+    if (sc->cv.folders_left)
+        st_say(0, "  mods\\: %u folder(s) left as they were by an earlier run (they could not be converted)", sc->cv.folders_left);
+    if (sc->cv.builds_dir) st_say(0, "  mods\\.builds\\: the retired last good builds; the folder goes to the Recycle Bin");
+    if (sc->cv.sections) st_say(0, "  mods\\snapmap-plus.json: retired section(s) %s", sc->cv.section_names);
+    if (sc->cv.maps)
+        st_say(0, "  %u saved map(s), rawmap or prefab file(s) of an earlier release to convert (the first: %s)", sc->cv.maps,
+               sc->cv.first_map);
+    if (sc->cv.maps_left)
+        st_say(0, "  %u map(s) left as they were by an earlier run (they could not be converted)", sc->cv.maps_left);
+}
+
+static void st_line(void *context, int err, const char *line)
+{
+    (void)context;
+    st_emit(err, line);
 }
 
 /* ---------------------------------------------------------- commands ---- */
@@ -331,8 +380,8 @@ static void st_usage(int err)
     st_emit(err, "snapmap-plus-store -- moves a Snapmap+ store from earlier releases to the current layout");
     st_emit(err, "");
     st_emit(err, "Usage:");
-    st_emit(err, "  snapmap-plus-store check <store>");
-    st_emit(err, "  snapmap-plus-store migrate <store> [--doom <DOOM folder>]");
+    st_emit(err, "  snapmap-plus-store check <store> [--saves <savegame.user folder>]");
+    st_emit(err, "  snapmap-plus-store migrate <store> [--doom <DOOM folder>] [--saves <savegame.user folder>]");
     st_emit(err, "");
     st_emit(err, "<store> is the Snapmap+ data folder, usually %LOCALAPPDATA%\\snapmap-plus.");
     st_emit(err, "check lists what needs migrating and changes nothing (exit 0 nothing to do, 1 work to do, 2 error).");
@@ -340,13 +389,18 @@ static void st_usage(int err)
     st_emit(err, "2 error). It needs the DOOM folder to move overrides\\ (found through Steam when --doom is not");
     st_emit(err, "given); entries added to overrides\\ after an earlier migration are moved too. The loose files of");
     st_emit(err, "overrides\\ and strings\\strids.json become the mod My overrides (mods\\my-overrides), and overrides\\ and");
-    st_emit(err, "strings\\ go to the Recycle Bin once everything in them is in mods\\. Close DOOM first.");
+    st_emit(err, "strings\\ go to the Recycle Bin once everything in them is in mods\\. Mod folders of earlier releases");
+    st_emit(err, "are converted to this version's shape and built (a folder that cannot be is left as it was, with");
+    st_emit(err, "its cause), and the maps in My Maps, rawmap.json and the prefabs follow them, each file as it was");
+    st_emit(err, "kept beside it as <name>" SH_CONV_BACKUP_SUFFIX ". --saves names the folder of My Maps (the account");
+    st_emit(err, "folders of Saved Games\\id Software\\DOOM\\base\\savegame.user, found by itself). Close DOOM first.");
 }
 
 static void st_store_free(st_store *s)
 {
     free(s->dir);
     free(s->u8);
+    free(s->saves);
 }
 
 static int st_store_open(const wchar_t *arg, st_store *s)
@@ -366,6 +420,11 @@ static int st_store_open(const wchar_t *arg, st_store *s)
     /* The overrides migration and the legacy converter take UTF-8 too. */
     sh_modmigrate_set_data_root(s->u8);
     sh_modlegacy_set_data_root(s->u8);
+    sh_modlegacy_set_salter(sh_ms_assign_salt);
+    /* My Maps: the seam's folder, else the player's own. */
+    if (g_saves_seam_set) s->saves = g_saves_seam && g_saves_seam[0] ? st_full(g_saves_seam) : NULL;
+    else s->saves = sh_store_saves_root();
+    if (s->saves && !st_is_dir(s->saves)) { free(s->saves); s->saves = NULL; }
     return 1;
 }
 
@@ -418,7 +477,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         free(doom);
         return SH_STORE_ERROR;
     }
-    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose) && g_steam) doom = st_steam_doom();
+    if (!doom && (before.ov_due || before.ov_changed || before.lc.loose || before.cv.folders || before.layout_work) && g_steam) doom = st_steam_doom();
     st_say(0, "Migrating %s", s->u8);
     memset(&g_rc, 0, sizeof g_rc);
     if (g_discard) sh_ms_set_discard(g_discard, g_discard_ctx, g_discard_verb);
@@ -484,6 +543,36 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
         int r = sh_modmigrate_retire();
         if (r > 0) st_part(done, sizeof done, "%d retired folder(s) %s", r, sh_ms_discard_verb());
     }
+    /* 6. Every mod folder of an earlier release in the one shape, 7. every
+     * map the same way, 8. .builds\ and the retired record sections. */
+    {
+        sh_conv_opts o;
+        sh_conv_stats cs;
+        st_store *ws = (st_store *)s;
+        memset(&cs, 0, sizeof cs);
+        if ((before.cv.folders || before.layout_work) && doom && !ws->stock) {
+            if (!doom_u8) {
+                doom_u8 = st_utf8(doom, CP_UTF8, NULL);
+                sh_modstock_set_install(doom_u8);
+                sh_modstock_register();
+            }
+            ws->stock = 1;
+        }
+        st_conv_opts(ws, &o);
+        if (before.cv.folders || before.cv.duplicates || before.layout_work) {
+            /* (a folder the layout upgrade just wrote is beta.26's shape) */
+            sh_conv_folders(&o, &cs);
+            if (cs.waiting) need_doom = 1;
+            if (cs.converted || cs.refused || cs.removed)
+                st_part(done, sizeof done, "%u mod folder(s) converted, %u left as they were, %u second build(s) removed",
+                        cs.converted, cs.refused, cs.removed);
+        }
+        sh_conv_maps(&o, &cs);
+        if (cs.maps_converted || cs.maps_refused)
+            st_part(done, sizeof done, "%u map(s) converted, %u left as they were", cs.maps_converted, cs.maps_refused);
+        sh_conv_retire(&o, &cs);
+        if (cs.retired) st_part(done, sizeof done, "%u retired item(s) of the mod store removed", cs.retired);
+    }
     g_log_on = 0;
     sh_ms_set_discard(NULL, NULL, NULL);
     if (com) CoUninitialize();
@@ -509,7 +598,7 @@ static int st_migrate(const st_store *s, const wchar_t *doom_arg)
 
 int sh_store_tool_run(int argc, wchar_t **argv)
 {
-    const wchar_t *cmd = argc > 1 ? argv[1] : NULL, *store = NULL, *doom = NULL;
+    const wchar_t *cmd = argc > 1 ? argv[1] : NULL, *store = NULL, *doom = NULL, *saves = NULL;
     st_store s;
     int i, r;
     if (!cmd || !_wcsicmp(cmd, L"help") || !_wcsicmp(cmd, L"--help") || !_wcsicmp(cmd, L"-h")) {
@@ -527,6 +616,9 @@ int sh_store_tool_run(int argc, wchar_t **argv)
         if (!_wcsicmp(argv[i], L"--doom") && !_wcsicmp(cmd, L"migrate")) {
             if (i + 1 >= argc) { st_say(1, "error: --doom needs the DOOM folder"); return SH_STORE_ERROR; }
             doom = argv[++i];
+        } else if (!_wcsicmp(argv[i], L"--saves")) {
+            if (i + 1 >= argc) { st_say(1, "error: --saves needs the savegame.user folder"); return SH_STORE_ERROR; }
+            saves = argv[++i];
         } else if (argv[i][0] == L'-' && argv[i][1] == L'-') {
             char *u = st_utf8(argv[i], CP_UTF8, NULL);
             st_say(1, "error: unknown option %s", u ? u : "?");
@@ -540,6 +632,7 @@ int sh_store_tool_run(int argc, wchar_t **argv)
         }
     }
     if (!store) { st_say(1, "error: name the store folder, usually %%LOCALAPPDATA%%\\snapmap-plus"); st_usage(1); return SH_STORE_ERROR; }
+    if (saves) sh_store_tool_set_saves(saves);
     if (!st_store_open(store, &s)) { st_store_free(&s); return SH_STORE_ERROR; }
     r = !_wcsicmp(cmd, L"check") ? st_check(&s) : st_migrate(&s, doom);
     st_store_free(&s);

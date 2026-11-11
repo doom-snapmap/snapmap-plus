@@ -21,6 +21,7 @@
 
 #include "modstore.h"
 #include "modstore_upgrade.h"
+#include "modbundle_old.h"
 #include "mod_test_util.h"
 
 static int failures;
@@ -1237,14 +1238,23 @@ static void test_upgrade_steps(const char *tmp)
     CHECK(sh_mb_record_get(root, "layout", &rec) == 1 && rec && !strcmp(rec, "2"));
     free(rec);
     CHECK(sh_ms_upgrade(&us) == 0);   /* once */
-    /* Contract 2: a bundle.json this release cannot read is left as it was;
-     * the product files still fold into the record. */
+    /* Contract 2: a bundle.json becomes a format-1 mod.json, the shape the
+     * store tool's conversion to the one shape reads next; one without an id
+     * is left as it was; the product files still fold into the record. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2@1.0.0+1", root);
     mt_write(path, "bundle.json", "{\"format\":1,\"id\":\"alex.c2\",\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+    {
+        char bad[MAX_PATH];
+        _snprintf_s(bad, sizeof bad, _TRUNCATE, "%s\\noid@1.0.0+1", root);
+        mt_write(bad, "bundle.json", "{\"format\":1,\"version\":\"1.0.0\",\"build\":1,\"files\":[]}");
+    }
     mt_write(root, "claims.json", "{\"claims\":{\"x\":{\"ref\":\"1\"}}}");
     g_logged = 0;
     CHECK(sh_ms_upgrade(&us) == 1 && us.ran && us.failed == 1 && us.records == 1);
-    CHECK(log_has("alex.c2@1.0.0+1: left as it was") && mt_has(path, "bundle.json") && !mt_has(root, "claims.json"));
+    CHECK(log_has("noid@1.0.0+1: left as it was") && !mt_has(root, "claims.json"));
+    CHECK(log_has("alex.c2@1.0.0+1: mod.json written for alex.c2@1.0.0+1"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.c2", root);
+    CHECK(mt_has(path, "mod.json") && !mt_has(path, "bundle.json") && sh_mb_old_is_old(path));
     rec = NULL;
     CHECK(sh_mb_record_get(root, "claims", &rec) == 1 && rec && strstr(rec, "\"ref\""));
     free(rec);

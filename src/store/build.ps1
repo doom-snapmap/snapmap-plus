@@ -7,7 +7,8 @@ param(
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-$Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c",
+$Sources = @("store_main.c", "store_tool.c", "store_recycle.c", "store_seam.c", "store_convert.c", "store_saves.c",
+             "store_deflate.c", "../backend/prefab_block.c",
              "../backend/modstore.c", "../backend/modstore_upgrade.c", "../backend/modmigrate.c", "../backend/modlegacy.c", "../backend/modbundle.c",
              "../backend/modsalt.c", "../backend/modbundle_old.c", "../backend/companion.c", "../backend/modstock.c",
              "../backend/modmanifest.c", "../backend/map_legacy_payload.c", "../backend/map_old.c",
@@ -26,7 +27,7 @@ $objs = Invoke-CbCompile -WorkDir $here -Sources $Sources -Flags "/nologo /O2 /W
     -IncludeDirs @((Join-Path $here "..\backend"), (Join-Path $here "..\common")) -Log (Join-Path $outDir "store-build.log")
 $objArgs = ($objs | ForEach-Object { '"..\..\build\obj\store\' + (Split-Path -Leaf $_) + '"' }) -join " "
 $cl = "cl /nologo /O2 /W3 /MT /Brepro $objArgs " +
-      "/Fe:..\..\build\snapmap-plus-store.exe /link /SUBSYSTEM:CONSOLE shell32.lib ole32.lib advapi32.lib /Brepro"
+      "/Fe:..\..\build\snapmap-plus-store.exe /link /SUBSYSTEM:CONSOLE shell32.lib ole32.lib advapi32.lib bcrypt.lib /Brepro"
 Invoke-CbLink -WorkDir $here -Command $cl -Objects $objs -Output (Join-Path $outDir "snapmap-plus-store.exe") `
     -Log (Join-Path $outDir "store-link.log")
 Write-Host "built $(Join-Path $outDir 'snapmap-plus-store.exe')"
