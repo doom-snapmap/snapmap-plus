@@ -159,7 +159,7 @@ func TestInstall2018BuildCleansAnEarlierBlindUpdate(t *testing.T) {
 		}
 	})
 	for _, want := range []string{"Cleaning the DOOM folder", currentProxy, "Cleaning up after the " + legacyReleaseTag + " installer",
-		"Backups of files that were not ours"} {
+		"Other programs' files Snapmap+ had replaced"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // entryFixture is shared with the Python release renderer. Both suites check it
@@ -274,5 +275,17 @@ func TestTerminalWidthIsClampedToSomethingReadable(t *testing.T) {
 	t.Setenv("COLUMNS", "")
 	if w := terminalWidth(); w != 80 {
 		t.Errorf("default width = %d, want 80", w)
+	}
+}
+
+// A headline too long for the index is cut between characters, never inside one.
+func TestRenderIndexCutsNonASCIIHeadlinesWhole(t *testing.T) {
+	var b strings.Builder
+	renderIndex(&b, []indexRow{{Tag: "v1.0.0", Date: "2026-11-10", Headline: strings.Repeat("é—ü ", 40)}}, 60)
+	if !utf8.ValidString(b.String()) {
+		t.Fatalf("index holds a cut character: %q", b.String())
+	}
+	if !strings.Contains(b.String(), "...") {
+		t.Errorf("long headline was not shortened: %q", b.String())
 	}
 }

@@ -122,7 +122,7 @@ func migrateUserData() {
 				if err := copyMissingFile(s, t); err == nil && identicalFiles(s, t) {
 					os.Remove(s)
 				} else {
-					ui.Warn("kept legacy metadata %s -- the destination could not be verified", s)
+					ui.Warn("left %s in the old open-snaphak folder because its copy could not be checked; you can delete it", s)
 				}
 			}
 			os.Remove(oldAD) // Only an empty directory can be retired.

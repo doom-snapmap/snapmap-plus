@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 // repoSlug is the GitHub "owner/repo" the installer downloads releases from.
@@ -160,7 +162,8 @@ type ghAsset struct {
 // downloadReleaseFn is the download step; tests replace it so routing runs without a network.
 var downloadReleaseFn = downloadRelease
 
-// downloadRelease resolves the requested release (stable / --beta pre-release / --release tag), downloads
+// downloadRelease resolves the requested release (fetchRelease), refuses one older than the
+// installation in f.doom unless --release names it, downloads
 // its snapmap-plus-bundle.zip asset (with the token if set), and extracts it into a temp dir.
 func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error) {
 	noop := func() {}
@@ -169,6 +172,11 @@ func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error
 	rel, err := fetchRelease(f, token)
 	if err != nil {
 		return "", "", noop, err
+	}
+	if f.release == "" {
+		if err := refuseDowngrade(f.doom, rel.TagName, f.beta); err != nil {
+			return "", "", noop, err
+		}
 	}
 	var asset *ghAsset
 	for i := range rel.Assets {
@@ -198,67 +206,133 @@ func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error
 	return tmp, rel.TagName, cleanup, nil
 }
 
-// fetchRelease picks: an explicit --release tag, the latest --beta pre-release, or the latest stable
-// (falling back to the newest beta while no stable has been published yet).
+// fetchRelease picks the release to install: an explicit --release tag, else the newest release by
+// version -- with --beta of either kind, otherwise the newest stable one (the newest beta while no
+// stable release exists).
 func fetchRelease(f flags, token string) (*ghRelease, error) {
-	base := releasesURL()
-	switch {
-	case f.release != "":
+	if f.release != "" {
 		var r ghRelease
-		return &r, apiGet(base+"/tags/"+f.release, token, &r)
-	case f.beta:
-		var list []ghRelease
-		if err := apiGet(base+"?per_page=30", token, &list); err != nil {
+		if err := apiGet(releasesURL()+"/tags/"+url.PathEscape(f.release), token, &r); err != nil {
 			return nil, err
 		}
-		for i := range list {
-			if list[i].Prerelease {
-				return &list[i], nil
-			}
-		}
-		return nil, fmt.Errorf("no beta build is available yet")
-	default:
-		var r ghRelease
-		err := apiGet(base+"/latest", token, &r)
-		if err == nil {
-			return &r, nil
-		}
-		// The latest-release endpoint excludes prereleases. On failure, inspect the list
-		// and prefer a stable release; report the beta fallback when none exists.
-		var list []ghRelease
-		if lerr := apiGet(base+"?per_page=30", token, &list); lerr == nil {
-			if pick, isBeta := pickDefaultRelease(list); pick != nil {
-				if isBeta && !betaFallbackNoted {
-					betaFallbackNoted = true
-					ui.Note("No stable release has been published yet -- using the newest beta (%s).", pick.TagName)
-				}
-				return pick, nil
-			}
-		}
+		return &r, nil
+	}
+	list, err := listReleases(token)
+	if err != nil {
 		return nil, err
 	}
+	if r := newestRelease(list, f.beta); r != nil {
+		return r, nil
+	}
+	return nil, fmt.Errorf("no Snapmap+ release has been published yet -- try again later")
 }
 
-// betaFallbackNoted keeps the newest-beta fallback notice to one line per run (an update resolves
-// the release twice: for the bundle and for the installer itself).
-var betaFallbackNoted bool
+// releasePages bounds how many pages of 100 releases a listing reads.
+const releasePages = 10
 
-// pickDefaultRelease expects newest-first input. It returns the newest stable
-// release, or the newest prerelease and a true fallback flag. An empty list returns
-// nil.
-func pickDefaultRelease(list []ghRelease) (*ghRelease, bool) {
-	for i := range list {
-		if !list[i].Prerelease {
-			return &list[i], false
+// listReleases returns every published release, newest version first.
+func listReleases(token string) ([]ghRelease, error) {
+	var all []ghRelease
+	for page := 1; page <= releasePages; page++ {
+		var batch []ghRelease
+		if err := apiGet(fmt.Sprintf("%s?per_page=100&page=%d", releasesURL(), page), token, &batch); err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < 100 {
+			break
 		}
 	}
-	for i := range list {
-		if list[i].Prerelease {
-			return &list[i], true
+	published := all[:0]
+	for _, r := range all {
+		if !r.Draft {
+			published = append(published, r)
 		}
 	}
-	return nil, false
+	sortReleases(published)
+	return published, nil
 }
+
+// sortReleases orders releases newest version first; a tag that is not a version goes last.
+func sortReleases(list []ghRelease) {
+	sort.SliceStable(list, func(i, j int) bool {
+		vi, vj := releaseVersionRE.MatchString(list[i].TagName), releaseVersionRE.MatchString(list[j].TagName)
+		if vi != vj || !vi {
+			return vi
+		}
+		c, _ := compareVersions(list[i].TagName, list[j].TagName)
+		return c > 0
+	})
+}
+
+// newestRelease returns the newest published release by version: of either kind with beta, else
+// the newest stable release, or the newest beta when none is stable. It returns nil when nothing is
+// published.
+func newestRelease(list []ghRelease, beta bool) *ghRelease {
+	var newest, newestStable *ghRelease
+	for i := range list {
+		r := &list[i]
+		if r.Draft || !releaseVersionRE.MatchString(r.TagName) {
+			continue
+		}
+		if c, _ := compareVersions(r.TagName, tagOf(newest)); newest == nil || c > 0 {
+			newest = r
+		}
+		if c, _ := compareVersions(r.TagName, tagOf(newestStable)); !r.Prerelease && (newestStable == nil || c > 0) {
+			newestStable = r
+		}
+	}
+	if beta || newestStable == nil {
+		return newest
+	}
+	return newestStable
+}
+
+func tagOf(r *ghRelease) string {
+	if r == nil {
+		return ""
+	}
+	return r.TagName
+}
+
+// newerInstalled is a release choice older than the installed version: an install or update without
+// --release never moves to an older version.
+type newerInstalled struct {
+	installed, chosen string
+	beta              bool
+}
+
+func (e *newerInstalled) Error() string {
+	msg := fmt.Sprintf("Snapmap+ %s is installed, which is newer than %s, the newest ", e.installed, e.chosen)
+	if e.beta {
+		msg += "published release; nothing was changed."
+	} else {
+		msg += "stable release; nothing was changed. For the newest beta, run: snapmap-plus update --beta."
+	}
+	return msg + fmt.Sprintf(" To install %s anyway, run: snapmap-plus update --release %s", e.chosen, e.chosen)
+}
+
+// refuseDowngrade returns a newerInstalled when doom's recorded installation is newer than tag.
+func refuseDowngrade(doom, tag string, beta bool) error {
+	rec, err := loadRecord()
+	if err != nil || !samePath(rec.DoomPath, doom) {
+		return nil
+	}
+	if c, ok := compareVersions(tag, rec.Version); ok && c < 0 {
+		return &newerInstalled{installed: rec.Version, chosen: tag, beta: beta}
+	}
+	return nil
+}
+
+// apiClient bounds every Releases API request, so a stalled network fails with a message.
+var apiClient = &http.Client{Timeout: 30 * time.Second}
+
+// downloadClient bounds a download: the wait for the server to answer, and the whole transfer.
+var downloadClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{Transport: t, Timeout: 15 * time.Minute}
+}()
 
 func apiGet(url, token string, out interface{}) error {
 	req, err := http.NewRequest("GET", url, nil)
@@ -270,7 +344,7 @@ func apiGet(url, token string, out interface{}) error {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("couldn't reach GitHub (%v) -- check your internet connection and try again", err)
 	}
@@ -290,9 +364,9 @@ func friendlyHTTP(code int, token string) string {
 		return "GitHub denied or rate-limited the request (403) -- wait a few minutes and try again"
 	case http.StatusNotFound: // 404
 		if token == "" {
-			return "couldn't find the release (404) -- if no stable version has been released yet, run:  snapmap-plus update --beta"
+			return "couldn't find that release (404) -- list the published versions with: snapmap-plus changelog all"
 		}
-		return "release not found (404) -- check the version, or your token may not have access to this repository"
+		return "couldn't find that release (404) -- check the version, or your token may not have access to this repository"
 	default:
 		return fmt.Sprintf("GitHub returned an error (HTTP %d) -- try again in a moment", code)
 	}
@@ -316,7 +390,7 @@ func downloadAsset(a *ghAsset, token, dest string) error {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("couldn't download %s (%v) -- check your internet connection and try again", a.Name, err)
 	}
@@ -403,7 +477,7 @@ func cmdSetToken(args []string) error {
 	if err := os.WriteFile(p, []byte(strings.TrimSpace(args[0])), 0o600); err != nil {
 		return fmt.Errorf("couldn't save your token (%v)", err)
 	}
-	ui.OK("Token saved. You can now run:  snapmap-plus update --beta")
+	ui.OK("Token saved. Run: snapmap-plus update")
 	return nil
 }
 
@@ -411,19 +485,10 @@ func cmdSetToken(args []string) error {
 // or selects a requested version. Fetching current release bodies also exposes
 // notes newer than the installed version.
 func cmdChangelog(f flags, args []string) error {
-	token := resolveToken(f)
-	var list []ghRelease
-	if err := apiGet(releasesURL()+"?per_page=30", token, &list); err != nil {
+	list, err := listReleases(resolveToken(f))
+	if err != nil {
 		return err
 	}
-	// Drafts are not published releases; nobody can install one.
-	published := list[:0]
-	for _, r := range list {
-		if !r.Draft {
-			published = append(published, r)
-		}
-	}
-	list = published
 	if len(list) == 0 {
 		ui.Skip("No releases have been published yet.")
 		return nil
@@ -504,23 +569,6 @@ func headerFor(r ghRelease, installed string) releaseHeader {
 	}
 }
 
-// releaseHeadline formats a one-line "tag (beta)   date   <- you have this" summary for a release.
-func releaseHeadline(r ghRelease, installed string) string {
-	kind := ""
-	if r.Prerelease {
-		kind = " (beta)"
-	}
-	date := r.PublishedAt
-	if len(date) >= 10 {
-		date = date[:10]
-	}
-	you := ""
-	if r.TagName == installed {
-		you = "   <- you have this"
-	}
-	return fmt.Sprintf("%s%s   %s%s", r.TagName, kind, date, you)
-}
-
 // unzip extracts src into dest, guarding against zip-slip path traversal.
 func unzip(src, dest string) error {
 	r, err := zip.OpenReader(src)
@@ -532,7 +580,7 @@ func unzip(src, dest string) error {
 	for _, zf := range r.File {
 		target := filepath.Join(dest, filepath.FromSlash(zf.Name))
 		if !strings.HasPrefix(target, prefix) {
-			return fmt.Errorf("unsafe zip entry: %s", zf.Name)
+			return fmt.Errorf("the download contains an unsafe file path (%s) and was refused -- run the command again; if it repeats, report it", zf.Name)
 		}
 		if zf.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {

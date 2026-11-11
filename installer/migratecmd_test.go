@@ -12,6 +12,12 @@ import (
 // withTool is false) in `mode`, and returns what the installer printed, the tool's indented lines, the
 // stub's argument log and the command's error.
 func runCmdMigrate(t *testing.T, withTool bool, mode string, f flags) (printed, tool string, calls []string, err error) {
+	return runCmdMigrateTool(t, withTool, true, mode, f)
+}
+
+// runCmdMigrateTool is runCmdMigrate with the tool recorded in install.json as the copy an install
+// placed, or not.
+func runCmdMigrateTool(t *testing.T, withTool, recorded bool, mode string, f flags) (printed, tool string, calls []string, err error) {
 	t.Helper()
 	appdata := filepath.Join(t.TempDir(), "appdata")
 	t.Setenv("LOCALAPPDATA", appdata)
@@ -21,8 +27,18 @@ func runCmdMigrate(t *testing.T, withTool bool, mode string, f flags) (printed, 
 			t.Fatal(e)
 		}
 		mkdirAll(t, appDataDir())
-		if e := copyFile(self, filepath.Join(appDataDir(), storeToolName)); e != nil {
+		placed := filepath.Join(appDataDir(), storeToolName)
+		if e := copyFile(self, placed); e != nil {
 			t.Fatal(e)
+		}
+		if recorded {
+			sum, e := fileSHA256(placed)
+			if e == nil {
+				e = saveExecutableRecord(appDataDir(), executableRecord{storeToolName: sum})
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
 		}
 	}
 	log := filepath.Join(t.TempDir(), "calls.txt")
@@ -78,7 +94,7 @@ func TestCmdMigrateFailsWhenTheToolDidNotFinish(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a partial migration passed:\n%s", printed)
 	}
-	if !strings.Contains(printed, "did not finish migrating your mods folder") {
+	if !strings.Contains(printed, "did not finish moving your mods") {
 		t.Errorf("output lacks the warning naming the command:\n%s", printed)
 	}
 }
@@ -100,5 +116,16 @@ func TestCmdMigrateWithoutAnInstallOrDoomFlagFails(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("the tool ran without a DOOM folder: %q", calls)
+	}
+}
+
+// A store tool the install record does not list as placed by Snapmap+ is never run.
+func TestCmdMigrateRefusesAnUnrecordedTool(t *testing.T) {
+	_, _, calls, err := runCmdMigrateTool(t, true, false, "work", flags{doom: `D:\Games\DOOM`})
+	if err == nil || !strings.Contains(err.Error(), "is not the copy Snapmap+ placed") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("an unrecorded tool was run: %q", calls)
 	}
 }

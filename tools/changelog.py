@@ -27,6 +27,10 @@ COLLAPSED_RE = re.compile(r"^_(?P<text>.+?)_\s*$")
 
 GROUP_KEYS = {"New": "added", "Improved": "improved", "Fixed": "fixed"}
 
+# The headline of the skeleton prepare-release opens when drafting failed; it must be rewritten
+# before the entry is merged or released.
+UNWRITTEN = "NEEDS WRITING"
+
 
 def _split_sections(text):
     """Yield (header_line, body_lines) for every '## ' block, in file order."""
@@ -99,11 +103,17 @@ def find(sections, tag):
     return None
 
 
-def lint(text):
-    """Return human-readable problems; empty list means the file is valid."""
+def unwritten(section):
+    """True for the skeleton entry that still needs writing."""
+    return section["headline"].strip() == UNWRITTEN
+
+
+def lint(text, allow_unwritten=False):
+    """Return human-readable problems; empty list means the file is valid.
+    allow_unwritten accepts the skeleton entry, for the draft step that opens it for review."""
     problems = []
     seen = set()
-    for header, _ in _split_sections(text):
+    for header, body_lines in _split_sections(text):
         m = HEADER_RE.match(header)
         if not m:
             problems.append(
@@ -125,6 +135,11 @@ def lint(text):
                 tag + " is marked (" + m.group("channel") + ") but its tag "
                 "means it is " + expected
             )
+        if not allow_unwritten and unwritten(_parse_body(body_lines)):
+            problems.append(
+                tag + " still has the " + UNWRITTEN + " draft; write the entry "
+                "before merging it"
+            )
     return problems
 
 
@@ -141,6 +156,8 @@ def main(argv=None):
     mode.add_argument("--section", metavar="TAG")
     mode.add_argument("--has", metavar="TAG")
     mode.add_argument("--lint", action="store_true")
+    ap.add_argument("--allow-unwritten", action="store_true",
+                    help="with --lint: accept the " + UNWRITTEN + " draft")
     args = ap.parse_args(argv)
 
     if args.section and not args.out:
@@ -154,7 +171,7 @@ def main(argv=None):
         return 1
 
     if args.lint:
-        problems = lint(text)
+        problems = lint(text, allow_unwritten=args.allow_unwritten)
         for problem in problems:
             print("::error::" + args.file + ": " + problem, file=sys.stderr)
         return 1 if problems else 0
@@ -171,6 +188,10 @@ def main(argv=None):
             + " -- run the prepare-release workflow for this version first",
             file=sys.stderr,
         )
+        return 1
+    if unwritten(found):
+        print("::error::the " + args.section + " entry in " + args.file + " still has the "
+              + UNWRITTEN + " draft -- write it before releasing", file=sys.stderr)
         return 1
     _write(args.out, found["body"] + "\n")
     return 0

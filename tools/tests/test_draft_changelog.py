@@ -188,7 +188,7 @@ class TestRender(unittest.TestCase):
         self.assertEqual(parsed[0]["tag"], "v0.2.2-beta.1")
         self.assertEqual(parsed[0]["headline"], "One-prompt map installs")
         self.assertEqual(len(parsed[0]["added"]), 1)
-        self.assertEqual(changelog.lint(out), [])
+        self.assertEqual(changelog.lint(out, allow_unwritten=True), [])
 
     def test_an_unvalidated_draft_really_would_forge_a_section(self):
         """Invalid entries must fail validation before rendering."""
@@ -205,7 +205,7 @@ class TestSkeleton(unittest.TestCase):
         out = dc.render_skeleton("v0.2.2-beta.1", "2026-09-05",
                                  ["Install maps in one step", "Fix the dialog"],
                                  "the API call failed")
-        self.assertEqual(changelog.lint(out), [])
+        self.assertEqual(changelog.lint(out, allow_unwritten=True), [])
         self.assertIn("NEEDS WRITING", out)
         self.assertIn("the API call failed", out)
 
@@ -214,7 +214,7 @@ class TestSkeleton(unittest.TestCase):
         the grammar or produce a 20-line skeleton."""
         out = dc.render_skeleton("v0.2.2-beta.1", "2026-09-05", [],
                                  "ValidationError: 3 errors\nline two\nline three")
-        self.assertEqual(changelog.lint(out), [])
+        self.assertEqual(changelog.lint(out, allow_unwritten=True), [])
         self.assertIn("line two", out)
         self.assertNotIn("\n\nline two", out)
 
