@@ -477,6 +477,23 @@ int  sh_mb_rekey_path(const char *rel, const char *from, const char *to, char *o
  * not a JSON object or salt is not a salt. */
 char *sh_mb_salt_modjson(const char *text, size_t n, const char *from, const char *salt, size_t *out_len);
 
+/* A new mod's strings keys (DECISIONS 6). sh_mb_salt_strings returns the
+ * mod.json text with every key of every "strings".<language> object that
+ * lacks the "<salt>_" prefix renamed "<salt>_<key>" (an earlier spelling's
+ * leading "mods/<salt>/", or a copy's "<from>_" when `from` is a salt,
+ * dropped; any character outside [A-Za-z0-9_] made '_'); every other byte
+ * is kept. *keys (free with sh_mb_strkeys_free)
+ * lists each renamed key once, from -> to. NULL when the text does not read
+ * as a JSON object or salt is not a salt. sh_mb_restr_text rewrites every
+ * "#str_<from>" reference (any case, ending at a name boundary) in a text to
+ * "#str_<to>": the count, and with `out` the rewritten text (malloc'd, NULL
+ * when the count is 0); (size_t)-1 when out of memory. */
+typedef struct sh_mb_strkey { char *from, *to; } sh_mb_strkey;
+char  *sh_mb_salt_strings(const char *text, size_t n, const char *from, const char *salt, sh_mb_strkey **keys, size_t *count,
+                          size_t *out_len);
+size_t sh_mb_restr_text(const char *text, size_t n, const sh_mb_strkey *keys, size_t count, char **out, size_t *out_len);
+void   sh_mb_strkeys_free(sh_mb_strkey *keys, size_t count);
+
 /* The classes counts as one line ("2 adds, 0 borrows, 1 edits, 0 replaces, 0 editor, 0 surfaces"). */
 void sh_mb_classes_text(const sh_mb_classes *c, char *out, size_t cap);
 

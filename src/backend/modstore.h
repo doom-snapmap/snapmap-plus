@@ -152,12 +152,16 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * files becomes mods/<salt>/ (decl text and any other text, the folder
  * segments of paths under assets/, both spellings, sh_mb_rekey_text and
  * sh_mb_rekey_path), and its block becomes {"format": 2, "salt": <salt>}
- * (sh_mb_salt_modjson). `from` is normally the folder's own name; the store
+ * (sh_mb_salt_modjson). Its strings keys gain the salt's prefix, "<key>"
+ * becoming "<salt>_<key>", and every "#str_<key>" reference in its own text
+ * files (mod.json among them) follows (sh_mb_salt_strings,
+ * sh_mb_restr_text; DECISIONS 6), so an author writes plain keys in a new
+ * folder. `from` is normally the folder's own name; the store
  * tool passes a converted package's id. The folder keeps its name: the result
  * is staged beside it ("<name>.staging-<pid>", unchanged files hard-linked)
  * and swapped in with two renames, the second undone on failure; the old
  * folder goes to the Recycle Bin. A file that cannot be read, a binary file
- * naming mods/<from>/, files under another mod's mods/<x>/, two files landing
+ * naming mods/<from>/ or one of its strings, files under another mod's mods/<x>/, two files landing
  * on one path, or a refused rename leaves the folder exactly as it was.
  * Works on any folder (the store tool salts a staged folder outside the
  * store); a new folder in a map's place is refused (a place holds received
@@ -168,6 +172,15 @@ int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
  * folder untouched (also an earlier shape, or a mod.json that is not a JSON
  * object). A refusal of a store folder is also recorded as its build cause. */
 int  sh_ms_assign_salt(const char *folder, const char *from, char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
+
+/* The same salting written to a new folder `dest` (it must not exist; files
+ * the salting does not rewrite are hard-linked), with `modjson` (a fresh
+ * author text: no block, no retired key) in place of the folder's own
+ * descriptor; `folder` is never touched. The store tool converts a folder
+ * of an earlier shape through it: salted and built in `dest`, swapped in
+ * only when the build succeeds. Returns 1 with the salt, -1 with the cause. */
+int  sh_ms_salt_copy(const char *folder, const char *modjson, size_t modjson_len, const char *from, const char *dest,
+                     char salt_out[SH_SALT_LEN + 1], char *cause, size_t cause_cap);
 
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* carried files copied into the store */

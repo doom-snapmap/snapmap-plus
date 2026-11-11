@@ -139,8 +139,11 @@ already-cooked idTech 6 files at the paths the game asks for. Converting assets 
 Doomforge's job, not this product's. Each mod has a salt, eight letters and digits it is given once,
 the first time Snapmap+ sees the folder; new names live under `mods/<salt>/`, and every `strings` key
 is `<salt>_<name>` in letters, digits and `_` (no `/`), referenced from a decl as `#str_<salt>_<name>`.
-A folder made by hand has no salt until its first scan, so give it strings after that scan has
-written the salt into `mod.json`. The folder's name is yours and you can rename it at any time. A stock file
+A folder made by hand has no salt until its first scan: write its strings with plain keys
+(`imp_blue_name`, referenced `#str_imp_blue_name`), and that scan names them `<salt>_imp_blue_name`
+and rewrites the folder's own references with them. After that scan a new key must carry the
+prefix itself; one without it is refused with a sentence naming the expected prefix. The folder's
+name is yours and you can rename it at any time. A stock file
 the mod replaces is derived from its path (the bundle's `shadows`). A shadow may keep a name the stock text already carries and the game ships
 without (the stock hands model names six animations no archive holds): the builder reports it and
 does not refuse, since the engine already tolerates those names.

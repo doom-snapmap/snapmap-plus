@@ -815,8 +815,15 @@ or New mod; there is no folder watcher. Under the store lock it:
    folder of the store holds), every reference to `mods/<folder name>/` in its
    own files rewritten to `mods/<salt>/` (decl text and any other text, the
    folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
-   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s strings keys and
-   its block `{"format": 2, "salt": ...}`). Everything is read and rewritten in
+   `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s references and
+   its block `{"format": 2, "salt": ...}`). Its strings keys gain the salt's
+   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced),
+   and every `#str_<key>` reference in its own text files, `mod.json` among
+   them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
+   writes plain keys in a new folder; a binary file naming one of them refuses
+   the folder as a binary naming `mods/<folder name>/` does. After the first
+   scan a key without the prefix is refused by the build ("mod.json strings key
+   <key> is not named <salt>_<name>"). Everything is read and rewritten in
    memory first, staged beside the folder as `<name>.staging-<pid>` (unchanged
    files hard-linked), then swapped in with two renames under the same name, the
    second undone on failure; the folder as it was goes to the Recycle Bin. A
