@@ -586,7 +586,8 @@ void sh_script_hooks_gate(int gate)
     if (g_in_tick) return;        /* a gate cannot run inside the frame; never close under the runtime */
     map_close(0);                 /* the departed map's entities are gone at a map gate */
     InterlockedExchange(&g_full_logged, 0);
-    g_log_last[0] = 0;
+    free(g_log_last);
+    g_log_last = NULL;            /* a new map may say again what the last one said */
     sh_script_handles_reset();
     if (!sh_script_gate_opens(gate)) return;
     n = sh_script_map_open();
