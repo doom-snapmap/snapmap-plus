@@ -168,13 +168,26 @@ static void check_direct_image_preview(void)
     {
         char out[64];
         CHECK(g_soundLoaded == 0 && g_vmtrLoaded == 0);
-        CHECK(sh_imgpreview_list(SH_ASSET_IMAGE, 0, out, sizeof out) == 1);
+        CHECK(list_into(SH_ASSET_IMAGE, out, sizeof out) == 1);
         CHECK(strcmp(out, "textures/direct\n") == 0);
         CHECK(g_soundLoaded == 0 && g_vmtrLoaded == 0);
     }
 
     g_box[0].res = NULL;
     fclose(file);
+}
+
+/* A whole listing (owned interface text) into out; the number of names, -1 when there was none. */
+static int list_into(int kind, char *out, size_t cap)
+{
+    char *all = sh_imgpreview_list(kind);
+    int n = 0;
+    out[0] = 0;
+    if (!all) return -1;
+    if (strlen(all) < cap) strcpy_s(out, cap, all);
+    for (const char *c = all; *c; c++) n += *c == '\n';
+    sh_iface_text_free(all);
+    return n;
 }
 
 int main(void)
@@ -236,7 +249,7 @@ int main(void)
     {
         char out[2048];
         CHECK(g_soundLoaded == 0);
-        int n = sh_imgpreview_list(SH_ASSET_SOUND, 0, out, sizeof out);
+        int n = list_into(SH_ASSET_SOUND, out, sizeof out);
         CHECK(g_soundLoaded == 1);
         CHECK(n == 5);
         CHECK(strstr(out, "play_existing\n") != NULL);
@@ -244,7 +257,7 @@ int main(void)
         CHECK(sh_imgpreview_has(SH_ASSET_SOUND, "PLAY_SPECIFIC") == 1);
         CHECK(sh_imgpreview_has(SH_ASSET_SOUND, "missing") == 0);
 
-        n = sh_imgpreview_list(SH_ASSET_SNDBANK, 0, out, sizeof out);
+        n = list_into(SH_ASSET_SNDBANK, out, sizeof out);
         CHECK(n == 5);
         CHECK(strstr(out, "Play_Existing|doom_initial\n") != NULL);
         CHECK(strstr(out, "play_multi|doom_monsters\n") != NULL ||
@@ -275,7 +288,7 @@ int main(void)
     CHECK(g_vmtrLoaded == 0);
     {
         char out[64];
-        int n = sh_imgpreview_list(SH_ASSET_MATERIAL, 0, out, sizeof out);
+        int n = list_into(SH_ASSET_MATERIAL, out, sizeof out);
         CHECK(g_vmtrLoaded == 1);
         CHECK(g_vtCount == 1);
         CHECK(g_vt && _stricmp(g_vt[0], "materials/vt") == 0);
@@ -283,20 +296,10 @@ int main(void)
         CHECK(n == 2);
         CHECK(strcmp(out, "materials/existing\nmaterials/vt\n") == 0 ||
               strcmp(out, "materials/existing\nMATERIALS/VT\n") == 0);
-
-        char one[20];
-        n = sh_imgpreview_list(SH_ASSET_MATERIAL, 0, one, sizeof one);
-        CHECK(n == 1);
-        CHECK(strcmp(one, "materials/existing\n") == 0);
-        n = sh_imgpreview_list(SH_ASSET_MATERIAL, 1, one, sizeof one);
-        CHECK(n == 1);
-        CHECK(_stricmp(one, "materials/vt\n") == 0);
-        CHECK(sh_imgpreview_list(SH_ASSET_MATERIAL, 2, one, sizeof one) == 0);
-        CHECK(sh_imgpreview_list(SH_ASSET_VTONLY, 0, out, sizeof out) == 1);
+        CHECK(list_into(SH_ASSET_VTONLY, out, sizeof out) == 1);
     }
 
-    /* A page that cannot fit the next name stops there: a shorter name later in the listing
-     * must not be written ahead of it, or the next page would skip one name and repeat another. */
+    /* The whole listing in one answer, however many names and however long. */
     set_records(2);
     if (g_rec) {
         g_rec[0].name = "aaaaaaaaaaaa";
@@ -306,20 +309,13 @@ int main(void)
     }
     {
         static const char *const events[] = { "c" };
-        char page[24], seen[128] = "";
-        unsigned start = 0;
-        int n, pages = 0;
+        char seen[128];
         free(g_ev);
         g_ev = (const char **)malloc(sizeof events);
         CHECK(g_ev != NULL);
         if (g_ev) { memcpy((void *)g_ev, events, sizeof events); g_evCount = 1; }
-        while ((n = sh_imgpreview_list(SH_ASSET_SOUND, start, page, sizeof page)) > 0 && pages < 8) {
-            strcat_s(seen, sizeof seen, page);
-            start += (unsigned)n;
-            pages++;
-        }
+        CHECK(list_into(SH_ASSET_SOUND, seen, sizeof seen) == 3);
         CHECK(strcmp(seen, "aaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbb\nc\n") == 0);
-        CHECK(pages == 2);
     }
 
     free(g_vt); g_vt = NULL; g_vtCount = 0;

@@ -1013,7 +1013,11 @@ int main(int argc, char **argv)
         call.op = SH_MODS_LIST;
         CHECK(sh_modui_slot(NULL, &call) == 0);
         call.op = SH_MODS_FETCH;
-        CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);   /* the earlier document remains */
+        CHECK(sh_modui_slot(NULL, &call) == 1 && call.out && call.out[0]);   /* the earlier document remains */
+        sh_iface_text_free(call.out);
+        call.out = NULL;
+        call.op = SH_MODS_GENERATION;
+        CHECK(sh_modui_slot(NULL, &call) == 1 && call.generation != 0 && !call.out);
         call.op = 5;                                                   /* the retired WAIT */
         CHECK(sh_modui_slot(NULL, &call) == 0);
     }
@@ -1755,7 +1759,7 @@ int main(int argc, char **argv)
         CHECK(row_has(doc, "doorlogic", "\"scriptRun\":{\"status\":\"running\",\"stop\":\"\",\"lines\":3}"));
         free(doc);
 
-        /* The script log op: any thread, its own buffer, a size query first. */
+        /* The script log op: any thread, its own owned text. */
         {
             sh_mods_call call;
             char *out;
@@ -1764,59 +1768,49 @@ int main(int argc, char **argv)
             memset(&call, 0, sizeof call);
             call.op = SH_MODS_SCRIPTS;
             call.arg = s;
-            CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);
-            out = (char *)malloc((size_t)call.needed + 1);
-            call.out = out;
-            call.out_cap = call.needed + 1;
-            CHECK(out && sh_modui_slot(NULL, &call) == 1);
+            CHECK(sh_modui_slot(NULL, &call) == 1);
+            out = call.out;
+            CHECK(out);
             _snprintf_s(lua, sizeof lua, _TRUNCATE, "{\"mods\":[{\"salt\":\"%s\",\"status\":\"stopped\",\"stop\":\"Script stopped: Door "
                         "Logic, scripts\\\\door.lua line 5:", s);
             CHECK(out && !strncmp(out, lua, strlen(lua)));
             CHECK(has(out, "\"log\":[\"door: switch 1 of 3\",\"a line with \\\"quotes\\\" and a \\\\ backslash\","
                            "\"Script stopped: Door Logic,"));
-            free(out);
+            sh_iface_text_free(out);
             /* no salt: every mod's state, no log; a salt the runtime does not know: an empty log */
             memset(&call, 0, sizeof call);
             call.op = SH_MODS_SCRIPTS;
             call.arg = "";
-            CHECK(sh_modui_slot(NULL, &call) == -1);
-            out = (char *)malloc((size_t)call.needed + 1);
-            call.out = out;
-            call.out_cap = call.needed + 1;
-            CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"salt\":\"\",\"total\":0,\"full\":false,\"log\":[]}"));
-            free(out);
+            CHECK(sh_modui_slot(NULL, &call) == 1);
+            out = call.out;
+            CHECK(out && has(out, "\"salt\":\"\",\"total\":0,\"full\":false,\"log\":[]}"));
+            sh_iface_text_free(out);
             /* the tail the window shows, and the whole log Copy log asks for */
             {
                 char full[64];
                 memset(&call, 0, sizeof call);
                 call.op = SH_MODS_SCRIPTS;
                 call.arg = s;
-                CHECK(sh_modui_slot(NULL, &call) == -1);
-                out = (char *)malloc((size_t)call.needed + 1);
-                call.out = out;
-                call.out_cap = call.needed + 1;
-                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":false,\"log\":["));
-                free(out);
+                CHECK(sh_modui_slot(NULL, &call) == 1);
+                out = call.out;
+                CHECK(out && has(out, "\"total\":3,\"full\":false,\"log\":["));
+                sh_iface_text_free(out);
                 _snprintf_s(full, sizeof full, _TRUNCATE, "%s%s", SH_MODS_SCRIPTS_FULL, s);
                 memset(&call, 0, sizeof call);
                 call.op = SH_MODS_SCRIPTS;
                 call.arg = full;
-                CHECK(sh_modui_slot(NULL, &call) == -1);
-                out = (char *)malloc((size_t)call.needed + 1);
-                call.out = out;
-                call.out_cap = call.needed + 1;
-                CHECK(out && sh_modui_slot(NULL, &call) == 1 && has(out, "\"total\":3,\"full\":true,\"log\":[\"door: switch 1 of 3\""));
-                free(out);
+                CHECK(sh_modui_slot(NULL, &call) == 1);
+                out = call.out;
+                CHECK(out && has(out, "\"total\":3,\"full\":true,\"log\":[\"door: switch 1 of 3\""));
+                sh_iface_text_free(out);
             }
             g_script_on = 0;
             {
-                char tiny[256];
                 memset(&call, 0, sizeof call);
                 call.op = SH_MODS_SCRIPTS;
                 call.arg = s;
-                call.out = tiny;
-                call.out_cap = (int)sizeof tiny;
-                CHECK(sh_modui_slot(NULL, &call) == 1 && has(tiny, "{\"mods\":[],") && has(tiny, "\"log\":[]}"));
+                CHECK(sh_modui_slot(NULL, &call) == 1 && has(call.out, "{\"mods\":[],") && has(call.out, "\"log\":[]}"));
+                sh_iface_text_free(call.out);
             }
             g_main = 1;
         }

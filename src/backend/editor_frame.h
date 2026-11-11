@@ -46,20 +46,21 @@ void *sh_editor_frame_target(void);
 
 /* Could a rawmap save happen right now? 1 = yes, and it changes NOTHING either way -- ask before
  * applying a destination of your own, so a refusal cannot leave the save path moved. */
-int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);
+int sh_editor_frame_can_rawmap_save(char **msg);
 
 /* Queue "write the OPEN map to a rawmap file" for the next editor frame. NULL uses the current save
  * path; an explicit path becomes the target only when that same map services the save. 1 = queued,
- * with the outcome told to the player when it lands; 0 = refused, reason in out_msg. */
-int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity);
+ * with the outcome told to the player when it lands; 0 = refused. Either way *msg (malloc'd) is the sentence
+ * for the player. */
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char **msg);
 
 /* Could the editor open a rawmap right now? Side-effect free. 1 = yes; 0 with one sentence for the
- * player in `out_msg`. */
-int sh_editor_frame_can_reload(char *out_msg, int msg_capacity);
+ * player in *msg (malloc'd). */
+int sh_editor_frame_can_reload(char **msg);
 
 /* Queue an in-place reload that opens the load path on the next editor frame. 1 = queued; 0 =
- * refused with one sentence for the player in `out_msg`. The frame re-checks everything and tells
- * the player if the open fails. */
-int sh_editor_frame_request_reload(char *out_msg, int msg_capacity);
+ * refused. Either way *msg (malloc'd) is one sentence for the player. The frame re-checks
+ * everything and tells the player if the open fails. */
+int sh_editor_frame_request_reload(char **msg);
 
 #endif /* BACKEND_EDITOR_FRAME_H */

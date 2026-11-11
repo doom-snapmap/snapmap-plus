@@ -13,14 +13,12 @@ static int failures;
 
 void backend_log(const char *msg) { (void)msg; }
 const char *sh_product_version(void) { return "v1.0.0"; }
-int sh_rawmap_diag_status(char *out, size_t cap)
+char *sh_rawmap_diag_status(void)
 {
     const char *s = "{\"opens\":1,\"generation\":3,\"pending\":0,\"faulted\":0,\"last\":{\"seq\":2,"
                     "\"path\":\"C:\\\\maps\\\\a.json\",\"state\":\"opened\",\"rc\":0,\"reason\":\"\","
                     "\"bytes\":10,\"mods\":0}}";
-    if (strlen(s) >= cap) return -1;
-    strcpy_s(out, cap, s);
-    return (int)strlen(s);
+    return _strdup(s);
 }
 
 /* The non-comment lines of a .def file, joined by newlines. */

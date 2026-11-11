@@ -25,8 +25,8 @@
 
 int sh_diag_status(char *out, int cap);
 
-/* The object built into buf (any size); the length, or -1 when it does not fit. */
-int sh_diag_status_build(char *buf, size_t cap);
+/* The object, malloc'd and sized to it; NULL when memory runs out. */
+char *sh_diag_status_build(void);
 #endif
 
 #endif /* BACKEND_DIAG_STATUS_H */

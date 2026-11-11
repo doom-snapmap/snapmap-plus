@@ -10,15 +10,13 @@
 
 /* ------------------------------------------------------------------ consumer side (the UI thread) --*/
 
-/* Consume the latest published preview as a `data:image/png;base64,...` URI. Returns the length on
- * success, 0 if nothing has been published yet (including immediately after a request), or
- * -(required size) if `cap` is too small so the caller can re-ask with a bigger buffer. A successful
- * copy releases the backend buffer; an undersized probe leaves it available for the required retry.
- * Safe from any thread. Backs iface ext 13 (+0x2D0). */
-int  sh_preview_get(char *out, size_t cap);
+/* Consume the latest published preview as a `data:image/png;base64,...` URI, owned (interface
+ * text: sh_iface_text_free), or NULL if nothing has been published yet (including immediately after
+ * a request). Safe from any thread. Backs iface ext 13 (+0x2D0). */
+char *sh_preview_take(void);
 
 /* Stage a name and invalidate the current preview. Production is
- * asynchronous; poll sh_preview_get for completion. Backs iface ext 14
+ * asynchronous; poll sh_preview_take for completion. Backs iface ext 14
  * (+0x2d8).
  */
 void sh_preview_request(const char *name);
@@ -34,10 +32,10 @@ void sh_preview_cancel(void);
 
 /* ------------------------------------------------------------- producer side (whoever makes pixels) */
 
-/* Read the staged request. Copies the name and catalog kind into `out` / `kind`, and returns 1 if a
- * request is pending: neither published nor failed. Does NOT clear the request; publishing or
- * failing it is what ends it. `kind` is SH_PREVIEW_KIND_AUTO for an untyped request. */
-int  sh_preview_take_request(char *out, size_t cap, unsigned long *generation, int *kind);
+/* Read the staged request: its name (malloc'd) and catalog kind when a request is pending, neither
+ * published nor failed; else NULL. Does NOT clear the request; publishing or failing it is what
+ * ends it. `kind` is SH_PREVIEW_KIND_AUTO for an untyped request. */
+char *sh_preview_take_request(unsigned long *generation, int *kind);
 
 /* Encode `w` x `h` RGBA8 pixels (row-major, top row first, 4 bytes/pixel) and publish them as the
  * current preview only if `generation` is still the latest request. Thread-safe: the previous buffer
@@ -50,12 +48,11 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
 /* End request `generation` without a picture. `reason` is one plain sentence the Assets tab shows in
  * place of the preview ("This material has no image to preview."). A stale generation is ignored.
  * Returns SH_PREVIEW_STALE or SH_PREVIEW_FAILED. */
-#define SH_PREVIEW_REASON_CAP 160
 int sh_preview_fail(unsigned long generation, const char *reason);
 
-/* The reason the latest request failed: copies it into `out` and returns 1, or returns 0 while the
- * request is pending, published or cancelled. Safe from any thread; the reason stays until the next
- * request or cancel, so a poller that sees sh_preview_get return 0 can ask this to stop waiting. */
-int sh_preview_failure(char *out, size_t cap);
+/* The reason the latest request failed, owned (interface text), or NULL while the request is
+ * pending, published or cancelled. Safe from any thread; the reason stays until the next request or
+ * cancel, so a poller that sees sh_preview_take return NULL can ask this to stop waiting. */
+char *sh_preview_failure(void);
 
 #endif /* BACKEND_PREVIEW_H */

@@ -35,7 +35,7 @@ int main(void)
     float axis[9], o[3] = { -548.0f, -2544.0f, 0.25f }, a[3] = { 10.0f, 90.0f, 0.0f };
     sh_modscene_place_table t = {0};
     sh_modscene_place_record r;
-    int i, dummy[20];
+    int i, dummy[200];
 
     /* Only a mod's scene_play row is a scene row. */
     CHECK(sh_modscene_place_is_scene_row("mods/campaign-interactables-2/actions/scene_play"));
@@ -85,7 +85,7 @@ int main(void)
         CHECK(!sh_modscene_place_pose_ok(NULL, a));
     }
 
-    /* The record table: keyed by node, replaced per node, oldest evicted. */
+    /* The record table: keyed by node, replaced per node, growing: nothing is dropped. */
     sh_modscene_place_table_clear(&t);
     CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));
     CHECK(!sh_modscene_place_remember(&t, NULL, "player1", o, a));
@@ -104,15 +104,31 @@ int main(void)
     CHECK(!strcmp(r.player, "player2") && close_to(r.angles[1], 45.0f) && close_to(r.origin[0], -548.0f));
     free(r.player);
     CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));
-    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS + 1; i++)
-        CHECK(sh_modscene_place_remember(&t, &dummy[i], "player1", o, a));
-    CHECK(!sh_modscene_place_take(&t, &dummy[0], &r));   /* the oldest went */
-    CHECK(sh_modscene_place_take(&t, &dummy[1], &r));
-    free(r.player);
-    CHECK(sh_modscene_place_take(&t, &dummy[SH_MODSCENE_PLACE_RECORDS], &r));
-    free(r.player);
+    /* 200 scenes placed at once: every pose is kept, and each comes back as it was given. */
+    for (i = 0; i < 200; i++) {
+        char who[32];
+        sprintf_s(who, sizeof who, "player%d", i);
+        a[0] = (float)i;
+        CHECK(sh_modscene_place_remember(&t, &dummy[i], who, o, a));
+    }
+    CHECK(t.count == 200);
+    for (i = 199; i >= 0; i -= 2) {
+        char who[32];
+        sprintf_s(who, sizeof who, "player%d", i);
+        CHECK(sh_modscene_place_take(&t, &dummy[i], &r) && !strcmp(r.player, who) && close_to(r.angles[0], (float)i));
+        free(r.player);
+    }
+    for (i = 0; i < 200; i += 2) {
+        char who[32];
+        sprintf_s(who, sizeof who, "player%d", i);
+        CHECK(sh_modscene_place_take(&t, &dummy[i], &r) && !strcmp(r.player, who) && close_to(r.angles[0], (float)i));
+        free(r.player);
+    }
+    CHECK(t.count == 0 && !sh_modscene_place_take(&t, &dummy[2], &r));
+    a[0] = 0.0f;
+    CHECK(sh_modscene_place_remember(&t, &dummy[3], "player1", o, a));
     sh_modscene_place_table_clear(&t);
-    CHECK(!sh_modscene_place_take(&t, &dummy[2], &r));
+    CHECK(t.count == 0 && !t.rows && !sh_modscene_place_take(&t, &dummy[3], &r));
 
     /* The three detour targets name both renderers and start with the
      * prologues whose stolen windows the backend replays. */

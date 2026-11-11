@@ -347,18 +347,21 @@ int sh_scene_pending_set(sh_scene_pending_table *t, const void *node, const char
             return 0;
         }
     }
-    for (i = 0; i < SH_SCENE_PENDING_ROWS && !row; i++)
+    for (i = 0; i < t->count && !row; i++)
         if (t->rows[i].node == node) row = &t->rows[i];
-    for (i = 0; i < SH_SCENE_PENDING_ROWS && !row; i++)
-        if (!t->rows[i].node) { row = &t->rows[i]; t->count++; }
     if (!row) {
-        row = &t->rows[0];
-        for (i = 1; i < SH_SCENE_PENDING_ROWS; i++)
-            if (t->rows[i].stamp < row->stamp) row = &t->rows[i];
+        if (t->count == t->capacity) {
+            int capacity = t->capacity ? t->capacity * 2 : 16;
+            sh_scene_pending *grown = (sh_scene_pending *)realloc(t->rows, (size_t)capacity * sizeof *grown);
+            if (!grown) { sh_scene_pending_release(&copy); return 0; }
+            t->rows = grown;
+            t->capacity = capacity;
+        }
+        row = &t->rows[t->count++];
+        memset(row, 0, sizeof *row);
     }
     sh_scene_pending_release(row);
     *row = copy;
-    row->stamp = ++t->next_stamp;
     return 1;
 }
 
@@ -374,15 +377,12 @@ int sh_scene_pending_take(sh_scene_pending_table *t, const void *node, sh_scene_
 {
     int i;
     if (!t || !node) return 0;
-    for (i = 0; i < SH_SCENE_PENDING_ROWS; i++) {
+    for (i = 0; i < t->count; i++) {
         if (t->rows[i].node != node) continue;
-        if (out) {
-            *out = t->rows[i];
-            memset(&t->rows[i], 0, sizeof t->rows[i]);
-        } else {
-            sh_scene_pending_release(&t->rows[i]);
-        }
-        t->count--;
+        if (out) *out = t->rows[i];
+        else sh_scene_pending_release(&t->rows[i]);
+        t->rows[i] = t->rows[--t->count];   /* the last row fills the hole; order does not matter */
+        memset(&t->rows[t->count], 0, sizeof t->rows[t->count]);
         return 1;
     }
     return 0;
@@ -392,7 +392,8 @@ void sh_scene_pending_clear(sh_scene_pending_table *t)
 {
     int i;
     if (!t) return;
-    for (i = 0; i < SH_SCENE_PENDING_ROWS; i++) sh_scene_pending_release(&t->rows[i]);
+    for (i = 0; i < t->count; i++) sh_scene_pending_release(&t->rows[i]);
+    free(t->rows);
     memset(t, 0, sizeof *t);
 }
 

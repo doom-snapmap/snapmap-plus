@@ -1,4 +1,5 @@
 /* preview_test.c -- generation-safe preview transport and PNG payload contract. */
+#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,27 @@ static int failures;
 } while (0)
 
 void backend_log(const char *msg) { (void)msg; }
+
+/* The pending request's name into `name` (whole, or the test ends), 1 when one is pending. */
+static int take_request(char *name, size_t cap, unsigned long *generation, int *kind)
+{
+    char *got = sh_preview_take_request(generation, kind);
+    if (got && strlen(got) >= cap) { fprintf(stderr, "a request name longer than the test's buffer\n"); abort(); }
+    name[0] = 0;
+    if (got) strcpy_s(name, cap, got);
+    free(got);
+    return got != NULL;
+}
+
+/* The latest failure's reason into `why` (owned text, released), 1 when there is one. */
+static int failure(char *why, size_t cap)
+{
+    char *got = sh_preview_failure();
+    why[0] = 0;
+    if (got && strlen(got) < cap) strcpy_s(why, cap, got);
+    sh_iface_text_free(got);
+    return got != NULL;
+}
 
 static int b64_value(unsigned char c)
 {
@@ -101,55 +123,44 @@ int main(void)
     const unsigned char old_pixel[4] = {255, 0, 0, 255};
     const unsigned char pixels[8] = {1, 2, 3, 4, 10, 20, 30, 40};
 
-    CHECK(sh_preview_take_request(name, sizeof name, &first, &kind) == 0);
+    CHECK(take_request(name, sizeof name, &first, &kind) == 0);
     CHECK(kind == SH_PREVIEW_KIND_AUTO);
     CHECK(sh_preview_publish(0, pixels, 2, 1) == SH_PREVIEW_FAILED);
     CHECK(sh_preview_publish(1, NULL, 2, 1) == SH_PREVIEW_FAILED);
 
     sh_preview_request("materials/first");
-    CHECK(sh_preview_take_request(name, sizeof name, &first, &kind) == 1);
+    CHECK(take_request(name, sizeof name, &first, &kind) == 1);
     CHECK(strcmp(name, "materials/first") == 0);
     CHECK(first != 0);
     CHECK(kind == SH_PREVIEW_KIND_AUTO);
 
     sh_preview_request_kind("materials/second", SH_ASSET_IMAGE);
-    CHECK(sh_preview_take_request(name, sizeof name, &second, &kind) == 1);
+    CHECK(take_request(name, sizeof name, &second, &kind) == 1);
     CHECK(strcmp(name, "materials/second") == 0);
     CHECK(second != first);
     CHECK(kind == SH_ASSET_IMAGE);
 
     CHECK(sh_preview_publish(first, old_pixel, 1, 1) == SH_PREVIEW_STALE);
-    {
-        char empty[8] = "dirty";
-        CHECK(sh_preview_get(empty, sizeof empty) == 0);
-        CHECK(empty[0] == '\0');
-    }
+    CHECK(sh_preview_take() == NULL);
 
     CHECK(sh_preview_publish(second, pixels, 2, 1) == SH_PREVIEW_PUBLISHED);
-    CHECK(sh_preview_take_request(name, sizeof name, &repeated, &kind) == 0);
+    CHECK(take_request(name, sizeof name, &repeated, &kind) == 0);
     CHECK(kind == SH_PREVIEW_KIND_AUTO);
     {
-        char tiny[8];
-        int needed = sh_preview_get(tiny, sizeof tiny);
-        CHECK(needed < 0);
-        if (needed < 0) {
-            size_t cap = (size_t)(-needed);
-            char *uri = (char *)malloc(cap);
-            CHECK(uri != NULL);
-            if (uri) {
-                int got = sh_preview_get(uri, cap);
-                CHECK(got == (int)strlen(uri));
-                verify_png(uri, pixels, 2, 1);
-                free(uri);
-                CHECK(sh_preview_get(tiny, sizeof tiny) == 0);
-                CHECK(sh_preview_take_request(name, sizeof name, &repeated, &kind) == 0);
-                CHECK(kind == SH_PREVIEW_KIND_AUTO);
-            }
+        /* The whole URI is handed over once, as owned text. */
+        char *uri = sh_preview_take();
+        CHECK(uri != NULL);
+        if (uri) {
+            verify_png(uri, pixels, 2, 1);
+            sh_iface_text_free(uri);
+            CHECK(sh_preview_take() == NULL);
+            CHECK(take_request(name, sizeof name, &repeated, &kind) == 0);
+            CHECK(kind == SH_PREVIEW_KIND_AUTO);
         }
     }
 
     sh_preview_request("materials/second");
-    CHECK(sh_preview_take_request(name, sizeof name, &repeated, &kind) == 1);
+    CHECK(take_request(name, sizeof name, &repeated, &kind) == 1);
     CHECK(repeated != second);
     CHECK(strcmp(name, "materials/second") == 0);
     CHECK(kind == SH_PREVIEW_KIND_AUTO);
@@ -157,37 +168,46 @@ int main(void)
     CHECK(sh_preview_publish(repeated, old_pixel, 1, 1) == SH_PREVIEW_PUBLISHED);
     sh_preview_cancel();
     {
-        char empty[8] = "dirty";
-        CHECK(sh_preview_get(empty, sizeof empty) == 0);
-        CHECK(empty[0] == '\0');
-        CHECK(sh_preview_take_request(name, sizeof name, &second, &kind) == 0);
+        CHECK(sh_preview_take() == NULL);
+        CHECK(take_request(name, sizeof name, &second, &kind) == 0);
         CHECK(kind == SH_PREVIEW_KIND_AUTO);
         CHECK(sh_preview_publish(repeated, old_pixel, 1, 1) == SH_PREVIEW_STALE);
     }
 
     /* A request with no picture ends with a plain reason instead of staying pending. */
     {
-        char why[SH_PREVIEW_REASON_CAP];
+        char why[256];
         unsigned long failed = 0, next = 0;
         sh_preview_request("materials/no_image");
-        CHECK(sh_preview_take_request(name, sizeof name, &failed, &kind) == 1);
-        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(take_request(name, sizeof name, &failed, &kind) == 1);
+        CHECK(failure(why, sizeof why) == 0);
         CHECK(sh_preview_fail(failed - 1, "stale") == SH_PREVIEW_STALE);
-        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(failure(why, sizeof why) == 0);
         CHECK(sh_preview_fail(failed, "This material has no image to preview.") == SH_PREVIEW_FAILED);
-        CHECK(sh_preview_take_request(name, sizeof name, &next, &kind) == 0);
-        CHECK(sh_preview_failure(why, sizeof why) == 1);
+        CHECK(take_request(name, sizeof name, &next, &kind) == 0);
+        CHECK(failure(why, sizeof why) == 1);
         CHECK(strcmp(why, "This material has no image to preview.") == 0);
-        CHECK(sh_preview_get(why, sizeof why) == 0);
+        CHECK(sh_preview_take() == NULL);
         CHECK(sh_preview_publish(failed, old_pixel, 1, 1) == SH_PREVIEW_PUBLISHED);
-        CHECK(sh_preview_failure(why, sizeof why) == 0);   /* a picture after all replaces the reason */
+        CHECK(failure(why, sizeof why) == 0);   /* a picture after all replaces the reason */
         sh_preview_request("materials/next");
-        CHECK(sh_preview_failure(why, sizeof why) == 0);
-        CHECK(sh_preview_take_request(name, sizeof name, &next, &kind) == 1);
+        CHECK(failure(why, sizeof why) == 0);
+        CHECK(take_request(name, sizeof name, &next, &kind) == 1);
         CHECK(sh_preview_fail(next, NULL) == SH_PREVIEW_FAILED);
-        CHECK(sh_preview_failure(why, sizeof why) == 1 && why[0] != '\0');
+        CHECK(failure(why, sizeof why) == 1 && why[0] != '\0');
         sh_preview_cancel();
-        CHECK(sh_preview_failure(why, sizeof why) == 0);
+        CHECK(failure(why, sizeof why) == 0);
+    }
+
+    /* A request names its asset whole, at any length. */
+    {
+        static char longname[5000], got[5100];
+        unsigned long g = 0;
+        memset(longname, 'm', sizeof longname - 1);
+        longname[sizeof longname - 1] = 0;
+        sh_preview_request(longname);
+        CHECK(take_request(got, sizeof got, &g, &kind) == 1 && !strcmp(got, longname));
+        sh_preview_cancel();
     }
 
     if (failures) {

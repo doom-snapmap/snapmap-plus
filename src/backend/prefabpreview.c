@@ -959,21 +959,24 @@ int sh_prefabpreview_request(unsigned long generation, const char *model_name)
     return 1;
 }
 
-int sh_prefabpreview_get(void *out_blob, int out_capacity)
+int sh_prefabpreview_take(void **out)
 {
+    unsigned char *blob;
+    int bytes;
+    if (!out) return 0;
+    *out = NULL;
     if (!g_pp_installed) return 0;
     EnterCriticalSection(&g_pp_lock);
     if (!g_pp_result_count) { LeaveCriticalSection(&g_pp_lock); return 0; }
     pp_result *r = &g_pp_results[g_pp_result_head];
-    int needed = r->bytes;
-    if (!out_blob || out_capacity < needed) {
-        LeaveCriticalSection(&g_pp_lock);
-        return -needed;
-    }
-    memcpy(out_blob, r->blob, (size_t)needed);
-    free(r->blob); r->blob = NULL; r->bytes = 0;
+    blob = r->blob;
+    bytes = r->bytes;
+    r->blob = NULL; r->bytes = 0;
     g_pp_result_head = (g_pp_result_head + 1u) % PP_RESULT_CAP;
     g_pp_result_count--;
     LeaveCriticalSection(&g_pp_lock);
-    return needed;
+    /* Handed over as interface text: a process-heap copy the window releases. */
+    *out = sh_iface_textn(blob, (size_t)bytes);
+    free(blob);
+    return *out ? bytes : 0;
 }

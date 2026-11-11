@@ -443,13 +443,20 @@ int main(void)
     assert(slot_schedule_apply(NULL, &item, 1, "test") == 0 && !g_pending_items);
     append_fails = 0;
     {
-        char *oversize = (char *)malloc(APPLY_TEXT_CAP + 1);
+        /* Text of any length is copied whole into the batch: no size of its own. */
+        size_t big = (size_t)8 * 1024 * 1024;
+        char *large = (char *)malloc(big + 1);
         sh_apply_item batch[2] = {item, item};
-        memset(oversize, 'x', APPLY_TEXT_CAP); oversize[APPLY_TEXT_CAP] = 0;
-        batch[1].text = oversize;
-        assert(slot_schedule_apply(NULL, batch, 2, "test") == 0 && !g_pending_items);
-        assert(slot_apply_sync(NULL, batch, 2, "test") == 0 && executions == 2);
-        free(oversize);
+        memset(large, 'x', big); large[big] = 0;
+        batch[1].text = large;
+        assert(slot_schedule_apply(NULL, batch, 2, "test") == 1 && g_pending_items && g_pending_count == 2 &&
+               strlen(g_pending_items[1].text) == big);
+        free(large);
+        for (int i = 0; i < g_pending_count; i++) free(g_pending_items[i].text);
+        free(g_pending_items);
+        g_pending_items = NULL;
+        g_pending_count = 0;
+        assert(executions == 2);
     }
     engine_id = GetCurrentThreadId() + 1;
     assert(slot_apply_sync(NULL, &item, 1, "test") == 0);
@@ -484,7 +491,7 @@ int main(void)
 uintptr_t sig_addr_by_name(const sig_result *r, size_t n, const char *name) { (void)r; (void)n; (void)name; assert(0); return 0; }
 void *sh_typeinfo_get_declmgr(void) { assert(ns_allowed); return &ns_declmgr; }
 int sh_iface_class_inherit_ok(int id, const char *c, const char *h) { (void)id; (void)c; (void)h; assert(0); return 0; }
-const char *ie_resolve_id_string(int id, char *buf, int cap) { (void)id; (void)buf; (void)cap; assert(0); return NULL; }
+char *ie_resolve_id_string(int id) { (void)id; assert(0); return NULL; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status) { (void)base; (void)name; (void)status; assert(0); return 0; }
 int sh_host_is_supported_build(void) { assert(0); return 0; }
 uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }

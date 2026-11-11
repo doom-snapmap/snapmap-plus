@@ -67,23 +67,14 @@ void  sh_nav_bake_set_map(const char *json, size_t len) { (void)json; (void)len;
 static int g_maps_opened;
 void  sh_nav_bake_map_opened(void) { g_maps_opened++; }
 
-int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
-{ (void)destination;
-  if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
-                                             "stub: no editor in this test", _TRUNCATE);
-  return 0; }
-int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
-{ if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
-                                             "stub: no editor in this test", _TRUNCATE);
-  return 0; }
-int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
-{ if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
-                                             "stub: no editor in this test", _TRUNCATE);
-  return 0; }
-int sh_editor_frame_can_reload(char *out_msg, int msg_capacity)
-{ if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
-                                             "stub: no editor in this test", _TRUNCATE);
-  return 0; }
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char **msg)
+{ (void)destination; ho_set(msg, "stub: no editor in this test"); return 0; }
+int sh_editor_frame_can_rawmap_save(char **msg)
+{ ho_set(msg, "stub: no editor in this test"); return 0; }
+int sh_editor_frame_request_reload(char **msg)
+{ ho_set(msg, "stub: no editor in this test"); return 0; }
+int sh_editor_frame_can_reload(char **msg)
+{ ho_set(msg, "stub: no editor in this test"); return 0; }
 
 static int g_pretty_on;   /* sh_pretty_on is the only cvar rawmap.c reads */
 int sh_cvar_value_int(int index, int def) { (void)index; return g_pretty_on ? 1 : def; }
@@ -103,19 +94,40 @@ static int g_checks;
 
 static const char BODY[] = "{\"entities\":[]}";
 
+/* The interface hands text over as process-heap strings (sh_iface_text_free). HOIF copies a
+ * slot's *out into the test's buffer and releases it, as HO does for malloc'd results;
+ * HOIFS does the same for a returned string and is 1 when there was one. */
+static intptr_t hoif_take(char *buf, size_t cap, intptr_t r)
+{
+    ho_copy(buf, cap, g_ho[0], "hoif");
+    sh_iface_text_free(g_ho[0]);
+    g_ho[0] = NULL;
+    return r;
+}
+static int hoif_str(char *buf, size_t cap, char *text)
+{
+    ho_copy(buf, cap, text, "hoif");
+    if (!text && buf && cap) buf[0] = 0;
+    sh_iface_text_free(text);
+    return text != NULL;
+}
+#define HOIF(buf, call) ((int)hoif_take((buf), sizeof(buf), (g_ho[0] = NULL, (intptr_t)(call))))
+#define HOIFS(buf, call) hoif_str((buf), sizeof(buf), (call))
+
+/* The paths in force, into the test's buffers (whole, or the test ends). */
 static void eff_paths(char *load, int load_cap, char *save, int save_cap)
 {
-    if (load) load[0] = '\0';
-    if (save) save[0] = '\0';
-    sh_rawmap_get_paths(load, load_cap, save, save_cap);
+    if (load) ho_str(load, (size_t)load_cap, sh_rawmap_load_path());
+    if (save) ho_str(save, (size_t)save_cap, sh_rawmap_save_path());
 }
 
 static int save_is_default(void)
 {
-    char eff[MAX_PATH] = "", def[MAX_PATH] = "";
-    sh_rawmap_get_paths(NULL, 0, eff, (int)sizeof eff);
-    sh_rawmap_get_default_paths(NULL, 0, def, (int)sizeof def);
-    return (eff[0] && _stricmp(eff, def) == 0) ? 1 : 0;
+    char *eff = sh_rawmap_save_path(), *def = sh_rawmap_default_path();
+    int same = eff && def && eff[0] && _stricmp(eff, def) == 0;
+    free(eff);
+    free(def);
+    return same;
 }
 
 static int temp_path(const char *name, char *out, size_t cap)
@@ -281,11 +293,11 @@ static void picking_the_usual_file_holds_nothing(void)
     printf("\n-- picking the usual file leaves nothing in force\n");
 
     clean_state();
-    sh_rawmap_get_default_paths(NULL, 0, dflt, (int)sizeof dflt);
+    HOS(dflt, sh_rawmap_default_path());
     CHECK(dflt[0] != '\0');
 
     CHECK(sh_rawmap_set_save_target(dflt) == 1);
-    sh_rawmap_get_save_target(target, (int)sizeof target);
+    HOS(target, sh_rawmap_save_target());
     printf("   after picking it: target is %s\n", target[0] ? target : "(nothing)");
     CHECK(target[0] == '\0');            /* the tick stays clear */
     CHECK(save_is_default());
@@ -301,13 +313,13 @@ static void picking_the_usual_file_releases_a_chosen_one(void)
     printf("\n-- picking the usual file releases a file chosen before it\n");
 
     clean_state();
-    sh_rawmap_get_default_paths(NULL, 0, dflt, (int)sizeof dflt);
+    HOS(dflt, sh_rawmap_default_path());
     CHECK(temp_path("rawmap_test_export5.json", picked, sizeof picked));
     CHECK(sh_rawmap_set_save_target(picked) == 1);
     CHECK(!save_is_default());
 
     CHECK(sh_rawmap_set_save_target(dflt) == 1);
-    sh_rawmap_get_save_target(target, (int)sizeof target);
+    HOS(target, sh_rawmap_save_target());
     CHECK(target[0] == '\0');
     CHECK(save_is_default());
 
@@ -423,7 +435,7 @@ static void looks_like_rawmap_tells_them_apart(void)
      * their resemblance to it, so check one that the engine actually wrote */
     {
         char real[MAX_PATH] = "";
-        sh_rawmap_get_default_paths(NULL, 0, real, (int)sizeof real);
+        HOS(real, sh_rawmap_default_path());
         if (real[0] && file_exists(real)) {
             printf("   the real %s -> %d\n", real, sh_rawmap_looks_like_rawmap(real));
             CHECK(sh_rawmap_looks_like_rawmap(real) == 1);
@@ -442,11 +454,11 @@ static void refused_menu_save_changes_nothing(void)
     CHECK(temp_path("rawmap_review_requested.json", requested, sizeof requested));
     CHECK(sh_rawmap_set_save_target(original));
     sh_rawmap_get_slots(NULL, &configure, NULL);
-    CHECK(configure(NULL, NULL, requested, -1, message, sizeof message) == 0);
-    sh_rawmap_get_save_target(actual, sizeof actual);
+    CHECK(HOIF(message, configure(NULL, NULL, requested, -1, HO_P(0))) == 0);
+    HOS(actual, sh_rawmap_save_target());
     CHECK(strcmp(actual, original) == 0);
     CHECK(strstr(message, "no editor") != NULL);
-    CHECK(configure(NULL, NULL, NULL, 5, message, sizeof message) == 0);
+    CHECK(HOIF(message, configure(NULL, NULL, NULL, 5, HO_P(0))) == 0);
     clean_state();
 }
 
@@ -456,11 +468,11 @@ static void missing_overwrite_protection_refuses_opening(const char *archive)
     char before[MAX_PATH], after[MAX_PATH], message[192];
     clean_state();
     sh_rawmap_set_branch_tag(1);
-    sh_rawmap_get_paths(before, sizeof before, NULL, 0);
+    HOS(before, sh_rawmap_load_path());
     sh_rawmap_get_slots(NULL, &configure, NULL);
     CHECK(!sh_rawmap_load_is_safe());
-    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
-    sh_rawmap_get_paths(after, sizeof after, NULL, 0);
+    CHECK(!HOIF(message, configure(NULL, archive, NULL, 2, HO_P(0))));
+    HOS(after, sh_rawmap_load_path());
     CHECK(strcmp(before, after) == 0);
     CHECK(strstr(message, "overwriting the map a rawmap opens over") != NULL);
     sh_rawmap_set_branch_tag(0);
@@ -531,7 +543,7 @@ static void a_live_export_writes_once(void)
     g_idstr_ctor = fixture_idstr_ctor;
     g_idstr_dtor = fixture_idstr_dtor;
     live_serializations = 0;
-    CHECK(sh_rawmap_write_from_live((void *)1, target, msg, sizeof msg, &wrote));
+    CHECK(HO(msg, sh_rawmap_write_from_live((void *)1, target, HO_P(0), &wrote)));
     CHECK(live_serializations == 1 && wrote == sizeof BODY - 1);
     CHECK(sh_rawmap_save_count() == before + 1);
     CHECK(g_snapshot_depth == 0);
@@ -557,7 +569,7 @@ static void a_live_export_is_pretty_when_asked(void)
     g_idstr_ctor = fixture_idstr_ctor;
     g_idstr_dtor = fixture_idstr_dtor;
     g_pretty_on = 1;
-    CHECK(sh_rawmap_write_from_live((void *)1, target, msg, sizeof msg, &wrote));
+    CHECK(HO(msg, sh_rawmap_write_from_live((void *)1, target, HO_P(0), &wrote)));
     g_pretty_on = 0;
     CHECK(wrote > sizeof BODY - 1);
     h = CreateFileA(target, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -627,7 +639,7 @@ static void large_sources_use_native_lengths(void)
     }
     CHECK(WriteFile(file, "}", 1, &wrote, NULL) && wrote == 1);
     CloseHandle(file);
-    CHECK(sh_rawmap_validate_source(path, message, sizeof(message)));
+    CHECK(sh_rawmap_validate_source(path, NULL));
     CHECK(sh_rawmap_swap_set_source(path));
     {
         int importing = 0;
@@ -800,19 +812,19 @@ static void a_rawmap_open_is_unsaved_until_its_first_save(void)
     CHECK(sh_rawmap_swap_set_source(staged));
     sh_rawmap_set_branch_tag(0);
     g_deser_orig = fixture_deser;
-    CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
+    CHECK(!HO(name, sh_rawmap_open_unsaved(HO_P(0))) && !name[0]);
     CHECK(open_through_reload("{\"~type\":\"idSnapMap\",\"entities\":[{}]}") == 1);
-    CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_open_unsaved.json"));
+    CHECK(HO(name, sh_rawmap_open_unsaved(HO_P(0))) && !strcmp(name, "rawmap_open_unsaved.json"));
     /* An export of the live map (a snapshot) is not a save. */
     g_ser_orig = fixture_serialize;
     CHECK(sh_rawmap_snapshot(fixture_map_to_json, (void *)1, str));
-    CHECK(sh_rawmap_open_unsaved(NULL, 0));
+    CHECK(sh_rawmap_open_unsaved(NULL));
     /* The first save names it. */
     CHECK(sh_ser_detour((void *)1, str, 1) == 1);
-    CHECK(!sh_rawmap_open_unsaved(name, sizeof name) && !name[0]);
+    CHECK(!HO(name, sh_rawmap_open_unsaved(HO_P(0))) && !name[0]);
     /* Opened again, then the engine's own map: that map is itself. */
-    CHECK(open_through_reload(plain) == 1 && sh_rawmap_open_unsaved(NULL, 0));
-    CHECK(sh_deser_detour(plain, (void *)1) == 1 && !sh_rawmap_open_unsaved(NULL, 0));
+    CHECK(open_through_reload(plain) == 1 && sh_rawmap_open_unsaved(NULL));
+    CHECK(sh_deser_detour(plain, (void *)1) == 1 && !sh_rawmap_open_unsaved(NULL));
     g_ser_orig = NULL;
     sh_rawmap_set_branch_tag(1);
     g_deser_orig = NULL;
@@ -853,7 +865,7 @@ static const char ENGINE_MAP[] = "{\"~type\":\"idSnapMap\",\"entities\":[],\"nam
 
 extern unsigned long long g_mod_stub_export_result;
 extern int g_mod_stub_export_calls;
-extern char g_mod_stub_export_path[520];
+extern char *g_mod_stub_export_path;
 extern char g_mod_stub_import_cause[HO_TEXT];
 extern const char *g_mod_stub_import_text;
 extern int g_mod_stub_import_calls;
@@ -1136,7 +1148,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     CHECK(open_through_reload(MOD_MAP) == 1 && !strcmp(g_parsed, plain));
     CHECK(sh_modmanifest_current(&cur) == 0);
     sh_modmanifest_list_free(&cur);
-    CHECK(sh_rawmap_open_unsaved(name, sizeof name) && !strcmp(name, "rawmap_own_rows.json"));
+    CHECK(HO(name, sh_rawmap_open_unsaved(HO_P(0))) && !strcmp(name, "rawmap_own_rows.json"));
     /* While the edit holds the borrowed id, Save asks for a name. */
     sh_rawmap_set_branch_tag(1);
     strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "BORROWED00000000000A");
@@ -1145,7 +1157,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
      * Save writes that map (the engine answers; it is no branch). */
     g_ser_orig = fixture_serialize;
     CHECK(sh_ser_detour((void *)1, str, 1) == 1);
-    CHECK(!sh_rawmap_open_unsaved(NULL, 0));
+    CHECK(!sh_rawmap_open_unsaved(NULL));
     strcpy_s(g_fake_edit_id, sizeof g_fake_edit_id, "OWNID000000000000000B");
     CHECK(sh_isbranch_detour(NULL) == 0 && sh_isbranch_detour(NULL) == 0);
     /* An edit whose id cannot be read keeps the safe answer. */
@@ -1164,7 +1176,7 @@ static void a_rawmap_open_takes_its_own_rows_and_then_its_own_id(void)
     CHECK(sh_isbranch_detour(NULL) == 1);
     /* A browser load of another map: the engine's map, itself. */
     CHECK(sh_deser_detour(plain, (void *)1) == 1);
-    CHECK(!sh_rawmap_open_unsaved(NULL, 0) && sh_isbranch_detour(NULL) == 0);
+    CHECK(!sh_rawmap_open_unsaved(NULL) && sh_isbranch_detour(NULL) == 0);
     sh_rawmap_set_edit_id_reader(NULL);
     g_fake_edit_id[0] = 0;
     g_ser_orig = NULL;
@@ -1215,11 +1227,11 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     printf("\n-- a save of a map that uses mods writes <name>.zip beside the .json and says to share it\n");
     mods_begin();
 
-    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\rawmap.json", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\rawmap.zip"));
-    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\Arena.JSON", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\Arena.zip"));
-    CHECK(sh_rawmap_companion_zip_path("C:\\maps\\notes.txt", zip, sizeof zip) && !strcmp(zip, "C:\\maps\\notes.txt.zip"));
-    CHECK(!sh_rawmap_companion_zip_path("C:\\maps\\shared.zip", zip, sizeof zip) && !zip[0]);
-    CHECK(!sh_rawmap_companion_zip_path("", zip, sizeof zip));
+    CHECK(HOS(zip, sh_rawmap_companion_zip_path("C:\\maps\\rawmap.json")) && !strcmp(zip, "C:\\maps\\rawmap.zip"));
+    CHECK(HOS(zip, sh_rawmap_companion_zip_path("C:\\maps\\Arena.JSON")) && !strcmp(zip, "C:\\maps\\Arena.zip"));
+    CHECK(HOS(zip, sh_rawmap_companion_zip_path("C:\\maps\\notes.txt")) && !strcmp(zip, "C:\\maps\\notes.txt.zip"));
+    CHECK(!HOS(zip, sh_rawmap_companion_zip_path("C:\\maps\\shared.zip")) && !zip[0]);
+    CHECK(!HOS(zip, sh_rawmap_companion_zip_path("")));
 
     CHECK(temp_path("rawmap_share.json", target, sizeof target));
     CHECK(sh_rawmap_set_save_target(target));
@@ -1228,7 +1240,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
     CHECK(R.toasts == 0);                       /* never from inside the save itself */
     transport_settle();                         /* the export ran off the main thread */
-    CHECK(g_mod_stub_export_calls == 1 && sh_rawmap_companion_zip_path(target, zip, sizeof zip) &&
+    CHECK(g_mod_stub_export_calls == 1 && HOS(zip, sh_rawmap_companion_zip_path(target)) &&
           !_stricmp(g_mod_stub_export_path, zip));
     sh_rawmap_last_save(&last);
     CHECK(!_stricmp(last.json, target) && !_stricmp(last.zip, zip) && last.zip_bytes == 4321 && last.mods == 1);
@@ -1239,7 +1251,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(R.toasts == 1);                       /* once */
 
     sh_rawmap_get_slots(&status_fn, NULL, NULL);
-    CHECK(status_fn && status_fn(NULL, status, (int)sizeof status) > 0);
+    CHECK(status_fn && HOIFS(status, status_fn(NULL)));
     CHECK(strstr(status, "\"lastZip\":\"") && strstr(status, "rawmap_share.zip\"") &&
           strstr(status, "\"lastZipBytes\":4321") && strstr(status, "\"lastMods\":1") &&
           strstr(status, "\"mapMods\":") && status[strlen(status) - 1] == '}');
@@ -1251,7 +1263,7 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(!strcmp(R.toast, "This map uses 1 mod, but rawmap_share.zip could not be written (the rawmap export is not "
                            "linked into this test). The .json alone will not load for others."));
     sh_rawmap_last_save(&last);
-    CHECK(last.zip[0] && last.zip_bytes == 0 && strstr(last.zip_error, "not linked") != NULL);
+    CHECK(last.zip && last.zip_bytes == 0 && strstr(last.zip_error, "not linked") != NULL);
 
     printf("-- a map without mods writes only the .json, and says nothing\n");
     g_mod_stub_export_calls = 0;
@@ -1259,16 +1271,16 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
     CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == sizeof BODY - 1);
     sh_rawmap_poll_main();
     sh_rawmap_last_save(&last);
-    CHECK(g_mod_stub_export_calls == 0 && R.toasts == 0 && !last.zip[0] && last.mods == 0 && last.json[0]);
+    CHECK(g_mod_stub_export_calls == 0 && R.toasts == 0 && !last.zip && last.mods == 0 && last.json);
 
     DeleteFileA(target);
 
     printf("-- every path is UTF-8 to the export: a non-ASCII folder saves and imports\n");
     {
-        char dir[SH_RAWMAP_PATH_MAX], json[SH_RAWMAP_PATH_MAX], why[512];
-        wchar_t wdir[MAX_PATH];
+        char dir[1024], json[1024], why[512];
+        wchar_t *wdir;
         CHECK(temp_path("caf\xc3\xa9 \xe2\x80\x94 maps", dir, sizeof dir));
-        CHECK(sh_rawmap_path_wide(dir, wdir, MAX_PATH));
+        CHECK((wdir = sh_rawmap_path_wide(dir)) != NULL);
         CreateDirectoryW(wdir, NULL);
         _snprintf_s(json, sizeof json, _TRUNCATE, "%s\\arena.json", dir);
         CHECK(sh_rawmap_set_save_target(json));
@@ -1281,9 +1293,9 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
         _snprintf_s(zip, sizeof zip, _TRUNCATE, "%s\\arena.zip", dir);
         CHECK(!strcmp(g_mod_stub_export_path, zip));
         {
-            wchar_t wz[MAX_PATH];
+            wchar_t *wz = sh_rawmap_path_wide(zip);
             HANDLE h;
-            CHECK(sh_rawmap_path_wide(zip, wz, MAX_PATH));
+            CHECK(wz != NULL);
             h = CreateFileW(wz, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             CHECK(h != INVALID_HANDLE_VALUE);
             if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
@@ -1294,15 +1306,123 @@ static void a_save_with_mods_writes_the_zip_beside_the_json(void)
             g_mod_stub_import_text = NULL;
             sh_rawmap_swap_set_source(NULL);
             DeleteFileW(wz);
+            free(wz);
         }
         _snprintf_s(json, sizeof json, _TRUNCATE, "%s\\arena.json", dir);
         {
-            wchar_t wj[MAX_PATH];
-            if (sh_rawmap_path_wide(json, wj, MAX_PATH)) DeleteFileW(wj);
+            wchar_t *wj = sh_rawmap_path_wide(json);
+            if (wj) DeleteFileW(wj);
+            free(wj);
         }
         RemoveDirectoryW(wdir);
+        free(wdir);
         g_mod_stub_export_result = 0;
     }
+    mods_end();
+}
+
+/* A rawmap in a folder 3,000 characters deep whose folder names are not ASCII: the save makes the
+ * folders and writes the map, the export beside it gets the whole .zip path, the map opens from
+ * there, and its .zip imports and opens. Every path is whole in the report and the status. */
+static void a_long_unicode_path_saves_exports_loads_and_imports(void)
+{
+    /* "Карты-ü-地図" in UTF-8: a folder name outside every ANSI code page. */
+    static const char folder[] = "\xD0\x9A\xD0\xB0\xD1\x80\xD1\x82\xD1\x8B-\xC3\xBC-\xE5\x9C\xB0\xE5\x9B\xB3";
+    wchar_t temp[MAX_PATH + 1];
+    char *base, *deep = NULL, *json = NULL, *zip = NULL, *next, why[1280], *status;
+    wchar_t *w;
+    sh_rawmap_save_report last;
+    sh_rawmap_status_fn status_fn = NULL;
+    size_t depth = 0;
+    int length, units;
+    printf("\n-- a rawmap 3,000 characters deep under non-ASCII folders saves, exports, loads and imports\n");
+    mods_begin();
+    CHECK(GetTempPathW(MAX_PATH + 1, temp) != 0);
+    base = sh_rawmap_path_utf8(temp);
+    CHECK(base != NULL);
+    if (!base) { mods_end(); return; }
+    deep = sh_textf("%snl2-%lu", base, GetCurrentProcessId());
+    free(base);
+    for (;;) {
+        units = MultiByteToWideChar(CP_UTF8, 0, deep, -1, NULL, 0);
+        if (units > 2990) break;
+        next = sh_textf("%s\\%s-%02u", deep, folder, (unsigned)depth++);
+        free(deep);
+        deep = next;
+    }
+    json = sh_textf("%s\\map.json", deep);
+    zip = sh_textf("%s\\map.zip", deep);
+    units = MultiByteToWideChar(CP_UTF8, 0, json, -1, NULL, 0) - 1;
+    printf("   %d UTF-16 units, %u bytes of UTF-8, %u folders\n", units, (unsigned)strlen(json), (unsigned)depth);
+    CHECK(units >= 3000 && strlen(json) > 3000);
+
+    /* Save: the folders do not exist yet; the save makes them and writes the map whole. */
+    CHECK(sh_rawmap_set_save_target(json));
+    g_mod_stub_export_calls = 0;
+    g_mod_stub_export_result = 77;
+    CHECK(sh_rawmap_test_write(MOD_MAP, sizeof MOD_MAP - 1) == sizeof MOD_MAP - 1);
+    w = sh_rawmap_path_wide(json);
+    CHECK(w && !wcsncmp(w, L"\\\\?\\", 4) && GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES);
+    free(w);
+
+    /* Export: the .zip beside it, its path whole to the exporter and in the report. */
+    transport_settle();
+    CHECK(g_mod_stub_export_calls == 1 && g_mod_stub_export_path && !strcmp(g_mod_stub_export_path, zip));
+    sh_rawmap_last_save(&last);
+    CHECK(last.json && !strcmp(last.json, json) && last.zip && !strcmp(last.zip, zip) && last.zip_bytes == 77);
+    sh_rawmap_save_report_free(&last);
+    sh_rawmap_get_slots(&status_fn, NULL, NULL);
+    status = status_fn ? status_fn(NULL) : NULL;
+    CHECK(status != NULL);
+    if (status) {
+        char *escaped = json_escape(zip);
+        length = (int)strlen(status);
+        CHECK(escaped && length > 6000 && strstr(status, escaped) != NULL);
+        free(escaped);
+    }
+    sh_iface_text_free(status);
+
+    /* Load: a map without mods written to the same deep file opens from there. */
+    CHECK(sh_rawmap_test_write(ENGINE_MAP, sizeof ENGINE_MAP - 1) == sizeof ENGINE_MAP - 1);
+    CHECK(sh_rawmap_validate_source(json, NULL) == 1 && sh_rawmap_looks_like_rawmap(json) == 1);
+    CHECK(sh_rawmap_swap_set_source(json));
+    CHECK(HO(why, sh_rawmap_prepare_reload(HO_P(0))) == 1 && g_prepared && strstr(g_prepared, "ENGINE_MARK") &&
+          g_prepared_path && !strcmp(g_prepared_path, json));
+    sh_rawmap_reload_done(0, 0);
+
+    /* Import: the .zip at the same depth imports and opens. */
+    w = sh_rawmap_path_wide(zip);
+    if (w) {
+        HANDLE h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+    g_mod_stub_import_text = ENGINE_MAP;
+    CHECK(sh_rawmap_swap_set_source(zip));
+    CHECK(prepare_zip(why, (int)sizeof why) == 1 && g_prepared && strstr(g_prepared, "ENGINE_MARK"));
+    sh_rawmap_reload_done(0, 0);
+    g_mod_stub_import_text = NULL;
+    g_mod_stub_export_result = 0;
+    if (w) DeleteFileW(w);
+    free(w);
+
+    /* Remove the file and every folder the save made, deepest first. */
+    w = sh_rawmap_path_wide(json);
+    if (w) DeleteFileW(w);
+    free(w);
+    while (depth--) {
+        char *cut = strrchr(deep, '\\');
+        w = sh_rawmap_path_wide(deep);
+        if (w) RemoveDirectoryW(w);
+        free(w);
+        if (cut) *cut = '\0';
+    }
+    w = sh_rawmap_path_wide(deep);
+    if (w) RemoveDirectoryW(w);
+    free(w);
+    free(deep);
+    free(json);
+    free(zip);
     mods_end();
 }
 
@@ -1327,15 +1447,15 @@ static void a_load_path_never_replaces_another_parse(const char *archive)
     /* Load Rawmap with no live editor: refused now, the load path unchanged. */
     sh_rawmap_swap_set_source(NULL);
     sh_rawmap_get_slots(NULL, &configure, NULL);
-    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
+    CHECK(!HOIF(message, configure(NULL, archive, NULL, 2, HO_P(0))));
     CHECK(strstr(message, "no editor") != NULL);
     {
         char load[MAX_PATH], dflt[MAX_PATH];
-        sh_rawmap_get_paths(load, (int)sizeof load, NULL, 0);
-        sh_rawmap_get_default_paths(dflt, (int)sizeof dflt, NULL, 0);
+        HOS(load, sh_rawmap_load_path());
+        HOS(dflt, sh_rawmap_default_path());
         CHECK(!_stricmp(load, dflt));
     }
-    CHECK(!sh_rawmap_open_now(archive, message, sizeof message));
+    CHECK(!HO(message, sh_rawmap_open_now(archive, HO_P(0))));
     /* Inside a reload whose checked text is gone the borrowed map is never parsed. */
     InterlockedExchange(&g_in_reload, 1);
     g_parses = 0;
@@ -1353,7 +1473,7 @@ static void a_unicode_path_is_read_and_written(void)
     /* "rawmap-" + U+00E9 + U+4E16 + ".json" in UTF-8 */
     static const char name[] = "rawmap-\xC3\xA9\xE4\xB8\x96.json";
     char dir[MAX_PATH], path[MAX_PATH], why[256], out[64] = {0};
-    wchar_t wpath[MAX_PATH];
+    wchar_t *wpath;
     unsigned long long wrote;
     size_t len = 0;
     char *text;
@@ -1364,9 +1484,9 @@ static void a_unicode_path_is_read_and_written(void)
     CHECK(sh_rawmap_set_save_target(path) == 1);
     wrote = sh_rawmap_test_write(BODY, sizeof BODY - 1);
     CHECK(wrote == sizeof BODY - 1);
-    CHECK(sh_rawmap_path_wide(path, wpath, MAX_PATH));
-    CHECK(GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES);
-    CHECK(sh_rawmap_validate_source(path, why, (int)sizeof why) == 1 && !why[0]);
+    CHECK((wpath = sh_rawmap_path_wide(path)) != NULL);
+    CHECK(wpath && GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES);
+    CHECK(HO(why, sh_rawmap_validate_source(path, HO_P(0))) == 1 && !why[0]);
     CHECK(sh_rawmap_swap_set_source(path));
     {
         int importing = 0;
@@ -1375,7 +1495,8 @@ static void a_unicode_path_is_read_and_written(void)
     CHECK(text != NULL && len == sizeof BODY - 1);
     if (text) { memcpy(out, text, len < sizeof out - 1 ? len : sizeof out - 1); HeapFree(GetProcessHeap(), 0, text); }
     CHECK(!strcmp(out, BODY));
-    DeleteFileW(wpath);
+    if (wpath) DeleteFileW(wpath);
+    free(wpath);
     clean_state();
 }
 
@@ -1419,6 +1540,7 @@ int main(void)
     a_rawmap_whose_mods_are_installed_loads();
     a_rawmap_open_takes_its_own_rows_and_then_its_own_id();
     a_save_with_mods_writes_the_zip_beside_the_json();
+    a_long_unicode_path_saves_exports_loads_and_imports();
     a_refused_zip_tells_the_player_why();
 
     DeleteFileA(archive);

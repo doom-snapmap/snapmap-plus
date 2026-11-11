@@ -10,9 +10,11 @@
 #include <ctype.h>
 #include <math.h>
 #include <float.h>
+#include <limits.h>
 #include <stdarg.h>
 #include "snapstack.h"
 #include "snapmap_plus_iface.h"
+#include "../common/text.h"
 #include "json_patch.h"
 #include "commands.h"
 #include "backend_log.h"
@@ -82,9 +84,10 @@ static int ss_ids_copy_out(const ss_ids *v, int **out)
 }
 static void ss_ids_free(ss_ids *v) { free(v->items); v->items = NULL; v->count = 0; v->cap = 0; }
 
-/* Numbered stacks. */
-#define SS_MAX_STACKS 256   /* Stack indices clamp into this fixed range. */
-static ss_ids g_stacks[SS_MAX_STACKS];
+/* Numbered stacks: any non-negative index, each made the first time it is named. The
+ * pointer table grows; a stack itself never moves, so a pointer to it stays good. */
+static ss_ids **g_stacks;
+static int      g_stack_count;
 
 /* Main-thread handlers and frontend push/clear slots can mutate numbered stacks.
  * Lock mutations and snapshots so realloc cannot invalidate an active reader.
@@ -107,36 +110,70 @@ static void ss_unlock(void) { LeaveCriticalSection(&g_ss_lock); }
 
 static int ss_clamp_index(int index)
 {
-    if (index < 0) return 0;
-    if (index >= SS_MAX_STACKS) return SS_MAX_STACKS - 1;   /* clamp, never index OOB */
-    return index;
+    return index < 0 ? 0 : index;
 }
-static ss_ids *stack_get(int index) { return &g_stacks[ss_clamp_index(index)]; }
+/* The stack at `index`, made when first named; NULL only when memory runs out. */
+static ss_ids *stack_get(int index)
+{
+    ss_ids *s = NULL;
+    index = ss_clamp_index(index);
+    ss_lock();
+    if (index >= g_stack_count) {
+        int count = g_stack_count ? g_stack_count : 16;
+        ss_ids **grown;
+        while (count <= index) count = count > INT_MAX / 2 ? INT_MAX : count * 2;
+        grown = (ss_ids **)realloc(g_stacks, (size_t)count * sizeof *grown);
+        if (grown) {
+            memset(grown + g_stack_count, 0, (size_t)(count - g_stack_count) * sizeof *grown);
+            g_stacks = grown;
+            g_stack_count = count;
+        }
+    }
+    if (index < g_stack_count) {
+        if (!g_stacks[index]) g_stacks[index] = (ss_ids *)calloc(1, sizeof **g_stacks);
+        s = g_stacks[index];
+    }
+    ss_unlock();
+    return s;
+}
+static int stack_count_of(int index)
+{
+    ss_ids *s = stack_get(index);
+    return s ? s->count : 0;
+}
 /* Centralize locked stack mutations. */
 static int stack_push(int index, const int *ids, int n)
 {
+    ss_ids *s = stack_get(index);
+    int pushed = 0;
+    if (!s) return 0;
     ss_lock();
-    int pushed = ss_ids_push_dedup(stack_get(index), ids, n);
+    pushed = ss_ids_push_dedup(s, ids, n);
     ss_unlock();
     return pushed;
 }
 static void stack_clear(int index)
 {
+    ss_ids *s = stack_get(index);
+    if (!s) return;
     ss_lock();
-    ss_ids_clear(stack_get(index));
+    ss_ids_clear(s);
     ss_unlock();
 }
 static int stack_move_out(int index, int **out)
 {
+    ss_ids *s = stack_get(index);
+    int n = 0;
+    *out = NULL;
+    if (!s) return 0;
     ss_lock();
-    int n = ss_ids_move_out(stack_get(index), out);
+    n = ss_ids_move_out(s, out);
     ss_unlock();
     return n;
 }
 
-/* Named groups. */
-#define SS_GROUP_NAME_CAP 64
-typedef struct ss_group { char name[SS_GROUP_NAME_CAP]; ss_ids ids; } ss_group;
+/* Named groups, each name whole. */
+typedef struct ss_group { char *name; ss_ids ids; } ss_group;
 static ss_group *g_groups = NULL;
 static int        g_group_count = 0, g_group_cap = 0;
 
@@ -151,9 +188,10 @@ static ss_ids *group_get(const char *name)
         g_groups = ni;
         g_group_cap = ncap;
     }
-    ss_group *g = &g_groups[g_group_count++];
+    ss_group *g = &g_groups[g_group_count];
     memset(g, 0, sizeof *g);
-    _snprintf_s(g->name, sizeof g->name, _TRUNCATE, "%s", name);
+    if ((g->name = _strdup(name)) == NULL) return NULL;
+    g_group_count++;
     return &g->ids;
 }
 static int group_has(const char *name)
@@ -176,6 +214,7 @@ static int group_remove(const char *name)
         if (strcmp(g_groups[i].name, name) != 0) continue;
         int had = g_groups[i].ids.count;
         ss_ids_free(&g_groups[i].ids);
+        free(g_groups[i].name);
         for (int j = i; j < g_group_count - 1; j++)
             g_groups[j] = g_groups[j + 1];
         g_group_count--;                                /* The shifted duplicate no longer owns its buffer. */
@@ -186,7 +225,7 @@ static int group_remove(const char *name)
 
 static void group_remove_all(void)
 {
-    for (int i = 0; i < g_group_count; i++) ss_ids_free(&g_groups[i].ids);
+    for (int i = 0; i < g_group_count; i++) { ss_ids_free(&g_groups[i].ids); free(g_groups[i].name); }
     g_group_count = 0;
 }
 
@@ -229,6 +268,12 @@ static int ic_hovered_id(sh_iface *iface)
     if (!iface || !iface->vtbl || !iface->vtbl->hovered_id) return -1;
     return iface->vtbl->hovered_id(iface);
 }
+static int ic_entity_count(sh_iface *iface)
+{
+    int n = 0;
+    if (iface && iface->vtbl && iface->vtbl->entity_count) n = iface->vtbl->entity_count(iface);
+    return n > 0 ? n : 0;
+}
 static int ic_is_valid_id(sh_iface *iface, int id)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->is_valid_id) return 0;
@@ -238,26 +283,22 @@ static void ic_toast(sh_iface *iface, const char *title, const char *text)
 {
     if (iface && iface->vtbl && iface->vtbl->toast) iface->vtbl->toast(iface, title, text);
 }
-static void ic_classname(sh_iface *iface, int id, char *buf, int cap)
+/* The interface's owned text (snapmap_plus_iface.h), whole; release with ic_free. */
+static void ic_free(char *text) { sh_iface_text_free(text); }
+static char *ic_classname(sh_iface *iface, int id)
 {
-    buf[0] = '\0';
-    if (!iface || !iface->vtbl || !iface->vtbl->get_classname_copy) return;
-    const char *s = iface->vtbl->get_classname_copy(iface, id, buf, cap);
-    if (s != buf) { buf[0] = '\0'; if (s) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s", s); }
+    if (!iface || !iface->vtbl || !iface->vtbl->get_classname_copy) return NULL;
+    return iface->vtbl->get_classname_copy(iface, id);
 }
-static void ic_inherit(sh_iface *iface, int id, char *buf, int cap)
+static char *ic_inherit(sh_iface *iface, int id)
 {
-    buf[0] = '\0';
-    if (!iface || !iface->vtbl || !iface->vtbl->get_inherit_copy) return;
-    const char *s = iface->vtbl->get_inherit_copy(iface, id, buf, cap);
-    if (s != buf) { buf[0] = '\0'; if (s) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s", s); }
+    if (!iface || !iface->vtbl || !iface->vtbl->get_inherit_copy) return NULL;
+    return iface->vtbl->get_inherit_copy(iface, id);
 }
-static void ic_declsource_text(sh_iface *iface, int id, char *buf, int cap)
+static char *ic_declsource_text(sh_iface *iface, int id)
 {
-    buf[0] = '\0';
-    if (!iface || !iface->vtbl || !iface->vtbl->get_declsource_copy) return;
-    const char *s = iface->vtbl->get_declsource_copy(iface, id, buf, cap);
-    if (s != buf) { buf[0] = '\0'; if (s) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s", s); }
+    if (!iface || !iface->vtbl || !iface->vtbl->get_declsource_copy) return NULL;
+    return iface->vtbl->get_declsource_copy(iface, id);
 }
 static void ic_rebuild_declsource(sh_iface *iface, int id, const char *src)
 {
@@ -271,22 +312,27 @@ static int ic_apply_class_inherit(sh_iface *iface, int id, const char *cls, cons
     if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit) return -1;
     return iface->vtbl->apply_class_inherit(iface, id, cls, inh);
 }
-/* the id-STRING leaf value (bse/accl/acctargets/mkcmd); decimal fallback if the slot is absent/empty. */
-static void ic_id_string(sh_iface *iface, int id, char *buf, int cap)
+/* the id-STRING leaf value (bse/accl/acctargets/mkcmd), owned; decimal fallback if the slot is
+ * absent or empty. NULL only when memory runs out. */
+static char *ic_id_string(sh_iface *iface, int id)
 {
-    buf[0] = '\0';
-    if (iface && iface->vtbl && iface->vtbl->id_to_string) {
-        const char *s = iface->vtbl->id_to_string(iface, id, buf, cap);
-        if (s != buf && s) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s", s);
-    }
-    if (buf[0] == '\0') _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%d", id);
+    char *s = NULL;
+    if (iface && iface->vtbl && iface->vtbl->id_to_string) s = iface->vtbl->id_to_string(iface, id);
+    if (s && s[0]) return s;
+    ic_free(s);
+    return sh_iface_textf("%d", id);
 }
-#define SH_APPLY_JSON_CAP (256 * 1024)   /* Per-entity serialization capacity. */
-static int ic_serialize_entity(sh_iface *iface, int id, char *out, int cap)
+/* The entity's JSON, whole and owned; NULL when it cannot be read. */
+static char *ic_serialize_entity(sh_iface *iface, int id)
 {
-    out[0] = '\0';
-    if (!iface || !iface->vtbl || !iface->vtbl->serialize_entity) return 0;
-    return iface->vtbl->serialize_entity(iface, id, out, cap);
+    if (!iface || !iface->vtbl || !iface->vtbl->serialize_entity) return NULL;
+    return iface->vtbl->serialize_entity(iface, id);
+}
+/* Room for a patched document: the source, what is added, and the members
+ * a patch creates along `path` (a quote, colon and braces per part). */
+static size_t ss_patch_room(const char *full, const char *path, size_t added)
+{
+    return strlen(full) + added + (path ? strlen(path) * 4 : 0) + 64;
 }
 static int ic_schedule_apply(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
@@ -422,7 +468,7 @@ static void ss_sync_stacks(void)
         g_ss_stack_generation = g_ss_group_generation = now;
         g_ss_generation_known = 1;
     } else if (g_ss_stack_generation != now) {
-        for (int i = 0; i < SS_MAX_STACKS; i++) ss_ids_clear(&g_stacks[i]);
+        for (int i = 0; i < g_stack_count; i++) if (g_stacks[i]) ss_ids_clear(g_stacks[i]);
         g_ss_stack_generation = now;
     }
     ss_unlock();
@@ -438,9 +484,6 @@ static void ss_sync(void)
     }
 }
 
-/* Bulk edits change at most this many entities in one command; more is refused before anything
- * changes, with the ids left where they were. */
-#define SS_BULK_MAX 512
 
 /* The operand's ids, caller-owned: a group is copied; a stack is consumed and its index is
  * written to *stack (-1 for a group), so a refused command can put them back. */
@@ -461,50 +504,40 @@ static void ss_put_back(int stack, const int *ids, int n)
 
 static void ss_toastf(sh_iface *iface, const char *fmt, ...)
 {
-    char text[256];
+    char *text;
     va_list ap;
     va_start(ap, fmt);
-    _vsnprintf_s(text, sizeof text, _TRUNCATE, fmt, ap);
+    text = sh_vtextf(fmt, ap);
     va_end(ap);
-    ic_toast(iface, "SnapStack", text);
+    ic_toast(iface, "SnapStack", text ? text : "SnapStack ran out of memory.");
+    free(text);
 }
 
-/* Refuse an operand over the bulk limit, putting a consumed stack back. 1 = refused. */
-static int ss_over_limit(sh_iface *iface, const char *op, int *ids, int n, int stack)
-{
-    if (n <= SS_BULK_MAX) return 0;
-    ss_put_back(stack, ids, n);
-    free(ids);
-    ss_toastf(iface, "%s changes at most %d entities at once and this has %d; split it and run it again. "
-              "Nothing was changed.", op, SS_BULK_MAX, n);
-    return 1;
-}
 
 /* One bulk edit: serialize each entity, set `prop` to the JSON `leaf`, and apply the batch.
  * Entities without the property are counted in *missing. */
 static void ss_bulk_set(sh_iface *iface, const char *op, const int *ids, int n, const char *prop, const char *leaf)
 {
-    char *full = (char *)malloc(SH_APPLY_JSON_CAP);
-    char *scratch = (char *)malloc(SH_APPLY_JSON_CAP + 1024);
     sh_apply_item *items = (sh_apply_item *)calloc((size_t)(n > 0 ? n : 1), sizeof *items);
     char **owned = (char **)calloc((size_t)(n > 0 ? n : 1), sizeof *owned);
     int m = 0, missing = 0;
 
-    if (!full || !scratch || !items || !owned) {
+    if (!items || !owned) {
         ss_toastf(iface, "%s: not enough memory; nothing was changed.", op);
         goto done;
     }
     for (int i = 0; i < n; i++) {
-        size_t plen;
-        if (!ic_serialize_entity(iface, ids[i], full, SH_APPLY_JSON_CAP) ||
-            !sh_json_patch_set_leaf(full, prop, leaf, scratch, SH_APPLY_JSON_CAP + 1024)) {
+        char *full = ic_serialize_entity(iface, ids[i]), *patched = NULL;
+        size_t room = full ? ss_patch_room(full, prop, strlen(leaf)) : 0;
+        if (!full || room > INT_MAX || (patched = (char *)malloc(room)) == NULL ||
+            !sh_json_patch_set_leaf(full, prop, leaf, patched, (int)room)) {
+            ic_free(full);
+            free(patched);
             missing++;
             continue;
         }
-        plen = strlen(scratch);
-        owned[m] = (char *)malloc(plen + 1);
-        if (!owned[m]) { missing++; continue; }
-        memcpy(owned[m], scratch, plen + 1);
+        ic_free(full);
+        owned[m] = patched;
         items[m].kind = 0; items[m].id = ids[i]; items[m].text = owned[m];
         m++;
     }
@@ -518,7 +551,7 @@ static void ss_bulk_set(sh_iface *iface, const char *op, const int *ids, int n, 
         ss_toastf(iface, "%s: the editor did not accept the change; open the map in the editor and try again.", op);
 done:
     if (owned) for (int i = 0; i < m; i++) free(owned[i]);
-    free(owned); free(items); free(full); free(scratch);
+    free(owned); free(items);
 }
 
 /* Stack and group commands. */
@@ -528,17 +561,18 @@ static void h_psel(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
     int index = ss_clamp_index(parse_stack_index(arg_at(argc, argv, 1)));
-    enum { SEL_CAP = 4096 };
     ss_sync();
-    int *sel = (int *)malloc((size_t)SEL_CAP * sizeof(int));
-    int *valid = (int *)malloc((size_t)SEL_CAP * sizeof(int));
+    /* The selection never holds more ids than the editor has entities (the engine's own table). */
+    int room = ic_entity_count(iface) + 1;
+    int *sel = (int *)malloc((size_t)room * sizeof(int));
+    int *valid = (int *)malloc((size_t)room * sizeof(int));
     if (!sel || !valid) { free(sel); free(valid); ic_toast(iface, "SnapStack", "psel: not enough memory."); return; }
-    int sel_n = ic_get_selection(iface, sel, SEL_CAP);
+    int sel_n = ic_get_selection(iface, sel, room);
     int valid_n = 0;
     for (int i = 0; i < sel_n; i++)
         if (ic_is_valid_id(iface, sel[i])) valid[valid_n++] = sel[i];
     int pushed = stack_push(index, valid, valid_n);
-    int now = stack_get(index)->count;
+    int now = stack_count_of(index);
     free(sel);
     free(valid);
     ic_clear_selection(iface);
@@ -565,10 +599,11 @@ static void h_phov(void *ctx, int argc, const char **argv)
     int hovered = ic_hovered_id(iface);
     if (hovered < 0) { ic_toast(iface, "SnapStack", "phov: nothing hovered (point at an entity in the 3D view)"); return; }
     int pushed = stack_push(index, &hovered, 1);
-    int now = stack_get(index)->count;
-    char idstr[200]; ic_id_string(iface, hovered, idstr, (int)sizeof idstr);
+    int now = stack_count_of(index);
+    char *idstr = ic_id_string(iface, hovered);
     ss_toastf(iface, "phov: %s id %d \"%s\" onto stack %d (now %d)",
-              pushed ? "pushed" : "already on --", hovered, idstr, index, now);
+              pushed ? "pushed" : "already on --", hovered, idstr ? idstr : "", index, now);
+    ic_free(idstr);
 }
 
 /* Clear a numbered stack and report its prior count. */
@@ -590,13 +625,16 @@ static void h_pr(void *ctx, int argc, const char **argv)
     const char *hi_s = arg_at(argc, argv, 3);
     int lo = lo_s ? atoi(lo_s) : 0;
     int hi = hi_s ? atoi(hi_s) : 0;
-    enum { RANGE_CAP = 65536 };
     ss_sync();
     if (hi < lo) { int t = lo; lo = hi; hi = t; }
-    int *in_range = (int *)malloc((size_t)RANGE_CAP * sizeof(int));
+    /* Valid ids are below the editor's entity count (the engine's own table). */
+    int count = ic_entity_count(iface);
+    if (lo < 0) lo = 0;
+    if (hi >= count) hi = count - 1;
+    int *in_range = (int *)malloc((size_t)(hi >= lo ? hi - lo + 1 : 1) * sizeof(int));
     if (!in_range) { ic_toast(iface, "SnapStack", "pr: not enough memory."); return; }
     int n = 0;
-    for (int id = lo; id <= hi && n < RANGE_CAP; id++)
+    for (int id = lo; id <= hi; id++)
         if (ic_is_valid_id(iface, id)) in_range[n++] = id;
     int pushed = stack_push(index, in_range, n);
     free(in_range);
@@ -660,10 +698,9 @@ static void do_filt(sh_iface *iface, int index, const char *match, int by_class)
     int kn = 0;
     if (n > 0 && !kept) { ss_put_back(index, cur, n); free(cur); ic_toast(iface, "SnapStack", "Not enough memory."); return; }
     for (int i = 0; i < n; i++) {
-        char field[256];
-        if (by_class) ic_classname(iface, cur[i], field, (int)sizeof field);
-        else          ic_inherit(iface, cur[i], field, (int)sizeof field);
-        if (strcmp(field, match) == 0) kept[kn++] = cur[i];
+        char *field = by_class ? ic_classname(iface, cur[i]) : ic_inherit(iface, cur[i]);
+        if (strcmp(field ? field : "", match) == 0) kept[kn++] = cur[i];
+        ic_free(field);
     }
     stack_push(index, kept, kn);
     free(cur);
@@ -703,7 +740,6 @@ static void do_bulkset(sh_iface *iface, const char *op, int argc, const char **a
     }
     int n = ss_take(argc, argv, &ids, &stack);
     if (n <= 0) { free(ids); ss_toastf(iface, "%s: no entities on the stack.", op); return; }
-    if (ss_over_limit(iface, op, ids, n, stack)) return;
     ss_bulk_set(iface, op, ids, n, prop, leaf);
     free(ids);
 }
@@ -736,15 +772,19 @@ static void h_bse(void *ctx, int argc, const char **argv)
     if (!prop) { ic_toast(iface, "SnapStack", "usage: bse <stack> <path>"); return; }
     int n = ss_take_targets(iface, "bse", index, &ids);
     if (n == 0) return;
-    if (ss_over_limit(iface, "bse", ids, n, index)) return;
-    char receiver[256]; ic_id_string(iface, ids[n - 1], receiver, (int)sizeof receiver);
-    char leaf[300];
-    if (!sh_json_quote_string(receiver, leaf, (int)sizeof leaf)) {
+    char *receiver = ic_id_string(iface, ids[n - 1]);
+    /* A quoted, escaped string: every byte escapes to at most six. */
+    size_t room = receiver ? strlen(receiver) * 6 + 3 : 0;
+    char *leaf = receiver && room <= INT_MAX ? (char *)malloc(room) : NULL;
+    if (!leaf || !sh_json_quote_string(receiver, leaf, (int)room)) {
         ss_put_back(index, ids, n); free(ids);
+        ic_free(receiver); free(leaf);
         ic_toast(iface, "SnapStack", "bse: that entity's reference cannot be written; nothing was changed.");
         return;
     }
     ss_bulk_set(iface, "bse", ids, n - 1, prop, leaf);
+    ic_free(receiver);
+    free(leaf);
     free(ids);
 }
 
@@ -758,53 +798,56 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
     if (!hardcoded_targets && !userPath) { ic_toast(iface, "SnapStack", "usage: accl <stack> <path>"); return; }
     int n = ss_take_targets(iface, op, index, &ids);
     if (n == 0) return;
-    if (ss_over_limit(iface, op, ids, n, index)) return;
     int receiver = ids[n - 1];
     int targets = n - 1;
     const char *path = hardcoded_targets ? "targets" : userPath;
 
-    const char **idstr_ptrs = (const char **)malloc((size_t)targets * sizeof(char *));
-    char *idstr_bufs = (char *)malloc((size_t)targets * 256);
-    char *full = (char *)malloc(SH_APPLY_JSON_CAP);
-    char *patched = (char *)malloc(SH_APPLY_JSON_CAP + 4096);
+    char **idstr_ptrs = (char **)calloc((size_t)(targets > 0 ? targets : 1), sizeof(char *));
+    char *full = NULL, *patched = NULL;
+    size_t added = 0, room;
     int nvalid = 0, skipped = 0;
-    if (!idstr_ptrs || !idstr_bufs || !full || !patched) {
+    if (!idstr_ptrs) {
         ss_put_back(index, ids, n);
         ss_toastf(iface, "%s: not enough memory; nothing was changed.", op);
         goto done;
     }
     for (int i = 0; i < targets; i++) {
         if (!ic_is_valid_id(iface, ids[i])) { skipped++; continue; }
-        char *slot = idstr_bufs + (size_t)nvalid * 256;
-        ic_id_string(iface, ids[i], slot, 256);
-        idstr_ptrs[nvalid++] = slot;
+        if ((idstr_ptrs[nvalid] = ic_id_string(iface, ids[i])) == NULL) { skipped++; continue; }
+        added += strlen(idstr_ptrs[nvalid]) * 6 + 32;   /* escaped, with its item[N] key */
+        nvalid++;
     }
     if (nvalid == 0) {
         ss_toastf(iface, "%s: all %d targets on the stack were deleted; nothing was changed.", op, targets);
         goto done;
     }
-    if (!ic_serialize_entity(iface, receiver, full, SH_APPLY_JSON_CAP)) {
+    if ((full = ic_serialize_entity(iface, receiver)) == NULL) {
         ss_toastf(iface, "%s: the receiving entity could not be read; nothing was changed.", op);
         goto done;
     }
-    if (!sh_json_patch_upsert_reflist(full, path, idstr_ptrs, nvalid, patched, SH_APPLY_JSON_CAP + 4096)) {
+    room = ss_patch_room(full, path, added);
+    if (room > INT_MAX || (patched = (char *)malloc(room)) == NULL ||
+        !sh_json_patch_upsert_reflist(full, path, (const char * const *)idstr_ptrs, nvalid, patched, (int)room)) {
         ss_toastf(iface, "%s: the receiving entity's %s is not a list; nothing was changed.", op, path);
         goto done;
     }
     {
         sh_apply_item it; it.kind = 0; it.id = receiver; it.text = patched;
         int applied = ic_apply(iface, &it, 1, op);
-        char rcv[200]; ic_id_string(iface, receiver, rcv, (int)sizeof rcv);
+        char *rcv = ic_id_string(iface, receiver);
+        const char *r = rcv ? rcv : "";
         if (applied == 1)
             ss_toastf(iface, "%s: added %d %s to \"%s\"%s.", op, nvalid, hardcoded_targets ? "target(s)" : "reference(s)",
-                      rcv, skipped ? " (deleted ones skipped)" : "");
+                      r, skipped ? " (deleted ones skipped)" : "");
         else if (applied == SH_APPLY_IN_PROGRESS)
-            ss_toastf(iface, "%s: the change to \"%s\" is still running in the editor.", op, rcv);
+            ss_toastf(iface, "%s: the change to \"%s\" is still running in the editor.", op, r);
         else
-            ss_toastf(iface, "%s: the editor did not accept the change to \"%s\"; nothing was changed.", op, rcv);
+            ss_toastf(iface, "%s: the editor did not accept the change to \"%s\"; nothing was changed.", op, r);
+        ic_free(rcv);
     }
 done:
-    free(idstr_ptrs); free(idstr_bufs); free(full); free(patched); free(ids);
+    if (idstr_ptrs) for (int i = 0; i < nvalid; i++) ic_free(idstr_ptrs[i]);
+    free(idstr_ptrs); ic_free(full); free(patched); free(ids);
 }
 static void h_accl(void *ctx, int argc, const char **argv)       { do_acc((sh_iface *)ctx, "accl", argc, argv, 0); }
 static void h_acctargets(void *ctx, int argc, const char **argv) { do_acc((sh_iface *)ctx, "acctargets", argc, argv, 1); }
@@ -821,54 +864,44 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
     const char *tmpl_arg = arg_at(argc, argv, 2);
     const char *tmpl = (tmpl_arg && tmpl_arg[0]) ? tmpl_arg : "$";
 
-    char *commandText = (char *)malloc(SH_APPLY_JSON_CAP);
-    char *prefab = (char *)malloc(SH_APPLY_JSON_CAP + 4096);
-    if (!commandText || !prefab) {
-        ss_put_back(stack, ids, n);
-        free(commandText); free(prefab); free(ids);
-        ic_toast(iface, "SnapStack", "mkcmd: not enough memory; nothing was changed.");
-        return;
-    }
+    /* The command text: "ai_ScriptCmdEnt <template, $ = the id>;" for each entity, whole. */
+    char *commandText = sh_text(""), *prefab = NULL;
     size_t clen = 0;
-    int fits = 1;
-    commandText[0] = '\0';
-    for (int i = 0; i < n && fits; i++) {
-        char idStr[256]; ic_id_string(iface, ids[i], idStr, (int)sizeof idStr);
-        char part[512]; size_t plen = 0;
-        int wrote = _snprintf_s(part, sizeof part, _TRUNCATE, "ai_ScriptCmdEnt ");
-        plen = (wrote > 0) ? (size_t)wrote : 0;
-        for (const char *c = tmpl; *c && plen + 1 < sizeof part; c++) {
-            if (*c == '$') { size_t idlen = strlen(idStr); if (plen + idlen + 1 >= sizeof part) break; memcpy(part + plen, idStr, idlen); plen += idlen; }
-            else part[plen++] = *c;
+    for (int i = 0; i < n && commandText; i++) {
+        char *idStr = ic_id_string(iface, ids[i]), *next = NULL;
+        size_t idlen = idStr ? strlen(idStr) : 0, dollars = 0, plen;
+        for (const char *c = tmpl; *c; c++) dollars += *c == '$';
+        plen = 16 + strlen(tmpl) + dollars * idlen;   /* "ai_ScriptCmdEnt " and the template */
+        if (idStr && (next = (char *)realloc(commandText, clen + plen + 2)) != NULL) {
+            commandText = next;
+            memcpy(commandText + clen, "ai_ScriptCmdEnt ", 16);
+            clen += 16;
+            for (const char *c = tmpl; *c; c++) {
+                if (*c == '$') { memcpy(commandText + clen, idStr, idlen); clen += idlen; }
+                else commandText[clen++] = *c;
+            }
+            commandText[clen++] = ';';
+            commandText[clen] = '\0';
+        } else {
+            free(commandText);
+            commandText = NULL;
         }
-        part[plen] = '\0';
-        if (clen + plen + 2 >= SH_APPLY_JSON_CAP) { fits = 0; break; }
-        memcpy(commandText + clen, part, plen); clen += plen;
-        commandText[clen++] = ';';
+        ic_free(idStr);
     }
-    commandText[clen] = '\0';
 
     const char *ph = "__SH_MKCMD_COMMANDTEXT__";
     const char *tmplsrc = SH_MKCMD_PREFAB_TEMPLATE_C;
     const char *pos = strstr(tmplsrc, ph);
-    size_t pre = pos ? (size_t)(pos - tmplsrc) : 0;
-    size_t phlen = strlen(ph);
-    if (!pos) {
-        backend_log("SNAPSTACK: mkcmd template has no command placeholder");
-        fits = 0;
-    } else if (pre + clen + strlen(tmplsrc + pre + phlen) + 1 > (size_t)(SH_APPLY_JSON_CAP + 4096)) {
-        fits = 0;
-    }
-    if (!fits) {
+    if (!pos) backend_log("SNAPSTACK: mkcmd template has no command placeholder");
+    else if (commandText)
+        prefab = sh_textf("%.*s%s%s", (int)(pos - tmplsrc), tmplsrc, commandText, pos + strlen(ph));
+    free(commandText);
+    if (!prefab) {
         ss_put_back(stack, ids, n);
-        free(commandText); free(prefab); free(ids);
-        ic_toast(iface, "SnapStack", "mkcmd: too many entities for one command entity; split the stack. Nothing was changed.");
+        free(ids);
+        ic_toast(iface, "SnapStack", "mkcmd: not enough memory; nothing was changed.");
         return;
     }
-    memcpy(prefab, tmplsrc, pre);
-    memcpy(prefab + pre, commandText, clen);
-    _snprintf_s(prefab + pre + clen, (size_t)(SH_APPLY_JSON_CAP + 4096) - pre - clen, _TRUNCATE, "%s", tmplsrc + pre + phlen);
-    free(commandText);
     free(ids);
 
     /* Defer kind 1 staging through the engine command buffer; the backend reports the result. */
@@ -891,24 +924,21 @@ static void do_class_inherit(sh_iface *iface, const char *op, int argc, const ch
     ss_sync();
     int n = ss_take(argc, argv, &ids, &stack);
     if (n <= 0) { free(ids); ss_toastf(iface, "%s: no entities on the stack.", op); return; }
-    if (ss_over_limit(iface, op, ids, n, stack)) return;
     for (int i = 0; i < n; i++) {
         if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit ||
             !iface->vtbl->get_declsource_copy || !iface->vtbl->rebuild_set_declsource) {
             refused++;
             continue;
         }
-        char *rsrc = (char *)malloc(64 * 1024);
-        if (!rsrc) { refused++; continue; }
         int r = ic_apply_class_inherit(iface, ids[i], cls, inh);
         if (r == 1) {
-            ic_declsource_text(iface, ids[i], rsrc, 64 * 1024);
-            ic_rebuild_declsource(iface, ids[i], rsrc);
+            char *rsrc = ic_declsource_text(iface, ids[i]);
+            ic_rebuild_declsource(iface, ids[i], rsrc ? rsrc : "");
+            ic_free(rsrc);
             if (ic_apply_class_inherit(iface, ids[i], cls, inh) == 1) completed++;
             else again++; /* Source rebuild and the first pair already ran. */
         } else if (r == 0 || r == -1) refused++;
         else again++;
-        free(rsrc);
     }
     free(ids);
     if (again)
@@ -950,12 +980,14 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
         /* Snapshot under the lock before engine reads; frontend pushes may reallocate. */
         int *ids = NULL;
         ss_lock();
-        int n = ss_ids_copy_out(stack_get(index), &ids);
+        ss_ids *s = stack_get(index);
+        int n = s ? ss_ids_copy_out(s, &ids) : 0;
         ss_unlock();
         sh_printf("chkstk: stack %d holds %d id(s):\n", index, n);
         for (int i = 0; i < n; i++) {
-            char idstr[256]; ic_id_string(iface, ids[i], idstr, (int)sizeof idstr);
-            sh_printf("  [%d] id=%d  \"%s\"\n", i, ids[i], idstr);
+            char *idstr = ic_id_string(iface, ids[i]);
+            sh_printf("  [%d] id=%d  \"%s\"\n", i, ids[i], idstr ? idstr : "");
+            ic_free(idstr);
         }
         free(ids);
         ss_toastf(iface, "stack %d: %d id(s)", index, n);
@@ -963,13 +995,13 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
         int nonempty = 0, total = 0;
         sh_printf("chkstk: non-empty stacks:\n");
         ss_lock();
-        for (int i = 0; i < SS_MAX_STACKS; i++) {
-            if (g_stacks[i].count == 0) continue;
-            sh_printf("  stack %d: %d id(s)\n", i, g_stacks[i].count);
-            nonempty++; total += g_stacks[i].count;
+        for (int i = 0; i < g_stack_count; i++) {
+            if (!g_stacks[i] || g_stacks[i]->count == 0) continue;
+            sh_printf("  stack %d: %d id(s)\n", i, g_stacks[i]->count);
+            nonempty++; total += g_stacks[i]->count;
         }
         ss_unlock();
-        if (nonempty == 0) sh_printf("  (all %d stacks empty)\n", SS_MAX_STACKS);
+        if (nonempty == 0) sh_printf("  (every stack is empty)\n");
         ss_toastf(iface, "%d non-empty stack(s), %d id(s) total", nonempty, total);
     }
 }
@@ -988,8 +1020,9 @@ static void h_chkgrp(void *ctx, int argc, const char **argv)
         ss_ids *g = group_get(name);
         sh_printf("chkgrp: group '%s' holds %d id(s):\n", name, g->count);
         for (int i = 0; i < g->count; i++) {
-            char idstr[256]; ic_id_string(iface, g->items[i], idstr, (int)sizeof idstr);
-            sh_printf("  [%d] id=%d  \"%s\"\n", i, g->items[i], idstr);
+            char *idstr = ic_id_string(iface, g->items[i]);
+            sh_printf("  [%d] id=%d  \"%s\"\n", i, g->items[i], idstr ? idstr : "");
+            ic_free(idstr);
         }
         ss_toastf(iface, "group '%s': %d id(s)", name, g->count);
     } else {
@@ -1068,9 +1101,11 @@ void sh_snapstack_push_ids_backend(int index, const int *ids, int count)
 int sh_snapstack_clear_stack_backend(int index)
 {
     ss_sync_stacks();
-    ss_lock();
     ss_ids *s = stack_get(index);
-    int had = s->count;
+    int had = 0;
+    if (!s) return 0;
+    ss_lock();
+    had = s->count;
     ss_ids_clear(s);
     ss_unlock();
     return had;

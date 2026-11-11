@@ -27,9 +27,9 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
 int sh_soundpreview_play(const char *name);
 
 /* Why the latest audition was refused -- at once, or later on the main thread
- * ("Sounds play only inside a map.") -- copied into `out`; returns 1, or 0 with
- * "" when it was accepted. Any thread. */
-int sh_soundpreview_refusal(char *out, size_t cap);
+ * ("Sounds play only inside a map.") -- as owned interface text, or NULL when it
+ * was accepted. Any thread. */
+char *sh_soundpreview_refusal(void);
 
 /* Stop the current preview. While a session is open (below) this silences the emitter and nothing
  * else, leaving preview mode up so the next Play is instant; with no session it also drops the mode

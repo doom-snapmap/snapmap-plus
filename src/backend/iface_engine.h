@@ -26,8 +26,9 @@ int sh_iface_engine_copy_paste_enabled(void);
  * for compatible or unknown; this fail-open check is not full validation. */
 int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInherit);
 
-/* Format a module-qualified entity reference. Global entities produce a
- * no-module marker that target-reference callers reject. */
-const char *ie_resolve_id_string(int id, char *buf, int cap);
+/* Format a module-qualified entity reference, owned (sh_iface_text_free).
+ * Global entities produce a no-module marker that target-reference callers
+ * reject. NULL when memory runs out. */
+char *ie_resolve_id_string(int id);
 
 #endif /* B2_IFACE_ENGINE_H */

@@ -695,9 +695,9 @@ Console variables; defaults shown in parentheses.
 
 Subcommands of `sh`, operating on numbered entity-id stacks and named groups. A numbered stack
 is one-shot scratch — apply/use ops drain it; move a set into a named group (`pop2g`) to reuse it.
-Stacks and groups hold the open map's entity ids, so opening another map empties them all. A bulk
-edit (`bss`, `bsi`, `bsf`, `bsb`, `bse`, `accl`, `acctargets`, `bsin`, `bscls`, `bsincls`) changes at
-most 512 entities at once; a larger stack is refused before anything changes and stays as it was.
+Stacks and groups hold the open map's entity ids, so opening another map empties them all. A stack
+index is any number from 0 up, a group name any length, and a bulk edit (`bss`, `bsi`, `bsf`, `bsb`,
+`bse`, `accl`, `acctargets`, `bsin`, `bscls`, `bsincls`) changes every entity on its stack at once.
 Each edit reports the true count: "Changed N of M entities".
 
 The SnapStack stores + all 20 handlers live in the **backend** (`src/backend/snapstack.c` +

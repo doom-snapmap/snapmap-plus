@@ -2,6 +2,22 @@
 #include <assert.h>
 #include "../src/backend/snapstack.c"
 
+/* The interface's owned text (snapmap_plus_iface.c, not linked here: this test defines the
+ * registry calls itself). */
+char *sh_iface_textf(const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    char *out;
+    va_start(ap, fmt);
+    n = _vscprintf(fmt, ap);
+    va_end(ap);
+    out = n < 0 ? NULL : (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)n + 1);
+    if (out) { va_start(ap, fmt); vsnprintf(out, (size_t)n + 1, fmt, ap); va_end(ap); }
+    return out;
+}
+void sh_iface_text_free(void *text) { if (text) HeapFree(GetProcessHeap(), 0, text); }
+
 static int pair_calls[6], rebuild_calls[6], reads[6];
 static int toasts, applies, apply_result = 1;
 static unsigned long generation = 7;
@@ -18,13 +34,12 @@ static int pair(sh_iface *self, int id, const char *cls, const char *inh)
     if (id == 4 && call == 1) return -2;
     return 1;
 }
-static const char *source(sh_iface *self, int id, char *out, int cap)
+static char *source(sh_iface *self, int id)
 {
     (void)self;
-    assert(id != 1 && id != 2 && pair_calls[id] == 1 && cap > 8);
+    assert(id != 1 && id != 2 && pair_calls[id] == 1);
     reads[id]++;
-    strcpy_s(out, (size_t)cap, "source");
-    return out;
+    return sh_iface_textf("source");
 }
 static void rebuild(sh_iface *self, int id, const char *text)
 {
@@ -40,8 +55,8 @@ static void toast(sh_iface *self, const char *title, const char *text)
     toasts++;
 }
 static int valid(sh_iface *self, int id) { (void)self; return id >= 0; }
-static int serialize(sh_iface *self, int id, char *out, int cap)
-{ (void)self; _snprintf_s(out, (size_t)cap, _TRUNCATE, "{\"id\":%d}", id); return 1; }
+static char *serialize(sh_iface *self, int id)
+{ (void)self; return sh_iface_textf("{\"id\":%d}", id); }
 static int apply_sync(sh_iface *self, const sh_apply_item *items, int n, const char *op)
 { (void)self; (void)items; (void)op; applies++; return apply_result < 0 ? apply_result : (apply_result ? n : 0); }
 
@@ -81,12 +96,12 @@ int main(void)
 
     /* A different map empties every stack before anything reads it. */
     sh_snapstack_push_ids_backend(3, ids, 4);
-    assert(g_stacks[3].count == 4);
+    assert(g_stacks[3]->count == 4);
     generation++;
     {
         const char *chk[] = {"chkstk", "3"};
         h_chkstk(&iface, 2, chk);
-        assert(g_stacks[3].count == 0 && strstr(message, "stack 3: 0 id(s)"));
+        assert(g_stacks[3]->count == 0 && strstr(message, "stack 3: 0 id(s)"));
     }
 
     /* bse and accl need the targets and a receiver: one id is refused and stays on the stack. */
@@ -95,22 +110,24 @@ int main(void)
         const char *accl[] = {"accl", "1", "targets"};
         sh_snapstack_push_ids_backend(1, ids, 1);
         h_bse(&iface, 3, bse);
-        assert(strstr(message, "at least two entities") && g_stacks[1].count == 1);
+        assert(strstr(message, "at least two entities") && g_stacks[1]->count == 1);
         h_accl(&iface, 3, accl);
-        assert(strstr(message, "at least two entities") && g_stacks[1].count == 1);
+        assert(strstr(message, "at least two entities") && g_stacks[1]->count == 1);
         sh_snapstack_clear_stack_backend(1);
     }
 
-    /* Over the bulk limit: refused with the limit named, the stack left as it was. */
+    /* Any number of entities in one bulk edit, on any numbered stack: 600 on stack 300. */
     {
-        static int many[SS_BULK_MAX + 1];
-        const char *bss[] = {"bss", "2", "name", "x"};
-        for (int i = 0; i <= SS_BULK_MAX; i++) many[i] = i;
-        sh_snapstack_push_ids_backend(2, many, SS_BULK_MAX + 1);
+        static int many[600];
+        const char *bss[] = {"bss", "300", "name", "\"x\""};
+        const char *chk[] = {"chkstk", "300"};
+        for (int i = 0; i < 600; i++) many[i] = i;
+        sh_snapstack_push_ids_backend(300, many, 600);
+        h_chkstk(&iface, 2, chk);
+        assert(strstr(message, "stack 300: 600 id(s)"));
         applies = 0;
         h_bss(&iface, 4, bss);
-        assert(strstr(message, "at most 512") && g_stacks[2].count == SS_BULK_MAX + 1 && applies == 0);
-        sh_snapstack_clear_stack_backend(2);
+        assert(applies == 1 && !strstr(message, "at most") && g_stacks[300]->count == 0);
     }
 
     /* accl says "added" only when the editor applied it. */

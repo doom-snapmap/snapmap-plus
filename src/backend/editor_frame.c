@@ -77,7 +77,7 @@ static volatile LONG  g_reload_faulted = 0;
 typedef struct ef_save_request {
     void *map;
     unsigned long generation;
-    char destination[MAX_PATH];
+    char *destination;   /* malloc'd; the service takes it */
     int choose_target;
 } ef_save_request;
 static volatile LONG  g_save_pending = 0;
@@ -121,54 +121,64 @@ static int valid_map_id(const wchar_t *s)
     return n == 20;
 }
 
-static int saved_games_root(wchar_t *out, size_t cap)
+/* The Saved Games folder (malloc'd), or NULL. */
+static wchar_t *saved_games_root(void)
 {
     PWSTR wide = NULL;
-    /* FOLDERID_SavedGames. Spelled out rather than pulled from knownfolders.h's extern so this
-     * compiles the same regardless of which SDK headers the build picks up. */
+    wchar_t *out = NULL;
+    /* FOLDERID_SavedGames and FOLDERID_Profile. Spelled out rather than pulled from
+     * knownfolders.h's extern so this compiles the same regardless of which SDK headers the build
+     * picks up. */
     static const GUID kSavedGames =
         { 0x4C5C32FFu, 0xBB9D, 0x43b0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } };
+    static const GUID kProfile =
+        { 0x5E6C858Fu, 0x0E22, 0x4760, { 0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73 } };
 
-    if (SUCCEEDED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &wide)) && wide) {
-        int ok = wcscpy_s(out, cap, wide) == 0;
-        CoTaskMemFree(wide);
-        if (ok) return 1;
-    }
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, out))) {
-        wcsncat_s(out, cap, L"\\Saved Games", _TRUNCATE);
-        return 1;
-    }
-    return 0;
+    if (SUCCEEDED(SHGetKnownFolderPath(&kSavedGames, 0, NULL, &wide)) && wide)
+        out = sh_wtextf(L"%s", wide);
+    else if (wide) { CoTaskMemFree(wide); wide = NULL; }
+    if (!out && SUCCEEDED(SHGetKnownFolderPath(&kProfile, 0, NULL, &wide)) && wide)
+        out = sh_wtextf(L"%s\\Saved Games", wide);
+    if (wide) CoTaskMemFree(wide);
+    return out;
 }
 
 static int newest_saved_map_id(char *out, size_t cap)
 {
-    wchar_t root[MAX_PATH], base[MAX_PATH], glob[MAX_PATH];
+    wchar_t *root, *base, *glob;
     WIN32_FIND_DATAW acct;
     HANDLE ha;
     FILETIME best;
     int found = 0;
 
-    if (!saved_games_root(root, MAX_PATH)) return 0;
-    _snwprintf_s(base, MAX_PATH, _TRUNCATE, L"%s\\id Software\\DOOM\\base\\savegame.user", root);
+    if ((root = saved_games_root()) == NULL) return 0;
+    /* The long form: a relocated Saved Games folder may be of any depth. */
+    base = wcsncmp(root, L"\\\\", 2)
+         ? sh_wtextf(L"\\\\?\\%s\\id Software\\DOOM\\base\\savegame.user", root)
+         : sh_wtextf(L"\\\\?\\UNC%s\\id Software\\DOOM\\base\\savegame.user", root + 1);
+    free(root);
+    if (!base) return 0;
     memset(&best, 0, sizeof best);
 
     /* Walk the account folders. Usually one, but a shared machine can have several, and the newest
      * map across all of them is a better answer than picking the first account we happen to see. */
-    _snwprintf_s(glob, MAX_PATH, _TRUNCATE, L"%s\\*", base);
-    ha = FindFirstFileW(glob, &acct);
-    if (ha == INVALID_HANDLE_VALUE) return 0;
+    glob = sh_wtextf(L"%s\\*", base);
+    ha = glob ? FindFirstFileW(glob, &acct) : INVALID_HANDLE_VALUE;
+    free(glob);
+    if (ha == INVALID_HANDLE_VALUE) { free(base); return 0; }
     do {
         WIN32_FIND_DATAW fd;
         HANDLE hm;
         if (!(acct.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (acct.cFileName[0] == L'.') continue;
 
-        _snwprintf_s(glob, MAX_PATH, _TRUNCATE, L"%s\\%s\\SNAPMAPS*", base, acct.cFileName);
-        hm = FindFirstFileW(glob, &fd);
+        glob = sh_wtextf(L"%s\\%s\\SNAPMAPS*", base, acct.cFileName);
+        hm = glob ? FindFirstFileW(glob, &fd) : INVALID_HANDLE_VALUE;
+        free(glob);
         if (hm == INVALID_HANDLE_VALUE) continue;
         do {
-            wchar_t probe[MAX_PATH];
+            wchar_t *decl, *details;
+            int whole;
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if (!valid_map_id(fd.cFileName + 8)) continue;   /* skip "SNAPMAPS" */
 
@@ -176,20 +186,24 @@ static int newest_saved_map_id(char *out, size_t cap)
              * game.details and map.decl but leaves both .verify sidecars, so the tree fills with
              * folders that pass every name check and hold no data. Require the two files that
              * actually constitute a save. */
-            _snwprintf_s(probe, MAX_PATH, _TRUNCATE, L"%s\\%s\\%s\\map.decl", base, acct.cFileName, fd.cFileName);
-            if (GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES) continue;
-            _snwprintf_s(probe, MAX_PATH, _TRUNCATE, L"%s\\%s\\%s\\game.details", base, acct.cFileName, fd.cFileName);
-            if (GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES) continue;
+            decl = sh_wtextf(L"%s\\%s\\%s\\map.decl", base, acct.cFileName, fd.cFileName);
+            details = sh_wtextf(L"%s\\%s\\%s\\game.details", base, acct.cFileName, fd.cFileName);
+            whole = decl && details && GetFileAttributesW(decl) != INVALID_FILE_ATTRIBUTES &&
+                    GetFileAttributesW(details) != INVALID_FILE_ATTRIBUTES;
+            free(decl);
+            free(details);
+            if (!whole) continue;
 
             if (found && CompareFileTime(&fd.ftLastWriteTime, &best) <= 0) continue;
             best = fd.ftLastWriteTime;
-            /* The id is 20 hex digits, so this conversion is exact. */
+            /* The id is the engine's 20 hex digits, so this conversion is exact. */
             if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName + 8, -1, out, (int)cap, NULL, NULL)) continue;
             found = 1;
         } while (FindNextFileW(hm, &fd));
         FindClose(hm);
     } while (FindNextFileW(ha, &acct));
     FindClose(ha);
+    free(base);
 
     return found && out[0] != '\0';
 }
@@ -230,7 +244,7 @@ static void *ef_live_map(void *editor)
 static void ef_service_rawmap_save(void *editor)
 {
     ef_save_request request;
-    char msg[MAX_PATH + 192] = "";
+    char *msg = NULL, *text;
     void *map;
 
     AcquireSRWLockExclusive(&g_save_lock);
@@ -239,6 +253,7 @@ static void ef_service_rawmap_save(void *editor)
         return;
     }
     request = g_save_request;
+    g_save_request.destination = NULL;
     ReleaseSRWLockExclusive(&g_save_lock);
 
     /* A click can outlive its map or editor state. Never export the next map
@@ -247,14 +262,15 @@ static void ef_service_rawmap_save(void *editor)
     if (map == NULL || map != request.map || sh_rawmap_load_generation() != request.generation) {
         backend_log("EF: rawmap save cancelled -- the map changed before the save");
         sh_rawmap_tell("The rawmap was not saved: the map changed before the save. Save it again.");
-        return;
+    } else if (request.choose_target && !sh_rawmap_set_save_target(request.destination)) {
+        sh_rawmap_tell("The rawmap was not saved: the game ran out of memory. Save it again.");
+    } else if (!sh_rawmap_write_from_live(map, request.destination, &msg, NULL)) {
+        text = sh_textf("The rawmap was not saved: %s.", msg ? msg : "the game ran out of memory");
+        sh_rawmap_tell(text ? text : "The rawmap was not saved.");
+        free(text);
     }
-    if (request.choose_target && !sh_rawmap_set_save_target(request.destination)) return;
-    if (!sh_rawmap_write_from_live(map, request.destination, msg, (int)sizeof msg, NULL)) {
-        char text[sizeof msg + 48];
-        _snprintf_s(text, sizeof text, _TRUNCATE, "The rawmap was not saved: %s.", msg);
-        sh_rawmap_tell(text);
-    }
+    free(msg);
+    free(request.destination);
 }
 
 /* Why a rawmap save cannot happen right now, or NULL if it can. NO SIDE EFFECTS and no logging. */
@@ -499,76 +515,81 @@ void *sh_editor_frame_target(void)
     return g_frame_entry;
 }
 
-int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
+/* Set *msg (malloc'd, the old one freed) to `text` when msg is given. */
+static void ef_msg(char **msg, const char *text)
+{
+    if (!msg) return;
+    free(*msg);
+    *msg = text ? sh_text(text) : NULL;
+}
+
+int sh_editor_frame_can_rawmap_save(char **msg)
 {
     const char *why = ef_rawmap_save_blocker();
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (msg) *msg = NULL;
     if (why) {
-        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
+        ef_msg(msg, why);
         return 0;
     }
     return 1;
 }
 
-int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char **msg)
 {
     const char *why;
     ef_save_request request = {0};
     int accepted = 0;
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (msg) *msg = NULL;
     AcquireSRWLockExclusive(&g_save_lock);
     why = ef_rawmap_save_blocker();
     if (why) goto done;
-    if (destination && strlen(destination) >= sizeof request.destination) {
-        why = "That save path is too long to use";
-        goto done;
-    }
     request.choose_target = destination && destination[0];
-    if (request.choose_target) strcpy_s(request.destination, sizeof request.destination, destination);
-    else sh_rawmap_get_paths(NULL, 0, request.destination, (int)sizeof request.destination);
-    if (!sh_rawmap_dest_writable_now(request.destination, out_msg, msg_capacity)) goto done;
+    request.destination = request.choose_target ? sh_text(destination) : sh_rawmap_save_path();
+    if (!request.destination) { why = "The game ran out of memory; restart DOOM and save again"; goto done; }
+    if (!sh_rawmap_dest_writable_now(request.destination, msg)) goto done;
     request.generation = sh_rawmap_load_generation();
     request.map = ef_live_map((void *)g_editor_obj);
     if (!request.map) { why = EF_OPEN_A_MAP; goto done; }
+    free(g_save_request.destination);
     g_save_request = request;
     InterlockedExchange(&g_save_pending, 1);
     accepted = 1;
 done:
     ReleaseSRWLockExclusive(&g_save_lock);
-    if (out_msg && msg_capacity > 0 && why)
-        strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
-    else if (out_msg && msg_capacity > 0 && accepted)
-        _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE, "Saving the open map to %s.", request.destination);
+    if (why) ef_msg(msg, why);
+    else if (msg && accepted) *msg = sh_textf("Saving the open map to %s.", request.destination);
+    if (!accepted) free(request.destination);
     return accepted;
 }
 
-int sh_editor_frame_can_reload(char *out_msg, int msg_capacity)
+int sh_editor_frame_can_reload(char **msg)
 {
     const char *why = ef_reload_blocker();
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (msg) *msg = NULL;
     if (!why && !sh_rawmap_load_is_safe())
         why = "Opening rawmaps is unavailable on this game build: Snapmap+ cannot stop DOOM's Save from "
               "overwriting the map a rawmap opens over";
     if (why) {
-        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
+        ef_msg(msg, why);
         return 0;
     }
     return 1;
 }
 
-int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
+int sh_editor_frame_request_reload(char **out_msg)
 {
     ef_reload_request request;
-    char msg[MAX_PATH + 192] = "";
-    char rl[MAX_PATH + 256];
+    char *msg = NULL, rl[160];
 
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (out_msg) *out_msg = NULL;
     memset(&request, 0, sizeof request);
 
-    if (!sh_editor_frame_can_reload(msg, (int)sizeof msg) || !sh_rawmap_source_ok(msg, (int)sizeof msg)) {
-        _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: rawmap open REFUSED -- %s", msg);
-        backend_log(rl);
-        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, msg, _TRUNCATE);
+    if (!sh_editor_frame_can_reload(&msg) || !sh_rawmap_source_ok(&msg)) {
+        char *line = sh_textf("EF: rawmap open REFUSED -- %s", msg ? msg : "out of memory");
+        backend_log(line ? line : "EF: rawmap open REFUSED");
+        free(line);
+        if (out_msg) *out_msg = msg;
+        else free(msg);
         return 0;
     }
 
@@ -577,10 +598,7 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
      * the engine has certainly listed it. */
     if (!newest_saved_map_id(request.id, sizeof request.id)) {
         backend_log("EF: no saved map found under <Saved Games>\\id Software\\DOOM\\base\\savegame.user");
-        if (out_msg && msg_capacity > 0)
-            strncpy_s(out_msg, (size_t)msg_capacity,
-                      "To open a rawmap, DOOM needs one saved map of yours: save any map once, then try again",
-                      _TRUNCATE);
+        ef_msg(out_msg, "To open a rawmap, DOOM needs one saved map of yours: save any map once, then try again");
         return 0;
     }
 
@@ -589,9 +607,7 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     AcquireSRWLockExclusive(&g_reload_lock);
     if (request.map == NULL || InterlockedCompareExchange(&g_reload_pending, 0, 0) != 0) {
         ReleaseSRWLockExclusive(&g_reload_lock);
-        if (out_msg && msg_capacity > 0)
-            strncpy_s(out_msg, (size_t)msg_capacity, request.map ? "A rawmap is already opening" : EF_OPEN_A_MAP,
-                      _TRUNCATE);
+        ef_msg(out_msg, request.map ? "A rawmap is already opening" : EF_OPEN_A_MAP);
         return 0;
     }
     g_reload_request = request;
@@ -600,8 +616,6 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
 
     _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: rawmap open ACCEPTED -- queued through saved map %s", request.id);
     backend_log(rl);
-    if (out_msg && msg_capacity > 0)
-        strncpy_s(out_msg, (size_t)msg_capacity, "Opening the rawmap as a new map; Save will ask you to name it",
-                  _TRUNCATE);
+    ef_msg(out_msg, "Opening the rawmap as a new map; Save will ask you to name it");
     return 1;
 }

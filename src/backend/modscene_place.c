@@ -34,7 +34,8 @@ void sh_modscene_place_table_clear(sh_modscene_place_table *t)
 {
     size_t i;
     if (!t) return;
-    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS; i++) free(t->rows[i].player);
+    for (i = 0; i < t->count; i++) free(t->rows[i].player);
+    free(t->rows);
     memset(t, 0, sizeof *t);
 }
 
@@ -46,14 +47,19 @@ int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, con
     size_t i;
     if (!t || !node || !player || !player[0] || !origin || !angles || !(name = _strdup(player)))
         return 0;
-    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS && !row; i++)
+    for (i = 0; i < t->count && !row; i++)
         if (t->rows[i].node == node) row = &t->rows[i];
-    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS && !row; i++)
-        if (!t->rows[i].node) row = &t->rows[i];
     if (!row) {
-        row = &t->rows[0];
-        for (i = 1; i < SH_MODSCENE_PLACE_RECORDS; i++)
-            if (t->rows[i].stamp < row->stamp) row = &t->rows[i];
+        if (t->count == t->capacity) {
+            size_t capacity = t->capacity ? t->capacity * 2 : 16;
+            sh_modscene_place_record *grown =
+                (sh_modscene_place_record *)realloc(t->rows, capacity * sizeof *grown);
+            if (!grown) { free(name); return 0; }
+            t->rows = grown;
+            t->capacity = capacity;
+        }
+        row = &t->rows[t->count++];
+        row->player = NULL;
     }
     free(row->player);
     memset(row, 0, sizeof *row);
@@ -61,7 +67,6 @@ int sh_modscene_place_remember(sh_modscene_place_table *t, const void *node, con
     row->player = name;
     memcpy(row->origin, origin, sizeof row->origin);
     memcpy(row->angles, angles, sizeof row->angles);
-    row->stamp = ++t->next_stamp;
     return 1;
 }
 
@@ -69,11 +74,12 @@ int sh_modscene_place_take(sh_modscene_place_table *t, const void *node, sh_mods
 {
     size_t i;
     if (!t || !node) return 0;
-    for (i = 0; i < SH_MODSCENE_PLACE_RECORDS; i++) {
+    for (i = 0; i < t->count; i++) {
         if (t->rows[i].node != node) continue;
         if (out) *out = t->rows[i];
         else free(t->rows[i].player);
-        memset(&t->rows[i], 0, sizeof t->rows[i]);
+        t->rows[i] = t->rows[--t->count];   /* the last row fills the hole; order does not matter */
+        memset(&t->rows[t->count], 0, sizeof t->rows[t->count]);
         return 1;
     }
     return 0;

@@ -4,7 +4,7 @@
  * function was not where the build puts it (another program changed the
  * game's code) or a patch could not be made. Each install records such a
  * feature once, by the name the player knows it by. The Snapmap+ window shows
- * one line naming them (sh_features_off_line, interface slot features_off),
+ * one line naming them (sh_features_off_text, interface slot features_off),
  * and a feature the player invokes from the UI refuses with
  * sh_feature_refusal instead of doing nothing. Background guards stay in the
  * log only. Safe from any thread. */
@@ -54,21 +54,25 @@ void sh_feature_off(const char *feature, const char *why);
 /* 1 when feature was recorded off. */
 int sh_feature_is_off(const char *feature);
 
-/* Write "These features are unavailable in this session: A, B." into out, or
- * an empty string when none is off. Returns the length written. */
-size_t sh_features_off_line(char *out, size_t cap);
+/* "These features are unavailable in this session: A, B." (malloc'd), naming
+ * every feature that is off; NULL when none is off. */
+char *sh_features_off_text(void);
 
 /* Write "<Feature> is unavailable in this session." into out when feature is
- * off and return its length; 0 (and an empty string) when it is available. */
+ * off and return its length; 0 (and an empty string) when it is available.
+ * The features are the names above: the longest sentence is under 128 bytes,
+ * the size every caller passes. */
 size_t sh_feature_refusal(const char *feature, char *out, size_t cap);
 
-/* Interface slot features_off (snapmap_plus_iface.h): sh_features_off_line. */
+/* Interface slot features_off (snapmap_plus_iface.h): the same line as owned
+ * interface text, or NULL. */
 struct sh_iface;
-size_t sh_feature_health_slot(struct sh_iface *self, char *out, size_t cap);
+char *sh_feature_health_slot(struct sh_iface *self);
 
 #ifdef SH_DIAG
-/* The diagnostic build's status export: the index-th feature off, by name; 0 past the end. */
-int sh_feature_off_name(int index, char *out, size_t cap);
+/* The diagnostic build's status export: the index-th feature off, by name (malloc'd); NULL past
+ * the end. */
+char *sh_feature_off_name(int index);
 #endif
 
 #ifdef SH_FEATURE_HEALTH_TESTING

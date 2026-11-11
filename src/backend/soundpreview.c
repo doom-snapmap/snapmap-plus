@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "soundpreview.h"
+#include "snapmap_plus_iface.h"   /* sh_iface_text: the refusal handed to the window */
 #include "imgpreview.h"      /* sh_imgpreview_has -- the name gate in front of the engine's find */
 #include "engine_globals.h"
 #include "engine_build.h"
@@ -99,7 +100,7 @@ static const uint8_t    *g_cvar_slot;          /* the cvar system's global slot 
 
 /* Why the last audition was refused, in one plain sentence; empty when it was accepted. */
 static SRWLOCK g_why_lock = SRWLOCK_INIT;
-static char    g_why[160];
+static const char *g_why = "";   /* one of the WHY_ sentences, or "" */
 
 #define WHY_UNAVAILABLE "Sound preview is not available on this game build."
 #define WHY_NOT_SOUND   "That sound is not in the game's files."
@@ -110,7 +111,7 @@ static char    g_why[160];
 static void sp_refuse(const char *why)
 {
     AcquireSRWLockExclusive(&g_why_lock);
-    strncpy_s(g_why, sizeof g_why, why ? why : "", _TRUNCATE);
+    g_why = why ? why : "";
     ReleaseSRWLockExclusive(&g_why_lock);
     if (why && why[0]) {
         char l[200];
@@ -119,15 +120,13 @@ static void sp_refuse(const char *why)
     }
 }
 
-int sh_soundpreview_refusal(char *out, size_t cap)
+char *sh_soundpreview_refusal(void)
 {
-    int refused;
-    if (!out || !cap) return 0;
+    char *out = NULL;
     AcquireSRWLockShared(&g_why_lock);
-    refused = g_why[0] != '\0';
-    strncpy_s(out, cap, g_why, _TRUNCATE);
+    if (g_why[0]) out = sh_iface_text(g_why);
     ReleaseSRWLockShared(&g_why_lock);
-    return refused;
+    return out;
 }
 
 /* Decode RIP-relative loads for any destination register: ModRM must satisfy

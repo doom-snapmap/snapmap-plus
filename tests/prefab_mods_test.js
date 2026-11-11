@@ -125,15 +125,15 @@ check(resolve !== -1 && host.indexOf('GetFileAttributesA(meta) == INVALID_FILE_A
 const detail = host.indexOf('static void ui_send_prefab_detail(');
 check(detail !== -1 && host.indexOf('sceneBody.resize(sh_prefab_block_strip(&sceneBody[0], sceneBody.size()));', detail) !== -1,
       'host: the selected prefab\'s scene ships without its block');
-check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path, mp, nullptr)') !== -1,
+check(host.indexOf('call.op = SH_MODULE_PREFAB_META_READ;') !== -1 && host.indexOf('ui_prefab_view(path.c_str(), mp.c_str(), nullptr)') !== -1,
       'host: the list and details read the view from the file');
 const rec = host.indexOf('call.op = SH_MODULE_PREFAB_MODS_RECORD;');
-check(rec !== -1 && host.indexOf('call.path = path;', rec) !== -1 && host.indexOf('call.path = path;', rec) < rec + 200,
+check(rec !== -1 && host.indexOf('call.path = path.c_str();', rec) !== -1 && host.indexOf('call.path = path.c_str();', rec) < rec + 200,
       'host: Create has the backend write the block into the prefab file');
 const save = host.indexOf('static void ui_apply_save_prefab_meta(');
 const saveEnd = host.indexOf('\n}\n', save);
 check(save !== -1 && host.slice(save, saveEnd).indexOf('fopen_s') === -1 && host.slice(save, saveEnd).indexOf('DeleteFileA') === -1 &&
-      host.slice(save, saveEnd).indexOf('call.path = path;') !== -1,
+      host.slice(save, saveEnd).indexOf('call.path = path.c_str();') !== -1,
       'host: description and tag edits go to the file\'s block; no sidecar is written or deleted');
 check(host.indexOf('call.meta_path = meta;\n    call.out = out;') === -1, 'host: the module prefab save writes no sidecar');
 

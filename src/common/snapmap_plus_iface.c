@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include "snapmap_plus_iface.h"
 
@@ -189,13 +191,69 @@ int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
     return 1;
 }
 
-/* One mutable shared vtable. Registry/drain slots bind immediately; config
- * and engine callbacks bind separately. Optional slots may remain null. */
+/* Owned text: process-heap strings, so the window frees them through
+ * free_text whatever C runtime either DLL links. */
+char *sh_iface_textn(const void *s, size_t n)
+{
+    char *out;
+    if (!s || n == (size_t)-1) return NULL;
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
+    if (!out) return NULL;
+    if (n) memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+char *sh_iface_text(const char *s)
+{
+    return s ? sh_iface_textn(s, strlen(s)) : NULL;
+}
+
+char *sh_iface_textf(const char *fmt, ...)
+{
+    va_list ap, copy;
+    int n;
+    char *out;
+    if (!fmt) return NULL;
+    va_start(ap, fmt);
+    va_copy(copy, ap);
+    n = _vscprintf(fmt, copy);
+    va_end(copy);
+    out = n < 0 ? NULL : (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)n + 1);
+    if (out) vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+void sh_iface_text_free(void *text)
+{
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+}
+
+int sh_iface_text_set(char **slot, const char *s)
+{
+    char *copy;
+    if (!slot) return 1;
+    copy = sh_iface_text(s);
+    sh_iface_text_free(*slot);
+    *slot = copy;
+    return copy || !s;
+}
+
+static void iface_free_text(sh_iface *self, void *text)
+{
+    (void)self;
+    sh_iface_text_free(text);
+}
+
+/* One mutable shared vtable. Registry/drain slots and free_text bind
+ * immediately; config and engine callbacks bind separately. Optional slots
+ * may remain null. */
 static sh_iface_vtbl g_iface_vtbl_live = {
     .register_cmd     = iface_register_cmd,     /* +0x188 */
     .unregister_cmd   = iface_unregister_cmd,   /* +0x190 */
     .drain_work_queue = iface_drain_work_queue, /* +0x1a0 */
-
+    .free_text        = iface_free_text,        /* +0x3a0 */
 };
 
 /* Config is available before engine installation. Keep its binding separate

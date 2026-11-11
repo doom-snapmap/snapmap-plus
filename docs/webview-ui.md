@@ -24,7 +24,6 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/report_scrub.h` | Crash-report attachments: the account, profile-folder and machine names scrubbed as UTF-8, ANSI, UTF-16LE and short-path text; whole-line log tails; the logs trimmed oldest-first to fit the relay's 64 KB cap. `tests/report_scrub_test.c`. |
 | `src/ui/webview/game_identity.h` | The game identity (`--game=`) and the backend's release (`--version=`) from the startup arguments. `tests/game_identity_arg_test.cpp`. |
 | `src/ui/webview/folder_watch.h` | The debounce behind the prefabs folder watcher. `tests/folder_watch_test.c`. |
-| `src/ui/webview/growing_text_buffer.h`, `serialization_buffer.h` | Retained buffers that grow for large declarations and serialized entities, up to 32 MiB. |
 | `src/ui/webview/webview_profile.h` | The WebView2 profile folder under `cache\`. |
 | `src/ui/webview/rawmap_picker.h` | The file dialogs' types and the folder each opens in (its key in `config.json`, its default). Pure; `tests/rawmap_picker_test.cpp`. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |

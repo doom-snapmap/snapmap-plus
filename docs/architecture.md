@@ -309,7 +309,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x398`; the current table occupies `0x3A0`
+retained, with extensions through `+0x3A0`; the current table occupies `0x3A8`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -326,7 +326,8 @@ paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`), 
 `features_off` (`+0x388`, the one line naming the features that are off this session,
 from `feature_health.c`), `preview_failure` (`+0x390`, why the latest image preview
 failed, `preview.c`) and `sound_refusal` (`+0x398`, why the latest sound audition was
-refused, `soundpreview.c`). The retired
+refused, `soundpreview.c`), and `free_text` (`+0x3A0`, bound by
+`sh_iface_create` itself). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -334,7 +335,17 @@ so a frontend never reads past an older backend's table.
 Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
-Headers define buffer ownership, return values and thread requirements. Keep
+Text crosses the interface as owned strings, never in a buffer the caller sized:
+every slot that hands text or bytes to the window returns it, or stores it in
+its call record, allocated by the backend from the process heap and sized to
+what it holds, and the window releases it with `free_text` (the two DLLs link
+different C runtimes; the process heap is the one both reach). Text the window
+passes in is a NUL-terminated string of any length the backend copies before
+the call returns. The window refuses a backend whose table is not its own size,
+with the reinstall notice, so a pair built on either side of this rule never
+runs together.
+
+Headers define ownership, return values and thread requirements. Keep
 engine pointers inside the backend where possible. Copy values across the
 boundary rather than exposing mutable engine storage. An accepted asynchronous
 request is distinct from completed engine work.
@@ -560,8 +571,9 @@ These backend files share the work:
   (a longer notice prints whole to the console and the dialog says so), the
   vendored Lua's 60-byte chunk name in its own messages (the runtime reads
   the whole name from the stack instead), and the fixed fields of the store
-  tool's records and the rawmap interface, where a longer sentence is
-  written whole to the log and the field says so. Nothing is cut silently.
+  tool's records, where a longer sentence is written whole to the log and
+  the field says so. The window interface carries text of any length (owned
+  strings, below). Nothing is cut silently.
 
   `mod.json` format 2: the author's part is every member but `snapmap-plus`
   (`name`, `description`, `author`, `homepage`, `requirements`,
@@ -1739,7 +1751,7 @@ feature.
   row carries the block's `scripts` member and, once a Play ran them,
   `scriptRun {status, stop, lines}`; the read-only `SH_MODS_SCRIPTS` op
   (`sh_modui_scripts`) answers every mod's state and one mod's log on any
-  thread into the caller's buffer, never the tab's shared document, and the
+  thread as its own owned text, never the tab's shared document, and the
   page asks for it each second while the tab shows a mod with scripts. A
   script build error is the row's cause as written, and the Files view matches
   it to the file by the author's spelling (`sh_mb_script_file_name`). The
@@ -3679,8 +3691,10 @@ map; try again when it is done"). An import says "Importing <file> and its
 mods; it opens when that is done."; the main tick (`sh_rawmap_poll_main`) then
 holds the imported text and asks the editor to open the map again, which parses
 exactly those bytes. The store lock is taken only to choose and install
-builds, never while files are copied or read. Every path is UTF-8 and opened
-through the wide calls (`SH_RAWMAP_PATH_MAX`).
+builds, never while files are copied or read. Every path is UTF-8, held in a
+heap string sized to it (the process heap, never an engine heap), and opened
+through the wide calls in the long form (`sh_rawmap_path_wide`), so a path of
+any depth Windows accepts loads, saves, exports and imports.
 
 Saving. After every rawmap write of a map with at least one row (the File menu's
 Save Rawmap and Save Rawmap As, and `sh_rawmaps save`), the export is written beside the JSON at the same path with `.zip`

@@ -4,7 +4,7 @@
 
 static unsigned long generation;
 static int writes, choices, failed, ticks, loads, done_rc = -1, done_faulted = -1, tells, fault_load;
-static char current[MAX_PATH] = "C:\\maps\\current.json", written[MAX_PATH];
+static char current[4096] = "C:\\maps\\current.json", written[4096];
 static unsigned char editor[0x24000];
 static int map_a, map_b;
 #define CHECK(x) do { if (!(x)) { ++failed; printf("FAIL %d: %s\n", __LINE__, #x); } } while (0)
@@ -25,19 +25,17 @@ int hook_unpatch(void *trampoline) { (void)trampoline; return 1; }
 int sh_rawmap_live_serialize_ready(void) { return 1; }
 unsigned long sh_rawmap_load_generation(void) { return generation; }
 int sh_rawmap_load_is_safe(void) { return 1; }
-int sh_rawmap_source_ok(char *msg, int cap) { (void)msg; (void)cap; return 1; }
+int sh_rawmap_source_ok(char **msg) { if (msg) *msg = NULL; return 1; }
 int sh_rawmap_prepare_reload(char **why) { if (why) *why = NULL; return 1; }
 void sh_rawmap_reload_done(int rc, int faulted) { done_rc = rc; done_faulted = faulted; }
 void sh_rawmap_tell(const char *text) { (void)text; ++tells; }
-void sh_rawmap_get_paths(char *load, int load_cap, char *save, int save_cap)
-{ (void)load; (void)load_cap; if (save) strcpy_s(save, save_cap, current); }
-int sh_rawmap_dest_writable_now(const char *path, char *msg, int cap)
-{ (void)path; (void)msg; (void)cap; return 1; }
+char *sh_rawmap_save_path(void) { return _strdup(current); }
+int sh_rawmap_dest_writable_now(const char *path, char **msg)
+{ (void)path; (void)msg; return 1; }
 int sh_rawmap_set_save_target(const char *path)
 { ++choices; strcpy_s(current, sizeof current, path); return 1; }
-int sh_rawmap_write_from_live(void *map, const char *path, char *msg, int cap,
-                              unsigned long long *bytes)
-{ (void)map; (void)msg; (void)cap; (void)bytes; ++writes; strcpy_s(written, sizeof written, path); return 1; }
+int sh_rawmap_write_from_live(void *map, const char *path, char **msg, unsigned long long *bytes)
+{ (void)map; (void)bytes; if (msg) *msg = NULL; ++writes; strcpy_s(written, sizeof written, path); return 1; }
 static int refusals, disk_reads, load_rc;
 static char placeholder[16];
 void shield_note_refused_load(void) { ++refusals; }
@@ -89,42 +87,42 @@ static void reset(void)
 
 int main(void)
 {
-    char msg[192];
+    char msg[HO_TEXT];
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to("C:\\maps\\chosen.json", msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to("C:\\maps\\chosen.json", HO_P(0))));
     CHECK(!choices && !writes);
-    CHECK(!sh_editor_frame_request_rawmap_save_to("C:\\maps\\other.json", msg, sizeof msg));
+    CHECK(!HO(msg, sh_editor_frame_request_rawmap_save_to("C:\\maps\\other.json", HO_P(0))));
     sh_editor_frame_detour(editor, NULL);
     CHECK(writes == 1 && choices == 1 && !strcmp(written, "C:\\maps\\chosen.json"));
     sh_editor_frame_detour(editor, NULL);
     CHECK(writes == 1);
 
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     strcpy_s(current, sizeof current, "C:\\maps\\later-setting.json");
     sh_editor_frame_detour(editor, NULL);
     CHECK(writes == 1 && !choices && !strcmp(written, "C:\\maps\\current.json"));
 
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to("C:\\maps\\chosen.json", msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to("C:\\maps\\chosen.json", HO_P(0))));
     *(int *)(editor + ED_STATE_OFF) = 0;
     sh_editor_frame_detour(editor, NULL);
     CHECK(!writes && !choices && !g_save_pending);
 
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     *(int *)(editor + ED_SUBSTATE_OFF) = 5;
     sh_editor_frame_detour(editor, NULL);
     CHECK(!writes);
 
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     *(void **)(editor + ED_MAP_PTR_OFF) = &map_b;
     sh_editor_frame_detour(editor, NULL);
     CHECK(!writes);
 
     reset();
-    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     ++generation; /* The next map may reuse exactly the same allocation. */
     sh_editor_frame_detour(editor, NULL);
     CHECK(!writes);
@@ -154,7 +152,7 @@ int main(void)
     /* Without the read detour a rawmap is never opened. */
     reset();
     g_read_text_orig = NULL;
-    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "unavailable"));
+    CHECK(!HO(msg, sh_editor_frame_can_reload(HO_P(0))) && strstr(msg, "unavailable"));
 
     /* A reload request does not outlive its map: another map, or the same
      * allocation reused by a newer load, cancels it and says so. */
@@ -189,16 +187,30 @@ int main(void)
     ticks = 0;
     sh_editor_frame_detour(editor, NULL);
     CHECK(ticks == 1);
-    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "restart DOOM"));
-    CHECK(sh_editor_frame_request_rawmap_save_to(NULL, msg, sizeof msg));
+    CHECK(!HO(msg, sh_editor_frame_can_reload(HO_P(0))) && strstr(msg, "restart DOOM"));
+    CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(NULL, HO_P(0))));
     sh_editor_frame_detour(editor, NULL);
     CHECK(writes == 1);
 
     /* The editor at the menu: the map pointer survives, the state does not. */
     reset();
     *(int *)(editor + ED_STATE_OFF) = 0;
-    CHECK(!sh_editor_frame_can_reload(msg, sizeof msg) && strstr(msg, "Open a map"));
-    CHECK(!sh_editor_frame_request_reload(msg, sizeof msg) && strstr(msg, "Open a map"));
+    CHECK(!HO(msg, sh_editor_frame_can_reload(HO_P(0))) && strstr(msg, "Open a map"));
+    CHECK(!HO(msg, sh_editor_frame_request_reload(HO_P(0))) && strstr(msg, "Open a map"));
+
+    /* A destination of any length is queued and written whole, and the sentence names it whole. */
+    {
+        static char deep[3200];
+        size_t n = 0;
+        reset();
+        n += (size_t)sprintf_s(deep, sizeof deep, "D:\\maps");
+        while (n < 3000) n += (size_t)sprintf_s(deep + n, sizeof deep - n, "\\%s", "folder-of-maps");
+        sprintf_s(deep + n, sizeof deep - n, "\\deep.json");
+        CHECK(HO(msg, sh_editor_frame_request_rawmap_save_to(deep, HO_P(0))));
+        CHECK(strstr(msg, deep) != NULL);
+        sh_editor_frame_detour(editor, NULL);
+        CHECK(writes == 1 && choices == 1 && !strcmp(written, deep) && !strcmp(current, deep));
+    }
     printf("editor_frame_test: %d failures\n", failed);
     return failed ? 1 : 0;
 }

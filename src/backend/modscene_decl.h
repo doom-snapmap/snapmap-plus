@@ -117,26 +117,24 @@ int sh_scene_owner_namespace(const char *name);
 void sh_scene_table_free(sh_scene_table *t);
 
 /* Spawns queued by a node's Activate until its sync starts: one row per node
- * (a later Activate replaces it), the oldest evicted when full. `node` is
- * compared, never dereferenced; the spawn poses are world poses. */
-#define SH_SCENE_PENDING_ROWS 16
-
+ * (a later Activate replaces it), as many nodes as Activate them; the table
+ * grows and nothing is dropped. `node` is compared, never dereferenced; the
+ * spawn poses are world poses. */
 typedef struct sh_scene_pending {
     const void *node;
     char *node_name;               /* malloc'd */
     int count;
     sh_scene_spawn *spawns;        /* count of them, each name its own copy (malloc'd) */
-    unsigned stamp;
 } sh_scene_pending;
 
 typedef struct sh_scene_pending_table {
-    sh_scene_pending rows[SH_SCENE_PENDING_ROWS];
-    int count;                     /* rows in use */
-    unsigned next_stamp;
+    sh_scene_pending *rows;        /* malloc'd, `capacity` of them */
+    int count;                     /* rows in use, rows[0..count) */
+    int capacity;
 } sh_scene_pending_table;
 
 /* Queue `count` (1 or more) spawns for `node`, copied. Returns 1, or 0 for a
- * bad argument or when memory runs out. */
+ * bad argument or when memory runs out (the table is then unchanged). */
 int sh_scene_pending_set(sh_scene_pending_table *t, const void *node, const char *node_name,
                          const sh_scene_spawn *spawns, int count);
 /* Take and remove `node`'s row into *out (which then owns its names: release

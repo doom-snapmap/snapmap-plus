@@ -102,14 +102,20 @@ func runStoreTool(tool string, args ...string) (int, error) {
 	cmd.Stderr = pw
 	done := make(chan struct{})
 	go func() {
-		sc := bufio.NewScanner(pr)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := "  " + strings.TrimRight(sc.Text(), "\r")
-			if storeToolOut != nil {
-				fmt.Fprintln(storeToolOut, line)
-			} else {
-				ui.Line(line)
+		// Every line whole, however long: a reader, not a scanner with a longest token.
+		br := bufio.NewReader(pr)
+		for {
+			text, err := br.ReadString('\n')
+			if text != "" {
+				line := "  " + strings.TrimRight(text, "\r\n")
+				if storeToolOut != nil {
+					fmt.Fprintln(storeToolOut, line)
+				} else {
+					ui.Line(line)
+				}
+			}
+			if err != nil {
+				break
 			}
 		}
 		io.Copy(io.Discard, pr)

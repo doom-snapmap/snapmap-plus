@@ -120,7 +120,7 @@ static int g_ent_seen;
 
 static volatile LONG g_last_rebinds, g_total_rebinds;
 static SRWLOCK g_status_lock = SRWLOCK_INIT;
-static char g_record_class[64];
+static char *g_record_class;   /* malloc'd copy of the engine's class name, or NULL */
 static int g_status_tile_row = -1, g_status_unknown_row = -1;
 
 static void tl_logf(const char *fmt, ...)
@@ -390,12 +390,22 @@ static int tl_palette_current(const unsigned char *palette)
 
 static void tl_set_status_class(const char *cls)
 {
+    char *copy = NULL, *old;
+    size_t n = 0;
+    if (cls) {
+        __try { n = strlen(cls); } __except (EXCEPTION_EXECUTE_HANDLER) { cls = NULL; }
+    }
+    if (cls && (copy = (char *)malloc(n + 1)) != NULL) {
+        __try { memcpy(copy, cls, n + 1); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { free(copy); copy = NULL; }
+    }
     AcquireSRWLockExclusive(&g_status_lock);
-    __try { strncpy_s(g_record_class, sizeof g_record_class, cls ? cls : "", _TRUNCATE); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { g_record_class[0] = 0; }
+    old = g_record_class;
+    g_record_class = copy;
     g_status_tile_row = g_tile_row;
     g_status_unknown_row = g_unknown_row;
     ReleaseSRWLockExclusive(&g_status_lock);
+    free(old);
 }
 
 /* The palette build gives the tile's prototype record the entityDef's own
@@ -617,12 +627,12 @@ int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call)
     call->last_rebinds = (int)InterlockedCompareExchange(&g_last_rebinds, 0, 0);
     call->total_rebinds = (int)InterlockedCompareExchange(&g_total_rebinds, 0, 0);
     call->registered = InterlockedCompareExchange(&g_registered, 0, 0) == 1;
-    call->record_class[0] = 0;
+    call->record_class = NULL;
     if (!ed || !rd_ptr(ed + ED_MAP_OFF, &map) || !map) return 0;
     AcquireSRWLockShared(&g_status_lock);
     call->tile_row = g_status_tile_row;
     call->unknown_row = g_status_unknown_row;
-    strncpy_s(call->record_class, sizeof call->record_class, g_record_class, _TRUNCATE);
+    if (g_record_class) call->record_class = sh_iface_text(g_record_class);
     ReleaseSRWLockShared(&g_status_lock);
     return 1;
 }

@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <string.h>
 #include "typeinfo.h"
+#include "snapmap_plus_iface.h"   /* the packed lists are interface text */
 #include "commands.h"
 #include "clipboard.h"
 #include "backend_log.h"
@@ -110,11 +111,12 @@ void *sh_typeinfo_get_reflect(void)
 /* Enumerate decl-type instance names through reflection's silent enum lookup.
  * GetDeclsOfType serves asset classes and logs errors for these names. Pack
  * NUL-separated strings with a double-NUL terminator; preserve partial output. */
-int sh_typeinfo_enum_decls_of_type(const char *declType, char *out_buf, int cap, int *out_count)
+int sh_typeinfo_enum_decls_of_type(const char *declType, char **out, int *out_count)
 {
+    sh_ti_pack pack = { NULL, 0, 0, 0 };
     if (out_count) *out_count = 0;
-    if (cap > 0 && out_buf) out_buf[0] = '\0';
-    if (!declType || !declType[0] || !out_buf || cap <= 1 || !g_find_enum) return 0;
+    if (out) *out = NULL;
+    if (!declType || !declType[0] || !out || !g_find_enum) return 0;
 
     void *reflect = ti_get_reflect();
     if (!reflect) return 0;
@@ -123,25 +125,18 @@ int sh_typeinfo_enum_decls_of_type(const char *declType, char *out_buf, int cap,
     __except (EXCEPTION_EXECUTE_HANDLER) { node = NULL; }
     if (!node) return 0;
 
-    int written = 0, names = 0;
+    int names = 0;
     __try {
         void **list = *(void ***)((const uint8_t *)node + 0x10);
         for (uint32_t i = 0; list && i < TI_WALK_CAP; i++) {
             const char *nm = (const char *)list[(size_t)i * 2];
             if (!nm) break;
-            int nlen = (int)strlen(nm);
-            if (nlen <= 0 || nlen > 250) continue;
-            if (written + nlen + 1 > cap - 1) break;
-            memcpy(out_buf + written, nm, (size_t)nlen);
-            out_buf[written + nlen] = '\0';
-            written += nlen + 1;
+            if (!nm[0]) continue;
+            if (!sh_ti_pack_put(&pack, nm)) break;
             names++;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* keep whatever we copied before the fault */ }
-
-    out_buf[written] = '\0';   /* double-NUL end marker */
-    if (out_count) *out_count = names;
-    return names > 0 ? 1 : 0;
+    return sh_ti_pack_finish(&pack, names, out, out_count);
 }
 
 /* FindTypeInfoByName(reflect, name, NULL) -> rec*, SEH-guarded. NULL on any fault / missing sig. */
@@ -444,41 +439,56 @@ static int ti_derives_by_records(const char *className, const char *baseName)
     return 0;
 }
 
-int sh_typeinfo_collect_classnames(const char **out_names, int cap)
+/* The registry's records up to its NULL name, at most REGISTRY_WALK_CAP (a
+ * guard against reading past an unterminated array, not a count of its own). */
+static int ti_registry_count(const uint8_t *B)
 {
-    if (!out_names || cap <= 0) return -1;
-    const uint8_t *B = ti_type_array_base();
-    if (!B) return -1;
     int n = 0;
     __try {
-        for (uint32_t i = 0; i < REGISTRY_WALK_CAP && n < cap; i++) {
-            const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
-            const char *name = *(const char * const *)(rec + REGISTRY_NAME_OFF);
-            if (name == NULL) break;
-            out_names[n++] = name;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* Keep the records collected before a memory fault. */
-    }
+        for (uint32_t i = 0; i < REGISTRY_WALK_CAP; i++, n++)
+            if (*(const char * const *)(B + (size_t)i * REGISTRY_RECORD_STRIDE + REGISTRY_NAME_OFF) == NULL) break;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return n;
 }
 
-int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
+int sh_typeinfo_collect_classnames(const char ***out)
 {
-    if (!out || cap <= 0) return -1;
-    const uint8_t *B = ti_type_array_base();
-    if (!B) return -1;
-    int n = 0;
+    const uint8_t *B;
+    const char **names;
+    int n = 0, count;
+    if (!out) return -1;
+    *out = NULL;
+    if ((B = ti_type_array_base()) == NULL) return -1;
+    count = ti_registry_count(B);
+    if ((names = (const char **)malloc(((size_t)count + 1) * sizeof *names)) == NULL) return -1;
     __try {
-        for (uint32_t i = 0; i < REGISTRY_WALK_CAP && n < cap; i++) {
-            const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
-            const char *name = *(const char * const *)(rec + REGISTRY_NAME_OFF);
-            if (name == NULL) break;
-            out[n].name  = name;
-            out[n].super = *(const char * const *)(rec + REGISTRY_SUPER_OFF);
-            n++;
+        for (; n < count; n++)
+            names[n] = *(const char * const *)(B + (size_t)n * REGISTRY_RECORD_STRIDE + REGISTRY_NAME_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* Keep the records collected before a memory fault. */
+    }
+    *out = names;
+    return n;
+}
+
+int sh_typeinfo_collect_records(sh_ti_record **out)
+{
+    const uint8_t *B;
+    sh_ti_record *recs;
+    int n = 0, count;
+    if (!out) return -1;
+    *out = NULL;
+    if ((B = ti_type_array_base()) == NULL) return -1;
+    count = ti_registry_count(B);
+    if ((recs = (sh_ti_record *)malloc(((size_t)count + 1) * sizeof *recs)) == NULL) return -1;
+    __try {
+        for (; n < count; n++) {
+            const uint8_t *rec = B + (size_t)n * REGISTRY_RECORD_STRIDE;
+            recs[n].name  = *(const char * const *)(rec + REGISTRY_NAME_OFF);
+            recs[n].super = *(const char * const *)(rec + REGISTRY_SUPER_OFF);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    *out = recs;
     return n;
 }
 
@@ -487,24 +497,67 @@ int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
 #define ENTITYDEF_MGR_ARRAY_OFF  0x20
 #define ENTITYDEF_MGR_COUNT_OFF  0x28
 #define DECL_NAME_OFF            0x08
-int sh_typeinfo_collect_inherits(const char **out_names, int cap)
+int sh_typeinfo_collect_inherits(const char ***out)
 {
-    if (!out_names || cap <= 0 || !g_resource_mgr_ctx) return -1;
-    int n = 0;
+    const uint8_t *mgr = (const uint8_t *)g_resource_mgr_ctx;
+    const uint8_t * const *arr = NULL;
+    const char **names;
+    int n = 0, count = 0;
+    if (!out) return -1;
+    *out = NULL;
+    if (!mgr) return -1;
     __try {
-        const uint8_t *mgr = (const uint8_t *)g_resource_mgr_ctx;
-        int count = *(const int *)(mgr + ENTITYDEF_MGR_COUNT_OFF);
-        const uint8_t * const *arr = *(const uint8_t * const * const *)(mgr + ENTITYDEF_MGR_ARRAY_OFF);
-        if (arr == NULL || count <= 0 || (uint32_t)count > REGISTRY_WALK_CAP) return -1;  /* stale-mgr guard */
-        if (count > cap) count = cap;
+        count = *(const int *)(mgr + ENTITYDEF_MGR_COUNT_OFF);
+        arr = *(const uint8_t * const * const *)(mgr + ENTITYDEF_MGR_ARRAY_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    /* The engine's own count; a stale manager reads as a negative or absurd one. */
+    if (arr == NULL || count <= 0 || (uint32_t)count > REGISTRY_WALK_CAP) return -1;
+    if ((names = (const char **)malloc((size_t)count * sizeof *names)) == NULL) return -1;
+    __try {
         for (int i = 0; i < count; i++) {
             const uint8_t *decl = arr[i];
             if (decl == NULL) continue;
             const char *name = *(const char * const *)(decl + DECL_NAME_OFF);
-            if (name != NULL && name[0] != '\0') out_names[n++] = name;
+            if (name != NULL && name[0] != '\0') names[n++] = name;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    *out = names;
     return n;
+}
+
+int sh_ti_pack_put(sh_ti_pack *p, const char *name)
+{
+    size_t n = strlen(name);
+    if (p->failed) return 0;
+    if (p->len + n + 2 > p->cap) {   /* the name, its NUL and the closing empty name */
+        size_t cap = p->cap ? p->cap : 4096;
+        char *grown;
+        while (p->len + n + 2 > cap) cap *= 2;
+        grown = p->text ? (char *)HeapReAlloc(GetProcessHeap(), 0, p->text, cap)
+                        : (char *)HeapAlloc(GetProcessHeap(), 0, cap);
+        if (!grown) { p->failed = 1; return 0; }
+        p->text = grown;
+        p->cap = cap;
+    }
+    memcpy(p->text + p->len, name, n + 1);
+    p->len += n + 1;
+    return 1;
+}
+
+int sh_ti_pack_finish(sh_ti_pack *p, int names, char **out, int *out_count)
+{
+    if (out_count) *out_count = 0;
+    if (out) *out = NULL;
+    if (p->failed || names <= 0 || !p->text || !out) {
+        sh_iface_text_free(p->text);
+        memset(p, 0, sizeof *p);
+        return 0;
+    }
+    p->text[p->len] = '\0';   /* the empty name that ends the list */
+    *out = p->text;
+    if (out_count) *out_count = names;
+    memset(p, 0, sizeof *p);
+    return 1;
 }
 
 /* Console handlers registered in commands.c. */
@@ -738,13 +791,11 @@ void h_sh_validclasses(idCmdArgs *a)
     }
     sh_printf("inherit '%s' -> base type Y = '%s'; engine-valid classes (derive from Y):\n", inherit, Y);
 
-    static const char *names[SH_REGISTRY_MAX];       /* main-thread-serial console handler -> static is safe */
+    const char **names = NULL;
     int count = 0, y_seen = 0;
-    int k = sh_typeinfo_collect_classnames(names, SH_REGISTRY_MAX);
+    int k = sh_typeinfo_collect_classnames(&names);
     if (k > 0) {
         for (int i = 0; i < k; i++) vc_emit(names[i], Y, &count, &y_seen);
-        if (k >= SH_REGISTRY_MAX)
-            sh_printf("  (list truncated)\n");
     } else {
         sh_printf("  (live type registry unavailable -- using the static candidate set)\n");
         for (int i = 0; i < SH_CLASS_UNIVERSE_N; i++) vc_emit(SH_CLASS_UNIVERSE[i], Y, &count, &y_seen);
@@ -754,6 +805,7 @@ void h_sh_validclasses(idCmdArgs *a)
         count++;
     }
     sh_printf("(%d valid classes for inherit '%s')\n", count, inherit);
+    free((void *)names);
 }
 
 /* Dependency installation. */

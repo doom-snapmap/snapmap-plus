@@ -1242,53 +1242,62 @@ int sh_imgpreview_produce_image(const char *name, unsigned long generation, cons
     return imgpreview_produce_kind(name, generation, 1, why);
 }
 
-/* One page of names. Positions count every visible name in the listing's order; once one name
- * does not fit, nothing after it is written, so the next page starts exactly there. */
+/* The listing being built: owned interface text that grows to hold every name. */
 typedef struct {
     char *out; size_t cap, used;
-    unsigned start, seen;
-    int written, full;
+    int failed;
 } list_page;
 
 static void list_emit(list_page *p, const char *name, const char *bank)
 {
-    if (p->full) return;
-    if (p->seen++ < p->start) return;
+    if (p->failed) return;
     size_t n = strlen(name), m = bank ? strlen(bank) + 1u : 0u;
-    if (p->used + n + m + 2 > p->cap) { p->full = 1; return; }   /* room for '\n' and NUL */
+    if (p->used + n + m + 2 > p->cap) {   /* room for '\n' and NUL */
+        size_t cap = p->cap ? p->cap : 64u * 1024u;
+        char *grown;
+        while (p->used + n + m + 2 > cap) cap *= 2;
+        grown = p->out ? (char *)HeapReAlloc(GetProcessHeap(), 0, p->out, cap)
+                       : (char *)HeapAlloc(GetProcessHeap(), 0, cap);
+        if (!grown) { p->failed = 1; return; }
+        p->out = grown;
+        p->cap = cap;
+    }
     memcpy(p->out + p->used, name, n); p->used += n;
     if (bank) { p->out[p->used++] = '|'; memcpy(p->out + p->used, bank, m - 1); p->used += m - 1; }
     p->out[p->used++] = '\n';
-    p->written++;
 }
 
-int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
+char *sh_imgpreview_list(int kind)
 {
-    if (!out || cap < 2) return 0;
-    out[0] = '\0';
     /* Validate the public SH_ASSET_* range before indexing category state. */
-    if (kind < 0 || kind >= SH_ASSET_COUNT) return 0;
+    if (kind < 0 || kind >= SH_ASSET_COUNT) return NULL;
     AcquireSRWLockExclusive(&g_lock);
-    list_page p = { out, cap, 0, start, 0, 0, 0 };
-    if (imgpreview_load()) {
+    list_page p = { NULL, 0, 0, 0 };
+    int loaded = imgpreview_load();
+    if (loaded) {
         imgpreview_prepare_list_kind(kind);
         /* `hidden` is decided once at load: everything in box 1 except sounds, and box-1 sounds
          * that duplicate a SnapMap one. See imgpreview_load. */
-        for (int i = 0; i < g_recCount && !p.full; ++i)
+        for (int i = 0; i < g_recCount; ++i)
             if (g_rec[i].kind == kind && !g_rec[i].hidden) list_emit(&p, g_rec[i].name, NULL);
         if (kind == SH_ASSET_SOUND)
-            for (int e = 0; e < g_evCount && !p.full; ++e) list_emit(&p, g_ev[e], NULL);
+            for (int e = 0; e < g_evCount; ++e) list_emit(&p, g_ev[e], NULL);
         /* Publish event|bank lines on a separate pseudo-kind. The sound-name list is applied
          * verbatim and must contain only names. */
         if (kind == SH_ASSET_SNDBANK)
-            for (int b = 0; b < g_sbCount && !p.full; ++b) list_emit(&p, g_sb[b].name, g_sb[b].bank);
+            for (int b = 0; b < g_sbCount; ++b) list_emit(&p, g_sb[b].name, g_sb[b].bank);
         /* Atlas-only materials remain selectable through their VMTR rectangle. */
         if (kind == SH_ASSET_MATERIAL || kind == SH_ASSET_VTONLY)
-            for (int v = 0; v < g_vtCount && !p.full; ++v) list_emit(&p, g_vt[v], NULL);
+            for (int v = 0; v < g_vtCount; ++v) list_emit(&p, g_vt[v], NULL);
     }
-    out[p.used] = '\0';
     ReleaseSRWLockExclusive(&g_lock);
-    return p.written;
+    if (!loaded || p.failed) {
+        if (p.out) HeapFree(GetProcessHeap(), 0, p.out);
+        return NULL;
+    }
+    if (!p.out) return sh_iface_text("");
+    p.out[p.used] = '\0';
+    return p.out;
 }
 
 int sh_imgpreview_install(void)

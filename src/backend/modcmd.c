@@ -661,22 +661,24 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
             return 1;
         }
         if (!_stricmp(verb, "export")) {
-            char why[192] = "";
+            char *why = NULL;
             /* The open map through the rawmap writer, which writes a .zip
              * destination as an export (as 'sh_rawmaps save <path.zip>'). */
-            if (sh_editor_frame_request_rawmap_save_to(arg, why, (int)sizeof why))
+            if (sh_editor_frame_request_rawmap_save_to(arg, &why))
                 mc_line("MODS: export: writing the open map and its mods to %s; the console says when it is done", arg);
             else
-                mc_line("MODS: export: cannot save: %s", why[0] ? why : "the editor is not ready");
+                mc_line("MODS: export: cannot save: %s", why && why[0] ? why : "the editor is not ready");
+            free(why);
             free(arg);
             return 1;
         }
         {
             /* Opened as File > Load Rawmap opens it: the import runs off the
              * game's thread and the map opens when it is done. */
-            char why[192] = "";
-            if (sh_rawmap_open_now(arg, why, (int)sizeof why)) mc_line("MODS: import: opening %s", arg);
-            else mc_line("MODS: import: %s was not opened: %s", arg, why[0] ? why : "the editor cannot open it now");
+            char *why = NULL;
+            if (sh_rawmap_open_now(arg, &why)) mc_line("MODS: import: opening %s", arg);
+            else mc_line("MODS: import: %s was not opened: %s", arg, why && why[0] ? why : "the editor cannot open it now");
+            free(why);
         }
         free(arg);
         return 1;

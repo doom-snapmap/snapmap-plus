@@ -69,8 +69,8 @@ int sh_prefabpreview_is_mesh_name(const char *name);
 int sh_prefabpreview_editor_model(const char *sedef_name, char *out_model, size_t out_capacity,
                                   float out_size[3]);
 
-/* Consume the oldest completion. Returns 0 when none exists, -required_bytes for a size query or short
- * destination, and positive bytes copied when the completion was consumed. */
-int sh_prefabpreview_get(void *out_blob, int out_capacity);
+/* Take the oldest finished mesh blob, as owned interface text (sh_iface_text_free) in *out, and
+ * return its byte count; 0 (and NULL) when none is ready. */
+int sh_prefabpreview_take(void **out);
 
 #endif /* BACKEND_PREFABPREVIEW_H */
