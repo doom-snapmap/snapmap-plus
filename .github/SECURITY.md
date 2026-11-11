@@ -31,9 +31,16 @@ stay current.
   in Cloudflare. Both are inventoried in [`docs/services.md`](../docs/services.md).
 - Any change to a supply-chain-critical path (the CI/release workflows, the build scripts, the installer)
   requires maintainer review before it can merge.
-- Every merge to the default branch requires a passing security + build gate.
-- Third-party GitHub Actions are pinned to full commit SHAs.
+- Every pull request runs the CI gate: the security guard, the Windows build and tests, and the installer's
+  checks. A release tag must be a `vMAJOR.MINOR.PATCH` (or `-beta.N`) tag on a commit of `main`, and the whole
+  gate runs again on it before anything is built.
+- A release is created as a draft; it is published only after every asset is uploaded and read back
+  unchanged.
+- Third-party GitHub Actions are pinned to full commit SHAs, and tools CI downloads are checked against a
+  pinned hash or lockfile.
 - Release artifacts ship a `MANIFEST.sha256` and a build-provenance attestation; verify a download with
   `gh attestation verify <file> --repo doom-snapmap/snapmap-plus`.
+- Release binaries are not code-signed yet. The release workflow has a disabled signing step, placed before
+  the hashes and the attestation, for when a signing account exists.
 
 Thank you for helping keep Snapmap+ and its users safe.
