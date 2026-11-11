@@ -28,11 +28,8 @@ const char *sh_host_image_name(void);
  * files (base, virtualtextures) are found from here. */
 const wchar_t *sh_host_dir(void);
 
-/* Infer Vulkan (1), OpenGL (0), or unresolved (-1) from loaded renderer libraries. */
-int sh_host_is_vulkan(void);
-
-/* Return "vulkan", "opengl", or "". Cache only a definite renderer so startup
- * calls can retry; later reporting calls use the cached string without loader access. */
+/* "vulkan" or "opengl" from the identified build (sh_host_identity), or ""
+ * on an unsupported executable. */
 const char *sh_host_renderer_name(void);
 
 /* Snapmap+ supports one DOOM build: the April 2024 update, Steam build 13954591.
