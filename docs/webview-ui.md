@@ -503,7 +503,7 @@ state, "placedEntities", placedCount, placedModules, "references", size, inManif
 | `rescan` | Refresh: the scan (new folders get their salt, copies a salt of their own, changed folders are built), the serving index, and what changed brought into the running game. Its message is only the sentence a change still needs ("Some of the changes take effect only after you restart DOOM.", "... when you next open the map.", "... when you are back in the editor."), shown even though Refresh is otherwise quiet. |
 | `install` | Install one or more folders (the native picker). |
 | `openFolder` | The host's own: opens the mods folder, or with `arg` that folder under it. |
-| `mapAddMod` | Attach the mod to the open map without placing anything (a map-level row for its build); the next save writes it. A downloaded map's mod is refused. |
+| `mapAddMod` | Attach the mod to the open map without placing anything (a map-level row for the build of its folder at the root); the next save writes it. A folder a downloaded map or a prefab brought names its mod: the root folder of its salt is attached, and without one the answer sends the player to Add to my mods. The window never sets where a map finds its mods. |
 | `chooseRegistry` | `"<slot>\t<salt>"` (an empty salt clears): the open map's choice of whose edit serves that slot. |
 | `mapRemoveModPreview`, `mapRemoveMod` | The dry run and the removal of a mod from the open map: its placed entities in one undo step, the wires and timeline references to them, its row, and with the last mod the search tag. |
 | `uninstallPreview`, `uninstall` | The dry run and the uninstall: the open map cleaned of the mod, its undo history cleared, the folder moved to the Recycle Bin, the rescan. |

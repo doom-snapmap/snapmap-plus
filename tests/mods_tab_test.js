@@ -230,7 +230,7 @@ function standIn(initial, folders) {
     } else if (a === 'mapAddMod') {
       if (!docu.map || docu.map.entities === -1 || !Array.isArray(docu.map.mods)) { ok = false; msg = 'No map is open in the editor.'; }
       else if (!b) { ok = false; msg = key + ' is not installed.'; }
-      else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + ', so only that map uses it.'; }
+      else if (b.place) { ok = false; msg = nameOf(key) + ' came with the map ' + b.placeTitle + '. Add it to your mods first (Add to my mods); then your own maps can use it.'; }
       else if (r && r.attached) msg = nameOf(key) + ' is already used by the whole of ' + docu.map.name + '.';
       else {
         if (r) r.attached = true;
@@ -770,7 +770,7 @@ test('Use in this map from the details pane, and back', () => {
   assert.equal(use.textContent, 'Use in this map');
   /* a downloaded map's mod: refused by the fake host as by the backend */
   h.ui.act('mapAddMod', 'maps\\Hell Guard Arena\\Lava Floor');
-  assert.match(h.toasts.pop().text, /came with the map Hell Guard Arena, so only that map uses it/);
+  assert.match(h.toasts.pop().text, /came with the map Hell Guard Arena\. Add it to your mods first \(Add to my mods\)/);
 });
 test('Uninstall: the confirmation lists what it does; the folder goes to the Recycle Bin', () => {
   const h = live();

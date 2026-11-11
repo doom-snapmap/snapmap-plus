@@ -720,7 +720,7 @@ static const char **mu_blobs(const sh_ms_entry *e, size_t *n)
     return v;
 }
 
-/* Two mods with near-identical content are two mods (ONE-SHAPE rule 1): the
+/* Two mods with near-identical content are two mods (identity is the salt): the
  * tab only says so. For each root mod, the other root mod whose files include
  * the most of its carried files at equal bytes, when that is at least half of
  * them (the blocks the scan read; nothing is hashed here). */
@@ -932,8 +932,8 @@ static const char *mu_entry_title(const sh_ms_entry *s);
 
 /* ---- what the builder derived */
 
-/* The stock banks the product block's registries "banks" names (DESIGN-
- * additive 2.4, "Sound events"), each with this process's state: up to 8. */
+/* The stock banks the product block's registries "banks" names, each with
+ * this process's state: up to 8. */
 static int mu_stock_banks(const sh_mb_bundle *bd, char banks[8][SH_MBI_LEAF_MAX])
 {
     mpj *x;
@@ -3199,7 +3199,6 @@ int sh_modui_scope_launch_refused(const char *why)
         sh_modmanifest_current_close();
         mu_settings_close();
         InterlockedExchange(&g_scope_editor, 0);
-        (void)sh_modserve_scope_set_place(NULL, 1);
         changed = sh_modserve_scope_set(NULL, 0, NULL, 0, 0);
         mu_log("scope: %s was refused; nothing was launched, so nothing is declared", at);
     }
@@ -3245,7 +3244,6 @@ static void mu_scope_tick(int editor_map)
             InterlockedIncrement(&g_gen);
             sh_modmanifest_current_close();
             mu_settings_close();
-            (void)sh_modserve_scope_set_place(NULL, 1);
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the editor left the map; its mods' rows, shadows and requirements are withdrawn");
                 (void)mu_scope_apply("map exit");
@@ -3258,7 +3256,6 @@ static void mu_scope_tick(int editor_map)
             InterlockedExchange(&g_launch, MU_LAUNCH_NONE);
             sh_modmanifest_current_close();
             mu_settings_close();
-            (void)sh_modserve_scope_set_place(NULL, 1);
             if (sh_modserve_scope_set(NULL, 0, NULL, 0, 0)) {
                 mu_log("scope: the launched map's Play is over; nothing is declared at the hub");
                 (void)mu_scope_apply("hub");
@@ -3830,10 +3827,13 @@ static void mu_mark_modified(const char *label)
 
 /* ---- map add: a map-level row */
 
-/* Attach `key` (a folder, as sh_ms_entry_matches reads it) to the open map:
- * the current manifest gets a map-level row naming the mod's build, and the
- * map scope follows at once. The next save writes the row. A mod a
- * downloaded map brought (a place folder) serves only that map. */
+/* Attach `key` (a folder, as sh_ms_entry_matches reads it, or a salt) to the
+ * open map: the current manifest gets a map-level row naming the build of the
+ * mod's folder at the root, and the map scope follows at once. The next save
+ * writes the row. A folder a downloaded map or a prefab brought names its mod:
+ * the root folder of its salt is the one the player's maps use (placing a
+ * prefab puts its mods there after the one approval); without one the player is
+ * sent to Add to my mods. */
 static int mu_map_add(const char *key, const mu_out *o)
 {
     const int action = SH_MODS_ACT_MAP_ADD;
@@ -3862,6 +3862,9 @@ static int mu_map_add(const char *key, const mu_out *o)
         if (!strcmp(m.list.items[i].name, key) && m.list.items[i].loaded) entry = (int)i;
     for (i = 0; i < m.list.count && entry < 0; i++)
         if (sh_ms_entry_matches(&m.list.items[i], key) && m.list.items[i].loaded && !m.list.items[i].place[0]) entry = (int)i;
+    for (i = 0; entry >= 0 && m.list.items[entry].place[0] && i < m.list.count; i++)
+        if (!m.list.items[i].place[0] && m.list.items[i].loaded && !_stricmp(m.list.items[i].salt, m.list.items[entry].salt))
+            entry = (int)i;
     strncpy_s(title, sizeof title, entry >= 0 ? mu_entry_title(&m.list.items[entry]) : key, _TRUNCATE);
     where = mp.name[0] ? mp.name : "the open map";
     st = entry >= 0 ? sh_modserve_bundle_state(m.list.items[entry].bundle.hash, cause, sizeof cause) : 0;
@@ -3872,8 +3875,8 @@ static int mu_map_add(const char *key, const mu_out *o)
                                                                    : "The open map cannot be read on this build.");
     else if (entry < 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
     else if (m.list.items[entry].place[0])
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s, so only that map uses it. To use it in your own "
-                    "maps, copy its folder into your own mods and press Refresh.", title, place);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s came with the map %s. Add it to your mods first (Add to my mods); then "
+                    "your own maps can use it.", title, place);
     else if (sh_mb_editor_only(&m.list.items[entry].bundle))
         /* Editor tweaks are this computer's: every map opened in
          * this editor already has them, a map never records them. */
@@ -4072,7 +4075,7 @@ static const char *mu_file_cause(const char *cause, const char *path)
 }
 
 /* The mod's standing cause: why the folder serves nothing (a failed build
- * included: rule 2, no last good build), or "". Raw: the Files view matches
+ * included: there is no last good build), or "". Raw: the Files view matches
  * it against file paths before saying it plainly. */
 static const char *mu_entry_cause(const sh_ms_entry *e)
 {
@@ -4359,7 +4362,7 @@ static void mu_remove_tree(const wchar_t *dir)
  * (a mod a map brought) at the root, until the store side provides it. The
  * folder is copied outside the store first, so the install takes it as a mod
  * from elsewhere: every file it holds is copied to mods\<its name> and built
- * under its own salt (decision 10: nothing is dropped). */
+ * under its own salt (nothing is dropped). */
 int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                           sh_ms_install_stats *stats, sh_mb_bundle *bundle_out, char *cause, size_t cause_cap)
 {
@@ -4392,7 +4395,7 @@ int sh_ms_install_to_root(const char *folder, const sh_mb_resolver *resolver, ch
 
 /* addToMine (arg: a folder of a downloaded map's mods): copy it to the root
  * of mods\ as one of the player's own mods, which their own maps can then use
- * (decision 23). A salt the root already holds is that folder. */
+ * A salt the root already holds is that folder. */
 static int mu_add_mine(const char *key)
 {
     const int action = SH_MODS_ACT_ADD_MINE;

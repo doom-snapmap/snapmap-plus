@@ -1080,11 +1080,13 @@ int main(int argc, char **argv)
         CHECK(doc_prose_ok(doc));
         union_add(doc);
         free(doc);
+        /* Use in this map with the map's copy named: the root folder of its salt is attached. */
         open_test_map();
         doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
-        CHECK(has(doc, "\"ok\":false,\"message\":\"R2 Imp copy came with the map Hell Arena, so only that map uses it."));
+        CHECK(has(doc, "\"ok\":true,\"message\":\"R2 Imp copy is now used by the whole of "));
         free(doc);
         g_map_on = 0;
+        sh_modmanifest_reset();
         /* Add to my mods: the salt is already yours, so that folder is the one. */
         doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
         CHECK(has(doc, "\"action\":\"addToMine\",\"ok\":true,\"message\":\"R2 Imp copy is already one of your mods, in "
@@ -1133,6 +1135,12 @@ int main(int argc, char **argv)
         free(run_doc(SH_MODS_ACT_RESCAN, NULL));
         for (q = 0; name[q] && w + 2 < sizeof esc; q++) { if (name[q] == '\\') esc[w++] = '\\'; esc[w++] = name[q]; }
         esc[w] = 0;
+        /* Only the map's copy: Use in this map sends the player to Add to my mods, which is there. */
+        open_test_map();
+        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
+        CHECK(has(doc, "\"ok\":false,\"message\":\"Solo came with the map Solo Arena. Add it to your mods first (Add to my "
+                       "mods); then your own maps can use it.\""));
+        free(doc);
         g_main = 0;
         g_refreshes = 0;
         doc = run_doc(SH_MODS_ACT_ADD_MINE, name);
@@ -1155,6 +1163,12 @@ int main(int argc, char **argv)
         }
         CHECK(doc_prose_ok(doc));
         free(doc);
+        /* Now the map's copy names your own folder, which the map uses. */
+        doc = run_doc(SH_MODS_ACT_MAP_ADD, name);
+        CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is now used by the whole of "));
+        free(doc);
+        g_map_on = 0;
+        sh_modmanifest_reset();
         /* Your own mod: nothing to add. */
         doc = run_doc(SH_MODS_ACT_ADD_MINE, "Solo");
         CHECK(has(doc, "\"ok\":true,\"message\":\"Solo is already one of your mods.\""));

@@ -185,8 +185,9 @@ int  sh_modui_list(void);
  * manifest gets a map-level row for the mod's build, the map scope is
  * recomputed and applied at once, and the next save writes the row (so the
  * map publishes, downloads and lists the mod); MAP_REMOVE drops the row
- * again, deleting nothing when no entity uses the mod. A mod a downloaded map
- * brought (a place folder) serves only that map and is not attached.
+ * again, deleting nothing when no entity uses the mod. A folder a downloaded
+ * map or a prefab brought names its mod: the root folder of its salt is
+ * attached, and without one the answer sends the player to Add to my mods.
  *
  * Map scope: binding also registers the manifest's scope hook, its row
  * resolver and the serving layer's scope source. At every load the listing is
@@ -254,8 +255,8 @@ int  sh_modui_poll_main(void *context);
  * (sh_modserve_scope_set_place): `place` the launched map's place
  * ("maps\<segment>", NULL for none) and `own` 1 for the player's own map (a
  * My Maps play, a map this machine published), whose rows follow the root
- * folders. When the editor leaves its map, or a launched Play is over, the
- * context returns to no place, own. */
+ * folders. Nothing in this file resets the place: where a map finds its mods
+ * is a fact of that map, set from its record at every load. */
 int  sh_modui_scope_launch(const char *why);
 int  sh_modui_scope_launch_at(const char *why, const char *place, int own);
 
@@ -304,20 +305,20 @@ struct sh_ms_install_stats;
  * every file it holds copied to mods\<its name> (" (2)" when taken) under its
  * own salt, built, the source untouched. Returns 1 with the folder name under
  * mods\, else 0 with the plain cause. Any thread; takes the store lock. Add
- * to my mods calls it; decision 12's install of a prefab's mods at the root is
+ * to my mods calls it; placing a prefab installs its mods at the root by
  * the same step. Thin implementation: modui.c (copies the folder outside the
  * store, then installs that copy). */
 int sh_ms_install_to_root(const char *folder, const struct sh_mb_resolver *resolver, char *name_out, size_t name_cap,
                           struct sh_ms_install_stats *stats, struct sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 
 /* How many of the player's saved maps record `place` ("maps\<segment>") as
- * where they find their mods (decision 11's record), or -1 when it cannot be
+ * where they find their mods (the saved map's record), or -1 when it cannot be
  * told. The Mods tab's short view of a downloaded map's mods says whether the
  * start-up cleanup keeps them. Serving or store side; no implementation here:
  * until it lands the short view states the cleanup rule without a count. */
 int sh_ms_place_saved_maps(const char *place);
 
-/* The start-up cleanup of decision 22: every place under mods\maps\ that no
+/* The start-up cleanup: every place under mods\maps\ that no
  * saved map of the player records and whose map was not played for `days`
  * days is removed (playing the map again downloads it again). Returns how
  * many places went, -1 when the store cannot be read. Store side, called at
@@ -325,9 +326,9 @@ int sh_ms_place_saved_maps(const char *place);
 int sh_ms_places_prune(unsigned days);
 
 /* The published-map gate sets the launched map's place through
- * sh_modui_scope_launch_at today. With decision 11 the place is a fact of the
- * map, set from its record at every load, so the gate sets it and calls
- * sh_modui_scope_launch; sh_modui_scope_launch_at then goes. */
+ * sh_modui_scope_launch_at today. Once the place is a fact of the map, set
+ * from its record at every load, the gate sets it and calls
+ * sh_modui_scope_launch, and sh_modui_scope_launch_at goes. */
 
 #ifdef SH_MODUI_TESTING
 /* The hub launch state machine (modui.c): "none", "launched", "loading",

@@ -35,7 +35,7 @@ var modsTab = (function () {
   /* A mod that cannot be used and whose cause the backend did not send. */
   var UNUSABLE_TEXT = 'This mod cannot be used right now; press Refresh.';
   function placeText(b) { return 'Came with the map ' + (b.placeTitle || 'you downloaded') + '; only that map uses it.'; }
-  /* The informational hint: near-identical mods are two mods (ONE-SHAPE rule 1); nothing merges. */
+  /* The informational hint: near-identical mods are two mods (identity is the salt); nothing merges. */
   function sameFilesText(s) {
     return 'Carries ' + plural(s.count, 'file') + ' that ' + s.name + ' also carries. They stay two separate mods.';
   }
@@ -106,17 +106,17 @@ var modsTab = (function () {
   function confirmScope(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var BORROWS_NOTE = "Game files are never stored or uploaded with the mod; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
-  /* A folder of editor tweaks only (facts.editorOnly): a map never records it (DESIGN-additive 2.6). */
+  /* A folder of editor tweaks only (facts.editorOnly): a map never records it. */
   var EDITOR_ONLY_NOTE = "Changes only this computer's editor; maps made with it need nothing.";
   var USE_TITLE = 'Use the selected mod in the whole open map without placing anything; the map lists it when you save';
-  /* A downloaded map's mod (decision 22): the short view, its map, Add to my mods and Remove. */
+  /* A downloaded map's mod: the short view, its map, Add to my mods and Remove. */
   var ADD_MINE_TITLE = 'Copy this mod into your own mods, so your own maps can use it';
   var PLACE_CLEANUP_TEXT = 'Snapmap+ removes it at start when none of your saved maps uses it and you have not played ' +
                            'that map for 30 days; playing the map downloads it again.';
   var MAP_LEVEL_TEXT = 'Used by the whole map';
   var NOTHING_PLACED_TEXT = 'Used by the whole map, nothing placed';
   /* Editor tweaks always apply in this computer's editor, a downloaded map included; a map never
-     records them and Play never sees them (DESIGN-additive 2.6, owner 2026-11-09). */
+     records them and Play never sees them. */
   var EDITOR_TWEAKS_TEXT = 'they apply in your editor whatever map is open and are never saved with a map or used at Play';
   var NOTHING_CHANGED_TEXT = 'Changes nothing of the game; it only adds.';
   var COPY_ID_TITLE = "Copy this mod's id: the name its own files and strings sit under, which the Files view shows in their paths";
