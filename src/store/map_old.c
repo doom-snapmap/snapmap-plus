@@ -620,6 +620,7 @@ static const char *const ms_product_prefixes[] = {"smp.", "smnav1.", "smpmod1.",
 typedef struct ms_elem {
     size_t from, to;          /* the element, '{' to '}' inclusive-exclusive */
     size_t vfrom, vto;        /* initialValue body (no quotes); vto == 0 when absent */
+    size_t nfrom, nto;        /* info.name body (no quotes); nto == 0 when absent */
     int which;                /* MS_RENDER, MS_BOUNDS, MS_PRODUCT or MS_AUTHOR */
 } ms_elem;
 
@@ -718,8 +719,11 @@ static int ms_list_read(const char *json, size_t len, ms_list *l)
         e->to = l->doc.c[i].close + 1;
         e->which = MS_AUTHOR;
         info = sh_shard_doc_member(json, len, &l->doc, (int)i, "info");
-        if (info >= 0 && ms_member_string(json, len, &l->doc, info, "name", &nf, &nt))
+        if (info >= 0 && ms_member_string(json, len, &l->doc, info, "name", &nf, &nt)) {
             e->which = ms_classify(json + nf, nt - nf);
+            e->nfrom = nf;
+            e->nto = nt;
+        }
         if (!ms_member_string(json, len, &l->doc, (int)i, "initialValue", &e->vfrom, &e->vto))
             e->vfrom = e->vto = 0;
     }
@@ -739,16 +743,21 @@ static int ms_removable(const ms_list *l, size_t k)
     return 1;
 }
 
-/* Rebuild the text with element k dropped when drop[k], and element k's value
- * body replaced by value[k] when value[k] is not NULL. allocCount[4] follows
+/* A settings row an author's variable follows stays in place (variables bind
+ * by index) under this name and an empty value, which no check of an earlier
+ * shape matches; the setting itself moves to the member. */
+#define MS_KEPT_NAME "unused"
+
+/* Rebuild the text with element k dropped when drop[k], and element k kept
+ * under MS_KEPT_NAME with an empty value when keep[k]. allocCount[4] follows
  * the new count when anything was dropped. */
 static char *ms_rebuild(const char *json, size_t len, const ms_list *l, const unsigned char *drop,
-                        const char *const *value, size_t *out_len)
+                        const unsigned char *keep, size_t *out_len)
 {
     size_t need = len + 1, w = 0, k, open = l->doc.c[l->bucket].open, close = l->doc.c[l->bucket].close;
     int first = 1, dropped = 0;
     char *out;
-    for (k = 0; k < l->n; k++) if (value[k]) need += strlen(value[k]);
+    for (k = 0; k < l->n; k++) if (keep[k]) need += sizeof MS_KEPT_NAME;
     out = (char *)HeapAlloc(GetProcessHeap(), 0, need + 16);
     if (!out) return NULL;
 #define MS_EMIT(p, n) do { memcpy(out + w, (p), (n)); w += (n); } while (0)
@@ -761,10 +770,25 @@ static char *ms_rebuild(const char *json, size_t len, const ms_list *l, const un
         if (first) MS_EMIT(json + open + 1, l->e[0].from - (open + 1));
         else MS_EMIT(json + l->e[k - 1].to, e->from - l->e[k - 1].to);
         first = 0;
-        if (value[k] && e->vto) {
-            MS_EMIT(json + e->from, e->vfrom - e->from);
-            MS_EMIT(value[k], strlen(value[k]));
-            MS_EMIT(json + e->vto, e->to - e->vto);
+        if (keep[k]) {
+            /* The name and the value bodies, in the order the element holds them. */
+            size_t at = e->from, s[2][2];
+            const char *put[2];
+            int i, n = 0;
+            if (e->nto) { s[n][0] = e->nfrom; s[n][1] = e->nto; put[n++] = MS_KEPT_NAME; }
+            if (e->vto) { s[n][0] = e->vfrom; s[n][1] = e->vto; put[n++] = ""; }
+            if (n == 2 && s[1][0] < s[0][0]) {
+                size_t t0 = s[0][0], t1 = s[0][1];
+                const char *tp = put[0];
+                s[0][0] = s[1][0]; s[0][1] = s[1][1]; put[0] = put[1];
+                s[1][0] = t0; s[1][1] = t1; put[1] = tp;
+            }
+            for (i = 0; i < n; i++) {
+                MS_EMIT(json + at, s[i][0] - at);
+                MS_EMIT(put[i], strlen(put[i]));
+                at = s[i][1];
+            }
+            MS_EMIT(json + at, e->to - at);
         } else MS_EMIT(json + e->from, e->to - e->from);
     }
     if (l->n) MS_EMIT(json + l->e[l->n - 1].to, close - l->e[l->n - 1].to);
@@ -1239,14 +1263,13 @@ static int mo_read_settings(const char *json, size_t len, sh_map_old *o)
 }
 
 /* The text without its settings rows: a row only Snapmap+ rows follow is
- * removed, one an author's variable follows is kept and rewritten as off.
+ * removed, one an author's variable follows keeps its place under
+ * MS_KEPT_NAME with an empty value, so every author variable keeps its index.
  * Process heap, or NULL when nothing changed (*failed when it did not read). */
 static char *mo_strip_settings(const char *json, size_t len, size_t *out_len, int *failed)
 {
-    static const char *const off_text[2] = {"4;8192", "1;0"};
     ms_list l;
-    unsigned char *drop;
-    const char **rewrite;
+    unsigned char *drop, *keep;
     size_t k;
     int changed = 0;
     char *out = NULL;
@@ -1254,25 +1277,22 @@ static char *mo_strip_settings(const char *json, size_t len, size_t *out_len, in
     if (!ms_mentions(json, len)) return NULL;
     if (!ms_list_read(json, len, &l)) { *failed = 1; return NULL; }
     drop = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, l.n ? l.n : 1);
-    rewrite = (const char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (l.n ? l.n : 1) * sizeof *rewrite);
-    if (!drop || !rewrite) { *failed = 1; goto done; }
+    keep = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, l.n ? l.n : 1);
+    if (!drop || !keep) { *failed = 1; goto done; }
     for (k = 0; k < l.n; k++) {
         int which = l.e[k].which;
-        size_t n;
         if (which != MS_RENDER && which != MS_BOUNDS) continue;
-        if (ms_removable(&l, k)) { drop[k] = 1; changed = 1; continue; }
-        n = l.e[k].vto - l.e[k].vfrom;
-        if (!l.e[k].vto || (n == strlen(off_text[which]) && !memcmp(json + l.e[k].vfrom, off_text[which], n))) continue;
-        rewrite[k] = off_text[which];
+        if (ms_removable(&l, k)) drop[k] = 1;
+        else keep[k] = 1;
         changed = 1;
     }
     if (changed) {
-        out = ms_rebuild(json, len, &l, drop, rewrite, out_len);
+        out = ms_rebuild(json, len, &l, drop, keep, out_len);
         if (!out) *failed = 1;
     }
 done:
     if (drop) HeapFree(GetProcessHeap(), 0, drop);
-    if (rewrite) HeapFree(GetProcessHeap(), 0, (void *)rewrite);
+    if (keep) HeapFree(GetProcessHeap(), 0, keep);
     ms_list_free(&l);
     return out;
 }

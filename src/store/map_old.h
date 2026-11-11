@@ -20,9 +20,9 @@
  *
  * and later the "snapmap-plus" member (map_carrier.h) whose "mods" rows named
  * the mod by "id" and its build by "bundle". A variable is bound by index, so
- * a settings row an author's variable follows is kept in place and rewritten
- * to the value that reads as off ("4;8192", "1;0"); every other row is
- * removed and allocCount[4] rewritten.
+ * a settings row an author's variable follows is kept in place, renamed
+ * "unused" with an empty value (no earlier family's name, so the game reads
+ * the map); every other row is removed and allocCount[4] rewritten.
  *
  * The conversion: sh_map_old_read collects what the text carries (for each
  * family, the member's part wins when both exist), the caller records each
