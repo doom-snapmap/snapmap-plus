@@ -1,10 +1,11 @@
 /* fault_record.c -- see fault_record.h. */
 #include "fault_record.h"
 #include "../common/log_rotate.h"
+#include "../common/wide_path.h"
 #include <stdio.h>
 #include <string.h>
 
-static char g_logpath[MAX_PATH] = {0};
+static wchar_t g_logpath[SH_WPATH_MAX];
 
 int shield_format(char *buf, size_t n, const shield_fault *f)
 {
@@ -19,19 +20,16 @@ int shield_format(char *buf, size_t n, const shield_fault *f)
 
 void shield_set_logpath_from_module(HINSTANCE self)
 {
-    char path[MAX_PATH];
-    DWORD len = GetModuleFileNameA((HMODULE)self, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) { strcpy_s(g_logpath, MAX_PATH, "shield_faults.log"); return; }
-    char *slash = strrchr(path, '\\');
-    if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
-    /* group logs under <DOOM>\snapmap-plus\logs\ (same dir the backend log uses; parent first) */
-    char dir[MAX_PATH];
-    _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus", path);
-    CreateDirectoryA(dir, NULL);
-    _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs", path);
-    CreateDirectoryA(dir, NULL);   /* idempotent */
-    _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\shield_faults.log", dir);
-    log_rotate_if_large(g_logpath, LOG_ROTATE_CAP_BYTES);
+    /* <DOOM>\snapmap-plus\logs\shield_faults.log, beside the backend log. */
+    g_logpath[0] = L'\0';
+    if (!sh_wpath_module_dir((void *)self, g_logpath, SH_WPATH_MAX) ||
+        !sh_wpath_append(g_logpath, SH_WPATH_MAX, L"snapmap-plus") || !sh_wpath_ensure_dir(g_logpath) ||
+        !sh_wpath_append(g_logpath, SH_WPATH_MAX, L"logs") || !sh_wpath_ensure_dir(g_logpath) ||
+        !sh_wpath_append(g_logpath, SH_WPATH_MAX, L"shield_faults.log")) {
+        g_logpath[0] = L'\0';
+        return;
+    }
+    log_rotate_if_large_w(g_logpath, LOG_ROTATE_CAP_BYTES);
 }
 
 void shield_emit(const shield_fault *f)
@@ -44,10 +42,10 @@ void shield_emit(const shield_fault *f)
         "[shield] %04d-%02d-%02d %02d:%02d:%02d.%03d %s\n",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, body);
 
-    OutputDebugStringA(line);   /* -> in-game console + any attached debugger */
+    OutputDebugStringA(line);   /* for an attached debugger */
 
     if (g_logpath[0]) {
-        HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        HANDLE h = CreateFileW(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             DWORD wrote;

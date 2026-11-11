@@ -1,14 +1,16 @@
 /* Offline signature-resolution checks against a PE mapped by RVA.
  * The image is bound to its SHA-256 identity. On a build 13954591 executable
- * every match must be unique and land on the recorded RVA for its renderer;
- * "portable" (or any other image, e.g. a 2018 cross-check) requires uniqueness
- * only. Run via run-tests.ps1. */
+ * every pattern must match exactly once in the whole image, at the recorded RVA
+ * for its renderer, and resolve there; "portable" (or any other image)
+ * requires uniqueness only. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "signatures.h"
 #include "host_image.h"
+#include "companion_engine.h"
+#include "modscene_decl.h"
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {
@@ -63,35 +65,60 @@ int main(int argc, char **argv)
            identity ? identity->label : "not a supported executable (cross-check only)",
            pinned ? "recorded-RVA" : "portable");
 
-    /* Size results for the whole signature database to prevent out-of-bounds access. */
+    /* Every entry: the whole-image scan must find exactly one match, on a
+     * supported executable at the recorded RVA for its renderer, and the
+     * run-time resolution (recorded RVA only) must agree. Both passes are
+     * timed: the scan is what a boot used to cost, the recorded check what it
+     * costs now. */
     size_t total = sig_db_count();
-    sig_result results[SIG_RESULTS_MAX];
-    size_t ok = sig_resolve_all(base, results, SIG_RESULTS_MAX);
+    sig_result results[SIG_RESULTS_MAX], scanned[SIG_RESULTS_MAX];
+    LARGE_INTEGER freq, t0, t1, t2;
     if (total > SIG_RESULTS_MAX) {
         printf("SIGNATURE DB OVERFLOW: %zu entries > SIG_RESULTS_MAX %d -- raise it\n",
                total, (int)SIG_RESULTS_MAX);
         return 1;
     }
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    for (size_t i = 0; i < total; i++) sig_scan_one(base, &BACKEND_ENGINE_SIGNATURES[i], &scanned[i]);
+    QueryPerformanceCounter(&t1);
+    size_t ok = sig_resolve_all(base, results, SIG_RESULTS_MAX);
+    QueryPerformanceCounter(&t2);
+    printf("timing: whole-image scan of %zu signatures %.1f ms; recorded-RVA check %.3f ms\n", total,
+           (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart,
+           (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)freq.QuadPart);
+    if (!pinned) ok = 0;
 
     int bad = 0;
     for (size_t i = 0; i < total; i++) {
-        const char *st = results[i].status == SIG_OK ? "OK " :
-                         results[i].status == SIG_NOT_FOUND ? "NOTFOUND" :
-                         results[i].status == SIG_AMBIGUOUS ? "AMBIG" : "BAD";
+        const char *st = scanned[i].status == SIG_OK ? "" :
+                         scanned[i].status == SIG_NOT_FOUND ? "NOTFOUND" :
+                         scanned[i].status == SIG_AMBIGUOUS ? "AMBIG" : "BAD";
         uint32_t known = identity ? (identity->vulkan ? BACKEND_ENGINE_SIGNATURES[i].rva_vk
                                                       : BACKEND_ENGINE_SIGNATURES[i].rva_gl) : 0;
-        int unique = (results[i].status == SIG_OK);
-        int rva_ok = pinned && known ? (unique && results[i].rva == known) : unique;
-        if (!rva_ok) bad++;
-        if (pinned) {
-            printf("%s %-20s resolved=0x%-9x known=0x%-9x %s\n",
-                   rva_ok ? "OK " : "BAD", results[i].name, results[i].rva, known,
-                   unique ? "" : st);
-        } else {
-            printf("%s %-20s resolved=0x%-9x shift=%+d %s\n",
-                   rva_ok ? "OK " : "BAD", results[i].name, results[i].rva,
-                   unique ? (int)((long)results[i].rva - (long)known) : 0,
-                   unique ? "" : st);
+        int unique = (scanned[i].status == SIG_OK);
+        int good = pinned ? (unique && known && scanned[i].rva == known &&
+                             results[i].status == SIG_OK && results[i].rva == known) : unique;
+        if (!good) bad++;
+        printf("%s %-20s scanned=0x%-9x recorded=0x%-9x %s\n", good ? "OK " : "BAD",
+               scanned[i].name, scanned[i].rva, known, st);
+    }
+    /* The private tables the companion and scene-spawn features resolve. */
+    {
+        const sig_entry *tables[2] = { SH_COMPANION_SIGNATURES, SH_MODSCENE_SPAWN_SIGNATURES };
+        for (int t = 0; t < 2; t++) {
+            for (const sig_entry *e = tables[t]; e->name; e++) {
+                sig_result scan, rec;
+                uint32_t known = identity ? (identity->vulkan ? e->rva_vk : e->rva_gl) : 0;
+                int good;
+                sig_scan_one(base, e, &scan);
+                sig_resolve_one(base, e, &rec);
+                good = pinned ? (scan.status == SIG_OK && known && scan.rva == known && rec.status == SIG_OK)
+                              : scan.status == SIG_OK;
+                if (!good) bad++;
+                printf("%s %-20s scanned=0x%-9x recorded=0x%-9x\n", good ? "OK " : "BAD",
+                       e->name, scan.rva, known);
+            }
         }
     }
 
@@ -104,9 +131,9 @@ int main(int argc, char **argv)
         uint64_t preferred = nt->OptionalHeader.ImageBase;
         size_t i;
         for (i = 0; i < total; i++) {
-            if (strcmp(results[i].name, "DeclRegistryAnchor") == 0) anchor = &results[i];
-            else if (strcmp(results[i].name, "DeclTypeByName") == 0) type_method = &results[i];
-            else if (strcmp(results[i].name, "DeclRegisterFile") == 0) register_method = &results[i];
+            if (strcmp(scanned[i].name, "DeclRegistryAnchor") == 0) anchor = &scanned[i];
+            else if (strcmp(scanned[i].name, "DeclTypeByName") == 0) type_method = &scanned[i];
+            else if (strcmp(scanned[i].name, "DeclRegisterFile") == 0) register_method = &scanned[i];
         }
         if (!anchor || !type_method || !register_method || anchor->status != SIG_OK ||
             type_method->status != SIG_OK || register_method->status != SIG_OK) {
@@ -144,7 +171,8 @@ int main(int argc, char **argv)
     }
     {
         sig_result target;
-        sig_status status = sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
+        sig_status status = pinned ? sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target)
+                                   : sig_scan_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
         int is_gl = identity ? !identity->vulkan : strstr(argv[1], "DOOMx64.exe") != NULL;
         if ((is_gl && (status != SIG_OK ||
                        (pinned && target.rva != NAV_RENDER_TARGET_GL_SIGNATURE.rva_gl))) ||
@@ -159,9 +187,9 @@ int main(int argc, char **argv)
     if (identity) {
         const sig_result *re = NULL, *tree = NULL, *apply = NULL;
         for (size_t i = 0; i < total; i++) {
-            if (!strcmp(results[i].name, "GridReapplyEntityTree")) re = &results[i];
-            else if (!strcmp(results[i].name, "GridEntityTree")) tree = &results[i];
-            else if (!strcmp(results[i].name, "GridApplyEntityTree")) apply = &results[i];
+            if (!strcmp(scanned[i].name, "GridReapplyEntityTree")) re = &scanned[i];
+            else if (!strcmp(scanned[i].name, "GridEntityTree")) tree = &scanned[i];
+            else if (!strcmp(scanned[i].name, "GridApplyEntityTree")) apply = &scanned[i];
         }
         int ok_tree = 0;
         if (re && tree && apply && re->status == SIG_OK && tree->status == SIG_OK && apply->status == SIG_OK) {
@@ -177,9 +205,8 @@ int main(int argc, char **argv)
         else printf("OK  grid-room tree cleanup decodes from GridReapplyEntityTree\n");
     }
     printf("======================================================================\n");
-    printf("C resolver [%s]: %zu/%zu unique; %d %s\n",
-           pinned ? "pinned" : "portable", ok, total, bad,
-           pinned ? "RVA-mismatches" : "non-unique");
+    printf("signatures [%s]: %zu/%zu resolved at their recorded RVAs; %d bad\n",
+           pinned ? "recorded-RVA" : "portable", ok, total, bad);
     free(base);
-    return (ok == total && bad == 0) ? 0 : 1;
+    return ((ok == total || !pinned) && bad == 0) ? 0 : 1;
 }

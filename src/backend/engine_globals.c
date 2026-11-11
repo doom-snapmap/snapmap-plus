@@ -97,11 +97,13 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
         if (strcmp(e->name, name) == 0) break;
     if (!e->name) return 0;
 
-    /* Disable RVA fallback: detours overwrite the displacement we need to decode.
- * Only an intact, unique anchor can locate a data global. */
+    /* The anchor is checked at its recorded code site only; a detour there
+     * would overwrite the displacement, so changed bytes locate nothing. */
     memset(&anchor_sig, 0, sizeof anchor_sig);
     anchor_sig.name      = e->name;
     anchor_sig.pattern   = e->anchor;
+    anchor_sig.rva_vk    = e->site_vk;
+    anchor_sig.rva_gl    = e->site_gl;
 
     st = sig_resolve_one(module_base, &anchor_sig, &r);
     if (st != SIG_OK) {

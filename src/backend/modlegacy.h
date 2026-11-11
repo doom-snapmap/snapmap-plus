@@ -63,7 +63,6 @@ typedef struct sh_modlegacy_verdict {
     char layout;                       /* 'B' or 'C' once the ZIP was read, else 0 */
     char id[SH_MODLEGACY_ID_CAP];      /* the package's id (its old key) */
     char salt[SH_MODMANIFEST_SALT_CAP];   /* the converted folder's salt */
-    char version[SH_MODMANIFEST_VERSION_CAP];
     char build[SH_MODMANIFEST_HASH_CAP];  /* its build hash */
     unsigned long long size;
     unsigned files, shadows;
@@ -177,7 +176,6 @@ unsigned long long sh_modlegacy_zip_carried_bytes(const sh_modlegacy_zip *zip, u
 
 /* Where a converted folder came from (the migration of overrides\). */
 typedef struct sh_modlegacy_origin {
-    const char *version;               /* bundle version label; NULL: the package's own, else "1.0.0" */
     const char *source;                /* the migration source (logged) */
     const char *folder;                /* overrides-relative folder, '/'-separated */
     const char *tree;                  /* 64 hex tree fingerprint, or NULL */
@@ -198,7 +196,7 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
  * not exist): mod.json (the descriptor migrated as for a carrier: the
  * author's part only, no id and no retired key) and assets/ in the era C
  * layout. Neither salted nor built. Fills verdict->id (the package id, from
- * which its salting rewrites mods/<id>/), version, files and skipped;
+ * which its salting rewrites mods/<id>/), files and skipped;
  * returns 1 on success, 0 with verdict->reason. */
 int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_origin *origin,
                               const char *dest, sh_modlegacy_verdict *verdict);

@@ -12,10 +12,7 @@ typedef struct {
 
 static perf_counter g_perf[SH_PERF_SLOTS] = {
     { "resource open (all)" },
-    { "override file checks" },
     { "engine's own open" },
-    { "installed resources" },
-    { "published decls" },
     { "map -> JSON (engine)" },
     { "navigation parse" },
     { "green preview (frame)" },
@@ -26,7 +23,7 @@ static perf_counter g_perf[SH_PERF_SLOTS] = {
     { "session log line" },
 };
 
-static LONGLONG g_freq;
+static volatile LONGLONG g_freq;   /* the same value from any thread that sets it */
 
 LONGLONG sh_perf_now(void)
 {
@@ -42,9 +39,11 @@ void sh_perf_add(sh_perf_slot slot, LONGLONG ticks)
     c = &g_perf[slot];
     InterlockedIncrement64(&c->calls);
     InterlockedAdd64(&c->ticks, ticks);
-    /* Racing writers can lose a sample here; the worst call is a guide, not a
-     * ledger, and a lock on this path would cost more than the reading is worth. */
-    if (ticks > c->worst) c->worst = ticks;
+    for (LONG64 worst = c->worst; ticks > worst; ) {
+        LONG64 seen = InterlockedCompareExchange64(&c->worst, ticks, worst);
+        if (seen == worst) break;
+        worst = seen;
+    }
 }
 
 void sh_perf_reset(void)

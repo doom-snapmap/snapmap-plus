@@ -1,4 +1,4 @@
-/* Persist fault records under <game>\snapmap-plus\crash\pending-*.json.
+/* Persist fault records under <game>\snapmap-plus\crash\pending-*.json (UTF-8 JSON).
  * The UI polls these records for notices or report prompts. Recovery paths,
  * terminal engine throws, and fatal handlers can produce records; a Class-B or
  * off-thread record alone does not establish that the process survived.
@@ -10,12 +10,18 @@
 #include <windows.h>
 #include <stdint.h>
 
-/* Resolve paths, snapshot the installed version and renderer, and bind dbghelp.
- * Call once outside the loader lock, before arming fatal handlers. */
+/* The product version: the release tag build.ps1 -Version stamped into this
+ * build as SNAPMAP_PLUS_VERSION, or "dev" for a local build. */
+const char *sh_product_version(void);
+
+/* Resolve paths (wide, any length), snapshot the renderer and game identity,
+ * and bind the system dbghelp. Call once outside the loader lock, before
+ * arming fatal handlers. */
 void crash_report_init(void);
 
-/* Arm the fatal VEH and unhandled filter, then reassert the filter during startup.
- * Direct fail-fast termination may bypass both handlers. Call after initialization. */
+/* Arm the fatal VEH and the unhandled-exception filter, once; the filter
+ * chains to the one it replaced. Direct fail-fast termination may bypass both
+ * handlers. Call after initialization. */
 void crash_report_arm_fatal_handlers(void);
 
 /* Publish complete JSON through a write-through temporary file and rename.

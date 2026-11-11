@@ -4,10 +4,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "../backend/signatures.h"
 
-/* Install recovery and crash capture after the backend's decryption wait, using
- * its resolved module range. May wait up to 10 seconds for instrumentation.
- * A NULL base is a no-op. Call outside the loader lock. */
-void shield_install(uint8_t *doom_base, size_t doom_size);
+/* Install recovery and crash capture with the host module range and the
+ * bootstrap's signature results (resolved before any detour). A NULL base is
+ * a no-op. Call outside the loader lock. Returns 1 when the fault handler and
+ * the main-frame hook (which also drains main-thread work) are installed. */
+int shield_install(uint8_t *doom_base, size_t doom_size, const sig_result *results, size_t count);
 
 #endif /* FAULT_SHIELD_H */

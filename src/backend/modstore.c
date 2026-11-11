@@ -957,12 +957,21 @@ static void ms_mark_duplicates(sh_ms_list *l)
         sh_ms_entry *e = &l->items[i];
         if (keeper[i] == (size_t)-1) continue;
         e->refused = 1;
-        if (e->place[0])
+        if (e->place[0]) {
             _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, SH_MB_SHAPE "another folder of this map has the same mod: "
                         "mods\\%s", l->items[keeper[i]].name);
-        else
-            _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "mods\\%s is a copy of mods\\%s; Refresh in the Mods tab "
-                        "makes it a new mod", e->name, l->items[keeper[i]].name);
+        } else {
+            /* A copy the scan could not give a new salt (its binaries name
+             * the salt, as an outside converter's do) says why, plainly;
+             * any other waits for the scan's new salt. */
+            char why[SH_MB_CAUSE_MAX];
+            sh_ms_build_cause(e->folder, why, sizeof why);
+            if (why[0])
+                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "%s", why);
+            else
+                _snprintf_s(e->cause, sizeof e->cause, _TRUNCATE, "mods\\%s is a copy of mods\\%s; Refresh in the Mods tab "
+                            "makes it a new mod", e->name, l->items[keeper[i]].name);
+        }
     }
     free(keeper);
 }
@@ -2150,7 +2159,7 @@ static int ms_new_mod(const char *name, int example, char salt_out[SH_MB_ID_MAX 
                     "      \"%s_" MS_EXAMPLE_DECL "_desc\": \"A crate your new mod adds. Change it in the mod's files.\"\r\n"
                     "    }\r\n  },\r\n", salt, esc, salt, salt);
     _snprintf_s(text, sizeof text, _TRUNCATE,
-                "{\r\n  \"name\": \"%s\",\r\n  \"version\": \"0.1.0\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
+                "{\r\n  \"name\": \"%s\",\r\n  \"description\": \"\",\r\n  \"author\": \"\",\r\n%s"
                 "\r\n  \"" SH_MB_BLOCK_KEY "\": {\r\n    \"format\": %d,\r\n    \"salt\": \"%s\"\r\n  }\r\n}\r\n",
                 esc, strings, SH_MB_FORMAT, salt);
     if (!ms_write_text(desc, text, strlen(text))) { ms_cause(cause, cap, "cannot write mods\\%s\\mod.json", leaf); goto done; }
@@ -2621,9 +2630,11 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         ok = 1;
         goto done;
     }
+    /* DECISIONS 10: every file the folder holds is installed, the game's own
+     * files included (the builder decides what is a borrow); only a pointer
+     * the folder does not carry (the closure's) has nothing to copy. */
     for (i = 0; i < b.file_count; i++) {
         if (!b.files[i].stock) continue;
-        b.files[i].absent = 1;   /* the store never receives installed content */
         st->stock_files++;
         st->stock_bytes += b.files[i].size;
     }
@@ -2634,7 +2645,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     for (i = 0; i < b.file_count; i++) {
         wchar_t *from, *to;
         int copied;
-        if (b.files[i].stock) continue;
+        if (b.files[i].stock && b.files[i].absent) continue;
         from = ms_wjoin_utf8(src, b.files[i].path);
         to = ms_wjoin_utf8(staging, b.files[i].path);
         copied = from && to && sh_ms_copy_file(from, to);
@@ -2900,8 +2911,8 @@ static int ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st, int yie
         if (ms_build_in_place(v[i].folder, NULL, resolver, &b, cause, sizeof cause)) {
             st->rebuilt++;
             sh_mb_classes_text(&b.classes, classes, sizeof classes);
-            ms_log("MODS: store: %s built: %s %s (salt %s), build %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s; %s",
-                   v[i].name, b.name ? b.name : "", b.version, b.id, b.hash, b.file_count, b.stock_count,
+            ms_log("MODS: store: %s built: %s (salt %s), build %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s; %s",
+                   v[i].name, b.name ? b.name : "", b.id, b.hash, b.file_count, b.stock_count,
                    (unsigned long long)(GetTickCount64() - b0),
                    b.prev_hash[0] && strcmp(b.prev_hash, b.hash) ? ", its tree changed" : (b.prev_hash[0] ? ", unchanged content" : ""),
                    classes);

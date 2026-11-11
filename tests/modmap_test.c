@@ -159,7 +159,6 @@ int main(void)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "barehand");
         strcpy_s(row.name, sizeof row.name, "Bare hands");
-        strcpy_s(row.version, sizeof row.version, "1.0.0");
         memset(row.build, 'c', 64);
         row.size = 77;
         row.attached = 1;

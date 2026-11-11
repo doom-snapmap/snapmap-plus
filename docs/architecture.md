@@ -30,7 +30,12 @@ can call the wrong interface slot. See [packaging](packaging.md).
 Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
 13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
 ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
-set (named and unnamed) and exports nothing else.
+set (named and unnamed) and exports nothing else. The proxy loads the system `XInput1_4.dll`
+from the system directory (`LOAD_LIBRARY_SEARCH_SYSTEM32`), wherever Windows is installed.
+Only the diagnostic build (`build.ps1 -Diag`) links `xinput1_4_diag.def`, the same set plus
+`sh_diag_status` at ordinal 300: one JSON object with the product version, the interface
+table's size, the features off this session and the last rawmap open (`diag_status.h`), for
+the development daemon. A release has neither the export nor its code.
 
 `host_image.c` identifies the host by the SHA-256 of its executable file
 (`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
@@ -42,9 +47,6 @@ Every engine constant is a build 13954591 value: struct and slot offsets in
 `engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
 global RVAs in the generated globals table. Raw RVAs are applied only on a
 recognized executable, for its own renderer, so no address can reach another image.
-A feature whose engine offsets are not yet verified for this build stays off and
-logs which values it waits for (`SH_PENDING_*` in `engine_build.h`); starting DOOM with
-the environment variable `SNAPMAP_PLUS_LIVE_VERIFY=1` runs those features for live verification.
 
 The installer routes by build before downloading anything: it hashes
 `DOOMx64vk.exe` and `DOOMx64.exe`, installs the current release on build 13954591,
@@ -54,9 +56,25 @@ See [packaging](packaging.md#supported-build-and-the-final-2018-release).
 
 ## Engine resolution and patching
 
-Function signatures identify engine code. Generated anchors derive global
-addresses from code references. Vulkan and OpenGL share these portable resolution
-paths; field layouts still need explicit verification when porting.
+The game build is pinned by the executable's hash, so every engine function is
+where the signature table records it. At run time `sig_resolve_one` checks each
+signature at its recorded RVA for the host's renderer and accepts it only when the
+whole masked pattern holds there; nothing is scanned and nothing is guessed. A
+function whose bytes differ there (`SIG_CHANGED`: another program has changed the
+game's code, typically an overlay or another mod's detour) is not resolved, and the
+features that need it are recorded off (see "Features off this session" below).
+Checking the whole table takes well under a millisecond; the whole-image scan it
+replaced took about five seconds (nine seconds over a mapped file, `sig_test`).
+
+The scan, `sig_scan_one`, is the developer tool that derives and audits the table:
+`sig_test` (and `tools/signatures/sigscan.py`) prove that every pattern matches
+exactly once in each executable, at the recorded RVA. Contributor changes to
+signatures or anchors require that two-image test gate in
+[contributing](contributing.md#7-run-the-tests). The globals table's anchors are
+checked the same way: each row records the RVA of its anchor's code site on both
+renderers (`site_vk`, `site_gl`), next to the audit RVAs of the global itself, and
+`glb_resolve` decodes the displacement only where the whole anchor holds at that
+site.
 
 A pattern that matches more than once is not an identification. Where two
 functions share a body, the caller must confirm its target by something the
@@ -64,21 +82,19 @@ pattern cannot carry: the rawmap branch answer follows the call its candidate
 makes and reads the literal that callee names, because the sibling it must not
 patch differs only there.
 
-A raw-RVA fallback requires an exact fingerprint of a supported
-executable. The hook-tolerant fallback additionally checks the detour and remaining
-signature bytes. A filename or a readable address is not sufficient evidence.
-Contributor changes to signatures or anchors require the two-image test gate in
-[contributing](contributing.md#7-run-the-tests).
+The boot pacing sites (`boot_pacing.c`) are resolved and patched right after the
+build check, about 0.1 s after process creation, ahead of the engine's resource
+preload, which starts about two seconds after launch.
 
-The bootstrap scans the whole database once, which takes about five seconds;
-later installs reuse those results instead of scanning again. The boot pacing
-sites (`boot_pacing.c`) cannot wait for that scan: the engine's resource preload
-starts about two seconds after launch. Right after the build check they are
-matched at their recorded RVAs only (`sig_match_recorded`), checked byte by byte,
-and patched about 0.1 s after process creation. The offline signature tests
-prove each of those recorded RVAs is the pattern's only match. A patch that would
-land more than three seconds after process creation is not made, because the
-preload's threads could then be executing the redirected instructions.
+Every code write -- a detour's prologue, a call's operand, a single byte -- goes
+through `code_patch` (`patch.c`), which suspends the process's other threads,
+checks that none is executing inside the bytes being changed or about to return
+into them (a thread in the callee of a call the window covers), writes, and
+resumes them. A thread found inside makes the attempt repeat a moment later; one
+that stays inside for every attempt fails the patch with nothing written. No
+thread can run a partly written instruction, at boot or for a patch made later
+from the main thread. `tests/patch_test.c` proves the suspension, both refusals
+and a stress run that commits and removes a detour under a thread calling it.
 
 Hook callers prepare a trampoline, publish it as their original callback, then
 commit the detour. Preparation does not write the target. Callers own the
@@ -88,9 +104,23 @@ can still use them. Failed rollback remains a recoverable state, not a successfu
 uninstall. The patch and hook headers define the supported installation and
 restoration sequence. Stolen instructions must be complete and independently
 executable. The ordinary hook helper performs no relocation; its explicit
-`hook_prepare_rip_lea` variant expands one verified 64-bit RIP-relative LEA.
-Callers still verify every other stolen instruction. Original target bytes
+variants relocate one verified instruction: `hook_prepare_rip_lea` a 64-bit
+RIP-relative LEA, `hook_prepare_rip_load` a 64-bit RIP-relative load and
+`hook_prepare_relative_call` an E8 call. Callers still verify every other stolen
+instruction. Original target bytes
 remain separate from relocated code for commit validation and restoration.
+
+### Features off this session
+
+`feature_health.c` keeps the one list of features that could not install this
+session, each by the name the player knows it by, and logs each once with why.
+The patch self-test and a scratch detour run before any engine code is touched; if
+either fails, nothing is patched and the list holds a single entry for every editor
+feature. The Snapmap+ window reads the list through the interface slot
+`features_off` and shows one line ("These features are unavailable in this
+session: ..."); a feature the player invokes from the window refuses with
+`sh_feature_refusal` instead of doing nothing. Background guards stay in the log
+only.
 
 ## The map carrier
 
@@ -279,7 +309,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x380`; the current table occupies `0x388`
+retained, with extensions through `+0x398`; the current table occupies `0x3A0`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -292,7 +322,11 @@ section, built on the game thread after each palette build by
 `modui.c`, run on the game thread through `run_on_main`) and `prefab_watch`
 (`+0x380`, the Prefabs tab's guarded reads: the Blueprint module selection that
 gates Create, the Load / Place held in the 3D view, and the game thread's last
-paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`). The retired
+paste decision, from `iface_engine.c`, `apply_engine.c` and `module_prefab.c`), then
+`features_off` (`+0x388`, the one line naming the features that are off this session,
+from `feature_health.c`), `preview_failure` (`+0x390`, why the latest image preview
+failed, `preview.c`) and `sound_refusal` (`+0x398`, why the latest sound audition was
+refused, `soundpreview.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -481,7 +515,13 @@ These backend files share the work:
   `mods/<salt>/` (a salt has one spelling in decl text and cooked paths), and
   every strings key is `<salt>_<name>` (letters, digits and `_`; no `/`, since
   the engine's string ids were only ever exercised with `[a-z0-9_]`), which a
-  decl references as `#str_<salt>_<name>`. Every file is classified from
+  decl references as `#str_<salt>_<name>`. A strings key the game's language
+  table or the product's built-in table already defines (`strkeys.c`: the
+  game's keys compiled in as hashes from the supported build's English table,
+  `strkeys_game.h`, and the baked set) is a string edit: it keeps that name, any
+  mod may carry it, the build lists it under the block's `registries`
+  `stringEdits` (the mod's own keys under `strings`), and it applies where the
+  mod's other edits apply (below, the bundle string layer). Every file is classified from
   its path and bytes: an addition or a borrow (a stock pointer) under the salt,
   editor-only types included (a Toybox row travels with its mod), an editor
   tweak (an editor-only type outside the salt), a surface (the game's own bytes
@@ -698,9 +738,10 @@ These backend files share the work:
   decision and `sh_mods held`.
 - `modmanifest.c` owns the manifest rows (a placed mod's row and a map-level
   one, `"attached": true`), carried in the map member's `mods` part (The map
-  carrier). A row is `{"mod":"<salt>@<build hash>","name","version","size",
+  carrier). A row is `{"mod":"<salt>@<build hash>","name","size",
   "names":[...],"attached"?,"choices"?}`: the salt names the mod, the hash its
-  build, and `name` and `version` are the author's, for display. Rows merge by
+  build, and `name` is the author's, for display. A mod has no version: the
+  build hash alone tells builds apart, and no player or author sees or sets one. Rows merge by
   salt and build; a row naming an `id` or a `bundle` does not parse (the parse
   detour has already refused such a map). The display name of a placed mod's
   row comes from the build that serves it at the save (the row resolver).
@@ -836,7 +877,8 @@ or New mod; there is no folder watcher. Under the store lock it:
    folder segments of paths under `assets\`, both spellings; `sh_mb_rekey_text`,
    `sh_mb_rekey_path`, `sh_mb_salt_modjson` for `mod.json`'s references and
    its block `{"format": 2, "salt": ...}`). Its strings keys gain the salt's
-   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced),
+   prefix, `<key>` becoming `<salt>_<key>` (a copy's `<old salt>_` replaced;
+   a string edit keeps its name),
    and every `#str_<key>` reference in its own text files, `mod.json` among
    them, follows (`sh_mb_salt_strings`, `sh_mb_restr_text`), so an author
    writes plain keys in a new folder; a binary file naming one of them refuses
@@ -1170,10 +1212,12 @@ bytes equal installed content, and an author writes one in the descriptor's
 `stock` object (`{"<request>": {"source": "<installed path>", "sha256":
 "<optional>"}}`, the hash filled in by the builder) to alias installed content
 under a mod name. Pointers do not count toward the 64 MiB and 256 MiB caps and
-the extension whitelist does not apply to them, because nothing is carried;
-the store never receives their bytes (no copied file, nothing uploaded), so a
-converted package or a copy-of-stock mod uploads only its authored and edited
-files. `modstock.c` answers them from the player's own
+the extension whitelist does not apply to them, because nothing is carried
+for them; an upload never sends their bytes, so a converted package or a
+copy-of-stock mod uploads only its authored and edited files. An install keeps
+every file of the folder it installs, a copy of a game file included (the
+builder decides what is a borrow; nothing is dropped at install), and the
+folder's own copy answers when the player's game lacks those bytes. `modstock.c` answers them from the player's own
 install, read-only: it parses `base\snap_gameresources.pindex` and
 `base\gameresources.pindex` once, on the first question (about 171,000 rows
 with bytes, 20 MB held, 125 ms on build 13954591; an empty `mods\` never loads
@@ -1259,8 +1303,14 @@ two layers and keeps the first writer of each key (case-insensitive): the
 `strings.en` object of every admitted bundle's author block (root folders
 before maps' places, then by salt, then folder, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
-`#str_` prefix decls use (a mod's keys are `<salt>_<name>`, which the builder
-enforces), and only `en` is read. When two bundles give one key
+`#str_` prefix decls use (a mod's own keys are `<salt>_<name>`, which the
+builder enforces), and only `en` is read. A string edit (a key the game or the
+product defines, `strkeys.h`) applies only where its mod's edits apply
+(`sh_modserve_bundle_edits_live`: map scope off, the open map declares the
+build, or it is the editor-tweak class), so an editor-tweaks mod's string edits
+apply in this machine's editor and a map-declared mod's in the maps that use it;
+`sh_strids_scope_check` marks a refresh when that changes for a bundle that
+carries one (each editor pass and map activation). When two bundles give one key
 different text the first stands and one `B1: strids REFUSED` line names both;
 identical text is not a conflict. The pass summary reads `N #str_ entries
 (bundles B, baked D)`. The player's own document of earlier releases,
@@ -1378,7 +1428,7 @@ way from the installed bytes. A bare program name in a material, shared includes
 together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
 0) and may write the permutation decl into the player's `base\generated\`.
 The first open of each served render-program file logs
-`MODS: renderprog: served <request> (<id>@<version>, <n> bytes)` (the first 64),
+`MODS: renderprog: served <request> (<mod name>, <n> bytes)` (the first 64),
 which shows the variant this GPU binds.
 ### Owner-bound companions
 
@@ -2365,7 +2415,7 @@ tests enable it where they test it (`sh_modserve_scope_enable`).
 ("scope: key <key>: N bundles installed; ..."), one line per bundle (key, version, hash, its names, shadows and surfaces, and
 what it serves for the open map), then per path several bundles provide with
 different bytes which layer serves it and why (`serving: <request>:
-<key>@<version> (<hash16>), declared (row N): <why>; not served: ...` or
+<mod name>, declared (row N): <why>; not served: ...` or
 `the game (no declared bundle provides it)`), and the counts per layer. The
 walks of the engine's resource lists (watermarks, `sh_modserve_resource_each`,
 `op_held`, the ledger's census and sweep) hold the engine's resource lock: the
@@ -2521,9 +2571,9 @@ bridge's install (`sh_modstock_set_install`):
   left out) into a staging folder outside the store and installed by
   `modstore.c` as `mods\<folder>\` (its own name; with the tree's first 8 hex
   when another mod holds that name), `mod.json` and real files. The package's
-  keys are the author part in the one shape: its name, version (else the
-  package's own, else `1.0.0`), requirements, strings and hud and its other keys,
-  without the retired ones (`id`, `composes`, an era B `schema`) and with no
+  keys are the author part in the one shape: its name, requirements, strings and
+  hud and its other keys, without the retired ones (`id`, `version`, `composes`,
+  an era B `schema`) and with no
   product block. The staged folder is salted with `from` its id (or, for an
   era B pack without one, its folder name; `sh_ms_assign_salt`, which also names
   its strings `<salt>_<key>`) and built under the current rules with its
@@ -2547,7 +2597,7 @@ bridge's install (`sh_modstock_set_install`):
   512 MiB or 8192 files is skipped before it is read, and one whose carried part
   is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
 - a file byte-identical to installed game content becomes a stock pointer (see
-  above): the store never receives it and an upload never sends it. Each
+  above): its file stays in the folder and an upload never sends it. Each
   folder's line says `N file(s), P of them stock pointer(s) to installed
   content, K KiB not stored`, the summary line totals them, and the record
   carries `stockPointers` and `stockBytes`. Measured on the owner's packs:
@@ -2567,7 +2617,8 @@ package is: placed under `assets\` at their paths below `overrides\`, files a
 mod cannot carry left out and counted, copies of installed content made stock
 pointers, with a descriptor of id `my-overrides`, name `My overrides` and the
 document's keys as `strings.en`, and installed by `modstore.c` as
-`mods\my-overrides\`, salted from `my-overrides` (its strings `<salt>_<key>`).
+`mods\my-overrides\`, salted from `my-overrides` (its own strings `<salt>_<key>`;
+a key the game or the product defines stays as it is, a string edit).
 With the document alone the folder is `mod.json` (the same author part) and an
 empty `assets\`. When `mods\my-overrides\` already exists only what it lacks is added
 (files compared by path, keys case-insensitively) and one `MODS: migration:
@@ -2991,7 +3042,7 @@ top-level member, `snapmapPlus`, after the engine's own members
 
 ```
 "snapmapPlus":{"format":1,"description":"","tags":[],
-               "mods":[{"mod":"<salt>@<build hash>","name","version","size","names"}...],
+               "mods":[{"mod":"<salt>@<build hash>","name","size","names"}...],
                "summary":{...}}
 ```
 
@@ -3025,7 +3076,7 @@ placed names of the prefab text (`sh_modmanifest_placed_names`: every
 `inherit`, `moduleName` and string inside an `edit` object) go through
 `modserve_bundles_for_names_visit`, which names every admitted build that
 provides one and the builds its needs reach. Each build is one row in the
-manifest's form (`<salt>@<build hash>`, its name and version from the build).
+manifest's form (`<salt>@<build hash>`, its name from the build).
 Create writes the file the engine
 serialized and then has the backend write a fresh block into it (`MODS_RECORD`:
 empty description and tags, the rows, `[]` when there are none); a module
@@ -3064,7 +3115,7 @@ map's root folders first), with the place the prefab's import filled,
   scope listing, else its manifest rows) is attached as a map-level row through
   the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`, given the
   folder of the build that serves the row, else its salt), with one
-  console line: "Prefab <name> uses <mod name> <version>; this map did not list it,
+  console line: "Prefab <name> uses <mod name>; this map did not list it,
   so it was added to the map (the Mods tab's Remove from map takes it out).".
   Then the placement goes on unchanged;
 - otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
@@ -3127,7 +3178,7 @@ in one ZIP. An export in an earlier shape (any `bundle.canonical.json`, in a
 ZIP or an extracted folder, an `export.json` index, a carried `mod.json` or
 rows in an earlier shape) is refused with "The prefab was not imported. This
 export was saved in a format this version does not read."
-`sh_prefab mods "<name>"` lists the block's rows, each as `<name> <version>
+`sh_prefab mods "<name>"` lists the block's rows, each as `<name>
 (<salt>@<build16>)`, and whether each is served in the placement's context,
 with the asset rule's sentence for one that is not.
 
@@ -3399,6 +3450,35 @@ the stolen prologue is verified at startup on both renderers
 (`tests/load_screen_stop_test.c`). Only while that detour is armed does the
 policy redirect a fault with the loading-screen thread running; otherwise it
 declines it as before.
+
+Redirects are bounded per incident, not per session: an incident starts at its
+first redirect and lasts 30 seconds, and may redirect four faults
+(`SHIELD_INCIDENT_REDIRECTS`, `redirect_policy.h`). An incident that keeps
+faulting past that is left to the fatal handlers; a later, separate fault starts
+a new incident, so a long session survives any number of recoveries. An access
+violation is classified first-chance by the vectored handler. Any other hardware
+fault (a divide, a floating-point or misalignment fault, an in-page error) is
+redirected only at second chance, from the unhandled-exception filter
+(`shield_second_chance`), so the engine's own `__except` blocks see it first.
+The shield also changes `FatalError`'s level byte from 7 to 6 at startup
+(through `code_patch`, the byte compared first), so a fatal engine error thrown
+inside Frame takes the same recoverable path; direct dispatcher calls and
+failures outside Frame still exit.
+
+What the player reads after a recovery is one fixed sentence,
+`SHIELD_RECOVERED_TEXT` (`recovery.c`): "Snapmap+ caught a problem in the game and
+returned you to the menu. Unsaved changes to this map were lost." It is the text
+of the `Error(6)` the redirect raises, so the engine's own error dialog shows it,
+and the crash record carries it; the fault's code and address go to
+`shield_faults.log` only. When the fault leaves the editor open, `recovery_tick`
+drives the editor's own exit to the map browser and answers its exit prompt Yes,
+which is what the sentence says.
+
+The damaged-save guard dismisses the engine's offer to delete a save it cannot
+read (the shell's own ClearDialog, so no button action runs and nothing is
+deleted) and then, once that dialog has left the queue, raises one engine dialog
+of its own saying why the map did not open and that the file was kept
+(`shield_damaged_save_text`).
 
 The serialized-entity cleanup guard permits an empty moved handle, as the native
 snapshot writer already does. It skips that handle's index write and preserves

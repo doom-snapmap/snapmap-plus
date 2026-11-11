@@ -456,9 +456,9 @@ static void test_generation(void)
     rep[0] = 0;
     CHECK(sh_modserve_registry_report(report_line, rep) > 0);
     CHECK(strstr(rep, "registry " REQ_PLAYER ": generated") &&
-          strstr(rep, "md6def/player/mp/tp_body_mp.md6: 3 edit(s) from kscenes0@1.0.0") &&
+          strstr(rep, "md6def/player/mp/tp_body_mp.md6: 3 edit(s) from kscenes0") &&
           strstr(rep, "player body: the merged body holds 4 clips and 1 alias") &&
-          strstr(rep, "registry edits " REQ_PLAYER ": khands00@1.0.0 (4444444444444444) edits it; its copy is never served"));
+          strstr(rep, "registry edits " REQ_PLAYER ": khands00 edits it; its copy is never served"));
     if (!strstr(rep, "player body: the merged body holds 4 clips")) printf("%s\n", rep);
     /* Played: the same (the declared set serves in Play). */
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_PLAY) >= 0);
@@ -476,8 +476,8 @@ static void test_generation(void)
     g_log_len = 0; g_log[0] = 0;
     CHECK(sh_modserve_scope_set(list, 2, NULL, 0, 1) >= 2);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "handsModelMPUseDoomHands = \"player/fp_hands.md6\";"));
-    CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00@1.0.0 (4444444444444444), "
-                  "krival00@1.0.0 (5555555555555555); serving khands00@1.0.0 (4444444444444444) (row order; choose with "
+    CHECK(log_has("entitydef/player/coop/edit/handsModelMPUseDoomHands: set by khands00, "
+                  "krival00; serving khands00 (row order; choose with "
                   "sh_mods choose \"entitydef/player/coop/edit/handsModelMPUseDoomHands\" \"<key>\")"));
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "krival00", line, sizeof line) >= 1 &&
           strstr(line, "is served from krival00"));
@@ -488,8 +488,8 @@ static void test_generation(void)
     CHECK(sh_modregistry_choose_command("entitydef/player/coop/edit/handsModelMPUseDoomHands", "", line, sizeof line) >= 1);
     CHECK(open_text(REQ_PLAYER, text, sizeof text) == 1 && strstr(text, "player/fp_hands.md6"));
     /* The losing source's edit is counted: superseded by row order, then by the map's choice. */
-    CHECK(log_has("2 edit(s) from krival00@1.0.0 (5555555555555555): 0 applied, 1 already held, 1 superseded by khands00 (row order)"));
-    CHECK(log_has("3 edit(s) from khands00@1.0.0 (4444444444444444): 2 applied, 0 already held, 1 superseded by krival00's choice"));
+    CHECK(log_has("2 edit(s) from krival00: 0 applied, 1 already held, 1 superseded by khands00 (row order)"));
+    CHECK(log_has("3 edit(s) from khands00: 2 applied, 0 already held, 1 superseded by krival00's choice"));
 
     /* A choice persists: the save writes it into its key's row, a load reads
      * it back, and the next listing applies it. */
@@ -501,10 +501,8 @@ static void test_generation(void)
         memset(&ra, 0, sizeof ra);
         memset(&rb, 0, sizeof rb);
         strcpy_s(ra.salt, sizeof ra.salt, "khands00");
-        strcpy_s(ra.version, sizeof ra.version, "1.0.0");
         strcpy_s(ra.build, sizeof ra.build, hh);
         strcpy_s(rb.salt, sizeof rb.salt, "krival00");
-        strcpy_s(rb.version, sizeof rb.version, "1.0.0");
         strcpy_s(rb.build, sizeof rb.build, hr);
         ra.size = rb.size = 10;
         CHECK(sh_modmanifest_current_attach(&ra) >= 0 && sh_modmanifest_current_attach(&rb) >= 0);

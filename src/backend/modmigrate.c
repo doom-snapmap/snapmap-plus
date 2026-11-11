@@ -34,7 +34,6 @@ typedef struct mg_item {
     unsigned long long bytes;
     char reason[MG_CAUSE_MAX];         /* skipped or refused: why; built: notes */
     char id[SH_MB_ID_MAX + 1];
-    char version[4 * SH_MB_VERSION_MAX + 1];
     char store[MG_NAME_MAX];           /* folder under mods\, '/' */
     char bundle[SH_MB_HASH_HEX + 1];
     char tree[SH_MB_HASH_HEX + 1];
@@ -489,13 +488,12 @@ static char *mg_member_text(const sh_json_object *o, const char *key)
     return out;
 }
 
-/* The id and version the converter will give a package (lg_pick_id). */
-static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id, size_t idcap,
-                        char *version, size_t vcap)
+/* The id the converter will give a package (lg_pick_id). */
+static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id, size_t idcap)
 {
     const sh_modlegacy_zip_entry *d = sh_modlegacy_zip_find(zip, "package.json");
     sh_json_object o = {0};
-    char *text = NULL, *idt = NULL, *vt = NULL;
+    char *text = NULL, *idt = NULL;
     size_t n = 0;
     if (!d) d = sh_modlegacy_zip_find(zip, "mod.json");
     if (d) text = (char *)sh_modlegacy_zip_read(d, &n, NULL, 0);
@@ -505,20 +503,10 @@ static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id,
         while (n && (*t == ' ' || *t == '\t' || *t == '\r' || *t == '\n')) { t++; n--; }
         if (n && sh_json_parse_object(t, n, 24, &o)) {
             idt = mg_member_text(&o, "id");
-            vt = mg_member_text(&o, "version");
         }
     }
     if (!(idt && sh_modlegacy_normalize_id(idt, id, idcap))) mg_slug(name, id, idcap);
-    if (vt) {
-        char *s = vt, *e;
-        while (*s == ' ' || *s == '\t') s++;
-        e = s + strlen(s);
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
-        if (sh_mb_version_valid(s)) strncpy_s(version, vcap, s, _TRUNCATE);
-        else strncpy_s(version, vcap, "0.0.0", _TRUNCATE);
-    } else strncpy_s(version, vcap, "0.0.0", _TRUNCATE);
     free(idt);
-    free(vt);
     free(text);
     sh_json_object_free(&o);
 }
@@ -576,12 +564,23 @@ static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t
 static unsigned g_mg_pointers;
 static unsigned long long g_mg_pointer_bytes;
 
+/* Whether the game holds `request`, from the installed archives the stock
+ * bridge reads from disk (the store tool runs without the engine): 1 yes, 0
+ * no, -1 when no DOOM folder was given. A file outside the mod's namespace
+ * must replace a game file, which only this can confirm. */
+static int mg_stock(void *context, const char *request)
+{
+    char where[64];
+    (void)context;
+    if (!sh_mb_stock_available()) return -1;
+    return sh_mb_stock_container(request, NULL, where, sizeof where) ? 1 : 0;
+}
+
 /* modlegacy's builder for a delivered package: the normal builder over the
- * installed bundles, without the game's resource reader (the store tool
- * runs without the engine). Copies of installed content still become stock
- * pointers: the stock bridge reads the installed archives from disk, not
- * through the engine. A migrated package is content the product received,
- * so its replacements are kept (sh_mb_keep_replacements_here). */
+ * installed bundles and the game's files read from the install (mg_stock).
+ * Copies of installed content become stock pointers. A migrated package is
+ * content the product received, so its replacements are kept
+ * (sh_mb_keep_replacements_here). */
 static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
 {
     char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX];
@@ -598,7 +597,7 @@ static int mg_build_legacy(const char *folder_utf8, char *first_cause, size_t n)
     if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
     r.installed = sh_ms_request_exists;
     r.installed_context = &list;
-    r.stock = NULL;
+    r.stock = mg_stock;
     r.stock_context = NULL;
     sh_mb_keep_replacements_here(1);
     if (!sh_mb_build(folder, NULL, &r, &b)) {
@@ -655,7 +654,11 @@ static int mg_install_staged(const char *stage_u8, const char *from, const char 
               : sh_ms_assign_salt(stage_u8, from, salt, cause, cause_cap) < 0)
         return 0;
     sh_mb_keep_replacements_here(1);
-    ok = sh_ms_install_as(stage_u8, target, NULL, key, key_cap, st, b, cause, cause_cap);
+    {
+        /* The game's files decide what a file outside the mod's namespace replaces. */
+        static const sh_mb_resolver game = { NULL, NULL, mg_stock, NULL };
+        ok = sh_ms_install_as(stage_u8, target, &game, key, key_cap, st, b, cause, cause_cap);
+    }
     sh_mb_keep_replacements_here(0);
     return ok;
 }
@@ -798,7 +801,6 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         }
         it->outcome = v.files ? SH_MODMIGRATE_CONVERTED : SH_MODMIGRATE_REUSED;
         strncpy_s(it->id, sizeof it->id, v.id, _TRUNCATE);
-        strncpy_s(it->version, sizeof it->version, v.version, _TRUNCATE);
         strncpy_s(it->bundle, sizeof it->bundle, v.build, _TRUNCATE);
         it->bundle_files = v.files;
         it->left_out = v.skipped;
@@ -815,10 +817,9 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         sh_mb_bundle b;
         char *stage_u8;
         int installed;
-        mg_identity(&zip, it->name, id, sizeof id, it->version, sizeof it->version);
+        mg_identity(&zip, it->name, id, sizeof id);
         mg_target_name(c, it, target, sizeof target);
         origin.source = MG_OVERRIDES;
-        origin.version = it->version;
         _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\%zu-%lu", c->root, index,
                     GetCurrentProcessId());
         wparent = mg_wide(c->root, "mods-migrate.tmp");
@@ -1010,7 +1011,6 @@ static int mg_write_record(mg_ctx *c, int complete)
         mg_puts(&b, ", \"outcome\": "); mg_putq(&b, mg_outcome_name(it->outcome));
         if (it->files || it->bytes) mg_putf(&b, ", \"files\": %u, \"bytes\": %llu", it->files, it->bytes);
         if (it->id[0]) { mg_puts(&b, ", \"id\": "); mg_putq(&b, it->id); }
-        if (it->version[0]) { mg_puts(&b, ", \"version\": "); mg_putq(&b, it->version); }
         if (it->store[0]) { mg_puts(&b, ", \"store\": "); mg_putq(&b, it->store); }
         if (it->bundle[0]) { mg_puts(&b, ", \"bundle\": "); mg_putq(&b, it->bundle); }
         if (it->tree[0]) { mg_puts(&b, ", \"tree\": "); mg_putq(&b, it->tree); }
@@ -1920,7 +1920,6 @@ int sh_modmigrate_loose_run(sh_modmigrate_loose_stats *st)
             goto out;
         }
         memset(&origin, 0, sizeof origin);
-        origin.version = "0.0.0";
         origin.source = MG_OVERRIDES;
         origin.folder = "";
         origin.tree = tree;

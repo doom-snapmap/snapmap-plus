@@ -56,7 +56,6 @@ static void salt_of(sh_map_old_salt *m, const char *key, const char *salt, const
     strcpy_s(m->salt, sizeof m->salt, salt);
     strcpy_s(m->build, sizeof m->build, build);
     strcpy_s(m->name, sizeof m->name, name);
-    strcpy_s(m->version, sizeof m->version, version);
 }
 
 /* Every variable family at once: smpmod1 rows, smpprod1, both settings, one
@@ -109,7 +108,7 @@ static void variables(void)
         CHECK(sh_map_old_shape(out, n) == SH_MAP_OLD_NONE);
         CHECK(sh_modmanifest_read(out, n, &rows, &rejected) == 1 && !rejected);
         CHECK(rows.count == 1 && !strcmp(rows.rows[0].salt, "alexpink") && !strcmp(rows.rows[0].build, HASH_B) &&
-              !strcmp(rows.rows[0].name, "Pink Imp") && !strcmp(rows.rows[0].version, "1.2.0") &&
+              !strcmp(rows.rows[0].name, "Pink Imp") &&
               rows.rows[0].size == 11782 && rows.rows[0].name_count == 1 &&
               !strcmp(rows.rows[0].names[0], "mods/alexpink/imp") && !strcmp(rows.rows[0].choices, "player.hands\talexpink\n"));
         sh_modmanifest_list_free(&rows);
@@ -164,7 +163,7 @@ static void member_rows(void)
         CHECK(sh_map_old_shape(out, n) == SH_MAP_OLD_VARIABLES);   /* the kept row still names its family */
         CHECK(strstr(out, VAR("smp.render.v1", "4;8192")) && alloc4(out) == 3 && strstr(out, "bound by index"));
         CHECK(sh_modmanifest_read(out, n, &rows, NULL) == 2);
-        CHECK(rows.count == 2 && !strcmp(rows.rows[0].name, "alex.pink-imp") && !strcmp(rows.rows[0].version, "1.0.0") &&
+        CHECK(rows.count == 2 && !strcmp(rows.rows[0].name, "alex.pink-imp") &&
               !strcmp(rows.rows[1].salt, "bobroom1") && !strcmp(rows.rows[1].name, "Room") && rows.rows[1].attached);
         CHECK(strstr(out, "\"settings\":{\"bounds\":\"1;20000\"}") && strstr(out, "\"module\":\"a/b\""));
         CHECK(!strstr(out, "\"id\":") && !strstr(out, "\"bundle\":"));

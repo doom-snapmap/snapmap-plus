@@ -6,6 +6,8 @@
  * displacement from the live image. Every anchor matches exactly once on both
  * DOOM 2016 build 13954591 executables (DOOMx64vk.exe and DOOMx64.exe); rva_vk and
  * rva_gl are where it resolves on each, for audit only -- never a runtime fallback.
+ * site_vk and site_gl are the RVAs of the code site: the anchor is checked there,
+ * and only there.
  */
 #ifndef BACKEND_ENGINE_GLOBALS_TABLE_GEN_H
 #define BACKEND_ENGINE_GLOBALS_TABLE_GEN_H
@@ -17,175 +19,204 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
       /* idCmdSystem singleton pointer.
        * Build 13954591: Vulkan 0x2F451C0, OpenGL 0x2F8D1C0. */
       .anchor = "48 8B 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B 01 FF 50 50 48 8B 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B 01 48 83 C4 28",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F451C0u, .rva_gl = 0x2F8D1C0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F451C0u, .rva_gl = 0x2F8D1C0u,
+      .site_vk = 0x39F0F4u, .site_gl = 0x39EA04u },
 
     { .name = "cvar_system_slot",
       /* idCvarSystem singleton pointer (cmdSystem + 0x10).
        * Build 13954591: Vulkan 0x2F451D0, OpenGL 0x2F8D1D0. */
       .anchor = "48 8B 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 45 33 C0 0F 28 F0 48 8B 01 FF 50 60 33 C9 F3 0F 11 73 08 0F 28 74 24 40 88 43 1C 48 8B C3 F3 0F 11 7B 0C 0F 28 7C 24 30 F3 44 0F 11 43 10 44 0F 28 44 24 20 89 0B 48 89 4B 14",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F451D0u, .rva_gl = 0x2F8D1D0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F451D0u, .rva_gl = 0x2F8D1D0u,
+      .site_vk = 0xAB9C25u, .site_gl = 0xAB8E15u },
 
     { .name = "decl_resource_head",
       /* head of the engine decl resource list-of-lists.
        * Build 13954591: Vulkan 0x5D78E60, OpenGL 0x467E4E0. */
       .anchor = "48 89 35 ?? ?? ?? ?? 48 89 6E 08 4C 89 76 10 48 8B C6 48 8B 8C 24 40 08 00 00 48 33 CC",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5D78E60u, .rva_gl = 0x467E4E0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5D78E60u, .rva_gl = 0x467E4E0u,
+      .site_vk = 0x1571938u, .site_gl = 0x1572AC8u },
 
     { .name = "decl_visibility_manager",
       /* decl visibility manager pointer.
        * Build 13954591: Vulkan 0x3611608, OpenGL 0x3659220. */
       .anchor = "48 89 4C 24 38 48 8B 0D ?? ?? ?? ?? 48 8B 01 BA ?? 00 00 00 FF 90 B0 00 00 00",
-      .disp_slot = 8, .disp_tail = 0, .delta = 0, .rva_vk = 0x3611608u, .rva_gl = 0x3659220u },
+      .disp_slot = 8, .disp_tail = 0, .delta = 0, .rva_vk = 0x3611608u, .rva_gl = 0x3659220u,
+      .site_vk = 0x19C63ACu, .site_gl = 0x19BA7CCu },
 
     { .name = "declmgr_accessor",
       /* idDeclManager accessor; its prologue is shared by ~47 functions.
        * Build 13954591: Vulkan 0x1565BD0, OpenGL 0x1566EB0. */
       .anchor = "E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 52 20 48 8B 10 48 8B C8 FF 52 20 48 8B D8",
-      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0x1565BD0u, .rva_gl = 0x1566EB0u },
+      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0x1565BD0u, .rva_gl = 0x1566EB0u,
+      .site_vk = 0x360DC2u, .site_gl = 0x360782u },
 
     { .name = "editor_singleton",
       /* idSnapEditorLocal, constructed in place.
        * Build 13954591: Vulkan 0x2F6AD18, OpenGL 0x2FB2C08. */
       .anchor = "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? EB ?? CC CC 40 53",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F6AD18u, .rva_gl = 0x2FB2C08u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F6AD18u, .rva_gl = 0x2FB2C08u,
+      .site_vk = 0x1204E38u, .site_gl = 0x1204238u },
 
     { .name = "error_state",
       /* error state, cleared during shield recovery.
        * Build 13954591: Vulkan 0x583BD58, OpenGL 0x41413D8. */
       .anchor = "0F B6 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 48 83 EC 28 48 83 3D ?? ?? ?? ?? 00 74 15",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD58u, .rva_gl = 0x41413D8u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD58u, .rva_gl = 0x41413D8u,
+      .site_vk = 0x2821D0u, .site_gl = 0x2823C0u },
 
     { .name = "game_manager_slot",
       /* game manager singleton pointer.
        * Build 13954591: Vulkan 0x5B0F6D0, OpenGL 0x4414D50. */
       .anchor = "48 8B 05 ?? ?? ?? ?? 48 63 CB 48 8D 14 49 48 8B CE 48 C1 E2 04 48 03 90 E0 53 04 00",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5B0F6D0u, .rva_gl = 0x4414D50u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5B0F6D0u, .rva_gl = 0x4414D50u,
+      .site_vk = 0x35A6E2u, .site_gl = 0x35A072u },
 
     { .name = "idlist_grow",
       /* idList growth helper; too generic to sign by its own bytes.
        * Build 13954591: Vulkan 0xFE18D0, OpenGL 0x1724F20. */
       .anchor = "E8 ?? ?? ?? ?? 84 C0 74 17 48 63 46 10 3B 46 14 7D 0E 48 8B C8 48 8B 46 08 48 89 3C C8 FF 46 10 48 8B 5C 24 50",
-      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0xFE18D0u, .rva_gl = 0x1724F20u },
+      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0xFE18D0u, .rva_gl = 0x1724F20u,
+      .site_vk = 0x1A08904u, .site_gl = 0x1A24A14u },
 
     { .name = "last_error_msg",
       /* last error message buffer (0x800 bytes).
        * Build 13954591: Vulkan 0x583BD70, OpenGL 0x41413F0. */
       .anchor = "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D A1 E8 ?? ?? ?? ?? CC 41 B8 00 08 00 00 48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D A1 E8 ?? ?? ?? ?? 90 48 8B 4D F0 48 33 CC E8 ?? ?? ?? ??",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD70u, .rva_gl = 0x41413F0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD70u, .rva_gl = 0x41413F0u,
+      .site_vk = 0x19AD30Cu, .site_gl = 0x19A18DCu },
 
     { .name = "load_screen",
       /* idLoadScreen; its first field is the loading-screen thread, whose byte +0x4b2 is 1 while it runs.
        * Build 13954591: Vulkan 0x360E3D0, OpenGL 0x3656080. */
       .anchor = "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 49 8B CF E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ??",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x360E3D0u, .rva_gl = 0x3656080u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x360E3D0u, .rva_gl = 0x3656080u,
+      .site_vk = 0x39D076u, .site_gl = 0x39C986u },
 
     { .name = "load_state",
       /* map load state; the Play detector.
        * Build 13954591: Vulkan 0x583BD4C, OpenGL 0x41413CC. */
       .anchor = "89 0D ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC 48 83 EC 28",
-      .disp_slot = 2, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD4Cu, .rva_gl = 0x41413CCu },
+      .disp_slot = 2, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD4Cu, .rva_gl = 0x41413CCu,
+      .site_vk = 0x282210u, .site_gl = 0x282400u },
 
     { .name = "main_thread_id",
       /* engine main-thread id (DWORD).
        * Build 13954591: Vulkan 0x583BD50, OpenGL 0x41413D0. */
       .anchor = "48 39 05 ?? ?? ?? ?? 74 07 32 C0 48 83 C4 28 C3 B0 01",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD50u, .rva_gl = 0x41413D0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x583BD50u, .rva_gl = 0x41413D0u,
+      .site_vk = 0x2821F3u, .site_gl = 0x2823E3u },
 
     { .name = "material_manager_ctx",
       /* material type-manager context.
        * Build 13954591: Vulkan 0x66C4A60, OpenGL 0x4FCA020. */
       .anchor = "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 86 F0 1B 00 00 48 8B 86 E8 1B 00 00 48 89 86 E0 1B 00 00 41 B0 01",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x66C4A60u, .rva_gl = 0x4FCA020u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x66C4A60u, .rva_gl = 0x4FCA020u,
+      .site_vk = 0x1615485u, .site_gl = 0x1616765u },
 
     { .name = "palette_vtable",
       /* editor palette vtable (.rdata).
        * Build 13954591: Vulkan 0x235FF50, OpenGL 0x2379CA0. */
       .anchor = "48 8D 0D ?? ?? ?? ?? 48 89 08 C7 40 20 00 00 05 00 4C 89 70 10 4C 89 70 18 C7 40 40 00 00 05 00 4C 89 70 30 4C 89 70 38 C7 40 58 00 00 05 00 4C 89 70 48 4C 89 70 50 48 8D 87 C0 06 02 00 48 89 44 24 68",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x235FF50u, .rva_gl = 0x2379CA0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x235FF50u, .rva_gl = 0x2379CA0u,
+      .site_vk = 0x117B1E8u, .site_gl = 0x117A258u },
 
     { .name = "provider_vtable",
       /* resource provider vtable, 31 slots (.rdata).
        * Build 13954591: Vulkan 0x1FF4CA0, OpenGL 0x200EA70. */
       .anchor = "48 8D 05 ?? ?? ?? ?? 48 89 01 33 FF C7 41 18 00 00 ?? 00 48 89 79 08 48 89 79 10 48 83 C1 30",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x1FF4CA0u, .rva_gl = 0x200EA70u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x1FF4CA0u, .rva_gl = 0x200EA70u,
+      .site_vk = 0x2A28DBu, .site_gl = 0x2A2AABu },
 
     { .name = "render_world_slot",
       /* idRenderWorld singleton pointer.
        * Build 13954591: Vulkan 0x5C43B30, OpenGL 0x45491B0. */
       .anchor = "4C 8D 05 ?? ?? ?? ?? 48 8B D7 48 8B CB F2 48 0F 2A C0 48 8B 45 70 48 89 44 24 28",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C43B30u, .rva_gl = 0x45491B0u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C43B30u, .rva_gl = 0x45491B0u,
+      .site_vk = 0x12A9CEFu, .site_gl = 0x12A93CFu },
 
     { .name = "resource_lock",
       /* engine resource lock: a static struct whose first qword is the CRITICAL_SECTION every resource-list add, remove and find takes, built on first use by its accessor (Vulkan 0x1572B80, OpenGL 0x1573D10); the anchor runs from the end of ResourceStaticPromote into that accessor's LEA of the struct.
        * Build 13954591: Vulkan 0x5D79238, OpenGL 0x467E8B8. */
       .anchor = "C7 42 28 04 00 00 00 48 83 E9 01 79 EB 4D 8B 40 18 4D 85 C0 75 D2 48 8B CB E8 ?? ?? ?? ?? 90 48 83 C4 30 5B C3 CC CC CC 40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 BA 04 00 00 00 48 8B 0C C8 8B 04 0A 39 05 ?? ?? ?? ?? 7E 42 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 3D ?? ?? ?? ?? FF 75 2D 48 8D 1D ?? ?? ?? ??",
-      .disp_slot = 114, .disp_tail = 0, .delta = 0, .rva_vk = 0x5D79238u, .rva_gl = 0x467E8B8u },
+      .disp_slot = 114, .disp_tail = 0, .delta = 0, .rva_vk = 0x5D79238u, .rva_gl = 0x467E8B8u,
+      .site_vk = 0x1572B58u, .site_gl = 0x1573CE8u },
 
     { .name = "resource_manager_ctx",
       /* resource type-manager context.
        * Build 13954591: Vulkan 0x66C4980, OpenGL 0x4FC9F40. */
       .anchor = "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 86 B8 A0 29 00 ?? 89 ?? 08 5C 28 00",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x66C4980u, .rva_gl = 0x4FC9F40u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x66C4980u, .rva_gl = 0x4FC9F40u,
+      .site_vk = 0x3684C1u, .site_gl = 0x367E51u },
 
     { .name = "shell_ptr_slot",
       /* menu shell pointer slot.
        * Build 13954591: Vulkan 0x2F60A10, OpenGL 0x2FA89A0. */
       .anchor = "C7 44 24 68 01 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8D 54 24 60",
-      .disp_slot = 11, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F60A10u, .rva_gl = 0x2FA89A0u },
+      .disp_slot = 11, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F60A10u, .rva_gl = 0x2FA89A0u,
+      .site_vk = 0x1AB6B4Bu, .site_gl = 0x1AD0ADBu },
 
     { .name = "snap_editor_row_count",
       /* int count of the registered snapEditorEntityDef decls (the type list at -0x28); idSnapTypeInfoCache::Build reads it before its MAX_ENT_TYPES check and stops the game at 0x5dc; modtypeinfo.c reports it.
        * Build 13954591: Vulkan 0x5C3D228, OpenGL 0x45428A8. */
       .anchor = "8B 2D ?? ?? ?? ?? 81 FD DC 05 00 00 7C 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC 33 FF 85 ED 7E 3C",
-      .disp_slot = 2, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C3D228u, .rva_gl = 0x45428A8u },
+      .disp_slot = 2, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C3D228u, .rva_gl = 0x45428A8u,
+      .site_vk = 0x1244BC4u, .site_gl = 0x12441F4u },
 
     { .name = "snap_typeinfo_cache",
       /* idSnapTypeInfoCache: int count, MAX_ENT_TYPES (0x5db) entityDef-name keys at +8, one 0x48-byte default property tree per entry at +0x2ee8; the LEA in the game's cache-build wrapper (VK 0x141181c50, GL 0x141180db0).
        * Build 13954591: Vulkan 0x5C6F800, OpenGL 0x4574E80. */
       .anchor = "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 50 90 48 83 C4 38 C3",
-      .disp_slot = 32, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C6F800u, .rva_gl = 0x4574E80u },
+      .disp_slot = 32, .disp_tail = 0, .delta = 0, .rva_vk = 0x5C6F800u, .rva_gl = 0x4574E80u,
+      .site_vk = 0x1181C50u, .site_gl = 0x1180DB0u },
 
     { .name = "throw_suppressor_a",
       /* level-6 dispatcher throw gate A.
        * Build 13954591: Vulkan 0x583C7B0, OpenGL 0x4141E30. */
       .anchor = "75 ?? 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? C7 45 A0 00 00 ?? 00 4C 89 65 90",
-      .disp_slot = 4, .disp_tail = 1, .delta = 0, .rva_vk = 0x583C7B0u, .rva_gl = 0x4141E30u },
+      .disp_slot = 4, .disp_tail = 1, .delta = 0, .rva_vk = 0x583C7B0u, .rva_gl = 0x4141E30u,
+      .site_vk = 0x39CD4Au, .site_gl = 0x39C65Au },
 
     { .name = "throw_suppressor_b",
       /* level-6 dispatcher throw gate B.
        * Build 13954591: Vulkan 0x583C850, OpenGL 0x4141ED0. */
       .anchor = "83 3D ?? ?? ?? ?? 00 0F 85 ?? ?? ?? ?? 41 83 FF 07 0F 8C ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 85 C0",
-      .disp_slot = 2, .disp_tail = 1, .delta = 0, .rva_vk = 0x583C850u, .rva_gl = 0x4141ED0u },
+      .disp_slot = 2, .disp_tail = 1, .delta = 0, .rva_vk = 0x583C850u, .rva_gl = 0x4141ED0u,
+      .site_vk = 0x283B57u, .site_gl = 0x283D77u },
 
     { .name = "throwinfo_fatal",
       /* ThrowInfo for the fatal level-7 throw (.rdata).
        * Build 13954591: Vulkan 0x2F3DD00, OpenGL 0x2F6AC38. */
       .anchor = "48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 30 E8 ?? ?? ?? ?? CC 41 B8 00 08 00 00 48 8D 95 B0 05 00 00",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F3DD00u, .rva_gl = 0x2F6AC38u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F3DD00u, .rva_gl = 0x2F6AC38u,
+      .site_vk = 0x283BE7u, .site_gl = 0x283E07u },
 
     { .name = "throwinfo_recoverable",
       /* ThrowInfo for the recoverable level-6 throw (.rdata).
        * Build 13954591: Vulkan 0x2F3DD58, OpenGL 0x2F6AC90. */
       .anchor = "48 8D 15 ?? ?? ?? ?? 48 8D 4D A1 E8 ?? ?? ?? ?? CC 41 B8 00 08 00 00 48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D A1 E8 ?? ?? ?? ?? 90 48 8B 4D F0",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F3DD58u, .rva_gl = 0x2F6AC90u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F3DD58u, .rva_gl = 0x2F6AC90u,
+      .site_vk = 0x19AD318u, .site_gl = 0x19A18E8u },
 
     { .name = "type_container",
       /* reflection type container.
        * Build 13954591: Vulkan 0x2F5A940, OpenGL 0x2FA2900. */
       .anchor = "48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 3D ?? ?? ?? ?? 48 89 7C 24 30 48 8D 1D ?? ?? ?? ?? 48 89 5C 24 28",
-      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F5A940u, .rva_gl = 0x2FA2900u },
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .rva_vk = 0x2F5A940u, .rva_gl = 0x2FA2900u,
+      .site_vk = 0xB4A313u, .site_gl = 0xB49883u },
 
     { .name = "validator_manager",
       /* reflection validator manager pointer.
        * Build 13954591: Vulkan 0x35EB618, OpenGL 0x3633430. */
       .anchor = "0F 84 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 ?? 02 00 00 4C 8B F0",
-      .disp_slot = 9, .disp_tail = 0, .delta = 0, .rva_vk = 0x35EB618u, .rva_gl = 0x3633430u },
+      .disp_slot = 9, .disp_tail = 0, .delta = 0, .rva_vk = 0x35EB618u, .rva_gl = 0x3633430u,
+      .site_vk = 0x18ED706u, .site_gl = 0x18E37F6u },
 
     { .name = "vis_leaf_lo",
       /* visibility leaf, entry; too short to anchor uniquely.
        * Build 13954591: Vulkan 0x12AA950, OpenGL 0x12AA030. */
       .anchor = "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 45 33 FF 44 38 BF E4 02 00 00 41 0F 95 C7",
-      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0x12AA950u, .rva_gl = 0x12AA030u },
+      .disp_slot = 1, .disp_tail = 0, .delta = 0, .rva_vk = 0x12AA950u, .rva_gl = 0x12AA030u,
+      .site_vk = 0x1201B38u, .site_gl = 0x1200F08u },
 
     { .name = NULL }
 };

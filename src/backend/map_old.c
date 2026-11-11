@@ -1559,7 +1559,6 @@ char *sh_map_old_write(const char *json, size_t len, const sh_map_old *old,
         strcpy_s(row.salt, sizeof row.salt, m->salt);
         strcpy_s(row.build, sizeof row.build, m->build);
         strncpy_s(row.name, sizeof row.name, m->name[0] ? m->name : o->key, _TRUNCATE);
-        strcpy_s(row.version, sizeof row.version, m->version[0] ? m->version : o->version);
         row.size = m->size ? m->size : o->size;
         row.attached = o->attached;
         for (p = o->choices; *p;) {

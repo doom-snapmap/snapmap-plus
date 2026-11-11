@@ -37,6 +37,12 @@ int sh_strids_rearm(void);
  * so the bundle layer may have changed. Only marks the refresh pending. */
 void sh_strids_request_refresh(void);
 
+/* Any thread: a mod's string edits apply only where its edits apply
+ * (sh_modserve_bundle_edits_live). When that changed for a bundle whose
+ * strings carry string edits since the last pass (a map opened or closed,
+ * another map declared), mark the refresh pending. Returns 1 when marked. */
+int sh_strids_scope_check(void);
+
 /* Engine main thread: when a refresh is pending and the first injection has
  * run, clear the request and rearm. Returns -1 when nothing ran (no request,
  * or the first injection is still to come and will read the index itself),
@@ -48,7 +54,7 @@ int sh_strids_refresh_pending(void);
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
 /* Read back how row `index` was attributed: its id and its owner ("<baked>"
- * for the baked defaults, "<id>@<version>" for a bundle). */
+ * for the baked defaults, the salt for a bundle). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 

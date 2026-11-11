@@ -3,13 +3,13 @@
  * member's grammar once).
  *
  * A row is the compact JSON
- * {"mod":"<salt>@<build hash>","name","version","size","names":[...],"attached"?,"choices"?}
+ * {"mod":"<salt>@<build hash>","name","size","names":[...],"attached"?,"choices"?}
  * where "mod" names the mod by its salt (the eight characters in its
  * mod.json's "snapmap-plus" block) and the build by the SHA-256 of its
  * canonical manifest, which itself records the salt, so a build verified
- * against the hash is proved to be that salt. "name" and "version" are the
- * author's, for display only. "names" lists the placed logical names the
- * build provides (informational; every name is kept, there is no row
+ * against the hash is proved to be that salt. "name" is the author's, for
+ * display only; a mod has no version (a build is named by its hash).
+ * "names" lists the placed logical names the build provides (informational; every name is kept, there is no row
  * budget). "choices": {"<slot>": "<salt>", ...} records the map's choices
  * between its mods' edits (modregistry.h: which declared mod's value serves a
  * field or keyed entry several of them edit, slot "<game file>/<path>",
@@ -42,7 +42,6 @@
 #define SH_MODMANIFEST_SALT_LEN   8
 #define SH_MODMANIFEST_SALT_CAP   (SH_MODMANIFEST_SALT_LEN + 1)
 #define SH_MODMANIFEST_DISPLAY_CAP 129  /* the author's name: at most 128 characters */
-#define SH_MODMANIFEST_VERSION_CAP 33   /* at most 32 */
 #define SH_MODMANIFEST_HASH_CAP   (SH_MOD_HASH_CHARS + 1)
 #define SH_MODMANIFEST_NAME_MAX   512
 #define SH_MODMANIFEST_MAX_NAMES  256    /* per row, on read */
@@ -56,7 +55,6 @@ typedef struct sh_modmanifest_row {
     char salt[SH_MODMANIFEST_SALT_CAP];          /* the mod */
     char build[SH_MODMANIFEST_HASH_CAP];         /* its canonical manifest's SHA-256 */
     char name[SH_MODMANIFEST_DISPLAY_CAP];       /* display only */
-    char version[SH_MODMANIFEST_VERSION_CAP];    /* display only */
     unsigned long long size;
     char **names;          /* malloc'd strings; owned by the row */
     size_t name_count;
@@ -116,8 +114,8 @@ void sh_modmanifest_names_free(char **names, size_t count);
 /* ------------------------------------------------------------ mod.json --- */
 
 /* What the manifest needs from a built mod's mod.json: its salt and build
- * hash (the "snapmap-plus" block's "salt" and "build"), its name and version
- * (author block, display only), total carried size, and every file's
+ * hash (the "snapmap-plus" block's "salt" and "build"), its name (author
+ * block, display only), total carried size, and every file's
  * provides.name (block "files" and "stock", stored as `names`). 1 on
  * success; 0 with the reason in err (a block without a salt or a build, as
  * while its build fails, is not built). */
@@ -168,10 +166,10 @@ typedef int (*sh_modmanifest_listed_fn)(char (*out)[SH_MODMANIFEST_HASH_CAP], in
 void sh_modmanifest_set_listed(sh_modmanifest_listed_fn listed);
 
 /* The build that serves a row at save (modui.c binds the serving index,
- * sh_modserve_row_build): for `build` of `salt`. Fills salt, build, name,
- * version and size and returns 1, or 0 when nothing installed answers (the
+ * sh_modserve_row_build): for `build` of `salt`. Fills salt, build, name
+ * and size and returns 1, or 0 when nothing installed answers (the
  * row is written as it is). A map-level row is renamed to that build; a row
- * the placed names gave takes its name and version from it. */
+ * the placed names gave takes its name from it. */
 typedef int (*sh_modmanifest_resolve_fn)(const char *build, const char *salt, sh_modmanifest_row *out);
 void sh_modmanifest_set_resolver(sh_modmanifest_resolve_fn resolve);
 

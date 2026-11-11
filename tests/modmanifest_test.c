@@ -73,7 +73,6 @@ int sh_modserve_row_build(const sh_modmanifest_row *row, sh_modserve_bundle_ref 
             if (!strcmp(g_installed[b].salt, row->salt)) break;
     if (b == g_installed_count) return 0;
     if (out) {
-        strcpy_s(out->version, sizeof out->version, g_installed[b].version);
         strcpy_s(out->hash, sizeof out->hash, g_installed[b].hash);
         out->size = g_installed[b].size;
     }
@@ -90,8 +89,7 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         for (i = 0; i < count; i++)
             for (k = 0; k < 4 && g_installed[b].names[k]; k++)
                 if (!_stricmp(names[i], g_installed[b].names[k])) {
-                    visit(context, g_installed[b].salt, g_installed[b].version, g_installed[b].hash,
-                          g_installed[b].size, names[i]);
+                    visit(context, g_installed[b].salt, g_installed[b].hash, g_installed[b].size, names[i]);
                     any = 1;
                 }
         distinct += any;
@@ -170,9 +168,9 @@ static char *engine_text(char *prepared, const char *input, size_t input_len, si
 static void make_row(sh_modmanifest_row *row, const char *salt, const char *version, const char *hash,
                      unsigned long long size)
 {
+    (void)version;   /* a mod has no version; the callers' labels are ignored */
     memset(row, 0, sizeof *row);
     strcpy_s(row->salt, sizeof row->salt, salt);
-    strcpy_s(row->version, sizeof row->version, version);
     strcpy_s(row->build, sizeof row->build, hash);
     row->size = size;
 }
@@ -208,19 +206,19 @@ static void value_round_trip(void)
     value = sh_modmanifest_format_value(&row, &n);
     CHECK(value && n == strlen(value));
     {
-        static const char expect[] = "{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"Pink Imp\",\"version\":\"1.0.0\","
+        static const char expect[] = "{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"Pink Imp\","
                                      "\"size\":11782,\"names\":[\"mods/alexpink/imp\",";
         CHECK(value && !strncmp(value, expect, sizeof expect - 1));
     }
     CHECK(value && sh_modmanifest_parse_value(value, n, &back, err, sizeof err));
-    CHECK(!strcmp(back.salt, row.salt) && !strcmp(back.version, row.version) && !strcmp(back.build, row.build) &&
+    CHECK(!strcmp(back.salt, row.salt) && !strcmp(back.build, row.build) &&
           !strcmp(back.name, "Pink Imp"));
     CHECK(back.size == 11782 && back.name_count == 2 && !strcmp(back.names[1], "a \"quoted\" \\ name"));
     sh_modmanifest_row_free(&back);
     free(value);
 
     /* Refusals: wrong hash, bad salt, no "@", missing size, names not a list;
-     * an unknown member is kept out, a missing name or version is empty. */
+     * an unknown member is kept out, a missing name is empty. */
     {
         static const char short_hash[] = "{\"mod\":\"alexpink@abc\",\"size\":1}";
         static const char bad_salt[] = "{\"mod\":\"Alexpink@" HASH_A "\",\"size\":1}";
@@ -234,7 +232,7 @@ static void value_round_trip(void)
         CHECK(!sh_modmanifest_parse_value(no_size, sizeof no_size - 1, &back, err, sizeof err));
         CHECK(!sh_modmanifest_parse_value(bad_names, sizeof bad_names - 1, &back, err, sizeof err));
         CHECK(sh_modmanifest_parse_value(extra, sizeof extra - 1, &back, err, sizeof err) && !back.name[0] &&
-              !back.version[0] && !strcmp(back.salt, "alexpink") && !strcmp(back.build, HASH_A));
+              !strcmp(back.salt, "alexpink") && !strcmp(back.build, HASH_A));
         sh_modmanifest_row_free(&back);
     }
     /* A row that names an "id" or a "bundle" is in an earlier shape. */
@@ -300,8 +298,8 @@ static void text_round_trip_and_order(void)
     CHECK(!memcmp(written, MAP, sizeof MAP - 2));
     CHECK(!strcmp(written + sizeof MAP - 2,
                   ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@" HASH_A "\",\"name\":\"\","
-                  "\"version\":\"1.0.0\",\"size\":11782,\"names\":[\"mods/alexpink/imp\"]},{\"mod\":\"bobroom1@" HASH_B
-                  "\",\"name\":\"\",\"version\":\"2\",\"size\":4096,\"names\":[]}]}}"));
+                  "\"size\":11782,\"names\":[\"mods/alexpink/imp\"]},{\"mod\":\"bobroom1@" HASH_B
+                  "\",\"name\":\"\",\"size\":4096,\"names\":[]}]}}"));
 
     CHECK(sh_modmanifest_read(written, wlen, &back, &rejected) == 2 && rejected == 0 && back.count == 2);
     CHECK(back.count == 2 && !strcmp(back.rows[0].salt, "alexpink") && !strcmp(back.rows[1].build, HASH_B) &&
@@ -482,7 +480,6 @@ static void editor_substitution(void)
     g_installed_count = 2;
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "alexgone");
-    strcpy_s(row.version, sizeof row.version, "0.9.0");
     strcpy_s(row.build, sizeof row.build, gone);
     row.size = 10;
     CHECK(sh_modmanifest_list_add(&rows, &row));
@@ -546,7 +543,7 @@ static void save_closure(void)
     if (out) {
         CHECK(sh_modmanifest_read(out, n, &back, NULL) == 1 && back.count == 1);
         CHECK(back.count == 1 && !strcmp(back.rows[0].build, HASH_A) && back.rows[0].name_count == 2 &&
-              back.rows[0].size == 11782 && !strcmp(back.rows[0].version, "1.0.0") && !strcmp(back.rows[0].salt, "alexpink"));
+              back.rows[0].size == 11782 && !strcmp(back.rows[0].salt, "alexpink"));
         CHECK(string_rows(out) == 2 && strstr(out, ",\"snapmap-plus\":{\"format\":1,\"mods\":[{\"mod\":\"alexpink@"));
         sh_modmanifest_list_free(&back);
 
@@ -646,7 +643,7 @@ static void mod_json(void)
     char err[160];
     printf("-- mod.json reader\n");
     CHECK(sh_modmanifest_read_mod_json(text, sizeof text - 1, &info, err, sizeof err));
-    CHECK(!strcmp(info.salt, "alexpink") && !strcmp(info.version, "1.0.0") && !strcmp(info.build, HASH_A) &&
+    CHECK(!strcmp(info.salt, "alexpink") && !strcmp(info.build, HASH_A) &&
           !strcmp(info.name, "Pink Imp"));
     CHECK(info.size == 11800 && info.name_count == 3 && !strcmp(info.names[0], "mods/alexpink/imp.md6"));
     sh_modmanifest_row_free(&info);
@@ -676,7 +673,6 @@ static void activate_by_id(void)
     g_installed = INSTALLED;
     g_installed_count = 2;
     strcpy_s(row.salt, sizeof row.salt, INSTALLED[1].salt);
-    strcpy_s(row.version, sizeof row.version, "0.9");
     strcpy_s(row.build, sizeof row.build, "9999999999999999999999999999999999999999999999999999999999999999");
     CHECK(sh_modmanifest_list_add(&rows, &row));
     strcpy_s(row.salt, sizeof row.salt, "nobodyht");
@@ -717,7 +713,6 @@ static int fake_resolve(const char *build, const char *salt, sh_modmanifest_row 
     if (salt && !strcmp(salt, "alexhand")) {
         strcpy_s(out->salt, sizeof out->salt, "alexhand");
         strcpy_s(out->name, sizeof out->name, "Bare Hands");
-        strcpy_s(out->version, sizeof out->version, "1.1.0");
         strcpy_s(out->build, sizeof out->build, HASH_D);
         out->size = 777;
         return 1;
@@ -726,7 +721,6 @@ static int fake_resolve(const char *build, const char *salt, sh_modmanifest_row 
         if (salt && build && !strcmp(g_installed[b].salt, salt) && !strcmp(g_installed[b].hash, build)) {
             strcpy_s(out->salt, sizeof out->salt, salt);
             strcpy_s(out->name, sizeof out->name, g_installed[b].name);
-            strcpy_s(out->version, sizeof out->version, g_installed[b].version);
             strcpy_s(out->build, sizeof out->build, build);
             out->size = g_installed[b].size;
             return 1;
@@ -748,7 +742,7 @@ static void map_level(void)
     free(value);
     row.attached = 1;
     value = sh_modmanifest_format_value(&row, &vlen);
-    CHECK(value && !strcmp(value, "{\"mod\":\"alexhand@" HASH_C "\",\"name\":\"\",\"version\":\"1.0.0\","
+    CHECK(value && !strcmp(value, "{\"mod\":\"alexhand@" HASH_C "\",\"name\":\"\","
                                   "\"size\":512,\"names\":[],\"attached\":true}"));
     CHECK(value && sh_modmanifest_parse_value(value, vlen, &back, err, sizeof err) && back.attached == 1);
     sh_modmanifest_row_free(&back);
@@ -804,8 +798,7 @@ static void map_level(void)
           strstr(saved, "\"name\":\"Bare Hands\"") && strstr(saved, "\"name\":\"Pink Imp\""));
     CHECK(saved && strstr(saved, "\"attached\":true"));
     CHECK(g_scope_when == SH_MODSERVE_AT_SAVE && g_scope_rows == 2 && g_scope_attached == 1);
-    CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].build, HASH_D) &&
-          !strcmp(rows.rows[0].version, "1.1.0"));
+    CHECK(sh_modmanifest_current_attached(&rows) == 1 && !strcmp(rows.rows[0].build, HASH_D));
     sh_modmanifest_list_free(&rows);
     if (saved) {
         /* Reloaded, the row is map-level again. */

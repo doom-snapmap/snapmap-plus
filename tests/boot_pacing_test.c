@@ -119,17 +119,15 @@ int main(void)
     sh_boot_pacing_get_stats(&st);assert(st.video_sleeps==3&&st.video_released==1);
     g_video_lock=NULL;
 
-    /* Late, missing or wrong sites leave the bytes untouched. */
+    /* Missing or wrong sites leave the bytes untouched. */
     {
         unsigned char before[0x400];
         r[0].addr=(uintptr_t)(img+LOCK);r[1].addr=(uintptr_t)(img+SLEEP);
         r[2].addr=(uintptr_t)(img+POLL);
         memcpy(before,img,sizeof before);
-        assert(sh_boot_pacing_install(r,3,3,SH_BOOT_PACING_LATE_MS+1)==0&&strstr(last_log,"too late"));
-        assert(!memcmp(before,img,sizeof before)&&!g_page);
         assert(sh_boot_pacing_install(r,0,3,10)==0&&strstr(last_log,"was not found")&&!g_page);
         assert(sh_boot_pacing_install(r,3,0,10)==0&&strstr(last_log,"off")&&!g_page);
-        r[1].status=SIG_OK_HOOKED;
+        r[1].status=SIG_NOT_FOUND;
         assert(sh_boot_pacing_install(r,3,SH_BOOT_PACING_VIDEO_LOCK,10)==0&&strstr(last_log,"video draw was not found"));
         r[1].status=SIG_OK;
         /* A lock site from another function: its handle is not the one drawn. */

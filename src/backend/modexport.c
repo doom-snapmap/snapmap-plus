@@ -313,7 +313,6 @@ static int me_write(const me_payload *pl, const char *zip_path, modexport_stats 
             r = &fixed.rows[fixed.count - 1];
             strcpy_s(r->build, sizeof r->build, b->hash);
             if (b->name) strncpy_s(r->name, sizeof r->name, b->name, _TRUNCATE);
-            strncpy_s(r->version, sizeof r->version, b->version, _TRUNCATE);
             r->size = b->total_size;
         }
         me_log("MODS: export: %zu row(s) pinned an earlier build; the export carries and names the root folder's build",

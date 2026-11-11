@@ -1,7 +1,10 @@
 /* Guarded code patches with restore handles, plus wrappers for hook.c detours.
- * Signature wrappers require a clean match; optional expected bytes are checked
- * before writing. Failed writes roll back; failed rollback keeps its handle. */
+ * Every write runs with the process's other threads suspended and none of them
+ * executing inside, or about to return into, the bytes being changed, so no
+ * thread can run a half-written instruction. Expected bytes are checked before
+ * writing; failed writes roll back; a failed rollback keeps its handle. */
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +23,7 @@ const char *sh_patch_status_str(sh_patch_status s)
         case B2_PATCH_FAIL_SEH:        return "FAIL_SEH";
         case B2_PATCH_FAIL_NOTLIVE:    return "FAIL_NOTLIVE";
         case B2_PATCH_FAIL_ROLLBACK:   return "FAIL_ROLLBACK";
+        case B2_PATCH_FAIL_BUSY:       return "FAIL_BUSY";
         default:                       return "?";
     }
 }
@@ -85,10 +89,134 @@ static int patch_write(uint8_t *target, const uint8_t *bytes, size_t size)
     return safe_memcpy(target, bytes, size);
 }
 
+/* Quiescing the process.
+ *
+ * Between quiesce() and resume_all() this thread must not allocate, log or
+ * take a lock another thread could hold: every other thread is suspended. Only
+ * VirtualProtect, plain copies and FlushInstructionCache run in that window.
+ * A thread is inside when its RIP lies strictly within (start, start+len) --
+ * RIP == start is an instruction boundary and runs the new bytes -- or when one
+ * of its top stack slots is a return address strictly inside the window (a
+ * thread in the callee of a call the window covers, such as a stack probe).
+ * Then every thread is resumed and the attempt repeated a moment later. A
+ * thread created after the thread list is taken is not covered; creating and
+ * starting one takes far longer than a patch window. */
+
+#define QUIESCE_MAX_THREADS  1024
+#define QUIESCE_ATTEMPTS     100
+#define QUIESCE_STACK_SLOTS  8
+
+static SRWLOCK g_quiesce_lock = SRWLOCK_INIT;
+static DWORD   g_thread_ids[QUIESCE_MAX_THREADS];
+static HANDLE  g_suspended[QUIESCE_MAX_THREADS];
+static int     g_suspended_count;
+
+static void resume_all(void)
+{
+    for (int i = 0; i < g_suspended_count; i++) {
+        ResumeThread(g_suspended[i]);
+        CloseHandle(g_suspended[i]);
+    }
+    g_suspended_count = 0;
+}
+
+static int inside(uintptr_t value, uintptr_t start, size_t len)
+{
+    return value > start && value < start + len;
+}
+
+static int thread_in_window(HANDLE thread, uintptr_t start, size_t len)
+{
+    CONTEXT context;
+    uint64_t slots[QUIESCE_STACK_SLOTS];
+    memset(&context, 0, sizeof context);
+    context.ContextFlags = CONTEXT_CONTROL;
+    /* GetThreadContext also waits for the suspension to take effect. */
+    if (!GetThreadContext(thread, &context)) return 1;
+    if (inside((uintptr_t)context.Rip, start, len)) return 1;
+    if (!safe_memcpy((uint8_t *)slots, (const uint8_t *)(uintptr_t)context.Rsp, sizeof slots))
+        return 0;
+    for (int i = 0; i < QUIESCE_STACK_SLOTS; i++)
+        if (inside((uintptr_t)slots[i], start, len)) return 1;
+    return 0;
+}
+
+/* Collect the other threads' ids before suspending anything: the snapshot
+ * allocates, and nothing may allocate once a thread is suspended. */
+static int list_threads(int *count)
+{
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    THREADENTRY32 entry;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    int n = 0, ok = 1;
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    entry.dwSize = sizeof entry;
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+        if (n == QUIESCE_MAX_THREADS) { ok = 0; break; }
+        g_thread_ids[n++] = entry.th32ThreadID;
+    }
+    CloseHandle(snapshot);
+    *count = n;
+    return ok;
+}
+
+/* Return 1 with every other thread suspended and outside the window, 0 if the
+ * threads could not be listed or one stayed inside for every attempt. */
+static int quiesce(uintptr_t start, size_t len)
+{
+    for (int attempt = 0; attempt < QUIESCE_ATTEMPTS; attempt++) {
+        int count = 0, busy = 0;
+        if (!list_threads(&count)) return 0;
+        g_suspended_count = 0;
+        for (int i = 0; i < count; i++) {
+            HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE,
+                                       g_thread_ids[i]);
+            if (!thread) continue;               /* it has exited since the list was taken */
+            if (SuspendThread(thread) == (DWORD)-1) { CloseHandle(thread); continue; }
+            g_suspended[g_suspended_count++] = thread;
+        }
+        for (int i = 0; i < g_suspended_count && !busy; i++)
+            busy = thread_in_window(g_suspended[i], start, len);
+        if (!busy) return 1;
+        resume_all();
+        Sleep(1);
+    }
+    return 0;
+}
+
+typedef enum write_result { WRITE_OK, WRITE_BUSY, WRITE_PROTECT, WRITE_FAULT, WRITE_RESTORE } write_result;
+
+/* Make the range writable, write, flush and set its protection to restore_to
+ * (0: the protection it had) with every other thread quiesced. *old_protect
+ * receives the protection it had. */
+static write_result quiesced_write(uint8_t *t, const uint8_t *bytes, size_t len, DWORD restore_to,
+                                   DWORD *old_protect)
+{
+    DWORD old = 0, ignored;
+    write_result result = WRITE_OK;
+    AcquireSRWLockExclusive(&g_quiesce_lock);
+    if (!quiesce((uintptr_t)t, len)) {
+        ReleaseSRWLockExclusive(&g_quiesce_lock);
+        return WRITE_BUSY;
+    }
+    if (!patch_protect(t, len, PAGE_EXECUTE_READWRITE, &old)) result = WRITE_PROTECT;
+    else {
+        if (!patch_write(t, bytes, len)) result = WRITE_FAULT;
+        FlushInstructionCache(GetCurrentProcess(), t, len);
+        if (!patch_protect(t, len, restore_to ? restore_to : old, &ignored) && result == WRITE_OK)
+            result = WRITE_RESTORE;
+    }
+    resume_all();
+    ReleaseSRWLockExclusive(&g_quiesce_lock);
+    if (old_protect) *old_protect = old;
+    return result;
+}
+
 static sh_patch_status patch_failed(sh_patch_handle *handle, sh_patch_status reason)
 {
     if (code_unpatch(handle) == B2_PATCH_OK) return reason;
-    backend_log("B2: patch rollback failed; restore handle retained for retry");
+    backend_log("patch: rollback failed; the restore handle is kept for a retry");
     return B2_PATCH_FAIL_ROLLBACK;
 }
 
@@ -107,7 +235,11 @@ static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
 {
-    if (out_handle) { out_handle->live = 0; out_handle->atomic_rel32 = 0; out_handle->protection_only = 0; }
+    uint8_t bytes[B2_PATCH_MAX_BYTES];
+    char line[512];
+    DWORD old = 0;
+    write_result written;
+    if (out_handle) out_handle->live = 0;
     if (!target || !new_bytes || !out_handle || len == 0 || len > B2_PATCH_MAX_BYTES)
         return B2_PATCH_REFUSED_BADARG;
 
@@ -117,52 +249,48 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
     if (expect) {
         int match = 0;
         if (!safe_memcmp(t, expect, len, &match)) {
-            backend_log("B2: code_patch FAIL_SEH (target unreadable during verify) -- no write");
+            backend_log("patch: target unreadable while checking its bytes; nothing written");
             return B2_PATCH_FAIL_SEH;
         }
         if (!match) {
-            char line[160], exp_hex[64], got_hex[64];
+            char exp_hex[200], got_hex[200];
             uint8_t got[B2_PATCH_MAX_BYTES];
-            /* re-read the live bytes for the diagnostic; if that faults, mark unreadable */
             int rd = safe_memcpy(got, t, len);
             hexdump(expect, len, exp_hex, sizeof exp_hex);
             if (rd) hexdump(got, len, got_hex, sizeof got_hex);
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: code_patch REFUSED_VERIFY @%p exp=[%s] got=[%s] -- no write",
-                target, exp_hex, rd ? got_hex : "<unreadable>");
+                "patch: bytes at %p differ (expected [%s], found [%s]); nothing written",
+                target, exp_hex, rd ? got_hex : "unreadable");
             backend_log(line);
             return B2_PATCH_REFUSED_VERIFY;
         }
     }
 
-    /* Save original bytes before changing protection or writing the patch. */
-    if (!safe_memcpy(out_handle->orig, t, len)) {
-        backend_log("B2: code_patch FAIL_SEH (target unreadable during orig-record) -- no write");
+    /* Read the original and the new bytes before any thread is suspended. */
+    if (!safe_memcpy(out_handle->orig, t, len) || !safe_memcpy(bytes, new_bytes, len)) {
+        backend_log("patch: target or replacement unreadable; nothing written");
         return B2_PATCH_FAIL_SEH;
     }
 
-
-    DWORD old = 0;
-    if (!patch_protect(t, len, PAGE_EXECUTE_READWRITE, &old)) {
-        char line[96];
+    written = quiesced_write(t, bytes, len, 0, &old);
+    if (written == WRITE_BUSY) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: code_patch FAIL_PROTECT @%p (err %lu) -- no write", target, GetLastError());
+            "patch: a thread stayed inside %p for every attempt; nothing written", target);
+        backend_log(line);
+        return B2_PATCH_FAIL_BUSY;
+    }
+    if (written == WRITE_PROTECT) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "patch: could not make %p writable; nothing written", target);
         backend_log(line);
         return B2_PATCH_FAIL_PROTECT;
     }
-
     out_handle->target      = target;
     out_handle->len         = len;
     out_handle->old_protect = (uint32_t)old;
     out_handle->live        = 1;
-    if (!patch_write(t, new_bytes, len))
-        return patch_failed(out_handle, B2_PATCH_FAIL_SEH);
-    FlushInstructionCache(GetCurrentProcess(), t, len);
-    {
-        DWORD ignored;
-        if (!patch_protect(t, len, old, &ignored))
-            return patch_failed(out_handle, B2_PATCH_FAIL_PROTECT);
-    }
+    if (written == WRITE_FAULT) return patch_failed(out_handle, B2_PATCH_FAIL_SEH);
+    if (written == WRITE_RESTORE) return patch_failed(out_handle, B2_PATCH_FAIL_PROTECT);
     return B2_PATCH_OK;
 }
 
@@ -171,43 +299,25 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     if (!handle || !handle->live) return B2_PATCH_FAIL_NOTLIVE;
     if (!handle->target || handle->len == 0 || handle->len > B2_PATCH_MAX_BYTES)
         return B2_PATCH_REFUSED_BADARG;
-    if (handle->atomic_rel32 && (handle->len != 5 ||
-        (((uintptr_t)handle->target + 1) & 3u))) return B2_PATCH_REFUSED_BADARG;
 
-    uint8_t *t = (uint8_t *)handle->target;
-
-    DWORD old = 0;
-    if (!patch_protect(t, handle->len, PAGE_EXECUTE_READWRITE, &old)) {
-        backend_log("B2: code_unpatch FAIL_PROTECT -- original NOT restored");
+    switch (quiesced_write((uint8_t *)handle->target, handle->orig, handle->len,
+                           (DWORD)handle->old_protect, NULL)) {
+    case WRITE_OK:
+        handle->live = 0;
+        return B2_PATCH_OK;
+    case WRITE_BUSY:
+        backend_log("patch: a thread stayed inside the patch for every attempt; original not restored yet");
+        return B2_PATCH_FAIL_BUSY;
+    case WRITE_PROTECT:
+        backend_log("patch: could not make the patch writable; original not restored");
         return B2_PATCH_FAIL_PROTECT;
-    }
-
-    int restored;
-    if (handle->protection_only) restored = 1;
-    else if (handle->atomic_rel32) {
-        __try {
-            LONG original;
-            memcpy(&original, handle->orig + 1, sizeof original);
-            InterlockedExchange((volatile LONG *)(t + 1), original);
-            restored = 1;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { restored = 0; }
-    } else restored = patch_write(t, handle->orig, handle->len);
-    FlushInstructionCache(GetCurrentProcess(), t, handle->len);
-
-
-    DWORD ignored;
-    int protected = patch_protect(t, handle->len, handle->old_protect, &ignored);
-
-    if (!restored) {
-        backend_log("B2: code_unpatch FAIL_SEH (restore write faulted)");
+    case WRITE_FAULT:
+        backend_log("patch: the restore write faulted");
         return B2_PATCH_FAIL_SEH;
-    }
-    if (!protected) {
-        backend_log("B2: code_unpatch FAIL_PROTECT -- original bytes restored; protection retry needed");
+    default:
+        backend_log("patch: original bytes restored; the page protection restore needs a retry");
         return B2_PATCH_FAIL_PROTECT;
     }
-    handle->live = 0;
-    return B2_PATCH_OK;
 }
 
 /* Signature-gated patch operations. */
@@ -215,57 +325,22 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
 sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
                                     const uint8_t replacement[5], sh_patch_handle *handle)
 {
-    DWORD old, ignored;
-    LONG before, after;
-    sh_patch_status status = B2_PATCH_REFUSED_VERIFY;
     if (!handle) return B2_PATCH_REFUSED_BADARG;
-    memset(handle, 0, sizeof *handle);
+    handle->live = 0;
     if (!r || r->status != SIG_OK || !r->addr) return B2_PATCH_REFUSED_SIG;
-    if (!expect || !replacement || expect[0] != 0xe8 || replacement[0] != 0xe8 ||
-        ((r->addr + 1) & 3u)) return B2_PATCH_REFUSED_BADARG;
-    uint8_t *target = (uint8_t *)r->addr;
-    int match = 0;
-    if (!safe_memcmp(target, expect, 5, &match) || !match) return B2_PATCH_REFUSED_VERIFY;
-    memcpy(&before, expect + 1, sizeof before);
-    memcpy(&after, replacement + 1, sizeof after);
-    if (!patch_protect(target, 5, PAGE_EXECUTE_READWRITE, &old)) return B2_PATCH_FAIL_PROTECT;
-    memcpy(handle->orig, expect, 5);
-    handle->target = target; handle->len = 5; handle->old_protect = old;
-    handle->atomic_rel32 = 1;
-    handle->protection_only = 1;
-    __try {
-        if (target[0] == 0xe8 &&
-            InterlockedCompareExchange((volatile LONG *)(target + 1), after, before) == before) {
-            memcpy(handle->orig, expect, 5);
-            handle->target = target; handle->len = 5; handle->old_protect = old;
-            handle->live = 1; handle->atomic_rel32 = 1;
-            handle->protection_only = 0;
-            status = B2_PATCH_OK;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { status = B2_PATCH_FAIL_SEH; }
-    FlushInstructionCache(GetCurrentProcess(), target, 5);
-    if (!patch_protect(target, 5, old, &ignored)) {
-        /* Even an unchanged call owns the outstanding page-protection restore. */
-        handle->live = 1;
-        return patch_failed(handle, B2_PATCH_FAIL_PROTECT);
-    }
-    return status;
+    if (!expect || !replacement || expect[0] != 0xe8 || replacement[0] != 0xe8)
+        return B2_PATCH_REFUSED_BADARG;
+    return code_patch((void *)r->addr, expect, replacement, 5, handle);
 }
 
 sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
                                size_t len, sh_patch_handle *out_handle)
 {
+    char line[160];
     if (out_handle) out_handle->live = 0;
-    if (!r || r->addr == 0) {
-        backend_log("B2: code_patch_sig REFUSED_SIG (target not resolved) -- no write");
-        return B2_PATCH_REFUSED_SIG;
-    }
-    /* Already-hooked results do not establish intact patch bytes. */
-    if (r->status != SIG_OK) {
-        char line[160];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: code_patch_sig REFUSED_SIG %s status=%d (not a clean unique hit) -- no write",
-            r->name ? r->name : "?", (int)r->status);
+    if (!r || r->addr == 0 || r->status != SIG_OK) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "patch: %s is not resolved; nothing written",
+                    r && r->name ? r->name : "target");
         backend_log(line);
         return B2_PATCH_REFUSED_SIG;
     }
@@ -284,30 +359,24 @@ int sh_detour_is_installed(void *tramp) { return hook_is_installed(tramp); }
 
 void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
 {
-    if (!r || r->addr == 0) {
-        backend_log("B2: prepare_detour_sig REFUSED_SIG (target not resolved)");
-        return NULL;
-    }
-    if (r->status != SIG_OK) {
-        char line[160];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: prepare_detour_sig REFUSED_SIG %s status=%d (not a clean unique hit)",
-            r->name ? r->name : "?", (int)r->status);
+    char line[192];
+    void *tramp;
+    if (!r || r->addr == 0 || r->status != SIG_OK) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "detour: %s is not resolved; not installed",
+                    r && r->name ? r->name : "target");
         backend_log(line);
         return NULL;
     }
-    void *tramp = hook_prepare((void *)r->addr, detour, stolen);
+    tramp = hook_prepare((void *)r->addr, detour, stolen);
     if (!tramp) {
-        char line[192];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: prepare_detour_sig %s FAILED (%s, stolen %u)", r->name ? r->name : "?",
-            hook_last_failure(), (unsigned)stolen);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "detour: %s not prepared (%s, %u bytes)",
+                    r->name ? r->name : "?", hook_last_failure(), (unsigned)stolen);
         backend_log(line);
     }
     return tramp;
 }
 
-/* Scratch-memory patch checks. */
+/* Scratch-memory patch check. */
 
 /* This stub returns 0x11. Change its immediate to 0x22 and restore it, checking
  * calls as well as bytes. Handwritten code keeps the patch window deterministic. */
@@ -321,85 +390,39 @@ static const uint8_t SCRATCH_CODE[] = {
 int sh_patch_selftest(void)
 {
     typedef int (*scratch_fn)(void);
-    char line[224];
-    char whybuf[160];             /* Keep diagnostic scratch separate from the destination log buffer. */
-    const char *why = "not run";
-
+    static const uint8_t expect[4] = { 0x11, 0x00, 0x00, 0x00 };
+    static const uint8_t newbytes[4] = { 0x22, 0x00, 0x00, 0x00 };
+    static const uint8_t wrong[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+    char line[160];
+    const char *why = NULL;
+    sh_patch_handle h;
     uint8_t *stub = (uint8_t *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
                                             PAGE_EXECUTE_READWRITE);
+    scratch_fn fn;
     if (!stub) {
-        backend_log("B2: patch-layer self-test FAIL (scratch alloc failed)");
+        backend_log("patch self-test: FAIL (scratch allocation failed)");
         return 0;
     }
     memcpy(stub, SCRATCH_CODE, sizeof SCRATCH_CODE);
     FlushInstructionCache(GetCurrentProcess(), stub, 64);
-    scratch_fn fn = (scratch_fn)stub;
+    fn = (scratch_fn)stub;
 
-    int ok = 0;
+    if (fn() != 0x11) why = "the scratch stub does not run";
+    else if (code_patch(stub + SCRATCH_PATCH_OFF, expect, newbytes, 4, &h) != B2_PATCH_OK || !h.live)
+        why = "a matching patch was not applied";
+    else if (fn() != 0x22 || stub[SCRATCH_PATCH_OFF] != 0x22) why = "the patch did not take";
+    else if (code_unpatch(&h) != B2_PATCH_OK || h.live) why = "the restore was not applied";
+    else if (fn() != 0x11 || stub[SCRATCH_PATCH_OFF] != 0x11) why = "the restore did not take";
+    else if (code_patch(stub + SCRATCH_PATCH_OFF, wrong, newbytes, 4, &h) != B2_PATCH_REFUSED_VERIFY ||
+             h.live || stub[SCRATCH_PATCH_OFF] != 0x11 || fn() != 0x11)
+        why = "a mismatched patch was not refused";
 
-
-    if (fn() != 0x11) {
-        why = "baseline scratch wrong";
-        goto done;
-    }
-
-    /* Matching expected bytes permit the patch. */
-    {
-        const uint8_t expect[4]   = { 0x11, 0x00, 0x00, 0x00 };
-        const uint8_t newbytes[4] = { 0x22, 0x00, 0x00, 0x00 };
-        sh_patch_handle h;
-        sh_patch_status st = code_patch(stub + SCRATCH_PATCH_OFF, expect, newbytes, 4, &h);
-        if (st != B2_PATCH_OK || !h.live) {
-            _snprintf_s(whybuf, sizeof whybuf, _TRUNCATE,
-                "apply returned %s (expected OK)", sh_patch_status_str(st));
-            why = whybuf;
-            goto done;
-        }
-
-        if (fn() != 0x22) { why = "patch did not take (call-through != 0x22)"; goto done; }
-
-        if (stub[SCRATCH_PATCH_OFF] != 0x22) { why = "patch readback wrong"; goto done; }
-
-
-        sh_patch_status us = code_unpatch(&h);
-        if (us != B2_PATCH_OK || h.live) {
-            _snprintf_s(whybuf, sizeof whybuf, _TRUNCATE,
-                "restore returned %s (expected OK)", sh_patch_status_str(us));
-            why = whybuf;
-            goto done;
-        }
-        if (fn() != 0x11) { why = "restore did not take (call-through != 0x11)"; goto done; }
-        if (stub[SCRATCH_PATCH_OFF] != 0x11) { why = "restore readback wrong"; goto done; }
-    }
-
-    /* Mismatched expected bytes must refuse the patch without modifying the stub. */
-    {
-        const uint8_t wrong_expect[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
-        const uint8_t newbytes[4]     = { 0x33, 0x00, 0x00, 0x00 };
-        sh_patch_handle h;
-        sh_patch_status st = code_patch(stub + SCRATCH_PATCH_OFF, wrong_expect, newbytes, 4, &h);
-        if (st != B2_PATCH_REFUSED_VERIFY) {
-            _snprintf_s(whybuf, sizeof whybuf, _TRUNCATE,
-                "negative test got %s (expected REFUSED_VERIFY)", sh_patch_status_str(st));
-            why = whybuf;
-            goto done;
-        }
-        if (h.live) { why = "negative test produced a live handle"; goto done; }
-
-        if (stub[SCRATCH_PATCH_OFF] != 0x11) { why = "negative test wrote bytes (should refuse)"; goto done; }
-        if (fn() != 0x11) { why = "negative test altered behavior (should refuse)"; goto done; }
-    }
-
-    ok = 1;
-
-done:
     VirtualFree(stub, 0, MEM_RELEASE);
-    if (ok) {
-        backend_log("B2: patch-layer self-test PASS (apply/restore ok; refuse-on-mismatch ok)");
-    } else {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: patch-layer self-test FAIL (%s)", why);
-        backend_log(line);
+    if (!why) {
+        backend_log("patch self-test: PASS");
+        return 1;
     }
-    return ok;
+    _snprintf_s(line, sizeof line, _TRUNCATE, "patch self-test: FAIL (%s)", why);
+    backend_log(line);
+    return 0;
 }

@@ -112,9 +112,9 @@ int main(void)
     CHECK(strstr(g_log, "2 file(s), 1 of them stock pointer(s) to installed content, 0 KiB not stored") != NULL);
     CHECK(strstr(g_log, "3 file(s) became stock pointers, 0 KiB not stored") != NULL);
 
-    /* The authored pack's store folder holds only the edited file. */
+    /* The authored pack's store folder keeps every file it had (DECISIONS 10). */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber\\assets", mods);
-    CHECK(count_files(path) == 1);
+    CHECK(count_files(path) == 3);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", mods);
     CHECK(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES);
     CHECK(sh_ms_enumerate(&l));

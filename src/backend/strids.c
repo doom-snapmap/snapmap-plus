@@ -18,6 +18,7 @@
 #include "backend_log.h"
 #include "config_json.h"
 #include "modserve.h"   /* sh_modserve_each_bundle_extra: the bundle string layer */
+#include "strkeys.h"    /* string edits: keys the game or the product defines (DECISIONS 9) */
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
  *   48 89 5C 24 18        mov [rsp+0x18],rbx        (5)
@@ -101,7 +102,7 @@ typedef struct strids_row {
     int          layer;       /* STRIDS_LAYER_* */
 } strids_row;
 
-/* "<id>@<version>" of each bundle that supplied strings in this pass. */
+/* The salt of each bundle that supplied strings in this pass. */
 static char **g_bundle_names;
 static size_t g_bundle_names_n, g_bundle_names_capacity;
 static size_t g_layer_rows[STRIDS_LAYERS];
@@ -479,14 +480,6 @@ invalid:
     return 0;
 }
 
-static void inject_decoded(const sh_json_object *pairs, int owner, int layer)
-{
-    size_t i;
-    for (i = 0; i < pairs->count; i++)
-        inject_row_owned(pairs->members[i].key, pairs->members[i].value_json,
-                         strlen(pairs->members[i].value_json), owner, layer);
-}
-
 /* ------------------------------------------------------------------ bundle layer */
 
 /* mod.json is validated at this depth by the serving index (modserve.c). */
@@ -519,17 +512,22 @@ typedef struct strids_bundle_pass {
  * refuses any other, so a decl references #str_<salt>_<name>). Other languages
  * are ignored; the native table holds one. A malformed strings object refuses
  * that bundle's strings only. */
-static void inject_bundle(void *context, const char *id, const char *version, int place, const char *extra)
+/* The bundles whose strings carry string edits, and whether the last pass
+ * applied them (sh_strids_scope_check). */
+#define STRIDS_EDIT_BUNDLES 64
+static struct { char hash[65]; int live; } g_edit_bundles[STRIDS_EDIT_BUNDLES];
+static volatile LONG g_edit_count;
+
+static void inject_bundle(void *context, const char *id, const char *hash, int place, const char *extra)
 {
     strids_bundle_pass *pass = (strids_bundle_pass *)context;
     sh_json_object root = {0}, languages = {0}, pairs = {0};
     const char *strings, *english;
-    size_t before, name_cap;
+    size_t before, name_cap, i;
     char *name;
-    int owner;
+    int owner, edits = 0, live = 1;
     (void)place;   /* the order already places maps' places after the root */
     if (!id) id = "";
-    if (!version) version = "";
     if (!extra || !sh_json_parse_object(extra, strlen(extra), STRIDS_BUNDLE_JSON_DEPTH, &root)) goto done;
     strings = sh_json_object_get(&root, "strings");
     if (!strings) goto done;
@@ -538,7 +536,7 @@ static void inject_bundle(void *context, const char *id, const char *version, in
     english = sh_json_object_get(&languages, "en");
     if (!english) goto done;
     if (*english != '{' || !decode_pairs(english, strlen(english), &pairs)) goto refused;
-    name_cap = strlen(id) + strlen(version) + 2;
+    name_cap = strlen(id) + 1;
     if (g_bundle_names_n >= INT_MAX ||
         !strids_reserve((void **)&g_bundle_names, &g_bundle_names_capacity,
                         g_bundle_names_n + 1, sizeof(*g_bundle_names)) ||
@@ -546,11 +544,29 @@ static void inject_bundle(void *context, const char *id, const char *version, in
         g_pass_failed = 1;
         goto done;
     }
-    _snprintf_s(name, name_cap, _TRUNCATE, "%s@%s", id, version);
+    _snprintf_s(name, name_cap, _TRUNCATE, "%s", id);
     owner = (int)g_bundle_names_n;
     g_bundle_names[g_bundle_names_n++] = name;
     before = g_layer_rows[STRIDS_LAYER_BUNDLE];
-    inject_decoded(&pairs, owner, STRIDS_LAYER_BUNDLE);
+    /* A key the game or the product defines is an edit of that string: it
+     * applies where the mod's other edits apply (an editor-tweak mod's in
+     * every map, any other mod's in maps that declare it). The mod's own
+     * keys always apply. */
+    for (i = 0; i < pairs.count; i++) edits |= sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length);
+    if (edits) {
+        LONG at = InterlockedCompareExchange(&g_edit_count, 0, 0);
+        live = sh_modserve_bundle_edits_live(hash);
+        if (at < STRIDS_EDIT_BUNDLES) {
+            strncpy_s(g_edit_bundles[at].hash, sizeof g_edit_bundles[at].hash, hash ? hash : "", _TRUNCATE);
+            g_edit_bundles[at].live = live;
+            InterlockedExchange(&g_edit_count, at + 1);
+        }
+    }
+    for (i = 0; i < pairs.count; i++) {
+        if (!live && sh_strkey_is_edit(pairs.members[i].key, pairs.members[i].key_length)) continue;
+        inject_row_owned(pairs.members[i].key, pairs.members[i].value_json, strlen(pairs.members[i].value_json), owner,
+                         STRIDS_LAYER_BUNDLE);
+    }
     if (pass && pass->debug) {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids: bundle %s supplied %zu string(s)", name,
@@ -562,8 +578,8 @@ refused:
     {
         char line[256];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: strids REFUSED the strings of bundle %s@%s: expected extra.strings.en to be a JSON "
-                    "object of valid text strings and nonempty IDs", id, version);
+                    "B1: strids REFUSED the strings of bundle %s: expected extra.strings.en to be a JSON "
+                    "object of valid text strings and nonempty IDs", id);
         backend_log(line);
     }
 done:
@@ -601,6 +617,7 @@ static long inject_layers(void)
         return 0;
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
+    InterlockedExchange(&g_edit_count, 0);
     free_bundle_names();
     memset(g_layer_rows, 0, sizeof g_layer_rows);
 
@@ -800,6 +817,17 @@ void sh_strids_request_refresh(void)
     InterlockedExchange(&g_refresh_pending, 1);
 }
 
+int sh_strids_scope_check(void)
+{
+    LONG i, n = InterlockedCompareExchange(&g_edit_count, 0, 0);
+    for (i = 0; i < n; i++)
+        if (sh_modserve_bundle_edits_live(g_edit_bundles[i].hash) != g_edit_bundles[i].live) {
+            sh_strids_request_refresh();
+            return 1;
+        }
+    return 0;
+}
+
 int sh_strids_refresh_pending(void)
 {
     if (!InterlockedCompareExchange(&g_refresh_pending, 0, 0)) return -1;
@@ -840,7 +868,7 @@ void sh_strids_test_set_sort(void *sort)
 }
 
 /* How the injector attributed each row this pass: the id, and its owner ("<baked>" for the baked
- * defaults, "<id>@<version>" for a bundle). Returns 0 past the end. */
+ * defaults, the salt for a bundle). Returns 0 past the end. */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
 {
     if (index < 0 || (size_t)index >= g_injected_n) return 0;

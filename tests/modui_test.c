@@ -371,7 +371,6 @@ static int load_rows(const char *const *salts, const char *const *builds, const 
         strcpy_s(row.salt, sizeof row.salt, salts[i]);
         strcpy_s(row.build, sizeof row.build, builds[i]);
         strcpy_s(row.name, sizeof row.name, names[i]);
-        strcpy_s(row.version, sizeof row.version, "0.9.0");
         row.size = 10;
         row.attached = 1;
         if (!sh_modmanifest_list_add(&rows, &row)) return 0;
@@ -644,7 +643,6 @@ static void load_map_naming(const char *salt, const char *build, const char *nam
     strcpy_s(row.salt, sizeof row.salt, salt);
     strcpy_s(row.build, sizeof row.build, build);
     strcpy_s(row.name, sizeof row.name, name);
-    strcpy_s(row.version, sizeof row.version, "1.0.0");
     row.size = 1234;
     CHECK(sh_modmanifest_row_add_name(&row, placed ? placed : "mods/alexrimp/imp_copy"));
     CHECK(sh_modmanifest_list_add(&rows, &row));
@@ -923,7 +921,7 @@ int main(int argc, char **argv)
     doc = list_doc();
     row_salt(doc, "alex.r2-imp", salt1, sizeof salt1);
     CHECK(!strcmp(salt1, "alexrimp"));
-    CHECK(bundle_has(doc, "alex.r2-imp", "\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\",\"version\":\"1.0.0\""));
+    CHECK(bundle_has(doc, "alex.r2-imp", "\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\""));
     CHECK(bundle_has(doc, "alex.r2-imp", "\"state\":\"ready\",\"cause\":\"\",\"editorRows\":2,\"folder\":\"alex.r2-imp\","
                                          "\"group\":\"\",\"place\":\"\",\"placeTitle\":\"\""));
     CHECK(row_has(doc, "alex.r2-imp", "\"editorRowNames\":[") && row_has(doc, "alex.r2-imp", "\"facts\":{\"adds\":"));
@@ -972,7 +970,7 @@ int main(int argc, char **argv)
         _snprintf_s(path, sizeof path, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\twin.decl", salt_a);
         CHECK(mt_has(a, path));
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: mod mods\\twin_a (Twin A 1.0.0): ready\n"));
+        CHECK(has(dr, "MODS: doctor: mod mods\\twin_a (Twin A): ready\n"));
         CHECK(has(dr, "MODS: doctor: mod mods\\twin_a: carries 1 of the same files as mods\\twin_b; both are mods of their own\n"));
         CHECK(lines_prose_ok(dr));
     }
@@ -1096,7 +1094,7 @@ int main(int argc, char **argv)
     g_placed_count = 2;
     doc = list_doc();
     CHECK(has(doc, "\"map\":{\"entities\":2,\"names\":2,"));
-    CHECK(has(doc, "\"rows\":[{\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\",\"version\":\"1.0.0\""));
+    CHECK(has(doc, "\"rows\":[{\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\""));
     CHECK(has(doc, "\"state\":\"active\",\"cause\":\"\",\"key\":\"alex.r2-imp\""));
     CHECK(has(doc, "\"placed\":[{\"salt\":\"alexrimp\""));
     CHECK(doc_prose_ok(doc));
@@ -1134,7 +1132,6 @@ int main(int argc, char **argv)
         strcpy_s(row.salt, sizeof row.salt, "alexrimp");
         strcpy_s(row.build, sizeof row.build, hash1);
         strcpy_s(row.name, sizeof row.name, "R2 Imp copy");
-        strcpy_s(row.version, sizeof row.version, "1.0.0");
         CHECK(sh_modmanifest_list_add(&rows, &row));
         text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
         CHECK(text != NULL);
@@ -1148,7 +1145,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"name\":\"Imp Arena\",\"saved\":"));
     CHECK(has(doc, "\"published\":{\"state\":\"published\",\"at\":1793164563},\"uploaded\":{\"claimed\":true,"));
     CHECK(bundle_has(doc, "alex.r2-imp", "\"state\":\"ready\"") && row_has(doc, "alex.r2-imp", "\"publishedMaps\":1"));
-    CHECK(has(doc, "\"mods\":[{\"key\":\"alex.r2-imp\",\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\",\"version\":\"1.0.0\","
+    CHECK(has(doc, "\"mods\":[{\"key\":\"alex.r2-imp\",\"salt\":\"alexrimp\",\"name\":\"R2 Imp copy\","
                    "\"state\":\"installed\",\"placedEntities\":["));
     CHECK(has(doc, "\"placedCount\":2,"));
     CHECK(has(doc, "\"vanilla\":false"));
@@ -1205,7 +1202,7 @@ int main(int argc, char **argv)
         g_doctor[0] = 0;
         CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
         CHECK(has(g_doctor, "MODS: map: Imp Arena, 5 entities, last saved "));
-        CHECK(has(g_doctor, "MODS: map: mod R2 Imp copy 1.0.0 (mods\\alex.r2-imp, ready): 2 placed entities, 3 wire or "
+        CHECK(has(g_doctor, "MODS: map: mod R2 Imp copy (mods\\alex.r2-imp, ready): 2 placed entities, 3 wire or "
                             "timeline reference(s)\n"));
         CHECK(has(g_doctor, "MODS: map:   entity Gate imp #2\n"));
         CHECK(lines_prose_ok(g_doctor));
@@ -1311,7 +1308,7 @@ int main(int argc, char **argv)
 
     printf("-- the doctor: every folder, plainly\n");
     dr = doctor(1);
-    CHECK(has(dr, "MODS: doctor: mod mods\\twin_b (Twin B 1.0.0): ready\n"));
+    CHECK(has(dr, "MODS: doctor: mod mods\\twin_b (Twin B): ready\n"));
     {
         /* A mod with console settings and commands: the document carries them as the builder wrote them. */
         char req[MAX_PATH * 2];

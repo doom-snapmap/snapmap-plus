@@ -1,6 +1,6 @@
 /* Boot pacing (see boot_pacing.h).
  *
- * Build 13954591 evidence (snaphak-re boot-time-13954591 R-001, R-002):
+ * Build 13954591:
  *   Load-screen video draw VK FUN_141901c80 / GL FUN_1418fab70, render thread:
  *     LEA RDI,[bink lock] (VK 0x146fd5228 / GL 0x1458dff48, a global holding a
  *     CRITICAL_SECTION pointer; enter = VK FUN_140324320 TryEnter-then-Enter,
@@ -226,7 +226,7 @@ size_t sh_boot_pacing_match(const uint8_t *base, sig_result *results, size_t cap
         results[i].addr = 0; results[i].rva = 0;
         for (j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
             if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, k_names[i])) {
-                if (sig_match_recorded(base, &BACKEND_ENGINE_SIGNATURES[j], &results[i]) == SIG_OK) ok++;
+                if (sig_resolve_one(base, &BACKEND_ENGINE_SIGNATURES[j], &results[i]) == SIG_OK) ok++;
                 break;
             }
     }
@@ -319,11 +319,6 @@ unsigned sh_boot_pacing_install(const sig_result *results, size_t count, unsigne
         poll_why = "the poll's sleep is not the engine's Sleep";
     else { want |= SH_BOOT_PACING_READ_POLL; sites[nsites++] = poll_r->addr; }
 
-    if (want && age_ms > SH_BOOT_PACING_LATE_MS) {
-        video_why = (want & SH_BOOT_PACING_VIDEO_LOCK) ? "installed too late to patch safely" : video_why;
-        poll_why = (want & SH_BOOT_PACING_READ_POLL) ? "installed too late to patch safely" : poll_why;
-        want = 0;
-    }
     if (want && !g_page && !(g_page = near_page(sites, nsites))) {
         video_why = (want & SH_BOOT_PACING_VIDEO_LOCK) ? "no page within reach of the engine" : video_why;
         poll_why = (want & SH_BOOT_PACING_READ_POLL) ? "no page within reach of the engine" : poll_why;

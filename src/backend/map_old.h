@@ -106,9 +106,10 @@ enum {
 };
 
 /* One mod row as earlier builds wrote it: the mod by its old key. */
+#define SH_MAP_OLD_VERSION_CAP 33          /* an earlier row's version label (read, never written) */
 typedef struct sh_map_old_row {
     char key[SH_MAP_OLD_KEY_CAP];               /* the row's "id" */
-    char version[SH_MODMANIFEST_VERSION_CAP];
+    char version[SH_MAP_OLD_VERSION_CAP];
     char bundle[SH_MODMANIFEST_HASH_CAP];       /* the build hash it pinned */
     unsigned long long size;
     char **names;                               /* malloc'd; owned */
@@ -140,15 +141,13 @@ void sh_map_old_free(sh_map_old *old);
 /* --------------------------------------------------------------- write ---- */
 
 /* One old key's identity in this shape: the converted folder's salt and the
- * build its row now names, with the display name and version the row
- * carries (empty: the old row's version, the key as name) and its size (0:
- * the old row's). */
+ * build its row now names, with the display name the row carries (empty: the
+ * key) and its size (0: the old row's). A row carries no version. */
 typedef struct sh_map_old_salt {
     char key[SH_MAP_OLD_KEY_CAP];
     char salt[SH_MODMANIFEST_SALT_CAP];
     char build[SH_MODMANIFEST_HASH_CAP];
     char name[SH_MODMANIFEST_DISPLAY_CAP];
-    char version[SH_MODMANIFEST_VERSION_CAP];
     unsigned long long size;
 } sh_map_old_salt;
 

@@ -1139,13 +1139,11 @@ static void pub_print(const char *line)
     if (g_ops.print) g_ops.print(g_ops.context, line);
 }
 
-/* "name version" for a row, the way the refusal names a mod (the salt when
- * the row has no name). */
+/* A row's name, the way the refusal names a mod (the salt when the row has
+ * no name). */
 static void pub_row_label(char *out, size_t cap, const sh_modmanifest_row *row)
 {
-    const char *name = row->name[0] ? row->name : row->salt;
-    if (row->version[0]) _snprintf_s(out, cap, _TRUNCATE, "%s %s", name, row->version);
-    else _snprintf_s(out, cap, _TRUNCATE, "%s", name);
+    _snprintf_s(out, cap, _TRUNCATE, "%s", row->name[0] ? row->name : row->salt);
 }
 
 /* mode 0: the store lacks them; 1: the store could not be reached; 2 (a
@@ -1235,7 +1233,7 @@ void sh_modpub_rawmap_source(const char *source)
     pub_scope(pub_leaf_stem(source), map_id, 1);
 }
 
-#define PUB_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + SH_MODMANIFEST_VERSION_CAP + 16)
+#define PUB_LABEL_CAP (SH_MODMANIFEST_DISPLAY_CAP + 16)
 
 /* One row's refusal notice: the asset rule's sentence, what did not happen,
  * and where the mod can come from. Kept only when it fits the dialog body. */

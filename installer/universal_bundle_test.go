@@ -74,9 +74,10 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 		}
 		return string(b)
 	}
-	m := regexp.MustCompile(`#define SH_UI_DLL_PATH "\.\\\\(.+)"`).FindStringSubmatch(read("src/backend/ui_bridge.h"))
+	// A wide string relative to the host executable's folder (ui_bridge.c joins it to sh_host_dir).
+	m := regexp.MustCompile(`#define SH_UI_DLL_PATH L"(.+)"`).FindStringSubmatch(read("src/backend/ui_bridge.h"))
 	if m == nil || strings.ReplaceAll(m[1], `\\`, `\`) != currentUIDll {
-		t.Errorf("SH_UI_DLL_PATH = %v, want .\\%s", m, currentUIDll)
+		t.Errorf("SH_UI_DLL_PATH = %v, want %s", m, currentUIDll)
 	}
 	pkg := read("package.ps1")
 	if !strings.Contains(pkg, `$uiRel = "`+currentUIDll+`"`) {

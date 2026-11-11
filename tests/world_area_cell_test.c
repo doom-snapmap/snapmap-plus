@@ -54,7 +54,7 @@ int main(void)
     assert(site_reads(bad)==511.0f&&!g_patch.live&&!g_page);
     {float native=512.0f;bad[8]=0x90;memcpy(bad+0x3a,&native,4);}
     assert(!sh_world_area_cell_install(&r,1,NULL)&&strstr(last_log,"unexpected bytes")&&!g_page);
-    r.status=SIG_OK_HOOKED;r.addr=(uintptr_t)site;
+    r.status=SIG_CHANGED;r.addr=(uintptr_t)site;
     assert(!sh_world_area_cell_install(&r,1,NULL)&&!g_live);
     /* Not live: the hooks do nothing. */
     sh_world_area_cell_build(map);sh_world_area_cell_build_end();

@@ -365,10 +365,13 @@ static void test_fresh_folder_strings(const char *tmp)
     fb_make(dir, "talker");
     mt_write(dir, "mod.json",
              "{\r\n  \"name\": \"Talker\",\r\n  \"version\": \"1.0.0\",\r\n  \"strings\": {\r\n    \"en\": {\r\n"
-             "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\"\r\n    }\r\n  }\r\n}\r\n");
+             "      \"probe_name\": \"Probe\",\r\n      \"probe_desc\": \"Says #str_probe_name.\",\r\n"
+             "      \"snapentity_demon_baron\": \"Big Baron\",\r\n      \"sh_bv_navigation_desc\": \"Mine\"\r\n"
+             "    }\r\n  }\r\n}\r\n");
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, "talker");
     mt_write(dir, rel, "{\r\n\tinherit = \"mods/talker/probe_base\";\r\n\tdisplayName = \"#str_probe_name\";\r\n"
-                       "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n}");
+                       "\tdescription = \"#str_probe_desc\";\r\n\tother = \"#str_probe_names\";\r\n"
+                       "\tbaron = \"#str_snapentity_demon_baron\";\r\n}");
     g_logged = 0;
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.salted == 1 && ss.rebuilt == 1 && ss.failed == 0);
     if (ss.failed || !ss.salted) log_dump("strings");
@@ -379,6 +382,9 @@ static void test_fresh_folder_strings(const char *tmp)
     CHECK(t && strstr(t, want));
     _snprintf_s(want, sizeof want, _TRUNCATE, "Says #str_%s_probe_name.", salt);
     CHECK(t && strstr(t, want) && !strstr(t, "\"probe_desc\""));
+    /* DECISIONS 9: a key the game (snapentity_demon_baron) or Snapmap+
+     * (sh_bv_navigation_desc) defines is a string edit and keeps its name. */
+    CHECK(t && strstr(t, "\"snapentity_demon_baron\": \"Big Baron\"") && strstr(t, "\"sh_bv_navigation_desc\": \"Mine\""));
     free(t);
     _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_ROW, salt);
     t = slurp(dir, rel, NULL);
@@ -387,6 +393,7 @@ static void test_fresh_folder_strings(const char *tmp)
     _snprintf_s(want, sizeof want, _TRUNCATE, "description = \"#str_%s_probe_desc\"", salt);
     CHECK(t && strstr(t, want));
     CHECK(t && strstr(t, "other = \"#str_probe_names\""));   /* not one of its keys: a name boundary */
+    CHECK(t && strstr(t, "baron = \"#str_snapentity_demon_baron\""));   /* a string edit's reference stays */
     free(t);
     /* A copy: its keys and references follow its new salt. */
     _snprintf_s(copy, sizeof copy, _TRUNCATE, "%s\\talker - Copy", root);
@@ -511,6 +518,60 @@ static void test_fresh_folder_refusals(const char *tmp)
         free(t);
         mt_remove_tree(path);
     }
+}
+
+/* An outside converter (Doomforge) writes a new folder already salted: its
+ * builder part is only {"format":2,"salt":"<salt>"}, and its binaries name
+ * that salt. The first scan keeps the salt and builds it; a second such folder
+ * of the same salt is a copy of the first, and as its binaries name the salt
+ * it cannot be given another: it is refused with a plain cause, untouched. */
+static void conv_make(const char *dir, const char *salt)
+{
+    char rel[MAX_PATH * 2], text[600], path[MAX_PATH * 2];
+    FILE *f = NULL;
+    static const char bytes[] = "MD6\0\0\0material mods/cvsalt00/skin\0";
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "{\r\n  \"name\": \"Converted demon\",\r\n  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\"}\r\n}\r\n", salt);
+    mt_write(dir, "mod.json", text);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, FB_BASE, salt);
+    mt_write(dir, rel, "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\generated\\basemodel\\md6\\mods\\%s\\m.bmd6model", dir, salt);
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes, 1, sizeof bytes, f); fclose(f); }
+}
+
+static void test_converter_salt(const char *tmp)
+{
+    char root[MAX_PATH], a[MAX_PATH], b[MAX_PATH], salt[SH_SALT_LEN + 1], before[2048], after[2048], *mj0, *mj1;
+    sh_ms_sync_stats ss;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    int usable;
+    printf("-- salt: a new folder an outside converter salted keeps its salt; a second one of that salt is refused\n");
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\converted\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\Converted demon", root);
+    conv_make(a, "cvsalt00");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0 && ss.resalted == 0);
+    CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));
+    /* The same converter output again, in another folder. */
+    _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\Converted demon again", root);
+    conv_make(b, "cvsalt00");
+    dir_names(b, before, sizeof before);
+    mj0 = slurp(b, "mod.json", NULL);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.resalted == 0);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "Converted demon again");
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "inside a binary file"));
+    if (e) printf("   %s\n", e->cause);
+    CHECK(sh_ms_entry_usable(find_entry(&list, "Converted demon")));
+    sh_ms_list_free(&list);
+    dir_names(b, after, sizeof after);
+    mj1 = slurp(b, "mod.json", NULL);
+    CHECK(!strcmp(before, after) && same_text(mj0, mj1));
+    free(mj0);
+    free(mj1);
+    CHECK(entry_of("Converted demon", salt, NULL, &usable) && usable && !strcmp(salt, "cvsalt00"));
 }
 
 static void test_copy_gets_new_salt(const char *tmp)
@@ -1271,6 +1332,7 @@ int main(int argc, char **argv)
     test_fresh_folder_strings(tmp);
     test_fresh_folder_refusals(tmp);
     test_copy_gets_new_salt(tmp);
+    test_converter_salt(tmp);
     test_earlier_shapes(tmp);
     test_place_folders(fixture, tmp);
     test_new_mod(tmp);

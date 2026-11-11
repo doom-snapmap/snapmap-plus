@@ -11,6 +11,7 @@
 #include "cvar_unlock.h"
 #include "backend_log.h"
 #include "host_image.h"
+#include "engine_globals.h"
 
 /* Registration and the developer-table alias.
  *
@@ -119,155 +120,29 @@ static void set_settable_one(void *cvar_v)
         uint8_t *cvar = (uint8_t *)cvar_v;
         if (cvar == NULL)
             return;
-        uint32_t *flags = (uint32_t *)(cvar + SH_IDCVAR_FLAGS);
-        *flags |= CVAR_FLAG_NOCHEAT;
+        /* Atomic: the main thread may write the same flags word meanwhile. */
+        volatile LONG *flags = (volatile LONG *)(cvar + SH_IDCVAR_FLAGS);
+        if (!(*flags & CVAR_FLAG_NOCHEAT)) InterlockedOr(flags, CVAR_FLAG_NOCHEAT);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* A later pass retries entries still being initialized. */
     }
 }
 
 
-/* Resolve CmdSystemLea independently of backend bootstrap, then decode its
- * singleton slot. The adjacent cvar-system slot is 0x10 bytes later.
- * A pinned-RVA fallback remains for the encrypted early-boot window. */
-
-/* CmdSystemLea; relative operands are wildcarded. */
-static const char *const CVU_CMDSYS_LEA_SIG =
-    "40 53 48 83 EC 30 48 8B 0D ?? ?? ?? ?? 4C 8D 0D ?? ?? ?? ?? 33 DB 4C 8D 05 ?? ?? ?? ?? "
-    "89 5C 24 28 48 8D 15 ?? ?? ?? ?? 48 89 5C 24 20 48 8B 01 FF 50 20 48 8B 0D ?? ?? ?? ?? "
-    "4C 8D 0D ?? ?? ?? ??";
-
-#define CVU_RIP_SCAN_WINDOW 0x40   /* mirror B2_RIP_SCAN_WINDOW: first 0x40 bytes of the accessor fn */
-#define CVU_CMDSYS_TO_CVARSYS 0x10 /* cvarSys == cmdSystem .data slot + 0x10 (adjacent singletons) */
-
-static const uint8_t *g_cvu_cmdsys_slot = NULL;   /* sig-decoded cmdSystem .data slot, cached (scan runs once) */
-
-/* Parse masked hex bytes; return the byte count or 0 on malformed/oversized input. */
-static int cvu_parse_sig(const char *s, uint8_t *bytes, uint8_t *mask, int cap)
-{
-    int n = 0, hi, lo;
-    while (*s) {
-        while (*s == ' ') s++;
-        if (!*s) break;
-        if (n >= cap) return 0;
-        if (s[0] == '?') {
-            bytes[n] = 0; mask[n] = 0;
-            s++; if (*s == '?') s++;
-        } else {
-            hi = (s[0]>='0'&&s[0]<='9')?s[0]-'0':(s[0]>='A'&&s[0]<='F')?s[0]-'A'+10:(s[0]>='a'&&s[0]<='f')?s[0]-'a'+10:-1;
-            lo = (s[1]>='0'&&s[1]<='9')?s[1]-'0':(s[1]>='A'&&s[1]<='F')?s[1]-'A'+10:(s[1]>='a'&&s[1]<='f')?s[1]-'a'+10:-1;
-            if (hi < 0 || lo < 0) return 0;
-            bytes[n] = (uint8_t)((hi << 4) | lo); mask[n] = 1;
-            s += 2;
-        }
-        n++;
-    }
-    return n;
-}
-
-/* Read the PE .text span; return 0 if headers are invalid or unreadable. */
-static int cvu_find_text(const uint8_t *base, const uint8_t **out_start, size_t *out_size)
-{
-    __try {
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-        const IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-            if (memcmp(sec[i].Name, ".text", 5) == 0) {
-                *out_start = base + sec[i].VirtualAddress;
-                *out_size  = sec[i].Misc.VirtualSize;
-                return 1;
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-    return 0;
-}
-
-/* Return the unique masked match, or NULL if absent or ambiguous. */
-static const uint8_t *cvu_scan_unique(const uint8_t *hay, size_t haylen,
-                                      const uint8_t *bytes, const uint8_t *mask, int len)
-{
-    if (len <= 0 || (size_t)len > haylen) return NULL;
-    const uint8_t *hit = NULL;
-    size_t last = haylen - (size_t)len;
-    for (size_t i = 0; i <= last; i++) {
-        int ok = 1;
-        for (int j = 0; j < len; j++)
-            if (mask[j] && hay[i + j] != bytes[j]) { ok = 0; break; }
-        if (ok) {
-            if (hit) return NULL;   /* ambiguous -> refuse rather than guess */
-            hit = hay + i;
-        }
-    }
-    return hit;
-}
-
-/* Decode the first supported RIP-relative MOV/LEA within the accessor window. */
-static const uint8_t *cvu_decode_rip_slot(const uint8_t *fn)
-{
-    uint8_t b[CVU_RIP_SCAN_WINDOW];
-    __try { memcpy(b, fn, sizeof b); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
-    for (int i = 0; i + 7 <= CVU_RIP_SCAN_WINDOW; i++) {
-        if (b[i] == 0x48 && (b[i+1] == 0x8B || b[i+1] == 0x8D) && (b[i+2] == 0x0D || b[i+2] == 0x05)) {
-            int32_t disp;
-            memcpy(&disp, &b[i+3], 4);
-            return fn + i + 7 + disp;
-        }
-    }
-    return NULL;
-}
-
-/* Decode and cache the slot, then read cvarSys. A cached slot with no object
- * means engine construction is pending; a missing slot means resolution failed. */
-static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
-{
-    if (g_cvu_cmdsys_slot == NULL) {
-        const uint8_t *text; size_t tsize;
-        if (!cvu_find_text(base, &text, &tsize)) return NULL;
-        uint8_t bytes[96], mask[96];
-        int len = cvu_parse_sig(CVU_CMDSYS_LEA_SIG, bytes, mask, (int)sizeof bytes);
-        if (len <= 0) return NULL;
-        const uint8_t *fn = cvu_scan_unique(text, tsize, bytes, mask, len);
-        if (!fn) return NULL;
-        const uint8_t *slot = cvu_decode_rip_slot(fn);
-        if (!slot) return NULL;
-        g_cvu_cmdsys_slot = slot;
-        backend_log("B2: cvar-unlock CmdSystemLea sig RESOLVED -> portable cvarSys path live (SteamStub .text decrypted)");
-    }
-    uint8_t *cvarSys = NULL;
-    __try { cvarSys = *(uint8_t **)(g_cvu_cmdsys_slot + CVU_CMDSYS_TO_CVARSYS); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
-    return cvarSys;
-}
-
 /* What the worker saw before its first alias, for the APPLIED log line. */
 static int      g_cvu_aliased = 0;
 static uint32_t g_cvu_running_polls = 0, g_cvu_running_first = 0, g_cvu_running_chain = 0;
 static uint32_t g_cvu_alias_count = 0, g_cvu_changes = 0;
 
-/* SteamStub may still hide .text during boot. Try the signature first, then
- * the Vulkan-name-gated RVA while it is unavailable. */
+/* The cvar system through the globals table's anchor, checked at its recorded
+ * code site; NULL until the engine has constructed it. */
 static uint8_t *cvu_cvarsys(uint8_t *base)
 {
-    static ULONGLONG last_scan = 0;
+    uintptr_t slot = glb_resolve(base, "cvar_system_slot", NULL);
     uint8_t *cvarSys = NULL;
-    /* An unresolved signature means a full .text scan; keep those 10 ms apart. */
-    if (g_cvu_cmdsys_slot != NULL || GetTickCount64() - last_scan >= 10) {
-        if (g_cvu_cmdsys_slot == NULL)
-            last_scan = GetTickCount64();
-        cvarSys = cvu_resolve_cvarsys_portable(base);
-    }
-    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_supported_build()) {
-        /* The gate excludes OpenGL by name; it does not verify the pinned build hash. */
-        __try {
-            cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return NULL;
-        }
-    }
+    if (!slot) return NULL;
+    __try { cvarSys = *(uint8_t **)slot; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
     return cvarSys;
 }
 
@@ -300,7 +175,7 @@ static int apply_unlock(uint8_t *cvarSys)
                             memcmp(cvarSys + CVARSYS_DEV_HASH_OFF, cvarSys + CVARSYS_FULL_HASH_OFF, 0x10);
                 char msg[200];
                 _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                            "B2: cvar-unlock full cvar table changed after the alias (%u -> %u cvars, arrays %s); "
+                            "cvars: unlock full cvar table changed after the alias (%u -> %u cvars, arrays %s); "
                             "aliasing again", g_cvu_alias_count, count, moved ? "moved" : "kept");
                 backend_log(msg);
             }
@@ -341,13 +216,9 @@ static DWORD WINAPI unlock_thread(LPVOID param)
     /* The developer-table alias writes idCVarSystem fields: only on the supported
      * executable, and only once that layout is established. */
     if (!SH_CVARSYS_LAYOUT_ESTABLISHED) {
-        backend_log("B2: cvar-unlock SKIPPED -- the idCVarSystem layout is not established for "
+        backend_log("cvars: unlock off -- the idCVarSystem layout is not established for "
                     "build 13954591");
         return 0;
-    }
-    for (int i = 0; i < 6000 && base == NULL; i++) {
-        Sleep(10);
-        base = (uint8_t *)sh_host_image_base();
     }
     if (base == NULL || !sh_host_is_supported_build())
         return 0;
@@ -363,14 +234,16 @@ static DWORD WINAPI unlock_thread(LPVOID param)
         if (!applied)
             Sleep(cvarSys != NULL ? 1 : 10);
     }
-    if (!applied)
+    if (!applied) {
+        backend_log("cvars: unlock off -- the cvar system was not found within 60 s");
         return 0;
+    }
     if (g_cvu_running_polls != 0)
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "B2: cvar-unlock APPLIED after registration (%u cvars); deferred %u polls while "
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "cvars: unlock APPLIED after registration (%u cvars); deferred %u polls while "
                   "registration ran, first at %u of %u", g_cvu_alias_count, g_cvu_running_polls,
                   g_cvu_running_first, g_cvu_running_chain);
     else
-        _snprintf_s(msg, sizeof msg, _TRUNCATE, "B2: cvar-unlock APPLIED after registration (%u cvars)", g_cvu_alias_count);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "cvars: unlock APPLIED after registration (%u cvars)", g_cvu_alias_count);
     backend_log(msg);
 
     /* Re-mark NOCHEAT for about ten seconds and watch the full table. */
@@ -378,14 +251,14 @@ static DWORD WINAPI unlock_thread(LPVOID param)
         Sleep(50);
         apply_unlock(cvu_cvarsys(base));
     }
-    _snprintf_s(msg, sizeof msg, _TRUNCATE, "B2: cvar-unlock settled -- full table %s after the alias",
+    _snprintf_s(msg, sizeof msg, _TRUNCATE, "cvars: unlock settled -- full table %s after the alias",
               g_cvu_changes ? "changed" : "unchanged");
     backend_log(msg);
     return 0;
 }
 
 /* Called from DllMain; the worker waits until after loader initialization to run.
- * Its independent signature scan does not require backend bootstrap to finish. */
+ * It does not wait for the backend bootstrap. */
 void sh_cvar_unlock_start(void)
 {
     HANDLE h = CreateThread(NULL, 0, unlock_thread, NULL, 0, NULL);

@@ -16,7 +16,9 @@ int sh_map_render_write(void *map,const sh_map_render *s)
 {assert(map==map_a);if(fail_write)return 0;saved_a=*s;writes++;return 1;}
 void sh_map_render_select(const sh_map_render *s){selected=*s;selects++;}
 static int marks;
-int sh_editor_mark_modified(const char *label){assert(!strcmp(label,"Unlock View Distance"));marks++;return 1;}
+/* The setting lives in the map's text, so it marks the map modified without an undo step. */
+int sh_editor_mark_modified(const char *label){(void)label;assert(!"an undo step was pushed");return 1;}
+int sh_editor_mark_modified_no_undo(void){marks++;return 1;}
 int sh_settings_tab_register_group(const sh_settings_group *g){group=*g;registered++;return 1;}
 int sh_settings_tab_add_bool(sh_settings_rows *rows,const sh_settings_bool *row,int *draft,int *base)
 {

@@ -69,7 +69,7 @@ static void test_stream_abi_and_memory_streams(void)
 
     sh_overrides_test_stream_helpers_reset();
     /* Require SIG_OK and an in-image address, accepting shifted RVAs.
-     * SIG_OK_HOOKED and out-of-image pointers must refuse the provider. */
+     * SIG_CHANGED and out-of-image pointers must refuse the provider. */
     {
         const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
         CHECK(base != NULL);

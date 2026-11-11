@@ -13,6 +13,7 @@
 #include "backend_log.h"
 #include "config.h"
 #include "config_json.h"
+#include "../common/wide_path.h"
 
 #define SH_CONFIG_MUTEX_NAME L"Local\\SnapmapPlus.Config"
 #define SH_CONFIG_MUTEX_WAIT_MS 2000u
@@ -472,20 +473,19 @@ static int test_fault(config_fault fault)
 
 static int resolve_paths_locked(void)
 {
-    wchar_t *base = NULL;
-    PWSTR known = NULL;
-    if (test_fault(CONFIG_FAIL_RESOLVE)) return 0;
-#ifdef SH_CONFIG_TESTING
-    if (g_test_local_appdata) base = copy_wstring(g_test_local_appdata);
-#endif
-    if (!base) {
-        if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &known)) ||
-            !known)
-            return 0;
-        base = copy_wstring(known);
-        CoTaskMemFree(known);
-    }
+    /* The long form ("\\?\..."): the folder may be deeper than MAX_PATH. */
+    wchar_t *base = (wchar_t *)malloc(SH_WPATH_MAX * sizeof(wchar_t));
+    size_t length = 0;
     if (!base) return 0;
+    if (test_fault(CONFIG_FAIL_RESOLVE)) { free(base); return 0; }
+#ifdef SH_CONFIG_TESTING
+    if (g_test_local_appdata && wcslen(g_test_local_appdata) < SH_WPATH_MAX) {
+        wcscpy_s(base, SH_WPATH_MAX, g_test_local_appdata);
+        length = sh_wpath_long(base, SH_WPATH_MAX);
+    }
+#endif
+    if (!length) length = sh_wpath_local_appdata(base, SH_WPATH_MAX);
+    if (!length) { free(base); return 0; }
     g_config_dir = join_path(base, L"snapmap-plus");
     free(base);
     if (!g_config_dir) return 0;
@@ -497,8 +497,8 @@ static int ensure_config_dir_locked(void)
 {
     int result;
     if (!g_config_dir) return 0;
-    result = SHCreateDirectoryExW(NULL, g_config_dir, NULL);
-    return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS;
+    result = sh_wpath_ensure_dir(g_config_dir);
+    return result;
 }
 
 static HANDLE acquire_process_mutex(void)
@@ -792,19 +792,18 @@ static int restore_interrupted_replace_locked(void)
         (sizeof(rollback_prefix) / sizeof(rollback_prefix[0])) - 1;
     WIN32_FIND_DATAW found;
     HANDLE search = INVALID_HANDLE_VALUE;
-    wchar_t pattern[MAX_PATH];
+    wchar_t *pattern;
     wchar_t temp_name[96];
     wchar_t *best_rollback = NULL;
     wchar_t *best_temp = NULL;
     FILETIME best_time = {0, 0};
     int restored = 0;
 
-    if (!g_config_dir || !g_config_path ||
-        _snwprintf_s(pattern, sizeof(pattern) / sizeof(pattern[0]),
-                     _TRUNCATE, L"%s\\config.json.rollback.*",
-                     g_config_dir) < 0)
-        return 0;
+    if (!g_config_dir || !g_config_path) return 0;
+    pattern = join_path(g_config_dir, L"config.json.rollback.*");
+    if (!pattern) return 0;
     search = FindFirstFileW(pattern, &found);
+    free(pattern);
     if (search == INVALID_HANDLE_VALUE) return 0;
     do {
         const wchar_t *suffix;

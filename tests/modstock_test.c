@@ -316,7 +316,7 @@ static void test_builder(const char *tmp)
             char file[1024], text[2048];
             _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
             _snprintf_s(text, sizeof text, _TRUNCATE, "{\"bundle\":\"%s\",\"files\":[%s],\"format\":2,\"id\":\"" SALT_STOCK "\","
-                        "\"name\":\"x\",\"version\":\"0.0.0\"}", h, file);
+                        "\"name\":\"x\"}", h, file);
             CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
             CHECK(strstr(b.first_cause, "stock") != NULL);
             sh_mb_free(&b);
@@ -984,12 +984,13 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(sh_ms_set_root(store));
     CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
-    CHECK(st.stock_files == 3 && st.copied == 1);
+    CHECK(st.stock_files == 3 && st.copied == 4);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
-    /* The store folder holds the one carried file; the pointers are in its mod.json only. */
+    /* DECISIONS 10: the store folder keeps every file the folder held, the
+     * game's own copy included; the closure's pointers are in mod.json only. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store, key);
-    CHECK(count_files(path) == 1);
+    CHECK(count_files(path) == 4);
     {
         char *text;
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, key);
@@ -999,7 +1000,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     }
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\" REQ_COPY, store, key);
     { char *q; for (q = path; *q; q++) if (*q == '/') *q = '\\'; }
-    CHECK(!mt_exists(path));
+    CHECK(mt_exists(path));
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause) && vs.files == 4 && vs.pointers == 3);
 
     /* Serving: the pointer is answered with the installed bytes. */
@@ -1039,9 +1040,10 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     sh_modstock_set_install(d1);
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));
     CHECK(sh_modserve_index_build(store) == 2);
+    /* Another revision without those bytes: the copy the folder keeps answers. */
     sh_modstock_set_install(d2);
-    CHECK(sh_modserve_open(REQ_COPY, &bytes, &len) == -1);
-    CHECK(strstr(g_log, "points at installed content 'generated/image/stock/b.bimage'") != NULL);
+    CHECK(sh_modserve_open(REQ_COPY, &bytes, &len) == 1 && len == sizeof IMG_B && !memcmp(bytes, IMG_B, len));
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     sh_modstock_set_install(d1);
 
     /* The store client: the archive carries only the carried file. */

@@ -82,8 +82,10 @@ static void check_selection(void)
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)image;
     IMAGE_NT_HEADERS64 *nt;
     IMAGE_SECTION_HEADER *sec;
-    /* The pattern is detoured at 0x1100 (prologue replaced by jmp rel32), tail intact. */
-    sig_entry hooked = { "Hooked", "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00", 0x1100, 0 };
+    /* The pattern sits intact at 0x1100 and again, detoured (prologue replaced
+     * by jmp rel32, tail intact), at 0x1200. */
+    sig_entry intact = { "Intact", "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00", 0x1100, 0 };
+    sig_entry hooked = { "Hooked", "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00", 0x1200, 0 };
     sig_result r;
     assert(vk->vulkan && !gl->vulkan);
 
@@ -97,25 +99,30 @@ static void check_selection(void)
     sec = IMAGE_FIRST_SECTION(nt);
     sec->VirtualAddress = 0x1000; sec->Misc.VirtualSize = 0x1000;
     sec->Characteristics = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
-    memcpy(image + 0x1100, "\xE9\x11\x22\x33\x44\x57\x48\x83\xEC\x20\x8B\xDA\x48\x8B\xF9\x8B\x91\x18\x36\x02\x00", 21);
+    memcpy(image + 0x1100, "\x48\x89\x5C\x24\x08\x57\x48\x83\xEC\x20\x8B\xDA\x48\x8B\xF9\x8B\x91\x18\x36\x02\x00", 21);
+    memcpy(image + 0x1200, "\xE9\x11\x22\x33\x44\x57\x48\x83\xEC\x20\x8B\xDA\x48\x8B\xF9\x8B\x91\x18\x36\x02\x00", 21);
 
     /* An unbound image is unsupported: no RVA is ever applied. */
     sh_host_test_bind_identity(NULL, NULL);
     assert(!sh_host_image_is_supported(image) && sh_host_image_rva(image, 1, 2) == 0);
     assert(sh_engine_game_system_slot(image) == 0);
-    assert(sig_resolve_one(image, &hooked, &r) == SIG_NOT_FOUND);
+    assert(sig_resolve_one(image, &intact, &r) == SIG_NOT_FOUND && r.addr == 0);
 
-    /* Vulkan identity: the Vulkan RVA recovers the detour. */
+    /* Vulkan identity: the Vulkan RVA resolves when the whole pattern holds there,
+     * and a detoured site is reported changed, never recovered. */
     sh_host_test_bind_identity(image, vk);
     assert(sh_host_image_is_supported(image) && sh_host_image_rva(image, 1, 2) == 1);
     assert(sh_engine_game_system_slot(image) == (uintptr_t)image + 0x2F48600u);
-    assert(sig_resolve_one(image, &hooked, &r) == SIG_OK_HOOKED && r.rva == 0x1100);
+    assert(sig_resolve_one(image, &intact, &r) == SIG_OK && r.rva == 0x1100 && r.addr == (uintptr_t)image + 0x1100);
+    assert(sig_resolve_one(image, &hooked, &r) == SIG_CHANGED && r.addr == 0);
+    /* The scan finds the one intact copy, wherever the entry says it is. */
+    assert(sig_scan_one(image, &hooked, &r) == SIG_OK && r.rva == 0x1100);
 
     /* OpenGL identity: its own (here absent) RVA applies, never the Vulkan one. */
     sh_host_test_bind_identity(image, gl);
     assert(sh_host_image_rva(image, 1, 2) == 2);
     assert(sh_engine_game_system_slot(image) == (uintptr_t)image + 0x2F905D8u);
-    assert(sig_resolve_one(image, &hooked, &r) == SIG_NOT_FOUND);
+    assert(sig_resolve_one(image, &intact, &r) == SIG_NOT_FOUND && r.addr == 0);
     sh_host_test_bind_identity(NULL, NULL);
     puts("OK  recorded RVAs apply only to a supported image, per renderer");
 }

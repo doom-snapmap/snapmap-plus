@@ -1381,7 +1381,6 @@ static int lg_set_display(sh_json_object *o, const char *key, const char *text, 
 /* Where a converted tree came from when it is not a map carrier: the
  * migration of a retired overrides\ folder (modmigrate.c). */
 typedef struct lg_origin {
-    const char *version;     /* the bundle version label */
     const char *source;      /* the migration source: an authored or a delivered package */
     const char *folder;      /* overrides-relative folder, '/'-separated */
     const char *tree;        /* the beta.16-19 tree fingerprint (64 hex), or NULL */
@@ -1409,21 +1408,15 @@ static char *lg_descriptor(lg_plan *p, const char *id, const sh_legacy_header *h
                            unsigned *shadows, size_t *out_len)
 {
     sh_json_object d = {0};
-    char version[SH_MODMANIFEST_VERSION_CAP], ns[96];
+    char ns[96];
     char *name = lg_text_of(sh_json_object_get(&p->root, "name")), *out = NULL, *text;
     const char *raw;
     size_t i;
     (void)h;
     *shadows = 0;
-    /* The package's own version, else 1.0.0 (no generated version label). */
-    text = lg_text_of(sh_json_object_get(&p->root, "version"));
-    if (origin && origin->version) strncpy_s(version, sizeof version, origin->version, _TRUNCATE);
-    else if (text && text[0] && strlen(text) < sizeof version && !strpbrk(text, " \t\r\n\"\\"))
-        strcpy_s(version, sizeof version, text);
-    else strcpy_s(version, sizeof version, "1.0.0");
-    free(text);
+    /* A mod has no version (the package's own is dropped). */
+    (void)origin;
     _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", id);
-    if (!lg_set_text(&d, "version", version)) goto done;
     if (name) lg_clip_codepoints(name, SH_MB_NAME_MAX);
     {
         char *trimmed = name;
@@ -1516,7 +1509,6 @@ static int lg_take_bundle(const char *folder, sh_modlegacy_verdict *v, sh_modman
     free(text);
     if (!ok) { LG_ERR(v->reason, sizeof v->reason, "mod.json does not read: %s", err); return 0; }
     strcpy_s(v->salt, sizeof v->salt, info->salt);
-    strcpy_s(v->version, sizeof v->version, info->version);
     strcpy_s(v->build, sizeof v->build, info->build);
     v->size = info->size;
     strncpy_s(v->folder, sizeof v->folder, folder, _TRUNCATE);
@@ -1840,7 +1832,6 @@ static void lg_origin_of(const sh_modlegacy_origin *in, lg_origin *out)
 {
     memset(out, 0, sizeof *out);
     if (!in) return;
-    out->version = in->version;
     out->source = in->source;
     out->folder = in->folder;
     out->tree = in->tree;
@@ -1921,7 +1912,6 @@ int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_or
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.tmp-%lu", dest, GetCurrentProcessId());
     if (!lg_unpack(zip, &plan, descriptor, descriptor_len, tmp, dest, v)) goto done;
     strcpy_s(v->id, sizeof v->id, id);
-    if (o.version) strncpy_s(v->version, sizeof v->version, o.version, _TRUNCATE);
     strncpy_s(v->folder, sizeof v->folder, dest, _TRUNCATE);
     v->files = (unsigned)plan.count;
     v->shadows = shadows;
@@ -2043,10 +2033,10 @@ static void lg_log_verdict(const sh_modlegacy_verdict *v, int memo)
     char line[1024];
     if (v->verdict == SH_MODLEGACY_CONVERT)
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CONVERT -> %s, package %s, salt %s, version %s, "
+            "LEGACY: smpkg.%s digest %s (%u/%u shards, %s): CONVERT -> %s, package %s, salt %s, "
             "build %.16s, layout era %c, %u file(s), %u name(s) outside mods/<salt>/%s",
             v->key, v->digest, v->present, v->total, sh_map_legacy_key_form_name(v->key_form),
-            v->folder, v->id, v->salt, v->version, v->build, v->layout ? v->layout : '?', v->files, v->shadows,
+            v->folder, v->id, v->salt, v->build, v->layout ? v->layout : '?', v->files, v->shadows,
             memo ? " [converted earlier this session]" : "");
     else
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -2128,7 +2118,6 @@ char *sh_modlegacy_process(const char *json, size_t length, size_t *out_length)
             }
             memset(&row, 0, sizeof row);
             strcpy_s(row.salt, sizeof row.salt, v->salt);
-            strcpy_s(row.version, sizeof row.version, v->version);
             strcpy_s(row.build, sizeof row.build, v->build);
             strncpy_s(row.name, sizeof row.name, info.name[0] ? info.name : v->id, _TRUNCATE);
             row.size = v->size;

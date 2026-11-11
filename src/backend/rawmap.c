@@ -18,6 +18,7 @@
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathW */
 #include "rawmap.h"
+#include "feature_health.h"
 #include "hook.h"
 #include "backend_log.h"
 #include "map_carrier.h"
@@ -551,6 +552,16 @@ static __declspec(thread) int g_parse_kind;
  * the player is thrown out. Such a map goes to the rawmap hold
  * (modpublished.c), which offers the download when the mod store has the mods
  * and refuses with a notice when it does not. */
+#ifdef SH_DIAG
+/* The diagnostic build's record of the immediate-open path (sh_rawmap_diag_status). */
+static void rawmap_diag_note(int new_seq, const char *state, const char *path, int rc,
+                             const char *reason, size_t bytes, int mods);
+#define RAWMAP_DIAG(seq, state, path, rc, reason, bytes, mods) \
+    rawmap_diag_note((seq), (state), (path), (rc), (reason), (bytes), (mods))
+#else
+#define RAWMAP_DIAG(seq, state, path, rc, reason, bytes, mods) ((void)0)
+#endif
+
 static char *g_prepared;               /* process heap; the text the reload checked */
 static size_t g_prepared_len;
 static char g_prepared_path[MAX_PATH];
@@ -566,10 +577,12 @@ static void rawmap_base_name(const char *path, char *out, size_t cap)
     strncpy_s(out, cap, b, _TRUNCATE);
 }
 
-static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows)
+static size_t rawmap_missing_guarded(const char *text, size_t len, sh_modmanifest_list *rows,
+                                     const char *source)
 {
     memset(rows, 0, sizeof *rows);
     __try {
+        sh_modpub_rawmap_source(source);
         return sh_modpub_rawmap_missing(text, len, rows);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("MODS: the rawmap's mod check FAULTED; the map loads as it is");
@@ -620,10 +633,11 @@ int sh_rawmap_prepare_reload(char *why, int cap)
          * this frame ran. */
         _snprintf_s(sentence, sizeof sentence, _TRUNCATE, "%s was not opened: %s.", name, cause);
         rawmap_tell(sentence);
+        RAWMAP_DIAG(0, "refused", path, 0, sentence, 0, 0);
         if (why && cap > 0) strncpy_s(why, (size_t)cap, sentence, _TRUNCATE);
         return 0;
     }
-    missing = rawmap_missing_guarded(text, len, &rows);
+    missing = rawmap_missing_guarded(text, len, &rows, name);
     if (missing) {
         char line[MAX_PATH + 128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -639,8 +653,10 @@ int sh_rawmap_prepare_reload(char *why, int cap)
             _snprintf_s(why, (size_t)cap, _TRUNCATE, held > 0
                         ? "%s needs %u mod(s) you do not have; the game is checking whether it can download them"
                         : "%s needs %u mod(s) you do not have, so it was not opened", name, (unsigned)missing);
+        RAWMAP_DIAG(0, "refused", path, 0, why && cap > 0 ? why : "", len, (int)missing);
         return 0;
     }
+    RAWMAP_DIAG(0, "opening", path, 0, "", len, (int)rows.count);
     sh_modmanifest_list_free(&rows);
     g_prepared_len = len;
     strncpy_s(g_prepared_path, sizeof g_prepared_path, path, _TRUNCATE);
@@ -654,6 +670,7 @@ void sh_rawmap_reload_done(int rc, int faulted)
     char name[MAX_PATH], text[MAX_PATH + 160];
     rawmap_base_name(g_prepared_path, name, sizeof name);
     InterlockedExchange(&g_in_reload, 0);
+    RAWMAP_DIAG(0, faulted ? "faulted" : rc ? "failed" : "opened", g_prepared_path, rc, "", g_prepared_len, -1);
     if (faulted) {
         _snprintf_s(text, sizeof text, _TRUNCATE,
                     "Opening %s failed with an engine error. Rawmaps cannot be opened again until you restart DOOM.",
@@ -932,18 +949,22 @@ static SRWLOCK g_tell_lock = SRWLOCK_INIT;
 static char g_tell[MODEXPORT_CAUSE_MAX + MAX_PATH];
 static volatile LONG g_tell_pending;
 static volatile LONG g_tell_console_only;   /* the page shows its own toast for this one */
+static const char *volatile g_tell_title = "Rawmap";
 
-static void rawmap_tell(const char *text)
+static void tell_titled(const char *title, const char *text)
 {
     char line[sizeof g_tell + 32];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "RAWMAP: %s", text);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", title, text);
     backend_log(line);
     AcquireSRWLockExclusive(&g_tell_lock);
     strncpy_s(g_tell, sizeof g_tell, text, _TRUNCATE);
+    g_tell_title = title;
     ReleaseSRWLockExclusive(&g_tell_lock);
     InterlockedExchange(&g_tell_console_only, 0);
     InterlockedExchange(&g_tell_pending, 1);
 }
+
+static void rawmap_tell(const char *text) { tell_titled("Rawmap", text); }
 
 void sh_rawmap_tell(const char *text)
 {
@@ -960,6 +981,7 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
     backend_log(line);
     AcquireSRWLockExclusive(&g_tell_lock);
     _snprintf_s(g_tell, sizeof g_tell, _TRUNCATE, "The rawmap was not loaded: %s.", reason && reason[0] ? reason : "it cannot be read");
+    g_tell_title = "Rawmap";
     ReleaseSRWLockExclusive(&g_tell_lock);
     InterlockedExchange(&g_tell_console_only, 1);
     InterlockedExchange(&g_tell_pending, 1);
@@ -968,14 +990,16 @@ static void rawmap_tell_load_refused(const char *path, const char *reason)
 void sh_rawmap_poll_main(void)
 {
     char text[sizeof g_tell];
+    const char *title;
     void (*toast)(const char *, const char *) = g_notify_toast;
     void (*print)(const char *) = g_notify_print;
     if (!InterlockedExchange(&g_tell_pending, 0)) return;
     AcquireSRWLockShared(&g_tell_lock);
     strncpy_s(text, sizeof text, g_tell, _TRUNCATE);
+    title = g_tell_title;
     ReleaseSRWLockShared(&g_tell_lock);
     if (print) print(text);
-    if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast("Rawmap", text);
+    if (toast && !InterlockedCompareExchange(&g_tell_console_only, 0, 0)) toast(title, text);
 }
 
 void sh_rawmap_last_save(sh_rawmap_save_report *out)
@@ -1631,7 +1655,7 @@ void sh_rawmap_embed_install(const void *module_base)
         sig_status st;
         if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "IdStrAssignFromStr") != 0) continue;
         st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &ra);
-        if (st == SIG_OK || st == SIG_OK_HOOKED) g_idstr_assign = (idstr_assign_fn)ra.addr;
+        if (st == SIG_OK) g_idstr_assign = (idstr_assign_fn)ra.addr;
         break;
     }
     backend_log(g_idstr_assign != NULL
@@ -1693,17 +1717,19 @@ static void nav_embed_on_save(void *out_idstr)
     int len = 0;
     char *body = NULL;
     size_t body_len = 0;
+    int failed = 0;
 
     if (!g_idstr_assign || out_idstr == NULL) return;
     if (!read_out_idstr(out_idstr, &data, &len)) return;
 
-    body = sh_navmesh_embed_all(data, (size_t)len, &body_len);
-    if (body == NULL) return;
-
-    if (!replace_out_idstr(out_idstr, body, body_len))
-        backend_log("NAV: the saved map could not be written back; its navigation shards are "
-                    "not in this save");
-    HeapFree(GetProcessHeap(), 0, body);
+    body = sh_navmesh_embed_all(data, (size_t)len, &body_len, &failed);
+    if (body != NULL) {
+        failed = !replace_out_idstr(out_idstr, body, body_len);
+        HeapFree(GetProcessHeap(), 0, body);
+    }
+    if (failed)
+        tell_titled("Navigation", "This save does not carry the map's AI navigation. "
+                    "Save again to retry.");
 }
 
 /* Put the open map's settings into the map's member (map_settings.h). */
@@ -2072,16 +2098,74 @@ int sh_rawmap_open_now(const char *path, char *out_msg, int msg_capacity)
         if (!sh_rawmap_validate_source(path, reason, (int)sizeof reason)) {
             if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
             rawmap_tell_load_refused(path, reason);
+            RAWMAP_DIAG(1, "refused", path, 0, reason, 0, 0);
             return 0;
         }
         if (!sh_rawmap_swap_set_source(path)) {
             if (out_msg && msg_capacity > 0)
                 strncpy_s(out_msg, (size_t)msg_capacity, "that path is too long to use", _TRUNCATE);
+            RAWMAP_DIAG(1, "refused", path, 0, "that path is too long to use", 0, 0);
             return 0;
         }
     }
-    return sh_editor_frame_request_reload(out_msg, msg_capacity);
+    {
+        int queued = sh_editor_frame_request_reload(out_msg, msg_capacity);
+#ifdef SH_DIAG
+        char src[MAX_PATH];
+        resolve_source_path(src, sizeof src);
+        RAWMAP_DIAG(1, queued ? "queued" : "refused", src, 0, queued || !out_msg ? "" : out_msg, 0, 0);
+#endif
+        return queued;
+    }
 }
+
+#ifdef SH_DIAG
+static SRWLOCK g_diag_lock = SRWLOCK_INIT;
+static struct {
+    unsigned long opens, seq;
+    int faulted, rc, mods;
+    size_t bytes;
+    char state[16], path[MAX_PATH], reason[MODEXPORT_CAUSE_MAX + MAX_PATH];
+} g_diag;
+
+/* new_seq starts a request (sh_rawmap_open_now); later notes update it. mods < 0 keeps the count. */
+static void rawmap_diag_note(int new_seq, const char *state, const char *path, int rc,
+                             const char *reason, size_t bytes, int mods)
+{
+    AcquireSRWLockExclusive(&g_diag_lock);
+    if (new_seq || !g_diag.seq) {
+        g_diag.seq++;
+        g_diag.bytes = 0; g_diag.mods = 0; g_diag.rc = 0; g_diag.reason[0] = '\0';
+    }
+    strncpy_s(g_diag.state, sizeof g_diag.state, state, _TRUNCATE);
+    if (path && path[0]) strncpy_s(g_diag.path, sizeof g_diag.path, path, _TRUNCATE);
+    g_diag.rc = rc;
+    strncpy_s(g_diag.reason, sizeof g_diag.reason, reason ? reason : "", _TRUNCATE);
+    if (bytes) g_diag.bytes = bytes;
+    if (mods >= 0) g_diag.mods = mods;
+    if (!strcmp(state, "opened")) g_diag.opens++;
+    if (!strcmp(state, "faulted")) g_diag.faulted = 1;
+    ReleaseSRWLockExclusive(&g_diag_lock);
+}
+
+int sh_rawmap_diag_status(char *out, size_t cap)
+{
+    char path[MAX_PATH * 2], reason[sizeof g_diag.reason * 2];
+    int n, pending;
+    if (!out || !cap) return -1;
+    AcquireSRWLockShared(&g_diag_lock);
+    if (!json_escape_into(path, sizeof path, g_diag.path)) path[0] = '\0';
+    if (!json_escape_into(reason, sizeof reason, g_diag.reason)) reason[0] = '\0';
+    pending = !strcmp(g_diag.state, "queued") || !strcmp(g_diag.state, "opening");
+    n = _snprintf_s(out, cap, _TRUNCATE,
+        "{\"opens\":%lu,\"generation\":%lu,\"pending\":%d,\"faulted\":%d,\"last\":{\"seq\":%lu,"
+        "\"path\":\"%s\",\"state\":\"%s\",\"rc\":%d,\"reason\":\"%s\",\"bytes\":%llu,\"mods\":%d}}",
+        g_diag.opens, sh_rawmap_load_generation(), pending, g_diag.faulted, g_diag.seq, path,
+        g_diag.seq ? g_diag.state : "", g_diag.rc, reason, (unsigned long long)g_diag.bytes, g_diag.mods);
+    ReleaseSRWLockShared(&g_diag_lock);
+    return n;
+}
+#endif
 
 static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
@@ -2142,6 +2226,10 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
 
     (void)self;
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    /* Opening or saving a rawmap needs the map-load and map-save hooks. */
+    if ((arm == 2 || arm == 5 || (save_path && save_path[0])) && out_msg && msg_capacity > 0 &&
+        sh_feature_refusal(SH_FEATURE_RAWMAPS, out_msg, (size_t)msg_capacity))
+        return 0;
 
     if (arm == 0 || arm == 1) {
         if (out_msg && msg_capacity > 0)
@@ -2197,6 +2285,8 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
 static int slot_rawmap_load_now(sh_iface *self, char *out_msg, int msg_capacity)
 {
     (void)self;
+    if (out_msg && msg_capacity > 0 && sh_feature_refusal(SH_FEATURE_RAWMAPS, out_msg, (size_t)msg_capacity))
+        return 0;
     return sh_rawmap_open_now(NULL, out_msg, msg_capacity);
 }
 

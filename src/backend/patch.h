@@ -1,8 +1,10 @@
 /* Code patches with saved originals, signature gates, and inline-detour wrappers.
- * Expected-byte checks reject mismatches before writing; guarded copies can still
- * fail with a retryable restore handle if rollback cannot finish. */
-#ifndef BACKEND_B2_PATCH_H
-#define BACKEND_B2_PATCH_H
+ * Every write and restore runs with the process's other threads suspended and
+ * outside the changed bytes (patch.c), so concurrent execution never sees a
+ * partly written instruction. Expected-byte checks reject mismatches before
+ * writing; a failed rollback keeps a retryable restore handle. */
+#ifndef BACKEND_PATCH_H
+#define BACKEND_PATCH_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -17,8 +19,6 @@ typedef struct sh_patch_handle {
     size_t    len;                       /* how many bytes were saved/overwritten */
     uint32_t  old_protect;               /* the page protection before we touched it */
     int       live;                      /* 1 = patched (restorable), 0 = not / already reverted */
-    int       atomic_rel32;              /* E8 operand changed with one aligned interlocked store */
-    int       protection_only;           /* no owned byte write; retry only page protection */
 } sh_patch_handle;
 
 
@@ -30,7 +30,8 @@ typedef enum sh_patch_status {
     B2_PATCH_FAIL_PROTECT,      /* VirtualProtect failed */
     B2_PATCH_FAIL_SEH,          /* an access violation / SEH fault during read or write */
     B2_PATCH_FAIL_NOTLIVE,      /* code_unpatch on a non-live handle */
-    B2_PATCH_FAIL_ROLLBACK      /* failed apply could not fully restore; handle stays live */
+    B2_PATCH_FAIL_ROLLBACK,     /* failed apply could not fully restore; handle stays live */
+    B2_PATCH_FAIL_BUSY          /* a thread stayed inside the bytes for every attempt; nothing changed */
 } sh_patch_status;
 
 /* Patch 1..B2_PATCH_MAX_BYTES after checking expect, if supplied. Passing NULL
@@ -48,12 +49,9 @@ sh_patch_status code_unpatch(sh_patch_handle *handle);
 sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
                                size_t len, sh_patch_handle *out_handle);
 
-/* Redirect an existing E8 call without changing its opcode. The four-byte
- * displacement MUST be aligned. Validate the complete call and publish its
- * operand with a compare-exchange, so concurrent execution cannot see a torn
- * displacement. The destination must be fully initialized before this call.
- * The caller owns destination lifetime until all users have finished.
- * handle is an output and must not already own a live patch, as with code_patch. */
+/* Redirect an existing E8 call: require SIG_OK and both calls to be E8 rel32,
+ * then code_patch the five bytes. The destination must be fully initialized
+ * before this call, and the caller owns its lifetime until all users finish. */
 sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
                                     const uint8_t replacement[5], sh_patch_handle *handle);
 
@@ -80,4 +78,4 @@ void sh_patch_test_faults(uint64_t protect_calls, uint64_t write_calls, size_t w
 void sh_patch_test_observe_write(void (*observer)(void *target));
 #endif
 
-#endif /* BACKEND_B2_PATCH_H */
+#endif /* BACKEND_PATCH_H */

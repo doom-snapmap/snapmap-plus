@@ -555,6 +555,8 @@
   .ctxmenu [role="menuitem"] { display: block; width: 100%; padding: 5px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
   .ctxmenu [role="menuitem"]:hover, .ctxmenu [role="menuitem"]:focus-visible { background: var(--sel); color: var(--selText); outline: 0; }
 
+  .features-off { flex-shrink: 0; padding: 5px 10px; font-size: 11px; color: var(--warnText); background: var(--panel2); border-top: 1px solid var(--border); }
+  .features-off[hidden] { display: none; }
   .statusbar { flex-shrink: 0; display: flex; align-items: center; min-width: 0; max-width: 100%; overflow: hidden; background: var(--panel2); border-top: 1px solid var(--border); color: var(--muted); padding: 6px 10px; font-size: 11px; }
   .status-group { display: flex; align-items: center; gap: 14px; white-space: nowrap; }
   .status-main { min-width: 0; }

@@ -261,7 +261,6 @@ static int install_mod(const char *src, const char *salt, const char *name, cons
     if (ok) {
         strcpy_s(row->salt, sizeof row->salt, b.id);
         if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
-        strcpy_s(row->version, sizeof row->version, b.version);
         strcpy_s(row->build, sizeof row->build, b.hash);
         row->size = b.total_size;
     }
@@ -478,8 +477,7 @@ static void recording(const char *lib, const sh_modmanifest_row *door)
     int n, source;
     printf("-- Create writes the closure into the file's block; the engine's bytes stay as they were\n");
     n = sh_prefab_mods_closure(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows);
-    CHECK(n == 1 && rows.count == 1 && !strcmp(rows.rows[0].build, door->build) && !strcmp(rows.rows[0].salt, "testdoor") && !strcmp(rows.rows[0].name, "test.door") &&
-          !strcmp(rows.rows[0].version, "1.0.0") && rows.rows[0].size == door->size);
+    CHECK(n == 1 && rows.count == 1 && !strcmp(rows.rows[0].build, door->build) && !strcmp(rows.rows[0].salt, "testdoor") && !strcmp(rows.rows[0].name, "test.door") && rows.rows[0].size == door->size);
     CHECK(rows.count == 1 && rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/testdoor/door"));
     sh_modmanifest_list_free(&rows);
     CHECK(sh_prefab_mods_closure(STOCK_PREFAB, sizeof STOCK_PREFAB - 1, &rows) == 0);
@@ -622,13 +620,12 @@ static void status(const sh_modmanifest_row *door)
     memset(&ghost, 0, sizeof ghost);
     strcpy_s(ghost.salt, sizeof ghost.salt, "ghostmod");
         strcpy_s(ghost.name, sizeof ghost.name, "ghost.mod");
-    strcpy_s(ghost.version, sizeof ghost.version, "2.0");
     strcpy_s(ghost.build, sizeof ghost.build, GHOST);
     ghost.size = 1048576;
     CHECK(sh_modmanifest_list_add(&rows, door) && sh_modmanifest_list_add(&rows, &ghost));
     json = sh_prefab_mods_status_json(&rows, &missing);
     CHECK(json && missing == 1 && strstr(json, "\"count\":2,\"missing\":1") && strstr(json, "\"id\":\"test.door\"") &&
-          strstr(json, "\"installed\":true") && strstr(json, "\"id\":\"ghost.mod\",\"salt\":\"ghostmod\",\"version\":\"2.0\""));
+          strstr(json, "\"installed\":true") && strstr(json, "\"id\":\"ghost.mod\",\"salt\":\"ghostmod\""));
     free(json);
     json = sh_prefab_mods_view_set(NULL, 0, &rows, NULL);
     memset(&call, 0, sizeof call);
@@ -651,7 +648,6 @@ static void rows_of(sh_modmanifest_list *rows, const sh_modmanifest_row *door, i
         memset(&ghost, 0, sizeof ghost);
         strcpy_s(ghost.salt, sizeof ghost.salt, "ghostmod");
         strcpy_s(ghost.name, sizeof ghost.name, "ghost.mod");
-        strcpy_s(ghost.version, sizeof ghost.version, "2.0");
         strcpy_s(ghost.build, sizeof ghost.build, GHOST);
         ghost.size = 1048576;
         sh_modmanifest_row_add_name(&ghost, "maps/modules/mods/ghostmod/room.decl");
@@ -670,7 +666,7 @@ static void resolving(const sh_modmanifest_row *door)
     rows_of(&rows, door, 0);
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     CHECK(r == SH_PREFAB_MODS_PLACE && seq == 0 && F.activations == 1 && F.attaches == 1 && !strcmp(F.attached[0], door->build));
-    CHECK(!strcmp(F.last_print, "Prefab Door uses test.door 1.0.0; this map did not list it, so it was added to the map "
+    CHECK(!strcmp(F.last_print, "Prefab Door uses test.door; this map did not list it, so it was added to the map "
                                 "(the Mods tab's Remove from map takes it out)."));
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     CHECK(r == SH_PREFAB_MODS_PLACE && F.attaches == 1 && F.prints == 1);   /* the map lists it now */
@@ -745,9 +741,9 @@ static void resolving(const sh_modmanifest_row *door)
     rows_of(&rows, door, 1);
     r = sh_prefab_mods_resolve_main(OBJECT_PREFAB, sizeof OBJECT_PREFAB - 1, &rows, "Door", &seq, msg, sizeof msg);
     CHECK(r == SH_PREFAB_MODS_REFUSED && seq == 0 && F.attaches == 0);
-    CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod 2.0, which you do not have. Ask the "
+    CHECK(!strcmp(F.last_print, "Prefab Door was not placed: it needs ghost.mod, which you do not have. Ask the "
                                 "prefab's author for its .zip export, which carries the mods."));
-    CHECK(F.toasts == 1 && !strcmp(F.last_toast, "This prefab was not placed. It needs mods you do not have: ghost.mod 2.0. "
+    CHECK(F.toasts == 1 && !strcmp(F.last_toast, "This prefab was not placed. It needs mods you do not have: ghost.mod. "
                                                  "Ask the prefab's author for its .zip export."));
     CHECK(!strcmp(msg, F.last_toast));
     sh_modmanifest_list_free(&rows);
@@ -1053,7 +1049,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
             free(with);
             CHECK(sh_prefab_mods_import(lone, libD, name, sizeof name, msg, sizeof msg) == 1);
             CHECK(!strcmp(name, "Ghost door") &&
-                  !strcmp(msg, "Imported prefab Ghost door: 0 mods installed, 0 already installed. It also needs ghost.mod 2.0, "
+                  !strcmp(msg, "Imported prefab Ghost door: 0 mods installed, 0 already installed. It also needs ghost.mod, "
                                "which the export does not carry."));
         }
     }
@@ -1068,7 +1064,7 @@ static void zip(const char *tmp, const char *libA, const char *storeA, const sh_
         F.prints_all[0] = 0;
         mods_argv[1] = "Door (2)";
         sh_prefab_mods_command(2, mods_argv);
-        CHECK(strstr(F.prints_all, "Prefab Door (2) needs 1 mod:") && strstr(F.prints_all, "test.door 1.0.0 (testdoor@") &&
+        CHECK(strstr(F.prints_all, "Prefab Door (2) needs 1 mod:") && strstr(F.prints_all, "test.door (testdoor@") &&
               strstr(F.prints_all, "): installed"));
         mods_argv[1] = "Door";
         sh_prefab_mods_command(2, mods_argv);
@@ -1306,7 +1302,6 @@ static int e_install(const char *src, const char *salt, const char *name, const 
     if (ok) {
         strcpy_s(row->salt, sizeof row->salt, b.id);
         if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
-        strcpy_s(row->version, sizeof row->version, b.version);
         strcpy_s(row->build, sizeof row->build, b.hash);
         row->size = b.total_size;
         if (folder_out) strcpy_s(folder_out, folder_cap, key);

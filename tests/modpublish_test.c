@@ -207,7 +207,6 @@ static char *map_with(const char *const *hashes, const char *const *ids, int n, 
         sh_modmanifest_row row;
         memset(&row, 0, sizeof row);
         strcpy_s(row.name, sizeof row.name, ids[i]);
-        strcpy_s(row.version, sizeof row.version, "1.0.0");
         (void)modsync_parse_mod(hashes[i], row.salt, row.build);
         row.size = 1000 + (unsigned long long)i;
         row.attached = g_attach_second && i == 1;

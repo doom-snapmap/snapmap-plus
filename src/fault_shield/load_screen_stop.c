@@ -1,7 +1,6 @@
 /* Stop the loading-screen thread at CancelMapChange entry (load_screen_stop.h).
  *
- * Build 13954591, both renderers (snaphak-re campaign-interactables-triage F3b,
- * decompiled from logs/shared-ghidra/triage-F3b-*):
+ * Build 13954591, both renderers:
  *   - idLoadScreen::LevelLoadCompleted (VK 0x141676770 / GL 0x1416774B0) sets the
  *     thread's stop byte +0x4B1, waits for it (idSysThread::WaitForThread on its
  *     manual-reset done event, so a repeat call does not block), syncs the renderer

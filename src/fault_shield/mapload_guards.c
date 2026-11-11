@@ -8,8 +8,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "mapload_guards.h"
-#include "engine_layout.h"   /* RVA_EVLINK / RVA_INTERACTABLE_SPAWN + the offsets, with their recipes */
-#include "../backend/host_image.h"
+#include "engine_layout.h"   /* the guarded layouts' offsets, with their recipes */
+
 #include "../backend/signatures.h" /* EventLink / InteractableSpawn are signature-resolved */
 #include "fault_record.h"    /* shield_emit -> shield_faults.log */
 #include "hook.h"
@@ -106,6 +106,7 @@ static void guard_log(LONG counter, const char *msg, uintptr_t rva, uintptr_t ad
 
 typedef void (*evlink_fn)(void *a, void *b);
 static evlink_fn     g_orig_evlink   = NULL;
+static uintptr_t     g_evlink_rva    = 0;   /* for the log lines */
 static volatile LONG g_evlink_fires  = 0;
 
 /* Vet one list and repair it if needed. `owner_slot` = address of the pointer field holding the list.
@@ -180,7 +181,7 @@ static void evlink_precheck(void *a, void *b)
             "evwire-guard: stale event-link list neutralized before the walk (a=%p tier=%d, b=%p tier=%d; "
             "tier1=handle dropped, engine rebuilds it; tier2=header reset to empty). Some event wiring for "
             "this pair is dropped; nothing was freed.", a, ra, b, rb);
-        guard_log(n, m, RVA_EVLINK, 0);
+        guard_log(n, m, g_evlink_rva, 0);
     }
 }
 
@@ -192,13 +193,9 @@ static void sh_evlink_detour(void *a, void *b)
 
 /* Take the bootstrap's resolution, with pinned-build fallback. Callers also
  * verify the stolen prologue because an identified function may already be hooked. */
-static void *guard_target(const uint8_t *module_base, const sig_result *results, size_t count,
-                          const char *sig_name, uint32_t pinned_rva)
+static void *guard_target(const sig_result *results, size_t count, const char *sig_name)
 {
-    uintptr_t a = results ? sig_addr_by_name(results, count, sig_name) : 0;
-    if (a) return (void *)a;
-    if (sh_host_is_supported_build()) return (void *)(module_base + pinned_rva);
-    return NULL;   /* unknown build: refuse rather than detour a guessed address */
+    return results ? (void *)sig_addr_by_name(results, count, sig_name) : NULL;
 }
 int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *results, size_t count)
 {
@@ -211,10 +208,11 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
         g_orig_evlink = NULL;
     }
 
-    target = guard_target(module_base, results, count, "EventLink", RVA_EVLINK);
+    target = guard_target(results, count, "EventLink");
+    g_evlink_rva = target ? (uintptr_t)target - (uintptr_t)module_base : 0;
     if (target == NULL) {
         shield_fault f = { "load", -1,
-            "evwire-guard: EventLink is unresolved on this build -- NOT installed", RVA_EVLINK, 0 };
+            "evwire-guard: EventLink is unresolved on this build -- NOT installed", g_evlink_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -222,7 +220,7 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
         shield_fault f = { "load", -1,
             "evwire-guard: prologue MISMATCH at the resolved EventLink -- NOT installed (the function is "
             "already hooked, or its stolen-byte window changed). Re-derive the STOLEN count.",
-            RVA_EVLINK, 0 };
+            g_evlink_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -230,7 +228,7 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
     if (tramp == NULL) {
         shield_fault f = { "load", -1,
             "evwire-guard: trampoline preparation failed",
-            RVA_EVLINK, 0 };
+            g_evlink_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -238,14 +236,14 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
     if (hook_commit(tramp) != B2_PATCH_OK) {
         if (hook_unpatch(tramp)) g_orig_evlink = NULL;
         shield_fault f = { "load", -1,
-            "evwire-guard: commit failed; retained callbacks require restoration", RVA_EVLINK, 0 };
+            "evwire-guard: commit failed; retained callbacks require restoration", g_evlink_rva, 0 };
         shield_emit(&f);
         return 0;
     }
     {
         shield_fault f = { "load", -1,
             "evwire-guard: armed -- stale event-link list guard on the event/trigger linker (0x9C2370)",
-            RVA_EVLINK, 0 };
+            g_evlink_rva, 0 };
         shield_emit(&f);
     }
     return 1;
@@ -259,6 +257,7 @@ int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *result
 
 typedef void (*ia_spawn_fn)(void *self);
 static ia_spawn_fn   g_orig_ia_spawn = NULL;
+static uintptr_t     g_ia_rva        = 0;   /* for the log lines */
 static volatile LONG g_ia_fires      = 0;
 
 static void ia_spawn_precheck(void *self)
@@ -291,10 +290,10 @@ static void ia_spawn_precheck(void *self)
         _snprintf_s(m, sizeof m, _TRUNCATE,
             "interactable-guard: idInteractable::Spawn entered with an absent tag subsystem "
             "(this=%p *(this+0x3db0)=%p tags=%d) -- tag count zeroed so the engine takes its own "
-            "no-tags path; this interactable spawns without tags instead of faulting at 0x123293f.",
+            "no-tags path; this interactable spawns without tags instead of faulting.",
             self, base, tagcount);
         /* Use the prevented null+0xE90 address to match reports of this crash. */
-        guard_log(n, m, RVA_INTERACTABLE_SPAWN, IA_SUBSYS_PROBE - 8u);
+        guard_log(n, m, g_ia_rva, IA_SUBSYS_PROBE - 8u);
     }
 }
 
@@ -315,11 +314,12 @@ int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *
         g_orig_ia_spawn = NULL;
     }
 
-    target = guard_target(module_base, results, count, "InteractableSpawn", RVA_INTERACTABLE_SPAWN);
+    target = guard_target(results, count, "InteractableSpawn");
+    g_ia_rva = target ? (uintptr_t)target - (uintptr_t)module_base : 0;
     if (target == NULL) {
         shield_fault f = { "load", -1,
             "interactable-guard: InteractableSpawn is unresolved on this build -- NOT installed",
-            RVA_INTERACTABLE_SPAWN, 0 };
+            g_ia_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -327,7 +327,7 @@ int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *
         shield_fault f = { "load", -1,
             "interactable-guard: prologue MISMATCH at 0x1232830 -- NOT installed (different DOOM build, or "
             "the function is already hooked). Re-derive the RVA + STOLEN count for this build.",
-            RVA_INTERACTABLE_SPAWN, 0 };
+            g_ia_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -335,7 +335,7 @@ int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *
     if (tramp == NULL) {
         shield_fault f = { "load", -1,
             "interactable-guard: trampoline preparation failed",
-            RVA_INTERACTABLE_SPAWN, 0 };
+            g_ia_rva, 0 };
         shield_emit(&f);
         return 0;
     }
@@ -344,14 +344,14 @@ int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *
         if (hook_unpatch(tramp)) g_orig_ia_spawn = NULL;
         shield_fault f = { "load", -1,
             "interactable-guard: commit failed; retained callbacks require restoration",
-            RVA_INTERACTABLE_SPAWN, 0 };
+            g_ia_rva, 0 };
         shield_emit(&f);
         return 0;
     }
     {
         shield_fault f = { "load", -1,
             "interactable-guard: armed -- absent-subsystem guard on idInteractable::Spawn (0x1232830)",
-            RVA_INTERACTABLE_SPAWN, 0 };
+            g_ia_rva, 0 };
         shield_emit(&f);
     }
     return 1;

@@ -10,27 +10,26 @@ uint8_t *g_doom_base;
 shield_engine g_eng;
 static int failed, clears, emitted, widget_visible, callback_alive;
 static int orig_calls, maintenance_calls, throw_frame, arm_in_frame;
+/* Frame's real first bytes, so recovery_install accepts it. */
+static unsigned char frame_bytes[FRAME_STOLEN] = {
+    0x40, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0xB8, 0xC0, 0x1D, 0x01, 0x00
+};
 static unsigned char manager[0x1000], shell_manager[0x100], queue[4 * DLG_DESC_STRIDE];
 static void *shell[8];
 static void *shell_slot;
-static sig_status resolve_status;
 static void fake_clear(void *self, void *block);
 
-const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
-    {"ClearDialogWrapper", "40 57", 0}, {NULL, NULL, 0}
-};
+static int dialog_asks, dialog_can_ask, main_frames;
+static const char *dialog_text;
 
-int sh_host_is_supported_build(void) { return 0; }
-uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
-sig_status sig_resolve_one(const uint8_t *base, const sig_entry *entry, sig_result *result)
-{
-    (void)base;
-    result->name = entry->name;
-    result->status = resolve_status;
-    result->addr = (uintptr_t)fake_clear;
-    result->rva = 0;
-    return resolve_status;
-}
+int sh_engine_dialog_can_ask(void) { return dialog_can_ask; }
+int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
+{ (void)gdm_id; (void)button_set; dialog_asks++; dialog_text = text; return 7; }
+int sh_engine_dialog_poll(int ticket) { (void)ticket; return SH_ENGINE_DIALOG_PENDING; }
+void sh_engine_dialog_release(int ticket) { (void)ticket; }
+sh_patch_status code_patch(void *at, const uint8_t *expect, const uint8_t *bytes, size_t n, sh_patch_handle *h)
+{ (void)at; (void)expect; (void)bytes; (void)n; if (h) h->live = 1; return B2_PATCH_OK; }
+void sh_commands_main_frame(void) { main_frames++; }
 void *hook_prepare(void *target, void *detour, size_t stolen)
 { (void)detour; (void)stolen; return target; }
 sh_patch_status hook_commit(void *original) { (void)original; return B2_PATCH_OK; }
@@ -106,7 +105,11 @@ static void reset(void)
     g_doom_base = manager;
     g_clear_dialog = fake_clear;
     g_editor_at = g_load_state_at = g_last_err_at = g_suppr_a_at = NULL;
-    g_armed = g_notice_armed = 0;
+    g_armed = 0;
+    g_damaged_text = NULL; g_damaged_wait = 0; g_damaged_ticket = 0;
+    dialog_asks = dialog_can_ask = main_frames = 0;
+    dialog_text = NULL;
+    memset(&g_eng, 0, sizeof g_eng);
     g_state = g_frames = 0;
     clears = emitted = widget_visible = callback_alive = 0;
     orig_calls = maintenance_calls = throw_frame = arm_in_frame = 0;
@@ -192,21 +195,46 @@ static void test_frame_route(void)
     CHECK(orig_calls == 1 && !maintenance_calls);
 }
 
-static void test_clean_clear_resolution(void)
+static void test_install(void)
 {
-    const sig_status refused[] = {SIG_NOT_FOUND, SIG_AMBIGUOUS, SIG_OK_HOOKED, SIG_BAD_MODULE};
-    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
-        reset();
-        g_eng.frame = (uintptr_t)fake_frame;
-        resolve_status = refused[i];
-        CHECK(recovery_install());
-        CHECK(!g_clear_dialog);
-    }
+    /* Without ClearDialog the save guard is off, and the Frame route installs. */
     reset();
-    g_eng.frame = (uintptr_t)fake_frame;
-    resolve_status = SIG_OK;
+    g_clear_dialog = NULL;
+    g_eng.frame = (uintptr_t)frame_bytes;
+    CHECK(recovery_install());
+    CHECK(!g_clear_dialog && emitted >= 1);
+
+    reset();
+    g_clear_dialog = NULL;
+    g_eng.frame = (uintptr_t)frame_bytes;
+    g_eng.clear_dialog = (uintptr_t)fake_clear;
+    orig_frame = NULL;
     CHECK(recovery_install());
     CHECK(g_clear_dialog == fake_clear);
+
+    /* A Frame another program changed is never patched. */
+    reset();
+    orig_frame = NULL;
+    frame_bytes[0] = 0xE9;
+    g_eng.frame = (uintptr_t)frame_bytes;
+    CHECK(!recovery_install());
+    frame_bytes[0] = 0x40;
+}
+
+/* A dismissed damaged save is explained once the engine can show a dialog. */
+static void test_damaged_notice(void)
+{
+    reset();
+    *(int *)(manager + DLGQ_COUNT_OFF) = 1;
+    *(int *)queue = GDM_LOAD_DAMAGED_FILE;
+    CHECK(frame_detour(shell) == 123);
+    CHECK(clears == 1 && !dialog_asks);           /* the dialog is still leaving the queue */
+    dialog_can_ask = 1;
+    CHECK(frame_detour(shell) == 123);
+    CHECK(dialog_asks == 1 && dialog_text && strstr(dialog_text, "kept the file"));
+    CHECK(frame_detour(shell) == 123);
+    CHECK(dialog_asks == 1);                       /* one notice per dismissal */
+    CHECK(main_frames == 3);                       /* the console registration tick runs every frame */
 }
 
 int main(void)
@@ -214,8 +242,9 @@ int main(void)
     test_mixed_queue_retirement();
     test_guard_refusals_and_selection();
     test_frame_route();
-    test_clean_clear_resolution();
+    test_install();
+    test_damaged_notice();
     if (failed) return 1;
-    puts("recovery dialog lifetime and Frame route tests passed");
+    puts("recovery dialog lifetime, damaged-save notice and Frame route tests passed");
     return 0;
 }

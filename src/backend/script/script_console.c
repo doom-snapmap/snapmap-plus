@@ -10,6 +10,7 @@
 #include "script_source.h"
 #ifndef SH_SCRIPT_PURE
 #include "../commands.h"
+#include "../feature_health.h"
 #endif
 
 typedef struct {
@@ -80,7 +81,7 @@ static void log_one(void *context, const char *salt, const char *name)
     log_ctx l;
     if (!matches(c, salt, name)) return;
     c->shown++;
-    say(c, "Script log of %s:", name && name[0] ? name : salt);
+    say(c, "Script log of %s:", name && name[0] ? name : "a mod without a name");
     l.c = c;
     l.n = 0;
     sh_script_log_read(salt, log_line, &l);
@@ -158,6 +159,10 @@ void h_sh_scripts(struct idCmdArgs *a)
     if (argc < 0) argc = 0;
     if (argc > 8) argc = 8;
     for (i = 0; i < argc; i++) argv[i] = cmd_argv(a, i + 1);
+    {
+        char off[160];
+        if (sh_feature_refusal(SH_FEATURE_MOD_SCRIPTS, off, sizeof off)) { sh_printf("%s\n", off); return; }
+    }
     sh_script_console(argc, argv, print_line, NULL);
 }
 #endif /* SH_SCRIPT_PURE */

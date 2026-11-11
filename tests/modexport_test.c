@@ -84,7 +84,6 @@ static int install(const char *src, char *name, size_t cap, sh_modmanifest_row *
         strcpy_s(row->salt, sizeof row->salt, b.id);
         strcpy_s(row->build, sizeof row->build, b.hash);
         if (b.name) strncpy_s(row->name, sizeof row->name, b.name, _TRUNCATE);
-        strncpy_s(row->version, sizeof row->version, b.version, _TRUNCATE);
         row->size = b.total_size;
     }
     sh_mb_free(&b);

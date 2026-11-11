@@ -177,12 +177,13 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     size_t at = 0;
     int i;
     const char *extra = g_bundle_extra ? g_bundle_extra : "";
+    (void)version;   /* a mod has no version: the fixtures' labels are not written */
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", parent, folder);
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
+                      "{\n  \"name\": \"%s\",\n  %s\n"
                       "  \"snapmap-plus\": {\"format\": 2, \"salt\": \"%s\", \"rules\": 8, \"build\": \"%s\"",
-                      version, g_bundle_name ? g_bundle_name : id, extra, id, hash64(hash_digit, h));
+                      g_bundle_name ? g_bundle_name : id, extra, id, hash64(hash_digit, h));
     if (state) {
         const char *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
         if (c) {
@@ -265,7 +266,7 @@ static void build_fixture(void)
             { "maps/game/snapmap/test/nav_owned.decl", "MODNAV", -1, "file", "maps/game/snapmap/test/nav_owned.decl", NULL, 'a' },
         };
         /* The NAV shadow path is not namespaced; it is declared a shadow. */
-        make_bundle(g_root, "alexpink@1.0.0", "alexpink", "1.0.0", 'a',
+        make_bundle(g_root, "alexpink", "alexpink", "1.0.0", 'a',
                     "\"" SHADOW "\", \"" LIFT "\", \"" GRID "\", \"maps/game/snapmap/test/nav_owned.decl\"",
                     a, (int)(sizeof a / sizeof a[0]), "{\"validated\": true, \"installedAt\": 100}");
         hash64('a', g_hash_a);
@@ -276,7 +277,7 @@ static void build_fixture(void)
         static const fx_file a2[] = {
             { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alexpink/fireball", NULL, 'b' },
         };
-        make_bundle(g_root, "maps\\Pinks\\alexpink@1.1.0", "alexpink", "1.1.0", 'b', NULL, a2, 1,
+        make_bundle(g_root, "maps\\Pinks\\alexpink", "alexpink", "1.1.0", 'b', NULL, a2, 1,
                     "{\"validated\": true, \"installedAt\": 200}");
         hash64('b', g_hash_a2);
     }
@@ -291,7 +292,7 @@ static void build_fixture(void)
               "[{\"type\":\"entityDef\",\"name\":\"mods/bobskins/thing\"},"
               "{\"type\":\"md6Def\",\"name\":\"mods/bobskins/missing.md6\"}]", 'e' },
         };
-        make_bundle(g_root, "bobskins@2.0.0", "bobskins", "2.0.0", 'c', "\"" SHADOW "\"", b, 3, NULL);
+        make_bundle(g_root, "bobskins", "bobskins", "2.0.0", 'c', "\"" SHADOW "\"", b, 3, NULL);
         hash64('c', g_hash_b);
     }
     {
@@ -299,14 +300,14 @@ static void build_fixture(void)
         static const fx_file c[] = {
             { C_ONLY, "entityDef only {}", 999, "entityDef", "mods/carolbro/only", NULL, 'f' },
         };
-        make_bundle(g_root, "carolbro@1.0.0", "carolbro", "1.0.0", 'd', NULL, c, 1, NULL);
+        make_bundle(g_root, "carolbro", "carolbro", "1.0.0", 'd', NULL, c, 1, NULL);
         hash64('d', g_hash_c);
     }
     {
         static const fx_file d[] = {
             { "generated/decls/entitydef/mods/davex000/a.decl", "x", -1, "entityDef", "mods/davex000/a", NULL, '1' },
         };
-        make_bundle(g_root, "davex000@1.0.0", "davex000", "1.0.0", 'e', NULL, d, 1,
+        make_bundle(g_root, "davex000", "davex000", "1.0.0", 'e', NULL, d, 1,
                     "{\"validated\": false, \"firstCause\": \"md6Def mesh missing\"}");
     }
     {
@@ -314,12 +315,12 @@ static void build_fixture(void)
         static const fx_file e[] = {
             { "generated/decls/entitydef/monster/sneaky.decl", "x", -1, "entityDef", "monster/sneaky", NULL, '1' },
         };
-        make_bundle(g_root, "erinns00@1.0.0", "erinns00", "1.0.0", '1', NULL, e, 1, NULL);
+        make_bundle(g_root, "erinns00", "erinns00", "1.0.0", '1', NULL, e, 1, NULL);
     }
     {
         /* A raw file: its own tree holds it (there is no blob store). */
         static const fx_file f[] = { { F_BLOB, "BLOBBYTES", 9, "image", "mods/fayblob0/tex", NULL, '2' } };
-        make_bundle(g_root, "fayblob0@1.0.0", "fayblob0", "1.0.0", '2', NULL, f, 1, NULL);
+        make_bundle(g_root, "fayblob0", "fayblob0", "1.0.0", '2', NULL, f, 1, NULL);
         hash64('2', g_hash_f);
     }
     {
@@ -331,8 +332,8 @@ static void build_fixture(void)
         static const fx_file h[] = {
             { "sound/soundbanks/pc/other_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/other_fx.bnk", NULL, '6' },
         };
-        make_bundle(g_root, "gailsnd0@1.0.0", "gailsnd0", "1.0.0", '5', NULL, g, 1, NULL);
-        make_bundle(g_root, "hanksnd0@1.0.0", "hanksnd0", "1.0.0", '6', NULL, h, 1, NULL);
+        make_bundle(g_root, "gailsnd0", "gailsnd0", "1.0.0", '5', NULL, g, 1, NULL);
+        make_bundle(g_root, "hanksnd0", "hanksnd0", "1.0.0", '6', NULL, h, 1, NULL);
     }
     {
         /* A mod the player filed under an organizing folder: found by its
@@ -460,18 +461,18 @@ static void test_index_and_isolation(void)
     CHECK(st.bundles_seen == 11);
     CHECK(st.bundles_admitted == 6);
     CHECK(st.conflicts == 1);
-    CHECK(log_has("bundle 'carolbro@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
-    CHECK(log_has("bundle 'davex000@1.0.0' skipped: not built: md6Def mesh missing"));
-    CHECK(log_has("bundle 'erinns00@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erinns00/"));
+    CHECK(log_has("bundle 'carolbro' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
+    CHECK(log_has("bundle 'davex000' skipped: not built: md6Def mesh missing"));
+    CHECK(log_has("bundle 'erinns00' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erinns00/"));
     CHECK(log_has("bundle 'unbuilt' skipped: not built yet"));
-    CHECK(log_has("bundle 'hanksnd0@1.0.0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hanksnd0/"));
-    CHECK(!log_has("bundle 'gailsnd0@1.0.0' skipped"));
+    CHECK(log_has("bundle 'hanksnd0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hanksnd0/"));
+    CHECK(!log_has("bundle 'gailsnd0' skipped"));
     CHECK(log_count("skipped:") == 5);   /* one line per skipped bundle */
     /* Two mods' shadows of one stock decl: with no map, the static winner
      * (no rule separates them: the first salt; the install time never counts;
      * the texts are outside the composable grammar). */
-    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alexpink@1.0.0, bobskins@2.0.0; serving "
-                  "alexpink@1.0.0 (no rule separates them; the first salt in name order"));
+    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alexpink, bobskins; serving "
+                  "alexpink (no rule separates them; the first salt in name order"));
     /* Two builds of one salt (the root and a place) are never a conflict. */
     CHECK(log_has("MODS: mod alexpink: builds ") && log_has("each map serves the build it declares"));
     CHECK(!log_has("superseded"));
@@ -557,7 +558,7 @@ static void test_lookup(void)
         CHECK(sh_modserve_lookup(SHADOW, &w) && !strcmp(w.bundle_id, "alexpink"));
         CHECK(sh_modserve_conflict_info("GENERATED/decls/entitydef/monster/imp.decl", &c) && c.count == 2 &&
               !c.composed && !strcmp(c.served_id, "alexpink") && strstr(c.reason, "the first salt in name order") &&
-              !strcmp(c.providers, "alexpink@1.0.0, bobskins@2.0.0"));
+              !strcmp(c.providers, "alexpink, bobskins"));
         CHECK(!sh_modserve_conflict_info(A_ENT, &c));
         CHECK(open_text(SHADOW, text, sizeof text) == 1 && !strcmp(text, "entityDef pink { }"));
     }
@@ -759,7 +760,7 @@ static void test_rescan(void)
         { "generated/decls/entitydef/mods/gusnew00/a.decl", "entityDef a {}", -1, "entityDef", "mods/gusnew00/a", NULL, '4' },
     };
     sh_modserve_plan p;
-    make_bundle(g_root, "gusnew00@1.0.0", "gusnew00", "1.0.0", '4', NULL, g, 1, NULL);
+    make_bundle(g_root, "gusnew00", "gusnew00", "1.0.0", '4', NULL, g, 1, NULL);
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gusnew00/a.decl", NULL));
     CHECK(sh_modserve_index_rescan() == 7);
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gusnew00/a.decl", NULL));
@@ -911,7 +912,7 @@ static void make_plain(const char *root)
         { PL_SEDEF, "{ plain }", -1, "snapEditorEntityDef", "mods/plainmod/thing", NULL, '1' },
     };
     g_bundle_extra = NULL;
-    make_bundle(root, "plainmod@1.0.0", "plainmod", "1.0.0", '7', NULL, p, 1, NULL);
+    make_bundle(root, "plainmod", "plainmod", "1.0.0", '7', NULL, p, 1, NULL);
 }
 
 static void build_requirements_fixture(const char *root)
@@ -931,9 +932,9 @@ static void build_requirements_fixture(const char *root)
     };
     /* Both gates, in the converter's spelling and as a number. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": 0}},\n  ";
-    make_bundle(root, "cydcut00@1.0.0", "cydcut00", "1.0.0", '1', NULL, cy, 3, NULL);
+    make_bundle(root, "cydcut00", "cydcut00", "1.0.0", '1', NULL, cy, 3, NULL);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "imgonly0@2.0.0", "imgonly0", "2.0.0", '2', NULL, im, 1, NULL);
+    make_bundle(root, "imgonly0", "imgonly0", "2.0.0", '2', NULL, im, 1, NULL);
     /* What the builder refuses: a name that is not a cvar's, a decimal
      * number, a line holding two commands, an unknown key. */
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"9lives\": \"0\"}},\n  ";
@@ -968,15 +969,15 @@ static void test_requirements(void)
      * first cause; each requirement is logged once per bundle. */
     log_clear();
     CHECK(sh_modserve_index_build(req_root) == 3);
-    CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cydcut00@1.0.0") == 1);
-    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cydcut00@1.0.0") == 1);
-    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for imgonly0@2.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cydcut00") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cydcut00") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for imgonly0") == 1);
     CHECK(log_count("MODS: requirements:") == 3);
     CHECK(log_has("bundle 'bad.cvar@1.0.0' skipped: requirements.cvars key 9lives is not a cvar name"));
     CHECK(log_has("bundle 'bad.value@1.0.0' skipped: requirements.cvars.com_maxFps must be a string, an integer or a boolean"));
     CHECK(log_has("bundle 'bad.key@1.0.0' skipped: requirements key dlls is not supported (cvars, commands)"));
     CHECK(log_has("bundle 'bad.line@1.0.0' skipped: requirements.commands.activate[0] must be one console command"));
-    CHECK(!log_has("plainmod@1.0.0' skipped"));
+    CHECK(!log_has("plainmod' skipped"));
     /* The distinct cvars the admitted bundles set. */
     CHECK(sh_modserve_requirements() == 2 && sh_modserve_requirements_held() == 1);
     /* A rescan of the same bundles does not repeat the lines. */
@@ -1127,11 +1128,11 @@ static void test_requirements_general(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 5);
     /* The later install asking another value loses, both named. */
-    CHECK(log_has("MODS: requirements: conflict: com_maxFps: bsecond0@1.0.0 asks \"60\", afirst00@1.0.0 asks \"120\"; "
-                  "bsecond0@1.0.0, the later install, loses"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120 for afirst00@1.0.0") && log_has("MODS: requirements: r_fancy=1 for afirst00@1.0.0"));
-    CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for afirst00@1.0.0"));
-    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for dsame000@1.0.0") && !log_has("for bsecond0@1.0.0"));
+    CHECK(log_has("MODS: requirements: conflict: com_maxFps: bsecond0 asks \"60\", afirst00 asks \"120\"; "
+                  "bsecond0, the later install, loses"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120 for afirst00") && log_has("MODS: requirements: r_fancy=1 for afirst00"));
+    CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for afirst00"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for dsame000") && !log_has("for bsecond0"));
     CHECK(sh_modserve_requirements() == 4);
 
     log_clear();
@@ -1144,13 +1145,13 @@ static void test_requirements_general(void)
     CHECK(ev_first("C:echo second on") < 0 && ev_first("C:echo e off") < 0 && ev_first("C:echo first off") < 0);
     CHECK(log_has("MODS: requirements: afirst00: command \"echo first on\""));
     CHECK(log_has("MODS: requirements: afirst00: command \"bind x \"say hi\"\""));
-    CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0@1.0.0) is not live: the engine marks it read-only"));
+    CHECK(log_has("MODS: editor: requirement ro_locked=1 (clocked0) is not live: the engine marks it read-only"));
     /* Only the bundles whose requirements are not live are blocked. */
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 5);
     log_clear();
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 3);
-    CHECK(log_has("(bsecond0) BLOCKED: requirement com_maxFps=60 lost to afirst00@1.0.0, installed earlier, which asks \"120\""));
+    CHECK(log_has("(bsecond0) BLOCKED: requirement com_maxFps=60 lost to afirst00, installed earlier, which asks \"120\""));
     CHECK(log_has("(clocked0) BLOCKED: requirement ro_locked=1 is not live"));
     CHECK(ev_first("R:snapEditorEntityDef:mods/afirst00/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/dsame000/thing") >= 0 &&
           ev_first("R:snapEditorEntityDef:mods/elines00/thing") >= 0);
@@ -1159,14 +1160,14 @@ static void test_requirements_general(void)
     CHECK(g_gate_lines == 2 && !log_has("command \""));
     g_report[0] = 0;
     CHECK(sh_modserve_requirements_report(report_line, NULL) >= 8);
-    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: cvar com_maxFps=120: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: dsame000@1.0.0: cvar g_label=two words: live\n") != NULL);
-    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: activate command \"echo first on\": ran\n") != NULL);
-    CHECK(strstr(g_report, "requirements: afirst00@1.0.0: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
-    CHECK(strstr(g_report, "requirements: bsecond0@1.0.0: cvar com_maxFps=60: refused (com_maxFps=60 lost to afirst00@1.0.0") != NULL);
-    CHECK(strstr(g_report, "requirements: bsecond0@1.0.0: activate command \"echo second on\": not run") != NULL);
-    CHECK(strstr(g_report, "requirements: clocked0@1.0.0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
-    CHECK(strstr(g_report, "requirements: elines00@1.0.0: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00: cvar com_maxFps=120: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: dsame000: cvar g_label=two words: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00: activate command \"echo first on\": ran\n") != NULL);
+    CHECK(strstr(g_report, "requirements: afirst00: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0: cvar com_maxFps=60: refused (com_maxFps=60 lost to afirst00") != NULL);
+    CHECK(strstr(g_report, "requirements: bsecond0: activate command \"echo second on\": not run") != NULL);
+    CHECK(strstr(g_report, "requirements: clocked0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: elines00: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
 
     /* afirst00 and bsecond0 go: afirst00's deactivate line runs, r_fancy is
      * restored, com_maxFps stays (dsame000 asks the same number). */
@@ -1175,7 +1176,7 @@ static void test_requirements_general(void)
     g_events[0] = 0;
     (void)sh_modserve_requirements_apply(&g_gates, "rescan", &r);
     CHECK(ev_first("C:echo first off") >= 0 && ev_first("C:echo second on") < 0 && r.commands == 1);
-    CHECK(log_has("MODS: rescan: requirements of afirst00@1.0.0 stopped; running its deactivate commands"));
+    CHECK(log_has("MODS: rescan: requirements of afirst00 stopped; running its deactivate commands"));
     CHECK(!strcmp(g_text_val[1], "0") && log_has("requirement released: r_fancy restored to 0"));
     CHECK(!strcmp(g_text_val[0], "120") && r.restored == 1);
 
@@ -1367,7 +1368,7 @@ static void test_ungated_raw(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\gated\\mods", top);
     mkdirs(root);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
-    make_bundle(root, "gtraw000@1.0.0", "gtraw000", "1.0.0", '6', NULL, gt, 4, NULL);
+    make_bundle(root, "gtraw000", "gtraw000", "1.0.0", '6', NULL, gt, 4, NULL);
     g_bundle_extra = NULL;
     CHECK(sh_modserve_index_build(root) == 1);
     /* The gates cannot be set: not live; the boot-time opens are ungated. */
@@ -1933,15 +1934,15 @@ static void test_conflicts(void)
             { CONDUCTOR, CONDUCTOR_SPIDER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'e' },
             { WHITELIST, WL_B, -1, "snapPropertyInspector_WhiteListEncounterDecl", "single_encounters_white_list_inspector", NULL, 'f' },
         };
-        make_bundle(root, "localcyb@0.0.0+1", "localcyb", "0.0.0", '1',
+        make_bundle(root, "localcyb+1", "localcyb", "0.0.0", '1',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 10}");
         make_bundle(root, "maps\\Boss map\\localcyb", "localcyb", "0.0.0-05238b2e", '2',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 11}");
         make_bundle(root, "cyberdem", "cyberdem", "1.0.0", '3',
                     "\"" CYB_AW "\", \"" CONDUCTOR "\"", dl, 2, "{\"validated\": true, \"installedAt\": 99}");
-        make_bundle(root, "localhel@0.0.0+1", "localhel", "0.0.0", '4', "\"" CONDUCTOR "\"", gd, 1,
+        make_bundle(root, "localhel+1", "localhel", "0.0.0", '4', "\"" CONDUCTOR "\"", gd, 1,
                     "{\"validated\": true, \"installedAt\": 12}");
-        make_bundle(root, "localspi@0.0.0+1", "localspi", "0.0.0", '5',
+        make_bundle(root, "localspi+1", "localspi", "0.0.0", '5',
                     "\"" CONDUCTOR "\", \"" WHITELIST "\"", sp, 2, "{\"validated\": true, \"installedAt\": 13}");
     }
     {
@@ -1953,9 +1954,9 @@ static void test_conflicts(void)
             { NEEDY, "{ pain b }", -1, "aiPainGraph", "cyberdem_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/here.md6\"}]", '2' },
             { "generated/decls/md6def/zion/here.md6.decl", "{ md6 }", -1, "md6Def", "zion/here.md6", NULL, '3' },
         };
-        make_bundle(root, "needslat@1.0.0", "needslat", "1.0.0", '6', "\"" NEEDY "\"", n1, 1,
+        make_bundle(root, "needslat", "needslat", "1.0.0", '6', "\"" NEEDY "\"", n1, 1,
                     "{\"validated\": true, \"installedAt\": 500}");
-        make_bundle(root, "needsok0@1.0.0", "needsok0", "1.0.0", '7', "\"" NEEDY "\", \"generated/decls/md6def/zion/here.md6.decl\"",
+        make_bundle(root, "needsok0", "needsok0", "1.0.0", '7', "\"" NEEDY "\", \"generated/decls/md6def/zion/here.md6.decl\"",
                     n2, 2, "{\"validated\": true, \"installedAt\": 400}");
     }
     {
@@ -1971,7 +1972,7 @@ static void test_conflicts(void)
             { "generated/decls/md6def/mods/awpack00/door.md6.decl", "{ md6 }", -1, "md6Def", "mods/awpack00/door.md6", NULL, '3' },
         };
         g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
-        make_bundle(root, "awpack00@0.0.0+1", "awpack00", "0.0.0", '8', NULL, aw, 3, NULL);
+        make_bundle(root, "awpack00+1", "awpack00", "0.0.0", '8', NULL, aw, 3, NULL);
         hash64('8', aw_hash);
     }
     g_bundle_extra = NULL;
@@ -1982,15 +1983,15 @@ static void test_conflicts(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 8);
     /* The animWeb the boss bundles carry: one copy serves, never none. */
-    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdem@1.0.0, localcyb@0.0.0, "
-                  "localcyb@0.0.0-05238b2e; serving localcyb@0.0.0 (most providers carry these bytes)"));
+    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdem, localcyb, "
+                  "localcyb; serving localcyb (most providers carry these bytes)"));
     CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "localcyb"));
     CHECK(open_text(CYB_AW, text, sizeof text) == 1 && strstr(text, "AW_CF_IDLE_CYCLE"));
     CHECK(sh_modserve_probe_claims(CYB_AW));
     /* The conductor: every boss's aiTypeList entry is served. */
     /* (index order: the root folders, then maps' places) */
-    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdem@1.0.0, localcyb@0.0.0, "
-                  "localhel@0.0.0, localspi@0.0.0, localcyb@0.0.0-05238b2e; serving "));
+    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdem, localcyb, "
+                  "localhel, localspi, localcyb; serving "));
     CHECK(log_has("'s text with the others' list entries (3 added)"));
     CHECK(sh_modserve_conflict_info(CONDUCTOR, &c) && c.composed && c.count == 5 && strstr(c.reason, "composed: 3 list entries"));
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 6;") && strstr(text, "\"524288\"") &&
@@ -2003,7 +2004,7 @@ static void test_conflicts(void)
         CHECK(st.conflicts == 4 && st.conflicts_composed == 2);
     }
     /* Needs before recency. */
-    CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needslat@1.0.0, needsok0@1.0.0; serving needsok0@1.0.0 "
+    CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needslat, needsok0; serving needsok0 "
                   "(its needs resolve against the installed bundles where the others' do not)"));
     CHECK(open_text(NEEDY, text, sizeof text) == 1 && !strcmp(text, "{ pain b }"));
     CHECK(!log_has("serving neither"));
@@ -2076,7 +2077,7 @@ static void test_editor_refs(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\edrefs\\mods", top);
     mkdirs(root);
-    make_bundle(root, "localcyb@0.0.0+1", "localcyb", "0.0.0", '9', NULL, row, 3, NULL);
+    make_bundle(root, "localcyb+1", "localcyb", "0.0.0", '9', NULL, row, 3, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     CHECK(sh_modserve_plan_editor(&p) == 2);
     /* Rows that did not get ready point at nothing yet. */
@@ -3021,7 +3022,7 @@ static void test_refusals(void)
     mkdirs(root);
     /* A pack whose animWebs name models (the issue-132 "SP doors", in the one
      * shape: its own names under its salt). */
-    make_bundle(root, "dzpack00@0.0.0+1", "dzpack00", "0.0.0", '9', NULL, files, 4, NULL);
+    make_bundle(root, "dzpack00+1", "dzpack00", "0.0.0", '9', NULL, files, 4, NULL);
     hash64('9', hash);
     hashes[0] = hash;
     CHECK(sh_modserve_index_build(root) == 1);
@@ -3172,7 +3173,7 @@ static void test_permanent_first_parse(void)
         /* The second time the unlockModel is what the real bundle ships: a
          * pointer to the game's own bytes under the same name. */
         g_fx_restore = round ? "generated/decls/unlockmodel/mods/pfspider/spidermastermind.decl" : NULL;
-        make_bundle(root, "pfspider@0.0.0+1", "pfspider", "0.0.0", digit, NULL, files, 2, NULL);
+        make_bundle(root, "pfspider+1", "pfspider", "0.0.0", digit, NULL, files, 2, NULL);
         g_fx_restore = NULL;
         g_bundle_extra = NULL;
         hash64(digit, hash);
@@ -3344,7 +3345,7 @@ static void test_registration_reparse_of_held_permanent(void)
     /* The unlockModel carrying its own bytes (a surface, the game's bytes
      * under its name, is never planned at all). */
     g_fx_restore = NULL;
-    make_bundle(root, "hrspider@0.0.0+1", "hrspider", "0.0.0", '6', NULL, files, 3, NULL);
+    make_bundle(root, "hrspider+1", "hrspider", "0.0.0", '6', NULL, files, 3, NULL);
     g_fx_restore = NULL;
     g_bundle_extra = NULL;
     hash64('6', hash);
@@ -3423,12 +3424,13 @@ static void test_registration_reparse_of_held_permanent(void)
 /* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
  * installed before map-delivered, then id, then version. */
 static char g_extra_seen[1024];
-static void collect_extra(void *c, const char *id, const char *version, int place, const char *extra)
+static void collect_extra(void *c, const char *id, const char *hash, int place, const char *extra)
 {
     (void)c;
+    CHECK(hash && strlen(hash) == 64);
     CHECK(extra && extra[0] == '{' && strstr(extra, "\"strings\""));
     _snprintf_s(g_extra_seen + strlen(g_extra_seen), sizeof g_extra_seen - strlen(g_extra_seen), _TRUNCATE,
-                "%s@%s%s;", id, version, place ? "(place)" : "");
+                "%s%s;", id, place ? "(place)" : "");
 }
 
 static void test_bundle_extra(void)
@@ -3446,23 +3448,23 @@ static void test_bundle_extra(void)
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\extra_mods", top);
     mkdirs(mods);
     g_bundle_extra = "\"strings\": {\"en\": {\"zed_name\": \"Zed\"}},";
-    make_bundle(mods, "zedmod00@1.0.0", "zedmod00", "1.0.0", '7', NULL, z, 1, NULL);
+    make_bundle(mods, "zedmod00", "zedmod00", "1.0.0", '7', NULL, z, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}},";
     make_bundle(mods, "abemod00", "abemod00", "2.0.0", '8', NULL, a2, 1, NULL);
     g_bundle_extra = "\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}},";
     make_bundle(mods, "maps\\Abe map\\abemod00", "abemod00", "1.0.0", '9', NULL, a1, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"bad_name\": \"Bad\"}},";
-    make_bundle(mods, "badsize0@1.0.0", "badsize0", "1.0.0", '0', NULL, bad, 1, NULL);
+    make_bundle(mods, "badsize0", "badsize0", "1.0.0", '0', NULL, bad, 1, NULL);
     g_bundle_extra = "\"strings\": {\"en\": {\"old_name\": \"Old\"}},";
     make_bundle(mods, "maps\\Old map\\old", "aaaold00", "0.1.0", 'f', NULL, old, 1, NULL);
     g_bundle_extra = NULL;
-    make_bundle(mods, "plainmod@1.0.0", "plainmod", "1.0.0", 'e', NULL, plain, 1, NULL);
+    make_bundle(mods, "plainmod", "plainmod", "1.0.0", 'e', NULL, plain, 1, NULL);
     CHECK(sh_modserve_index_build(mods) == 5);
     g_extra_seen[0] = 0;
     CHECK(sh_modserve_each_bundle_extra(collect_extra, NULL) == 4);
     /* Root folders first, then maps' places; by salt, then folder. */
-    CHECK(!strcmp(g_extra_seen, "abemod00@2.0.0;zedmod00@1.0.0;aaaold00@0.1.0(place);abemod00@1.0.0(place);"));
-    if (strcmp(g_extra_seen, "abemod00@2.0.0;zedmod00@1.0.0;aaaold00@0.1.0(place);abemod00@1.0.0(place);"))
+    CHECK(!strcmp(g_extra_seen, "abemod00;zedmod00;aaaold00(place);abemod00(place);"));
+    if (strcmp(g_extra_seen, "abemod00;zedmod00;aaaold00(place);abemod00(place);"))
         fprintf(stderr, "bundle extra order: %s\n", g_extra_seen);
 }
 
@@ -3569,8 +3571,8 @@ static void test_scope(void)
     sh_modserve_each_refresh(scope_refresh, &seen);
     /* Off (as every earlier test): everything serves. */
     CHECK(sh_modserve_lookup(SC_COOP, NULL) && sh_modserve_lookup(SC_IMAGE, NULL) && sh_modserve_lookup(SC_MAPED, NULL));
-    CHECK(log_has("MODS: scope: eeditor0@1.0.0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
-    CHECK(log_has("MODS: scope: meditor0@1.0.0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
+    CHECK(log_has("MODS: scope: eeditor0 shadows editor-time content (" SC_SET "); its editor tweaks serve in every map"));
+    CHECK(log_has("MODS: scope: meditor0 shadows editor-time content (" SC_MAPED "); its editor tweaks serve in every map"));
     CHECK(log_count("MODS: scope:") == 2);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
@@ -3615,13 +3617,13 @@ static void test_scope(void)
           si.shadows == 2 && si.requirements && !si.requirements_live && si.rank == -1 && !si.inert && si.newest);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: ahands00 (0 names, 2 shadows, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not\n") != NULL);
-    CHECK(strstr(g_report, "scope: eeditor0@1.0.0 (2222222222222222) (0 names, 1 shadow, 0 surfaces): editor-time content ("
+    CHECK(strstr(g_report, "scope: eeditor0 (0 names, 1 shadow, 0 surfaces): editor-time content ("
                            SC_SET "): its editor tweaks serve in every map; the rest only in maps that declare it\n") != NULL);
-    CHECK(strstr(g_report, "scope: nnames00@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared (no map is "
+    CHECK(strstr(g_report, "scope: nnames00 (1 name, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
-    CHECK(strstr(g_report, "scope: rrows000@1.0.0 (5555555555555555) (1 name, 1 shadow, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: rrows000 (1 name, 1 shadow, 0 surfaces, requirements): not declared "
                            "(no map is open): its names serve for the Toybox and its surfaces serve; its shadows do not; its "
                            "requirements stay live because it adds Toybox rows\n") != NULL);
     CHECK(strstr(g_report, "serving: 0 path(s) from bundles the open map declares, ") != NULL);
@@ -3639,12 +3641,12 @@ static void test_scope(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "play", &r) >= 0 && !strcmp(g_text_val[3], ""));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: rrows000@1.0.0 (5555555555555555)") && !strstr(g_report, "requirements stay live"));
+    CHECK(strstr(g_report, "scope: rrows000") && !strstr(g_report, "requirements stay live"));
     CHECK(sh_modserve_scope_mode(SH_MODSERVE_MODE_EDITOR) > 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) >= 0 && !strcmp(g_text_val[3], "knights"));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): not declared "
+    CHECK(strstr(g_report, "scope: ahands00 (0 names, 2 shadows, 0 surfaces, requirements): not declared "
                            "by the open map: its names serve") != NULL);
 
     /* The map declares ahands00 (its row's hash): its shadows serve, marked to be re-parsed and reloaded. */
@@ -3665,7 +3667,7 @@ static void test_scope(void)
     CHECK(sh_modserve_bundle_scope(h_hands, &si) && si.listed && si.rank == 0 && si.shadows_live && si.requirements_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: ahands00@1.0.0 (1111111111111111) (0 names, 2 shadows, 0 surfaces, requirements): declared by "
+    CHECK(strstr(g_report, "scope: ahands00 (0 names, 2 shadows, 0 surfaces, requirements): declared by "
                            "the open map (row 1): serves everything it carries\n") != NULL);
     /* The same listing again changes nothing. */
     CHECK(sh_modserve_scope_set(list, 1, NULL, 0, 1) == 0);
@@ -3688,7 +3690,7 @@ static void test_scope(void)
         memset(&row, 0, sizeof row);
         strcpy_s(row.salt, sizeof row.salt, "ahands00");
         strcpy_s(row.build, sizeof row.build, h_hands);
-        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands) && !strcmp(ref.version, "1.0.0"));
+        CHECK(sh_modserve_row_build(&row, &ref) && !strcmp(ref.hash, h_hands));
         strcpy_s(row.build, sizeof row.build, h_none);
         CHECK(!sh_modserve_row_build(&row, &ref));   /* pinned: that build is not installed */
         CHECK(sh_modserve_scope_set_place(NULL, 1) == 0);
@@ -3709,7 +3711,7 @@ static void test_scope(void)
     CHECK(sh_modserve_bundle_scope(h_rows, &si) && si.play && !si.names_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: nnames00@1.0.0 (6666666666666666) (1 name, 0 shadows, 0 surfaces): not declared by the map "
+    CHECK(strstr(g_report, "scope: nnames00 (1 name, 0 shadows, 0 surfaces): not declared by the map "
                            "being played: serves nothing\n") != NULL);
     /* A withdrawn name is not re-read: the engine keeps what it parsed. */
     memset(&seen, 0, sizeof seen);
@@ -3798,20 +3800,20 @@ static void test_scope_providers(void)
     CHECK(sh_modserve_bundle_scope(h_req, &si) && si.shadows == 1 && si.shadows_live);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: breq0000@1.0.0 (dddddddddddddddd) (0 names, 1 shadow, 0 surfaces, requirements): declared by the "
+    CHECK(strstr(g_report, "scope: breq0000 (0 names, 1 shadow, 0 surfaces, requirements): declared by the "
                            "open map (row 1): serves everything it carries\n") != NULL);
     CHECK(!strstr(g_report, "serving: " SC_COOP ": ") &&
           strstr(g_report, "serving: 1 path(s) several bundles carry with the same bytes; one copy serves when any provider may\n"));
-    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no declared bundle provides it); not served: xone0000@1.0.0 "
-                           "(eeeeeeeeeeeeeeee), ytwo0000@1.0.0 (ffffffffffffffff)\n") != NULL);
+    CHECK(strstr(g_report, "serving: " SC_DECL ": the game (no declared bundle provides it); not served: xone0000, "
+                           "ytwo0000\n") != NULL);
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 1 && !strcmp(g_text_val[1], "1"));
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: breq0000: cvar r_fancy=1: live\n") != NULL);
     /* abare000 asks the same value but the map does not declare it: not live for it. */
-    CHECK(strstr(g_report, "requirements: abare000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
-                           "the cvar has this value because breq0000@1.0.0 asks it)\n") != NULL);
-    CHECK(!strstr(g_report, "abare000@1.0.0: cvar r_fancy=1: live"));
+    CHECK(strstr(g_report, "requirements: abare000: cvar r_fancy=1: not active for this map (the open map does not use it; "
+                           "the cvar has this value because breq0000 asks it)\n") != NULL);
+    CHECK(!strstr(g_report, "abare000: cvar r_fancy=1: live"));
     /* Its gate is live now: the re-parse that waited for it runs. */
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
@@ -3853,14 +3855,14 @@ static void test_scope_providers(void)
     CHECK(sh_modserve_requirements_apply(&g_gates, "map", &r) == 0 && !strcmp(g_text_val[1], "0"));
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it; "
+    CHECK(strstr(g_report, "requirements: breq0000: cvar r_fancy=1: not active for this map (the open map does not use it; "
                            "restored: the cvar is back at the value it displaced)\n") != NULL);
-    CHECK(strstr(g_report, "requirements: abare000@1.0.0: cvar r_fancy=1: not active for this map (the open map does not use it)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: abare000: cvar r_fancy=1: not active for this map (the open map does not use it)\n") != NULL);
     CHECK(!strstr(g_report, "not applied yet") && !strstr(g_report, ": live"));
     CHECK(sh_modserve_scope_set(NULL, 0, NULL, 0, 0) >= 0);
     g_report[0] = 0;
     sh_modserve_requirements_report(report_line, NULL);
-    CHECK(strstr(g_report, "requirements: breq0000@1.0.0: cvar r_fancy=1: not active for this map (no map is open; restored") != NULL);
+    CHECK(strstr(g_report, "requirements: breq0000: cvar r_fancy=1: not active for this map (no map is open; restored") != NULL);
 
     sh_modserve_scope_enable(0);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
@@ -4018,11 +4020,11 @@ static void test_additive_same_key(void)
     sh_modserve_plan_free(&plan);
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: mod kfork000: 2 builds installed (the root folder and maps' places); each map serves the build "
+    CHECK(strstr(g_report, "scope: mod Fork: 2 builds installed (the root folder and maps' places); each map serves the build "
                            "it declares, and with no map open the root folder's\n") != NULL);
-    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (6666666666666666) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
+    CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): a build in maps\\Fork map; it serves only for that map\n") != NULL);
-    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): not declared (no map is "
+    CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): not declared (no map is "
                            "open): its names serve for the Toybox") != NULL);
 
     /* Map A pins the first build: its bytes, its own names; the other build is inert. */
@@ -4039,10 +4041,10 @@ static void test_additive_same_key(void)
     CHECK(modserve_bundles_for_names(placed, 1, out, 4) == 1 && !strcmp(out[0], h1));
     g_report[0] = 0;
     sh_modserve_scope_report(report_line, NULL);
-    CHECK(strstr(g_report, "scope: kfork000@1.0.0 (7777777777777777) (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
+    CHECK(strstr(g_report, "scope: Fork (3 names, 0 shadows, 0 surfaces): inert: the open map declares "
                            "another build of its salt\n") != NULL);
-    CHECK(strstr(g_report, "serving: " AD_THING ": kfork000@1.0.0 (6666666666666666), declared (row 1): the only provider; not "
-                           "served: kfork000@1.0.0 (7777777777777777)\n") != NULL);
+    CHECK(strstr(g_report, "serving: " AD_THING ": Fork, declared (row 1): the only provider; not "
+                           "served: Fork\n") != NULL);
     /* The registration plan of the map's bundle names its own paths. */
     list[0] = h1;
     CHECK(sh_modserve_plan_bundles(list, 1, &plan, NULL) >= 2);
@@ -4572,7 +4574,6 @@ static void test_row_served(void)
     mkdirs(root);
     memset(&row, 0, sizeof row);
     strcpy_s(row.salt, sizeof row.salt, "localhel");
-    strcpy_s(row.version, sizeof row.version, "1.0.0");
     hash64('d', row.build);                 /* the build the map was saved with */
     names[0] = "mods/localhel/hell_guard_combo_enc";
     names[1] = "MODS/localhel/hell_guard_shield";   /* names fold case */
@@ -4642,11 +4643,11 @@ static void test_row_served(void)
  * editor-time content names no bundle; a gameplay shadow still does. And the
  * record's editorOnly section serves a row without a folder. */
 typedef struct dep_seen { char names[512]; int bundles; } dep_seen;
-static void dep_visit(void *context, const char *id, const char *version, const char *hash,
-                      unsigned long long size, const char *name)
+static void dep_visit(void *context, const char *id, const char *hash, unsigned long long size,
+                      const char *name)
 {
     dep_seen *s = (dep_seen *)context;
-    (void)version; (void)hash; (void)size;
+    (void)hash; (void)size;
     if (name) { strcat_s(s->names, sizeof s->names, name); strcat_s(s->names, sizeof s->names, ";"); }
     else s->bundles++;
     (void)id;
@@ -4672,10 +4673,10 @@ static void test_dependency_names(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\deps\\mods", top);
     mkdirs(root);
     g_bundle_extra = NULL;
-    make_bundle(root, "ivyairlo@1.0.0", "ivyairlo", "1.0.0", 'a',
+    make_bundle(root, "ivyairlo", "ivyairlo", "1.0.0", 'a',
                 "\"cooked/model/models/modular/airlock/air_lock_shell.bmodel\"", ivy, 1, NULL);
-    make_bundle(root, "joeditor@1.0.0", "joeditor", "1.0.0", 'b', "\"" LIFT "\"", jo, 1, NULL);
-    make_bundle(root, "kaygame0@1.0.0", "kaygame0", "1.0.0", 'c', "\"" SHADOW "\"", kay, 1, NULL);
+    make_bundle(root, "joeditor", "joeditor", "1.0.0", 'b', "\"" LIFT "\"", jo, 1, NULL);
+    make_bundle(root, "kaygame0", "kaygame0", "1.0.0", 'c', "\"" SHADOW "\"", kay, 1, NULL);
     hash64('a', ha); hash64('c', hc); hash64('d', hd); hash64('e', he);
     _snprintf_s(record, sizeof record, _TRUNCATE, "{\"%s\": {\"id\": \"zed.editor\", \"name\": \"Zed\", \"at\": 1}}", hd);
     CHECK(sh_mb_record_put(root, "editorOnly", record));
@@ -4819,7 +4820,7 @@ static void test_mixed_editor_bundle(void)
     CHECK(sh_modserve_index_build(root) == 2);
     memset(&seen, 0, sizeof seen);
     sh_modserve_each_refresh(scope_refresh, &seen);
-    CHECK(log_has("MODS: scope: xmixed00@1.0.0 shadows editor-time content (" MX_SET "); its editor tweaks serve in every "
+    CHECK(log_has("MODS: scope: xmixed00 shadows editor-time content (" MX_SET "); its editor tweaks serve in every "
                   "map this editor opens, the rest only in maps that declare it"));
     sh_modserve_scope_enable(1);
     /* No map: the tweak and the Toybox names serve; the cvar is not accepted. */

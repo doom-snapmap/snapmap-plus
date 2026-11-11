@@ -228,6 +228,7 @@ int sh_script_hooks_reload(void)
 #else /* the engine side ------------------------------------------------- */
 
 #include "../backend_log.h"
+#include "../feature_health.h"
 #include "../entity.h"
 #include "../hook.h"
 #include "../engine_globals.h"
@@ -648,8 +649,10 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     if (!module_base) return 0;
     for (i = 0; i < SH_SCRIPT_SIG_COUNT; i++) {
         if (sig_resolve_one(module_base, &SH_SCRIPT_SIGNATURES[i], &r[i]) != SIG_OK && i <= SH_SCRIPT_SIG_IS_CLIENT) {
-            hooks_log("Mod scripts are unavailable in this session: the game function they need (%s) was not found "
-                      "in this executable.", SH_SCRIPT_SIGNATURES[i].name);
+            char why[160];
+            _snprintf_s(why, sizeof why, _TRUNCATE, "the game function they need (%s) was not found in this "
+                        "executable", SH_SCRIPT_SIGNATURES[i].name);
+            sh_feature_off(SH_FEATURE_MOD_SCRIPTS, why);
             return 0;
         }
     }
@@ -660,13 +663,14 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     g_load_screen = (const uint8_t *)glb_resolve(module_base, "load_screen", NULL);
     g_editor = (const uint8_t *)glb_resolve(module_base, "editor_singleton", NULL);
     if (!g_main_tid || !g_load_screen || !g_editor) {
-        hooks_log("Mod scripts are unavailable in this session: the game state they check (%s) was not found in "
-                  "this executable.", !g_main_tid ? "main thread" : !g_load_screen ? "loading screen" : "editor");
+        sh_feature_off(SH_FEATURE_MOD_SCRIPTS, !g_main_tid ? "the game's main thread was not found in this executable"
+                       : !g_load_screen ? "the game's loading screen was not found in this executable"
+                       : "the editor was not found in this executable");
         return 0;
     }
     if (!prologue_ok()) {
-        hooks_log("Mod scripts are unavailable in this session: the game's frame function is not the expected one "
-                  "(another tool may have changed it).");
+        sh_feature_off(SH_FEATURE_MOD_SCRIPTS, "the game's frame function is not the expected one (another tool "
+                       "may have changed it)");
         return 0;
     }
     sh_script_handles_set_resolver(resolve_spawn_id);

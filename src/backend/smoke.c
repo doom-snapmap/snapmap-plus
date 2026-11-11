@@ -1,7 +1,7 @@
-/* Report live signature resolution at startup. RVA drift is diagnostic;
- * resolution requires uniqueness or a verified hooked fallback. The diagnostic
- * build (SH_DIAG) also exercises the detour engine on scratch code; a release
- * build allocates no writable-executable memory for it. */
+/* Report live signature resolution at startup, with the expected and live
+ * bytes of every signature that did not resolve. The diagnostic build
+ * (SH_DIAG) also exercises the detour engine on scratch code; a release build
+ * allocates no writable-executable memory for it. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,6 +46,7 @@ static const char *sig_status_str(sig_status s)
         case SIG_AMBIGUOUS:   return "AMBIGUOUS";
         case SIG_BAD_PATTERN: return "BAD_PATTERN";
         case SIG_BAD_MODULE:  return "BAD_MODULE";
+        case SIG_CHANGED:     return "CHANGED";
         default:              return "?";
     }
 }
@@ -193,62 +194,21 @@ int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t cou
         total = count;
     }
 
-    int rva_match = 0, rva_diff = 0, hooked = 0;
-    char hooked_names[160] = {0};   /* comma-list of the hook-tolerant sigs for the success line */
-    const char *first_bad = NULL;
-    sig_status  first_bad_status = SIG_OK;
     for (size_t i = 0; i < total; i++) {
-        if (results[i].status == SIG_OK) {
-            ok++;
-            if (results[i].rva == sh_host_image_rva(doom_base, BACKEND_ENGINE_SIGNATURES[i].rva_vk,
-                                                    BACKEND_ENGINE_SIGNATURES[i].rva_gl)) rva_match++;
-            else rva_diff++;
-        } else if (results[i].status == SIG_OK_HOOKED) {
-            ok++;
-            /* A matching tail identifies an entry whose prologue is already detoured. */
-            hooked++;
-            size_t l = strlen(hooked_names);
-            _snprintf_s(hooked_names + l, sizeof hooked_names - l, _TRUNCATE,
-                        "%s%s", l ? "/" : "", results[i].name);
-        } else {
-            if (!first_bad) {
-                first_bad = results[i].name;
-                first_bad_status = results[i].status;
-            }
-            /* Log bytes for every unresolved entry. */
-            log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
-        }
+        if (results[i].status == SIG_OK) ok++;
+        else log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
     }
-    int resolver_ok = (ok == sig_db_count());
-
 
     int detour_ok = 1;
     const char *detour_why = "OK";
 #ifdef SH_DIAG
     detour_ok = scratch_detour_check(&detour_why);
 #endif
-
-    if (resolver_ok && detour_ok) {
-        if (hooked > 0) {
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "startup: resolved %zu/%zu sigs (after %lums; rva-pinned %d, hook-tolerant %d: %s)",
-                ok, total, deferred_ms, rva_match, hooked, hooked_names);
-        } else {
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                "startup: resolved %zu/%zu sigs (after %lums; rva-pinned %d, rva-shifted %d)",
-                ok, total, deferred_ms, rva_match, rva_diff);
-        }
-    } else if (!resolver_ok) {
-        /* The remaining signatures are patched by another tool, or this is not a supported build. */
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "startup: resolved only %zu/%zu sigs after %lums (first unresolved: %s status=%d); detour %s",
-            ok, total, deferred_ms, first_bad ? first_bad : "?", (int)first_bad_status, detour_why);
-    } else {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-            "startup: resolved %zu/%zu sigs (after %lums); the scratch detour test failed (%s)",
-            ok, total, deferred_ms, detour_why);
-    }
+    /* A signature that did not resolve turns off only the features that need
+     * it (feature_health.h); the return gates all patching on the detour test. */
+    _snprintf_s(line, sizeof line, _TRUNCATE, "startup: resolved %zu/%zu sigs (after %lums)%s%s",
+                ok, total, deferred_ms, detour_ok ? "" : "; the scratch detour test failed: ",
+                detour_ok ? "" : detour_why);
     backend_log(line);
-
-    return (resolver_ok && detour_ok) ? 1 : 0;
+    return detour_ok;
 }

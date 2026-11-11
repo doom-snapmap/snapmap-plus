@@ -40,6 +40,13 @@ unsigned long sh_rawmap_swap_count(void);
 /* Changes on every map parse, even when the engine reuses the same map pointer. */
 unsigned long sh_rawmap_load_generation(void);
 
+#ifdef SH_DIAG
+/* The diagnostic build's immediate-open record as one JSON object
+ * ({"opens","generation","pending","faulted","last":{...}}, diag_status.h);
+ * the length written, or -1 when it does not fit in cap. */
+int sh_rawmap_diag_status(char *out, size_t cap);
+#endif
+
 /* Opening a rawmap requires installed overwrite protection unless explicitly disabled. */
 int sh_rawmap_load_is_safe(void);
 

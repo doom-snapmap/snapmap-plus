@@ -24,6 +24,7 @@ new Function('exports', [
   extract('const GAME_PATTERN =', ';\n'),
   extract('function gameOf(game) {', '\n}'),
   extract('function gameLine(game) {', '\n}'),
+  extract('function contactText(contact) {', '\n}'),
   extract('function issueBody(', '\n}'),
   extract('function commentBody(', '\n}'),
   'exports.rendererOf = rendererOf; exports.issueBody = issueBody; exports.commentBody = commentBody;',
@@ -61,7 +62,7 @@ check(withVk.indexOf('report-sig:abc123') >= 0, 'issueBody should still carry th
 
 const withGl = issueBody('it broke', 'v0.2.1', 'beta', 'me@example.com', 'opengl', 'abc123');
 check(withGl.indexOf('- Renderer: OpenGL') >= 0, 'issueBody should name OpenGL: ' + withGl);
-check(withGl.indexOf('- Contact: me@example.com') >= 0, 'issueBody should still carry the contact line');
+check(withGl.indexOf('- Contact: `me@example.com`') >= 0, 'issueBody should carry the contact line as inline code');
 
 const none = issueBody('it broke', 'dev', null, '', null, 'abc123');
 check(none.indexOf('Renderer') < 0, 'issueBody should omit the renderer line when unknown: ' + none);

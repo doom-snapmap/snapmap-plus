@@ -5,7 +5,7 @@
  * "snapmapPlus" block after the engine's own members (prefab_block.h):
  *
  *   "snapmapPlus":{"format":1,"description":"","tags":[],
- *                  "mods":[{"mod":"<salt>@<build hash>","name","version","size","names"}...],
+ *                  "mods":[{"mod":"<salt>@<build hash>","name","size","names"}...],
  *                  "summary":{...}}            (module prefabs only)
  *
  * The mods are found exactly as a map's save finds them (modmanifest.h): the
@@ -13,7 +13,7 @@
  * inside an "edit" object) go through the serving layer's save-time closure,
  * which names every admitted build that provides one, with the builds its
  * needs reach. Each build becomes one row in the map manifest's form
- * (modmanifest.h), its name and version from the build. Create writes the block
+ * (modmanifest.h), its name from the build. Create writes the block
  * once the engine has serialized the prefab, a module prefab's save writes it
  * with the file, and the Prefabs tab's description and tag edits rewrite it in
  * place. The engine never re-saves a prefab file, so the block persists; every
@@ -114,10 +114,10 @@ char *sh_prefab_mods_view_set(const char *view, size_t len, const sh_modmanifest
 /* 1 when a row names `name` among the names it provides (case-insensitive). */
 int   sh_prefab_mods_row_provides(const sh_modmanifest_list *rows, const char *name);
 
-/* "name version" for a row, the salt when it has no name (the refusal's label). */
+/* A row's name, the salt when it has no name (the refusal's label). */
 void  sh_prefab_mods_label(const sh_modmanifest_row *row, char *out, size_t cap);
 
-/* {"count":N,"missing":M,"mods":[{"id","salt","version","build","size",
+/* {"count":N,"missing":M,"mods":[{"id","salt","build","size",
  * "installed","state","cause"}...]}, "id" the row's name (else its salt),
  * with each row's state under the asset rule
  * (row_state): "served", "missing" or "incomplete", and the refusal sentence

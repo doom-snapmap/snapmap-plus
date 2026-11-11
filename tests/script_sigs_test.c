@@ -115,12 +115,13 @@ static void check_image(const char *path)
         const sig_entry *e = &SH_SCRIPT_SIGNATURES[i];
         sig_result r;
         rva[i] = 0;
-        if (sig_resolve_one(base, e, &r) != SIG_OK || !r.addr) {
+        if (sig_scan_one(base, e, &r) != SIG_OK || !r.addr) {
             printf("FAIL %s did not resolve to a unique match\n", e->name);
             g_fail = 1;
             continue;
         }
         CHECK(r.rva == (vk ? e->rva_vk : e->rva_gl));
+        CHECK(sig_resolve_one(base, e, &r) == SIG_OK);   /* the boot check at the recorded RVA */
         rva[i] = r.rva;
         printf("  %-22s rva=0x%X\n", e->name, r.rva);
     }
@@ -131,7 +132,7 @@ static void check_image(const char *path)
         const sh_script_named_sig *s = &SH_SCRIPT_ANIM_NOTIFY_SIGNATURE;
         sh_script_named_sig mover = *s;
         sig_result r;
-        CHECK(sig_resolve_one(base, &s->sig, &r) == SIG_AMBIGUOUS);
+        CHECK(sig_scan_one(base, &s->sig, &r) == SIG_AMBIGUOUS);
         CHECK(sh_script_resolve_named(base, s, &r) == SIG_OK);
         CHECK(r.rva == (vk ? s->sig.rva_vk : s->sig.rva_gl));
         printf("  %-22s rva=0x%X (by its callback name)\n", s->sig.name, r.rva);

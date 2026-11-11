@@ -58,7 +58,7 @@ int main(void)
     site.addr = (uintptr_t)(code + sizeof before);
 
     CHECK(!sh_serialized_entities_guard_install(NULL, 0));
-    site.status = SIG_OK_HOOKED;
+    site.status = SIG_CHANGED;
     CHECK(!sh_serialized_entities_guard_install(&site, 1));
     CHECK(!g_index_relay && !g_index_patch.live);
     site.status = SIG_OK;

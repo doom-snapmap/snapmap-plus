@@ -103,7 +103,7 @@ static void test_binding(void)
     assert(sh_process_heap_bind(&bound, results, 3, base));
     assert(bound.get == get && bound.push == push && bound.pop == pop);
     for (int i = 0; i < 3; i++) {
-        results[i].status = SIG_OK_HOOKED;
+        results[i].status = SIG_CHANGED;
         assert(!sh_process_heap_bind(&bound, results, 3, base));
         assert(!bound.get && !bound.push && !bound.pop);
         results[i].status = SIG_OK;

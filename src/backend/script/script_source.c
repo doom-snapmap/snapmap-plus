@@ -204,11 +204,11 @@ int sh_script_source_map_mods(sh_script_mod_desc *out, int cap)
 
 typedef struct { const char *hash; char salt[SH_SCRIPT_SALT_CAP]; } hash_salt;
 
-static void salt_of_hash(void *context, const char *id, const char *version, const char *hash, int admitted,
+static void salt_of_hash(void *context, const char *id, const char *hash, int admitted,
                          const char *cause, int files, int place)
 {
     hash_salt *h = (hash_salt *)context;
-    (void)version; (void)cause; (void)files; (void)place;
+    (void)cause; (void)files; (void)place;
     if (h->salt[0] || !admitted || !id || !hash || _stricmp(hash, h->hash)) return;
     strncpy_s(h->salt, sizeof h->salt, id, _TRUNCATE);
 }

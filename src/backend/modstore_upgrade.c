@@ -158,6 +158,7 @@ typedef struct ms_up_item {
     int dropped;                /* a delivered copy an installed mod already serves */
     size_t kept;                /* when dropped: the item that serves it */
     sh_mb_bundle b;
+    char version[160];          /* the old folder name's version label */
     char content[SH_MB_HASH_HEX + 1];
     unsigned long long build;   /* bundle.json's build counter */
 } ms_up_item;
@@ -329,7 +330,8 @@ static char *ms_up_strdup_body(const mpj *v)
  * manifest of format 1: id, version, name, files with blob and size, stock
  * pointers): b->id the old id, b->hash its bundle hash, b->files their path,
  * request, blob, size and stock flag. 1 when it reads. */
-static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *cause, size_t cap)
+static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *version, size_t vcap, char *cause,
+                         size_t cap)
 {
     mpj *j = mpj_parse(text, len);
     const mpj *v, *files;
@@ -342,7 +344,7 @@ static int ms_up_read_c2(const char *text, size_t len, sh_mb_bundle *b, char *ca
         goto out;
     }
     v = mpj_get(j, "version");
-    strncpy_s(b->version, sizeof b->version, v && v->type == MPJ_STR ? v->text : "0.0.0", _TRUNCATE);
+    strncpy_s(version, vcap, v && v->type == MPJ_STR ? v->text : "0.0.0", _TRUNCATE);
     b->name = ms_up_strdup_body(mpj_get(j, "name"));
     v = mpj_get(j, "bundle");
     if (v && v->type == MPJ_STR && ms_is_hash(v->text)) strcpy_s(b->hash, sizeof b->hash, v->text);
@@ -434,7 +436,7 @@ out:
 
 /* A folder this upgrade wrote before (an interrupted pass): its format-1
  * mod.json read back for the steps after. 1 when it reads. */
-static int ms_up_read_old(const char *dir, sh_mb_bundle *b)
+static int ms_up_read_old(const char *dir, sh_mb_bundle *b, char *version, size_t vcap)
 {
     sh_mb_old old;
     size_t i;
@@ -442,10 +444,12 @@ static int ms_up_read_old(const char *dir, sh_mb_bundle *b)
     memset(b, 0, sizeof *b);
     if (!sh_mb_old_load(dir, &old) || old.block_format != 1 || !old.key[0]) { sh_mb_old_free(&old); return 0; }
     strcpy_s(b->id, sizeof b->id, old.key);
-    if (old.version && old.version[0] == '"') {
+    if (!version) {
+        /* the caller wants the files only */
+    } else if (old.version && old.version[0] == '"') {
         size_t n = strlen(old.version);
-        _snprintf_s(b->version, sizeof b->version, _TRUNCATE, "%.*s", (int)(n > 2 ? n - 2 : 0), old.version + 1);
-    } else strcpy_s(b->version, sizeof b->version, "0.0.0");
+        _snprintf_s(version, vcap, _TRUNCATE, "%.*s", (int)(n > 2 ? n - 2 : 0), old.version + 1);
+    } else strcpy_s(version, vcap, "0.0.0");
     strcpy_s(b->hash, sizeof b->hash, old.bundle);
     b->files = old.file_count ? (sh_mb_file *)calloc(old.file_count, sizeof *b->files) : NULL;
     for (i = 0; b->files && i < old.file_count; i++) {
@@ -482,7 +486,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
     if (!ms_exists(bj)) {
         /* Converted already (an interrupted pass: the leftovers go now), or
          * not a built folder. */
-        r = ms_up_read_old(dir, &it->b) ? 1 : 0;
+        r = ms_up_read_old(dir, &it->b, it->version, sizeof it->version) ? 1 : 0;
         if (!r) { sh_mb_free(&it->b); memset(&it->b, 0, sizeof it->b); }
         else {
             wchar_t *p = ms_wjoin(it->dir, L"bundle.canonical.json");
@@ -501,7 +505,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         it->build = v && mpj_is_num(v) ? (unsigned long long)mpj_int(v) : 0;
         mpj_free(j);
     }
-    if (!text || !ms_up_read_c2(text, len, &it->b, cause, sizeof cause)) {
+    if (!text || !ms_up_read_c2(text, len, &it->b, it->version, sizeof it->version, cause, sizeof cause)) {
         char why[SH_MB_CAUSE_MAX];
         strcpy_s(why, sizeof why, cause[0] ? cause : "it cannot be read");
         _snprintf_s(cause, sizeof cause, _TRUNCATE, "bundle.json does not read: %s", why);
@@ -529,7 +533,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
         ms_cause(cause, sizeof cause, "mod.json could not be written (%s)", ms_why(GetLastError(), "mod.json", 1, 0));
         goto out;
     }
-    if (!ms_up_read_old(dir, &chk) || strcmp(chk.hash, it->b.hash) != 0) {
+    if (!ms_up_read_old(dir, &chk, NULL, 0) || strcmp(chk.hash, it->b.hash) != 0) {
         _snprintf_s(cause, sizeof cause, _TRUNCATE, "the written mod.json does not read back as bundle %.16s", it->b.hash);
         goto out;
     }
@@ -551,7 +555,7 @@ static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
                         unlinked, restored);
         ms_log("MODS: store: %s: mod.json written for %s@%s+%llu (bundle %.16s, %zu file(s)); bundle.json, "
                "bundle.canonical.json and .state.json removed%s",
-               it->from, it->b.id, it->b.version, it->build, it->b.hash, it->b.file_count, extra);
+               it->from, it->b.id, it->version, it->build, it->b.hash, it->b.file_count, extra);
     }
     r = 1;
 out:
@@ -613,7 +617,7 @@ static void ms_up_scan(ms_up_ctx *c, const wchar_t *dir, int legacy)
         }
         {
             char key[SH_MS_KEY_MAX + 1];
-            _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->build);
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", it->b.id, it->version, it->build);
             it->product = legacy || !_stricmp(key, it->name);
         }
         sh_mb_content_key(&it->b, it->content);
@@ -636,9 +640,9 @@ static void ms_up_pick(ms_up_ctx *c, size_t k)
         wchar_t *p;
         int taken = 0;
         if (round == 0) strncpy_s(leaf, sizeof leaf, it->b.id, _TRUNCATE);
-        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", it->b.id, it->b.version);
-        else if (round == 2) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->build);
-        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", it->b.id, it->b.version, round == 3 ? 8 : 16, it->b.hash);
+        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", it->b.id, it->version);
+        else if (round == 2) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+%llu", it->b.id, it->version, it->build);
+        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", it->b.id, it->version, round == 3 ? 8 : 16, it->b.hash);
         if (!it->legacy && !_stricmp(leaf, it->name)) return;   /* already there */
         /* Folders are renamed one at a time, so the disk says what is taken. */
         p = ms_wjoin_utf8(c->root, leaf);

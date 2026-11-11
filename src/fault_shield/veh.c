@@ -1,7 +1,11 @@
 /* Classify engine faults and attempt bounded recovery. Visibility-leaf faults
  * return false for the bad node. Repaired CSR/render-node faults can unwind to
- * editor Think (Class A); remaining eligible faults redirect to Error(6) and request
- * editor exit (Class B). redirect_policy.h decides when that redirect is declined.
+ * editor Think (Class A); a remaining wild access violation redirects to
+ * Error(6) and requests editor exit (Class B). Other hardware faults (divide,
+ * floating point, misalignment, in-page) are left to the engine's own handlers
+ * and redirected only when nothing handled them (shield_second_chance, from the
+ * unhandled-exception filter). redirect_policy.h decides when a redirect is
+ * declined and bounds each incident.
  * Engine C++ throws continue to their handlers after recovery-gate adjustments.
  * Fault logging is independent of recovery and may also record non-engine faults. */
 #include <windows.h>
@@ -9,7 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine_layout.h"
-#include "../backend/host_image.h"     /* report the build a crash came from + gate every pinned RVA */
+#include "../backend/host_image.h"     /* the host image name for crash records */
 #include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
 #include "fault_record.h"
 #include "crash_report.h"
@@ -23,16 +27,11 @@
 extern uint8_t *g_doom_base;
 extern size_t   g_doom_size;
 
-/* Is the host the exact build every pinned RVA in this file was extracted from? Answered once at
- * install, so neither the classifier nor the fault path does string work. */
-static int g_pinned_build = 0;
-
-/* Derive [lo,hi) from resolved entries and measured spans. Use a literal start
- * only on the pinned build; an unresolved range cannot classify a fault. */
+/* Derive [lo,hi) from resolved entries and measured spans; an unresolved
+ * range cannot classify a fault. */
 static int editor_frame_range(uintptr_t *lo, uintptr_t *hi)
 {
     uintptr_t l = g_eng.editor_pump_rva;
-    if (!l && g_pinned_build) l = RVA_EDITOR_FRAME_LO;
     if (!l) return 0;
     *lo = l; *hi = l + EDITOR_FRAME_SPAN;
     return 1;
@@ -40,7 +39,6 @@ static int editor_frame_range(uintptr_t *lo, uintptr_t *hi)
 static int resolver_range(uintptr_t *lo, uintptr_t *hi)
 {
     uintptr_t l = g_eng.resolver_rva;
-    if (!l && g_pinned_build) l = RVA_RESOLVER_LO;
     if (!l) return 0;
     *lo = l; *hi = l + RESOLVER_SPAN;
     return 1;
@@ -63,8 +61,6 @@ static uintptr_t g_visleaf_lo_rva    = 0;
 static uintptr_t g_visleaf_hi_rva    = 0;
 static uintptr_t g_visleaf_false_rva = 0;
 static int       g_visleaf_ok        = 0;
-/* Offsets within the leaf remain tied to the measured body layout. */
-#define VIS_LEAF_FALSE_OFF  (RVA_VIS_LEAF_FALSE - RVA_VIS_LEAF_LO)   /* == 0x24, the XOR AL,AL; RET tail */
 
 /* An unresolved leaf never matches a fault. */
 static int in_vis_leaf(uintptr_t rva)
@@ -78,7 +74,6 @@ static void veh_resolve_globals(void)
     const uint8_t *base = g_doom_base;
     uintptr_t v;
 
-    g_pinned_build = sh_host_is_supported_build();
     if (base == NULL) return;
 
     g_errstate_at   = glb_resolve(base, "error_state", NULL);
@@ -118,13 +113,12 @@ static void write_suppressor_b(void)
     *(volatile int32_t *)b = 0;
 }
 
-#define SHIELD_MAX_REDIRECTS 8
-static volatile LONG g_redirects = 0;    /* Class-B/fallback Error(6) redirects (runaway-guarded) */
+static shield_incident g_incident;      /* Class-B redirects in the current incident (redirect_policy.h) */
 static volatile LONG g_classa_seen = 0;  /* Class-A in-editor recoveries (log rate-limit only; NOT capped) */
 static volatile LONG g_visleaf_seen = 0; /* vis-leaf micro-recoveries (log rate-limit only; NOT capped) */
 static volatile LONG g_diag_seen = 0;    /* DIAGNOSTIC: count of AVs the VEH has logged */
 static volatile LONG g_rn_seen = 0;      /* DIAGNOSTIC: render-node (vis-leaf) fault detail count */
-static char g_why[200];   /* persists: Error(6) reads it as the fmt (rcx) after we return */
+static char g_visleaf_log[200], g_classa_log[200], g_classb_log[200];   /* one per path */
 static char g_diag[260];
 static char g_rndiag[220];
 
@@ -390,9 +384,9 @@ static int try_neutralize_rendernode(const CONTEXT *ctx)
     return 0;
 }
 
-/* Supported non-AV hardware faults route to Class B without the wild-address
- * test. Stack overflow is excluded because recovery needs a usable stack.
- * C++ throws and debugger notifications use separate handling or pass through. */
+/* Non-AV hardware faults Class B may take once no handler did. Stack overflow
+ * is excluded because recovery needs a usable stack. C++ throws and debugger
+ * notifications use separate handling or pass through. */
 static int is_other_hw_fault(DWORD code)
 {
     switch (code) {
@@ -520,6 +514,8 @@ static int shield_frame_on_stack(const CONTEXT *fault)
 static volatile LONG g_offthread_seen = 0;
 static char g_offthread[320];
 
+static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva, void *fault_addr);
+
 static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -590,14 +586,13 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    /* Keep only supported hardware faults; AVs need further address classification. */
-    if (code != EXCEPTION_ACCESS_VIOLATION && !is_other_hw_fault(code))
+    /* First chance, only access violations: their fault address classifies them.
+     * Other hardware faults reach shield_second_chance if nothing handles them. */
+    if (code != EXCEPTION_ACCESS_VIOLATION)
         return EXCEPTION_CONTINUE_SEARCH;
 
-    int   is_av = (code == EXCEPTION_ACCESS_VIOLATION);
-    /* fault-address + data-deref classification are AV-only (ExceptionInformation[1] is the AV address). */
-    void *fault_addr = is_av ? (void *)er->ExceptionInformation[1] : NULL;
-    int   data       = is_av && (fault_addr != rip);
+    void *fault_addr = (void *)er->ExceptionInformation[1];
+    int   data       = (fault_addr != rip);
 
     /* Recovery is limited to DOOM code. First-chance logging above may still
      * record other modules. */
@@ -621,7 +616,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     /* At the visibility leaf, record the node index and reference slots for diagnosis. */
     {
         uintptr_t rrva = (uintptr_t)rip - (uintptr_t)g_doom_base;
-        if (is_av && in_vis_leaf(rrva) && InterlockedIncrement(&g_rn_seen) <= 12) {
+        if (in_vis_leaf(rrva) && InterlockedIncrement(&g_rn_seen) <= 12) {
             __try {
                 uintptr_t node = (uintptr_t)ep->ContextRecord->Rcx;
                 uintptr_t rax  = (uintptr_t)ep->ContextRecord->Rax;
@@ -645,7 +640,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     /* AV-specific: a WILD data AV is the in-editor draw-fault class (Class-A). A committed-but-valid AV is
      * left to the engine's own SEH (redirecting one the engine would have handled is worse than its local
      * handling -- fault-shield-recovery.md scope). Non-AV hardware faults skip this gate -> Class-B. */
-    if (is_av) {
+    {
         /* Visibility-leaf faults return false for this node by resuming at the leaf
          * tail. The leaf is frameless, so RSP still holds the caller return address.
          * This skips one predicate without unwinding active resolver/build frames.
@@ -656,10 +651,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             /* Return through the leaf itself. Unwinding past active builder frames here
              * caused heap corruption on exit from Play; preserve those frames. */
             if (InterlockedIncrement(&g_visleaf_seen) <= 3) {
-                _snprintf_s(g_why, sizeof g_why, _TRUNCATE,
+                _snprintf_s(g_visleaf_log, sizeof g_visleaf_log, _TRUNCATE,
                     "vis-leaf render-node fault @ 0x%llx (rip+0x%llx) -> predicate forced FALSE (skip node), resumed",
                     (unsigned long long)(uintptr_t)fault_addr, (unsigned long long)rva);
-                shield_fault vf = { "visleaf", -1, g_why, rva, (uintptr_t)fault_addr };
+                shield_fault vf = { "visleaf", -1, g_visleaf_log, rva, (uintptr_t)fault_addr };
                 shield_emit(&vf);
             }
             ep->ContextRecord->Rip = (DWORD64)((uintptr_t)g_doom_base + g_visleaf_false_rva);
@@ -683,12 +678,12 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
              * skipping their callers left a second invalid return address. */
             if(reverted || rn_cleared) {
             if (InterlockedIncrement(&g_classa_seen) <= 5) {
-                _snprintf_s(g_why, sizeof g_why, _TRUNCATE,
+                _snprintf_s(g_classa_log, sizeof g_classa_log, _TRUNCATE,
                     "in-editor draw fault @ 0x%llx (rip+0x%llx) -> aborted draw%s%s, resumed editor frame",
                     (unsigned long long)(uintptr_t)fault_addr, (unsigned long long)rva,
                     reverted ? " + reverted bad connection" : "",
                     rn_cleared ? " + cleared dangling render-node ref" : "");
-                shield_fault fa = { "action", -1, g_why, rva, (uintptr_t)fault_addr };
+                shield_fault fa = { "action", -1, g_classa_log, rva, (uintptr_t)fault_addr };
                 shield_emit(&fa);
             }
             /* Class-A recovery stays silent to avoid repeated error toasts during
@@ -699,8 +694,17 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             }
         }
     }
-    }   /* end if (is_av) -- a wild AV the editor-unwind didn't claim falls through to Class-B */
+    }   /* a wild AV the editor unwind did not claim falls through to Class B */
 
+    return redirect_to_error6(ep, code, rva, fault_addr);
+}
+
+/* Class B: redirect a fault in DOOM code into the engine's own recoverable
+ * Error(6) and drive the editor exit to the browser, unless the policy
+ * declines it. The player is told SHIELD_RECOVERED_TEXT. */
+static LONG redirect_to_error6(PEXCEPTION_POINTERS ep, DWORD code, uintptr_t rva, void *fault_addr)
+{
+    void *rip = (void *)ep->ContextRecord->Rip;
     /* Error(6) relies on Frame's catch on the engine main thread. On a known worker
      * thread, record the fault and continue normal exception search instead. This
      * does not recover or prove containment; a surrounding handler may catch it.
@@ -760,14 +764,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         }
     }
 
-    /* ---- Class B (Layer 1): a wild AV the editor-unwind did NOT claim, OR a non-AV hardware fault in DOOM
-     * (illegal/priv instruction, int/float divide, in-page, ...). Redirect into the engine's own recoverable
-     * Error(6) + the proven editor-exit -> My-Maps browser. Runaway-guarded; CAN surface DOOM's recoverable-
-     * error drop-to-menu -- survivable, vastly better than the hard crash these faults would otherwise be. */
-    if (InterlockedIncrement(&g_redirects) > SHIELD_MAX_REDIRECTS) {
-        /* runaway guard -> let the OS take it. This is the shield GIVING UP -- the process is very
-         * likely about to die, so write a fatal crash record first (one-shot; the branch re-enters on
-         * every subsequent fault). LOG-ONLY: the disposition below is unchanged. */
+    /* An incident that keeps faulting past its budget is left to the fatal
+     * handlers: the process is about to end, so a fatal record is written first
+     * (once per incident). */
+    if (!shield_incident_allow(&g_incident, GetTickCount64())) {
         static volatile LONG s_runaway_recorded = 0;
         if (InterlockedExchange(&s_runaway_recorded, 1) == 0) {
             __try {
@@ -779,10 +779,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    _snprintf_s(g_why, sizeof g_why, _TRUNCATE,
-        "shield: caught fault 0x%lx at rip+0x%llx -> recovered via Error(6)",
-        (unsigned long)code, (unsigned long long)rva);
-    shield_fault f = { "load", -1, g_why, rva, (uintptr_t)fault_addr };
+    _snprintf_s(g_classb_log, sizeof g_classb_log, _TRUNCATE,
+        "shield: caught fault 0x%lx at rip+0x%llx -> recovered via Error(6) (redirect %d of this incident)",
+        (unsigned long)code, (unsigned long long)rva, g_incident.count);
+    shield_fault f = { "load", -1, g_classb_log, rva, (uintptr_t)fault_addr };
     shield_emit(&f);
 
     /* Capture stack and a nonterminal record, capped separately from redirects.
@@ -794,7 +794,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             shield_fault sk = { "stack", (int)code, g_crashstk, rva, (uintptr_t)fault_addr };
             shield_emit(&sk);   /* the full call stack -> shield_faults.log */
             crash_report_file("classB", code, rva, (uintptr_t)fault_addr, sh_host_image_name(),
-                              g_crashstk, "", "");
+                              g_crashstk, SHIELD_RECOVERED_TEXT, "");
             /* FREE THE MOUSE: DOOM clips the cursor to its window + hides it (captured input); un-clip +
              * force it visible (ShowCursor is a refcount -- bounded loop) so the user can actually reach
              * the Snapmap+ window where the crash dialog appears. */
@@ -808,10 +808,6 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     /* A later fault in this same Frame call is inside the catch's recovery. */
     recovery_note_redirect();
 
-    /* Error(6) will populate engine error text after this redirect. Request a toast
-     * using that text if recovery later has an editor screen to show it on. */
-    notice_request_msg();
-
     /* Clear both resolved suppressors before Error(6). A failed write is logged;
      * the redirect still proceeds because the gate may already be open. */
     __try {
@@ -822,17 +818,13 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         shield_emit(&sf);
     }
 
-    /* Simulate call Error(g_why): align RSP and push the fault RIP as the unwindable
-     * return address. Require a resolved wrapper or the exact pinned-build fallback. */
+    /* Simulate call Error(SHIELD_RECOVERED_TEXT): align RSP and push the fault
+     * RIP as the unwindable return address. */
     {
         uintptr_t error6 = g_eng.error6;
-        if (!error6 && g_pinned_build)
-            error6 = (uintptr_t)(g_doom_base + RVA_ERROR6);
         if (!error6) {
             shield_fault nf = { "sig", (int)code,
-                "Class-B declined: idCommon::Error(6) is unresolved and this is not the pinned "
-                "extraction build -- resuming into a pinned address would be a wild call", rva,
-                (uintptr_t)fault_addr };
+                "Class-B declined: idCommon::Error(6) is unresolved", rva, (uintptr_t)fault_addr };
             shield_emit(&nf);
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -853,10 +845,18 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         uintptr_t sp = ep->ContextRecord->Rsp - 8;
         *(uintptr_t *)sp = (uintptr_t)ep->ContextRecord->Rip;
         ep->ContextRecord->Rsp = sp;
-        ep->ContextRecord->Rcx = (uintptr_t)g_why;                   /* Error(fmt) in rcx */
+        ep->ContextRecord->Rcx = (uintptr_t)SHIELD_RECOVERED_TEXT;   /* Error(fmt) in rcx; no '%' */
         ep->ContextRecord->Rip = error6;                             /* resume INTO Error(6) */
     }
     return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+LONG shield_second_chance(PEXCEPTION_POINTERS ep)
+{
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    void *rip = (void *)ep->ContextRecord->Rip;
+    if (!is_other_hw_fault(code) || !rip_in_doom(rip)) return EXCEPTION_CONTINUE_SEARCH;
+    return redirect_to_error6(ep, code, (uintptr_t)rip - (uintptr_t)g_doom_base, NULL);
 }
 
 int veh_install(void)
