@@ -549,9 +549,16 @@ void sh_script_check_name(lua_State *L, int arg, const char *call, int allow_gam
 
 /* --------------------------------------------------------- registration */
 
-static const char *const k_kinds[] = { "spawn", "think", "remove", "damage", "death", "anim" };
+static const char *const k_kinds[] = { "spawn", "think", "remove", "damage", "death", "anim", "pain", "projectile",
+                                       "frame_event" };
 static const unsigned k_bits[] = { SH_SCRIPT_BIND_SPAWN, SH_SCRIPT_BIND_THINK, SH_SCRIPT_BIND_REMOVE,
-                                   SH_SCRIPT_BIND_DAMAGE, SH_SCRIPT_BIND_DEATH, SH_SCRIPT_BIND_ANIM };
+                                   SH_SCRIPT_BIND_DAMAGE, SH_SCRIPT_BIND_DEATH, SH_SCRIPT_BIND_ANIM,
+                                   SH_SCRIPT_BIND_PAIN, SH_SCRIPT_BIND_PROJECTILE, SH_SCRIPT_BIND_FRAME };
+#define SHS_KINDS      9
+#define SHS_KIND_ANIM  5
+#define SHS_KIND_FRAME 8
+/* The kinds whose second value names what in the animation they wait for. */
+#define SHS_KEYED(kind) ((kind) == SHS_KIND_ANIM || (kind) == SHS_KIND_FRAME)
 
 static int add_bind(shs_mod *m, const char *full, unsigned bit)
 {
@@ -586,17 +593,28 @@ static void list_append(lua_State *L, int t, const char *key, int fn)
     lua_pop(L, 1);
 }
 
-/* on.spawn / think / remove / damage / death (name, fn); on.anim(name, notify, fn). */
+/* on.spawn / think / remove / damage / death / pain / projectile (name, fn);
+ * on.anim(name, notify, fn); on.frame_event(name, command, fn). */
 static int on_entity(lua_State *L)
 {
     shs_mod *m = shs_mod_of(L);
     int kind = (int)lua_tointeger(L, lua_upvalueindex(1));
     char call[24], full[SH_SCRIPT_DEFNAME_CAP], notify[SH_SCRIPT_EVENT_TEXT];
-    int fn = kind == 5 ? 3 : 2;
+    int fn = SHS_KEYED(kind) ? 3 : 2;
     _snprintf_s(call, sizeof call, _TRUNCATE, "on.%s", k_kinds[kind]);
     call[sizeof call - 1] = 0;
     sh_script_check_name(L, 1, call, 0, full, sizeof full, NULL);
-    if (kind == 5) {
+    if (kind == SHS_KIND_FRAME) {
+        size_t n;
+        const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
+        if (!s || !n)
+            sh_script_refuse(L, "\"on.frame_event\" needs the command name its ae_notify rows start with as its second value");
+        if (n + 1 >= sizeof notify || strchr(s, ':') || strchr(s, ' '))
+            sh_script_refuse(L, "\"on.frame_event\" needs a command name without \":\" or spaces, at most %d characters",
+                             (int)sizeof notify - 2);
+        copyz(notify, sizeof notify, s);
+        lower(notify);
+    } else if (kind == SHS_KIND_ANIM) {
         size_t n;
         const char *s = lua_type(L, 2) == LUA_TSTRING ? lua_tolstring(L, 2, &n) : NULL;
         if (!s || !n)
@@ -612,7 +630,7 @@ static int on_entity(lua_State *L)
                          lua_isnoneornil(L, fn) ? "nothing" : luaL_typename(L, fn));
     lua_getfield(L, LUA_REGISTRYINDEX, SHS_REG_HANDLERS);
     lua_getfield(L, -1, k_kinds[kind]);
-    if (kind == 5) {
+    if (SHS_KEYED(kind)) {
         if (lua_getfield(L, -1, full) != LUA_TTABLE) {
             lua_pop(L, 1);
             lua_newtable(L);
@@ -677,6 +695,20 @@ int sh_script_api_add(int kind, const char *name, lua_CFunction fn)
     return 1;
 }
 
+#define SHS_OPENERS_MAX 8
+static sh_script_opener_fn g_openers[SHS_OPENERS_MAX];
+static int g_nopeners;
+
+int sh_script_api_add_opener(sh_script_opener_fn fn)
+{
+    int i;
+    if (!fn) return 0;
+    for (i = 0; i < g_nopeners; i++) if (g_openers[i] == fn) return 1;
+    if (g_nopeners >= SHS_OPENERS_MAX) return 0;
+    g_openers[g_nopeners++] = fn;
+    return 1;
+}
+
 /* ------------------------------------------------------------- opening */
 
 static int job_open(lua_State *L)
@@ -686,7 +718,7 @@ static int job_open(lua_State *L)
     shs_open_libs(L, seed);
     /* handler tables */
     lua_newtable(L);
-    for (i = 0; i < 6; i++) { lua_newtable(L); lua_setfield(L, -2, k_kinds[i]); }
+    for (i = 0; i < SHS_KINDS; i++) { lua_newtable(L); lua_setfield(L, -2, k_kinds[i]); }
     lua_newtable(L); lua_setfield(L, -2, "input");
     lua_newtable(L); lua_setfield(L, -2, "map_start");
     lua_newtable(L); lua_setfield(L, -2, "map_end");
@@ -715,9 +747,11 @@ static int job_open(lua_State *L)
         lua_pushcfunction(L, g_api[i].fn);
         lua_setglobal(L, g_api[i].name);
     }
+    /* globals other modules open themselves (sh_script_api_add_opener) */
+    for (i = 0; i < g_nopeners; i++) g_openers[i](L);
     /* on: a read-only table of the registration calls */
     lua_newtable(L);
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < SHS_KINDS; i++) {
         lua_pushinteger(L, i);
         lua_pushcclosure(L, on_entity, 1);
         lua_setfield(L, -2, k_kinds[i]);
@@ -1221,9 +1255,17 @@ static void call_chain(lua_State *L, const char *kind, const char *chain, int ar
     }
 }
 
+static void push_vec3(lua_State *L, const float *v)
+{
+    lua_createtable(L, 0, 3);
+    lua_pushnumber(L, v[0]); lua_setfield(L, -2, "x");
+    lua_pushnumber(L, v[1]); lua_setfield(L, -2, "y");
+    lua_pushnumber(L, v[2]); lua_setfield(L, -2, "z");
+}
+
 static void push_hit(lua_State *L, const sh_script_event *ev)
 {
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 6);
     sh_script_push_entity(L, ev->other);
     lua_setfield(L, -2, "attacker");
     sh_script_push_entity(L, ev->third);
@@ -1234,6 +1276,50 @@ static void push_hit(lua_State *L, const sh_script_event *ev)
     lua_setfield(L, -2, "damage");
     lua_pushstring(L, ev->text2);
     lua_setfield(L, -2, "location");
+    if (ev->flags & SH_SCRIPT_EVF_VEC) {
+        push_vec3(L, ev->vec);
+        lua_setfield(L, -2, "direction");
+    }
+}
+
+/* An ae_notify text "<command>:<a>:<b>" as frame-event arguments: the
+ * pieces after the command, each a number when it reads as one, else the
+ * text as written in the row. Pushes the table. */
+static void push_frame_args(lua_State *L, const char *text)
+{
+    const char *p = strchr(text, ':');
+    lua_Integer i = 0;
+    lua_newtable(L);
+    while (p) {
+        const char *q = strchr(p + 1, ':');
+        size_t n = q ? (size_t)(q - p - 1) : strlen(p + 1);
+        lua_pushlstring(L, p + 1, n);
+        if (n && lua_stringtonumber(L, lua_tostring(L, -1))) lua_remove(L, -2);
+        lua_rawseti(L, -2, ++i);
+        p = q;
+    }
+}
+
+/* Call H[kind][name][key] for each name of the chain (anim, frame_event)
+ * with the values at args..args+nargs-1. */
+static void call_chain_keyed(lua_State *L, const char *kind, const char *chain, const char *key, int args, int nargs)
+{
+    const char *p = chain;
+    while (p && *p) {
+        char name[SH_SCRIPT_DEFNAME_CAP];
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n && n < sizeof name) {
+            memcpy(name, p, n);
+            name[n] = 0;
+            if (push_handlers(L, kind, name)) {
+                if (lua_getfield(L, -1, key) == LUA_TTABLE) call_list(L, lua_gettop(L), args, nargs);
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+        p = e ? e + 1 : NULL;
+    }
 }
 
 static void input_missed(lua_State *L, shs_mod *m, const char *node)
@@ -1298,25 +1384,30 @@ static int job_event(lua_State *L)
             push_hit(L, ev);
             call_chain(L, ev->kind == SH_SCRIPT_EV_DAMAGE ? "damage" : "death", chain, at, 2);
         } else if (ev->kind == SH_SCRIPT_EV_ANIM) {
-            char notify[SH_SCRIPT_EVENT_TEXT];
-            const char *p = chain;
+            char notify[SH_SCRIPT_EVENT_TEXT], command[SH_SCRIPT_EVENT_TEXT];
+            char *colon;
             copyz(notify, sizeof notify, ev->text);
             lower(notify);
-            while (p && *p) {
-                char name[SH_SCRIPT_DEFNAME_CAP];
-                const char *e = strchr(p, '\n');
-                size_t n = e ? (size_t)(e - p) : strlen(p);
-                if (n && n < sizeof name) {
-                    memcpy(name, p, n);
-                    name[n] = 0;
-                    if (push_handlers(L, "anim", name)) {
-                        if (lua_getfield(L, -1, notify) == LUA_TTABLE) call_list(L, lua_gettop(L), at, 1);
-                        lua_pop(L, 1);
-                    }
-                    lua_pop(L, 1);
-                }
-                p = e ? e + 1 : NULL;
+            call_chain_keyed(L, "anim", chain, notify, at, 1);
+            /* a frame event: "<command>:<args>", the command matched without case */
+            copyz(command, sizeof command, notify);
+            colon = strchr(command, ':');
+            if (colon) *colon = 0;
+            if (command[0]) {
+                push_frame_args(L, ev->text);
+                call_chain_keyed(L, "frame_event", chain, command, at, 2);
             }
+        } else if (ev->kind == SH_SCRIPT_EV_PAIN) {
+            lua_pushstring(L, ev->text);
+            if (ev->text2[0]) lua_pushstring(L, ev->text2); else lua_pushnil(L);
+            sh_script_push_entity(L, ev->other);
+            call_chain(L, "pain", chain, at, 4);
+        } else if (ev->kind == SH_SCRIPT_EV_PROJECTILE) {
+            sh_script_push_entity(L, ev->other);
+            lua_pushstring(L, ev->text);
+            if (ev->flags & SH_SCRIPT_EVF_VEC) { push_vec3(L, ev->vec); push_vec3(L, ev->vec + 3); }
+            else { lua_pushnil(L); lua_pushnil(L); }
+            call_chain(L, "projectile", chain, at, 5);
         }
         free(chain);
         lua_settop(L, base);

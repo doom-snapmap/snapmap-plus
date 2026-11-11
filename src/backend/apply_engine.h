@@ -102,6 +102,9 @@ void sh_apply_engine_nav_read_stats(unsigned *reads, unsigned *noticed, double *
 /* A complete current edit map, including live instanceEntities ownership.
  * Main thread only. Successful output is malloc-owned by the caller. */
 int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx);
+/* The same JSON for any idSnapMapEdit, such as the one SnapMapEditToSnapBuild
+ * converts for Play. Main thread only; output malloc-owned by the caller. */
+int sh_apply_engine_map_json(const void *edit_map, char **out, size_t *len);
 /* Navigation geometry with collision dimensions resolved by the native entity
  * declarations in that same temporary snapshot. Main thread only. */
 int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx);

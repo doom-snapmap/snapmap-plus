@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
   "name": "Script Probe",
   "author": "Snapmap+",
+  "strings": {"en": {"scprobe1_marker": "Probe Marker"}},
 
   "snapmap-plus": {
     "format": 2,

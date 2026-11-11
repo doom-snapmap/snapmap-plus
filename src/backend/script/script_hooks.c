@@ -236,6 +236,7 @@ int sh_script_hooks_reload(void)
 #include "../../fault_shield/load_screen_stop.h"
 #include "script_source.h"
 #include "script_api_common.h"
+#include "script_api_combat.h"
 
 #define LOG_LINES_MAX            64
 #define LOAD_SCREEN_RUNNING_BYTE 0x4B2   /* idLoadScreen thread: 1 while it draws (load_screen_stop.c) */
@@ -267,6 +268,8 @@ static int           g_log_lines;
 static int           g_vtable_checked;   /* 1 verified, -1 refused */
 static double        g_time;             /* seconds of script frames this Play */
 static LARGE_INTEGER g_last_frame;       /* the previous script frame's game milliseconds + 1 */
+
+static void commit_combat_hooks(void);
 
 static void hooks_log(const char *fmt, ...)
 {
@@ -544,6 +547,8 @@ void sh_script_hooks_gate(int gate)
         mods_clear();
         return;
     }
+    commit_combat_hooks();
+    sh_script_combat_reset();
     g_open = n;
     g_started = 0;
     g_time = 0;
@@ -569,6 +574,7 @@ int sh_script_hooks_reload(void)
     g_started = 0;
     g_time = 0;
     g_last_frame.QuadPart = 0;
+    sh_script_combat_reset();
     n = sh_script_map_open();
     if (n <= 0) {
         sh_script_map_close(0);
@@ -650,6 +656,322 @@ static void *own(const sig_result *r, int i)
     return r[i].status == SIG_OK ? (void *)r[i].addr : NULL;
 }
 
+/* ---- damage, death, pain, animation notify and projectile hooks ----------
+ *
+ * Six detours, committed with the frame hook at the first Play with scripts
+ * and never unhooked. Each calls the engine's own function, then posts one
+ * record to the queue of the mod whose entity it concerns (script_queue.h):
+ * no Lua runs inside them, and they may run on AI prethink and animWeb job
+ * threads. On a client the first tick closes the scripts, so nothing they
+ * post is ever delivered there.
+ *   OnDamage dispatcher  (entity, attacker spawn id, amount): every entity class's damage taken; the
+ *                        amount is what the engine applied. When an idAI2 applies it, the record its
+ *                        Damage_Apply holds (the per-thread context below) adds the damage decl, the
+ *                        damage zone of the first hit and the direction.
+ *   Damage_Apply         (ai, record): sets the context, calls through, clears it.
+ *   idAI2::Killed        (ai, inflictor, attacker, parms, ...): the death, once per entity.
+ *   SetPainReaction      (ai, reaction, ms): a pain reaction started; reported with the decl and attacker
+ *                        of the entity's last hit.
+ *   OnAnimNotify         (entity, message): an md6 row ae_notify "<message>" ran.
+ *   idProjectile::Launch (projectile, owner, origin, axis, ...): a projectile an entity of a scripted
+ *                        mod launched (its weapon, ai:fire, an md6 row). */
+
+typedef void (*on_damage_fn)(void *entity, uint32_t attacker_spawn_id, float amount);
+typedef void (*damage_apply_fn)(void *ai, void *record);
+typedef void (*killed_fn)(void *ai, void *inflictor, void *attacker, void *parms, uint64_t a5, void *a6, void *a7,
+                          uint64_t a8);
+typedef void (*set_pain_fn)(void *ai, int reaction, int ms);
+typedef void (*anim_notify_fn)(void *entity, const char *message);
+typedef void (*launch_fn)(void *projectile, void *owner, const float *origin, const float *axis, void *a5,
+                          uint64_t a6, uint64_t a7, uint64_t a8);
+
+typedef struct combat_hook {
+    const char *what;            /* for the log line */
+    void       *target;
+    void       *detour;
+    size_t      stolen;
+    uint8_t     bytes[48];   /* the window as resolved (hook_prepare takes at most 48) */
+    void       *tramp;
+} combat_hook;
+
+enum { CH_ON_DAMAGE, CH_DAMAGE_APPLY, CH_KILLED, CH_SET_PAIN, CH_ANIM_NOTIFY, CH_LAUNCH, CH_COUNT };
+static combat_hook g_ch[CH_COUNT];
+static int         g_ch_committed;
+static DWORD       g_damage_tls = TLS_OUT_OF_INDEXES;
+
+typedef struct damage_ctx { void *ai; const uint8_t *record; struct damage_ctx *outer; } damage_ctx;
+
+/* "mods/<salt>/x" of mod `mod` as "x"; any other name as it is. */
+static void relative_name(int mod, const char *full, char *out, size_t cap)
+{
+    const char *salt = sh_script_hooks_mod_salt(mod);
+    size_t n = salt ? strlen(salt) : 0;
+    if (n && !_strnicmp(full, "mods/", 5) && !_strnicmp(full + 5, salt, n) && full[5 + n] == '/' && full[6 + n])
+        full += 6 + n;
+    strncpy_s(out, cap, full, _TRUNCATE);
+}
+
+/* The name of the decl at `decl` (idDecl +0x08) into out; "" when unreadable. */
+static void decl_name(const void *decl, char *out, size_t cap)
+{
+    const char *name = (const char *)read_ptr(decl, SH_COMBAT_DECL_NAME);
+    out[0] = 0;
+    if (!name) return;
+    __try { strncpy_s(out, cap, name, _TRUNCATE); }
+    __except (av_only(GetExceptionCode())) { out[0] = 0; }
+}
+
+/* A handle a script can hold for an entity, by spawn id (0 for none or the world). */
+static sh_script_handle handle_for_id(uint32_t id)
+{
+    sh_script_handle h;
+    if (id == SH_SCRIPT_SPAWN_ID_NONE || id == SH_SCRIPT_SPAWN_ID_WORLD) return 0;
+    h = sh_script_handles_find(id, NULL);
+    return h ? h : sh_script_handles_ref(id);
+}
+
+static sh_script_handle handle_for(void *entity)
+{
+    return entity ? handle_for_id(spawn_id_of(entity)) : 0;
+}
+
+static void on_damage_detour(void *entity, uint32_t attacker_id, float amount)
+{
+    sh_script_event ev;
+    damage_ctx *ctx;
+    int mod = -1;
+    sh_script_handle self;
+    ((on_damage_fn)g_ch[CH_ON_DAMAGE].tramp)(entity, attacker_id, amount);
+    self = sh_script_hooks_handle_of(entity, &mod);
+    if (!self || mod < 0) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = SH_SCRIPT_EV_DAMAGE;
+    ev.self = self;
+    ev.other = handle_for_id(attacker_id);
+    ev.amount = amount;
+    ctx = g_damage_tls != TLS_OUT_OF_INDEXES ? (damage_ctx *)TlsGetValue(g_damage_tls) : NULL;
+    if (ctx && ctx->ai == entity) {
+        const uint8_t *rec = ctx->record;
+        char name[SH_SCRIPT_EVENT_TEXT];
+        __try {
+            int hits = *(const int *)(rec + SH_COMBAT_REC_HITS), i;
+            ev.third = handle_for(*(void * const *)(rec + SH_COMBAT_REC_INFLICTOR));
+            decl_name(*(void * const *)(rec + SH_COMBAT_REC_DECL), name, sizeof name);
+            relative_name(mod, name, ev.text, sizeof ev.text);
+            memcpy(ev.vec, rec + SH_COMBAT_REC_DIR, 3 * sizeof(float));
+            ev.flags |= SH_SCRIPT_EVF_VEC;
+            if (hits > SH_COMBAT_REC_ZONES_MAX) hits = SH_COMBAT_REC_ZONES_MAX;
+            for (i = 0; i < hits && !ev.text2[0]; i++) {
+                const char *const *zone = *(const char *const *const *)(rec + SH_COMBAT_REC_ZONE + (size_t)i * 8);
+                if (zone && *zone) strncpy_s(ev.text2, sizeof ev.text2, *zone, _TRUNCATE);
+            }
+        } __except (av_only(GetExceptionCode())) {
+            ev.flags = 0;
+            ev.text[0] = ev.text2[0] = 0;
+        }
+    }
+    sh_script_combat_note_hit(self, ev.text, ev.other);
+    sh_script_queue_push(mod, &ev);
+}
+
+static void damage_apply_detour(void *ai, void *record)
+{
+    damage_ctx ctx;
+    int tls = g_damage_tls != TLS_OUT_OF_INDEXES;
+    ctx.ai = ai;
+    ctx.record = (const uint8_t *)record;
+    ctx.outer = tls ? (damage_ctx *)TlsGetValue(g_damage_tls) : NULL;
+    if (tls) TlsSetValue(g_damage_tls, &ctx);
+    ((damage_apply_fn)g_ch[CH_DAMAGE_APPLY].tramp)(ai, record);
+    if (tls) TlsSetValue(g_damage_tls, ctx.outer);
+}
+
+static void killed_detour(void *ai, void *inflictor, void *attacker, void *parms, uint64_t a5, void *a6, void *a7,
+                          uint64_t a8)
+{
+    sh_script_event ev;
+    char name[SH_SCRIPT_EVENT_TEXT];
+    int mod = -1;
+    sh_script_handle self = sh_script_hooks_handle_of(ai, &mod);
+    memset(&ev, 0, sizeof ev);
+    if (self && mod >= 0) {
+        ev.kind = SH_SCRIPT_EV_DEATH;
+        ev.self = self;
+        ev.other = handle_for(attacker);
+        ev.third = handle_for(inflictor);
+        decl_name(read_ptr(parms, SH_COMBAT_PARMS_DECL), name, sizeof name);
+        relative_name(mod, name, ev.text, sizeof ev.text);
+    }
+    ((killed_fn)g_ch[CH_KILLED].tramp)(ai, inflictor, attacker, parms, a5, a6, a7, a8);
+    if (self && mod >= 0 && sh_script_combat_first_death(self)) sh_script_queue_push(mod, &ev);
+}
+
+static void set_pain_detour(void *ai, int reaction, int ms)
+{
+    sh_script_event ev;
+    const char *name;
+    int mod = -1;
+    sh_script_handle self;
+    ((set_pain_fn)g_ch[CH_SET_PAIN].tramp)(ai, reaction, ms);
+    name = sh_script_combat_pain_name(reaction);
+    if (!name || reaction == SH_COMBAT_PAIN_NONE) return;
+    self = sh_script_hooks_handle_of(ai, &mod);
+    if (!self || mod < 0) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = SH_SCRIPT_EV_PAIN;
+    ev.self = self;
+    strncpy_s(ev.text, sizeof ev.text, name, _TRUNCATE);
+    sh_script_combat_last_hit(self, ev.text2, sizeof ev.text2, &ev.other);
+    sh_script_queue_push(mod, &ev);
+}
+
+static void anim_notify_detour(void *entity, const char *message)
+{
+    int mod = -1;
+    sh_script_handle self;
+    char text[SH_SCRIPT_EVENT_TEXT];
+    ((anim_notify_fn)g_ch[CH_ANIM_NOTIFY].tramp)(entity, message);
+    self = sh_script_hooks_handle_of(entity, &mod);
+    if (!self || mod < 0 || !message) return;
+    text[0] = 0;
+    __try { strncpy_s(text, sizeof text, message, _TRUNCATE); }
+    __except (av_only(GetExceptionCode())) { return; }
+    if (text[0]) sh_script_queue_post(mod, SH_SCRIPT_EV_ANIM, self, 0, 0, 0.0f, text, NULL);
+}
+
+static void launch_detour(void *projectile, void *owner, const float *origin, const float *axis, void *a5,
+                          uint64_t a6, uint64_t a7, uint64_t a8)
+{
+    sh_script_event ev;
+    char name[SH_SCRIPT_EVENT_TEXT];
+    int mod = -1;
+    uint32_t id;
+    sh_script_handle self;
+    ((launch_fn)g_ch[CH_LAUNCH].tramp)(projectile, owner, origin, axis, a5, a6, a7, a8);
+    self = owner ? sh_script_hooks_handle_of(owner, &mod) : 0;
+    if (!self || mod < 0) return;
+    id = spawn_id_of(projectile);
+    if (id == SH_SCRIPT_SPAWN_ID_NONE) return;
+    sh_script_combat_note_launch(id, self, mod);
+    memset(&ev, 0, sizeof ev);
+    ev.kind = SH_SCRIPT_EV_PROJECTILE;
+    ev.self = self;
+    ev.other = handle_for_id(id);
+    decl_name(read_ptr(projectile, SH_COMBAT_PROJ_DECL), name, sizeof name);
+    relative_name(mod, name, ev.text, sizeof ev.text);
+    __try {
+        if (origin && axis) {
+            memcpy(ev.vec, origin, 3 * sizeof(float));
+            memcpy(ev.vec + 3, axis, 3 * sizeof(float));   /* the axis' first row: the launch direction */
+            ev.flags |= SH_SCRIPT_EVF_VEC;
+        }
+    } __except (av_only(GetExceptionCode())) { ev.flags = 0; }
+    if (ev.other) sh_script_queue_push(mod, &ev);
+}
+
+/* Record a resolved target and its window bytes (install, main thread). */
+static void combat_hook_set(int which, const char *what, uintptr_t addr, void *detour, size_t stolen)
+{
+    combat_hook *c = &g_ch[which];
+    c->what = what;
+    c->target = (void *)addr;
+    c->detour = detour;
+    c->stolen = stolen;
+    if (addr) memcpy(c->bytes, (const void *)addr, stolen);
+}
+
+/* Commit every resolved combat hook (the Play gate, main thread, with the
+ * frame hook). A hook that cannot be committed leaves its event unreported:
+ * one line says which. */
+static void commit_combat_hooks(void)
+{
+    int i, failed = 0;
+    char missing[160];
+    size_t used = 0;
+    if (g_ch_committed) return;
+    g_ch_committed = 1;
+    missing[0] = 0;
+    for (i = 0; i < CH_COUNT; i++) {
+        combat_hook *c = &g_ch[i];
+        int same = 0;
+        void *tramp;
+        if (!c->target) { failed = 1; goto note; }
+        __try { same = !memcmp(c->target, c->bytes, c->stolen); } __except (EXCEPTION_EXECUTE_HANDLER) { same = 0; }
+        if (!same) { failed = 1; goto note; }
+        tramp = hook_prepare(c->target, c->detour, c->stolen);
+        if (!tramp) { failed = 1; goto note; }
+        c->tramp = tramp;
+        if (hook_commit(tramp) != B2_PATCH_OK) {
+            if (hook_unpatch(tramp)) c->tramp = NULL;
+            failed = 1;
+            goto note;
+        }
+        continue;
+note:
+        {
+            int w = _snprintf_s(missing + used, sizeof missing - used, _TRUNCATE, "%s%s", used ? ", " : "", c->what);
+            if (w > 0) used += (size_t)w;
+        }
+    }
+    if (failed) {
+        char why[220];
+        hooks_log("Mod scripts: these game events cannot reach scripts in this session: %s. Other script calls work.",
+                  missing);
+        _snprintf_s(why, sizeof why, _TRUNCATE, "the hooks for %s could not be installed", missing);
+        sh_feature_off(SH_FEATURE_SCRIPT_EVENTS, why);
+    }
+    else
+        hooks_log("SCRIPTS: damage, death, pain, animation and projectile hooks installed");
+}
+
+/* Install: resolve the combat hooks' targets (commits nothing). */
+static void resolve_combat_hooks(const sig_result *r, const uint8_t *module_base)
+{
+    sig_result s;
+    if (g_damage_tls == TLS_OUT_OF_INDEXES) g_damage_tls = TlsAlloc();
+    combat_hook_set(CH_ON_DAMAGE, "damage", (uintptr_t)own(r, SH_SCRIPT_SIG_ON_DAMAGE), (void *)on_damage_detour,
+                    SH_SCRIPT_ON_DAMAGE_STOLEN);
+    combat_hook_set(CH_KILLED, "death", (uintptr_t)own(r, SH_SCRIPT_SIG_KILLED), (void *)killed_detour,
+                    SH_SCRIPT_KILLED_STOLEN);
+    s.addr = 0;
+    combat_hook_set(CH_ANIM_NOTIFY, "animation notify",
+                    sh_script_resolve_named(module_base, &SH_SCRIPT_ANIM_NOTIFY_SIGNATURE, &s) == SIG_OK ? s.addr : 0,
+                    (void *)anim_notify_detour, SH_SCRIPT_ON_ANIM_STOLEN);
+    s.addr = 0;
+    combat_hook_set(CH_DAMAGE_APPLY, "damage details",
+                    sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_DAMAGE_APPLY], &s) == SIG_OK ? s.addr : 0,
+                    (void *)damage_apply_detour, SH_COMBAT_DAMAGE_APPLY_STOLEN);
+    s.addr = 0;
+    combat_hook_set(CH_SET_PAIN, "pain",
+                    sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_SET_PAIN], &s) == SIG_OK ? s.addr : 0,
+                    (void *)set_pain_detour, SH_COMBAT_SET_PAIN_STOLEN);
+    s.addr = 0;
+    combat_hook_set(CH_LAUNCH, "projectile launch",
+                    sig_resolve_one(module_base, &SH_COMBAT_SIGNATURES[SH_COMBAT_SIG_PROJECTILE_LAUNCH], &s) == SIG_OK ? s.addr : 0,
+                    (void *)launch_detour, SH_COMBAT_LAUNCH_STOLEN);
+    /* The boot check: every target found by its signature on this
+     * executable; what is missing is a feature-registry row now, not a
+     * surprise at the first Play. */
+    {
+        char missing[160], why[220];
+        size_t used = 0;
+        int i;
+        missing[0] = 0;
+        for (i = 0; i < CH_COUNT; i++) {
+            int w;
+            if (g_ch[i].target) continue;
+            w = _snprintf_s(missing + used, sizeof missing - used, _TRUNCATE, "%s%s", used ? ", " : "", g_ch[i].what);
+            if (w > 0) used += (size_t)w;
+        }
+        if (used) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "the game functions for %s were not found in this executable",
+                        missing);
+            sh_feature_off(SH_FEATURE_SCRIPT_EVENTS, why);
+        }
+    }
+}
+
+
 int sh_script_hooks_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     sig_result r[SH_SCRIPT_SIG_COUNT];
@@ -684,6 +1006,13 @@ int sh_script_hooks_install(const sig_result *results, size_t count, const uint8
     }
     sh_script_handles_set_resolver(resolve_spawn_id);
     (void)sh_script_api_install(results, count, module_base);   /* logs its own line when it cannot */
+    (void)sh_script_combat_install(results, count, module_base);   /* a missing part is its own registry row */
+    resolve_combat_hooks(r, module_base);
+    /* Spawns during Play reach scripts through the companions' CallSpawn
+     * detour, resolved and checked at their install (before this one). */
+    if (!sh_companions_spawn_ready())
+        sh_feature_off(SH_FEATURE_SCRIPT_SPAWNS, "the game's spawn function is not the expected one in this executable, "
+                       "so only entities placed in the map reach scripts");
     sh_script_source_install();
     sh_companions_set_spawn_subscriber(sh_script_hooks_after_spawn, sh_script_hooks_spawn_wanted);
     sh_load_screen_stop_set_map_end(sh_script_hooks_map_cancel);

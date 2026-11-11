@@ -23,6 +23,7 @@
 #include "script/script_runtime.h"
 #include "script/script_hooks.h"
 #include "script/script_api_common.h"
+#include "script/script_api_ai.h"
 
 static int g_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail = 1; } } while (0)
@@ -204,6 +205,25 @@ static int f_time(int *ms) { *ms = g_ms; return 1; }
 static const sh_script_engine k_engine = {
     f_resolve, f_spawn_id, f_slots, f_slot_spawn_id, f_kind, f_origin, f_axis, f_place, f_def_name, f_event,
     f_ai_health, f_ai_heal, f_ai_set_health, f_anim_node, f_spawn, f_trace, f_time
+};
+
+/* The AI calls' engine seam, as far as a demon's animation needs it: the
+ * park answers yes and each command reaches the same event log. */
+static int ai_park(void *ai) { (void)ai; return 1; }
+static int ai_event(void *ent, int ev, const sh_ai_arg *args, int n, double *ret)
+{
+    sh_script_earg a[SH_SCRIPT_EVENT_ARGS];
+    int i;
+    for (i = 0; i < n && i < SH_SCRIPT_EVENT_ARGS; i++) {
+        if (args[i].type == 's' || args[i].type == '1') a[i] = sh_script_earg_text(args[i].type, args[i].s);
+        else if (args[i].type == 'f') a[i] = sh_script_earg_float(args[i].f);
+        else a[i] = sh_script_earg_int(args[i].i);
+    }
+    if (ret) *ret = 0;
+    return f_event(ent, SH_AI_EVENTS[ev].name, a, n, NULL, 0);
+}
+static const sh_script_ai_engine k_ai_engine = {
+    NULL, NULL, NULL, NULL, NULL, ai_event, ai_park, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
 /* the handle table's resolver: a removed entity is gone */
@@ -497,7 +517,7 @@ static void test_animation(void)
     CHECK(sh_script_status(SALT) == SH_SCRIPT_RUNNING);
     CHECK(has(log_now(), "current\tcombat/idle\tnil"));
     CHECK(has(g_log, "requested\tfalse\tfalse"));
-    CHECK(has(g_events, "post ssaction_ChangeAnimStateVia(0,'combat/melee','combat/windup',0);"));
+    CHECK(has(g_events, "setScriptAbort(0,0);setScriptAbortFlags(0,0);ssaction_ChangeAnimStateVia(0,'combat/melee','combat/windup',0);"));
     ai = &g_ents[E_AI];
     /* the web goes through the via node to the destination, then on */
     strcpy_s(ai->node, sizeof ai->node, "combat/windup");
@@ -516,7 +536,7 @@ static void test_animation(void)
     run("api = 1\n"
         "on.spawn('ai/brute', function(self) self:anim_force('combat/stagger', 0.2) end)\n"
         "on.think('ai/brute', function(self) print('dest', self:anim_event('DEST_BLEND_START'), self:anim_finished()) end)\n");
-    CHECK(has(g_events, "post ssaction_ForceAnimState(0,'combat/stagger',200,0);"));
+    CHECK(has(g_events, "ssaction_ForceAnimState(0,'combat/stagger',200,0);"));
     ai = &g_ents[E_AI];
     strcpy_s(ai->node, sizeof ai->node, "combat/stagger");
     sh_script_api_frame();
@@ -555,6 +575,7 @@ int main(void)
 {
     sh_script_api_add(SH_SCRIPT_API_GLOBAL, "ent", t_ent);
     sh_script_api_set_engine(&k_engine);
+    sh_script_ai_set_engine(&k_ai_engine);
     sh_script_api_install(NULL, 0, NULL);
     sh_script_api_register();   /* idempotent */
     sh_script_handles_set_resolver(h_resolve);

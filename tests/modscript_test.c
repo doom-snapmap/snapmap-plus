@@ -14,7 +14,14 @@
  * inside its .lua like any text (DECISIONS 13, 6); the serving index lists the
  * scripts with their recorded hashes and serves those bytes; the publish
  * archive, a rawmap export and its import carry the scripts under their
- * lower-case game names with no new member kind. */
+ * lower-case game names with no new member kind. A mod whose scripts register
+ * an input records "node" and the serving index serves its Script node row
+ * (the entityDef and Toybox row, never in the author's folder, with the
+ * row's strings), so a placed node names the mod's build; an author file at
+ * the row's paths is refused. The example and probe fixture mods
+ * (tests\fixtures\scripts) build without errors or warnings.
+ *
+ *   modscript_test.exe <tests\fixtures\scripts> */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,7 +207,7 @@ static void test_builds(void)
     if (b.errors) fprintf(stderr, "  %s\n", b.first_cause);
     CHECK(b.script_files == 2 && b.warnings == 0);
     CHECK(b.scripts && !strcmp(b.scripts, "{\"dynamic\":1,\"entities\":[{\"events\":[\"spawn\",\"think\"],\"name\":\"ai/door\"}],"
-                                         "\"files\":2,\"inputs\":[\"switch_used\"],\"outputs\":[\"open_door\"]}"));
+                                         "\"files\":2,\"inputs\":[\"switch_used\"],\"node\":true,\"outputs\":[\"open_door\"]}"));
     if (b.scripts) printf("  scripts: %s\n", b.scripts);
     f = find_file(&b, "mods/" SALT "/scripts/door.lua");
     CHECK(f && f->ptype && !strcmp(f->ptype, "script") && f->cls == SH_MB_CLASS_ADD && !f->stock);
@@ -287,6 +294,10 @@ static void test_builds(void)
     good_mod(dir, sizeof dir);
     mt_write(dir, ENTRY, "api = 1\non.spawn(\"mods/zzzzzzzz/ai/imp\", function() end)\n");
     refused(dir, "scripts\\door.lua line 2: \"mods/zzzzzzzz/ai/imp\" is another mod's name. Name this mod's own content");
+
+    good_mod(dir, sizeof dir);
+    mt_write(dir, "assets\\generated\\decls\\snapeditorentitydef\\mods\\" SALT "\\script.decl", "{\r\n}");
+    refused(dir, "assets/generated/decls/snapeditorentitydef/mods/" SALT "/script.decl: " SH_MB_SCRIPT_NODE_RESERVED);
 
     good_mod(dir, sizeof dir);
     sh_mb_set_script_check(NULL);
@@ -476,14 +487,88 @@ static void test_store(void)
     sh_mb_free(&b);
 }
 
-int main(void)
+/* ------------------------------------------- fixtures and the Script node */
+
+static char g_fixtures[MAX_PATH];
+
+typedef struct extra_seek { const char *salt; int found; } extra_seek;
+
+static void extra_cb(void *context, const char *id, const char *hash, int place, const char *extra)
 {
+    extra_seek *s = (extra_seek *)context;
+    char key[64];
+    (void)hash;
+    (void)place;
+    _snprintf_s(key, sizeof key, _TRUNCATE, "\"%s_script_node\":\"Script\"", s->salt);
+    if (id && !strcmp(id, s->salt) && extra && strstr(extra, key) && strstr(extra, "\"en\":{")) s->found = 1;
+}
+
+static void test_fixtures(void)
+{
+    static const char *const mods[] = { "door-logic", "spin-heal", "brute", "script-probe", "script-runaway", NULL };
+    char src[MAX_PATH * 2], e[MAX_PATH], name[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX] = "";
+    char hashes[4][SH_MODSERVE_HASH_HEX + 1];
+    const char *names[1];
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    sh_modserve_hit hit;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    extra_seek seek = { "doorlogc", 0 };
+    int i;
+
+    printf("-- the example and probe fixture mods build without errors or warnings\n");
+    for (i = 0; mods[i]; i++) {
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\%s", g_fixtures, mods[i]);
+        CHECK(build(src, &b) && b.errors == 0 && b.warnings == 0 && b.script_files == 1);
+        if (b.errors || b.warnings) fprintf(stderr, "  %s: %s%s\n", mods[i], b.first_cause, b.first_warning);
+        CHECK(!strcmp(mods[i], "door-logic") == (b.scripts && strstr(b.scripts, "\"node\":true") != NULL));
+        sh_mb_free(&b);
+    }
+
+    printf("-- the serving index serves a scripted mod's Script node row\n");
+    _snprintf_s(e, sizeof e, _TRUNCATE, "%s\\storeE", g_tmp);
+    CreateDirectoryA(e, NULL);
+    CHECK(sh_ms_set_root(e));
+    for (i = 0; i < 2; i++) {
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\%s", g_fixtures, i ? "script-probe" : "door-logic");
+        memset(&b, 0, sizeof b);
+        CHECK(sh_ms_install_from_folder(src, NULL, name, sizeof name, &st, &b, cause, sizeof cause));
+        if (cause[0]) fprintf(stderr, "  install: %s\n", cause);
+        if (!i) strcpy_s(hashes[3], sizeof hashes[3], b.hash);
+        sh_mb_free(&b);
+    }
+    CHECK(sh_modserve_index_build(e) == 2);
+    (void)sh_modserve_scope_set_place("", 1);
+    memset(&hit, 0, sizeof hit);
+    CHECK(sh_modserve_lookup("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &hit) && hit.is_decl);
+    CHECK(sh_modserve_open("generated/decls/snapeditorentitydef/mods/doorlogc/script.decl", &bytes, &len) == 1);
+    CHECK(bytes && strstr((const char *)bytes, "entityDef = \"mods/doorlogc/script\";") &&
+          strstr((const char *)bytes, "inherit = \"logic/relay\";"));
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    bytes = NULL;
+    CHECK(sh_modserve_open("generated/decls/entitydef/mods/doorlogc/script.decl", &bytes, &len) == 1);
+    CHECK(bytes && strstr((const char *)bytes, "inherit = \"snapmaps/logic/relay\";"));
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    /* a placed node names the mod's build; the probe, with no input, has no row */
+    names[0] = "mods/doorlogc/script";
+    CHECK(modserve_bundles_for_names(names, 1, hashes, 3) == 1 && !strcmp(hashes[0], hashes[3]));
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/scprobe1/script.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/snapeditorentitydef/mods/scprobe1/probe/marker.decl", NULL));
+    /* the row's title and description reach the string layer */
+    CHECK(sh_modserve_each_bundle_extra(extra_cb, &seek) >= 0 && seek.found);
+}
+
+int main(int argc, char **argv)
+{
+    strcpy_s(g_fixtures, sizeof g_fixtures, argc > 1 ? argv[1] : "fixtures\\scripts");
     CHECK(mt_temp_dir("modscript", g_tmp, sizeof g_tmp));
     sh_mb_set_script_check(sh_script_compile_check);
     test_requests();
     test_scan();
     test_builds();
     test_store();
+    test_fixtures();
     mt_remove_tree(g_tmp);
     printf("modscript_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

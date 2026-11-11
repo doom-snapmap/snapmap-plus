@@ -32,6 +32,7 @@
 #include <string.h>
 #include "script_api_common.h"
 #include "script_hooks.h"
+#include "script_api_ai.h"   /* a demon's animation goes through its park (sh_script_ai_anim) */
 
 #define SPAWN_LIVE_MAX     64      /* live entities a mod's scripts spawned */
 #define SPAWN_PER_SECOND   16
@@ -363,17 +364,10 @@ static int l_anim_state(lua_State *L)
     if (via) anim_path(ent, via, vpath, sizeof vpath);
     sh_script_api_anim_request(h, dest, via ? vpath : NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
-        sh_script_earg a[4];
-        a[0] = sh_script_earg_int(0);                       /* AIANIMWEB_BODY */
-        a[1] = sh_script_earg_text('1', dest);
-        if (via) {
-            a[2] = sh_script_earg_text('1', vpath);
-            a[3] = sh_script_earg_int(0);                   /* AIANIMWAIT_DONT_WAIT */
-            sh_script_api_post(ent, "ssaction_ChangeAnimStateVia", a, 4);
-        } else {
-            a[2] = sh_script_earg_int(0);
-            sh_script_api_post(ent, "ssaction_ChangeAnimState", a, 3);
-        }
+        /* idAI2 ignores the stock animWeb events: the designer commands act
+         * on a demon parked in its script state, so the AI calls park it and
+         * run them (ssaction_ChangeAnimState, ..Via). */
+        (void)sh_script_ai_anim(ent, h, dest, via ? vpath : NULL, 0, 0);
     } else {
         sh_script_earg a[4];
         char sub[PATH_CAP], vsub[PATH_CAP];
@@ -410,11 +404,7 @@ static int l_anim_force(lua_State *L)
     anim_path(ent, node, dest, sizeof dest);
     sh_script_api_anim_request(h, dest, NULL);
     if (sh_script_api_kind(ent) == SH_SCRIPT_KIND_AI) {
-        a[0] = sh_script_earg_int(0);
-        a[1] = sh_script_earg_text('1', dest);
-        a[2] = sh_script_earg_int(ms);
-        a[3] = sh_script_earg_int(0);
-        sh_script_api_post(ent, "ssaction_ForceAnimState", a, 4);
+        (void)sh_script_ai_anim(ent, h, dest, NULL, 1, ms);   /* ssaction_ForceAnimState, parked */
     } else {
         char sub[PATH_CAP];
         const char *state;

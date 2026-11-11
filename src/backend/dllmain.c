@@ -79,6 +79,8 @@
 #include "feature_health.h"
 #include "script/script_hooks.h"
 #include "script/script_compile.h"
+#include "script/script_node.h"
+#include "script/script_api_ai.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
@@ -363,6 +365,19 @@ static void install_features(const sig_result *results, size_t db)
      * fails records mod scripts off with its reason (feature_health.h). */
     if (overrides_installed) (void)sh_script_hooks_install(results, db, g_doom_base);
     else sh_feature_off(SH_FEATURE_MOD_SCRIPTS, "mods are not served");
+    /* Script nodes (script/script_node.h): node():fire, vars and the Relay
+     * hook committed at the first Play with scripts. A mod's Script node row
+     * is served whatever happens here, so a map holding one always loads. */
+    if (sh_feature_is_off(SH_FEATURE_MOD_SCRIPTS)) sh_feature_off(SH_FEATURE_SCRIPT_NODES, "mod scripts are off");
+    else need(sh_script_node_install(results, db, g_doom_base),
+              "the game's Relay, output or variable functions are not the expected ones", SH_FEATURE_SCRIPT_NODES,
+              NULL, NULL);
+    /* Scripts driving their own demons (script/script_api_ai.h): the calls run
+     * through the entity calls' event helper; the demon park (a detour of the
+     * engine's IsRunningScript) is committed at the first command. */
+    if (sh_feature_is_off(SH_FEATURE_MOD_SCRIPTS)) sh_feature_off(SH_FEATURE_SCRIPT_DEMONS, "mod scripts are off");
+    else need(sh_script_ai_install(g_doom_base),
+              "the game's AI functions are not the expected ones", SH_FEATURE_SCRIPT_DEMONS, NULL, NULL);
 
     /* Decode virtual-texture previews from installed files through the signed
      * engine page decoder; no renderer or GPU calls are needed. */

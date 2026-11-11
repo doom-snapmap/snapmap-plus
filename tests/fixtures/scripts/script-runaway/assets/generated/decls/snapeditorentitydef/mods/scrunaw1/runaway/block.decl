@@ -1,0 +1,7 @@
+{
+	inherit = "logic/relay";
+	edit = {
+		displayNameTag = "#str_scrunaw1_block";
+		entityDef = "mods/scrunaw1/runaway/block";
+	}
+}

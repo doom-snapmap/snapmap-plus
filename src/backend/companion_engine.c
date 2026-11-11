@@ -510,6 +510,11 @@ static int commit_detour(const char *phase)
     return 1;
 }
 
+int sh_companions_spawn_ready(void)
+{
+    return g_resolved && ((g_orig && hook_is_installed((void *)g_orig)) || prologue_ok());
+}
+
 int sh_companions_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     if (g_orig && hook_is_installed((void *)g_orig)) return 1;

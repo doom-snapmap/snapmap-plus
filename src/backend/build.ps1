@@ -48,6 +48,12 @@ param(
                            "script/script_source.c", "script/script_console.c",
                            # Mod scripts: the entity, animation, world and time calls and their engine side.
                            "script/script_api_common.c", "script/script_api_sigs.c", "script/script_api_entity.c", "script/script_api_world.c",
+                           # Mod scripts: the Script node (its row, the Relay hook, node():fire and vars).
+                           "script/script_node.c", "script/script_node_row.c",
+                           # Mod scripts' AI calls and the demon park.
+                           "script/script_api_ai.c", "script/script_ai_sigs.c",
+                           # Mod scripts: the combat calls (damage, projectiles, effects, sounds, joints, pain).
+                           "script/script_api_combat.c", "script/script_combat_sigs.c",
                            "../third_party/lua/lapi.c", "../third_party/lua/lauxlib.c", "../third_party/lua/lbaselib.c", "../third_party/lua/lcode.c", "../third_party/lua/lcorolib.c", "../third_party/lua/lctype.c", "../third_party/lua/ldebug.c", "../third_party/lua/ldo.c", "../third_party/lua/ldump.c", "../third_party/lua/lfunc.c", "../third_party/lua/lgc.c", "../third_party/lua/llex.c", "../third_party/lua/lmathlib.c", "../third_party/lua/lmem.c", "../third_party/lua/lobject.c", "../third_party/lua/lopcodes.c", "../third_party/lua/lparser.c", "../third_party/lua/lstate.c", "../third_party/lua/lstring.c", "../third_party/lua/ltable.c", "../third_party/lua/ltablib.c", "../third_party/lua/ltm.c", "../third_party/lua/lundump.c", "../third_party/lua/lutf8lib.c", "../third_party/lua/lvm.c", "../third_party/lua/lzio.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.

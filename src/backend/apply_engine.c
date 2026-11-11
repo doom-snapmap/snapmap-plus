@@ -1694,20 +1694,17 @@ int sh_apply_engine_entity_transform(int id, float origin[3], float m[3][3],
     return 1;
 }
 
-int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
+/* One idSnapMapEdit through EditorMapToJson into a malloc'd copy. */
+static int ae_map_json(void *map, char **out, size_t *len)
 {
     uint8_t str[IDSTR_SIZE] = {0};
-    void *map = NULL; char *copy = NULL;
-    const uint8_t *ed;
+    char *copy = NULL;
     int initialized = 0, ok = 0, length = 0;
     uint32_t main_id = 0;
-    (void)ctx;
     *out = NULL; *len = 0;
-    if (!g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json || !g_main_thread_at ||
+    if (!map || !g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json || !g_main_thread_at ||
         !ae_read_u32((const uint8_t *)g_main_thread_at, &main_id) ||
         main_id != GetCurrentThreadId()) return 0;
-    ed = ae_editor_session();
-    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
     __try {
         g_idstr_ctor(str, ""); initialized = 1;
         SH_PERF_BEGIN(t0);
@@ -1725,6 +1722,25 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     }
     if (!ok) { free(copy); return 0; }
     *out = copy; *len = (size_t)length; return 1;
+}
+
+int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
+{
+    void *map = NULL;
+    const uint8_t *ed;
+    (void)ctx;
+    *out = NULL; *len = 0;
+    ed = ae_editor_session();
+    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
+    return ae_map_json(map, out, len);
+}
+
+int sh_apply_engine_map_json(const void *edit_map, char **out, size_t *len)
+{
+    if (out) *out = NULL;
+    if (len) *len = 0;
+    if (!out || !len) return 0;
+    return ae_map_json((void *)edit_map, out, len);
 }
 
 /* idSnapMap::entities is a contiguous array of cloned idSnapEntity declarations.

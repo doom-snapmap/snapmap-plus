@@ -54,8 +54,9 @@ extern "C" {
 /* One engine event argument or return value. type is the engine's
  * idEventArg type character:
  *   'i' int (a bool too: the engine's argument copy carries a bool as 'i'),
- *   'f' float, 'v' vector (v), 's' text (s, copied by the engine),
- *   'e' entity (p, an engine entity), 'd' decl (p), '1' animWeb path text (s),
+ *   'f' float, 'v' vector (v), 'a' angles (v: pitch, yaw, roll in degrees),
+ *   's' text (s, copied by the engine), 'e' entity (p, an engine entity),
+ *   'd' decl (p), '1' animWeb path text (s), '2' joint name text (s),
  *   '4' no animation (always NULL).
  * A return of type 0 means the receiver did not handle the event. */
 typedef struct sh_script_earg {

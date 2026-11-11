@@ -22,9 +22,12 @@
  *     "editor": ["<request>", ...],    files classified as editor tweaks
  *     "registries": {"banks": [...], "conductor": [...], "strings": [...]},
  *     "edits": [{"file", "stock", "counts", "ops"}, ...],   derived edits of decls at game names
- *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "dynamic"},
+ *     "scripts": {"files", "entities": [{"name", "events"}], "inputs", "outputs", "node", "dynamic"},
  *                                      what the mod's scripts bind, read without running them
- *                                      (sh_mb_script_scan); only when the mod carries scripts
+ *                                      (sh_mb_script_scan); only when the mod carries scripts.
+ *                                      "node": true when a script registers an input
+ *                                      (sh_script_node_registers_input): the serving index then
+ *                                      serves the mod's Script node row (script_node.h)
  *     "shadows": ["<request>", ...],
  *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
  *     "stock": [{"path", "sha256", "source", "provides", "needs", "closure": true?}]
@@ -106,8 +109,9 @@
  * folder whose block carries another number is built again once by the
  * rebuild rule, so a product update reclassifies every own folder. Raise it
  * when a build's classification, edits or manifest change. 10: mod scripts
- * (a folder that failed only on a .lua file builds now). */
-#define SH_MB_RULES           10
+ * (a folder that failed only on a .lua file builds now). 11: the scripts
+ * member records whether the mod gets its Script node row ("node"). */
+#define SH_MB_RULES           11
 /* The refusal of a folder in any shape but this one (ONE-SHAPE rule 6). */
 #define SH_MB_SHAPE           "This mod folder is not in a shape Snapmap+ can build: "
 #define SH_MB_ID_MAX          64u
@@ -556,6 +560,11 @@ int  sh_mb_extension_allowed(const char *request);
 #define SH_MB_SCRIPT_ENTRY      1
 #define SH_MB_SCRIPT_LIB        2
 #define SH_MB_SCRIPT_MISPLACED  (-1)
+/* An author file at one of the two paths the mod's Script node row is served
+ * at (sh_script_node_reserved) is refused: the product makes that row. */
+#define SH_MB_SCRIPT_NODE_RESERVED \
+    "Snapmap+ makes this mod's Script node at this path, so the file cannot be here; remove it or give it another " \
+    "name"
 #define SH_MB_SCRIPT_WHERE \
     "a script goes in this mod's scripts folder, assets\\mods\\<salt>\\scripts\\ (entry files) or scripts\\lib\\ " \
     "(files loaded with require); move it there"

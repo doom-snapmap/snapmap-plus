@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nav_play.h"
@@ -17,6 +18,8 @@
 #include "grid_room_native.h"
 #include "modserve.h"
 #include "near_page.h"
+#include "script/script_hooks.h"
+#include "script/script_node.h"
 
 void backend_log(const char *message);
 
@@ -218,6 +221,19 @@ failed:
     backend_log("NAV: instance-specific AAS loads unavailable");return 0;
 }
 
+/* The played map's Script node and variable names (script_node.h), read from
+ * the JSON of the map being converted; only when a mod of this Play carries
+ * scripts (the Play gate above opened them). */
+static void nav_script_nodes(const void *build_map)
+{
+    char *json = NULL;
+    size_t len = 0;
+    if (!sh_script_hooks_open()) return;
+    if (!sh_apply_engine_map_json(build_map, &json, &len)) json = NULL;
+    sh_script_node_play_begin(json, len);
+    free(json);
+}
+
 static int nav_snapbuild_detour(void *a, void *b, void *c)
 {
     /* Capture the final snapshot before conversion; contain faults at the
@@ -234,6 +250,9 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
         sh_nav_bake_build_begin();
         /* Mods: the cut-content gates hold for the level load. */
         sh_modserve_play_begin();
+        /* Mod scripts: the Script nodes and map variables of the map being
+         * converted, by name, before its spawns. */
+        nav_script_nodes(b);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("NAV: the pre-build editor snapshot faulted");
     }
